@@ -23,6 +23,7 @@
 // import) — same reason transcript.ts's header gives for itself — so its
 // tests exercise syncSessionTick/restorePlan directly, not a hand-copied
 // re-implementation.
+import type { RescueTarget } from "./rescue";
 import {
   sessionLatestKey, sessionDailyKey, sessionDisplacedKey, sessionSupersededKey,
   SESSION_SINGLE_READ_MAX, SESSION_SPLIT_PART, SESSION_TOTAL_MAX, SESSION_DAILY_KEEPERS,
@@ -175,7 +176,8 @@ export type BurnPersistError = { at: string; reason: string };
  * 1000-key default page.
  */
 export interface SessionSyncDeps {
-  exec(cmd: string): Promise<{ code: number; stdout: string; stderr: string }>;
+  /** `env`: per-exec env vars (issue #1: the rescue remote's token). */
+  exec(cmd: string, env?: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }>;
   r2Put(key: string, bytes: Uint8Array): Promise<void>;
   r2List(prefix: string): Promise<string[]>;
   r2Delete(keys: string[]): Promise<void>;
@@ -217,6 +219,12 @@ export interface SessionSyncDeps {
    */
   botName?: string;
   botEmail?: string;
+  /**
+   * Issue #1 piece 5: where rescue pushes go -- do.ts resolves
+   * FLEET_RESCUE_REMOTE + a minted token once per rescue (rescue.ts's
+   * resolveRescueTarget). Absent, or `{}`, means origin, leak-gated.
+   */
+  rescueTarget?(): Promise<RescueTarget>;
 }
 
 /** Issue #361: the Worker-side ports for a completion record's one copy

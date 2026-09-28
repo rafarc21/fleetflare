@@ -371,3 +371,20 @@ describe("the wrap never truncates or reorders role.prompt", () => {
     expect(prompt.indexOf("TASK BRIEF")).toBeGreaterThan(prompt.indexOf("MEM INDEX"));
   });
 });
+
+// Issue #1: the fleet now develops in a PUBLIC repo. Every studio is told
+// what public means, and what a leak-gate refusal looks like.
+describe("HOUSE_RULES — public repositories (issue #1)", () => {
+  it("says a public repo is world-readable and bans private names in it", () => {
+    const rules = collapseWs(HOUSE_RULES);
+    expect(rules).toMatch(/If the repo you work in is public, everything you write there is world-readable/);
+    expect(rules).toMatch(/Never write client names, operator ids, emails, internal hostnames or tokens/);
+    expect(rules).toMatch(/Tests use fake names/);
+  });
+
+  it("explains a leak-gate refusal: a pattern number, rewrite the text, never bypass", () => {
+    const rules = collapseWs(HOUSE_RULES);
+    expect(rules).toMatch(/names a pattern number, never the term/);
+    expect(rules).toMatch(/Rewrite the text; never route around the gate/);
+  });
+});

@@ -20,12 +20,13 @@
 import type { Env } from "../env";
 import { verifyAccess } from "../studio/auth";
 import { redactSecrets } from "../studio/redact";
-import { reachRepo, repoTokenMinter, type RepoReach } from "../github/auth";
+import { reachRepo, repoTokenMinter, mintRepoToken, type RepoReach } from "../github/auth";
 import {
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   closeIssue as closeIssueApi, getDefaultBranch, getPullRequest, commitReachableFromBranch,
   getIssueCloser, type IssueCloser, pullClaimsIssue,
   listMatchingBranches, commitDate, compareFiles, deleteBranch, resolveCanonicalRepoName,
+  repoIsPrivate, fetchRepoFile,
 } from "../github/api";
 import {
   createIssue, getIssue, listIssues, addLabels, removeLabel,
@@ -48,6 +49,9 @@ import { isSpawnTokenShaped, resolveSpawnParent, SPAWN_TOKEN_HEADER } from "../s
 import { parseStudioId } from "../studio/ids";
 import type { StudioStatus } from "../studio/types";
 import type { BoardTask } from "./types";
+import { guardBoardApi, leakGuard, LeakGateError, type LeakGuardDeps } from "./leak";
+import { OPS_DENYLIST_PATH } from "../leak-gate";
+import { resolveOpsRepo } from "../ops-repo";
 
 // `/studio/board/tasks`, optionally one task number, optionally one action on
 // it. Anything else is a 404 by construction, including a non-numeric task id
@@ -65,9 +69,10 @@ const BOARD_ROUTE_RE = /^\/studio\/board\/tasks(?:\/(\d+)(?:\/(state|envelope|ad
  * — than the fleet's own repo. Every method already takes the repo, so each
  * one asks for the credential that repo's owner actually uses.
  */
-export function githubBoardApi(env: Env): BoardApi {
+export function githubBoardApi(env: Env, leakDeps: Partial<LeakGuardDeps> = {}): BoardApi {
   const token = repoTokenMinter(env);
-  return {
+  // Issue #1: issue and comment writes pass the leak gate first (src/board/leak.ts).
+  return guardBoardApi({
     createIssue: async (repo, input) => createIssue(await token(repo), repo, input),
     getIssue: async (repo, number) => getIssue(await token(repo), repo, number),
     listIssues: async (repo, query) => listIssues(await token(repo), repo, query),
@@ -80,6 +85,21 @@ export function githubBoardApi(env: Env): BoardApi {
     branchExists: async (repo, branch) => branchExists(await token(repo), repo, branch),
     commitExists: async (repo, sha) => commitExists(await token(repo), repo, sha),
     closeIssue: async (repo, number) => closeIssueApi(await token(repo), repo, number),
+  }, leakGuard({ ...realLeakDeps(env, token), ...leakDeps }));
+}
+
+/** Visibility via the board's own token; the denylist via a contents:read
+ *  token on the ops repo -- same port as do.ts's opsFileFetcher, inlined
+ *  because do.ts imports this file. No ops repo = no list = fail closed. */
+function realLeakDeps(env: Env, token: (repo: string) => Promise<string>): LeakGuardDeps {
+  return {
+    isPrivate: async (repo) => repoIsPrivate(await token(repo), repo),
+    fetchDenylist: async () => {
+      const opsRepo = resolveOpsRepo(env);
+      if (opsRepo === null) throw new Error("FLEET_OPS_REPO unset");
+      const opsToken = await mintRepoToken(env, opsRepo, { permissions: { contents: "read" } });
+      return fetchRepoFile(opsToken, opsRepo, OPS_DENYLIST_PATH, "HEAD");
+    },
   };
 }
 
@@ -639,6 +659,9 @@ export async function handleBoard(
  * surfaces differ in WHO is asking, never in what a broken upstream means.
  */
 function upstreamFailure(err: unknown, method: string, pathname: string): Response {
+  // Issue #1: a leak refusal is the gate's answer, not an upstream failure --
+  // the lead sees its status and its (term-free) message verbatim.
+  if (err instanceof LeakGateError) return new Response(err.message, { status: err.status });
   const status = err instanceof GitHubError && err.status === 404 ? 404 : 502;
   console.error(`board ${method} ${pathname} failed`, err);
   const message = redactSecrets(err instanceof Error ? err.message : String(err));

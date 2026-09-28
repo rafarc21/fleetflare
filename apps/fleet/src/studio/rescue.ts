@@ -3,6 +3,99 @@
 // against real git; do.ts re-exports it for its callers.
 import { RESCUE_MARKER_PATHSPECS } from "./rescue-gc";
 import { KILL_GRACE_SECONDS } from "./exec-deadline";
+import { STUDIO_REAL_GIT_PATH } from "./credentials";
+
+/**
+ * Issue #1 piece 5: origin can be PUBLIC, so rescued work goes to a PRIVATE
+ * repo when the Worker setting `FLEET_RESCUE_REMOTE` (`owner/name`) names one.
+ * Its token reaches the container only as exec env under this NAME; a
+ * credential helper expands it at auth time, so argv never carries it
+ * (same shape as memory/store.ts's memoryCloneCmd).
+ */
+export const RESCUE_TOKEN_ENV = "FLEET_RESCUE_TOKEN";
+
+/** Where rescue pushes go, and how. remoteUrl absent = origin via plain
+ *  `git` on PATH, i.e. the leak-gate wrapper (origin may be public). */
+export interface RescuePushOptions {
+  /** Push URL replacing `origin` for every rescue push. */
+  remoteUrl?: string;
+  /** Git binary for PRIVATE-remote pushes only (remoteUrl set) -- the REAL
+   *  one, past the leak-gate wrapper: a private rescue must never lose data
+   *  to a refused push. Ignored for origin: that push stays leak-gated. */
+  realGit?: string;
+}
+
+/** Exec-side half of RescuePushOptions: what do.ts resolves per rescue. */
+export interface RescueTarget {
+  remoteUrl?: string;
+  env?: Record<string, string>;
+}
+
+const RESCUE_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/** Same contract as ops-repo.ts's resolveOpsRepo: blank = null, malformed =
+ *  null + logged, never guessed at. */
+export function resolveRescueRemote(env: { FLEET_RESCUE_REMOTE?: string }): string | null {
+  const raw = (env.FLEET_RESCUE_REMOTE ?? "").trim();
+  if (raw === "") return null;
+  if (!RESCUE_REPO_RE.test(raw)) {
+    console.error(`rescue: FLEET_RESCUE_REMOTE ${JSON.stringify(raw)} is not owner/name -- ignored`);
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * One call per rescue. Unset/malformed or a failed mint → `{}` (origin), each
+ * loudly. Origin rescue runs through the leak-gate wrapper, so a denylist hit
+ * refuses it (RESCUE_FAILED) rather than publish private text.
+ * `mint` is do.ts's mintRepoToken, scoped contents:write to that repo.
+ */
+export async function resolveRescueTarget(
+  env: { FLEET_RESCUE_REMOTE?: string }, mint: (repo: string) => Promise<string>,
+): Promise<RescueTarget> {
+  const slug = resolveRescueRemote(env);
+  if (slug === null) {
+    console.error(
+      "rescue: FLEET_RESCUE_REMOTE is unset -- rescue pushes go to origin and are leak-gated; " +
+      "a denylist hit or missing denylist refuses them; set FLEET_RESCUE_REMOTE",
+    );
+    return {};
+  }
+  try {
+    const token = await mint(slug);
+    return { remoteUrl: `https://github.com/${slug}.git`, env: { [RESCUE_TOKEN_ENV]: token } };
+  } catch (err) {
+    console.error(
+      `rescue: token mint for ${slug} failed (${err instanceof Error ? err.message : String(err)}) -- ` +
+      "falling back to origin; rescue to origin is leak-gated; a denylist hit or missing denylist " +
+      "refuses it; set FLEET_RESCUE_REMOTE",
+    );
+    return {};
+  }
+}
+
+/** Single-quotes `s` for bash. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Prelude both builders emit: `__rgit` (argv prefix for every push) and
+ * `__rdest` (push destination). The helper is added only for a remoteUrl, and
+ * only when the token env is present at run time; otherwise the container's
+ * own git auth applies, as for origin.
+ */
+function rescuePushPrelude(opts: RescuePushOptions): string {
+  // Origin may be public: plain `git` on PATH = the leak-gate wrapper.
+  if (opts.remoteUrl === undefined) return `__rgit=(git); __rdest=origin\n`;
+  const git = shq(opts.realGit ?? STUDIO_REAL_GIT_PATH);
+  const helper = `!f() { echo username=x-access-token; echo "password=\${${RESCUE_TOKEN_ENV}}"; }; f`;
+  return (
+    `__rgit=(${git}); __rdest=${shq(opts.remoteUrl)}\n` +
+    `if [ -n "\${${RESCUE_TOKEN_ENV}:-}" ]; then __rgit+=(-c credential.helper= -c ${shq(`credential.helper=${helper}`)}); fi\n`
+  );
+}
 
 /**
  * Board issue #359, fresh review round 3: the ORIGINAL fix for "rescue-all
@@ -382,6 +475,8 @@ export function rescuePushCmd(
   // use elsewhere (do.ts's syncDeps() passes the real, env-configured value
   // through; every other/test caller gets this neutral default unchanged).
   botName = "fleetflare[bot]", botEmail = "fleetflare[bot]@users.noreply.github.com",
+  // Issue #1 piece 5: private rescue remote + real git (RescuePushOptions).
+  opts: RescuePushOptions = {},
 ): string {
   const dir = `${root}/${repo}`;
   // Issue #217: tool markers (RESCUE_MARKER_PATHS) never count as work and
@@ -398,6 +493,7 @@ export function rescuePushCmd(
     // reasoning, including the #371-review correction of this file's
     // earlier, factually wrong "reused session" justification).
     `__rescue_start=$(date +%s)\n` +
+    rescuePushPrelude(opts) +
     // Issue #371: checked once before every logical push attempt (a first
     // try plus its own immediate non-fast-forward retry counts as one — see
     // this file's own RESCUE_SERVER_DEADLINE_SECONDS doc comment). Prints
@@ -516,7 +612,7 @@ export function rescuePushCmd(
     // see this file's own header comment above for why. A killed push's exit
     // code is simply non-zero, so `prc` below already treats it exactly like
     // a rejected one; no other line here needs to change.
-    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$w" push $nv origin "HEAD:refs/heads/$target" 2>&1 1>/dev/null)"; prc=$?\n` +
+    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push $nv "$__rdest" "HEAD:refs/heads/$target" 2>&1 1>/dev/null)"; prc=$?\n` +
     `  if [ "$prc" = "0" ]; then printf '%s' "$target"; return 0; fi\n` +
     `  if printf '%s' "$perr" | grep -qiE 'non-fast-forward|fetch first'; then\n` +
     // HOLD-round fix: this used to sit flat between two dashes
@@ -536,7 +632,7 @@ export function rescuePushCmd(
     // always qualifies for --no-verify unconditionally — no case check
     // needed here the way the first attempt above needs one.
     // Issue #359 round 3: same per-push timeout bound as the first attempt.
-    `    if timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$w" push --no-verify origin "HEAD:refs/heads/$ftarget" >/dev/null 2>&1; then printf '%s' "$ftarget"; return 0; fi\n` +
+    `    if timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push --no-verify "$__rdest" "HEAD:refs/heads/$ftarget" >/dev/null 2>&1; then printf '%s' "$ftarget"; return 0; fi\n` +
     `  fi\n` +
     `  return 1\n` +
     `}\n` +
@@ -791,7 +887,7 @@ export function rescuePushCmd(
     // branch push, unlike rescue_push()'s own conditional check above.
     // Issue #359 round 3: same per-push timeout bound as rescue_push()'s own
     // pushes above — see this file's own header comment.
-    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C ${dir} push --no-verify origin "refs/heads/$b:refs/heads/$btarget" </dev/null; then\n` +
+    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --no-verify "$__rdest" "refs/heads/$b:refs/heads/$btarget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:$b push"; fail=$((fail+1))\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$btarget" "refs/heads/$b" </dev/null 2>/dev/null || true\n` +
@@ -845,7 +941,7 @@ export function rescuePushCmd(
     // unconditionally — never a real branch push.
     // Issue #359 round 3: same per-push timeout bound as every other push in
     // this file — see this file's own header comment.
-    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C ${dir} push --no-verify origin "$ssha:refs/heads/$starget" </dev/null; then\n` +
+    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --no-verify "$__rdest" "$ssha:refs/heads/$starget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:stash-$sn push"; fail=$((fail+1))\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$starget" "$ssha" </dev/null 2>/dev/null || true\n` +
@@ -941,6 +1037,8 @@ export function rescueSnapshotCmd(
   serverDeadlineSeconds = RESCUE_SERVER_DEADLINE_SECONDS, budgetMarginSeconds = RESCUE_BUDGET_MARGIN_SECONDS,
   // Issue #335: see rescuePushCmd's own identical trailing params above.
   botName = "fleetflare[bot]", botEmail = "fleetflare[bot]@users.noreply.github.com",
+  // Issue #1 piece 5: private rescue remote + real git (RescuePushOptions).
+  opts: RescuePushOptions = {},
 ): string {
   const dir = `${root}/${repo}`;
   const scope = `-- . ${RESCUE_MARKER_PATHSPECS}`;
@@ -953,6 +1051,7 @@ export function rescueSnapshotCmd(
     // see that copy's own doc comment for why the dirty-tree/clean-but-ahead
     // call sites below pass `2`.
     `__rescue_start=$(date +%s)\n` +
+    rescuePushPrelude(opts) +
     `rescue_budget_ok() {\n` +
     `  local id="$1" mult="\${2:-1}" now remaining\n` +
     `  now=$(date +%s)\n` +
@@ -1012,14 +1111,14 @@ export function rescueSnapshotCmd(
     // Issue #359 round 3: `timeout -k <grace> <secs>` bounds a single push
     // that stalls to its own small budget — see this file's own header
     // comment above.
-    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$w" push --no-verify origin "$ref:refs/heads/$target" 2>&1 1>/dev/null)"; prc=$?\n` +
+    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push --no-verify "$__rdest" "$ref:refs/heads/$target" 2>&1 1>/dev/null)"; prc=$?\n` +
     `  if [ "$prc" = "0" ]; then printf '%s' "$target"; return 0; fi\n` +
     `  if printf '%s' "$perr" | grep -qiE 'non-fast-forward|fetch first'; then\n` +
     // HOLD-round fix: same wt/-nested, discoverable shape as rescuePushCmd's
     // own rescue_push (N3) above — see that copy's own comment.
     `    ftarget="fleet/rescue/${studio}/wt/$id-nff-$(date -u +%Y%m%d%H%M%S)"\n` +
     // Issue #359 round 3: same per-push timeout bound as the first attempt.
-    `    if timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$w" push --no-verify origin "$ref:refs/heads/$ftarget" >/dev/null 2>&1; then printf '%s' "$ftarget"; return 0; fi\n` +
+    `    if timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push --no-verify "$__rdest" "$ref:refs/heads/$ftarget" >/dev/null 2>&1; then printf '%s' "$ftarget"; return 0; fi\n` +
     `  fi\n` +
     `  return 1\n` +
     `}\n` +
@@ -1179,7 +1278,7 @@ export function rescueSnapshotCmd(
     // branch push, unlike rescue_push()'s own conditional check above.
     // Issue #359 round 3: same per-push timeout bound as rescue_push()'s own
     // pushes above — see this file's own header comment.
-    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C ${dir} push --no-verify origin "refs/heads/$b:refs/heads/$btarget" </dev/null; then\n` +
+    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --no-verify "$__rdest" "refs/heads/$b:refs/heads/$btarget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:$b push"; fail=$((fail+1))\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$btarget" "refs/heads/$b" </dev/null 2>/dev/null || true\n` +
@@ -1216,7 +1315,7 @@ export function rescueSnapshotCmd(
     // unconditionally — never a real branch push.
     // Issue #359 round 3: same per-push timeout bound as every other push in
     // this file — see this file's own header comment.
-    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C ${dir} push --no-verify origin "$ssha:refs/heads/$starget" </dev/null; then\n` +
+    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --no-verify "$__rdest" "$ssha:refs/heads/$starget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:stash-$sn push"; fail=$((fail+1))\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$starget" "$ssha" </dev/null 2>/dev/null || true\n` +
