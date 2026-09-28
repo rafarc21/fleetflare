@@ -84,13 +84,24 @@ export async function handleFleetJunior(
   try { body = JSON.parse(raw); } catch { return text("bad json", 400); }
   if (!JUNIOR_MODELS.includes(body?.model)) return text("model not allowed", 400);
   if (!Array.isArray(body?.messages) || body.messages.length === 0) return text("messages required", 400);
-  const maxTokens = Number(body.max_tokens) > 0 ? Number(body.max_tokens) : 64_000;
+  // The Worker's AI binding is the real trust boundary — it is what talks to
+  // the billed Workers AI service — so the 128,000 ceiling documented as a
+  // Global Constraint (matching skills/junior/src/client.ts's MAX_TOKENS_CAP)
+  // must be enforced here too, not only client-side where an already-
+  // authorized studio could simply skip it and call this route directly.
+  const maxTokens = Math.min(Number(body.max_tokens) > 0 ? Number(body.max_tokens) : 64_000, 128_000);
 
   const ai = env.AI;
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const w = writable.getWriter();
   const enc = new TextEncoder();
-  const beat = setInterval(() => { void w.write(enc.encode(" ")); }, heartbeatMs);
+  // A client that disconnects (or whose own AbortSignal fires) while ai.run()
+  // is still in flight leaves this writer closed/errored well before that
+  // call resolves — every heartbeat tick after that would otherwise reject
+  // with nothing to catch it (an unhandled rejection on every 15s tick for
+  // the rest of the call). Stop retrying the moment a write fails instead of
+  // firing into a dead writer indefinitely.
+  const beat = setInterval(() => { w.write(enc.encode(" ")).catch(() => clearInterval(beat)); }, heartbeatMs);
   void (async () => {
     let out: string;
     try {

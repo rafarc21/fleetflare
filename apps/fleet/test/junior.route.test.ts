@@ -110,6 +110,28 @@ describe("handleFleetJunior", () => {
     expect(text.startsWith(" ")).toBe(true);
     expect(JSON.parse(text.trim()).content).toBe("late");
   });
+  it("a client disconnect mid-call stops the heartbeat instead of retrying a dead writer forever", async () => {
+    const { token, rows, e } = await setup();
+    // ai.run resolves well after the disconnect below, so if the interval
+    // is only ever cleared in the async IIFE's `finally` (the unfixed
+    // behaviour) clearInterval cannot have fired yet at the check below —
+    // the fix must clear it the moment a heartbeat write itself fails.
+    (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(() => new Promise((res) => setTimeout(() => res({ response: "late" }), 200)));
+    const clearSpy = vi.spyOn(globalThis, "clearInterval");
+    const r = await handleFleetJunior(req(token, good), e, board(), rows, 10);
+    const reader = r.body!.getReader();
+    await reader.read(); // consume a heartbeat byte so the stream is flowing
+    await reader.cancel(); // simulate the client going away mid-call
+    await new Promise((res) => setTimeout(res, 60)); // let several 10ms heartbeat ticks fire against the now-errored writer
+    expect(clearSpy).toHaveBeenCalled();
+    clearSpy.mockRestore();
+  });
+  it("max_tokens is clamped to 128000 server-side before reaching env.AI.run", async () => {
+    const { token, rows, e, run } = await setup();
+    const r = await handleFleetJunior(req(token, { ...good, max_tokens: 999999999 }), e, board(), rows);
+    expect(r.status).toBe(200);
+    expect(run).toHaveBeenCalledWith(good.model, { messages: good.messages, max_tokens: 128_000 });
+  });
 });
 
 describe("handleFleetJunior — maestro authorization", () => {
