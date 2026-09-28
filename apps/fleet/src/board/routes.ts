@@ -38,6 +38,7 @@ import {
   openAssignedTasks,
   type BoardApi, type BoardResult, type ListTasksQuery, type OnAssigned,
 } from "./board";
+import { recordJuniorAuthorization } from "../junior/authz";
 import { wakeOnAssign, checkAssignRepo, type AssignWakeDeps, type AssignWakeReport } from "./assign-wake";
 import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify";
 import { openTasksWithLatestPr } from "./pr-landed";
@@ -48,7 +49,7 @@ import { listStudios } from "../studio/registry";
 import { isSpawnTokenShaped, resolveSpawnParent, SPAWN_TOKEN_HEADER } from "../studio/spawn";
 import { parseStudioId } from "../studio/ids";
 import type { StudioStatus } from "../studio/types";
-import type { BoardTask } from "./types";
+import { JUNIOR_LABEL, type BoardTask } from "./types";
 import { guardBoardApi, leakGuard, LeakGateError, type LeakGuardDeps } from "./leak";
 import { OPS_DENYLIST_PATH } from "../leak-gate";
 import { resolveOpsRepo } from "../ops-repo";
@@ -487,6 +488,40 @@ async function withAssignWake(
 }
 
 /**
+ * PR #9 review, blocker B1: the ONE call site anywhere in this codebase that
+ * may ever write a `/fleet/junior` authorization record — see
+ * src/junior/authz.ts's own header for the full argument and
+ * src/board/board.ts's findLiveAssignedTask for the read side.
+ *
+ * Reachable ONLY from `handleBoard`'s create-task branch, itself gated by
+ * `verifyAccess` (Cloudflare Access) at the top of that function — a spawn
+ * token, the credential every studio actually holds, is never accepted here.
+ * So the single fact this whole fix rests on is: nothing a studio's own `gh`
+ * token or spawn token can drive ever reaches this function.
+ *
+ * Fires only when `createTask` actually succeeded, the created (or replayed)
+ * task carries `JUNIOR_LABEL`, AND it resolved to exactly one assignee — an
+ * unassigned junior-flagged task (a brief with `junior: true` and no
+ * `assignee`) authorizes NOBODY, since there is no studio to authorize. A D1
+ * write failure is logged and swallowed rather than failing the whole
+ * request: the task itself was already created successfully, and the safe
+ * direction for this record to fail in is "nobody gets junior access", which
+ * is exactly what an absent record already means.
+ */
+async function recordJuniorAuthorizationIfNeeded(
+  env: Env, repo: string, result: BoardResult<BoardTask>,
+): Promise<void> {
+  if (!result.ok) return;
+  if (!result.value.labels.includes(JUNIOR_LABEL)) return;
+  if (result.value.assignee === null) return;
+  try {
+    await recordJuniorAuthorization(env.DB, repo, result.value.number, result.value.assignee, Date.now());
+  } catch (err) {
+    console.error(`board: junior authorization record failed for #${result.value.number} in ${repo}`, err);
+  }
+}
+
+/**
  * Issue #284 round 2: the repo-mismatch refusal used to run only AFTER
  * `createTask`/`assignTask` had already written the `studio:` label —
  * `wakeOnAssign` (above, in `withAssignWake`) only runs from board.ts's
@@ -591,7 +626,11 @@ export async function handleBoard(
         // exception (edge 500) instead of upstreamFailure's 502 (PR #142).
         const createPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee);
         if (createPreflight) return createPreflight;
-        return await withAssignWake(assignWake, repo.value, (onAssigned) => createTask(api, repo.value, body, onAssigned));
+        return await withAssignWake(assignWake, repo.value, async (onAssigned) => {
+          const result = await createTask(api, repo.value, body, onAssigned);
+          await recordJuniorAuthorizationIfNeeded(env, repo.value, result);
+          return result;
+        });
       }
       const query: ListTasksQuery = {};
       const milestone = url.searchParams.get("milestone");

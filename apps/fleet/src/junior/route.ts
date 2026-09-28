@@ -8,7 +8,8 @@ import { isSpawnTokenShaped, resolveSpawnParent, SPAWN_TOKEN_HEADER } from "../s
 import { listStudios } from "../studio/registry";
 import type { StudioStatus } from "../studio/types";
 import { JUNIOR_MODELS, juniorEnabled } from "./gate";
-import { hasJuniorAuthorizedTask, type BoardApi } from "../board/board";
+import { findLiveAssignedTask, type BoardApi } from "../board/board";
+import { isJuniorAuthorized } from "./authz";
 import { githubBoardApi, resolveStudioBoardRepo } from "../board/routes";
 
 export const JUNIOR_BODY_CAP = 2 * 1024 * 1024;
@@ -70,13 +71,24 @@ export async function handleFleetJunior(
   // The maestro's gate: only a live task it filed with `--junior` lets this
   // studio through. Read fresh every call — a completed or reassigned task
   // must stop authorizing at once. A board error fails CLOSED.
+  //
+  // PR #9 review, blocker B1: `findLiveAssignedTask` finds the CANDIDATE task
+  // (open, live state, assigned to this studio) from board/GitHub signals the
+  // Worker itself controls the meaning of. Whether THAT task was actually
+  // authorized for junior is then answered from D1 (isJuniorAuthorized),
+  // never from `JUNIOR_LABEL` on the issue — see board.ts's own doc comment
+  // on findLiveAssignedTask and authz.ts's header for the full argument. A
+  // studio's own `gh` token can label its own issue; it can never write a
+  // fleet_state row.
   const repo = resolveStudioBoardRepo(studio.repoSlug, env.AGENT_REPO, undefined);
   if (!repo.ok) return text("junior not authorized for your current task", 403);
-  let authorized;
-  try { authorized = await hasJuniorAuthorizedTask(api, repo.value, studio.id); }
+  let live;
+  try { live = await findLiveAssignedTask(api, repo.value, studio.id); }
   catch { return text("board unavailable", 503); }
-  if (!authorized.ok) return text("board unavailable", 503);
-  if (!authorized.value) return text("junior not authorized for your current task", 403);
+  if (!live.ok) return text("board unavailable", 503);
+  if (live.value === null) return text("junior not authorized for your current task", 403);
+  const authorized = await isJuniorAuthorized(env.DB, repo.value, live.value.number, studio.id);
+  if (!authorized) return text("junior not authorized for your current task", 403);
 
   const raw = await req.text();
   if (new TextEncoder().encode(raw).length > JUNIOR_BODY_CAP) return text("payload too large", 413);

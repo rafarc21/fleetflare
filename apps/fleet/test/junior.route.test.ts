@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import { handleFleetJunior, normalizeAiResult } from "../src/junior/route";
 import { juniorEnabled } from "../src/junior/gate";
@@ -50,6 +50,14 @@ const req = (token: string | null, body: unknown, path = "/fleet/junior", method
     body: method === "POST" ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
   });
 const good = { model: "@cf/zai-org/glm-5.3", messages: [{ role: "user", content: "hi" }], max_tokens: 100 };
+
+// PR #9 review, blocker B1: fleet_state is NOT isolated per test (see
+// agents.do.test.ts's own identical beforeEach) — a D1-backed authorization
+// record written in one test would otherwise leak into the next, silently
+// authorizing a test that expects a 403.
+beforeEach(async () => {
+  await env.DB.prepare("DELETE FROM fleet_state").run();
+});
 
 describe("juniorEnabled", () => {
   it("off unless exactly 'on'", () => {
@@ -148,8 +156,11 @@ describe("handleFleetJunior", () => {
 });
 
 describe("handleFleetJunior — maestro authorization", () => {
-  it("403 when no live task carries junior", async () => {
-    const { token, rows, e, run } = await setup();
+  // B1: the label is no longer load-bearing (see the B1 test below), so this
+  // is deliberately `authorize: false` — the actual refusal reason is "no D1
+  // record for this task", not "no junior label".
+  it("403 when the live task has no D1 authorization record", async () => {
+    const { token, rows, e, run } = await setup({}, undefined, false);
     const r = await handleFleetJunior(req(token, good), e, board([boardTask({ labels: ["working", studioLabel(ME)] })]), rows);
     expect(r.status).toBe(403);
     expect(await r.text()).toBe("junior not authorized for your current task");
