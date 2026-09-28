@@ -97,6 +97,12 @@
     "FLEET_TELEGRAM": "off",
     "FLEET_DIRECTUS": "off",
     "FLEET_AUTO_FAILOVER": "off",
+    // FLEET_JUNIOR gates the junior skill (Workers AI delegation, see
+    // skills/junior/SKILL.md): studios get the skill and /fleet/junior
+    // answers only when "on". JUNIOR_REPOS optionally narrows it to a comma
+    // list of owner/repo. Needs the "ai" binding above.
+    "FLEET_JUNIOR": "off",
+    // "JUNIOR_REPOS": "<your-org>/<your-repo>",
     // Issue #335: must match r2_buckets[0].bucket_name below exactly
     // (install-cache.ts's presignR2 signs URLs against this value). Not a
     // secret — a bucket name isn't a credential.
@@ -113,6 +119,8 @@
     // name would collide with the secret at deploy time (wrangler rejects or
     // shadows it). Secrets are authoritative.
   },
+  // Workers AI — only /fleet/junior uses it; harmless while FLEET_JUNIOR is off.
+  "ai": { "binding": "AI" },
   "d1_databases": [
     {
       "binding": "DB",

@@ -38,6 +38,15 @@ export interface Env {
   /** Board issue #334: the Directus project card runs only when this is
    *  exactly "on" (directus/client.ts's `directusConfig`). */
   FLEET_DIRECTUS?: string;
+  /** Junior (Workers AI delegation, docs/superpowers/specs/2026-09-28-junior-workers-ai-design.md):
+   *  `/fleet/junior` answers and studios get the `junior` skill only when this
+   *  is exactly "on". Absent = off. */
+  FLEET_JUNIOR?: string;
+  /** Optional comma list of "owner/repo" narrowing FLEET_JUNIOR, same format
+   *  as INSTALL_CACHE_REPOS. Absent/empty = every repo when FLEET_JUNIOR is on. */
+  JUNIOR_REPOS?: string;
+  /** Workers AI binding (`"ai": { "binding": "AI" }`). Only junior uses it. */
+  AI?: { run(model: string, input: unknown): Promise<unknown> };
   /**
    * THE claude credential, and the first of an ordered list.
    *

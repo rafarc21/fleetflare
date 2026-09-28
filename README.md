@@ -83,10 +83,15 @@ operator-specific values.
 | `FLEET_TELEGRAM` | the legacy Telegram surface: `/tg` webhook, AgentDO tasks, DeployDO approvals, operator alerts | secrets `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`; var `TELEGRAM_OPERATOR_ID` |
 | `FLEET_DIRECTUS` | the Directus project card in studio prompts | `DIRECTUS_URL`, secret `DIRECTUS_TOKEN` |
 | `FLEET_AUTO_FAILOVER` | automatic Claude-account switch on a usage limit | more than one `CLAUDE_CODE_OAUTH_TOKEN_<n>` |
+| `FLEET_JUNIOR` | the junior skill (Workers AI delegation): studios get the skill and `/fleet/junior` answers | the "ai" binding; `JUNIOR_REPOS` optionally narrows to a comma list of owner/repo |
 
 With `FLEET_TELEGRAM` off, AgentDO and DeployDO stay declared (removing a
 Durable Object class needs a migration) but nothing reaches them, so their
 containers never start.
+
+On your own Mac, `fleet junior enable --account <id>` enables the junior
+skill locally (a direct Workers AI call, not through the Worker); `fleet
+junior disable` removes it.
 
 ---
 

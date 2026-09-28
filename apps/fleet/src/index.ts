@@ -11,6 +11,7 @@ import { listStudios } from "./studio/registry";
 import { isWatchMinute, watchStoppedContainers } from "./studio/container-watch";
 import { handleBoard, handleFleetBoard } from "./board/routes";
 import { handleMemory } from "./memory/routes";
+import { handleFleetJunior } from "./junior/route";
 
 export { AgentDO } from "./agents/do";
 // A container class declared in wrangler.jsonc without a matching export
@@ -52,6 +53,11 @@ export default {
     // Access service token. First because handleFleetSpawn 404s every path
     // but `/fleet/spawn`; the two cannot overlap (`tasks` is not `spawn`),
     // so this is ordering for readability, not a hazard.
+    // Junior (Workers AI delegation): spawn-token authenticated like
+    // /fleet/tasks, before the /fleet/ catch-all. 404s itself unless
+    // FLEET_JUNIOR is on for the calling studio's repo; 403 unless the
+    // studio's live task carries the maestro's `junior` label.
+    if (url.pathname === "/fleet/junior") return handleFleetJunior(req, env);
     if (url.pathname.startsWith("/fleet/tasks")) return handleFleetBoard(req, env);
     // Fleet Spawn P3, R-P3-7: the machine surface, deliberately OUTSIDE the
     // `/studio` prefix the Cloudflare Access app is scoped to — a container
