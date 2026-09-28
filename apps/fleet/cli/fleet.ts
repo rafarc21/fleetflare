@@ -29,6 +29,7 @@ import { parseCliArgs, renderHelp } from "../src/studio/cli-args";
 import { parseStudioId } from "../src/studio/ids";
 import { parseGitRemote, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
 import { runOnboardPreflight } from "../src/studio/onboard";
+import { cmdJunior } from "./junior";
 import { runTaskStateTransition, type TaskStateFetchResult } from "../src/studio/task-state";
 import type { ReapOutcome } from "../src/studio/task-reap";
 import type { RescueGcOutcome } from "../src/studio/rescue-gc";
@@ -2177,6 +2178,13 @@ async function main(): Promise<void> {
   // and must never reach anywhere near cmdAttach's interactive WS machinery.
   if (parsed.cmd === "attach" && parsed.printHandle) {
     return cmdPrintAttachHandle(parsed.id);
+  }
+
+  // Junior: purely local (a symlink + one config file), so like onboard it
+  // must work on a machine with no ~/.fleet/credentials at all.
+  if (parsed.cmd === "junior") {
+    process.exitCode = cmdJunior(parsed);
+    return;
   }
 
   const creds = await loadCredentials();

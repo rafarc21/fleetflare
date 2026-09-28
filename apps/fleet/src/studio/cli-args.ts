@@ -173,6 +173,10 @@ export type CliCommand =
   // flag, so it reads like every other command AND so the VERBS table below
   // can be typed against this union — which is what stops the help drifting.
   | { cmd: "help" }
+  // Task 8: purely local opt-in — `fleet junior enable [--account <id>] |
+  // disable | status`. Never reaches the Worker or any studio; cli/junior.ts
+  // (a symlink + one config file under $HOME) does the actual work.
+  | { cmd: "junior"; action: "enable" | "disable" | "status"; account?: string }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -311,6 +315,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   "task-reap": {
     args: "reap [--dry-run|--apply]",
     summary: "Deterministic backfill: every open task whose latest envelope names a PR now on the default branch. Bare (or --dry-run) only REPORTS would-close/skipped(why); --apply actually closes the GitHub issue and moves the board to completed, the SAME idempotent action a push webhook uses. The only coverage for a repo on the token auth path, where no webhook is ever sent.",
+  },
+  junior: {
+    args: "enable [--account <id>] | disable | status",
+    summary: "Opt this Mac into the junior skill (Workers AI delegation, skills/junior/SKILL.md). enable symlinks ~/.claude/skills/junior to this checkout and stores the Cloudflare account id in ~/.config/fleet/junior.json; disable removes only that symlink; status prints whether it is on, the account, and which auth path a call would take. Local only — never touches the Worker or any studio.",
   },
 };
 
@@ -717,6 +725,19 @@ export function parseCliArgs(argv: string[]): CliCommand {
       if (arg === undefined || arg === "ls") return { cmd: "memory-ls" };
       if (arg === "compact") return { cmd: "memory-compact" };
       return usage(`unknown memory command ${JSON.stringify(arg)}`);
+    // Task 8: `fleet junior enable [--account <id>] | disable | status`.
+    case "junior": {
+      const action = argv[1];
+      if (action !== "enable" && action !== "disable" && action !== "status") {
+        return { cmd: "usage", message: "usage: fleet junior enable [--account <id>] | disable | status" };
+      }
+      const rest = argv.slice(2);
+      if (action !== "enable" || rest.length === 0) {
+        return rest.length === 0 ? { cmd: "junior", action } : { cmd: "usage", message: `fleet junior ${action}: takes no arguments` };
+      }
+      if (rest.length === 2 && rest[0] === "--account" && rest[1] !== "") return { cmd: "junior", action, account: rest[1] };
+      return { cmd: "usage", message: "usage: fleet junior enable [--account <id>]" };
+    }
     default:
       return { cmd: "usage", message: CLI_USAGE };
   }
