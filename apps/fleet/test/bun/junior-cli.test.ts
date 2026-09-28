@@ -29,10 +29,10 @@ function repo(files: Record<string, string>) {
   for (const [p, c] of Object.entries(files)) writeFileSync(join(dir, p), c);
   return dir;
 }
-async function run(dir: string, args: string[]) {
+async function run(dir: string, args: string[], apiBase = `http://127.0.0.1:${server.port}`) {
   const p = Bun.spawn(["bash", SH, ...args], {
     cwd: dir, stdout: "pipe", stderr: "pipe",
-    env: { PATH: process.env.PATH!, HOME: dir, CLOUDFLARE_API_TOKEN: "t", CLOUDFLARE_ACCOUNT_ID: "a", JUNIOR_API_BASE: `http://127.0.0.1:${server.port}` },
+    env: { PATH: process.env.PATH!, HOME: dir, CLOUDFLARE_API_TOKEN: "t", CLOUDFLARE_ACCOUNT_ID: "a", JUNIOR_API_BASE: apiBase },
   });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { out, err, code };
@@ -112,5 +112,21 @@ describe("junior.sh", () => {
     replies = [{ content: "ok" }];
     const r = await run(dir, ["--mode", "text", "--model", "deepseek", "--task", "t", "a.ts"]);
     expect(r.err).toContain("model=deepseek-v4-pro-0813");
+  });
+
+  // Regression: a network-level failure (connection refused, DNS failure —
+  // anything that never reaches callOnce's response handling) is neither an
+  // ApiError, an AuthError, nor named TimeoutError/AbortError. main() used to
+  // let it fall through to a bare `throw`, crashing with an unhandled
+  // exception, a raw stack trace on stderr, and exit code 1 — outside the
+  // documented contract of EXIT.{OK,USAGE,API,INVALID,TIMEOUT,AUTH}. It must
+  // exit 3 (API) with a clean one-line message instead.
+  test("network-level fetch failure -> exit 3, not an unhandled crash", async () => {
+    const dir = repo({ "a.ts": "x\n" });
+    replies = [];
+    const r = await run(dir, ["--mode", "text", "--task", "t", "a.ts"], "http://127.0.0.1:1");
+    expect(r.code).toBe(3);
+    expect(r.err).toContain("junior:");
+    expect(r.err).not.toContain("at async callOnce");
   });
 });
