@@ -70,4 +70,34 @@ describe("junior at provision", () => {
     expect((bringupEnv as { STUDIO_SKILLS: string }).STUDIO_SKILLS.split(",")).not.toContain("junior");
     expect(decode(bringupEnv.ROLE_PROMPT_B64)).not.toContain("House rules — junior");
   });
+
+  // Fresh-review addition: the maestro exclusion (and the FLEET_JUNIOR-off
+  // path) must not merely SKIP adding "junior" -- they must actively STRIP it
+  // if the studio.md's own frontmatter already lists it. `skills:` is parsed
+  // straight off blueprint content (parseSimpleArray, no allow-list), so an
+  // operator typo/bad merge/blueprint-repo write access could put "junior"
+  // directly in a studio's (including the maestro's) skills array. Nothing
+  // upstream of this function filters that, so materialization must.
+  const STUDIO_MD_WITH_JUNIOR_SKILL = STUDIO_MD.replace("skills: []", "skills: [junior]");
+
+  it("maestro's own frontmatter listing 'junior' directly in skills is still stripped -- authorization is never blueprint-content-derived", async () => {
+    files["fleet/blueprint/studios/maestro/studio.md"] = STUDIO_MD_WITH_JUNIOR_SKILL.replace("name: web-studio", "name: maestro");
+    const { bringupEnv } = await resolveBringupEnv(deps(() => true), { repo: "websites", role: "maestro" }, "o/fleet", "o/websites");
+    expect((bringupEnv as { STUDIO_SKILLS: string }).STUDIO_SKILLS.split(",")).not.toContain("junior");
+  });
+
+  it("a non-maestro studio.md listing 'junior' directly in skills is stripped when the global flag is off/absent", async () => {
+    files["fleet/blueprint/studios/web-studio/studio.md"] = STUDIO_MD_WITH_JUNIOR_SKILL;
+    const { bringupEnv } = await resolveBringupEnv(deps(() => false), { repo: "websites", role: "web-studio" }, "o/fleet", "o/websites");
+    expect((bringupEnv as { STUDIO_SKILLS: string }).STUDIO_SKILLS.split(",")).not.toContain("junior");
+    files["fleet/blueprint/studios/web-studio/studio.md"] = STUDIO_MD; // restore
+  });
+
+  it("a studio.md listing 'junior' directly in skills still gets exactly one 'junior' entry when actually authorized (filter-then-readd, no accidental always-strip, no dedup-wasting duplicate)", async () => {
+    files["fleet/blueprint/studios/web-studio/studio.md"] = STUDIO_MD_WITH_JUNIOR_SKILL;
+    const { bringupEnv } = await resolveBringupEnv(deps(() => true), { repo: "websites", role: "web-studio" }, "o/fleet", "o/websites");
+    const skills = (bringupEnv as { STUDIO_SKILLS: string }).STUDIO_SKILLS.split(",");
+    expect(skills.filter((s) => s === "junior")).toEqual(["junior"]);
+    files["fleet/blueprint/studios/web-studio/studio.md"] = STUDIO_MD; // restore
+  });
 });
