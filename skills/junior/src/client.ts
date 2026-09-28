@@ -72,9 +72,33 @@ export async function callOnce(
 
 type Kind = "retry" | "rate" | "other";
 function classify(e: ApiError): Kind {
-  if (e.code === 3046 || e.code === 3040 || /timeout|capacity/i.test(e.message)) return "retry";
+  // The text fallback only applies alongside a transient-shaped HTTP status (5xx). A 4xx whose
+  // message merely happens to contain "timeout"/"capacity" (e.g. a permanent quota/validation
+  // error) must not be treated as retryable.
+  if (e.code === 3046 || e.code === 3040 || (e.httpStatus >= 500 && /timeout|capacity/i.test(e.message))) return "retry";
   if (e.code === 429 || e.httpStatus === 429 || /rate limit|too many requests/i.test(e.message)) return "rate";
   return "other";
+}
+
+function abortError(): Error {
+  const e = new Error("The operation was aborted.");
+  e.name = "AbortError";
+  return e;
+}
+
+// Races an injected/default sleep against the caller's AbortSignal so a mid-backoff abort
+// interrupts the wait immediately instead of running the full 10s/20s delay regardless.
+function sleepAbortable(ms: number, sleep: (ms: number) => Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return sleep(ms);
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    sleep(ms).then(
+      () => { signal.removeEventListener("abort", onAbort); resolve(); },
+      (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
+    );
+  });
 }
 
 export interface PolicyOpts {
@@ -107,7 +131,7 @@ export async function callWithPolicy(o: PolicyOpts): Promise<{ result: ChatResul
         last = `${model}: ${e.message}`;
         const k = classify(e);
         if (k === "rate") {
-          if (rateWaits < 2) { rateWaits++; await sleep(10_000 * rateWaits); continue; }
+          if (rateWaits < 2) { rateWaits++; await sleepAbortable(10_000 * rateWaits, sleep, o.signal); continue; }
           throw new ApiError(429, `rate limited: ${last}`, 429);
         }
         if (k === "retry" && !retried) { retried = true; continue; }
