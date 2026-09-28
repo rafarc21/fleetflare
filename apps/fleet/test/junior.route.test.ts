@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
-import { handleFleetJunior, normalizeAiResult } from "../src/junior/route";
+import { handleFleetJunior, normalizeAiResult, JUNIOR_BODY_CAP } from "../src/junior/route";
 import { juniorEnabled } from "../src/junior/gate";
 import { recordJuniorAuthorization } from "../src/junior/authz";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
@@ -109,6 +109,56 @@ describe("handleFleetJunior", () => {
     const { token, rows, e } = await setup();
     const big = { ...good, messages: [{ role: "user", content: "x".repeat(2 * 1024 * 1024) }] };
     expect((await handleFleetJunior(req(token, big), e, board(), rows)).status).toBe(413);
+  });
+  // PR #9 review, F3: the old check read the WHOLE body into one JS string
+  // (`req.text()`) before ever comparing its length to the cap — exactly the
+  // DoS shape a Content-Length ceiling is supposed to prevent. A lying
+  // Content-Length must be caught from the header alone, with nothing else
+  // in the handler (auth, board, AI) ever running.
+  it("F3: a Content-Length lying above the cap is rejected before auth, board, or AI work", async () => {
+    const { e, run } = await setup();
+    const api = board();
+    const rows = vi.fn(async () => []);
+    const request = new Request("https://w/fleet/junior", {
+      method: "POST",
+      // Deliberately NO spawn-token header: the size gate must fire even
+      // before auth would, proving nothing downstream of it ran.
+      headers: { "content-length": String(JUNIOR_BODY_CAP + 1) },
+      body: JSON.stringify(good),
+    });
+    const r = await handleFleetJunior(request, e, api, rows);
+    expect(r.status).toBe(413);
+    expect(rows).not.toHaveBeenCalled();
+    expect(api.listIssues).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+  // The Content-Length header can be absent or under-reported; the real
+  // ceiling has to be enforced against the bytes actually read, streamed in,
+  // never against one fully-materialized string.
+  it("F3: a streamed body over the cap with no Content-Length header is rejected without ever being fully drained", async () => {
+    const { token, rows, e, run } = await setup();
+    const chunkSize = 1024 * 1024; // 1 MiB
+    const totalChunks = 5; // 5 MiB total, well over the 2 MiB cap
+    let produced = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        produced++;
+        if (produced > totalChunks) { controller.close(); return; }
+        controller.enqueue(new Uint8Array(chunkSize));
+      },
+    });
+    const request = new Request("https://w/fleet/junior", {
+      method: "POST",
+      headers: { [SPAWN_TOKEN_HEADER]: token },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+    const r = await handleFleetJunior(request, e, board(), rows);
+    expect(r.status).toBe(413);
+    // Stopped pulling once the running total crossed the cap (after 3 MiB —
+    // the 3rd chunk), never drained all 5.
+    expect(produced).toBeLessThan(totalChunks);
+    expect(run).not.toHaveBeenCalled();
   });
   it("200 streams normalized JSON and forwards the request to env.AI.run", async () => {
     const { token, rows, e, run } = await setup();
