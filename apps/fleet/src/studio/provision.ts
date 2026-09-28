@@ -1759,10 +1759,23 @@ export async function resolveBringupEnv(
     // and this exclusion is a real safety property, not a display nicety.
     const isMaestro = cfg.role === "maestro" || studio.name === "maestro";
     const junior = !isMaestro && deps.juniorEnabled?.(workRepoSlug) === true;
+    // "junior" is stripped out of the blueprint-parsed skills list
+    // UNCONDITIONALLY, then re-added only when `junior` above says so. Never
+    // the reverse (pass `studio` through untouched when not authorized):
+    // `studio.skills` came straight off studio.md frontmatter
+    // (parseSimpleArray, no allow-list) via `tryFetchStudio`, so a typo, a
+    // bad merge, or anyone with blueprint-repo write access could put
+    // "junior" directly in ANY studio's (including the maestro's) skills
+    // array and, without this filter, it would materialize into the
+    // container regardless of cfg.role/studio.name/FLEET_JUNIOR. Filtering
+    // first means blueprint content alone can never decide this; only
+    // `junior` (computed above from server-side signals) can.
+    const skills = studio.skills.filter((s) => s !== "junior");
+    const finalSkills = junior ? [...skills, "junior"] : skills;
     return {
       bringupEnv: {
         ...studioBringupEnv(
-          junior ? { ...studio, skills: [...studio.skills, "junior"] } : studio,
+          { ...studio, skills: finalSkills },
           members,
           composePromptBlocks(composePromptBlocks(junior ? JUNIOR_HOUSE_RULE : undefined, cfg.projectCard), briefPrompt),
           await resolveMemoryIndex(deps),
