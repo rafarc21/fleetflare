@@ -496,8 +496,35 @@ function parseTask(argv: string[]): CliCommand {
   // `--junior` is the one bare boolean on task new (parseFlags only takes
   // `--flag value` pairs). Pulled out first so it may sit anywhere; on any
   // other task verb it stays in and parseFlags rejects it as unexpected.
-  const junior = sub === "new" && rest.includes("--junior");
-  const flagArgs = junior ? rest.filter((a) => a !== "--junior") : rest;
+  //
+  // Code review round: a blind `rest.includes("--junior")` / `.filter` matches
+  // the literal string "--junior" no matter WHERE it sits — including inside
+  // another flag's VALUE slot (e.g. `--boundaries "--junior"`). That silently
+  // authorizes junior for a task that never asked for it, AND shifts every
+  // later key/value pairing by one, since `parseFlags` below walks argv in
+  // strict alternating name/value order. Extracting it here has to walk `rest`
+  // the same way `parseFlags` will: a token immediately after one of
+  // `TASK_FLAGS.new`'s value-taking flag NAMES is that flag's VALUE, whatever
+  // it looks like, and is never eligible to be treated as the bare flag —
+  // only a `--junior` that is NOT itself sitting in a value slot is the real
+  // boolean flag.
+  let junior = false;
+  const flagArgs: string[] = [];
+  if (sub === "new") {
+    for (let i = 0; i < rest.length; i++) {
+      const token = rest[i];
+      if (token === "--junior") { junior = true; continue; }
+      flagArgs.push(token);
+      // `token` is a value-taking flag's bare NAME (no `--k=v` form, which
+      // carries its value inline and consumes nothing further) — its value
+      // sits in the very next slot and must be taken as-is.
+      if (!token.includes("=") && token.startsWith("--") && TASK_FLAGS.new.includes(token.slice(2)) && i + 1 < rest.length) {
+        flagArgs.push(rest[++i]);
+      }
+    }
+  } else {
+    flagArgs.push(...rest);
+  }
   const parsed = parseFlags(flagArgs, TASK_FLAGS[sub]);
   if ("bad" in parsed) return usage(`unexpected ${JSON.stringify(parsed.bad)}`);
 
