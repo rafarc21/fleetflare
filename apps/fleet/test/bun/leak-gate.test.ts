@@ -159,6 +159,26 @@ describe("fleet-leak-scan (container scanner script)", () => {
     expect(r.code).toBe(0);
   });
 
+  // Maestro review of PR #2, blocker 1: an 'off' gate that exits without
+  // reading stdin SIGPIPEs its producer, and the wrapper's pipefail then
+  // refuses every push from a private-repo studio.
+  test("an 'off' gate drains large stdin so a pipefail producer upstream still exits 0", () => {
+    scanner(denylistFileContent({ off: "work repo is private" }));
+    const r = Bun.spawnSync({
+      cmd: ["bash", "-c", `set -o pipefail; seq 1 2000000 | '${join(dir!, "fleet-leak-scan")}'`],
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("an 'off' gate with file arguments does not wait on stdin", () => {
+    scanner(denylistFileContent({ off: "work repo is private" }));
+    const f = join(dir!, "body.md");
+    writeFileSync(f, "acmeclient\n");
+    const r = Bun.spawnSync({ cmd: [join(dir!, "fleet-leak-scan"), f], stdin: "pipe", stdout: "pipe", stderr: "pipe", timeout: 5000 });
+    expect(r.exitCode).toBe(0);
+  });
+
   test("binary-looking input is still scanned", () => {
     expect(scanner(ON).run("\u0000\u0001acmeclient\u0000\n").code).toBe(1);
   });

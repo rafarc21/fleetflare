@@ -154,7 +154,9 @@ export function leakScanScript(denylistPath = LEAK_DENYLIST_PATH): string {
     `[ -f "$list" ] && [ -r "$list" ] || missing`,
     `IFS= read -r header < "$list" || missing`,
     `case "$header" in`,
-    `  '${LEAK_GATE_OFF}'*) exit 0 ;;`,
+    // Drain stdin first: exiting unread SIGPIPEs the producer, and a caller
+    // under pipefail then refuses (maestro review of PR #2, blocker 1).
+    `  '${LEAK_GATE_OFF}'*) [ "$#" -gt 0 ] || cat > /dev/null; exit 0 ;;`,
     `  '${LEAK_GATE_ON}') ;;`,
     `  *) missing ;;`,
     `esac`,
