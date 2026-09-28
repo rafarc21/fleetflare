@@ -450,6 +450,26 @@ write is refused. A refusal names the pattern's line number, never the term.
 A studio whose work repo is private gets the gate switched off. See
 `apps/fleet/src/leak-gate.ts`.
 
+**Write proxy** (on by default; issue #7): the wrappers above run inside the
+container, and container root can step around them. So a studio whose work
+repo is public (or whose visibility cannot be confirmed) holds a **read-only**
+GitHub credential, and its writes go through the Worker instead: `git push` is
+rewritten (`pushInsteadOf`) to `/fleet/git/...`, which parses the pack, scans
+every ref name, commit, tag, file and path against the same denylist, and only
+then forwards the identical bytes to GitHub with the Worker's own token; `gh pr
+create|edit|ready|comment|review` and `gh issue create|edit|comment` go to
+`/fleet/gh` the same way. Other `gh` writes fail at GitHub (the token cannot
+write). Pushes over 16 MiB are refused; split them. Operator setup:
+
+- GitHub App fleets: nothing. The studio's token is narrowed to read at mint time.
+- PAT fleets: `scripts/deploy.sh secret put GITHUB_READ_TOKEN` with a read-only
+  fine-grained PAT (`GITHUB_READ_TOKEN_<OWNER>` per owner, like
+  `GITHUB_TOKEN_<OWNER>`). Without one, studios read their public repo
+  anonymously (low `gh` rate limits); the write PAT never reaches them.
+- Restart running studios after deploying (new image, new credential).
+- `FLEET_WRITE_PROXY=off` (a `vars` entry) turns it off and hands studios
+  their write credential again. See `apps/fleet/src/write-proxy/`.
+
 **`FLEET_RESCUE_REMOTE`** (optional, strongly recommended when your fork is
 public): the `owner/name` slug of a PRIVATE repo that receives rescue
 pushes (`fleet/rescue/*` and friends) instead of `origin`, for studios whose

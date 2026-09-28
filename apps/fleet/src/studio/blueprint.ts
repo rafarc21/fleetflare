@@ -486,6 +486,12 @@ export const HOUSE_RULES = [
   "operator's private denylist. The refusal names a pattern number, never",
   "the term. Rewrite the text; never route around the gate.",
   "",
+  "On a public repo your GitHub token is read-only. `git push` and",
+  "`gh pr create|edit|ready|comment|review` / `gh issue create|edit|comment`",
+  "go through the fleet Worker, which runs the same check server-side and",
+  "refuses pushes over 16 MiB. Other gh writes (merge, api, release) fail:",
+  "ask the maestro.",
+  "",
   // Board issue #160 — another standing rule. #98 said "one heavy gate at a
   // time" and was read as a rule about the DIFF: a one-line diff looked cheap,
   // so its gate budget looked spent on nothing. The cost lives in the
