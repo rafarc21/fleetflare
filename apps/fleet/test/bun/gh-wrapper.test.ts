@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { denylistFileContent } from "../../src/leak-gate";
@@ -24,7 +24,9 @@ type Studio = {
   dir: string;
   bin: string;
   real: string;
+  sysGh: string;
   block: () => number;
+  run: (path: string, args: string[]) => number;
   install: () => { code: number; stderr: string };
   gh: (args: string[], stdin?: string) => { code: number; stderr: string };
   realArgv: () => string[] | null;
@@ -48,6 +50,13 @@ function studio(denylist: string | null): Studio {
     `exit 0`,
   ].join("\n") + "\n");
   chmodSync(real, 0o755);
+  // Stands in for a gh the block must NOT touch: a CI runner's root-owned
+  // /usr/bin/gh sits on PATH, and a non-root chmod of it fails.
+  const sysDir = join(d, "sys");
+  mkdirSync(sysDir);
+  const sysGh = join(sysDir, "gh");
+  writeFileSync(sysGh, `#!/bin/sh\ntouch '${d}/sys-ran'\nexit 0\n`);
+  chmodSync(sysGh, 0o755);
   const list = join(d, "denylist");
   if (denylist !== null) writeFileSync(list, denylist);
   const cmd = leakGateInstallCmd({
@@ -56,12 +65,18 @@ function studio(denylist: string | null): Studio {
     realGh: real,
     denylistPath: list,
   });
-  const env = { PATH: `${bin}:${realDir}:${SYS_PATH}` };
+  const env = { PATH: `${bin}:${realDir}:${sysDir}:${SYS_PATH}` };
   const s: Studio = {
     dir: d,
     bin,
     real,
-    block: () => Bun.spawnSync({ cmd: ["bash", "-c", ghBlockCmd(real)], env, stdin: "ignore" }).exitCode ?? -1,
+    sysGh,
+    block: () => Bun.spawnSync({
+      cmd: ["bash", "-c", ghBlockCmd({ realGh: real, ghWrapperPath: join(bin, "gh") })], env, stdin: "ignore",
+    }).exitCode ?? -1,
+    run: (path, args) => Bun.spawnSync({
+      cmd: ["bash", "-c", '"$0" "$@"', path, ...args], env, cwd: d, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    }).exitCode ?? -1,
     install: () => {
       const r = Bun.spawnSync({ cmd: ["bash", "-c", cmd], env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
       return { code: r.exitCode ?? -1, stderr: r.stderr.toString() };
@@ -387,22 +402,27 @@ describe("gh wrapper: aliases refused", () => {
 });
 
 describe("gh block (install failure)", () => {
-  test("after block, gh fails and real gh never runs (mutant: block a no-op)", () => {
+  // Hermetic: every assertion names the fixture's own wrapper and real-gh
+  // paths. A bare `gh` would resolve past them to whatever gh the host has.
+  test("after block, wrapper and real gh both fail and real gh never runs (mutant: block a no-op)", () => {
     const s = installed();
     expect(s.block()).toBe(0);
-    const r = s.gh(["issue", "list"]);
-    expect(r.code).not.toBe(0);
-    expect(s.realArgv()).toBeNull();
-    const direct = Bun.spawnSync({ cmd: ["bash", "-c", '"$0" issue list', s.real], stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-    expect(direct.exitCode).not.toBe(0);
+    expect(s.run(join(s.bin, "gh"), ["issue", "list"])).not.toBe(0);
+    expect(s.run(s.real, ["issue", "list"])).not.toBe(0);
     expect(s.realArgv()).toBeNull();
   });
 
-  test("block with no wrapper installed: bare gh fails", () => {
+  test("block with no wrapper installed: real gh fails", () => {
     const s = studio(ON);
     expect(s.block()).toBe(0);
-    expect(s.gh(["issue", "list"]).code).not.toBe(0);
+    expect(s.run(s.real, ["issue", "list"])).not.toBe(0);
     expect(s.realArgv()).toBeNull();
+  });
+
+  test("block touches only the configured paths, never another gh on PATH (CI runner: root-owned /usr/bin/gh)", () => {
+    const s = installed();
+    expect(s.block()).toBe(0);
+    expect(statSync(s.sysGh).mode & 0o111).toBe(0o111);
   });
 
   test("later successful install restores gh (mutant: install never re-enables real gh)", () => {
@@ -417,7 +437,9 @@ describe("gh block (install failure)", () => {
   });
 
   test("defaults target the real gh path", () => {
-    expect(ghBlockCmd()).toContain("chmod a-x '/usr/bin/gh'");
+    expect(ghBlockCmd()).toContain("'/usr/bin/gh'");
+    expect(ghBlockCmd()).toContain("'/usr/local/bin/gh'");
+    expect(ghBlockCmd()).not.toContain("type -ap");
   });
 });
 

@@ -176,16 +176,19 @@ export function leakGateInstallCmd(
 
 /**
  * Install failed: make gh fail loudly rather than run ungated. The real gh
- * and every other gh on PATH lose their exec bit; the command fails unless
- * no gh resolves afterwards. A later leakGateInstallCmd rewrites the wrapper
- * (fresh 0755) and restores the real gh only once the wrapper is confirmed.
+ * and the wrapper path lose their exec bit; the command fails unless neither
+ * is executable afterwards. Only these two paths, never a PATH walk: the
+ * image ships gh nowhere else, and a walk would chmod a host's own gh (a CI
+ * runner's root-owned /usr/bin/gh, where a non-root chmod fails). A later
+ * leakGateInstallCmd rewrites the wrapper (fresh 0755) and restores the real
+ * gh only once the wrapper is confirmed.
  */
-export function ghBlockCmd(realGh = STUDIO_REAL_GH_PATH): string {
+export function ghBlockCmd(opts: { realGh?: string; ghWrapperPath?: string } = {}): string {
+  const real = opts.realGh ?? STUDIO_REAL_GH_PATH;
+  const wrapper = opts.ghWrapperPath ?? STUDIO_GH_WRAPPER_PATH;
   return (
-    `chmod a-x '${realGh}' && ` +
-    `{ type -ap gh | while IFS= read -r g; do chmod a-x "$g"; done; } && ` +
-    `hash -r && ` +
-    `[ -z "$(type -ap gh)" ]`
+    `for g in '${real}' '${wrapper}'; do [ ! -e "$g" ] || chmod a-x "$g"; done; ` +
+    `[ ! -x '${real}' ] && [ ! -x '${wrapper}' ]`
   );
 }
 
