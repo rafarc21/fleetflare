@@ -2406,3 +2406,111 @@ Write `/tmp/junior-pr.md` first: summary, eval table from spec, smoke output, ro
 3a. Negative check: a task filed WITHOUT `--junior` — the same smoke from its studio exits 6 with "junior not authorized for your current task". Maestro session: `ls ~/.claude/skills/junior` → absent.
 3b. Local maestro (operator's own Claude session): add to `~/.claude/CLAUDE.md` under "Agent Dispatch", matching the cloud rulebook — "Junior: maestro-only call, per task. `fleet task new --junior` when a task has clear mechanical parts; never for auth/secrets/migrations/deploys/irreversible; name junior parts in boundaries; never call junior yourself." Caveman, per that file's rule.
 4. After a week of sane telemetry, widen `JUNIOR_REPOS`.
+
+---
+
+## Deviations from this plan (execution record, Tasks 1-9 + Task 10 Steps 1/4)
+
+Every deviation below is a fresh-context review finding against the plan's
+own literal sample code, fixed same-task with a RED/GREEN test, per the
+Execution notes' "Deviation needed? Note it in PR body with reason. Never
+silently redesign." No task was silently redesigned; each deviation is a
+narrow behavior fix or a stricter check than the sample code shipped with.
+
+**Task 1 (edit blocks):** `blocks.ts`, copied verbatim from the plan's Task
+1 Step 3 sample, had two real bugs found on review, both fixed with a
+RED-first test: (1) `count()` advanced by `needle.length` instead of `1`,
+silently under-counting self-overlapping SEARCH strings (e.g. two spaces
+inside `"a   b"`) as one match instead of two, violating the "must match
+exactly once" invariant; (2) `BLOCK_RE`'s `^`+`/m` anchor let a blank/missing
+path line above `<<<<<<< SEARCH` capture path `""` instead of erroring,
+which either produced a confusing error message or, for an empty-SEARCH
+new-file block, silently wrote a `""`-keyed entry that crashed
+`toUnifiedDiff` with `EISDIR`. Fixed by rejecting blank-path blocks up
+front with a clear "block N: missing file path" error.
+
+**Task 2 (chat client):** review found a text-based error-classification
+fallback misclassifying some permanent (non-retryable) errors as
+retryable, and a rate-limit backoff sleep that ignored an abort signal.
+Fixed by scoping the text fallback to 5xx-only and making the backoff
+abortable.
+
+**Task 3 (transport selection/auth):** review found `wranglerToken`
+validation (`/\s/.test(tok)`) caught whitespace-containing garbage but let
+a short single-word non-token string (e.g. `"NotLoggedIn"`) through to
+fail obscurely at the HTTP layer instead of clearly at the auth boundary.
+Added a minimum-length floor (20 chars; real wrangler/Cloudflare tokens
+run 40+) as a cheap, low-risk tightening. Also closed a real coverage gap:
+`defaultAuthDeps`'s `wranglerToken` and `readConfig` had zero direct test
+coverage (only exercised indirectly through hand-injected fake deps).
+
+**Task 4 (wrapper CLI):** review found an unexpected network-level `fetch`
+throw crashed the wrapper instead of exiting 3 (the documented api-error
+exit code); mapped it explicitly. Also one doc-only fix: corrected the
+scope described by a catch-all comment in `main.ts`.
+
+**Task 5 (maestro authorization / `--junior` flag):** review found
+`parseTask`'s `rest.includes("--junior")` matched the literal string
+anywhere in argv, including inside another flag's VALUE slot (e.g.
+`--boundaries "--junior"`), which silently set `brief.junior = true` for a
+task that never asked for it. Fixed by walking `rest` position-aware,
+tracking which tokens are known value-taking flag NAMES so only a
+standalone `--junior` token is treated as the bare boolean flag.
+
+**Task 6 (Worker proxy `/fleet/junior`):** review found two issues: (1)
+heartbeat interval writes were unguarded — a client disconnect mid-call
+left every subsequent 15s tick rejecting into a dead writer with no catch;
+fixed by clearing the interval the moment a heartbeat write fails; (2)
+`max_tokens` was only capped client-side (`skills/junior/src/client.ts`);
+added a server-side clamp to the documented 128,000 ceiling before the
+Worker's own `env.AI.run` call, since the Worker's AI binding is the real
+trust boundary.
+
+**Task 7 (provision — skill + house rule):** deviation from the plan's own
+sample code — the maestro-exclusion check uses `cfg.role === "maestro" ||
+studio.name === "maestro"`, not `studio.name` alone as the plan's sample
+implied. `studio.name` is unenforced frontmatter content (nothing in
+`provision.ts` actually checks it matches the directory name it is
+documented to match), so a `studio.md` fetched via role `"maestro"` whose
+frontmatter name field drifted would defeat a name-only check while still
+being the actual maestro. `cfg.role` is the identifier that selected this
+file in the first place and is already used elsewhere in the same
+spawn/provision path to gate maestro behavior. Also found and fixed: a
+blueprint-declared `"junior"` skill in a studio's own frontmatter could
+bypass the maestro/flag exclusion entirely — fixed by unconditionally
+stripping `"junior"` from the blueprint's declared skill list before
+conditionally re-adding it only when actually enabled.
+
+**Task 8 (local CLI `fleet junior enable|disable|status`):** no logic bugs
+found; review closed test-coverage gaps only — foreign/dangling symlink
+cases for `linkState`, a real end-to-end spawn of `cli/fleet.ts` proving
+`cmdJunior`'s `import.meta.dir`-based `repoRoot` arithmetic actually
+resolves to this checkout's `skills/junior`, and a clearer `juniorStatus`
+message ("auth: (no account — see above)" instead of naming a specific
+auth path `resolveTransport` can never reach with no account configured).
+
+**Task 9 (replay eval harness):** no logic bugs found. Review added a
+regression test locking in `aggregate()`'s existing tie-break behavior
+(Array.sort is spec-stable, so ties are broken by first-appearance order)
+since the plan's own sample fixture never produces a tie. Separately (this
+final pass, pre-Task-10): added a doc comment + README note flagging that
+`p50` is the upper of the two middle values for an even sample count, not
+an averaged median — the tool's own `--auto 10` default always produces an
+even count.
+
+**Task 10:** per this plan's own Execution notes ("Skip Task 10 Steps 2,
+3, 5"), only Steps 1 (full-suite gate) and 4 (push confirmation) were run.
+Step 1's combined command was run via `flock` (this sandbox has no `lockf`;
+the Execution notes themselves say "Ignore `lockf` (Mac-only)"), against
+the shared fleet-wide gate lock rather than a project-local one, since no
+other lock file convention was documented for this sandbox. One real,
+pre-existing (not this branch's) issue surfaced and was confirmed
+out-of-scope by diffing against `origin/main`: `test/bun/deploy-ops-guard.test.ts`
+(6 failures) fails identically on a fresh `origin/main` checkout — an
+environment-level git-push guard hook present in this sandbox, unrelated
+to any junior-branch code. One additional failure
+(`test/bun/rescue-push.test.ts`, an off-by-one-second budget assertion)
+occurred only when run concurrently with the full vitest suite under one
+combined command and passed cleanly in isolation on the same branch — a
+timing-sensitive flake from resource contention, not a regression; the
+test file itself has zero diff against `origin/main`.
