@@ -59,7 +59,8 @@ describe("parseGhOp", () => {
   it("refuses unknown ops, extra fields, wrong types and empty edits", () => {
     for (const bad of [
       null, [], { op: "pr-merge", number: 1 },
-      { op: "comment", number: 3, body: "b", repo: "other/repo" },
+      { op: "comment", number: 3, body: "b", extra: "x" },
+      { op: "comment", number: 3, body: "b", repo: 7 },
       { op: "comment", number: "3", body: "b" },
       { op: "comment", number: 0, body: "b" },
       { op: "comment", number: 3 },
@@ -168,6 +169,24 @@ describe("handleGhProxy", () => {
     const { send, calls } = await setup({ isPrivate: true });
     expect((await send({ op: "comment", number: 5, body: "acmeclient" })).status).toBe(201);
     expect(calls).toHaveLength(1);
+  });
+
+  // Review finding 5: the client names the repo it meant (-R, an issue URL);
+  // a different one is refused rather than silently written to the work repo.
+  it("an op naming another repo is 403; naming its own repo passes", async () => {
+    const { send, calls } = await setup();
+    expect((await send({ op: "comment", number: 5, body: "x", repo: "example-org/private-ops" })).status).toBe(403);
+    expect(calls).toHaveLength(0);
+    expect((await send({ op: "comment", number: 5, body: "x", repo: "Example-Org/Demo" })).status).toBe(201);
+  });
+
+  it("a body over the cap is 413", async () => {
+    const { ports, token } = await setup();
+    const big = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array(1024 * 1024 + 1)); c.close(); } });
+    const res = await handleGhProxy(new Request("https://fleet.example/fleet/gh", {
+      method: "POST", headers: { [SPAWN_TOKEN_HEADER]: token }, body: big,
+    }), ports);
+    expect(res.status).toBe(413);
   });
 
   it("bad JSON and a bad op are 400", async () => {

@@ -30,7 +30,8 @@ import { pushText } from "./scan-push";
 import { studioFromRequest, studioWorkRepo } from "./studio-auth";
 
 export const PUSH_BODY_CAP = 16 * 1024 * 1024;
-export const PUSH_INFLATE_CAP = 64 * 1024 * 1024;
+// Worker memory is 128 MB: body + inflated objects + their decoded text.
+export const PUSH_INFLATE_CAP = 24 * 1024 * 1024;
 
 const PATH_RE = /^\/fleet\/git\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/(info\/refs|git-upload-pack|git-receive-pack)$/;
 const FORWARD_HEADERS = ["git-protocol", "content-type", "accept", "content-encoding"];
@@ -47,9 +48,9 @@ export interface GitProxyPorts {
 const text = (body: string, status: number, headers: Record<string, string> = {}) =>
   new Response(body, { status, headers });
 
-/** The body, gzip undone, or null past PUSH_BODY_CAP -- counted on the real
- *  bytes, never trusting a header. */
-async function readBody(stream: ReadableStream<Uint8Array> | null): Promise<Uint8Array | null> {
+/** The body, or null past `cap` -- counted on the real bytes, never trusting
+ *  a header. */
+export async function readCapped(stream: ReadableStream<Uint8Array> | null, cap: number): Promise<Uint8Array | null> {
   if (stream === null) return new Uint8Array(0);
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
@@ -58,7 +59,7 @@ async function readBody(stream: ReadableStream<Uint8Array> | null): Promise<Uint
     const { done, value } = await reader.read();
     if (done) break;
     total += value.byteLength;
-    if (total > PUSH_BODY_CAP) {
+    if (total > cap) {
       await reader.cancel();
       return null;
     }
@@ -137,9 +138,9 @@ async function receivePack(req: Request, ports: GitProxyPorts, repo: string, ups
   if (encoding !== "identity" && encoding !== "gzip") return text(`fleet: write proxy: unsupported content-encoding ${encoding}`, 415);
   let body: Uint8Array | null;
   try {
-    body = await readBody(encoding === "gzip" && req.body
+    body = await readCapped(encoding === "gzip" && req.body
       ? req.body.pipeThrough(new DecompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>)
-      : req.body);
+      : req.body, PUSH_BODY_CAP);
   } catch {
     return text("fleet: write proxy: request body could not be read", 400);
   }
@@ -152,12 +153,18 @@ async function receivePack(req: Request, ports: GitProxyPorts, repo: string, ups
     return text(`fleet: write proxy: ${err instanceof PktError ? err.message : "bad push request"}`, 400);
   }
   const refs = parsed.commands.map((c) => c.ref);
-  const refuse = (message: string, status: number) =>
-    parsed.caps.includes("report-status")
-      ? new Response(refusalReport(refs, message, parsed.caps), {
-        headers: { "content-type": "application/x-git-receive-pack-result", "cache-control": "no-cache" },
-      })
-      : text(message, status);
+  const refuse = (message: string, status: number) => {
+    if (!parsed.caps.includes("report-status")) return text(message, status);
+    let report: Uint8Array;
+    try {
+      report = refusalReport(refs, message, parsed.caps);
+    } catch {
+      return text(message, status); // a ref too long for one pkt-line
+    }
+    return new Response(report, {
+      headers: { "content-type": "application/x-git-receive-pack-result", "cache-control": "no-cache" },
+    });
+  };
 
   let texts: string;
   try {

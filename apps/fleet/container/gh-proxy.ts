@@ -9,14 +9,14 @@ import { readFileSync } from "node:fs";
 
 export class UsageError extends Error {}
 
-export type GhOp =
+export type GhOp = { repo?: string } & (
   | { op: "pr-create"; title: string; body: string; head: string; base: string; draft: boolean }
   | { op: "pr-edit"; number: number; title?: string; body?: string; base?: string }
   | { op: "pr-ready"; number: number }
   | { op: "comment"; number: number; body: string }
   | { op: "issue-create"; title: string; body: string; labels: string[] }
   | { op: "issue-edit"; number: number; title?: string; body?: string }
-  | { op: "pr-review"; number: number; event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES"; body: string };
+  | { op: "pr-review"; number: number; event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES"; body: string });
 
 export interface TranslateCtx {
   readFile(path: string): string;
@@ -56,20 +56,36 @@ const VERBS: Record<string, Key[]> = {
   "issue comment": ["body", "body-file"],
 };
 
-/** Strip the global -R/--repo (studio is bound to one repo; Worker enforces). */
-function stripRepo(argv: string[]): string[] {
+/** Pull out the global -R/--repo. Its value travels as `repo`: the Worker
+ *  refuses a repo other than the studio's own rather than write there. */
+function stripRepo(argv: string[]): { argv: string[]; repo?: string } {
   const out: string[] = [];
+  let repo: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "-R" || a === "--repo") { i++; continue; }
-    if (a.startsWith("--repo=") || (a.startsWith("-R") && a.length > 2)) continue;
+    if (a === "-R" || a === "--repo") { repo = argv[++i]; continue; }
+    if (a.startsWith("--repo=")) { repo = a.slice(7); continue; }
+    if (a.startsWith("-R") && a.length > 2) { repo = a.slice(2); continue; }
     out.push(a);
   }
-  return out;
+  return { argv: out, repo: repo?.replace(/^github\.com\//i, "") };
 }
 
 export function translate(argv: string[], ctx: TranslateCtx): GhOp {
-  const [group, verb, ...rest] = stripRepo(argv);
+  const stripped = stripRepo(argv);
+  let repo = stripped.repo;
+  const named = (r: string) => {
+    if (repo !== undefined && repo.toLowerCase() !== r.toLowerCase()) {
+      throw new UsageError(`-R ${repo} and ${r} name different repos`);
+    }
+    repo = r;
+  };
+  const op = translateOp(stripped.argv, ctx, named);
+  return repo === undefined ? op : { ...op, repo };
+}
+
+function translateOp(argv: string[], ctx: TranslateCtx, named: (repo: string) => void): GhOp {
+  const [group, verb, ...rest] = argv;
   const name = `${group ?? ""} ${verb ?? ""}`;
   const allowed = VERBS[name];
   if (!allowed) throw new UsageError(`unsupported command: gh ${name.trim()}`);
@@ -112,8 +128,8 @@ export function translate(argv: string[], ctx: TranslateCtx): GhOp {
       return ctx.prNumber();
     }
     if (/^\d+$/.test(sel)) return Number(sel);
-    const m = sel.match(/^https:\/\/github\.com\/[^/]+\/[^/]+\/(pull|issues)\/(\d+)(?:[/?#].*)?$/);
-    if (m) return Number(m[2]);
+    const m = sel.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/(pull|issues)\/(\d+)(?:[/?#].*)?$/);
+    if (m) { named(m[1]); return Number(m[3]); }
     if (group === "issue") throw new UsageError(`not an issue number or URL: ${sel}`);
     return ctx.prNumber(sel);
   };

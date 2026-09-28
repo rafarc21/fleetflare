@@ -23,7 +23,9 @@ export async function handleFleetGit(req: Request, env: Env): Promise<Response> 
     check: leakGuard(realLeakDeps(env, (repo) => workerReadToken(env, repo))),
     upstream: async (url, init, access, repo) => {
       const token = access === "write"
-        ? await workerWriteToken(env, repo, { contents: "write" })
+        // Not narrowed: a push touching .github/workflows needs the App's
+        // workflows permission, and this token never leaves the Worker.
+        ? await workerWriteToken(env, repo)
         : await workerReadToken(env, repo);
       const headers = new Headers(init.headers);
       headers.set("authorization", `Basic ${btoa(`x-access-token:${token}`)}`);

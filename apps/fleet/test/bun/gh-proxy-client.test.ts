@@ -60,14 +60,14 @@ describe("translate", () => {
     expect(c.prCalls).toEqual(["my-branch"]);
   });
 
-  test("issue comment with URL selector", () => {
-    expect(translate(["issue", "comment", "https://github.com/example-org/demo/issues/5", "-b", "x"], ctx()))
+  test("issue comment with a number", () => {
+    expect(translate(["issue", "comment", "5", "-b", "x"], ctx()))
       .toEqual({ op: "comment", number: 5, body: "x" });
   });
 
   test("pr edit with pull URL", () => {
     expect(translate(["pr", "edit", "https://github.com/example-org/demo/pull/8", "--body", "nb"], ctx()))
-      .toEqual({ op: "pr-edit", number: 8, body: "nb" });
+      .toEqual({ op: "pr-edit", number: 8, body: "nb", repo: "example-org/demo" });
   });
 
   test("pr edit with nothing to change refuses", () => {
@@ -120,11 +120,23 @@ describe("translate", () => {
     expect(() => translate(["issue", "create", "-t", "T", "--web"], ctx())).toThrow("--web");
   });
 
-  test("-R / --repo ignored anywhere", () => {
+  // Review finding 5: the named repo travels to the Worker, which refuses a
+  // repo other than the studio's own instead of writing the work repo.
+  test("-R / --repo anywhere: passed on as repo", () => {
     expect(translate(["-R", "example-org/demo", "pr", "comment", "12", "-b", "x"], ctx()))
-      .toEqual({ op: "comment", number: 12, body: "x" });
-    expect(translate(["pr", "comment", "12", "--repo=example-org/demo", "-b", "x"], ctx()))
-      .toEqual({ op: "comment", number: 12, body: "x" });
+      .toEqual({ op: "comment", number: 12, body: "x", repo: "example-org/demo" });
+    expect(translate(["pr", "comment", "12", "--repo=github.com/example-org/demo", "-b", "x"], ctx()))
+      .toEqual({ op: "comment", number: 12, body: "x", repo: "example-org/demo" });
+  });
+
+  test("a URL selector's repo is passed on too", () => {
+    expect(translate(["issue", "comment", "https://github.com/example-org/other/issues/5", "-b", "x"], ctx()))
+      .toEqual({ op: "comment", number: 5, body: "x", repo: "example-org/other" });
+  });
+
+  test("-R and a URL naming different repos refuses", () => {
+    expect(() => translate(["-R", "example-org/demo", "issue", "comment", "https://github.com/example-org/other/issues/5", "-b", "x"], ctx()))
+      .toThrow(UsageError);
   });
 
   test("--flag=value form", () => {

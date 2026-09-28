@@ -232,6 +232,17 @@ describe("handleGitProxy: receive-pack", () => {
     expect(await res.text()).toContain("#1");
   });
 
+  it("a refusal for a ref too long for one pkt-line is still a clean refusal, not a 500", async () => {
+    const { push, upstreamCalls } = await setup();
+    // Fits the request's own pkt-line (caps kept short), but "ng <ref> <msg>"
+    // does not.
+    const ref = `refs/heads/acmeclient-${"x".repeat(65_417 - 22)}`;
+    const res = await push(await pushBody({ ref, caps: "report-status" }));
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("#1");
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
   it("an unparseable request is 400", async () => {
     const { push, upstreamCalls } = await setup();
     expect((await push(enc.encode("zzzz"))).status).toBe(400);

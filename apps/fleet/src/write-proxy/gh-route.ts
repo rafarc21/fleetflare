@@ -21,21 +21,26 @@ import type { StudioStatus } from "../studio/types";
 import { mintRepoToken, repoOwner, repoToken, resolveRepoAuthKind } from "../github/auth";
 import { USER_AGENT } from "../github/app";
 import { studioFromRequest, studioWorkRepo } from "./studio-auth";
+import { readCapped } from "./git-route";
 
 export const GH_OP_BODY_CAP = 1024 * 1024;
 
-export type GhOp =
+export type GhOp = { repo?: string } & (
   | { op: "pr-create"; title: string; body: string; head: string; base: string; draft: boolean }
   | { op: "pr-edit"; number: number; title?: string; body?: string; base?: string }
   | { op: "pr-ready"; number: number }
   | { op: "comment"; number: number; body: string }
   | { op: "issue-create"; title: string; body: string; labels: string[] }
   | { op: "issue-edit"; number: number; title?: string; body?: string }
-  | { op: "pr-review"; number: number; event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES"; body: string };
+  | { op: "pr-review"; number: number; event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES"; body: string });
 
 export class GhOpError extends Error {}
 
 type Kind = "string" | "string?" | "number" | "boolean" | "strings" | "event";
+
+/** Every op may name the repo the caller meant (gh -R, an issue URL). A
+ *  repo other than the studio's own is refused, never silently rewritten. */
+const COMMON: Record<string, Kind> = { repo: "string?" };
 const SHAPES: Record<GhOp["op"], Record<string, Kind>> = {
   "pr-create": { title: "string", body: "string", head: "string", base: "string", draft: "boolean" },
   "pr-edit": { number: "number", title: "string?", body: "string?", base: "string?" },
@@ -64,14 +69,14 @@ export function parseGhOp(raw: unknown): GhOp {
   const obj = raw as Record<string, unknown>;
   const op = obj.op;
   if (typeof op !== "string" || !Object.hasOwn(SHAPES, op)) throw new GhOpError(`unsupported op ${JSON.stringify(op)}`);
-  const shape = SHAPES[op as GhOp["op"]];
+  const shape = { ...SHAPES[op as GhOp["op"]], ...COMMON };
   for (const key of Object.keys(obj)) {
     if (key !== "op" && !Object.hasOwn(shape, key)) throw new GhOpError(`unexpected field ${JSON.stringify(key)}`);
   }
   for (const [key, kind] of Object.entries(shape)) {
     if (!fits(kind, obj[key])) throw new GhOpError(`field ${JSON.stringify(key)} must be ${kind}`);
   }
-  if ((op === "pr-edit" || op === "issue-edit") && Object.keys(obj).length <= 2) {
+  if ((op === "pr-edit" || op === "issue-edit") && Object.keys(obj).filter((k) => k !== "repo").length <= 2) {
     throw new GhOpError(`${op} changes nothing`);
   }
   return obj as unknown as GhOp;
@@ -81,7 +86,7 @@ export function parseGhOp(raw: unknown): GhOp {
 function opTexts(op: GhOp): string[] {
   const out: string[] = [];
   for (const [k, v] of Object.entries(op)) {
-    if (k === "op") continue;
+    if (k === "op" || k === "repo") continue;
     if (typeof v === "string") out.push(v);
     else if (Array.isArray(v)) out.push(...v);
   }
@@ -96,10 +101,10 @@ const READY_MUTATION =
 function restCall(op: Exclude<GhOp, { op: "pr-ready" }>, repo: string): GhCall {
   const r = `/repos/${repo}`;
   switch (op.op) {
-    case "pr-create": { const { op: _, ...body } = op; return { method: "POST", path: `${r}/pulls`, body }; }
-    case "issue-create": { const { op: _, ...body } = op; return { method: "POST", path: `${r}/issues`, body }; }
-    case "pr-edit": { const { op: _, number, ...body } = op; return { method: "PATCH", path: `${r}/pulls/${number}`, body }; }
-    case "issue-edit": { const { op: _, number, ...body } = op; return { method: "PATCH", path: `${r}/issues/${number}`, body }; }
+    case "pr-create": { const { op: _, repo: _r, ...body } = op; return { method: "POST", path: `${r}/pulls`, body }; }
+    case "issue-create": { const { op: _, repo: _r, ...body } = op; return { method: "POST", path: `${r}/issues`, body }; }
+    case "pr-edit": { const { op: _, repo: _r, number, ...body } = op; return { method: "PATCH", path: `${r}/pulls/${number}`, body }; }
+    case "issue-edit": { const { op: _, repo: _r, number, ...body } = op; return { method: "PATCH", path: `${r}/issues/${number}`, body }; }
     case "comment": return { method: "POST", path: `${r}/issues/${op.number}/comments`, body: { body: op.body } };
     case "pr-review": return { method: "POST", path: `${r}/pulls/${op.number}/reviews`, body: { event: op.event, body: op.body } };
   }
@@ -115,17 +120,14 @@ export interface GhProxyPorts {
 
 const text = (body: string, status: number) => new Response(body, { status });
 
-async function readCapped(req: Request): Promise<string | null> {
-  const buf = new Uint8Array(await req.arrayBuffer());
-  return buf.byteLength > GH_OP_BODY_CAP ? null : new TextDecoder().decode(buf);
-}
 
 export async function handleGhProxy(req: Request, ports: GhProxyPorts): Promise<Response> {
   const studio = await studioFromRequest(req, await ports.rows());
   if (!studio) return text("unauthorized", 401);
   if (req.method !== "POST") return text("method not allowed", 405);
-  const raw = await readCapped(req);
-  if (raw === null) return text("payload too large", 413);
+  const bytes = await readCapped(req.body, GH_OP_BODY_CAP);
+  if (bytes === null) return text("payload too large", 413);
+  const raw = new TextDecoder().decode(bytes);
   let op: GhOp;
   try {
     op = parseGhOp(JSON.parse(raw));
@@ -133,6 +135,9 @@ export async function handleGhProxy(req: Request, ports: GhProxyPorts): Promise<
     return text(`fleet: /fleet/gh: ${err instanceof GhOpError ? err.message : "bad json"}`, 400);
   }
   const repo = studioWorkRepo(studio, ports.defaultRepo);
+  if (op.repo !== undefined && op.repo.toLowerCase() !== repo) {
+    return text(`fleet: this studio writes only its own work repo ${repo}, not ${op.repo}`, 403);
+  }
   try {
     await ports.check(repo, opTexts(op));
   } catch (err) {
@@ -157,9 +162,9 @@ export async function handleGhProxy(req: Request, ports: GhProxyPorts): Promise<
 }
 
 /** The Worker's write credential for `repo`: never reaches a container. */
-export async function workerWriteToken(env: Env, repo: string, permissions: Record<string, string>): Promise<string> {
+export async function workerWriteToken(env: Env, repo: string, permissions?: Record<string, string>): Promise<string> {
   if (resolveRepoAuthKind(env, repo) === "token") return repoToken(env, repoOwner(repo)) as string;
-  return mintRepoToken(env, repo, { permissions });
+  return mintRepoToken(env, repo, permissions ? { permissions } : undefined);
 }
 
 export async function handleFleetGh(req: Request, env: Env): Promise<Response> {
