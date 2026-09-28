@@ -86,6 +86,10 @@ export { RECYCLE_REFUSED_PREFIX };
 import { bringupLogTailCmd, BRINGUP_LOG_PATH, BRINGUP_LOG_TAIL_MAX_CHARS } from "./provision";
 // Issue #330: the house-rules overlay reads the ops repo #346 resolves.
 import { resolveOpsRepo } from "../ops-repo";
+// Task 7: FLEET_JUNIOR/JUNIOR_REPOS -> whether this work repo gets the
+// junior skill + house rule at bring-up (never the maestro — provision.ts's
+// own exclusion).
+import { juniorEnabled } from "../junior/gate";
 // Board task #149: the credential command builders moved to their own
 // sandbox-free module so the bun:test lane can ask real git which
 // credential it picks — see credentials.ts's own header. Re-exported
@@ -4417,6 +4421,9 @@ export class StudioDO extends Sandbox<Env> {
       // repo -- through its OWN port, a token scoped to that repo and
       // narrowed to contents:read (round 4), never the blueprint minter above.
       opsRepo,
+      // Task 7: FLEET_JUNIOR/JUNIOR_REPOS, checked against the WORK repo
+      // slug resolveBringupEnv passes in — never the fleet/blueprint repo.
+      juniorEnabled: (slug: string) => juniorEnabled(this.env, slug),
       ...(opsRepo === null ? {} : { fetchOpsFile: opsFileFetcher(this.env, opsRepo) }),
       // Task 3 (P2 plane 2): the fresh-container restore step's R2 read —
       // see provision.ts's runSessionRestore and ProvisionDeps.r2Get's own

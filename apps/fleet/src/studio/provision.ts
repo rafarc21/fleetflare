@@ -56,6 +56,7 @@ import {
   type ObservedSession,
   mergeObserved, bringupLeftLeadUntouched, resolveSnapshotAge,
 } from "./observed";
+import { JUNIOR_HOUSE_RULE } from "../junior/gate";
 
 /**
  * Dependency seam — mirrors src/agents/do.ts's `LoopDeps`/src/deploy/do.ts's
@@ -120,6 +121,13 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
    * default only, exactly as it did before this field existed.
    */
   opsRepo?: string | null;
+  /**
+   * Junior (Workers AI delegation): true when FLEET_JUNIOR is on for this
+   * work repo (src/junior/gate.ts's juniorEnabled). do.ts wires it from env.
+   * Optional like opsRepo, and absent means off: every existing fixture keeps
+   * getting no junior skill and no junior house rule.
+   */
+  juniorEnabled?: (workRepoSlug: string) => boolean;
   /**
    * #330 round 4: reads one file of `opsRepo` with a token scoped to that repo
    * and narrowed to contents:read (do.ts's opsFileFetcher). The overlay is
@@ -1734,10 +1742,29 @@ export async function resolveBringupEnv(
   const studio = await tryFetchStudio(deps, fleet.blueprint.repo, cfg.role, ref);
   if (studio !== null) {
     const members = await listStudioMembers(deps, fleet.blueprint.repo, cfg.role, ref);
+    // The maestro authorizes junior use; it never uses it. Its own session
+    // gets neither the skill nor the rule (studio.md "Junior — your call").
+    //
+    // Checked against BOTH `cfg.role` (the id that actually selected this
+    // studio.md -- `tryFetchStudio`'s own `name` argument, and the same
+    // literal role identifier spawn.ts/do.ts already gate maestro behaviour
+    // on elsewhere) and `studio.name` (the file's own frontmatter, which
+    // studio-blueprint.ts documents as "matches its directory name" but
+    // never actually enforces against it anywhere in this file). A studio.md
+    // fetched via role "maestro" whose frontmatter `name:` field has drifted
+    // from "maestro" -- an operator rename, or any other mismatch -- must
+    // still be excluded: `cfg.role` alone already guards that case, and
+    // `studio.name` is kept as a second, independent signal rather than
+    // trusted alone, since blueprint content is comparatively easy to edit
+    // and this exclusion is a real safety property, not a display nicety.
+    const isMaestro = cfg.role === "maestro" || studio.name === "maestro";
+    const junior = !isMaestro && deps.juniorEnabled?.(workRepoSlug) === true;
     return {
       bringupEnv: {
         ...studioBringupEnv(
-          studio, members, composePromptBlocks(cfg.projectCard, briefPrompt),
+          junior ? { ...studio, skills: [...studio.skills, "junior"] } : studio,
+          members,
+          composePromptBlocks(composePromptBlocks(junior ? JUNIOR_HOUSE_RULE : undefined, cfg.projectCard), briefPrompt),
           await resolveMemoryIndex(deps),
           opsOverlay.text,
         ),
