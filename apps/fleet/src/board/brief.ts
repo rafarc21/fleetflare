@@ -42,6 +42,9 @@ export interface TaskBrief {
    * create-every-time behaviour.
    */
   idempotencyKey?: string;
+  /** Maestro's per-task authorization for the junior skill. Absent = not
+   *  authorized. Becomes the `junior` label (types.ts JUNIOR_LABEL). */
+  junior?: boolean;
 }
 
 // GitHub's own limits, not ours — a longer title/body is refused by the API
@@ -119,7 +122,17 @@ export function parseBrief(raw: unknown): BriefResult {
     }
   }
 
-  const brief: TaskBrief = { title, objective, outputFormat, boundaries, milestone, assignee };
+  // Boolean only: a string "true" from a hand-rolled request is a caller bug,
+  // and quietly treating it as yes would authorize a junior nobody chose.
+  const rawJunior = body.junior;
+  if (rawJunior !== undefined && rawJunior !== null && typeof rawJunior !== "boolean") {
+    return { ok: false, message: "junior must be a boolean" };
+  }
+
+  const brief: TaskBrief = {
+    title, objective, outputFormat, boundaries, milestone, assignee,
+    ...(rawJunior === true ? { junior: true } : {}),
+  };
   const rawKey = body.idempotencyKey;
   if (rawKey !== undefined && rawKey !== null) {
     if (typeof rawKey !== "string" || !IDEMPOTENCY_KEY.test(rawKey)) {

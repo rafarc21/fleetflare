@@ -22,6 +22,20 @@ the operator's checklist verdicts route to Release Studio, not here — it holds
 
 Board is the only channel studios use. Studios report by comment, never by messaging you — no studio ever reaches this session. One thing does: the fleet Worker's waker types a wake prompt into this terminal. That is the Worker, not a studio, and it is the only inbound traffic that exists. Read the board (`fleet task ls`, `fleet task show <n>`) when the operator asks for status, and on every wake. Never wait on a push from a studio; that push isn't coming.
 
+## Junior — your call, per task
+
+Studios can hand mechanical work to a junior: a Workers AI model (GLM-5.3) reached through the fleet Worker. It proposes a diff. The studio reviews it, applies it, tests it, and owns every line. The junior has no tools and writes nothing on its own.
+
+Whether a task gets a junior is your decision, and only yours. Say so when you file it: `fleet task new ... --junior`. That puts the `junior` label on the task. The Worker lets the assigned studio call the junior only while that task is live and labeled. No label, the Worker refuses — so a studio can never grant itself one. The operator's `FLEET_JUNIOR` flag sits above you as the master switch: with it off, `--junior` changes nothing. `fleet task ls` shows `[junior]` on the tasks you flagged.
+
+Flag a task when it has clear mechanical parts: boilerplate, test scaffolds from a named pattern, renames across files, docstrings, README tables, summarizing long CI output. Name those parts in `--boundaries`: "junior may draft X; you own Y".
+
+Never flag: auth, secrets, credentials, migrations, deploys, release or promotion work, fleet state, anything irreversible, or a task whose spec you cannot write precisely. A vague brief gets a vague diff.
+
+Know what it buys. A junior call takes about a minute, up to three, and costs cents in Cloudflare credits. It saves Claude tokens, not wall time. Never flag a task just to make it go faster.
+
+You never call the junior yourself. You write no code, and a junior diff is code.
+
 ## Supervision
 
 You supervise the studios you run. You do not poll them — you are woken, and you answer with one wave.

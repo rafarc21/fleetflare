@@ -8,7 +8,7 @@
 // the issue url: the operator reads the board on his phone, in the GitHub app,
 // and this table's job is to get him there — not to become a second board.
 
-import { STUDIO_LABEL_PREFIX, taskStates, type BoardTask, type EnvelopeDoc } from "../src/board/types";
+import { JUNIOR_LABEL, STUDIO_LABEL_PREFIX, taskStates, type BoardTask, type EnvelopeDoc } from "../src/board/types";
 import type { TaskComment } from "../src/board/board";
 import type { AssignWakeReport } from "../src/board/assign-wake";
 
@@ -85,7 +85,7 @@ export function formatTaskTable(tasks: (BoardTask & { stale?: boolean })[]): str
     stateCell(t),
     studioCell(t),
     t.milestone ?? "-",
-    truncate(t.title.replace(/\s+/g, " "), TITLE_WIDTH),
+    truncate(`${t.labels.includes(JUNIOR_LABEL) ? "[junior] " : ""}${t.title.replace(/\s+/g, " ")}`, TITLE_WIDTH),
     t.url,
   ]);
   const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
@@ -122,7 +122,8 @@ function envelopeLines(doc: EnvelopeDoc): string[] {
 export function formatTaskShow(view: { task: BoardTask; comments: TaskComment[] }): string {
   const t = view.task;
   const out: string[] = [
-    `#${t.number}  ${stateCell(t)}  studio: ${studioCell(t)}  sprint: ${t.milestone ?? "-"}  ${t.open ? "open" : "closed"}`,
+    `#${t.number}  ${stateCell(t)}  studio: ${studioCell(t)}  sprint: ${t.milestone ?? "-"}  ${t.open ? "open" : "closed"}` +
+      `${t.labels.includes(JUNIOR_LABEL) ? "  junior: yes" : ""}`,
     t.title,
     t.url,
     "",

@@ -23,6 +23,7 @@ import { parseBrief, renderBriefPrompt, renderTaskBody, taskKeyMarker } from "./
 import { parseEnvelope, parseEnvelopeComment, renderEnvelopeComment } from "./envelope";
 import {
   isStaleBacklog, isTaskState, studioLabel, taskAssignees, taskStates, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES,
+  JUNIOR_LABEL,
   type BoardTask, type BoardTaskView, type EnvelopeDoc, type TaskState,
 } from "./types";
 import type { BoardComment, IssueInput, ListIssuesQuery } from "./api";
@@ -151,10 +152,12 @@ export async function createTask(
   // add: an issue that exists for a moment carrying a state but no owner is
   // a window in which `listStudioTasks` would not return it to the studio
   // being spawned for it, and `ff` spawns immediately after filing.
+  const labels = brief.assignee === null ? [ENTRY_STATE] : [ENTRY_STATE, studioLabel(brief.assignee)];
+  if (brief.junior === true) labels.push(JUNIOR_LABEL);
   const input: IssueInput = {
     title: brief.title,
     body: renderTaskBody(brief),
-    labels: brief.assignee === null ? [ENTRY_STATE] : [ENTRY_STATE, studioLabel(brief.assignee)],
+    labels,
   };
   if (brief.milestone !== null) {
     const milestone = await resolveMilestone(api, repo, brief.milestone);
@@ -909,6 +912,46 @@ export async function resolveLatestAssignedBrief(
   // would arrive at a live pane as several broken half-prompts (see
   // `assignDigest`'s own doc comment in src/board/assign-wake.ts).
   return { prompt, taskNumber: newest.number, title: newest.title };
+}
+
+/**
+ * The one live task, if any, that `studioId` currently holds — open, not
+ * drifted, in a LIVE_TASK_STATES state, carrying THIS studio's own
+ * `studioLabel`. Same membership discipline `requireAssignedTask` documents:
+ * checked directly against `studioLabel(studioId)` rather than trusting
+ * `listTasks`'s `assignedTo` filter alone, in case a test double (or a future
+ * BoardApi implementation) does not honor it.
+ *
+ * PR #9 review, blocker B1: this used to also require JUNIOR_LABEL, and its
+ * boolean answer (as `hasJuniorAuthorizedTask`) WAS the whole of the
+ * `/fleet/junior` gate. That made a GitHub label load-bearing for
+ * authorization — and a studio's own repo-scoped `gh` token can add a label
+ * to its own issue (`gh issue edit <n> --add-label junior`), which is a
+ * studio granting itself the very permission this gate exists to withhold.
+ * The label still gets WRITTEN (createTask, when the maestro's own
+ * filed-with-`--junior` request asks for it) and still SHOWS on `fleet task
+ * ls`/`show` (cli/task-format.ts's `[junior]` marker) — cosmetic uses, not
+ * security ones. The actual decision now lives in D1
+ * (src/junior/authz.ts's isJuniorAuthorized), keyed by the task NUMBER this
+ * function resolves, and written exactly once by createTask's own caller
+ * (src/board/routes.ts's handleBoard) — a route nothing but the maestro's
+ * Cloudflare-Access-gated `fleet task new --junior` can ever reach. This
+ * module stays free of that binding on purpose (see this file's own header),
+ * so the D1 check happens in src/junior/route.ts, which combines the task
+ * this function finds with authz.ts's own answer.
+ *
+ * A board error is returned, never read as "no task" — same fail-closed
+ * posture the boolean version always had.
+ */
+export async function findLiveAssignedTask(
+  api: BoardApi, repo: string, studioId: string,
+): Promise<BoardResult<BoardTask | null>> {
+  const r = await listTasks(api, repo, { assignedTo: studioId });
+  if (!r.ok) return r;
+  const mine = studioLabel(studioId);
+  const found = r.value.find((t) =>
+    t.open && t.state !== null && LIVE_TASK_STATES.includes(t.state) && t.labels.includes(mine));
+  return { ok: true, value: found ?? null };
 }
 
 /**

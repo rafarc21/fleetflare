@@ -33,6 +33,11 @@ export function isTaskState(raw: unknown): raw is TaskState {
   return typeof raw === "string" && (TASK_STATES as readonly string[]).includes(raw);
 }
 
+/** Junior (Workers AI delegation): a task carrying this label lets its
+ *  assigned studio call /fleet/junior while the task is live. Written only by
+ *  createTask, only when the maestro filed it with `fleet task new --junior`. */
+export const JUNIOR_LABEL = "junior";
+
 /**
  * Every board state label carried by one issue, in vocabulary order.
  *

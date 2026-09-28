@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   createTask, transitionTask, commentEnvelope, listTasks, showTask, resolveBoardRepo,
   requireAssignedTask, showStudioTask, commentStudioEnvelope, resolveBriefPrompt, resolveLatestAssignedBrief,
-  assignTask, transitionStudioTask, openAssignedTasks,
+  assignTask, transitionStudioTask, openAssignedTasks, findLiveAssignedTask,
   type BoardApi,
 } from "../src/board/board";
 import { parseEnvelopeComment, renderEnvelopeComment, parseEnvelope } from "../src/board/envelope";
@@ -91,6 +91,66 @@ describe("createTask", () => {
     expect(res.status).toBe(400);
     expect(api.listMilestones).not.toHaveBeenCalled();
     expect(api.createIssue).not.toHaveBeenCalled();
+  });
+
+  // Task 5: the maestro's per-task authorization for the junior skill.
+  it("createTask writes the junior label in the same single create call", async () => {
+    const api = fakeApi();
+    await createTask(api, "acme-org/websites", {
+      title: "t", objective: "o", outputFormat: "f", boundaries: "b",
+      assignee: "websites--web-studio", junior: true,
+    });
+    expect(vi.mocked(api.createIssue).mock.calls.length).toBe(1);
+    expect(vi.mocked(api.createIssue).mock.calls[0][1].labels)
+      .toEqual(["submitted", "studio:websites--web-studio", "junior"]);
+  });
+
+  // PR #9 review, blocker B1: `hasJuniorAuthorizedTask` (label-gated) is gone
+  // — JUNIOR_LABEL is no longer this module's concern at all, on purpose (see
+  // findLiveAssignedTask's own doc comment). This block now proves only the
+  // board-signal half (open/state/assignee); the actual junior authorization
+  // decision is D1-backed and covered by test/junior.authz.test.ts and
+  // test/junior.route.test.ts's B1 mutation test.
+  describe("findLiveAssignedTask", () => {
+    const S = "websites--web-studio";
+    const withTasks = (tasks: BoardTask[]) => fakeApi({ listIssues: vi.fn(async () => tasks) });
+    it("finds the live task assigned to the studio — no label required", async () => {
+      const t = task({ state: "working", labels: ["working", studioLabel(S)], assignee: S });
+      const api = withTasks([t]);
+      // listTasks (the underlying call) adds `stale`, same as every other
+      // BoardTaskView it returns — see that function's own return type.
+      expect(await findLiveAssignedTask(api, "acme-org/websites", S)).toEqual({ ok: true, value: { ...t, stale: false } });
+    });
+    it("null when the only task is completed", async () => {
+      const api = withTasks([task({ state: "completed", open: false, labels: ["completed", studioLabel(S)], assignee: S })]);
+      expect(await findLiveAssignedTask(api, "acme-org/websites", S)).toEqual({ ok: true, value: null });
+    });
+    // Review gap: the plan's own comment demands the helper check
+    // `studioLabel(S)` explicitly rather than trust `listTasks`'s label
+    // filter blindly, "in case a test double ignores that filter". Prove it:
+    // a fake that returns a task belonging to ANOTHER studio (as if the
+    // assignedTo filter were never applied) must not be found for S.
+    it("ignores a live task assigned to a DIFFERENT studio, even if listIssues does not honor the filter", async () => {
+      const other = "websites--release-studio";
+      const api = withTasks([
+        task({ state: "working", labels: ["working", studioLabel(other)], assignee: other }),
+      ]);
+      expect(await findLiveAssignedTask(api, "acme-org/websites", S)).toEqual({ ok: true, value: null });
+    });
+    // Board board.ts's own #124-review rule for resolveLatestAssignedBrief
+    // applies here too: a terminal board state leaves the ISSUE open (sprint
+    // close is what closes it), so `open` alone is not "live" — both `open`
+    // AND a LIVE_TASK_STATES state are required, independently.
+    it("null for a task that is a terminal state but the issue is still open", async () => {
+      const api = withTasks([task({ state: "completed", open: true, labels: ["completed", studioLabel(S)], assignee: S })]);
+      expect(await findLiveAssignedTask(api, "acme-org/websites", S)).toEqual({ ok: true, value: null });
+    });
+    // The mirror case: a live-looking state label on an issue GitHub already
+    // shows closed. `open` still gates it, even with the state label intact.
+    it("null for a task carrying a live state label but the issue itself is closed", async () => {
+      const api = withTasks([task({ state: "working", open: false, labels: ["working", studioLabel(S)], assignee: S })]);
+      expect(await findLiveAssignedTask(api, "acme-org/websites", S)).toEqual({ ok: true, value: null });
+    });
   });
 });
 

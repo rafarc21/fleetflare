@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { collapseWs } from "../collapse-ws";
 
@@ -68,6 +68,17 @@ describe("skills/fleet-cockpit — the gate budget counts verification", () => {
 
   test("tells a task author to name heavy verification in the task's Boundaries", () => {
     expect(cockpit()).toMatch(/Boundaries/);
+  });
+});
+
+describe("vendored skills/junior", () => {
+  test("SKILL.md exists and names junior", () => {
+    const md = readFileSync(join(SKILLS, "junior", "SKILL.md"), "utf8");
+    const frontmatter = md.split("---")[1] ?? "";
+    expect(/^name:\s*(.+)$/m.exec(frontmatter)?.[1]?.trim()).toBe("junior");
+  });
+  test("junior.sh is executable", () => {
+    expect(statSync(join(SKILLS, "junior", "junior.sh")).mode & 0o111).not.toBe(0);
   });
 });
 

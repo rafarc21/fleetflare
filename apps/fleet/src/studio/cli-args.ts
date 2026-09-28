@@ -173,6 +173,10 @@ export type CliCommand =
   // flag, so it reads like every other command AND so the VERBS table below
   // can be typed against this union — which is what stops the help drifting.
   | { cmd: "help" }
+  // Task 8: purely local opt-in — `fleet junior enable [--account <id>] |
+  // disable | status`. Never reaches the Worker or any studio; cli/junior.ts
+  // (a symlink + one config file under $HOME) does the actual work.
+  | { cmd: "junior"; action: "enable" | "disable" | "status"; account?: string }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -195,6 +199,9 @@ export interface TaskBriefArgs {
    *  Absent = file into whatever `detectRepo()` resolves from the CWD's git
    *  remote, today's unchanged default. */
   repo?: string;
+  /** Task 5: maestro's `--junior` authorization for this task. Absent = the
+   *  ordinary, unauthorized default. See src/board/brief.ts's TaskBrief.junior. */
+  junior?: true;
 }
 
 /**
@@ -266,8 +273,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it.",
   },
   "task-new": {
-    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name]",
-    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required.",
+    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--junior]",
+    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required. --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given.",
   },
   "task-ls": {
     args: "ls [--sprint S] [--state submitted|working|input_required|completed|failed|canceled] [--studio ID]",
@@ -308,6 +315,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   "task-reap": {
     args: "reap [--dry-run|--apply]",
     summary: "Deterministic backfill: every open task whose latest envelope names a PR now on the default branch. Bare (or --dry-run) only REPORTS would-close/skipped(why); --apply actually closes the GitHub issue and moves the board to completed, the SAME idempotent action a push webhook uses. The only coverage for a repo on the token auth path, where no webhook is ever sent.",
+  },
+  junior: {
+    args: "enable [--account <id>] | disable | status",
+    summary: "Opt this Mac into the junior skill (Workers AI delegation, skills/junior/SKILL.md). enable symlinks ~/.claude/skills/junior to this checkout and stores the Cloudflare account id in ~/.config/fleet/junior.json; disable removes only that symlink; status prints whether it is on, the account, and which auth path a call would take. Local only — never touches the Worker or any studio.",
   },
 };
 
@@ -490,7 +501,39 @@ function parseTask(argv: string[]): CliCommand {
   }
   if (sub !== "new" && sub !== "ls") return usage(`unknown task command ${JSON.stringify(sub ?? "")}`);
 
-  const parsed = parseFlags(rest, TASK_FLAGS[sub]);
+  // `--junior` is the one bare boolean on task new (parseFlags only takes
+  // `--flag value` pairs). Pulled out first so it may sit anywhere; on any
+  // other task verb it stays in and parseFlags rejects it as unexpected.
+  //
+  // Code review round: a blind `rest.includes("--junior")` / `.filter` matches
+  // the literal string "--junior" no matter WHERE it sits — including inside
+  // another flag's VALUE slot (e.g. `--boundaries "--junior"`). That silently
+  // authorizes junior for a task that never asked for it, AND shifts every
+  // later key/value pairing by one, since `parseFlags` below walks argv in
+  // strict alternating name/value order. Extracting it here has to walk `rest`
+  // the same way `parseFlags` will: a token immediately after one of
+  // `TASK_FLAGS.new`'s value-taking flag NAMES is that flag's VALUE, whatever
+  // it looks like, and is never eligible to be treated as the bare flag —
+  // only a `--junior` that is NOT itself sitting in a value slot is the real
+  // boolean flag.
+  let junior = false;
+  const flagArgs: string[] = [];
+  if (sub === "new") {
+    for (let i = 0; i < rest.length; i++) {
+      const token = rest[i];
+      if (token === "--junior") { junior = true; continue; }
+      flagArgs.push(token);
+      // `token` is a value-taking flag's bare NAME (no `--k=v` form, which
+      // carries its value inline and consumes nothing further) — its value
+      // sits in the very next slot and must be taken as-is.
+      if (!token.includes("=") && token.startsWith("--") && TASK_FLAGS.new.includes(token.slice(2)) && i + 1 < rest.length) {
+        flagArgs.push(rest[++i]);
+      }
+    }
+  } else {
+    flagArgs.push(...rest);
+  }
+  const parsed = parseFlags(flagArgs, TASK_FLAGS[sub]);
   if ("bad" in parsed) return usage(`unexpected ${JSON.stringify(parsed.bad)}`);
 
   if (sub === "ls") {
@@ -516,6 +559,7 @@ function parseTask(argv: string[]): CliCommand {
   if (parsed.sprint !== undefined) brief.milestone = parsed.sprint;
   if (parsed.studio !== undefined) brief.assignee = parsed.studio;
   if (parsed.repo !== undefined) brief.repo = parsed.repo;
+  if (junior) brief.junior = true;
   return { cmd: "task-new", brief };
 }
 
@@ -681,6 +725,19 @@ export function parseCliArgs(argv: string[]): CliCommand {
       if (arg === undefined || arg === "ls") return { cmd: "memory-ls" };
       if (arg === "compact") return { cmd: "memory-compact" };
       return usage(`unknown memory command ${JSON.stringify(arg)}`);
+    // Task 8: `fleet junior enable [--account <id>] | disable | status`.
+    case "junior": {
+      const action = argv[1];
+      if (action !== "enable" && action !== "disable" && action !== "status") {
+        return { cmd: "usage", message: "usage: fleet junior enable [--account <id>] | disable | status" };
+      }
+      const rest = argv.slice(2);
+      if (action !== "enable" || rest.length === 0) {
+        return rest.length === 0 ? { cmd: "junior", action } : { cmd: "usage", message: `fleet junior ${action}: takes no arguments` };
+      }
+      if (rest.length === 2 && rest[0] === "--account" && rest[1] !== "") return { cmd: "junior", action, account: rest[1] };
+      return { cmd: "usage", message: "usage: fleet junior enable [--account <id>]" };
+    }
     default:
       return { cmd: "usage", message: CLI_USAGE };
   }

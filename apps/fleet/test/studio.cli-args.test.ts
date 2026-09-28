@@ -298,6 +298,41 @@ describe("parseCliArgs: task", () => {
     expect(parseCliArgs(["task"]).cmd).toBe("usage");
     expect(parseCliArgs(["task", "close", "12"]).cmd).toBe("usage");
   });
+
+  // Task 5: the maestro's per-task authorization for the junior skill.
+  // `--junior` is the one bare boolean flag on `task new` — no value, unlike
+  // every other flag here — so it must be pulled out before parseFlags runs,
+  // which is why it can sit anywhere in the argv, not just at the end.
+  it("task new --junior is a bare boolean flag, anywhere after new", () => {
+    const a = parseCliArgs(["task", "new", ...flags, "--junior"]);
+    expect(a.cmd === "task-new" && a.brief.junior).toBe(true);
+    const b = parseCliArgs(["task", "new", "--junior", ...flags]);
+    expect(b.cmd === "task-new" && b.brief.junior).toBe(true);
+    const c = parseCliArgs(["task", "new", ...flags]);
+    expect(c.cmd === "task-new" && c.brief.junior).toBeUndefined();
+    expect(parseCliArgs(["task", "ls", "--junior"]).cmd).toBe("usage");
+  });
+
+  // Task 5 review: the naive `rest.includes("--junior")` extraction is
+  // positionally blind — it matches the literal string "--junior" no matter
+  // WHERE it sits, including inside another flag's VALUE slot. Here
+  // `--boundaries`'s value is itself the literal string "--junior"; that must
+  // stay `boundaries: "--junior"` and must NOT flip `brief.junior` to true.
+  it("a --junior VALUE (e.g. --boundaries --junior) is not the bare boolean flag", () => {
+    const res = parseCliArgs([
+      "task", "new",
+      "--title", "t",
+      "--objective", "o",
+      "--output", "f",
+      "--boundaries", "--junior",
+      "--studio", "a",
+    ]);
+    expect(res.cmd).toBe("task-new");
+    if (res.cmd !== "task-new") return;
+    expect(res.brief.boundaries).toBe("--junior");
+    expect(res.brief.assignee).toBe("a");
+    expect(res.brief.junior).toBeUndefined();
+  });
 });
 
 describe("fleet task assign — P5 §3 reassignment", () => {
@@ -574,5 +609,19 @@ describe("fleet rescue-all — issue #251", () => {
   it("an unknown flag or a --repo with no value is a usage error", () => {
     expect(parseCliArgs(["rescue-all", "--force"]).cmd).toBe("usage");
     expect(parseCliArgs(["rescue-all", "--repo"]).cmd).toBe("usage");
+  });
+});
+
+// Task 8: `fleet junior enable|disable|status` — local opt-in, never touches
+// the Worker or any studio.
+describe("fleet junior", () => {
+  it("junior verbs", () => {
+    expect(parseCliArgs(["junior", "enable"])).toEqual({ cmd: "junior", action: "enable" });
+    expect(parseCliArgs(["junior", "enable", "--account", "abc"])).toEqual({ cmd: "junior", action: "enable", account: "abc" });
+    expect(parseCliArgs(["junior", "disable"])).toEqual({ cmd: "junior", action: "disable" });
+    expect(parseCliArgs(["junior", "status"])).toEqual({ cmd: "junior", action: "status" });
+    expect(parseCliArgs(["junior"]).cmd).toBe("usage");
+    expect(parseCliArgs(["junior", "nuke"]).cmd).toBe("usage");
+    expect(parseCliArgs(["junior", "enable", "--acount", "x"]).cmd).toBe("usage");
   });
 });

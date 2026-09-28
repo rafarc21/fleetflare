@@ -135,6 +135,20 @@ describe("parseBrief — assignee (§5 assignment)", () => {
   });
 });
 
+// Task 5: the maestro's per-task authorization for the junior skill.
+describe("parseBrief — junior (Task 5: maestro authorization)", () => {
+  it("junior: true accepted, absent/false means not set, anything else is a 400", () => {
+    const base = { title: "t", objective: "o", outputFormat: "f", boundaries: "b" };
+    const ok = parseBrief({ ...base, junior: true });
+    expect(ok.ok && ok.brief.junior).toBe(true);
+    const off = parseBrief({ ...base, junior: false });
+    expect(off.ok && off.brief.junior).toBeUndefined();
+    const absent = parseBrief(base);
+    expect(absent.ok && absent.brief.junior).toBeUndefined();
+    expect(parseBrief({ ...base, junior: "yes" })).toEqual({ ok: false, message: "junior must be a boolean" });
+  });
+});
+
 describe("renderBriefPrompt — what a lead boots holding", () => {
   const task = {
     number: 71, url: "https://github.com/o/r/issues/71",
