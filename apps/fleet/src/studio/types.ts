@@ -337,6 +337,14 @@ export interface ProvisionConfig {
    */
   blueprintRef?: string;
   /**
+   * Issue #28: `fleet provision|recycle --fresh-session`. THIS bring-up only
+   * skips the worktree-session adopt and runs with FLEET_FRESH_SESSION=1, so
+   * studio-bringup.sh moves the old session aside (never deletes) and claude
+   * starts without `--continue`. Never persisted: the stored role env every
+   * later restart/heal replays does not carry it.
+   */
+  freshSession?: boolean;
+  /**
    * Dynamic repo selection (P4a): the full `owner/repo` of the WORK repo to
    * clone. Absent means "whatever this studio is already bound to, else the
    * fleet default" — runProvision resolves that fallback, which is what

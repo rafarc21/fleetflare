@@ -138,13 +138,13 @@ describe("parseCliArgs", () => {
   });
 
   it("provision requires an id", () => {
-    expect(parseCliArgs(["provision", "websites--scratch"])).toEqual({ cmd: "provision", id: "websites--scratch" });
+    expect(parseCliArgs(["provision", "websites--scratch"])).toEqual({ cmd: "provision", id: "websites--scratch", freshSession: false });
     expect(parseCliArgs(["provision"])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });
 
   it("recycle requires an id", () => {
     expect(parseCliArgs(["recycle", "websites--scratch"])).toEqual({
-      cmd: "recycle", id: "websites--scratch", discardUnsynced: false,
+      cmd: "recycle", id: "websites--scratch", discardUnsynced: false, freshSession: false,
     });
     expect(parseCliArgs(["recycle"])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });
@@ -152,8 +152,26 @@ describe("parseCliArgs", () => {
   // Issue #96: the only way past the guard is saying so.
   it("recycle <id> --discard-unsynced sets discardUnsynced: true", () => {
     expect(parseCliArgs(["recycle", "websites--scratch", "--discard-unsynced"])).toEqual({
-      cmd: "recycle", id: "websites--scratch", discardUnsynced: true,
+      cmd: "recycle", id: "websites--scratch", discardUnsynced: true, freshSession: false,
     });
+  });
+
+  // Issue #28.
+  it("--fresh-session: provision and recycle, in any order with --discard-unsynced; repeats and strays are usage errors", () => {
+    expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: true,
+    });
+    expect(parseCliArgs(["recycle", "websites--scratch", "--fresh-session"])).toEqual({
+      cmd: "recycle", id: "websites--scratch", discardUnsynced: false, freshSession: true,
+    });
+    for (const flags of [["--fresh-session", "--discard-unsynced"], ["--discard-unsynced", "--fresh-session"]]) {
+      expect(parseCliArgs(["recycle", "websites--scratch", ...flags])).toEqual({
+        cmd: "recycle", id: "websites--scratch", discardUnsynced: true, freshSession: true,
+      });
+    }
+    expect(parseCliArgs(["provision", "websites--scratch", "--force"]).cmd).toBe("usage");
+    expect(parseCliArgs(["provision", "--fresh-session"])).toEqual({ cmd: "usage", message: CLI_USAGE });
+    expect(parseCliArgs(["recycle", "websites--scratch", "--fresh-session", "--fresh-session"]).cmd).toBe("usage");
   });
 
   it("recycle: any other trailing token, or the flag in the id slot, is a usage error", () => {

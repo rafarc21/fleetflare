@@ -698,6 +698,8 @@ export async function handleStudio(
       repo: id.repo, role: id.role, ...(id.instance === 1 ? {} : { instance: id.instance }),
       blueprintRef, repoSlug: repo.slug, briefPrompt,
       ...(projectCard === null ? {} : { projectCard }),
+      // Issue #28: one bring-up with a fresh claude session, old one set aside.
+      ...(url.searchParams.get("fresh-session") === "true" ? { freshSession: true } : {}),
     };
     try {
       return Response.json(burnView(await stub.provision(cfg)));
@@ -765,6 +767,8 @@ export async function handleStudio(
       // Issue #269, same reason and same omit-at-1 as the provision route above.
       repo: id.repo, role: id.role, ...(id.instance === 1 ? {} : { instance: id.instance }),
       ...(recycleCard === null ? {} : { projectCard: recycleCard }),
+      // Issue #28: same query param as the provision route above.
+      ...(url.searchParams.get("fresh-session") === "true" ? { freshSession: true } : {}),
     };
     // Second review pass (2026-08-20): a live run found destroy+reprovision
     // racing — see do.ts's recycleWithSync/sbAwaitReady for the mechanism.

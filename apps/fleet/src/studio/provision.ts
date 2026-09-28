@@ -2256,6 +2256,9 @@ export async function runProvision(
   let houseRulesOverlayNote: string | null = null;
   // Issue #1: same row-note channel as houseRulesOverlayNote.
   let leakGateNote: string | null = null;
+  // Issue #28: where a --fresh-session bring-up put the old session. Same
+  // channel: a discard nobody is told about is the thing this must never be.
+  let freshSessionNote: string | null = null;
 
   try {
     const resolved = await resolveBringupEnv(deps, cfg, fleetRepoSlug, workRepoSlug);
@@ -2332,15 +2335,21 @@ export async function runProvision(
     }
 
     // Issue #116: after the restore, before bring-up's --continue guard.
-    let adoption = await adoptBeforeBringup(deps, cfg.repo);
+    // Issue #28: a fresh-session bring-up adopts nothing (bring-up moves the
+    // old session aside instead), and the flag rides THIS exec's env only --
+    // `resolved.bringupEnv` is what gets persisted and replayed on restart.
+    let adoption = cfg.freshSession ? null : await adoptBeforeBringup(deps, cfg.repo);
 
-    const bringupRes = await deps.sbExec(BRINGUP_CMD, resolved.bringupEnv);
+    const bringupRes = await deps.sbExec(
+      BRINGUP_CMD, cfg.freshSession ? { ...resolved.bringupEnv, FLEET_FRESH_SESSION: "1" } : resolved.bringupEnv,
+    );
     if (bringupRes.code !== 0) {
       throw new Error(`bring-up failed (${bringupRes.code}): ${bringupRes.stderr.slice(0, 500)}`);
     }
     // Issue #146: on a fresh container it is bring-up's own adopt, after the
     // restore untar, that finds the session.
     adoption = keepAdopted(adoption, parseSessionAdoption(bringupRes.stdout, deps.now()));
+    if (cfg.freshSession) freshSessionNote = freshSessionNoteFor(parseFreshSession(bringupRes.stdout));
 
     // Board issue #28 — the missing observation. `bringupRes.code === 0`
     // (and, above it, `cloneRes.code === 0`) prove those two execs ran to
@@ -2392,7 +2401,7 @@ export async function runProvision(
     // stamps BARE_SELF_HEALED on this row -- it only writes over `error: null`.
     status = {
       ...status, state: "running", lastRefresh: deps.now(),
-      error: [houseRulesOverlayNote, leakGateNote].filter((part) => part !== null).join(" | ") || null,
+      error: [houseRulesOverlayNote, leakGateNote, freshSessionNote].filter((part) => part !== null).join(" | ") || null,
       sessionAdoption: adoptionRecord(adoption),
     };
   } catch (err) {
@@ -2411,7 +2420,7 @@ export async function runProvision(
     // already-known misconfiguration an operator would otherwise lose.
     status = {
       ...status, state: "degraded",
-      error: [houseRulesOverlayNote, leakGateNote, redactSecrets(err instanceof Error ? err.message : String(err))]
+      error: [houseRulesOverlayNote, leakGateNote, freshSessionNote, redactSecrets(err instanceof Error ? err.message : String(err))]
         .filter((part) => part !== null).join(" | ") || null,
       sessionAdoption: null,
     };
@@ -2850,6 +2859,45 @@ export function adoptWorktreeSessionCmd(
     `if [ -x ${scriptPath} ]; then timeout -k 2 ${killAfterSeconds} ${scriptPath} ${singleQuote(repo)} ${singleQuote(logPath)} || echo "${m} failed"; ` +
     `else timeout -k 2 ${killAfterSeconds} sh -c ${singleQuote(snippet)} || echo "${m} failed"; fi`
   );
+}
+
+/** Issue #28: bring-up's own stdout marker for a `--fresh-session` bring-up. */
+export const FRESH_SESSION_MARKER = "FLEET_SESSION_FRESH";
+
+/**
+ * Issue #28: where a `--fresh-session` bring-up moved the old session.
+ * `null` = no fresh-session marker at all (the flag was not set, or an older
+ * image ignored it). `[]` = flag honored, nothing to move. Otherwise every
+ * aside dir. A `failed` line is surfaced as `failed <path>` so the caller
+ * never reports a clean move that did not happen. Untrusted text: only the
+ * two shapes bring-up prints count.
+ */
+export function parseFreshSession(stdout: string): string[] | null {
+  const lines = stdout.split("\n").filter((l) => l.startsWith(`${FRESH_SESSION_MARKER} `));
+  if (lines.length === 0) return null;
+  const out: string[] = [];
+  for (const l of lines) {
+    const [, verb, ...rest] = l.trim().split(" ");
+    const path = rest.join(" ");
+    if (verb === "moved" && /^~\/\.claude\/projects\/fleet-aside-[A-Za-z0-9-]+$/.test(path)) out.push(path);
+    else if (verb === "failed" && path !== "") out.push(`failed ${path}`);
+  }
+  return out;
+}
+
+/** Issue #28: the row note for a --fresh-session bring-up. */
+export function freshSessionNoteFor(moved: string[] | null): string {
+  if (moved === null) {
+    return "fresh session not confirmed: bring-up printed no FLEET_SESSION_FRESH line (older image?) -- " +
+      "the old session was NOT moved aside and claude may have resumed it";
+  }
+  const failed = moved.filter((m) => m.startsWith("failed ")).map((m) => m.slice("failed ".length));
+  const aside = moved.filter((m) => !m.startsWith("failed "));
+  const parts: string[] = [];
+  if (aside.length > 0) parts.push(`fresh session: old session moved aside to ${aside.join(", ")} (kept, ships with the session snapshot)`);
+  if (failed.length > 0) parts.push(`fresh session: could not move ${failed.join(", ")} -- left in place`);
+  if (parts.length === 0) parts.push("fresh session: no old session to move aside");
+  return parts.join("; ");
 }
 
 /** Container stdout is untrusted text: only a well-formed marker line with a

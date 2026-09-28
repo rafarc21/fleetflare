@@ -196,6 +196,11 @@ The ones worth knowing before you need them:
   discarding everything since. Measured 2026-09-24: 3 such recycles cost up
   to 63 min of a lead still alive. Commits after a wedge = alive, do not
   recycle. No commits is NOT evidence of death.
+- `fleet provision|recycle <id> --fresh-session` — session claude cannot
+  resume (corrupt, oversize, exits on `--continue`). One bring-up skips
+  adopt + `--continue`. Old session moved aside to
+  `~/.claude/projects/fleet-aside-*`, never deleted, shipped with next
+  snapshot. Row's error line names where (#28).
   503 `the Durable Object did not answer` = every repair verb dead the same
   way. Retry cannot help — unless it says `retryable=true`: then one retry
   may land. Same failure again → watch CHECKED in `fleet ls`; wait (~20 min,

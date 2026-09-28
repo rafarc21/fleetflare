@@ -694,6 +694,8 @@ fleet check <id>            # ask the container right now, read-only
 fleet task ls               # the board for this repo
 fleet task new --title T --objective O --output F --boundaries B
 fleet provision <id>        # heal a half-built studio, same container
+                            # --fresh-session (also on recycle): start claude without
+                            # --continue; old session moved aside, never deleted
 fleet recycle <id>          # new container on the current image; rescues first
                             # refuses if rescue impossible; --discard-unsynced overrides
 fleet destroy <id>          # stop for good; rescues first; refuses if rescue impossible

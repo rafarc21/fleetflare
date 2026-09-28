@@ -2663,6 +2663,27 @@ describe("repair verbs name the failing side (#96)", () => {
     expect((recycle.mock.calls as unknown[][]).map((c) => c[1])).toEqual([false, true]);
   });
 
+  // Issue #28: `--fresh-session` rides a query param on both verbs, same
+  // shape as recycle's discard-unsynced, and reaches the DO as
+  // cfg.freshSession for that ONE call. Absent = the field is absent.
+  it("#28: provision and recycle ?fresh-session=true reach the DO as cfg.freshSession; absent, no field", async () => {
+    authorized();
+    const { testEnv, fakeNs } = envWithFakeStudio();
+    const stub = fakeNs.get();
+    const provision = vi.fn(async () => ({ id: STUDIO_ID, state: "running" }) as StudioStatus);
+    const recycle = vi.fn(async () => ({ id: STUDIO_ID, state: "running" }) as StudioStatus);
+    const ns = { ...fakeNs, get: () => ({ ...stub, provision, recycle }) };
+    const e = { ...testEnv, STUDIO: ns } as unknown as Env;
+    await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/provision`, { method: "POST" }), e);
+    await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/provision?fresh-session=true`, { method: "POST" }), e);
+    await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/recycle`, { method: "POST" }), e);
+    await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/recycle?fresh-session=true&discard-unsynced=true`, { method: "POST" }), e);
+    const pcfg = (provision.mock.calls as unknown[][]).map((c) => (c[0] as ProvisionConfig).freshSession);
+    const rcfg = (recycle.mock.calls as unknown[][]).map((c) => [(c[0] as ProvisionConfig).freshSession, c[1]]);
+    expect(pcfg).toEqual([undefined, true]);
+    expect(rcfg).toEqual([[undefined, false], [true, true]]);
+  });
+
   it("inspect: a DO failure says only what is known — the container may or may not have been reached", async () => {
     authorized();
     const res = await handleStudio(
