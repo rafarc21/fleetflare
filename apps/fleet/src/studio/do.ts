@@ -76,7 +76,7 @@ import {
   getObserved, mergeObserved, isIncarnationToken, computeAdoptedVerdict,
   type Observed, type ObservedSession, type ObservedStorage, type BringupVia,
 } from "./observed";
-import { recycleRefusal, recycleCostLine, RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
+import { recycleRefusal, recycleRescueFailedRefusal, recycleCostLine, RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
 import { sessionLatestKey } from "./archive";
 export { RECYCLE_REFUSED_PREFIX };
 // Issue #38: the bring-up log's Worker-side half. Deliberately its own import
@@ -1353,6 +1353,7 @@ export async function recycleWithSync(
     // `if (alive) try` just above actually entered the try block.
     await clearConsumedForceStamp(storage);
   }
+  let rescueDiscarded: string | null = null;
   if (alive) try {
     const rescue = await rescuePush(syncDeps, cfg.repo, idFallback);
     if (rescue.pushed) {
@@ -1363,7 +1364,16 @@ export async function recycleWithSync(
       }
     }
   } catch (err) {
+    // Issue #16: a CONFIRMED rescue failure refuses, exactly like destroy.ts.
+    // Every other throw (a killed exec, the shell dying) means "cannot tell"
+    // and stays best-effort — destroy.ts's posture for those, unchanged.
+    if (err instanceof RescuePushFailedError && !guard.discardUnsynced) {
+      throw new Error(recycleRescueFailedRefusal(idFallback, redactSecrets(err.message)));
+    }
     console.error(`studio ${idFallback}: pre-destroy rescue-push failed, continuing`, err);
+    if (err instanceof RescuePushFailedError) {
+      rescueDiscarded = `recycled with a confirmed rescue-push failure: ${redactSecrets(err.message)} (--discard-unsynced)`;
+    }
   }
   if (alive) try {
     // #367 round 2: `storage` (StudioStorage & SessionSyncStorage) does not
@@ -1521,6 +1531,8 @@ export async function recycleWithSync(
         // #346: learnings dropped because memory is off show on the row --
         // never over a real error.
         ...(learningsLost > 0 && status.error == null ? { error: learningsLostNote("recycled", learningsLost) } : {}),
+        // Issue #16: a discarded confirmed rescue failure outranks that note.
+        ...(rescueDiscarded && status.error == null ? { error: rescueDiscarded } : {}),
       };
       await storage.put(STATUS_KEY, fresh);
       await recordStudioFn(fresh);

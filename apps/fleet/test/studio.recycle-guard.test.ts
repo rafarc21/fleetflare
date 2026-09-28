@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { recycleWithSync, RECYCLE_REFUSED_PREFIX, decideHeal } from "../src/studio/do";
+import {
+  recycleWithSync, RECYCLE_REFUSED_PREFIX, decideHeal, RESCUE_FAILED_PREFIX, RESCUE_PUSHED_PREFIX, HARVEST_NO_RECORD,
+} from "../src/studio/do";
 import {
   PROVISIONED_OK, provisionedCheckCmd, STATUS_KEY, OPERATION_KEY, OPERATION_STALE_MS, provisionWithStorage,
   BRINGUP_CMD, type StudioStorage, type ProvisionDeps, type OperationInFlight,
@@ -393,5 +395,87 @@ describe("recycleWithSync — op-lock coverage (issue #85 review round 3, MUST-F
     const storedStatus = (await s.get(STATUS_KEY)) as StudioStatus;
     const decision = decideHeal(storedStatus, readiness, undefined, opDuringBringup as OperationInFlight, NOW);
     expect(decision.kind).toBe("stand-down");
+  });
+});
+
+/**
+ * Issue #16. A LIVE container whose rescue-push CONFIRMS a loss
+ * (`RESCUE_FAILED <wt> <step>`) used to log "continuing" and recycle anyway —
+ * the work was gone. Now it refuses exactly like destroy.ts already does,
+ * unless the caller passed --discard-unsynced.
+ */
+function liveDeps(rescueStdout: string): SessionSyncDeps {
+  return {
+    exec: async (cmd: string) => {
+      if (cmd === "printf ok") return { code: 0, stdout: "ok", stderr: "" };
+      if (cmd.startsWith("mkdir -p")) return { code: 0, stdout: "0\n1758067200", stderr: "" };
+      if (cmd.includes("status --porcelain")) return { code: 0, stdout: rescueStdout, stderr: "" };
+      if (cmd.includes(HARVEST_NO_RECORD)) return { code: 0, stdout: HARVEST_NO_RECORD, stderr: "" };
+      if (cmd === provisionedCheckCmd(CFG.repo)) return { code: 0, stdout: PROVISIONED_OK, stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    },
+    r2Put: async () => {},
+    r2List: async () => [],
+    r2Delete: async () => {},
+    now: () => NOW,
+    notify: async () => {},
+    burnAlertThresholdTokens: 0,
+  };
+}
+
+function runLive(rescueStdout: string, discardUnsynced: boolean) {
+  const destroy = vi.fn(async () => {});
+  const provision = vi.fn(async () => ({ id: ID, state: "running", error: null }) as StudioStatus);
+  const promise = recycleWithSync(
+    liveDeps(rescueStdout), storage(), ID, destroy, async () => {}, provision, async () => {}, CFG,
+    async () => "unused", async () => {}, { discardUnsynced, lastSyncedAt: async () => SYNCED_63_MIN_AGO },
+  );
+  return { promise, destroy, provision };
+}
+
+describe("recycle guard — a CONFIRMED rescue-push failure refuses (issue #16)", () => {
+  it("rescue failed, no flag: refuses naming the worktree and the flag; destroy NEVER called", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { promise, destroy, provision } = runLive(`${RESCUE_FAILED_PREFIX} agent-a1 push`, false);
+      const message = await promise.then(() => "", (err: Error) => err.message);
+      expect(message.startsWith(RECYCLE_REFUSED_PREFIX)).toBe(true);
+      expect(message).toContain("agent-a1 (push)");
+      expect(message).toContain(`fleet recycle ${ID} --discard-unsynced`);
+      expect(destroy).not.toHaveBeenCalled();
+      expect(provision).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("one worktree pushed, one failed: still refuses, naming both", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const stdout = `${RESCUE_PUSHED_PREFIX} fleet/rescue/${ID}-20260924121500 2 files\n${RESCUE_FAILED_PREFIX} agent-a2 push`;
+      const { promise, destroy } = runLive(stdout, false);
+      const message = await promise.then(() => "", (err: Error) => err.message);
+      expect(message.startsWith(RECYCLE_REFUSED_PREFIX)).toBe(true);
+      expect(message).toContain(`fleet/rescue/${ID}-20260924121500`);
+      expect(message).toContain("agent-a2 (push)");
+      expect(destroy).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("rescue failed + --discard-unsynced: proceeds, and the row names what was discarded", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { promise, destroy, provision } = runLive(`${RESCUE_FAILED_PREFIX} agent-a1 push`, true);
+      const result = await promise;
+      expect(destroy).toHaveBeenCalledTimes(1);
+      expect(provision).toHaveBeenCalledWith(CFG);
+      expect(result.state).toBe("running");
+      expect(result.error).toMatch(/agent-a1/);
+      expect(result.error).toMatch(/--discard-unsynced/);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });

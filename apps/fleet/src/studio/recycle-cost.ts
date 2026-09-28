@@ -56,6 +56,15 @@ export const LIVENESS_RULE =
  *  an error class: Workers RPC keeps an error's message but not its class. */
 export const RECYCLE_REFUSED_PREFIX = "recycle refused: ";
 
+/** Issue #16: rescue-push CONFIRMED a worktree's work never landed (a
+ *  RescuePushFailedError). Same refusal destroy.ts already makes; `detail`
+ *  is that error's message, already redacted by the caller. */
+export function recycleRescueFailedRefusal(id: string, detail: string): string {
+  return RECYCLE_REFUSED_PREFIX +
+    `rescue-push confirmed it could not save this studio's work before recycle: ${detail} ` +
+    `To discard anyway, as a stated choice: fleet recycle ${id} --discard-unsynced`;
+}
+
 export function recycleRefusal(id: string, probeMs: number, lastSyncedAt: Date | null | undefined, now: Date): string {
   return RECYCLE_REFUSED_PREFIX +
     `the container did not answer an ${probeMs / 1000}s probe, so session sync, rescue-push and ` +
