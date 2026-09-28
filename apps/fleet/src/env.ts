@@ -45,6 +45,16 @@ export interface Env {
   /** Optional comma list of "owner/repo" narrowing FLEET_JUNIOR, same format
    *  as INSTALL_CACHE_REPOS. Absent/empty = every repo when FLEET_JUNIOR is on. */
   JUNIOR_REPOS?: string;
+  /**
+   * PR #9 review, F1: per-studio throttles on `/fleet/junior`, both D1-backed
+   * (src/junior/ratelimit.ts). `JUNIOR_RATE_PER_MINUTE` caps calls in any
+   * rolling 60s bucket per studio (default 5); `JUNIOR_DAILY_CAP` caps calls
+   * per UTC day per studio (default 50). Both optional, and garbage input
+   * (absent, non-numeric, zero, negative) falls back to the default rather
+   * than disabling the limit — see ratelimit.ts's parsePositiveInt.
+   */
+  JUNIOR_RATE_PER_MINUTE?: string;
+  JUNIOR_DAILY_CAP?: string;
   /** Workers AI binding (`"ai": { "binding": "AI" }`). Only junior uses it. */
   AI?: { run(model: string, input: unknown): Promise<unknown> };
   /**

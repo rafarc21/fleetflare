@@ -11,6 +11,7 @@ import type { StudioStatus } from "../studio/types";
 import { JUNIOR_MODELS, juniorEnabled } from "./gate";
 import { findLiveAssignedTask, type BoardApi } from "../board/board";
 import { isJuniorAuthorized } from "./authz";
+import { checkAndConsumeJuniorRateLimit } from "./ratelimit";
 import { githubBoardApi, resolveStudioBoardRepo } from "../board/routes";
 
 export const JUNIOR_BODY_CAP = 2 * 1024 * 1024;
@@ -165,6 +166,20 @@ export async function handleFleetJunior(
   if (live.value === null) return text("junior not authorized for your current task", 403);
   const authorized = await isJuniorAuthorized(env.DB, repo.value, live.value.number, studio.id);
   if (!authorized) return text("junior not authorized for your current task", 403);
+
+  // F1: only an AUTHORIZED call consumes rate budget — a caller hammering an
+  // unauthorized/misconfigured task must not be able to burn through its own
+  // allowance before it is ever entitled to spend it. Checked after
+  // authorization, before any body work or the AI call itself.
+  const rate = await checkAndConsumeJuniorRateLimit(env.DB, env, studio.id, Date.now());
+  if (!rate.ok) {
+    return text(
+      rate.limit === "per-minute"
+        ? "rate limit exceeded: too many /fleet/junior calls this minute"
+        : "rate limit exceeded: daily /fleet/junior cap reached",
+      429,
+    );
+  }
 
   const raw = await readCappedBody(req, JUNIOR_BODY_CAP);
   if (raw === null) return text("payload too large", 413);
