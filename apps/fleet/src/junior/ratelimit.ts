@@ -45,6 +45,36 @@ function dailyKey(studioId: string, dayBucket: number): string {
   return `junior-daily:${studioId}:${dayBucket}`;
 }
 
+// PR #9 review, item (c): a window comfortably wider than the bucket size
+// itself, so a row is never deleted while its own bucket could still be
+// read — only once its bucket is definitely over and it has become pure
+// dead weight.
+const RATE_RETENTION_MS = MINUTE_MS * 2;
+const DAILY_RETENTION_MS = DAY_MS * 2;
+
+/**
+ * PR #9 review, item (c): `checkAndConsumeJuniorRateLimit` writes a NEW
+ * `fleet_state` row per studio per minute (and per day) bucket and nothing
+ * else in this codebase ever deletes one — left alone, this table grows by
+ * one row per call, forever. Opportunistic deletion, run inline on every
+ * call this module makes, rather than a scheduled job: this Worker has no
+ * cron wired for it, and a `DELETE ... WHERE key LIKE ... AND ts < ?` against
+ * this table's small row count is cheap enough to simply always run rather
+ * than gate behind a TODO.
+ *
+ * The two prefixes (`junior-rate:` / `junior-daily:`) are pruned
+ * independently, each against its own retention window, since a minute
+ * bucket and a day bucket go stale on very different timescales.
+ */
+async function pruneStaleCounters(db: D1Database, now: number): Promise<void> {
+  await Promise.all([
+    db.prepare(`DELETE FROM fleet_state WHERE key LIKE 'junior-rate:%' AND ts < ?`)
+      .bind(now - RATE_RETENTION_MS).run(),
+    db.prepare(`DELETE FROM fleet_state WHERE key LIKE 'junior-daily:%' AND ts < ?`)
+      .bind(now - DAILY_RETENTION_MS).run(),
+  ]);
+}
+
 /**
  * Checks BOTH limits and, only if neither is exceeded, consumes one unit of
  * each — a single call this route makes once per request it intends to
@@ -91,6 +121,10 @@ export async function checkAndConsumeJuniorRateLimit(
   const dayBucket = Math.floor(now / DAY_MS);
   const rKey = rateKey(studioId, minuteBucket);
   const dKey = dailyKey(studioId, dayBucket);
+
+  // Item (c): opportunistic, ahead of this call's own increments — see
+  // pruneStaleCounters's own doc comment for why inline rather than a cron.
+  await pruneStaleCounters(db, now);
 
   const minuteCount = await incrementCounter(db, rKey, now);
   if (minuteCount > perMinute) return { ok: false, limit: "per-minute" };
