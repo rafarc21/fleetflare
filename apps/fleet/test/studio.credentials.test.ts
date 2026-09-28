@@ -12,8 +12,9 @@ import {
   STUDIO_GIT_WRAPPER_PATH, STUDIO_GIT_WRAPPER_TMP_PATH, STUDIO_REAL_GIT_PATH,
   STUDIO_PUSH_REFUSAL, STUDIO_PUSH_UNRESOLVED_DEFAULT,
   STUDIO_PUSH_PROBE_FAILED, STUDIO_PUSH_SHELL_ALIAS_REFUSAL,
-  STUDIO_PUSH_PLUMBING_REFUSAL, STUDIO_PUSH_ALIAS_DEPTH_REFUSAL,
+  STUDIO_PUSH_PLUMBING_REFUSAL, STUDIO_PUSH_ALIAS_DEPTH_REFUSAL, STUDIO_PUSH_LEAK_REFUSAL,
 } from "../src/studio/credentials";
+import { LEAK_SCAN_PATH } from "../src/leak-gate";
 
 describe("studioGitSafetyCmd — the two git config values (issue #253)", () => {
   it("sets push.default=current, git's own safer default for a bare push", () => {
@@ -364,5 +365,26 @@ describe("studioGitWrapperScript — the generated /usr/local/bin/git wrapper (i
   it("takes a realGit seam and defaults to /usr/bin/git", () => {
     expect(studioGitWrapperScript("/tmp/seam/real-git")).toContain("real='/tmp/seam/real-git'");
     expect(studioGitWrapperScript()).toBe(studioGitWrapperScript(STUDIO_REAL_GIT_PATH));
+  });
+});
+
+describe("studioGitWrapperScript — the leak gate on push (issue #1)", () => {
+  it("calls the container scanner at LEAK_SCAN_PATH by default, and prints the fleet refusal", () => {
+    const s = studioGitWrapperScript();
+    expect(s).toContain(`scan='${LEAK_SCAN_PATH}'`);
+    expect(s).toContain('| "$scan"');
+    expect(s).toContain(STUDIO_PUSH_LEAK_REFUSAL);
+  });
+
+  it("takes a scanner seam, threaded through studioGitSafetyCmd", () => {
+    const s = studioGitWrapperScript(STUDIO_REAL_GIT_PATH, "/tmp/seam/scan");
+    expect(s).toContain("scan='/tmp/seam/scan'");
+    expect(s).not.toContain(LEAK_SCAN_PATH);
+    const b64 = Buffer.from(s, "utf8").toString("base64");
+    expect(studioGitSafetyCmd({ scanPath: "/tmp/seam/scan" })).toContain(b64);
+  });
+
+  it("does not install the scanner itself — another step owns that", () => {
+    expect(studioGitSafetyCmd()).not.toContain(LEAK_SCAN_PATH);
   });
 });

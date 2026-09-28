@@ -6,8 +6,9 @@ import {
   studioGitSafetyCmd, studioGitWrapperScript,
   STUDIO_PUSH_REFUSAL, STUDIO_PUSH_UNRESOLVED_DEFAULT,
   STUDIO_PUSH_PROBE_FAILED, STUDIO_PUSH_SHELL_ALIAS_REFUSAL,
-  STUDIO_PUSH_PLUMBING_REFUSAL, STUDIO_PUSH_ALIAS_DEPTH_REFUSAL,
+  STUDIO_PUSH_PLUMBING_REFUSAL, STUDIO_PUSH_ALIAS_DEPTH_REFUSAL, STUDIO_PUSH_LEAK_REFUSAL,
 } from "../../src/studio/credentials";
+import { denylistFileContent, leakScanScript, type LeakGateFile } from "../../src/leak-gate";
 import { withKillDeadline } from "../../src/studio/exec-deadline";
 import {
   rescuePushCmd, rescueSnapshotCmd, RESCUE_PUSHED_PREFIX, RESCUE_PUSHED_KIND_FILES, RESCUE_PUSHED_KIND_COMMITS,
@@ -117,6 +118,9 @@ interface Fixture {
   clone: string;
   /** The remote's default branch name for this fixture. */
   def: string;
+  /** Issue #1: the leak scanner the wrapper calls, and its gate file. */
+  scan: string;
+  gate: string;
   env: Record<string, string>;
 }
 
@@ -182,9 +186,15 @@ function originState(f: Fixture): string[] {
  * against a wrapper that was not actually reached.
  */
 function installWrapper(f: Fixture): void {
-  const cmd = studioGitSafetyCmd({ wrapperPath: f.wrapper, realGit: REAL_GIT as string });
+  const cmd = studioGitSafetyCmd({ wrapperPath: f.wrapper, realGit: REAL_GIT as string, scanPath: f.scan });
   const r = run(["bash", "-c", withKillDeadline(cmd, 30_000)], f.clone, f.env);
   if (r.code !== 0) throw new Error(`wrapper install failed (${r.code}): ${r.stderr}${r.stdout}`);
+}
+
+/** Issue #1: (re)writes the fixture's leak gate file. The default pattern
+ *  matches nothing any fixture writes, so every pre-#1 test pushes clean. */
+function writeGate(f: Fixture, gate: LeakGateFile = { patterns: ["fleet-harmless-999999999"] }): void {
+  writeFileSync(f.gate, denylistFileContent(gate));
 }
 
 /** A bare origin whose default branch is `def`, one seeded commit on it, a
@@ -202,6 +212,7 @@ function setup(def = "trunk", install = true): Fixture {
   const f: Fixture = {
     root, bin, wrapper: join(bin, "git"),
     origin: join(root, "origin.git"), clone: join(ws, REPO), def,
+    scan: join(root, "fleet-leak-scan"), gate: join(root, "denylist"),
     env: {
       ...process.env as Record<string, string>,
       HOME: home,
@@ -217,6 +228,9 @@ function setup(def = "trunk", install = true): Fixture {
     },
   };
   fx = f;
+  writeFileSync(f.scan, leakScanScript(f.gate));
+  chmodSync(f.scan, 0o755);
+  writeGate(f);
 
   realGit(f, ["init", "-q", "--bare", "-b", def, f.origin], root);
   realGit(f, ["init", "-q", "-b", def, seed], root);
@@ -896,7 +910,7 @@ LANE("a re-provision repairs a BROKEN live wrapper — maestro round 2, item 4 (
     installWrapper(f);
 
     expect(readFileSync(f.wrapper, "utf8")).toBe(good);
-    expect(good).toBe(studioGitWrapperScript(REAL_GIT as string));
+    expect(good).toBe(studioGitWrapperScript(REAL_GIT as string, f.scan));
     // And the repaired wrapper guards again.
     commit(f);
     expectRefused(git(f, ["push", "origin", `HEAD:${f.def}`]));
@@ -1049,7 +1063,7 @@ LANE("a DANGLING option cannot swallow the probe's flags — maestro round 3, it
     const shim = join(f.root, "sigpipe-git");
     writeFileSync(shim, `#!/bin/bash\nfor a in "$@"; do [ "$a" = "--dry-run" ] && exit 141; done\nexec ${REAL_GIT} "$@"\n`);
     chmodSync(shim, 0o755);
-    const cmd = studioGitSafetyCmd({ wrapperPath: f.wrapper, realGit: shim });
+    const cmd = studioGitSafetyCmd({ wrapperPath: f.wrapper, realGit: shim, scanPath: f.scan });
     const inst = run(["bash", "-c", withKillDeadline(cmd, 30_000)], f.clone, f.env);
     if (inst.code !== 0) throw new Error(`wrapper install failed (${inst.code}): ${inst.stderr}${inst.stdout}`);
     realGit(f, ["config", "receive.advertisePushOptions", "true"], f.origin);
@@ -1849,5 +1863,165 @@ LANE("issue #353 — a genuinely empty remote's very first push, and its non-emp
     const r = git(f, ["push", "origin", "feature/new-353"]);
     expect(r.code, r.stderr).toBe(0);
     expect(originRefs(f)).toContain("refs/heads/feature/new-353");
+  });
+});
+
+/**
+ * Issue #1 — the LEAK GATE on push. The repo is public, so a push carrying a
+ * denylisted term (commit metadata, message, added line, new path, pushed ref
+ * name) is refused before the real git runs. Fail closed: no gate file, a
+ * bad pattern, a missing scanner each refuse. `acmeclient` stands in for a
+ * private term.
+ */
+LANE("the fleet git wrapper runs the leak gate on every push (issue #1)", () => {
+  const TERM = "acmeclient";
+
+  /** A leak-gated fixture on a fresh feature branch. */
+  function gated(): Fixture {
+    const f = setup();
+    writeGate(f, { patterns: ["fleet-harmless-999999999", TERM] });
+    realGit(f, ["checkout", "-q", "-b", "feature"]);
+    return f;
+  }
+
+  function commitWith(f: Fixture, file: string, content: string, message: string): void {
+    writeFileSync(join(f.clone, file), content);
+    realGit(f, ["add", "-A"]);
+    realGit(f, ["commit", "-q", "-m", message]);
+  }
+
+  function pushFeature(f: Fixture): Run {
+    return git(f, ["push", "origin", "HEAD:refs/heads/feature"]);
+  }
+
+  function expectLeakRefused(f: Fixture, r: Run, before: string[]): void {
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain(STUDIO_PUSH_LEAK_REFUSAL);
+    expect(r.stderr.toLowerCase()).not.toContain(TERM);
+    expect(originState(f)).toEqual(before);
+  }
+
+  function expectLanded(f: Fixture, r: Run): void {
+    expect(r.code, r.stderr).toBe(0);
+    const head = realGit(f, ["rev-parse", "HEAD"]).stdout.trim();
+    expect(originState(f)).toContain(`refs/heads/feature ${head}`);
+  }
+
+  test("a hit in the commit MESSAGE is refused, pattern index only (mutant: hit found but push allowed)", () => {
+    const f = gated();
+    commitWith(f, "a.txt", "clean\n", `work for ${TERM.toUpperCase()}`);
+    const before = originState(f);
+
+    const r = pushFeature(f);
+
+    expectLeakRefused(f, r, before);
+    expect(r.stderr).toContain("#2");
+  });
+
+  test("a hit in an ADDED line is refused", () => {
+    const f = gated();
+    commitWith(f, "a.txt", `notes about ${TERM}\n`, "clean message");
+    const before = originState(f);
+    expectLeakRefused(f, pushFeature(f), before);
+  });
+
+  test("a hit in a NEW file path is refused", () => {
+    const f = gated();
+    commitWith(f, `${TERM}-notes.txt`, "clean\n", "clean message");
+    const before = originState(f);
+    expectLeakRefused(f, pushFeature(f), before);
+  });
+
+  test("a hit in an EMPTY new file's path is refused (no +++ line in its diff)", () => {
+    const f = gated();
+    commitWith(f, `${TERM}.txt`, "", "clean message");
+    const before = originState(f);
+    expectLeakRefused(f, pushFeature(f), before);
+  });
+
+  test("a hit in the author identity is refused", () => {
+    const f = gated();
+    writeFileSync(join(f.clone, "a.txt"), "clean\n");
+    realGit(f, ["add", "-A"]);
+    realGit(f, ["-c", `user.name=x`, "commit", "-q", "-m", "clean", `--author=Someone <someone@${TERM}.example>`]);
+    const before = originState(f);
+    expectLeakRefused(f, pushFeature(f), before);
+  });
+
+  test("a hit in the pushed BRANCH NAME is refused", () => {
+    const f = gated();
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    const before = originState(f);
+    expectLeakRefused(f, git(f, ["push", "origin", `HEAD:refs/heads/fix-${TERM}`]), before);
+  });
+
+  test("a clean push is allowed and lands", () => {
+    const f = gated();
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    expectLanded(f, pushFeature(f));
+  });
+
+  test("a term only in a commit ALREADY on the remote does not block a new clean commit (mutant: no exclusion)", () => {
+    const f = gated();
+    commitWith(f, "old.txt", `${TERM}\n`, `old ${TERM} work`);
+    // Landed before the gate existed: pushed with the REAL git.
+    realGit(f, ["push", "-q", "origin", "HEAD:refs/heads/feature"]);
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    expectLanded(f, pushFeature(f));
+  });
+
+  test("a REMOVED line containing the term is allowed", () => {
+    const f = gated();
+    commitWith(f, "old.txt", `keep\n${TERM}\n`, "old work");
+    realGit(f, ["push", "-q", "origin", "HEAD:refs/heads/feature"]);
+    commitWith(f, "old.txt", "keep\n", "scrub");
+    expectLanded(f, pushFeature(f));
+  });
+
+  test("gate file MISSING refuses a clean push (mutant: denylist missing reads as a pass)", () => {
+    const f = gated();
+    rmSync(f.gate);
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    const before = originState(f);
+    expectLeakRefused(f, pushFeature(f), before);
+  });
+
+  test("an INVALID pattern refuses a clean push (mutant: scanner errors swallowed)", () => {
+    const f = gated();
+    writeGate(f, { patterns: ["("] });
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    const before = originState(f);
+    expectLeakRefused(f, pushFeature(f), before);
+  });
+
+  test("the scanner binary MISSING refuses a clean push", () => {
+    const f = gated();
+    rmSync(f.scan);
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    const before = originState(f);
+    expectLeakRefused(f, pushFeature(f), before);
+  });
+
+  test("a FAILING history read refuses a clean push (mutant: pipefail dropped, log error swallowed)", () => {
+    const f = gated();
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    const before = originState(f);
+    // Measured, git 2.50: a bad log.date fails `git log` (128) but not the push probe.
+    expectLeakRefused(f, git(f, ["-c", "log.date=bogus", "push", "origin", "HEAD:refs/heads/feature"]), before);
+  });
+
+  test("gate `off` lets a hit through", () => {
+    const f = gated();
+    writeGate(f, { off: "work repo is private" });
+    commitWith(f, "a.txt", `${TERM}\n`, `work for ${TERM}`);
+    expectLanded(f, pushFeature(f));
+  });
+
+  test("nothing to push is handed over without a scan, even with no gate file", () => {
+    const f = gated();
+    rmSync(f.gate);
+    realGit(f, ["checkout", "-q", f.def]);
+    const r = git(f, ["push", "origin", f.def]);
+    expect(r.code, r.stderr).toBe(0);
   });
 });

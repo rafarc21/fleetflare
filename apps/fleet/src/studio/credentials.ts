@@ -16,6 +16,8 @@
 // blueprint.ts imports nothing itself, so this stays loadable from the
 // bun:test lane exactly as this file already was.
 import { base64EncodeUtf8 } from "./blueprint";
+// Issue #1: leak-gate.ts imports nothing, so this stays bun:test-loadable too.
+import { LEAK_SCAN_PATH } from "../leak-gate";
 
 /** #110 review: the env var every token-carrying fleet command reads its
  *  secret from. sbExec hands it over in the exec's env option, so the token
@@ -341,6 +343,11 @@ export const STUDIO_PUSH_PLUMBING_REFUSAL =
 export const STUDIO_PUSH_ALIAS_DEPTH_REFUSAL =
   "fleet: this alias chain is too deep to resolve -- refusing it (fail closed)";
 
+/** Issue #1: printed after the leak scanner's own line (pattern index, never
+ *  the term) when a push's outgoing text fails the gate, or the gate itself
+ *  cannot run (no gate file, bad pattern, scanner missing). */
+export const STUDIO_PUSH_LEAK_REFUSAL = "fleet: leak gate refused this push";
+
 /**
  * Subcommands that are git BUILTINS. Git ignores any alias that shadows a
  * builtin ("aliases that hide existing Git commands are ignored",
@@ -500,7 +507,7 @@ const STUDIO_GIT_BUILTINS = [
  * `gh repo sync`, `gh pr merge`. No wrapper change closes those; the rule
  * naming them is the whole of their cover.
  */
-export function studioGitWrapperScript(realGit = STUDIO_REAL_GIT_PATH): string {
+export function studioGitWrapperScript(realGit = STUDIO_REAL_GIT_PATH, scanPath = LEAK_SCAN_PATH): string {
   return [
     `#!/bin/bash`,
     `# fleet: issue #253. Installed at ${STUDIO_GIT_WRAPPER_PATH}, which comes`,
@@ -510,6 +517,7 @@ export function studioGitWrapperScript(realGit = STUDIO_REAL_GIT_PATH): string {
     `# untouched, repo hooks and all. Deliberately NOT a git hook: see`,
     `# credentials.ts's studioGitWrapperScript for the three measured reasons.`,
     `real='${realGit}'`,
+    `scan='${scanPath}'`,
     ``,
     `args=("$@")`,
     `globals=()`,
@@ -777,6 +785,44 @@ export function studioGitWrapperScript(realGit = STUDIO_REAL_GIT_PATH): string {
     `  exit 1`,
     `fi`,
     ``,
+    `# Issue #1 leak gate: the repo may be PUBLIC, so every outgoing text is`,
+    `# scanned before the real push. Outgoing = each moving ref's src, minus`,
+    `# commits the remote already has. Exclusion only for ONE trusted url;`,
+    `# otherwise the full reachable history is scanned (safe side).`,
+    `srcs=()`,
+    `dsts=()`,
+    `while IFS= read -r line; do`,
+    `  case "$line" in 'To '*) continue ;; esac`,
+    `  IFS=$'\\t' read -r flag pair summary <<< "$line"`,
+    `  case "$flag" in ' '|'+'|'*'|'!') ;; *) continue ;; esac`,
+    `  srcs+=("\${pair%%:*}")`,
+    `  dsts+=("\${pair#*:}")`,
+    `done <<< "$out"`,
+    `if [ "\${#srcs[@]}" -gt 0 ]; then`,
+    `  have=()`,
+    `  if [ "$(grep -c '^To ' <<< "$out")" = 1 ] && [ "$trusted" = 1 ]; then`,
+    `    while read -r sha type; do`,
+    `      [ "$type" = commit ] && have+=("$sha")`,
+    `    done < <("$real" "\${globals[@]}" ls-remote -- "$url" 2>/dev/null | cut -f1 | sed 's/$/^{commit}/' |`,
+    `      "$real" "\${globals[@]}" cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null)`,
+    `  fi`,
+    `  # Text: pushed ref names, author/committer, full message, added lines`,
+    `  # and new paths. Flags pin the output against config (color, ext diff,`,
+    `  # textconv, diff.relative, log.showRoot, replace refs). pipefail: ANY`,
+    `  # failure -- log, scanner, scanner missing (127) -- refuses.`,
+    `  (`,
+    `    set -o pipefail`,
+    `    lg=("$real" "\${globals[@]}" --no-replace-objects -c log.showRoot=true log --no-color)`,
+    `    {`,
+    `      printf '%s\\n' "\${dsts[@]}" &&`,
+    `      "\${lg[@]}" --format='%an <%ae>%n%cn <%ce>%n%B' "\${srcs[@]}" --not "\${have[@]}" &&`,
+    `      "\${lg[@]}" --format= -p --summary --text --no-ext-diff --no-textconv --no-relative` +
+      ` --diff-merges=first-parent "\${srcs[@]}" --not "\${have[@]}" |`,
+    `        sed -n -E '/^(\\+|rename to |copy to | create mode )/p'`,
+    `    } | "$scan"`,
+    `  ) || { echo "${STUDIO_PUSH_LEAK_REFUSAL}" >&2; exit 1; }`,
+    `fi`,
+    ``,
     `exec "$real" "$@"`,
   ].join("\n") + "\n";
 }
@@ -835,12 +881,14 @@ export function studioGitWrapperScript(realGit = STUDIO_REAL_GIT_PATH): string {
  * wrapper would be installed and inert, and this is what says so.
  */
 export function studioGitSafetyCmd(
-  opts: { wrapperPath?: string; realGit?: string } = {},
+  opts: { wrapperPath?: string; realGit?: string; scanPath?: string } = {},
 ): string {
   const wrapper = opts.wrapperPath ?? STUDIO_GIT_WRAPPER_PATH;
   const real = opts.realGit ?? STUDIO_REAL_GIT_PATH;
   const tmp = `${wrapper}.fleet-install`;
-  const b64 = base64EncodeUtf8(studioGitWrapperScript(real));
+  // Issue #1: scanPath only tells the wrapper where the scanner is; installing
+  // the scanner itself is another step's job.
+  const b64 = base64EncodeUtf8(studioGitWrapperScript(real, opts.scanPath));
   return (
     `'${real}' config --global push.default current && ` +
     `'${real}' config --global branch.autoSetupMerge false && ` +
