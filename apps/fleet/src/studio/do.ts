@@ -95,12 +95,13 @@ import { juniorEnabled } from "../junior/gate";
 // credential it picks — see credentials.ts's own header. Re-exported
 // here so every existing `from "./do"` importer is unchanged.
 import { credentialWriteCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV } from "./credentials";
+import { leakGateInstallCmd } from "./gh-wrapper";
 export { credentialWriteCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV };
 
 import { mintSpawnToken, hashSpawnToken } from "./org";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
 import {
-  fetchRepoFile, createRepoFile, upsertRepoFile, listOpenPullNumbers,
+  fetchRepoFile, createRepoFile, upsertRepoFile, listOpenPullNumbers, repoIsPrivate,
   // Issue #249 (PR4b): the survival re-brief's three GitHub reads, all from
   // OUTSIDE the container. `compareAhead` in particular is the spec's loudest
   // correction on this feature — a studio's own clone is shallow and
@@ -500,7 +501,7 @@ export async function restartWithSync(
 
 import {
   rescuePushCmd, rescueSnapshotCmd, RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX,
-  RESCUE_FAILED_PREFIX,
+  RESCUE_FAILED_PREFIX, resolveRescueTarget,
 } from "./rescue";
 // Moved to src/studio/rescue.ts (pure, so a bun test runs it against real
 // git — issue #217); re-exported so every existing import keeps working.
@@ -618,7 +619,10 @@ export async function rescuePush(deps: SessionSyncDeps, repo: string, studio: st
   // rescuePushCmd's OWN defaults for those (root/timeouts unchanged) —
   // only botName/botEmail come from deps, absent (undefined) unless the
   // real do.ts syncDeps() set them from env.
-  const res = await deps.exec(rescuePushCmd(repo, studio, undefined, undefined, undefined, undefined, deps.botName, deps.botEmail));
+  // Issue #1 piece 5: private rescue remote; its token rides exec env only.
+  const t = (await deps.rescueTarget?.()) ?? {};
+  const cmd = rescuePushCmd(repo, studio, undefined, undefined, undefined, undefined, deps.botName, deps.botEmail, { remoteUrl: t.remoteUrl });
+  const res = await (t.env ? deps.exec(cmd, t.env) : deps.exec(cmd));
   return parseRescueExecResult(res, "rescue-push");
 }
 
@@ -635,7 +639,10 @@ export async function rescuePush(deps: SessionSyncDeps, repo: string, studio: st
  */
 export async function rescueSnapshot(deps: SessionSyncDeps, repo: string, studio: string): Promise<RescueResult> {
   // Issue #335: see rescuePush's own identical comment above.
-  const res = await deps.exec(rescueSnapshotCmd(repo, studio, undefined, undefined, undefined, undefined, deps.botName, deps.botEmail));
+  // Issue #1 piece 5: see rescuePush's own identical comment above.
+  const t = (await deps.rescueTarget?.()) ?? {};
+  const cmd = rescueSnapshotCmd(repo, studio, undefined, undefined, undefined, undefined, deps.botName, deps.botEmail, { remoteUrl: t.remoteUrl });
+  const res = await (t.env ? deps.exec(cmd, t.env) : deps.exec(cmd));
   return parseRescueExecResult(res, "rescue-snapshot");
 }
 
@@ -4520,6 +4527,11 @@ export class StudioDO extends Sandbox<Env> {
       // (just below this class) so a test can reach it at all.
       applyStudioGitSafety: () =>
         applyStudioGitSafetyPort((cmd) => sbExec(this, cmd, EXEC_CLASSES.provision)),
+      // Issue #1: leak scanner + gh wrapper, and the work repo's visibility
+      // (private = gate off). See provision.ts's applyLeakGate.
+      installLeakGate: () =>
+        installLeakGatePort((cmd) => sbExec(this, cmd, EXEC_CLASSES.provision)),
+      workRepoIsPrivate: async (slug: string) => repoIsPrivate(await mint(slug), slug),
       // Board #350: the repo gate and the presign-GET mint. Both optional on
       // ProvisionDeps (install-cache.ts's InstallCacheRestoreDeps doc
       // comment) — wired here unconditionally, since the gate itself (empty
@@ -5002,7 +5014,7 @@ export class StudioDO extends Sandbox<Env> {
    *  default page). */
   private syncDeps(cls: "sync" | "readiness" | "rescue"): SessionSyncDeps {
     return {
-      exec: (cmd: string) => sbExec(this, cmd, EXEC_CLASSES[cls]),
+      exec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, env ? { ...EXEC_CLASSES[cls], env } : EXEC_CLASSES[cls]),
       r2Put: async (key: string, bytes: Uint8Array) => {
         await this.env.STUDIO_ARCHIVE.put(key, bytes);
       },
@@ -5039,6 +5051,10 @@ export class StudioDO extends Sandbox<Env> {
       // rescueSnapshotCmd's own neutral defaults apply.
       botName: this.env.FLEET_BOT_NAME,
       botEmail: this.env.FLEET_BOT_EMAIL,
+      // Issue #1 piece 5: FLEET_RESCUE_REMOTE + a contents:write token scoped
+      // to it; unset or a failed mint → origin, leak-gated, loudly (rescue.ts).
+      rescueTarget: () => resolveRescueTarget(this.env, (repo) =>
+        mintRepoToken(this.env, repo, { permissions: { contents: "write" } })),
     };
   }
 
@@ -6424,6 +6440,20 @@ export async function applyStudioGitSafetyPort(
     if (res.code !== 0) {
       throw new Error(`git safety config/wrapper install failed (${res.code}): ${res.stderr.slice(0, 500)}`);
     }
+    return { ok: true as const };
+  } catch (err) {
+    return { ok: false as const, error: redactSecrets(err instanceof Error ? err.message : String(err)) };
+  }
+}
+
+/** `ProvisionDeps.installLeakGate`'s body (issue #1), outside `deps()` for
+ *  the same testability reason as applyStudioGitSafetyPort just above. */
+export async function installLeakGatePort(
+  exec: (cmd: string) => Promise<{ code: number; stdout: string; stderr: string }>,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const res = await exec(leakGateInstallCmd());
+    if (res.code !== 0) throw new Error(`leak gate install failed (${res.code}): ${res.stderr.slice(0, 500)}`);
     return { ok: true as const };
   } catch (err) {
     return { ok: false as const, error: redactSecrets(err instanceof Error ? err.message : String(err)) };

@@ -86,6 +86,13 @@ export interface Env {
    */
   FLEET_BOT_NAME?: string;
   FLEET_BOT_EMAIL?: string;
+  /**
+   * Issue #1 piece 5, optional, NOT a secret: `owner/name` of a PRIVATE repo
+   * every rescue push (rescue.ts) goes to instead of `origin` -- origin may be
+   * public. Unset, malformed or a failed token mint = origin, logged loudly
+   * each rescue. See rescue.ts's resolveRescueTarget.
+   */
+  FLEET_RESCUE_REMOTE?: string;
   /** Optional: no wrangler.jsonc `vars` entry today. AgentDO falls back to claude-opus-5. */
   AGENT_MODEL?: string;
   /**

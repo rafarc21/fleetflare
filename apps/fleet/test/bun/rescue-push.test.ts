@@ -1756,3 +1756,229 @@ describe("issue #335 — the rescue commit's git identity is configurable, neutr
     expect(author).toBe("fleetflare[bot] <fleetflare[bot]@users.noreply.github.com>");
   });
 });
+
+// Issue #1 piece 5: origin can be PUBLIC. With `remoteUrl` set, every rescue
+// push (rescue_push + its nff retry, branch walk, stash walk, both builders)
+// lands on that private remote instead. Private pushes run the REAL git by
+// absolute path (`realGit`), past the leak-gate wrapper: a private rescue
+// never loses data. `realGit` applies ONLY there: origin pushes use plain
+// `git` on PATH (the wrapper), leak-gated -- see rescue-leak-gate.test.ts.
+describe("issue #1 — rescue pushes go to a configurable private remote, never origin", () => {
+  let priv: string;
+  const REAL_GIT = Bun.which("git") ?? "/usr/bin/git";
+
+  beforeEach(() => {
+    priv = join(dir, "private.git");
+    sh(`git init -q --bare -b main ${priv}`);
+  });
+
+  function privRefs(): string[] {
+    return sh(`git -C ${priv} for-each-ref --format='%(refname)' refs/heads/`).out.split("\n").filter(Boolean);
+  }
+  function pushPriv(opts: { realGit?: string } = {}): string {
+    return sh(rescuePushCmd(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined,
+      { remoteUrl: priv, realGit: opts.realGit ?? REAL_GIT })).out;
+  }
+  function snapPriv(): string {
+    return sh(rescueSnapshotCmd(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined,
+      { remoteUrl: priv, realGit: REAL_GIT })).out;
+  }
+
+  test("rescuePushCmd, dirty main checkout: the rescue ref lands on the private remote, NOT origin", () => {
+    writeFileSync(join(checkout, "notes.md"), "private work\n");
+
+    const out = pushPriv();
+
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 files$`, "m"));
+    const [ref] = privRefs().filter((r) => r.includes("fleet/rescue/"));
+    expect(ref).toBeDefined();
+    expect(sh(`git -C ${priv} ls-tree -r --name-only ${ref}`).out.split("\n")).toContain("notes.md");
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("rescuePushCmd, dirty member worktree: its wt/ ref lands on the private remote, NOT origin", () => {
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "wip.md"), "member work\n");
+
+    const out = pushPriv();
+
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-\\d{14} 1 files$`, "m"));
+    expect(privRefs().some((r) => r.includes("/wt/agent-a1b2-"))).toBe(true);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("rescuePushCmd, real feature branch: pushed under its own name to the private remote; origin never gets the branch", () => {
+    sh(`git -C ${checkout} checkout -q -b task/lead`);
+    writeFileSync(join(checkout, "notes.md"), "lead work\n");
+
+    const out = pushPriv();
+
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} task/lead 1 files$`, "m"));
+    expect(privRefs()).toContain("refs/heads/task/lead");
+    expect(sh(`git -C ${origin} for-each-ref --format='%(refname)' refs/heads/task/lead`).out).toBe("");
+  });
+
+  test("rescuePushCmd, non-fast-forward on the private remote: the -nff fallback ALSO lands on the private remote", () => {
+    sh(`git -C ${checkout} checkout -q -b task/lead`);
+    const other = join(dir, "other-clone");
+    sh(`git clone -q ${origin} ${other} 2>/dev/null && git -C ${other} checkout -q -b task/lead && git -C ${other} commit -q --allow-empty -m moved && git -C ${other} push -q ${priv} task/lead`);
+    writeFileSync(join(checkout, "notes.md"), "lead work that must not be lost\n");
+
+    const out = pushPriv();
+
+    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/checkout-nff-\\d{14} 1 files$`, "m"));
+    const fallback = privRefs().find((r) => r.includes("-nff-"));
+    expect(fallback).toBeDefined();
+    expect(sh(`git -C ${priv} rev-parse ${fallback}`).out).toBe(sh(`git -C ${checkout} rev-parse HEAD`).out);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("rescuePushCmd, branch walk: a not-checked-out branch's commits land on the private remote, NOT origin", () => {
+    sh(`cd ${checkout} && git checkout -q -b feat && git commit -q --allow-empty -m "feat work" && git checkout -q main`);
+
+    const out = pushPriv();
+
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/\\d{14}/checkout/feat 1 commits$`, "m"));
+    const featRef = privRefs().find((r) => r.endsWith("/checkout/feat"));
+    expect(featRef).toBeDefined();
+    expect(sh(`git -C ${priv} rev-parse ${featRef}`).out).toBe(sh(`git -C ${checkout} rev-parse feat`).out);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("rescuePushCmd, stash walk: a stash entry lands on the private remote, NOT origin", () => {
+    writeFileSync(join(checkout, "a.md"), "stash me\n");
+    sh(`git -C ${checkout} add a.md && git -C ${checkout} stash -q`);
+
+    const out = pushPriv();
+
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/\\d{14}/checkout/stash-0 1 files$`, "m"));
+    expect(privRefs().some((r) => r.endsWith("/checkout/stash-0"))).toBe(true);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("rescuePushCmd, private remote: a second run pushes nothing new (local bookkeeping still marks the ref pushed)", () => {
+    writeFileSync(join(checkout, "notes.md"), "once\n");
+    expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
+    const refs = privRefs();
+
+    expect(pushPriv()).not.toContain(RESCUE_PUSHED_PREFIX);
+    expect(privRefs()).toEqual(refs);
+  });
+
+  test("rescueSnapshotCmd: dirty tree, branch walk and stash walk all land on the private remote, NOT origin", () => {
+    writeFileSync(join(checkout, "notes.md"), "snap\n");
+    sh(`cd ${checkout} && git checkout -q -b feat && git commit -q --allow-empty -m "feat work" && git checkout -q main`);
+    writeFileSync(join(checkout, "s.md"), "stash me\n");
+    sh(`git -C ${checkout} add s.md && git -C ${checkout} stash -q`);
+    writeFileSync(join(checkout, "notes.md"), "snap\n");
+
+    const out = snapPriv();
+
+    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 files$`, "m"));
+    const refs = privRefs();
+    expect(refs.some((r) => new RegExp(`fleet/rescue/${STUDIO}-\\d{14}$`).test(r))).toBe(true);
+    expect(refs.some((r) => r.endsWith("/checkout/feat"))).toBe(true);
+    expect(refs.some((r) => r.endsWith("/checkout/stash-0"))).toBe(true);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("rescueSnapshotCmd, dirty member worktree: its wt/ ref lands on the private remote, NOT origin", () => {
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "wip.md"), "member work\n");
+
+    const out = snapPriv();
+
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-\\d{14} 1 files$`, "m"));
+    expect(privRefs().some((r) => r.includes("/wt/agent-a1b2-"))).toBe(true);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("rescueSnapshotCmd, its generated ref already taken on the private remote: the -nff fallback ALSO lands there", () => {
+    const shimDir = join(dir, "date-shim");
+    mkdirSync(shimDir);
+    writeFileSync(join(shimDir, "date"),
+      "#!/bin/sh\nif [ \"$1\" = \"-u\" ] && [ \"$2\" = \"+%Y%m%d%H%M%S\" ]; then echo 20260925120000; exit 0; fi\n" +
+      "for d in /bin/date /usr/bin/date; do [ -x \"$d\" ] && exec \"$d\" \"$@\"; done\n");
+    chmodSync(join(shimDir, "date"), 0o755);
+    const other = join(dir, "other-clone");
+    sh(`git clone -q ${origin} ${other} 2>/dev/null && git -C ${other} commit -q --allow-empty -m squat && git -C ${other} push -q ${priv} HEAD:refs/heads/fleet/rescue/${STUDIO}-20260925120000`);
+    writeFileSync(join(checkout, "notes.md"), "snap\n");
+
+    const out = sh(rescueSnapshotCmd(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined,
+      { remoteUrl: priv, realGit: REAL_GIT }), dir, { PATH: `${shimDir}:${BASE_PATH}` }).out;
+
+    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/checkout-nff-20260925120000 1 files$`, "m"));
+    expect(privRefs()).toContain(`refs/heads/fleet/rescue/${STUDIO}/wt/checkout-nff-20260925120000`);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("remoteUrl unset: rescue still goes to origin, as before", () => {
+    writeFileSync(join(checkout, "notes.md"), "origin work\n");
+
+    const out = sh(rescuePushCmd(REPO, STUDIO, root)).out;
+
+    expect(out).toContain(RESCUE_PUSHED_PREFIX);
+    expect(rescueRefs().length).toBe(1);
+    expect(privRefs()).toEqual([]);
+  });
+
+  describe("every private rescue push runs realGit; the token rides a credential helper, never argv", () => {
+    let log: string;
+    let shim: string;
+    beforeEach(() => {
+      log = join(dir, "realgit.log");
+      shim = join(dir, "realgit-shim");
+      writeFileSync(shim, `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\nexec '${REAL_GIT}' "$@"\n`);
+      chmodSync(shim, 0o755);
+      // Every push shape at once: dirty main, dirty member, branch walk, stash walk.
+      writeFileSync(join(checkout, "notes.md"), "x\n");
+      writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "wip.md"), "y\n");
+      sh(`cd ${checkout} && git checkout -q -b feat && git commit -q --allow-empty -m f && git checkout -q main`);
+      writeFileSync(join(checkout, "s.md"), "z\n");
+      sh(`git -C ${checkout} add s.md && git -C ${checkout} stash -q`);
+    });
+    function pushLines(): string[] {
+      return sh(`cat '${log}' 2>/dev/null || true`).out.split("\n").filter((l) => / push /.test(` ${l} `));
+    }
+
+    for (const [label, cmdFn] of [["rescuePushCmd", rescuePushCmd], ["rescueSnapshotCmd", rescueSnapshotCmd]] as const) {
+      test(`${label}: FLEET_RESCUE_TOKEN set — all 4 push shapes go through realGit with the helper; the token value never in argv`, () => {
+        const cmd = cmdFn(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined, { remoteUrl: priv, realGit: shim });
+        expect(cmd).not.toContain("s3cr3t-fake-token");
+
+        const out = sh(cmd, dir, { FLEET_RESCUE_TOKEN: "s3cr3t-fake-token" }).out;
+
+        expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+        const lines = pushLines();
+        expect(lines.length).toBe(4);
+        for (const l of lines) {
+          expect(l).toContain("credential.helper=!f()");
+          expect(l).toContain(priv);
+          expect(l).not.toContain("s3cr3t-fake-token");
+        }
+      });
+
+      test(`${label}: FLEET_RESCUE_TOKEN unset — pushes still run realGit, no helper injected`, () => {
+        const out = sh(cmdFn(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined, { remoteUrl: priv, realGit: shim })).out;
+
+        expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+        const lines = pushLines();
+        expect(lines.length).toBe(4);
+        for (const l of lines) expect(l).not.toContain("credential.helper");
+      });
+
+      test(`${label}: remoteUrl unset — realGit ignored; origin pushes run plain git on PATH (the leak-gate wrapper), never the rescue helper`, () => {
+        const cmd = cmdFn(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined, { realGit: shim });
+        expect(cmd).not.toContain(shim);
+        expect(cmd).not.toContain("credential.helper");
+
+        const out = sh(cmd, dir, { FLEET_RESCUE_TOKEN: "s3cr3t-fake-token" }).out;
+
+        expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+        expect(pushLines()).toEqual([]);
+        expect(rescueRefs().length).toBe(4);
+      });
+    }
+  });
+});

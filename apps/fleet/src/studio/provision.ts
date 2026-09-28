@@ -35,7 +35,9 @@
 import { memoryCloneCmd, MEMORY_REF, MEMORY_TOKEN_ENV } from "../memory/store";
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { redactSecrets } from "./redact";
+import { DenylistDialectError, LEAK_DENYLIST_PATH, OPS_DENYLIST_PATH, denylistFileContent, parseDenylist } from "../leak-gate";
 import { isDeadlineExit } from "./exec-deadline";
+import { ghBlockCmd } from "./gh-wrapper";
 import { STUDIO_TMUX, withStudioTmux } from "./tmux";
 // Issue #38: a restart has only the studio ID to work from, and the repo
 // segment of that id IS the checkout directory under /workspace. ids.ts
@@ -234,6 +236,17 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
    * `studioGitSafetyCmd()`.
    */
   applyStudioGitSafety?: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * Issue #1: installs the leak scanner + gh wrapper (gh-wrapper.ts's
+   * leakGateInstallCmd, one sbExec). Same union as applyStudioGitSafety.
+   * Absent = no leak gate step at all (old fixtures); do.ts always wires it.
+   */
+  installLeakGate?: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * Issue #1: is the WORK repo private? true = gate off for this studio.
+   * false, a throw, or absence = public: the denylist is delivered (fail closed).
+   */
+  workRepoIsPrivate?: (slug: string) => Promise<boolean>;
   /**
    * Maestro correction #10 — issue #90 (currently blocked, but also touches
    * `runProvision`/`runRestart` directly) makes widening either function's
@@ -2063,6 +2076,91 @@ async function applyStudioGitSafety(deps: ProvisionDeps, id: string): Promise<vo
 }
 
 /**
+ * Issue #1: the public-repo leak gate, on EVERY provision and restart (a
+ * replaced container has a fresh filesystem). Installs scanner + gh wrapper,
+ * then writes the gate file: "off" for a private work repo, else the ops-repo
+ * denylist. Written via writeFile, never a command string, so no term reaches
+ * an exec or a log. When no denylist can be delivered, any stale gate file is
+ * REMOVED so the wrappers refuse every public write (fail closed).
+ *
+ * Never throws, never degrades the studio. Returns a row note (never a term)
+ * or null. Skipped entirely when `installLeakGate` is absent.
+ */
+async function applyLeakGate(deps: ProvisionDeps, id: string, workRepoSlug: string): Promise<string | null> {
+  if (!deps.installLeakGate) return null;
+  const notes: string[] = [];
+  const install = await deps.installLeakGate();
+  if (!install.ok) {
+    console.error(`studio ${id}: leak gate install failed`, install.error);
+    // Fail closed: an ungated gh must not run. Block it; a later install restores it.
+    let blocked = false;
+    try {
+      const res = await deps.sbExec(ghBlockCmd());
+      blocked = res.code === 0;
+      if (!blocked) console.error(`studio ${id}: gh block failed (${res.code})`, res.stderr.slice(0, 500));
+    } catch (err) {
+      console.error(`studio ${id}: gh block failed`, err instanceof Error ? err.message : String(err));
+    }
+    notes.push(blocked
+      ? "leak gate: scanner/gh wrapper install failed -- gh is blocked in this studio until the next restart re-installs the gate."
+      : "leak gate: scanner/gh wrapper install failed and the gh block also failed -- public gh writes are NOT gated in this studio.");
+  }
+
+  let isPrivate = false;
+  try {
+    isPrivate = (await deps.workRepoIsPrivate?.(workRepoSlug)) ?? false;
+  } catch (err) {
+    console.error(`studio ${id}: leak gate privacy lookup failed, treating ${workRepoSlug} as public`,
+      err instanceof Error ? err.message : String(err));
+  }
+
+  let content: string | null = null;
+  let reason: string;
+  if (isPrivate) {
+    content = denylistFileContent({ off: `work repo ${workRepoSlug} is private` });
+    reason = "";
+  } else if (deps.opsRepo == null || !deps.fetchOpsFile) {
+    reason = "FLEET_OPS_REPO is unset";
+  } else {
+    try {
+      content = denylistFileContent({ patterns: parseDenylist(await deps.fetchOpsFile(OPS_DENYLIST_PATH, OPS_REPO_REF)) });
+      reason = "";
+    } catch (err) {
+      // Class only: a parse error's message is safe, but keep terms off the row by construction.
+      // A dialect error's message is built from an index alone (leak-gate.ts).
+      reason = isNotFoundError(err) ? `${OPS_DENYLIST_PATH} not found`
+        : err instanceof DenylistDialectError ? err.message
+        : `${OPS_DENYLIST_PATH} unreadable or empty`;
+    }
+  }
+
+  if (content !== null) {
+    try {
+      if (!deps.writeFile) throw new Error("no writeFile port");
+      await deps.sbExec(`mkdir -p ${LEAK_DENYLIST_PATH.slice(0, LEAK_DENYLIST_PATH.lastIndexOf("/"))}`);
+      await deps.writeFile(LEAK_DENYLIST_PATH, new TextEncoder().encode(content));
+    } catch (err) {
+      console.error(`studio ${id}: leak gate file write failed`, err instanceof Error ? err.message : String(err));
+      content = null;
+      reason = "gate file write failed";
+    }
+  }
+
+  if (content === null) {
+    try {
+      await deps.sbExec(`rm -f ${LEAK_DENYLIST_PATH}`);
+    } catch (err) {
+      console.error(`studio ${id}: leak gate stale file removal failed`, err instanceof Error ? err.message : String(err));
+    }
+    notes.push(
+      `leak gate: no denylist (${reason}) -- every public write in this studio is refused. ` +
+      `Add ${OPS_DENYLIST_PATH} to FLEET_OPS_REPO.`,
+    );
+  }
+  return notes.length === 0 ? null : notes.join(" ");
+}
+
+/**
  * Pure provisioning state machine: resolve the blueprint, guarded clone,
  * then bring-up (with the resolved ROLE_PROMPT_B64/ROLE_ALLOWED_TOOLS/
  * ROLE_EFFORT env),
@@ -2149,6 +2247,8 @@ export async function runProvision(
   // status can fold it into `status.error` — a maestro must see this note
   // regardless of whether a LATER step in this same provision also fails.
   let houseRulesOverlayNote: string | null = null;
+  // Issue #1: same row-note channel as houseRulesOverlayNote.
+  let leakGateNote: string | null = null;
 
   try {
     const resolved = await resolveBringupEnv(deps, cfg, fleetRepoSlug, workRepoSlug);
@@ -2163,6 +2263,7 @@ export async function runProvision(
     // Issue #253: git-safety config + the git wrapper, before the clone below
     // ever gives this container something to push.
     await applyStudioGitSafety(deps, id);
+    leakGateNote = await applyLeakGate(deps, id, workRepoSlug);
 
     const cloneRes = await deps.sbExec(guardedCloneCmd(workRepoSlug, `/workspace/${cfg.repo}`));
     if (cloneRes.code !== 0) {
@@ -2283,7 +2384,8 @@ export async function runProvision(
     // Side effect (#330 round 4): a non-null note here means do.ts's heal never
     // stamps BARE_SELF_HEALED on this row -- it only writes over `error: null`.
     status = {
-      ...status, state: "running", lastRefresh: deps.now(), error: houseRulesOverlayNote,
+      ...status, state: "running", lastRefresh: deps.now(),
+      error: [houseRulesOverlayNote, leakGateNote].filter((part) => part !== null).join(" | ") || null,
       sessionAdoption: adoptionRecord(adoption),
     };
   } catch (err) {
@@ -2302,7 +2404,7 @@ export async function runProvision(
     // already-known misconfiguration an operator would otherwise lose.
     status = {
       ...status, state: "degraded",
-      error: [houseRulesOverlayNote, redactSecrets(err instanceof Error ? err.message : String(err))]
+      error: [houseRulesOverlayNote, leakGateNote, redactSecrets(err instanceof Error ? err.message : String(err))]
         .filter((part) => part !== null).join(" | ") || null,
       sessionAdoption: null,
     };
@@ -2371,6 +2473,8 @@ export async function runRestart(
   // does: a restart that came up "fine" while refusing to put the checkout
   // back is not fine, and the row is the only place an operator looks.
   let cloneRefusal: string | null = null;
+  // Issue #1: rides `error` like cloneRefusal.
+  let leakGateNote: string | null = null;
 
   try {
     await deps.setKeepAlive?.(keepAlive);
@@ -2385,6 +2489,8 @@ export async function runRestart(
     // none of this config either — re-apply on every restart, same
     // reasoning as the blueprint credential just above.
     await applyStudioGitSafety(deps, status.id);
+    // Issue #1: fresh filesystem = no scanner, no wrapper, no gate file.
+    leakGateNote = await applyLeakGate(deps, status.id, resolveWorkRepoSlug(null, existing, fleetRepoSlug));
     // Issue #341: a replaced container lost /opt/memory too.
     await refreshMemoryClone(deps, status.id);
 
@@ -2562,6 +2668,7 @@ export async function runRestart(
       lastRefresh: deps.now(),
       error: [
         cloneRefusal,
+        leakGateNote,
         firstFailure === null
           ? null
           : `${BRINGUP_RETRY_HEALED}: ${firstFailure}. Both runs are in ${BRINGUP_LOG_PATH} on the container.`,
@@ -2577,9 +2684,12 @@ export async function runRestart(
       // Both attempts named, never just the last one: a second failure that
       // differs from the first is the most informative thing this path can
       // hand an operator, and reporting only one of them throws that away.
-      error: firstFailure === null
-        ? message
-        : `bring-up failed on BOTH attempts. first: ${firstFailure}. second: ${message}. See ${BRINGUP_LOG_PATH} on the container.`,
+      error: [
+        leakGateNote,
+        firstFailure === null
+          ? message
+          : `bring-up failed on BOTH attempts. first: ${firstFailure}. second: ${message}. See ${BRINGUP_LOG_PATH} on the container.`,
+      ].filter((part) => part !== null).join(" | "),
     };
   }
   await deps.recordStudio(status);

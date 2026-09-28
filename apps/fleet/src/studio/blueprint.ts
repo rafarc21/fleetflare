@@ -473,6 +473,19 @@ export const HOUSE_RULES = [
   "Some deployments enforce this in CI (an english-check gate); others may",
   "not. Either way, the rule applies.",
   "",
+  // Issue #1: the fleet itself now develops in a public repo. Worded
+  // conditionally: this default reaches studios on private repos too.
+  "## House rules — public repositories",
+  "",
+  "If the repo you work in is public, everything you write there is",
+  "world-readable: code, tests, commit messages, PR bodies, issues and",
+  "comments. Never write client names, operator ids, emails, internal",
+  "hostnames or tokens into it. Tests use fake names.",
+  "",
+  "A studio's leak gate refuses a push or a gh write that matches the",
+  "operator's private denylist. The refusal names a pattern number, never",
+  "the term. Rewrite the text; never route around the gate.",
+  "",
   // Board issue #160 — another standing rule. #98 said "one heavy gate at a
   // time" and was read as a rule about the DIFF: a one-line diff looked cheap,
   // so its gate budget looked spent on nothing. The cost lives in the
