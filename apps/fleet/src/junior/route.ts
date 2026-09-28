@@ -72,6 +72,48 @@ function isMaestroStudio(studioId: string): boolean {
   return id?.role === "maestro" && id.instance === 1;
 }
 
+/**
+ * PR #9 review, F3: the request body, or `null` if it is over `cap` — read
+ * off the actual byte STREAM, never via `req.text()`. `.text()` fully
+ * materializes the body into one JS string before anything downstream can
+ * compare its size against `cap`, which is exactly the DoS shape a body cap
+ * exists to prevent: a declared-or-actual size under whatever platform
+ * ceiling exists but still large enough to matter gets fully allocated
+ * regardless of what this function would have said about it.
+ *
+ * Pumps the reader chunk by chunk, summing byte lengths as it goes, and
+ * cancels the reader (never reads another byte) the instant the running total
+ * crosses `cap` — a lying-or-absent Content-Length header (this module's own
+ * early header check catches an HONEST one) is caught here from the real
+ * bytes, without ever concatenating an oversized body into one buffer.
+ *
+ * `req.body === null` (a GET, or a POST with a genuinely empty body) reads as
+ * the empty string — the same shape `req.text()` would have produced.
+ */
+async function readCappedBody(req: Request, cap: number): Promise<string | null> {
+  if (req.body === null) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > cap) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(buf);
+}
+
 export async function handleFleetJunior(
   req: Request, env: Env,
   api: BoardApi = githubBoardApi(env),
@@ -81,6 +123,17 @@ export async function handleFleetJunior(
   if (new URL(req.url).pathname !== "/fleet/junior") return text("not found", 404);
   if (env.FLEET_JUNIOR !== "on" || !env.AI) return text("not found", 404);
   if (req.method !== "POST") return text("method not allowed", 405);
+
+  // PR #9 review, F3: cheapest possible refusal, ahead of auth and every
+  // other check — a declared Content-Length already over the cap needs no
+  // token check, no board call, and (the whole point) no byte of the body
+  // ever read. A caller that lies UNDER the real size is still caught below,
+  // where the body is actually read.
+  const declaredLength = req.headers.get("content-length");
+  if (declaredLength !== null) {
+    const declared = Number(declaredLength);
+    if (Number.isFinite(declared) && declared > JUNIOR_BODY_CAP) return text("payload too large", 413);
+  }
 
   const presented = req.headers.get(SPAWN_TOKEN_HEADER);
   if (!isSpawnTokenShaped(presented)) return text("unauthorized", 401);
@@ -113,8 +166,8 @@ export async function handleFleetJunior(
   const authorized = await isJuniorAuthorized(env.DB, repo.value, live.value.number, studio.id);
   if (!authorized) return text("junior not authorized for your current task", 403);
 
-  const raw = await req.text();
-  if (new TextEncoder().encode(raw).length > JUNIOR_BODY_CAP) return text("payload too large", 413);
+  const raw = await readCappedBody(req, JUNIOR_BODY_CAP);
+  if (raw === null) return text("payload too large", 413);
   let body: Json;
   try { body = JSON.parse(raw); } catch { return text("bad json", 400); }
   if (!JUNIOR_MODELS.includes(body?.model)) return text("model not allowed", 400);
