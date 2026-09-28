@@ -1643,10 +1643,16 @@ describe("container/studio-bringup.sh — claude launch: skip-permissions + effo
     expect(src()).toContain('[ -n "${ROLE_EFFORT:-}" ] && claude_args+=(--effort "$ROLE_EFFORT")');
   });
 
-  it("the --allowedTools line survives unchanged alongside both additions (belt and braces, not a replacement)", () => {
-    expect(src()).toContain(
-      'claude_args+=(--append-system-prompt "$role_prompt" --allowedTools "${ROLE_ALLOWED_TOOLS:-}")',
-    );
+  it("the --allowedTools line survives alongside both additions (belt and braces, not a replacement)", () => {
+    expect(src()).toContain('claude_args+=(--allowedTools "${ROLE_ALLOWED_TOOLS:-}")');
+  });
+
+  // Issue #6: the prompt inlined into claude_args rode the send-keys line and
+  // overflowed tmux. claude_launch_line passes it by file; its behaviour runs
+  // in test/bun/bringup-launch-line.test.ts.
+  it("the role prompt never joins claude_args — it goes to claude_launch_line, which passes it by file", () => {
+    expect(src()).not.toContain('claude_args+=(--append-system-prompt "$role_prompt"');
+    expect(src()).toContain('cmd_str="$(claude_launch_line "$role_prompt" "${repo_dir:-}" "${claude_args[@]}")"');
   });
 
   it("skip-permissions lands before the --continue guard, --effort lands after --allowedTools, and both are assembled into cmd_str with everything else in claude_args", () => {
@@ -1654,7 +1660,7 @@ describe("container/studio-bringup.sh — claude launch: skip-permissions + effo
     const continueGuardIdx = src().indexOf('if claude_has_conversation "${repo_dir:-$PWD}"; then');
     const allowedToolsIdx = src().indexOf('--allowedTools "${ROLE_ALLOWED_TOOLS:-}")');
     const effortIdx = src().indexOf('claude_args+=(--effort "$ROLE_EFFORT")');
-    const cmdStrIdx = src().indexOf('cmd_str="$(printf');
+    const cmdStrIdx = src().indexOf('cmd_str="$(claude_launch_line');
     expect(skipIdx).toBeGreaterThan(-1);
     expect(continueGuardIdx).toBeGreaterThan(skipIdx);
     expect(allowedToolsIdx).toBeGreaterThan(continueGuardIdx);

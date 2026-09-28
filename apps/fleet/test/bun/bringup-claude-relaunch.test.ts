@@ -555,6 +555,62 @@ REAL("studio-bringup.sh claude_stop — a deliberate replacement, never two (iss
   }, T);
 });
 
+REAL("studio-bringup.sh claude_launch_line — a >64 KB role prompt still launches (issue #6)", () => {
+  test("the real launch line, typed through real send-keys, lands a lead holding the whole prompt", () => {
+    // MEASURED 2026-09-28 (issue #6): a 4.4 KB brief inlined into the typed
+    // line hit tmux's `command too long`; launch and retry both failed. The
+    // line claude_launch_line returns is typed here by bring-up's own
+    // claude_launch, so a prompt that leaks back into it fails this test.
+    const s = fresh();
+    const wrap = join(s.dir, "wrap");
+    const got = join(s.dir, "got");
+    mkdirSync(wrap, { recursive: true });
+    // Found first on the pane's PATH: records the prompt it was handed, then
+    // execs the harness's fake lead so the pane reads `claude` and the
+    // /proc count below sees exactly one.
+    writeFileSync(
+      join(wrap, "claude"),
+      "#!/bin/bash\n" +
+        "while [ $# -gt 0 ]; do\n" +
+        `  [ "$1" = --append-system-prompt ] && printf '%s' "$2" > ${JSON.stringify(got)}\n` +
+        "  shift\n" +
+        "done\n" +
+        `exec ${JSON.stringify(join(s.bin, "claude"))} 300\n`,
+      { mode: 0o755 },
+    );
+    s.start("claude", `exec env PATH=${wrap}:$PATH /bin/bash`);
+    expect(s.waitForPane("bash")).toBe("bash");
+    const chunk = `brief line with 'quotes' "double" $HOME \`tick\` and a long tail of words\n`;
+    const prompt = chunk.repeat(Math.ceil(70_000 / chunk.length)).trimEnd();
+    expect(prompt.length).toBeGreaterThan(64 * 1024);
+    const promptPath = join(s.dir, "prompt-in");
+    writeFileSync(promptPath, prompt);
+
+    const r = runSnippet({
+      shell: "bash",
+      env: {
+        CLAUDE_ALIVE_TRIES: "10",
+        CLAUDE_SETTLE_SECONDS: "1",
+        ...(s.env as Record<string, string>),
+        FLEET_WORKSPACE: join(s.dir, "ws"),
+      },
+      script:
+        "set -euo pipefail\n" +
+        `[ "$(command -v tmux)" = ${JSON.stringify(join(s.bin, "tmux"))} ] || { echo "relaunch harness: bare tmux is not the pinned wrapper -- refusing" >&2; exit 97; }\n` +
+        `${DECISION()}\n${extractShellFunc(BRINGUP, "claude_launch_line")}\n` +
+        `role_prompt="$(cat ${JSON.stringify(promptPath)})"\n` +
+        `line="$(claude_launch_line "$role_prompt" "" --dangerously-skip-permissions)"\n` +
+        "if claude_launch \"$line\"; then echo LANDED; else echo MISSED; fi\n",
+      timeout: 60000,
+    });
+
+    expect(r.stderr).not.toContain("command too long");
+    expect(r.stdout).toContain("LANDED");
+    expect(s.claudePids().length).toBe(1);
+    expect(readFileSync(got, "utf8")).toBe(prompt);
+  }, T);
+});
+
 /**
  * The harness's own safety, asserted rather than trusted. Every one of these
  * is a way this fleet's tests have hit, or nearly hit, a tmux they did not

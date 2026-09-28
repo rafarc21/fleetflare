@@ -46,11 +46,11 @@ const SESSION = () => `${SHADOW()}\n${extractRegion(BRINGUP, "tmux-render-option
 /** studio-shell.sh's socket choice, verbatim. */
 const STUDIO_SOCKET = () => extractShellFunc(SHELL, "studio_socket");
 
-/** The exact line bring-up assembles the lead's launch command with. */
+/** The exact line bring-up assembles the lead's launch command with, and the function it calls. */
 const CMD_STR_LINE = () => {
-  const line = BRINGUP.split("\n").find((l) => l.trimStart().startsWith(`cmd_str="$(printf '%q '`));
+  const line = BRINGUP.split("\n").find((l) => l.trimStart().startsWith(`cmd_str="$(claude_launch_line `));
   if (!line) throw new Error("bring-up's cmd_str assembly line not found");
-  return line.trim();
+  return `${extractShellFunc(BRINGUP, "claude_launch_line")}\n${line.trim()}`;
 };
 
 class TwoServers {
@@ -164,7 +164,7 @@ REAL("#117 — the studio session lives on `tmux -L fleet-studio`, never the def
 
     // Bring-up's own assembly line, then its own launch keystrokes.
     const launch = b.sh(
-      `set -euo pipefail\n${SHADOW()}\nclaude_args=(--flag)\n${CMD_STR_LINE()}\n` +
+      `set -euo pipefail\n${SHADOW()}\nclaude_args=(--flag)\nrole_prompt=brief\nrepo_dir=\nFLEET_WORKSPACE=${JSON.stringify(b.dir)}\n${CMD_STR_LINE()}\n` +
         'tmux send-keys -t studio:claude -- " $cmd_str" Enter',
     );
     expect(launch.code).toBe(0);
