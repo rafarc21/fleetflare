@@ -326,6 +326,31 @@ describe("handleFleetJunior — maestro exclusion (F2)", () => {
     expect(run).not.toHaveBeenCalled();
     expect(api.listIssues).not.toHaveBeenCalled();
   });
+
+  // PR #9 review, item (b): the check must match on ROLE ALONE, not
+  // role-and-instance-1. do.ts's own isMaestro() requires instance 1 too, but
+  // for a DIFFERENT reason specific to its own use (only the canonical
+  // instance 1 may arm the sweep loop, since wake-events.ts's maestroIdFor
+  // only ever wakes the bare id) — that reasoning does not transfer here.
+  // This route needs "is this studio a maestro AT ALL", so a stray second
+  // maestro instance (however it came to exist) must be excluded exactly like
+  // instance 1 is.
+  const MAESTRO_2 = "websites--maestro--2";
+  it("403s a maestro studio at instance 2 exactly like instance 1 — role alone is what matters here", async () => {
+    const token = mintSpawnToken();
+    const rows = async () => [row(MAESTRO_2, await hashSpawnToken(token))];
+    const run = vi.fn(async () => ({ response: "x" }));
+    const e = { ...env, AGENT_REPO: REPO, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+    const maestroTask = boardTask({ labels: ["working", studioLabel(MAESTRO_2), "junior"], assignee: MAESTRO_2 });
+    const api = board([maestroTask]);
+    await recordJuniorAuthorization(e.DB, REPO, maestroTask.number, MAESTRO_2, Date.now());
+
+    const r = await handleFleetJunior(req(token, good), e, api, rows);
+
+    expect(r.status).toBe(403);
+    expect(run).not.toHaveBeenCalled();
+    expect(api.listIssues).not.toHaveBeenCalled();
+  });
 });
 
 describe("normalizeAiResult", () => {
