@@ -14,9 +14,9 @@
  *
  * direct: all of it removed. Both branches repeat-safe. Every git word is the
  * REAL git, never the PATH wrapper (credentials.ts's studioGitSafetyCmd).
+ * Imports nothing Worker-only: the bun lane runs it against real git.
  */
 import { STUDIO_REAL_GIT_PATH } from "../studio/credentials";
-import type { WriteMode } from "./mode";
 
 /** Present = proxy mode; content = the Worker URL. Read by the gh wrapper. */
 export const WRITE_PROXY_MARKER = "/opt/fleet/write-proxy";
@@ -25,7 +25,7 @@ export const WRITE_PROXY_MARKER = "/opt/fleet/write-proxy";
 export const GH_PROXY_CLIENT = "fleet-gh-proxy";
 
 export function writeProxyConfigCmd(
-  mode: WriteMode, workerUrl: string, opts: { realGit?: string; marker?: string } = {},
+  mode: "direct" | "proxy", workerUrl: string, opts: { realGit?: string; marker?: string } = {},
 ): string {
   const git = `'${opts.realGit ?? STUDIO_REAL_GIT_PATH}'`;
   const marker = opts.marker ?? WRITE_PROXY_MARKER;
