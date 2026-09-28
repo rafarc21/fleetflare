@@ -533,7 +533,7 @@ describe("localci.sh", () => {
   });
 
   // PR #306 review: a git plumbing failure reports its own cause.
-  const REAL_GIT = Bun.which("git")!;
+  const REAL_GIT = Bun.which("git", { PATH: process.env.PATH })!;
   for (const [cmd, msg, want] of [
     ["commit-tree", "fatal: commit-tree boom", "commit-tree failed: fatal: commit-tree boom"],
     ["merge-tree", "fatal: bad tree", "merge-tree failed: fatal: bad tree"],

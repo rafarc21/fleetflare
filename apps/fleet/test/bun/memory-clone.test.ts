@@ -45,7 +45,7 @@ describe("#341 memoryCloneCmd, real git", () => {
   test("the token never reaches git's argv", () => {
     const shimDir = join(root, "shim");
     mkdirSync(shimDir);
-    const real = Bun.which("git")!;
+    const real = Bun.which("git", { PATH: process.env.PATH })!;
     writeFileSync(join(shimDir, "git"), `#!/bin/bash\nprintf '%s\\n' "$@" >> ${join(root, "argv.log")}\nexec ${real} "$@"\n`);
     Bun.spawnSync({ cmd: ["chmod", "+x", join(shimDir, "git")] });
     const dir = join(root, "opt-memory");
