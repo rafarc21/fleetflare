@@ -1765,7 +1765,11 @@ describe("issue #335 — the rescue commit's git identity is configurable, neutr
 // `git` on PATH (the wrapper), leak-gated -- see rescue-leak-gate.test.ts.
 describe("issue #1 — rescue pushes go to a configurable private remote, never origin", () => {
   let priv: string;
-  const REAL_GIT = Bun.which("git") ?? "/usr/bin/git";
+  // Issue #8: the explicit PATH is load-bearing. No-options Bun.which reads
+  // the startup PATH, not the preload's real-git shim (real-git-preload.ts),
+  // so in a studio it returned the leak-gate wrapper; the wrapper's unborn-HEAD
+  // refusal hid "(fetch first)" and the -nff retry never ran.
+  const REAL_GIT = Bun.which("git", { PATH: process.env.PATH }) ?? "/usr/bin/git";
 
   beforeEach(() => {
     priv = join(dir, "private.git");
