@@ -313,6 +313,17 @@ export async function getDefaultBranch(token: string, repo: string): Promise<str
   return body.default_branch;
 }
 
+/** Issue #1: GitHub's own `private` flag. Throws on non-2xx; the leak gate
+ *  reads a throw as public, so only a confirmed private repo skips its scan. */
+export async function repoIsPrivate(token: string, repo: string): Promise<boolean> {
+  const body = await ghJson<{ private?: unknown }>(
+    `https://api.github.com/repos/${repo}`,
+    { method: "GET", headers: GH_HEADERS(token) },
+    `read ${repo}`,
+  );
+  return body.private === true;
+}
+
 /** One file write, or — `content: null` — the removal of that path. Mirrors
  *  src/memory/compact.ts's FileChange exactly; a compaction plan's changes are
  *  handed here unmodified. */

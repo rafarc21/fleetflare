@@ -933,9 +933,10 @@ describe("github webhook -> auto-close on promote (board issue #8)", () => {
       const u = new URL(url);
       const path = u.pathname;
 
-      // GET /repos/{o}/{r} -- getDefaultBranch
+      // GET /repos/{o}/{r} -- getDefaultBranch, and repoIsPrivate (issue #1
+      // leak gate): private, since this suite tests auto-close, not the gate.
       if (method === "GET" && path === `/repos/${REPO}`) {
-        return Response.json({ default_branch: "main" });
+        return Response.json({ default_branch: "main", private: true });
       }
       // GET /repos/{o}/{r}/issues -- listIssues (listTasks, for the envelope cross-check candidate set).
       // Board issue #26: honours issueState's own open/closed rather than
