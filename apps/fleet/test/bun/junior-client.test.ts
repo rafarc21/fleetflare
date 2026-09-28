@@ -145,4 +145,27 @@ describe("callWithPolicy", () => {
     expect(e).toBeInstanceOf(ApiError);
     expect(e.message).toContain("all models failed");
   });
+  test("permanent (4xx) error whose message merely contains 'capacity' is not retried, falls straight to next model", async () => {
+    const { p, seen } = run([
+      { status: 400, json: cfErr(9001, "You have reached your neuron capacity limit for this billing period") },
+      { json: ok("done") },
+    ]);
+    expect(await p).toMatchObject({ model: DEEPSEEK, calls: 2 });
+    expect(seen.map((s) => s.body.model)).toEqual([GLM, DEEPSEEK]);
+  });
+  test("rate backoff aborts immediately if the caller's signal fires mid-wait, instead of completing the wait", async () => {
+    const ac = new AbortController();
+    let sleepCalls = 0;
+    const hangingSleep = (_ms: number) =>
+      new Promise<void>(() => {
+        sleepCalls++;
+        queueMicrotask(() => ac.abort());
+      });
+    const { f } = fakeFetch([{ status: 429, json: cfErr(429, "rate limited") }]);
+    const e = await callWithPolicy({
+      transport: direct, models: [GLM], messages: msgs, maxTokens: 1, fetchImpl: f, sleep: hangingSleep, signal: ac.signal,
+    }).catch((x) => x);
+    expect(sleepCalls).toBe(1);
+    expect(e.name).toBe("AbortError");
+  });
 });
