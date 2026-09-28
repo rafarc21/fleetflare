@@ -1446,7 +1446,7 @@ describe("the operator ops-repo overlay end to end (issue #330 round 2) — reso
 describe("applyLeakGate — denylist delivery into the container (issue #1)", () => {
   const STUDIO_WORK_CFG = { repo: "sample", role: "web-studio", repoSlug: "acme-org/sample" };
   const OPS = "acme-org/fleet-ops";
-  const DENYLIST = "acmeclient\nacme-secret-\\d+\n";
+  const DENYLIST = "acmeclient\nacme-secret-[0-9]+\n";
   const RM = `rm -f ${LEAK_DENYLIST_PATH}`;
 
   function studioFetch(): ProvisionDeps["fetchBlueprintFile"] {
@@ -1504,7 +1504,7 @@ describe("applyLeakGate — denylist delivery into the container (issue #1)", ()
     expect(status.state).toBe("running");
     expect(g.workRepoIsPrivate).toHaveBeenCalledWith("acme-org/sample");
     expect(g.writes).toEqual([
-      { path: LEAK_DENYLIST_PATH, text: denylistFileContent({ patterns: ["acmeclient", "acme-secret-\\d+"] }) },
+      { path: LEAK_DENYLIST_PATH, text: denylistFileContent({ patterns: ["acmeclient", "acme-secret-[0-9]+"] }) },
     ]);
     expect(g.writes[0].text.startsWith(`${LEAK_GATE_ON}\n`)).toBe(true);
     expect(g.cmds).not.toContain(RM);
@@ -1574,6 +1574,20 @@ describe("applyLeakGate — denylist delivery into the container (issue #1)", ()
     expect(g.writes).toEqual([]);
     expect(g.cmds).toContain(RM);
     expect(status.error).toContain("leak gate: no denylist");
+  });
+
+  // Mutant: a JS-only pattern delivered -> the container's grep -E reads `\d`
+  // as a literal d and passes the term (fail OPEN). Refused at parse instead.
+  it("pattern grep -E and JS read differently -> rm -f + note naming the index, never the term", async () => {
+    const g = gateDeps({ file: "acmeclient\nacme-secret-\\d+\n" });
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(status.state).toBe("running");
+    expect(g.writes).toEqual([]);
+    expect(g.cmds).toContain(RM);
+    expect(status.error).toContain("leak gate: no denylist");
+    expect(status.error).toContain("pattern #2");
+    expect(JSON.stringify(status)).not.toContain("acme-secret");
   });
 
   it("gate file write fails -> rm -f + note", async () => {

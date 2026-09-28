@@ -41,11 +41,71 @@ export const LEAK_DENYLIST_MISSING =
 export const LEAK_SCAN_ERROR = "fleet: leak gate: scanner error -- refusing (fail closed)";
 
 /** Lines of the ops-repo denylist, blank lines and CRs dropped. Throws on
- *  zero patterns: an empty list would pass everything. */
+ *  zero patterns (an empty list would pass everything) and on a pattern the
+ *  two scanners read differently (see denylistDialectError). */
 export function parseDenylist(text: string): string[] {
   const patterns = text.split("\n").map((l) => l.replace(/\r$/, "")).filter((l) => l.trim() !== "");
   if (patterns.length === 0) throw new Error(`${OPS_DENYLIST_PATH} has no patterns`);
+  const bad = denylistDialectError(patterns);
+  if (bad !== null) throw new DenylistDialectError(bad);
   return patterns;
+}
+
+/** parseDenylist's refusal of a non-portable pattern. Its message names the
+ *  index only, so it is safe on a studio row. */
+export class DenylistDialectError extends Error {
+  constructor(index: number) {
+    super(`${OPS_DENYLIST_PATH} pattern #${index} uses syntax grep -E and JS regex read differently`);
+    this.name = "DenylistDialectError";
+  }
+}
+
+/** Escapes both grep -E (GNU) and JS read the same way: a metachar made
+ *  literal, a word/space class, a word boundary, a back-reference. */
+const PORTABLE_ESCAPE = /[.[\](){}*+?^$|\\wWsSbB1-9]/;
+
+/**
+ * 1-based index of the first pattern whose syntax the Worker (JS RegExp) and
+ * the container (grep -E) disagree on, else null. A disagreement fails OPEN
+ * on one side: GNU grep reads `\d` as a literal d (a warning, exit 1 =
+ * "clean") where JS reads a digit. Flagged: any escape outside
+ * PORTABLE_ESCAPE (`\d \p \x \u \A \z \< \t` ...), `(?` (lookaround,
+ * non-capture, flags), a lazy quantifier, and inside a bracket expression a
+ * backslash or a POSIX `[: [. [=` class.
+ */
+export function denylistDialectError(patterns: string[]): number | null {
+  for (let n = 0; n < patterns.length; n++) {
+    if (!portable(patterns[n])) return n + 1;
+  }
+  return null;
+}
+
+function portable(p: string): boolean {
+  let inBracket = false;
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (inBracket) {
+      if (c === "\\") return false;
+      if (c === "[" && ":.=".includes(p[i + 1] ?? "")) return false;
+      if (c === "]") inBracket = false;
+      continue;
+    }
+    if (c === "\\") {
+      if (!PORTABLE_ESCAPE.test(p[i + 1] ?? "")) return false;
+      i++;
+      continue;
+    }
+    if (c === "[") {
+      inBracket = true;
+      // A leading `^` and a leading `]` belong to the set, not its end.
+      if (p[i + 1] === "^") i++;
+      if (p[i + 1] === "]") i++;
+      continue;
+    }
+    if (c === "(" && p[i + 1] === "?") return false;
+    if ("*+?}".includes(c) && p[i + 1] === "?") return false;
+  }
+  return true;
 }
 
 /** 1-based indexes of every pattern that matches `text`. Throws on an
@@ -53,7 +113,8 @@ export function parseDenylist(text: string): string[] {
 export function scanText(patterns: string[], text: string): number[] {
   const hits: number[] = [];
   patterns.forEach((p, i) => {
-    if (new RegExp(p, "i").test(text)) hits.push(i + 1);
+    // "m": `^`/`$` per line, as grep reads them.
+    if (new RegExp(p, "im").test(text)) hits.push(i + 1);
   });
   return hits;
 }
@@ -78,7 +139,9 @@ export function denylistFileContent(gate: LeakGateFile): string {
  * an unreadable input, an invalid pattern. Callers refuse on ANY non-zero.
  *
  * One `grep -E -i` per pattern, so a hit maps to its index. grep's own exit 2
- * (bad regex, read error) is an error, never "no match". `-a` treats binary
+ * (bad regex, read error) is an error, never "no match". So is ANY stderr,
+ * whatever the exit: GNU grep only WARNS on `\d` ("stray \\") and exits 1,
+ * which would read as clean. The stderr is never echoed. `-a` treats binary
  * input as text so a NUL byte cannot hide a term.
  */
 export function leakScanScript(denylistPath = LEAK_DENYLIST_PATH): string {
@@ -105,8 +168,10 @@ export function leakScanScript(denylistPath = LEAK_DENYLIST_PATH): string {
     `  p=\${p%$'\\r'}`,
     `  [ -n "\${p//[[:space:]]/}" ] || continue`,
     `  n=$((n + 1))`,
-    `  grep -qEia -e "$p" -- "$tmp"`,
-    `  case $? in`,
+    `  gerr=$(grep -qEia -e "$p" -- "$tmp" 2>&1)`,
+    `  rc=$?`,
+    `  [ -z "$gerr" ] || err "pattern #$n unreadable"`,
+    `  case $rc in`,
     `    0) hits="$hits #$n" ;;`,
     `    1) ;;`,
     `    *) err "pattern #$n unreadable" ;;`,

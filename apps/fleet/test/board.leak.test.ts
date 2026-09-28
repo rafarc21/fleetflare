@@ -127,6 +127,15 @@ describe("leakGuard -- fail closed", () => {
     expect(err.message).toBe(LEAK_SCAN_ERROR);
   });
 
+  // Mutant: the Worker accepts a list the container's grep -E reads
+  // differently (`\d` = literal d there) -> one side of the gate fails open.
+  it("503s a pattern grep -E and JS read differently -- refused at parse, never scanned", async () => {
+    const check = leakGuard(deps({ fetchDenylist: async () => "ok\nacme-secret-\\d+\n" }));
+    const err = await refusal(check(REPO, ["all clean"]));
+    expect(err.status).toBe(503);
+    expect(err.message).toBe(LEAK_DENYLIST_MISSING);
+  });
+
   it("scans as public when isPrivate throws", async () => {
     const check = leakGuard(deps({ isPrivate: async () => { throw new Error("403"); } }));
     expect((await refusal(check(REPO, [TERM]))).status).toBe(422);

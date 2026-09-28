@@ -35,7 +35,7 @@
 import { memoryCloneCmd, MEMORY_REF, MEMORY_TOKEN_ENV } from "../memory/store";
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { redactSecrets } from "./redact";
-import { LEAK_DENYLIST_PATH, OPS_DENYLIST_PATH, denylistFileContent, parseDenylist } from "../leak-gate";
+import { DenylistDialectError, LEAK_DENYLIST_PATH, OPS_DENYLIST_PATH, denylistFileContent, parseDenylist } from "../leak-gate";
 import { isDeadlineExit } from "./exec-deadline";
 import { STUDIO_TMUX, withStudioTmux } from "./tmux";
 // Issue #38: a restart has only the studio ID to work from, and the repo
@@ -2075,7 +2075,10 @@ async function applyLeakGate(deps: ProvisionDeps, id: string, workRepoSlug: stri
       reason = "";
     } catch (err) {
       // Class only: a parse error's message is safe, but keep terms off the row by construction.
-      reason = isNotFoundError(err) ? `${OPS_DENYLIST_PATH} not found` : `${OPS_DENYLIST_PATH} unreadable or empty`;
+      // A dialect error's message is built from an index alone (leak-gate.ts).
+      reason = isNotFoundError(err) ? `${OPS_DENYLIST_PATH} not found`
+        : err instanceof DenylistDialectError ? err.message
+        : `${OPS_DENYLIST_PATH} unreadable or empty`;
     }
   }
 

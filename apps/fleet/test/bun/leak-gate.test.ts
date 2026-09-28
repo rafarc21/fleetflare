@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  parseDenylist, scanText, denylistFileContent, leakScanScript,
+  parseDenylist, scanText, denylistFileContent, leakScanScript, denylistDialectError,
   LEAK_DENYLIST_MISSING, LEAK_SCAN_ERROR, LEAK_HIT_PREFIX,
 } from "../../src/leak-gate";
 
@@ -19,7 +19,7 @@ afterEach(() => {
   dir = null;
 });
 
-function scanner(denylist: string | null): { run: (text: string) => { code: number; stderr: string } } {
+function scanner(denylist: string | null, env?: Record<string, string>): { run: (text: string) => { code: number; stderr: string } } {
   dir = mkdtempSync(join(tmpdir(), "fleet-leak-"));
   const list = join(dir, "denylist");
   if (denylist !== null) writeFileSync(list, denylist);
@@ -28,7 +28,7 @@ function scanner(denylist: string | null): { run: (text: string) => { code: numb
   chmodSync(script, 0o755);
   return {
     run: (text: string) => {
-      const r = Bun.spawnSync({ cmd: [script], stdin: Buffer.from(text), stdout: "pipe", stderr: "pipe" });
+      const r = Bun.spawnSync({ cmd: [script], stdin: Buffer.from(text), stdout: "pipe", stderr: "pipe", env: env ?? process.env });
       return { code: r.exitCode ?? -1, stderr: r.stderr.toString() };
     },
   };
@@ -44,6 +44,40 @@ describe("parseDenylist", () => {
   test("zero patterns is an error, never an empty (pass-everything) list", () => {
     expect(() => parseDenylist("\n \n")).toThrow();
   });
+
+  // Mutant: a JS-only pattern shipped to the container, where grep -E reads
+  // `\d` as a literal d and never matches -> container fails OPEN.
+  test("a pattern grep -E and JS read differently throws, naming the index never the term", () => {
+    let msg = "";
+    try {
+      parseDenylist("acmeclient\nacme-secret-\\d+\n");
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toContain("#2");
+    expect(msg).not.toContain("acme-secret");
+  });
+});
+
+describe("denylistDialectError", () => {
+  test("portable ERE patterns pass", () => {
+    expect(denylistDialectError([
+      "acmeclient", "9{9}", "acme-secret-[0-9]+", "a|b", "(ab)+c?", "a\\.b", "x\\\\d", "\\bword\\b", "[^a-z]*",
+    ])).toBeNull();
+  });
+
+  test.each([
+    "\\d", "\\D", "\\p{L}", "\\P{L}", "\\h", "\\H", "\\z", "\\Z", "\\A", "\\Qx\\E", "\\E", "\\K",
+    "(?=a)", "(?!a)", "(?<=a)", "(?<!a)", "(?:a)", "(?i)a", "\\x41", "\\u0041",
+    "a*?", "a+?", "a??", "a{2}?",
+    "[\\d]", "[[:digit:]]", "\\<a", "\\t", "a\\/b",
+  ])("flags %s at its 1-based index", (p) => {
+    expect(denylistDialectError(["acmeclient", p])).toBe(2);
+  });
+
+  test("returns the FIRST offending index", () => {
+    expect(denylistDialectError(["ok", "a\\d", "(?=b)"])).toBe(2);
+  });
 });
 
 describe("scanText", () => {
@@ -53,6 +87,12 @@ describe("scanText", () => {
 
   test("clean text returns no hits", () => {
     expect(scanText(["acmeclient"], "plain text")).toEqual([]);
+  });
+
+  // Mutant: JS `^`/`$` anchor the whole text, grep anchors each line -> a
+  // term at the start of line 2 passes the Worker while the container catches it.
+  test("anchors are per line, as grep reads them", () => {
+    expect(scanText(["^acmeclient$"], "intro\nacmeclient\noutro")).toEqual([1]);
   });
 
   test("an invalid pattern throws (mutant: scanner errors swallowed -> a pass)", () => {
@@ -95,6 +135,23 @@ describe("fleet-leak-scan (container scanner script)", () => {
     const r = scanner(denylistFileContent({ patterns: ["acme["] })).run("plain text\n");
     expect(r.code).toBe(2);
     expect(r.stderr).toContain(LEAK_SCAN_ERROR);
+  });
+
+  // Mutant: grep stderr ignored -> a pattern grep only WARNS about (GNU
+  // "stray \\ before d", "? at start of expression") exits 1 = clean. BSD
+  // grep has no portable warning trigger, so a fake grep first on PATH warns.
+  test("any grep stderr refuses, even when grep exits 1 (no match)", () => {
+    const bin = mkdtempSync(join(tmpdir(), "fleet-leak-bin-"));
+    try {
+      writeFileSync(join(bin, "grep"), "#!/bin/sh\necho 'grep: warning: stray \\ before d' >&2\nexit 1\n");
+      chmodSync(join(bin, "grep"), 0o755);
+      const r = scanner(ON, { ...process.env, PATH: `${bin}:${process.env.PATH}` } as Record<string, string>).run("plain text\n");
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(LEAK_SCAN_ERROR);
+      expect(r.stderr).not.toContain("stray");
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
   });
 
   test("an 'off' gate passes everything and says why", () => {
