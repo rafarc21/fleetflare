@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { handleFleetJunior, normalizeAiResult } from "../src/junior/route";
 import { juniorEnabled } from "../src/junior/gate";
+import { recordJuniorAuthorization } from "../src/junior/authz";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
@@ -24,11 +25,23 @@ function row(id: string, hash: string, repoSlug: string | null = REPO): StudioSt
   return { id, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
     lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: hash, repoSlug };
 }
-async function setup(overrides: Partial<Env> = {}, aiResult: unknown = { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 2 } }) {
+// `authorize` seeds the B1 D1 record for task #7 (the default `boardTask()`)
+// assigned to `ME` — the Worker-side record that is now the actual /fleet/
+// junior gate (src/junior/authz.ts), never the `junior` GitHub label. Every
+// test below that exercises anything DOWNSTREAM of authorization (body
+// parsing, the AI call, streaming, heartbeats) needs it; tests that assert on
+// the authorization gate itself pass `authorize: false` and/or a different
+// board fixture instead.
+async function setup(
+  overrides: Partial<Env> = {},
+  aiResult: unknown = { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 2 } },
+  authorize = true,
+) {
   const token = mintSpawnToken();
   const rows = async () => [row(ME, await hashSpawnToken(token))];
   const run = vi.fn(async () => aiResult);
   const e = { ...env, AGENT_REPO: REPO, FLEET_JUNIOR: "on", AI: { run }, ...overrides } as unknown as Env;
+  if (authorize) await recordJuniorAuthorization(e.DB, REPO, 7, ME, Date.now());
   return { token, rows, run, e };
 }
 const req = (token: string | null, body: unknown, path = "/fleet/junior", method = "POST") =>
@@ -162,6 +175,27 @@ describe("handleFleetJunior — maestro authorization", () => {
     const api = board();
     await (await handleFleetJunior(req(token, good), e, api, rows)).text();
     expect(vi.mocked(api.listIssues).mock.calls[0][0]).toBe(REPO);
+  });
+
+  // PR #9 review, blocker B1: a studio's own repo-scoped `gh` token can add a
+  // label to its own issue (`gh issue edit <n> --add-label junior`) — GitHub
+  // never distinguishes who added a label. The default `board()` fixture
+  // already carries JUNIOR_LABEL on a live task assigned to ME (see
+  // `boardTask()` above), simulating exactly that: a label present on the
+  // board with NO Worker-side D1 record behind it (setup's `authorize: false`
+  // below skips the one write that would create one). This must stay 403.
+  //
+  // Mutation-test proof (performed by hand, not committed): reverting
+  // route.ts's authorization check back to `t.labels.includes(JUNIOR_LABEL)`
+  // (the pre-fix code) makes this exact test go green on a task that should
+  // never have been authorized — i.e. this test is RED against the label-only
+  // implementation and GREEN only against the real D1-backed one.
+  it("B1: a JUNIOR_LABEL present on the board with no Worker-side D1 record does NOT authorize", async () => {
+    const { token, rows, e, run } = await setup({}, undefined, false);
+    const r = await handleFleetJunior(req(token, good), e, board(), rows);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe("junior not authorized for your current task");
+    expect(run).not.toHaveBeenCalled();
   });
 });
 
