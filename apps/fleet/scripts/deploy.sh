@@ -61,6 +61,13 @@
 #     `--allow-dirty-ops` (consumed here, never passed to wrangler) skips
 #     these checks with a loud warning. A config outside any git repo cannot
 #     be checked: warning only.
+#   - (issue #20) the command replaces the studio containers (no args,
+#     deploy except --dry-run, versions deploy, rollback, delete; see
+#     replaces_containers) and `fleet rescue-all`, run first, exits non-zero
+#     (a studio FAILED/TIMED OUT, or no creds to list studios -- a first
+#     deploy). `--allow-unrescued` (consumed here, never passed to wrangler)
+#     deploys anyway with a loud warning. Read-only commands and d1
+#     migrations never run rescue-all.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,11 +89,17 @@ if grep -q '<YOUR_' <(printf '%s' "$FLEET_CONFIG_FILTERED"); then
   exit 1
 fi
 
-# Issue #365: --allow-dirty-ops is ours, never wrangler's.
+# Issue #365: --allow-dirty-ops is ours, never wrangler's. Issue #20: so is
+# --allow-unrescued.
 ALLOW_DIRTY_OPS=0
+ALLOW_UNRESCUED=0
 ARGS=()
 for a in "$@"; do
-  if [[ "$a" == "--allow-dirty-ops" ]]; then ALLOW_DIRTY_OPS=1; else ARGS+=("$a"); fi
+  case "$a" in
+    --allow-dirty-ops) ALLOW_DIRTY_OPS=1 ;;
+    --allow-unrescued) ALLOW_UNRESCUED=1 ;;
+    *) ARGS+=("$a") ;;
+  esac
 done
 
 # Issue #365 round 2: an ALLOWLIST of read-only commands — everything else is
@@ -150,6 +163,33 @@ is_read_only() {
     tail|whoami) return 0 ;;
     d1) d1_is_local ${after[@]+"${after[@]}"} ;;
     secret|versions) [[ "$flag_before_w2" == 0 && "$w2" == "list" ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+# Issue #20: commands that replace (or destroy) the running studio
+# containers, losing any unpushed work in them: no args (deploy), deploy
+# (not --dry-run), versions deploy, rollback, delete. Same strict parse as
+# is_read_only: an unknown flag before the command word, or any flag between
+# `versions` and its subcommand, is guarded (it may hide a deploy).
+replaces_containers() {
+  local a w1="" w2="" phase=0 skip=0
+  [[ "$#" == 0 ]] && return 0
+  is_read_only "$@" && return 1
+  for a in "$@"; do
+    if [[ "$skip" == 1 ]]; then skip=0; continue; fi
+    if is_value_flag "$a"; then skip=1; continue; fi
+    case "$a" in --env=*|--config=*|--cwd=*) continue ;; esac
+    if [[ "$phase" == 0 ]]; then
+      case "$a" in -*) return 0 ;; *) w1="$a"; phase=1; continue ;; esac
+    fi
+    if [[ "$phase" == 1 ]]; then
+      case "$a" in -*) [[ "$w1" == versions ]] && return 0 ;; *) w2="$a"; phase=2 ;; esac
+    fi
+  done
+  case "$w1" in
+    deploy|rollback|delete) return 0 ;;
+    versions) [[ "$w2" == deploy ]] ;;
     *) return 1 ;;
   esac
 }
@@ -280,6 +320,30 @@ if version_lt "$WRANGLER_INSTALLED" "$WRANGLER_LOCKED"; then
   echo "deploy.sh: refusing — installed wrangler $WRANGLER_INSTALLED is older than bun.lock's $WRANGLER_LOCKED." >&2
   echo "deploy.sh: run 'bun install' in $FLEET_DIR, then deploy again." >&2
   exit 1
+fi
+
+# Issue #20: the pre-deploy rescue gate, run here and not left to a README
+# `fleet rescue-all && bun run deploy` convention (a bare `bun run deploy`
+# skipped it). rescue-all pushes every running studio's unpushed work before
+# the containers are replaced; any FAILED/TIMEOUT (or no creds to list the
+# studios, as on a first deploy) exits non-zero and this refuses.
+# Unpiped: its per-studio progress reaches the operator live.
+if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
+  RESCUE_RC=0
+  if command -v bun >/dev/null 2>&1; then
+    bun "$FLEET_DIR/cli/fleet.ts" rescue-all || RESCUE_RC=$?
+  else
+    echo "deploy.sh: bun not found on PATH -- cannot run fleet rescue-all." >&2
+    RESCUE_RC=127
+  fi
+  if [[ "$RESCUE_RC" != 0 ]]; then
+    if [[ "$ALLOW_UNRESCUED" == 1 ]]; then
+      echo "deploy.sh: WARNING -- --allow-unrescued: rescue-all exited $RESCUE_RC; deploying anyway. Unpushed work in running studios may be LOST." >&2
+    else
+      echo "deploy.sh: refusing -- rescue-all reported FAILED -- pre-deploy gate UNSAFE; pass --allow-unrescued to override (exit $RESCUE_RC)." >&2
+      exit 1
+    fi
+  fi
 fi
 
 LOCAL_CONFIG="$FLEET_DIR/wrangler.local.jsonc"

@@ -421,8 +421,11 @@ lead two minutes into a task — twice: once at deploy time, and again ~12
 minutes later when the rollout CONVERGED and replaced a container that a
 recycle had booted on the old image. **A rollout replacement does NOT run the
 fleet's rescue-push** — only `fleet recycle` / `destroy` do. Unpushed work in a
-rolled container is gone. **Run `fleet rescue-all [--repo R] [--dry-run]`
-right before any `wrangler deploy`** (issue #251) — it commits and pushes
+rolled container is gone. **`bun run deploy` runs `fleet rescue-all`
+itself** (issue #251; gate built into `scripts/deploy.sh` by issue #20) and
+refuses on `pre-deploy gate UNSAFE`. Never call a bare `wrangler deploy`: it
+skips the gate. `--allow-unrescued` overrides, loudly; a first deploy (no
+Worker, no creds) needs it. rescue-all commits and pushes
 every RUNNING AND DEGRADED studio's uncommitted work (the main checkout AND
 every member git worktree, each independently, each to its own
 `fleet/rescue/...` ref), plus every local branch not checked out anywhere and
@@ -438,8 +441,8 @@ provisioning studio is never exec'd against and is printed as `skipped <id>
 container itself answers "not running" (stale registry) is printed `skipped
 <id>: container not running` — neither counts as a failure. It exits
 non-zero ONLY when a studio's rescue attempt genuinely failed (a rejected
-push, a lock file, a hook), so it can gate the deploy script itself rather
-than relying on someone remembering to check `fleet ls` by eye. Also check
+push, a lock file, a hook), and its last line says `pre-deploy gate SAFE` or
+`... FAILED or TIMED OUT -- pre-deploy gate UNSAFE; do NOT deploy`. Also check
 `fleet ls` for working studios and deploy between tasks when you can — and
 after a deploy, expect one more container replacement before the image is
 stable (run `fleet rescue-all` again once it lands, for the same reason).

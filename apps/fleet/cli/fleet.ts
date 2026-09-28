@@ -1456,6 +1456,8 @@ export interface RescueAllDeps {
    *  for a studio this module's own filter did not already select. */
   rescueStudio: (id: string) => Promise<RescueAllOutcome>;
   log: (line: string) => void;
+  /** Issue #20: stderr — carries the UNSAFE verdict. */
+  error: (line: string) => void;
 }
 export interface RescueAllFlags {
   repo: string | null;
@@ -1657,7 +1659,16 @@ export async function runRescueAll(flags: RescueAllFlags, deps: RescueAllDeps): 
       for (const p of outcome.pushes) deps.log(`rescued  ${s.id}: ${p.branch} (${p.files} ${p.kind}) ${elapsed}`);
     }
   });
-  return { exitCode: failures > 0 ? 1 : 0 };
+  // Issue #20: exit 1 alone was easy to miss (and `&&` was the whole gate).
+  // One verdict line, in words, last.
+  if (failures > 0) {
+    const count = `${failures}/${targets.length} studios FAILED or TIMED OUT`;
+    const what = failures === targets.length ? `every push failed (${count})` : count;
+    deps.error(`fleet rescue-all: ${what} -- pre-deploy gate UNSAFE; do NOT deploy`);
+    return { exitCode: 1 };
+  }
+  deps.log("fleet rescue-all: no failures -- pre-deploy gate SAFE");
+  return { exitCode: 0 };
 }
 
 /**
@@ -1741,6 +1752,7 @@ export async function cmdRescueAll(creds: Credentials, flags: RescueAllFlags): P
       return (await res.json()) as RescueAllOutcome;
     },
     log: (line) => console.log(line),
+    error: (line) => console.error(line),
   });
   if (exitCode !== 0) process.exit(exitCode);
 }

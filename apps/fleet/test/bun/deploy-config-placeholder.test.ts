@@ -38,6 +38,10 @@ function writeInstalledWrangler(app: string, stub: string, version = "4.141.0") 
   chmodSync(join(app, "node_modules", ".bin", "wrangler"), 0o755);
   writeFileSync(join(app, "node_modules", "wrangler", "package.json"), JSON.stringify({ name: "wrangler", version }));
   writeFileSync(join(app, "bun.lock"), `{\n  "packages": {\n    "wrangler": ["wrangler@${version}", "", {}, "sha512-x"],\n  }\n}\n`);
+  // Issue #20: deploy.sh runs `bun cli/fleet.ts rescue-all` before a deploy.
+  // A passing stub: this suite is about the placeholder check only.
+  mkdirSync(join(app, "cli"), { recursive: true });
+  writeFileSync(join(app, "cli", "fleet.ts"), "process.exit(0);\n");
 }
 
 function run(configBody: string): { code: number; stdout: string; stderr: string } {

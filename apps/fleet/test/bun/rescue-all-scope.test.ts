@@ -25,8 +25,9 @@ function flags(over: Partial<RescueAllFlags> = {}): RescueAllFlags {
 function fakeDeps(over: {
   studios?: StudioStatus[];
   rescueStudio?: (id: string) => Promise<RescueAllOutcome>;
-} = {}): { deps: RescueAllDeps; lines: string[]; rescueCalls: string[] } {
+} = {}): { deps: RescueAllDeps; lines: string[]; errs: string[]; rescueCalls: string[] } {
   const lines: string[] = [];
+  const errs: string[] = [];
   const rescueCalls: string[] = [];
   const deps: RescueAllDeps = {
     listStudios: async () => over.studios ?? [],
@@ -35,8 +36,9 @@ function fakeDeps(over: {
       return over.rescueStudio ? over.rescueStudio(id) : { ok: true, pushes: [] };
     },
     log: (line: string) => lines.push(line),
+    error: (line: string) => errs.push(line),
   };
-  return { deps, lines, rescueCalls };
+  return { deps, lines, errs, rescueCalls };
 }
 
 // ---------------------------------------------------------------------------
@@ -437,4 +439,49 @@ test("the real production default concurrency is 5 (RESCUE_ALL_CONCURRENCY_LIMIT
   expect(peak).toBeLessThanOrEqual(5);
   expect(peak).toBeGreaterThan(1); // proves this is genuinely concurrent, not accidentally serialized
   expect(result.exitCode).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// Issue #20: exit 1 alone was easy to miss. The run ends with ONE verdict
+// line on stderr that says, in words, whether deploying is safe.
+
+test("some studios FAILED or TIMED OUT: final stderr line says n/m and pre-deploy gate UNSAFE; exit 1", async () => {
+  const { deps, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b"), studio("websites--c")],
+    rescueStudio: async (id) =>
+      id === "websites--a" ? { ok: false, error: "push rejected" }
+        : id === "websites--b" ? { ok: false, error: "timed out", timedOut: true }
+          : { ok: true, pushes: [] },
+  });
+  const result = await runRescueAll(flags(), deps);
+  expect(result.exitCode).toBe(1);
+  expect(errs.at(-1)).toBe("fleet rescue-all: 2/3 studios FAILED or TIMED OUT -- pre-deploy gate UNSAFE; do NOT deploy");
+});
+
+test("every studio FAILED: verdict says every push failed", async () => {
+  const { deps, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b")],
+    rescueStudio: async () => ({ ok: false, error: "push rejected" }),
+  });
+  const result = await runRescueAll(flags(), deps);
+  expect(result.exitCode).toBe(1);
+  expect(errs.at(-1)).toBe(
+    "fleet rescue-all: every push failed (2/2 studios FAILED or TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy",
+  );
+});
+
+test("no failures: final line says pre-deploy gate SAFE, never UNSAFE; exit 0", async () => {
+  const { deps, lines, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b", "stopped")],
+  });
+  const result = await runRescueAll(flags(), deps);
+  expect(result.exitCode).toBe(0);
+  expect(lines.at(-1)).toContain("pre-deploy gate SAFE");
+  expect(errs.some((l) => l.includes("UNSAFE"))).toBe(false);
+});
+
+test("--dry-run rescues nothing, so it prints no SAFE verdict", async () => {
+  const { deps, lines, errs } = fakeDeps({ studios: [studio("websites--a")] });
+  await runRescueAll(flags({ dryRun: true }), deps);
+  expect([...lines, ...errs].some((l) => l.includes("pre-deploy gate"))).toBe(false);
 });
