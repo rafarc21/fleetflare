@@ -52,6 +52,15 @@ describe("applyBlocks", () => {
     if (!r.ok) expect(r.error).toContain("matched 2 times");
   });
 
+  test("overlapping matches count as 2, not 1", () => {
+    // "  " (two spaces) occurs at both index 1-2 and index 2-3 inside "a   b"
+    // (three spaces) -- these overlap, but both are real occurrences, so the
+    // SEARCH is ambiguous and must be rejected, not silently applied once.
+    const r = applyBlocks(new Map([["a", "a   b"]]), parseBlocks(B("a", "  ", "X")), none);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("matched 2 times");
+  });
+
   test("path not given as input -> error", () => {
     const r = applyBlocks(before(), parseBlocks(B("src/other.ts", "x", "y")), none);
     expect(r).toEqual({ ok: false, error: "block 1 names src/other.ts, which was not given as input" });
@@ -69,6 +78,44 @@ describe("applyBlocks", () => {
   test("empty SEARCH on existing file -> error", () => {
     const r = applyBlocks(before(), parseBlocks("x.ts\n<<<<<<< SEARCH\n=======\ny\n>>>>>>> REPLACE"), () => true);
     expect(r).toEqual({ ok: false, error: "block 1 (x.ts): empty SEARCH creates a file, but x.ts already exists" });
+  });
+
+  test("empty SEARCH on a path already in the before map -> error", () => {
+    // Exercises the before.has(...) disjunct specifically: the path is given
+    // as input context, not existsOnDisk, and not created earlier in the batch.
+    const r = applyBlocks(before(), parseBlocks("src/a.ts\n<<<<<<< SEARCH\n=======\ny\n>>>>>>> REPLACE"), none);
+    expect(r).toEqual({ ok: false, error: "block 1 (src/a.ts): empty SEARCH creates a file, but src/a.ts already exists" });
+  });
+
+  test("empty SEARCH on a path created earlier in the same batch -> error", () => {
+    // Exercises the after.has(...) disjunct specifically: the path is not in
+    // before and not existsOnDisk, but a prior block in this same batch already
+    // created it via its own empty-SEARCH new-file case.
+    const text = "new.ts\n<<<<<<< SEARCH\n=======\nexport {};\n>>>>>>> REPLACE\n" +
+      "new.ts\n<<<<<<< SEARCH\n=======\nexport {};\n>>>>>>> REPLACE";
+    const r = applyBlocks(before(), parseBlocks(text), none);
+    expect(r).toEqual({ ok: false, error: "block 2 (new.ts): empty SEARCH creates a file, but new.ts already exists" });
+  });
+
+  test("blank path line before SEARCH marker -> clear error, not a crash", () => {
+    // A blank line directly above "<<<<<<< SEARCH" (e.g. two blocks chained
+    // with no repeated path header) makes the path-capturing regex match an
+    // empty string via ^ + /m. Must surface as a clear parse-level error, not
+    // "block N names , which was not given as input".
+    const text = "src/a.ts\n<<<<<<< SEARCH\nconst a = 1;\n=======\nconst a = 2;\n>>>>>>> REPLACE\n\n" +
+      "<<<<<<< SEARCH\nconst b = 1;\n=======\nconst b = 2;\n>>>>>>> REPLACE";
+    const r = applyBlocks(before(), parseBlocks(text), none);
+    expect(r).toEqual({ ok: false, error: "block 2: missing file path" });
+  });
+
+  test("blank path line with empty SEARCH -> clear error, not an EISDIR crash", () => {
+    // Same blank-path bug, but hitting the empty-SEARCH (new file) branch,
+    // which previously inserted a "" key that crashed toUnifiedDiff with
+    // EISDIR when join(root, "b", "") resolved to a directory.
+    const text = "src/a.ts\n<<<<<<< SEARCH\nconst a = 1;\n=======\nconst a = 2;\n>>>>>>> REPLACE\n\n" +
+      "<<<<<<< SEARCH\n=======\nexport {};\n>>>>>>> REPLACE";
+    const r = applyBlocks(before(), parseBlocks(text), none);
+    expect(r).toEqual({ ok: false, error: "block 2: missing file path" });
   });
 
   test("rejects paths outside the repo", () => {
