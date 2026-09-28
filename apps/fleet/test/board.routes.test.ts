@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import type { RepoReach } from "../src/github/reach";
 import { env } from "cloudflare:test";
 import * as authModule from "../src/studio/auth";
@@ -9,6 +9,14 @@ import { GitHubError } from "../src/board/api";
 import type { BoardApi } from "../src/board/board";
 import type { BoardTask } from "../src/board/types";
 import type { Env } from "../src/env";
+import { isJuniorAuthorized } from "../src/junior/authz";
+
+// PR #9 review, blocker B1: fleet_state is not isolated per test (same as
+// agents.do.test.ts's own identical beforeEach) — the junior-authorization
+// tests below write real D1 rows that must not leak across tests.
+beforeEach(async () => {
+  await env.DB.prepare("DELETE FROM fleet_state").run();
+});
 
 // Same wiring as test/studio.routes.test.ts: real verifyAccess for the
 // unauthenticated cases, spied away for the rest, and every GitHub call
@@ -134,6 +142,57 @@ describe("handleBoard", () => {
     );
     expect(res.status).toBe(502);
     expect(await res.text()).toContain("board upstream failed");
+  });
+
+  // PR #9 review, blocker B1: the write half of the real fix — a task filed
+  // with `junior: true` and a real assignee must leave behind the D1 record
+  // src/junior/authz.ts's isJuniorAuthorized reads, written from exactly this
+  // route (see recordJuniorAuthorizationIfNeeded's own doc comment for why
+  // nowhere else may).
+  describe("POST /tasks — junior authorization record (B1)", () => {
+    it("records D1 authorization for the created task's assignee when the brief asks for junior", async () => {
+      authorized();
+      const created = task({ number: 55, labels: ["submitted", "studio:acme--web-studio", "junior"], assignee: "acme--web-studio" });
+      const api = fakeApi({ createIssue: vi.fn(async () => created) });
+      const res = await handleBoard(
+        req("/studio/board/tasks", {
+          method: "POST",
+          body: JSON.stringify({ ...brief, assignee: "acme--web-studio", junior: true }),
+        }),
+        testEnv, api, reach,
+      );
+      expect(res.status).toBe(200);
+      expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 55, "acme--web-studio")).toBe(true);
+      // Never for a DIFFERENT studio than the one actually assigned.
+      expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 55, "acme--release-studio")).toBe(false);
+    });
+
+    it("does not record anything when the brief does not ask for junior", async () => {
+      authorized();
+      const created = task({ number: 56, labels: ["submitted", "studio:acme--web-studio"], assignee: "acme--web-studio" });
+      const api = fakeApi({ createIssue: vi.fn(async () => created) });
+      await handleBoard(
+        req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, assignee: "acme--web-studio" }) }),
+        testEnv, api, reach,
+      );
+      expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 56, "acme--web-studio")).toBe(false);
+    });
+
+    it("does not authorize anyone for an unassigned junior-flagged task — there is no studio to authorize", async () => {
+      authorized();
+      const created = task({ number: 57, labels: ["submitted", "junior"], assignee: null });
+      const api = fakeApi({ createIssue: vi.fn(async () => created) });
+      const res = await handleBoard(
+        req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, junior: true }) }),
+        testEnv, api, reach,
+      );
+      expect(res.status).toBe(200);
+      // Nothing to assert isJuniorAuthorized against directly (no studio id),
+      // so this proves the negative the only way possible: the create still
+      // succeeds and nothing throws attempting to record an authorization
+      // with no assignee.
+      expect(await res.json()).toMatchObject({ number: 57 });
+    });
   });
 
   it("POST /tasks/:n/assign answers 502 when GitHub fails — never an escaped throw", async () => {
