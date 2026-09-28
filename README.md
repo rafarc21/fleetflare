@@ -439,9 +439,9 @@ A studio whose work repo is private gets the gate switched off. See
 public): the `owner/name` slug of a PRIVATE repo that receives every
 rescue push (`fleet/rescue/*` and friends) instead of `origin`. Set it with
 `scripts/deploy.sh secret put FLEET_RESCUE_REMOTE`. The GitHub App or token
-must be able to write that repo. Unset, rescue pushes still go to `origin` so
-no work is ever lost, and the Worker logs loudly that rescued work is public
-if `origin` is.
+must be able to write that repo. Unset (or if the token mint fails), rescue pushes go to `origin` through
+the leak gate: a denylist hit, or no denylist at all, refuses that rescue and
+the work is lost at teardown. The Worker logs this loudly on every rescue.
 
 **Telegram** (optional, off by default): the legacy `/tg` webhook, AgentDO
 tasks, DeployDO deploy approvals, and operator chat alerts all run only when
