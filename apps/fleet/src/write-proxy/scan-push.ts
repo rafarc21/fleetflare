@@ -1,7 +1,8 @@
 // Issue #7 (spec 5.6): everything a push carries, as one text for scanText.
 // Ref names, commit + tag raw text, blob text, full tree paths from each
 // commit root (walk stops at out-of-pack subtrees), plus every in-pack tree's
-// entry names. Malformed trees or commits throw: caller refuses the push.
+// entry names. BOM-marked UTF-16 blobs also as UTF-16. Malformed trees or
+// commits, or a non-UTF-8 `encoding` header, throw: caller refuses the push.
 
 import type { GitObject } from "./pack";
 
@@ -27,6 +28,24 @@ function parseTree(data: Uint8Array): TreeEntry[] {
   return out;
 }
 
+function utf16(data: Uint8Array, le: boolean): string {
+  const units = new Uint16Array(data.length >> 1);
+  for (let i = 0; i < units.length; i++) {
+    units[i] = le ? data[2 * i] | (data[2 * i + 1] << 8) : (data[2 * i] << 8) | data[2 * i + 1];
+  }
+  let out = "";
+  for (let i = 0; i < units.length; i += 0x8000) out += String.fromCharCode(...units.subarray(i, i + 0x8000));
+  return out;
+}
+
+/** A commit or tag may declare another encoding GitHub then honors; its bytes
+ *  would not read as the text the patterns match. Refused. */
+function assertUtf8Header(raw: string): void {
+  const head = raw.slice(0, raw.indexOf("\n\n") < 0 ? raw.length : raw.indexOf("\n\n"));
+  const m = /^encoding (.*)$/m.exec(head);
+  if (m && !/^utf-?8$/i.test(m[1].trim())) throw new Error("commit or tag encoding other than UTF-8 cannot be scanned");
+}
+
 export function pushText(refs: string[], objects: GitObject[]): string {
   const dec = new TextDecoder(); // non-fatal by default: bad UTF-8 becomes U+FFFD
   const parts: string[] = [...refs];
@@ -37,7 +56,11 @@ export function pushText(refs: string[], objects: GitObject[]): string {
       trees.set(o.oid, entries);
       for (const e of entries) parts.push(e.name);
     } else {
+      if (o.type === "commit" || o.type === "tag") assertUtf8Header(dec.decode(o.data));
       parts.push(dec.decode(o.data));
+      // GitHub renders a BOM-marked UTF-16 file as text; scan it as such too.
+      const bom = o.type === "blob" && o.data.length >= 2 ? (o.data[0] << 8) | o.data[1] : 0;
+      if (bom === 0xfffe || bom === 0xfeff) parts.push(utf16(o.data.subarray(2), bom === 0xfffe));
     }
   }
 

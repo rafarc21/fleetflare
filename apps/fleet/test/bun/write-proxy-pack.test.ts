@@ -138,3 +138,33 @@ describe("pushText tree parsing", () => {
     expect(() => pushText([], [bad])).toThrow();
   });
 });
+
+// Issue #7 review, finding 8: text GitHub renders that a UTF-8 decode misses.
+describe("pushText: non-UTF-8 text", () => {
+  const obj = (type: "commit" | "tag" | "blob", data: Uint8Array | string) => ({
+    type, oid: "0".repeat(40), data: typeof data === "string" ? new TextEncoder().encode(data) : data,
+  });
+  const TREE = `tree ${"a".repeat(40)}\n`;
+
+  test("a UTF-16LE blob with a BOM is decoded as UTF-16 too", () => {
+    const body = new Uint8Array([0xff, 0xfe, ...Array.from("acmeclient").flatMap((c) => [c.charCodeAt(0), 0])]);
+    expect(pushText([], [obj("blob", body)])).toContain("acmeclient");
+  });
+
+  test("a UTF-16BE blob with a BOM is decoded as UTF-16 too", () => {
+    const body = new Uint8Array([0xfe, 0xff, ...Array.from("acmeclient").flatMap((c) => [0, c.charCodeAt(0)])]);
+    expect(pushText([], [obj("blob", body)])).toContain("acmeclient");
+  });
+
+  test("a commit declaring a non-UTF-8 encoding is refused", () => {
+    expect(() => pushText([], [obj("commit", `${TREE}author a <a@x> 1 +0000\nencoding ISO-2022-JP\n\nmsg\n`)])).toThrow(/encoding/);
+  });
+
+  test("a tag declaring a non-UTF-8 encoding is refused", () => {
+    expect(() => pushText([], [obj("tag", `object ${"a".repeat(40)}\ntype commit\ntag v1\nencoding UTF-16\n\nmsg\n`)])).toThrow(/encoding/);
+  });
+
+  test("encoding UTF-8 is fine", () => {
+    expect(pushText([], [obj("commit", `${TREE}author a <a@x> 1 +0000\nencoding UTF-8\n\nmsg\n`)])).toContain("msg");
+  });
+});
