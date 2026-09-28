@@ -17,6 +17,10 @@ default. Manual only. Rerun when Cloudflare adds models.
    Save each judge's JSON to `/tmp/je/judge/<n>.json`.
 4. `bun scripts/junior-eval/eval.ts score --out /tmp/je`
 
+   Note: the printed `p50` is the upper of the two middle values for an even
+   sample count, not an averaged median — `--auto 10` (the documented default)
+   always produces an even count, so `p50` is not a textbook median by default.
+
 Switch the default (`skills/junior/src/client.ts` GLM/DEEPSEEK and
 `apps/fleet/src/junior/gate.ts` JUNIOR_MODELS) only on a clear win: higher
 mean, zero harmful, no more failures.

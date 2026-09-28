@@ -31,6 +31,8 @@ export function aggregate(results: EvalResult[], verdicts: Verdict[]): Row[] {
       perfect: xs.filter((x) => x.v?.s === 3).length,
       harmful: xs.filter((x) => x.v?.harmful).length,
       failed: xs.filter((x) => x.r.status !== "ok").length,
+      // p50 is the upper of the two middle values for an even sample count, not an
+      // averaged median — the tool's own --auto default (10) always produces an even count.
       p50: secs[Math.floor(n / 2)],
       costPerTask: Number((xs.reduce((s, x) => s + x.r.neurons, 0) / n * 0.011 / 1000).toFixed(4)),
     });
