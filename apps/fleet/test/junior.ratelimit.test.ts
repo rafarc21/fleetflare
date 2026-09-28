@@ -97,3 +97,41 @@ describe("checkAndConsumeJuniorRateLimit", () => {
     expect(succeeded).toBe(cap);
   });
 });
+
+// PR #9 review, item (c): a new fleet_state row per studio per minute (and
+// per day) bucket, with nothing deleting an old one, grows this table
+// unboundedly forever. Pruning must actually delete stale rows, not just be
+// a TODO comment.
+describe("checkAndConsumeJuniorRateLimit — stale counter pruning (c)", () => {
+  async function countKeysLike(pattern: string): Promise<number> {
+    const row = await env.DB
+      .prepare(`SELECT COUNT(*) AS n FROM fleet_state WHERE key LIKE ?`)
+      .bind(pattern)
+      .first<{ n: number }>();
+    return row!.n;
+  }
+
+  it("deletes a stale per-minute bucket row once its retention window has passed", async () => {
+    // A call at t=0 leaves behind a junior-rate:...:0 row stamped ts=0.
+    await checkAndConsumeJuniorRateLimit(env.DB, {}, STUDIO, 0);
+    expect(await countKeysLike("junior-rate:%")).toBe(1);
+    // A later call, far enough past that bucket's retention window, must
+    // prune the old row — for a DIFFERENT studio, so this is provably the
+    // pruning sweep and not that studio's own bucket simply rolling over.
+    await checkAndConsumeJuniorRateLimit(env.DB, {}, OTHER, MINUTE * 10);
+    expect(await countKeysLike("junior-rate:" + STUDIO + ":%")).toBe(0);
+  });
+
+  it("deletes a stale daily bucket row once its retention window has passed", async () => {
+    await checkAndConsumeJuniorRateLimit(env.DB, {}, STUDIO, 0);
+    expect(await countKeysLike("junior-daily:%")).toBe(1);
+    await checkAndConsumeJuniorRateLimit(env.DB, {}, OTHER, DAY * 10);
+    expect(await countKeysLike("junior-daily:" + STUDIO + ":%")).toBe(0);
+  });
+
+  it("does not delete a row still inside its retention window", async () => {
+    await checkAndConsumeJuniorRateLimit(env.DB, {}, STUDIO, 0);
+    await checkAndConsumeJuniorRateLimit(env.DB, {}, OTHER, 500);
+    expect(await countKeysLike("junior-rate:" + STUDIO + ":%")).toBe(1);
+  });
+});
