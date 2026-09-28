@@ -141,6 +141,18 @@ export async function main(argv: string[], env: Record<string, string | undefine
       console.error(telemetry(model, start, last, calls, "api-error"));
       return EXIT.API;
     }
+    // Anything else reaching here happened while calling the model (or
+    // applying its output): a network-level throw — connection refused, DNS
+    // failure — that classify() in client.ts never sees, because it only
+    // classifies a completed HTTP response wrapped as ApiError. This file's
+    // exit-code contract is EXIT.{OK,USAGE,API,INVALID,TIMEOUT,AUTH}; letting
+    // an arbitrary Error escape here crashes with a raw stack trace and a
+    // non-contract exit code. Treat it as an API failure instead.
+    if (e instanceof Error) {
+      console.error(`junior: ${e.message}`);
+      console.error(telemetry(model, start, last, calls, "api-error"));
+      return EXIT.API;
+    }
     throw e;
   }
 }
