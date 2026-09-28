@@ -304,10 +304,10 @@ describe("handleFleetJunior — rate limit and daily cap (F1)", () => {
 describe("handleFleetJunior — maestro exclusion (F2)", () => {
   // Defense in depth beyond "the maestro never gets the junior skill" (Task
   // 7's provision-time exclusion): even a maestro token that somehow reached
-  // this route must never get through. do.ts's own isMaestro() reads BOTH
-  // role and instance for the same reason (issue #269's singleton-role
-  // defense in depth) — this check matches it exactly rather than trusting
-  // "role === maestro" alone.
+  // this route must never get through. PR #9 review, item (b): the check
+  // matches on ROLE ALONE (see route.ts's isMaestroStudio doc comment for why
+  // it deliberately does NOT copy do.ts's own isMaestro()'s extra instance-1
+  // restriction) — any maestro instance is excluded, not just instance 1.
   const MAESTRO = "websites--maestro";
   it("403s a maestro-identified studio immediately — before board lookup, before body processing", async () => {
     const token = mintSpawnToken();

@@ -60,17 +60,21 @@ const text = (body: string, status: number) => new Response(body, { status });
  * `isMaestro` check) — even a maestro's own spawn token must never reach this
  * route, full stop, regardless of what the board or D1 would otherwise say.
  *
- * Same two-part check src/studio/do.ts's own `isMaestro()` uses, for the same
- * reason (issue #269's singleton-role defense in depth): role alone is not
- * enough, because maestro is a singleton role by CONVENTION
- * (`spawn.ts`'s `runSpawn` refuses any instance >1 for it) but this check
- * must not TRUST that refusal alone — reads the id's own instance too, so a
- * stray `x--maestro--2` (however it came to exist) is not swept into "not the
- * maestro, allow it".
+ * Role ALONE, deliberately NOT the same two-part (role + instance 1) check
+ * src/studio/do.ts's own `isMaestro()` uses — that extra instance-1
+ * restriction is specific to what THAT check decides ("may this studio arm
+ * the one sweep loop", issue #269's singleton-role defense in depth, where
+ * `wake-events.ts`'s `maestroIdFor` only ever wakes the bare id, so only
+ * instance 1 is ever the one being addressed). This check answers a
+ * different question — "is this studio a maestro AT ALL" — and a stray
+ * `x--maestro--2` (however it came to exist) is still a maestro studio and
+ * must still be excluded, not swept into "not instance 1, allow it". PR #9
+ * review, item (b): the original copy of do.ts's check left exactly that gap
+ * open.
  */
 function isMaestroStudio(studioId: string): boolean {
   const id = parseStudioId(studioId);
-  return id?.role === "maestro" && id.instance === 1;
+  return id?.role === "maestro";
 }
 
 /**
