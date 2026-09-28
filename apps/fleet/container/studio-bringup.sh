@@ -1549,6 +1549,44 @@ claude_launch() {
   claude_launch_landed
 }
 
+# The line claude_launch types: `claude_launch_line <prompt> <repo-dir> <arg>...`.
+#
+# Issue #6, measured 2026-09-28: the role prompt used to ride INSIDE this
+# line, printf %q-quoted, and a 4.4 KB task brief pushed the send-keys past
+# tmux's message limit -- `command too long`, launch and retry both failed,
+# and the pane showed only the retry's ^C. So the prompt goes to a file under
+# .fleet and the typed line reads it back with "$(cat ...)": the pane's bash
+# expands it into ONE argv element, and the line stays the same few hundred
+# bytes whatever the brief's size. $(...) strips trailing newlines, exactly
+# as the $(base64 -d) that produced the prompt already did.
+#
+# A file that cannot be written falls back to the old inline line, loudly: a
+# short brief still launches that way, and a studio that boots degraded
+# beats one that never tries.
+#
+# `env -u TMUX -u TMUX_PANE` (issue #117): the pane's shell carries TMUX
+# pointing at the studio's server, and a plain `tmux` honours $TMUX before
+# anything else. Stripped here, the lead and every gate or test it spawns
+# reach the DEFAULT server; the studio's is reachable only by name. `env`
+# execs claude, so the pane still reads `claude`.
+claude_launch_line() {
+  local prompt="$1" dir="$2" line
+  local file="${FLEET_WORKSPACE:-/workspace}/.fleet/role-prompt.md"
+  shift 2
+  if { mkdir -p "${file%/*}" && printf '%s' "$prompt" > "$file"; } 2>/dev/null; then
+    line="$(printf '%q ' env -u TMUX -u TMUX_PANE claude "$@")--append-system-prompt \"\$(cat $(printf '%q' "$file"))\""
+  else
+    echo "studio-bringup: could not write the role prompt file $file -- inlining the prompt into the launch line (issue #6: a long one overflows tmux)" >&2
+    line="$(printf '%q ' env -u TMUX -u TMUX_PANE claude "$@" --append-system-prompt "$prompt")"
+  fi
+  # Start claude IN the checkout, not in the image's own WORKDIR (observed
+  # 2026-08-20: a lead asked about README.md looked in /container-server).
+  # Guarded: a missing checkout (clone failed, bare container) falls back to
+  # the pane's own directory, so the studio still comes up attachable.
+  [ -n "$dir" ] && [ -d "$dir" ] && line="cd $(printf '%q' "$dir") && $line"
+  printf '%s' "$line"
+}
+
 # How many processes on this container match `claude` right now, logged on
 # every bring-up. Pure observation: it kills nothing and fails nothing.
 #
@@ -1638,35 +1676,19 @@ if claude_launch_needed; then
   # container/server.ts already relies on for the byte-identical string
   # (its runClaude argv: `"--allowedTools", "Bash(git *) ... Edit Write"`):
   # hand claude the whole policy and let its own paren-aware tokenizer split
-  # it. The printf %q below is what keeps it one argument through the pane's
-  # bash re-parse, exactly as it already does for the multi-line prompt.
-  claude_args+=(--append-system-prompt "$role_prompt" --allowedTools "${ROLE_ALLOWED_TOOLS:-}")
+  # it. The printf %q in claude_launch_line is what keeps it one argument
+  # through the pane's bash re-parse. The role prompt itself is NOT in
+  # claude_args: claude_launch_line passes it by file (issue #6).
+  claude_args+=(--allowedTools "${ROLE_ALLOWED_TOOLS:-}")
   # Fleet CTO effort default (operator directive 2026-08-19): provision.ts
   # resolves this per-role (blueprint.ts's roleBringupEnv) — explicit
   # frontmatter effort wins, else "max" for the cto role, else empty. Empty
   # means claude's own default: only pass --effort when a real value is set.
   [ -n "${ROLE_EFFORT:-}" ] && claude_args+=(--effort "$ROLE_EFFORT")
-  # printf %q round-trips through the pane's own bash exactly once, so
-  # role_prompt's newlines/quotes survive as ONE argument instead of being
-  # re-word-split by an intermediate shell.
-  # `env -u TMUX -u TMUX_PANE` (issue #117): the pane's shell carries TMUX
-  # pointing at the studio's server, and a plain `tmux` honours $TMUX before
-  # anything else. Stripped here, the lead and every gate or test it spawns
-  # reach the DEFAULT server; the studio's is reachable only by name.
-  # `env` execs claude, so the pane still reads `claude`.
-  cmd_str="$(printf '%q ' env -u TMUX -u TMUX_PANE claude "${claude_args[@]}")"
-  # Start claude IN the checkout, not in the image's own WORKDIR. The pane
-  # inherits /container-server, while provision clones the work repo to
-  # /workspace/<repo> -- so a lead asked about README.md looked in
-  # /container-server, found none, and reasoned about the wrong tree
-  # entirely (observed 2026-08-20). Repo name is the id's first segment;
-  # the id grammar makes `--` the only delimiter, so the strip is exact.
-  #
-  # Guarded: if the checkout is missing (clone failed, or a bare container),
-  # cd would fail and `set -e` would kill bring-up before claude ever
-  # launches -- a studio that cannot clone must still come up attachable so
-  # the operator can see WHY. Falls back to the pane's own directory.
-  [ -n "${repo_dir:-}" ] && [ -d "$repo_dir" ] && cmd_str="cd $(printf '%q' "$repo_dir") && $cmd_str"
+  cmd_str="$(claude_launch_line "$role_prompt" "${repo_dir:-}" "${claude_args[@]}")"
+  # Issue #6: the typed line's size, on record in the bring-up log. It no
+  # longer grows with the brief; a large number here means it leaked back.
+  echo "studio-bringup: launch line is $(printf '%s' "$cmd_str" | wc -c | tr -d ' ') bytes (role prompt $(printf '%s' "$role_prompt" | wc -c | tr -d ' ') bytes, passed by file)" >&2
   # Issue #54: claude_launch observes what the keystrokes actually did.
   # Recorded, not acted on here — the transcript pipe-pane below is the only
   # record of WHY claude exited and the shell window is the operator's way
