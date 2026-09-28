@@ -9,7 +9,7 @@ import { GitHubError } from "../src/board/api";
 import type { BoardApi } from "../src/board/board";
 import type { BoardTask } from "../src/board/types";
 import type { Env } from "../src/env";
-import { isJuniorAuthorized } from "../src/junior/authz";
+import { isJuniorAuthorized, recordJuniorAuthorization } from "../src/junior/authz";
 
 // PR #9 review, blocker B1: fleet_state is not isolated per test (same as
 // agents.do.test.ts's own identical beforeEach) — the junior-authorization
@@ -240,6 +240,32 @@ describe("handleBoard", () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as BoardTask).state).toBe("working");
     expect(api.removeLabel).toHaveBeenCalledWith("acme-org/websites", 12, "submitted");
+  });
+
+  // Issue #10: a terminal state ends the task the maestro authorized. The
+  // record goes with it, so no later move back to a live state (a relabel,
+  // a reopen) brings junior access back.
+  it("#10: POST /tasks/:n/state to a terminal state revokes the junior record", async () => {
+    authorized();
+    await recordJuniorAuthorization(testEnv.DB, "acme-org/websites", 12, "acme--web-studio", 1000);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })) });
+    const res = await handleBoard(
+      req("/studio/board/tasks/12/state", { method: "POST", body: JSON.stringify({ from: "working", to: "canceled" }) }),
+      testEnv, api, reach,
+    );
+    expect(res.status).toBe(200);
+    expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(false);
+  });
+
+  it("#10: a live-to-live transition keeps the junior record", async () => {
+    authorized();
+    await recordJuniorAuthorization(testEnv.DB, "acme-org/websites", 12, "acme--web-studio", 1000);
+    const res = await handleBoard(
+      req("/studio/board/tasks/12/state", { method: "POST", body: JSON.stringify({ from: "submitted", to: "working" }) }),
+      testEnv, fakeApi(), reach,
+    );
+    expect(res.status).toBe(200);
+    expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(true);
   });
 
   it("409s a transition the Worker did not initiate", async () => {

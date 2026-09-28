@@ -38,7 +38,7 @@ import {
   openAssignedTasks,
   type BoardApi, type BoardResult, type ListTasksQuery, type OnAssigned,
 } from "./board";
-import { recordJuniorAuthorization } from "../junior/authz";
+import { recordJuniorAuthorization, revokeJuniorAuthorization } from "../junior/authz";
 import { wakeOnAssign, checkAssignRepo, type AssignWakeDeps, type AssignWakeReport } from "./assign-wake";
 import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify";
 import { openTasksWithLatestPr } from "./pr-landed";
@@ -49,7 +49,7 @@ import { listStudios } from "../studio/registry";
 import { isSpawnTokenShaped, resolveSpawnParent, SPAWN_TOKEN_HEADER } from "../studio/spawn";
 import { parseStudioId } from "../studio/ids";
 import type { StudioStatus } from "../studio/types";
-import { JUNIOR_LABEL, type BoardTask } from "./types";
+import { JUNIOR_LABEL, TERMINAL_TASK_STATES, type BoardTask } from "./types";
 import { guardBoardApi, leakGuard, LeakGateError, type LeakGuardDeps } from "./leak";
 import { OPS_DENYLIST_PATH } from "../leak-gate";
 import { resolveOpsRepo } from "../ops-repo";
@@ -522,6 +522,24 @@ async function recordJuniorAuthorizationIfNeeded(
 }
 
 /**
+ * Issue #10: a transition into a terminal state ends the task the maestro
+ * authorized, so its junior record goes too. Without this a lead could set
+ * `failed` then `working` and keep junior. Same failure posture as the record
+ * write above: logged and swallowed, the transition already happened.
+ */
+async function revokeJuniorAuthorizationIfTerminal(
+  env: Env, repo: string, result: BoardResult<BoardTask>,
+): Promise<BoardResult<BoardTask>> {
+  if (!result.ok || result.value.state === null || !TERMINAL_TASK_STATES.includes(result.value.state)) return result;
+  try {
+    await revokeJuniorAuthorization(env.DB, repo, result.value.number);
+  } catch (err) {
+    console.error(`board: junior authorization revoke failed for #${result.value.number} in ${repo}`, err);
+  }
+  return result;
+}
+
+/**
  * Issue #284 round 2: the repo-mismatch refusal used to run only AFTER
  * `createTask`/`assignTask` had already written the `studio:` label —
  * `wakeOnAssign` (above, in `withAssignWake`) only runs from board.ts's
@@ -645,7 +663,9 @@ export async function handleBoard(
       return respond(await listTasks(api, repo.value, query));
     }
     if (action === undefined) return respond(await showTask(api, repo.value, number));
-    if (action === "state") return respond(await transitionTask(api, repo.value, number, body));
+    if (action === "state") {
+      return respond(await revokeJuniorAuthorizationIfTerminal(env, repo.value, await transitionTask(api, repo.value, number, body)));
+    }
     // P5 §3's two assignment verbs. Both are on the OPERATOR surface and on
     // no other: the studio surface below has no route for either, so "an
     // agent never writes a studio label" is a fact about this Worker rather
@@ -821,7 +841,10 @@ export async function handleFleetBoard(
     // request field — the same rule every other branch on this surface
     // follows, and what makes "a lead moves only ITS OWN task" a fact about
     // this Worker rather than a claim the caller makes about itself.
-    if (action === "state") return respond(await transitionStudioTask(api, repo.value, number, body, studio.id));
+    if (action === "state") {
+      return respond(await revokeJuniorAuthorizationIfTerminal(
+        env, repo.value, await transitionStudioTask(api, repo.value, number, body, studio.id)));
+    }
     // Same stamp as handleBoard's own envelope branch: `msg_id` minted here,
     // once per comment. `sender` is stamped too on this surface — see
     // board.ts's commentStudioEnvelope for why a studio may not sign for

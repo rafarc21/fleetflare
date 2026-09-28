@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import { handleFleetJunior, normalizeAiResult, JUNIOR_BODY_CAP } from "../src/junior/route";
 import { juniorEnabled } from "../src/junior/gate";
-import { recordJuniorAuthorization } from "../src/junior/authz";
+import { isJuniorAuthorized, recordJuniorAuthorization } from "../src/junior/authz";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
@@ -220,6 +220,16 @@ describe("handleFleetJunior — maestro authorization", () => {
     const { token, rows, e } = await setup();
     const done = boardTask({ state: "completed", open: false, labels: ["completed", studioLabel(ME), "junior"] });
     expect((await handleFleetJunior(req(token, good), e, board([done]), rows)).status).toBe(403);
+  });
+  // Issue #10: GitHub sets state_reason "reopened" on reopen, and only a later
+  // close clears it. A closed-then-reopened task (whoever reopened it) is not
+  // the task the maestro authorized: 403, and its record is revoked for good.
+  it("#10: a reopened task does not regain junior access, and its record is revoked", async () => {
+    const { token, rows, e, run } = await setup();
+    const r = await handleFleetJunior(req(token, good), e, board([boardTask({ reopened: true })]), rows);
+    expect(r.status).toBe(403);
+    expect(run).not.toHaveBeenCalled();
+    expect(await isJuniorAuthorized(e.DB, REPO, 7, ME)).toBe(false);
   });
   it("403 when the junior task belongs to another studio", async () => {
     const { token, rows, e } = await setup();

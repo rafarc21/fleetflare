@@ -593,6 +593,17 @@ describe("listIssueTexts", () => {
   });
 });
 
+describe("toBoardTask — reopened (issue #10)", () => {
+  it("true only for GitHub's state_reason \"reopened\"", async () => {
+    respond = () => Response.json(issue({ state_reason: "reopened" }));
+    expect((await getIssue("t", "o/r", 12)).reopened).toBe(true);
+    for (const state_reason of [null, undefined, "completed", "not_planned"]) {
+      respond = () => Response.json(issue({ state_reason }));
+      expect((await getIssue("t", "o/r", 12)).reopened).toBe(false);
+    }
+  });
+});
+
 describe("toBoardTask — assignee (§5 assignment)", () => {
   it("reads exactly one studio: label as the owner", async () => {
     respond = () => Response.json(issue({ labels: [{ name: "submitted" }, { name: "studio:websites--web-studio" }] }));

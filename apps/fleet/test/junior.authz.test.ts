@@ -7,7 +7,7 @@
 // test/junior.route.test.ts exercises end to end.
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import { recordJuniorAuthorization, isJuniorAuthorized } from "../src/junior/authz";
+import { recordJuniorAuthorization, isJuniorAuthorized, revokeJuniorAuthorization } from "../src/junior/authz";
 
 const REPO = "acme-org/websites";
 const STUDIO = "websites--web-studio";
@@ -36,6 +36,14 @@ describe("junior authz (D1-backed, not a GitHub label)", () => {
   it("does not authorize the same task number in a different repo", async () => {
     await recordJuniorAuthorization(env.DB, REPO, 42, STUDIO, 1000);
     expect(await isJuniorAuthorized(env.DB, "acme-org/other", 42, STUDIO)).toBe(false);
+  });
+
+  it("#10: revoked records stop authorizing; other tasks keep theirs", async () => {
+    await recordJuniorAuthorization(env.DB, REPO, 42, STUDIO, 1000);
+    await recordJuniorAuthorization(env.DB, REPO, 43, STUDIO, 1000);
+    await revokeJuniorAuthorization(env.DB, REPO, 42);
+    expect(await isJuniorAuthorized(env.DB, REPO, 42, STUDIO)).toBe(false);
+    expect(await isJuniorAuthorized(env.DB, REPO, 43, STUDIO)).toBe(true);
   });
 
   it("survives a hand-written record that is not valid JSON — fails closed, never throws", async () => {

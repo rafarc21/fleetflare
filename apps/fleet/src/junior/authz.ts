@@ -23,7 +23,7 @@
 // (cli/task-format.ts's `[junior]` marker) reads to show a human the task was
 // authorized. That is a DISPLAY use, not a security one, and this file is
 // deliberately the only place that decides the real thing.
-import { getFlag, setFlag } from "../state";
+import { deleteFlag, getFlag, setFlag } from "../state";
 
 function authzKey(repo: string, issueNumber: number): string {
   return `junior-auth:${repo.toLowerCase()}:${issueNumber}`;
@@ -73,4 +73,17 @@ export async function isJuniorAuthorized(
   } catch {
     return false;
   }
+}
+
+/**
+ * Issue #10: the record ends with the task the maestro authorized. Called when
+ * the Worker moves the task to a terminal state (board/routes.ts) and when
+ * /fleet/junior finds it reopened (route.ts). Deleting, not flagging: no later
+ * relabel or reopen can bring an absent row back, and only the maestro's own
+ * create writes one.
+ */
+export async function revokeJuniorAuthorization(
+  db: D1Database, repo: string, issueNumber: number,
+): Promise<void> {
+  await deleteFlag(db, authzKey(repo, issueNumber));
 }
