@@ -100,7 +100,7 @@ export { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, st
 
 import { mintSpawnToken, hashSpawnToken } from "./org";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
-import { studioCredential, writeProxyOn } from "../write-proxy/mode";
+import { containerToken, studioCredential, writeModeFor } from "../write-proxy/mode";
 import {
   fetchRepoFile, createRepoFile, upsertRepoFile, listOpenPullNumbers, repoIsPrivate,
   // Issue #249 (PR4b): the survival re-brief's three GitHub reads, all from
@@ -4442,7 +4442,10 @@ export class StudioDO extends Sandbox<Env> {
       // token rides into the container (exec env of the clone).
       memoryToken: async () => {
         if (opsRepo === null) throw new Error("FLEET_OPS_REPO is unset -- no memory token to mint");
-        return mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } });
+        // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts).
+        const token = await containerToken(this.env, opsRepo, { contents: "read" });
+        if (token === null) throw new Error("no read-only token for the ops repo -- set GITHUB_READ_TOKEN");
+        return token;
       },
       // Issue #330: the operator's house-rules overlay, from the same ops
       // repo -- through its OWN port, a token scoped to that repo and
@@ -4527,7 +4530,11 @@ export class StudioDO extends Sandbox<Env> {
       // the start rather than merely being scoped to the right repo.
       writeBlueprintCredential: async (blueprintRepo: string) => {
         try {
-          const token = await mintRepoToken(this.env, blueprintRepo, { permissions: { contents: "read" } });
+          // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts).
+          const token = await containerToken(this.env, blueprintRepo, { contents: "read" });
+          if (token === null) {
+            return { ok: false as const, error: "no read-only token for the blueprint repo -- set GITHUB_READ_TOKEN (a public blueprint still clones anonymously)" };
+          }
           const res = await sbExec(this, blueprintCredentialWriteCmd(blueprintRepo), { ...EXEC_CLASSES.provision, env: tokenEnv(token) });
           if (res.code !== 0) {
             throw new Error(`blueprint credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
@@ -4555,7 +4562,10 @@ export class StudioDO extends Sandbox<Env> {
       // Issue #30: discovery reads the same remote rescue writes to.
       rescueTarget: (slug: string) => this.rescueTarget(async () => slug, "discovery"),
       // Issue #7: same visibility answer drives the push/gh routing.
-      writeProxy: { on: writeProxyOn(this.env), workerUrl: this.env.WORKER_PUBLIC_URL },
+      writeProxy: {
+        workerUrl: this.env.WORKER_PUBLIC_URL,
+        mode: (slug: string, isPrivate: boolean) => writeModeFor(this.env, slug, isPrivate),
+      },
       // Board #350: the repo gate and the presign-GET mint. Both optional on
       // ProvisionDeps (install-cache.ts's InstallCacheRestoreDeps doc
       // comment) — wired here unconditionally, since the gate itself (empty

@@ -120,6 +120,13 @@ export interface Env {
    * fleets need neither: the App token is narrowed to read at mint time.
    */
   GITHUB_READ_TOKEN?: string;
+  /**
+   * Issue #7, PAT fleets only: a fine-grained PAT with write access to the
+   * FLEET_RESCUE_REMOTE repo and nothing else. It rides into the container
+   * for rescue pushes; the fleet's own PAT never does. Unset on a PAT fleet =
+   * rescue goes to origin through the write proxy (scanned).
+   */
+  FLEET_RESCUE_GITHUB_TOKEN?: string;
   /** Optional: no wrangler.jsonc `vars` entry today. AgentDO falls back to claude-opus-5. */
   AGENT_MODEL?: string;
   /**

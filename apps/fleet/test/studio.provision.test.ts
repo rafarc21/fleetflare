@@ -1820,8 +1820,10 @@ describe("applyLeakGate — denylist delivery into the container (issue #1)", ()
   // Issue #7: the push/gh routing follows the same visibility answer.
   describe("write proxy config (issue #7)", () => {
     const WORKER = "https://fleet.example.workers.dev";
+    // The port's own mode rule is write-proxy/mode.ts's writeModeFor (tested
+    // there); this stand-in is its App shape: direct only when private.
     const withProxy = (g: ReturnType<typeof gateDeps>, on = true) => {
-      g.deps.writeProxy = { on, workerUrl: WORKER };
+      g.deps.writeProxy = { workerUrl: WORKER, mode: (_slug, isPrivate) => (on && !isPrivate ? "proxy" : "direct") };
       return g;
     };
 
@@ -1865,6 +1867,15 @@ describe("applyLeakGate — denylist delivery into the container (issue #1)", ()
       const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
       expect(status.state).toBe("running");
       expect(status.error).toContain("write proxy: git config failed");
+    });
+
+    it("the mode rule gets the work repo and the gate's own visibility answer", async () => {
+      const g = gateDeps({ isPrivate: true });
+      const mode = vi.fn((_slug: string, _isPrivate: boolean) => "proxy" as const);
+      g.deps.writeProxy = { workerUrl: WORKER, mode };
+      await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+      expect(mode).toHaveBeenCalledWith("acme-org/sample", true);
+      expect(g.cmds).toContain(writeProxyConfigCmd("proxy", WORKER));
     });
 
     it("absent port -> no proxy config at all", async () => {

@@ -255,11 +255,12 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
    * wrote. `{}`, absence or a throw = origin-only discovery.
    */
   rescueTarget?: (workRepoSlug: string) => Promise<RescueTarget>;
-   * Issue #7: route pushes and gh writes through the Worker. Applied with the
-   * same visibility answer as the gate above: public or unknown + `on` =
-   * proxy config, else direct (proxy keys removed). Absent = no step.
+  /**
+   * Issue #7: route pushes and gh writes through the Worker. `mode` gets the
+   * same visibility answer as the gate above (unknown = public) and decides
+   * (write-proxy/mode.ts's writeModeFor). Absent = no step.
    */
-  writeProxy?: { on: boolean; workerUrl: string };
+  writeProxy?: { workerUrl: string; mode: (slug: string, isPrivate: boolean) => "direct" | "proxy" };
   /**
    * Maestro correction #10 — issue #90 (currently blocked, but also touches
    * `runProvision`/`runRestart` directly) makes widening either function's
@@ -2188,7 +2189,7 @@ async function applyLeakGate(deps: ProvisionDeps, id: string, workRepoSlug: stri
   // Issue #7. A failed exec leaves pushes pointed at GitHub on the read-only
   // token: they fail, they never leak. Noted on the row.
   if (deps.writeProxy) {
-    const mode = deps.writeProxy.on && !isPrivate ? "proxy" : "direct";
+    const mode = deps.writeProxy.mode(workRepoSlug, isPrivate);
     let ok = false;
     try {
       const res = await deps.sbExec(writeProxyConfigCmd(mode, deps.writeProxy.workerUrl));

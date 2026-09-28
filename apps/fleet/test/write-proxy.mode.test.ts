@@ -2,13 +2,14 @@ import { describe, it, expect, vi } from "vitest";
 import type { Env } from "../src/env";
 import {
   writeProxyOn, resolveWriteMode, readTokenEnvName, studioReadToken, studioCredential,
-  STUDIO_READ_PERMISSIONS,
+  STUDIO_READ_PERMISSIONS, containerToken,
 } from "../src/write-proxy/mode";
 
 // Issue #7: which credential a studio holds. Fake owners only (example-org).
 
 const REPO = "example-org/demo";
 const envOf = (vars: Record<string, string>) => vars as unknown as Env;
+const APP = { GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k", GITHUB_INSTALLATION_ID: "2" };
 
 describe("writeProxyOn", () => {
   it("is on unless FLEET_WRITE_PROXY is exactly off", () => {
@@ -21,17 +22,20 @@ describe("writeProxyOn", () => {
 
 describe("resolveWriteMode", () => {
   it("public repo = proxy", async () => {
-    expect(await resolveWriteMode({}, REPO, async () => false)).toBe("proxy");
+    expect(await resolveWriteMode(envOf(APP), REPO, async () => false)).toBe("proxy");
   });
-  it("confirmed private repo = direct", async () => {
-    expect(await resolveWriteMode({}, REPO, async () => true)).toBe("direct");
+  it("confirmed private repo on the App (repo-scoped token) = direct", async () => {
+    expect(await resolveWriteMode(envOf(APP), REPO, async () => true)).toBe("direct");
+  });
+  it("confirmed private repo on a PAT = proxy: the PAT also writes the owner's public repos", async () => {
+    expect(await resolveWriteMode(envOf({ GITHUB_TOKEN: "w" }), REPO, async () => true)).toBe("proxy");
   });
   it("a visibility lookup that throws reads as public = proxy (fail closed)", async () => {
-    expect(await resolveWriteMode({}, REPO, async () => { throw new Error("github down"); })).toBe("proxy");
+    expect(await resolveWriteMode(envOf(APP), REPO, async () => { throw new Error("github down"); })).toBe("proxy");
   });
   it("kill switch = direct without asking visibility", async () => {
     const isPrivate = vi.fn(async () => false);
-    expect(await resolveWriteMode({ FLEET_WRITE_PROXY: "off" }, REPO, isPrivate)).toBe("direct");
+    expect(await resolveWriteMode(envOf({ ...APP, FLEET_WRITE_PROXY: "off" }), REPO, isPrivate)).toBe("direct");
     expect(isPrivate).not.toHaveBeenCalled();
   });
 });
@@ -64,10 +68,16 @@ describe("studioReadToken", () => {
 describe("studioCredential", () => {
   const env = envOf({ GITHUB_TOKEN: "write", GITHUB_READ_TOKEN: "read" });
 
-  it("direct mode = the write credential, as before #7", async () => {
+  it("direct mode (App, private repo) = the write credential, as before #7", async () => {
+    const app = envOf(APP);
     const mint = vi.fn(async () => "write-minted");
-    expect(await studioCredential(env, REPO, { isPrivate: async () => true, mint })).toBe("write-minted");
-    expect(mint).toHaveBeenCalledWith(env, REPO);
+    expect(await studioCredential(app, REPO, { isPrivate: async () => true, mint })).toBe("write-minted");
+    expect(mint).toHaveBeenCalledWith(app, REPO);
+  });
+
+  it("proxy mode: a failed read mint = null (credential cleared), never a stale write token", async () => {
+    const mint = vi.fn(async () => { throw new Error("mint 500"); });
+    expect(await studioCredential(envOf(APP), REPO, { isPrivate: async () => false, mint })).toBeNull();
   });
 
   it("proxy mode = the read credential", async () => {
@@ -79,5 +89,35 @@ describe("studioCredential", () => {
     const mint = vi.fn(async () => "write-minted");
     const bare = envOf({ GITHUB_TOKEN: "write" });
     expect(await studioCredential(bare, REPO, { isPrivate: async () => false, mint })).toBeNull();
+  });
+});
+
+// Review of #7, blocker 1: every OTHER token that rides into the container
+// (blueprint clone, memory clone, rescue) goes through this, so a PAT fleet
+// never hands the write PAT over under a "read" label.
+describe("containerToken", () => {
+  it("App: the repo-scoped mint, narrowed as asked", async () => {
+    const mint = vi.fn(async () => "ghs_x");
+    const app = envOf(APP);
+    expect(await containerToken(app, REPO, { contents: "read" }, mint)).toBe("ghs_x");
+    expect(mint).toHaveBeenCalledWith(app, REPO, { permissions: { contents: "read" } });
+  });
+
+  it("PAT + read: the read PAT, else null -- never the write PAT", async () => {
+    const mint = vi.fn(async () => "write");
+    expect(await containerToken(envOf({ GITHUB_TOKEN: "write", GITHUB_READ_TOKEN: "read" }), REPO, { contents: "read" }, mint)).toBe("read");
+    expect(await containerToken(envOf({ GITHUB_TOKEN: "write" }), REPO, { contents: "read" }, mint)).toBeNull();
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  it("PAT + write: null (a PAT cannot be scoped to one repo)", async () => {
+    const mint = vi.fn(async () => "write");
+    expect(await containerToken(envOf({ GITHUB_TOKEN: "write", GITHUB_READ_TOKEN: "read" }), REPO, { contents: "write" }, mint)).toBeNull();
+  });
+
+  it("kill switch: the pre-#7 mint", async () => {
+    const mint = vi.fn(async () => "write");
+    const off = envOf({ GITHUB_TOKEN: "write", FLEET_WRITE_PROXY: "off" });
+    expect(await containerToken(off, REPO, { contents: "read" }, mint)).toBe("write");
   });
 });
