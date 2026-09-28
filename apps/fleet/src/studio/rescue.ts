@@ -50,15 +50,33 @@ export function resolveRescueRemote(env: { FLEET_RESCUE_REMOTE?: string }): stri
  * loudly. Origin rescue runs through the leak-gate wrapper, so a denylist hit
  * refuses it (RESCUE_FAILED) rather than publish private text.
  * `mint` is do.ts's mintRepoToken, scoped contents:write to that repo.
+ *
+ * Issue #24: the archive is for PUBLIC work repos only. `workRepoIsPrivate`
+ * true → origin: a private repo's rescue stays in its own repo, never the
+ * fleet's archive. A throw → origin too, leak-gated, since visibility is
+ * unknown and origin is where that studio's work already lives.
  */
 export async function resolveRescueTarget(
   env: { FLEET_RESCUE_REMOTE?: string }, mint: (repo: string) => Promise<string>,
+  workRepoIsPrivate: () => Promise<boolean>,
 ): Promise<RescueTarget> {
   const slug = resolveRescueRemote(env);
   if (slug === null) {
     console.error(
       "rescue: FLEET_RESCUE_REMOTE is unset -- rescue pushes go to origin and are leak-gated; " +
       "a denylist hit or missing denylist refuses them; set FLEET_RESCUE_REMOTE",
+    );
+    return {};
+  }
+  try {
+    if (await workRepoIsPrivate()) {
+      console.error(`rescue: work repo is private -- rescue pushes go to its own origin, not ${slug}`);
+      return {};
+    }
+  } catch (err) {
+    console.error(
+      `rescue: work repo visibility check failed (${err instanceof Error ? err.message : String(err)}) -- ` +
+      `rescue pushes go to origin, not ${slug}, and are leak-gated`,
     );
     return {};
   }

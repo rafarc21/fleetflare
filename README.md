@@ -441,8 +441,10 @@ A studio whose work repo is private gets the gate switched off. See
 `apps/fleet/src/leak-gate.ts`.
 
 **`FLEET_RESCUE_REMOTE`** (optional, strongly recommended when your fork is
-public): the `owner/name` slug of a PRIVATE repo that receives every
-rescue push (`fleet/rescue/*` and friends) instead of `origin`. Set it with
+public): the `owner/name` slug of a PRIVATE repo that receives rescue
+pushes (`fleet/rescue/*` and friends) instead of `origin`, for studios whose
+work repo is PUBLIC only. A private work repo, or one whose visibility check
+fails, always rescues to its own `origin`. Set it with
 `scripts/deploy.sh secret put FLEET_RESCUE_REMOTE`. The GitHub App or token
 must be able to write that repo. Unset (or if the token mint fails), rescue pushes go to `origin` through
 the leak gate: a denylist hit, or no denylist at all, refuses that rescue and
