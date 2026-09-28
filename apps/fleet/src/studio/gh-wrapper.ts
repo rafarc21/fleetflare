@@ -1,4 +1,5 @@
 import { LEAK_DENYLIST_PATH, LEAK_SCAN_PATH, leakScanScript } from "../leak-gate";
+import { GH_PROXY_CLIENT, WRITE_PROXY_MARKER } from "../write-proxy/container-config";
 
 /**
  * Issue #1: the container `gh` wrapper. Installed at STUDIO_GH_WRAPPER_PATH,
@@ -25,11 +26,21 @@ import { LEAK_DENYLIST_PATH, LEAK_SCAN_PATH, leakScanScript } from "../leak-gate
  * scanner absent -- refuses with STUDIO_GH_LEAK_REFUSAL. The term is never
  * printed; the scanner names pattern indexes only.
  *
- * Imports only ../leak-gate: the install command is built in the Worker.
+ * Imports only ../leak-gate and write-proxy/container-config (constants).
  */
 
 export const STUDIO_GH_LEAK_REFUSAL = "fleet: leak gate refused this gh write";
 export const STUDIO_GH_ALIAS_REFUSAL = "fleet: leak gate refused a gh alias -- run the gh command directly";
+
+/** Issue #7: proxy mode, but the image predates fleet-gh-proxy. The token is
+ *  read-only, so the real gh would only 403; say why instead. */
+export const STUDIO_GH_PROXY_MISSING =
+  `fleet: this studio writes to GitHub through the fleet Worker, but ${GH_PROXY_CLIENT} is missing -- restart the studio on a current image`;
+
+/** Issue #7: the gh verbs fleet-gh-proxy carries to the Worker's /fleet/gh. */
+export const GH_PROXY_VERBS = [
+  "pr create", "pr edit", "pr ready", "pr comment", "pr review", "issue create", "issue edit", "issue comment",
+];
 
 /**
  * gh's built-in top-level commands (gh 2.95, hidden ones included). A first
@@ -45,7 +56,9 @@ export const GH_BUILTIN_COMMANDS = [
 export const STUDIO_REAL_GH_PATH = "/usr/bin/gh";
 export const STUDIO_GH_WRAPPER_PATH = "/usr/local/bin/gh";
 
-export function studioGhWrapperScript(realGh = STUDIO_REAL_GH_PATH, scanPath = LEAK_SCAN_PATH): string {
+export function studioGhWrapperScript(
+  realGh = STUDIO_REAL_GH_PATH, scanPath = LEAK_SCAN_PATH, marker = WRITE_PROXY_MARKER,
+): string {
   return [
     `#!/bin/bash`,
     `# fleet: issue #1 leak gate. gh writes are scanned before the real gh runs.`,
@@ -127,6 +140,15 @@ export function studioGhWrapperScript(realGh = STUDIO_REAL_GH_PATH, scanPath = L
     `rm -f "$argv"`,
     `# exec skips the EXIT trap: open the captured stdin, then unlink it.`,
     `if [ -n "$in" ]; then exec 0<"$in" || refuse; rm -f "$in"; fi`,
+    `# Issue #7: proxy mode = read-only token; write verbs go to the Worker.`,
+    `if [ -f '${marker}' ]; then`,
+    `  case "$cmd $sub" in`,
+    `    ${GH_PROXY_VERBS.map((v) => `'${v}'`).join("|")})`,
+    `      command -v ${GH_PROXY_CLIENT} >/dev/null 2>&1 || { echo "${STUDIO_GH_PROXY_MISSING}" >&2; exit 1; }`,
+    `      exec ${GH_PROXY_CLIENT} "$@"`,
+    `      ;;`,
+    `  esac`,
+    `fi`,
     `exec "$real" "$@"`,
   ].join("\n") + "\n";
 }
@@ -160,14 +182,14 @@ function installStep(path: string, script: string): string {
  * itself is NOT written here: the Worker writes it via writeFile.
  */
 export function leakGateInstallCmd(
-  opts: { scanPath?: string; ghWrapperPath?: string; realGh?: string; denylistPath?: string } = {},
+  opts: { scanPath?: string; ghWrapperPath?: string; realGh?: string; denylistPath?: string; writeProxyMarker?: string } = {},
 ): string {
   const scan = opts.scanPath ?? LEAK_SCAN_PATH;
   const wrapper = opts.ghWrapperPath ?? STUDIO_GH_WRAPPER_PATH;
   const real = opts.realGh ?? STUDIO_REAL_GH_PATH;
   return (
     `${installStep(scan, leakScanScript(opts.denylistPath ?? LEAK_DENYLIST_PATH))} && ` +
-    `${installStep(wrapper, studioGhWrapperScript(real, scan))} && ` +
+    `${installStep(wrapper, studioGhWrapperScript(real, scan, opts.writeProxyMarker))} && ` +
     `hash -r && ` +
     `[ "$(command -v gh)" = '${wrapper}' ] && ` +
     `chmod 0755 '${real}'`
