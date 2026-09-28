@@ -423,6 +423,26 @@ App or token must be able to read and write that repo (private is fine). See
 `apps/fleet/src/studio/provision.ts` / `apps/fleet/src/memory/store.ts` for
 how each feature reads from it.
 
+**Leak gate** (always on; issue #1): a studio whose work repo is public, or
+whose visibility cannot be confirmed, refuses any `git push` or `gh`
+issue/pr/api/release/gist write whose text matches a private denylist. The
+Worker applies the same check to every board task and comment it posts to a
+repo that is not confirmed private. The denylist is `public-denylist.txt` at the root
+of the `FLEET_OPS_REPO` repo: one extended regex per line, matched
+case-insensitively. It is never committed to this repo. Fail closed: with no
+`FLEET_OPS_REPO`, no file, an empty file or an invalid pattern, every such
+write is refused. A refusal names the pattern's line number, never the term.
+A studio whose work repo is private gets the gate switched off. See
+`apps/fleet/src/leak-gate.ts`.
+
+**`FLEET_RESCUE_REMOTE`** (optional, strongly recommended when your fork is
+public): the `owner/name` slug of a PRIVATE repo that receives every
+rescue push (`fleet/rescue/*` and friends) instead of `origin`. Set it with
+`scripts/deploy.sh secret put FLEET_RESCUE_REMOTE`. The GitHub App or token
+must be able to write that repo. Unset, rescue pushes still go to `origin` so
+no work is ever lost, and the Worker logs loudly that rescued work is public
+if `origin` is.
+
 **Telegram** (optional, off by default): the legacy `/tg` webhook, AgentDO
 tasks, DeployDO deploy approvals, and operator chat alerts all run only when
 the `FLEET_TELEGRAM` var (in your `wrangler.jsonc`'s `vars`, not a secret) is
