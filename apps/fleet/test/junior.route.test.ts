@@ -210,6 +210,33 @@ describe("handleFleetJunior — maestro authorization", () => {
   });
 });
 
+describe("handleFleetJunior — maestro exclusion (F2)", () => {
+  // Defense in depth beyond "the maestro never gets the junior skill" (Task
+  // 7's provision-time exclusion): even a maestro token that somehow reached
+  // this route must never get through. do.ts's own isMaestro() reads BOTH
+  // role and instance for the same reason (issue #269's singleton-role
+  // defense in depth) — this check matches it exactly rather than trusting
+  // "role === maestro" alone.
+  const MAESTRO = "websites--maestro";
+  it("403s a maestro-identified studio immediately — before board lookup, before body processing", async () => {
+    const token = mintSpawnToken();
+    const rows = async () => [row(MAESTRO, await hashSpawnToken(token))];
+    const run = vi.fn(async () => ({ response: "x" }));
+    const e = { ...env, AGENT_REPO: REPO, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+    const maestroTask = boardTask({ labels: ["working", studioLabel(MAESTRO), "junior"], assignee: MAESTRO });
+    const api = board([maestroTask]);
+    // Even a D1 record that would otherwise authorize this exact studio/task
+    // must not save it — the maestro exclusion runs first and is absolute.
+    await recordJuniorAuthorization(e.DB, REPO, maestroTask.number, MAESTRO, Date.now());
+
+    const r = await handleFleetJunior(req(token, good), e, api, rows);
+
+    expect(r.status).toBe(403);
+    expect(run).not.toHaveBeenCalled();
+    expect(api.listIssues).not.toHaveBeenCalled();
+  });
+});
+
 describe("normalizeAiResult", () => {
   it("legacy { response } shape", () => {
     expect(normalizeAiResult({ response: "r" })).toEqual({ content: "r", finish: null, usage: { in: 0, out: 0, neurons: null } });
