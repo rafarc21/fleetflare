@@ -14,7 +14,7 @@ import {
 } from "../src/studio/provision";
 import {
   restartWithSync, recycleWithSync, checkProvisionedWithRetry, CHECK_ATTEMPTS,
-  rescuePush, rescuePushCmd, RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_PUSHED_PREFIX, RESCUE_FAILED_PREFIX,
+  rescuePush, rescuePushCmd, rescueSnapshot, rescueSnapshotCmd, RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_PUSHED_PREFIX, RESCUE_FAILED_PREFIX,
   RescuePushFailedError,
   harvestLearnings, harvestRecordCmd, HARVEST_NO_RECORD, type CommitLearningFile, type ResolveMemoryRepo,
   archiveDoneRecords, doneRecordsListCmd, type DoneRecordPorts,
@@ -2390,7 +2390,9 @@ describe("rescuePushCmd — the shell shape rescue-push commits and pushes with"
     // Issue #359: `$nv` carries --no-verify only when `$target` is a
     // generated fleet/rescue/... ref — see rescue_push()'s own doc comment
     // in rescue.ts.
-    expect(cmd).toContain('git -C "$w" push $nv origin "HEAD:refs/heads/$target"');
+    // Issue #1 piece 5: real git + configurable destination (origin by default).
+    expect(cmd).toContain('"${__rgit[@]}" -C "$w" push $nv "$__rdest" "HEAD:refs/heads/$target"');
+    expect(cmd).toContain("__rgit=('/usr/bin/git'); __rdest=origin");
     expect(cmd).toContain(`echo "${RESCUE_NO_CHECKOUT}"`);
     expect(cmd).toContain(`echo "${RESCUE_CLEAN}"`);
     expect(cmd).toContain(RESCUE_PUSHED_PREFIX);
@@ -2453,6 +2455,51 @@ describe("rescuePushCmd — the shell shape rescue-push commits and pushes with"
 
   it("never bare `cd`s — every git subcommand is `git -C <dir>`, so it cannot leak a cwd into the next sbExec call on the same shared session", () => {
     expect(rescuePushCmd("websites", STUDIO_ID)).not.toMatch(/(^|[;&|(\s])cd\b/);
+  });
+});
+
+// Issue #1 piece 5: deps.rescueTarget (do.ts wires FLEET_RESCUE_REMOTE + a
+// minted token) picks the push URL; its env rides the exec, never the cmd.
+describe("rescuePush/rescueSnapshot — private rescue remote wiring", () => {
+  function withTarget(target: { remoteUrl?: string; env?: Record<string, string> } | undefined) {
+    const base = fakeSyncDeps();
+    const envs: (Record<string, string> | undefined)[] = [];
+    const deps: SessionSyncDeps = {
+      ...base,
+      exec: async (cmd: string, env?: Record<string, string>) => { envs.push(env); return base.exec(cmd); },
+      ...(target ? { rescueTarget: async () => target } : {}),
+    };
+    return { deps, base, envs };
+  }
+  const URL = "https://github.com/acme/rescue-vault.git";
+
+  it("rescuePush: target set -- cmd pushes to that URL, token env passed to exec, token never in the cmd", async () => {
+    const { deps, base, envs } = withTarget({ remoteUrl: URL, env: { FLEET_RESCUE_TOKEN: "ghs_fake" } });
+    await rescuePush(deps, "websites", STUDIO_ID);
+    expect(base.execCalls).toEqual([
+      rescuePushCmd("websites", STUDIO_ID, undefined, undefined, undefined, undefined, undefined, undefined, { remoteUrl: URL }),
+    ]);
+    expect(base.execCalls[0]).toContain(`__rdest='${URL}'`);
+    expect(base.execCalls[0]).not.toContain("ghs_fake");
+    expect(envs).toEqual([{ FLEET_RESCUE_TOKEN: "ghs_fake" }]);
+  });
+
+  it("rescueSnapshot: target set -- same URL + env wiring", async () => {
+    const { deps, base, envs } = withTarget({ remoteUrl: URL, env: { FLEET_RESCUE_TOKEN: "ghs_fake" } });
+    await rescueSnapshot(deps, "websites", STUDIO_ID);
+    expect(base.execCalls).toEqual([
+      rescueSnapshotCmd("websites", STUDIO_ID, undefined, undefined, undefined, undefined, undefined, undefined, { remoteUrl: URL }),
+    ]);
+    expect(envs).toEqual([{ FLEET_RESCUE_TOKEN: "ghs_fake" }]);
+  });
+
+  it("empty target (unset / mint failed) or no rescueTarget port: origin, exec gets no env", async () => {
+    for (const t of [{}, undefined]) {
+      const { deps, base, envs } = withTarget(t);
+      await rescuePush(deps, "websites", STUDIO_ID);
+      expect(base.execCalls).toEqual([rescuePushCmd("websites", STUDIO_ID)]);
+      expect(envs).toEqual([undefined]);
+    }
   });
 });
 

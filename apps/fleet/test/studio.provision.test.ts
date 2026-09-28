@@ -20,10 +20,14 @@ import {
 } from "../src/studio/provision";
 import { appendHouseRules, base64EncodeUtf8, BlueprintError } from "../src/studio/blueprint";
 import { recordStudio } from "../src/studio/registry";
-import { gatedStateIn, opsFileFetcher } from "../src/studio/do";
+import { gatedStateIn, opsFileFetcher, installLeakGatePort } from "../src/studio/do";
+import { leakGateInstallCmd } from "../src/studio/gh-wrapper";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { memoryCloneCmd, MEMORY_TOKEN_ENV } from "../src/memory/store";
+import {
+  LEAK_DENYLIST_PATH, LEAK_GATE_OFF, LEAK_GATE_ON, OPS_DENYLIST_PATH, denylistFileContent,
+} from "../src/leak-gate";
 
 const REPO_SLUG = "acme-org/websites";
 
@@ -1432,5 +1436,220 @@ describe("the operator ops-repo overlay end to end (issue #330 round 2) — reso
 
     expect(status.state).toBe("running");
     expect(status.error).toContain("rafarc21/fleetflare-ops");
+  });
+});
+
+// Issue #1: the leak gate reaches every studio container at provision AND
+// restart -- scanner + gh wrapper installed, the private denylist written as
+// a file (never a command string), and a stale gate file removed whenever the
+// Worker cannot deliver one, so the wrappers fail closed.
+describe("applyLeakGate — denylist delivery into the container (issue #1)", () => {
+  const STUDIO_WORK_CFG = { repo: "sample", role: "web-studio", repoSlug: "acme-org/sample" };
+  const OPS = "acme-org/fleet-ops";
+  const DENYLIST = "acmeclient\nacme-secret-\\d+\n";
+  const RM = `rm -f ${LEAK_DENYLIST_PATH}`;
+
+  function studioFetch(): ProvisionDeps["fetchBlueprintFile"] {
+    return vi.fn(async (_repo: string, path: string, ref: string) => {
+      if (path === "fleet.json") return FAKE_FLEET_JSON;
+      if (path === "fleet/blueprint/studios/web-studio/studio.md") return FAKE_STUDIO_MD;
+      if (path === "fleet/blueprint/studios/web-studio/members") return FAKE_MEMBERS_LISTING;
+      if (path === "fleet/blueprint/studios/web-studio/members/frontend-developer.md") return FAKE_MEMBER_FRONTEND_MD;
+      if (path === "fleet/blueprint/studios/web-studio/members/qa-engineer.md") return FAKE_MEMBER_QA_MD;
+      throw notFound(path, ref);
+    });
+  }
+
+  // `ops` null = FLEET_OPS_REPO unset. A file value of Error = the fetch throws.
+  function gateDeps(opts: { ops?: string | null; file?: string | Error; isPrivate?: boolean | Error; noHouseRules?: boolean } = {}) {
+    const cmds: string[] = [];
+    const writes: { path: string; text: string }[] = [];
+    const ops = opts.ops === undefined ? OPS : opts.ops;
+    const file = opts.file === undefined ? DENYLIST : opts.file;
+    const fetchOpsFile = vi.fn(async (path: string, ref: string) => {
+      if (path === OPS_DENYLIST_PATH) {
+        if (file instanceof Error) throw file;
+        return file;
+      }
+      if (path === OPS_HOUSE_RULES_PATH && !opts.noHouseRules) return "## Operator house rules";
+      throw notFound(path, ref);
+    });
+    const installLeakGate = vi.fn(async () => ({ ok: true as const }));
+    const workRepoIsPrivate = vi.fn(async () => {
+      if (opts.isPrivate instanceof Error) throw opts.isPrivate;
+      return opts.isPrivate ?? false;
+    });
+    const deps: ProvisionDeps = {
+      sbExec: vi.fn(async (cmd: string) => {
+        cmds.push(cmd);
+        return { code: 0, stdout: "", stderr: "" };
+      }),
+      recordStudio: (status: StudioStatus) => recordStudio(env as unknown as Env, status),
+      now: () => "2026-09-28T00:00:00.000Z",
+      fetchBlueprintFile: studioFetch(),
+      writeFile: vi.fn(async (path: string, bytes: Uint8Array) => {
+        writes.push({ path, text: new TextDecoder().decode(bytes) });
+      }),
+      installLeakGate,
+      workRepoIsPrivate,
+      ...(ops === null ? {} : { opsRepo: ops, fetchOpsFile }),
+    };
+    return { deps, cmds, writes, fetchOpsFile, installLeakGate, workRepoIsPrivate };
+  }
+
+  it("public work repo + denylist present -> gate file written with the on header and every pattern, no rm", async () => {
+    const g = gateDeps();
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(status.state).toBe("running");
+    expect(g.workRepoIsPrivate).toHaveBeenCalledWith("acme-org/sample");
+    expect(g.writes).toEqual([
+      { path: LEAK_DENYLIST_PATH, text: denylistFileContent({ patterns: ["acmeclient", "acme-secret-\\d+"] }) },
+    ]);
+    expect(g.writes[0].text.startsWith(`${LEAK_GATE_ON}\n`)).toBe(true);
+    expect(g.cmds).not.toContain(RM);
+    expect(status.error).toBeNull();
+  });
+
+  it("terms never ride a command string or the row", async () => {
+    const g = gateDeps();
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(g.cmds.join("\n")).not.toContain("acmeclient");
+    expect(JSON.stringify(status)).not.toContain("acmeclient");
+  });
+
+  it("install cmd issued through installLeakGate on provision", async () => {
+    const g = gateDeps();
+    await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(g.installLeakGate).toHaveBeenCalledTimes(1);
+  });
+
+  it("private work repo -> off header naming the repo, denylist never fetched", async () => {
+    const g = gateDeps({ isPrivate: true });
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(g.writes).toEqual([
+      { path: LEAK_DENYLIST_PATH, text: denylistFileContent({ off: "work repo acme-org/sample is private" }) },
+    ]);
+    expect(g.writes[0].text.startsWith(LEAK_GATE_OFF)).toBe(true);
+    expect(g.fetchOpsFile.mock.calls.map((c) => c[0])).not.toContain(OPS_DENYLIST_PATH);
+    expect(status.error).toBeNull();
+  });
+
+  it("privacy lookup throws -> treated as public (fail closed): patterns written", async () => {
+    const g = gateDeps({ isPrivate: new Error("github 502") });
+    await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(g.writes[0].text.startsWith(`${LEAK_GATE_ON}\n`)).toBe(true);
+  });
+
+  // Mutant: a missing denylist must never become a pass (no gate file = the
+  // wrappers refuse). A stale file from an earlier provision is removed.
+  it("FLEET_OPS_REPO unset -> rm -f the gate file, nothing written, note on the row, still running", async () => {
+    const g = gateDeps({ ops: null });
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(status.state).toBe("running");
+    expect(g.writes).toEqual([]);
+    expect(g.cmds).toContain(RM);
+    expect(status.error).toContain("leak gate: no denylist");
+    expect(status.error).toContain(OPS_DENYLIST_PATH);
+  });
+
+  it("denylist 404 -> rm -f + note", async () => {
+    const g = gateDeps({ file: notFound(OPS_DENYLIST_PATH, "HEAD") });
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(g.writes).toEqual([]);
+    expect(g.cmds).toContain(RM);
+    expect(status.error).toContain("leak gate: no denylist");
+  });
+
+  it("empty denylist (parse error) -> rm -f + note, never an empty on-list", async () => {
+    const g = gateDeps({ file: "\n\n" });
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(g.writes).toEqual([]);
+    expect(g.cmds).toContain(RM);
+    expect(status.error).toContain("leak gate: no denylist");
+  });
+
+  it("gate file write fails -> rm -f + note", async () => {
+    const g = gateDeps();
+    g.deps.writeFile = vi.fn(async () => { throw new Error("sandbox writeFile failed"); });
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(status.state).toBe("running");
+    expect(g.cmds).toContain(RM);
+    expect(status.error).toContain("leak gate: no denylist");
+  });
+
+  it("install failure -> note on the row, denylist still delivered", async () => {
+    const g = gateDeps();
+    g.deps.installLeakGate = vi.fn(async () => ({ ok: false as const, error: "exit 1" }));
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(status.state).toBe("running");
+    expect(status.error).toContain("leak gate: scanner/gh wrapper install failed");
+    expect(g.writes).toHaveLength(1);
+  });
+
+  it("note joins the house-rules overlay note on the row", async () => {
+    const g = gateDeps({ file: notFound(OPS_DENYLIST_PATH, "HEAD"), noHouseRules: true });
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(status.error).toContain(OPS_HOUSE_RULES_PATH);
+    expect(status.error).toContain("leak gate: no denylist");
+  });
+
+  it("restart re-installs and re-delivers the gate (fresh container filesystem)", async () => {
+    const storage = fakeStorage();
+    await provisionWithStorage(gateDeps().deps, storage, STUDIO_WORK_CFG, REPO_SLUG);
+
+    const g = gateDeps();
+    g.deps.fetchBlueprintFile = vi.fn(async () => { throw new Error("restart must not refetch the blueprint"); });
+    const status = await restartWithStorage(g.deps, storage, "sample--web-studio", "rafarc21/fleetflare");
+
+    expect(status.state).toBe("running");
+    expect(g.installLeakGate).toHaveBeenCalledTimes(1);
+    expect(g.workRepoIsPrivate).toHaveBeenCalledWith("acme-org/sample");
+    expect(g.writes.map((w) => w.path)).toEqual([LEAK_DENYLIST_PATH]);
+  });
+
+  it("restart with no denylist -> rm -f + note on the row", async () => {
+    const storage = fakeStorage();
+    await provisionWithStorage(gateDeps().deps, storage, STUDIO_WORK_CFG, REPO_SLUG);
+
+    const g = gateDeps({ ops: null });
+    const status = await restartWithStorage(g.deps, storage, "sample--web-studio", "rafarc21/fleetflare");
+
+    expect(status.state).toBe("running");
+    expect(g.cmds).toContain(RM);
+    expect(status.error).toContain("leak gate: no denylist");
+  });
+
+  it("absence is a no-op: no installLeakGate port -> no gate exec, no write, no note", async () => {
+    const g = gateDeps({ ops: null });
+    delete g.deps.installLeakGate;
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(g.cmds).not.toContain(RM);
+    expect(g.writes).toEqual([]);
+    expect(status.error).toBeNull();
+  });
+});
+
+describe("installLeakGatePort — do.ts's installLeakGate body (issue #1)", () => {
+  it("runs leakGateInstallCmd() in one exec; ok on exit 0", async () => {
+    const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+    expect(await installLeakGatePort(exec)).toEqual({ ok: true });
+    expect(exec).toHaveBeenCalledWith(leakGateInstallCmd());
+  });
+
+  it("non-zero exit or a throw -> ok:false, never throws", async () => {
+    expect((await installLeakGatePort(vi.fn(async () => ({ code: 1, stdout: "", stderr: "boom" })))).ok).toBe(false);
+    expect((await installLeakGatePort(vi.fn(async () => { throw new Error("gone"); }))).ok).toBe(false);
   });
 });
