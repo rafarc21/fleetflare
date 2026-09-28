@@ -1869,6 +1869,68 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
     expect(privRefs()).toEqual(refs);
   });
 
+  // Issue #16: provision clones `--depth 1`. An empty private remote rejects
+  // a shallow push ("shallow update not allowed") -- it lacks the parents
+  // behind the shallow boundary. Rescue now pushes a parentless snapshot of
+  // the same tree instead: the content survives, the history cut does not.
+  describe("issue #16 — a --depth 1 checkout still rescues to an empty private remote", () => {
+    beforeEach(() => {
+      const origin3 = join(dir, "origin3.git");
+      const seed = join(dir, "seed");
+      sh(`git init -q --bare -b main ${origin3}`);
+      sh(`git clone -q ${origin3} ${seed} 2>/dev/null; cd ${seed} && ` +
+        `for f in a b c; do echo "$f" > "$f.md" && git add "$f.md" && git commit -q -m "$f"; done && git push -q origin HEAD:main`);
+      rmSync(checkout, { recursive: true, force: true });
+      sh(`git clone -q --depth 1 file://${origin3} ${checkout}`);
+      expect(sh(`git -C ${checkout} rev-parse --is-shallow-repository`).out).toBe("true");
+    });
+
+    function privTreeFiles(ref: string): string[] {
+      return sh(`git -C ${priv} ls-tree -r --name-only ${ref}`).out.split("\n").filter(Boolean);
+    }
+
+    test("rescuePushCmd, dirty shallow checkout: RESCUE_PUSHED, and the private ref holds the whole tree plus the dirty file", () => {
+      writeFileSync(join(checkout, "notes.md"), "shallow work\n");
+
+      const out = pushPriv();
+
+      expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 files$`, "m"));
+      const ref = privRefs().find((r) => r.includes("fleet/rescue/"));
+      expect(ref).toBeDefined();
+      expect(privTreeFiles(ref!)).toEqual(["a.md", "b.md", "c.md", "notes.md"]);
+      expect(sh(`git -C ${priv} show ${ref}:notes.md`).out).toBe("shallow work");
+      expect(sh(`git -C ${priv} rev-parse ${ref}^{tree}`).out).toBe(sh(`git -C ${checkout} rev-parse HEAD^{tree}`).out);
+    });
+
+    test("rescuePushCmd, clean-but-ahead shallow checkout: RESCUE_PUSHED, and the private ref holds HEAD's exact tree", () => {
+      writeFileSync(join(checkout, "d.md"), "d\n");
+      sh(`git -C ${checkout} add d.md && git -C ${checkout} commit -q -m d`);
+
+      const out = pushPriv();
+
+      expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 commits$`, "m"));
+      const ref = privRefs().find((r) => r.includes("fleet/rescue/"));
+      expect(ref).toBeDefined();
+      expect(sh(`git -C ${priv} rev-parse ${ref}^{tree}`).out).toBe(sh(`git -C ${checkout} rev-parse HEAD^{tree}`).out);
+      expect(privTreeFiles(ref!)).toEqual(["a.md", "b.md", "c.md", "d.md"]);
+    });
+
+    test("rescueSnapshotCmd, dirty shallow checkout: RESCUE_PUSHED, and the private ref holds the dirty file", () => {
+      writeFileSync(join(checkout, "notes.md"), "live shallow work\n");
+
+      const out = snapPriv();
+
+      expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 files$`, "m"));
+      const ref = privRefs().find((r) => r.includes("fleet/rescue/"));
+      expect(ref).toBeDefined();
+      expect(privTreeFiles(ref!)).toEqual(["a.md", "b.md", "c.md", "notes.md"]);
+      expect(sh(`git -C ${priv} show ${ref}:notes.md`).out).toBe("live shallow work");
+    });
+  });
+
   test("rescueSnapshotCmd: dirty tree, branch walk and stash walk all land on the private remote, NOT origin", () => {
     writeFileSync(join(checkout, "notes.md"), "snap\n");
     sh(`cd ${checkout} && git checkout -q -b feat && git commit -q --allow-empty -m "feat work" && git checkout -q main`);
