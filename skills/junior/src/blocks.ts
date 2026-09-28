@@ -29,8 +29,11 @@ function outsideRepo(path: string): boolean {
 }
 
 function count(hay: string, needle: string): number {
+  // Advance by 1, not needle.length: self-overlapping needles (e.g. "  " inside
+  // "a   b") must be counted as ambiguous (2+ matches), never silently collapsed
+  // to 1 by skipping past an overlapping occurrence.
   let n = 0;
-  for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + needle.length)) n++;
+  for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + 1)) n++;
   return n;
 }
 
@@ -41,6 +44,12 @@ export function applyBlocks(
   const after = new Map(before);
   for (const [i, b] of blocks.entries()) {
     const n = i + 1;
+    // A blank or missing path line (e.g. two blocks chained with no repeated
+    // path header, or a stray blank line above "<<<<<<< SEARCH") makes the
+    // path-capturing regex match an empty string via ^ + /m. Reject that here
+    // rather than let it silently become a "" path key that can crash later
+    // (join(root, "b", "") resolves to a directory, not a file).
+    if (b.path === "") return { ok: false, error: `block ${n}: missing file path` };
     if (outsideRepo(b.path)) return { ok: false, error: `block ${n}: path ${b.path} is outside the repository` };
     if (b.search === "") {
       if (before.has(b.path) || after.has(b.path) || existsOnDisk(b.path)) {
