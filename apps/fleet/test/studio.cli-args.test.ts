@@ -611,3 +611,17 @@ describe("fleet rescue-all — issue #251", () => {
     expect(parseCliArgs(["rescue-all", "--repo"]).cmd).toBe("usage");
   });
 });
+
+// Task 8: `fleet junior enable|disable|status` — local opt-in, never touches
+// the Worker or any studio.
+describe("fleet junior", () => {
+  it("junior verbs", () => {
+    expect(parseCliArgs(["junior", "enable"])).toEqual({ cmd: "junior", action: "enable" });
+    expect(parseCliArgs(["junior", "enable", "--account", "abc"])).toEqual({ cmd: "junior", action: "enable", account: "abc" });
+    expect(parseCliArgs(["junior", "disable"])).toEqual({ cmd: "junior", action: "disable" });
+    expect(parseCliArgs(["junior", "status"])).toEqual({ cmd: "junior", action: "status" });
+    expect(parseCliArgs(["junior"]).cmd).toBe("usage");
+    expect(parseCliArgs(["junior", "nuke"]).cmd).toBe("usage");
+    expect(parseCliArgs(["junior", "enable", "--acount", "x"]).cmd).toBe("usage");
+  });
+});
