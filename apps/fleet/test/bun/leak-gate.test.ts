@@ -137,6 +137,22 @@ describe("fleet-leak-scan (container scanner script)", () => {
     expect(r.stderr).toContain(LEAK_SCAN_ERROR);
   });
 
+  // Mutant: scanner errors swallowed -> a pass. The stderr check above masks
+  // grep's exit-2 branch for a real bad regex, so this pins that branch on
+  // its own: a grep that fails silently must still refuse.
+  test("a grep that exits 2 with no stderr refuses (mutant: scanner errors swallowed -> a pass)", () => {
+    const bin = mkdtempSync(join(tmpdir(), "fleet-leak-bin-"));
+    try {
+      writeFileSync(join(bin, "grep"), "#!/bin/sh\nexit 2\n");
+      chmodSync(join(bin, "grep"), 0o755);
+      const r = scanner(ON, { ...process.env, PATH: `${bin}:${process.env.PATH}` } as Record<string, string>).run("plain text\n");
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(LEAK_SCAN_ERROR);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
   // Mutant: grep stderr ignored -> a pattern grep only WARNS about (GNU
   // "stray \\ before d", "? at start of expression") exits 1 = clean. BSD
   // grep has no portable warning trigger, so a fake grep first on PATH warns.
