@@ -29,9 +29,13 @@ Non-goals:
 
 ## 3. Write mode per studio
 
-One decision, `writeMode(env, workRepo)`:
-- `direct` — `FLEET_WRITE_PROXY=off`, OR work repo CONFIRMED private.
+One decision, `writeModeFor(env, repo, isPrivate)` (`mode.ts`):
+- `direct` — `FLEET_WRITE_PROXY=off`, OR (work repo CONFIRMED private AND
+  App auth). App token = `repositories: [repo]` only.
 - `proxy` — everything else. Visibility lookup error = public = `proxy`.
+  PAT + private repo = `proxy` too: PAT writes every repo of its owner,
+  public ones included (review finding). Scan skipped there (confirmed
+  private), routing kept.
 
 Default ON. `FLEET_WRITE_PROXY=off` = operator kill switch (logged per
 provision). Same fail-closed read as #2's `applyLeakGate`.
@@ -63,6 +67,15 @@ write PAT: that is the failure this issue closes.
 
 Write token (App write mint / write PAT) now lives Worker-side only for
 `proxy` studios.
+
+Every OTHER container-bound token goes through `containerToken` (review
+finding 1: PAT path ignores `permissions`, so each "read" mint was the write
+PAT):
+- blueprint clone file, memory clone env: App = narrowed mint; PAT = read
+  PAT or none (row/log note; public blueprint clones anonymously).
+- rescue token: App = contents:write mint scoped to the rescue repo; PAT =
+  `FLEET_RESCUE_GITHUB_TOKEN` (rescue-repo-only PAT) or none → origin.
+- proxy-mode mint failure = credential cleared, never stale.
 
 ## 5. Git push: receive-pack proxy
 
@@ -118,14 +131,15 @@ Body = pkt-lines (`<old> <new> <ref>` [`\0caps` on first]) + flush + pack.
 - `Content-Encoding: gzip` → decompress first. Any other encoding → refuse.
 - Caps requested include `push-options`/`push-cert` → refuse.
 - Pack required iff any command is not a delete.
-- Pack: `PACK`, version 2, N objects, N entries, 20-byte SHA-1 trailer,
+- Pack: `PACK`, version 2 or 3 (same entry format), N objects, N entries, 20-byte SHA-1 trailer,
   nothing after. Trailer verified.
 - Entry types: commit, tree, blob, tag, OFS_DELTA, REF_DELTA. REF_DELTA base
   must be in-pack (no-thin). Unknown base → refuse.
 - Inflate: zlib (header, deflate, adler32). Own inflater: must report bytes
   consumed to find next entry; `DecompressionStream` cannot. Inflated size
   must equal header size.
-- Caps: body 16 MiB, total inflated 64 MiB (Worker 128 MB memory). Over →
+- Caps: body 16 MiB, total inflated (delta output included) 24 MiB
+  (Worker 128 MB: body + objects + decoded text). Over →
   `413` naming the cap. Rescue unaffected (private remote, own token).
 
 ### 5.6 What is scanned
@@ -134,7 +148,9 @@ Superset of wrapper's scan. Joined with `\n`, one `scanText` call:
 - Ref names (every command).
 - Commit objects: raw text (author, committer, message, extra headers).
 - Tag objects: raw text (tagger, message).
-- Blobs: full content, UTF-8 decode (non-fatal). Full, not added lines:
+- Blobs: full content, UTF-8 decode (non-fatal); BOM-marked UTF-16 also
+  decoded as UTF-16 (GitHub renders it).
+- Commit/tag with `encoding` header other than UTF-8 → refuse. Full, not added lines:
   a public repo must hold no denylisted term anyway; stricter side.
 - Tree paths: full path from each in-pack commit root. Every tree on a
   changed path is new, so in-pack; walk stops at out-of-pack subtrees.
@@ -186,6 +202,8 @@ needs a client for gh verbs. Chosen: **op RPC**.
 ### 6.2 Route
 
 `POST /fleet/gh` JSON `{op, ...}`. Spawn-token auth, repo = work repo (§5.3).
+Optional `repo` on every op (client's `-R` or URL repo). ≠ work repo → 403,
+never silently rewritten to the work repo.
 Worker validates shape, scans every string field via `leakGuard`, then
 calls GitHub with its write token.
 
@@ -230,8 +248,11 @@ Credential refresh (every 50 min) re-evaluates mode.
 
 ## 8. Rescue
 
-- `FLEET_RESCUE_REMOTE` set: unchanged. Real git, own contents:write token
-  for the private repo, not via proxy.
+- `FLEET_RESCUE_REMOTE` set AND confirmed private AND a token (§4): real
+  git, own token, not via proxy. The rescue push pins its URL
+  (`-c url.<u>.pushInsteadOf=<u>`, longest match wins) so proxy mode's
+  global `pushInsteadOf` cannot redirect it. Not private / no token →
+  origin, loud log.
 - Unset: rescue pushes plain `git` to origin → wrapper → pushInsteadOf →
   proxy → scanned. Hit = refused, logged loudly (same as #2).
 
@@ -259,6 +280,9 @@ Credential refresh (every 50 min) re-evaluates mode.
 4. Deploy rebuilds the studio image (new `fleet-gh-proxy`).
 5. Kill switch: `FLEET_WRITE_PROXY=off`.
 6. Existing studios: restart to pick up read token + config.
+7. **Rotate the write PAT** (PAT fleets): every pre-#7 studio held it.
+8. PAT fleets: read PAT must also read private blueprint + ops repos
+   (memory clone). Rescue to private remote: `FLEET_RESCUE_GITHUB_TOKEN`.
 
 ## 11. Testing
 
@@ -275,3 +299,7 @@ Credential refresh (every 50 min) re-evaluates mode.
 - Container can still read via its read token. Reads leak nothing.
 - Worker holds the write token. Compromise of Worker = same as today.
 - Denylist quality bounds everything. Unchanged from #2.
+- Text GitHub renders but scan cannot see as text: HTML entities in
+  markdown, other encodings without BOM. Denylist can add entity forms.
+- Hostile pack ordering can make delta resolution slow; Worker CPU limit
+  kills it = refused (fail closed).

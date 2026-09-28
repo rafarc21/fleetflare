@@ -466,6 +466,12 @@ write). Pushes over 16 MiB are refused; split them. Operator setup:
   fine-grained PAT (`GITHUB_READ_TOKEN_<OWNER>` per owner, like
   `GITHUB_TOKEN_<OWNER>`). Without one, studios read their public repo
   anonymously (low `gh` rate limits); the write PAT never reaches them.
+  The read PAT also needs read access to a private blueprint or ops repo.
+  PAT studios on a private repo are proxied too: a PAT can write every repo
+  of its owner. Rotate the write PAT once deployed: earlier studios held it.
+- Rescue to `FLEET_RESCUE_REMOTE` needs that repo to be private; PAT fleets
+  also set `FLEET_RESCUE_GITHUB_TOKEN` (a PAT that can write only that repo).
+  Otherwise rescue goes to origin through the proxy.
 - Restart running studios after deploying (new image, new credential).
 - `FLEET_WRITE_PROXY=off` (a `vars` entry) turns it off and hands studios
   their write credential again. See `apps/fleet/src/write-proxy/`.
