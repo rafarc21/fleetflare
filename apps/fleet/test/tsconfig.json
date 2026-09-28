@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // bun:test file, not a Worker — same "types": ["bun"] override
+    // cli/tsconfig.json and test-integration/tsconfig.json already use, and
+    // the same DOM/Bun-vs-workers-types collision reason (see
+    // test-integration/tsconfig.json's own comment): kept OUT of the root
+    // project's "test/**/*.ts" include (../tsconfig.json's own "exclude")
+    // instead of loading both type sets into one project.
+    "types": ["bun"]
+  },
+  "include": ["bun/**/*.ts", "studio.studio-blueprint.test.ts", "studio.files.test.ts"],
+  // "extends" inherits ../tsconfig.json's "exclude" too (path-adjusted) —
+  // without this override it would exclude the one file this project exists
+  // to include, right back out.
+  "exclude": []
+}

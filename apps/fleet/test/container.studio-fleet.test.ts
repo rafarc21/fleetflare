@@ -1,0 +1,223 @@
+import { env } from "cloudflare:test";
+import { describe, it, expect } from "vitest";
+
+// container/studio-fleet — Fleet Spawn P3, Task 3 (R-P3-2/R-P3-7).
+//
+// No `.ts` extension by design (baked verbatim into the studio image and
+// exec'd directly via its own shebang — see that file's own header), so it
+// is outside `tsc -p container`'s `**/*.ts` include and cannot be imported
+// as a module either way. Source-pinned instead, injected as
+// TEST_STUDIO_FLEET_SRC by vitest.config.ts — the SAME technique
+// test/container.args.test.ts already uses for container/server.ts, and
+// test/studio.session.test.ts uses for container/studio-bringup.sh. Every
+// fragment pinned below was ALSO verified live: `bun run container/
+// studio-fleet` was run directly for --help/no-args/bad-command/missing-role
+// (env absent, so exit 2 was reached for the actual spawn attempt too), and
+// a real HTTP round trip against a throwaway local server proved the
+// success (200 -> "spawned <id> (<state>)", exit 0) and failure (401 -> the
+// server's own body on stderr, exit 1) paths end to end. Review fix round 1
+// added a top-level main().catch() (see that test's own comment below) —
+// its uncaught-vs-caught behavior was live-verified the same way, before
+// and after the fix, with an actual malformed FLEET_WORKER_URL. See
+// task-3-report.md (base report + fix round section) for every transcript.
+const src = () => env.TEST_STUDIO_FLEET_SRC;
+
+describe("container/studio-fleet — source assertions", () => {
+  it("is a bun script, directly executable via its own shebang", () => {
+    expect(src().startsWith("#!/usr/bin/env bun\n")).toBe(true);
+  });
+
+  it("guarded so importing this file never runs main() on its own", () => {
+    expect(src()).toContain("if (import.meta.main) {");
+  });
+
+  // Review fix round 1: main() previously ran unguarded (`main();`) — a
+  // synchronous throw deep inside it (buildSpawnRequest's `new URL(...)` on
+  // a malformed FLEET_WORKER_URL) surfaced as a raw, multi-line Bun stack
+  // dump instead of this file's own one-line `studio-fleet: ...` convention
+  // every other error path already follows. Live-executed with an actual
+  // malformed FLEET_WORKER_URL after this fix (task-3-report.md's fix round
+  // section has the full transcript) — vitest-pool-workers runs test files
+  // inside workerd, which cannot spawn a real bun subprocess, so that
+  // execution check lives outside this file, the same way the Docker smoke
+  // and the real HTTP round-trip in the ORIGINAL report both do. This test
+  // pins the source-level guarantee that makes that behavior possible.
+  it("main() is wrapped in a top-level .catch() that uses the file's own error convention and exits non-zero", () => {
+    expect(src()).toContain("main().catch((err) => {");
+    expect(src()).toMatch(
+      /main\(\)\.catch\(\(err\) => \{\s*console\.error\(`studio-fleet: \$\{err instanceof Error \? err\.message : String\(err\)\}`\);\s*process\.exit\(1\);/,
+    );
+  });
+
+  it("--help / -h / bare invocation all resolve to the help branch", () => {
+    expect(src()).toContain(
+      'if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") return { kind: "help" };',
+    );
+  });
+
+  it("only \"spawn\", \"task\" and \"memory\" are recognised commands; anything else is a usage error naming what it expected", () => {
+    expect(src()).toContain('if (argv[0] !== "spawn") {');
+    expect(src()).toContain('expected "spawn", "task" or "memory"');
+    // P5 §9: the Release Studio runs the compaction pass from inside its own
+    // container at sprint close, so the verb has to exist on THIS binary.
+    expect(src()).toContain('if (argv[0] === "memory") return parseMemoryArgs(argv.slice(1));');
+    expect(src()).toContain('fleet memory compact');
+    // The help must say what a demotion does, since "demote" reads like
+    // "delete" to anyone who has not read the spec.
+    expect(src()).toContain("never deletes a memory file");
+  });
+
+  it("spawn requires a role argument", () => {
+    expect(src()).toContain('if (!role) return { kind: "usage-error", message: "spawn: missing <role>" };');
+  });
+
+  it("a usage error exits 1", () => {
+    expect(src()).toContain('if (cmd.kind === "usage-error") {');
+    expect(src()).toMatch(/if \(cmd\.kind === "usage-error"\) \{[\s\S]{0,200}process\.exit\(1\);/);
+  });
+
+  // The env-absent contract (R-P3-2's own binding: "Env absent → clear error
+  // exit 2") — pure resolveEnv (env passed in, not read from process.env
+  // inside it) names EXACTLY which var(s) are missing, and main()'s call
+  // site is what turns that into exit 2, distinct from every other error
+  // path's exit 1 above/below.
+  it("resolveEnv is pure (env passed as a parameter, not read from process.env inside it) and names the missing var(s)", () => {
+    expect(src()).toContain(
+      "export function resolveEnv(env: Record<string, string | undefined>): SpawnEnv | { error: string } {",
+    );
+    expect(src()).toContain("const workerUrl = env.FLEET_WORKER_URL;");
+    expect(src()).toContain("const token = env.FLEET_SPAWN_TOKEN;");
+    expect(src()).toContain('missing.join(", ")');
+  });
+
+  it("env-absent exits 2, distinct from every other error path's exit 1", () => {
+    expect(src()).toMatch(/if \("error" in spawnEnv\) \{[\s\S]{0,80}process\.exit\(2\);/);
+  });
+
+  it("the request is POST /fleet/spawn with the exact X-Fleet-Spawn-Token header spawn.ts expects, and a {role} JSON body", () => {
+    expect(src()).toContain('const SPAWN_TOKEN_HEADER = "X-Fleet-Spawn-Token";');
+    expect(src()).toContain('new URL("/fleet/spawn", env.workerUrl).toString()');
+    expect(src()).toContain('method: "POST",');
+    expect(src()).toContain("headers: { [SPAWN_TOKEN_HEADER]: env.token,");
+    expect(src()).toContain("body: JSON.stringify({ role }),");
+  });
+
+  it("a non-ok response prints the server's own error body and exits 1 (never swallowed)", () => {
+    expect(src()).toMatch(/if \(!res\.ok\) \{[\s\S]{0,200}process\.exit\(1\);/);
+    // P4a-2 named the command in this line (`built.what`) — spawn is no longer
+    // the only thing this binary does, and "spawn failed" on a `task report`
+    // would send a lead debugging the wrong call.
+    expect(src()).toContain("${built.what} failed (${res.status}): ${text}");
+  });
+
+  it("a network failure (fetch itself throwing) is caught and exits 1, never an uncaught rejection", () => {
+    expect(src()).toContain("} catch (err) {");
+    expect(src()).toContain("request to ${built.url} failed:");
+  });
+
+  it("success prints the child's id and state, not the raw response verbatim", () => {
+    expect(src()).toContain('return `spawned ${status.id ?? "?"} (${status.state ?? "?"})`;');
+  });
+
+  it("never logs the spawn token itself under any code path (grep for the literal env var name, not just usage)", () => {
+    // The token flows only through `env.token` (the resolved SpawnEnv) and
+    // the request init's headers — never string-interpolated into a
+    // console.log/console.error anywhere in the file.
+    expect(src()).not.toMatch(/console\.(log|error)\([^)]*FLEET_SPAWN_TOKEN/);
+    expect(src()).not.toMatch(/console\.(log|error)\([^)]*\benv\.token\b/);
+  });
+});
+
+// --- P4a-2: the board verbs -------------------------------------------------
+//
+// Same source-pinning technique as everything above (this file is baked into
+// the image and exec'd via its own shebang, so it cannot be imported as a
+// module here). The parse half is ALSO exercised as real code — `bun -e` over
+// the actual file — during live verification; these pins are what keeps the
+// wire contract from drifting away from src/board/routes.ts's own route
+// grammar without a test noticing.
+
+describe("container/studio-fleet — the board verbs (P4a-2)", () => {
+  it("task ls / show <n> / report <n> / state <n> <to> are the four, and <n> must be numeric", () => {
+    expect(src()).toContain('if (sub === "ls") return { kind: "task-ls" };');
+    expect(src()).toContain('if (sub !== "show" && sub !== "report" && sub !== "state") {');
+    expect(src()).toContain("expected ls, show, report or state");
+    expect(src()).toContain("missing or non-numeric <n>");
+  });
+
+  it("there is still NO create verb — a studio does not open tasks", () => {
+    // Not a convention this script keeps: the Worker serves no such route to
+    // a spawn token (src/board/routes.ts's FLEET_BOARD_ROUTE_RE). Pinned here
+    // so adding one to this CLI cannot pass unnoticed.
+    expect(src()).not.toContain('"task-new"');
+  });
+
+  // Board issue #41, half two: the verb that closes the loop. A task a lead
+  // is ACTIVELY working used to sit at `submitted` until a coordinator moved
+  // it by hand, so every monitor read a healthy studio as stalled.
+  describe("task state <n> <to> (board issue #41)", () => {
+    it("offers exactly the three states a lead may set", () => {
+      expect(src()).toContain('const LEAD_TASK_STATES = ["working", "input_required", "failed"];');
+    });
+
+    it("refuses `completed` in the CLI itself, naming who owns that verdict — no request is even built", () => {
+      expect(src()).toContain("a lead may not mark its own task completed");
+      expect(src()).toContain("verifies");
+      // Client-side courtesy only. The Worker refuses it too, which is the
+      // enforcement — see src/board/board.ts's LEAD_TASK_STATES.
+      expect(src()).toContain("the Worker refuses it too");
+    });
+
+    it("POSTs {to} to /fleet/tasks/<n>/state and sends no label call of any kind", () => {
+      expect(src()).toContain("buildTaskRequest(env, `/${cmd.number}/state`, JSON.stringify({ to: cmd.to }))");
+      // The whole point: the lead asks, the Worker writes. Nothing in this
+      // binary ever reaches GitHub.
+      expect(src()).not.toContain("api.github.com");
+      expect(src()).not.toContain("gh issue");
+    });
+
+    it("the help text says which three states, and that completed is not one of them", () => {
+      expect(src()).toContain("fleet task state <n> <working|input_required|failed>");
+      expect(src()).toContain("You cannot mark your own task completed");
+    });
+
+    it("prints the before -> after the Worker actually wrote, not the state that was asked for", () => {
+      expect(src()).toContain("task ${cmd.number} is now ${moved.state ?? \"?\"}");
+    });
+  });
+
+  it("every board call goes to /fleet/tasks with the same one spawn-token header", () => {
+    expect(src()).toContain('new URL(`/fleet/tasks${path}`, env.workerUrl).toString()');
+    expect(src()).toContain("[SPAWN_TOKEN_HEADER]: env.token");
+  });
+
+  it("no `repo` is ever sent — the Worker decides which board this studio reads", () => {
+    expect(src()).not.toMatch(/JSON\.stringify\(\{[^}]*\brepo\b/);
+    expect(src()).toContain("resolveStudioBoardRepo");
+  });
+
+  it("the envelope is read from STDIN, and an empty stdin is refused rather than posted", () => {
+    expect(src()).toContain("const body = await Bun.stdin.text();");
+    expect(src()).toContain('if (body.trim() === "") {');
+    expect(src()).toContain("reads the envelope JSON from stdin");
+  });
+
+  it("the help text carries a copyable heredoc and the §6 enums, so a lead never has to guess the shape", () => {
+    expect(src()).toContain("fleet task report 71 <<'EOF'");
+    expect(src()).toContain("intent: request|result|error|clarify|escalate");
+    expect(src()).toContain("status: ok|partial|failed|blocked");
+    expect(src()).toContain("The Worker stamps msg_id, task_id, schema_version and");
+  });
+
+  it("the help text states the single-writer rule to the agent that could break it", () => {
+    // Board issue #41 narrowed the rule from "you never move a task's state"
+    // to "you never write a label": the lead now ASKS (fleet task state), and
+    // the Worker is still the only thing that writes.
+    expect(src()).toContain("The Worker is the single writer of the board");
+    expect(src()).toContain("Never label, close or reopen a board");
+  });
+
+  it("an empty listing says so rather than printing nothing", () => {
+    expect(src()).toContain('return "(no tasks assigned to this studio)";');
+  });
+});

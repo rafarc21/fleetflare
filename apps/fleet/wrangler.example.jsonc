@@ -1,0 +1,173 @@
+// Example Worker config for your own fleet. Secrets are set with
+// `scripts/deploy.sh secret put <NAME>` (never a bare `wrangler secret
+// put` — see that script's own header for why), never here:
+// CLAUDE_CODE_OAUTH_TOKEN, and GITHUB_TOKEN (fine-grained PAT) or
+// GITHUB_APP_PRIVATE_KEY for a GitHub App, GITHUB_WEBHOOK_SECRET, plus
+// ACCESS_TEAM_DOMAIN and ACCESS_AUD for the Cloudflare Access app in front
+// of /studio. See ../../docs/threat-model.md.
+// Board #350 (install cache, opt-in via INSTALL_CACHE_REPOS below) needs
+// three more if you turn it on: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
+// R2_SECRET_ACCESS_KEY — an R2 API token scoped to ONLY the bucket named
+// under "r2_buckets" below, never account-wide (src/studio/install-cache.ts's
+// own header names exactly what each is for).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Copy this file to your own `$FLEET_CONFIG` location (e.g.
+  // `fleet/wrangler.jsonc` in your own ops-repo-equivalent checkout — see
+  // scripts/deploy.sh) and replace every `<PLACEHOLDER>` below with your own
+  // value. This template's own placeholders all use the literal `<YOUR_`
+  // prefix on purpose: scripts/deploy.sh refuses to deploy while that
+  // substring is still present, so copy-then-forget-to-fill-in fails loudly
+  // instead of deploying garbage.
+  //
+  // Cloudflare account: if `wrangler whoami` shows more than one account, add
+  // `"account_id": "<YOUR_CLOUDFLARE_ACCOUNT_ID>"` at this level, or export
+  // CLOUDFLARE_ACCOUNT_ID before running wrangler commands (README's
+  // Quickstart uses the env-var form) — this template omits the field
+  // entirely, matching the maintainer's own config, which relies on
+  // wrangler's single-account default.
+  "name": "<YOUR_WORKER_NAME>",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    // The FLEET repo: where fleet.json lives (src/studio/repo.ts's header
+    // names the three repos this one string used to conflate), and the
+    // default WORK repo for a caller that names none. See that file's header
+    // for the full role this plays.
+    "AGENT_REPO": "<YOUR_GITHUB_ORG>/<YOUR_REPO>",
+    // "main" is a sane default for any fork; the maintainer's own fleet
+    // points this at "staging" as a personal branching choice, not something
+    // an adopter needs to copy.
+    "AGENT_BASE_REF": "main",
+    "MAX_TASK_SECONDS": "900",
+    // Non-secret (see env.ts's own doc comment on GITHUB_APP_ID/
+    // GITHUB_INSTALLATION_ID) — set once you've installed your GitHub App
+    // (README's Quickstart, step 3).
+    "GITHUB_APP_ID": "<YOUR_GITHUB_APP_ID>",
+    "GITHUB_INSTALLATION_ID": "<YOUR_GITHUB_INSTALLATION_ID>",
+    // P6c: installation id PER OWNER (src/github/app.ts's installationEnvName),
+    // only needed once your fleet reaches a SECOND GitHub owner (org or
+    // personal account) beyond the one GITHUB_INSTALLATION_ID above covers.
+    // Name derived by uppercasing the owner and replacing every
+    // non-alphanumeric character with `_`. Example for an owner "acme-corp"
+    // (uncomment and add one line per extra owner):
+    // "GITHUB_INSTALLATION_ID_ACME_CORP": "<YOUR_GITHUB_INSTALLATION_ID_ACME_CORP>",
+    //
+    // P6a repo auth (src/github/auth.ts) — owner -> provider, comma-separated
+    // `owner=provider`, `*` as the wildcard. Optional: absent means every
+    // owner falls back to GITHUB_TOKEN when set, else the App. Only add an
+    // entry for an owner you want pinned to the App path, e.g.:
+    // "GITHUB_REPO_AUTH": "<YOUR_GITHUB_ORG>=app",
+    "BURN_ALERT_OUTPUT_TOKENS_5H": "0",
+    // Fleet Spawn P3, Task 3: this Worker's own deployed address, threaded
+    // into every studio container as FLEET_WORKER_URL. Non-secret (a
+    // *.workers.dev address, not a credential). Fill in once you know your
+    // worker name and workers.dev subdomain (`wrangler whoami` shows the
+    // subdomain, or `wrangler deploy` prints the full URL the first time).
+    "WORKER_PUBLIC_URL": "https://<YOUR_WORKER_NAME>.<YOUR_WORKERS_DEV_SUBDOMAIN>.workers.dev",
+    // Issue #271, optional: per-repo primary Claude account, JSON string
+    // (repo part of <repo>--<role> -> account slot). Unmapped repos use the
+    // first set account. Omitted here since it's fleet-specific; example
+    // shape if you want it:
+    // "CLAUDE_ACCOUNT_BY_REPO": "{\"<your-repo-name>\":2}"
+    //
+    // Board #350, optional: per-repo install cache, comma-separated
+    // "owner/repo" list — opt in ONLY a repo whose cold `bun install` is
+    // genuinely slow enough to be worth it (install-cache.ts's own header:
+    // 623s measured for the repo this shipped for; most repos are break-even
+    // or slower with the cache than without). Off (absent) by default; needs
+    // the three R2_* secrets named at the top of this file. Example:
+    // "INSTALL_CACHE_REPOS": "<your-org>/<your-slow-repo>"
+    //
+    // Board issue #334: operator-specific features. Off/neutral by default in
+    // this public template — turn one on only once you actually run it.
+    // FLEET_TELEGRAM gates the legacy Telegram surface (/tg webhook, AgentDO
+    // tasks, DeployDO approvals, operator alerts); needs secrets
+    // TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET and var
+    // TELEGRAM_OPERATOR_ID (the one sender /tg obeys, the one chat alerts go
+    // to). FLEET_DIRECTUS gates the Directus project card in studio prompts;
+    // needs DIRECTUS_URL and secret DIRECTUS_TOKEN. FLEET_AUTO_FAILOVER
+    // switches Claude accounts automatically on a usage limit; needs more
+    // than one CLAUDE_CODE_OAUTH_TOKEN_<n>. With FLEET_TELEGRAM off, AgentDO
+    // and DeployDO stay declared (removing a Durable Object class needs a
+    // migration) but nothing reaches them, so their containers never start.
+    "FLEET_TELEGRAM": "off",
+    "FLEET_DIRECTUS": "off",
+    "FLEET_AUTO_FAILOVER": "off",
+    // Issue #335: must match r2_buckets[0].bucket_name below exactly
+    // (install-cache.ts's presignR2 signs URLs against this value). Not a
+    // secret — a bucket name isn't a credential.
+    "R2_BUCKET_NAME": "<YOUR_R2_BUCKET_NAME>",
+    // Issue #335: the git identity a rescue commit is authored as. Optional
+    // — absent uses a neutral built-in default ("fleetflare[bot]").
+    "FLEET_BOT_NAME": "<YOUR_BOT_NAME>",
+    "FLEET_BOT_EMAIL": "<YOUR_BOT_EMAIL>"
+    //
+    // ACCESS_TEAM_DOMAIN / ACCESS_AUD (Access JWT verification for /studio/*,
+    // P1 auth.ts) intentionally NOT here. Set both with
+    // `scripts/deploy.sh secret put` instead (README's Quickstart, step
+    // 4/5) — a committed var of the same
+    // name would collide with the secret at deploy time (wrangler rejects or
+    // shadows it). Secrets are authoritative.
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "<YOUR_D1_DATABASE_NAME>",
+      "database_id": "<YOUR_D1_DATABASE_UUID>",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "STUDIO_ARCHIVE", "bucket_name": "<YOUR_R2_BUCKET_NAME>" }
+  ],
+  "durable_objects": {
+    // Issue #379: wrangler >= 4.141 defaults Durable Object code updates to
+    // "deferred" (a live instance keeps the OLD code for up to 5 minutes).
+    // The fleet wants every DO on the new code at deploy, as before.
+    "code_update_strategy": { "mode": "immediate" },
+    "bindings": [
+      { "name": "AGENT", "class_name": "AgentDO" },
+      { "name": "DEPLOY", "class_name": "DeployDO" },
+      { "name": "STUDIO", "class_name": "StudioDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AgentDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["DeployDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["StudioDO"] }
+  ],
+  "containers": [
+    {
+      "class_name": "AgentDO",
+      "image": "./container/Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 3
+    },
+    {
+      "class_name": "DeployDO",
+      "image": "./container/Dockerfile.deploy",
+      "instance_type": "standard-1",
+      "max_instances": 2
+    },
+    {
+      "class_name": "StudioDO",
+      "image": "./container/Dockerfile.studio",
+      // Build context pinned to apps/fleet (this config's own directory)
+      // rather than wrangler's default (the directory holding the
+      // Dockerfile, i.e. ./container) — see the maintainer's own config for
+      // the full reasoning. apps/fleet/.dockerignore keeps that wider
+      // context cheap.
+      "image_build_context": ".",
+      // Build ARGs for Dockerfile.studio. ENABLE_CAVEMAN_PLUGIN="true" bakes
+      // the caveman plugin into every studio image (issue #330); off here.
+      "image_vars": { "ENABLE_CAVEMAN_PLUGIN": "false" },
+      "instance_type": "standard-1",
+      "max_instances": 5,
+      "rollout_step_percentage": 100
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "edges": {
+    "operator": ["pilot", "scratch", "maestro", "web-studio", "release-studio"],
+    "pilot": ["scratch"],
+    "maestro": ["web-studio", "release-studio"]
+  },
+  "gates": {
+    "merge": ["release"],
+    "deploy": ["release"]
+  }
+}

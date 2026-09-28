@@ -1,0 +1,26 @@
+diff --git a/.github/workflows/fleet-check.yml b/.github/workflows/fleet-check.yml
+index bf5932e..f1b3761 100644
+--- a/.github/workflows/fleet-check.yml
++++ b/.github/workflows/fleet-check.yml
+@@ -50,5 +50,21 @@ jobs:
+       - name: tmux (the real-terminal lane needs it)
+         run: tmux -V || (sudo apt-get update && sudo apt-get install -y tmux)
+ 
++      # test/bun/ego-browser-*.test.ts (board issue #30) drive a REAL
++      # Chrome-for-Testing via playwright-core -- container/ego-browser/
++      # daemon.ts launches it from a hardcoded /usr/local/bin/chromium,
++      # same path container/Dockerfile.studio's own chromium install
++      # symlinks to. This runner does not ship that image, so both the
++      # download and the symlink are reproduced here explicitly, same
++      # "install what this lane needs deterministically" reasoning as the
++      # tmux step just above -- skipping this would let a green CI mean
++      # "the persistence/smoke tests never actually ran", which is exactly
++      # the false-signal failure mode board issue #30 exists to close.
++      - name: chromium (the ego-browser lane needs a real browser)
++        run: |
++          bun x playwright install chromium --with-deps
++          sudo ln -sf "$(echo ~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome)" /usr/local/bin/chromium
++          chromium --version
++
+       - name: Container tests (bun-test)
+         run: bun run bun-test

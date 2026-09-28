@@ -1,0 +1,455 @@
+#!/usr/bin/env bun
+/**
+ * In-container spawn CLI — Fleet Spawn P3, Task 3 (R-P3-2/R-P3-7).
+ *
+ * Baked into the studio image at /opt/fleet/studio-fleet (Dockerfile.studio),
+ * symlinked to /usr/local/bin/fleet — the exact binary name every role's
+ * `allowedTools` already grants claude (`Bash(fleet *)`, byte-identical to
+ * the string container/server.ts's OWN task image uses for ITS OWN
+ * /usr/local/bin/fleet, a wrapper around container/fleet-cli.ts). These are
+ * two DIFFERENT binaries sharing one name on purpose: each is scoped to its
+ * own container class (task vs studio) and neither image ever installs the
+ * other. This file has ZERO relative imports — self-contained, same
+ * convention container/fleet-cli.ts and container/server.ts already keep —
+ * so nothing about building the studio image depends on the Worker's `src/`
+ * tree.
+ *
+ * `studio-fleet spawn <role>` calls POST /fleet/spawn on the deployed
+ * Worker (R-P3-7's machine surface — deliberately OUTSIDE the
+ * Access-protected /studio path, since a container holds a spawn token, not
+ * an Access service token). The one auth header below is the ENTIRE
+ * credential; there is nothing else in this script, matching
+ * src/studio/spawn.ts's SPAWN_TOKEN_HEADER/spawnBody contract exactly (kept
+ * as a literal here, not imported — see this file's own note above on why).
+ *
+ * P4a-2 adds the board verbs against `/fleet/tasks*`, the same machine
+ * surface with the same one header: `task ls`, `task show <n>`, and `task
+ * report <n>` (the §6 envelope, read from stdin). Deliberately NO create verb
+ * — a studio does not open tasks; the Worker is the single writer of the
+ * board. There is no route here for one, so this is a fact about the server,
+ * not a convention this script keeps.
+ *
+ * Board issue #41 adds `task state <n> <to>`, and narrows the rule above
+ * rather than breaking it. The gap it closes was measured: a task a lead was
+ * ACTIVELY working sat at `submitted` until a coordinator moved it by hand,
+ * so every monitor watching board state read a healthy working studio as
+ * stalled — a false negative in the expensive direction. What the lead now
+ * has is a ROUTE, not a credential: it POSTs a destination, and the Worker —
+ * still the only thing in this system holding a GitHub token — decides and
+ * writes the label. The destination is restricted server-side to `working`,
+ * `input_required` and `failed` (src/board/board.ts's LEAD_TASK_STATES).
+ * `completed` is refused, because that is the verdict of whoever VERIFIES the
+ * work and never of whoever did it.
+ *
+ * Both env vars below are injected by do.ts's studioEnvVars into the tmux
+ * SERVER's captured environment at bring-up (FLEET_WORKER_URL from the new
+ * WORKER_PUBLIC_URL wrangler var, FLEET_SPAWN_TOKEN from Fleet Spawn P3 Task
+ * 1) — every pane, including this one, inherits both with no extra wiring.
+ */
+
+const HELP = `usage: fleet spawn <role>
+       fleet task ls | fleet task show <n> | fleet task report <n>
+       fleet task state <n> <working|input_required|failed>
+       fleet memory ls | fleet memory compact
+
+  fleet spawn <role>    Spawn a peer studio under THIS studio's org-chart
+                        edges (fleet/blueprint/org.json, enforced server-side
+                        by the Worker — this script only proves WHICH studio
+                        is asking, never what it may do). Prints the child's
+                        id and state on success, the server's error body
+                        otherwise.
+
+  fleet task ls         The tasks assigned to THIS studio. Nobody else's.
+  fleet task show <n>   One of them, with its brief and every comment.
+  fleet task report <n> Post your §6 envelope as a comment on task <n>.
+                        The envelope JSON comes from STDIN:
+
+                          fleet task report 71 <<'EOF'
+                          {
+                            "intent": "result",
+                            "status": "ok",
+                            "artifacts": [{"kind": "pr", "pr": "84"}],
+                            "evidence": ["bun run test -> 1065 passed"],
+                            "open_questions": [],
+                            "context_digest": ["chose X over Y because ..."],
+                            "notes": "caveman prose for the human"
+                          }
+                          EOF
+
+                        intent: request|result|error|clarify|escalate
+                        status: ok|partial|failed|blocked
+                        The Worker stamps msg_id, task_id, schema_version and
+                        sender — you cannot set them, and you do not need to.
+
+  fleet task state <n> <to>
+                        Move YOUR OWN task to working, input_required or
+                        failed. Do it the moment you start: a task left at
+                        submitted while you work reads as a stalled studio to
+                        every monitor watching the board.
+
+                          fleet task state 41 working
+
+                        You cannot mark your own task completed. That is the
+                        verdict of whoever VERIFIES the work, not of whoever
+                        did it — report your result and let the verifier
+                        close it. You also cannot cancel a task or move
+                        anybody else's.
+
+  fleet memory ls       Fleet memory, measured: every index line, plus each
+                        file's citation count, age and verdict.
+  fleet memory compact  Run P5 §9's compaction pass (sprint close). Proposal
+                        JSON on STDIN; empty stdin rebuilds the index only:
+
+                          fleet memory compact <<'EOF'
+                          {
+                            "merges": [{"title": "CF rollout",
+                                        "summary": "keep every number verbatim",
+                                        "sources": ["studio/a.md", "studio/b.md"]}],
+                            "demote": ["studio/c.md"],
+                            "promote": [{"path": "skills/x/SKILL.md",
+                                         "title": "X", "summary": "...",
+                                         "content": "# X\\n...",
+                                         "sources": ["studio/d.md"]}]
+                          }
+                          EOF
+
+                        It opens a PR. It never deletes a memory file: a
+                        demoted file MOVES to fleet/memory/archive/ and stays
+                        greppable. The Worker refuses any merge that would drop
+                        a number, command, date or path the sources carried.
+
+  fleet --help          Show this message.
+
+The Worker is the single writer of the board. You ask, it writes: every verb
+above is one HTTP call to it, and this binary holds no GitHub credential at
+all. Never label, close or reopen a board issue by hand — not with gh, not
+with git, not with curl.
+
+Requires FLEET_WORKER_URL and FLEET_SPAWN_TOKEN in the environment — both are
+set automatically by provisioning; their absence means this container was
+never provisioned by Fleet Spawn P3 (exit 2).
+`;
+
+// Same header name spawn.ts's SPAWN_TOKEN_HEADER exports — see this file's
+// own header for why it is a literal here rather than an import.
+const SPAWN_TOKEN_HEADER = "X-Fleet-Spawn-Token";
+
+/** One parsed argv -> what to do. Exported so the source-pin test
+ *  (test/container.studio-fleet.test.ts) can regex-anchor on real
+ *  identifiers instead of loose prose. */
+export type Command =
+  | { kind: "help" }
+  | { kind: "spawn"; role: string }
+  | { kind: "task-ls" }
+  | { kind: "task-show"; number: number }
+  | { kind: "task-report"; number: number }
+  // Board issue #41, half two: a lead moves the state of its own task.
+  | { kind: "task-state"; number: number; to: string }
+  // P5 §9's memory pass, at sprint close. Release Studio's verb.
+  | { kind: "memory-ls" }
+  | { kind: "memory-compact" }
+  | { kind: "usage-error"; message: string };
+
+/** Pure — no env, no I/O. */
+export function parseArgs(argv: string[]): Command {
+  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") return { kind: "help" };
+  if (argv[0] === "task") return parseTaskArgs(argv.slice(1));
+  if (argv[0] === "memory") return parseMemoryArgs(argv.slice(1));
+  if (argv[0] !== "spawn") {
+    return { kind: "usage-error", message: `unknown command "${argv[0]}" — expected "spawn", "task" or "memory"` };
+  }
+  const role = argv[1];
+  if (!role) return { kind: "usage-error", message: "spawn: missing <role>" };
+  return { kind: "spawn", role };
+}
+
+/**
+ * Board issue #41: the states a lead may move its OWN task to. Kept
+ * BYTE-IDENTICAL to src/board/board.ts's own LEAD_TASK_STATES, which is the
+ * one that enforces — this copy only turns a typo into a usage error instead
+ * of a 403, and lists the options in the message. Same literal-not-imported
+ * convention as SPAWN_TOKEN_HEADER above; see this file's own header.
+ */
+const LEAD_TASK_STATES = ["working", "input_required", "failed"];
+
+/** `task <sub> [<n>] [<to>]`. Split out for the same reason cli/fleet.ts's own
+ *  parseTask is: it is the only command with a second word. */
+export function parseTaskArgs(argv: string[]): Command {
+  const [sub, raw, to] = argv;
+  if (sub === "ls") return { kind: "task-ls" };
+  if (sub !== "show" && sub !== "report" && sub !== "state") {
+    return { kind: "usage-error", message: `unknown task command "${sub ?? ""}" — expected ls, show, report or state` };
+  }
+  if (raw === undefined || !/^[0-9]+$/.test(raw)) {
+    return { kind: "usage-error", message: `task ${sub}: missing or non-numeric <n> (the board issue number)` };
+  }
+  if (sub === "state") {
+    if (to === undefined) {
+      return { kind: "usage-error", message: `task state: missing <to> — one of ${LEAD_TASK_STATES.join(", ")}` };
+    }
+    if (to === "completed") {
+      // Refused HERE only so a lead gets a sentence instead of a 403. The
+      // enforcement is the Worker's (src/board/board.ts's LEAD_TASK_STATES):
+      // the Worker refuses it too, before it reads the issue, so editing
+      // this line buys nothing.
+      return {
+        kind: "usage-error",
+        message: "a lead may not mark its own task completed — that is the verdict of whoever verifies the " +
+          "work, not of whoever did it. Report your result (fleet task report <n>) and let the verifier " +
+          "close it. The Worker refuses it too.",
+      };
+    }
+    if (!LEAD_TASK_STATES.includes(to)) {
+      return { kind: "usage-error", message: `task state: "${to}" is not yours to set — one of ${LEAD_TASK_STATES.join(", ")}` };
+    }
+    return { kind: "task-state", number: Number(raw), to };
+  }
+  return sub === "show" ? { kind: "task-show", number: Number(raw) } : { kind: "task-report", number: Number(raw) };
+}
+
+/** `memory [ls|compact]`. Bare `memory` is the survey, same alias the Mac
+ *  CLI keeps (src/studio/cli-args.ts): the read is the safe half. */
+export function parseMemoryArgs(argv: string[]): Command {
+  const sub = argv[0];
+  if (sub === undefined || sub === "ls") return { kind: "memory-ls" };
+  if (sub === "compact") return { kind: "memory-compact" };
+  return { kind: "usage-error", message: `unknown memory command "${sub}" — expected ls or compact` };
+}
+
+/**
+ * Builds a /fleet/memory* request. Same one header, same no-repo rule as
+ * buildTaskRequest above: the Worker resolves the blueprint repo itself from
+ * fleet.json, and a studio does not get to name where memory lives.
+ */
+export function buildMemoryRequest(
+  env: SpawnEnv, path: string, body?: string,
+): { url: string; init: RequestInit } {
+  return {
+    url: new URL(`/fleet/memory${path}`, env.workerUrl).toString(),
+    init: body === undefined
+      ? { method: "GET", headers: { [SPAWN_TOKEN_HEADER]: env.token } }
+      : {
+        method: "POST",
+        headers: { [SPAWN_TOKEN_HEADER]: env.token, "content-type": "application/json" },
+        body,
+      },
+  };
+}
+
+export interface SpawnEnv {
+  workerUrl: string;
+  token: string;
+}
+
+/**
+ * Resolves the two required env vars, or names exactly which is/are
+ * missing. Pure — env is passed in, never read from `process.env` inside
+ * this function — so the exit-2 contract is testable with a plain object,
+ * no real process state involved.
+ */
+export function resolveEnv(env: Record<string, string | undefined>): SpawnEnv | { error: string } {
+  const workerUrl = env.FLEET_WORKER_URL;
+  const token = env.FLEET_SPAWN_TOKEN;
+  const missing = [!workerUrl && "FLEET_WORKER_URL", !token && "FLEET_SPAWN_TOKEN"].filter(Boolean);
+  if (missing.length > 0) {
+    return {
+      error: `studio-fleet: missing env ${missing.join(", ")} — ` +
+        "this container was not provisioned by Fleet Spawn P3 (run `fleet --help`)",
+    };
+  }
+  return { workerUrl: workerUrl!, token: token! };
+}
+
+/** Builds the exact request /fleet/spawn expects — see spawn.ts's own
+ *  SPAWN_TOKEN_HEADER/spawnBody doc comments for the contract this mirrors. */
+export function buildSpawnRequest(env: SpawnEnv, role: string): { url: string; init: RequestInit } {
+  return {
+    url: new URL("/fleet/spawn", env.workerUrl).toString(),
+    init: {
+      method: "POST",
+      headers: { [SPAWN_TOKEN_HEADER]: env.token, "content-type": "application/json" },
+      body: JSON.stringify({ role }),
+    },
+  };
+}
+
+/**
+ * Builds a /fleet/tasks* request. No `repo` is ever sent: the Worker resolves
+ * the board repo from the studio this token belongs to, and a studio that
+ * NAMED a repo would be refused anyway (src/board/routes.ts's
+ * resolveStudioBoardRepo). Same one header as spawn — that is the whole
+ * credential on this surface.
+ */
+export function buildTaskRequest(
+  env: SpawnEnv, path: string, body?: string,
+): { url: string; init: RequestInit } {
+  return {
+    url: new URL(`/fleet/tasks${path}`, env.workerUrl).toString(),
+    init: body === undefined
+      ? { method: "GET", headers: { [SPAWN_TOKEN_HEADER]: env.token } }
+      : {
+        method: "POST",
+        headers: { [SPAWN_TOKEN_HEADER]: env.token, "content-type": "application/json" },
+        body,
+      },
+  };
+}
+
+/** One task row as `fleet task ls` prints it. The url is the actionable half
+ *  — a lead pastes it into its own envelope's artifacts. */
+interface TaskRow { number: number; state: string | null; title: string; url: string }
+
+/**
+ * The board's JSON as lines a lead reads. Deliberately not a table: this is
+ * read by an LLM in a terminal pane, and a fixed-width table buys nothing that
+ * `#n [state] title` does not.
+ */
+export function formatTaskRows(rows: TaskRow[]): string {
+  if (rows.length === 0) return "(no tasks assigned to this studio)";
+  return rows.map((t) => `#${t.number}  [${t.state ?? "DRIFT"}]  ${t.title}\n    ${t.url}`).join("\n");
+}
+
+async function main(): Promise<void> {
+  const cmd = parseArgs(process.argv.slice(2));
+
+  if (cmd.kind === "help") {
+    console.log(HELP);
+    return;
+  }
+  if (cmd.kind === "usage-error") {
+    console.error(`studio-fleet: ${cmd.message}`);
+    console.error(HELP);
+    process.exit(1);
+  }
+
+  const spawnEnv = resolveEnv(process.env as Record<string, string | undefined>);
+  if ("error" in spawnEnv) {
+    console.error(spawnEnv.error);
+    process.exit(2);
+  }
+
+  const built = await buildRequest(spawnEnv, cmd);
+  let res: Response;
+  try {
+    res = await fetch(built.url, built.init);
+  } catch (err) {
+    console.error(`studio-fleet: request to ${built.url} failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
+  const text = await res.text();
+  if (!res.ok) {
+    console.error(`studio-fleet: ${built.what} failed (${res.status}): ${text}`);
+    process.exit(1);
+  }
+
+  try {
+    console.log(built.render(JSON.parse(text)));
+  } catch {
+    // Malformed-but-200 is not this script's problem to diagnose further —
+    // print whatever the server sent and let the operator read it directly.
+    console.log(text);
+  }
+}
+
+/** One command -> the request to make and how to print what comes back.
+ *  Async only because `task report` reads its envelope off stdin. */
+async function buildRequest(
+  env: SpawnEnv, cmd: Command,
+): Promise<{ what: string; url: string; init: RequestInit; render: (json: unknown) => string }> {
+  if (cmd.kind === "spawn") {
+    const { url, init } = buildSpawnRequest(env, cmd.role);
+    return {
+      what: "spawn", url, init,
+      render: (json) => {
+        const status = json as { id?: string; state?: string };
+        return `spawned ${status.id ?? "?"} (${status.state ?? "?"})`;
+      },
+    };
+  }
+  if (cmd.kind === "task-ls") {
+    const { url, init } = buildTaskRequest(env, "");
+    return { what: "task ls", url, init, render: (json) => formatTaskRows(json as TaskRow[]) };
+  }
+  if (cmd.kind === "task-show") {
+    const { url, init } = buildTaskRequest(env, `/${cmd.number}`);
+    return { what: "task show", url, init, render: (json) => JSON.stringify(json, null, 2) };
+  }
+  if (cmd.kind === "task-state") {
+    // Board issue #41, half two. Only `to` is sent: no `from` (the Worker
+    // reads the task's current state itself, so a lead never has to know it
+    // and can never send a stale one) and no `repo` (same rule every other
+    // board call here follows — the Worker resolves the board from the
+    // studio this token belongs to).
+    const { url, init } = buildTaskRequest(env, `/${cmd.number}/state`, JSON.stringify({ to: cmd.to }));
+    return {
+      what: "task state", url, init,
+      render: (json) => {
+        // Printed from what the WORKER wrote back, never from `cmd.to` — the
+        // same "trust what was actually written, not what was asked for"
+        // discipline src/studio/task-state.ts keeps on the operator side.
+        const moved = json as { state?: string | null };
+        return `task ${cmd.number} is now ${moved.state ?? "?"}`;
+      },
+    };
+  }
+  if (cmd.kind === "memory-ls") {
+    const { url, init } = buildMemoryRequest(env, "");
+    return { what: "memory ls", url, init, render: (json) => JSON.stringify(json, null, 2) };
+  }
+  if (cmd.kind === "memory-compact") {
+    // Same stdin channel as `task report` below, for the same reason: a
+    // proposal is a multi-line JSON document, and a heredoc survives quotes
+    // where a shell-quoted argv element does not. Empty stdin is LEGAL here
+    // and means "rebuild the index only" — the bootstrap run.
+    const proposal = await Bun.stdin.text();
+    const { url, init } = buildMemoryRequest(env, "/compact", proposal.trim() === "" ? "{}" : proposal);
+    return {
+      what: "memory compact", url, init,
+      render: (json) => {
+        const r = json as { pr?: number; url?: string; summary?: Record<string, number> };
+        const s = r.summary ?? {};
+        return `PR #${r.pr ?? "?"}  ${r.url ?? "(no url)"}\n` +
+          `merged ${s.merged ?? 0}, demoted ${s.demoted ?? 0}, promoted ${s.promoted ?? 0}; ` +
+          `${s.archived ?? 0} file(s) MOVED to fleet/memory/archive/ (none deleted); ` +
+          `index now ${s.indexLines ?? 0} line(s)`;
+      },
+    };
+  }
+  // task report. The envelope is read from STDIN rather than an argv flag: a
+  // lead composes a multi-line JSON document with quotes in it, and a heredoc
+  // survives that where a shell-quoted argument does not.
+  const body = await Bun.stdin.text();
+  if (body.trim() === "") {
+    console.error("studio-fleet: task report reads the envelope JSON from stdin — see `fleet --help`");
+    process.exit(1);
+  }
+  const { url, init } = buildTaskRequest(env, `/${cmd.number}/envelope`, body);
+  return {
+    what: "task report", url, init,
+    render: (json) => {
+      const posted = json as { url?: string };
+      return `reported on task ${cmd.number}: ${posted.url ?? "(no url in response)"}`;
+    },
+  };
+}
+
+// Review fix round 1: main() had no top-level `.catch()` — a malformed
+// FLEET_WORKER_URL (e.g. not a valid URL at all) throws synchronously out of
+// buildSpawnRequest's `new URL(...)` deep inside main(), which surfaced as a
+// raw, multi-line Bun stack dump (file paths, line numbers, "at ...") instead
+// of this file's own `studio-fleet: ...` one-line convention every OTHER
+// error path above already follows. Same wrapper shape cli/fleet.ts's own
+// top-level guard uses (that file's tail, `main().catch(...)`) — same
+// prefix, same `err instanceof Error ? err.message : String(err)` unwrap.
+// Exit 1: this is an unrecoverable/unexpected failure the same way a
+// non-2xx spawn response or a network failure already is above (both exit
+// 1) — distinct from the DELIBERATE, anticipated exit 2 for absent env,
+// which resolveEnv reaches BEFORE any URL is ever constructed and therefore
+// can never itself throw here.
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(`studio-fleet: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}

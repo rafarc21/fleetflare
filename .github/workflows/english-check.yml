@@ -1,0 +1,28 @@
+name: English Check
+
+# Board issue #66: all repository content is English. Its own workflow, with
+# no paths filter, so every file in the repo is covered (not only the paths
+# Fleet Check watches) and a false positive here never skips a Fleet Check
+# step. No install: the script imports only node builtins, runs in well under
+# a second, and names file:line on failure. A deliberate exception goes in
+# the script's ALLOWLIST / LINE_ALLOWLIST, or ends its line with
+# `english-check: allow`.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  english:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: English check
+        run: bun run apps/fleet/scripts/english-check.ts

@@ -1,0 +1,14 @@
+Fleetflare
+Copyright 2026 Rafael Rjeille
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes third-party material:
+
+skills/frontend-design
+  Based on the frontend-design skill from Anthropic's public skills
+  repository (https://github.com/anthropics/skills, path
+  skills/frontend-design), licensed under the Apache License, Version 2.0.
+
+skills/i-have-adhd
+  Declares the MIT License in its own front matter.

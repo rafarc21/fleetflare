@@ -1,0 +1,39 @@
+// Issue #96. A repair verb's non-2xx, printed whole. Split out of cli/fleet.ts
+// as a pure module for the same reason cli/inspect-request.ts is: a test can
+// import it without dragging Bun globals into the root type-check.
+
+/** Upper bound for a pathological body. Well above the longest line the
+ *  Worker writes on purpose (the recycle refusal, ~900 chars). */
+const MAX_CHARS = 2000;
+
+/**
+ * Before #96 every verb printed `text.slice(0, 300)`. The side-naming line
+ * and the recycle refusal are both longer, and the cut half was the fallback
+ * — the only actionable part.
+ */
+export function repairFailureLine(
+  verb: string, status: number, text: string, label: string = `fleet ${verb}`,
+): string {
+  // A Cloudflare error page (e.g. 1101 "Worker threw exception") is a whole
+  // HTML document; its <title> is the only part worth a terminal line.
+  const title = /<title>([^<]*)<\/title>/i.exec(text)?.[1]?.trim();
+  if (title) {
+    return `${label}: ${status} ${title} ` +
+      "(a Cloudflare error page: the Worker threw — this page does not say which side failed)";
+  }
+  return `${label}: ${status} ${text.trim().slice(0, MAX_CHARS)}`;
+}
+
+/** `fleet destroy`'s route path — the flags ride recycle's own query names. */
+export function destroyPath(force: boolean, discardUnsynced: boolean): string {
+  const query = [force && "force=true", discardUnsynced && "discard-unsynced=true"].filter(Boolean).join("&");
+  return query ? `/destroy?${query}` : "/destroy";
+}
+
+/** Stderr note after a recycle run with --discard-unsynced: it bypassed the
+ *  refusal on purpose, and this says what that cost. */
+export function discardNote(id: string): string {
+  return `fleet recycle: --discard-unsynced was passed for ${id}. If its container could not answer, ` +
+    "nothing was rescued: the studio came back from its last synced snapshot, and conversation, " +
+    "uncommitted and unpushed work since then were discarded.";
+}

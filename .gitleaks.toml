@@ -1,0 +1,71 @@
+title = "Fleetflare public-export gitleaks config"
+
+# Used by scripts/public-export.sh (issue #335) to scan the squashed,
+# history-free export before it is ever considered publishable. Extends
+# gitleaks' own default ruleset and allowlists a short, explicit list of
+# known-fake test fixtures and one vendored third-party file — nothing here
+# exempts a real secret. Each entry below was verified by hand against the
+# actual source line it matches (not guessed at), and is scoped as tightly as
+# gitleaks' allowlist mechanism allows:
+#   - `regexes` under `[[allowlists]]` with `regexTarget = "match"` compares only
+#     the exact matched secret text, not the whole line/file, so a real
+#     secret elsewhere that merely shares a file with one of these fixtures
+#     is still caught.
+#   - `paths` is used for exactly one vendored, minified third-party bundle
+#     (see below) — not for any first-party source or test file.
+#
+# If gitleaks ever reports a NEW finding in a file already covered by a
+# `paths` entry below, or a finding whose secret text does not exact-match
+# one of the `regexes` below, that is real signal — it means something
+# genuinely new landed in that file, not that the allowlist needs
+# broadening. Investigate before adding another line here.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known-fake fixtures, verified by hand — see PR for #347"
+regexTarget = "match"
+
+regexes = [
+  # apps/fleet/test/bun/exec-deadline.test.ts — a deliberately-named fake
+  # GitHub installation token. The test's own name for it, LEAKCANARY, says
+  # what it's for: proving secrets never reach logs/output, not a real token.
+  '''ghs_PSLEAKCANARY0123456789''',
+
+  # apps/fleet/test/board.board.test.ts, apps/fleet/test/board.routes.test.ts
+  # — a fake idempotency-key / fleet-task-key fixture used to test board
+  # comment-marker parsing. Not a credential of any kind.
+  '''k-0123456789abcdef''',
+
+  # apps/fleet/test/bun/bringup-log.test.ts,
+  # apps/fleet/test/bun/memguard-select.test.ts — a fake JWT-shaped bearer
+  # token in a fixture curl command. "payload" and "sig" are literal
+  # placeholder segments, not real base64url JWT content.
+  '''eyJhbGciOiJIUzI1NiJ9\.payload\.sig''',
+
+  # apps/fleet/test/github.app.test.ts — the PEM header/footer of a template
+  # literal whose actual key bytes are generated fresh at test-run time via
+  # WebCrypto (crypto.subtle.generateKey) and never appear in source; the
+  # literal source text gitleaks sees is the template markers plus a
+  # `${...}` interpolation, not real key material.
+  '''-----BEGIN PRIVATE KEY-----\\n\$\{b64\.match''',
+]
+
+# apps/fleet/page/terminal.html is a vendored/bundled third-party JS blob
+# (xterm.js et al) shipped verbatim — not our code, no secrets live here.
+# Round-2 review nit (#347): a blanket whole-file exemption could hide a
+# real future leak landing in this same file, so this is scoped to the two
+# exact minified-code strings that coincidentally match generic-api-key,
+# and only inside this one file (matchCondition "and" requires both the
+# path AND the regex to match — neither alone allowlists anything here).
+[[allowlists]]
+description = "terminal.html vendored bundle: minified var-assignment coincidences, not secrets"
+matchCondition = "and"
+paths = [
+  '''apps/fleet/page/terminal\.html''',
+]
+regexes = [
+  '''t\.TwoKeyMap=void''',
+  '''t\.Sequencer=t\.Throttler=void''',
+]

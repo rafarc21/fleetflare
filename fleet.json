@@ -1,0 +1,8 @@
+{
+  "blueprint": {
+    "repo": "rafarc21/fleetflare",
+    "ref": "main"
+  },
+  "roles": ["pilot", "scratch", "maestro", "web-studio", "release-studio"],
+  "instance_type": "standard-2"
+}

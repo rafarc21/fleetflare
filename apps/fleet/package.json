@@ -1,0 +1,40 @@
+{
+  "name": "@fleetflare/fleet",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "fleet": "cli/fleet.ts",
+    "ff": "cli/ff.ts",
+    "ego-browser": "container/ego-browser/cli.ts"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "scripts/deploy.sh",
+    "test": "vitest run",
+    "bun-test": "bun test test/bun test/studio.files.test.ts test/studio.studio-blueprint.test.ts",
+    "test:integration": "bun test-integration/attach.e2e.ts",
+    "test:acceptance": "bun test-integration/cli.acceptance.ts",
+    "check": "tsc --noEmit && tsc --noEmit -p container && tsc --noEmit -p cli && tsc --noEmit -p test-integration && tsc --noEmit -p test",
+    "build:page": "bun run scripts/build-page.ts",
+    "english-check": "bun run scripts/english-check.ts",
+    "migrate:local": "scripts/deploy.sh d1 migrations apply fleet --local",
+    "migrate:remote": "scripts/deploy.sh d1 migrations apply fleet --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.19.1",
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@types/bun": "^1.3.14",
+    "@xterm/xterm": "^6.0.0",
+    "miniflare": "4.20260730.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.141.0"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.0.20",
+    "@cloudflare/sandbox": "0.12.7",
+    "aws4fetch": "^1.0.20",
+    "playwright-core": "^1.63.0"
+  }
+}

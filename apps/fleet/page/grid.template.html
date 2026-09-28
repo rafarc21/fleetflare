@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<title>fleet grid</title>
+<!--
+  Fleet grid (Task 5, P2 plane 3 — docs/superpowers/specs/2026-08-16-studio-memory-p2-design.md,
+  ruling R-P2-6: "Grid follows the terminal page's discipline." Same as
+  page/terminal.template.html: no framework, one file, self-contained, no
+  external requests. Unlike that page, this one inlines no third-party
+  bundle — scripts/build-page.ts still emits it (page/grid.html) through the
+  same stray-source-map-comment guard (see that script's own
+  assertNoSourceMappingUrl), for the same "one build script, one
+  discipline" reason, but there is nothing between markers here to hand-edit
+  around.
+
+  Server-side data injection: routes.ts (src/studio/grid.ts's renderGridPage)
+  substitutes the quoted placeholder below with a JSON array of per-studio
+  card data BEFORE this page is ever served — see grid.ts's own header for
+  the safe-injection shape (JSON.stringify with "<" escaped, so neither
+  "</script>" nor "<!--" can appear literally inside it, no matter what a
+  studio's own scrubbed terminal preview text contains). That array is the
+  ONLY point a per-studio hot-tail preview ever enters this page: the 10s
+  auto-refresh below re-fetches /studio/ (the same plain JSON list `fleet
+  ls` uses) for state/burn/lastActivity/tailscaleHost, but NEVER for
+  previews — previews refresh only on a full page reload. This is
+  deliberate (design spec, Plane 3 / Task 5 brief): the JSON list route
+  stays exactly what it is today (no transcript content ever added to it,
+  numbers/strings separation), and re-rendering 15 lines of preview text
+  for every studio every 10 seconds would cost a DO round trip per studio
+  for no operator-visible benefit between reloads.
+
+  Fleet Spawn P3, Task 5 (R-P3-4): a SECOND placeholder, FLEET_TOTALS,
+  carries the server-computed (grid.ts's computeFleetTotals) fleet-wide
+  turns/output/5h sum for the header row below. Same "static at load,
+  refreshes only on reload" posture as the preview text above, and for the
+  same reason: computing it is cheap server-side (grid.ts already has the
+  full card list in hand for the initial render), but there is no operator
+  benefit to re-deriving it client-side every 10s over what is already a
+  once-per-reload snapshot page.
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    /* iOS Safari: 100vh includes the address bar's own height and then
+       hides it, leaving a scrollable gap; 100dvh tracks the visible
+       viewport instead — same reasoning as terminal.template.html. */
+    min-height: 100dvh;
+    background: #0b0b0c;
+    color: #e6e6e6;
+    touch-action: manipulation;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 14px 16px calc(10px + env(safe-area-inset-top));
+    background: #0b0b0c;
+    border-bottom: 1px solid #2a2b2f;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  header p {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: #8a8b90;
+  }
+  #grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    padding: 12px 16px calc(16px + env(safe-area-inset-bottom));
+  }
+  .empty {
+    grid-column: 1 / -1;
+    color: #8a8b90;
+    font-size: 13px;
+  }
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: #17181b;
+    border: 1px solid #2a2b2f;
+    border-radius: 10px;
+    padding: 12px;
+    min-width: 0;
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .id {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chip {
+    flex: 0 0 auto;
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    background: #26272b;
+    color: #9a9ba0;
+  }
+  .chip[data-state="running"] { background: #123524; color: #5be49b; }
+  .chip[data-state="provisioning"] { background: #241a08; color: #ffce7a; }
+  .chip[data-state="degraded"] { background: #3a1414; color: #ff8a8a; }
+  .chip[data-state="stopped"] { background: #26272b; color: #9a9ba0; }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    color: #9a9ba0;
+  }
+  .row b {
+    color: #e6e6e6;
+    font-weight: 500;
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .preview {
+    margin: 0;
+    background: #0b0b0c;
+    border: 1px solid #2a2b2f;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    color: #9fd0ff;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 160px;
+    overflow: auto;
+  }
+  .actions {
+    display: flex;
+    gap: 6px;
+  }
+  .actions a, .actions button {
+    flex: 1 1 0;
+    text-align: center;
+    padding: 8px 4px;
+    border-radius: 8px;
+    border: 1px solid #34353a;
+    background: #26272b;
+    color: #e6e6e6;
+    font-size: 12px;
+    font-family: inherit;
+    text-decoration: none;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .actions a:active, .actions button:active {
+    background: #3a6df0;
+    border-color: #3a6df0;
+    color: #fff;
+  }
+  #toast {
+    position: fixed;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    max-width: 90vw;
+    background: #26272b;
+    border: 1px solid #3a6df0;
+    color: #fff;
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    display: none;
+  }
+  #toast.show { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>fleet</h1>
+  <p>auto-refreshes every 10s (state, activity, burn) &middot; previews refresh on reload</p>
+  <p id="totals"></p>
+</header>
+<div id="grid"></div>
+<div id="toast"></div>
+<script>
+"use strict";
+(function () {
+  // The server-injected initial snapshot — see the top-of-file comment for
+  // why this is the ONLY point a preview ever enters the page.
+  var STUDIO_DATA = "__FLEET_STUDIO_DATA__";
+  // Fleet Spawn P3, Task 5 (R-P3-4) — server-computed fleet-wide totals, same
+  // "injected once, static at load" posture as STUDIO_DATA's own preview
+  // field (see the top-of-file comment).
+  var FLEET_TOTALS = "__FLEET_TOTALS__";
+
+  var previewById = {};
+  STUDIO_DATA.forEach(function (c) { previewById[c.id] = c.preview; });
+
+  function fmtNum(n) {
+    return typeof n === "number" ? n.toLocaleString() : "-";
+  }
+
+  function renderTotals(t) {
+    var el = document.getElementById("totals");
+    el.textContent =
+      "fleet totals — turns: " + fmtNum(t.turns) +
+      " · output tokens: " + fmtNum(t.outputTokens) +
+      " · 5h output: " + fmtNum(t.window5hOutput);
+  }
+
+  function row(label, value) {
+    var r = document.createElement("div");
+    r.className = "row";
+    var l = document.createElement("span");
+    l.textContent = label;
+    var v = document.createElement("b");
+    v.textContent = value;
+    r.appendChild(l);
+    r.appendChild(v);
+    return r;
+  }
+
+  function card(c) {
+    var el = document.createElement("div");
+    el.className = "card";
+
+    var head = document.createElement("div");
+    head.className = "head";
+    var idEl = document.createElement("span");
+    idEl.className = "id";
+    idEl.textContent = c.id;
+    var chip = document.createElement("span");
+    chip.className = "chip";
+    chip.dataset.state = c.state;
+    chip.textContent = c.state;
+    head.appendChild(idEl);
+    head.appendChild(chip);
+    el.appendChild(head);
+
+    el.appendChild(row("last activity", c.lastRefresh || "-"));
+    el.appendChild(row("tailscale", c.tailscaleHost || "-"));
+    el.appendChild(row("turns", fmtNum(c.burn ? c.burn.turns : null)));
+    el.appendChild(row("output tokens", fmtNum(c.burn ? c.burn.outputTokens : null)));
+    el.appendChild(row("5h output", fmtNum(c.burn ? c.burn.window5hOutput : null)));
+
+    var pre = document.createElement("pre");
+    pre.className = "preview";
+    // textContent, never innerHTML: a studio's own scrubbed terminal output
+    // is still arbitrary text (it can contain "<script>" as PLAIN
+    // characters a session printed) — rendering it as inert text keeps that
+    // safe with no client-side escaping logic needed at all.
+    pre.textContent = previewById[c.id] || "(no preview yet)";
+    el.appendChild(pre);
+
+    var actions = document.createElement("div");
+    actions.className = "actions";
+
+    var open = document.createElement("a");
+    open.href = "/studio/" + encodeURIComponent(c.id) + "/terminal";
+    open.textContent = "open terminal";
+    actions.appendChild(open);
+
+    ["provision", "restart"].forEach(function (action) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = action;
+      btn.addEventListener("click", function () { doAction(c.id, action); });
+      actions.appendChild(btn);
+    });
+
+    el.appendChild(actions);
+    return el;
+  }
+
+  var gridEl = document.getElementById("grid");
+  function renderCards(list) {
+    gridEl.textContent = "";
+    if (!list || list.length === 0) {
+      var empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "(no studios provisioned)";
+      gridEl.appendChild(empty);
+      return;
+    }
+    list.forEach(function (c) { gridEl.appendChild(card(c)); });
+  }
+
+  var toastEl = document.getElementById("toast");
+  var toastTimer = null;
+  function showToast(msg) {
+    toastEl.textContent = msg;
+    toastEl.className = "show";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.className = ""; }, 4000);
+  }
+
+  function doAction(id, action) {
+    var verb = action === "provision" ? "Provision" : "Restart";
+    if (!confirm(verb + " " + id + "?")) return;
+    fetch("/studio/" + encodeURIComponent(id) + "/" + action, { method: "POST" })
+      .then(function (res) {
+        return res.text().then(function (text) {
+          var body = null;
+          try { body = JSON.parse(text); } catch (e) { /* non-JSON error body, e.g. 401/403/400 */ }
+          if (!res.ok) throw new Error((body && body.error) || text || (res.status + ""));
+          showToast(id + ": " + (body && body.state ? body.state : "done"));
+          refresh();
+        });
+      })
+      .catch(function (err) {
+        showToast(id + ": " + action + " failed — " + (err && err.message ? err.message : err));
+      });
+  }
+
+  // 10s auto-refresh: re-fetches the plain JSON list (Accept:
+  // application/json, same endpoint `fleet ls` uses) and re-renders every
+  // card from it — but card() only ever reads preview text from
+  // previewById (captured once above from the server-injected snapshot), so
+  // this never touches any card's preview, by construction, not by
+  // convention.
+  function refresh() {
+    fetch("/studio/", { headers: { Accept: "application/json" } })
+      .then(function (res) { return res.json(); })
+      .then(function (list) { renderCards(list); })
+      .catch(function (err) { console.error("fleet grid: refresh failed", err); });
+  }
+
+  renderTotals(FLEET_TOTALS);
+  renderCards(STUDIO_DATA);
+  setInterval(refresh, 10000);
+})();
+</script>
+</body>
+</html>

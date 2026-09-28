@@ -1,0 +1,4 @@
+# Issue #267 flake policy: a lane whose failures ALL sit in files listed here
+# reruns those files alone, once. Every entry names its issue.
+test/bun/session-memory.test.ts  # #256 peak-memory budget times out under host load
+test/bun/localci-run.test.ts  # #382 SIGTERM-teardown timing: sweep_procs's Linux branch walks its own /proc, twice per interrupted run — cheap inside a real `docker run` (its own isolated PID namespace keeps /proc small regardless of host load), but genuinely host-wide and unbounded on a Linux host with no such isolation (--native mode on a studio container, which shares /proc with concurrent sibling sessions — see the plan doc for the measurement)

@@ -1,0 +1,379 @@
+FROM docker.io/cloudflare/sandbox:0.12.7
+
+# Security (operator directive 2026-08-19): unlocks
+# --dangerously-skip-permissions for claude running as root in this
+# container (studio-bringup.sh's claude-launch block) — verified live on
+# pinned 2.1.224: root is refused without this var, accepted with it. Honest,
+# not a workaround: this base image IS a Firecracker microVM. See
+# studio-bringup.sh's own comment above that flag for the full safety case
+# (no Cloudflare creds in this container; merge/deploy gated by the Worker).
+ENV IS_SANDBOX=1
+# The image pins a claude version deliberately (every permission/gate probe in
+# this fleet was verified against THAT build). claude's own auto-updater
+# rewrites /usr/local/bin/claude underneath the container, which both defeats
+# the pin and -- observed live 2026-08-20 -- can leave the binary without its
+# exec bit: `-bash: /usr/local/bin/claude: Permission denied`, studio dead
+# until someone chmods it by hand. Updating the pin is a Dockerfile change and
+# a deploy, never a silent in-place swap.
+ENV DISABLE_AUTOUPDATER=1
+# Image provenance. Also load-bearing for deploys: wrangler diffs the built
+# DIGEST, not the Dockerfile ("Image already exists remotely, skipping push"),
+# and a zero diff returns before any rollout starts -- so a cached rebuild can
+# leave a real change unshipped. Bumping this on a change that must reach
+# running studios guarantees a new digest and therefore a rollout.
+# Issue #379: wrangler < 4.141 also skipped an image already in the registry
+# but never applied to the app (a push that landed, then a failed apply):
+# "no changes" forever. >= 4.141 applies it (EDIT ... @sha256); package.json
+# pins that, and scripts/deploy.sh runs only the pinned binary.
+LABEL fleet.image.rev="p8-install-cache-git-core-ppa"
+
+# tmux hosts the long-lived `studio` session; git/curl/ca-certificates are
+# runtime deps of the bring-up script and the tailscale installer below
+# (the guarded clone itself is issued Worker-side via sbExec, but git must
+# exist IN the container for that exec to succeed). tailscale's own installer
+# script adds its apt repo and installs both the `tailscale` CLI and the
+# `tailscaled` daemon. zstd — board #350's install-cache restore/save path
+# (src/studio/install-cache.ts's installCacheRestoreCmd/installCacheSaveCmd):
+# `curl | zstd -d | tar -x` and the reverse. Bundled into the FIRST apt-get
+# line below (tmux/curl/ca-certificates/gnupg), not git's own PPA-sourced
+# line right after it — zstd has nothing to do with the git-core PPA this
+# block exists for, and installing it before the PPA dance keeps this
+# package list ordered the same "runtime deps first" way it always was.
+#
+# Issue #373: 23 bun-test failures inside a real studio container traced to
+# `git merge-tree --write-tree` (the flag `scripts/localci/localci.sh:293`
+# calls -- NOT the #253/#310/#319 push-guard wrapper, which does not use
+# merge-tree at all) being unsupported -- that flag needs git >= 2.38, and
+# this base (docker.io/cloudflare/sandbox:0.12.7) ships Ubuntu's stock 1:2.34.1.
+# Confirmed, not assumed: pulled this base image's own manifest+config from
+# the registry and extracted /etc/os-release from its root layer directly --
+# `PRETTY_NAME="Ubuntu 22.04.5 LTS (Jammy Jellyfish)"`, `ID=ubuntu` (the
+# image's own `org.opencontainers.image.version="22.04"` label and
+# `ARG LAUNCHPAD_BUILD_ARCH` in its build history agree). Genuinely Ubuntu,
+# NOT Debian, despite that same os-release's `ID_LIKE=debian` and the
+# unrelated `oven/bun:1.3-debian` mentioned in the gh comment right below --
+# that is container/Dockerfile's OWN, different, base image, not this one.
+# Since it's Ubuntu, the real fix is Ubuntu's own git-core PPA
+# (~git-core/ubuntu/ppa, "Git stable releases", the Ubuntu Git Maintainers
+# team's official backport) -- PPAs are Launchpad/Ubuntu-specific and would
+# NOT apply to a Debian base. Verified live against Launchpad's own archive
+# API that this PPA publishes `git 1:2.55.0-0ppa1~ubuntu22.04.2` for jammy
+# specifically, comfortably above the 2.38 floor. Key added by fingerprint
+# (this PPA's own signing_key_fingerprint per the Launchpad archive API) from
+# keyserver.ubuntu.com and dearmored into a keyring file -- the same
+# curl-key/sources.list.d idiom the gh install right below already uses for
+# its own apt repo, so no add-apt-repository/software-properties-common
+# pulling in an early python3 stack just for this.
+#
+# This upgrade crosses git's own 2.35.2 boundary (CVE-2022-24765): from that
+# version on, git hard-refuses to operate on a repo it doesn't own
+# ("fatal: detected dubious ownership") unless `safe.directory` allows it.
+# The container's repos are cloned/chowned at runtime by whatever UID the
+# Worker's sbExec/provision flow uses, not necessarily the build-time root
+# this RUN step itself runs as, so this must be set globally right after git
+# lands -- same guard, same `--global --add safe.directory '*'` form, already
+# proven in the sibling container/Dockerfile and scripts/localci/Dockerfile.
+RUN apt-get update && apt-get install -y --no-install-recommends tmux curl ca-certificates gnupg zstd \
+    && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&exact=on&search=0xF911AB184317630C59970973E363C90F8F1B6217" \
+       | gpg --dearmor -o /usr/share/keyrings/git-core-ppa-archive-keyring.gpg \
+    && FPR="$(gpg --show-keys --with-colons /usr/share/keyrings/git-core-ppa-archive-keyring.gpg | awk -F: '/^fpr:/ {print $10; exit}')" \
+    && [ "$FPR" = "F911AB184317630C59970973E363C90F8F1B6217" ] \
+       || { echo "git-core PPA key fingerprint mismatch: got '$FPR', expected F911AB184317630C59970973E363C90F8F1B6217" >&2; exit 1; } \
+    && echo "deb [signed-by=/usr/share/keyrings/git-core-ppa-archive-keyring.gpg] https://ppa.launchpadcontent.net/git-core/ppa/ubuntu jammy main" \
+       > /etc/apt/sources.list.d/git-core-ppa.list \
+    && apt-get update && apt-get install -y --no-install-recommends git \
+    && dpkg --compare-versions "$(git --version | awk '{print $3}')" ge 2.38 \
+       || { echo "installed git $(git --version) is older than the 2.38 floor" >&2; exit 1; } \
+    && rm -rf /tmp/git-merge-tree-smoke && mkdir -p /tmp/git-merge-tree-smoke \
+    && cd /tmp/git-merge-tree-smoke && git init -q \
+    && git config user.email smoke@fleetflare.local && git config user.name smoke \
+    && echo a > f.txt && git add f.txt && git commit -qm base \
+    && SMOKE_BASE=$(git rev-parse HEAD) && git checkout -qb other \
+    && echo b >> f.txt && git commit -qam other && SMOKE_SHA=$(git rev-parse HEAD) \
+    && git checkout -q - \
+    && git merge-tree --write-tree "$SMOKE_BASE" "$SMOKE_SHA" >/dev/null \
+       || { echo "git merge-tree --write-tree smoke test failed -- scripts/localci/localci.sh:293 needs it to work" >&2; exit 1; } \
+    && cd / && rm -rf /tmp/git-merge-tree-smoke \
+    && git config --global --add safe.directory '*' \
+    && curl -fsSL https://tailscale.com/install.sh | sh \
+    && rm -rf /var/lib/apt/lists/*
+
+# gh: copied verbatim from container/Dockerfile (task image) — same install
+# mechanism, so the two images can never silently drift on how `gh` gets
+# authenticated/resolved. (git/ca-certificates/curl re-installing here is a
+# harmless no-op apt-get already satisfied above; kept because "verbatim"
+# means verbatim, not hand-merged. Issue #373: deliberately NOT re-pointing
+# this line's `git` at the git-core PPA a second time -- the PPA's
+# sources.list.d entry and its >= 2.38 build are already on disk from the RUN
+# block above by the time this one runs, apt-get install never downgrades a
+# package to an older archive version, so this stays the same harmless no-op
+# it already was, at the newer version. Editing this line's package list
+# would also break the verbatim-with-container/Dockerfile invariant this
+# comment describes -- and container/Dockerfile's own base really is Debian
+# [oven/bun:1.3-debian, see below], where the git-core PPA does not even
+# apply, so the two images could never share this exact mechanism anyway.)
+#
+# No separate bun runtime install line to copy: unlike container/Dockerfile's
+# `FROM oven/bun:1.3-debian`, this image's base
+# (docker.io/cloudflare/sandbox:0.12.7) already ships bun — confirmed
+# `which bun` resolves to /usr/local/bin/bun inside the base image itself.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates curl gnupg \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pinned to the exact same version container/Dockerfile installs — see that
+# file's own comment: the auth gate/JSON contract this version's output
+# shape satisfies is the same concern here, even though this studio never
+# parses that JSON (a human watches the tmux pane directly instead).
+#
+# The plain `bun install -g` alone is NOT enough on this base image: verified
+# by direct inspection that this base's bun (1.3.12) does not run the
+# package's postinstall for a GLOBAL install, unlike container/Dockerfile's
+# base (oven/bun:1.3-debian, bun 1.3.14), where the identical install line
+# works unmodified. Without the postinstall, `bin/claude.exe` is left as the
+# package's own placeholder stub — its content IS an error message ("claude
+# native binary not installed... Run the postinstall manually: node
+# node_modules/@anthropic-ai/claude-code/install.cjs") — instead of the real
+# 295 MB binary, and bun never creates a global `claude` symlink at all
+# (confirmed: neither /usr/local/bin/claude nor ~/.bun/bin/claude exists
+# after a plain install; `--trust` does not help either — its own --help
+# text scopes it to a project package.json, and a `-g` install has none).
+# Running the postinstall explicitly and symlinking into /usr/local/bin
+# ourselves reproduces exactly what oven/bun's newer bun does automatically,
+# deterministically, independent of bun's per-version default trust list.
+RUN bun install -g @anthropic-ai/claude-code@2.1.224 \
+    && node /root/.bun/install/global/node_modules/@anthropic-ai/claude-code/install.cjs \
+    && ln -sf /root/.bun/install/global/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/local/bin/claude
+
+# P4a-1: python3 (studio-bringup.sh's materialization block decodes/writes
+# the member/MCP bundles via `python3 -c`, no other interpreter in this
+# image does it); openssh-server + mosh (mosh-server is the Moshi phone
+# path's own transport, sshd is what it hands a session to once the UDP
+# link is up). tailscale itself is already installed above; nothing further
+# to add for it here. Chromium is deliberately NOT in this apt line — see
+# the next RUN block for why and what actually provides it.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 openssh-server mosh \
+    && rm -rf /var/lib/apt/lists/*
+
+# P4a-1: chromium for the playwright MCP server studio-bringup.sh's
+# known-server map already wires up (STUDIO_MCP="playwright" ->
+# `bunx @playwright/mcp@latest`, no browser flags of its own). The brief's
+# literal `apt-get install chromium` does NOT work on this base image —
+# verified by actually running it: Ubuntu jammy's `chromium`/`chromium-
+# browser` .deb is a transitional stub (2.4KB wrapper script) that shells
+# out to `snap install chromium` on first launch, and this container has no
+# functional snapd ("System doesn't have a working snapd" during install,
+# then "requires the chromium snap to be installed" at runtime) — so the
+# resulting `chromium-browser --version` hard-fails no matter what. Real
+# fix, the officially supported one for exactly this headless-Linux-
+# container case: Playwright's own browser installer, which fetches a
+# self-contained Chrome-for-Testing build (no snap/apt involved) AND, via
+# --with-deps, apt-installs the transitive system libs that build needs
+# (libgbm1, libgl1, xvfb, fonts, ...) — verified end to end, including that
+# the downloaded binary runs `--version` cleanly as root with no extra
+# flags. Symlinked to /usr/local/bin/chromium so a plain `chromium` command
+# resolves, same `ln -sf` idiom this file already uses for `claude` and
+# `fleet` below. The glob is load-bearing, not cosmetic: Playwright names
+# the install directory after an internal build revision
+# (`chromium-<rev>`) that is not known ahead of time and changes as
+# Playwright itself updates. `rm -rf /var/lib/apt/lists/*` at the end, same
+# as every other apt-installing RUN in this file: `--with-deps` is a real
+# apt-get install under the hood and leaves the same stale list files behind
+# if uncleaned (measured: 76M/26 files before this line was added).
+#
+# Caveat worth flagging, not fixed here (would mean editing studio-
+# bringup.sh, out of this task's file scope): this resolves whatever
+# `playwright` package is newest AT BUILD TIME, while the MCP server
+# resolves whatever `@playwright/mcp@latest` is newest AT STUDIO RUNTIME —
+# two independently-moving "latest"s. Playwright pins its browser launch to
+# an exact bundled revision, not a semver range, so a wide enough drift
+# between the two could in principle produce a "browser not found, run
+# playwright install" error from the MCP server despite this layer having
+# run. No evidence this has actually happened; noting the mechanism so it
+# is diagnosable if it ever does.
+RUN bun x playwright install chromium --with-deps \
+    && ln -sf /root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome /usr/local/bin/chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+# ego-browser (issue #30): every brief this fleet sends tells its agent "use
+# the ego-browser skill (ego lite), NOT agent-browser" -- unfollowable until
+# something answers to that name on PATH. This installs the Tier-1 shim over
+# playwright-core, apps/fleet/container/ego-browser/, which speaks ego lite's
+# own documented API (taskSpace/Page/etc, see skills/ego-browser/SKILL.md)
+# against the SAME chromium the RUN block above already installed -- daemon.ts
+# hardcodes that exact /usr/local/bin/chromium path as its executablePath, so
+# nothing here installs or duplicates a browser of its own, only the shim's
+# TS source plus its one real npm dependency.
+#
+# Not COPY + chmod + ln -sf alone like studio-shell.sh/studio-fleet below:
+# unlike those two, this source imports a real package (playwright-core) that
+# must resolve at runtime, so its own directory needs a `bun install` first.
+# apps/fleet itself (the Worker/orchestrator code) is deliberately NOT copied
+# into this image anywhere else -- copying just this one subdirectory, with
+# its own minimal package.json (pinned to the exact playwright-core version
+# apps/fleet's own root package.json/bun.lock already resolve to, so the
+# version the shim runs against in-container is never a moving target), stays
+# consistent with that rather than installing the whole workspace wholesale.
+# `bun install --production` (no devDependencies to skip here, but the same
+# flag every other in-image install in this file implicitly gets by having no
+# devDependencies at all -- explicit here since this is the one package.json
+# actually shipped in the image) resolves node_modules alongside the source,
+# which is exactly where Bun's own module resolution (a directory walk up
+# from the importing file, same algorithm as Node) finds it from daemon.ts
+# and client.ts regardless of where the `ego-browser` symlink itself points.
+# cli.ts already carries `#!/usr/bin/env bun` -- same shebang idiom as
+# studio-fleet below -- so chmod + ln -sf is enough to make a bare
+# `ego-browser nodejs ...` resolve on PATH, no wrapper script needed.
+COPY container/ego-browser /opt/fleet/ego-browser
+RUN cd /opt/fleet/ego-browser && bun install --production \
+    && chmod 0755 cli.ts \
+    && ln -sf /opt/fleet/ego-browser/cli.ts /usr/local/bin/ego-browser
+
+# P4a-1: superpowers (always) + caveman (operator opt-in, issue #330 — see
+# ENABLE_CAVEMAN_PLUGIN below) baked at build so a studio boots with whatever
+# it's carrying already loaded, no network round-trip on first attach.
+# Mechanism below is PROVEN, not assumed — probed live (`plugin marketplace
+# add`/`install`/`list --json` against a throwaway $HOME with zero prior
+# state and zero token), then re-verified against THIS layer's own real
+# build+exec cycle on
+# the actual pinned 2.1.224, and cross-checked file-for-file against this
+# Mac's own already-working ~/.claude/plugins. `claude plugin install` needs
+# no auth: it is local git + file ops, not an API call — confirmed by the
+# same throwaway-$HOME run succeeding with no credential anywhere, and again
+# by `claude plugin list --json` succeeding inside the built image itself
+# (a plain agentic `-p` prompt in that same container still hits "Not logged
+# in", unchanged from Task 0/4's finding — this RUN step's install path is
+# a genuinely separate, unauthenticated code path, not an exception to it).
+# No `-y`/`--yes` on either install below: that flag exists on 2.1.235 (this
+# Mac's own CLI, used for the initial throwaway-$HOME probe) but 2.1.224 —
+# the version actually pinned in this image — rejects it outright
+# ("error: unknown option '-y'"), caught by this exact RUN step failing a
+# real build before this comment was written. Dropping it was then verified
+# safe, not just convenient: 2.1.224 installs both plugins non-interactively
+# with no prompt and no hang either way. Ground truth: the "official
+# marketplace cache format" is
+# ~/.claude/plugins/{known_marketplaces,installed_plugins}.json +
+# marketplaces/<name>/ (the marketplace repo's own checkout, read for
+# `plugin list`/`update`) + cache/<marketplace>/<plugin>/<version>/ (the
+# actual materialized content claude loads skills/hooks/agents from — this
+# is `installPath` in installed_plugins.json).
+#
+# BOTH plugins are pinned by commit, the same way, on purpose: cloned
+# straight to the path `plugin marketplace add` would itself manage for a
+# GitHub-sourced marketplace, checked out at a fixed sha, then registered
+# from there as a local "directory" source. This works because each plugin
+# already self-hosts its own single-plugin marketplace manifest at its repo
+# root (`obra/superpowers`'s own `.claude-plugin/marketplace.json` names
+# itself "superpowers-dev"; `JuliusBrussee/caveman`'s names itself
+# "caveman") — installing straight from the plugin's own upstream repo
+# instead of through an aggregator marketplace (claude-plugins-official,
+# superpowers-marketplace) sidesteps two real problems with the aggregator
+# route: "claude-plugins-official" is a CLI-enforced reserved name (a
+# local-path add of a pinned clone of it is flatly refused: "The name
+# 'claude-plugins-official' is reserved..."), and — the finding that forced
+# this rework — even where the name isn't reserved, an aggregator's
+# declared per-plugin commit is NOT a stable pin over time, only its version
+# LABEL is. Measured directly: this Mac's own already-installed superpowers
+# (installed February, last `plugin update`d 2026-08-15) sits at commit
+# e4a2375cb705..., while a bare `claude plugin marketplace add
+# anthropics/claude-plugins-official` done fresh days later resolves the
+# *same* declared "version": "6.3.0" to a *different* commit,
+# b36e0829c6d0..., reproduced identically across two separate builds. Same
+# label, moving commit — Anthropic bumps the sha claude-plugins-official
+# points at as upstream superpowers ships new commits under an unchanged
+# version number, so a build of this Dockerfile that went through that
+# aggregator would silently drift over calendar time despite looking pinned.
+# Cloning the plugin's own repo and checking out a sha ourselves is the only
+# way to actually fix a commit here. Chosen pin
+# (b36e0829c6d0140e93cfef2ca599b1b07d4a7797) is not arbitrary: it is exactly
+# the commit claude-plugins-official resolved to on the build that first
+# surfaced this drift, already proven to install and validate cleanly.
+#
+# caveman's pin (84cc3c14fa1e10182adaced856e003406ccd250d) is separately
+# load-bearing, not just for reproducibility: verified independently that
+# upstream HEAD's plugin.json fails this exact claude release's own manifest
+# validator ("agents: Invalid input" — a schema break from an "agents" array
+# the caveman repo added since this install path was last known good). Not
+# an arbitrary old commit either — it is the literal commit this same Mac's
+# own installed_plugins.json runs today, confirmed by `claude plugin list
+# --json` producing an identical, clean entry (no marketplace-load errors)
+# once pinned here.
+#
+# Both marketplace checkouts are kept on disk afterward rather than
+# rm -rf'd: a "directory"-sourced marketplace's installLocation IS that
+# path, not a copy of it, and deleting it post-install was measured to leave
+# `claude plugin list` reporting "Marketplace <name> failed to load:
+# cache-miss" on every later invocation (plugin stays enabled and usable
+# either way, but the warning is needless noise this image doesn't need to
+# ship with). ~10MB on disk combined (per plugin actually installed below).
+RUN git clone -q https://github.com/obra/superpowers.git \
+       /root/.claude/plugins/marketplaces/superpowers-dev \
+    && git -C /root/.claude/plugins/marketplaces/superpowers-dev checkout -q \
+       b36e0829c6d0140e93cfef2ca599b1b07d4a7797 \
+    && claude plugin marketplace add /root/.claude/plugins/marketplaces/superpowers-dev \
+    && claude plugin install superpowers@superpowers-dev
+
+# Issue #330 (public-release prep): caveman used to be baked unconditionally
+# above, for every deployment of this image regardless of operator — an
+# ultra-compressed communication STYLE plugin that is one specific operator's
+# own preference, not a generic default a new operator running this
+# fleet software would want imposed on them sight-unseen. Default OFF for the
+# public/product image; the pin, provenance and "why this commit, why kept on
+# disk" reasoning two paragraphs up applies identically if/when this arg is
+# flipped on.
+#
+# This IS a genuinely live gate, not a decorative one: `image_vars` is a
+# real, schema-validated field of a wrangler.jsonc `containers[]` entry
+# ("Image variables available to the image at build-time only" — Cloudflare's
+# own config-schema.json, confirmed against the wrangler version this repo
+# pins), and wrangler's own container build code (containers-shared/src/
+# build.ts's buildImage/constructBuildCommand) passes each entry straight
+# through as `docker build --build-arg KEY=VALUE`. An operator who wants
+# caveman for their OWN deployment sets
+# `containers[].image_vars.ENABLE_CAVEMAN_PLUGIN = "true"` on the StudioDO
+# entry in the wrangler config THEY actually deploy with (kept in their private
+# ops repo; wrangler.example.jsonc ships it "false") — no Dockerfile edit, no
+# fork of this RUN step.
+ARG ENABLE_CAVEMAN_PLUGIN=false
+RUN if [ "$ENABLE_CAVEMAN_PLUGIN" = "true" ]; then \
+      git clone -q https://github.com/JuliusBrussee/caveman.git \
+        /root/.claude/plugins/marketplaces/caveman \
+      && git -C /root/.claude/plugins/marketplaces/caveman checkout -q \
+        84cc3c14fa1e10182adaced856e003406ccd250d \
+      && claude plugin marketplace add /root/.claude/plugins/marketplaces/caveman \
+      && claude plugin install caveman@caveman; \
+    else \
+      echo "ENABLE_CAVEMAN_PLUGIN != true — skipping caveman plugin install (issue #330 default)"; \
+    fi
+
+COPY container/studio-bringup.sh /opt/fleet/studio-bringup.sh
+# The pty's root process (src/studio/sandbox-api.ts's STUDIO_SHELL). Baked
+# into the image rather than written at provision time on purpose: the pty is
+# opened lazily, on the first attach, which can happen against a container
+# that recycled since the last provision — a script written by provision
+# would be gone, and the attach would land on nothing.
+COPY container/studio-shell.sh /opt/fleet/studio-shell.sh
+# Fleet Spawn P3, Task 3 (R-P3-2/R-P3-7): the in-container `fleet spawn`
+# command — baked, not written at provision time, same reasoning as
+# studio-shell.sh just above (it must survive a container recycle that
+# happens without a re-provision). Symlinked to /usr/local/bin/fleet — same
+# `ln -sf` idiom this Dockerfile already uses for `claude` above, and the
+# exact binary name every role's `allowedTools` grants (`Bash(fleet *)`,
+# see studio-fleet's own header for why this is safe to share with the task
+# image's OWN, unrelated /usr/local/bin/fleet).
+COPY container/studio-fleet /opt/fleet/studio-fleet
+# Issue #146: the worktree-session adopt bring-up runs right after the
+# session-restore untar; the Worker's pre-bring-up adopt runs it too when it
+# is executable here.
+COPY container/studio-adopt.sh /opt/fleet/studio-adopt.sh
+# Issue #169: memory guard, started by studio-bringup.sh's memguard step.
+# Plain TS run by the base image's own bun; no dependencies.
+COPY container/memguard.ts /opt/fleet/memguard.ts
+RUN chmod 0755 /opt/fleet/studio-bringup.sh /opt/fleet/studio-shell.sh /opt/fleet/studio-fleet /opt/fleet/studio-adopt.sh \
+    && ln -sf /opt/fleet/studio-fleet /usr/local/bin/fleet

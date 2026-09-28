@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // Bun script, not a Worker. dev-entry.ts is deliberately NOT in this
+    // project — it imports src/ and must be checked against workers-types, so
+    // the ROOT tsconfig's include list owns it. Loading both type sets in one
+    // project makes lib DOM/Bun globals collide with workers-types inside
+    // src/ (auth.ts's BufferSource, page.ts's HTMLBundle).
+    "types": ["bun"]
+  },
+  "include": ["attach.e2e.ts", "cli.acceptance.ts", "harness.ts"]
+}

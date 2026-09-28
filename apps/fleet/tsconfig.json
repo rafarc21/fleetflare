@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2022"],
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "test-integration/dev-entry.ts"],
+  // studio.studio-blueprint.test.ts and studio.files.test.ts (P4a-1 T6) both
+  // run on bun:test (no workerd/cloudflare:test needed — pure-function/
+  // filesystem parsing only), so they need bun-types, not workers-types —
+  // same reason cli/, container/, and test-integration/ each carry their own
+  // tsconfig.json instead of sharing this one (test/tsconfig.json's own
+  // header explains why).
+  "exclude": ["test/bun/**/*.ts", "test/studio.studio-blueprint.test.ts", "test/studio.files.test.ts"]
+}

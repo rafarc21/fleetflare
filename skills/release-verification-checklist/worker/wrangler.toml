@@ -1,0 +1,18 @@
+name = "review-worker"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "REVIEW_ROOM"
+class_name = "ReviewRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ReviewRoom"]
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "review-media"
+
+# secrets set out-of-band: wrangler secret put REVIEW_READ_TOKEN / REVIEW_WRITE_TOKEN

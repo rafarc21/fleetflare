@@ -1,0 +1,97 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Issue #329 critical fix round: the fleet's real, account-specific
+  // wrangler.jsonc no longer lives in this repo at all (see
+  // apps/fleet/scripts/deploy.sh's header and the root README's Deploy
+  // section) — it lives in the private rafarc21/fleetflare-ops repo on the
+  // operator's own deploy machine. That means `bun run test` can no longer
+  // depend on it, or on any operator config being present anywhere, ever
+  // (a fresh clone has none). This file is the fake-but-VALID stand-in
+  // vitest.config.ts points @cloudflare/vitest-pool-workers at instead:
+  // every name/id below is fabricated, but shaped exactly like the real
+  // thing, so the bindings it builds (D1, R2, Durable Objects, containers)
+  // are the genuine article as far as workerd/miniflare are concerned.
+  //
+  // Never used for an actual `wrangler deploy` — see wrangler.example.jsonc
+  // for the public template a stranger fills in with THEIR OWN real values
+  // for their own ops-repo-equivalent, and deploy.sh for how a real deploy
+  // is actually run.
+  "name": "fleet-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    "AGENT_REPO": "acme-corp/example-repo",
+    "AGENT_BASE_REF": "main",
+    "MAX_TASK_SECONDS": "900",
+    "GITHUB_APP_ID": "999999",
+    "GITHUB_INSTALLATION_ID": "888888",
+    "GITHUB_INSTALLATION_ID_ACME_CORP": "777777",
+    "GITHUB_REPO_AUTH": "acme-corp=app",
+    "BURN_ALERT_OUTPUT_TOKENS_5H": "0",
+    "WORKER_PUBLIC_URL": "https://fleet-test.example-subdomain.workers.dev",
+    "CLAUDE_ACCOUNT_BY_REPO": "{\"example-repo\":2}",
+    // Board issue #334: most of this suite predates the FLEET_TELEGRAM /
+    // FLEET_DIRECTUS flags and exercises the legacy Telegram surface
+    // (approvals, alerts, /tg dispatch) directly against this file's ambient
+    // `env`, the same way it always ran before the flag existed. Keep it "on"
+    // here so that suite keeps exercising the real code path; test/*.ts files
+    // that specifically cover the flags (telegram.webhook.test.ts's "FLEET_
+    // TELEGRAM off" describe block, directus.*.test.ts) override FLEET_
+    // TELEGRAM/FLEET_DIRECTUS explicitly per test regardless of this default.
+    // TELEGRAM_OPERATOR_ID below matches the sender/chat id these tests
+    // already hardcode as "the operator" (telegram.webhook.test.ts's and
+    // telegram.callback.test.ts's default fromId/chatId) — not a value this
+    // file invented. It is the scrubbed placeholder id (issue #347/#335),
+    // not the real operator id it once was when this was hardcoded in
+    // application code.
+    "FLEET_TELEGRAM": "on",
+    "TELEGRAM_OPERATOR_ID": "100000001"
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "fleet-test", "database_id": "00000000-0000-4000-8000-000000000000", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "STUDIO_ARCHIVE", "bucket_name": "fleet-test-archive" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "AGENT", "class_name": "AgentDO" },
+      { "name": "DEPLOY", "class_name": "DeployDO" },
+      { "name": "STUDIO", "class_name": "StudioDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AgentDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["DeployDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["StudioDO"] }
+  ],
+  "containers": [
+    {
+      "class_name": "AgentDO",
+      "image": "./container/Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 3
+    },
+    {
+      "class_name": "DeployDO",
+      "image": "./container/Dockerfile.deploy",
+      "instance_type": "standard-1",
+      "max_instances": 2
+    },
+    {
+      "class_name": "StudioDO",
+      "image": "./container/Dockerfile.studio",
+      // Same build-context pin as the real config — see that file's own
+      // (now ops-repo-only) comment history / wrangler.example.jsonc for the
+      // full reasoning. Kept here too so this test config parses/binds
+      // identically in shape to what's actually deployed.
+      "image_build_context": ".",
+      "instance_type": "standard-1",
+      "max_instances": 5,
+      "rollout_step_percentage": 100
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+# Applies ONLY to the StudioDO image: it is the one container entry whose
+# `image_build_context` is this directory (see wrangler.jsonc). The AgentDO and
+# DeployDO images still build with ./container as their context, which has no
+# .dockerignore of its own, so nothing here affects them.
+#
+# That image COPYs exactly one file (container/studio-bringup.sh). Everything
+# below is therefore dead weight in the context transfer — node_modules alone
+# is ~605MB, which would otherwise be uploaded to the builder on every build.
+node_modules
+.wrangler
+.git
+page/dist
+
+# Secrets. Not a size concern — a correctness one. This directory is now a
+# docker build context, so anything left here is uploaded to the builder and
+# can be baked into an image layer by a stray COPY. Three real ways a secret
+# ends up here: test-integration/attach.e2e.ts WRITES .dev.vars into this
+# directory before wrangler builds the studio image; the operator runs
+# `wrangler deploy` from here per the finish list, with whatever .dev.vars or
+# .env they keep locally; and a GitHub App PEM is the natural thing to drop
+# next to wrangler.jsonc while setting GITHUB_APP_PRIVATE_KEY.
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+*.pem

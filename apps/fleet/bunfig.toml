@@ -1,0 +1,10 @@
+[test]
+# Issue #353 round 2 -- runs before any test file. See
+# test/bun/real-git-preload.ts's own header for the full "why": inside a real
+# studio container, "the real git" (Bun.which("git"), a bare `git` word) is
+# NOT genuine git by default -- it is this same repo's own #253 safety
+# wrapper, installed ahead of it on PATH on purpose. This preload fixes the
+# outer process's own PATH so real-git test fixtures get genuine git, and is
+# a no-op everywhere else (dev machines, CI, anywhere no wrapper is
+# installed).
+preload = ["./test/bun/real-git-preload.ts"]

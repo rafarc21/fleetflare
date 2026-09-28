@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"],
+    // server.ts and fleet-cli.ts each have zero import/export statements, so
+    // under module:"es2022" (not nodenext) tsc treats them as global scripts
+    // sharing one scope: same-named top-level consts collide, and top-level
+    // await is rejected because a "script" isn't a module. Force isolates
+    // each file's scope so two independent entrypoints can coexist here.
+    "moduleDetection": "force"
+  },
+  "include": ["**/*.ts"]
+}

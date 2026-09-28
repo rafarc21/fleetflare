@@ -1,0 +1,79 @@
+name: Fleet Check
+
+# Runs on every PR/push that touches the fleet worker. Two lanes: the vitest
+# suite (runs in workerd — no filesystem/child_process, source-text assertions
+# only) and bun-test (executes the shell studio-bringup.sh emits, in
+# containers — the only lane that catches a broken hook).
+
+on:
+  pull_request:
+    paths:
+      - 'apps/fleet/**'
+      - 'skills/**'
+      - 'fleet/blueprint/**'
+      - 'scripts/**'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/fleet/**'
+      - 'skills/**'
+      - 'fleet/blueprint/**'
+      - 'scripts/**'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: apps/fleet
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Type check
+        run: bun run check
+
+      - name: Unit tests (vitest-pool-workers)
+        run: bun run test
+
+      # test/bun/wake-cmd.test.ts runs the waker's emitted `tmux send-keys`
+      # against a REAL tmux server. Without tmux those tests fail loudly
+      # (they pin tmux's own stderr, so a missing binary can never read as
+      # green) -- installed here so the lane is deterministic rather than
+      # dependent on what the runner image happens to ship.
+      - name: tmux (the real-terminal lane needs it)
+        run: tmux -V || (sudo apt-get update && sudo apt-get install -y tmux)
+
+      # The ego-browser shim's daemon launches /usr/local/bin/chromium, the
+      # exact path Dockerfile.studio symlinks. Mirrored here line for line so
+      # the shim's tests -- cross-process persistence included -- run against
+      # a real browser in CI instead of failing on a missing binary.
+      - name: Chromium (ego-browser lane needs it)
+        run: |
+          bun x playwright install chromium --with-deps
+          sudo ln -sf "$(ls -d $HOME/.cache/ms-playwright/chromium-*/chrome-linux64/chrome | head -1)" /usr/local/bin/chromium
+          /usr/local/bin/chromium --version
+
+      # Issue #388: Ubuntu 24.04 (this runner's own image) restricts
+      # unprivileged user namespaces via AppArmor by default
+      # (kernel.apparmor_restrict_unprivileged_userns=1) -- `unshare -r`
+      # (test/bun/install-cache-security.test.ts's own real-full-disk ENOSPC
+      # suite) fails with "Operation not permitted" under that default, for
+      # both root and an unprivileged user. Reset for this job only; sudo is
+      # passwordless on GitHub-hosted runners. `|| true`: non-fatal if the
+      # sysctl itself is absent (an older or differently-configured runner
+      # image) -- that suite's own CI=true loud-fail catches a still-broken
+      # `unshare` either way, this step just tries the known fix first.
+      - name: "Allow unprivileged user namespaces (issue #388)"
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Container tests (bun-test)
+        run: bun run bun-test

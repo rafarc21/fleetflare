@@ -1,0 +1,38 @@
+# Local secret overrides for `wrangler dev` (dotenv-parsed: KEY=value, one
+# per line, no quoting). Copy this file to `.dev.vars` (same directory,
+# already git-ignored) and fill in your own values.
+#
+# This is for LOCAL DEVELOPMENT ONLY. The deployed Worker never reads this
+# file — its secrets are set individually with `wrangler secret put <NAME>`
+# (see README.md's Quickstart, step 5, for the full list and order). Anything
+# non-secret (repo names, ids that aren't credentials, feature flags) lives in
+# wrangler.jsonc's `vars` instead, in both places, and does not belong here —
+# see wrangler.example.jsonc.
+#
+# Values below are throwaway examples for local dev; do not reuse them for
+# anything deployed. See src/env.ts for the authoritative list of what the
+# Worker reads and which fields are required vs optional.
+
+# Required by env.ts today:
+TELEGRAM_BOT_TOKEN=dev-only
+TELEGRAM_WEBHOOK_SECRET=dev-only
+CLAUDE_CODE_OAUTH_TOKEN=dev-only
+GITHUB_WEBHOOK_SECRET=dev-only
+CLOUDFLARE_DEPLOY_TOKEN=dev-only
+
+# GitHub App private key, PKCS#8, one line (see README's Quickstart step 3 for
+# the PKCS#1 -> PKCS#8 `openssl pkcs8` conversion). Leave the header/footer in
+# place; strip only the newlines inside the body.
+GITHUB_APP_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----...-----END PRIVATE KEY-----
+
+# Cloudflare Access (studio/auth.ts). Secrets, not vars, even locally — see
+# wrangler.example.jsonc's comment on why these never go in wrangler.jsonc.
+ACCESS_TEAM_DOMAIN=<your-team>.cloudflareaccess.com
+ACCESS_AUD=<ACCESS_AUD>
+
+# Optional:
+# GITHUB_TOKEN=              # fine-grained PAT, alternative/complement to the GitHub App
+# TS_AUTHKEY=                # Tailscale, reusable/non-ephemeral. Leave UNSET rather than a
+#                             # placeholder — a bogus key fails `tailscale up` loudly (set -e)
+#                             # and takes studio bring-up down with it.
+# DIRECTUS_TOKEN=            # only if you use Directus (src/directus)

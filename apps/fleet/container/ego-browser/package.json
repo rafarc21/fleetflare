@@ -1,0 +1,9 @@
+{
+  "name": "ego-browser",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "1.63.0"
+  }
+}

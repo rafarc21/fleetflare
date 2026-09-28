@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "unsplash-integration",
+  "owner": "sickn33",
+  "repo": "antigravity-awesome-skills",
+  "path": "plugins/antigravity-awesome-skills-claude/skills/unsplash-integration",
+  "branch": "main",
+  "sha": "00b6f0d6703ce2bf09d8b8e71bb743ebce4425b5",
+  "source": "manual"
+}
