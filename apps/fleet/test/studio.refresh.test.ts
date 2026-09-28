@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import {
   runRefreshCredential, runRefreshToken, refreshWithStorage,
-  credentialWriteCmd, tokenEnv, FLEET_TOKEN_ENV, REFRESH_SECONDS, studioEnvVars, readTailscaleHost, type RefreshDeps,
+  credentialWriteCmd, credentialClearCmd, tokenEnv, FLEET_TOKEN_ENV, REFRESH_SECONDS, studioEnvVars, readTailscaleHost, type RefreshDeps,
   ensureSpawnToken, loadOrMintSpawnToken, SPAWN_TOKEN_KEY, type SpawnTokenStorage,
 } from "../src/studio/do";
 import { hashSpawnToken } from "../src/studio/org";
@@ -193,6 +193,15 @@ describe("runRefreshCredential", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).not.toContain("ghs_capturedtoken");
     expect(deps.sbExec).toHaveBeenCalledWith(credentialWriteCmd(), tokenEnv("ghs_capturedtoken"));
+  });
+
+  // Issue #7: proxy mode with no read token. The write credential must not
+  // survive in the container, so the files are cleared, not left stale.
+  it("a null token clears the credential files instead of writing one", async () => {
+    const deps = fakeRefreshDeps({ mintToken: vi.fn(async () => null) });
+    const result = await runRefreshCredential(deps);
+    expect(result).toEqual({ ok: true, lastRefresh: NOW_ISO });
+    expect(deps.sbExec).toHaveBeenCalledWith(credentialClearCmd());
   });
 
   it("a non-zero sbExec exit becomes ok:false with a stderr-derived error", async () => {

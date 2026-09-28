@@ -94,12 +94,13 @@ import { juniorEnabled } from "../junior/gate";
 // sandbox-free module so the bun:test lane can ask real git which
 // credential it picks — see credentials.ts's own header. Re-exported
 // here so every existing `from "./do"` importer is unchanged.
-import { credentialWriteCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV } from "./credentials";
+import { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV } from "./credentials";
 import { leakGateInstallCmd } from "./gh-wrapper";
-export { credentialWriteCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV };
+export { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV };
 
 import { mintSpawnToken, hashSpawnToken } from "./org";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
+import { studioCredential } from "../write-proxy/mode";
 import {
   fetchRepoFile, createRepoFile, upsertRepoFile, listOpenPullNumbers, repoIsPrivate,
   // Issue #249 (PR4b): the survival re-brief's three GitHub reads, all from
@@ -189,7 +190,9 @@ export const REFRESH_SECONDS = 3000;
 export const SHIP_TRANSCRIPT_SECONDS = 30;
 
 export interface RefreshDeps {
-  mintToken: () => Promise<string>;
+  /** Issue #7: null = no credential for this studio (proxy mode, no read
+   *  token) -- the container's credential files are cleared instead. */
+  mintToken: () => Promise<string | null>;
   // `env`: the credential write's token rides here (#110 review), never in `cmd`.
   sbExec: (cmd: string, env?: Record<string, string>) => Promise<{ code: number; stdout: string; stderr: string }>;
   recordStudio: (status: StudioStatus) => Promise<void>;
@@ -224,7 +227,9 @@ export async function runRefreshCredential(
 ): Promise<{ ok: true; lastRefresh: string } | { ok: false; error: string }> {
   try {
     const token = await deps.mintToken();
-    const res = await deps.sbExec(credentialWriteCmd(), tokenEnv(token));
+    const res = token === null
+      ? await deps.sbExec(credentialClearCmd())
+      : await deps.sbExec(credentialWriteCmd(), tokenEnv(token));
     if (res.code !== 0) {
       throw new Error(`credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
     }
@@ -4994,7 +4999,11 @@ export class StudioDO extends Sandbox<Env> {
    */
   private refreshDeps(workRepoSlug: string): RefreshDeps {
     return {
-      mintToken: () => mintRepoToken(this.env, workRepoSlug),
+      // Issue #7: read-only unless the work repo is confirmed private (or the
+      // operator switched the write proxy off). See write-proxy/mode.ts.
+      mintToken: () => studioCredential(this.env, workRepoSlug, {
+        isPrivate: async (repo) => repoIsPrivate(await mintRepoToken(this.env, repo, { permissions: { contents: "read" } }), repo),
+      }),
       sbExec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.refresh, env }),
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
       notify: async (message: string) => {
