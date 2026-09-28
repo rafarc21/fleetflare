@@ -60,7 +60,11 @@ export function juniorDisable(p: JuniorPaths): Out {
 export function juniorStatus(p: JuniorPaths, env: Record<string, string | undefined>): Out {
   const state = linkState(p);
   const account = env.CLOUDFLARE_ACCOUNT_ID || readConfig(p).accountId || "(none)";
-  const auth = env.FLEET_WORKER_URL && env.FLEET_SPAWN_TOKEN ? "proxy" : env.CLOUDFLARE_API_TOKEN ? "api-token" : "wrangler";
+  // resolveTransport (Task 3) throws AuthError before ever reaching wrangler
+  // when no account id is configured anywhere, so naming "wrangler" here in
+  // that case would claim a path that can never actually be taken.
+  const auth = account === "(none)" ? "(no account — see above)"
+    : env.FLEET_WORKER_URL && env.FLEET_SPAWN_TOKEN ? "proxy" : env.CLOUDFLARE_API_TOKEN ? "api-token" : "wrangler";
   return { ok: true, lines: [`enabled: ${state === "ours" ? "yes" : state === "foreign" ? "no (foreign dir in the way)" : "no"}`, `account: ${account}`, `auth: ${auth}`] };
 }
 
