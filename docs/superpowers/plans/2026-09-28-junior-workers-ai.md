@@ -33,6 +33,20 @@
 4. Block path absolute or containing `..` (escape attempt, or new-file create outside repo) → rejected with clear error. Test: Task 1 `rejects paths outside the repo`.
 5. Proxy answers plain-text 404/401 (flag off, bad token) or heartbeat spaces before JSON → wrapper exits 6 with "junior not enabled for this repo" / "unauthorized", and parses padded JSON fine. Test: Task 2 `proxy transport` cases.
 
+
+## Execution notes (for the implementing studio)
+
+- Branch `junior/workers-ai`. Studio clone is shallow single-branch: `git fetch origin junior/workers-ai:junior/workers-ai && git checkout junior/workers-ai`.
+- Run with superpowers:subagent-driven-development: fresh member per task, fresh reviewer gate per task, whole-branch review at end. Tasks 1-9 in order, then Task 10 Steps 1 and 4 only.
+- Line numbers here are approximate (~). Locate by named symbol.
+- Deviation needed? Note it in PR body with reason. Never silently redesign.
+- Skip Task 10 Steps 2, 3, 5 (live Workers AI smoke, rollout). Container holds no Cloudflare credential by design: do not look for one, do not add one.
+- No `wrangler deploy`, no ops-repo edits, no merging. Operator merges.
+- Heavy gates one at a time: full vitest, full `bun test test/bun`, repo tsc. Never parallel. Memory ceiling 11.65 GiB. Ignore `lockf` (Mac-only).
+- CI = Mac local-ci commit statuses. Never enable GitHub Actions.
+- Public repo: no private names, account ids, personal paths in committed text. English only.
+- PR `junior/workers-ai` -> `main`, title "feat(junior): opt-in Workers AI delegation, maestro-gated". Body: summary, eval table from spec, per-task test evidence (command + pass counts), note Task 10 Steps 2, 3, 5 left for operator.
+
 ---
 
 ## File Structure
