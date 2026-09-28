@@ -38,6 +38,7 @@ import { redactSecrets } from "./redact";
 import { DenylistDialectError, LEAK_DENYLIST_PATH, OPS_DENYLIST_PATH, denylistFileContent, parseDenylist } from "../leak-gate";
 import { isDeadlineExit, KILL_GRACE_SECONDS } from "./exec-deadline";
 import { ghBlockCmd } from "./gh-wrapper";
+import { writeProxyConfigCmd } from "../write-proxy/container-config";
 import { STUDIO_TMUX, withStudioTmux } from "./tmux";
 // Issue #38: a restart has only the studio ID to work from, and the repo
 // segment of that id IS the checkout directory under /workspace. ids.ts
@@ -254,6 +255,11 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
    * wrote. `{}`, absence or a throw = origin-only discovery.
    */
   rescueTarget?: (workRepoSlug: string) => Promise<RescueTarget>;
+   * Issue #7: route pushes and gh writes through the Worker. Applied with the
+   * same visibility answer as the gate above: public or unknown + `on` =
+   * proxy config, else direct (proxy keys removed). Absent = no step.
+   */
+  writeProxy?: { on: boolean; workerUrl: string };
   /**
    * Maestro correction #10 — issue #90 (currently blocked, but also touches
    * `runProvision`/`runRestart` directly) makes widening either function's
@@ -2177,6 +2183,23 @@ async function applyLeakGate(deps: ProvisionDeps, id: string, workRepoSlug: stri
   } catch (err) {
     console.error(`studio ${id}: leak gate privacy lookup failed, treating ${workRepoSlug} as public`,
       err instanceof Error ? err.message : String(err));
+  }
+
+  // Issue #7. A failed exec leaves pushes pointed at GitHub on the read-only
+  // token: they fail, they never leak. Noted on the row.
+  if (deps.writeProxy) {
+    const mode = deps.writeProxy.on && !isPrivate ? "proxy" : "direct";
+    let ok = false;
+    try {
+      const res = await deps.sbExec(writeProxyConfigCmd(mode, deps.writeProxy.workerUrl));
+      ok = res.code === 0;
+      if (!ok) console.error(`studio ${id}: write proxy config failed (${res.code})`, res.stderr.slice(0, 500));
+    } catch (err) {
+      console.error(`studio ${id}: write proxy config failed`, err instanceof Error ? err.message : String(err));
+    }
+    if (!ok) {
+      notes.push(`write proxy: git config failed (${mode}) -- pushes and gh writes from this studio fail until the next restart.`);
+    }
   }
 
   let content: string | null = null;

@@ -100,7 +100,7 @@ export { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, st
 
 import { mintSpawnToken, hashSpawnToken } from "./org";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
-import { studioCredential } from "../write-proxy/mode";
+import { studioCredential, writeProxyOn } from "../write-proxy/mode";
 import {
   fetchRepoFile, createRepoFile, upsertRepoFile, listOpenPullNumbers, repoIsPrivate,
   // Issue #249 (PR4b): the survival re-brief's three GitHub reads, all from
@@ -4554,6 +4554,8 @@ export class StudioDO extends Sandbox<Env> {
       workRepoIsPrivate: async (slug: string) => repoIsPrivate(await mint(slug), slug),
       // Issue #30: discovery reads the same remote rescue writes to.
       rescueTarget: (slug: string) => this.rescueTarget(async () => slug, "discovery"),
+      // Issue #7: same visibility answer drives the push/gh routing.
+      writeProxy: { on: writeProxyOn(this.env), workerUrl: this.env.WORKER_PUBLIC_URL },
       // Board #350: the repo gate and the presign-GET mint. Both optional on
       // ProvisionDeps (install-cache.ts's InstallCacheRestoreDeps doc
       // comment) — wired here unconditionally, since the gate itself (empty
