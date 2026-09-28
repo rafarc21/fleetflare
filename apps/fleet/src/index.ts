@@ -13,6 +13,7 @@ import { handleBoard, handleFleetBoard } from "./board/routes";
 import { handleMemory } from "./memory/routes";
 import { handleFleetJunior } from "./junior/route";
 import { handleFleetGh } from "./write-proxy/gh-route";
+import { handleFleetGit } from "./write-proxy/git-worker";
 
 export { AgentDO } from "./agents/do";
 // A container class declared in wrangler.jsonc without a matching export
@@ -59,9 +60,11 @@ export default {
     // FLEET_JUNIOR is on for the calling studio's repo; 403 unless the
     // studio's live task carries the maestro's `junior` label.
     if (url.pathname === "/fleet/junior") return handleFleetJunior(req, env);
-    // Issue #7: the write proxy -- a public-repo studio's only gh write path.
+    // Issue #7: the write proxy -- a public-repo studio's only push and gh
+    // write path.
     // Spawn-token authenticated, before the /fleet/ catch-all.
     if (url.pathname === "/fleet/gh") return handleFleetGh(req, env);
+    if (url.pathname.startsWith("/fleet/git/")) return handleFleetGit(req, env);
     if (url.pathname.startsWith("/fleet/tasks")) return handleFleetBoard(req, env);
     // Fleet Spawn P3, R-P3-7: the machine surface, deliberately OUTSIDE the
     // `/studio` prefix the Cloudflare Access app is scoped to — a container
