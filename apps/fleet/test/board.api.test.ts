@@ -57,7 +57,7 @@ describe("createIssue", () => {
     expect(task).toEqual({
       number: 12, url: "https://github.com/o/r/issues/12", title: "Build the task board",
       body: "## Objective\n", state: "submitted", labels: ["submitted"], assignee: null,
-      milestone: "Sprint 1", open: true, updatedAt: "2026-08-25T10:00:00Z",
+      milestone: "Sprint 1", open: true, reopened: false, updatedAt: "2026-08-25T10:00:00Z",
     });
   });
 
