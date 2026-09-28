@@ -5053,8 +5053,13 @@ export class StudioDO extends Sandbox<Env> {
       botEmail: this.env.FLEET_BOT_EMAIL,
       // Issue #1 piece 5: FLEET_RESCUE_REMOTE + a contents:write token scoped
       // to it; unset or a failed mint → origin, leak-gated, loudly (rescue.ts).
+      // Issue #24: only for a PUBLIC work repo; private or unknown → origin.
       rescueTarget: () => resolveRescueTarget(this.env, (repo) =>
-        mintRepoToken(this.env, repo, { permissions: { contents: "write" } })),
+        mintRepoToken(this.env, repo, { permissions: { contents: "write" } }),
+      async () => {
+        const slug = await this.workRepoSlug(null);
+        return repoIsPrivate(await mintRepoToken(this.env, slug), slug);
+      }),
     };
   }
 
