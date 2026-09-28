@@ -348,6 +348,12 @@ export const STUDIO_PUSH_ALIAS_DEPTH_REFUSAL =
  *  cannot run (no gate file, bad pattern, scanner missing). */
 export const STUDIO_PUSH_LEAK_REFUSAL = "fleet: leak gate refused this push";
 
+/** Issue #1: a pushed ref whose object (after peeling every annotated tag) is
+ *  a blob or tree. `git log` prints nothing for those, so the scan would see
+ *  no text while the object's own bytes reach the remote. Refused. */
+export const STUDIO_PUSH_NONCOMMIT_REFUSAL =
+  "fleet: refusing to push a ref that does not resolve to a commit (blob or tree) -- the leak gate cannot scan it";
+
 /** Issue #1: a push that recurses into submodules (`--recurse-submodules=
  *  on-demand|only`, `push.recurseSubmodules`, `submodule.recurse=true`) makes
  *  the real git push the submodules' commits too, past a leak scan that only
@@ -846,16 +852,22 @@ export function studioGitWrapperScript(realGit = STUDIO_REAL_GIT_PATH, scanPath 
     `    done < <("$real" "\${globals[@]}" ls-remote -- "$url" 2>/dev/null | cut -f1 | sed 's/$/^{commit}/' |`,
     `      "$real" "\${globals[@]}" cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null)`,
     `  fi`,
+    `  # A src that peels to a blob or tree carries bytes git log never prints.`,
+    `  for o in "\${srcs[@]}"; do`,
+    `    [ "$("$real" "\${globals[@]}" --no-replace-objects cat-file -t "$o^{}" 2>/dev/null)" = commit ] ||`,
+    `      { echo "${STUDIO_PUSH_NONCOMMIT_REFUSAL}" >&2; exit 1; }`,
+    `  done`,
     `  # Text: pushed ref names, the push's own argv (push options), configured`,
     `  # push options, every annotated tag object on a src (nested tags walked:`,
     `  # tagger + message), author/committer, full message, added lines and new`,
     `  # paths. Flags pin the output against config (color, ext diff, textconv,`,
     `  # diff.relative, log.showRoot, replace refs, core.quotePath -- a quoted`,
-    `  # path octal-escapes non-ASCII bytes past the patterns). pipefail: ANY`,
+    `  # path octal-escapes non-ASCII bytes past the patterns; logOutputEncoding --`,
+    `  # UTF-16 interleaves NULs through every term). pipefail: ANY`,
     `  # failure -- log, cat-file, config, scanner, scanner missing (127) -- refuses.`,
     `  (`,
     `    set -o pipefail`,
-    `    cg=("$real" "\${globals[@]}" --no-replace-objects)`,
+    `    cg=("$real" "\${globals[@]}" --no-replace-objects -c i18n.logOutputEncoding=UTF-8)`,
     `    lg=("\${cg[@]}" -c log.showRoot=true -c core.quotePath=false log --no-color)`,
     `    tagtext() {`,
     `      local o t`,

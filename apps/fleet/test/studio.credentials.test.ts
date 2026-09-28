@@ -13,7 +13,7 @@ import {
   STUDIO_PUSH_REFUSAL, STUDIO_PUSH_UNRESOLVED_DEFAULT,
   STUDIO_PUSH_PROBE_FAILED, STUDIO_PUSH_SHELL_ALIAS_REFUSAL,
   STUDIO_PUSH_PLUMBING_REFUSAL, STUDIO_PUSH_ALIAS_DEPTH_REFUSAL, STUDIO_PUSH_LEAK_REFUSAL,
-  STUDIO_PUSH_SUBMODULE_REFUSAL,
+  STUDIO_PUSH_SUBMODULE_REFUSAL, STUDIO_PUSH_NONCOMMIT_REFUSAL,
 } from "../src/studio/credentials";
 import { LEAK_SCAN_PATH } from "../src/leak-gate";
 
@@ -398,6 +398,13 @@ describe("studioGitWrapperScript — the leak gate on push (issue #1)", () => {
     expect(STUDIO_PUSH_SUBMODULE_REFUSAL).toContain("submodule");
     expect(s).toContain("push.recurseSubmodules");
     expect(s).toContain("submodule.recurse");
+  });
+
+  it("refuses a src that peels to a blob or tree, and pins log output to UTF-8", () => {
+    const s = studioGitWrapperScript();
+    expect(s).toContain(STUDIO_PUSH_NONCOMMIT_REFUSAL);
+    expect(s).toContain('cat-file -t "$o^{}"');
+    expect(s).toContain("-c i18n.logOutputEncoding=UTF-8");
   });
 
   it("does not install the scanner itself — another step owns that", () => {

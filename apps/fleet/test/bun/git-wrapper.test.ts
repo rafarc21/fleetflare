@@ -7,7 +7,7 @@ import {
   STUDIO_PUSH_REFUSAL, STUDIO_PUSH_UNRESOLVED_DEFAULT,
   STUDIO_PUSH_PROBE_FAILED, STUDIO_PUSH_SHELL_ALIAS_REFUSAL,
   STUDIO_PUSH_PLUMBING_REFUSAL, STUDIO_PUSH_ALIAS_DEPTH_REFUSAL, STUDIO_PUSH_LEAK_REFUSAL,
-  STUDIO_PUSH_SUBMODULE_REFUSAL,
+  STUDIO_PUSH_SUBMODULE_REFUSAL, STUDIO_PUSH_NONCOMMIT_REFUSAL,
 } from "../../src/studio/credentials";
 import { denylistFileContent, leakScanScript, type LeakGateFile } from "../../src/leak-gate";
 import { withKillDeadline } from "../../src/studio/exec-deadline";
@@ -137,7 +137,7 @@ afterEach(() => {
 interface Run { code: number; stdout: string; stderr: string }
 
 function run(cmd: string[], cwd: string, env: Record<string, string>): Run {
-  const r = Bun.spawnSync({ cmd, cwd, env, stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync({ cmd, cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   return { code: r.exitCode ?? -1, stdout: r.stdout.toString(), stderr: r.stderr.toString() };
 }
 
@@ -2126,6 +2126,65 @@ LANE("the fleet git wrapper runs the leak gate on every push (issue #1)", () => 
     commitWith(f, "a.txt", "clean\n", "clean message");
     expectLanded(f, git(f, [...(g as string[]), "push", ...(a as string[]), "origin", "HEAD:refs/heads/feature"]));
   });
+
+  /** A blob holding the term, written from a file (no stdin needed). */
+  function termBlob(f: Fixture): string {
+    writeFileSync(join(f.root, "blob.txt"), `secret ${TERM}\n`);
+    return realGit(f, ["hash-object", "-w", join(f.root, "blob.txt")]).stdout.trim();
+  }
+
+  function expectNonCommitRefused(f: Fixture, r: Run, before: string[]): void {
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain(STUDIO_PUSH_NONCOMMIT_REFUSAL);
+    expect(r.stderr.toLowerCase()).not.toContain(TERM);
+    expect(originState(f)).toEqual(before);
+  }
+
+  test("a lightweight tag at a BLOB is refused (mutant: git log prints nothing for a blob, push leaks)", () => {
+    const f = gated();
+    realGit(f, ["tag", "blobtag", termBlob(f)]);
+    const before = originState(f);
+    expectNonCommitRefused(f, git(f, ["push", "origin", "refs/tags/blobtag"]), before);
+  });
+
+  test("a lightweight tag at a TREE is refused", () => {
+    const f = gated();
+    commitWith(f, `${TERM}.txt`, `${TERM}\n`, "clean message");
+    realGit(f, ["tag", "treetag", "HEAD^{tree}"]);
+    const before = originState(f);
+    expectNonCommitRefused(f, git(f, ["push", "origin", "refs/tags/treetag"]), before);
+  });
+
+  test("an annotated tag chain ending at a BLOB is refused", () => {
+    const f = gated();
+    realGit(f, ["tag", "-a", "blobann", "-m", "clean", termBlob(f)]);
+    realGit(f, ["tag", "-a", "blobouter", "-m", "clean", "blobann"]);
+    const before = originState(f);
+    expectNonCommitRefused(f, git(f, ["push", "origin", "refs/tags/blobouter"]), before);
+  });
+
+  test("a raw BLOB SHA pushed to a ref is refused", () => {
+    const f = gated();
+    const blob = termBlob(f);
+    const before = originState(f);
+    expectNonCommitRefused(f, git(f, ["push", "origin", `${blob}:refs/tags/rawblob`]), before);
+  });
+
+  test("i18n.logOutputEncoding=UTF-16 cannot hide a hit in the message (mutant: encoding not pinned)", () => {
+    const f = gated();
+    realGit(f, ["config", "i18n.logOutputEncoding", "UTF-16"]);
+    commitWith(f, "a.txt", "clean\n", `work for ${TERM}`);
+    const before = originState(f);
+    expectLeakRefused(f, pushFeature(f), before);
+  });
+
+  test("gate `off` with a 5 MB diff still lands (mutant: 'off' exits without draining stdin, SIGPIPE)", () => {
+    const f = gated();
+    writeGate(f, { off: "work repo is private" });
+    const line = `line with ${TERM} padding ${"x".repeat(60)}\n`;
+    commitWith(f, "big.txt", line.repeat(Math.ceil((5 * 1024 * 1024) / line.length)), "big");
+    expectLanded(f, pushFeature(f));
+  }, 60_000);
 
   test("nothing to push is handed over without a scan, even with no gate file", () => {
     const f = gated();
