@@ -23,6 +23,7 @@ import { parseBrief, renderBriefPrompt, renderTaskBody, taskKeyMarker } from "./
 import { parseEnvelope, parseEnvelopeComment, renderEnvelopeComment } from "./envelope";
 import {
   isStaleBacklog, isTaskState, studioLabel, taskAssignees, taskStates, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES,
+  JUNIOR_LABEL,
   type BoardTask, type BoardTaskView, type EnvelopeDoc, type TaskState,
 } from "./types";
 import type { BoardComment, IssueInput, ListIssuesQuery } from "./api";
@@ -151,10 +152,12 @@ export async function createTask(
   // add: an issue that exists for a moment carrying a state but no owner is
   // a window in which `listStudioTasks` would not return it to the studio
   // being spawned for it, and `ff` spawns immediately after filing.
+  const labels = brief.assignee === null ? [ENTRY_STATE] : [ENTRY_STATE, studioLabel(brief.assignee)];
+  if (brief.junior === true) labels.push(JUNIOR_LABEL);
   const input: IssueInput = {
     title: brief.title,
     body: renderTaskBody(brief),
-    labels: brief.assignee === null ? [ENTRY_STATE] : [ENTRY_STATE, studioLabel(brief.assignee)],
+    labels,
   };
   if (brief.milestone !== null) {
     const milestone = await resolveMilestone(api, repo, brief.milestone);
@@ -909,6 +912,26 @@ export async function resolveLatestAssignedBrief(
   // would arrive at a live pane as several broken half-prompts (see
   // `assignDigest`'s own doc comment in src/board/assign-wake.ts).
   return { prompt, taskNumber: newest.number, title: newest.title };
+}
+
+/**
+ * Junior gate: may `studioId` call /fleet/junior right now? Only while one of
+ * its own tasks is live (LIVE_TASK_STATES, open, not drifted) and carries
+ * JUNIOR_LABEL. The maestro sets that label when it files the task; nothing
+ * else ever does. A board error is returned, never read as "yes".
+ */
+export async function hasJuniorAuthorizedTask(
+  api: BoardApi, repo: string, studioId: string,
+): Promise<BoardResult<boolean>> {
+  const r = await listTasks(api, repo, { assignedTo: studioId });
+  if (!r.ok) return r;
+  const mine = studioLabel(studioId);
+  return {
+    ok: true,
+    value: r.value.some((t) =>
+      t.open && t.state !== null && LIVE_TASK_STATES.includes(t.state)
+      && t.labels.includes(mine) && t.labels.includes(JUNIOR_LABEL)),
+  };
 }
 
 /**

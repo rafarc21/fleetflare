@@ -167,3 +167,13 @@ describe("formatAssignWake", () => {
     expect(formatAssignWake(undefined)).toBeNull();
   });
 });
+
+// Task 5: the maestro's per-task authorization for the junior skill.
+describe("junior authorization is visible on the board", () => {
+  it("marks junior-authorized tasks in ls and show", () => {
+    const t = { ...task(), labels: [...task().labels, "junior"] };
+    expect(formatTaskTable([t])).toContain("[junior] ");
+    expect(formatTaskShow({ task: t, comments: [] }).split("\n")[0]).toContain("junior: yes");
+    expect(formatTaskShow({ task: task(), comments: [] }).split("\n")[0]).not.toContain("junior");
+  });
+});

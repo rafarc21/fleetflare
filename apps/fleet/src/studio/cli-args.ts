@@ -195,6 +195,9 @@ export interface TaskBriefArgs {
    *  Absent = file into whatever `detectRepo()` resolves from the CWD's git
    *  remote, today's unchanged default. */
   repo?: string;
+  /** Task 5: maestro's `--junior` authorization for this task. Absent = the
+   *  ordinary, unauthorized default. See src/board/brief.ts's TaskBrief.junior. */
+  junior?: true;
 }
 
 /**
@@ -266,8 +269,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it.",
   },
   "task-new": {
-    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name]",
-    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required.",
+    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--junior]",
+    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required. --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given.",
   },
   "task-ls": {
     args: "ls [--sprint S] [--state submitted|working|input_required|completed|failed|canceled] [--studio ID]",
@@ -490,7 +493,12 @@ function parseTask(argv: string[]): CliCommand {
   }
   if (sub !== "new" && sub !== "ls") return usage(`unknown task command ${JSON.stringify(sub ?? "")}`);
 
-  const parsed = parseFlags(rest, TASK_FLAGS[sub]);
+  // `--junior` is the one bare boolean on task new (parseFlags only takes
+  // `--flag value` pairs). Pulled out first so it may sit anywhere; on any
+  // other task verb it stays in and parseFlags rejects it as unexpected.
+  const junior = sub === "new" && rest.includes("--junior");
+  const flagArgs = junior ? rest.filter((a) => a !== "--junior") : rest;
+  const parsed = parseFlags(flagArgs, TASK_FLAGS[sub]);
   if ("bad" in parsed) return usage(`unexpected ${JSON.stringify(parsed.bad)}`);
 
   if (sub === "ls") {
@@ -516,6 +524,7 @@ function parseTask(argv: string[]): CliCommand {
   if (parsed.sprint !== undefined) brief.milestone = parsed.sprint;
   if (parsed.studio !== undefined) brief.assignee = parsed.studio;
   if (parsed.repo !== undefined) brief.repo = parsed.repo;
+  if (junior) brief.junior = true;
   return { cmd: "task-new", brief };
 }
 

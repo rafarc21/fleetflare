@@ -298,6 +298,20 @@ describe("parseCliArgs: task", () => {
     expect(parseCliArgs(["task"]).cmd).toBe("usage");
     expect(parseCliArgs(["task", "close", "12"]).cmd).toBe("usage");
   });
+
+  // Task 5: the maestro's per-task authorization for the junior skill.
+  // `--junior` is the one bare boolean flag on `task new` — no value, unlike
+  // every other flag here — so it must be pulled out before parseFlags runs,
+  // which is why it can sit anywhere in the argv, not just at the end.
+  it("task new --junior is a bare boolean flag, anywhere after new", () => {
+    const a = parseCliArgs(["task", "new", ...flags, "--junior"]);
+    expect(a.cmd === "task-new" && a.brief.junior).toBe(true);
+    const b = parseCliArgs(["task", "new", "--junior", ...flags]);
+    expect(b.cmd === "task-new" && b.brief.junior).toBe(true);
+    const c = parseCliArgs(["task", "new", ...flags]);
+    expect(c.cmd === "task-new" && c.brief.junior).toBeUndefined();
+    expect(parseCliArgs(["task", "ls", "--junior"]).cmd).toBe("usage");
+  });
 });
 
 describe("fleet task assign — P5 §3 reassignment", () => {
