@@ -21,7 +21,7 @@ import {
 import { appendHouseRules, base64EncodeUtf8, BlueprintError } from "../src/studio/blueprint";
 import { recordStudio } from "../src/studio/registry";
 import { gatedStateIn, opsFileFetcher, installLeakGatePort } from "../src/studio/do";
-import { leakGateInstallCmd } from "../src/studio/gh-wrapper";
+import { ghBlockCmd, leakGateInstallCmd } from "../src/studio/gh-wrapper";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { memoryCloneCmd, MEMORY_TOKEN_ENV } from "../src/memory/store";
@@ -1608,6 +1608,50 @@ describe("applyLeakGate — denylist delivery into the container (issue #1)", ()
     expect(status.state).toBe("running");
     expect(status.error).toContain("leak gate: scanner/gh wrapper install failed");
     expect(g.writes).toHaveLength(1);
+  });
+
+  it("install failure -> gh blocked via ghBlockCmd, note says so (mutant: row note only, no block)", async () => {
+    const g = gateDeps();
+    g.deps.installLeakGate = vi.fn(async () => ({ ok: false as const, error: "exit 1" }));
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(g.cmds).toContain(ghBlockCmd());
+    expect(status.error).toContain("gh is blocked in this studio");
+  });
+
+  it("install ok -> gh never blocked", async () => {
+    const g = gateDeps();
+    await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(g.cmds).not.toContain(ghBlockCmd());
+  });
+
+  it("install failure + block exec non-zero -> note says gh is NOT blocked", async () => {
+    const g = gateDeps();
+    g.deps.installLeakGate = vi.fn(async () => ({ ok: false as const, error: "exit 1" }));
+    g.deps.sbExec = vi.fn(async (cmd: string) => {
+      g.cmds.push(cmd);
+      return { code: cmd === ghBlockCmd() ? 1 : 0, stdout: "", stderr: "" };
+    });
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(status.state).toBe("running");
+    expect(status.error).toContain("gh block also failed");
+    expect(status.error).not.toContain("gh is blocked in this studio");
+  });
+
+  it("install failure + block exec throws -> note says gh is NOT blocked, never throws", async () => {
+    const g = gateDeps();
+    g.deps.installLeakGate = vi.fn(async () => ({ ok: false as const, error: "exit 1" }));
+    g.deps.sbExec = vi.fn(async (cmd: string) => {
+      g.cmds.push(cmd);
+      if (cmd === ghBlockCmd()) throw new Error("sandbox gone");
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+
+    expect(status.state).toBe("running");
+    expect(status.error).toContain("gh block also failed");
   });
 
   it("note joins the house-rules overlay note on the row", async () => {

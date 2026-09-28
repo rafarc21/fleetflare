@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { denylistFileContent } from "../../src/leak-gate";
-import { leakGateInstallCmd, STUDIO_GH_LEAK_REFUSAL } from "../../src/studio/gh-wrapper";
+import { ghBlockCmd, leakGateInstallCmd, STUDIO_GH_ALIAS_REFUSAL, STUDIO_GH_LEAK_REFUSAL } from "../../src/studio/gh-wrapper";
 
 /**
  * Issue #1 -- the container `gh` wrapper. Real bash, a fake real gh that
@@ -23,6 +23,8 @@ const SYS_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 type Studio = {
   dir: string;
   bin: string;
+  real: string;
+  block: () => number;
   install: () => { code: number; stderr: string };
   gh: (args: string[], stdin?: string) => { code: number; stderr: string };
   realArgv: () => string[] | null;
@@ -36,7 +38,15 @@ function studio(denylist: string | null): Studio {
   const realDir = join(d, "real");
   mkdirSync(realDir);
   const real = join(realDir, "gh");
-  writeFileSync(real, `#!/bin/bash\nprintf '%s\\0' "$@" > '${d}/argv'\ncat > '${d}/stdin'\nexit 0\n`);
+  // `alias list` answers from ${d}/aliases (exit 1 if ${d}/alias-fail) and
+  // is NOT recorded: argv/stdin record only the pass-through call.
+  writeFileSync(real, [
+    `#!/bin/bash`,
+    `if [ "$1 $2" = 'alias list' ]; then [ -f '${d}/alias-fail' ] && exit 1; [ -f '${d}/aliases' ] && cat '${d}/aliases'; exit 0; fi`,
+    `printf '%s\\0' "$@" > '${d}/argv'`,
+    `cat > '${d}/stdin'`,
+    `exit 0`,
+  ].join("\n") + "\n");
   chmodSync(real, 0o755);
   const list = join(d, "denylist");
   if (denylist !== null) writeFileSync(list, denylist);
@@ -50,6 +60,8 @@ function studio(denylist: string | null): Studio {
   const s: Studio = {
     dir: d,
     bin,
+    real,
+    block: () => Bun.spawnSync({ cmd: ["bash", "-c", ghBlockCmd(real)], env, stdin: "ignore" }).exitCode ?? -1,
     install: () => {
       const r = Bun.spawnSync({ cmd: ["bash", "-c", cmd], env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
       return { code: r.exitCode ?? -1, stderr: r.stderr.toString() };
@@ -288,6 +300,127 @@ describe("gh wrapper: file contents", () => {
   });
 });
 
+describe("gh wrapper: --recover file, workflow run --json stdin", () => {
+  test("issue create --recover file hit refused (mutant: recover file unscanned)", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "r.json"), '{"Title":"t","Body":"acmeclient"}\n');
+    expectRefused(s, s.gh(["issue", "create", "--recover", "r.json"]));
+  });
+
+  test("pr create --recover=file hit refused", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "r.json"), '{"Title":"t","Body":"acmeclient"}\n');
+    expectRefused(s, s.gh(["pr", "create", "--recover=r.json"]));
+  });
+
+  test("clean --recover file passes with identical argv", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "r.json"), '{"Title":"t","Body":"clean"}\n');
+    const args = ["issue", "create", "--recover", "r.json"];
+    expect(s.gh(args).code).toBe(0);
+    expect(s.realArgv()).toEqual(args);
+  });
+
+  test("workflow run --json stdin hit refused (mutant: --json stdin unscanned)", () => {
+    const s = installed();
+    expectRefused(s, s.gh(["workflow", "run", "w.yml", "--json"], '{"name":"acmeclient"}\n'));
+  });
+
+  test("clean workflow run --json hands real gh identical stdin", () => {
+    const s = installed();
+    const body = '{"name":"clean"}\n';
+    const args = ["workflow", "run", "w.yml", "--json"];
+    expect(s.gh(args, body).code).toBe(0);
+    expect(s.realArgv()).toEqual(args);
+    expect(s.realStdin()).toBe(body);
+  });
+});
+
+describe("gh wrapper: aliases refused", () => {
+  function expectAliasRefused(s: Studio, r: { code: number; stderr: string }): void {
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(STUDIO_GH_ALIAS_REFUSAL);
+    expect(r.stderr).toContain("run the gh command directly");
+    expect(s.realArgv()).toBeNull();
+  }
+
+  test("clean argv through a defined alias refused (mutant: aliases passed after argv scan)", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "aliases"), "co: pr checkout\nic: 'issue create --body-file b.md'\n");
+    expectAliasRefused(s, s.gh(["ic"]));
+  });
+
+  test("alias after -R still refused", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "aliases"), "co: pr checkout\n");
+    expectAliasRefused(s, s.gh(["-R", "o/r", "co", "5"]));
+  });
+
+  test("shell alias refused", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "aliases"), "sh: '!echo hi'\n");
+    expectAliasRefused(s, s.gh(["sh"]));
+  });
+
+  test("alias lookup failure for a non-builtin word refuses (mutant: lookup failure = pass)", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "alias-fail"), "");
+    expectAliasRefused(s, s.gh(["myext", "clean"]));
+  });
+
+  test("builtin never consults aliases: passes even when lookup fails (mutant: every word looked up)", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "alias-fail"), "");
+    const args = ["issue", "list", "-R", "o/r"];
+    expect(s.gh(args).code).toBe(0);
+    expect(s.realArgv()).toEqual(args);
+  });
+
+  test("extension (non-builtin, not alias) passes with identical argv and stdin", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "aliases"), "co: pr checkout\n");
+    const args = ["myext", "clean"];
+    expect(s.gh(args, "in\n").code).toBe(0);
+    expect(s.realArgv()).toEqual(args);
+    expect(s.realStdin()).toBe("in\n");
+  });
+});
+
+describe("gh block (install failure)", () => {
+  test("after block, gh fails and real gh never runs (mutant: block a no-op)", () => {
+    const s = installed();
+    expect(s.block()).toBe(0);
+    const r = s.gh(["issue", "list"]);
+    expect(r.code).not.toBe(0);
+    expect(s.realArgv()).toBeNull();
+    const direct = Bun.spawnSync({ cmd: ["bash", "-c", '"$0" issue list', s.real], stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    expect(direct.exitCode).not.toBe(0);
+    expect(s.realArgv()).toBeNull();
+  });
+
+  test("block with no wrapper installed: bare gh fails", () => {
+    const s = studio(ON);
+    expect(s.block()).toBe(0);
+    expect(s.gh(["issue", "list"]).code).not.toBe(0);
+    expect(s.realArgv()).toBeNull();
+  });
+
+  test("later successful install restores gh (mutant: install never re-enables real gh)", () => {
+    const s = installed();
+    expect(s.block()).toBe(0);
+    const r = s.install();
+    expect(r.stderr).toBe("");
+    expect(r.code).toBe(0);
+    const args = ["issue", "list"];
+    expect(s.gh(args).code).toBe(0);
+    expect(s.realArgv()).toEqual(args);
+  });
+
+  test("defaults target the real gh path", () => {
+    expect(ghBlockCmd()).toContain("chmod a-x '/usr/bin/gh'");
+  });
+});
+
 describe("gh wrapper: fail closed", () => {
   test("gate file missing refuses (mutant: denylist missing -> a pass)", () => {
     const s = installed(null);
@@ -339,6 +472,6 @@ describe("leakGateInstallCmd", () => {
     const cmd = leakGateInstallCmd();
     expect(cmd).toContain("'/usr/local/bin/fleet-leak-scan'");
     expect(cmd).toContain("'/usr/local/bin/gh'");
-    expect(cmd.endsWith(`[ "$(command -v gh)" = '/usr/local/bin/gh' ]`)).toBe(true);
+    expect(cmd.endsWith(`[ "$(command -v gh)" = '/usr/local/bin/gh' ] && chmod 0755 '/usr/bin/gh'`)).toBe(true);
   });
 });

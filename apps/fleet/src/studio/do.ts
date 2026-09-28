@@ -5045,7 +5045,7 @@ export class StudioDO extends Sandbox<Env> {
       botName: this.env.FLEET_BOT_NAME,
       botEmail: this.env.FLEET_BOT_EMAIL,
       // Issue #1 piece 5: FLEET_RESCUE_REMOTE + a contents:write token scoped
-      // to it; unset or a failed mint → origin, loudly (rescue.ts).
+      // to it; unset or a failed mint → origin, leak-gated, loudly (rescue.ts).
       rescueTarget: () => resolveRescueTarget(this.env, (repo) =>
         mintRepoToken(this.env, repo, { permissions: { contents: "write" } })),
     };

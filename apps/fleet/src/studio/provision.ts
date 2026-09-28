@@ -37,6 +37,7 @@ import type { ProvisionConfig, StudioStatus } from "./types";
 import { redactSecrets } from "./redact";
 import { DenylistDialectError, LEAK_DENYLIST_PATH, OPS_DENYLIST_PATH, denylistFileContent, parseDenylist } from "../leak-gate";
 import { isDeadlineExit } from "./exec-deadline";
+import { ghBlockCmd } from "./gh-wrapper";
 import { STUDIO_TMUX, withStudioTmux } from "./tmux";
 // Issue #38: a restart has only the studio ID to work from, and the repo
 // segment of that id IS the checkout directory under /workspace. ids.ts
@@ -2051,7 +2052,18 @@ async function applyLeakGate(deps: ProvisionDeps, id: string, workRepoSlug: stri
   const install = await deps.installLeakGate();
   if (!install.ok) {
     console.error(`studio ${id}: leak gate install failed`, install.error);
-    notes.push("leak gate: scanner/gh wrapper install failed -- public writes are not gated in this studio.");
+    // Fail closed: an ungated gh must not run. Block it; a later install restores it.
+    let blocked = false;
+    try {
+      const res = await deps.sbExec(ghBlockCmd());
+      blocked = res.code === 0;
+      if (!blocked) console.error(`studio ${id}: gh block failed (${res.code})`, res.stderr.slice(0, 500));
+    } catch (err) {
+      console.error(`studio ${id}: gh block failed`, err instanceof Error ? err.message : String(err));
+    }
+    notes.push(blocked
+      ? "leak gate: scanner/gh wrapper install failed -- gh is blocked in this studio until the next restart re-installs the gate."
+      : "leak gate: scanner/gh wrapper install failed and the gh block also failed -- public gh writes are NOT gated in this studio.");
   }
 
   let isPrivate = false;

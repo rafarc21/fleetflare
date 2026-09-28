@@ -15,6 +15,12 @@ import { LEAK_DENYLIST_PATH, LEAK_SCAN_PATH, leakScanScript } from "../leak-gate
  *   - for gist and release, every argument naming an existing file, a
  *     trailing `#label` stripped (gist uploads it, release attaches it);
  *   - `gist create` with no file argument reads stdin: captured and scanned.
+ *   - `--recover <file>` (issue/pr create) contents; `workflow run --json`
+ *     reads inputs JSON from stdin: captured, scanned, passed through.
+ * Aliases expand inside the real gh, past the scan: a non-builtin first word
+ * that `gh alias list` names (shell `!` aliases too) is refused with
+ * STUDIO_GH_ALIAS_REFUSAL; a failed lookup refuses too. Extensions pass
+ * with the argv scan.
  * Any scanner non-zero -- hit, no gate file, bad pattern, unreadable file,
  * scanner absent -- refuses with STUDIO_GH_LEAK_REFUSAL. The term is never
  * printed; the scanner names pattern indexes only.
@@ -23,6 +29,19 @@ import { LEAK_DENYLIST_PATH, LEAK_SCAN_PATH, leakScanScript } from "../leak-gate
  */
 
 export const STUDIO_GH_LEAK_REFUSAL = "fleet: leak gate refused this gh write";
+export const STUDIO_GH_ALIAS_REFUSAL = "fleet: leak gate refused a gh alias -- run the gh command directly";
+
+/**
+ * gh's built-in top-level commands (gh 2.95, hidden ones included). A first
+ * word outside this list is an alias or an extension: aliases are refused
+ * (their expansion is never scanned), extensions get the argv scan.
+ */
+export const GH_BUILTIN_COMMANDS = [
+  "a11y", "accessibility", "actions", "agent-task", "alias", "api", "attestation", "auth", "browse",
+  "cache", "codespace", "completion", "config", "copilot", "credits", "discussion", "extension", "gist",
+  "gpg-key", "help", "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo",
+  "ruleset", "run", "search", "secret", "skill", "ssh-key", "status", "variable", "version", "workflow",
+];
 export const STUDIO_REAL_GH_PATH = "/usr/bin/gh";
 export const STUDIO_GH_WRAPPER_PATH = "/usr/local/bin/gh";
 
@@ -33,6 +52,7 @@ export function studioGhWrapperScript(realGh = STUDIO_REAL_GH_PATH, scanPath = L
     `real='${realGh}'`,
     `scan='${scanPath}'`,
     `refuse() { echo "${STUDIO_GH_LEAK_REFUSAL}" >&2; exit 1; }`,
+    `refuse_alias() { echo "${STUDIO_GH_ALIAS_REFUSAL}" >&2; exit 1; }`,
     `args=("$@")`,
     `n=\${#args[@]}`,
     ``,
@@ -50,6 +70,16 @@ export function studioGhWrapperScript(realGh = STUDIO_REAL_GH_PATH, scanPath = L
     `  i=$((i + 1))`,
     `done`,
     ``,
+    `# Aliases expand inside the real gh, past the scan: refuse any first word`,
+    `# that is not builtin and is a defined alias. Lookup failure = refuse.`,
+    `case "$cmd" in`,
+    `  ''|${GH_BUILTIN_COMMANDS.join("|")}) ;;`,
+    `  *)`,
+    `    aliases=$("$real" alias list </dev/null 2>/dev/null) || refuse_alias`,
+    `    while IFS= read -r l; do [ "\${l%%:*}" = "$cmd" ] && refuse_alias; done <<< "$aliases"`,
+    `    ;;`,
+    `esac`,
+    ``,
     `files=()`,
     `stdin=0`,
     `gfile=0`,
@@ -61,8 +91,9 @@ export function studioGhWrapperScript(realGh = STUDIO_REAL_GH_PATH, scanPath = L
     `  a=\${args[$i]}`,
     `  v=\${args[$((i + 1))]}`,
     `  case "$a" in`,
-    `    --body-file|--notes-file|--input) addf "$v"; i=$((i + 1)) ;;`,
-    `    --body-file=*|--notes-file=*|--input=*) addf "\${a#*=}" ;;`,
+    `    --body-file|--notes-file|--input|--recover) addf "$v"; i=$((i + 1)) ;;`,
+    `    --body-file=*|--notes-file=*|--input=*|--recover=*) addf "\${a#*=}" ;;`,
+    `    --json) if [ "$cmd $sub" = 'workflow run' ]; then stdin=1; fi ;;`,
     `    -F) bodyf "$v"; i=$((i + 1)) ;;`,
     `    -F?*) bodyf "\${a#-F}" ;;`,
     `    --field) field "$v"; i=$((i + 1)) ;;`,
@@ -138,6 +169,23 @@ export function leakGateInstallCmd(
     `${installStep(scan, leakScanScript(opts.denylistPath ?? LEAK_DENYLIST_PATH))} && ` +
     `${installStep(wrapper, studioGhWrapperScript(real, scan))} && ` +
     `hash -r && ` +
-    `[ "$(command -v gh)" = '${wrapper}' ]`
+    `[ "$(command -v gh)" = '${wrapper}' ] && ` +
+    `chmod 0755 '${real}'`
   );
 }
+
+/**
+ * Install failed: make gh fail loudly rather than run ungated. The real gh
+ * and every other gh on PATH lose their exec bit; the command fails unless
+ * no gh resolves afterwards. A later leakGateInstallCmd rewrites the wrapper
+ * (fresh 0755) and restores the real gh only once the wrapper is confirmed.
+ */
+export function ghBlockCmd(realGh = STUDIO_REAL_GH_PATH): string {
+  return (
+    `chmod a-x '${realGh}' && ` +
+    `{ type -ap gh | while IFS= read -r g; do chmod a-x "$g"; done; } && ` +
+    `hash -r && ` +
+    `[ -z "$(type -ap gh)" ]`
+  );
+}
+
