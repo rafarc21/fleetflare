@@ -260,6 +260,47 @@ describe("handleFleetJunior — maestro authorization", () => {
   });
 });
 
+describe("handleFleetJunior — rate limit and daily cap (F1)", () => {
+  it("a request within both limits still succeeds normally", async () => {
+    const { token, rows, e, run } = await setup();
+    const r = await handleFleetJunior(req(token, good), e, board(), rows);
+    expect(r.status).toBe(200);
+    expect(run).toHaveBeenCalled();
+  });
+  it("429s once the per-minute rate is exceeded, naming the limit", async () => {
+    const { token, rows, e, run } = await setup({ JUNIOR_RATE_PER_MINUTE: "1" });
+    const api = board();
+    const first = await handleFleetJunior(req(token, good), e, api, rows);
+    expect(first.status).toBe(200);
+    const second = await handleFleetJunior(req(token, good), e, api, rows);
+    expect(second.status).toBe(429);
+    expect(await second.text()).toMatch(/minute/i);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+  it("429s once the daily cap is exceeded, naming the limit, even with room left in the per-minute rate", async () => {
+    const { token, rows, e, run } = await setup({ JUNIOR_DAILY_CAP: "1" });
+    const api = board();
+    const first = await handleFleetJunior(req(token, good), e, api, rows);
+    expect(first.status).toBe(200);
+    const second = await handleFleetJunior(req(token, good), e, api, rows);
+    expect(second.status).toBe(429);
+    expect(await second.text()).toMatch(/daily/i);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+  it("an unauthorized call never consumes rate budget", async () => {
+    const { token, rows, e, run } = await setup({ JUNIOR_RATE_PER_MINUTE: "1" }, undefined, false);
+    // Unauthorized (no D1 record) — should 403, not consume the one
+    // per-minute slot, and leave it free for a subsequently authorized call.
+    const unauthorized = await handleFleetJunior(req(token, good), e, board(), rows);
+    expect(unauthorized.status).toBe(403);
+    const { recordJuniorAuthorization } = await import("../src/junior/authz");
+    await recordJuniorAuthorization(e.DB, REPO, 7, ME, Date.now());
+    const authorized = await handleFleetJunior(req(token, good), e, board(), rows);
+    expect(authorized.status).toBe(200);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("handleFleetJunior — maestro exclusion (F2)", () => {
   // Defense in depth beyond "the maestro never gets the junior skill" (Task
   // 7's provision-time exclusion): even a maestro token that somehow reached

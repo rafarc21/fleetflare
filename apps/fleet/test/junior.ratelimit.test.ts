@@ -1,0 +1,79 @@
+// apps/fleet/test/junior.ratelimit.test.ts
+//
+// PR #9 review, F1: a per-studio per-minute rate and a separate daily cap on
+// /fleet/junior, both D1-backed (fleet_state, same as everything else in
+// src/state.ts), both configurable with sane defaults.
+import { describe, it, expect, beforeEach } from "vitest";
+import { env } from "cloudflare:test";
+import {
+  checkAndConsumeJuniorRateLimit,
+  DEFAULT_JUNIOR_DAILY_CAP,
+  DEFAULT_JUNIOR_RATE_PER_MINUTE,
+} from "../src/junior/ratelimit";
+
+const STUDIO = "websites--web-studio";
+const OTHER = "websites--release-studio";
+const MINUTE = 60_000;
+const DAY = 86_400_000;
+
+beforeEach(async () => {
+  await env.DB.prepare("DELETE FROM fleet_state").run();
+});
+
+describe("checkAndConsumeJuniorRateLimit", () => {
+  it("allows calls under both limits", async () => {
+    const r = await checkAndConsumeJuniorRateLimit(env.DB, {}, STUDIO, 0);
+    expect(r).toEqual({ ok: true });
+  });
+
+  it("blocks the (default + 1)th call within the same minute", async () => {
+    const env_ = { JUNIOR_RATE_PER_MINUTE: "2" };
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 100)).toEqual({ ok: true });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 200)).toEqual({ ok: false, limit: "per-minute" });
+  });
+
+  it("a new minute bucket resets the per-minute count", async () => {
+    const env_ = { JUNIOR_RATE_PER_MINUTE: "1" };
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 500)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, MINUTE + 1)).toEqual({ ok: true });
+  });
+
+  it("blocks past the daily cap even with room left in the per-minute bucket", async () => {
+    const env_ = { JUNIOR_RATE_PER_MINUTE: "100", JUNIOR_DAILY_CAP: "2" };
+    // Two calls a minute apart, well under the per-minute limit, each in a
+    // different minute bucket so only the daily counter is exercised.
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, MINUTE)).toEqual({ ok: true });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, MINUTE * 2)).toEqual({ ok: false, limit: "daily" });
+  });
+
+  it("a new UTC day resets the daily count", async () => {
+    const env_ = { JUNIOR_RATE_PER_MINUTE: "100", JUNIOR_DAILY_CAP: "1" };
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, MINUTE)).toEqual({ ok: false, limit: "daily" });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, DAY + 1)).toEqual({ ok: true });
+  });
+
+  it("tracks each studio independently", async () => {
+    const env_ = { JUNIOR_RATE_PER_MINUTE: "1" };
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, OTHER, 0)).toEqual({ ok: true });
+  });
+
+  it("defaults are sane and exported", async () => {
+    expect(DEFAULT_JUNIOR_RATE_PER_MINUTE).toBeGreaterThan(0);
+    expect(DEFAULT_JUNIOR_DAILY_CAP).toBeGreaterThan(0);
+    expect(DEFAULT_JUNIOR_DAILY_CAP).toBeGreaterThanOrEqual(DEFAULT_JUNIOR_RATE_PER_MINUTE);
+  });
+
+  it("garbage config values fall back to the defaults rather than disabling the limit", async () => {
+    const env_ = { JUNIOR_RATE_PER_MINUTE: "not-a-number", JUNIOR_DAILY_CAP: "-5" };
+    for (let i = 0; i < DEFAULT_JUNIOR_RATE_PER_MINUTE; i++) {
+      expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, i)).toEqual({ ok: true });
+    }
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, DEFAULT_JUNIOR_RATE_PER_MINUTE)).toEqual({ ok: false, limit: "per-minute" });
+  });
+});
