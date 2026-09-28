@@ -51,7 +51,7 @@ function studio(denylist: string | null): Studio {
     dir: d,
     bin,
     install: () => {
-      const r = Bun.spawnSync({ cmd: ["bash", "-c", cmd], env, stdout: "pipe", stderr: "pipe" });
+      const r = Bun.spawnSync({ cmd: ["bash", "-c", cmd], env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
       return { code: r.exitCode ?? -1, stderr: r.stderr.toString() };
     },
     gh: (args, stdin = "") => {
@@ -133,11 +133,90 @@ describe("gh wrapper: argv text", () => {
     expect(s.realArgv()).toEqual(args);
   });
 
-  test("ungated command passes through untouched (mutant: every command gated)", () => {
+  test("clean non-write command passes through untouched", () => {
     const s = installed();
-    const r = s.gh(["repo", "view", "acmeclient/x"]);
+    const r = s.gh(["repo", "view", "o/x"]);
     expect(r.code).toBe(0);
-    expect(s.realArgv()).toEqual(["repo", "view", "acmeclient/x"]);
+    expect(s.realArgv()).toEqual(["repo", "view", "o/x"]);
+  });
+});
+
+describe("gh wrapper: default deny, every command scanned", () => {
+  const cases: [string, string[]][] = [
+    ["repo view with term (mutant: allowlist of gated commands)", ["repo", "view", "acmeclient/x"]],
+    ["alias", ["co", "acmeclient"]],
+    ["project item-create --title", ["project", "item-create", "1", "--owner", "o", "--title", "acmeclient"]],
+    ["repo edit --description", ["repo", "edit", "--description", "for acmeclient"]],
+    ["label create", ["label", "create", "acmeclient"]],
+    ["workflow run -f", ["workflow", "run", "w.yml", "-f", "name=acmeclient"]],
+    ["extension", ["myext", "--note", "999999999"]],
+  ];
+  for (const [name, args] of cases) {
+    test(`${name} hit refused`, () => {
+      const s = installed();
+      expectRefused(s, s.gh(args));
+    });
+  }
+
+  test("workflow run -F key=@file hit refused (mutant: -F files only for api)", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "v.txt"), "acmeclient\n");
+    expectRefused(s, s.gh(["workflow", "run", "w.yml", "-F", "name=@v.txt"]));
+  });
+
+  test("workflow run -F key=value clean passes (not read as a file)", () => {
+    const s = installed();
+    const args = ["workflow", "run", "w.yml", "-F", "name=value"];
+    const r = s.gh(args);
+    expect(r.code).toBe(0);
+    expect(s.realArgv()).toEqual(args);
+  });
+
+  test("unknown command --body-file hit refused", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "b.md"), "acmeclient\n");
+    expectRefused(s, s.gh(["myext", "--body-file", "b.md"]));
+  });
+});
+
+describe("gh wrapper: gist stdin, release assets", () => {
+  test("gist create with no file args: stdin hit refused (mutant: stdin gist unscanned)", () => {
+    const s = installed();
+    expectRefused(s, s.gh(["gist", "create"], "has acmeclient\n"));
+  });
+
+  test("gist create -d desc, no file args: stdin hit refused", () => {
+    const s = installed();
+    expectRefused(s, s.gh(["gist", "create", "-d", "desc", "-f", "x.txt"], "has acmeclient\n"));
+  });
+
+  test("clean stdin gist hands real gh identical stdin", () => {
+    const s = installed();
+    const body = "clean gist\n";
+    const r = s.gh(["gist", "create", "--public"], body);
+    expect(r.code).toBe(0);
+    expect(s.realStdin()).toBe(body);
+  });
+
+  test("release create positional asset hit refused (mutant: assets unscanned)", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "notes.bin"), "acmeclient\n");
+    expectRefused(s, s.gh(["release", "create", "v1", "notes.bin"]));
+  });
+
+  test("release upload asset#label hit refused", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "a.bin"), "acmeclient\n");
+    expectRefused(s, s.gh(["release", "upload", "v1", "a.bin#Display label"]));
+  });
+
+  test("release upload clean asset passes", () => {
+    const s = installed();
+    writeFileSync(join(s.dir, "a.bin"), "clean\n");
+    const args = ["release", "upload", "v1", "a.bin#lbl"];
+    const r = s.gh(args);
+    expect(r.code).toBe(0);
+    expect(s.realArgv()).toEqual(args);
   });
 });
 
@@ -252,7 +331,7 @@ describe("leakGateInstallCmd", () => {
       scanPath: join(s.bin, "fleet-leak-scan"), ghWrapperPath: join(s.bin, "gh"),
       realGh: join(s.dir, "real", "gh"), denylistPath: join(s.dir, "denylist"),
     });
-    const r = Bun.spawnSync({ cmd: ["bash", "-c", cmd], env: { PATH: `${shadow}:${s.bin}:${SYS_PATH}` } });
+    const r = Bun.spawnSync({ cmd: ["bash", "-c", cmd], env: { PATH: `${shadow}:${s.bin}:${SYS_PATH}` }, stdin: "ignore" });
     expect(r.exitCode).not.toBe(0);
   });
 

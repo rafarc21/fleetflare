@@ -5,13 +5,16 @@ import { LEAK_DENYLIST_PATH, LEAK_SCAN_PATH, leakScanScript } from "../leak-gate
  * ahead of the real gh on PATH, so every gh write a studio makes is scanned
  * by fleet-leak-scan (src/leak-gate.ts) before it can reach GitHub.
  *
- * Gated top-level commands: issue, pr, api, release, gist. Everything else
- * execs the real gh untouched. For a gated call the scanner reads:
+ * Default deny: EVERY gh invocation is scanned -- aliases, extensions and
+ * subcommands gh adds later included. The scanner reads:
  *   - every argv word (titles, bodies, -f/-F values, positional text);
- *   - files named by --body-file, --notes-file, --input, non-api -F, and
- *     api `-F|--field key=@file`; `-` / `@-` = stdin, captured to a temp
- *     file, scanned, then handed to the real gh as its stdin;
- *   - for gist, every argument naming an existing file (gist uploads it).
+ *   - files named by --body-file, --notes-file, --input, `-F|--field
+ *     key=@file`, and -F <file> outside api/workflow (where -F is a body or
+ *     notes file); `-` / `@-` = stdin, captured to a temp file, scanned,
+ *     then handed to the real gh as its stdin;
+ *   - for gist and release, every argument naming an existing file, a
+ *     trailing `#label` stripped (gist uploads it, release attaches it);
+ *   - `gist create` with no file argument reads stdin: captured and scanned.
  * Any scanner non-zero -- hit, no gate file, bad pattern, unreadable file,
  * scanner absent -- refuses with STUDIO_GH_LEAK_REFUSAL. The term is never
  * printed; the scanner names pattern indexes only.
@@ -33,27 +36,26 @@ export function studioGhWrapperScript(realGh = STUDIO_REAL_GH_PATH, scanPath = L
     `args=("$@")`,
     `n=\${#args[@]}`,
     ``,
-    `# Top-level command: first non-flag word. -R/--repo take a value.`,
-    `cmd=''`,
+    `# Top-level command and subcommand: first two non-flag words.`,
+    `# -R/--repo take a value. Other flag values may be misread as sub;`,
+    `# sub only widens what is scanned, never narrows it.`,
+    `cmd=''; sub=''`,
     `i=0`,
     `while [ "$i" -lt "$n" ]; do`,
     `  case "\${args[$i]}" in`,
     `    -R|--repo) i=$((i + 1)) ;;`,
     `    -*) ;;`,
-    `    *) cmd=\${args[$i]}; break ;;`,
+    `    *) if [ -z "$cmd" ]; then cmd=\${args[$i]}; else sub=\${args[$i]}; break; fi ;;`,
     `  esac`,
     `  i=$((i + 1))`,
     `done`,
-    `case "$cmd" in`,
-    `  issue|pr|api|release|gist) ;;`,
-    `  *) exec "$real" "$@" ;;`,
-    `esac`,
     ``,
     `files=()`,
     `stdin=0`,
+    `gfile=0`,
     `addf() { if [ "$1" = '-' ]; then stdin=1; else files+=("$1"); fi; }`,
     `field() { case "$1" in *=@*) addf "\${1#*=@}" ;; esac; }`,
-    `bodyf() { if [ "$cmd" = 'api' ]; then field "$1"; else addf "$1"; fi; }`,
+    `bodyf() { case "$cmd" in api|workflow) field "$1" ;; *) addf "$1" ;; esac; }`,
     `i=0`,
     `while [ "$i" -lt "$n" ]; do`,
     `  a=\${args[$i]}`,
@@ -66,13 +68,20 @@ export function studioGhWrapperScript(realGh = STUDIO_REAL_GH_PATH, scanPath = L
     `    --field) field "$v"; i=$((i + 1)) ;;`,
     `    --field=*) field "\${a#--field=}" ;;`,
     `    *)`,
-    `      if [ "$cmd" = 'gist' ]; then`,
-    `        if [ "$a" = '-' ]; then stdin=1; elif [ -f "$a" ]; then files+=("$a"); fi`,
-    `      fi`,
+    `      case "$cmd" in`,
+    `        gist|release)`,
+    `          if [ "$a" = '-' ]; then stdin=1; gfile=1`,
+    `          elif [ -f "$a" ]; then files+=("$a"); gfile=1`,
+    `          elif [ -f "\${a%#*}" ]; then files+=("\${a%#*}"); gfile=1`,
+    `          fi`,
+    `          ;;`,
+    `      esac`,
     `      ;;`,
     `  esac`,
     `  i=$((i + 1))`,
     `done`,
+    `# gist create with no file argument uploads stdin.`,
+    `if [ "$cmd" = 'gist' ] && [ "$sub" = 'create' ] && [ "$gfile" = 0 ]; then stdin=1; fi`,
     ``,
     `argv=''; in=''`,
     `trap 'rm -f "$argv" "$in"' EXIT`,
