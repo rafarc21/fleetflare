@@ -312,6 +312,27 @@ describe("parseCliArgs: task", () => {
     expect(c.cmd === "task-new" && c.brief.junior).toBeUndefined();
     expect(parseCliArgs(["task", "ls", "--junior"]).cmd).toBe("usage");
   });
+
+  // Task 5 review: the naive `rest.includes("--junior")` extraction is
+  // positionally blind — it matches the literal string "--junior" no matter
+  // WHERE it sits, including inside another flag's VALUE slot. Here
+  // `--boundaries`'s value is itself the literal string "--junior"; that must
+  // stay `boundaries: "--junior"` and must NOT flip `brief.junior` to true.
+  it("a --junior VALUE (e.g. --boundaries --junior) is not the bare boolean flag", () => {
+    const res = parseCliArgs([
+      "task", "new",
+      "--title", "t",
+      "--objective", "o",
+      "--output", "f",
+      "--boundaries", "--junior",
+      "--studio", "a",
+    ]);
+    expect(res.cmd).toBe("task-new");
+    if (res.cmd !== "task-new") return;
+    expect(res.brief.boundaries).toBe("--junior");
+    expect(res.brief.assignee).toBe("a");
+    expect(res.brief.junior).toBeUndefined();
+  });
 });
 
 describe("fleet task assign — P5 §3 reassignment", () => {
