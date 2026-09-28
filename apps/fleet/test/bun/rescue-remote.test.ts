@@ -117,4 +117,28 @@ describe("resolveRescueTarget, purpose discovery", () => {
     const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => "ghs_fake", PUBLIC, "discovery");
     expect(t).toEqual({ remoteUrl: "https://github.com/acme/rescue-vault.git", env: { [RESCUE_TOKEN_ENV]: "ghs_fake" } });
   });
+
+  // Issue #7: the rescue token is a WRITE token handed to the container.
+  // Only for a rescue repo confirmed private; no token to mint = origin.
+  test("rescue repo not confirmed private: origin, token never minted", async () => {
+    let minted = false;
+    const mint = async () => { minted = true; return "ghs_fake"; };
+    const slug = { FLEET_RESCUE_REMOTE: "acme/rescue-vault" };
+    expect(await resolveRescueTarget(slug, mint, PUBLIC, "push", async () => false)).toEqual({});
+    expect(await resolveRescueTarget(slug, mint, PUBLIC, "push", async () => { throw new Error("down"); })).toEqual({});
+    expect(minted).toBe(false);
+    expect(logged()).toMatch(/acme\/rescue-vault is not confirmed private.*origin/);
+  });
+
+  test("no token to mint (PAT fleet, no FLEET_RESCUE_GITHUB_TOKEN): origin, loudly", async () => {
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => null, PUBLIC, "push", async () => true);
+    expect(t).toEqual({});
+    expect(logged()).toMatch(/no write token for acme\/rescue-vault.*FLEET_RESCUE_GITHUB_TOKEN.*origin/);
+  });
+
+  test("confirmed-private rescue repo + token: the private target", async () => {
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => "ghs_fake", PUBLIC, "push", async () => true);
+    expect(t.remoteUrl).toBe("https://github.com/acme/rescue-vault.git");
+  });
 });
+

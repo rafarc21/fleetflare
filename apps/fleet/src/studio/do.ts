@@ -5104,12 +5104,15 @@ export class StudioDO extends Sandbox<Env> {
   private rescueTarget(
     workRepoSlug: () => Promise<string>, purpose: "push" | "discovery" = "push",
   ): Promise<RescueTarget> {
-    return resolveRescueTarget(this.env, (repo) =>
-      mintRepoToken(this.env, repo, { permissions: { contents: "write" } }),
-    async () => {
-      const slug = await workRepoSlug();
-      return repoIsPrivate(await mintRepoToken(this.env, slug), slug);
-    }, purpose);
+    // Issue #7: never the fleet's write PAT (containerToken); PAT fleets bring
+    // a rescue-only token. And only for a rescue repo confirmed private.
+    return resolveRescueTarget(this.env,
+      async (repo) => (await containerToken(this.env, repo, { contents: "write" })) ?? (this.env.FLEET_RESCUE_GITHUB_TOKEN || null),
+      async () => {
+        const slug = await workRepoSlug();
+        return repoIsPrivate(await mintRepoToken(this.env, slug), slug);
+      }, purpose,
+      async (repo) => repoIsPrivate(await mintRepoToken(this.env, repo, { permissions: { contents: "read" } }), repo));
   }
 
   /**

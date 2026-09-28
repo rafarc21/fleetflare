@@ -1801,6 +1801,19 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
     expect(rescueRefs()).toEqual([]);
   });
 
+  // Issue #7 review, finding 4: proxy mode sets a global pushInsteadOf that
+  // rewrites every github.com push to the Worker -- the rescue URL too. The
+  // rescue push pins its own URL (longest pushInsteadOf match wins).
+  test("rescuePushCmd: an ambient pushInsteadOf covering the private remote does not redirect it", () => {
+    sh(`git -C ${checkout} config url./nonexistent/hijack/.pushInsteadOf ${dir}/`);
+    writeFileSync(join(checkout, "notes.md"), "private work\n");
+
+    const out = pushPriv();
+
+    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(privRefs().some((r) => r.includes("fleet/rescue/"))).toBe(true);
+  });
+
   test("rescuePushCmd, dirty member worktree: its wt/ ref lands on the private remote, NOT origin", () => {
     writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "wip.md"), "member work\n");
 
