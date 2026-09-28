@@ -44,7 +44,13 @@ export function defaultAuthDeps(env: Record<string, string | undefined>) {
         encoding: "utf8", env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId },
       });
       const tok = (r.stdout ?? "").trim().split("\n").filter((l) => l.trim() !== "").pop()?.trim();
-      if (r.status !== 0 || !tok || /\s/.test(tok)) {
+      // Task 3 review, note 2: whitespace alone does not catch a short,
+      // single-word non-token string (e.g. an error sentence's last word, or
+      // a status word like "NotLoggedIn") slipping through and failing
+      // obscurely at the HTTP layer instead of failing clearly here. Real
+      // wrangler/Cloudflare tokens run 40+ characters, so a minimum length is
+      // a cheap, low-risk floor.
+      if (r.status !== 0 || !tok || /\s/.test(tok) || tok.length < 20) {
         throw new AuthError("`wrangler auth token` failed: run `wrangler login`, or set CLOUDFLARE_API_TOKEN");
       }
       return tok;
