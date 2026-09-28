@@ -663,6 +663,40 @@ if [ -n "${STUDIO_ID:-}" ] && [ -x "$adopt_script" ]; then
 fi
 # <<< session-adopt <<<
 
+# Bring the blueprint checkout at $1 to what BLUEPRINT_REPO holds NOW, at
+# BLUEPRINT_REF (the ref provision resolved; unset = the remote's HEAD).
+#
+# Issue #11: the clone used to run only when $1/.git was absent, so a skill
+# added to the blueprint after the container booted never appeared and
+# provision marked the studio bare (`skills-unresolvable`) until a recycle.
+# Now every bring-up fetches the ref (depth 1) and resets onto it.
+#
+# Both failures are tolerated, loudly: a network or auth hiccup on this one
+# extra repo must not take the studio down, and claude still launches with
+# whatever skills resolve. A failed clone leaves no .git, so the next
+# bring-up retries it; a failed refresh keeps the checkout it already had.
+# GIT_TERMINAL_PROMPT=0: a missing credential fails fast instead of blocking
+# on a tty prompt this non-interactive script can never answer.
+#
+# Bounded (PR #14 review): a server that accepts the connection and never
+# answers hung the fetch past a 90 s probe, and provision with it. Both
+# network calls run under `timeout` (the same coreutils session-adopt above
+# relies on); a timeout is just another failure, handled as above.
+# BLUEPRINT_SYNC_TIMEOUT is a test seam; production never sets it.
+blueprint_sync() {
+  local dir="$1" ref="${BLUEPRINT_REF:-HEAD}" t="${BLUEPRINT_SYNC_TIMEOUT:-30}"
+  [ -n "${BLUEPRINT_REPO:-}" ] || return 0
+  if [ ! -d "$dir/.git" ]; then
+    GIT_TERMINAL_PROMPT=0 timeout -k 2 "$t" git clone --depth 1 "https://github.com/${BLUEPRINT_REPO}.git" "$dir" \
+      || { echo "studio-bringup: blueprint clone failed, skills will be missing" >&2; return 0; }
+  fi
+  if GIT_TERMINAL_PROMPT=0 timeout -k 2 "$t" git -C "$dir" fetch -q --depth 1 origin "$ref" && git -C "$dir" reset -q --hard FETCH_HEAD; then
+    echo "studio-bringup: blueprint at $ref $(git -C "$dir" rev-parse --short HEAD)" >&2
+  else
+    echo "studio-bringup: blueprint refresh failed -- keeping $dir at $(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo unknown); skills added since will be missing" >&2
+  fi
+}
+
 # --- studio materialization (Task 4, P4a-1) ---------------------------------
 # No-op when STUDIO_NAME is unset -- the pilot/scratch ROLE_* path (below,
 # unchanged) is what runs then. Set means studio-blueprint.ts's
@@ -727,9 +761,10 @@ for fn, b64 in bundle.items():
     rm -f /tmp/studio-members.json
   fi
 
-  # skills: shallow-clone the blueprint repo once, symlink the studio's own
-  # list into it. ln -sfn is idempotent (force + no-dereference), so a repeat
-  # bring-up just re-links, never re-clones over a live checkout.
+  # skills: sync the blueprint checkout (blueprint_sync: clone once, then
+  # refresh to BLUEPRINT_REF on every bring-up, issue #11), symlink the
+  # studio's own list into it. ln -sfn is idempotent (force +
+  # no-dereference), so a repeat bring-up just re-links.
   #
   # Auth: deliberately NO token in this URL. This file's own header comment
   # is explicit that GH_TOKEN is never handed to this container -- do.ts's
@@ -741,24 +776,9 @@ for fn, b64 in bundle.items():
   # concern (Task 7), not bringup's -- left unguarded here on purpose so a
   # scope miss fails loudly instead of silently swallowing the clone.
   #
-  # Skip the clone entirely when BLUEPRINT_REPO is unset/empty -- nothing to
-  # clone from, which is today's real state (T7 not wired yet). Review fix
-  # round: a failed clone never creates /opt/blueprint/.git, so an unset var
-  # used to re-attempt the same doomed clone on EVERY bring-up call, forever
-  # -- not a real retry, just a repeated guaranteed failure. When
-  # BLUEPRINT_REPO IS set, the clone failure itself is still tolerated
-  # (|| echo, not a bare command under this script's set -e): a network/auth
-  # hiccup on this one extra repo must not take the whole studio down with
-  # it -- claude still needs to launch below even with no skills symlinked.
-  # Not creating .git on failure is exactly what makes the NEXT bring-up
-  # call retry the clone instead of accepting the miss permanently --
-  # correct behavior, kept as-is. GIT_TERMINAL_PROMPT=0: a missing or
-  # rejected credential must fail fast, not block forever on a tty prompt
-  # this non-interactive script can never answer.
-  if [ -n "${BLUEPRINT_REPO:-}" ] && [ ! -d /opt/blueprint/.git ]; then
-    GIT_TERMINAL_PROMPT=0 git clone --depth 1 "https://github.com/${BLUEPRINT_REPO}.git" /opt/blueprint \
-      || echo "studio-bringup: blueprint clone failed, skills will be missing" >&2
-  fi
+  # Unset BLUEPRINT_REPO skips it entirely; clone and refresh failures are
+  # tolerated -- see blueprint_sync's own comment.
+  blueprint_sync /opt/blueprint
   #
   # A declared-but-absent skill is now LOUD (fix wave, Critical #2). The old
   # `[ -d ] && ln` guard logged nothing at all, which is how 13 of web-

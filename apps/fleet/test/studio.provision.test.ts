@@ -137,6 +137,8 @@ describe("provisionWithStorage — studio-first resolution (P4a-1 T7)", () => {
     const stored = (await storage.get(ROLE_ENV_KEY)) as StudioEnv;
     expect(stored.STUDIO_NAME).toBe("web-studio");
     expect(stored.BLUEPRINT_REPO).toBe(REPO_SLUG);
+    // Issue #11: bring-up refreshes /opt/blueprint to this ref every time.
+    expect(stored.BLUEPRINT_REF).toBe("main");
     expect(stored.ROLE_ALLOWED_TOOLS).toBe("Bash(git *) Read Edit Write");
 
     const bundle = JSON.parse(atob(stored.STUDIO_MEMBERS_B64)) as Record<string, string>;
@@ -147,6 +149,31 @@ describe("provisionWithStorage — studio-first resolution (P4a-1 T7)", () => {
     // The exact record persisted is the exact record handed to bring-up.
     expect(bringupEnvCalls).toHaveLength(1);
     expect(bringupEnvCalls[0]).toEqual(stored);
+  });
+
+  it("(a1) issue #11: an explicit blueprintRef reaches bring-up as BLUEPRINT_REF, over fleet.json's ref", async () => {
+    const fetchBlueprintFile = vi.fn(async (_repo: string, path: string, ref: string) => {
+      if (path === "fleet.json") return FAKE_FLEET_JSON;
+      if (path === "fleet/blueprint/studios/web-studio/studio.md") return FAKE_STUDIO_MD;
+      if (path === "fleet/blueprint/studios/web-studio/members") return FAKE_MEMBERS_LISTING;
+      if (path === "fleet/blueprint/studios/web-studio/members/frontend-developer.md") return FAKE_MEMBER_FRONTEND_MD;
+      if (path === "fleet/blueprint/studios/web-studio/members/qa-engineer.md") return FAKE_MEMBER_QA_MD;
+      throw notFound(path, ref);
+    });
+    const storage = fakeStorage();
+    const deps: ProvisionDeps = {
+      sbExec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+      recordStudio: (status: StudioStatus) => recordStudio(env as unknown as Env, status),
+      now: () => "2026-08-19T00:00:00.000Z",
+      fetchBlueprintFile,
+    };
+
+    await provisionWithStorage(
+      deps, storage, { repo: "websites", role: "web-studio", blueprintRef: "pinned-branch" }, REPO_SLUG,
+    );
+
+    const stored = (await storage.get(ROLE_ENV_KEY)) as StudioEnv;
+    expect(stored.BLUEPRINT_REF).toBe("pinned-branch");
   });
 
   it("(a2) studio with no members/ dir at all (maestro's real shape, Task 6): resolves solo, STUDIO_MEMBERS_B64 carries an empty bundle rather than failing", async () => {
