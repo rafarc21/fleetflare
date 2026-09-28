@@ -677,14 +677,20 @@ fi
 # bring-up retries it; a failed refresh keeps the checkout it already had.
 # GIT_TERMINAL_PROMPT=0: a missing credential fails fast instead of blocking
 # on a tty prompt this non-interactive script can never answer.
+#
+# Bounded (PR #14 review): a server that accepts the connection and never
+# answers hung the fetch past a 90 s probe, and provision with it. Both
+# network calls run under `timeout` (the same coreutils session-adopt above
+# relies on); a timeout is just another failure, handled as above.
+# BLUEPRINT_SYNC_TIMEOUT is a test seam; production never sets it.
 blueprint_sync() {
-  local dir="$1" ref="${BLUEPRINT_REF:-HEAD}"
+  local dir="$1" ref="${BLUEPRINT_REF:-HEAD}" t="${BLUEPRINT_SYNC_TIMEOUT:-30}"
   [ -n "${BLUEPRINT_REPO:-}" ] || return 0
   if [ ! -d "$dir/.git" ]; then
-    GIT_TERMINAL_PROMPT=0 git clone --depth 1 "https://github.com/${BLUEPRINT_REPO}.git" "$dir" \
+    GIT_TERMINAL_PROMPT=0 timeout -k 2 "$t" git clone --depth 1 "https://github.com/${BLUEPRINT_REPO}.git" "$dir" \
       || { echo "studio-bringup: blueprint clone failed, skills will be missing" >&2; return 0; }
   fi
-  if GIT_TERMINAL_PROMPT=0 git -C "$dir" fetch -q --depth 1 origin "$ref" && git -C "$dir" reset -q --hard FETCH_HEAD; then
+  if GIT_TERMINAL_PROMPT=0 timeout -k 2 "$t" git -C "$dir" fetch -q --depth 1 origin "$ref" && git -C "$dir" reset -q --hard FETCH_HEAD; then
     echo "studio-bringup: blueprint at $ref $(git -C "$dir" rev-parse --short HEAD)" >&2
   else
     echo "studio-bringup: blueprint refresh failed -- keeping $dir at $(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo unknown); skills added since will be missing" >&2

@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { createServer, type Server, type Socket } from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,11 @@ import { extractShellFunc, runSnippet } from "./exec-snippet";
  */
 const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
 const SYNC = () => extractShellFunc(BRINGUP, "blueprint_sync");
+
+/** blueprint_sync bounds its network calls with coreutils `timeout`, which the
+ *  studio image has (session-adopt already relies on it). macOS ships none,
+ *  so this file runs in the Linux bun-test lane and skips on a Mac. */
+const LINUX = Bun.which("timeout") ? describe : describe.skip;
 
 const GIT_ENV = {
   GIT_AUTHOR_NAME: "t",
@@ -57,20 +63,21 @@ function world() {
   };
   addSkill("first-skill");
   const checkout = join(dir, "opt-blueprint");
-  const sync = (env: Record<string, string> = {}) => {
+  const sync = (env: Record<string, string> = {}, upstream = `file://${remotes}/`) => {
     const r = runSnippet({
       shell: "bash",
       env: {
         ...GIT_ENV,
         HOME: dir,
         GIT_CONFIG_COUNT: "1",
-        GIT_CONFIG_KEY_0: `url.file://${remotes}/.insteadOf`,
+        GIT_CONFIG_KEY_0: `url.${upstream}.insteadOf`,
         GIT_CONFIG_VALUE_0: "https://github.com/",
         BLUEPRINT_REPO: "example-org/blueprint",
         ...env,
       },
       script: `set -euo pipefail\n${SYNC()}\nblueprint_sync ${JSON.stringify(checkout)}\necho SYNC_DONE\n`,
-      timeout: 30000,
+      // Past this the snippet is killed: a hang reads as a failed test, not a stuck suite.
+      timeout: 25000,
     });
     expect(r.parentAlive).toBe(true);
     return r;
@@ -78,7 +85,7 @@ function world() {
   return { dir, bare, work, checkout, addSkill, sync, has: (s: string) => existsSync(join(checkout, "skills", s, "SKILL.md")) };
 }
 
-describe("blueprint_sync — a provision sees what the blueprint holds NOW (issue #11)", () => {
+LINUX("blueprint_sync — a provision sees what the blueprint holds NOW (issue #11)", () => {
   test("first bring-up clones the blueprint", () => {
     const w = world();
     const r = w.sync();
@@ -134,4 +141,54 @@ describe("blueprint_sync — a provision sees what the blueprint holds NOW (issu
     expect(r.stdout).toContain("SYNC_DONE");
     expect(existsSync(w.checkout)).toBe(false);
   });
+});
+
+/**
+ * Maestro review of PR #14: a server that accepts the connection and never
+ * answers hung the fetch past a 90 s probe, and with it the whole provision.
+ * The stalled server here does exactly that: it accepts, reads, never
+ * writes. The kernel completes the handshake from the listen backlog, so it
+ * stalls git even while runSnippet's spawnSync blocks this event loop.
+ *
+ */
+LINUX("blueprint_sync against a server that never answers — provision never stalls", () => {
+  let server: Server;
+  const sockets: Socket[] = [];
+  let stalled = "";
+  beforeAll(async () => {
+    server = createServer((sock) => {
+      sockets.push(sock);
+      sock.on("data", () => {});
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("stalled server has no port");
+    stalled = `http://127.0.0.1:${addr.port}/`;
+  });
+  afterAll(() => {
+    for (const s of sockets) s.destroy();
+    server.close();
+  });
+
+  test("a stalled refresh ends within the bound, keeps the old checkout, and says so", () => {
+    const w = world();
+    w.sync();
+    const t0 = Date.now();
+    const r = w.sync({ BLUEPRINT_SYNC_TIMEOUT: "2" }, stalled);
+    const elapsed = Date.now() - t0;
+    expect(r.stdout).toContain("SYNC_DONE");
+    expect(elapsed).toBeLessThan(15_000);
+    expect(w.has("first-skill")).toBe(true);
+    expect(r.stderr).toContain("blueprint refresh failed");
+  }, 30_000);
+
+  test("a stalled first clone ends within the bound, and bring-up carries on", () => {
+    const w = world();
+    const t0 = Date.now();
+    const r = w.sync({ BLUEPRINT_SYNC_TIMEOUT: "2" }, stalled);
+    const elapsed = Date.now() - t0;
+    expect(r.stdout).toContain("SYNC_DONE");
+    expect(elapsed).toBeLessThan(15_000);
+    expect(r.stderr).toContain("blueprint clone failed, skills will be missing");
+  }, 30_000);
 });
