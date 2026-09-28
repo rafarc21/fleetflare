@@ -1638,6 +1638,7 @@ claude_process_census() {
   return 0
 }
 
+# >>> claude-launch >>>
 claude_process_census
 if claude_launch_needed; then
   role_prompt="$(base64 -d <<< "${ROLE_PROMPT_B64:-}")"
@@ -1716,6 +1717,7 @@ if claude_launch_needed; then
   # one does. The script's own exit code is settled at the very end instead.
   claude_launch "$cmd_str" || claude_launch_failed=1
 fi
+# <<< claude-launch <<<
 
 # --- transcript pipe-pane ----------------------------------------------------
 # Mirrors the claude window's pane byte-for-byte (ANSI included — it is the
