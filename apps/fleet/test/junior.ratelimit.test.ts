@@ -76,4 +76,24 @@ describe("checkAndConsumeJuniorRateLimit", () => {
     }
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, DEFAULT_JUNIOR_RATE_PER_MINUTE)).toEqual({ ok: false, limit: "per-minute" });
   });
+
+  // PR #9 review, BLOCKER F1: the pre-fix implementation reads the counter,
+  // checks it, and only THEN writes the increment — two separate D1
+  // round-trips with nothing atomic between them. N genuinely concurrent
+  // callers against the SAME window can all read the same pre-increment
+  // value, all pass the check, and all then write — a live 20-vs-cap-3 run
+  // measured all 20 succeeding. The fix must make the increment-and-check a
+  // SINGLE atomic D1 statement (RETURNING the post-increment value), so that
+  // under real concurrent access to the same binding, EXACTLY `cap` calls
+  // succeed — never more, never "approximately".
+  it("F1: exactly `cap` of N concurrent calls succeed — the increment is atomic, not read-then-write", async () => {
+    const cap = 3;
+    const n = 20;
+    const env_ = { JUNIOR_RATE_PER_MINUTE: String(cap) };
+    const results = await Promise.all(
+      Array.from({ length: n }, () => checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)),
+    );
+    const succeeded = results.filter((r) => r.ok).length;
+    expect(succeeded).toBe(cap);
+  });
 });
