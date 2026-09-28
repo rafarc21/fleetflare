@@ -7,6 +7,7 @@ import {
   STUDIO_PUSH_REFUSAL, STUDIO_PUSH_UNRESOLVED_DEFAULT,
   STUDIO_PUSH_PROBE_FAILED, STUDIO_PUSH_SHELL_ALIAS_REFUSAL,
   STUDIO_PUSH_PLUMBING_REFUSAL, STUDIO_PUSH_ALIAS_DEPTH_REFUSAL, STUDIO_PUSH_LEAK_REFUSAL,
+  STUDIO_PUSH_SUBMODULE_REFUSAL,
 } from "../../src/studio/credentials";
 import { denylistFileContent, leakScanScript, type LeakGateFile } from "../../src/leak-gate";
 import { withKillDeadline } from "../../src/studio/exec-deadline";
@@ -2015,6 +2016,115 @@ LANE("the fleet git wrapper runs the leak gate on every push (issue #1)", () => 
     writeGate(f, { off: "work repo is private" });
     commitWith(f, "a.txt", `${TERM}\n`, `work for ${TERM}`);
     expectLanded(f, pushFeature(f));
+  });
+
+  test("a hit in an ANNOTATED TAG's message is refused (mutant: tag object text unscanned)", () => {
+    const f = gated();
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    realGit(f, ["tag", "-a", "v1", "-m", `release for ${TERM}`]);
+    const before = originState(f);
+    expectLeakRefused(f, git(f, ["push", "origin", "v1"]), before);
+  });
+
+  test("a hit in a NESTED annotated tag (tag of a tag) is refused", () => {
+    const f = gated();
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    realGit(f, ["tag", "-a", "inner", "-m", `inner ${TERM}`]);
+    realGit(f, ["tag", "-a", "outer", "-m", "outer clean", "inner"]);
+    const before = originState(f);
+    expectLeakRefused(f, git(f, ["push", "origin", "refs/tags/outer"]), before);
+  });
+
+  test("a hit in the tagger identity is refused, even when the tagged commit is already on the remote", () => {
+    const f = gated();
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    realGit(f, ["push", "-q", "origin", "HEAD:refs/heads/feature"]);
+    // The tagger ident comes from GIT_COMMITTER_*, which the fixture env pins.
+    const t = run([REAL_GIT as string, "tag", "-a", "v2", "-m", "clean"], f.clone,
+      { ...f.env, GIT_COMMITTER_EMAIL: `x@${TERM}.example` });
+    expect(t.code, t.stderr).toBe(0);
+    const before = originState(f);
+    expectLeakRefused(f, git(f, ["push", "origin", "v2"]), before);
+  });
+
+  test("a clean annotated tag is allowed and lands", () => {
+    const f = gated();
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    realGit(f, ["tag", "-a", "v3", "-m", "clean release"]);
+    const r = git(f, ["push", "origin", "v3"]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(originRefs(f)).toContain("refs/tags/v3");
+  });
+
+  test("a NON-ASCII term in a new path is refused (mutant: core.quotePath octal-escapes it)", () => {
+    const f = setup();
+    const U = "acme\u00e7\u00e3o";
+    writeGate(f, { patterns: ["fleet-harmless-999999999", U] });
+    realGit(f, ["checkout", "-q", "-b", "feature"]);
+    commitWith(f, `${U}.txt`, "", "clean message");
+    const before = originState(f);
+    const r = pushFeature(f);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain(STUDIO_PUSH_LEAK_REFUSAL);
+    expect(originState(f)).toEqual(before);
+  });
+
+  test.each([
+    ["-o", (t: string) => ["-o", `note=${t}`]],
+    ["--push-option=", (t: string) => [`--push-option=note ${t}`]],
+    ["--push-option <v>", (t: string) => ["--push-option", `note ${t}`]],
+  ])("a hit in a push option (%s) is refused (mutant: push options unscanned)", (_n, opt) => {
+    const f = gated();
+    realGit(f, ["-C", f.origin, "config", "receive.advertisePushOptions", "true"], f.origin);
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    const before = originState(f);
+    expectLeakRefused(f, git(f, ["push", ...opt(TERM), "origin", "HEAD:refs/heads/feature"]), before);
+  });
+
+  test("a hit in a push.pushOption config value is refused", () => {
+    const f = gated();
+    realGit(f, ["-C", f.origin, "config", "receive.advertisePushOptions", "true"], f.origin);
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    const before = originState(f);
+    expectLeakRefused(f, git(f, ["-c", `push.pushOption=note ${TERM}`, "push", "origin", "HEAD:refs/heads/feature"]), before);
+  });
+
+  test("a clean push option is allowed and lands", () => {
+    const f = gated();
+    realGit(f, ["-C", f.origin, "config", "receive.advertisePushOptions", "true"], f.origin);
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    expectLanded(f, git(f, ["push", "-o", "ci.skip", "origin", "HEAD:refs/heads/feature"]));
+  });
+
+  test.each([
+    ["--recurse-submodules=on-demand", [], ["--recurse-submodules=on-demand"]],
+    ["--recurse-submodules=only", [], ["--recurse-submodules=only"]],
+    ["--recurse-submodules on-demand", [], ["--recurse-submodules", "on-demand"]],
+    ["abbreviated --recurse=on-demand", [], ["--recurse=on-demand"]],
+    ["check then on-demand (last wins)", [], ["--recurse-submodules=check", "--recurse-submodules=on-demand"]],
+    ["config push.recurseSubmodules=on-demand", ["-c", "push.recurseSubmodules=on-demand"], []],
+    ["config push.recurseSubmodules=only", ["-c", "push.recurseSubmodules=only"], []],
+    ["config submodule.recurse=true", ["-c", "submodule.recurse=true"], []],
+  ])("a submodule-recursing push (%s) is refused, nothing moves (mutant: submodule commits pushed unscanned)", (_n, g, a) => {
+    const f = gated();
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    const before = originState(f);
+    const r = git(f, [...(g as string[]), "push", ...(a as string[]), "origin", "HEAD:refs/heads/feature"]);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain(STUDIO_PUSH_SUBMODULE_REFUSAL);
+    expect(originState(f)).toEqual(before);
+  });
+
+  test.each([
+    ["--recurse-submodules=check", [], ["--recurse-submodules=check"]],
+    ["--no-recurse-submodules", [], ["--no-recurse-submodules"]],
+    ["on-demand then no (last wins)", [], ["--recurse-submodules=on-demand", "--recurse-submodules=no"]],
+    ["config push.recurseSubmodules=check", ["-c", "push.recurseSubmodules=check"], []],
+    ["submodule.recurse=true overridden by --recurse-submodules=check", ["-c", "submodule.recurse=true"], ["--recurse-submodules=check"]],
+  ])("a non-recursing push (%s) is allowed and lands", (_n, g, a) => {
+    const f = gated();
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    expectLanded(f, git(f, [...(g as string[]), "push", ...(a as string[]), "origin", "HEAD:refs/heads/feature"]));
   });
 
   test("nothing to push is handed over without a scan, even with no gate file", () => {

@@ -13,6 +13,7 @@ import {
   STUDIO_PUSH_REFUSAL, STUDIO_PUSH_UNRESOLVED_DEFAULT,
   STUDIO_PUSH_PROBE_FAILED, STUDIO_PUSH_SHELL_ALIAS_REFUSAL,
   STUDIO_PUSH_PLUMBING_REFUSAL, STUDIO_PUSH_ALIAS_DEPTH_REFUSAL, STUDIO_PUSH_LEAK_REFUSAL,
+  STUDIO_PUSH_SUBMODULE_REFUSAL,
 } from "../src/studio/credentials";
 import { LEAK_SCAN_PATH } from "../src/leak-gate";
 
@@ -382,6 +383,21 @@ describe("studioGitWrapperScript — the leak gate on push (issue #1)", () => {
     expect(s).not.toContain(LEAK_SCAN_PATH);
     const b64 = Buffer.from(s, "utf8").toString("base64");
     expect(studioGitSafetyCmd({ scanPath: "/tmp/seam/scan" })).toContain(b64);
+  });
+
+  it("scans annotated tag objects, push options, and unquoted paths", () => {
+    const s = studioGitWrapperScript();
+    expect(s).toContain("cat-file tag");
+    expect(s).toContain("core.quotePath=false");
+    expect(s).toContain("push.pushOption");
+  });
+
+  it("refuses a submodule-recursing push with a message naming the fix", () => {
+    const s = studioGitWrapperScript();
+    expect(s).toContain(STUDIO_PUSH_SUBMODULE_REFUSAL);
+    expect(STUDIO_PUSH_SUBMODULE_REFUSAL).toContain("submodule");
+    expect(s).toContain("push.recurseSubmodules");
+    expect(s).toContain("submodule.recurse");
   });
 
   it("does not install the scanner itself — another step owns that", () => {
