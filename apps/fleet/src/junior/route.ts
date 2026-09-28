@@ -6,6 +6,7 @@
 import type { Env } from "../env";
 import { isSpawnTokenShaped, resolveSpawnParent, SPAWN_TOKEN_HEADER } from "../studio/spawn";
 import { listStudios } from "../studio/registry";
+import { parseStudioId } from "../studio/ids";
 import type { StudioStatus } from "../studio/types";
 import { JUNIOR_MODELS, juniorEnabled } from "./gate";
 import { findLiveAssignedTask, type BoardApi } from "../board/board";
@@ -52,6 +53,25 @@ function aiErrorCode(message: string): number {
 
 const text = (body: string, status: number) => new Response(body, { status });
 
+/**
+ * PR #9 review, F2: defense in depth beyond "the maestro never gets the
+ * `junior` skill" (Task 7's provision-time exclusion, studio/provision.ts's
+ * `isMaestro` check) — even a maestro's own spawn token must never reach this
+ * route, full stop, regardless of what the board or D1 would otherwise say.
+ *
+ * Same two-part check src/studio/do.ts's own `isMaestro()` uses, for the same
+ * reason (issue #269's singleton-role defense in depth): role alone is not
+ * enough, because maestro is a singleton role by CONVENTION
+ * (`spawn.ts`'s `runSpawn` refuses any instance >1 for it) but this check
+ * must not TRUST that refusal alone — reads the id's own instance too, so a
+ * stray `x--maestro--2` (however it came to exist) is not swept into "not the
+ * maestro, allow it".
+ */
+function isMaestroStudio(studioId: string): boolean {
+  const id = parseStudioId(studioId);
+  return id?.role === "maestro" && id.instance === 1;
+}
+
 export async function handleFleetJunior(
   req: Request, env: Env,
   api: BoardApi = githubBoardApi(env),
@@ -66,6 +86,9 @@ export async function handleFleetJunior(
   if (!isSpawnTokenShaped(presented)) return text("unauthorized", 401);
   const studio = await resolveSpawnParent(await rows(), presented);
   if (!studio) return text("unauthorized", 401);
+  // F2: absolute, and first — before juniorEnabled, before any board call,
+  // before a D1 read. See isMaestroStudio's own doc comment.
+  if (isMaestroStudio(studio.id)) return text("junior not authorized for your current task", 403);
   if (!juniorEnabled(env, studio.repoSlug ?? env.AGENT_REPO)) return text("not found", 404);
 
   // The maestro's gate: only a live task it filed with `--junior` lets this
