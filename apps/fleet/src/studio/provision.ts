@@ -402,6 +402,12 @@ export type StudioEnv = {
    *  re-resolves the blueprint. */
   STUDIO_COMPLETION_GATE?: string;
   BLUEPRINT_REPO: string;
+  /** The blueprint ref this provision resolved (issue #11): bring-up resets
+   *  /opt/blueprint onto it every time, so a skill added after the container
+   *  booted still resolves. Optional on the TYPE for the same reason as
+   *  STUDIO_COMPLETION_GATE: an env stored before this field existed reads as
+   *  `${BLUEPRINT_REF:-}`, and bring-up falls back to the remote's HEAD. */
+  BLUEPRINT_REF?: string;
 };
 
 /** The keys this feature stores. Exported so tests can seed/read storage
@@ -1795,6 +1801,7 @@ export async function resolveBringupEnv(
           opsOverlay.text,
         ),
         BLUEPRINT_REPO: fleet.blueprint.repo,
+        BLUEPRINT_REF: ref,
       },
       keepAlive: studio.keep_alive,
       houseRulesOverlayNote: opsOverlay.note,

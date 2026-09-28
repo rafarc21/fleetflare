@@ -37,7 +37,7 @@ const WORK_TOKEN = "github_pat_workTokenForThePersonalWorkRepo";
  *  what failure mode 1 above is, so the test must not restate it by hand. */
 function blueprintCloneUrl(repo: string): string {
   const src = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
-  const m = /git clone --depth 1 "([^"]+)" \/opt\/blueprint/.exec(src);
+  const m = /git clone --depth 1 "([^"]+)" "\$dir"/.exec(src);
   if (!m) throw new Error("blueprint clone line not found in studio-bringup.sh");
   return m[1]!.replace("${BLUEPRINT_REPO}", repo);
 }
