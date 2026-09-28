@@ -693,7 +693,7 @@ REAL("studio-bringup.sh claude-launch region — a large restored session never 
     expect(readFileSync(got, "utf8")).toBe(prompt);
     expect(s.claudePids().length).toBe(1);
     // The size line #6 added, so the next wedge arrives with its own numbers.
-    expect(r.stderr).toMatch(/launch line is \d{2,3} bytes \(role prompt \d+ bytes, passed by file\)/);
+    expect(r.stderr).toMatch(/launch line is \d{2,3} bytes \(role prompt \d+ bytes\)/);
   }, T);
 });
 

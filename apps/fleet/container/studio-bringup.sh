@@ -1598,6 +1598,12 @@ claude_launch_line() {
   else
     echo "studio-bringup: could not write the role prompt file $file -- inlining the prompt into the launch line (issue #6: a long one overflows tmux)" >&2
     line="$(printf '%q ' env -u TMUX -u TMUX_PANE claude "$@" --append-system-prompt "$prompt")"
+    # Issue #21: past this, tmux answers only "command too long" -- the
+    # symptom. 16338 bytes is the largest send-keys argument tmux accepts
+    # (MEASURED 2026-09-29, tmux 3.2a in the studio image and 3.4).
+    local n
+    n="$(printf '%s' "$line" | wc -c | tr -d ' ')"
+    [ "$n" -gt 16338 ] && echo "studio-bringup: launch line is $n bytes, over tmux's 16338-byte send-keys limit -- the role prompt is too large to inline and this launch will fail; fix the role prompt file write above" >&2
   fi
   # Start claude IN the checkout, not in the image's own WORKDIR (observed
   # 2026-08-20: a lead asked about README.md looked in /container-server).
@@ -1709,7 +1715,7 @@ if claude_launch_needed; then
   cmd_str="$(claude_launch_line "$role_prompt" "${repo_dir:-}" "${claude_args[@]}")"
   # Issue #6: the typed line's size, on record in the bring-up log. It no
   # longer grows with the brief; a large number here means it leaked back.
-  echo "studio-bringup: launch line is $(printf '%s' "$cmd_str" | wc -c | tr -d ' ') bytes (role prompt $(printf '%s' "$role_prompt" | wc -c | tr -d ' ') bytes, passed by file)" >&2
+  echo "studio-bringup: launch line is $(printf '%s' "$cmd_str" | wc -c | tr -d ' ') bytes (role prompt $(printf '%s' "$role_prompt" | wc -c | tr -d ' ') bytes)" >&2
   # Issue #54: claude_launch observes what the keystrokes actually did.
   # Recorded, not acted on here — the transcript pipe-pane below is the only
   # record of WHY claude exited and the shell window is the operator's way

@@ -124,4 +124,23 @@ describe("claude_launch_line — the role prompt never rides the send-keys line 
     expect(w.got()).toBe("inline brief");
     expect(r.stderr).toContain("could not write the role prompt file");
   });
+
+  // Issue #21 item 4: the shell's "command too long" named the symptom. The
+  // inline fallback is the one path left that can overflow tmux (16338
+  // bytes per send-keys, measured on tmux 3.2a and 3.4), so it says so.
+  test("an inline fallback past tmux's limit names the cause before tmux refuses it", () => {
+    const w = world();
+    const blocker = join(w.dir, "not-a-dir");
+    writeFileSync(blocker, "");
+    const r = buildAndRun(w, bigPrompt(), "", blocker);
+    expect(r.stderr).toMatch(/launch line is \d+ bytes, over tmux's 16338-byte send-keys limit/);
+  });
+
+  test("a short inline fallback stays quiet about the limit", () => {
+    const w = world();
+    const blocker = join(w.dir, "not-a-dir");
+    writeFileSync(blocker, "");
+    const r = buildAndRun(w, "short", "", blocker);
+    expect(r.stderr).not.toContain("send-keys limit");
+  });
 });
