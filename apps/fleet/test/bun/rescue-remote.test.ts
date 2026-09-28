@@ -1,7 +1,7 @@
 // Issue #1 piece 5: where rescue pushes go. `FLEET_RESCUE_REMOTE` (owner/name,
 // a PRIVATE repo) resolves to a URL + a scoped token in exec env; unset,
-// malformed or a failed mint all fall back to origin, loudly — rescue never
-// loses data over configuration.
+// malformed or a failed mint all fall back to origin, loudly. That origin
+// push is leak-gated (blocker 2): a denylist hit refuses it.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { resolveRescueRemote, resolveRescueTarget, RESCUE_TOKEN_ENV } from "../../src/studio/rescue";
 
@@ -39,19 +39,19 @@ describe("resolveRescueTarget", () => {
     expect(RESCUE_TOKEN_ENV).toBe("FLEET_RESCUE_TOKEN");
   });
 
-  test("unset: origin (empty target), and says loudly that origin may be public", async () => {
+  test("unset: origin (empty target), and says loudly the origin rescue is leak-gated", async () => {
     let called = false;
     const t = await resolveRescueTarget({}, async () => { called = true; return "x"; });
     expect(t).toEqual({});
     expect(called).toBe(false);
-    expect(logged()).toMatch(/FLEET_RESCUE_REMOTE is unset.*origin.*public/);
+    expect(logged()).toMatch(/FLEET_RESCUE_REMOTE is unset.*origin.*leak-gated.*denylist hit or missing denylist refuses.*set FLEET_RESCUE_REMOTE/);
   });
 
-  test("mint fails: falls back to origin (never lose data), loudly", async () => {
+  test("mint fails: falls back to leak-gated origin, loudly", async () => {
     const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => {
       throw new Error("422 nope");
     });
     expect(t).toEqual({});
-    expect(logged()).toMatch(/acme\/rescue-vault.*422 nope.*origin/);
+    expect(logged()).toMatch(/acme\/rescue-vault.*422 nope.*origin.*leak-gated.*denylist hit or missing denylist refuses.*set FLEET_RESCUE_REMOTE/);
   });
 });

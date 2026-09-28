@@ -222,7 +222,7 @@ export interface SessionSyncDeps {
   /**
    * Issue #1 piece 5: where rescue pushes go -- do.ts resolves
    * FLEET_RESCUE_REMOTE + a minted token once per rescue (rescue.ts's
-   * resolveRescueTarget). Absent, or `{}`, means origin.
+   * resolveRescueTarget). Absent, or `{}`, means origin, leak-gated.
    */
   rescueTarget?(): Promise<RescueTarget>;
 }

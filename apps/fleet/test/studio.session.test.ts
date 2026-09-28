@@ -2390,9 +2390,11 @@ describe("rescuePushCmd — the shell shape rescue-push commits and pushes with"
     // Issue #359: `$nv` carries --no-verify only when `$target` is a
     // generated fleet/rescue/... ref — see rescue_push()'s own doc comment
     // in rescue.ts.
-    // Issue #1 piece 5: real git + configurable destination (origin by default).
+    // Issue #1 piece 5 + blocker 2: configurable destination; origin (the
+    // default) pushes via plain `git` on PATH = the leak-gate wrapper.
     expect(cmd).toContain('"${__rgit[@]}" -C "$w" push $nv "$__rdest" "HEAD:refs/heads/$target"');
-    expect(cmd).toContain("__rgit=('/usr/bin/git'); __rdest=origin");
+    expect(cmd).toContain("__rgit=(git); __rdest=origin");
+    expect(cmd).not.toContain("/usr/bin/git");
     expect(cmd).toContain(`echo "${RESCUE_NO_CHECKOUT}"`);
     expect(cmd).toContain(`echo "${RESCUE_CLEAN}"`);
     expect(cmd).toContain(RESCUE_PUSHED_PREFIX);

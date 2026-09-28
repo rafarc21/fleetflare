@@ -14,12 +14,14 @@ import { STUDIO_REAL_GIT_PATH } from "./credentials";
  */
 export const RESCUE_TOKEN_ENV = "FLEET_RESCUE_TOKEN";
 
-/** Where rescue pushes go, and how. Both fields absent = origin via real git. */
+/** Where rescue pushes go, and how. remoteUrl absent = origin via plain
+ *  `git` on PATH, i.e. the leak-gate wrapper (origin may be public). */
 export interface RescuePushOptions {
   /** Push URL replacing `origin` for every rescue push. */
   remoteUrl?: string;
-  /** Git binary for every rescue push -- the REAL one, past the leak-gate
-   *  wrapper: rescue must never lose data to a refused push. */
+  /** Git binary for PRIVATE-remote pushes only (remoteUrl set) -- the REAL
+   *  one, past the leak-gate wrapper: a private rescue must never lose data
+   *  to a refused push. Ignored for origin: that push stays leak-gated. */
   realGit?: string;
 }
 
@@ -45,7 +47,8 @@ export function resolveRescueRemote(env: { FLEET_RESCUE_REMOTE?: string }): stri
 
 /**
  * One call per rescue. Unset/malformed or a failed mint → `{}` (origin), each
- * loudly: a rescue that lands somewhere beats one that lands nowhere.
+ * loudly. Origin rescue runs through the leak-gate wrapper, so a denylist hit
+ * refuses it (RESCUE_FAILED) rather than publish private text.
  * `mint` is do.ts's mintRepoToken, scoped contents:write to that repo.
  */
 export async function resolveRescueTarget(
@@ -53,7 +56,10 @@ export async function resolveRescueTarget(
 ): Promise<RescueTarget> {
   const slug = resolveRescueRemote(env);
   if (slug === null) {
-    console.error("rescue: FLEET_RESCUE_REMOTE is unset -- rescue pushes go to origin; if origin is public, rescued work is public");
+    console.error(
+      "rescue: FLEET_RESCUE_REMOTE is unset -- rescue pushes go to origin and are leak-gated; " +
+      "a denylist hit or missing denylist refuses them; set FLEET_RESCUE_REMOTE",
+    );
     return {};
   }
   try {
@@ -62,7 +68,8 @@ export async function resolveRescueTarget(
   } catch (err) {
     console.error(
       `rescue: token mint for ${slug} failed (${err instanceof Error ? err.message : String(err)}) -- ` +
-      "falling back to origin; if origin is public, rescued work is public",
+      "falling back to origin; rescue to origin is leak-gated; a denylist hit or missing denylist " +
+      "refuses it; set FLEET_RESCUE_REMOTE",
     );
     return {};
   }
@@ -80,8 +87,9 @@ function shq(s: string): string {
  * own git auth applies, as for origin.
  */
 function rescuePushPrelude(opts: RescuePushOptions): string {
+  // Origin may be public: plain `git` on PATH = the leak-gate wrapper.
+  if (opts.remoteUrl === undefined) return `__rgit=(git); __rdest=origin\n`;
   const git = shq(opts.realGit ?? STUDIO_REAL_GIT_PATH);
-  if (opts.remoteUrl === undefined) return `__rgit=(${git}); __rdest=origin\n`;
   const helper = `!f() { echo username=x-access-token; echo "password=\${${RESCUE_TOKEN_ENV}}"; }; f`;
   return (
     `__rgit=(${git}); __rdest=${shq(opts.remoteUrl)}\n` +

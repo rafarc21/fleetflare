@@ -1759,8 +1759,10 @@ describe("issue #335 — the rescue commit's git identity is configurable, neutr
 
 // Issue #1 piece 5: origin can be PUBLIC. With `remoteUrl` set, every rescue
 // push (rescue_push + its nff retry, branch walk, stash walk, both builders)
-// lands on that private remote instead. Every push runs the REAL git by
-// absolute path (`realGit`), past the leak-gate wrapper: rescue never loses data.
+// lands on that private remote instead. Private pushes run the REAL git by
+// absolute path (`realGit`), past the leak-gate wrapper: a private rescue
+// never loses data. `realGit` applies ONLY there: origin pushes use plain
+// `git` on PATH (the wrapper), leak-gated -- see rescue-leak-gate.test.ts.
 describe("issue #1 — rescue pushes go to a configurable private remote, never origin", () => {
   let priv: string;
   const REAL_GIT = Bun.which("git") ?? "/usr/bin/git";
@@ -1914,14 +1916,14 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
   test("remoteUrl unset: rescue still goes to origin, as before", () => {
     writeFileSync(join(checkout, "notes.md"), "origin work\n");
 
-    const out = sh(rescuePushCmd(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined, { realGit: REAL_GIT })).out;
+    const out = sh(rescuePushCmd(REPO, STUDIO, root)).out;
 
     expect(out).toContain(RESCUE_PUSHED_PREFIX);
     expect(rescueRefs().length).toBe(1);
     expect(privRefs()).toEqual([]);
   });
 
-  describe("every rescue push runs realGit; the token rides a credential helper, never argv", () => {
+  describe("every private rescue push runs realGit; the token rides a credential helper, never argv", () => {
     let log: string;
     let shim: string;
     beforeEach(() => {
@@ -1966,17 +1968,16 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
         for (const l of lines) expect(l).not.toContain("credential.helper");
       });
 
-      test(`${label}: remoteUrl unset — pushes to origin still run realGit, never with the rescue helper`, () => {
-        const out = sh(cmdFn(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined, { realGit: shim }), dir,
-          { FLEET_RESCUE_TOKEN: "s3cr3t-fake-token" }).out;
+      test(`${label}: remoteUrl unset — realGit ignored; origin pushes run plain git on PATH (the leak-gate wrapper), never the rescue helper`, () => {
+        const cmd = cmdFn(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined, { realGit: shim });
+        expect(cmd).not.toContain(shim);
+        expect(cmd).not.toContain("credential.helper");
+
+        const out = sh(cmd, dir, { FLEET_RESCUE_TOKEN: "s3cr3t-fake-token" }).out;
 
         expect(out).not.toContain(RESCUE_FAILED_PREFIX);
-        const lines = pushLines();
-        expect(lines.length).toBe(4);
-        for (const l of lines) {
-          expect(l).toContain(" origin ");
-          expect(l).not.toContain("credential.helper");
-        }
+        expect(pushLines()).toEqual([]);
+        expect(rescueRefs().length).toBe(4);
       });
     }
   });
