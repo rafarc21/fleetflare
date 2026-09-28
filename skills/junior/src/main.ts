@@ -141,13 +141,17 @@ export async function main(argv: string[], env: Record<string, string | undefine
       console.error(telemetry(model, start, last, calls, "api-error"));
       return EXIT.API;
     }
-    // Anything else reaching here happened while calling the model (or
-    // applying its output): a network-level throw — connection refused, DNS
-    // failure — that classify() in client.ts never sees, because it only
-    // classifies a completed HTTP response wrapped as ApiError. This file's
+    // Catch-all for any otherwise-unclassified Error reaching this point:
+    // network-level throws while calling the model (connection refused, DNS
+    // failure — cases classify() in client.ts never sees, because it only
+    // classifies a completed HTTP response wrapped as ApiError), but also
+    // local git/fs errors from applying the model's output (e.g. toUnifiedDiff's
+    // "git diff failed: ..." if git isn't installed, or mkdirSync/writeFileSync
+    // failing under .junior/ due to disk-full or permission-denied). This file's
     // exit-code contract is EXIT.{OK,USAGE,API,INVALID,TIMEOUT,AUTH}; letting
     // an arbitrary Error escape here crashes with a raw stack trace and a
-    // non-contract exit code. Treat it as an API failure instead.
+    // non-contract exit code, so we report it as EXIT.API/status=api-error even
+    // though it may not actually be an API failure.
     if (e instanceof Error) {
       console.error(`junior: ${e.message}`);
       console.error(telemetry(model, start, last, calls, "api-error"));
