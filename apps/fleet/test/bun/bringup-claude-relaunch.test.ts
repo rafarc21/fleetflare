@@ -28,6 +28,17 @@ import { extractShellFunc, runSnippet } from "./exec-snippet";
  */
 const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
 
+/** A `# >>> name >>>` ... `# <<< name <<<` region of bring-up, verbatim. */
+function extractRegion(src: string, marker: string): string {
+  const open = `# >>> ${marker} >>>`;
+  const close = `# <<< ${marker} <<<`;
+  const openAt = src.indexOf(open);
+  if (openAt === -1) throw new Error(`region opener ${open} not found in source`);
+  const closeAt = src.indexOf(close, openAt);
+  if (closeAt === -1) throw new Error(`region terminator ${close} not found in source`);
+  return src.slice(src.indexOf("\n", openAt) + 1, closeAt);
+}
+
 const DECISION = () =>
   [
     // Bring-up's tmux shadow (#117): every call below goes `-L fleet-studio`,
@@ -608,6 +619,81 @@ REAL("studio-bringup.sh claude_launch_line — a >64 KB role prompt still launch
     expect(r.stdout).toContain("LANDED");
     expect(s.claudePids().length).toBe(1);
     expect(readFileSync(got, "utf8")).toBe(prompt);
+  }, T);
+});
+
+REAL("studio-bringup.sh claude-launch region — a large restored session never wedges bring-up (issue #21)", () => {
+  test("a 5 MB resumable session plus a 70 KB brief: --continue, the whole brief, one lead, verdict clean", () => {
+    // MEASURED 2026-09-28 (issue #21): a studio with a large restored session
+    // failed provision and recycle twice each with `command too long`. The
+    // session never enters the launch argv -- session-adopt only copies a
+    // .jsonl, and the guard only decides --continue -- so what overflowed
+    // was the inline brief #6 moved into a file. This runs the REAL
+    // claude-launch region, extracted from studio-bringup.sh, with both at
+    // their worst, through real send-keys.
+    const s = fresh();
+    const wrap = join(s.dir, "wrap");
+    const got = join(s.dir, "got");
+    const argsFile = join(s.dir, "args");
+    const repo = join(s.dir, "acme-os");
+    mkdirSync(wrap, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(
+      join(wrap, "claude"),
+      "#!/bin/bash\n" +
+        `printf '%s\\n' "$@" > ${JSON.stringify(argsFile)}\n` +
+        "while [ $# -gt 0 ]; do\n" +
+        `  [ "$1" = --append-system-prompt ] && printf '%s' "$2" > ${JSON.stringify(got)}\n` +
+        "  shift\n" +
+        "done\n" +
+        `exec ${JSON.stringify(join(s.bin, "claude"))} 300\n`,
+      { mode: 0o755 },
+    );
+    // The restored session, where claude_has_conversation looks for it:
+    // ~/.claude/projects/<cwd with every non-alphanumeric char as `-`>/.
+    const slug = repo.replace(/[^a-zA-Z0-9]/g, "-");
+    const projects = join(s.env.HOME as string, ".claude", "projects", slug);
+    mkdirSync(projects, { recursive: true });
+    const line = `${JSON.stringify({ type: "user", message: { content: "x".repeat(1000) } })}\n`;
+    writeFileSync(join(projects, "f0e1d2c3-4b5a-6978-8a9b-0c1d2e3f4a5b.jsonl"), line.repeat(5000));
+    s.start("claude", `exec env PATH=${wrap}:$PATH /bin/bash`);
+    expect(s.waitForPane("bash")).toBe("bash");
+    const chunk = `brief line with 'quotes' "double" $HOME \`tick\` and a long tail of words\n`;
+    const prompt = chunk.repeat(Math.ceil(70_000 / chunk.length)).trimEnd();
+
+    const r = runSnippet({
+      shell: "bash",
+      env: {
+        CLAUDE_ALIVE_TRIES: "10",
+        CLAUDE_SETTLE_SECONDS: "1",
+        ...(s.env as Record<string, string>),
+        FLEET_WORKSPACE: join(s.dir, "ws"),
+        STUDIO_ID: "acme-os--web-studio",
+        ROLE_PROMPT_B64: Buffer.from(prompt).toString("base64"),
+        ROLE_ALLOWED_TOOLS: "Bash(git *) Read",
+        ROLE_EFFORT: "",
+      },
+      script:
+        "set -euo pipefail\n" +
+        `[ "$(command -v tmux)" = ${JSON.stringify(join(s.bin, "tmux"))} ] || { echo "relaunch harness: bare tmux is not the pinned wrapper -- refusing" >&2; exit 97; }\n` +
+        `cd ${JSON.stringify(repo)}\n` +
+        `${DECISION()}\n` +
+        ["claude_launch_line", "claude_project_dir", "claude_has_conversation", "claude_process_census"]
+          .map((f) => extractShellFunc(BRINGUP, f))
+          .join("\n") +
+        "\n" +
+        extractRegion(BRINGUP, "claude-launch") +
+        'echo "VERDICT ${claude_launch_failed:-0}"\n',
+      timeout: 60000,
+    });
+
+    expect(r.stderr).not.toContain("command too long");
+    expect(r.stdout).toContain("VERDICT 0");
+    expect(readFileSync(argsFile, "utf8").split("\n")).toContain("--continue");
+    expect(readFileSync(got, "utf8")).toBe(prompt);
+    expect(s.claudePids().length).toBe(1);
+    // The size line #6 added, so the next wedge arrives with its own numbers.
+    expect(r.stderr).toMatch(/launch line is \d{2,3} bytes \(role prompt \d+ bytes\)/);
   }, T);
 });
 
