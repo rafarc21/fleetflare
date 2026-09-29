@@ -28,6 +28,9 @@ const WEB = "acmeclient--web-studio";
 const MEMBER_ROW = /\n[^\n]*◯ frontend-developer[^\n]*/;
 const CLEAN_IDLE = REAL_WEBSTUDIO_PANE.replace(MEMBER_ROW, "")
   .replace(" · 7 shells still running", "").replace(" · 7 shells", "");
+// The clean pane with a live spinner on its status line: a running turn and
+// NOTHING else to trip on (no member row, no shells) — isolates the frame check.
+const CLEAN_WORKING = CLEAN_IDLE.replace("✻ Cooked for 36m 35s", "✻ Cogitating… (3s · esc to interrupt)");
 // Same idle pane, member row still under the footer: the lead is idle but a
 // background agent may still be running.
 const IDLE_WITH_MEMBER = REAL_WEBSTUDIO_PANE.replace(" · 7 shells still running", "").replace(" · 7 shells", "");
@@ -191,6 +194,12 @@ describe("reap — never a studio with a running turn", () => {
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
+  test("the live pane shows a running turn, no member row, no shells -> no destroy", async () => {
+    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), tail: CLEAN_WORKING }) });
+    await runReap(flags(), f.deps);
+    expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
+  });
+
   test("the live pane is idle but a member row sits under the footer -> no destroy", async () => {
     const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_MEMBER }) });
     await runReap(flags(), f.deps);
@@ -204,7 +213,7 @@ describe("reap — never a studio with a running turn", () => {
   });
 
   test("the DO's own activity says working at destroy time -> no destroy", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), activity: activity("working", 0) }) });
+    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), activity: activity("working", 45 * MIN) }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
