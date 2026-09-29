@@ -23,6 +23,16 @@ describe("writeProxyOn", () => {
     err.mockRestore();
   });
 
+  // #13 re-review LOW: writeProxyOn runs on every refresh, route and
+  // provision; one bad entry must not flood the log.
+  it("a malformed entry is logged once, not on every call", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const env = { FLEET_WRITE_PROXY_REPOS: "example-org/once-bad.git" };
+    for (let i = 0; i < 5; i++) writeProxyOn(env, REPO);
+    expect(err.mock.calls.filter((c) => String(c[0]).includes("once-bad.git"))).toHaveLength(1);
+    err.mockRestore();
+  });
+
   it("is off unless the work repo is on FLEET_WRITE_PROXY_REPOS (deploy changes nothing)", () => {
     expect(writeProxyOn({}, REPO)).toBe(false);
     expect(writeProxyOn({ FLEET_WRITE_PROXY_REPOS: "" }, REPO)).toBe(false);
