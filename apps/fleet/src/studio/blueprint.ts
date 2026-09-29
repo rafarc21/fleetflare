@@ -518,6 +518,12 @@ export const HOUSE_RULES = [
   "wedged. Recovered only by `recycle --discard-unsynced`, losing 22 min of",
   "conversation.",
   "",
+  // Issue #70 ask 3: that ceiling, as a rule rather than an anecdote.
+  "This container has a memory ceiling of about 11.6 GiB. The full test",
+  "suite together with two bundler builds exceeds it and wedges the studio.",
+  "Never run the full test suite and a bundler build at the same time. Run",
+  "the tests your change touches; leave the full set to CI or the merge gate.",
+  "",
   // Board issue #235, measured 2026-09-25 by the BETA maestro: a studio
   // container carries neither CLOUDFLARE_API_TOKEN (what wrangler reads) nor
   // CLOUDFLARE_DEPLOY_TOKEN (env.ts, do.ts, deploy-server.ts — the fleet's

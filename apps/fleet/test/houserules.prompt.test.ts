@@ -163,6 +163,23 @@ describe("HOUSE_RULES — the gate budget counts verification, not just the diff
 // BETA PR #829 hit exactly this; its release-studio found the gap, searched its
 // own env, and correctly stopped — but only after burning minutes on it. This
 // section says so up front so no studio has to rediscover it again.
+// Issue #70 ask 3: a full suite plus two bundler builds wedged ~11.6 GiB
+// studios all day. The ceiling was only in an anecdote; state it as the rule,
+// with what exceeds it and where the heavy set goes instead.
+describe("HOUSE_RULES — the memory ceiling is a rule, not an anecdote (issue #70)", () => {
+  const rules = () => collapseWs(HOUSE_RULES);
+
+  it("states the ceiling and what exceeds it", () => {
+    expect(rules()).toMatch(/This container has a memory ceiling of about 11\.6 GiB\./);
+    expect(rules()).toMatch(/The full test suite together with two bundler builds exceeds it/);
+  });
+
+  it("says never run the heavy set together, and where it goes instead", () => {
+    expect(rules()).toMatch(/Never run the full test suite and a bundler build at the same time\./);
+    expect(rules()).toMatch(/leave the full set to CI or the merge gate/);
+  });
+});
+
 describe("HOUSE_RULES — studios never hold Cloudflare deploy credentials", () => {
   // Collapse before matching, same reason as the gate-budget block above: a
   // whole clause can straddle the line-wrap boundary in the source array.
