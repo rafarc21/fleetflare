@@ -449,6 +449,11 @@ fails, always rescues to its own `origin`. Set it with
 must be able to write that repo. Unset (or if the token mint fails), rescue pushes go to `origin` through
 the leak gate: a denylist hit, or no denylist at all, refuses that rescue and
 the work is lost at teardown. The Worker logs this loudly on every rescue.
+The next provision of the same studio lists and fetches its rescue branches
+from the same place: `origin` first, then this remote when rescue would use
+it. A branch name on both with different commits keeps `origin`'s under its
+name and fetches this remote's as `<name>-rescue-remote`. If this remote
+cannot be listed, provision logs a WARNING and keeps `origin`'s results.
 
 **Telegram** (optional, off by default): the legacy `/tg` webhook, AgentDO
 tasks, DeployDO deploy approvals, and operator chat alerts all run only when

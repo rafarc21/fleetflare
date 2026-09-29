@@ -103,8 +103,11 @@ function shq(s: string): string {
  * `__rdest` (push destination). The helper is added only for a remoteUrl, and
  * only when the token env is present at run time; otherwise the container's
  * own git auth applies, as for origin.
+ * Issue #30: provision.ts's discoverRescueRefsCmd reuses it to list + fetch
+ * from the same remote with the same auth; `__rgit` and `__rdest` work for
+ * `ls-remote`/`fetch` as for `push`.
  */
-function rescuePushPrelude(opts: RescuePushOptions): string {
+export function rescuePushPrelude(opts: RescuePushOptions): string {
   // Origin may be public: plain `git` on PATH = the leak-gate wrapper.
   if (opts.remoteUrl === undefined) return `__rgit=(git); __rdest=origin\n`;
   const git = shq(opts.realGit ?? STUDIO_REAL_GIT_PATH);
