@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
   syncSessionTick, restorePlan, tarAndStatCmd, singleReadCmd, splitCmd, partReadCmd,
-  sessionDailyPrefix, SESSION_SYNC_DIR, SESSION_TAR_PATH, SESSION_EXCLUDES_PATH,
+  sessionDailyPrefix, SESSION_SYNC_DIR, SESSION_TAR_PATH, SESSION_EXCLUDES_PATH, asideListCmd,
   SESSION_DAILY_DATE_KEY, SESSION_BURN_WATERMARK_KEY, BURN_KEY, SESSION_GUARD_KEY, SESSION_FORCE_KEY,
   type SessionSyncDeps, type SessionSyncStorage,
 } from "../src/studio/session-sync";
@@ -310,7 +310,8 @@ describe("tarAndStatCmd / singleReadCmd / splitCmd / partReadCmd — exact shell
   it("tarAndStatCmd selects subagent transcripts newest-first under SESSION_SUBAGENT_RAW_BUDGET, admits everything past the burn watermark, then chains tar -> gzip -t -> stat -> watermark with && (C1 fix)", () => {
     expect(tarAndStatCmd()).toBe(
       `mkdir -p ${SESSION_SYNC_DIR} && ` +
-      `( cd /root && find .claude/projects -path '*/subagents/*' ` +
+      // Issue #37: aside dirs pruned from the budget, excluded from the tar.
+      `( cd /root && find .claude/projects -path '.claude/projects/fleet-aside-*' -prune -o -path '*/subagents/*' ` +
         `\\( -type l -printf '-1\\t0\\t%p\\n' ` +
         `-o -name '*.jsonl' -type f -printf '%T@\\t%s\\t%p\\n' \\) ) ` +
       `| LC_ALL=C sort -rn ` +
@@ -319,7 +320,7 @@ describe("tarAndStatCmd / singleReadCmd / splitCmd / partReadCmd — exact shell
         `'BEGIN { n = k > 0 ? (k > n - d ? k : n - d) : n - w } ` +
         `{ t += $2 } $1 < 0 { print $3 } $1 >= 0 && NR > 1 && t > b && $1 < n { print $3 }' ` +
       `> ${SESSION_EXCLUDES_PATH} && ` +
-      `tar -C /root --anchored --no-wildcards -X ${SESSION_EXCLUDES_PATH} -czf ${SESSION_TAR_PATH} .claude/projects .claude.json && ` +
+      `tar -C /root --exclude='.claude/projects/fleet-aside-*' --anchored --no-wildcards -X ${SESSION_EXCLUDES_PATH} -czf ${SESSION_TAR_PATH} .claude/projects .claude.json && ` +
       `gzip -t ${SESSION_TAR_PATH} && ` +
       `stat -c %s ${SESSION_TAR_PATH} && ` +
       `stat -c %Y ${SESSION_EXCLUDES_PATH}`,
@@ -342,7 +343,7 @@ describe("tarAndStatCmd / singleReadCmd / splitCmd / partReadCmd — exact shell
     // Review round 3 moved the `-path` test outside the parens so it gates the
     // symlink branch too; it still gates the jsonl candidate branch, which is
     // what this assertion is about.
-    expect(cmd).toContain("find .claude/projects -path '*/subagents/*' \\(");
+    expect(cmd).toContain("-prune -o -path '*/subagents/*' \\(");
     expect(cmd).toContain("-o -name '*.jsonl' -type f -printf");
     expect(cmd).not.toMatch(/find \.claude\/projects \\\(/); // never unscoped
     // Written under SESSION_SYNC_DIR (/workspace), never under /root — so the
@@ -404,7 +405,7 @@ describe("tarAndStatCmd / singleReadCmd / splitCmd / partReadCmd — exact shell
     // the only real symlink in the fleet (`websites--web-studio`) is a
     // subagent one, and the sentinel mtime `-1` sorts it last and routes it to
     // its own unconditional print.
-    expect(cmd).toContain("find .claude/projects -path '*/subagents/*' \\( -type l -printf '-1\\t0\\t%p\\n'");
+    expect(cmd).toContain("-prune -o -path '*/subagents/*' \\( -type l -printf '-1\\t0\\t%p\\n'");
     expect(cmd).toContain("$1 < 0 { print $3 }");
   });
 
@@ -3384,7 +3385,8 @@ describe("recycleWithSync — sync before rescue-push before destroy, destroy be
       // lands beside it — proven here as one strict sequence, not as
       // independent "both ran" assertions. Either running after destroy
       // saves nothing; this array fails the instant that ever regresses.
-      tarAndStatCmd(), singleReadCmd(), rescuePushCmd(CFG.repo, STUDIO_ID), harvestRecordCmd(CFG.repo, null),
+      // Issue #37: aside sessions (none here) are listed after the main sync.
+      tarAndStatCmd(), singleReadCmd(), asideListCmd(), rescuePushCmd(CFG.repo, STUDIO_ID), harvestRecordCmd(CFG.repo, null),
       "destroy", "awaitReady", "provision:websites--pilot",
       // The check runs LAST, against the container provisioning just
       // finished with — asserted as the exact command, so this test fails

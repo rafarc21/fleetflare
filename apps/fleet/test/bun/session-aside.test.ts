@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -45,7 +45,9 @@ beforeEach(() => {
   writeFileSync(join(home, ".claude", "projects", ROOT, `${NEW_ID}.jsonl`), '{"type":"user"}\n');
   const aside = join(home, ".claude", "projects", ASIDE);
   mkdirSync(join(aside, OLD_ID, "subagents"), { recursive: true });
-  writeFileSync(join(aside, `${OLD_ID}.jsonl`), '{"type":"user","old":true}\n'.repeat(1000));
+  // Random bytes: gzip cannot shrink them, so the aside tar spans several
+  // 64k test parts.
+  writeFileSync(join(aside, `${OLD_ID}.jsonl`), randomBytes(200_000).toString("hex") + "\n");
   // A big aside subagent: counted in the budget, it would push live
   // subagents out of the main tar.
   writeFileSync(join(aside, OLD_ID, "subagents", "agent-1.jsonl"), "x".repeat(300_000) + "\n");

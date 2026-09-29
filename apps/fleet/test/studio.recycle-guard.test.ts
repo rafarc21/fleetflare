@@ -519,8 +519,9 @@ describe("recycle — aside sessions ship before destroy (issue #37)", () => {
     d.exec = async (cmd: string, env?: Record<string, string>) => {
       if (cmd === asideListCmd()) { order.push("list"); return { code: 0, stdout: `${DIR}\n`, stderr: "" }; }
       if (cmd === asidePackCmd(DIR)) return { code: 0, stdout: "10\nabc\n", stderr: "" };
-      if (cmd.includes(`${DIR}.tar.gz.part-`)) return { code: 0, stdout: btoa("x".repeat(10)), stderr: "" };
+      // The mark command also names `<tar>.part-*` (it removes them): first.
       if (cmd === asideMarkCmd(DIR)) { order.push("mark"); return { code: 0, stdout: "", stderr: "" }; }
+      if (cmd.includes(`${DIR}.tar.gz.part-`)) return { code: 0, stdout: btoa("x".repeat(10)), stderr: "" };
       return env ? inner(cmd, env) : inner(cmd);
     };
     const puts: string[] = [];

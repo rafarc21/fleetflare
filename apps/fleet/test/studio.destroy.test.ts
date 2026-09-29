@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  tarAndStatCmd, singleReadCmd, type SessionSyncDeps, type SessionSyncStorage,
+  tarAndStatCmd, singleReadCmd, asideListCmd, type SessionSyncDeps, type SessionSyncStorage,
 } from "../src/studio/session-sync";
 import {
   STATUS_KEY, DESTROY_EPOCH_KEY, readDestroyEpoch, type StudioStorage, type RoleEnv, type StudioEnv,
@@ -103,7 +103,8 @@ describe("destroyWithSync", () => {
 
     // Issue #104: the probe comes first, exactly as recycleWithSync's does.
     expect(order).toEqual([
-      "printf ok", tarAndStatCmd(), singleReadCmd(), rescuePushCmd(REPO, STUDIO_ID), harvestRecordCmd(REPO, null),
+      // Issue #37: aside sessions (none here) are listed after the main sync.
+      "printf ok", tarAndStatCmd(), singleReadCmd(), asideListCmd(), rescuePushCmd(REPO, STUDIO_ID), harvestRecordCmd(REPO, null),
       "destroy",
     ]);
     expect(destroy).toHaveBeenCalledTimes(1);
