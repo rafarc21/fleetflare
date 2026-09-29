@@ -112,6 +112,16 @@ export async function resolveRescueTarget(
   }
 }
 
+/**
+ * Issue #45: the rescue-remote token's GitHub App permissions, by purpose.
+ * Rescue pushes (write). Provision's rescue-branch discovery only lists and
+ * fetches, so it gets read: a token leaked from a provision exec cannot
+ * write the archive.
+ */
+export function rescueMintPermissions(purpose: "push" | "discovery"): { contents: "read" | "write" } {
+  return { contents: purpose === "discovery" ? "read" : "write" };
+}
+
 /** Single-quotes `s` for bash. */
 function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;

@@ -501,7 +501,8 @@ export async function restartWithSync(
 
 import {
   rescuePushCmd, rescueSnapshotCmd, RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX,
-  RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport, type RescueWorktree, type RescueTarget,
+  RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport, rescueMintPermissions,
+  type RescueWorktree, type RescueTarget,
 } from "./rescue";
 // Moved to src/studio/rescue.ts (pure, so a bun test runs it against real
 // git — issue #217); re-exported so every existing import keeps working.
@@ -5111,8 +5112,9 @@ export class StudioDO extends Sandbox<Env> {
   private rescueTarget(
     workRepoSlug: () => Promise<string>, purpose: "push" | "discovery" = "push",
   ): Promise<RescueTarget> {
+    // Issue #45: discovery only reads the remote — read token, not write.
     return resolveRescueTarget(this.env, (repo) =>
-      mintRepoToken(this.env, repo, { permissions: { contents: "write" } }),
+      mintRepoToken(this.env, repo, { permissions: rescueMintPermissions(purpose) }),
     async () => {
       const slug = await workRepoSlug();
       return repoIsPrivate(await mintRepoToken(this.env, slug), slug);
