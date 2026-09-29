@@ -28,5 +28,13 @@ describe("rescue token permissions (issue #45)", () => {
     expect(body).toContain('purpose: "push" | "discovery" = "push"');
     expect(body).not.toContain('contents: "write"');
     expect(src).toContain(`rescueTarget: (slug: string) => this.rescueTarget(async () => slug, "discovery"),`);
+    // PR #50 review: the PUSH port (syncDeps) passes no purpose, so it gets
+    // the "push" default = write. Passing "discovery" there would push with
+    // a read token: every rescue refused, work lost at teardown.
+    const syncStart = src.indexOf("  private syncDeps(");
+    expect(syncStart).toBeGreaterThan(-1);
+    const syncBody = src.slice(syncStart, src.indexOf("\n  }", syncStart));
+    expect(syncBody).toContain("rescueTarget: () => this.rescueTarget(() => this.workRepoSlug(null)),");
+    expect(syncBody).not.toMatch(/this\.rescueTarget\([^\n]*"discovery"/);
   });
 });
