@@ -246,17 +246,24 @@ is_plain_deploy() {
 }
 
 # PR #60 review F3: the override record's command, without values that may
-# be secrets (--var K:V, --define, --secrets-file ...): flag names only;
-# a word right after any other flag is taken as that flag's value and
-# dropped; -e/--env keep theirs (the target env, never a secret).
+# be secrets (--var K:V, --define, --secrets-file ...): flag names only.
+# Issue #69: wrangler's --var/--define take EVERY word up to the next flag,
+# so after any flag other than -e/--env every following word is dropped
+# until the next flag, not just the first. -e/--env keep exactly their one
+# value (the target env, never a secret). Words before any flag are kept.
 record_command() {
-  local a prev="" out=()
+  local a mode=keep out=()
   for a in "$@"; do
     case "$a" in
-      -*) out+=("${a%%=*}") ;;
-      *) case "$prev" in -e|--env|""|[!-]*) out+=("$a") ;; esac ;;
+      -e|--env) out+=("$a"); mode=one ;;
+      -*) out+=("${a%%=*}"); mode=drop ;;
+      *)
+        case "$mode" in
+          keep) out+=("$a") ;;
+          one) out+=("$a"); mode=keep ;;
+        esac
+        ;;
     esac
-    prev="$a"
   done
   printf '%s' "${out[*]}"
 }
