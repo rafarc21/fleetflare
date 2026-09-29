@@ -818,6 +818,9 @@ const FLEET_BOARD_ROUTE_RE = /^\/fleet\/tasks(?:\/(\d+)(?:\/(envelope|state|assi
  */
 export type PolicyFetch = () => Promise<SpawnPolicy>;
 
+/** Review round 1: the longest `why` a studio may attach to an assign. */
+const STUDIO_WHY_MAX = 500;
+
 function realPolicyFetch(env: Env): PolicyFetch {
   const mint = repoTokenMinter(env);
   return () => resolveSpawnPolicy(
@@ -928,7 +931,12 @@ export async function handleFleetBoard(
       if (refused) return refused;
       const preflight = await assignRepoPreflight(assignWake, repo.value, body.assignee);
       if (preflight) return preflight;
-      return await withAssignWake(assignWake, repo.value, (onAssigned) => createTask(api, repo.value, body, onAssigned));
+      // Review round 1, hardening 3: no idempotencyKey on this surface.
+      // createTask REPLAYS any earlier issue carrying the key's marker — one
+      // filed for a studio outside the caller's edges included — and fires
+      // the assign wake on it. A studio's create is never a replay.
+      const { idempotencyKey: _dropped, ...brief } = body;
+      return await withAssignWake(assignWake, repo.value, (onAssigned) => createTask(api, repo.value, brief, onAssigned));
     }
     // Issue #59: hand a task to a studio the caller directs. The task may be
     // taken only from nobody, the caller, or another studio the caller
@@ -938,10 +946,29 @@ export async function handleFleetBoard(
         return new Response('assignment needs "assignee" — the studio id this task moves to', { status: 400 });
       }
       const to = body.assignee.trim();
+      // Review round 1, hardening 4: `why` is quoted into the lineage comment
+      // on one `- why:` line. A newline would let a studio write extra
+      // lineage lines or headings of its own. Operator path unchanged.
+      if (body.why !== undefined && body.why !== null) {
+        if (typeof body.why !== "string" || /[\r\n]/.test(body.why) || body.why.length > STUDIO_WHY_MAX) {
+          return new Response(`"why" must be one line of at most ${STUDIO_WHY_MAX} chars`, { status: 400 });
+        }
+      }
       const refused = await directGate(policy, studio, [to]);
       if (refused) return refused;
-      const holders = taskAssignees((await api.getIssue(repo.value, number)).labels)
-        .filter((o) => o !== studio.id && o !== to);
+      const current = await api.getIssue(repo.value, number);
+      // Review round 1, blocker 2: assignTask resets state to `submitted`, so
+      // an assign would reopen finished work. Closed, completed and canceled
+      // are refused here; `failed` stays assignable — handing it to a fresh
+      // studio IS the retry. Studio path only: the operator's assign keeps
+      // its full reach.
+      if (!current.open || current.state === "completed" || current.state === "canceled") {
+        return new Response(
+          `task #${number} is ${current.open ? current.state : "closed"} — a studio does not reopen finished work`,
+          { status: 409 },
+        );
+      }
+      const holders = taskAssignees(current.labels).filter((o) => o !== studio.id && o !== to);
       const taken = await directGate(policy, studio, holders);
       if (taken) return taken;
       const preflight = await assignRepoPreflight(assignWake, repo.value, to);

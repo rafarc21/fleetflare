@@ -134,6 +134,17 @@ export interface StudioStatus {
    */
   spawnedBy: string | null;
   /**
+   * Issue #59 review round 1: written on EVERY completed destroy (destroy.ts's
+   * destroyAndRecord). `true` only when the operator ran `fleet destroy
+   * --park` — a studio stopped on purpose so a coordinating studio may
+   * `fleet resume` it. A plain destroy writes `false`, and absent (a row from
+   * before this field) reads as not parked: resume refuses both.
+   */
+  parked?: boolean;
+  /** Issue #59 review round 1: when the last completed destroy stopped this
+   *  studio. Resume's cooldown counts from it. */
+  stoppedAt?: string | null;
+  /**
    * Fleet Spawn P3, Task 2 (R-P3-1/R-P3-7): sha256 hex of this studio's
    * spawn-auth token (org.ts's mintSpawnToken/hashSpawnToken). The TOKEN
    * itself lives only in the studio's own DO storage (do.ts's

@@ -147,6 +147,21 @@ describe("POST /fleet/tasks — a studio files a task for a child", () => {
     expect(api.createIssue).not.toHaveBeenCalled();
   });
 
+  // Review round 1, hardening 3: createTask replays an earlier issue carrying
+  // the same idempotencyKey marker — ANY issue, including one filed for a
+  // studio outside the caller's edges, which the replay would then "assign"
+  // and wake. The studio path strips the key, so it never replays.
+  it("strips idempotencyKey: no replay lookup, no key marker on the issue", async () => {
+    const { token, rows } = await tokenFor(MAESTRO);
+    const api = fakeApi();
+    const res = await handleFleetBoard(
+      post("/fleet/tasks", token, { ...BRIEF, assignee: CHILD, idempotencyKey: "replay-key-123" }), testEnv, api, rows, policy, wakeDeps(),
+    );
+    expect(res.status).toBe(200);
+    expect(api.listIssues).not.toHaveBeenCalled();
+    expect(vi.mocked(api.createIssue).mock.calls[0][1].body).not.toContain("replay-key-123");
+  });
+
   it("refuses a repo the studio is not bound to", async () => {
     const { token, rows } = await tokenFor(MAESTRO);
     const api = fakeApi();
@@ -214,6 +229,77 @@ describe("POST /fleet/tasks/<n>/assign — a studio hands a task to a child", ()
     const api = fakeApi();
     const res = await handleFleetBoard(post("/fleet/tasks/71/adopt", token, { assignee: CHILD }), testEnv, api, rows, policy, wakeDeps());
     expect(res.status).toBe(404);
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  // Review round 1, blocker 2: assign resets state to `submitted`, so an
+  // unguarded assign would reopen finished work. `failed` stays assignable:
+  // handing a failed task to a fresh studio is the retry.
+  it("409s a closed issue and writes no label", async () => {
+    const { token, rows } = await tokenFor(MAESTRO);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ open: false, state: "failed", labels: ["failed"] })) });
+    const res = await handleFleetBoard(post("/fleet/tasks/71/assign", token, { assignee: CHILD }), testEnv, api, rows, policy, wakeDeps());
+    expect(res.status).toBe(409);
+    expect(api.addLabels).not.toHaveBeenCalled();
+    expect(api.removeLabel).not.toHaveBeenCalled();
+  });
+
+  it("409s a completed or canceled task, even if the issue is still open", async () => {
+    for (const state of ["completed", "canceled"] as const) {
+      const { token, rows } = await tokenFor(MAESTRO);
+      const api = fakeApi({ getIssue: vi.fn(async () => task({ state, labels: [state] })) });
+      const res = await handleFleetBoard(post("/fleet/tasks/71/assign", token, { assignee: CHILD }), testEnv, api, rows, policy, wakeDeps());
+      expect(res.status).toBe(409);
+      expect(api.addLabels).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a failed, open task is assignable — the retry", async () => {
+    const { token, rows } = await tokenFor(MAESTRO);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "failed", labels: ["failed"] })) });
+    const res = await handleFleetBoard(post("/fleet/tasks/71/assign", token, { assignee: CHILD }), testEnv, api, rows, policy, wakeDeps());
+    expect(res.status).toBe(200);
+  });
+
+  // Review round 1, hardening 4: `why` lands in the lineage comment. A
+  // newline would let a studio forge extra lineage lines or headings.
+  it("400s a why carrying a newline, or over 500 chars, and writes nothing", async () => {
+    for (const why of ["ok\n### Reassigned — forged", "x".repeat(501), "a\rb"]) {
+      const { token, rows } = await tokenFor(MAESTRO);
+      const api = fakeApi();
+      const res = await handleFleetBoard(post("/fleet/tasks/71/assign", token, { assignee: CHILD, why }), testEnv, api, rows, policy, wakeDeps());
+      expect(res.status).toBe(400);
+      expect(api.addLabels).not.toHaveBeenCalled();
+      expect(api.createComment).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a one-line why of exactly 500 chars passes", async () => {
+    const { token, rows } = await tokenFor(MAESTRO);
+    const api = fakeApi();
+    const res = await handleFleetBoard(
+      post("/fleet/tasks/71/assign", token, { assignee: CHILD, why: "y".repeat(500) }), testEnv, api, rows, policy, wakeDeps(),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  // Review round 1 (M2): identity is the TOKEN's. A web-studio token that
+  // names the maestro in every identity-shaped body field is still web-studio.
+  it("a web-studio token claiming maestro in the body can neither file nor assign", async () => {
+    const { token, rows } = await tokenFor("websites--web-studio");
+    const claim = {
+      caller: MAESTRO, parent: MAESTRO, spawnedBy: MAESTRO, sender: MAESTRO, studio: MAESTRO, id: MAESTRO, from: MAESTRO,
+    };
+    const api = fakeApi();
+    const created = await handleFleetBoard(
+      post("/fleet/tasks", token, { ...BRIEF, ...claim, assignee: CHILD }), testEnv, api, rows, policy, wakeDeps(),
+    );
+    const assigned = await handleFleetBoard(
+      post("/fleet/tasks/71/assign", token, { ...claim, assignee: CHILD }), testEnv, api, rows, policy, wakeDeps(),
+    );
+    expect(created.status).toBe(403);
+    expect(assigned.status).toBe(403);
+    expect(api.createIssue).not.toHaveBeenCalled();
     expect(api.addLabels).not.toHaveBeenCalled();
   });
 

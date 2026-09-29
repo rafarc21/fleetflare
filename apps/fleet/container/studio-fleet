@@ -72,10 +72,13 @@ const HELP = `usage: fleet spawn <role>[--<n>] [--instance <n>|next]
                         A studio that already exists is a 409.
 
   fleet resume <role>--<n>
-                        Start a STOPPED studio again. Same org-chart edges as
-                        spawn, same provision path the operator uses. Only a
-                        stopped studio in your own repo: a running one is a
-                        409, a missing one a 404.
+                        Start a studio the operator PARKED (fleet destroy
+                        --park) again. Same org-chart edges as spawn, same
+                        provision path the operator uses. Only a parked,
+                        stopped studio in your own repo, 10+ minutes after it
+                        stopped. Destroyed (not parked) is a 403, running or
+                        already resuming a 409, missing a 404. Never retry a
+                        resume that timed out: check its state later.
 
   fleet task ls         The tasks assigned to THIS studio. Nobody else's.
   fleet task show <n>   One of them, with its brief and every comment.
@@ -386,6 +389,20 @@ export function buildTaskRequest(
   };
 }
 
+/** Review round 1 (M1): how long `fleet resume` waits for its one request.
+ *  A bring-up can take minutes; past this the Worker may still be starting
+ *  the studio. `FLEET_RESUME_TIMEOUT_MS` overrides (tests use it). */
+const RESUME_TIMEOUT_MS = 300_000;
+
+export function resumeTimeoutMs(raw: string | undefined): number {
+  const n = Number(raw);
+  return raw !== undefined && Number.isInteger(n) && n > 0 ? n : RESUME_TIMEOUT_MS;
+}
+
+const RESUME_NO_RETRY =
+  "studio-fleet: do not retry the resume — the Worker may still be starting that studio, and a second " +
+  "resume is refused (409) while it does. Check its state on your next wake or sweep instead.";
+
 /** One task row as `fleet task ls` prints it. The url is the actionable half
  *  — a lead pastes it into its own envelope's artifacts. */
 interface TaskRow { number: number; state: string | null; title: string; url: string }
@@ -425,6 +442,7 @@ async function main(): Promise<void> {
     res = await fetch(built.url, built.init);
   } catch (err) {
     console.error(`studio-fleet: request to ${built.url} failed: ${err instanceof Error ? err.message : String(err)}`);
+    if (cmd.kind === "resume") console.error(RESUME_NO_RETRY);
     process.exit(1);
   }
 
@@ -453,6 +471,10 @@ async function buildRequest(
       ...(cmd.instance === undefined ? {} : { instance: cmd.instance }),
       ...(cmd.kind === "resume" ? { resume: true as const } : {}),
     });
+    // Review round 1 (M1): a resume runs a whole bring-up. Give up after a
+    // deadline rather than hold the socket forever — and never retry: this
+    // is ONE request, and main() tells the lead not to send another.
+    if (cmd.kind === "resume") init.signal = AbortSignal.timeout(resumeTimeoutMs(process.env.FLEET_RESUME_TIMEOUT_MS));
     return {
       what: cmd.kind, url, init,
       render: (json) => {

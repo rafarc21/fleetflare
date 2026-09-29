@@ -29,6 +29,11 @@ test("the rulebook says filing spawns nothing, and nothing acts on a request env
   expect(MAESTRO).toContain("Nothing reads that envelope for you and acts on it");
 });
 
+test("review round 1: the rulebook says resume needs a parked studio, and never to retry one", () => {
+  expect(MAESTRO).toContain("`fleet destroy --park`");
+  expect(MAESTRO).toContain("Never retry a resume");
+});
+
 test("the rulebook says the in-container task new refuses a junior", () => {
   expect(MAESTRO).toContain("The in-container `fleet task new` refuses `junior: true`");
 });

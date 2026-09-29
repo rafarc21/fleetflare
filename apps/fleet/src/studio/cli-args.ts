@@ -116,7 +116,7 @@ export type CliCommand =
   // which every other flag-taking verb here still goes through unchanged)
   // — it overrides the refusal that fires when this studio still carries an
   // open assigned board task.
-  | { cmd: "destroy"; id: string; force: boolean; discardUnsynced: boolean }
+  | { cmd: "destroy"; id: string; force: boolean; discardUnsynced: boolean; park?: true }
   // P4 §5's board. Two words rather than one, because `task` is a noun with
   // three operations on it; flags rather than positionals, because a brief is
   // four fields and no positional order survives that.
@@ -281,8 +281,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Destroy the container and reprovision on the CURRENT image, then verify and report THAT verdict. The only way an image change reaches a running studio. Loses the container filesystem; the session is rescued first. If the container cannot answer, nothing can be rescued: recycle REFUSES (409) and names the age of the last synced snapshot it would restore. --discard-unsynced proceeds anyway, discarding everything since. " + FRESH_SESSION_HELP + " " + LIVENESS_RULE,
   },
   destroy: {
-    args: "<id> [--force] [--discard-unsynced]",
-    summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it.",
+    args: "<id> [--force] [--discard-unsynced] [--park]",
+    summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it. --park stops it RESUMABLE: a studio whose org-chart edges reach it may `fleet resume` it from its container (after a cooldown). Without --park, only you can start it again.",
   },
   "task-new": {
     args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--junior]",
@@ -721,13 +721,20 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // own comment already says must never be silently ignored, just at the
     // position 0 (id) instead of position 1 (rest[0]).
     case "destroy": {
-      if (!arg || arg === "--force" || arg === "--discard-unsynced") return { cmd: "usage", message: CLI_USAGE };
+      if (!arg || arg === "--force" || arg === "--discard-unsynced" || arg === "--park") {
+        return { cmd: "usage", message: CLI_USAGE };
+      }
       const rest = argv.slice(2);
       const flags = new Set(rest);
-      const unknown = rest.find((t) => t !== "--force" && t !== "--discard-unsynced");
+      const unknown = rest.find((t) => t !== "--force" && t !== "--discard-unsynced" && t !== "--park");
       if (unknown !== undefined) return usage(`unexpected ${JSON.stringify(unknown)}`);
       if (flags.size !== rest.length) return usage("a flag was given twice");
-      return { cmd: "destroy", id: arg, force: flags.has("--force"), discardUnsynced: flags.has("--discard-unsynced") };
+      // Issue #59 review round 1: `park` only when given, so every existing
+      // destroy parses to the same shape it always did.
+      return {
+        cmd: "destroy", id: arg, force: flags.has("--force"), discardUnsynced: flags.has("--discard-unsynced"),
+        ...(flags.has("--park") ? { park: true } : {}),
+      };
     }
     // Issue #217.
     case "rescue-gc": {

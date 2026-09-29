@@ -142,6 +142,8 @@ export async function destroyWithSync(
   // restartWithStorage/recycleWithSync already use for this — do.ts's real
   // destroyStudio() always supplies it.
   observedStorage?: ObservedStorage,
+  // Issue #59 review round 1: the operator's `--park` — see StudioStatus.parked.
+  park = false,
 ): Promise<StudioStatus> {
   // #113 F1: a container that is not running has nothing to rescue (its disk
   // is ephemeral and already gone), and ANY exec would boot it. A probe that
@@ -313,7 +315,9 @@ export async function destroyWithSync(
   // Cleared in the `finally`, on every path out, a throw included.
   await storage.put(DESTROYING_KEY, syncDeps.now().toISOString());
   try {
-    return await destroyAndRecord(storage, idFallback, destroy, recordStudioFn, unrescued);
+    return await destroyAndRecord(
+      storage, idFallback, destroy, recordStudioFn, unrescued, park, syncDeps.now().toISOString(),
+    );
   } finally {
     await storage.put(DESTROYING_KEY, null);
   }
@@ -325,6 +329,8 @@ async function destroyAndRecord(
   destroy: () => Promise<void>,
   recordStudioFn: (status: StudioStatus) => Promise<void>,
   unrescued: string | null,
+  park: boolean,
+  stoppedAt: string,
 ): Promise<StudioStatus> {
   try {
     await destroy();
@@ -342,7 +348,13 @@ async function destroyAndRecord(
 
   const existing = (await storage.get(STATUS_KEY)) ?? null;
   // A destroy that skipped the rescue must not read like a clean one.
-  const status: StudioStatus = { ...(existing ?? freshStatus(idFallback)), state: "stopped", error: unrescued, containerRunningSince: null };
+  // Issue #59 review round 1: `parked` is written on EVERY completed destroy,
+  // false unless the operator asked to park — so a plain destroy clears an
+  // earlier park, and only the operator's latest word decides resumability.
+  const status: StudioStatus = {
+    ...(existing ?? freshStatus(idFallback)), state: "stopped", error: unrescued, containerRunningSince: null,
+    parked: park, stoppedAt,
+  };
   await storage.put(STATUS_KEY, status);
   // Issue #152: the SECOND bump, right after the stopped row lands and still
   // BEFORE destroyWithSync's own `finally` clears DESTROYING_KEY. Net effect
@@ -413,6 +425,7 @@ export async function runDestroy(
   // Review round 3 (issue #85 PR1), MUST-FIX 8(a) — threaded straight
   // through to destroyWithSync's own identical trailing param.
   observedStorage?: ObservedStorage,
+  park = false,
 ): Promise<DestroyOutcome> {
   if (!force) {
     const result = checkOpenTask ? await checkOpenTask(studioId, workRepoSlug) : { ok: false as const, message: "no open-task checker configured" };
@@ -450,6 +463,7 @@ export async function runDestroy(
   try {
     const status = await destroyWithSync(
       syncDeps, storage, idFallback, destroy, recordStudioFn, repo, resolveMemoryRepo, commitFile, guard, observedStorage,
+      park,
     );
     return { ok: true, status };
   } catch (err) {

@@ -354,7 +354,28 @@ export function mayDirect(
  * lead is never re-provisioned from under it), never a new id (that is
  * spawn), and only a studio bound to the caller's own work repo.
  */
-export async function runResume(deps: SpawnDeps, parent: SpawnParent, body: unknown): Promise<Response> {
+/**
+ * Issue #59 review round 1: how long after a studio STOPPED it may be
+ * resumed. Bounds a park <-> resume cycle to one container start per window,
+ * whatever drives it.
+ */
+export const RESUME_COOLDOWN_MS = 10 * 60_000;
+
+/** runResume's ports: spawn's, plus the two only a resume needs. */
+export interface ResumeDeps extends SpawnDeps {
+  /**
+   * Atomically flip the registry row `stopped` -> `provisioning` (routes.ts
+   * wires registry.ts's claimStoppedRow, a conditional D1 UPDATE). Resolves
+   * to the release (flip back, only while still `provisioning`), or null when
+   * the row was no longer `stopped` — another resume won. Without it, the row
+   * reads `stopped` for the whole multi-minute provision, and a retried
+   * resume starts a second bring-up.
+   */
+  claimStopped: (studioId: string) => Promise<(() => Promise<void>) | null>;
+  now: () => Date;
+}
+
+export async function runResume(deps: ResumeDeps, parent: SpawnParent, body: unknown): Promise<Response> {
   const requested = (body as { role?: unknown } | null)?.role;
   if (typeof requested !== "string" || requested.length === 0) return new Response("bad role", { status: 400 });
   const roleProbe = parseStudioId(buildStudioId({ repo: parent.repo, role: requested }));
@@ -375,6 +396,11 @@ export async function runResume(deps: SpawnDeps, parent: SpawnParent, body: unkn
   }
   const gate = mayDirect(policy.org, parent, target.full);
   if (!gate.ok) return new Response(gate.message, { status: gate.status });
+  // Review round 1: the same fleet.json check runSpawn makes — a role the
+  // fleet no longer declares is not started again, edge or not.
+  if (!policy.roles.includes(requested)) {
+    return new Response(`role "${requested}" is not declared in fleet.json roles — not resuming it`, { status: 400 });
+  }
 
   const row = (await deps.listStudios()).find((r) => r.id === target.full);
   if (!row) return new Response(`no studio ${target.full} — resume never creates one; spawn it`, { status: 404 });
@@ -386,14 +412,43 @@ export async function runResume(deps: SpawnDeps, parent: SpawnParent, body: unkn
   if (bound !== mine) {
     return new Response(`${target.full} is bound to another work repo than ${parent.id}`, { status: 403 });
   }
+  // Review round 1, blocker 1: a destroy is the operator's decision to stop
+  // paying for a studio. Only one he PARKED (`fleet destroy --park`) is
+  // resumable; a plain destroy, or a row from before the marker, is not.
+  if (row.parked !== true) {
+    return new Response(
+      `${target.full} was destroyed by the operator, not parked — only the operator can start it again ` +
+      "(ask with an intent: request envelope)",
+      { status: 403 },
+    );
+  }
+  const stoppedAt = row.stoppedAt ? Date.parse(row.stoppedAt) : NaN;
+  const opensAt = stoppedAt + RESUME_COOLDOWN_MS;
+  if (!Number.isFinite(stoppedAt) || deps.now().getTime() < opensAt) {
+    return new Response(
+      `${target.full} is in its resume cooldown — ` +
+      (Number.isFinite(stoppedAt) ? `resumable from ${new Date(opensAt).toISOString()}` : "its stop time is unknown"),
+      { status: 409 },
+    );
+  }
 
+  // Review round 1 (M1): one resume at a time — see ResumeDeps.claimStopped.
+  const release = await deps.claimStopped(target.full);
+  if (release === null) return new Response(`${target.full} is already being resumed`, { status: 409 });
   // No `spawnedBy`: a resume does not re-parent the studio. No `briefPrompt`:
   // bring-up falls back to the latest task assigned to it on the board.
-  return Response.json(await deps.provisionChild(target.full, {
-    repo: target.repo, role: target.role,
-    ...(target.instance === 1 ? {} : { instance: target.instance }),
-    repoSlug: parent.repoSlug,
-  }));
+  let status: StudioStatus;
+  try {
+    status = await deps.provisionChild(target.full, {
+      repo: target.repo, role: target.role,
+      ...(target.instance === 1 ? {} : { instance: target.instance }),
+      repoSlug: parent.repoSlug,
+    });
+  } catch (err) {
+    await release();
+    throw err;
+  }
+  return Response.json(status);
 }
 
 /** Issue #296: how many numbers a `"next"` spawn tries after losing races. */

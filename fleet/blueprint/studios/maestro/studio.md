@@ -23,7 +23,7 @@ In a cloud container, `fleet` is the studio binary. Run `fleet --help` before yo
 - `fleet task new --studio <id>` — brief JSON on stdin. The assignee must be a studio your org-chart edges let you spawn (`fleet/blueprint/org.json`), in your own repo. Never yourself, never unassigned, never `junior`.
 - `fleet task assign <n> <id> [--why <text>]` — same rule for the new owner. The task must be unassigned, yours, or held by another studio you may spawn. The assignee is woken if it is running.
 - `fleet spawn <role>` / `<role>--<n>` / `--instance next` — a NEW studio. An existing id answers 409.
-- `fleet resume <role>--<n>` — start a STOPPED studio again, through the same provision path the operator uses. Running is 409, missing is 404.
+- `fleet resume <role>--<n>` — start a studio the operator parked with `fleet destroy --park`, through the same provision path the operator uses. Only 10+ minutes after it stopped. A plain destroy is the operator's call to stop paying for it: 403, ask him instead. Running or already resuming is 409, missing is 404. Never retry a resume — a timeout is not a failure, the Worker may still be starting it. Check its state on your next wake or sweep.
 - `fleet task ls|show|report|state` — your OWN tasks only.
 
 Filing a task spawns nothing. Order: `fleet task new --studio <id>`, then `fleet spawn` (new) or `fleet resume` (stopped). Bring-up hands the lead its latest assigned task.

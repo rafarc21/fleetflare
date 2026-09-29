@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import { handleFleetSpawn, type BlueprintFetch } from "../src/studio/routes";
 import {
-  runResume, DEFAULT_MAX_STUDIOS, SPAWN_TOKEN_HEADER, type SpawnDeps, type SpawnParent,
+  runResume, DEFAULT_MAX_STUDIOS, SPAWN_TOKEN_HEADER, type ResumeDeps, type SpawnParent,
 } from "../src/studio/spawn";
 import {
   hashSpawnToken, mintSpawnToken, __resetOrgCacheForTests, __resetFleetJsonCacheForTests,
@@ -22,11 +22,14 @@ function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
   return {
     id: "websites--web-studio--5", state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
     lastRefreshError: null, burn: null, spawnedBy: "operator", spawnTokenHash: null, repoSlug: REPO_SLUG,
+    // Review round 1: only an operator-PARKED studio, stopped past the
+    // cooldown, is resumable (test/studio.resume-guards.test.ts).
+    parked: true, stoppedAt: "2026-09-01T00:00:00.000Z",
     ...overrides,
   };
 }
 
-function deps(rows: StudioStatus[], provisioned: { id: string; cfg: ProvisionConfig }[] = []): SpawnDeps {
+function deps(rows: StudioStatus[], provisioned: { id: string; cfg: ProvisionConfig }[] = []): ResumeDeps {
   return {
     listStudios: async () => rows,
     fetchPolicy: async () => ({
@@ -41,6 +44,8 @@ function deps(rows: StudioStatus[], provisioned: { id: string; cfg: ProvisionCon
     notifyMaestro: async () => {},
     maxStudios: DEFAULT_MAX_STUDIOS,
     claimStudioId: async () => null,
+    claimStopped: async () => async () => {},
+    now: () => new Date("2026-09-29T12:00:00.000Z"),
   };
 }
 
@@ -210,5 +215,75 @@ describe("POST /fleet/spawn {resume: true}", () => {
     const res = await handleFleetSpawn(post({ role: "web-studio" }, token), testEnv, fetchFile);
     expect(res.status).toBe(200);
     expect(ns.provisioned.map((p) => p.id)).toEqual(["websites--web-studio"]);
+  });
+});
+
+// Review round 1 (M1): the registry row reads `stopped` for the whole
+// multi-minute provision, so two resumes (a lead retrying a timed-out call)
+// both passed the state check and started two bring-ups. The claim flips
+// stopped -> provisioning atomically in D1: one winner, the other a 409.
+describe("POST /fleet/spawn {resume: true} — one resume at a time", () => {
+  it("two concurrent resumes of one stopped studio: exactly one provision, the other 409", async () => {
+    const token = await register("websites--maestro");
+    await recordStudio(env, status());
+    const provisioned: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const ns = {
+      idFromName: (name: string) => name as unknown as DurableObjectId,
+      get: (id: DurableObjectId) => ({
+        provision: async () => {
+          provisioned.push(id as unknown as string);
+          await gate;
+          return status({ id: id as unknown as string, state: "running" });
+        },
+      }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
+    };
+    const testEnv = { ...env, STUDIO: ns, AGENT_REPO: REPO_SLUG } as unknown as Env;
+    const body = { role: "web-studio", instance: 5, resume: true };
+    const first = handleFleetSpawn(post(body, token), testEnv, fetchFile);
+    const second = handleFleetSpawn(post(body, token), testEnv, fetchFile);
+    // Let both reach the claim before either provision can finish.
+    await new Promise((r) => setTimeout(r, 50));
+    release();
+    const statuses = (await Promise.all([first, second])).map((r) => r.status).sort();
+    expect(statuses).toEqual([200, 409]);
+    expect(provisioned).toEqual(["websites--web-studio--5"]);
+  });
+
+  it("a provision that throws releases the claim: the studio reads stopped again", async () => {
+    const token = await register("websites--maestro");
+    await recordStudio(env, status());
+    const ns = {
+      idFromName: (name: string) => name as unknown as DurableObjectId,
+      get: () => ({ provision: async () => { throw new Error("container refused"); } }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
+    };
+    const testEnv = { ...env, STUDIO: ns, AGENT_REPO: REPO_SLUG } as unknown as Env;
+    await expect(handleFleetSpawn(post({ role: "web-studio", instance: 5, resume: true }, token), testEnv, fetchFile))
+      .rejects.toThrow("container refused");
+    const row = await env.DB.prepare("SELECT value FROM fleet_state WHERE key LIKE '%websites--web-studio--5'")
+      .first<{ value: string }>();
+    expect(JSON.parse(row!.value).state).toBe("stopped");
+  });
+});
+
+// Review round 1 (M2): identity is the TOKEN's, never the body's. A studio
+// with no edges claiming to be the maestro in any identity-shaped field is
+// still itself.
+describe("POST /fleet/spawn {resume: true} — identity never comes from the body", () => {
+  it("a web-studio token claiming maestro in the body is refused 403", async () => {
+    await register("websites--maestro");
+    const token = await register("websites--web-studio");
+    await recordStudio(env, status());
+    const ns = fakeNamespace();
+    const testEnv = { ...env, STUDIO: ns, AGENT_REPO: REPO_SLUG } as unknown as Env;
+    const body = {
+      role: "web-studio", instance: 5, resume: true,
+      caller: "websites--maestro", parent: "websites--maestro", spawnedBy: "websites--maestro",
+      sender: "websites--maestro", studio: "websites--maestro", id: "websites--maestro",
+    };
+    const res = await handleFleetSpawn(post(body, token), testEnv, fetchFile);
+    expect(res.status).toBe(403);
+    expect(ns.provisioned).toEqual([]);
   });
 });

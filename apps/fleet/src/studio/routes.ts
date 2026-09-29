@@ -13,12 +13,12 @@ import { parseStudioId } from "./ids";
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { TERMINAL_PATH } from "./terminal";
 import { PASTE_MIME_EXT, PASTE_MAX_BYTES } from "./paste";
-import { listStudios, expireBurnWindow, claimStudioRow } from "./registry";
+import { listStudios, expireBurnWindow, claimStudioRow, claimStoppedRow } from "./registry";
 import { renderTerminalPage } from "./page";
 import { renderGridPage, scrubPreview, type GridCard } from "./grid";
 import {
   runSpawn, runResume, resolveSpawnParent, resolveSpawnPolicy, resolveMaxStudios, isSpawnTokenShaped,
-  SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type SpawnParent,
+  SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type ResumeDeps, type SpawnParent,
 } from "./spawn";
 import { reachRepo, repoTokenMinter, type RepoReach } from "../github/auth";
 import { fetchRepoFile } from "../github/api";
@@ -190,7 +190,7 @@ function repoDeps(reach: RepoReachFetch): WorkRepoDeps {
  */
 export type BriefResolve = SpawnDeps["resolveBrief"];
 
-export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: BriefResolve): SpawnDeps {
+export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: BriefResolve): ResumeDeps {
   // Memoised for the lifetime of ONE request (spawnDeps is built per call),
   // the same lazy-once idiom githubBlueprintFetch above uses for its token:
   // /fleet/spawn reads the registry twice — once to resolve the parent from
@@ -230,6 +230,9 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
     },
     maxStudios: resolveMaxStudios(env.MAX_STUDIOS),
     claimStudioId: (_childId: string, placeholder: StudioStatus) => claimStudioRow(env, placeholder),
+    // Issue #59 review round 1 (M1): resume's atomic stopped -> provisioning flip.
+    claimStopped: (studioId: string) => claimStoppedRow(env, studioId),
+    now: () => new Date(),
   };
 }
 
@@ -831,8 +834,14 @@ export async function handleStudio(
     const force = url.searchParams.get("force") === "true";
     // #113 M3: recycle's --discard-unsynced, for destroy — same query name.
     const discardUnsynced = url.searchParams.get("discard-unsynced") === "true";
+    // Issue #59 review round 1: `?park=true` stops the studio RESUMABLE by a
+    // studio whose edges reach it (StudioStatus.parked). Sent only when set,
+    // so a plain destroy's RPC is the byte-identical pre-#59 call.
+    const park = url.searchParams.get("park") === "true";
     try {
-      const result = await stub.destroyStudio(force, discardUnsynced);
+      const result = park
+        ? await stub.destroyStudio(force, discardUnsynced, true)
+        : await stub.destroyStudio(force, discardUnsynced);
       if (!result.ok) return new Response(result.reason, { status: 409 });
       return Response.json(burnView(result.status));
     } catch (err) {
