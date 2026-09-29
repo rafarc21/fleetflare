@@ -4548,7 +4548,7 @@ export class StudioDO extends Sandbox<Env> {
         installLeakGatePort((cmd) => sbExec(this, cmd, EXEC_CLASSES.provision)),
       workRepoIsPrivate: async (slug: string) => repoIsPrivate(await mint(slug), slug),
       // Issue #30: discovery reads the same remote rescue writes to.
-      rescueTarget: (slug: string) => this.rescueTarget(async () => slug),
+      rescueTarget: (slug: string) => this.rescueTarget(async () => slug, "discovery"),
       // Board #350: the repo gate and the presign-GET mint. Both optional on
       // ProvisionDeps (install-cache.ts's InstallCacheRestoreDeps doc
       // comment) — wired here unconditionally, since the gate itself (empty
@@ -5080,13 +5080,15 @@ export class StudioDO extends Sandbox<Env> {
    * to it; provision's discovery (deps().rescueTarget) lists + fetches from
    * it, so discovery reads exactly what rescue wrote.
    */
-  private rescueTarget(workRepoSlug: () => Promise<string>): Promise<RescueTarget> {
+  private rescueTarget(
+    workRepoSlug: () => Promise<string>, purpose: "push" | "discovery" = "push",
+  ): Promise<RescueTarget> {
     return resolveRescueTarget(this.env, (repo) =>
       mintRepoToken(this.env, repo, { permissions: { contents: "write" } }),
     async () => {
       const slug = await workRepoSlug();
       return repoIsPrivate(await mintRepoToken(this.env, slug), slug);
-    });
+    }, purpose);
   }
 
   /**

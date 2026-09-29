@@ -36,7 +36,7 @@ import { memoryCloneCmd, MEMORY_REF, MEMORY_TOKEN_ENV } from "../memory/store";
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { redactSecrets } from "./redact";
 import { DenylistDialectError, LEAK_DENYLIST_PATH, OPS_DENYLIST_PATH, denylistFileContent, parseDenylist } from "../leak-gate";
-import { isDeadlineExit } from "./exec-deadline";
+import { isDeadlineExit, KILL_GRACE_SECONDS } from "./exec-deadline";
 import { ghBlockCmd } from "./gh-wrapper";
 import { STUDIO_TMUX, withStudioTmux } from "./tmux";
 // Issue #38: a restart has only the studio ID to work from, and the repo
@@ -875,10 +875,20 @@ export const REMOTE_BRANCHES_LIST_FILE = "/workspace/.fleet/remote-branches.txt"
  *
  * Private remote unreachable = one loud WARNING line; origin's results stand
  * and the command still exits 0.
+ *
+ * PR #42 review (same class as the #14 review): every git network call here
+ * runs under `timeout -k`, `timeoutSeconds` each. A server that accepts and
+ * never answers used to hold the provision to its 600 s exec deadline. A
+ * timed-out origin list = the "skipped" line; a timed-out private list = the
+ * WARNING line; the other remote's results stand.
  */
+export const RESCUE_DISCOVERY_TIMEOUT_SECONDS = 30;
+
 export function discoverRescueRefsCmd(
   targetDir: string, studio: string, listFile = REMOTE_BRANCHES_LIST_FILE, rescue: RescuePushOptions = {},
+  timeoutSeconds = RESCUE_DISCOVERY_TIMEOUT_SECONDS,
 ): string {
+  const bounded = `timeout -k ${KILL_GRACE_SECONDS} ${timeoutSeconds}`;
   const listDir = listFile.slice(0, listFile.lastIndexOf("/"));
   const flatPrefix = `refs/heads/fleet/rescue/${studio}-`;
   // PR #263 round 4 (#251 review, Finding 2): rescue.ts's round 3 N1/N2 push
@@ -920,10 +930,10 @@ export function discoverRescueRefsCmd(
     `${flatPrefix}[0-9]{14}$|${nestedPrefix}[0-9]{14}/checkout/[^[:space:]]+$|${wtPrefix}[^[:space:]]+-[0-9]{14}$`;
   const originCmd = (
     `{ mkdir -p ${listDir} && ` +
-    `git -C ${targetDir} ls-remote --heads origin > ${listFile} && ` +
+    `${bounded} git -C ${targetDir} ls-remote --heads origin > ${listFile} && ` +
     `grep -oE '${pattern}' ${listFile} | sort -u | while IFS= read -r ref; do ` +
     `name="\${ref#refs/heads/}"; ` +
-    `git -C ${targetDir} fetch origin "$ref:$name" && ` +
+    `${bounded} git -C ${targetDir} fetch origin "$ref:$name" && ` +
     `echo "studio-bringup: found rescued work from a prior incarnation of this studio on branch $name -- fetched (not checked out), see git log $name" >&2; ` +
     // PR #312 round 3: still never fails provisioning, but no longer silent --
     // an unwritable list dir or a failed ls-remote used to vanish into `|| true`.
@@ -931,7 +941,7 @@ export function discoverRescueRefsCmd(
   );
   if (rescue.remoteUrl === undefined) return originCmd;
   // Issue #30. GIT_TERMINAL_PROMPT=0: a missing token fails, never waits.
-  const rgit = `GIT_TERMINAL_PROMPT=0 "\${__rgit[@]}" -C ${targetDir}`;
+  const rgit = `GIT_TERMINAL_PROMPT=0 ${bounded} "\${__rgit[@]}" -C ${targetDir}`;
   return (
     `${originCmd}\n` +
     `{ ${rescuePushPrelude(rescue)}` +
@@ -943,7 +953,8 @@ export function discoverRescueRefsCmd(
     // Same commit already fetched from origin: nothing to add.
     `[ "$have" = "$sha" ] && continue; ` +
     `if [ -n "$have" ]; then ` +
-    `echo "studio-bringup: rescue branch $name exists on origin AND the private rescue remote with different commits -- origin's kept as $name, the private remote's fetched as $name-rescue-remote" >&2; ` +
+    // PR #42 review: the local branch may be origin's or the lead's own.
+    `echo "studio-bringup: local branch $name already exists at a different commit -- kept; the private rescue remote's copy fetched as $name-rescue-remote" >&2; ` +
     `name="$name-rescue-remote"; fi; ` +
     `if ${rgit} fetch "$__rdest" "$ref:$name" </dev/null; then ` +
     `echo "studio-bringup: found rescued work from a prior incarnation of this studio on branch $name (private rescue remote) -- fetched (not checked out), see git log $name" >&2; ` +
@@ -2345,7 +2356,7 @@ export async function runProvision(
       const res = await deps.sbExec(
         discoverRescueRefsCmd(`/workspace/${cfg.repo}`, id, undefined, { remoteUrl: target.remoteUrl }), target.env);
       for (const line of res.stderr.split("\n")) {
-        if (line.includes("WARNING")) console.error(`studio ${id}: ${line}`);
+        if (line.includes("WARNING") || line.includes("rescue discovery skipped")) console.error(`studio ${id}: ${line}`);
       }
     } catch (err) {
       console.error(
