@@ -124,7 +124,8 @@ export async function sweepJuniorAuthorizations(
   // Issue #41: one page past `after`; `next` = the last number read, null
   // once nothing is left. Revoked records vanish, so the cursor is a number.
   const pending = numbers.filter((n) => n > (page.after ?? 0));
-  const batch = pending.slice(0, page.limit ?? JUNIOR_SWEEP_PAGE);
+  // `limit` only narrows: above the page it would buy past the subrequest cap.
+  const batch = pending.slice(0, Math.min(page.limit ?? JUNIOR_SWEEP_PAGE, JUNIOR_SWEEP_PAGE));
   const next = pending.length > batch.length ? batch[batch.length - 1] : null;
   const out: JuniorSweepOutcome[] = [];
   for (const number of batch) {

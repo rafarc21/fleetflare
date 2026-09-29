@@ -9,7 +9,7 @@ import { GitHubError } from "../src/board/api";
 import type { BoardApi } from "../src/board/board";
 import type { BoardTask } from "../src/board/types";
 import type { Env } from "../src/env";
-import { isJuniorAuthorized, recordJuniorAuthorization } from "../src/junior/authz";
+import { isJuniorAuthorized, recordJuniorAuthorization , JUNIOR_SWEEP_PAGE } from "../src/junior/authz";
 
 // PR #9 review, blocker B1: fleet_state is not isolated per test (same as
 // agents.do.test.ts's own identical beforeEach) — the junior-authorization
@@ -297,6 +297,22 @@ describe("handleBoard", () => {
       req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ limit: 1, after: 12 }) }), testEnv, api, reach,
     );
     expect(await second.json()).toMatchObject({ next: null, results: [{ number: 13 }] });
+  });
+
+  it("#41: junior-sweep clamps a huge limit to JUNIOR_SWEEP_PAGE GitHub reads", async () => {
+    authorized();
+    for (let n = 1; n <= JUNIOR_SWEEP_PAGE + 5; n++) {
+      await recordJuniorAuthorization(testEnv.DB, "acme-org/websites", n, "acme--web-studio", 1000);
+    }
+    const getIssue = vi.fn(async () => task({ state: "working", labels: ["working"] }));
+    const res = await handleBoard(
+      req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ limit: 10_000 }) }),
+      testEnv, fakeApi({ getIssue }), reach,
+    );
+    const body = (await res.json()) as { results: unknown[]; next: number | null };
+    expect(getIssue).toHaveBeenCalledTimes(JUNIOR_SWEEP_PAGE);
+    expect(body.results).toHaveLength(JUNIOR_SWEEP_PAGE);
+    expect(body.next).toBe(JUNIOR_SWEEP_PAGE);
   });
 
   it("#41: junior-sweep refuses a bad after/limit", async () => {
