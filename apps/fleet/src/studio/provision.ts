@@ -933,8 +933,12 @@ export function discoverRescueRefsCmd(
     `${bounded} git -C ${targetDir} ls-remote --heads origin > ${listFile} && ` +
     `grep -oE '${pattern}' ${listFile} | sort -u | while IFS= read -r ref; do ` +
     `name="\${ref#refs/heads/}"; ` +
-    `${bounded} git -C ${targetDir} fetch origin "$ref:$name" && ` +
+    // Issue #45 item 4: every fetch says how it went. `fetch && echo` let a
+    // failed LAST fetch end the loop non-zero, so the `||` below printed a
+    // false "could not list" line; an earlier failed fetch was silent.
+    `if ${bounded} git -C ${targetDir} fetch origin "$ref:$name" </dev/null; then ` +
     `echo "studio-bringup: found rescued work from a prior incarnation of this studio on branch $name -- fetched (not checked out), see git log $name" >&2; ` +
+    `else echo "studio-bringup: WARNING: could not fetch rescue branch $ref from origin -- fetch it by hand" >&2; fi; ` +
     // PR #312 round 3: still never fails provisioning, but no longer silent --
     // an unwritable list dir or a failed ls-remote used to vanish into `|| true`.
     `done; } || echo "studio-bringup: rescue discovery skipped (could not list origin's branches into ${listFile})" >&2`

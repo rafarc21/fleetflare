@@ -23,6 +23,9 @@ describe("rescue token permissions (issue #45)", () => {
     expect(start).toBeGreaterThan(-1);
     const body = src.slice(start, src.indexOf("\n  }", start));
     expect(body).toContain("permissions: rescueMintPermissions(purpose)");
+    // Issue #45 item 6: rescue's own port passes NO purpose — the default
+    // must stay "push" (write), or rescue would push with a read token.
+    expect(body).toContain('purpose: "push" | "discovery" = "push"');
     expect(body).not.toContain('contents: "write"');
     expect(src).toContain(`rescueTarget: (slug: string) => this.rescueTarget(async () => slug, "discovery"),`);
   });

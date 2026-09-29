@@ -2311,6 +2311,73 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
       }, 70_000);
     });
 
+    /**
+     * Issue #45 items 4-5 (#47 review): ls-remote answers, the FETCH fails or
+     * stalls. A failed last origin fetch used to exit the loop non-zero and
+     * print the false "could not list origin's branches" line; an earlier
+     * one failed silently. Every fetch now says WARNING on its own, and a
+     * stalled fetch (origin or private) ends within the discovery bound.
+     * The shim passes everything but `fetch` to real git; `exec sleep` so the
+     * process `timeout` kills IS the sleeper.
+     */
+    describe("#45 — a failing or stalled FETCH (ls-remote fine) is named, bounded, never a false skip", () => {
+      function fetchShim(mode: "fail" | "stall"): string {
+        const d = join(dir, `fetch-shim-${mode}`);
+        mkdirSync(d, { recursive: true });
+        const body = mode === "fail" ? `echo "fatal: shim fetch failure" >&2; exit 1` : "exec sleep 60";
+        writeFileSync(join(d, "git"),
+          `#!/bin/bash\nfor a in "$@"; do if [ "$a" = fetch ]; then ${body}; fi; done\nexec '${REAL_GIT}' "$@"\n`);
+        chmodSync(join(d, "git"), 0o755);
+        return d;
+      }
+      function run(cmd: string, pathPrefix?: string): { code: number; err: string; ms: number } {
+        const t0 = Date.now();
+        const r = Bun.spawnSync({ cmd: ["bash", "-c", cmd], cwd: dir, stdout: "pipe", stderr: "pipe", timeout: 60_000,
+          env: { ...process.env, PATH: pathPrefix ? `${pathPrefix}:${BASE_PATH}` : BASE_PATH } });
+        return { code: r.exitCode ?? -1, err: r.stderr.toString(), ms: Date.now() - t0 };
+      }
+
+      test("origin fetch FAILS: WARNING naming the ref, never the false 'could not list' skip", () => {
+        writeFileSync(join(checkout, "notes.md"), "origin work\n");
+        expect(rescue()).toContain(RESCUE_PUSHED_PREFIX);
+        const fresh = freshClone("fresh-origin-fetch-fail");
+
+        const r = run(discoverRescueRefsCmd(fresh, STUDIO, listFile(), {}, 2), fetchShim("fail"));
+
+        expect(r.code).toBe(0);
+        expect(r.err).toContain("WARNING: could not fetch rescue branch refs/heads/fleet/rescue/");
+        expect(r.err).toContain("from origin");
+        expect(r.err).not.toContain("rescue discovery skipped");
+      }, 70_000);
+
+      test("origin fetch STALLS: ends within the bound, WARNING, no false skip", () => {
+        writeFileSync(join(checkout, "notes.md"), "origin work\n");
+        expect(rescue()).toContain(RESCUE_PUSHED_PREFIX);
+        const fresh = freshClone("fresh-origin-fetch-stall");
+
+        const r = run(discoverRescueRefsCmd(fresh, STUDIO, listFile(), {}, 2), fetchShim("stall"));
+
+        expect(r.code).toBe(0);
+        expect(r.ms).toBeLessThan(20_000);
+        expect(r.err).toContain("WARNING: could not fetch rescue branch");
+        expect(r.err).not.toContain("rescue discovery skipped");
+      }, 70_000);
+
+      test("private-remote fetch STALLS: ends within the bound, WARNING names the private remote", () => {
+        writeFileSync(join(checkout, "notes.md"), "private work\n");
+        expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
+        const fresh = freshClone("fresh-priv-fetch-stall");
+
+        const r = run(discoverRescueRefsCmd(fresh, STUDIO, listFile(),
+          { remoteUrl: priv, realGit: join(fetchShim("stall"), "git") }, 2));
+
+        expect(r.code).toBe(0);
+        expect(r.ms).toBeLessThan(20_000);
+        expect(r.err).toContain("WARNING: could not fetch rescue branch");
+        expect(r.err).toContain("private rescue remote");
+      }, 70_000);
+    });
+
     test("FLEET_RESCUE_TOKEN rides a credential helper on the private list + fetch, never argv", () => {
       const log = join(dir, "realgit-discover.log");
       const shim = join(dir, "realgit-discover-shim");
