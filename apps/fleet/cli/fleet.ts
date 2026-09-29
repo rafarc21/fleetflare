@@ -38,6 +38,7 @@ import type { RescueGcOutcome } from "../src/studio/rescue-gc";
 import type { RepoReach } from "../src/github/reach";
 import { fleetTotals, formatFleetTotalsLine } from "./fleet-totals";
 import { formatBurn, BURN_LEGEND } from "./burn-format";
+import { formatRestartCell, formatRestartChurn, RESTART_LEGEND } from "./restart-format";
 import { requestInspect, renderInspect, formatSessionForceArmedLine, type InspectBody } from "./inspect-request";
 import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
@@ -215,7 +216,7 @@ export function formatStudioCount(studios: StudioStatus[]): string {
 
 /** The lines `fleet ls` prints above its table: the denominator FIRST. */
 export function formatLsHead(studios: StudioStatus[]): string[] {
-  return [formatStudioCount(studios), BURN_LEGEND];
+  return [formatStudioCount(studios), BURN_LEGEND, RESTART_LEGEND];
 }
 
 /** Issue #205: a 3,382-char ERROR padded every line of the table to ~3,600
@@ -302,7 +303,7 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
   // of truth, and a malformed id keeps rendering rather than crashing the
   // table.
   const headers = [
-    "ID", "REPO", "STATE", "READY", "SESSION", "ACTIVITY", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
+    "ID", "REPO", "STATE", "RST", "READY", "SESSION", "ACTIVITY", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
   ];
   const rows = studios.map((s) => [
     s.id,
@@ -311,6 +312,9 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
     // container the Worker's detector saw RUNNING — billing while the
     // registry says off — rather than the bare state word.
     formatState(s),
+    // RST column (issue #56): containers replaced in the last 24h / lifetime
+    // -- churn a coordinator can see without opening a container.
+    formatRestartCell(s, now),
     // Issue #85: `readyOverride` reads the DO's own Observed evidence
     // (replaced/unreachable/unverified) FIRST — that evidence contradicts or
     // supersedes the last container-side check `formatReady` renders, and
@@ -580,6 +584,8 @@ export async function cmdLs(creds: Credentials, fresh: boolean, orcaDeps: OrcaDe
   if (idle) console.log(idle);
   console.log(READY_CAVEAT);
   for (const line of formatSessionGuards(studios)) console.log(line);
+  // Issue #56: a studio whose container keeps being replaced.
+  for (const line of formatRestartChurn(studios, new Date())) console.log(line);
   // Issue #249 (PR4b) round 2, item 2: a survival re-brief still owed, or one
   // the studio has given up retrying. Same place, same shape as the session-guard
   // lines above — see formatSurvivalBriefs' own doc comment.

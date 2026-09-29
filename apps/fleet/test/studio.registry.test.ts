@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { listStudios, recordStudio } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
@@ -217,5 +217,33 @@ describe("studio registry", () => {
     await recordStudio(env, status({ id: "websites--reg11", readiness }));
     const all = await listStudios(env);
     expect(all.find((s) => s.id === "websites--reg11")?.readiness).toEqual(readiness);
+  });
+  // Issue #56: a row the DEPLOYED main Worker wrote carries no
+  // `observed.restarts` (and a pre-#85 row no `observed` at all). The new
+  // Worker must list both, never skip them as malformed.
+  it("#56: rows written by main (no restart count) still list, with restarts absent", async () => {
+    const mainRow = JSON.stringify({
+      id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: "example-org/acmeclient",
+      readiness: null,
+      observed: {
+        incarnation: "11111111-2222-3333-4444-555555555555", replacedAt: null, execFailures: 0, unreachableSince: null,
+        lastShipOkAt: "2026-09-29T10:00:00.000Z", lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+        survivalBriefDeliveredFor: null, survivalBriefPending: null,
+      },
+    });
+    const preObservedRow = JSON.stringify({
+      id: "acmeclient--old", state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+    });
+    for (const [key, value] of [["studio:acmeclient--lead", mainRow], ["studio:acmeclient--old", preObservedRow]]) {
+      await env.DB.prepare("INSERT INTO fleet_state (key, value, ts) VALUES (?, ?, 0)").bind(key, value).run();
+    }
+    const errors = vi.spyOn(console, "error");
+    const all = await listStudios(env);
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
+    expect(all.map((s) => s.id).sort()).toEqual(["acmeclient--lead", "acmeclient--old"]);
+    expect(all.find((s) => s.id === "acmeclient--lead")?.observed?.restarts).toBeUndefined();
   });
 });

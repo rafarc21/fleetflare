@@ -24,7 +24,8 @@
 // why folding it into the first exec would break the TOCTOU re-stat
 // semantics the rotation gate depends on.
 import { chunkKey, advance, shouldRotate, TRANSCRIPT_PULL_MAX, HOT_TAIL_BYTES, type TranscriptManifest } from "./archive";
-import { INCARNATION_PATH, paneLeadProbeCmd, parsePaneLeadProbe, type PaneProbeResult } from "./observed";
+import { INCARNATION_PATH, paneLeadProbeCmd, parsePaneLeadProbe, type BringupVia, type PaneProbeResult } from "./observed";
+import { RESTARTS_KEY, recordRestart, type RestartLog } from "./restarts";
 import { STUDIO_TMUX, withStudioTmux } from "./tmux";
 import { readActivityFrame, parseHookHeartbeat, type FrameVerdict, type HookHeartbeat } from "./activity";
 import { parseMemguardKillLines, type MemguardKillLogEntry } from "./memguard-log";
@@ -144,9 +145,13 @@ export interface TranscriptStorage {
   get(key: typeof TRANSCRIPT_MANIFEST_KEY): Promise<TranscriptManifest | undefined>;
   get(key: typeof TRANSCRIPT_TAIL_KEY): Promise<string | undefined>;
   get(key: typeof TRANSCRIPT_BOOT_ID_KEY): Promise<string | undefined>;
+  /** Issue #56: the container-restart log (restarts.ts), appended in the
+   *  same atomic write as a changed boot-id. */
+  get(key: typeof RESTARTS_KEY): Promise<RestartLog | undefined>;
   put(key: typeof TRANSCRIPT_MANIFEST_KEY, value: TranscriptManifest): Promise<void>;
   put(key: typeof TRANSCRIPT_TAIL_KEY, value: string): Promise<void>;
   put(key: typeof TRANSCRIPT_BOOT_ID_KEY, value: string): Promise<void>;
+  put(key: typeof RESTARTS_KEY, value: RestartLog): Promise<void>;
   /**
    * Fix round 2 (Critical residual): atomic multi-key write — the SAME
    * overload shape real `DurableObjectStorage.put` already has natively
@@ -157,7 +162,9 @@ export interface TranscriptStorage {
    * `shipTranscriptTick`'s "generation marker" doc comment) — every other
    * write in this file is single-key.
    */
-  put(entries: { [TRANSCRIPT_MANIFEST_KEY]: TranscriptManifest; [TRANSCRIPT_BOOT_ID_KEY]: string }): Promise<void>;
+  put(entries: {
+    [TRANSCRIPT_MANIFEST_KEY]: TranscriptManifest; [TRANSCRIPT_BOOT_ID_KEY]: string; [RESTARTS_KEY]?: RestartLog;
+  }): Promise<void>;
 }
 
 /**
@@ -899,6 +906,7 @@ export function readShipTickHookHeartbeat(stdout: string): HookHeartbeat | null 
  */
 export async function shipTranscriptTick(
   deps: ShipDeps, storage: TranscriptStorage, id: string, adoptionToken?: string,
+  bringupVia: BringupVia | null = null,
 ): Promise<ShipResult> {
   const now = deps.now();
   const manifest = (await storage.get(TRANSCRIPT_MANIFEST_KEY)) ?? NEVER_SHIPPED;
@@ -941,6 +949,9 @@ export async function shipTranscriptTick(
 
   let effectiveManifest = manifest;
   let resetTriggered = false;
+  // Issue #56: a new container generation — counted in the SAME atomic write
+  // that records the new boot-id below, so it lands exactly once.
+  let restarts: RestartLog | undefined;
 
   if (freshBootId === "") {
     // Fix round 2 (New breakage): NEVER call bootIdChanged with an empty
@@ -952,10 +963,17 @@ export async function shipTranscriptTick(
   } else if (bootIdChanged(storedBootId, freshBootId)) {
     effectiveManifest = { ...manifest, offset: 0 };
     resetTriggered = true;
-  } else if (freshBootId !== storedBootId) {
-    // Only reachable when storedBootId is undefined (first-ever
-    // observation) — seed the marker going forward; nothing to reset.
-    await storage.put(TRANSCRIPT_BOOT_ID_KEY, freshBootId);
+    restarts = recordRestart(await storage.get(RESTARTS_KEY), now, bringupVia);
+  } else {
+    if (freshBootId !== storedBootId) {
+      // Only reachable when storedBootId is undefined (first-ever
+      // observation) — seed the marker going forward; nothing to reset.
+      await storage.put(TRANSCRIPT_BOOT_ID_KEY, freshBootId);
+    }
+    // Issue #56 review: a boot-id baseline now exists, so "no replacement
+    // seen since" is a real fact from here on — seed the count at 0 once.
+    // Until this runs the key stays absent and `fleet ls` shows "-".
+    if ((await storage.get(RESTARTS_KEY)) === undefined) await storage.put(RESTARTS_KEY, { total: 0, recent: [] });
   }
 
   if (effectiveManifest.offset > size) {
@@ -969,7 +987,10 @@ export async function shipTranscriptTick(
     // block below.
     const bootIdToWrite = freshBootId !== "" ? freshBootId : storedBootId;
     if (bootIdToWrite !== undefined) {
-      await storage.put({ [TRANSCRIPT_MANIFEST_KEY]: effectiveManifest, [TRANSCRIPT_BOOT_ID_KEY]: bootIdToWrite });
+      await storage.put({
+        [TRANSCRIPT_MANIFEST_KEY]: effectiveManifest, [TRANSCRIPT_BOOT_ID_KEY]: bootIdToWrite,
+        ...(restarts === undefined ? {} : { [RESTARTS_KEY]: restarts }),
+      });
     } else {
       await storage.put(TRANSCRIPT_MANIFEST_KEY, effectiveManifest); // nothing meaningful known for boot-id yet
     }

@@ -57,6 +57,7 @@ import {
   parseMemberRows, buildMemberAlerts, MEMBER_ALERTS_KEY, MEMBER_ROWS_KEY,
   type MemberAlertsStorage, type MemberAlert,
 } from "./member-alerts";
+import { RESTARTS_KEY, type RestartStorage } from "./restarts";
 import type { MemguardKillLogEntry } from "./memguard-log";
 import {
   syncSessionTick, shipAsideSessions, asideNotShippedNote, ASIDE_SHIP_KEY, BURN_KEY, SYNC_SESSION_SECONDS, SESSION_GUARD_KEY, SESSION_MARK_KEY, SESSION_FORCE_KEY,
@@ -3433,14 +3434,16 @@ export async function ensureSpawnToken(
  * only this feature touches.
  */
 async function getObservedWithActivity(storage: ObservedStorage): Promise<Observed> {
-  const [observed, activity, memberAlerts] = await Promise.all([
+  const [observed, activity, memberAlerts, restarts] = await Promise.all([
     getObserved(storage),
     (storage as unknown as ActivityStorage).get(ACTIVITY_KEY),
     // Issue #311 — same "own DO key, internal cast at the one call site
     // that needs it" idiom `ACTIVITY_KEY` (above) already uses.
     (storage as unknown as MemberAlertsStorage).get(MEMBER_ALERTS_KEY),
+    // Issue #56 — same idiom again: the container-restart log (restarts.ts).
+    (storage as unknown as RestartStorage).get(RESTARTS_KEY),
   ]);
-  return { ...observed, activity: activity ?? null, memberAlerts: memberAlerts ?? null };
+  return { ...observed, activity: activity ?? null, memberAlerts: memberAlerts ?? null, ...(restarts === undefined ? {} : { restarts }) };
 }
 
 export async function withObserved(storage: ObservedStorage, status: StudioStatus): Promise<StudioStatus> {
@@ -3876,7 +3879,7 @@ export async function runShipTickWithObservation(
 
   let result: ShipResult;
   try {
-    result = await shipTranscriptTick(shipDeps, storage, id, adoptionToken);
+    result = await shipTranscriptTick(shipDeps, storage, id, adoptionToken, observedBefore.session?.via ?? null);
   } catch (err) {
     if (err instanceof ExecUnreachableError) {
       // Review round 3 (issue #85 PR1), MUST-FIX 5 — same op-lock freshness

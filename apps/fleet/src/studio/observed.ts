@@ -25,6 +25,9 @@ import type { Activity } from "./activity";
 // imports FROM this file — a value import here would cycle through that
 // same chain.
 import type { MemberAlert } from "./member-alerts";
+// Issue #56 — type-only for the same cycle reason: restarts.ts imports
+// BringupVia from this file.
+import type { RestartLog } from "./restarts";
 
 export const OBSERVED_KEY = "observed";
 
@@ -238,6 +241,14 @@ export interface Observed {
    * report, a real, different fact from "never checked."
    */
   memberAlerts: MemberAlert[] | null;
+  /**
+   * Issue #56 — the D1-facing mirror of the DO's own container-restart log
+   * (restarts.ts's `RESTARTS_KEY`), attached at the same seam as `activity`.
+   * ABSENT while unknown: no boot-id baseline yet, or a row written before
+   * this field existed — never a fabricated zero. `{ total: 0 }` only once
+   * the ship tick has a baseline and has seen no replacement since.
+   */
+  restarts?: RestartLog;
 }
 
 /**
