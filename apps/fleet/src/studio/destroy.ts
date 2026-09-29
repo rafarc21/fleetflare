@@ -71,10 +71,9 @@ export interface DestroyGuard {
    * review), N3: ALSO the escape hatch for a genuine, confirmed rescue-push
    * failure (a `RescuePushFailedError` — see that class's own doc comment,
    * do.ts) — a rejected push, a lock file, a hook, all of which mean "this
-   * worktree's work is confirmed NOT on origin", not "we cannot tell". Every
-   * OTHER rescue-push throw (a killed exec, the session shell dying outright)
-   * stays best-effort, unchanged from round 1: only a CONFIRMED loss gets
-   * this gate.
+   * worktree's work is confirmed NOT on origin". Issue #62: and for an
+   * UNCONFIRMED one (a killed exec, the session shell dying, the deadline) —
+   * "we cannot tell" is unknown state and refuses too.
    */
   discardUnsynced?: boolean;
   /** Which flag the caller passed, so the unrescued note names it. */
@@ -101,19 +100,20 @@ function destroyRefusal(id: string, lastSyncedAt: Date | null | undefined, now: 
  * run (the container answered fine) — only the one worktree(s) named in
  * `err.message` are confirmed lost.
  */
+function destroyRescueFailedRefusal(id: string, err: RescuePushFailedError): string {
+  return DESTROY_REFUSED_PREFIX +
+    `rescue-push confirmed it could not save this studio's work before destroy: ${redactSecrets(err.message)} ` +
+    `To discard anyway, as a stated choice: fleet destroy ${id} --discard-unsynced`;
+}
+
 /** Issue #62: rescue-push could not CONFIRM anything (exec threw, killed,
- *  deadline): unknown state, refused like a confirmed failure. `--force`
- *  stays the stated way past for a container that never answers. */
+ *  deadline): unknown state, refused like a confirmed failure. Offers only
+ *  --discard-unsynced, like every refusal: --force also skips the
+ *  open-board-task check, so it is never the suggested way past. */
 function destroyRescueUnconfirmedRefusal(id: string, reason: string, lastSyncedAt: Date | null | undefined, now: Date): string {
   return DESTROY_REFUSED_PREFIX +
     `rescue-push could not confirm this studio's work was saved before destroy (${reason}); ` +
     "unpushed work may be lost. " + recycleCostLine(lastSyncedAt, now, "the next provision") + " " +
-    `To discard anyway, as a stated choice: fleet destroy ${id} --discard-unsynced (or --force)`;
-}
-
-function destroyRescueFailedRefusal(id: string, err: RescuePushFailedError): string {
-  return DESTROY_REFUSED_PREFIX +
-    `rescue-push confirmed it could not save this studio's work before destroy: ${redactSecrets(err.message)} ` +
     `To discard anyway, as a stated choice: fleet destroy ${id} --discard-unsynced`;
 }
 
@@ -267,13 +267,9 @@ export async function destroyWithSync(
       // above already uses. This check runs BEFORE bumpDestroyEpoch below, on
       // purpose: a destroy that refuses here must leave the epoch untouched,
       // exactly like the probe refusal does (see that bump's own doc comment
-      // for why). Every OTHER rescue-push throw (a killed exec, the session
-      // shell itself dying) stays best-effort, unchanged from round 1 — those
-      // mean "we cannot tell", not "we confirmed a loss".
-      // Issue #62: every OTHER throw (killed exec, dead shell, deadline)
-      // used to stay best-effort here; it is unknown state, so it refuses
-      // too. Same flags past it, same epoch invariant (this runs before the
-      // bump below).
+      // for why). Issue #62: every OTHER throw (killed exec, dead shell,
+      // deadline) is unknown state and refuses too — it used to stay
+      // best-effort. Same flags past it, same epoch invariant.
       if (!guard.discardUnsynced) {
         if (err instanceof RescuePushFailedError) throw new Error(destroyRescueFailedRefusal(idFallback, err));
         const lastSyncedAt = await (guard.lastSyncedAt ?? (async () => undefined))().catch(() => undefined);

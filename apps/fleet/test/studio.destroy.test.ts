@@ -212,6 +212,9 @@ describe("destroyWithSync", () => {
         // Same price the probe refusal quotes: the last synced snapshot's age.
         expect(message).toContain("last synced snapshot (age unknown");
         expect(message).toContain(`fleet destroy ${STUDIO_ID} --discard-unsynced`);
+        // #62 follow-up: never offer --force here — it ALSO skips the
+        // open-board-task check. Same single override as every refusal.
+        expect(message).not.toContain("--force");
         expect(destroy).not.toHaveBeenCalled();
         expect(await readDestroyEpoch(storage)).toBe(0);
       } finally {

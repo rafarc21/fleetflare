@@ -585,10 +585,9 @@ export interface RescueResult {
  * retry (rescue.ts's `rescue_push`) already exhausted both attempts. Every
  * OTHER throw here (a killed exec, an unparseable exit, the exec call itself
  * throwing — e.g. the sandbox session shell dying outright) stays a plain
- * `Error`: those mean "we cannot tell", not "we confirmed a loss", and
- * destroy.ts's own best-effort posture for THOSE is unchanged from round 1 —
- * only a genuine, confirmed failure gets destroy.ts's new refusal gate
- * (`DestroyGuard.discardUnsynced`), because only this class carries proof.
+ * `Error`: those mean "we cannot tell", not "we confirmed a loss". Issue
+ * #62: destroy and recycle refuse on BOTH (only the 409's wording differs);
+ * this class is what lets them name the confirmed worktree(s).
  *
  * Issue #371 (#362 follow-up): one `step` value, `"budget"`, now optionally
  * carries a THIRD field — `detail` — the remaining-seconds count rescue.ts's
@@ -622,13 +621,10 @@ export class RescuePushFailedError extends Error {
  * push rejected, no remote reachable, the exec itself throwing) —
  * deliberately the SAME contract syncSessionTick (session-sync.ts) already
  * has, for the same reason: this function has no way to know whether ITS
- * failure is safe to ignore, only its caller does. Every call site wraps
- * this exactly like every existing call site already wraps syncSessionTick
- * — try/catch, log, proceed with the kill regardless (constraint from this
- * task's own brief: "a failed rescue must NOT block the kill... a container
- * that cannot be destroyed is worse than lost work, and the work is already
- * lost in that case" — by the time this throws, the commit/push never
- * landed, so there is nothing left here to protect by blocking).
+ * failure is safe to ignore, only its caller does. Issue #62: destroy and
+ * recycle refuse (409) on ANY throw here, confirmed or not, unless the
+ * caller passed --discard-unsynced — the original "never block the kill"
+ * posture lost unpushed work whenever the rescue could not tell.
  *
  * `studio` is the DO's own id (do.ts's `idFallback` at the call site),
  * threaded through ONLY to name a generated rescue ref (rescuePushCmd's own
@@ -640,9 +636,9 @@ export class RescuePushFailedError extends Error {
  * truncated tail that happens to look like a complete, well-formed
  * RESCUE_PUSHED line. And any `RESCUE_FAILED <wt> <step>` line (rescue.ts)
  * always throws, even beside real RESCUE_PUSHED lines from OTHER worktrees
- * in the same run — the thrown message names both, so the caller's log line
- * (destroy.ts/do.ts's own "pre-destroy rescue-push failed, continuing")
- * carries which ref(s) actually landed and which worktree(s) didn't.
+ * in the same run — the thrown message names both, so the caller's 409 (or,
+ * under --discard-unsynced, its log line and row note) carries which ref(s)
+ * actually landed and which worktree(s) didn't.
  */
 export async function rescuePush(deps: SessionSyncDeps, repo: string, studio: string): Promise<RescueResult> {
   // Issue #335: `undefined` for the skipped positional args triggers
@@ -681,13 +677,10 @@ export async function rescueSnapshot(deps: SessionSyncDeps, repo: string, studio
  * push rejected, no remote reachable, the exec itself throwing) —
  * deliberately the SAME contract syncSessionTick (session-sync.ts) already
  * has, for the same reason: this function has no way to know whether ITS
- * failure is safe to ignore, only its caller does. Every call site wraps
- * this exactly like every existing call site already wraps syncSessionTick
- * — try/catch, log, proceed with the kill regardless (constraint from this
- * task's own brief: "a failed rescue must NOT block the kill... a container
- * that cannot be destroyed is worse than lost work, and the work is already
- * lost in that case" — by the time this throws, the commit/push never
- * landed, so there is nothing left here to protect by blocking).
+ * failure is safe to ignore, only its caller does. Issue #62: destroy and
+ * recycle refuse (409) on ANY throw here, confirmed or not, unless the
+ * caller passed --discard-unsynced — the original "never block the kill"
+ * posture lost unpushed work whenever the rescue could not tell.
  *
  * PR #263 round 2, C1: two more ways this exec's output must NEVER read as
  * success. `isDeadlineExit` (exec-deadline.ts, #104/#110) is checked BEFORE
@@ -695,9 +688,9 @@ export async function rescueSnapshot(deps: SessionSyncDeps, repo: string, studio
  * truncated tail that happens to look like a complete, well-formed
  * RESCUE_PUSHED line. And any `RESCUE_FAILED <wt> <step>` line (rescue.ts)
  * always throws, even beside real RESCUE_PUSHED lines from OTHER worktrees
- * in the same run — the thrown message names both, so the caller's log line
- * (destroy.ts/do.ts's own "pre-destroy rescue-push failed, continuing")
- * carries which ref(s) actually landed and which worktree(s) didn't.
+ * in the same run — the thrown message names both, so the caller's 409 (or,
+ * under --discard-unsynced, its log line and row note) carries which ref(s)
+ * actually landed and which worktree(s) didn't.
  *
  * Issue #266: factored out of `rescuePush` so `rescueSnapshot` (above) can
  * share the identical parse — `rescuePushCmd` and `rescueSnapshotCmd` emit

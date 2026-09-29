@@ -3506,6 +3506,25 @@ describe("recycleWithSync — sync before rescue-push before destroy, destroy be
     }
   });
 
+  it("#62: a KILLED rescue exec (124) REFUSES recycle — the container is never touched", async () => {
+    const syncDeps = fakeSyncDeps({ rescue: { code: 124, stdout: "", stderr: "" } });
+    const destroy = vi.fn(async () => {});
+    const provisionFn = vi.fn(async () => ({ id: STUDIO_ID, state: "running" }) as StudioStatus);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const message = await recycleWithSync(
+        syncDeps, fakeCombinedStorage(), STUDIO_ID, destroy, async () => {}, provisionFn, vi.fn(async () => {}), CFG,
+        noopResolveMemoryRepo, noopCommit,
+      ).then(() => "", (err: Error) => err.message);
+      expect(message.startsWith(RECYCLE_REFUSED_PREFIX)).toBe(true);
+      expect(message).toContain("could not confirm");
+      expect(destroy).not.toHaveBeenCalled();
+      expect(provisionFn).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
   it("#62: a throwing rescue-push + --discard-unsynced → recycle proceeds, row names the unconfirmed rescue", async () => {
     const syncDeps = fakeSyncDeps({ rescue: null });
     const destroy = vi.fn(async () => {});
