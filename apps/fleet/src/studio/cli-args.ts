@@ -32,7 +32,8 @@ export type CliCommand =
   // ruling is explicit ("Do NOT make `fleet ls` always check live — it fans
   // out an exec per studio"), because this is the first command an operator
   // runs when something looks wrong and it must stay instant.
-  | { cmd: "ls"; fresh: boolean }
+  // Issue #70 ask 4: `json` = one machine-readable lead state per studio.
+  | { cmd: "ls"; fresh: boolean; json: boolean }
   // Board task #125: a pure, read-only preflight for a repo the fleet has
   // never talked to before — run from inside ANY git repo, not necessarily
   // this one. Zero-argument, same grammar as `ls`.
@@ -240,8 +241,8 @@ export interface VerbHelp {
 
 export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHelp> = {
   ls: {
-    args: "[--fresh]",
-    summary: "Every studio: id, repo, state, READY (provisioned/bare/\"?\" unknown, do.ts's periodic container check — the registry's own state/error can be stale, trust READY; READY may also read replaced/unreachable/unverified, issue #85, when the ship tick's own evidence contradicts the last container-side check), SESSION (resumed/fresh/LOST/\"?\", whether the live lead actually continued its history or started over, plus how old the last shipped snapshot is), CHECKED (how old that verdict is — up to 300s by default), tailnet host, burn, last activity (git commits — a quiet LAST ACTIVITY column means no recent commits, not that the studio is unhealthy; check READY/SESSION for that), error. Read-only. --fresh re-checks every studio live first (one container exec each, slower) instead of reading the last recorded verdict.",
+    args: "[--fresh] [--json]",
+    summary: "Every studio: id, repo, state, READY (provisioned/bare/\"?\" unknown, do.ts's periodic container check — the registry's own state/error can be stale, trust READY; READY may also read replaced/unreachable/unverified, issue #85, when the ship tick's own evidence contradicts the last container-side check), SESSION (resumed/fresh/LOST/\"?\", whether the live lead actually continued its history or started over, plus how old the last shipped snapshot is), CHECKED (how old that verdict is — up to 300s by default), tailnet host, burn, last activity (git commits — a quiet LAST ACTIVITY column means no recent commits, not that the studio is unhealthy; check READY/SESSION for that), error. Read-only. --fresh re-checks every studio live first (one container exec each, slower) instead of reading the last recorded verdict. --json prints only a JSON array: per studio id, state, repo, lead (working/idle/waiting-members/waiting-question/limit/modal/unknown/stopped), leadSince, limitResetsAt and the ACTIVITY text (issue #70).",
   },
   onboard: {
     args: "",
@@ -632,7 +633,7 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // positional to collide with), keeping `ls`'s own long-standing "a stray
     // extra token is ignored" grammar exactly as it was for everything else.
     case "ls":
-      return { cmd: "ls", fresh: argv.slice(1).includes("--fresh") };
+      return { cmd: "ls", fresh: argv.slice(1).includes("--fresh"), json: argv.slice(1).includes("--json") };
     case "onboard":
       return { cmd: "onboard" };
     // Issue #216: `--repo <owner/repo>` (value form or `--repo=value`),
