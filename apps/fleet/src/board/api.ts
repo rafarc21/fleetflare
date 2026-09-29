@@ -118,6 +118,7 @@ interface RawIssue {
   labels?: ({ name?: string } | string)[];
   milestone?: { title?: string } | null;
   updated_at?: string;
+  state_reason?: string | null;
   pull_request?: unknown;
 }
 
@@ -149,6 +150,7 @@ export function toBoardTask(raw: RawIssue): BoardTask {
     assignee: assignees.length === 1 ? assignees[0] : null,
     milestone: raw.milestone?.title ?? null,
     open: raw.state === "open",
+    reopened: raw.state_reason === "reopened",
     updatedAt: raw.updated_at ?? "",
   };
 }

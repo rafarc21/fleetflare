@@ -188,6 +188,9 @@ export interface BoardTask {
    *  sprint close is what closes an issue, and that is a later task. A
    *  terminal board state (completed/failed/canceled) leaves the issue open. */
   open: boolean;
+  /** Issue #10: GitHub's `state_reason === "reopened"`. Set on every reopen,
+   *  cleared only by a later close. Absent (hand-built doubles) = false. */
+  reopened?: boolean;
   updatedAt: string;
 }
 

@@ -10,7 +10,7 @@ import { parseStudioId } from "../studio/ids";
 import type { StudioStatus } from "../studio/types";
 import { JUNIOR_MODELS, juniorEnabled } from "./gate";
 import { findLiveAssignedTask, type BoardApi } from "../board/board";
-import { isJuniorAuthorized } from "./authz";
+import { isJuniorAuthorized, revokeJuniorAuthorization } from "./authz";
 import { checkAndConsumeJuniorRateLimit } from "./ratelimit";
 import { githubBoardApi, resolveStudioBoardRepo } from "../board/routes";
 
@@ -168,6 +168,13 @@ export async function handleFleetJunior(
   catch { return text("board unavailable", 503); }
   if (!live.ok) return text("board unavailable", 503);
   if (live.value === null) return text("junior not authorized for your current task", 403);
+  // Issue #10: a reopened task is not the task the maestro authorized. Its
+  // record is revoked here for good; open + live + assigned alone come back
+  // with any reopen, whoever did it.
+  if (live.value.reopened === true) {
+    await revokeJuniorAuthorization(env.DB, repo.value, live.value.number);
+    return text("junior not authorized for your current task", 403);
+  }
   const authorized = await isJuniorAuthorized(env.DB, repo.value, live.value.number, studio.id);
   if (!authorized) return text("junior not authorized for your current task", 403);
 

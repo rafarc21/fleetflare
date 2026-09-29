@@ -18,6 +18,10 @@ export async function setFlag(
     .run();
 }
 
+export async function deleteFlag(db: D1Database, key: string): Promise<void> {
+  await db.prepare(`DELETE FROM fleet_state WHERE key = ?`).bind(key).run();
+}
+
 /**
  * PR #9 review, BLOCKER F1: an atomic "increment `key` and tell me the new
  * total", as ONE D1 statement — never getFlag-then-setFlag, which is a read

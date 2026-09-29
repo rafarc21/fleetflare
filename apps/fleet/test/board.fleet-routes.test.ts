@@ -8,6 +8,7 @@ import { studioLabel, type BoardTask } from "../src/board/types";
 import type { BoardApi } from "../src/board/board";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
+import { isJuniorAuthorized, recordJuniorAuthorization } from "../src/junior/authz";
 
 // P4a-2 — GET/POST /fleet/tasks*: the STUDIO's own read of the board.
 //
@@ -192,6 +193,20 @@ describe("handleFleetBoard — a lead moves its own task", () => {
       expect(res.status).toBe(200);
       expect(api.addLabels).toHaveBeenCalledWith(REPO, 71, [to]);
     }
+  });
+
+  // Issue #10: `failed` is terminal and a lead may set it, then set `working`
+  // again. The first move must revoke junior, or the lead keeps it.
+  it("#10: a lead moving its task to failed revokes the junior record", async () => {
+    await testEnv.DB.prepare("DELETE FROM fleet_state").run();
+    await recordJuniorAuthorization(testEnv.DB, REPO, 71, MINE, 1000);
+    const { token, rows } = await tokenFor(MINE);
+    const res = await handleFleetBoard(
+      req("/fleet/tasks/71/state", token, { method: "POST", body: JSON.stringify({ to: "failed" }) }),
+      testEnv, fakeApi(), rows,
+    );
+    expect(res.status).toBe(200);
+    expect(await isJuniorAuthorized(testEnv.DB, REPO, 71, MINE)).toBe(false);
   });
 
   it("REFUSES completed with a 403 and writes no label — a lead never self-approves", async () => {

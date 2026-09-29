@@ -57,7 +57,7 @@ describe("createIssue", () => {
     expect(task).toEqual({
       number: 12, url: "https://github.com/o/r/issues/12", title: "Build the task board",
       body: "## Objective\n", state: "submitted", labels: ["submitted"], assignee: null,
-      milestone: "Sprint 1", open: true, updatedAt: "2026-08-25T10:00:00Z",
+      milestone: "Sprint 1", open: true, reopened: false, updatedAt: "2026-08-25T10:00:00Z",
     });
   });
 
@@ -590,6 +590,17 @@ describe("listIssueTexts", () => {
 
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+});
+
+describe("toBoardTask — reopened (issue #10)", () => {
+  it("true only for GitHub's state_reason \"reopened\"", async () => {
+    respond = () => Response.json(issue({ state_reason: "reopened" }));
+    expect((await getIssue("t", "o/r", 12)).reopened).toBe(true);
+    for (const state_reason of [null, undefined, "completed", "not_planned"]) {
+      respond = () => Response.json(issue({ state_reason }));
+      expect((await getIssue("t", "o/r", 12)).reopened).toBe(false);
+    }
   });
 });
 
