@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { createServer, type Server, type Socket } from "node:net";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
@@ -2490,5 +2490,95 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
 
     expect(r.out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
     expect(r.err).toContain("no upstream configured");
+  });
+});
+
+/**
+ * Issue #58 (#52 review follow-ups): the already-on-origin check is budgeted,
+ * never reads a failed or untrustworthy listing as "already saved", and every
+ * push failure — snapshot builder, branch walk, stash walk — carries its
+ * stderr out.
+ */
+describe("#58 — on-origin check: budgeted, fail-safe, push URL aware; every push failure has stderr", () => {
+  function prBranchOnOrigin(): void {
+    sh(`cd ${checkout} && git checkout -q -b task/pr && git commit -q --allow-empty -m "pr work" && ` +
+      `git push -q origin HEAD:refs/heads/task/pr && git update-ref -d refs/remotes/origin/task/pr; ` +
+      `git branch --unset-upstream 2>/dev/null; true`);
+    sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 2>/dev/null; rm -rf .claude; true`);
+  }
+  /** `git` on PATH that logs every call; `failLsRemote` makes ls-remote fail. */
+  function gitShim(failLsRemote: boolean): { dir: string; log: string } {
+    const d = mkdtempSync(join(tmpdir(), "fleet-git-shim-"));
+    const log = join(d, "calls.log");
+    const real = Bun.which("git", { PATH: process.env.PATH })!;
+    writeFileSync(join(d, "git"),
+      `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\n` +
+      (failLsRemote ? `for a in "$@"; do [ "$a" = ls-remote ] && { echo "fatal: shim listing failure" >&2; exit 128; }; done\n` : "") +
+      `exec '${real}' "$@"\n`);
+    chmodSync(join(d, "git"), 0o755);
+    return { dir: d, log };
+  }
+  function originRejects(msg: string): void {
+    mkdirSync(join(origin, "hooks"), { recursive: true });
+    writeFileSync(join(origin, "hooks", "pre-receive"), `#!/bin/sh\necho "${msg}" >&2\nexit 1\n`);
+    chmodSync(join(origin, "hooks", "pre-receive"), 0o755);
+  }
+
+  for (const [label, cmdFn] of RESCUE_CMDS) {
+    test(`${label}: a FAILED origin listing never reads as already-saved — the push runs`, () => {
+      prBranchOnOrigin();
+      const shim = gitShim(true);
+      const r = sh(cmdFn(REPO, STUDIO, root), dir, { PATH: `${shim.dir}:${BASE_PATH}` });
+      expect(bare(r.out)).not.toBe(RESCUE_CLEAN);
+      expect(r.out).toContain(RESCUE_PUSHED_PREFIX);
+    });
+
+    test(`${label}: out of budget → no ls-remote at all (never spends the last seconds listing)`, () => {
+      prBranchOnOrigin();
+      const shim = gitShim(false);
+      // pushTimeout 2 + KILL_GRACE -> single-push threshold 7s; a 5s server
+      // deadline leaves no budget for anything.
+      const r = sh(cmdFn(REPO, STUDIO, root, 2, 5, 0), dir, { PATH: `${shim.dir}:${BASE_PATH}` });
+      const calls = existsSync(shim.log) ? readFileSync(shim.log, "utf8") : "";
+      expect(calls).not.toMatch(/ls-remote --heads origin/);
+      expect(bare(r.out)).not.toBe(RESCUE_CLEAN);
+    });
+
+    test(`${label}: a dirty-tree push the origin REJECTS carries the remote's stderr out`, () => {
+      originRejects("policy says no");
+      writeFileSync(join(checkout, "notes.md"), "work\n");
+      const r = sh(cmdFn(REPO, STUDIO, root));
+      expect(r.out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
+      expect(r.err).toContain("policy says no");
+    });
+
+    test(`${label}: a branch-walk push the origin REJECTS carries stderr too`, () => {
+      sh(`cd ${checkout} && git checkout -q -b feat && git commit -q --allow-empty -m "feat work" && git checkout -q main`);
+      sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 2>/dev/null; rm -rf .claude; true`);
+      originRejects("branch policy says no");
+      const r = sh(cmdFn(REPO, STUDIO, root));
+      expect(r.out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout:feat push$`, "m"));
+      expect(r.err).toContain("branch policy says no");
+    });
+
+    test(`${label}: a stash-walk push the origin REJECTS carries stderr too`, () => {
+      sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 2>/dev/null; rm -rf .claude; true`);
+      writeFileSync(join(checkout, "s.md"), "stash me\n");
+      sh(`git -C ${checkout} add s.md && git -C ${checkout} stash -q`);
+      originRejects("stash policy says no");
+      const r = sh(cmdFn(REPO, STUDIO, root));
+      expect(r.out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout:stash-0 push$`, "m"));
+      expect(r.err).toContain("stash policy says no");
+    });
+  }
+
+  test("rescuePushCmd: pushurl differs from the fetch url → the listing cannot vouch for the push destination → push runs", () => {
+    prBranchOnOrigin();
+    const elsewhere = join(dir, "push-dest.git");
+    sh(`git init -q --bare -b main ${elsewhere}`);
+    sh(`git -C ${checkout} config remote.origin.pushurl ${elsewhere}`);
+    const r = sh(rescuePushCmd(REPO, STUDIO, root));
+    expect(bare(r.out)).not.toBe(RESCUE_CLEAN);
+    expect(sh(`git -C ${elsewhere} for-each-ref --format='%(refname)'`).out).toContain("refs/heads/task/pr");
   });
 });

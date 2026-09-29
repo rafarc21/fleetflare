@@ -191,8 +191,17 @@ export function rescuePushPrelude(opts: RescuePushOptions): string {
 function rescueOnOriginFn(pushTimeoutSeconds: number): string {
   return (
     `rescue_on_origin() {\n` +
-    `  if [ -z "\${__rheads_done:-}" ]; then __rheads_done=1; ` +
+    `  if [ -z "\${__rheads_done:-}" ]; then __rheads_done=1; __rheads=""\n` +
+    // Issue #58: a push URL other than the fetch URL means the listing below
+    // (fetch URL) cannot vouch for where a push would land: never "saved".
+    `    __rpu="$(git -C "$1" config --get remote.origin.pushurl 2>/dev/null)"\n` +
+    `    if [ -z "$__rpu" ] || [ "$__rpu" = "$(git -C "$1" config --get remote.origin.url 2>/dev/null)" ]; then\n` +
+    // Issue #58: budgeted like every push. Out of budget = no listing =
+    // "not on origin", so the push path (and its own budget refusal) runs.
+    `      if rescue_budget_ok on-origin >/dev/null; then ` +
     `__rheads="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" ls-remote --heads origin </dev/null 2>/dev/null | cut -f1)"; fi\n` +
+    `    fi\n` +
+    `  fi\n` +
     `  [ -n "$2" ] && printf '%s\\n' "$__rheads" | grep -qx -e "$2"\n` +
     `}\n`
   );
@@ -1063,6 +1072,8 @@ export function rescuePushCmd(
     // pushes above — see this file's own header comment.
     `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:$b push"; fail=$((fail+1))\n` +
+    // Issue #58: the reason reaches the 409, same as rescue_push's.
+    `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$btarget" "refs/heads/$b" </dev/null 2>/dev/null || true\n` +
     // Issue #266: $bahead is a COMMIT count (rev-list --count, above) —
@@ -1117,6 +1128,8 @@ export function rescuePushCmd(
     // this file — see this file's own header comment.
     `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:stash-$sn push"; fail=$((fail+1))\n` +
+    // Issue #58: the reason reaches the 409, same as rescue_push's.
+    `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$starget" "$ssha" </dev/null 2>/dev/null || true\n` +
     // Issue #266: $sfiles, despite `sahead` (the rev-list gate above) being a
@@ -1461,6 +1474,8 @@ export function rescueSnapshotCmd(
     // pushes above — see this file's own header comment.
     `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:$b push"; fail=$((fail+1))\n` +
+    // Issue #58: the reason reaches the 409, same as rescue_push's.
+    `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$btarget" "refs/heads/$b" </dev/null 2>/dev/null || true\n` +
     `        echo "${RESCUE_PUSHED_PREFIX} $btarget $bahead ${RESCUE_PUSHED_KIND_COMMITS}"; any=1\n` +
@@ -1498,6 +1513,8 @@ export function rescueSnapshotCmd(
     // this file — see this file's own header comment.
     `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:stash-$sn push"; fail=$((fail+1))\n` +
+    // Issue #58: the reason reaches the 409, same as rescue_push's.
+    `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$starget" "$ssha" </dev/null 2>/dev/null || true\n` +
     `        echo "${RESCUE_PUSHED_PREFIX} $starget $sfiles ${RESCUE_PUSHED_KIND_FILES}"; any=1\n` +
