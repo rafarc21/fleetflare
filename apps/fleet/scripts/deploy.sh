@@ -69,12 +69,25 @@
 #     deploy). `--allow-unrescued` (consumed here, never passed to wrangler)
 #     deploys anyway with a loud warning. Read-only commands and d1
 #     migrations never run rescue-all.
+#     Issue #40: a plain `deploy` that changes no container (same image
+#     digest, same container settings -- scripts/deploy-containers-changed.ts,
+#     asked only after rescue-all fails) replaces no studio: the failure is a
+#     WARNING and the deploy proceeds. An image or settings change, or
+#     anything the probe cannot tell, stays refused. Every override
+#     (--allow-unrescued, or this Worker-only pass) appends one JSON line to
+#     ~/.fleet/deploy-overrides.jsonl (time, command, target Worker, target
+#     check, rescue-all verdict, operator = git user.name or $USER; flag
+#     VALUES never recorded -- --var/--define/--secrets-file may carry
+#     secrets); an unwritable record refuses the deploy.
 #   - (issue #36) same commands, checked BEFORE rescue-all: the Worker
 #     wrangler will replace (this config read by the pinned wrangler's own
 #     reader, + --env/-e or CLOUDFLARE_ENV, + --name / `delete <name>`) is
 #     not provably the fleet ~/.fleet/credentials points rescue-all at, or
 #     cannot be determined (see scripts/deploy-target.ts). Same
-#     --allow-unrescued override.
+#     --allow-unrescued override. Issue #48: a workers.dev credentials host
+#     must also sit on the DEPLOYING account's workers.dev subdomain -- a
+#     read-only lookup that needs network and a logged-in wrangler
+#     (CLOUDFLARE_ACCOUNT_ID when the login sees several accounts).
 #   `secret put`/`secret delete`/`secret bulk` are NOT gated (issue #36,
 #   measured 2026-09-29 on a throwaway Worker: plain @cloudflare/containers
 #   Container DO, instance lite, one container, n=1): each deploys a new
@@ -209,6 +222,51 @@ replaces_containers() {
     containers) [[ "$w2" == delete ]] ;;
     *) return 1 ;;
   esac
+}
+
+# Issue #40: `deploy` (or no args) -- the one gated command a Worker-only
+# soft pass may apply to. versions deploy, rollback, delete and containers
+# delete stay hard. Strict (PR #60 review F4): only the word `deploy`,
+# -e/--env <env>, --env=<env> and --profile <p>; any other flag may change
+# what wrangler does to containers (--containers-rollout, --name, --var ...).
+# scripts/deploy-containers-changed.ts applies the same rule again.
+is_plain_deploy() {
+  local a skip=0 seen=0
+  [[ "$#" == 0 ]] && return 0
+  for a in "$@"; do
+    if [[ "$skip" == 1 ]]; then skip=0; continue; fi
+    case "$a" in
+      -e|--env|--profile) skip=1 ;;
+      --env=*) ;;
+      deploy) [[ "$seen" == 0 ]] || return 1; seen=1 ;;
+      *) return 1 ;;
+    esac
+  done
+  [[ "$skip" == 0 && "$seen" == 1 ]]
+}
+
+# PR #60 review F3: the override record's command, without values that may
+# be secrets (--var K:V, --define, --secrets-file ...): flag names only;
+# a word right after any other flag is taken as that flag's value and
+# dropped; -e/--env keep theirs (the target env, never a secret).
+record_command() {
+  local a prev="" out=()
+  for a in "$@"; do
+    case "$a" in
+      -*) out+=("${a%%=*}") ;;
+      *) case "$prev" in -e|--env|""|[!-]*) out+=("$a") ;; esac ;;
+    esac
+    prev="$a"
+  done
+  printf '%s' "${out[*]}"
+}
+
+# A JSON string literal: backslash and quote escaped, control characters
+# dropped.
+json_str() {
+  local s="${1//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "$(printf '%s' "$s" | tr -d '\000-\037')"
 }
 
 # Kill a process and every descendant (a hung fetch's transport helpers and
@@ -361,8 +419,9 @@ if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
   # own reader.
   TARGET_RC=0
   RESCUE_RC=0
+  TARGET_WORKER=""
   if command -v bun >/dev/null 2>&1; then
-    (cd "$FLEET_DIR" && bun scripts/deploy-target.ts wrangler.local.jsonc ${ARGS[@]+"${ARGS[@]}"}) >&2 || TARGET_RC=$?
+    TARGET_WORKER="$(cd "$FLEET_DIR" && bun scripts/deploy-target.ts wrangler.local.jsonc ${ARGS[@]+"${ARGS[@]}"})" || TARGET_RC=$?
   else
     echo "deploy.sh: bun not found on PATH -- cannot check the target or run fleet rescue-all." >&2
     TARGET_RC=127
@@ -380,13 +439,43 @@ if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
   else
     bun "$FLEET_DIR/cli/fleet.ts" rescue-all || RESCUE_RC=$?
   fi
+  OVERRIDE=""
   if [[ "$RESCUE_RC" != 0 ]]; then
+    # Issue #40: a plain deploy that changes no container (same image
+    # digest, same settings) replaces no studio -- a failed rescue then only
+    # warns. Asked only here, after a failure: the probe builds the image.
+    CHANGED_RC=1
+    if [[ "$ALLOW_UNRESCUED" != 1 && "$RESCUE_RC" != 127 ]] && is_plain_deploy ${ARGS[@]+"${ARGS[@]}"}; then
+      CHANGED_RC=0
+      (cd "$FLEET_DIR" && bun scripts/deploy-containers-changed.ts wrangler.local.jsonc ${ARGS[@]+"${ARGS[@]}"}) >&2 || CHANGED_RC=$?
+    fi
     if [[ "$ALLOW_UNRESCUED" == 1 ]]; then
       echo "deploy.sh: WARNING -- --allow-unrescued: rescue-all exited $RESCUE_RC; deploying anyway. Unpushed work in running studios may be LOST." >&2
+    elif [[ "$CHANGED_RC" == 0 ]]; then
+      echo "deploy.sh: WARNING -- rescue-all exited $RESCUE_RC, but this deploy makes no container changes (Worker-only): no studio container is replaced; deploying. Fix the failed rescues before the next image change." >&2
+      OVERRIDE="worker-only"
     else
       echo "deploy.sh: refusing -- rescue-all reported FAILED -- pre-deploy gate UNSAFE; pass --allow-unrescued to override (exit $RESCUE_RC)." >&2
       exit 1
     fi
+  fi
+  [[ "$ALLOW_UNRESCUED" == 1 ]] && OVERRIDE="--allow-unrescued"
+  # Issue #40: every override leaves a durable record, not just a stderr
+  # line. Append-only JSON lines in ~/.fleet/ (the same small local-record
+  # convention as orca-workspaces.json and locks/). Unwritable -> refused.
+  if [[ -n "$OVERRIDE" ]]; then
+    OVERRIDE_LOG="$HOME/.fleet/deploy-overrides.jsonl"
+    case "$TARGET_RC" in 0) TARGET_CHECK="matched" ;; 1) TARGET_CHECK="mismatch (exit 1)" ;; *) TARGET_CHECK="undeterminable (exit $TARGET_RC)" ;; esac
+    if [[ "$RESCUE_RC" == 0 ]]; then RESCUE_VERDICT="passed"; else RESCUE_VERDICT="exit $RESCUE_RC"; fi
+    OPERATOR="$(git -C "$FLEET_DIR" config user.name 2>/dev/null || true)"
+    [[ -n "$OPERATOR" ]] || OPERATOR="${USER:-unknown}"
+    if [[ "${#ARGS[@]}" == 0 ]]; then COMMAND="deploy"; else COMMAND="$(record_command "${ARGS[@]}")"; fi
+    RECORD="{\"ts\":$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)"),\"override\":$(json_str "$OVERRIDE"),\"command\":$(json_str "$COMMAND"),\"target_worker\":$(json_str "${TARGET_WORKER:-unknown}"),\"target_check\":$(json_str "$TARGET_CHECK"),\"rescue_all\":$(json_str "$RESCUE_VERDICT"),\"operator\":$(json_str "$OPERATOR")}"
+    if ! { mkdir -p "$HOME/.fleet" && printf '%s\n' "$RECORD" >> "$OVERRIDE_LOG"; } 2>/dev/null; then
+      echo "deploy.sh: refusing -- cannot write the override record $OVERRIDE_LOG; an override must leave a durable trace." >&2
+      exit 1
+    fi
+    echo "deploy.sh: override recorded in $OVERRIDE_LOG" >&2
   fi
 fi
 

@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -19,9 +19,20 @@ import { join, resolve } from "node:path";
  * (symlink), so scripts/deploy-target.ts reads the config exactly as wrangler
  * does. HOME is a temp dir whose ~/.fleet/credentials points, by default, at
  * the config's own Worker (fleet-test.example.workers.dev).
+ *
+ * Issue #40/#48: the default config has the real ops config's shape -- a
+ * StudioDO container whose image is the RELATIVE path ./container/Dockerfile
+ * (PR #44 hold). The gate's read-only probes (wrangler auth token / whoami /
+ * containers list / containers info, marked FLEET_DEPLOY_PROBE=1) are
+ * answered by the stub wrangler from files in `stubs/`; docker
+ * (WRANGLER_DOCKER_BIN) is a stub too; the Cloudflare API
+ * (CLOUDFLARE_API_BASE_URL) is a fake server process. Account acct-a's
+ * workers.dev subdomain is "example", acct-b's is "acme-sub", acct-err
+ * answers 500. Nothing reaches a real account.
  */
 const DEPLOY_SH = resolve(import.meta.dir, "../../scripts/deploy.sh");
 const DEPLOY_TARGET_TS = resolve(import.meta.dir, "../../scripts/deploy-target.ts");
+const CONTAINERS_CHANGED_TS = resolve(import.meta.dir, "../../scripts/deploy-containers-changed.ts");
 const REAL_WRANGLER = resolve(import.meta.dir, "../../node_modules/wrangler");
 
 let root: string;
@@ -29,6 +40,36 @@ let fleet: string;
 let calls: string;
 let config: string;
 let home: string;
+let stubs: string;
+
+// Fake Cloudflare API: GET /accounts/<id>/workers/subdomain, bearer
+// "stub-token" only. A separate process: deploy() blocks this one.
+let api: ReturnType<typeof Bun.spawn>;
+let apiBase: string;
+beforeAll(async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fake-cf-api-"));
+  const script = join(dir, "server.ts");
+  writeFileSync(script, [
+    'const subs: Record<string, string> = { "acct-a": "example", "acct-b": "acme-sub" };',
+    "const s = Bun.serve({ port: 0, fetch(req) {",
+    "  const m = /^\\/client\\/v4\\/accounts\\/([^/]+)\\/workers\\/subdomain$/.exec(new URL(req.url).pathname);",
+    '  if (req.headers.get("authorization") !== "Bearer stub-token") return Response.json({ success: false, errors: [{ code: 10000, message: "Authentication error" }] }, { status: 403 });',
+    '  if (!m || !(m[1] in subs)) return Response.json({ success: false, errors: [{ code: 10007, message: "not found" }] }, { status: m?.[1] === "acct-err" ? 500 : 404 });',
+    "  return Response.json({ success: true, result: { subdomain: subs[m[1]] } });",
+    "} });",
+    "console.log(s.port);",
+    "",
+  ].join("\n"));
+  api = Bun.spawn(["bun", script], { stdout: "pipe" });
+  const reader = (api.stdout as ReadableStream<Uint8Array>).getReader();
+  const { value } = await reader.read();
+  apiBase = `http://127.0.0.1:${new TextDecoder().decode(value).trim()}/client/v4`;
+});
+afterAll(() => api.kill());
+
+const DIGEST_A = "sha256:" + "a".repeat(64);
+const DIGEST_B = "sha256:" + "b".repeat(64);
+const REPO = "registry.cloudflare.com/acct-a/fleet-test-studiodo";
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "deploy-rescue-"));
@@ -36,11 +77,42 @@ beforeEach(() => {
   mkdirSync(join(fleet, "scripts"), { recursive: true });
   copyFileSync(DEPLOY_SH, join(fleet, "scripts", "deploy.sh"));
   if (existsSync(DEPLOY_TARGET_TS)) copyFileSync(DEPLOY_TARGET_TS, join(fleet, "scripts", "deploy-target.ts"));
+  if (existsSync(CONTAINERS_CHANGED_TS)) copyFileSync(CONTAINERS_CHANGED_TS, join(fleet, "scripts", "deploy-containers-changed.ts"));
   calls = join(root, "calls");
+  stubs = join(root, "stubs");
+  mkdirSync(stubs);
   const bin = join(fleet, "node_modules", ".bin");
   mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, "wrangler"), `#!/bin/sh\necho "wrangler $*" >> "${calls}"\n`);
+  writeFileSync(join(bin, "wrangler"), [
+    "#!/bin/sh",
+    'if [ -n "$FLEET_DEPLOY_PROBE" ]; then',
+    `  echo "probe $*" >> "${calls}"`,
+    '  case "$1 $2" in',
+    `    "auth token") f="${stubs}/auth-token.json" ;;`,
+    `    "whoami --json") f="${stubs}/whoami.json" ;;`,
+    `    "containers list") f="${stubs}/containers-list.json" ;;`,
+    `    "containers info") f="${stubs}/info-$3.json" ;;`,
+    "    *) exit 9 ;;",
+    "  esac",
+    '  [ -f "$f" ] || { echo "stub: no $f" >&2; exit 1; }',
+    '  cat "$f"; exit 0',
+    "fi",
+    `echo "wrangler $*" >> "${calls}"`,
+    "",
+  ].join("\n"));
   chmodSync(join(bin, "wrangler"), 0o755);
+  const docker = join(root, "docker");
+  writeFileSync(docker, [
+    "#!/bin/sh",
+    `echo "docker $*" >> "${calls}"`,
+    'case "$1 $2" in',
+    '  "build "*) cat > /dev/null; exit "${STUB_DOCKER_BUILD_EXIT:-0}" ;;',
+    `  "image inspect") [ -f "${stubs}/repo-digests.json" ] && cat "${stubs}/repo-digests.json" || echo "[]" ;;`,
+    "esac",
+    "exit 0",
+    "",
+  ].join("\n"));
+  chmodSync(docker, 0o755);
   symlinkSync(REAL_WRANGLER, join(fleet, "node_modules", "wrangler"));
   const version = JSON.parse(readFileSync(join(REAL_WRANGLER, "package.json"), "utf8")).version;
   writeFileSync(join(fleet, "bun.lock"), `{\n  "packages": {\n    "wrangler": ["wrangler@${version}", "", {}, "sha512-x"],\n  }\n}\n`);
@@ -52,12 +124,31 @@ beforeEach(() => {
     'process.exit(Number(process.env.STUB_RESCUE_EXIT ?? "0"));',
     "",
   ].join("\n"));
+  // The real ops config's shape: the image path is relative to the app dir.
+  mkdirSync(join(fleet, "container"));
+  writeFileSync(join(fleet, "container", "Dockerfile"), "FROM scratch\n");
   config = join(root, "wrangler.jsonc");
-  writeConfig({ name: "fleet-test" });
+  writeConfig(withImage("fleet-test"));
   home = join(root, "home");
   setCreds("https://fleet-test.example.workers.dev");
+  stub("auth-token.json", { type: "api_token", token: "stub-token" });
+  stub("whoami.json", { loggedIn: true, accounts: [{ id: "acct-a", name: "Acme" }] });
+  stub("containers-list.json", []);
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+function withImage(name: string, container: object = {}) {
+  return {
+    name,
+    durable_objects: { bindings: [{ name: "STUDIO", class_name: "StudioDO" }] },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["StudioDO"] }],
+    containers: [{ class_name: "StudioDO", image: "./container/Dockerfile", max_instances: 1, ...container }],
+  };
+}
+
+function stub(file: string, body: unknown) {
+  writeFileSync(join(stubs, file), JSON.stringify(body));
+}
 
 function writeConfig(c: object) {
   writeFileSync(config, JSON.stringify({ main: "src/index.ts", compatibility_date: "2026-08-01", ...c }, null, 2) + "\n");
@@ -73,17 +164,22 @@ function setCreds(workerUrl: string | null) {
 
 function deploy(args: string[], rescueExit: number, extraEnv: Record<string, string> = {}) {
   const env: Record<string, string | undefined> = {
-    ...process.env, HOME: home, FLEET_CONFIG: config, STUB_RESCUE_EXIT: String(rescueExit), ...extraEnv,
+    ...process.env, HOME: home, FLEET_CONFIG: config, STUB_RESCUE_EXIT: String(rescueExit),
+    CLOUDFLARE_API_BASE_URL: apiBase, WRANGLER_DOCKER_BIN: join(root, "docker"), ...extraEnv,
   };
-  if (!("CLOUDFLARE_ENV" in extraEnv)) delete env.CLOUDFLARE_ENV;
-  if (!("WRANGLER_CI_OVERRIDE_NAME" in extraEnv)) delete env.WRANGLER_CI_OVERRIDE_NAME;
+  for (const k of ["CLOUDFLARE_ENV", "WRANGLER_CI_OVERRIDE_NAME", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]) {
+    if (!(k in extraEnv)) delete env[k];
+  }
   const r = Bun.spawnSync(["bash", join(fleet, "scripts", "deploy.sh"), ...args], { env });
-  const log = existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [];
+  const all = existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean) : [];
+  const log = all.filter((l) => l.startsWith("fleet ") || l.startsWith("wrangler "));
   return {
     code: r.exitCode,
     err: r.stderr.toString(),
     fleet: log.filter((l) => l.startsWith("fleet ")),
     wrangler: log.filter((l) => l.startsWith("wrangler ")),
+    probe: all.filter((l) => l.startsWith("probe ")),
+    docker: all.filter((l) => l.startsWith("docker ")),
     log,
   };
 }
@@ -349,26 +445,14 @@ describe("deploy.sh refuses when wrangler's target Worker is not the credentials
   // PR #44 hold: the real ops config names container images relative to the
   // app dir (./container/Dockerfile). Read from the ops checkout, that path
   // does not exist; the check must read the copy wrangler actually gets.
-  const withImage = (name: string) => ({
-    name,
-    durable_objects: { bindings: [{ name: "STUDIO", class_name: "StudioDO" }] },
-    migrations: [{ tag: "v1", new_sqlite_classes: ["StudioDO"] }],
-    containers: [{ class_name: "StudioDO", image: "./container/Dockerfile", max_instances: 1 }],
-  });
-
+  // (Issue #40: every test now uses that shape -- beforeEach's default.)
   test("config with a relative container image (./container/Dockerfile, present in the app dir only) -> passes", () => {
-    mkdirSync(join(fleet, "container"));
-    writeFileSync(join(fleet, "container", "Dockerfile"), "FROM scratch\n");
-    writeConfig(withImage("fleet-test"));
     const r = deploy(["deploy"], 0);
     expect(r.code, r.err).toBe(0);
     expect(r.log).toEqual(["fleet rescue-all", "wrangler deploy -c wrangler.local.jsonc"]);
   });
 
   test("same relative-image config, creds on another Worker -> still refused as a mismatch", () => {
-    mkdirSync(join(fleet, "container"));
-    writeFileSync(join(fleet, "container", "Dockerfile"), "FROM scratch\n");
-    writeConfig(withImage("fleet-test"));
     setCreds("https://fleet-other.example.workers.dev");
     expectRefused(deploy(["deploy"], 0), "MISMATCH", "fleet-other.example.workers.dev");
   });
@@ -387,5 +471,514 @@ describe("deploy.sh refuses when wrangler's target Worker is not the credentials
     const r = deploy(["whoami"], 0);
     expect(r.code, r.err).toBe(0);
     expect(r.wrangler).toEqual(["wrangler whoami -c wrangler.local.jsonc"]);
+  });
+});
+
+/**
+ * Issue #40 item 1: a Worker-only deploy (same studio image, same container
+ * settings) replaces no container, so a failing rescue-all must not block
+ * it: rescue-all still runs, its failure is a WARNING, the deploy proceeds.
+ * The signal is wrangler 4.141's own: it builds each Dockerfile image, and
+ * when the built image's RepoDigests already hold the registry digest the
+ * container application runs, it pushes nothing and its apply diff is empty
+ * -- no rollout. Anything the probe cannot prove unchanged counts as
+ * changed: the gate stays hard.
+ */
+describe("deploy.sh: rescue-all failure only warns when no container changes (#40)", () => {
+  const deployedImage = `${REPO}@${DIGEST_A}`;
+  function deployed(app: Record<string, unknown> = {}, configuration: Record<string, unknown> = {}) {
+    stub("containers-list.json", [{ id: "app-1", name: "fleet-test-studiodo", image: deployedImage }]);
+    stub("info-app-1.json", {
+      id: "app-1", name: "fleet-test-studiodo", max_instances: 1, scheduling_policy: "default",
+      configuration: { image: deployedImage, vcpu: 0.0625, memory_mib: 256, disk: { size_mb: 2000 }, ...configuration },
+      constraints: { tiers: [1, 2] }, rollout_active_grace_period: 0, ...app,
+    });
+  }
+  function builtDigests(list: string[]) {
+    stub("repo-digests.json", list);
+  }
+  function expectHard(r: ReturnType<typeof deploy>, ...mentions: string[]) {
+    expect(r.code, r.err).toBe(1);
+    expect(r.fleet).toEqual(["fleet rescue-all"]);
+    expect(r.wrangler).toEqual([]);
+    expect(r.err).toContain("rescue-all reported FAILED -- pre-deploy gate UNSAFE; pass --allow-unrescued to override");
+    for (const m of mentions) expect(r.err).toContain(m);
+  }
+
+  test("same image digest, same settings: rescue-all fails -> WARNING, Worker-only deploy proceeds", () => {
+    deployed();
+    builtDigests(["other.example/x@" + DIGEST_B, deployedImage]);
+    const r = deploy([], 1);
+    expect(r.code, r.err).toBe(0);
+    expect(r.log).toEqual(["fleet rescue-all", "wrangler deploy -c wrangler.local.jsonc"]);
+    expect(r.err).toContain("WARNING");
+    expect(r.err).toContain("no container changes");
+    expect(r.err).toContain("fleet-test-studiodo");
+  });
+
+  test("the probe builds exactly as wrangler does: linux/amd64, no provenance, Dockerfile on stdin, app-dir context", () => {
+    deployed();
+    builtDigests([deployedImage]);
+    writeConfig(withImage("fleet-test", { image_vars: { NODE_V: "22" } }));
+    const r = deploy(["deploy"], 1);
+    expect(r.code, r.err).toBe(0);
+    const build = r.docker.find((l) => l.startsWith("docker build "));
+    expect(build).toBeDefined();
+    expect(build).toContain("--load");
+    expect(build).toContain("--platform linux/amd64 --provenance=false");
+    expect(build).toContain("--build-arg NODE_V=22");
+    expect(build).toContain(`-f - ${join(realpathSync(fleet), "container")}`);
+    expect(r.docker.some((l) => l.startsWith("docker image rm "))).toBe(true);
+  });
+
+  test("rescue-all passes: the image probe never runs (no docker, no containers calls)", () => {
+    deployed();
+    builtDigests([deployedImage]);
+    const r = deploy([], 0);
+    expect(r.code, r.err).toBe(0);
+    expect(r.docker).toEqual([]);
+    expect(r.probe.filter((l) => l.includes("containers"))).toEqual([]);
+  });
+
+  test("SAFETY: image digest changed + rescue-all fails -> still refused", () => {
+    deployed();
+    builtDigests([`${REPO}@${DIGEST_B}`]);
+    expectHard(deploy([], 1), "image changed");
+  });
+
+  test("built image never pushed from this machine (no RepoDigests) -> treated as changed, refused", () => {
+    deployed();
+    builtDigests([]);
+    expectHard(deploy([], 1), "image changed");
+  });
+
+  test("no deployed container application (first deploy) -> refused", () => {
+    builtDigests([deployedImage]);
+    expectHard(deploy([], 1), "fleet-test-studiodo");
+  });
+
+  test("docker build fails -> undeterminable, refused", () => {
+    deployed();
+    builtDigests([deployedImage]);
+    expectHard(deploy([], 1, { STUB_DOCKER_BUILD_EXIT: "1" }), "cannot tell");
+  });
+
+  test("containers list fails (no auth, offline) -> undeterminable, refused", () => {
+    builtDigests([deployedImage]);
+    rmSync(join(stubs, "containers-list.json"));
+    expectHard(deploy([], 1), "cannot tell");
+  });
+
+  test("containers info fails -> undeterminable, refused", () => {
+    deployed();
+    rmSync(join(stubs, "info-app-1.json"));
+    builtDigests([deployedImage]);
+    expectHard(deploy([], 1), "cannot tell");
+  });
+
+  test("same image, max_instances changed -> a rollout, refused", () => {
+    deployed({ max_instances: 5 });
+    builtDigests([deployedImage]);
+    expectHard(deploy([], 1), "max_instances");
+  });
+
+  test("same image, instance_type changed (config standard-4, deployed lite) -> refused", () => {
+    deployed();
+    builtDigests([deployedImage]);
+    writeConfig(withImage("fleet-test", { instance_type: "standard-4" }));
+    expectHard(deploy([], 1), "instance");
+  });
+
+  test("same image, instance_type standard-4 both sides -> Worker-only, proceeds", () => {
+    deployed({}, { vcpu: 4, memory_mib: 12288, disk: { size_mb: 20000 } });
+    builtDigests([deployedImage]);
+    writeConfig(withImage("fleet-test", { instance_type: "standard-4" }));
+    const r = deploy([], 1);
+    expect(r.code, r.err).toBe(0);
+  });
+
+  test("custom instance_type object matching the deployed limits -> proceeds", () => {
+    deployed({}, { vcpu: 4, memory_mib: 12288, disk: { size_mb: 20000 } });
+    builtDigests([deployedImage]);
+    writeConfig(withImage("fleet-test", { instance_type: { vcpu: 4, memory_mib: 12288, disk_mb: 20000 } }));
+    const r = deploy([], 1);
+    expect(r.code, r.err).toBe(0);
+  });
+
+  test("rollout_step_percentage (rollout pacing, not part of wrangler's application diff) -> still Worker-only, proceeds", () => {
+    deployed();
+    builtDigests([deployedImage]);
+    writeConfig(withImage("fleet-test", { rollout_step_percentage: 100 }));
+    const r = deploy([], 1);
+    expect(r.code, r.err).toBe(0);
+  });
+
+  test("an unmodelled key on ANY container is refused BEFORE any image build", () => {
+    deployed();
+    builtDigests([deployedImage]);
+    writeConfig({
+      ...withImage("fleet-test"),
+      durable_objects: { bindings: [{ name: "STUDIO", class_name: "StudioDO" }, { name: "AGENT", class_name: "AgentDO" }] },
+      migrations: [{ tag: "v1", new_sqlite_classes: ["StudioDO", "AgentDO"] }],
+      containers: [
+        { class_name: "StudioDO", image: "./container/Dockerfile", max_instances: 1 },
+        { class_name: "AgentDO", image: "./container/Dockerfile", max_instances: 1, constraints: { tiers: [1, 2] } },
+      ],
+    });
+    const r = deploy([], 1);
+    expect(r.code).toBe(1);
+    expect(r.docker).toEqual([]);
+  });
+
+  test("a container setting the probe does not model (constraints) -> undeterminable, refused", () => {
+    deployed();
+    builtDigests([deployedImage]);
+    writeConfig(withImage("fleet-test", { constraints: { tiers: [1, 2] } }));
+    expectHard(deploy([], 1), "constraints");
+  });
+
+  // PR #60 review F1: wrangler 4.141 derives each container application's
+  // logs setting from the Worker's TOP-LEVEL `observability`
+  // (isRootObservabilityLogsEnabled) and, for an app still on the legacy
+  // configuration.observability, writes it there -- inside `configuration`,
+  // so the rollout diff sees it and containers are replaced.
+  describe("top-level observability (F1)", () => {
+    test("logs on in config and on the deployed app (legacy configuration.observability) -> unchanged, proceeds", () => {
+      deployed({}, { observability: { logs: { enabled: true } } });
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { enabled: true } });
+      const r = deploy([], 1);
+      expect(r.code, r.err).toBe(0);
+    });
+
+    test("SAFETY: observability flipped off, same image, deployed legacy logs on -> refused", () => {
+      deployed({}, { observability: { logs: { enabled: true } } });
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { enabled: false } });
+      expectHard(deploy([], 1), "observability");
+    });
+
+    test("SAFETY: observability.logs.enabled false overrides enabled true (wrangler's rule) -> refused vs deployed logs on", () => {
+      deployed({}, { observability: { logs: { enabled: true } } });
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { enabled: true, logs: { enabled: false } } });
+      expectHard(deploy([], 1), "observability");
+    });
+
+    test("SAFETY: observability turned on, deployed app has none -> refused", () => {
+      deployed();
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { enabled: true } });
+      expectHard(deploy([], 1), "observability");
+    });
+
+    test("deployed app on top-level observability, logs on both sides -> unchanged, proceeds", () => {
+      deployed({ observability: { logs: { enabled: true } } });
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { logs: { enabled: true } } });
+      const r = deploy([], 1);
+      expect(r.code, r.err).toBe(0);
+    });
+
+    test("deployed app with BOTH top-level and legacy logs on (wrangler migrates it) -> refused", () => {
+      deployed({ observability: { logs: { enabled: true } } }, { observability: { logs: { enabled: true } } });
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { enabled: true } });
+      expectHard(deploy([], 1), "observability");
+    });
+
+    test("top-level `unsafe` set -> cannot tell, refused", () => {
+      deployed();
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), unsafe: { metadata: { x: 1 } } });
+      expectHard(deploy([], 1), "unsafe");
+    });
+  });
+
+  // PR #60 review F2: a DO migration deleting, renaming or transferring a
+  // container's class changes the container application's Durable Object.
+  describe("DO migrations naming a container class (F2)", () => {
+    for (const m of [
+      { tag: "v2", deleted_classes: ["StudioDO"] },
+      { tag: "v2", renamed_classes: [{ from: "StudioDO", to: "StudioDO2" }] },
+      { tag: "v2", transferred_classes: [{ from: "StudioDO", from_script: "other", to: "StudioDO" }] },
+    ]) {
+      test(`${Object.keys(m)[1]} names StudioDO -> cannot tell, refused`, () => {
+        deployed();
+        builtDigests([deployedImage]);
+        const base = withImage("fleet-test");
+        writeConfig({ ...base, migrations: [...base.migrations, m] });
+        expectHard(deploy([], 1), "migration");
+      });
+    }
+
+    test("new_sqlite_classes only (the real config's shape) -> not a reason to refuse", () => {
+      deployed();
+      builtDigests([deployedImage]);
+      const r = deploy([], 1);
+      expect(r.code, r.err).toBe(0);
+    });
+  });
+
+  // PR #60 review F4: deploy.sh's own is_plain_deploy layer, independent of
+  // the probe's argument check: a non-plain command never reaches the probe.
+  describe("is_plain_deploy (F4)", () => {
+    for (const args of [[], ["deploy"], ["deploy", "-e", "staging"], ["deploy", "--env=staging"], ["--profile", "ops", "deploy"]]) {
+      test(`"${args.join(" ")}" is plain: the probe runs`, () => {
+        const base = withImage("fleet-test");
+        writeConfig({ ...base, env: { staging: { durable_objects: base.durable_objects, containers: base.containers } } });
+        if (args.some((a) => a.includes("staging"))) setCreds("https://fleet-test-staging.example.workers.dev");
+        const r = deploy(args, 1);
+        expect(r.probe.some((l) => l.startsWith("probe containers list"))).toBe(true);
+      });
+    }
+    for (const args of [
+      ["versions", "deploy"], ["rollback"], ["delete", "fleet-test"],
+      ["deploy", "--containers-rollout", "immediate"], ["deploy", "--name", "fleet-test"],
+      ["deploy", "--var", "X:1"], ["deploy", "--minify"], ["deploy", "extra-word"],
+    ]) {
+      test(`"${args.join(" ")}" is NOT plain: refused, the probe never runs`, () => {
+        deployed();
+        builtDigests([deployedImage]);
+        const r = deploy(args, 1);
+        expect(r.code).toBe(1);
+        expect(r.wrangler).toEqual([]);
+        expect(r.docker).toEqual([]);
+        expect(r.probe.filter((l) => l.includes("containers"))).toEqual([]);
+        // deploy.sh itself never started the probe script.
+        expect(r.err).not.toContain("deploy-containers:");
+      });
+    }
+  });
+
+  test("config with no containers at all -> undeterminable, refused", () => {
+    writeConfig({ name: "fleet-test" });
+    expectHard(deploy([], 1), "no containers");
+  });
+
+  test("two containers, one unchanged and one changed -> refused", () => {
+    deployed();
+    builtDigests([deployedImage]);
+    writeConfig({
+      ...withImage("fleet-test"),
+      durable_objects: { bindings: [{ name: "STUDIO", class_name: "StudioDO" }, { name: "AGENT", class_name: "AgentDO" }] },
+      migrations: [{ tag: "v1", new_sqlite_classes: ["StudioDO", "AgentDO"] }],
+      containers: [
+        { class_name: "StudioDO", image: "./container/Dockerfile", max_instances: 1 },
+        { class_name: "AgentDO", image: "./container/Dockerfile", max_instances: 1 },
+      ],
+    });
+    expectHard(deploy([], 1), "fleet-test-agentdo");
+  });
+
+  for (const args of [["versions", "deploy"], ["rollback"], ["deploy", "--containers-rollout", "immediate"]]) {
+    test(`"${args.join(" ")}" is not a plain deploy: same image, rescue fails -> refused`, () => {
+      deployed();
+      builtDigests([deployedImage]);
+      const r = deploy(args, 1);
+      expect(r.code).toBe(1);
+      expect(r.wrangler).toEqual([]);
+    });
+  }
+
+  test("--env selects the env container app, named by wrangler own reader (fleet-test-studiodo-staging)", () => {
+    const base = withImage("fleet-test");
+    // durable_objects and containers are not inherited by an env.
+    writeConfig({ ...base, env: { staging: { durable_objects: base.durable_objects, containers: base.containers } } });
+    setCreds("https://fleet-test-staging.example.workers.dev");
+    const img = "registry.cloudflare.com/acct-a/fleet-test-studiodo-staging@" + DIGEST_A;
+    stub("containers-list.json", [{ id: "app-2", name: "fleet-test-studiodo-staging", image: img }]);
+    stub("info-app-2.json", {
+      id: "app-2", name: "fleet-test-studiodo-staging", max_instances: 1, scheduling_policy: "default",
+      configuration: { image: img, vcpu: 0.0625, memory_mib: 256, disk: { size_mb: 2000 } },
+      constraints: { tiers: [1, 2] }, rollout_active_grace_period: 0,
+    });
+    builtDigests([img]);
+    const r = deploy(["deploy", "-e", "staging"], 1);
+    expect(r.code, r.err).toBe(0);
+    expect(r.wrangler).toEqual(["wrangler deploy -e staging -c wrangler.local.jsonc"]);
+  });
+});
+
+/**
+ * Issue #40 item 2: --allow-unrescued (and the Worker-only soft pass) used
+ * to leave only a stderr line. Each now appends one JSON line to
+ * ~/.fleet/deploy-overrides.jsonl -- the same small local ~/.fleet/ record
+ * convention as orca-workspaces.json and locks/. No email in it.
+ */
+describe("deploy.sh records every rescue-gate override durably (#40)", () => {
+  const logPath = () => join(home, ".fleet", "deploy-overrides.jsonl");
+  const records = () => readFileSync(logPath(), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const gitUser = (name: string | null) => {
+    const f = join(root, "gitconfig");
+    writeFileSync(f, name === null ? "" : `[user]\n\tname = ${name}\n\temail = op@example.com\n`);
+    return { GIT_CONFIG_GLOBAL: f, GIT_CONFIG_NOSYSTEM: "1", USER: "op-user" };
+  };
+
+  test("--allow-unrescued with rescue-all failing: one record with time, command, Worker, verdicts, operator", () => {
+    const r = deploy(["deploy", "--allow-unrescued"], 1, gitUser("Op Tester"));
+    expect(r.code, r.err).toBe(0);
+    const [rec, ...rest] = records();
+    expect(rest).toEqual([]);
+    expect(Date.now() - Date.parse(rec.ts)).toBeLessThan(120_000);
+    expect(rec.override).toBe("--allow-unrescued");
+    expect(rec.command).toBe("deploy");
+    expect(rec.target_worker).toBe("fleet-test");
+    expect(rec.target_check).toBe("matched");
+    expect(rec.rescue_all).toBe("exit 1");
+    expect(rec.operator).toBe("Op Tester");
+    expect(readFileSync(logPath(), "utf8")).not.toContain("@");
+    expect(r.err).toContain(logPath());
+  });
+
+  test("no git user.name: operator falls back to $USER", () => {
+    deploy(["--allow-unrescued"], 1, gitUser(null));
+    expect(records()[0].operator).toBe("op-user");
+  });
+
+  test("target mismatch overridden: the record says so and names the target Worker", () => {
+    setCreds("https://fleet-other.example.workers.dev");
+    deploy(["--allow-unrescued"], 0, gitUser("Op Tester"));
+    const rec = records()[0];
+    expect(rec.target_check).toBe("mismatch (exit 1)");
+    expect(rec.target_worker).toBe("fleet-test");
+    expect(rec.rescue_all).toBe("passed");
+  });
+
+  test("records append: two overrides -> two lines", () => {
+    deploy(["--allow-unrescued"], 1, gitUser("Op Tester"));
+    deploy(["--allow-unrescued"], 1, gitUser("Op Tester"));
+    expect(records()).toHaveLength(2);
+  });
+
+  test("Worker-only soft pass is recorded too", () => {
+    stub("containers-list.json", [{ id: "app-1", name: "fleet-test-studiodo", image: `${REPO}@${DIGEST_A}` }]);
+    stub("info-app-1.json", {
+      id: "app-1", name: "fleet-test-studiodo", max_instances: 1, scheduling_policy: "default",
+      configuration: { image: `${REPO}@${DIGEST_A}`, vcpu: 0.0625, memory_mib: 256, disk: { size_mb: 2000 } },
+      constraints: { tiers: [1, 2] }, rollout_active_grace_period: 0,
+    });
+    stub("repo-digests.json", [`${REPO}@${DIGEST_A}`]);
+    const r = deploy([], 1, gitUser("Op Tester"));
+    expect(r.code, r.err).toBe(0);
+    const rec = records()[0];
+    expect(rec.override).toBe("worker-only");
+    expect(rec.rescue_all).toBe("exit 1");
+  });
+
+  test("no override needed (rescue passes, target matches): nothing recorded", () => {
+    expect(deploy([], 0).code).toBe(0);
+    expect(existsSync(logPath())).toBe(false);
+  });
+
+  // PR #60 review F3: --var/--define values and a secrets file path may be
+  // secrets. The record keeps flag names only.
+  test("flag values never land in the record: --var, --var=, --define, --secrets-file", () => {
+    const r = deploy(["deploy", "--var", "API_KEY:s3cr3t-one", "--var=K2:s3cr3t-two", "--define", "D:s3cr3t-three",
+      "--secrets-file", "s3cr3t-four.json", "--allow-unrescued"], 1, gitUser("Op Tester"));
+    expect(r.code, r.err).toBe(0);
+    const raw = readFileSync(logPath(), "utf8");
+    expect(raw).not.toContain("s3cr3t");
+    expect(raw).not.toContain("API_KEY");
+    expect(records()[0].command).toBe("deploy --var --var --define --secrets-file");
+  });
+
+  test("-e keeps its env value (not secret, needed to know the target)", () => {
+    const base = withImage("fleet-test");
+    writeConfig({ ...base, env: { staging: { durable_objects: base.durable_objects, containers: base.containers } } });
+    setCreds("https://fleet-test-staging.example.workers.dev");
+    deploy(["deploy", "-e", "staging", "--allow-unrescued"], 1, gitUser("Op Tester"));
+    expect(records()[0].command).toBe("deploy -e staging");
+  });
+
+  test("the record cannot be written -> refused (an override must leave a trace)", () => {
+    mkdirSync(logPath(), { recursive: true });
+    const r = deploy(["--allow-unrescued"], 1, gitUser("Op Tester"));
+    expect(r.code).toBe(1);
+    expect(r.wrangler).toEqual([]);
+    expect(r.err).toContain("deploy-overrides.jsonl");
+  });
+});
+
+/**
+ * Issue #48 (#40 scope add): a workers.dev credentials host matched by the
+ * Worker NAME alone let a same-named Worker on ANOTHER account pass. The
+ * check now resolves the deploying account's workers.dev subdomain (account:
+ * config account_id, else CLOUDFLARE_ACCOUNT_ID, else the one account
+ * `wrangler whoami` lists; token: `wrangler auth token`) and compares it.
+ * Unresolvable -> refused. Route/custom-domain matches need no lookup.
+ */
+describe("deploy.sh: workers.dev match compares the account subdomain (#48)", () => {
+  function expectRefused(r: ReturnType<typeof deploy>, ...mentions: string[]) {
+    expect(r.code, r.err).toBe(1);
+    expect(r.wrangler).toEqual([]);
+    expect(r.fleet).toEqual([]);
+    expect(r.err).toContain("pass --allow-unrescued to override");
+    for (const m of mentions) expect(r.err).toContain(m);
+  }
+
+  test("same Worker name, creds on another account's subdomain -> refused, both subdomains named", () => {
+    setCreds("https://fleet-test.acme-sub.workers.dev");
+    expectRefused(deploy([], 0), "acme-sub", "example.workers.dev");
+  });
+
+  test("same Worker name, same subdomain (whoami's single account) -> passes", () => {
+    const r = deploy([], 0);
+    expect(r.code, r.err).toBe(0);
+    expect(r.probe.some((l) => l.startsWith("probe whoami --json"))).toBe(true);
+  });
+
+  test("CLOUDFLARE_ACCOUNT_ID picks the account: acct-b + creds on acme-sub -> passes, whoami not needed", () => {
+    setCreds("https://fleet-test.acme-sub.workers.dev");
+    const r = deploy([], 0, { CLOUDFLARE_ACCOUNT_ID: "acct-b" });
+    expect(r.code, r.err).toBe(0);
+    expect(r.probe.some((l) => l.startsWith("probe whoami"))).toBe(false);
+  });
+
+  test("config account_id wins over CLOUDFLARE_ACCOUNT_ID, as in wrangler", () => {
+    writeConfig({ ...withImage("fleet-test"), account_id: "acct-b" });
+    expectRefused(deploy([], 0, { CLOUDFLARE_ACCOUNT_ID: "acct-a" }), "acme-sub");
+  });
+
+  test("no account id and whoami lists two accounts -> refused (wrangler would pick from its cache or prompt)", () => {
+    stub("whoami.json", { loggedIn: true, accounts: [{ id: "acct-a", name: "A" }, { id: "acct-b", name: "B" }] });
+    expectRefused(deploy([], 0), "CLOUDFLARE_ACCOUNT_ID");
+  });
+
+  test("API error for the account -> refused", () => {
+    expectRefused(deploy([], 0, { CLOUDFLARE_ACCOUNT_ID: "acct-err" }), "workers.dev subdomain");
+  });
+
+  test("no auth token (not logged in) -> refused", () => {
+    rmSync(join(stubs, "auth-token.json"));
+    expectRefused(deploy([], 0), "auth token");
+  });
+
+  test("API unreachable -> refused", () => {
+    expectRefused(deploy([], 0, { CLOUDFLARE_API_BASE_URL: "http://127.0.0.1:9/client/v4" }), "workers.dev subdomain");
+  });
+
+  test("unresolvable with --allow-unrescued -> WARNING, deploy proceeds", () => {
+    rmSync(join(stubs, "auth-token.json"));
+    const r = deploy(["--allow-unrescued"], 0);
+    expect(r.code, r.err).toBe(0);
+    expect(r.err).toContain("WARNING");
+    expect(r.wrangler).toEqual(["wrangler deploy -c wrangler.local.jsonc"]);
+  });
+
+  test("route match needs no account lookup (no probe calls at all)", () => {
+    writeConfig({ ...withImage("fleet-test"), routes: [{ pattern: "fleet.example.com", custom_domain: true }] });
+    setCreds("https://fleet.example.com");
+    rmSync(join(stubs, "auth-token.json"));
+    const r = deploy(["deploy"], 0);
+    expect(r.code, r.err).toBe(0);
+    expect(r.probe).toEqual([]);
+  });
+
+  test("--profile is forwarded to the auth probes (it selects the account)", () => {
+    const r = deploy(["--profile", "ops", "deploy"], 0);
+    expect(r.code, r.err).toBe(0);
+    expect(r.probe.length).toBeGreaterThan(0);
+    expect(r.probe.every((l) => l.includes("--profile ops"))).toBe(true);
   });
 });

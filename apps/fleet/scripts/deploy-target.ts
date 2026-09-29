@@ -13,14 +13,26 @@
 // selection, env name inheritance (<name>-<env>) and route inheritance are
 // exactly what wrangler will deploy. Exit 0: the credentials host is one of
 // the target Worker's hosts (a non-wildcard route/custom-domain host, or
-// <worker-name>.<subdomain>.workers.dev). Exit 1: it is not. Exit 2: the
-// target (or the credentials host) cannot be determined -- fail closed.
-// Everything is printed on stderr.
+// <worker-name>.<subdomain>.workers.dev where <subdomain> is the DEPLOYING
+// account's own -- issue #48). Exit 1: it is not. Exit 2: the target (or
+// the credentials host, or that account subdomain) cannot be determined --
+// fail closed. The target Worker's name goes to stdout (deploy.sh's
+// override record); everything else to stderr.
+//
+// Issue #48: the account subdomain costs a read-only lookup, only for a
+// workers.dev credentials host: the account is the config's account_id,
+// else CLOUDFLARE_ACCOUNT_ID, else the ONE account `wrangler whoami` lists
+// (wrangler's own order; with several accounts wrangler would use its cache
+// or prompt -- refused, set CLOUDFLARE_ACCOUNT_ID); the token is `wrangler
+// auth token` (CLOUDFLARE_API_TOKEN or the wrangler login); then GET
+// /accounts/<id>/workers/subdomain (CLOUDFLARE_API_BASE_URL honoured, as
+// wrangler does). Needs network and a logged-in wrangler.
 //
 // Why refuse instead of pointing rescue-all at the config's Worker: the
 // credentials file holds the Access service token of ONE fleet; another
 // Worker's /studio sits behind its own Access app, so rescue-all could not
 // reach it anyway.
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +56,7 @@ if (!configPath) undeterminable("no config path given");
 const norm = (f: string) => "--" + f.slice(2).replace(/[-_]/g, "").toLowerCase();
 const envs: string[] = [];
 const names: string[] = [];
+const profiles: string[] = [];
 const words: string[] = [];
 let deleteAt = -1;
 for (let i = 0; i < args.length; i++) {
@@ -55,6 +68,7 @@ for (let i = 0; i < args.length; i++) {
   const value = () => inline ?? args[++i] ?? "";
   if (flag === "-e" || flag === "--env") envs.push(value());
   else if (flag === "--name") names.push(value());
+  else if (flag === "--profile") profiles.push(value());
   else if (flag === "-c" || flag === "--config") undeterminable(`${a} in the arguments: deploy.sh passes its own --config; two configs, target unknown`);
   else if (flag === "--cwd") undeterminable(`${a} in the arguments: it moves where wrangler resolves the config`);
   else if (flag === "--envfile") undeterminable(`${a} (--env-file) in the arguments: wrangler loads that file into its environment (CLOUDFLARE_ENV, WRANGLER_CI_OVERRIDE_NAME, ...)`);
@@ -98,11 +112,12 @@ for (const f of dotenvFiles) {
 }
 if (envs.length > 1) undeterminable(`--env given ${envs.length} times (${envs.join(", ")})`);
 if (names.length > 1) undeterminable(`Worker name given ${names.length} times (${names.join(", ")})`);
+if (profiles.length > 1) undeterminable(`--profile given ${profiles.length} times (${profiles.join(", ")})`);
 if (process.env.WRANGLER_CI_OVERRIDE_NAME) {
   undeterminable("WRANGLER_CI_OVERRIDE_NAME is set; wrangler deploys under that name instead of the config's");
 }
 
-let config: { name?: string; routes?: unknown[]; route?: unknown };
+let config: { name?: string; routes?: unknown[]; route?: unknown; account_id?: string; compliance_region?: string };
 try {
   // env undefined -> wrangler itself falls back to CLOUDFLARE_ENV.
   config = unstable_readConfig({ config: configPath, env: envs[0] } as never, { hideWarnings: true }) as typeof config;
@@ -111,6 +126,7 @@ try {
 }
 const worker = (names[0] ?? config.name ?? "").toLowerCase();
 if (!worker) undeterminable(`${configPath} names no Worker`);
+console.log(worker);
 
 const routeHosts = [...(config.routes ?? []), ...(config.route ? [config.route] : [])]
   .map((r) => (typeof r === "string" ? r : (r as { pattern?: string }).pattern ?? ""))
@@ -128,13 +144,64 @@ try {
 // Exact host only. A wildcard route ("*.example.com/*") also matches hosts
 // other Workers serve (a more specific route wins), so it proves nothing.
 const viaRoute = routeHosts.find((h) => !h.includes("*") && h === credsHost);
-const viaWorkersDev = new RegExp(`^${worker.replace(/[.+?^${}()|[\]\\]/g, "\\$&")}\\.[^.]+\\.workers\\.dev$`).test(credsHost);
+const credsSubdomain = new RegExp(`^${worker.replace(/[.+?^${}()|[\]\\]/g, "\\$&")}\\.([^.]+)\\.workers\\.dev$`).exec(credsHost)?.[1];
 
 const env = envs[0] ?? process.env.CLOUDFLARE_ENV;
-const target = `Worker "${worker}"${env ? ` (env ${env})` : ""}, hosts: ${[...routeHosts, `${worker}.<subdomain>.workers.dev`].join(", ")}`;
+let workersDev = `${worker}.<subdomain>.workers.dev`;
+let viaWorkersDev = false;
+if (!viaRoute && credsSubdomain) {
+  const sub = await accountSubdomain();
+  workersDev = `${worker}.${sub}.workers.dev`;
+  viaWorkersDev = sub === credsSubdomain;
+}
+const target = `Worker "${worker}"${env ? ` (env ${env})` : ""}, hosts: ${[...routeHosts, workersDev].join(", ")}`;
 if (viaRoute || viaWorkersDev) {
   say(`wrangler targets ${target}; credentials host ${credsHost} matches -- rescue-all rescues this fleet.`);
   process.exit(0);
 }
 say(`MISMATCH -- wrangler targets ${target}; but ${credsPath} points rescue-all at ${credsHost}. The gate would rescue the wrong fleet.`);
 process.exit(1);
+
+// Issue #48: the deploying account's workers.dev subdomain (see header).
+// The wrangler calls are read-only; FLEET_DEPLOY_PROBE marks them for the
+// tests' stub wrangler.
+async function accountSubdomain(): Promise<string> {
+  const flags = ["-c", configPath, ...(envs[0] ? ["-e", envs[0]] : []), ...(profiles[0] ? ["--profile", profiles[0]] : [])];
+  const wranglerJson = (argv: string[], what: string) => {
+    const r = spawnSync(join(appDir, "node_modules", ".bin", "wrangler"), [...argv, ...flags], {
+      cwd: appDir, encoding: "utf8", timeout: 60_000, env: { ...process.env, FLEET_DEPLOY_PROBE: "1" },
+    });
+    const out = r.stdout ?? "";
+    try {
+      if (r.status !== 0) throw new Error(`exit ${r.status}`);
+      return JSON.parse(out.slice(out.search(/[[{]/)));
+    } catch (e) {
+      undeterminable(`${what} (\`wrangler ${argv.join(" ")}\`) failed: ${String(e)} ${(r.stderr ?? "").trim().split("\n").slice(-2).join(" ")}`);
+    }
+  };
+  if (config.compliance_region && config.compliance_region !== "public") {
+    undeterminable(`compliance_region ${config.compliance_region}: its workers.dev host differs; not modelled`);
+  }
+  let account = config.account_id ?? process.env.CLOUDFLARE_ACCOUNT_ID;
+  if (!account) {
+    const accounts = (wranglerJson(["whoami", "--json"], "listing the logged-in accounts").accounts ?? []) as { id: string }[];
+    if (accounts.length !== 1) {
+      undeterminable(`the deploying account is not pinned (no account_id in the config, no CLOUDFLARE_ACCOUNT_ID) and wrangler whoami lists ${accounts.length} accounts; set CLOUDFLARE_ACCOUNT_ID`);
+    }
+    account = accounts[0].id;
+  }
+  const auth = wranglerJson(["auth", "token", "--json"], "reading the wrangler auth token") as { type?: string; token?: string; key?: string; email?: string };
+  const headers: Record<string, string> = auth.type === "api_key"
+    ? { "X-Auth-Key": auth.key ?? "", "X-Auth-Email": auth.email ?? "" }
+    : { Authorization: `Bearer ${auth.token ?? ""}` };
+  const base = (process.env.CLOUDFLARE_API_BASE_URL || "https://api.cloudflare.com/client/v4").replace(/\/$/, "");
+  try {
+    const res = await fetch(`${base}/accounts/${account}/workers/subdomain`, { headers, signal: AbortSignal.timeout(15_000) });
+    const body = (await res.json()) as { success?: boolean; result?: { subdomain?: string }; errors?: { message?: string }[] };
+    const sub = body.result?.subdomain;
+    if (!res.ok || !sub) throw new Error(`HTTP ${res.status} ${body.errors?.map((e) => e.message).join("; ") ?? ""}`);
+    return sub.toLowerCase();
+  } catch (e) {
+    undeterminable(`could not read the workers.dev subdomain of account ${account}: ${String(e)}`);
+  }
+}
