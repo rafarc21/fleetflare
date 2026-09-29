@@ -442,7 +442,8 @@ container itself answers "not running" (stale registry) is printed `skipped
 <id>: container not running` — neither counts as a failure. It exits
 non-zero ONLY when a studio's rescue attempt genuinely failed (a rejected
 push, a lock file, a hook), and its last line says `pre-deploy gate SAFE` or
-`... FAILED or TIMED OUT -- pre-deploy gate UNSAFE; do NOT deploy`. Also check
+`... attempted studios not rescued (<f> push FAILED, <t> TIMED OUT) --
+pre-deploy gate UNSAFE; do NOT deploy`. Also check
 `fleet ls` for working studios and deploy between tasks when you can — and
 after a deploy, expect one more container replacement before the image is
 stable (run `fleet rescue-all` again once it lands, for the same reason).

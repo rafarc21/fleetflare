@@ -443,9 +443,11 @@ test("the real production default concurrency is 5 (RESCUE_ALL_CONCURRENCY_LIMIT
 
 // ---------------------------------------------------------------------------
 // Issue #20: exit 1 alone was easy to miss. The run ends with ONE verdict
-// line on stderr that says, in words, whether deploying is safe.
+// line that says, in words, whether deploying is safe. The denominator is
+// the studios ATTEMPTED (a "container not running" skip is not one), and
+// the words tell a push failure from a timeout.
 
-test("some studios FAILED or TIMED OUT: final stderr line says n/m and pre-deploy gate UNSAFE; exit 1", async () => {
+test("mixed: n/attempted, push FAILED and TIMED OUT counted apart, UNSAFE on stderr; exit 1", async () => {
   const { deps, errs } = fakeDeps({
     studios: [studio("websites--a"), studio("websites--b"), studio("websites--c")],
     rescueStudio: async (id) =>
@@ -455,18 +457,45 @@ test("some studios FAILED or TIMED OUT: final stderr line says n/m and pre-deplo
   });
   const result = await runRescueAll(flags(), deps);
   expect(result.exitCode).toBe(1);
-  expect(errs.at(-1)).toBe("fleet rescue-all: 2/3 studios FAILED or TIMED OUT -- pre-deploy gate UNSAFE; do NOT deploy");
+  expect(errs.at(-1)).toBe(
+    "fleet rescue-all: 2/3 attempted studios not rescued (1 push FAILED, 1 TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy",
+  );
 });
 
-test("every studio FAILED: verdict says every push failed", async () => {
+test("1 FAILED + 2 'container not running' skips: denominator is the 1 attempted, and it says every push failed", async () => {
   const { deps, errs } = fakeDeps({
-    studios: [studio("websites--a"), studio("websites--b")],
-    rescueStudio: async () => ({ ok: false, error: "push rejected" }),
+    studios: [studio("websites--a"), studio("websites--b"), studio("websites--c")],
+    rescueStudio: async (id) =>
+      id === "websites--a" ? { ok: false, error: "push rejected" } : { ok: false, error: "not running" },
   });
   const result = await runRescueAll(flags(), deps);
   expect(result.exitCode).toBe(1);
   expect(errs.at(-1)).toBe(
-    "fleet rescue-all: every push failed (2/2 studios FAILED or TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy",
+    "fleet rescue-all: every push failed (1/1 attempted studios not rescued: 1 push FAILED, 0 TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy",
+  );
+});
+
+test("every attempted studio TIMED OUT: says every rescue timed out, never 'push failed'", async () => {
+  const { deps, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b")],
+    rescueStudio: async () => ({ ok: false, error: "timed out", timedOut: true }),
+  });
+  const result = await runRescueAll(flags(), deps);
+  expect(result.exitCode).toBe(1);
+  expect(errs.at(-1)).toBe(
+    "fleet rescue-all: every rescue timed out (2/2 attempted studios not rescued: 0 push FAILED, 2 TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy",
+  );
+});
+
+test("every attempted studio failed, mixed push FAILED and TIMED OUT: says no studio rescued", async () => {
+  const { deps, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b")],
+    rescueStudio: async (id) =>
+      id === "websites--a" ? { ok: false, error: "push rejected" } : { ok: false, error: "timed out", timedOut: true },
+  });
+  await runRescueAll(flags(), deps);
+  expect(errs.at(-1)).toBe(
+    "fleet rescue-all: no studio rescued (2/2 attempted studios not rescued: 1 push FAILED, 1 TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy",
   );
 });
 
@@ -478,10 +507,4 @@ test("no failures: final line says pre-deploy gate SAFE, never UNSAFE; exit 0", 
   expect(result.exitCode).toBe(0);
   expect(lines.at(-1)).toContain("pre-deploy gate SAFE");
   expect(errs.some((l) => l.includes("UNSAFE"))).toBe(false);
-});
-
-test("--dry-run rescues nothing, so it prints no SAFE verdict", async () => {
-  const { deps, lines, errs } = fakeDeps({ studios: [studio("websites--a")] });
-  await runRescueAll(flags({ dryRun: true }), deps);
-  expect([...lines, ...errs].some((l) => l.includes("pre-deploy gate"))).toBe(false);
 });

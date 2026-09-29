@@ -86,7 +86,8 @@ describe("deploy.sh runs rescue-all before a container-replacing command (#20)",
     expect(r.log).toEqual(["fleet rescue-all", "wrangler deploy -c wrangler.local.jsonc"]);
   });
 
-  for (const args of [["deploy"], ["deploy", "--minify"], ["versions", "deploy"], ["rollback"], ["delete"], ["--profile", "x", "deploy"]]) {
+  for (const args of [["deploy"], ["deploy", "--minify"], ["versions", "deploy"], ["rollback"], ["delete"], ["--profile", "x", "deploy"],
+    ["containers", "delete", "abc123"], ["-e", "prod", "containers", "delete", "abc123"], ["containers", "--json", "delete", "abc123"]]) {
     test(`"${args.join(" ")}" is gated: rescue-all exit 1 refuses it`, () => {
       const r = deploy(args, 1);
       expect(r.code).toBe(1);
@@ -101,6 +102,9 @@ describe("deploy.sh runs rescue-all before a container-replacing command (#20)",
     ["versions", "list"],
     ["whoami"],
     ["secret", "put", "X"],
+    ["containers", "list"],
+    ["containers", "info", "abc123"],
+    ["containers", "images", "delete", "img:tag"],
   ]) {
     test(`"${args.join(" ")}" replaces no container: rescue-all never runs`, () => {
       const r = deploy(args, 1);

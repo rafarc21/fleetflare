@@ -62,7 +62,8 @@
 #     these checks with a loud warning. A config outside any git repo cannot
 #     be checked: warning only.
 #   - (issue #20) the command replaces the studio containers (no args,
-#     deploy except --dry-run, versions deploy, rollback, delete; see
+#     deploy except --dry-run, versions deploy, rollback, delete,
+#     containers delete; see
 #     replaces_containers) and `fleet rescue-all`, run first, exits non-zero
 #     (a studio FAILED/TIMED OUT, or no creds to list studios -- a first
 #     deploy). `--allow-unrescued` (consumed here, never passed to wrangler)
@@ -169,9 +170,10 @@ is_read_only() {
 
 # Issue #20: commands that replace (or destroy) the running studio
 # containers, losing any unpushed work in them: no args (deploy), deploy
-# (not --dry-run), versions deploy, rollback, delete. Same strict parse as
-# is_read_only: an unknown flag before the command word, or any flag between
-# `versions` and its subcommand, is guarded (it may hide a deploy).
+# (not --dry-run), versions deploy, rollback, delete, containers delete.
+# Same strict parse as is_read_only: an unknown flag before the command word,
+# or any flag between `versions`/`containers` and its subcommand, is guarded
+# (it may hide a deploy or a delete).
 replaces_containers() {
   local a w1="" w2="" phase=0 skip=0
   [[ "$#" == 0 ]] && return 0
@@ -184,12 +186,13 @@ replaces_containers() {
       case "$a" in -*) return 0 ;; *) w1="$a"; phase=1; continue ;; esac
     fi
     if [[ "$phase" == 1 ]]; then
-      case "$a" in -*) [[ "$w1" == versions ]] && return 0 ;; *) w2="$a"; phase=2 ;; esac
+      case "$a" in -*) [[ "$w1" == versions || "$w1" == containers ]] && return 0 ;; *) w2="$a"; phase=2 ;; esac
     fi
   done
   case "$w1" in
     deploy|rollback|delete) return 0 ;;
     versions) [[ "$w2" == deploy ]] ;;
+    containers) [[ "$w2" == delete ]] ;;
     *) return 1 ;;
   esac
 }

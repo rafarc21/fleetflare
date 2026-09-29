@@ -675,7 +675,8 @@ commands. A `degraded` response's `error` field names which step failed
 
 Every *subsequent* `bun run deploy` rescues first (issue #20): before any
 command that replaces the studio containers (a bare deploy, `deploy` without
-`--dry-run`, `versions deploy`, `rollback`, `delete`), `scripts/deploy.sh`
+`--dry-run`, `versions deploy`, `rollback`, `delete`, `containers delete`),
+`scripts/deploy.sh`
 runs `fleet rescue-all` and refuses if it exits non-zero — `rescue-all
 reported FAILED -- pre-deploy gate UNSAFE`. See "Things that will bite you"
 below. Read-only commands and `d1 migrations` never run it. Pass
@@ -746,8 +747,9 @@ once to a freshly generated ref before it counts as a failure. It prints a
 `skipped <id> (<state>)` row for every stopped/provisioning studio and for
 any studio the container itself reports isn't actually running, and
 exits non-zero only on a genuine rescue failure. Its last line is the
-verdict: `pre-deploy gate SAFE`, or `<n>/<m> studios FAILED or TIMED OUT --
-pre-deploy gate UNSAFE; do NOT deploy` on stderr. Push as you go regardless.
+verdict: `pre-deploy gate SAFE`, or `<n>/<attempted> attempted studios not
+rescued (<f> push FAILED, <t> TIMED OUT) -- pre-deploy gate UNSAFE; do NOT
+deploy` on stderr. A "container not running" skip is not attempted. Push as you go regardless.
 
 **Rollout convergence takes minutes.** `wrangler containers info` keeps
 reporting the old digest with an `active_rollout_id` until it finishes. A studio
