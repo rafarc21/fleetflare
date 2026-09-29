@@ -244,7 +244,7 @@ function fakeStudioNamespace(
       }
       // Issue #62: rescue-push answers a real verdict — an unparseable one is
       // now an UNCONFIRMED rescue, which refuses destroy/recycle.
-      if (cmd.includes("status --porcelain")) return { code: 0, stdout: RESCUE_CLEAN, stderr: "" };
+      if (cmd.includes("status --porcelain")) return fakeRescueAnswer;
       return { code: 0, stdout: cmd.startsWith("mkdir -p") ? "0\n1758067200" : "", stderr: "" }; // #202: size + tar-start watermark
     },
     r2Put: async () => {},
@@ -347,6 +347,10 @@ function fakeStudioNamespace(
     wakeCmds,
   };
 }
+
+/** Issue #62 follow-up: what the fake namespace's rescue-push exec answers.
+ *  A real script always prints a verdict; a test flips this to a killed exec. */
+let fakeRescueAnswer: { code: number; stdout: string; stderr: string } = { code: 0, stdout: RESCUE_CLEAN, stderr: "" };
 
 function envWithFakeStudio(
   sbExecFake: ProvisionDeps["sbExec"] = vi.fn(),
@@ -2638,6 +2642,29 @@ describe("repair verbs name the failing side (#96)", () => {
     expect(res.status).toBe(409);
     expect(await res.text()).toBe(refusal);
   });
+
+  // Issue #62 follow-up: end to end through the real recycleWithSync /
+  // runDestroy the fake namespace wires — a KILLED rescue exec (124) is an
+  // unconfirmed rescue, and each verb answers 409 naming it.
+  for (const verb of ["recycle", "destroy"] as const) {
+    it(`#62: ${verb} with a killed rescue exec (124) → 409 "could not confirm", never a teardown`, async () => {
+      authorized();
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      fakeRescueAnswer = { code: 124, stdout: "", stderr: "" };
+      try {
+        const { testEnv } = envWithFakeStudio();
+        const res = await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/${verb}`, { method: "POST" }), testEnv);
+        expect(res.status).toBe(409);
+        const text = await res.text();
+        expect(text).toContain("could not confirm");
+        expect(text).toContain(`fleet ${verb} ${STUDIO_ID} --discard-unsynced`);
+        expect(text).not.toContain("--force");
+      } finally {
+        fakeRescueAnswer = { code: 0, stdout: RESCUE_CLEAN, stderr: "" };
+        errSpy.mockRestore();
+      }
+    });
+  }
 
   it("recycle: a refusal is a 409 even without `remote`, and is logged as refused, not failed", async () => {
     authorized();
