@@ -196,8 +196,14 @@ function rescueOnOriginFn(pushTimeoutSeconds: number): string {
     // (fetch URL) cannot vouch for where a push would land: never "saved".
     // #7's write proxy uses a global pushInsteadOf that forwards to the SAME
     // GitHub repo, so it leaves this check (and the listing) valid.
+    // PR #65 review: fetch-side insteadOf can point the listing at a decoy
+    // while pushInsteadOf keeps pushes on the real origin (#344's shape).
+    // `ls-remote --get-url` applies insteadOf, ignores pushInsteadOf: it must
+    // name remote.origin.url itself, same guard as credentials.ts's wrapper.
+    `    __rurl="$(git -C "$1" config --get remote.origin.url 2>/dev/null)"\n` +
     `    __rpu="$(git -C "$1" config --get remote.origin.pushurl 2>/dev/null)"\n` +
-    `    if [ -z "$__rpu" ] || [ "$__rpu" = "$(git -C "$1" config --get remote.origin.url 2>/dev/null)" ]; then\n` +
+    `    if [ -n "$__rurl" ] && { [ -z "$__rpu" ] || [ "$__rpu" = "$__rurl" ]; } && ` +
+    `[ "$(git -C "$1" ls-remote --get-url origin 2>/dev/null)" = "$__rurl" ]; then\n` +
     // Issue #58: budgeted like every push. Out of budget = no listing =
     // "not on origin", so the push path (and its own budget refusal) runs.
     `      if rescue_budget_ok on-origin >/dev/null; then ` +
@@ -215,6 +221,9 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
   return (
     `rescue_try_push() {\n` +
     `  local w="$1" nv="$2" src="$3" ref="$4" snap\n` +
+    // PR #65 review: an early budget return must not leave the PREVIOUS
+    // push's stderr in perr for the caller to report as this one's.
+    `  perr=""\n` +
     // PR #31 review: the snapshot push (and the -nff retry calling this) run
     // past the pushes the caller's rescue_budget_ok reserved. Checked before
     // EVERY push, silently (a budget line here would land in rescue_push's

@@ -2572,6 +2572,29 @@ describe("#58 — on-origin check: budgeted, fail-safe, push URL aware; every pu
     });
   }
 
+  // PR #65 review: fetch-side insteadOf can point the LISTING at a decoy
+  // while pushInsteadOf keeps pushes on the real origin (the #344 shape).
+  // The decoy holds the commit; origin does not. Never a false clean.
+  for (const [label, cmdFn] of RESCUE_CMDS) {
+    test(`${label}: a fetch-side insteadOf decoy listing never reads as already-saved — work reaches the real origin`, () => {
+      const decoy = join(dir, "decoy.git");
+      sh(`git init -q --bare -b main ${decoy}`);
+      sh(`cd ${checkout} && git checkout -q -b task/pr && git commit -q --allow-empty -m "unpushed work" && ` +
+        `git push -q ${decoy} HEAD:refs/heads/task/pr; git branch --unset-upstream 2>/dev/null; true`);
+      sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 2>/dev/null; rm -rf .claude; true`);
+      const head = sh(`git -C ${checkout} rev-parse HEAD`).out;
+      sh(`git -C ${checkout} config url.${decoy}.insteadOf ${origin}`);
+      sh(`git -C ${checkout} config url.${origin}.pushInsteadOf ${origin}`);
+
+      const r = sh(cmdFn(REPO, STUDIO, root));
+
+      expect(bare(r.out)).not.toBe(RESCUE_CLEAN);
+      expect(r.out).toContain(RESCUE_PUSHED_PREFIX);
+      const onOrigin = sh(`git -C ${origin} for-each-ref --format='%(objectname)'`).out.split("\n");
+      expect(onOrigin).toContain(head);
+    });
+  }
+
   test("rescuePushCmd: pushurl differs from the fetch url → the listing cannot vouch for the push destination → push runs", () => {
     prBranchOnOrigin();
     const elsewhere = join(dir, "push-dest.git");
