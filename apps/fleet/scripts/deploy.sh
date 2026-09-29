@@ -69,6 +69,12 @@
 #     deploy). `--allow-unrescued` (consumed here, never passed to wrangler)
 #     deploys anyway with a loud warning. Read-only commands and d1
 #     migrations never run rescue-all.
+#   - (issue #36) same commands, checked BEFORE rescue-all: the Worker
+#     wrangler will replace (this config read by the pinned wrangler's own
+#     reader, + --env/-e or CLOUDFLARE_ENV, + --name / `delete <name>`) is
+#     not provably the fleet ~/.fleet/credentials points rescue-all at, or
+#     cannot be determined (see scripts/deploy-target.ts). Same
+#     --allow-unrescued override.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

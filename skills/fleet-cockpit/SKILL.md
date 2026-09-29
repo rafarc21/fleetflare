@@ -430,7 +430,11 @@ rolled container is gone. **`bun run deploy` runs `fleet rescue-all`
 itself** (issue #251; gate built into `scripts/deploy.sh` by issue #20) and
 refuses on `pre-deploy gate UNSAFE`. Never call a bare `wrangler deploy`: it
 skips the gate. `--allow-unrescued` overrides, loudly; a first deploy (no
-Worker, no creds) needs it. rescue-all commits and pushes
+Worker, no creds) needs it. Gate also refuses when wrangler's target Worker
+(config + `--env`/`CLOUDFLARE_ENV` + `--name`) is not the fleet
+`~/.fleet/credentials` names (issue #36) — else it rescues the wrong fleet
+and says SAFE. Deploying another fleet: point credentials at it first.
+rescue-all commits and pushes
 every RUNNING AND DEGRADED studio's uncommitted work (the main checkout AND
 every member git worktree, each independently, each to its own
 `fleet/rescue/...` ref), plus every local branch not checked out anywhere and

@@ -684,7 +684,17 @@ command that replaces the studio containers (a bare deploy, `deploy` without
 `scripts/deploy.sh`
 runs `fleet rescue-all` and refuses if it exits non-zero — `rescue-all
 reported FAILED -- pre-deploy gate UNSAFE`. See "Things that will bite you"
-below. Read-only commands and `d1 migrations` never run it. Pass
+below. Read-only commands and `d1 migrations` never run it. First the gate
+checks target (issue #36): `rescue-all` rescues the fleet
+`~/.fleet/credentials` names, wrangler replaces the Worker the config names
+(plus `--env`/`-e`, `CLOUDFLARE_ENV`, `--name`). `scripts/deploy-target.ts`
+reads the config with the pinned wrangler's own reader. The credentials host
+must be one of that Worker's route/custom-domain hosts, or
+`<worker-name>.<subdomain>.workers.dev`. Mismatch refuses, naming both.
+Undeterminable target refuses too: no credentials, unknown env, a second
+`-c`/`--config`, `--cwd`, `WRANGLER_CI_OVERRIDE_NAME`, and every `containers
+delete` (a container app id names no Worker). To deploy another fleet, point
+`~/.fleet/credentials` at it first. Pass
 `--allow-unrescued` later only after reading the FAILED rows and accepting
 the loss of that work. Never call a bare `wrangler deploy`: it skips the gate.
 
