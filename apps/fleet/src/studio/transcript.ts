@@ -151,6 +151,7 @@ export interface TranscriptStorage {
   put(key: typeof TRANSCRIPT_MANIFEST_KEY, value: TranscriptManifest): Promise<void>;
   put(key: typeof TRANSCRIPT_TAIL_KEY, value: string): Promise<void>;
   put(key: typeof TRANSCRIPT_BOOT_ID_KEY, value: string): Promise<void>;
+  put(key: typeof RESTARTS_KEY, value: RestartLog): Promise<void>;
   /**
    * Fix round 2 (Critical residual): atomic multi-key write — the SAME
    * overload shape real `DurableObjectStorage.put` already has natively
@@ -963,10 +964,16 @@ export async function shipTranscriptTick(
     effectiveManifest = { ...manifest, offset: 0 };
     resetTriggered = true;
     restarts = recordRestart(await storage.get(RESTARTS_KEY), now, bringupVia);
-  } else if (freshBootId !== storedBootId) {
-    // Only reachable when storedBootId is undefined (first-ever
-    // observation) — seed the marker going forward; nothing to reset.
-    await storage.put(TRANSCRIPT_BOOT_ID_KEY, freshBootId);
+  } else {
+    if (freshBootId !== storedBootId) {
+      // Only reachable when storedBootId is undefined (first-ever
+      // observation) — seed the marker going forward; nothing to reset.
+      await storage.put(TRANSCRIPT_BOOT_ID_KEY, freshBootId);
+    }
+    // Issue #56 review: a boot-id baseline now exists, so "no replacement
+    // seen since" is a real fact from here on — seed the count at 0 once.
+    // Until this runs the key stays absent and `fleet ls` shows "-".
+    if ((await storage.get(RESTARTS_KEY)) === undefined) await storage.put(RESTARTS_KEY, { total: 0, recent: [] });
   }
 
   if (effectiveManifest.offset > size) {

@@ -17,6 +17,7 @@ import {
 } from "../src/studio/transcript";
 import { RESTARTS_KEY, recordRestart, restartsInWindow, RESTART_WINDOW_MS, type RestartLog } from "../src/studio/restarts";
 import type { StudioStatus } from "../src/studio/types";
+import { formatRestartCell } from "../cli/restart-format";
 
 const TOK = "11111111-2222-3333-4444-555555555555";
 const T0 = "2026-09-29T10:00:00.000Z";
@@ -92,16 +93,28 @@ describe("container restart count — counted from the boot-id generation marker
   });
 
   it("restart on the SAME container (boot-id unchanged) is not a container restart", async () => {
-    const storage = fakeStorage({ bootId: "boot-a", via: "restart" });
+    const storage = fakeStorage({ bootId: "boot-a", via: "restart", restarts: { total: 2, recent: [] } });
     await tick(storage, "boot-a");
-    expect(log(storage)).toBeUndefined();
+    expect(log(storage)).toEqual({ total: 2, recent: [] });
   });
 
-  it("first-ever boot-id observation seeds, never counts (nothing to compare against)", async () => {
+  it("first-ever boot-id observation is the baseline: seeds 0, never counts", async () => {
     const storage = fakeStorage({ via: "provision" });
     await tick(storage, "boot-a");
-    expect(log(storage)).toBeUndefined();
+    expect(log(storage)).toEqual({ total: 0, recent: [] });
     expect(storage.map.get(TRANSCRIPT_BOOT_ID_KEY)).toBe("boot-a");
+  });
+
+  it("post-deploy studio (boot-id baseline stored, no log yet): same boot-id seeds 0", async () => {
+    const storage = fakeStorage({ bootId: "boot-a", via: "restart" });
+    await tick(storage, "boot-a");
+    expect(log(storage)).toEqual({ total: 0, recent: [] });
+  });
+
+  it("no baseline yet (boot-id unreadable, none stored): nothing seeded — count stays unknown", async () => {
+    const storage = fakeStorage({ via: "provision" });
+    await tick(storage, "");
+    expect(log(storage)).toBeUndefined();
   });
 
   it("unreadable boot-id never counts (no false generation change)", async () => {
@@ -162,9 +175,23 @@ describe("the count reaches the registry row through withObserved (#56)", () => 
     expect((await withObserved(storage, status)).observed?.restarts).toEqual(restarts);
   });
 
-  it("no stored log attaches null (never counted yet), not undefined", async () => {
+  it("no stored log leaves observed.restarts ABSENT (unknown), never a fabricated zero", async () => {
     const storage = fakeStorage();
     const out = await withObserved(storage, { id: "acmeclient--lead" } as StudioStatus);
-    expect(out.observed?.restarts).toBeNull();
+    expect(out.observed && "restarts" in out.observed).toBe(false);
+  });
+});
+
+describe("RST end to end: DO storage -> row -> cell (#56 review)", () => {
+  const cell = async (storage: Store) =>
+    formatRestartCell(await withObserved(storage, { id: "acmeclient--lead" } as StudioStatus), new Date(T0));
+
+  it("right after deploy (no key yet) reads '-', not 0/0; baseline tick -> 0/0; new boot-id -> 1/1", async () => {
+    const storage = fakeStorage({ bootId: "boot-a", via: "recycle" });
+    expect(await cell(storage)).toBe("-");
+    await tick(storage, "boot-a");
+    expect(await cell(storage)).toBe("0/0");
+    await tick(storage, "boot-b");
+    expect(await cell(storage)).toBe("1/1");
   });
 });

@@ -38,9 +38,6 @@ describe("observed.ts", () => {
       // Issue #249 round 2, item 2: the DEFERRED-brief marker, named for the
       // same reason and with the same optional-means-null reading.
       survivalBriefPending: null,
-      // Issue #56: the container-restart log, named for the same reason —
-      // withObserved always attaches it, so an empty record carries it too.
-      restarts: null,
     });
   });
 

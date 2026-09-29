@@ -9,13 +9,13 @@ import type { StudioStatus } from "../src/studio/types";
 export const RESTART_CHURN_24H = 3;
 
 export const RESTART_LEGEND =
-  "RST column: <containers replaced in the last 24h>/<lifetime>; '-' = not counted yet (row from an older Worker)";
+  "RST column: <containers replaced in the last 24h>/<since tracking began>; '-' = not tracked yet";
 
-/** `-` for a row that carries no count (written before #56); `0/0` for a
- *  studio watched and never replaced. */
+/** `-` while the count is unknown (no baseline yet, or a row from an older
+ *  Worker); `0/0` once tracked and never replaced since. */
 export function formatRestartCell(s: StudioStatus, now: Date): string {
   const log = s.observed?.restarts;
-  if (log === undefined) return "-";
+  if (log == null) return "-";
   return `${restartsInWindow(log, now)}/${Number(log?.total) || 0}`;
 }
 

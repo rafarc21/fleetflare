@@ -5,9 +5,17 @@
 // The unit is a container GENERATION: transcript.ts's ship tick sees a new
 // boot-id at TRANSCRIPT_BOOT_ID_PATH (one per container lifetime) and appends
 // here in the same atomic write that records the new boot-id — once per
-// generation, whatever caused it (fleet recycle, destroy+spawn, image
-// rollout, platform restart). A restart that re-runs bring-up on the SAME
-// container keeps its /workspace and its boot-id, so it is not counted.
+// generation it SEES (fleet recycle, destroy+spawn, image rollout, platform
+// restart). A restart that re-runs bring-up on the SAME container keeps its
+// /workspace and its boot-id, so it is not counted.
+//
+// Undercounts, knowingly: a container that dies before bring-up's
+// transcript-pipe step (no boot-id file or no log file yet — the tick skips
+// both) and is replaced again before the tick sees it is never counted, and
+// two replacements between ticks count as one.
+//
+// Starts ABSENT (unknown, `fleet ls` "-"); the tick seeds `{ total: 0 }`
+// once a boot-id baseline exists, so a zero is always an observed zero.
 //
 // Own DO-storage key, attached to `Observed` by do.ts's withObserved, so it
 // reaches the D1 row (`observed.restarts`) through the one seam every row
@@ -33,7 +41,7 @@ export interface RestartEvent {
 }
 
 export interface RestartLog {
-  /** Lifetime count since this Worker started counting. Never pruned. */
+  /** Count since tracking began (the baseline seed). Never pruned. */
   total: number;
   /** Events inside the last RESTART_WINDOW_MS as of the latest write. */
   recent: RestartEvent[];

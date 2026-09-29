@@ -3443,7 +3443,7 @@ async function getObservedWithActivity(storage: ObservedStorage): Promise<Observ
     // Issue #56 — same idiom again: the container-restart log (restarts.ts).
     (storage as unknown as RestartStorage).get(RESTARTS_KEY),
   ]);
-  return { ...observed, activity: activity ?? null, memberAlerts: memberAlerts ?? null, restarts: restarts ?? null };
+  return { ...observed, activity: activity ?? null, memberAlerts: memberAlerts ?? null, ...(restarts === undefined ? {} : { restarts }) };
 }
 
 export async function withObserved(storage: ObservedStorage, status: StudioStatus): Promise<StudioStatus> {

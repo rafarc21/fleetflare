@@ -16,7 +16,8 @@ function row(restarts?: RestartLog | null, id = "acmeclient--lead"): StudioStatu
   return {
     id, state: "running", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
     burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    ...(restarts === undefined ? {} : { observed: { ...emptyObserved(), restarts } }),
+    // `null` is never stored (hand-edited row only) — cast to exercise it.
+    ...(restarts === undefined ? {} : { observed: { ...emptyObserved(), restarts: restarts as RestartLog } }),
   };
 }
 
@@ -36,8 +37,11 @@ describe("RST cell", () => {
     const log: RestartLog = { total: 6, recent: [{ at: ago(30), via: "heal" }, { at: ago(2), via: "recycle" }, { at: ago(1), via: "recycle" }] };
     expect(formatRestartCell(row(log), NOW)).toBe("2/6");
   });
-  test("a studio this Worker has watched and never seen replaced reads 0/0", () => {
-    expect(formatRestartCell(row(null), NOW)).toBe("0/0");
+  test("a studio with a baseline and no replacement since reads 0/0", () => {
+    expect(formatRestartCell(row({ total: 0, recent: [] }), NOW)).toBe("0/0");
+  });
+  test("null (never a stored shape) reads '-', not a fabricated 0/0", () => {
+    expect(formatRestartCell(row(null), NOW)).toBe("-");
   });
   test("row written by deployed main (no count recorded) reads '-', never crashes", () => {
     expect(formatRestartCell(MAIN_ROW, NOW)).toBe("-");
@@ -83,5 +87,7 @@ describe("RESTARTS churn line", () => {
   test("legend explains the column", () => {
     expect(RESTART_LEGEND).toContain("RST");
     expect(RESTART_LEGEND).toContain("24h");
+    expect(RESTART_LEGEND).toContain("since tracking began");
+    expect(RESTART_LEGEND).not.toContain("lifetime");
   });
 });

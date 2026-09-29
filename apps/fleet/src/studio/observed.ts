@@ -244,10 +244,11 @@ export interface Observed {
   /**
    * Issue #56 — the D1-facing mirror of the DO's own container-restart log
    * (restarts.ts's `RESTARTS_KEY`), attached at the same seam as `activity`.
-   * `null`: this Worker has watched and seen no replacement yet. Absent: a
-   * row written before this field existed — the count is unknown.
+   * ABSENT while unknown: no boot-id baseline yet, or a row written before
+   * this field existed — never a fabricated zero. `{ total: 0 }` only once
+   * the ship tick has a baseline and has seen no replacement since.
    */
-  restarts?: RestartLog | null;
+  restarts?: RestartLog;
 }
 
 /**
@@ -311,9 +312,6 @@ export function emptyObserved(): Observed {
     incarnation: null, replacedAt: null, execFailures: 0, unreachableSince: null,
     lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
     survivalBriefDeliveredFor: null, survivalBriefPending: null,
-    // Issue #56: named explicitly, like `activity`/`memberAlerts` — the
-    // withObserved seam always attaches it, so an empty record carries it too.
-    restarts: null,
   };
 }
 
