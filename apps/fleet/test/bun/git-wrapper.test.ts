@@ -74,6 +74,12 @@ import {
  */
 const REAL_GIT = Bun.which("git", { PATH: process.env.PATH });
 const TIMEOUT_BIN = Bun.which("timeout") ?? Bun.which("gtimeout");
+/** Issue #39: rescue output also carries one RESCUE_WT line per worktree;
+ *  these asserts pin the verdict line alone. */
+function withoutWorktreeReport(stdout: string): string {
+  return stdout.trim().split("\n").filter((l) => !l.startsWith("RESCUE_WT ")).join("\n");
+}
+
 const LANE = REAL_GIT !== null && TIMEOUT_BIN !== null && !process.env.TMUX ? describe : describe.skip;
 
 /** A tiny PATH shim so withKillDeadline's hardcoded `timeout` invocation
@@ -539,7 +545,7 @@ LANE("the fleet git wrapper ALLOWS every push a studio actually needs (issue #25
 
     expect(r.code).toBe(0);
     // #266 (PR #312): every RESCUE_PUSHED line now names its kind.
-    expect(r.stdout.trim()).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 ${RESCUE_PUSHED_KIND_FILES}$`));
+    expect(withoutWorktreeReport(r.stdout)).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 ${RESCUE_PUSHED_KIND_FILES}$`));
     expect(originRefs(f).some((ref) => ref.startsWith(`refs/heads/fleet/rescue/${STUDIO}-`))).toBe(true);
   });
 
@@ -555,7 +561,7 @@ LANE("the fleet git wrapper ALLOWS every push a studio actually needs (issue #25
     const r = bash(f, rescueSnapshotCmd(REPO, STUDIO, join(f.root, "ws")), f.root);
 
     expect(r.code).toBe(0);
-    expect(r.stdout.trim()).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 ${RESCUE_PUSHED_KIND_FILES}$`));
+    expect(withoutWorktreeReport(r.stdout)).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 ${RESCUE_PUSHED_KIND_FILES}$`));
     expect(originRefs(f).some((ref) => ref.startsWith(`refs/heads/fleet/rescue/${STUDIO}-`))).toBe(true);
     // Live: the studio's own HEAD is untouched by the snapshot.
     expect(realGit(f, ["rev-parse", "HEAD"]).stdout.trim()).toBe(head);
@@ -570,7 +576,7 @@ LANE("the fleet git wrapper ALLOWS every push a studio actually needs (issue #25
     const r = bash(f, rescueSnapshotCmd(REPO, STUDIO, join(f.root, "ws")), f.root);
 
     expect(r.code).toBe(0);
-    expect(r.stdout.trim()).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 ${RESCUE_PUSHED_KIND_COMMITS}$`));
+    expect(withoutWorktreeReport(r.stdout)).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 ${RESCUE_PUSHED_KIND_COMMITS}$`));
     expect(originRefs(f).some((ref) => ref.startsWith(`refs/heads/fleet/rescue/${STUDIO}-`))).toBe(true);
     expect(originState(f).filter((l) => l.startsWith("refs/heads/task/feature"))).toEqual(featureBefore);
   });
