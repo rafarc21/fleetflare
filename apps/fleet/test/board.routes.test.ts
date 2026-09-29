@@ -1289,3 +1289,59 @@ describe("openTaskChecker (#55)", () => {
       .toEqual({ ok: true, hasOpenTask: true, tasks: [7], drifted: [7] });
   });
 });
+
+// Issue #63: `fleet task ls --studio <id>` from a directory with no git remote
+// sent no repo, so the Worker read the fleet default board -- silently the
+// wrong one for a studio on another repo. The studio's own registry row now
+// decides; a board that cannot be the studio's is refused, never guessed.
+describe("GET /tasks?assignedTo= — the studio's own board (issue #63)", () => {
+  const STUDIO = "beta--web-studio";
+  function wake(row: { state: string; repoSlug: string | null } | null) {
+    return {
+      studioState: vi.fn(async () => row),
+      wake: vi.fn(async () => ({ ok: true as const })),
+      resolveCanonicalRepo: vi.fn(async (slug: string) => slug),
+    };
+  }
+  async function ls(query: string, row: { state: string; repoSlug: string | null } | null) {
+    authorized();
+    const listIssues = vi.fn(async (_repo: string, _query: unknown) => [] as BoardTask[]);
+    const res = await handleBoard(req(`/studio/board/tasks?${query}`), testEnv, fakeApi({ listIssues }), reach,
+      undefined, undefined, wake(row));
+    return { res, listIssues };
+  }
+
+  it("no repo sent: reads the studio's registry repo, not the fleet default", async () => {
+    const { res, listIssues } = await ls(`assignedTo=${STUDIO}`, { state: "running", repoSlug: "acme-org/beta" });
+    expect(res.status).toBe(200);
+    expect(listIssues.mock.calls[0][0]).toBe("acme-org/beta");
+  });
+
+  it("no repo sent, no registry row, id names another repo: 409, no board read", async () => {
+    const { res, listIssues } = await ls(`assignedTo=${STUDIO}`, null);
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain("--repo");
+    expect(listIssues).not.toHaveBeenCalled();
+  });
+
+  it("no repo sent, no registry row, id matches the default repo: default board as before", async () => {
+    const { res, listIssues } = await ls("assignedTo=websites--web-studio", null);
+    expect(res.status).toBe(200);
+    expect(listIssues.mock.calls[0][0]).toBe("acme-org/websites");
+  });
+
+  it("repo sent that is not the studio's: 409, no board read", async () => {
+    const { res, listIssues } = await ls(`repo=acme-org/websites&assignedTo=${STUDIO}`,
+      { state: "running", repoSlug: "acme-org/beta" });
+    expect(res.status).toBe(409);
+    expect(listIssues).not.toHaveBeenCalled();
+  });
+
+  it("repo sent that is the studio's: read as asked", async () => {
+    const { res, listIssues } = await ls(`repo=acme-org/beta&assignedTo=${STUDIO}`,
+      { state: "running", repoSlug: "acme-org/beta" });
+    expect(res.status).toBe(200);
+    expect(listIssues.mock.calls[0][0]).toBe("acme-org/beta");
+  });
+});
+

@@ -437,6 +437,13 @@ describe("fleet task state — board task #131", () => {
 // `--force` handling takes (top-level switch), adapted here inside
 // parseTask's own "reap" branch. Bare and `--dry-run` are the SAME
 // non-executing posture; `--apply` is the only flag that closes anything.
+describe("fleet task ls --repo — issue #63", () => {
+  it("--repo rides the query", () => {
+    expect(parseCliArgs(["task", "ls", "--studio", "acmeclient--web-studio", "--repo", "example-org/acmeclient"]))
+      .toEqual({ cmd: "task-ls", query: { assignedTo: "acmeclient--web-studio", repo: "example-org/acmeclient" } });
+  });
+});
+
 describe("fleet task new --continues — issue #54", () => {
   const base = ["task", "new", "--title", "T", "--objective", "O", "--output", "F", "--boundaries", "B"];
   it("--continues N rides the brief as a number", () => {

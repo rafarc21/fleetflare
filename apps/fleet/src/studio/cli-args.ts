@@ -121,7 +121,8 @@ export type CliCommand =
   // three operations on it; flags rather than positionals, because a brief is
   // four fields and no positional order survives that.
   | { cmd: "task-new"; brief: TaskBriefArgs }
-  | { cmd: "task-ls"; query: { milestone?: string; state?: string; assignedTo?: string } }
+  // Issue #63: `repo` = `--repo`, overriding the cwd's git remote.
+  | { cmd: "task-ls"; query: { milestone?: string; state?: string; assignedTo?: string; repo?: string } }
   | { cmd: "task-show"; number: number }
   // Board task #119: mechanically re-checks the newest §6 result envelope's
   // own `verification` block — a followability check, never a gate. Same
@@ -292,8 +293,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given.",
   },
   "task-ls": {
-    args: "ls [--sprint S] [--state submitted|working|input_required|completed|failed|canceled] [--studio ID]",
-    summary: "List board tasks for the repo you are standing in.",
+    args: "ls [--sprint S] [--state submitted|working|input_required|completed|failed|canceled] [--studio ID] [--repo owner/name]",
+    summary: "List board tasks for the repo you are standing in, or --repo. With --studio and no git remote, the studio's own repo is read; a repo that is not that studio's is refused, never guessed (issue #63).",
   },
   "task-show": {
     args: "show <n>",
@@ -433,7 +434,7 @@ export function renderHelp(): string {
  *  sprint board at all, and nothing on screen would say so. */
 const TASK_FLAGS: Record<string, readonly string[]> = {
   new: ["title", "objective", "output", "boundaries", "sprint", "studio", "repo", "continues"],
-  ls: ["sprint", "state", "studio"],
+  ls: ["sprint", "state", "studio", "repo"],
   assign: ["why"],
 };
 
@@ -581,10 +582,11 @@ function parseTask(argv: string[]): CliCommand {
   if ("bad" in parsed) return usage(`unexpected ${JSON.stringify(parsed.bad)}`);
 
   if (sub === "ls") {
-    const query: { milestone?: string; state?: string; assignedTo?: string } = {};
+    const query: { milestone?: string; state?: string; assignedTo?: string; repo?: string } = {};
     if (parsed.sprint !== undefined) query.milestone = parsed.sprint;
     if (parsed.state !== undefined) query.state = parsed.state;
     if (parsed.studio !== undefined) query.assignedTo = parsed.studio;
+    if (parsed.repo !== undefined) query.repo = parsed.repo;
     return { cmd: "task-ls", query };
   }
 
