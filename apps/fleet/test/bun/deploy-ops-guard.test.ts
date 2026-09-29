@@ -48,6 +48,8 @@ beforeEach(() => {
   // (deploy-rescue-gate.test.ts covers the rescue gate).
   mkdirSync(join(fleet, "cli"));
   writeFileSync(join(fleet, "cli", "fleet.ts"), "process.exit(0);\n");
+  // Issue #36: and scripts/deploy-target.ts before that. Same passing stub.
+  writeFileSync(join(fleet, "scripts", "deploy-target.ts"), "process.exit(0);\n");
   const bin = join(root, "bin");
   mkdirSync(bin);
   writeFileSync(join(bin, "wrangler"), `#!/bin/sh\necho "PATH-wrangler $*" >> "${calls}"\n`);

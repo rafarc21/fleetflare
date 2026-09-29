@@ -69,6 +69,20 @@
 #     deploy). `--allow-unrescued` (consumed here, never passed to wrangler)
 #     deploys anyway with a loud warning. Read-only commands and d1
 #     migrations never run rescue-all.
+#   - (issue #36) same commands, checked BEFORE rescue-all: the Worker
+#     wrangler will replace (this config read by the pinned wrangler's own
+#     reader, + --env/-e or CLOUDFLARE_ENV, + --name / `delete <name>`) is
+#     not provably the fleet ~/.fleet/credentials points rescue-all at, or
+#     cannot be determined (see scripts/deploy-target.ts). Same
+#     --allow-unrescued override.
+#   `secret put`/`secret delete`/`secret bulk` are NOT gated (issue #36,
+#   measured 2026-09-29 on a throwaway Worker: plain @cloudflare/containers
+#   Container DO, instance lite, one container, n=1): each deploys a new
+#   Worker version and restarts the Durable Object; the container kept the
+#   same boot id throughout. StudioDO extends Sandbox -- not measured
+#   directly. The DO restart drops attached terminals (TerminalBridge) and
+#   aborts in-flight exec/rescue calls. A secret copied into a container at
+#   start stays OLD there until it next starts.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -325,6 +339,13 @@ if version_lt "$WRANGLER_INSTALLED" "$WRANGLER_LOCKED"; then
   exit 1
 fi
 
+# Copied BEFORE the gate (PR #44 hold): the #36 target check must read the
+# exact file wrangler gets, from wrangler's cwd. The ops config names its
+# container images relative to this app dir (./container/Dockerfile); read
+# in the ops checkout, wrangler's config reader throws on them.
+LOCAL_CONFIG="$FLEET_DIR/wrangler.local.jsonc"
+cp "$FLEET_CONFIG" "$LOCAL_CONFIG"
+
 # Issue #20: the pre-deploy rescue gate, run here and not left to a README
 # `fleet rescue-all && bun run deploy` convention (a bare `bun run deploy`
 # skipped it). rescue-all pushes every running studio's unpushed work before
@@ -332,12 +353,32 @@ fi
 # studios, as on a first deploy) exits non-zero and this refuses.
 # Unpiped: its per-studio progress reaches the operator live.
 if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
+  # Issue #36: rescue-all rescues the fleet ~/.fleet/credentials names;
+  # wrangler replaces the Worker this config (+ --env/CLOUDFLARE_ENV,
+  # --name) names. Refuse unless they are provably the same Worker --
+  # otherwise the gate rescues the wrong fleet and says SAFE. Unknown target
+  # fails closed. scripts/deploy-target.ts reads the config with wrangler's
+  # own reader.
+  TARGET_RC=0
   RESCUE_RC=0
   if command -v bun >/dev/null 2>&1; then
-    bun "$FLEET_DIR/cli/fleet.ts" rescue-all || RESCUE_RC=$?
+    (cd "$FLEET_DIR" && bun scripts/deploy-target.ts wrangler.local.jsonc ${ARGS[@]+"${ARGS[@]}"}) >&2 || TARGET_RC=$?
   else
-    echo "deploy.sh: bun not found on PATH -- cannot run fleet rescue-all." >&2
+    echo "deploy.sh: bun not found on PATH -- cannot check the target or run fleet rescue-all." >&2
+    TARGET_RC=127
+  fi
+  if [[ "$TARGET_RC" != 0 ]]; then
+    if [[ "$ALLOW_UNRESCUED" == 1 ]]; then
+      echo "deploy.sh: WARNING -- --allow-unrescued: wrangler's target Worker is NOT proven to be the fleet rescue-all rescues (exit $TARGET_RC); continuing. The target's studios may lose unpushed work." >&2
+    else
+      echo "deploy.sh: refusing -- wrangler's target Worker is not proven to be the fleet rescue-all rescues -- pre-deploy gate UNSAFE; point ~/.fleet/credentials at the target fleet, or pass --allow-unrescued to override (exit $TARGET_RC)." >&2
+      exit 1
+    fi
+  fi
+  if [[ "$TARGET_RC" == 127 ]]; then
     RESCUE_RC=127
+  else
+    bun "$FLEET_DIR/cli/fleet.ts" rescue-all || RESCUE_RC=$?
   fi
   if [[ "$RESCUE_RC" != 0 ]]; then
     if [[ "$ALLOW_UNRESCUED" == 1 ]]; then
@@ -348,9 +389,6 @@ if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
     fi
   fi
 fi
-
-LOCAL_CONFIG="$FLEET_DIR/wrangler.local.jsonc"
-cp "$FLEET_CONFIG" "$LOCAL_CONFIG"
 
 cd "$FLEET_DIR"
 if ((${#ARGS[@]})); then

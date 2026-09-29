@@ -350,6 +350,16 @@ against a Worker that does not exist yet will prompt to create it as a draft
 Worker — accept that prompt; the real deploy later in this walkthrough fills
 the rest in.
 
+`secret put`/`secret delete`/`secret bulk` skip the pre-deploy rescue gate
+(issue #36). Measured on a throwaway Worker: plain `@cloudflare/containers`
+`Container` DO, instance `lite`, one container (n=1). Each command deploys a
+new Worker version and restarts the Durable Object; the container kept its
+boot id. `StudioDO` extends `Sandbox`, not measured directly. The DO restart
+still costs something: attached terminals (TerminalBridge) drop, in-flight
+exec/rescue calls abort. Rotate secrets when no rescue or exec is running.
+A secret copied into a container at start stays OLD there until it next
+starts (`fleet recycle`).
+
 `AGENT_REPO` deserves its own callout: set it to YOUR fork
 (`<you>/fleetflare`, matching the `git clone` above), never to the upstream
 repo you forked from (e.g. `your-org/fleet`) — it is the fleet's own repo,
@@ -684,7 +694,21 @@ command that replaces the studio containers (a bare deploy, `deploy` without
 `scripts/deploy.sh`
 runs `fleet rescue-all` and refuses if it exits non-zero — `rescue-all
 reported FAILED -- pre-deploy gate UNSAFE`. See "Things that will bite you"
-below. Read-only commands and `d1 migrations` never run it. Pass
+below. Read-only commands and `d1 migrations` never run it. First the gate
+checks target (issue #36): `rescue-all` rescues the fleet
+`~/.fleet/credentials` names, wrangler replaces the Worker the config names
+(plus `--env`/`-e`, `CLOUDFLARE_ENV`, `--name`). `scripts/deploy-target.ts`
+reads the config with the pinned wrangler's own reader. The credentials host
+must EXACTLY equal one of that Worker's route/custom-domain hosts (a wildcard
+route proves nothing), or `<worker-name>.<subdomain>.workers.dev`. Mismatch
+refuses, naming both. Undeterminable target refuses too: no credentials,
+unknown env, a second `-c`/`--config`, `--cwd`, `--env-file`, inline short
+flags (`-e=prod`, `-eprod`; write `-e prod`), `WRANGLER_CI_OVERRIDE_NAME`, a
+`CLOUDFLARE_*`/`WRANGLER_*` var in `apps/fleet/.env`, `.env.local`,
+`.env.<env>`, `.env.<env>.local` (wrangler loads them), an unknown flag
+between `delete` and the Worker name, and every `containers delete` (a
+container app id names no Worker). To deploy another fleet, point
+`~/.fleet/credentials` at it first. Pass
 `--allow-unrescued` later only after reading the FAILED rows and accepting
 the loss of that work. Never call a bare `wrangler deploy`: it skips the gate.
 
