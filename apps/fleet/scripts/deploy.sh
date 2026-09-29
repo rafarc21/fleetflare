@@ -249,20 +249,15 @@ is_plain_deploy() {
 # be secrets (--var K:V, --define, --secrets-file ...): flag names only.
 # Issue #69: wrangler's --var/--define take EVERY word up to the next flag,
 # so after any flag other than -e/--env every following word is dropped
-# until the next flag, not just the first. -e/--env keep exactly their one
-# value (the target env, never a secret). Words before any flag are kept.
+# until the next flag, not just the first. -e/--env keep what follows (the
+# target env, never a secret), as do words before any flag.
 record_command() {
-  local a mode=keep out=()
+  local a keep=1 out=()
   for a in "$@"; do
     case "$a" in
-      -e|--env) out+=("$a"); mode=one ;;
-      -*) out+=("${a%%=*}"); mode=drop ;;
-      *)
-        case "$mode" in
-          keep) out+=("$a") ;;
-          one) out+=("$a"); mode=keep ;;
-        esac
-        ;;
+      -e|--env) out+=("$a"); keep=1 ;;
+      -*) out+=("${a%%=*}"); keep=0 ;;
+      *) [[ "$keep" == 1 ]] && out+=("$a") ;;
     esac
   done
   printf '%s' "${out[*]}"
