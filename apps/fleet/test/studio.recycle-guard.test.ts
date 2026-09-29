@@ -423,14 +423,15 @@ function liveDeps(rescueStdout: string): SessionSyncDeps {
   };
 }
 
-function runLive(rescueStdout: string, discardUnsynced: boolean) {
+function runLive(rescueStdout: string, discardUnsynced: boolean, provisioned: Partial<StudioStatus> = {}) {
   const destroy = vi.fn(async () => {});
-  const provision = vi.fn(async () => ({ id: ID, state: "running", error: null }) as StudioStatus);
+  const provision = vi.fn(async () => ({ id: ID, state: "running", error: null, ...provisioned }) as StudioStatus);
+  const s = storage();
   const promise = recycleWithSync(
-    liveDeps(rescueStdout), storage(), ID, destroy, async () => {}, provision, async () => {}, CFG,
+    liveDeps(rescueStdout), s, ID, destroy, async () => {}, provision, async () => {}, CFG,
     async () => "unused", async () => {}, { discardUnsynced, lastSyncedAt: async () => SYNCED_63_MIN_AGO },
   );
-  return { promise, destroy, provision };
+  return { promise, destroy, provision, storage: s };
 }
 
 describe("recycle guard — a CONFIRMED rescue-push failure refuses (issue #16)", () => {
@@ -474,6 +475,31 @@ describe("recycle guard — a CONFIRMED rescue-push failure refuses (issue #16)"
       expect(result.state).toBe("running");
       expect(result.error).toMatch(/agent-a1/);
       expect(result.error).toMatch(/--discard-unsynced/);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("rescue failed + --discard-unsynced, provision leaves its own error: the discard note is appended, never hidden", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { promise } = runLive(`${RESCUE_FAILED_PREFIX} agent-a1 push`, true, { error: "provision warning" });
+      const result = await promise;
+      expect(result.error).toContain("provision warning");
+      expect(result.error).toMatch(/agent-a1/);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("rescue failed + --discard-unsynced, reprovision ends degraded: the degraded row still names the discarded worktree", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { promise, storage: s } = runLive(`${RESCUE_FAILED_PREFIX} agent-a1 push`, true, { state: "degraded", error: "bring-up failed" });
+      await expect(promise).rejects.toThrow(/agent-a1/);
+      const row = (await s.get(STATUS_KEY)) as StudioStatus;
+      expect(row.state).toBe("degraded");
+      expect(row.error).toMatch(/agent-a1/);
     } finally {
       errSpy.mockRestore();
     }

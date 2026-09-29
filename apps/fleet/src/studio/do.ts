@@ -1354,6 +1354,9 @@ export async function recycleWithSync(
     await clearConsumedForceStamp(storage);
   }
   let rescueDiscarded: string | null = null;
+  // Issue #16: appended to every row this recycle writes after rescue.
+  const withDiscardNote = (error: string | null): string | null =>
+    rescueDiscarded ? (error ? `${error}; ${rescueDiscarded}` : rescueDiscarded) : error;
   if (alive) try {
     const rescue = await rescuePush(syncDeps, cfg.repo, idFallback);
     if (rescue.pushed) {
@@ -1446,7 +1449,7 @@ export async function recycleWithSync(
       // why: a container-startup error string is a real, reachable path for a
       // secret to appear, not just a hypothetical one).
       const message = redactSecrets(err instanceof Error ? err.message : String(err));
-      const failure = `recycle failed before reprovisioning could start: ${message}`;
+      const failure = withDiscardNote(`recycle failed before reprovisioning could start: ${message}`)!;
       const existing = (await storage.get(STATUS_KEY)) ?? null;
       const status: StudioStatus = { ...(existing ?? freshStatus(idFallback)), state: "degraded", error: failure };
       await storage.put(STATUS_KEY, status);
@@ -1531,9 +1534,9 @@ export async function recycleWithSync(
         // #346: learnings dropped because memory is off show on the row --
         // never over a real error.
         ...(learningsLost > 0 && status.error == null ? { error: learningsLostNote("recycled", learningsLost) } : {}),
-        // Issue #16: a discarded confirmed rescue failure outranks that note.
-        ...(rescueDiscarded && status.error == null ? { error: rescueDiscarded } : {}),
       };
+      // Issue #16: a discarded confirmed rescue failure is always on the row.
+      fresh.error = withDiscardNote(fresh.error);
       await storage.put(STATUS_KEY, fresh);
       await recordStudioFn(fresh);
       // Board issue #213: bring-up verified (never before this point) — see
@@ -1564,14 +1567,14 @@ export async function recycleWithSync(
       // failure would appear in, and the studio is one `fleet status` away
       // from the truth.
       const note = redactSecrets(`provisioned, but NOT verified: ${verdict.reason}`);
-      const unverified: StudioStatus = { ...status, error: note, readiness };
+      const unverified: StudioStatus = { ...status, error: withDiscardNote(note), readiness };
       await storage.put(STATUS_KEY, unverified);
       await recordStudioFn(unverified);
       console.error(`studio ${idFallback}: recycle could not verify the studio (${verdict.reason}); reporting unverified success`);
       return unverified;
     }
 
-    const message = redactSecrets(`recycle could not produce a provisioned studio: ${verdict.reason}`);
+    const message = withDiscardNote(redactSecrets(`recycle could not produce a provisioned studio: ${verdict.reason}`))!;
     const degraded: StudioStatus = { ...status, state: "degraded", error: message, readiness };
     await storage.put(STATUS_KEY, degraded);
     await recordStudioFn(degraded);
