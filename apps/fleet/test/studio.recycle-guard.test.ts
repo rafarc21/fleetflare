@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   recycleWithSync, RECYCLE_REFUSED_PREFIX, decideHeal, RESCUE_FAILED_PREFIX, RESCUE_PUSHED_PREFIX, HARVEST_NO_RECORD,
 } from "../src/studio/do";
+import { asideListCmd, asidePackCmd, asideMarkCmd } from "../src/studio/session-sync";
+const RESCUE_CLEAN_LINE = "RESCUE_CLEAN";
 import {
   PROVISIONED_OK, provisionedCheckCmd, STATUS_KEY, OPERATION_KEY, OPERATION_STALE_MS, provisionWithStorage,
   BRINGUP_CMD, type StudioStorage, type ProvisionDeps, type OperationInFlight,
@@ -500,6 +502,62 @@ describe("recycle guard — a CONFIRMED rescue-push failure refuses (issue #16)"
       const row = (await s.get(STATUS_KEY)) as StudioStatus;
       expect(row.state).toBe("degraded");
       expect(row.error).toMatch(/agent-a1/);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
+// Issue #37: an aside dir ships before the container is destroyed — the
+// recycle's pre-teardown sync is its last chance.
+describe("recycle — aside sessions ship before destroy (issue #37)", () => {
+  it("lists, packs, ships and marks the aside dir, all before destroy", async () => {
+    const DIR = "fleet-aside-20260929T100000Z-42--workspace-websites";
+    const order: string[] = [];
+    const d = liveDeps(RESCUE_CLEAN_LINE);
+    const inner = d.exec;
+    d.exec = async (cmd: string, env?: Record<string, string>) => {
+      if (cmd === asideListCmd()) { order.push("list"); return { code: 0, stdout: `${DIR}\n`, stderr: "" }; }
+      if (cmd === asidePackCmd(DIR)) return { code: 0, stdout: "10\nabc\n", stderr: "" };
+      // The mark command also names `<tar>.part-*` (it removes them): first.
+      if (cmd === asideMarkCmd(DIR)) { order.push("mark"); return { code: 0, stdout: "", stderr: "" }; }
+      if (cmd.includes(`${DIR}.tar.gz.part-`)) return { code: 0, stdout: btoa("x".repeat(10)), stderr: "" };
+      return env ? inner(cmd, env) : inner(cmd);
+    };
+    const puts: string[] = [];
+    d.r2Put = async (key: string) => { puts.push(key); };
+    const destroy = vi.fn(async () => { order.push("destroy"); });
+    const provision = vi.fn(async () => ({ id: ID, state: "running", error: null }) as StudioStatus);
+    await recycleWithSync(
+      d, storage(), ID, destroy, async () => {}, provision, async () => {}, CFG,
+      async () => "unused", async () => {}, { discardUnsynced: false, lastSyncedAt: async () => SYNCED_63_MIN_AGO },
+    );
+    expect(puts).toContain(`sessions/${ID}/aside/${DIR}/manifest.json`);
+    expect(order).toEqual(["list", "mark", "destroy"]);
+  });
+});
+
+// PR #46 review: an aside dir that could not ship before a recycle is named
+// on the row it returns — the container (and the dir) is about to be gone.
+describe("recycle — unshipped aside named on the row (PR #46 review)", () => {
+  it("pack fails: recycle proceeds, row error names the dir", async () => {
+    const DIR = "fleet-aside-20260929T100000Z-42--workspace-websites";
+    const d = liveDeps(RESCUE_CLEAN_LINE);
+    const inner = d.exec;
+    d.exec = async (cmd: string, env?: Record<string, string>) => {
+      if (cmd === asideListCmd()) return { code: 0, stdout: `${DIR}\n`, stderr: "" };
+      if (cmd === asidePackCmd(DIR)) return { code: 2, stdout: "", stderr: "tar: disk full" };
+      return env ? inner(cmd, env) : inner(cmd);
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const provision = vi.fn(async () => ({ id: ID, state: "running", error: null }) as StudioStatus);
+      const result = await recycleWithSync(
+        d, storage(), ID, vi.fn(async () => {}), async () => {}, provision, async () => {}, CFG,
+        async () => "unused", async () => {}, { discardUnsynced: false, lastSyncedAt: async () => SYNCED_63_MIN_AGO },
+      );
+      expect(result.error).toContain(`aside session NOT shipped: ${DIR}`);
+      expect(result.error).toContain("disk full");
     } finally {
       errSpy.mockRestore();
     }

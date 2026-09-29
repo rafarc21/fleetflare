@@ -471,6 +471,10 @@ export function formatSessionGuards(studios: StudioStatus[]): string[] {
     if (s.burnPersistError) {
       lines.push(`BURN PERSIST ${s.id}: FAILED since ${s.burnPersistError.at} (${s.burnPersistError.reason})`);
     }
+    // PR #46 review (#37): an aside session that is not reaching R2.
+    for (const f of s.asideShip?.failed ?? []) {
+      lines.push(`ASIDE ${s.id}: NOT SHIPPED ${f.dir} as of ${s.asideShip!.at} (${f.reason})`);
+    }
   }
   return lines;
 }

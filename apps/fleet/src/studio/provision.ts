@@ -46,7 +46,7 @@ import { buildStudioId, parseStudioId } from "./ids";
 import { repoIdSegment } from "./repo";
 import { parseFleetJson, parseRoleFile, assertRoleInFleet, roleBringupEnv } from "./blueprint";
 import { parseStudioFile, validateMemberFile, studioBringupEnv, type Studio, type MemberFile } from "./studio-blueprint";
-import { restorePlan, sessionDailyPrefix, dailyKeeperKeys, type RestoreAction } from "./session-sync";
+import { restorePlan, sessionDailyPrefix, dailyKeeperKeys, SESSION_FORCE_KEY, type RestoreAction } from "./session-sync";
 import { sessionStats, newestMark, SessionArchiveFormatError, type SessionMark } from "./burn";
 import { MEMORY_INDEX_PATH } from "../memory/index-file";
 import { memoryIndexPrompt } from "../memory/prompt";
@@ -352,6 +352,8 @@ export interface StudioStorage {
   put(key: typeof OPERATION_KEY, value: OperationInFlight | null): Promise<void>;
   put(key: typeof DESTROYING_KEY, value: string | null): Promise<void>;
   put(key: typeof DESTROY_EPOCH_KEY, value: number): Promise<void>;
+  // Issue #37: armed by a --fresh-session provision (see provisionWithStorage).
+  put(key: typeof SESSION_FORCE_KEY, value: boolean): Promise<void>;
 }
 
 /**
@@ -2287,7 +2289,11 @@ export async function runProvision(
   cfg: ProvisionConfig,
   fleetRepoSlug: string,
   existing: StudioStatus | null,
-): Promise<{ status: StudioStatus; roleEnv: RoleEnv | StudioEnv | null; keepAlive: boolean | null }> {
+): Promise<{
+  status: StudioStatus; roleEnv: RoleEnv | StudioEnv | null; keepAlive: boolean | null;
+  /** Issue #37: a --fresh-session bring-up confirmed it moved a session aside. */
+  freshSessionMoved?: boolean;
+}> {
   const id = buildStudioId(cfg);
   // Dynamic repo selection (P4a) — see resolveWorkRepoSlug's own doc comment
   // for the precedence and why each step is there.
@@ -2317,6 +2323,7 @@ export async function runProvision(
   // Issue #28: where a --fresh-session bring-up put the old session. Same
   // channel: a discard nobody is told about is the thing this must never be.
   let freshSessionNote: string | null = null;
+  let freshSessionMoved = false;
 
   try {
     const resolved = await resolveBringupEnv(deps, cfg, fleetRepoSlug, workRepoSlug);
@@ -2419,7 +2426,11 @@ export async function runProvision(
     // Issue #146: on a fresh container it is bring-up's own adopt, after the
     // restore untar, that finds the session.
     adoption = keepAdopted(adoption, parseSessionAdoption(bringupRes.stdout, deps.now()));
-    if (cfg.freshSession) freshSessionNote = freshSessionNoteFor(parseFreshSession(bringupRes.stdout));
+    if (cfg.freshSession) {
+      const moved = parseFreshSession(bringupRes.stdout);
+      freshSessionNote = freshSessionNoteFor(moved, id);
+      freshSessionMoved = moved !== null && moved.some((m) => !m.startsWith("failed "));
+    }
 
     // Board issue #28 — the missing observation. `bringupRes.code === 0`
     // (and, above it, `cloneRes.code === 0`) prove those two execs ran to
@@ -2497,7 +2508,7 @@ export async function runProvision(
   }
 
   await deps.recordStudio(status);
-  return { status, roleEnv, keepAlive };
+  return { status, roleEnv, keepAlive, ...(freshSessionMoved ? { freshSessionMoved } : {}) };
 }
 
 /**
@@ -2956,7 +2967,7 @@ export function parseFreshSession(stdout: string): string[] | null {
 }
 
 /** Issue #28: the row note for a --fresh-session bring-up. */
-export function freshSessionNoteFor(moved: string[] | null): string {
+export function freshSessionNoteFor(moved: string[] | null, studioId: string): string {
   if (moved === null) {
     return "fresh session not confirmed: bring-up printed no FLEET_SESSION_FRESH line (older image?) -- " +
       "the old session was NOT moved aside and claude may have resumed it";
@@ -2964,7 +2975,13 @@ export function freshSessionNoteFor(moved: string[] | null): string {
   const failed = moved.filter((m) => m.startsWith("failed ")).map((m) => m.slice("failed ".length));
   const aside = moved.filter((m) => !m.startsWith("failed "));
   const parts: string[] = [];
-  if (aside.length > 0) parts.push(`fresh session: old session moved aside to ${aside.join(", ")} (kept, ships with the session snapshot)`);
+  // Issue #37: aside dirs leave the main snapshot and ship on their own.
+  if (aside.length > 0) {
+    parts.push(
+      `fresh session: old session moved aside to ${aside.join(", ")} (kept on disk; the next session sync ` +
+      `ships it to R2 under sessions/${studioId}/aside/<dir>/)`,
+    );
+  }
   if (failed.length > 0) parts.push(`fresh session: could not move ${failed.join(", ")} -- left in place`);
   if (parts.length === 0) parts.push("fresh session: no old session to move aside");
   return parts.join("; ");
@@ -3428,8 +3445,9 @@ export async function provisionWithStorage(
   let status: StudioStatus;
   let roleEnv: RoleEnv | StudioEnv | null;
   let keepAlive: boolean | null;
+  let freshSessionMoved: boolean | undefined;
   try {
-    ({ status, roleEnv, keepAlive } = await runProvision(
+    ({ status, roleEnv, keepAlive, freshSessionMoved } = await runProvision(
       { ...provisionDeps, recordStudio: guardRecordStudio(deps, ctx) }, cfg, fleetRepoSlug, existing,
     ));
     // Review round 3 (issue #85 PR1), MUST-FIX 9 (maestro correction #4):
@@ -3473,6 +3491,17 @@ export async function provisionWithStorage(
   // Fleet Spawn P3, Task 4 (R-P3-6): same null-guard, same reason — a failed
   // resolve must not clobber a PREVIOUSLY resolved keepAlive either.
   if (keepAlive !== null) await storage.put(KEEP_ALIVE_KEY, keepAlive);
+  // Issue #37: the old session left the main snapshot (it ships as its own
+  // aside archive), so the sync guard's baseline — its newest file — is gone
+  // from every later candidate, which would be displaced forever. The same
+  // one-shot force upload `fleet clear-session-guard` arms: the old `latest`
+  // is kept under superseded/ by the upload itself, and a blank candidate
+  // (claude has not written yet) still waits.
+  if (freshSessionMoved) {
+    await storage.put(SESSION_FORCE_KEY, true);
+    // PR #46 review: the row says so, like clear-session-guard does.
+    status = { ...status, sessionForceArmedAt: deps.now() };
+  }
   await storage.put(STATUS_KEY, status);
   // Issue #100 N1: the container is up again, so no destroy is in flight —
   // including one that died before its own `finally` could say so.

@@ -274,6 +274,9 @@ export interface SessionSyncStorage {
    * `BURN_ALERTED_WINDOW_KEY` already use elsewhere in this interface).
    */
   get(key: typeof SESSION_FORCE_KEY): Promise<true | undefined>;
+  // PR #46 review: the last aside ship's failures, for the row (fleet ls).
+  get(key: typeof ASIDE_SHIP_KEY): Promise<AsideShipRecord | null | undefined>;
+  put(key: typeof ASIDE_SHIP_KEY, value: AsideShipRecord | null): Promise<void>;
   put(key: typeof SESSION_FORCE_KEY, value: true): Promise<void>;
   /**
    * Consumes the override (`syncSessionTick`, after a successful forced
@@ -532,7 +535,9 @@ export function tarAndStatCmd(
   const excludes = `${syncDir}/subagent-excludes.txt`;
   return (
     `mkdir -p ${syncDir} && ` +
-    `( cd ${home} && find .claude/projects -path '*/subagents/*' ` +
+    // Issue #37: aside dirs (#28) ship on their own (shipAsideSessions): kept
+    // out of this budget, and out of the tar below.
+    `( cd ${home} && find .claude/projects -path '.claude/projects/${SESSION_ASIDE_GLOB}' -prune -o -path '*/subagents/*' ` +
       `\\( -type l -printf '-1\\t0\\t%p\\n' ` +
       `-o -name '*.jsonl' -type f -printf '%T@\\t%s\\t%p\\n' \\) ) ` +
     `| LC_ALL=C sort -rn ` +
@@ -541,7 +546,8 @@ export function tarAndStatCmd(
       `'BEGIN { n = k > 0 ? (k > n - d ? k : n - d) : n - w } ` +
       `{ t += $2 } $1 < 0 { print $3 } $1 >= 0 && NR > 1 && t > b && $1 < n { print $3 }' ` +
     `> ${excludes} && ` +
-    `tar -C ${home} --anchored --no-wildcards -X ${excludes} -czf ${tar} .claude/projects .claude.json && ` +
+    // The aside exclude must come BEFORE --no-wildcards: it IS a wildcard.
+    `tar -C ${home} --exclude='.claude/projects/${SESSION_ASIDE_GLOB}' --anchored --no-wildcards -X ${excludes} -czf ${tar} .claude/projects .claude.json && ` +
     `gzip -t ${tar} && ` +
     `stat -c %s ${tar} && ` +
     `stat -c %Y ${excludes}`
@@ -578,6 +584,156 @@ export function splitCmd(): string {
  *  splitCmd's `-a 4` produces. */
 export function partReadCmd(index: number): string {
   return `base64 ${SESSION_TAR_PATH}.part-${String(index).padStart(4, "0")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #37: aside sessions. `--fresh-session` (#28) moves an un-resumable
+// session to ~/.claude/projects/fleet-aside-<ts>-<key>. Left in the main tar,
+// an OVERSIZE one kept that tar over SESSION_TOTAL_MAX: every tick refused and
+// neither the old nor the new session reached R2. So the main tar leaves aside
+// dirs out, and each ships ONCE as its own split archive:
+//   sessions/<id>/aside/<dir>/part-NNNN   (SESSION_SPLIT_PART each)
+//   sessions/<id>/aside/<dir>/manifest.json  {dir, parts, bytes, sha256, shippedAt}
+// Parts are read and put one at a time, so the Worker never holds more than
+// one part. A `.fleet-shipped` marker in the dir stops re-shipping; the dir
+// itself stays on disk (never deleted). Under their own `aside/` segment:
+// dailyKeeperKeys' dated pattern never matches them, so no prune touches them.
+// ---------------------------------------------------------------------------
+
+/** Glob (and name prefix) of an aside dir under ~/.claude/projects. */
+export const SESSION_ASIDE_GLOB = "fleet-aside-*";
+const ASIDE_DIR_RE = /^fleet-aside-[A-Za-z0-9-]+$/;
+const ASIDE_MARKER = ".fleet-shipped";
+/** 256 MiB (64 parts of SESSION_SPLIT_PART): bounds one tick's exec count.
+ *  Larger is reported every tick and left on disk, never half-shipped. */
+export const SESSION_ASIDE_MAX = 268_435_456;
+/** PR #46 review: the raw dir is measured BEFORE tar. 1 GiB raw (transcripts
+ *  compress ~4x, so roughly SESSION_ASIDE_MAX gzipped): above it, never tar. */
+export const SESSION_ASIDE_RAW_MAX = 1_073_741_824;
+
+/** PR #46 review: DO storage key for the last aside ship's failures, mirrored
+ *  onto the row (StudioStatus.asideShip) so `fleet ls` shows an aside that is
+ *  not reaching R2. `null` = the last ship had nothing failing. */
+export const ASIDE_SHIP_KEY = "asideShip";
+export interface AsideShipRecord { at: string; failed: { dir: string; reason: string }[] }
+
+/** Unshipped aside dirs, one name per line. Exits 0 when there are none. */
+export function asideListCmd(home = SESSION_HOME): string {
+  const p = `${home}/.claude/projects`;
+  return (
+    `for d in ${p}/${SESSION_ASIDE_GLOB}/; do [ -d "$d" ] || continue; ` +
+    `[ -e "$d${ASIDE_MARKER}" ] && continue; b="\${d%/}"; printf '%s\n' "\${b##*/}"; done; true`
+  );
+}
+
+function asideTar(dir: string, syncDir: string): string {
+  return `${syncDir}/aside/${dir}.tar.gz`;
+}
+
+/** Tars one aside dir, verifies it, splits it; prints size then sha256.
+ *  PR #46 review: the raw dir is measured FIRST (`du -sb`); over `rawMax` it
+ *  prints `oversize <bytes>` and never tars. A failed tar/verify/split removes
+ *  its own staging files (no `exit`: this runs in the long-lived exec shell).
+ *  `dir` is validated by the caller (ASIDE_DIR_RE) — never shell-quoted
+ *  user input. */
+export function asidePackCmd(
+  dir: string, home = SESSION_HOME, syncDir = SESSION_SYNC_DIR, part = SESSION_SPLIT_PART,
+  rawMax = SESSION_ASIDE_RAW_MAX,
+): string {
+  const t = asideTar(dir, syncDir);
+  return (
+    `umask 077; mkdir -p ${syncDir}/aside && sz=$(du -sb ${home}/.claude/projects/${dir} | cut -f1) && ` +
+    `if [ "$sz" -gt ${rawMax} ]; then echo "oversize $sz"; else ` +
+    `{ tar -C ${home}/.claude/projects --exclude=${dir}/${ASIDE_MARKER} -czf ${t} ${dir} && gzip -t ${t} && ` +
+    `rm -f ${t}.part-* && split -b ${part} -d -a 4 ${t} ${t}.part- && ` +
+    `stat -c %s ${t} && sha256sum ${t} | cut -d' ' -f1; } || { rm -f ${t} ${t}.part-*; false; }; fi`
+  );
+}
+
+/** PR #46 review: staging copy removed after a Worker-side failure. */
+export function asideCleanCmd(dir: string, syncDir = SESSION_SYNC_DIR): string {
+  const t = asideTar(dir, syncDir);
+  return `rm -f ${t} ${t}.part-*`;
+}
+
+export function asidePartReadCmd(dir: string, index: number, syncDir = SESSION_SYNC_DIR): string {
+  return `base64 ${asideTar(dir, syncDir)}.part-${String(index).padStart(4, "0")}`;
+}
+
+/** After the manifest is durable: marker in the dir, staging copy gone. */
+export function asideMarkCmd(dir: string, home = SESSION_HOME, syncDir = SESSION_SYNC_DIR): string {
+  const t = asideTar(dir, syncDir);
+  return `touch ${home}/.claude/projects/${dir}/${ASIDE_MARKER} && rm -f ${t} ${t}.part-*`;
+}
+
+export function sessionAsidePartKey(id: string, dir: string, index: number): string {
+  return `sessions/${id}/aside/${dir}/part-${String(index).padStart(4, "0")}`;
+}
+export function sessionAsideManifestKey(id: string, dir: string): string {
+  return `sessions/${id}/aside/${dir}/manifest.json`;
+}
+
+/**
+ * Issue #37: ship every unshipped aside dir. Each dir on its own: one that
+ * fails (pack error, short read, R2 error, over SESSION_ASIDE_MAX) is
+ * reported and NOT marked, so the next tick retries it; the rest still ship.
+ * The manifest goes last, then the marker: a dir is marked only once every
+ * part and its manifest are durable. Throws only if the listing itself fails.
+ */
+export async function shipAsideSessions(
+  deps: SessionSyncDeps, id: string,
+): Promise<{ shipped: string[]; failed: { dir: string; reason: string }[] }> {
+  const list = await deps.exec(asideListCmd());
+  if (list.code !== 0) throw new Error(`aside list failed (${list.code}): ${list.stderr.slice(0, 300)}`);
+  const dirs = list.stdout.split("\n").map((l) => l.trim()).filter((l) => ASIDE_DIR_RE.test(l));
+  const shipped: string[] = [];
+  const failed: { dir: string; reason: string }[] = [];
+  for (const dir of dirs) {
+    let packed = false;
+    try {
+      const pack = await deps.exec(asidePackCmd(dir));
+      if (pack.code !== 0) throw new Error(`pack failed (${pack.code}): ${pack.stderr.slice(0, 300)}`);
+      const oversize = /^oversize (\d+)$/.exec(pack.stdout.trim());
+      if (oversize) {
+        throw new Error(`aside dir ${oversize[1]} bytes raw exceeds SESSION_ASIDE_RAW_MAX ${SESSION_ASIDE_RAW_MAX}; left on disk, not shipped`);
+      }
+      packed = true;
+      const [sizeLine, shaLine] = pack.stdout.trim().split("\n").map((l) => l.trim());
+      const size = Number.parseInt(sizeLine ?? "", 10);
+      if (!Number.isFinite(size) || size <= 0 || !/^[0-9a-f]+$/.test(shaLine ?? "")) {
+        throw new Error(`pack printed no size/sha: ${JSON.stringify(pack.stdout.slice(0, 200))}`);
+      }
+      if (size > SESSION_ASIDE_MAX) {
+        throw new Error(`aside tar ${size} bytes exceeds SESSION_ASIDE_MAX ${SESSION_ASIDE_MAX}; left on disk, not shipped`);
+      }
+      const parts = Math.ceil(size / SESSION_SINGLE_READ_MAX);
+      let total = 0;
+      for (let i = 0; i < parts; i++) {
+        const r = await deps.exec(asidePartReadCmd(dir, i));
+        if (r.code !== 0) throw new Error(`part ${i} read failed (${r.code}): ${r.stderr.slice(0, 300)}`);
+        const bytes = base64ToBytes(r.stdout);
+        const want = i < parts - 1 ? SESSION_SINGLE_READ_MAX : size - SESSION_SINGLE_READ_MAX * (parts - 1);
+        if (bytes.length !== want) throw new Error(`part ${i} is ${bytes.length} bytes, expected ${want}`);
+        total += bytes.length;
+        await deps.r2Put(sessionAsidePartKey(id, dir, i), bytes);
+      }
+      const manifest = { dir, parts, bytes: total, sha256: shaLine, shippedAt: deps.now().toISOString() };
+      await deps.r2Put(sessionAsideManifestKey(id, dir), new TextEncoder().encode(JSON.stringify(manifest)));
+      const mark = await deps.exec(asideMarkCmd(dir));
+      if (mark.code !== 0) console.error(`syncSession ${id}: aside ${dir} shipped but not marked (${mark.code}); it re-ships next tick`);
+      console.log(`syncSession ${id}: aside ${dir} shipped to ${sessionAsideManifestKey(id, dir)} (${parts} part(s), ${total} bytes)`);
+      shipped.push(dir);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.error(`syncSession ${id}: aside ${dir} NOT shipped: ${reason}`);
+      failed.push({ dir, reason });
+      // PR #46 review: never leave a half-shipped staging copy behind.
+      if (packed) {
+        try { await deps.exec(asideCleanCmd(dir)); } catch { /* next tick re-packs over it */ }
+      }
+    }
+  }
+  return { shipped, failed };
 }
 
 /** The R2 prefix under which BOTH `latest.tar.gz` and every dated daily
@@ -1056,4 +1212,9 @@ async function parseBurn(
     console.error(`syncSession ${id}: burn parsing failed, session sync itself still succeeded`, err);
     return false;
   }
+}
+
+/** PR #46 review: one line per unshipped aside, for a row note. */
+export function asideNotShippedNote(failed: { dir: string; reason: string }[]): string | null {
+  return failed.length === 0 ? null : failed.map((f) => `aside session NOT shipped: ${f.dir} (${f.reason})`).join("; ");
 }

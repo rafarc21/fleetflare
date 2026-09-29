@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  adoptWorktreeSessionCmd, runProvision, BRINGUP_CMD, FRESH_SESSION_MARKER,
-  type ProvisionDeps,
+  adoptWorktreeSessionCmd, runProvision, provisionWithStorage, BRINGUP_CMD, FRESH_SESSION_MARKER,
+  type ProvisionDeps, type StudioStorage,
 } from "../src/studio/provision";
+import { SESSION_FORCE_KEY } from "../src/studio/session-sync";
 
 // Issue #28: `fleet provision|recycle --fresh-session`. ONE bring-up skips the
 // adopt and gets FLEET_FRESH_SESSION=1; the persisted role env never carries
@@ -76,5 +77,44 @@ describe("runProvision — freshSession (issue #28)", () => {
     expect(calls.map((c) => c.cmd)).toContain(ADOPT_CMD);
     expect(calls.find((c) => c.cmd === BRINGUP_CMD)!.env).not.toHaveProperty("FLEET_FRESH_SESSION");
     expect(status.error).toBeNull();
+  });
+});
+
+// Issue #37: the old session leaves the main tar (it ships as its own aside
+// archive), so the sync guard's baseline — the old session's newest file —
+// is gone from every later candidate and would displace them all. A fresh
+// bring-up that moved something arms the one-shot force upload; the old
+// `latest` is kept under superseded/ by that upload itself.
+describe("provisionWithStorage — freshSession arms the force upload (issue #37)", () => {
+  function mapStorage() {
+    const map = new Map<string, unknown>();
+    const storage = {
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"],
+    } as StudioStorage;
+    return { map, storage };
+  }
+
+  it("moved something: SESSION_FORCE_KEY armed; the note names where it ships", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { map, storage } = mapStorage();
+    const status = await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient");
+    expect(map.get(SESSION_FORCE_KEY)).toBe(true);
+    expect(status.error).toContain(`sessions/${REPO}--scratch/aside/`);
+    // PR #46 review: the row says the override is armed, like clear-session-guard.
+    expect(status.sessionForceArmedAt).toBe(NOW);
+  });
+
+  it("nothing moved, not confirmed, or no flag: not armed", async () => {
+    for (const [stdout, fresh] of [
+      [`${FRESH_SESSION_MARKER} none\n`, true], ["", true], ["", false],
+      // PR #46 review: every move failed — nothing left the tar, nothing to force.
+      [`${FRESH_SESSION_MARKER} failed /root/.claude/projects/-workspace-acmeclient/x.jsonl\n`, true],
+    ] as const) {
+      const { d } = deps(stdout);
+      const { map, storage } = mapStorage();
+      await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", ...(fresh ? { freshSession: true } : {}) }, "example-org/acmeclient");
+      expect(map.has(SESSION_FORCE_KEY)).toBe(false);
+    }
   });
 });

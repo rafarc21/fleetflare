@@ -203,8 +203,15 @@ The ones worth knowing before you need them:
 - `fleet provision|recycle <id> --fresh-session` — session claude cannot
   resume (corrupt, oversize, exits on `--continue`). One bring-up skips
   adopt + `--continue`. Old session moved aside to
-  `~/.claude/projects/fleet-aside-*`, never deleted, shipped with next
-  snapshot. Row's error line names where (#28).
+  `~/.claude/projects/fleet-aside-*`, never deleted. Kept OUT of the main
+  session snapshot (an oversize one would block every sync); next sync
+  ships each aside dir once to R2 `sessions/<id>/aside/<dir>/` (parts +
+  `manifest.json` with sha256; concat parts in order, check sha, `tar -xzf`).
+  Over 1 GiB raw / 256 MiB packed, or any ship failure: stays on disk,
+  `fleet ls` prints `ASIDE <id>: NOT SHIPPED <dir> (<reason>)`; recycle /
+  destroy name it on the row. Also arms one forced
+  upload so the fresh session replaces `latest` (old kept under
+  `superseded/`). Row's error line names where (#28, #37).
   503 `the Durable Object did not answer` = every repair verb dead the same
   way. Retry cannot help — unless it says `retryable=true`: then one retry
   may land. Same failure again → watch CHECKED in `fleet ls`; wait (~20 min,

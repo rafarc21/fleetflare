@@ -24,7 +24,7 @@ import { LIVENESS_RULE } from "./recycle-cost";
 /** Issue #28: shared by provision's and recycle's help. */
 const FRESH_SESSION_HELP =
   "--fresh-session starts claude WITHOUT --continue, for a session it cannot resume: bring-up moves the old session " +
-  "aside (never deletes; it ships with the next session snapshot) and the row names where. This one bring-up only.";
+  "aside (never deletes; the next session sync ships it to R2 as its own archive under sessions/<id>/aside/, outside the main snapshot) and the row names where. This one bring-up only.";
 
 export type CliCommand =
   // Issue #37: `fresh` opts into a live container check per studio before the
