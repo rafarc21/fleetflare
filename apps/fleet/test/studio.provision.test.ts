@@ -1891,6 +1891,24 @@ describe("applyLeakGate — denylist delivery into the container (issue #1)", ()
       expect(mem).toHaveBeenCalledWith("acme-org/sample");
     });
 
+    // #13 re-review: restart resolves the repo from the stored row. A mutant
+    // handing the fleet default repo to these ports survived; this pins it.
+    it("restart: blueprint + memory ports get the row's work repo, not the fleet default", async () => {
+      const storage = fakeStorage();
+      await provisionWithStorage(gateDeps().deps, storage, STUDIO_WORK_CFG, REPO_SLUG);
+      const g = gateDeps();
+      const cred = vi.fn(async () => ({ ok: true as const }));
+      const mem = vi.fn(async () => "fake-read-token");
+      g.deps.writeBlueprintCredential = cred;
+      g.deps.memoryRepo = "acme-org/fleet-ops";
+      g.deps.memoryToken = mem;
+      g.deps.fetchBlueprintFile = vi.fn(async () => { throw new Error("restart must not refetch the blueprint"); });
+      await restartWithStorage(g.deps, storage, "sample--web-studio", "rafarc21/fleetflare");
+      expect(cred.mock.calls.length).toBeGreaterThan(0);
+      for (const c of cred.mock.calls as unknown[][]) expect(c[2]).toBe("acme-org/sample");
+      expect(mem).toHaveBeenCalledWith("acme-org/sample");
+    });
+
     it("absent port -> no proxy config at all", async () => {
       const g = gateDeps();
       await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
