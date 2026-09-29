@@ -406,6 +406,13 @@ describe("reap — F2/F3: live pane chrome", () => {
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
+  test("a footer counter in words reap has never seen -> still no destroy (unknown = skip)", async () => {
+    const tail = CLEAN_IDLE.replace("⏵⏵ bypass permissions on ·", "⏵⏵ bypass permissions on · 3 widgets ·");
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), tail }) });
+    await runReap(flags(), f.deps);
+    expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
+  });
+
   test("a background task still running on the turn-ended row -> no destroy", async () => {
     const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_BG_TASK }) });
     await runReap(flags(), f.deps);
