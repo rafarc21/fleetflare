@@ -1358,7 +1358,11 @@ export async function recycleWithSync(
   let asideUnshipped: string | null = null;
   // Issue #16: appended to every row this recycle writes after rescue.
   const withDiscardNote = (error: string | null): string | null =>
-    [error, rescueDiscarded, asideUnshipped].filter((p): p is string => p !== null).join("; ") || null;
+    {
+      // No note: the row's error exactly as it was (undefined stays undefined).
+      const notes = [rescueDiscarded, asideUnshipped].filter((n): n is string => n !== null);
+      return notes.length === 0 ? error : [error, ...notes].filter((p): p is string => !!p).join("; ");
+    };
   // Issue #37: fresh-session aside dirs ship on their own; last chance.
   if (alive) try {
     asideUnshipped = asideNotShippedNote((await shipAsideSessions(syncDeps, idFallback)).failed);
