@@ -2101,4 +2101,161 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
       });
     }
   });
+
+  // Issue #30: rescue pushed to the private remote (public work repo) but
+  // discovery listed and fetched from origin only. Those refs never came back
+  // on the next provision. Discovery now also reads the private remote, under
+  // the SAME target rescue resolved (do.ts resolveRescueTarget): a private
+  // work repo gets `{}`, so the private remote is never consulted.
+  describe("issue #30 — discovery also fetches rescue refs from the private rescue remote", () => {
+    function listFile(): string {
+      return join(dir, ".fleet", "remote-branches.txt");
+    }
+    function freshClone(name: string): string {
+      const c = join(dir, name);
+      sh(`git clone -q ${origin} ${c}`);
+      return c;
+    }
+    function privRescueRef(): string {
+      const ref = privRefs().find((r) => r.includes("fleet/rescue/"));
+      expect(ref).toBeDefined();
+      return ref!;
+    }
+    const branchOf = (ref: string) => ref.replace(/^refs\/heads\//, "");
+
+    test("public-repo studio: a rescue on the private remote is fetched into a fresh checkout", () => {
+      writeFileSync(join(checkout, "notes.md"), "private work\n");
+      expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
+      const ref = privRescueRef();
+      const name = branchOf(ref);
+      const fresh = freshClone("fresh-priv");
+
+      const r = sh(discoverRescueRefsCmd(fresh, STUDIO, listFile(), { remoteUrl: priv, realGit: REAL_GIT }), dir);
+
+      expect(r.code).toBe(0);
+      expect(sh(`git -C ${fresh} rev-parse --verify refs/heads/${name}`).out).toBe(sh(`git -C ${priv} rev-parse ${ref}`).out);
+      expect(sh(`git -C ${fresh} show ${name}:notes.md`).out).toBe("private work");
+      expect(r.err).toContain(`on branch ${name}`);
+    });
+
+    test("public-repo studio: origin's own rescue refs are still fetched beside the private remote's", () => {
+      writeFileSync(join(checkout, "notes.md"), "origin work\n");
+      expect(rescue()).toContain(RESCUE_PUSHED_PREFIX);
+      const originName = branchOf(rescueRefs()[0]);
+      const fresh = freshClone("fresh-both");
+
+      const r = sh(discoverRescueRefsCmd(fresh, STUDIO, listFile(), { remoteUrl: priv, realGit: REAL_GIT }), dir);
+
+      expect(r.code).toBe(0);
+      expect(sh(`git -C ${fresh} rev-parse --verify refs/heads/${originName}`).code).toBe(0);
+    });
+
+    test("private-repo studio (target {}): the private remote is never consulted", () => {
+      writeFileSync(join(checkout, "notes.md"), "private work\n");
+      expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
+      const name = branchOf(privRescueRef());
+      const fresh = freshClone("fresh-private-repo");
+
+      const cmd = discoverRescueRefsCmd(fresh, STUDIO, listFile(), {});
+      const r = sh(cmd, dir);
+
+      expect(r.code).toBe(0);
+      expect(cmd).not.toContain(priv);
+      expect(cmd).toBe(discoverRescueRefsCmd(fresh, STUDIO, listFile()));
+      expect(sh(`git -C ${fresh} rev-parse --verify -q refs/heads/${name}`).code).not.toBe(0);
+    });
+
+    test("private remote unreachable: origin refs still fetched, a loud warning, exit 0", () => {
+      writeFileSync(join(checkout, "notes.md"), "origin work\n");
+      expect(rescue()).toContain(RESCUE_PUSHED_PREFIX);
+      const originName = branchOf(rescueRefs()[0]);
+      const fresh = freshClone("fresh-unreachable");
+
+      const r = sh(discoverRescueRefsCmd(fresh, STUDIO, listFile(),
+        { remoteUrl: join(dir, "no-such-remote.git"), realGit: REAL_GIT }), dir);
+
+      expect(r.code).toBe(0);
+      expect(sh(`git -C ${fresh} rev-parse --verify refs/heads/${originName}`).code).toBe(0);
+      expect(r.err).toContain("WARNING: rescue discovery could not list the private rescue remote");
+    });
+
+    test("same ref on both remotes, different commits: origin's keeps the name, the private one lands beside it -- neither lost", () => {
+      writeFileSync(join(checkout, "notes.md"), "private copy\n");
+      expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
+      const ref = privRescueRef();
+      const name = branchOf(ref);
+      // An unrelated commit under the SAME name on origin.
+      const other = join(dir, "other-origin-copy");
+      sh(`git init -q -b x ${other} && cd ${other} && git commit -q --allow-empty -m origin-copy && git push -q ${origin} HEAD:${ref}`);
+      const fresh = freshClone("fresh-collide");
+
+      const r = sh(discoverRescueRefsCmd(fresh, STUDIO, listFile(), { remoteUrl: priv, realGit: REAL_GIT }), dir);
+
+      expect(r.code).toBe(0);
+      expect(sh(`git -C ${fresh} rev-parse refs/heads/${name}`).out).toBe(sh(`git -C ${origin} rev-parse ${ref}`).out);
+      expect(sh(`git -C ${fresh} rev-parse refs/heads/${name}-rescue-remote`).out).toBe(sh(`git -C ${priv} rev-parse ${ref}`).out);
+      expect(r.err).toContain(`${name}-rescue-remote`);
+    });
+
+    test("same ref on both remotes, same commit: fetched once, no duplicate branch", () => {
+      writeFileSync(join(checkout, "notes.md"), "same\n");
+      expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
+      const ref = privRescueRef();
+      const name = branchOf(ref);
+      sh(`git -C ${priv} push -q ${origin} ${ref}:${ref}`);
+      const fresh = freshClone("fresh-same");
+
+      const r = sh(discoverRescueRefsCmd(fresh, STUDIO, listFile(), { remoteUrl: priv, realGit: REAL_GIT }), dir);
+
+      expect(r.code).toBe(0);
+      expect(sh(`git -C ${fresh} rev-parse refs/heads/${name}`).out).toBe(sh(`git -C ${priv} rev-parse ${ref}`).out);
+      expect(sh(`git -C ${fresh} rev-parse --verify -q refs/heads/${name}-rescue-remote`).code).not.toBe(0);
+    });
+
+    test("issue #16 parentless snapshot on the private remote: fetched into a fresh --depth 1 checkout", () => {
+      const origin3 = join(dir, "origin3-discover.git");
+      const seed = join(dir, "seed-discover");
+      sh(`git init -q --bare -b main ${origin3}`);
+      sh(`git clone -q ${origin3} ${seed} 2>/dev/null; cd ${seed} && ` +
+        `for f in a b c; do echo "$f" > "$f.md" && git add "$f.md" && git commit -q -m "$f"; done && git push -q origin HEAD:main`);
+      rmSync(checkout, { recursive: true, force: true });
+      sh(`git clone -q --depth 1 file://${origin3} ${checkout}`);
+      writeFileSync(join(checkout, "notes.md"), "shallow work\n");
+      expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
+      const ref = privRescueRef();
+      // Parentless: the snapshot shape #16 pushes when the remote refuses a shallow push.
+      expect(sh(`git -C ${priv} rev-list --count ${ref}`).out).toBe("1");
+      const name = branchOf(ref);
+      const fresh = join(dir, "fresh-shallow");
+      sh(`git clone -q --depth 1 file://${origin3} ${fresh}`);
+
+      const r = sh(discoverRescueRefsCmd(fresh, STUDIO, listFile(), { remoteUrl: priv, realGit: REAL_GIT }), dir);
+
+      expect(r.code).toBe(0);
+      expect(sh(`git -C ${fresh} show ${name}:notes.md`).out).toBe("shallow work");
+    });
+
+    test("FLEET_RESCUE_TOKEN rides a credential helper on the private list + fetch, never argv", () => {
+      const log = join(dir, "realgit-discover.log");
+      const shim = join(dir, "realgit-discover-shim");
+      writeFileSync(shim, `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\nexec '${REAL_GIT}' "$@"\n`);
+      chmodSync(shim, 0o755);
+      writeFileSync(join(checkout, "notes.md"), "x\n");
+      expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
+      const fresh = freshClone("fresh-token");
+      const cmd = discoverRescueRefsCmd(fresh, STUDIO, listFile(), { remoteUrl: priv, realGit: shim });
+      expect(cmd).not.toContain("s3cr3t-fake-token");
+
+      const r = sh(cmd, dir, { FLEET_RESCUE_TOKEN: "s3cr3t-fake-token" });
+
+      expect(r.code).toBe(0);
+      const lines = sh(`cat '${log}'`).out.split("\n").filter(Boolean);
+      expect(lines.some((l) => l.includes(" ls-remote "))).toBe(true);
+      expect(lines.some((l) => l.includes(" fetch "))).toBe(true);
+      for (const l of lines) {
+        expect(l).toContain("credential.helper=!f()");
+        expect(l).not.toContain("s3cr3t-fake-token");
+      }
+    });
+  });
 });

@@ -598,9 +598,19 @@ describe("discoverRescueRefsCmd — the shell shape that discovers + fetches thi
   });
 
   it("never calls `exit`, never bare `cd`s — same shared-session discipline every other command builder in this feature follows", () => {
-    const cmd = discoverRescueRefsCmd(DIR, STUDIO);
-    expect(cmd).not.toMatch(/(^|[;&|(\s])exit\b/);
-    expect(cmd).not.toMatch(/(^|[;&|(\s])cd\b/);
+    // Issue #30: the private-remote shape too.
+    for (const cmd of [
+      discoverRescueRefsCmd(DIR, STUDIO),
+      discoverRescueRefsCmd(DIR, STUDIO, undefined, { remoteUrl: "https://github.com/example-org/rescue-vault.git" }),
+    ]) {
+      expect(cmd).not.toMatch(/(^|[;&|(\s])exit\b/);
+      expect(cmd).not.toMatch(/(^|[;&|(\s])cd\b/);
+    }
+  });
+
+  // Issue #30: `{}` (private work repo, remote unset) = origin-only, byte-identical.
+  it("an empty rescue target yields exactly the origin-only command", () => {
+    expect(discoverRescueRefsCmd(DIR, STUDIO, undefined, {})).toBe(discoverRescueRefsCmd(DIR, STUDIO));
   });
 
   it("scopes the studio id into the grep pattern — a DIFFERENT studio's own rescue prefix is never matched", () => {
@@ -781,6 +791,64 @@ describe("runProvision wiring — rescue-branch discovery runs after the clone, 
       expect(status.error).toBeNull();
       expect(cmds.some((c) => c === BRINGUP_CMD)).toBe(true); // bring-up still ran
       expect(errSpy).toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  // Issue #30: discovery lists the SAME remote rescue pushes to. The target
+  // comes from deps.rescueTarget (do.ts: resolveRescueTarget); its token
+  // rides the discovery exec's env, never the command text.
+  it("with deps.rescueTarget set, discovery also reads the private rescue remote; the token rides exec env only", async () => {
+    const calls: { cmd: string; env?: Record<string, string> }[] = [];
+    const deps = dispatchingDeps([]);
+    deps.sbExec = vi.fn(async (cmd: string, env?: Record<string, string>) => {
+      calls.push({ cmd, env });
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const remoteUrl = "https://github.com/example-org/rescue-vault.git";
+    const askedFor: string[] = [];
+    deps.rescueTarget = async (workRepo: string) => {
+      askedFor.push(workRepo);
+      return { remoteUrl, env: { FLEET_RESCUE_TOKEN: "fake-token-value" } };
+    };
+
+    const status = await provisionWithStorage(deps, fakeStorage(), { repo: "websites", role: "scratch" }, REPO_SLUG);
+
+    expect(status.state).toBe("running");
+    // The visibility decision is about THIS provision's work repo.
+    expect(askedFor).toEqual([REPO_SLUG]);
+    const discover = calls.find((c) => c.cmd.includes("ls-remote --heads origin"));
+    expect(discover).toBeDefined();
+    expect(discover!.cmd).toBe(discoverRescueRefsCmd("/workspace/websites", "websites--scratch", undefined, { remoteUrl }));
+    expect(discover!.cmd).not.toContain("fake-token-value");
+    expect(discover!.env).toEqual({ FLEET_RESCUE_TOKEN: "fake-token-value" });
+  });
+
+  it("deps.rescueTarget throwing falls back to origin-only discovery; provisioning still lands 'running'", async () => {
+    const cmds: string[] = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const deps = dispatchingDeps(cmds);
+      deps.rescueTarget = async () => { throw new Error("mint failed"); };
+      const status = await provisionWithStorage(deps, fakeStorage(), { repo: "websites", role: "scratch" }, REPO_SLUG);
+      expect(status.state).toBe("running");
+      expect(cmds).toContain(discoverRescueRefsCmd("/workspace/websites", "websites--scratch"));
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("a private-remote WARNING on discovery's stderr is logged by the Worker, not only buried in the container", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const warning = "studio-bringup: WARNING: rescue discovery could not list the private rescue remote -- rescued work there NOT fetched; origin results kept";
+      const deps = dispatchingDeps([], (cmd) =>
+        cmd.includes("ls-remote --heads origin") ? { code: 0, stdout: "", stderr: warning } : undefined);
+      deps.rescueTarget = async () => ({ remoteUrl: "https://github.com/example-org/rescue-vault.git" });
+      const status = await provisionWithStorage(deps, fakeStorage(), { repo: "websites", role: "scratch" }, REPO_SLUG);
+      expect(status.state).toBe("running");
+      expect(errSpy.mock.calls.some((args) => args.join(" ").includes(warning))).toBe(true);
     } finally {
       errSpy.mockRestore();
     }
