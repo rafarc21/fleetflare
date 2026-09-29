@@ -2390,7 +2390,9 @@ describe("rescuePushCmd — the shell shape rescue-push commits and pushes with"
     const cmd = rescuePushCmd("websites", STUDIO_ID);
 
     expect(cmd).toContain("/workspace/websites/.git");
-    expect(cmd).toContain('rescue_one "/workspace/websites" "checkout" "checkout"');
+    // Issue #39: called through rescue_wt, which reports the worktree.
+    expect(cmd).toContain('rescue_wt "/workspace/websites" "checkout" "checkout"');
+    expect(cmd).toContain("rescue_one() {");
     expect(cmd).toContain('git -C "$w" status --porcelain');
     expect(cmd).toContain("git -C \"$w\" rev-parse --abbrev-ref HEAD");
     expect(cmd).toContain('git -C "$w" add -A');

@@ -184,7 +184,7 @@ function rescueWtFn(): string {
     `  if l="$(grep -m1 "^${RESCUE_FAILED_PREFIX} $id " "$f")"; then echo "${RESCUE_WT_PREFIX} $id failed \${l#* * }"\n` +
     `  elif l="$(grep -m1 "^${RESCUE_PUSHED_PREFIX} " "$f")"; then l="\${l#* }"; echo "${RESCUE_WT_PREFIX} $id pushed \${l%% *}"\n` +
     `  else echo "${RESCUE_WT_PREFIX} $id nothing"; fi\n` +
-    `  rm -f "$f"\n` +
+    `  rm -- "$f" 2>/dev/null || true\n` +
     `}\n`
   );
 }

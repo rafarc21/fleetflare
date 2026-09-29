@@ -187,7 +187,7 @@ describe("#217 — rescue-push never saves a tool marker as work", () => {
   test("a real change beside the marker: rescued to a branch that holds the change and NOT the marker", () => {
     writeFileSync(join(checkout, "notes.md"), "real work\n");
 
-    const out = rescue();
+    const out = bare(rescue());
 
     expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 files$`));
     const [ref] = rescueRefs();
