@@ -50,7 +50,7 @@ describe("closeTaskOnPromote", () => {
       testEnv, api, "o/r", 12, { sha: "abc123456789", branch: "main" }, 1_000,
     );
     expect(result).toEqual({ ok: true, outcome: "closed" });
-    expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12);
+    expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12, "completed");
     expect(api.removeLabel).toHaveBeenCalledWith("o/r", 12, "working");
     expect(api.addLabels).toHaveBeenCalledWith("o/r", 12, ["completed"]);
     expect(api.createComment).toHaveBeenCalledWith("o/r", 12, expect.stringContaining("abc12345"));

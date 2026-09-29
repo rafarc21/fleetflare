@@ -3,6 +3,7 @@ import {
   createTask, transitionTask, commentEnvelope, listTasks, showTask, resolveBoardRepo,
   requireAssignedTask, showStudioTask, commentStudioEnvelope, resolveBriefPrompt, resolveLatestAssignedBrief,
   assignTask, transitionStudioTask, openAssignedTasks, findLiveAssignedTask,
+  closeTerminalTasks, TERMINAL_CLOSE_PAGE,
   type BoardApi,
 } from "../src/board/board";
 import { parseEnvelopeComment, renderEnvelopeComment, parseEnvelope } from "../src/board/envelope";
@@ -261,12 +262,51 @@ describe("transitionTask", () => {
     expect(api.addLabels).not.toHaveBeenCalled();
   });
 
-  it("leaves GitHub's own open/closed alone — sprint close owns that", async () => {
+  // Issue #55: a terminal board state left the issue OPEN (226 stale in one
+  // repo). Now the transition closes it, after the label, with GitHub's own
+  // reason: completed = "completed", canceled/failed = "not_planned".
+  for (const [to, reason] of [["completed", "completed"], ["canceled", "not_planned"], ["failed", "not_planned"]] as const) {
+    it(`working -> ${to} closes the open issue as ${reason}, after the label write`, async () => {
+      const order: string[] = [];
+      const api = fakeApi({
+        getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })),
+        addLabels: vi.fn(async () => { order.push("label"); }),
+        closeIssue: vi.fn(async () => { order.push("close"); }),
+      });
+      const res = await transitionTask(api, "o/r", 12, { from: "working", to });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12, reason);
+      expect(order).toEqual(["label", "close"]);
+      expect(res.value.open).toBe(false);
+    });
+  }
+
+  it("a live transition never closes", async () => {
     const api = fakeApi();
-    const res = await transitionTask(api, "o/r", 12, { from: "submitted", to: "completed" });
+    await transitionTask(api, "o/r", 12, { from: "submitted", to: "working" });
+    expect(api.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it("an already-closed issue moving between terminal states is not closed again", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ open: false, state: "completed", labels: ["completed"] })) });
+    await transitionTask(api, "o/r", 12, { from: "completed", to: "canceled" });
+    expect(api.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it("terminal onto itself, issue still open (a close that failed last time): closes, no label writes", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"] })) });
+    const res = await transitionTask(api, "o/r", 12, { from: "completed", to: "completed" });
     expect(res.ok).toBe(true);
-    if (!res.ok) return;
-    expect(res.value.open).toBe(true);
+    expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12, "completed");
+    expect(api.removeLabel).not.toHaveBeenCalled();
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("terminal onto itself, issue closed: nothing at all", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ open: false, state: "canceled", labels: ["canceled"] })) });
+    await transitionTask(api, "o/r", 12, { from: "canceled", to: "canceled" });
+    expect(api.closeIssue).not.toHaveBeenCalled();
   });
 });
 
@@ -1237,3 +1277,58 @@ describe("createTask — idempotency key (#139)", () => {
     expect(vi.mocked(api.createIssue).mock.calls[0][1].body).not.toContain("fleet-task-key");
   });
 });
+
+// Issue #55: the backlog the old transition left behind -- terminal label,
+// issue still open. `fleet task reap --terminal` closes it, a page per call.
+describe("closeTerminalTasks", () => {
+  const board = [
+    task({ number: 1, state: "completed", labels: ["completed"] }),
+    task({ number: 2, state: "canceled", labels: ["canceled"] }),
+    task({ number: 3, state: "failed", labels: ["failed"] }),
+    task({ number: 4, state: "working", labels: ["working"] }),
+    task({ number: 5, state: "completed", labels: ["completed"], open: false }),
+    task({ number: 6, state: null, labels: ["completed", "working"] }),
+  ];
+
+  it("dry-run: lists open terminal tasks with their reason, closes nothing", async () => {
+    const api = fakeApi({ listIssues: vi.fn(async () => board) });
+    const r = await closeTerminalTasks(api, "o/r", false);
+    expect(r.results).toEqual([
+      { number: 1, state: "completed", outcome: "would-close", reason: "completed" },
+      { number: 2, state: "canceled", outcome: "would-close", reason: "not_planned" },
+      { number: 3, state: "failed", outcome: "would-close", reason: "not_planned" },
+    ]);
+    expect(r.remaining).toBe(0);
+    expect(api.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it("apply: closes each with its reason; live, closed and ambiguous untouched", async () => {
+    const api = fakeApi({ listIssues: vi.fn(async () => board) });
+    const r = await closeTerminalTasks(api, "o/r", true);
+    expect(r.results.map((x) => [x.number, x.outcome])).toEqual([[1, "closed"], [2, "closed"], [3, "closed"]]);
+    expect(api.closeIssue).toHaveBeenCalledTimes(3);
+    expect(api.closeIssue).toHaveBeenCalledWith("o/r", 2, "not_planned");
+    expect(api.removeLabel).not.toHaveBeenCalled();
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("apply: at most TERMINAL_CLOSE_PAGE closes per call; `remaining` says how many are left", async () => {
+    const many = Array.from({ length: TERMINAL_CLOSE_PAGE + 3 }, (_, i) =>
+      task({ number: i + 1, state: "completed", labels: ["completed"] }));
+    const api = fakeApi({ listIssues: vi.fn(async () => many) });
+    const r = await closeTerminalTasks(api, "o/r", true);
+    expect(api.closeIssue).toHaveBeenCalledTimes(TERMINAL_CLOSE_PAGE);
+    expect(r.remaining).toBe(3);
+  });
+
+  it("apply: one failed close is reported and the rest still run", async () => {
+    const api = fakeApi({
+      listIssues: vi.fn(async () => board),
+      closeIssue: vi.fn(async (_r: string, n: number) => { if (n === 2) throw new Error("github 502"); }),
+    });
+    const r = await closeTerminalTasks(api, "o/r", true);
+    expect(r.results.map((x) => [x.number, x.outcome])).toEqual([[1, "closed"], [2, "error"], [3, "closed"]]);
+    expect(r.results[1].error).toContain("github 502");
+  });
+});
+

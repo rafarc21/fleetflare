@@ -3,10 +3,10 @@
 // (src/studio/task-reap.ts) both call this, and neither reimplements any
 // part of it. GitHub's open/closed and this fleet's board `state` label are
 // separate things by design (board.ts's own header: "Deploy truth is
-// measured from branch + host, NEVER from a label" — a terminal board state
-// normally leaves the issue OPEN, closing it is sprint close's job). This
-// function does BOTH writes on purpose: that is the whole point of
-// auto-close-on-promote.
+// measured from branch + host, NEVER from a label"). This function does
+// BOTH writes on purpose: that is the whole point of auto-close-on-promote.
+// Since issue #55 the terminal transition does the close; this function
+// closes directly only when no transition can run.
 
 import type { Env } from "../env";
 import { transitionTask, type BoardApi } from "./board";
@@ -57,7 +57,8 @@ export interface CloseOnPromoteResult {
  *    comment thread). A thrown `closeIssue` here propagates uncaught, same
  *    as everywhere else in this function — this branch never writes a
  *    marker at all, so there's nothing for a throw to leave stale.
- * 2. `PATCH .../issues/{n} {state:"closed"}` — idempotent on GitHub's own
+ * 2. `PATCH .../issues/{n} {state:"closed"}` (issue #55: via the terminal
+ *    transition in point 4, directly only when that cannot run) — idempotent on GitHub's own
  *    side (closing an already-closed issue is a harmless 200), so this
  *    still runs even when the board's own state already reads `completed`
  *    for THIS evidence (a first look at this exact sha) — skipped only in
@@ -141,9 +142,12 @@ export async function closeTaskOnPromote(
       outcome = "closed";
     }
   } else {
-    await api.closeIssue(repo, issueNumber);
-
+    // Issue #55: a transition to completed closes the issue itself, so the
+    // close goes through it -- exactly one PATCH, never depending on a
+    // re-read seeing the close. Closed directly only where no transition
+    // can run (no single state label) or it refused.
     if (task.state === null) {
+      await api.closeIssue(repo, issueNumber);
       console.error(
         `close-action: task #${issueNumber} in ${repo} carries no single board state label ` +
         `(labels: ${task.labels.join(", ") || "none"}) — issue closed on GitHub, board state left as drift`,
@@ -155,6 +159,7 @@ export async function closeTaskOnPromote(
           `close-action: transitioning #${issueNumber} in ${repo} to completed failed ` +
           `(${result.status}): ${result.message}`,
         );
+        await api.closeIssue(repo, issueNumber);
       }
     }
 

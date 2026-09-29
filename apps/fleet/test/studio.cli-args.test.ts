@@ -437,6 +437,18 @@ describe("fleet task state — board task #131", () => {
 // `--force` handling takes (top-level switch), adapted here inside
 // parseTask's own "reap" branch. Bare and `--dry-run` are the SAME
 // non-executing posture; `--apply` is the only flag that closes anything.
+describe("fleet task reap --terminal — issue #55", () => {
+  it("--terminal is a dry run; with --apply it applies; flag order free", () => {
+    expect(parseCliArgs(["task", "reap", "--terminal"])).toEqual({ cmd: "task-reap", apply: false, terminal: true });
+    expect(parseCliArgs(["task", "reap", "--terminal", "--apply"])).toEqual({ cmd: "task-reap", apply: true, terminal: true });
+    expect(parseCliArgs(["task", "reap", "--apply", "--terminal"])).toEqual({ cmd: "task-reap", apply: true, terminal: true });
+    expect(parseCliArgs(["task", "reap", "--dry-run", "--terminal"])).toEqual({ cmd: "task-reap", apply: false, terminal: true });
+  });
+  it("plain reap keeps its old shape", () => {
+    expect(parseCliArgs(["task", "reap", "--apply"])).toEqual({ cmd: "task-reap", apply: true });
+  });
+});
+
 describe("fleet task reap — board issue #8", () => {
   it("bare `task reap` is a dry-run — apply: false", () => {
     expect(parseCliArgs(["task", "reap"])).toEqual({ cmd: "task-reap", apply: false });
