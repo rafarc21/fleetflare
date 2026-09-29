@@ -311,6 +311,9 @@ export function emptyObserved(): Observed {
     incarnation: null, replacedAt: null, execFailures: 0, unreachableSince: null,
     lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
     survivalBriefDeliveredFor: null, survivalBriefPending: null,
+    // Issue #56: named explicitly, like `activity`/`memberAlerts` — the
+    // withObserved seam always attaches it, so an empty record carries it too.
+    restarts: null,
   };
 }
 
