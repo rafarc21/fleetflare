@@ -59,9 +59,19 @@ export function resolveRescueRemote(env: { FLEET_RESCUE_REMOTE?: string }): stri
 export async function resolveRescueTarget(
   env: { FLEET_RESCUE_REMOTE?: string }, mint: (repo: string) => Promise<string>,
   workRepoIsPrivate: () => Promise<boolean>,
+  // PR #42 review: provision's discovery (issue #30) asks every provision.
+  // There the expected cases (unset, private repo) are silent, and real
+  // failures are worded for discovery, not as a rescue push.
+  purpose: "push" | "discovery" = "push",
 ): Promise<RescueTarget> {
+  const discovery = purpose === "discovery";
+  const discoveryFailed = (what: string, err: unknown) => console.error(
+    `rescue discovery: ${what} failed (${err instanceof Error ? err.message : String(err)}) -- ` +
+    "listing origin only; rescued work on the private rescue remote is NOT fetched",
+  );
   const slug = resolveRescueRemote(env);
   if (slug === null) {
+    if (discovery) return {};
     console.error(
       "rescue: FLEET_RESCUE_REMOTE is unset -- rescue pushes go to origin and are leak-gated; " +
       "a denylist hit or missing denylist refuses them; set FLEET_RESCUE_REMOTE",
@@ -70,10 +80,15 @@ export async function resolveRescueTarget(
   }
   try {
     if (await workRepoIsPrivate()) {
+      if (discovery) return {};
       console.error(`rescue: work repo is private -- rescue pushes go to its own origin, not ${slug}`);
       return {};
     }
   } catch (err) {
+    if (discovery) {
+      discoveryFailed("work repo visibility check", err);
+      return {};
+    }
     console.error(
       `rescue: work repo visibility check failed (${err instanceof Error ? err.message : String(err)}) -- ` +
       `rescue pushes go to origin, not ${slug}, and are leak-gated`,
@@ -84,6 +99,10 @@ export async function resolveRescueTarget(
     const token = await mint(slug);
     return { remoteUrl: `https://github.com/${slug}.git`, env: { [RESCUE_TOKEN_ENV]: token } };
   } catch (err) {
+    if (discovery) {
+      discoveryFailed(`token mint for ${slug}`, err);
+      return {};
+    }
     console.error(
       `rescue: token mint for ${slug} failed (${err instanceof Error ? err.message : String(err)}) -- ` +
       "falling back to origin; rescue to origin is leak-gated; a denylist hit or missing denylist " +
