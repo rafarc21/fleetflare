@@ -222,4 +222,34 @@ describe("telegram webhook", () => {
     expect(attempts).toBe(1);
     expect(await readSince(env.DB, "cto", 0)).toHaveLength(1);
   });
+
+  // Issue #7 (#13 review): the legacy AgentDO container gets a WRITE token
+  // for AGENT_REPO and has no write-proxy wrappers. A repo routed through the
+  // write proxy must not get one this way: the dispatch is skipped.
+  // Same env both ways (a PAT, so the mint needs no network): only the list
+  // differs, so the listed case's `0` is the skip, not a failed mint.
+  const agentEnv = (listed: boolean) => {
+    const calls = { started: 0 };
+    const e = {
+      ...env, GITHUB_TOKEN: "github_pat_fake", GITHUB_APP_ID: undefined, GITHUB_REPO_AUTH: undefined,
+      FLEET_WRITE_PROXY_REPOS: listed ? env.AGENT_REPO : "",
+      AGENT: { idFromName: (n: string) => n, get: () => ({ fetch: async () => { calls.started++; return new Response("{}"); } }) },
+    } as unknown as Env;
+    return { e, calls };
+  };
+
+  it("AGENT_REPO not listed: the agent starts as before", async () => {
+    const { e, calls } = agentEnv(false);
+    expect((await handleTelegramWebhook(update("do the thing"), e, "websites")).status).toBe(200);
+    expect(calls.started).toBe(1);
+  });
+
+  it("AGENT_REPO on FLEET_WRITE_PROXY_REPOS: the agent is never started, no write token minted", async () => {
+    const { e, calls } = agentEnv(true);
+    const res = await handleTelegramWebhook(update("do the thing"), e, "websites");
+    expect(res.status).toBe(200);
+    expect(calls.started).toBe(0);
+    expect(await readSince(env.DB, "cto", 0)).toHaveLength(1);
+  });
 });
+

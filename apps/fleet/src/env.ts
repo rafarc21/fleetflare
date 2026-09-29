@@ -104,6 +104,29 @@ export interface Env {
    * rescue. See rescue.ts's resolveRescueTarget.
    */
   FLEET_RESCUE_REMOTE?: string;
+  /**
+   * Issue #7, optional, NOT a secret: the work repos (`owner/name`, comma
+   * separated) whose studios hold a read-only credential and push/gh-write
+   * through /fleet/git and /fleet/gh. Unset = off everywhere: a deploy
+   * changes nothing until the operator lists a repo and restarts its
+   * studios. See src/write-proxy/mode.ts.
+   */
+  FLEET_WRITE_PROXY_REPOS?: string;
+  /**
+   * Issue #7, PAT fleets only: a read-only fine-grained PAT handed to studios
+   * in proxy mode. GITHUB_READ_TOKEN_<OWNER> (same naming as
+   * GITHUB_TOKEN_<OWNER>) wins for that owner. Unset = the studio gets no
+   * GitHub credential at all (anonymous reads), never the write PAT. App
+   * fleets need neither: the App token is narrowed to read at mint time.
+   */
+  GITHUB_READ_TOKEN?: string;
+  /**
+   * Issue #7, PAT fleets only: a fine-grained PAT with write access to the
+   * FLEET_RESCUE_REMOTE repo and nothing else. It rides into the container
+   * for rescue pushes; the fleet's own PAT never does. Unset on a PAT fleet =
+   * rescue goes to origin through the write proxy (scanned).
+   */
+  FLEET_RESCUE_GITHUB_TOKEN?: string;
   /** Optional: no wrangler.jsonc `vars` entry today. AgentDO falls back to claude-opus-5. */
   AGENT_MODEL?: string;
   /**

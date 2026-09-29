@@ -6,6 +6,7 @@ import { getFlag, setFlag } from "../state";
 import { sendMessage } from "./api";
 import type { TaskRecord } from "../tasks/loop";
 import { mintRepoToken } from "../github/auth";
+import { writeProxyOn } from "../write-proxy/mode";
 import { handleCallbackQuery, makeExecutor, type CallbackQuery } from "../approvals/gates";
 
 interface TelegramUpdate {
@@ -172,6 +173,13 @@ export async function handleTelegramWebhook(
   // (not a 500 Response), which becomes a runtime 500, which Telegram
   // retries. That retry is now a safe no-op (see the dedupe above), not a
   // duplicate event.
+  // Issue #7: this legacy container gets a WRITE token for AGENT_REPO and
+  // has none of the write proxy's wrappers or routing. A repo the operator
+  // routed through the proxy must not get one by this door.
+  if (writeProxyOn(env, env.AGENT_REPO)) {
+    console.error(`agent dispatch skipped: ${env.AGENT_REPO} is on FLEET_WRITE_PROXY_REPOS (no write token to legacy agents)`);
+    return new Response("ok");
+  }
   try {
     const stub = env.AGENT.get(env.AGENT.idFromName(agent.id));
     const doRes = await stub.fetch("https://agent/start", {

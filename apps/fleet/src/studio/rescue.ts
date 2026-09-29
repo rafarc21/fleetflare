@@ -57,12 +57,15 @@ export function resolveRescueRemote(env: { FLEET_RESCUE_REMOTE?: string }): stri
  * unknown and origin is where that studio's work already lives.
  */
 export async function resolveRescueTarget(
-  env: { FLEET_RESCUE_REMOTE?: string }, mint: (repo: string) => Promise<string>,
+  env: { FLEET_RESCUE_REMOTE?: string }, mint: (repo: string) => Promise<string | null>,
   workRepoIsPrivate: () => Promise<boolean>,
   // PR #42 review: provision's discovery (issue #30) asks every provision.
   // There the expected cases (unset, private repo) are silent, and real
   // failures are worded for discovery, not as a rescue push.
   purpose: "push" | "discovery" = "push",
+  // Issue #7: the rescue token WRITES and rides into the container, past
+  // every scan -- only for a rescue repo confirmed private. Absent = no check.
+  rescueRepoIsPrivate?: (repo: string) => Promise<boolean>,
 ): Promise<RescueTarget> {
   const discovery = purpose === "discovery";
   const discoveryFailed = (what: string, err: unknown) => console.error(
@@ -95,8 +98,20 @@ export async function resolveRescueTarget(
     );
     return {};
   }
+  const toOrigin = (why: string): RescueTarget => {
+    console.error(`rescue${discovery ? " discovery" : ""}: ${why} -- ${discovery ? "listing origin only" : "rescue pushes go to origin and are leak-gated"}`);
+    return {};
+  };
+  if (rescueRepoIsPrivate) {
+    let priv = false;
+    try {
+      priv = (await rescueRepoIsPrivate(slug)) === true;
+    } catch { /* unknown = not private */ }
+    if (!priv) return toOrigin(`${slug} is not confirmed private`);
+  }
   try {
     const token = await mint(slug);
+    if (token === null) return toOrigin(`no write token for ${slug} (PAT fleet: set FLEET_RESCUE_GITHUB_TOKEN)`);
     return { remoteUrl: `https://github.com/${slug}.git`, env: { [RESCUE_TOKEN_ENV]: token } };
   } catch (err) {
     if (discovery) {
@@ -131,8 +146,12 @@ export function rescuePushPrelude(opts: RescuePushOptions): string {
   if (opts.remoteUrl === undefined) return `__rgit=(git); __rdest=origin\n`;
   const git = shq(opts.realGit ?? STUDIO_REAL_GIT_PATH);
   const helper = `!f() { echo username=x-access-token; echo "password=\${${RESCUE_TOKEN_ENV}}"; }; f`;
+  // Issue #7: proxy mode's global pushInsteadOf sends every github.com push
+  // to the Worker, which would refuse this one (not the work repo). A
+  // self-mapping entry for the exact URL is the longest match, so it wins.
+  const pin = shq(`url.${opts.remoteUrl}.pushInsteadOf=${opts.remoteUrl}`);
   return (
-    `__rgit=(${git}); __rdest=${shq(opts.remoteUrl)}\n` +
+    `__rgit=(${git} -c ${pin}); __rdest=${shq(opts.remoteUrl)}\n` +
     `if [ -n "\${${RESCUE_TOKEN_ENV}:-}" ]; then __rgit+=(-c credential.helper= -c ${shq(`credential.helper=${helper}`)}); fi\n`
   );
 }

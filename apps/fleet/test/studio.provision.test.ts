@@ -21,6 +21,7 @@ import {
 import { appendHouseRules, base64EncodeUtf8, BlueprintError } from "../src/studio/blueprint";
 import { recordStudio } from "../src/studio/registry";
 import { gatedStateIn, opsFileFetcher, installLeakGatePort } from "../src/studio/do";
+import { writeProxyConfigCmd } from "../src/write-proxy/container-config";
 import { ghBlockCmd, leakGateInstallCmd } from "../src/studio/gh-wrapper";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -1814,6 +1815,87 @@ describe("applyLeakGate — denylist delivery into the container (issue #1)", ()
     expect(status.state).toBe("running");
     expect(g.cmds).toContain(RM);
     expect(status.error).toContain("leak gate: no denylist");
+  });
+
+  // Issue #7: the push/gh routing follows the same visibility answer.
+  describe("write proxy config (issue #7)", () => {
+    const WORKER = "https://fleet.example.workers.dev";
+    // The port's own mode rule is write-proxy/mode.ts's writeModeFor (tested
+    // there); this stand-in is its App shape: direct only when private.
+    const withProxy = (g: ReturnType<typeof gateDeps>, on = true) => {
+      g.deps.writeProxy = { workerUrl: WORKER, mode: (_slug, isPrivate) => (on && !isPrivate ? "proxy" : "direct") };
+      return g;
+    };
+
+    it("public work repo -> proxy config exec'd (pushInsteadOf to the Worker)", async () => {
+      const g = withProxy(gateDeps());
+      await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+      expect(g.cmds).toContain(writeProxyConfigCmd("proxy", WORKER));
+    });
+
+    it("visibility unknown reads as public -> proxy", async () => {
+      const g = withProxy(gateDeps({ isPrivate: new Error("github down") }));
+      await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+      expect(g.cmds).toContain(writeProxyConfigCmd("proxy", WORKER));
+    });
+
+    it("private work repo -> direct config (proxy keys removed)", async () => {
+      const g = withProxy(gateDeps({ isPrivate: true }));
+      await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+      expect(g.cmds).toContain(writeProxyConfigCmd("direct", WORKER));
+    });
+
+    it("kill switch -> direct even on a public repo", async () => {
+      const g = withProxy(gateDeps(), false);
+      await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+      expect(g.cmds).toContain(writeProxyConfigCmd("direct", WORKER));
+    });
+
+    it("restart re-applies it (fresh container)", async () => {
+      const storage = fakeStorage();
+      await provisionWithStorage(gateDeps().deps, storage, STUDIO_WORK_CFG, REPO_SLUG);
+      const g = withProxy(gateDeps());
+      await restartWithStorage(g.deps, storage, "sample--web-studio", "rafarc21/fleetflare");
+      expect(g.cmds).toContain(writeProxyConfigCmd("proxy", WORKER));
+    });
+
+    it("a failed config exec is a row note, never a thrown provision", async () => {
+      const g = withProxy(gateDeps());
+      const base = g.deps.sbExec;
+      g.deps.sbExec = vi.fn(async (cmd: string, e?: Record<string, string>) =>
+        cmd === writeProxyConfigCmd("proxy", WORKER) ? { code: 1, stdout: "", stderr: "boom" } : base(cmd, e));
+      const status = await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+      expect(status.state).toBe("running");
+      expect(status.error).toContain("write proxy: git config failed");
+    });
+
+    it("the mode rule gets the work repo and the gate's own visibility answer", async () => {
+      const g = gateDeps({ isPrivate: true });
+      const mode = vi.fn((_slug: string, _isPrivate: boolean) => "proxy" as const);
+      g.deps.writeProxy = { workerUrl: WORKER, mode };
+      await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+      expect(mode).toHaveBeenCalledWith("acme-org/sample", true);
+      expect(g.cmds).toContain(writeProxyConfigCmd("proxy", WORKER));
+    });
+
+    it("first provision: blueprint + memory ports get the resolved work repo (row has none yet)", async () => {
+      const g = gateDeps();
+      const cred = vi.fn(async () => ({ ok: true as const }));
+      const mem = vi.fn(async () => "fake-read-token");
+      g.deps.writeBlueprintCredential = cred;
+      g.deps.memoryRepo = "acme-org/fleet-ops";
+      g.deps.memoryToken = mem;
+      await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+      expect(cred.mock.calls.length).toBeGreaterThan(0);
+      for (const c of cred.mock.calls as unknown[][]) expect(c[2]).toBe("acme-org/sample");
+      expect(mem).toHaveBeenCalledWith("acme-org/sample");
+    });
+
+    it("absent port -> no proxy config at all", async () => {
+      const g = gateDeps();
+      await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+      expect(g.cmds.some((c) => c.includes("/fleet/git/"))).toBe(false);
+    });
   });
 
   it("absence is a no-op: no installLeakGate port -> no gate exec, no write, no note", async () => {

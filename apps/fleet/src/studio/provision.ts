@@ -38,6 +38,7 @@ import { redactSecrets } from "./redact";
 import { DenylistDialectError, LEAK_DENYLIST_PATH, OPS_DENYLIST_PATH, denylistFileContent, parseDenylist } from "../leak-gate";
 import { isDeadlineExit, KILL_GRACE_SECONDS } from "./exec-deadline";
 import { ghBlockCmd } from "./gh-wrapper";
+import { writeProxyConfigCmd } from "../write-proxy/container-config";
 import { STUDIO_TMUX, withStudioTmux } from "./tmux";
 // Issue #38: a restart has only the studio ID to work from, and the repo
 // segment of that id IS the checkout directory under /workspace. ids.ts
@@ -105,7 +106,7 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
   memoryRepo?: string | null;
   /** Issue #341: a token that can read `memoryRepo` (usually private). Rides
    *  the clone's exec env only. */
-  memoryToken?: () => Promise<string>;
+  memoryToken?: (workRepoSlug: string) => Promise<string>;
   /**
    * Issue #330 round 2: the resolved `FLEET_OPS_REPO` slug (resolveOpsRepo's
    * own result), or `null`/absent when unset — `resolveBringupEnv` cannot
@@ -216,7 +217,7 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
    * happens not to need one. do.ts's real `deps()` wires it to
    * blueprintCredentialWriteCmd + mintRepoToken.
    */
-  writeBlueprintCredential?: (blueprintRepo: string, id: string) =>
+  writeBlueprintCredential?: (blueprintRepo: string, id: string, workRepoSlug: string) =>
     Promise<{ ok: true } | { ok: false; error: string }>;
   /**
    * Issue #253 — the studio git-safety config + the /usr/local/bin/git
@@ -254,6 +255,12 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
    * wrote. `{}`, absence or a throw = origin-only discovery.
    */
   rescueTarget?: (workRepoSlug: string) => Promise<RescueTarget>;
+  /**
+   * Issue #7: route pushes and gh writes through the Worker. `mode` gets the
+   * same visibility answer as the gate above (unknown = public) and decides
+   * (write-proxy/mode.ts's writeModeFor). Absent = no step.
+   */
+  writeProxy?: { workerUrl: string; mode: (slug: string, isPrivate: boolean) => "direct" | "proxy" };
   /**
    * Maestro correction #10 — issue #90 (currently blocked, but also touches
    * `runProvision`/`runRestart` directly) makes widening either function's
@@ -1564,11 +1571,12 @@ async function resolveMemoryIndex(deps: ProvisionDeps): Promise<string | null> {
  * configured. Never degrades provisioning: memoryCloneCmd is fail-soft, and a
  * token mint or exec that throws is logged here.
  */
-async function refreshMemoryClone(deps: ProvisionDeps, id: string): Promise<void> {
+async function refreshMemoryClone(deps: ProvisionDeps, id: string, workRepoSlug: string): Promise<void> {
   const repo = deps.memoryRepo ?? null;
   if (repo === null) return;
   try {
-    const env = deps.memoryToken ? { [MEMORY_TOKEN_ENV]: await deps.memoryToken() } : undefined;
+    // Issue #7: the work repo decides what the token may be (write-proxy/mode.ts).
+    const env = deps.memoryToken ? { [MEMORY_TOKEN_ENV]: await deps.memoryToken(workRepoSlug) } : undefined;
     await deps.sbExec(memoryCloneCmd(repo), env);
   } catch (err) {
     console.error(`studio ${id}: memory clone failed, proceeding without it`, err instanceof Error ? err.message : String(err));
@@ -2112,10 +2120,10 @@ async function pickRestoreSource(
  * clone for it, so there is nothing here to authenticate.
  */
 async function maybeWriteBlueprintCredential(
-  deps: ProvisionDeps, bringupEnv: RoleEnv | StudioEnv, id: string,
+  deps: ProvisionDeps, bringupEnv: RoleEnv | StudioEnv, id: string, workRepoSlug: string,
 ): Promise<void> {
   if (!("BLUEPRINT_REPO" in bringupEnv)) return;
-  const cred = await deps.writeBlueprintCredential?.(bringupEnv.BLUEPRINT_REPO, id);
+  const cred = await deps.writeBlueprintCredential?.(bringupEnv.BLUEPRINT_REPO, id, workRepoSlug);
   if (cred && !cred.ok) {
     console.error(`studio ${id}: blueprint credential write failed, skills may be missing`, cred.error);
   }
@@ -2179,6 +2187,23 @@ async function applyLeakGate(deps: ProvisionDeps, id: string, workRepoSlug: stri
   } catch (err) {
     console.error(`studio ${id}: leak gate privacy lookup failed, treating ${workRepoSlug} as public`,
       err instanceof Error ? err.message : String(err));
+  }
+
+  // Issue #7. A failed exec leaves pushes pointed at GitHub on the read-only
+  // token: they fail, they never leak. Noted on the row.
+  if (deps.writeProxy) {
+    const mode = deps.writeProxy.mode(workRepoSlug, isPrivate);
+    let ok = false;
+    try {
+      const res = await deps.sbExec(writeProxyConfigCmd(mode, deps.writeProxy.workerUrl));
+      ok = res.code === 0;
+      if (!ok) console.error(`studio ${id}: write proxy config failed (${res.code})`, res.stderr.slice(0, 500));
+    } catch (err) {
+      console.error(`studio ${id}: write proxy config failed`, err instanceof Error ? err.message : String(err));
+    }
+    if (!ok) {
+      notes.push(`write proxy: git config failed (${mode}) -- pushes and gh writes from this studio fail until the next restart.`);
+    }
   }
 
   let content: string | null = null;
@@ -2334,7 +2359,7 @@ export async function runProvision(
     // Board task #149: the blueprint clone below (studio-bringup.sh) needs
     // its OWN credential before it runs, same reasoning do.ts's provision()
     // already applies to the work-repo credential and the clone it precedes.
-    await maybeWriteBlueprintCredential(deps, resolved.bringupEnv, id);
+    await maybeWriteBlueprintCredential(deps, resolved.bringupEnv, id, workRepoSlug);
     // Issue #253: git-safety config + the git wrapper, before the clone below
     // ever gives this container something to push.
     await applyStudioGitSafety(deps, id);
@@ -2371,7 +2396,7 @@ export async function runProvision(
         err instanceof Error ? err.message : String(err),
       );
     }
-    await refreshMemoryClone(deps, id);
+    await refreshMemoryClone(deps, id, workRepoSlug);
 
     // Task 3 (P2 plane 2): own try/catch, deliberately NOT folded into this
     // function's outer one — a restore failure must never degrade
@@ -2581,15 +2606,17 @@ export async function runRestart(
     // attempt never created /opt/blueprint/.git), or a studio whose
     // credential mint failed/was never attempted keeps retrying the clone on
     // every restart, forever.
-    await maybeWriteBlueprintCredential(deps, roleEnv, status.id);
+    // Issue #7: the row's own repo, resolved once for every port below.
+    const rowRepoSlug = resolveWorkRepoSlug(null, existing, fleetRepoSlug);
+    await maybeWriteBlueprintCredential(deps, roleEnv, status.id, rowRepoSlug);
     // Issue #253: a rollout-replaced container's fresh filesystem carries
     // none of this config either — re-apply on every restart, same
     // reasoning as the blueprint credential just above.
     await applyStudioGitSafety(deps, status.id);
     // Issue #1: fresh filesystem = no scanner, no wrapper, no gate file.
-    leakGateNote = await applyLeakGate(deps, status.id, resolveWorkRepoSlug(null, existing, fleetRepoSlug));
+    leakGateNote = await applyLeakGate(deps, status.id, rowRepoSlug);
     // Issue #341: a replaced container lost /opt/memory too.
-    await refreshMemoryClone(deps, status.id);
+    await refreshMemoryClone(deps, status.id, rowRepoSlug);
 
     // THE CLONE. Issue #76, and the reason every rollout-replaced container
     // stayed bare no matter how often it was restarted or healed.
