@@ -315,7 +315,7 @@ describe("deploy.sh refuses when wrangler's target Worker is not the credentials
       writeConfig(envConfig);
       // Creds match the target as seen WITHOUT the file: only the file can
       // make the check wrong.
-      if (args.includes("prod")) setCreds("https://prod.example.com");
+      if ((args as readonly string[]).includes("prod")) setCreds("https://prod.example.com");
       expect(deploy([...args], 0).code).toBe(0);
       rmSync(calls, { force: true });
       writeFileSync(join(fleet, file), body);
