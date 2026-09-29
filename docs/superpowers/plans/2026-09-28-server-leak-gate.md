@@ -23,7 +23,7 @@ lane with real git + `git http-backend`, bash wrappers.
 - Fail closed: any parse error, unknown, or exception = refuse.
 - Body cap 16 MiB (`PUSH_BODY_CAP = 16 * 1024 * 1024`); inflated cap 64 MiB (`PUSH_INFLATE_CAP`).
 - `src/write-proxy/{inflate,pack,pktline,scan-push}.ts` import nothing Worker-only: bun lane loads them.
-- Write mode default `proxy`; `FLEET_WRITE_PROXY=off` = `direct`. Confirmed-private repo = `direct`.
+- Write mode off unless work repo on `FLEET_WRITE_PROXY_REPOS` (#13 review); listed + App + confirmed private = `direct`.
 - Never fall back to write PAT for studio credential.
 - Heavy test runs under `lockf -k /tmp/fleetflare-gate.lock`.
 - Keep `bun run check`, `bun run test`, `bun run bun-test`, english-check green.
@@ -92,12 +92,12 @@ lane with real git + `git http-backend`, bash wrappers.
 
 **Files:**
 - Create: `apps/fleet/src/write-proxy/mode.ts`
-- Modify: `apps/fleet/src/env.ts` (add `FLEET_WRITE_PROXY?`, `GITHUB_READ_TOKEN?`), `apps/fleet/src/studio/credentials.ts` (add `credentialClearCmd()`), `apps/fleet/src/studio/do.ts` (`runRefreshCredential` + `refreshDeps`)
+- Modify: `apps/fleet/src/env.ts` (add `FLEET_WRITE_PROXY_REPOS?`, `GITHUB_READ_TOKEN?`, `FLEET_RESCUE_GITHUB_TOKEN?`), `apps/fleet/src/studio/credentials.ts` (add `credentialClearCmd()`), `apps/fleet/src/studio/do.ts` (`runRefreshCredential` + `refreshDeps`)
 - Test: `apps/fleet/test/write-proxy.mode.test.ts`, `apps/fleet/test/studio.credentials.test.ts`
 
 **Interfaces:**
 - Produces:
-  - `writeProxyOn(env): boolean` — false only for `FLEET_WRITE_PROXY === "off"`.
+  - `writeProxyOn(env, workRepo): boolean` — true only for a repo on `FLEET_WRITE_PROXY_REPOS`.
   - `resolveWriteMode(env, repo, isPrivate: (r) => Promise<boolean>): Promise<"direct" | "proxy">` — lookup throw = proxy.
   - `readTokenEnvName(owner)` = `GITHUB_READ_TOKEN_<OWNER>`; `studioReadToken(env, repo): Promise<string | null>` — App: `mintRepoToken(env, repo, {permissions: {contents: "read", pull_requests: "read", issues: "read"}})`; PAT: per-owner read token, else `GITHUB_READ_TOKEN`, else null.
   - `RefreshDeps.mintToken: () => Promise<string | null>`; null → exec `credentialClearCmd()`.
@@ -178,7 +178,7 @@ lane with real git + `git http-backend`, bash wrappers.
 ### Task 9: docs + config surface
 
 **Files:**
-- Modify: `README.md` (leak gate section: layer 2, operator actions), `docs/threat-model.md` (wrapper bypass closed for public repos), `apps/fleet/wrangler.example.jsonc` (FLEET_WRITE_PROXY note), blueprint house rules if they mention direct gh writes.
+- Modify: `README.md` (leak gate section: layer 2, operator actions), `docs/threat-model.md` (wrapper bypass closed for public repos), `apps/fleet/wrangler.example.jsonc` (FLEET_WRITE_PROXY_REPOS note), blueprint house rules if they mention direct gh writes.
 
 - [ ] Step 1: edit. Step 2: `bun run apps/fleet/scripts/english-check.ts`. Step 3: commit `docs(write-proxy): server-side leak gate operator notes (#7)`.
 
