@@ -332,12 +332,32 @@ fi
 # studios, as on a first deploy) exits non-zero and this refuses.
 # Unpiped: its per-studio progress reaches the operator live.
 if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
+  # Issue #36: rescue-all rescues the fleet ~/.fleet/credentials names;
+  # wrangler replaces the Worker this config (+ --env/CLOUDFLARE_ENV,
+  # --name) names. Refuse unless they are provably the same Worker --
+  # otherwise the gate rescues the wrong fleet and says SAFE. Unknown target
+  # fails closed. scripts/deploy-target.ts reads the config with wrangler's
+  # own reader.
+  TARGET_RC=0
   RESCUE_RC=0
   if command -v bun >/dev/null 2>&1; then
-    bun "$FLEET_DIR/cli/fleet.ts" rescue-all || RESCUE_RC=$?
+    bun "$FLEET_DIR/scripts/deploy-target.ts" "$FLEET_CONFIG" ${ARGS[@]+"${ARGS[@]}"} >&2 || TARGET_RC=$?
   else
-    echo "deploy.sh: bun not found on PATH -- cannot run fleet rescue-all." >&2
+    echo "deploy.sh: bun not found on PATH -- cannot check the target or run fleet rescue-all." >&2
+    TARGET_RC=127
+  fi
+  if [[ "$TARGET_RC" != 0 ]]; then
+    if [[ "$ALLOW_UNRESCUED" == 1 ]]; then
+      echo "deploy.sh: WARNING -- --allow-unrescued: wrangler's target Worker is NOT proven to be the fleet rescue-all rescues (exit $TARGET_RC); continuing. The target's studios may lose unpushed work." >&2
+    else
+      echo "deploy.sh: refusing -- wrangler's target Worker is not proven to be the fleet rescue-all rescues -- pre-deploy gate UNSAFE; point ~/.fleet/credentials at the target fleet, or pass --allow-unrescued to override (exit $TARGET_RC)." >&2
+      exit 1
+    fi
+  fi
+  if [[ "$TARGET_RC" == 127 ]]; then
     RESCUE_RC=127
+  else
+    bun "$FLEET_DIR/cli/fleet.ts" rescue-all || RESCUE_RC=$?
   fi
   if [[ "$RESCUE_RC" != 0 ]]; then
     if [[ "$ALLOW_UNRESCUED" == 1 ]]; then
