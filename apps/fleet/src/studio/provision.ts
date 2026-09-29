@@ -106,7 +106,7 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
   memoryRepo?: string | null;
   /** Issue #341: a token that can read `memoryRepo` (usually private). Rides
    *  the clone's exec env only. */
-  memoryToken?: () => Promise<string>;
+  memoryToken?: (workRepoSlug: string) => Promise<string>;
   /**
    * Issue #330 round 2: the resolved `FLEET_OPS_REPO` slug (resolveOpsRepo's
    * own result), or `null`/absent when unset — `resolveBringupEnv` cannot
@@ -217,7 +217,7 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
    * happens not to need one. do.ts's real `deps()` wires it to
    * blueprintCredentialWriteCmd + mintRepoToken.
    */
-  writeBlueprintCredential?: (blueprintRepo: string, id: string) =>
+  writeBlueprintCredential?: (blueprintRepo: string, id: string, workRepoSlug: string) =>
     Promise<{ ok: true } | { ok: false; error: string }>;
   /**
    * Issue #253 — the studio git-safety config + the /usr/local/bin/git
@@ -1569,11 +1569,12 @@ async function resolveMemoryIndex(deps: ProvisionDeps): Promise<string | null> {
  * configured. Never degrades provisioning: memoryCloneCmd is fail-soft, and a
  * token mint or exec that throws is logged here.
  */
-async function refreshMemoryClone(deps: ProvisionDeps, id: string): Promise<void> {
+async function refreshMemoryClone(deps: ProvisionDeps, id: string, workRepoSlug: string): Promise<void> {
   const repo = deps.memoryRepo ?? null;
   if (repo === null) return;
   try {
-    const env = deps.memoryToken ? { [MEMORY_TOKEN_ENV]: await deps.memoryToken() } : undefined;
+    // Issue #7: the work repo decides what the token may be (write-proxy/mode.ts).
+    const env = deps.memoryToken ? { [MEMORY_TOKEN_ENV]: await deps.memoryToken(workRepoSlug) } : undefined;
     await deps.sbExec(memoryCloneCmd(repo), env);
   } catch (err) {
     console.error(`studio ${id}: memory clone failed, proceeding without it`, err instanceof Error ? err.message : String(err));
@@ -2117,10 +2118,10 @@ async function pickRestoreSource(
  * clone for it, so there is nothing here to authenticate.
  */
 async function maybeWriteBlueprintCredential(
-  deps: ProvisionDeps, bringupEnv: RoleEnv | StudioEnv, id: string,
+  deps: ProvisionDeps, bringupEnv: RoleEnv | StudioEnv, id: string, workRepoSlug: string,
 ): Promise<void> {
   if (!("BLUEPRINT_REPO" in bringupEnv)) return;
-  const cred = await deps.writeBlueprintCredential?.(bringupEnv.BLUEPRINT_REPO, id);
+  const cred = await deps.writeBlueprintCredential?.(bringupEnv.BLUEPRINT_REPO, id, workRepoSlug);
   if (cred && !cred.ok) {
     console.error(`studio ${id}: blueprint credential write failed, skills may be missing`, cred.error);
   }
@@ -2351,7 +2352,7 @@ export async function runProvision(
     // Board task #149: the blueprint clone below (studio-bringup.sh) needs
     // its OWN credential before it runs, same reasoning do.ts's provision()
     // already applies to the work-repo credential and the clone it precedes.
-    await maybeWriteBlueprintCredential(deps, resolved.bringupEnv, id);
+    await maybeWriteBlueprintCredential(deps, resolved.bringupEnv, id, workRepoSlug);
     // Issue #253: git-safety config + the git wrapper, before the clone below
     // ever gives this container something to push.
     await applyStudioGitSafety(deps, id);
@@ -2388,7 +2389,7 @@ export async function runProvision(
         err instanceof Error ? err.message : String(err),
       );
     }
-    await refreshMemoryClone(deps, id);
+    await refreshMemoryClone(deps, id, workRepoSlug);
 
     // Task 3 (P2 plane 2): own try/catch, deliberately NOT folded into this
     // function's outer one — a restore failure must never degrade
@@ -2594,15 +2595,17 @@ export async function runRestart(
     // attempt never created /opt/blueprint/.git), or a studio whose
     // credential mint failed/was never attempted keeps retrying the clone on
     // every restart, forever.
-    await maybeWriteBlueprintCredential(deps, roleEnv, status.id);
+    // Issue #7: the row's own repo, resolved once for every port below.
+    const rowRepoSlug = resolveWorkRepoSlug(null, existing, fleetRepoSlug);
+    await maybeWriteBlueprintCredential(deps, roleEnv, status.id, rowRepoSlug);
     // Issue #253: a rollout-replaced container's fresh filesystem carries
     // none of this config either — re-apply on every restart, same
     // reasoning as the blueprint credential just above.
     await applyStudioGitSafety(deps, status.id);
     // Issue #1: fresh filesystem = no scanner, no wrapper, no gate file.
-    leakGateNote = await applyLeakGate(deps, status.id, resolveWorkRepoSlug(null, existing, fleetRepoSlug));
+    leakGateNote = await applyLeakGate(deps, status.id, rowRepoSlug);
     // Issue #341: a replaced container lost /opt/memory too.
-    await refreshMemoryClone(deps, status.id);
+    await refreshMemoryClone(deps, status.id, rowRepoSlug);
 
     // THE CLONE. Issue #76, and the reason every rollout-replaced container
     // stayed bare no matter how often it was restarted or healed.

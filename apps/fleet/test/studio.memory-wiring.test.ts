@@ -68,8 +68,8 @@ describe("#346 — memory tokens are scoped to the ops repo and narrowed", () =>
 
   it("container clone token: repositories [ops repo], contents:read only", async () => {
     stubGithub();
-    const d = doWith(appVars()).deps() as unknown as { memoryToken: () => Promise<string> };
-    expect(await d.memoryToken()).toBe("ghs_scoped_fake");
+    const d = doWith(appVars()).deps() as unknown as { memoryToken: (workRepo: string) => Promise<string> };
+    expect(await d.memoryToken("rafarc21/fleetflare")).toBe("ghs_scoped_fake");
     expect(mints).toHaveLength(1);
     expect(mints[0]!.body).toEqual({ repositories: ["fleetflare-ops"], permissions: { contents: "read" } });
   });
@@ -82,5 +82,38 @@ describe("#346 — memory tokens are scoped to the ops repo and narrowed", () =>
     await m.commitFile("rafarc21/fleetflare-ops", "fleet/memory/fleetflare--pilot/x.md", "fact\n", "fleet: harvest learning (fleetflare--pilot)");
     expect(mints).toHaveLength(1);
     expect(mints[0]!.body).toEqual({ repositories: ["fleetflare-ops"], permissions: { contents: "write" } });
+  });
+});
+
+// Issue #7, #13 re-review HIGH: on a FIRST provision the row has no repoSlug
+// yet, so reading it fell back to AGENT_REPO -- unlisted -- and a PAT fleet's
+// write PAT rode into the memory clone env and the blueprint credential file.
+// The ports now take the work repo provision already resolved.
+describe("#7 — container-bound tokens follow the work repo provision resolved", () => {
+  const pat = (extra: Record<string, string> = {}): Partial<Env> => ({
+    GITHUB_TOKEN: "github_pat_WRITE_fake", GITHUB_APP_ID: undefined, GITHUB_REPO_AUTH: undefined,
+    FLEET_OPS_REPO: "example-org/ops", FLEET_WRITE_PROXY_REPOS: "example-org/demo", ...extra,
+  } as unknown as Partial<Env>);
+  type Ports = {
+    memoryToken: (workRepo: string) => Promise<string>;
+    writeBlueprintCredential: (blueprintRepo: string, id: string, workRepo: string) => Promise<{ ok: boolean; error?: string }>;
+  };
+
+  it("memory token, PAT fleet, listed repo, no read token: refused, never the write PAT", async () => {
+    const d = doWith(pat()).deps() as unknown as Ports;
+    await expect(d.memoryToken("example-org/demo")).rejects.toThrow(/GITHUB_READ_TOKEN/);
+  });
+
+  it("memory token, PAT fleet, listed repo: the read PAT", async () => {
+    const d = doWith(pat({ GITHUB_READ_TOKEN: "github_pat_READ_fake" })).deps() as unknown as Ports;
+    expect(await d.memoryToken("example-org/demo")).toBe("github_pat_READ_fake");
+  });
+
+  it("blueprint credential, PAT fleet, listed repo, no read token: not written", async () => {
+    const d = doWith(pat()).deps() as unknown as Ports;
+    const r = await d.writeBlueprintCredential("example-org/blueprint", "demo--web-studio", "example-org/demo");
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("GITHUB_READ_TOKEN");
+    expect(r.error).not.toContain("github_pat_WRITE_fake");
   });
 });

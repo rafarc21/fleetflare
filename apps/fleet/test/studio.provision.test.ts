@@ -1878,6 +1878,19 @@ describe("applyLeakGate — denylist delivery into the container (issue #1)", ()
       expect(g.cmds).toContain(writeProxyConfigCmd("proxy", WORKER));
     });
 
+    it("first provision: blueprint + memory ports get the resolved work repo (row has none yet)", async () => {
+      const g = gateDeps();
+      const cred = vi.fn(async () => ({ ok: true as const }));
+      const mem = vi.fn(async () => "fake-read-token");
+      g.deps.writeBlueprintCredential = cred;
+      g.deps.memoryRepo = "acme-org/fleet-ops";
+      g.deps.memoryToken = mem;
+      await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);
+      expect(cred.mock.calls.length).toBeGreaterThan(0);
+      for (const c of cred.mock.calls as unknown[][]) expect(c[2]).toBe("acme-org/sample");
+      expect(mem).toHaveBeenCalledWith("acme-org/sample");
+    });
+
     it("absent port -> no proxy config at all", async () => {
       const g = gateDeps();
       await provisionWithStorage(g.deps, fakeStorage(), STUDIO_WORK_CFG, REPO_SLUG);

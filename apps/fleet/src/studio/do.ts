@@ -4456,10 +4456,12 @@ export class StudioDO extends Sandbox<Env> {
       memoryRepo: opsRepo,
       // #346 (on #339): scoped to the ops repo AND narrowed to read -- this
       // token rides into the container (exec env of the clone).
-      memoryToken: async () => {
+      memoryToken: async (workRepoSlug: string) => {
         if (opsRepo === null) throw new Error("FLEET_OPS_REPO is unset -- no memory token to mint");
         // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts).
-        const token = await containerToken(this.env, await this.workRepoSlug(null), opsRepo, { contents: "read" });
+        // The work repo comes from provision: on a first provision the row
+        // has none yet, and reading it would fall back to AGENT_REPO.
+        const token = await containerToken(this.env, workRepoSlug, opsRepo, { contents: "read" });
         if (token === null) throw new Error("no read-only token for the ops repo -- set GITHUB_READ_TOKEN");
         return token;
       },
@@ -4544,10 +4546,11 @@ export class StudioDO extends Sandbox<Env> {
       // blueprint clone only ever needs to be READ (fleet.json, a role file,
       // org.json), never pushed to, so the mint itself is denied write from
       // the start rather than merely being scoped to the right repo.
-      writeBlueprintCredential: async (blueprintRepo: string) => {
+      writeBlueprintCredential: async (blueprintRepo: string, _id: string, workRepoSlug: string) => {
         try {
-          // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts).
-          const token = await containerToken(this.env, await this.workRepoSlug(null), blueprintRepo, { contents: "read" });
+          // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts);
+          // work repo from provision, as memoryToken above.
+          const token = await containerToken(this.env, workRepoSlug, blueprintRepo, { contents: "read" });
           if (token === null) {
             return { ok: false as const, error: "no read-only token for the blueprint repo -- set GITHUB_READ_TOKEN (a public blueprint still clones anonymously)" };
           }
