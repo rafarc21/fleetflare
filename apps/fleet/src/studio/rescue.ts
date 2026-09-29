@@ -194,6 +194,8 @@ function rescueOnOriginFn(pushTimeoutSeconds: number): string {
     `  if [ -z "\${__rheads_done:-}" ]; then __rheads_done=1; __rheads=""\n` +
     // Issue #58: a push URL other than the fetch URL means the listing below
     // (fetch URL) cannot vouch for where a push would land: never "saved".
+    // #7's write proxy uses a global pushInsteadOf that forwards to the SAME
+    // GitHub repo, so it leaves this check (and the listing) valid.
     `    __rpu="$(git -C "$1" config --get remote.origin.pushurl 2>/dev/null)"\n` +
     `    if [ -z "$__rpu" ] || [ "$__rpu" = "$(git -C "$1" config --get remote.origin.url 2>/dev/null)" ]; then\n` +
     // Issue #58: budgeted like every push. Out of budget = no listing =
