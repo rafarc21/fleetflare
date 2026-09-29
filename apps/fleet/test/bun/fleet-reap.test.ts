@@ -372,6 +372,46 @@ describe("reap — F1: bounded gap between live read and destroy", () => {
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
+  // Maestro review of f8edce1: `unknown` must never pass the FINAL check.
+  // The unknown pane below has clean chrome (footer, empty box, no counter,
+  // no member row), so only the frame-kind check can refuse it.
+  test("the live pane reads unknown at the final check -> no destroy", async () => {
+    const unknownPane = CLEAN_IDLE.replace("✻ Cooked for 36m 35s", "✻ Pondering the next step");
+    const f = fake({
+      studios: [IDLE_45()], board: HISTORY,
+      inspect: (_id, n) => (n === 1 ? goodInspect() : { ...goodInspect(), tail: unknownPane }),
+    });
+    await runReap(flags(), f.deps);
+    expect(f.calls.filter((c) => c.startsWith("inspect:")).length).toBe(2);
+    expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
+  });
+
+  test("the DO's own activity reads unknown at the final check -> no destroy", async () => {
+    const f = fake({
+      studios: [IDLE_45()], board: HISTORY,
+      inspect: (_id, n) => (n === 1 ? goodInspect() : { ...goodInspect(), activity: activity("unknown", 45 * MIN) }),
+    });
+    await runReap(flags(), f.deps);
+    expect(f.calls.filter((c) => c.startsWith("inspect:")).length).toBe(2);
+    expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
+  });
+
+  test("the run lock is refreshed once per candidate, before its first read", async () => {
+    const f = fake({ studios: [IDLE_45(), studio(WEB, activity("idle", 45 * MIN))], board: HISTORY });
+    f.deps.heartbeat = async () => { f.calls.push("heartbeat"); };
+    await runReap(flags(), f.deps);
+    expect(f.calls.filter((c) => c === "heartbeat").length).toBe(2);
+    expect(f.calls[f.calls.indexOf(`inspect:${PILOT}`) - 1]).toBe("heartbeat");
+    expect(f.calls[f.calls.indexOf(`inspect:${WEB}`) - 1]).toBe("heartbeat");
+  });
+
+  test("a failed lock refresh stops the run before that candidate", async () => {
+    const f = fake({ studios: [IDLE_45()], board: HISTORY });
+    f.deps.heartbeat = async () => { throw new Error("lock gone"); };
+    await runReap(flags(), f.deps);
+    expect(f.calls).toEqual(["board"]);
+  });
+
   test("REAP_LIVE_READ_MAX_MS is at most 30s", () => {
     expect(REAP_LIVE_READ_MAX_MS).toBeLessThanOrEqual(30_000);
   });

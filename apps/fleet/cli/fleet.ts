@@ -46,7 +46,7 @@ import { requestDestroy } from "./destroy-outcome";
 import {
   formatIdleAlarm, emptyReapState, runReap, REAP_LIVE_READ_MAX_MS, type ReapDeps, type ReapFlags, type ReapState,
 } from "./reap";
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   formatReady, formatCheckedAt, readyOverride, formatSession, formatState, formatSessionGuards,
@@ -1945,8 +1945,11 @@ export function reapDeps(
 
 /** Review F5: one reap per state file at a time. The lock is an exclusively
  *  created file; a second run refuses rather than racing the state or the
- *  destroys. A lock older than REAP_LOCK_STALE_MS (a crashed run) is taken over. */
-export async function withReapLock<T>(statePath: string, fn: () => Promise<T>): Promise<T> {
+ *  destroys. A lock older than REAP_LOCK_STALE_MS (a crashed run) is taken over.
+ *  `fn` gets `refresh`, which re-stamps the lock's mtime: runReap calls it once
+ *  per candidate (ReapDeps.heartbeat), so a live run with several candidates
+ *  never looks stale — only a run that stopped refreshing does. */
+export async function withReapLock<T>(statePath: string, fn: (refresh: () => Promise<void>) => Promise<T>): Promise<T> {
   const lock = `${statePath}.lock`;
   await mkdir(dirname(statePath), { recursive: true });
   const take = () => writeFile(lock, `${process.pid} ${new Date().toISOString()}\n`, { flag: "wx" });
@@ -1961,8 +1964,12 @@ export async function withReapLock<T>(statePath: string, fn: () => Promise<T>): 
     await unlink(lock);
     await take();
   }
+  const refresh = async () => {
+    const now = new Date();
+    await utimes(lock, now, now);
+  };
   try {
-    return await fn();
+    return await fn(refresh);
   } finally {
     await unlink(lock).catch(() => {});
   }
@@ -1979,8 +1986,8 @@ async function cmdReap(creds: Credentials, flags: Omit<ReapFlags, "repo"> & { re
     console.error("fleet reap: no repo — stand in a repo checkout or pass --repo owner/name. Never fleet-wide.");
     process.exit(1);
   }
-  const { exitCode } = await withReapLock(REAP_STATE_PATH, () =>
-    runReap({ ...flags, repo }, reapDeps(creds, repo, REAP_STATE_PATH, (l) => console.log(l))));
+  const { exitCode } = await withReapLock(REAP_STATE_PATH, (refresh) =>
+    runReap({ ...flags, repo }, { ...reapDeps(creds, repo, REAP_STATE_PATH, (l) => console.log(l)), heartbeat: refresh }));
   if (exitCode !== 0) process.exit(exitCode);
 }
 

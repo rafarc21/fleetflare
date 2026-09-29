@@ -3,10 +3,10 @@
 // the pure-core suite (fleet-reap.test.ts) cannot: which routes are hit, and
 // that the destroy never carries force or discard-unsynced. No real fleet.
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLs, reapDeps, withReapLock } from "../../cli/fleet";
+import { cmdLs, reapDeps, withReapLock, REAP_LOCK_STALE_MS } from "../../cli/fleet";
 import { runReap } from "../../cli/reap";
 import type { OrcaDeps } from "../../cli/orca-workspace";
 import type { StudioStatus } from "../../src/studio/types";
@@ -151,6 +151,29 @@ for (const [name, content] of [["corrupt JSON", "{not json"], ["wrong types", JS
     expect(JSON.parse(readFileSync(statePath, "utf8")).boardRows[REPO]).toBe(1);
   });
 }
+
+// Maestro review of f8edce1: a run longer than the stale threshold must keep
+// its lock fresh, or a second reap takes over mid-run.
+test("a long run that refreshes its lock is never taken over; a truly stale lock is", async () => {
+  const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");
+  const lock = `${statePath}.lock`;
+  const old = (Date.now() - REAP_LOCK_STALE_MS - 60_000) / 1000;
+  let release!: () => void;
+  const first = withReapLock(statePath, async (refresh) => {
+    utimesSync(lock, old, old); // the run has now lasted past the stale threshold
+    await refresh(); // one candidate later
+    await new Promise<void>((r) => { release = r; });
+    return 0;
+  });
+  await Bun.sleep(20);
+  await expect(withReapLock(statePath, async () => 0)).rejects.toThrow(/another fleet reap/);
+  release();
+  await first;
+  // A crashed run's lock, never refreshed: taken over.
+  writeFileSync(lock, "1 crashed\n");
+  utimesSync(lock, old, old);
+  expect(await withReapLock(statePath, async () => 9)).toBe(9);
+});
 
 test("a second reap on the same state file refuses while the first holds the lock", async () => {
   const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");

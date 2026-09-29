@@ -116,6 +116,10 @@ export interface ReapDeps {
    *  treats the board floor as unknown and reaps nothing this poll. */
   loadState: () => Promise<ReapState>;
   saveState: (state: ReapState) => Promise<void>;
+  /** Refreshes the run lock (cli/fleet.ts withReapLock). Called once per
+   *  candidate: a run with several candidates can outlast the lock's stale
+   *  threshold. A throw stops the run — its lock can no longer be trusted. */
+  heartbeat?: () => Promise<void>;
   log: (line: string) => void;
 }
 
@@ -355,6 +359,12 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
     return liveReadRefusal(read, flags.idleMs, answeredAt);
   };
   for (const { s, idleMs } of candidates) {
+    try {
+      await deps.heartbeat?.();
+    } catch (err) {
+      deps.log(`fleet reap: run lock refresh failed (${err instanceof Error ? err.message : String(err)}) — stopping before ${s.id}`);
+      return exit(1);
+    }
     try {
       // Cheap pre-check first: a studio that is not idle right now gets no
       // rescue exec and no rescue branch (review item 6: noise).
