@@ -104,10 +104,10 @@ function destroyRefusal(id: string, lastSyncedAt: Date | null | undefined, now: 
 /** Issue #62: rescue-push could not CONFIRM anything (exec threw, killed,
  *  deadline): unknown state, refused like a confirmed failure. `--force`
  *  stays the stated way past for a container that never answers. */
-function destroyRescueUnconfirmedRefusal(id: string, reason: string): string {
+function destroyRescueUnconfirmedRefusal(id: string, reason: string, lastSyncedAt: Date | null | undefined, now: Date): string {
   return DESTROY_REFUSED_PREFIX +
     `rescue-push could not confirm this studio's work was saved before destroy (${reason}); ` +
-    "unpushed work may be lost. " +
+    "unpushed work may be lost. " + recycleCostLine(lastSyncedAt, now, "the next provision") + " " +
     `To discard anyway, as a stated choice: fleet destroy ${id} --discard-unsynced (or --force)`;
 }
 
@@ -276,8 +276,9 @@ export async function destroyWithSync(
       // bump below).
       if (!guard.discardUnsynced) {
         if (err instanceof RescuePushFailedError) throw new Error(destroyRescueFailedRefusal(idFallback, err));
+        const lastSyncedAt = await (guard.lastSyncedAt ?? (async () => undefined))().catch(() => undefined);
         throw new Error(destroyRescueUnconfirmedRefusal(
-          idFallback, redactSecrets(err instanceof Error ? err.message : String(err)),
+          idFallback, redactSecrets(err instanceof Error ? err.message : String(err)), lastSyncedAt, syncDeps.now(),
         ));
       }
       console.error(`studio ${idFallback}: pre-destroy rescue-push failed, continuing`, err);

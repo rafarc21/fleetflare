@@ -3488,12 +3488,15 @@ describe("recycleWithSync — sync before rescue-push before destroy, destroy be
     const provisionFn = vi.fn(async () => ({ id: STUDIO_ID, state: "running" }) as StudioStatus);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
+      const syncedAt = new Date(new Date(`${TODAY}T12:00:00.000Z`).getTime() - 63 * 60_000);
       const message = await recycleWithSync(
         syncDeps, fakeCombinedStorage(), STUDIO_ID, destroy, awaitReady, provisionFn, vi.fn(async () => {}), CFG,
-        noopResolveMemoryRepo, noopCommit,
+        noopResolveMemoryRepo, noopCommit, { discardUnsynced: false, lastSyncedAt: async () => syncedAt },
       ).then(() => "", (err: Error) => err.message);
       expect(message.startsWith(RECYCLE_REFUSED_PREFIX)).toBe(true);
       expect(message).toContain("could not confirm");
+      // Same price the probe refusal quotes: the last synced snapshot's age.
+      expect(message).toContain("(1h 3m old)");
       expect(message).toContain(`fleet recycle ${STUDIO_ID} --discard-unsynced`);
       expect(destroy).not.toHaveBeenCalled();
       expect(awaitReady).not.toHaveBeenCalled();

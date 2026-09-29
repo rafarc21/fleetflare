@@ -209,6 +209,8 @@ describe("destroyWithSync", () => {
         ).then(() => "", (err: Error) => err.message);
         expect(message.startsWith(DESTROY_REFUSED_PREFIX)).toBe(true);
         expect(message).toContain("could not confirm");
+        // Same price the probe refusal quotes: the last synced snapshot's age.
+        expect(message).toContain("last synced snapshot (age unknown");
         expect(message).toContain(`fleet destroy ${STUDIO_ID} --discard-unsynced`);
         expect(destroy).not.toHaveBeenCalled();
         expect(await readDestroyEpoch(storage)).toBe(0);

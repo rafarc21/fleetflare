@@ -149,7 +149,10 @@ describe("destroyWithSync — a MID-BOOT container is waited out first (#129 F2)
     deps.exec = (cmd: string) => {
       order.push(cmd);
       deps.execCalls.push(cmd);
-      return answers ? Promise.resolve({ code: 0, stdout: "", stderr: "" }) : new Promise(() => {});
+      // Issue #62: a real rescue verdict — unparseable output is an UNCONFIRMED rescue now, which refuses.
+      return answers
+        ? Promise.resolve({ code: 0, stdout: cmd.includes("status --porcelain") ? "RESCUE_CLEAN" : "", stderr: "" })
+        : new Promise(() => {});
     };
     return deps;
   }

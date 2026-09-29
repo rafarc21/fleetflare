@@ -1437,7 +1437,8 @@ export async function recycleWithSync(
         const perWorktree = rescueReport ? ` Worktrees: ${rescueReport.join("; ")}.` : "";
         throw new Error(recycleRescueFailedRefusal(idFallback, reason + perWorktree));
       }
-      throw new Error(recycleRescueUnconfirmedRefusal(idFallback, reason));
+      const lastSyncedAt = await guard.lastSyncedAt().catch(() => undefined);
+      throw new Error(recycleRescueUnconfirmedRefusal(idFallback, reason, lastSyncedAt, syncDeps.now()));
     }
     console.error(`studio ${idFallback}: pre-destroy rescue-push failed, continuing (--discard-unsynced)`, err);
     rescueDiscarded = err instanceof RescuePushFailedError
