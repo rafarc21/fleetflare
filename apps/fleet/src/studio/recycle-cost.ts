@@ -65,6 +65,16 @@ export function recycleRescueFailedRefusal(id: string, detail: string): string {
     `To discard anyway, as a stated choice: fleet recycle ${id} --discard-unsynced`;
 }
 
+/** Issue #62: rescue-push could not CONFIRM anything (the exec threw, was
+ *  killed, or hit its deadline): unknown state, refused like a confirmed
+ *  failure. `detail` is already redacted by the caller. */
+export function recycleRescueUnconfirmedRefusal(id: string, detail: string): string {
+  return RECYCLE_REFUSED_PREFIX +
+    `rescue-push could not confirm this studio's work was saved before recycle (${detail}); ` +
+    "unpushed work may be lost. " +
+    `To discard anyway, as a stated choice: fleet recycle ${id} --discard-unsynced`;
+}
+
 export function recycleRefusal(id: string, probeMs: number, lastSyncedAt: Date | null | undefined, now: Date): string {
   return RECYCLE_REFUSED_PREFIX +
     `the container did not answer an ${probeMs / 1000}s probe, so session sync, rescue-push and ` +

@@ -101,6 +101,16 @@ function destroyRefusal(id: string, lastSyncedAt: Date | null | undefined, now: 
  * run (the container answered fine) — only the one worktree(s) named in
  * `err.message` are confirmed lost.
  */
+/** Issue #62: rescue-push could not CONFIRM anything (exec threw, killed,
+ *  deadline): unknown state, refused like a confirmed failure. `--force`
+ *  stays the stated way past for a container that never answers. */
+function destroyRescueUnconfirmedRefusal(id: string, reason: string): string {
+  return DESTROY_REFUSED_PREFIX +
+    `rescue-push could not confirm this studio's work was saved before destroy (${reason}); ` +
+    "unpushed work may be lost. " +
+    `To discard anyway, as a stated choice: fleet destroy ${id} --discard-unsynced (or --force)`;
+}
+
 function destroyRescueFailedRefusal(id: string, err: RescuePushFailedError): string {
   return DESTROY_REFUSED_PREFIX +
     `rescue-push confirmed it could not save this studio's work before destroy: ${redactSecrets(err.message)} ` +
@@ -260,14 +270,22 @@ export async function destroyWithSync(
       // for why). Every OTHER rescue-push throw (a killed exec, the session
       // shell itself dying) stays best-effort, unchanged from round 1 — those
       // mean "we cannot tell", not "we confirmed a loss".
-      if (err instanceof RescuePushFailedError && !guard.discardUnsynced) {
-        throw new Error(destroyRescueFailedRefusal(idFallback, err));
+      // Issue #62: every OTHER throw (killed exec, dead shell, deadline)
+      // used to stay best-effort here; it is unknown state, so it refuses
+      // too. Same flags past it, same epoch invariant (this runs before the
+      // bump below).
+      if (!guard.discardUnsynced) {
+        if (err instanceof RescuePushFailedError) throw new Error(destroyRescueFailedRefusal(idFallback, err));
+        throw new Error(destroyRescueUnconfirmedRefusal(
+          idFallback, redactSecrets(err instanceof Error ? err.message : String(err)),
+        ));
       }
       console.error(`studio ${idFallback}: pre-destroy rescue-push failed, continuing`, err);
-      if (err instanceof RescuePushFailedError) {
-        const flag = guard.discardFlag ?? "--discard-unsynced";
-        unrescued = `destroyed with a confirmed rescue-push failure: ${redactSecrets(err.message)} (${flag})`;
-      }
+      const flag = guard.discardFlag ?? "--discard-unsynced";
+      const note = err instanceof RescuePushFailedError
+        ? `destroyed with a confirmed rescue-push failure: ${redactSecrets(err.message)} (${flag})`
+        : `destroyed with an unconfirmed rescue-push (${redactSecrets(err instanceof Error ? err.message : String(err))}) (${flag})`;
+      unrescued = unrescued ? `${unrescued}; ${note}` : note;
     }
   }
   // Round 3 review, fix 3 (verifier sim V10): bump the destroy epoch here —

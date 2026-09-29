@@ -190,17 +190,49 @@ describe("destroyWithSync", () => {
     expect(result.state).toBe("stopped");
   });
 
-  it("a throwing rescue-push does not prevent the harvest or the destroy from running (same best-effort posture as recycle's own pre-destroy sequence)", async () => {
+  // Issue #62: an UNCONFIRMED rescue (the exec throws — dead session shell,
+  // transport error — or is killed by its deadline) is unknown state, not
+  // "nothing lost": destroy refuses exactly like a confirmed failure, and
+  // the container is untouched. Used to proceed best-effort (#263 round 1).
+  for (const [label, rescue] of [
+    ["the rescue exec throws (dead shell)", null],
+    ["the rescue exec is killed (124)", { code: 124, stdout: "", stderr: "" }],
+  ] as const) {
+    it(`#62: ${label} → destroy REFUSES, names it, container and epoch untouched`, async () => {
+      const syncDeps = fakeSyncDeps({ rescue });
+      const destroy = vi.fn(async () => {});
+      const storage = fakeCombinedStorage();
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const message = await destroyWithSync(
+          syncDeps, storage, STUDIO_ID, destroy, vi.fn(async () => {}), REPO, noopResolveMemoryRepo, noopCommit,
+        ).then(() => "", (err: Error) => err.message);
+        expect(message.startsWith(DESTROY_REFUSED_PREFIX)).toBe(true);
+        expect(message).toContain("could not confirm");
+        expect(message).toContain(`fleet destroy ${STUDIO_ID} --discard-unsynced`);
+        expect(destroy).not.toHaveBeenCalled();
+        expect(await readDestroyEpoch(storage)).toBe(0);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+  }
+
+  it("#62: unconfirmed rescue + --discard-unsynced (or --force) → proceeds, stopped row names the unconfirmed rescue", async () => {
     const syncDeps = fakeSyncDeps({ rescue: null });
     const destroy = vi.fn(async () => {});
-    const recordStudioFn = vi.fn(async () => {});
-    const storage = fakeCombinedStorage();
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const result = await destroyWithSync(syncDeps, storage, STUDIO_ID, destroy, recordStudioFn, REPO, noopResolveMemoryRepo, noopCommit);
-      expect(destroy).toHaveBeenCalledTimes(1);
-      expect(result.state).toBe("stopped");
-      expect(errSpy).toHaveBeenCalled();
+      for (const flag of ["--discard-unsynced", "--force"] as const) {
+        const guard: DestroyGuard = { containerRunning: () => true, discardUnsynced: true, discardFlag: flag };
+        const result = await destroyWithSync(
+          syncDeps, fakeCombinedStorage(), STUDIO_ID, destroy, vi.fn(async () => {}), REPO, noopResolveMemoryRepo, noopCommit, guard,
+        );
+        expect(result.state).toBe("stopped");
+        expect(result.error).toContain("unconfirmed rescue-push");
+        expect(result.error).toContain(flag);
+      }
+      expect(destroy).toHaveBeenCalledTimes(2);
     } finally {
       errSpy.mockRestore();
     }

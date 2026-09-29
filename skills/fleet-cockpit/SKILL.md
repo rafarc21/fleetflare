@@ -195,6 +195,8 @@ The ones worth knowing before you need them:
   `nothing to push`, or `FAILED (<step>)` (#39). A ref from a shallow clone
   is a parentless snapshot: diff by tree, `git diff <base> <ref>`, never
   `git show`.
+  **Rescue failed OR could not confirm (killed exec, dead shell, deadline) →
+  recycle and destroy REFUSE (409), naming why (#62).**
   **Container cannot answer → rescue impossible → recycle REFUSES (409)** and
   names last synced snapshot age (#96). `--discard-unsynced` proceeds,
   discarding everything since. Measured 2026-09-24: 3 such recycles cost up
