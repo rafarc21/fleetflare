@@ -388,7 +388,7 @@ async function handleTaskReapRoute(
 }
 
 /**
- * Issue #35: `POST /studio/board/tasks/junior-sweep {apply?, repo?, after?, limit?}` — same
+ * Issue #35: `POST /studio/board/tasks/junior-sweep {apply?, repo?, after?, limit?}` (limit clamped to JUNIOR_SWEEP_PAGE) — same
  * shape and repo resolution as tasks/reap. Dry-run unless `apply: true`.
  * src/junior/authz.ts's sweepJuniorAuthorizations decides; this only wires
  * the board read.

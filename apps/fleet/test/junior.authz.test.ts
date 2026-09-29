@@ -141,5 +141,16 @@ describe("sweepJuniorAuthorizations (issue #35)", () => {
     expect(reads).toBe(JUNIOR_SWEEP_PAGE);
     expect(r.next).toBe(JUNIOR_SWEEP_PAGE);
   });
+
+  // Refs #41 follow-up: `limit` only ever narrows the page. A caller asking
+  // for more must not buy its way past the subrequest cap.
+  it("a limit above JUNIOR_SWEEP_PAGE is clamped to it", async () => {
+    await env.DB.prepare("DELETE FROM fleet_state").run();
+    for (let n = 1; n <= JUNIOR_SWEEP_PAGE + 5; n++) await recordJuniorAuthorization(env.DB, REPO, n, STUDIO, 1000);
+    let reads = 0;
+    const r = await sweepJuniorAuthorizations(env.DB, REPO, async (_r, n) => { reads++; return t(n); }, false, { limit: 10_000 });
+    expect(reads).toBe(JUNIOR_SWEEP_PAGE);
+    expect(r.next).toBe(JUNIOR_SWEEP_PAGE);
+  });
 });
 
