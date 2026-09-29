@@ -2398,7 +2398,9 @@ describe("rescuePushCmd — the shell shape rescue-push commits and pushes with"
     // in rescue.ts.
     // Issue #1 piece 5 + blocker 2: configurable destination; origin (the
     // default) pushes via plain `git` on PATH = the leak-gate wrapper.
-    expect(cmd).toContain('"${__rgit[@]}" -C "$w" push $nv "$__rdest" "HEAD:refs/heads/$target"');
+    // Issue #16: the push itself lives in rescue_try_push (shallow fallback).
+    expect(cmd).toContain('"${__rgit[@]}" -C "$w" push $nv "$__rdest" "$src:refs/heads/$ref"');
+    expect(cmd).toContain('rescue_try_push "$w" "$nv" HEAD "$target"');
     expect(cmd).toContain("__rgit=(git); __rdest=origin");
     expect(cmd).not.toContain("/usr/bin/git");
     expect(cmd).toContain(`echo "${RESCUE_NO_CHECKOUT}"`);

@@ -116,6 +116,36 @@ function rescuePushPrelude(opts: RescuePushOptions): string {
 }
 
 /**
+ * Issue #16: `rescue_try_push <w> <nv> <src> <ref>` — one bounded push of
+ * `<src>` to `refs/heads/<ref>`, leaving git's stderr in the CALLER's `perr`.
+ * Provision clones `--depth 1`; a remote without the history behind that
+ * shallow boundary (an empty private rescue remote) rejects the push with
+ * "shallow update not allowed". Then this pushes a PARENTLESS snapshot of
+ * `<src>`'s tree to the same ref instead: the content survives, only the
+ * history cut is lost. Never `+`/`--force`.
+ */
+function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
+  const push = (src: string) =>
+    `timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push $nv "$__rdest" "${src}:refs/heads/$ref" 2>&1 1>/dev/null`;
+  return (
+    `rescue_try_push() {\n` +
+    `  local w="$1" nv="$2" src="$3" ref="$4" snap\n` +
+    // PR #31 review: the snapshot push (and the -nff retry calling this) run
+    // past the pushes the caller's rescue_budget_ok reserved. Checked before
+    // EVERY push, silently (a budget line here would land in rescue_push's
+    // captured stdout): out of budget = a confirmed push failure, never an
+    // exec killed by the server deadline mid-push.
+    `  rescue_budget_ok "$ref" >/dev/null || return 1\n` +
+    `  perr="$(${push("$src")})" && return 0\n` +
+    `  printf '%s' "$perr" | grep -qi 'shallow update not allowed' || return 1\n` +
+    `  snap=$(git -C "$w" ${identity} commit-tree "$src^{tree}" -m "fleet rescue snapshot of $(git -C "$w" rev-parse "$src") (shallow clone)" 2>/dev/null) || return 1\n` +
+    `  rescue_budget_ok "$ref" >/dev/null || return 1\n` +
+    `  perr="$(${push("$snap")})"\n` +
+    `}\n`
+  );
+}
+
+/**
  * Board issue #359, fresh review round 3: the ORIGINAL fix for "rescue-all
  * times out on a busy studio" only added a client-side budget for the WHOLE
  * multi-push walk (cli/fleet.ts's RESCUE_ALL_STUDIO_TIMEOUT_MS) — a single
@@ -604,6 +634,7 @@ export function rescuePushCmd(
     // only when BOTH attempts failed — that, and only that, is a genuine
     // RESCUE_FAILED. Never a `+`/`--force` retry: the fallback ref is BRAND
     // NEW, so a plain push is never rejected on it for the same reason.
+    rescueTryPushFn(identity, pushTimeoutSeconds) +
     `rescue_push() {\n` +
     `  local w="$1" id="$2" target="$3" generated="$4" perr prc ftarget nv\n` +
     // Issue #359, measured live 2026-09-26: a slow or hanging pre-push hook
@@ -630,7 +661,9 @@ export function rescuePushCmd(
     // see this file's own header comment above for why. A killed push's exit
     // code is simply non-zero, so `prc` below already treats it exactly like
     // a rejected one; no other line here needs to change.
-    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push $nv "$__rdest" "HEAD:refs/heads/$target" 2>&1 1>/dev/null)"; prc=$?\n` +
+    // Issue #16: rescue_try_push (rescueTryPushFn) adds the shallow-clone
+    // snapshot fallback to both this attempt and the nff retry below.
+    `  rescue_try_push "$w" "$nv" HEAD "$target"; prc=$?\n` +
     `  if [ "$prc" = "0" ]; then printf '%s' "$target"; return 0; fi\n` +
     `  if printf '%s' "$perr" | grep -qiE 'non-fast-forward|fetch first'; then\n` +
     // HOLD-round fix: this used to sit flat between two dashes
@@ -650,7 +683,7 @@ export function rescuePushCmd(
     // always qualifies for --no-verify unconditionally — no case check
     // needed here the way the first attempt above needs one.
     // Issue #359 round 3: same per-push timeout bound as the first attempt.
-    `    if timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push --no-verify "$__rdest" "HEAD:refs/heads/$ftarget" >/dev/null 2>&1; then printf '%s' "$ftarget"; return 0; fi\n` +
+    `    if rescue_try_push "$w" --no-verify HEAD "$ftarget"; then printf '%s' "$ftarget"; return 0; fi\n` +
     `  fi\n` +
     `  return 1\n` +
     `}\n` +
@@ -905,7 +938,7 @@ export function rescuePushCmd(
     // branch push, unlike rescue_push()'s own conditional check above.
     // Issue #359 round 3: same per-push timeout bound as rescue_push()'s own
     // pushes above — see this file's own header comment.
-    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --no-verify "$__rdest" "refs/heads/$b:refs/heads/$btarget" </dev/null; then\n` +
+    `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:$b push"; fail=$((fail+1))\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$btarget" "refs/heads/$b" </dev/null 2>/dev/null || true\n` +
@@ -959,7 +992,7 @@ export function rescuePushCmd(
     // unconditionally — never a real branch push.
     // Issue #359 round 3: same per-push timeout bound as every other push in
     // this file — see this file's own header comment.
-    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --no-verify "$__rdest" "$ssha:refs/heads/$starget" </dev/null; then\n` +
+    `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:stash-$sn push"; fail=$((fail+1))\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$starget" "$ssha" </dev/null 2>/dev/null || true\n` +
@@ -1116,6 +1149,7 @@ export function rescueSnapshotCmd(
     // `HEAD` for the non-mutating branches below, or a bare commit SHA for
     // the snapshot branch) instead of always `HEAD` — never a `+`/`--force`
     // retry, same reasoning as rescuePushCmd's own N3 comment.
+    rescueTryPushFn(identity, pushTimeoutSeconds) +
     `rescue_push() {\n` +
     `  local w="$1" id="$2" target="$3" ref="$4" perr prc ftarget\n` +
     // Issue #359: unlike rescuePushCmd's own rescue_push (above), `$target`
@@ -1129,14 +1163,15 @@ export function rescueSnapshotCmd(
     // Issue #359 round 3: `timeout -k <grace> <secs>` bounds a single push
     // that stalls to its own small budget — see this file's own header
     // comment above.
-    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push --no-verify "$__rdest" "$ref:refs/heads/$target" 2>&1 1>/dev/null)"; prc=$?\n` +
+    // Issue #16: same shallow-clone snapshot fallback as rescuePushCmd's copy.
+    `  rescue_try_push "$w" --no-verify "$ref" "$target"; prc=$?\n` +
     `  if [ "$prc" = "0" ]; then printf '%s' "$target"; return 0; fi\n` +
     `  if printf '%s' "$perr" | grep -qiE 'non-fast-forward|fetch first'; then\n` +
     // HOLD-round fix: same wt/-nested, discoverable shape as rescuePushCmd's
     // own rescue_push (N3) above — see that copy's own comment.
     `    ftarget="fleet/rescue/${studio}/wt/$id-nff-$(date -u +%Y%m%d%H%M%S)"\n` +
     // Issue #359 round 3: same per-push timeout bound as the first attempt.
-    `    if timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push --no-verify "$__rdest" "$ref:refs/heads/$ftarget" >/dev/null 2>&1; then printf '%s' "$ftarget"; return 0; fi\n` +
+    `    if rescue_try_push "$w" --no-verify "$ref" "$ftarget"; then printf '%s' "$ftarget"; return 0; fi\n` +
     `  fi\n` +
     `  return 1\n` +
     `}\n` +
@@ -1296,7 +1331,7 @@ export function rescueSnapshotCmd(
     // branch push, unlike rescue_push()'s own conditional check above.
     // Issue #359 round 3: same per-push timeout bound as rescue_push()'s own
     // pushes above — see this file's own header comment.
-    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --no-verify "$__rdest" "refs/heads/$b:refs/heads/$btarget" </dev/null; then\n` +
+    `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:$b push"; fail=$((fail+1))\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$btarget" "refs/heads/$b" </dev/null 2>/dev/null || true\n` +
@@ -1333,7 +1368,7 @@ export function rescueSnapshotCmd(
     // unconditionally — never a real branch push.
     // Issue #359 round 3: same per-push timeout bound as every other push in
     // this file — see this file's own header comment.
-    `      if ! timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --no-verify "$__rdest" "$ssha:refs/heads/$starget" </dev/null; then\n` +
+    `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:stash-$sn push"; fail=$((fail+1))\n` +
     `      else\n` +
     `        git -C ${dir} update-ref "refs/remotes/origin/$starget" "$ssha" </dev/null 2>/dev/null || true\n` +
