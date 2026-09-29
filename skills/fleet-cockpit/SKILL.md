@@ -254,6 +254,11 @@ full sequence, end to end:
    (`fleet task state <n> canceled`), reassign it (`fleet task assign <n>
    <role>`), or pass `--force`. A task named as having drifted labels (not
    exactly one state label) needs its labels fixed by hand on GitHub.
+   **Follow-up work is invisible to this guard (#54).** A merge
+   auto-completes the task; anything typed into the lead afterwards is not
+   on the board, so the studio reads idle and can be destroyed mid-work.
+   File every follow-up as a task, BEFORE the merge:
+   `fleet task new --continues <n> ...` (assigned to task n's studio).
    `--force` skips the open-task check entirely, AND (#104) also skips the
    rescue on a wedged container — it counts as `--discard-unsynced`. Know both
    before passing it on a studio you have not actually confirmed is done.

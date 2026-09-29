@@ -205,6 +205,9 @@ export interface TaskBriefArgs {
    *  label carries a studio id). Absent = an unassigned task, which is a real
    *  thing to file at a sprint meeting before anyone takes it. */
   assignee?: string;
+  /** Issue #54: `--continues <n>`. The Worker reads task #n and, absent
+   *  --studio, assigns this task to #n's studio, lineage in the objective. */
+  continues?: number;
   /** Issue #278: `--repo <owner/name>`. Overrides the CWD-detected repo
    *  (cli/fleet.ts's `cmdTaskNew`, same override-wins-over-detection
    *  precedence `fleet tabs`'s own `--repo` already establishes for itself).
@@ -282,11 +285,11 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   },
   destroy: {
     args: "<id> [--force] [--discard-unsynced]",
-    summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it.",
+    summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it.",
   },
   "task-new": {
-    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--junior]",
-    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required. --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given.",
+    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior]",
+    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given.",
   },
   "task-ls": {
     args: "ls [--sprint S] [--state submitted|working|input_required|completed|failed|canceled] [--studio ID]",
@@ -429,7 +432,7 @@ export function renderHelp(): string {
  *  error and never ignored: a silently dropped `--sprint` puts a task on no
  *  sprint board at all, and nothing on screen would say so. */
 const TASK_FLAGS: Record<string, readonly string[]> = {
-  new: ["title", "objective", "output", "boundaries", "sprint", "studio", "repo"],
+  new: ["title", "objective", "output", "boundaries", "sprint", "studio", "repo", "continues"],
   ls: ["sprint", "state", "studio"],
   assign: ["why"],
 };
@@ -600,6 +603,10 @@ function parseTask(argv: string[]): CliCommand {
   if (parsed.sprint !== undefined) brief.milestone = parsed.sprint;
   if (parsed.studio !== undefined) brief.assignee = parsed.studio;
   if (parsed.repo !== undefined) brief.repo = parsed.repo;
+  if (parsed.continues !== undefined) {
+    if (!/^[1-9][0-9]*$/.test(parsed.continues)) return usage(`--continues needs a task number, not ${JSON.stringify(parsed.continues)}`);
+    brief.continues = Number(parsed.continues);
+  }
   if (junior) brief.junior = true;
   return { cmd: "task-new", brief };
 }
