@@ -76,8 +76,9 @@
 #     anything the probe cannot tell, stays refused. Every override
 #     (--allow-unrescued, or this Worker-only pass) appends one JSON line to
 #     ~/.fleet/deploy-overrides.jsonl (time, command, target Worker, target
-#     check, rescue-all verdict, operator = git user.name or $USER); an
-#     unwritable record refuses the deploy.
+#     check, rescue-all verdict, operator = git user.name or $USER; flag
+#     VALUES never recorded -- --var/--define/--secrets-file may carry
+#     secrets); an unwritable record refuses the deploy.
 #   - (issue #36) same commands, checked BEFORE rescue-all: the Worker
 #     wrangler will replace (this config read by the pinned wrangler's own
 #     reader, + --env/-e or CLOUDFLARE_ENV, + --name / `delete <name>`) is
@@ -225,18 +226,39 @@ replaces_containers() {
 
 # Issue #40: `deploy` (or no args) -- the one gated command a Worker-only
 # soft pass may apply to. versions deploy, rollback, delete and containers
-# delete stay hard. Its flags are judged by scripts/deploy-containers-changed.ts.
+# delete stay hard. Strict (PR #60 review F4): only the word `deploy`,
+# -e/--env <env>, --env=<env> and --profile <p>; any other flag may change
+# what wrangler does to containers (--containers-rollout, --name, --var ...).
+# scripts/deploy-containers-changed.ts applies the same rule again.
 is_plain_deploy() {
-  local a skip=0
+  local a skip=0 seen=0
   [[ "$#" == 0 ]] && return 0
   for a in "$@"; do
     if [[ "$skip" == 1 ]]; then skip=0; continue; fi
-    if is_value_flag "$a"; then skip=1; continue; fi
-    case "$a" in -*) continue ;; esac
-    [[ "$a" == deploy ]]
-    return
+    case "$a" in
+      -e|--env|--profile) skip=1 ;;
+      --env=*) ;;
+      deploy) [[ "$seen" == 0 ]] || return 1; seen=1 ;;
+      *) return 1 ;;
+    esac
   done
-  return 1
+  [[ "$skip" == 0 && "$seen" == 1 ]]
+}
+
+# PR #60 review F3: the override record's command, without values that may
+# be secrets (--var K:V, --define, --secrets-file ...): flag names only;
+# a word right after any other flag is taken as that flag's value and
+# dropped; -e/--env keep theirs (the target env, never a secret).
+record_command() {
+  local a prev="" out=()
+  for a in "$@"; do
+    case "$a" in
+      -*) out+=("${a%%=*}") ;;
+      *) case "$prev" in -e|--env|""|[!-]*) out+=("$a") ;; esac ;;
+    esac
+    prev="$a"
+  done
+  printf '%s' "${out[*]}"
 }
 
 # A JSON string literal: backslash and quote escaped, control characters
@@ -447,7 +469,7 @@ if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
     if [[ "$RESCUE_RC" == 0 ]]; then RESCUE_VERDICT="passed"; else RESCUE_VERDICT="exit $RESCUE_RC"; fi
     OPERATOR="$(git -C "$FLEET_DIR" config user.name 2>/dev/null || true)"
     [[ -n "$OPERATOR" ]] || OPERATOR="${USER:-unknown}"
-    if [[ "${#ARGS[@]}" == 0 ]]; then COMMAND="deploy"; else COMMAND="${ARGS[*]}"; fi
+    if [[ "${#ARGS[@]}" == 0 ]]; then COMMAND="deploy"; else COMMAND="$(record_command "${ARGS[@]}")"; fi
     RECORD="{\"ts\":$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)"),\"override\":$(json_str "$OVERRIDE"),\"command\":$(json_str "$COMMAND"),\"target_worker\":$(json_str "${TARGET_WORKER:-unknown}"),\"target_check\":$(json_str "$TARGET_CHECK"),\"rescue_all\":$(json_str "$RESCUE_VERDICT"),\"operator\":$(json_str "$OPERATOR")}"
     if ! { mkdir -p "$HOME/.fleet" && printf '%s\n' "$RECORD" >> "$OVERRIDE_LOG"; } 2>/dev/null; then
       echo "deploy.sh: refusing -- cannot write the override record $OVERRIDE_LOG; an override must leave a durable trace." >&2

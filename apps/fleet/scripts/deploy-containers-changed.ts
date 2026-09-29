@@ -55,7 +55,9 @@ env ??= process.env.CLOUDFLARE_ENV || undefined;
 if (env) probeFlags.push("-e", env);
 
 type Container = Record<string, unknown> & { name?: string; image?: string; image_build_context?: string; image_vars?: Record<string, string> };
-let config: { containers?: Container[] };
+type Observability = { enabled?: boolean; logs?: { enabled?: boolean } };
+type Migration = { deleted_classes?: string[]; renamed_classes?: { from?: string; to?: string }[]; transferred_classes?: { from?: string; to?: string }[] };
+let config: { containers?: Container[]; observability?: Observability; unsafe?: Record<string, unknown>; migrations?: Migration[] };
 try {
   config = unstable_readConfig({ config: configPath, env } as never, { hideWarnings: true }) as typeof config;
 } catch (e) {
@@ -109,15 +111,62 @@ function builtRepoDigests(c: Container): string[] {
   return digests;
 }
 
+type AppObs = { logs?: { enabled?: boolean }; target_instance_percentage?: number; target_instance_count?: number };
 type App = {
   id: string; name: string; max_instances?: number; scheduling_policy?: string; constraints?: { tiers?: number[] };
-  rollout_active_grace_period?: number; configuration?: { image?: string; vcpu?: number; memory_mib?: number; disk?: { size_mb?: number } } };
+  rollout_active_grace_period?: number; observability?: AppObs;
+  scheduling_hint?: { target?: { configuration?: { observability?: AppObs } } };
+  configuration?: { image?: string; vcpu?: number; memory_mib?: number; disk?: { size_mb?: number }; observability?: AppObs } };
+
+// Would wrangler 4.141's apply write an observability change for this app?
+// A port of its selectObservabilityWriteTarget,
+// buildTopLevelObservabilityPatch, buildConfigurationObservabilityPatch and
+// its legacy-migration triggers, for containers with no observability of
+// their own. `logsEnabled` is defined below, before any call.
+function observabilityChange(app: App): string | undefined {
+  const legacyOn = (o?: AppObs) => o?.logs?.enabled === true;
+  const hasLegacy = legacyOn(app.configuration?.observability) || legacyOn(app.scheduling_hint?.target?.configuration?.observability);
+  if (hasLegacy && (app.observability?.logs?.enabled === true || (app.observability !== undefined && logsEnabled))) {
+    return "legacy observability migration";
+  }
+  const target = hasLegacy ? "configuration" : "top-level";
+  const top = app.observability;
+  if (!(target === "configuration" && top === undefined)) {
+    const topOnly = top?.target_instance_percentage !== undefined || top?.target_instance_count !== undefined;
+    if (!logsEnabled) {
+      if (top !== undefined && (top.logs?.enabled === true || topOnly)) return `top-level logs ${top.logs?.enabled} -> false`;
+    } else if (!(top?.logs?.enabled === true && !topOnly)) {
+      return `top-level logs ${top?.logs?.enabled} -> true`;
+    }
+  }
+  if (target === "configuration") {
+    const latest = (app.scheduling_hint?.target?.configuration?.observability ?? app.configuration?.observability)?.logs?.enabled;
+    if (logsEnabled !== latest && !(!logsEnabled && latest === undefined)) return `configuration logs ${latest} -> ${logsEnabled}`;
+  }
+  return undefined;
+}
 // Every container is checked before any (slow) build.
 for (const c of containers) {
   const extra = Object.keys(c).filter((k) => c[k] !== undefined && !MODELLED.has(k));
   if (extra.length) cannotTell(`container ${c.name} sets ${extra.join(", ")}, which this probe does not compare`);
   if (typeof c.image !== "string" || !c.image.startsWith("/")) cannotTell(`container ${c.name}'s image is not a Dockerfile (a registry image is not compared here)`);
+  if (c.instance_type === "dev" || c.instance_type === "standard") cannotTell(`container ${c.name}: legacy instance_type ${c.instance_type} (wrangler infers the deployed type's canonical name)`);
 }
+// PR #60 review F1: top-level keys that feed the container application.
+if (config.unsafe && Object.keys(config.unsafe).length > 0) cannotTell("the config sets top-level `unsafe`, which this probe does not model");
+// PR #60 review F2: a migration deleting/renaming/transferring a container's
+// Durable Object class changes the application's namespace.
+const classes = new Set(containers.map((c) => String(c.class_name)));
+for (const m of config.migrations ?? []) {
+  const named = [...(m.deleted_classes ?? []), ...(m.renamed_classes ?? []).flatMap((r) => [r.from, r.to]), ...(m.transferred_classes ?? []).flatMap((r) => [r.from, r.to])];
+  const hit = named.find((n) => n !== undefined && classes.has(n));
+  if (hit) cannotTell(`a DO migration deletes, renames or transfers container class ${hit}`);
+}
+// wrangler 4.141 isRootObservabilityLogsEnabled: every container's logs
+// setting comes from the Worker's top-level `observability` (a
+// container-level `observability` is not in MODELLED).
+const root = config.observability;
+const logsEnabled = root?.logs?.enabled === true || (root?.enabled === true && root?.logs?.enabled !== false);
 const list = probe(["containers", "list", "--json"]) as { id: string; name: string }[];
 const changes: string[] = [];
 for (const c of containers) {
@@ -140,6 +189,8 @@ for (const c of containers) {
   if ((app.scheduling_policy ?? "default") !== "default") changes.push(`${c.name}: scheduling_policy ${app.scheduling_policy} -> default`);
   if ((app.constraints?.tiers ?? []).join() !== "1,2") changes.push(`${c.name}: constraints.tiers ${app.constraints?.tiers?.join() ?? "none"} -> 1,2`);
   if ((app.rollout_active_grace_period ?? 0) !== 0) changes.push(`${c.name}: rollout_active_grace_period ${app.rollout_active_grace_period} -> 0`);
+  const obs = observabilityChange(app);
+  if (obs) changes.push(`${c.name}: observability (${obs}; from the Worker's top-level observability)`);
 }
 if (changes.length) {
   for (const ch of changes) say(`CHANGES ${ch}`);

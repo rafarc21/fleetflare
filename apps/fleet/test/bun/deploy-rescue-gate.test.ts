@@ -637,6 +637,120 @@ describe("deploy.sh: rescue-all failure only warns when no container changes (#4
     expectHard(deploy([], 1), "constraints");
   });
 
+  // PR #60 review F1: wrangler 4.141 derives each container application's
+  // logs setting from the Worker's TOP-LEVEL `observability`
+  // (isRootObservabilityLogsEnabled) and, for an app still on the legacy
+  // configuration.observability, writes it there -- inside `configuration`,
+  // so the rollout diff sees it and containers are replaced.
+  describe("top-level observability (F1)", () => {
+    test("logs on in config and on the deployed app (legacy configuration.observability) -> unchanged, proceeds", () => {
+      deployed({}, { observability: { logs: { enabled: true } } });
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { enabled: true } });
+      const r = deploy([], 1);
+      expect(r.code, r.err).toBe(0);
+    });
+
+    test("SAFETY: observability flipped off, same image, deployed legacy logs on -> refused", () => {
+      deployed({}, { observability: { logs: { enabled: true } } });
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { enabled: false } });
+      expectHard(deploy([], 1), "observability");
+    });
+
+    test("SAFETY: observability.logs.enabled false overrides enabled true (wrangler's rule) -> refused vs deployed logs on", () => {
+      deployed({}, { observability: { logs: { enabled: true } } });
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { enabled: true, logs: { enabled: false } } });
+      expectHard(deploy([], 1), "observability");
+    });
+
+    test("SAFETY: observability turned on, deployed app has none -> refused", () => {
+      deployed();
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { enabled: true } });
+      expectHard(deploy([], 1), "observability");
+    });
+
+    test("deployed app on top-level observability, logs on both sides -> unchanged, proceeds", () => {
+      deployed({ observability: { logs: { enabled: true } } });
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { logs: { enabled: true } } });
+      const r = deploy([], 1);
+      expect(r.code, r.err).toBe(0);
+    });
+
+    test("deployed app with BOTH top-level and legacy logs on (wrangler migrates it) -> refused", () => {
+      deployed({ observability: { logs: { enabled: true } } }, { observability: { logs: { enabled: true } } });
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), observability: { enabled: true } });
+      expectHard(deploy([], 1), "observability");
+    });
+
+    test("top-level `unsafe` set -> cannot tell, refused", () => {
+      deployed();
+      builtDigests([deployedImage]);
+      writeConfig({ ...withImage("fleet-test"), unsafe: { metadata: { x: 1 } } });
+      expectHard(deploy([], 1), "unsafe");
+    });
+  });
+
+  // PR #60 review F2: a DO migration deleting, renaming or transferring a
+  // container's class changes the container application's Durable Object.
+  describe("DO migrations naming a container class (F2)", () => {
+    for (const m of [
+      { tag: "v2", deleted_classes: ["StudioDO"] },
+      { tag: "v2", renamed_classes: [{ from: "StudioDO", to: "StudioDO2" }] },
+      { tag: "v2", transferred_classes: [{ from: "StudioDO", from_script: "other", to: "StudioDO" }] },
+    ]) {
+      test(`${Object.keys(m)[1]} names StudioDO -> cannot tell, refused`, () => {
+        deployed();
+        builtDigests([deployedImage]);
+        const base = withImage("fleet-test");
+        writeConfig({ ...base, migrations: [...base.migrations, m] });
+        expectHard(deploy([], 1), "migration");
+      });
+    }
+
+    test("new_sqlite_classes only (the real config's shape) -> not a reason to refuse", () => {
+      deployed();
+      builtDigests([deployedImage]);
+      const r = deploy([], 1);
+      expect(r.code, r.err).toBe(0);
+    });
+  });
+
+  // PR #60 review F4: deploy.sh's own is_plain_deploy layer, independent of
+  // the probe's argument check: a non-plain command never reaches the probe.
+  describe("is_plain_deploy (F4)", () => {
+    for (const args of [[], ["deploy"], ["deploy", "-e", "staging"], ["deploy", "--env=staging"], ["--profile", "ops", "deploy"]]) {
+      test(`"${args.join(" ")}" is plain: the probe runs`, () => {
+        const base = withImage("fleet-test");
+        writeConfig({ ...base, env: { staging: { durable_objects: base.durable_objects, containers: base.containers } } });
+        if (args.some((a) => a.includes("staging"))) setCreds("https://fleet-test-staging.example.workers.dev");
+        const r = deploy(args, 1);
+        expect(r.probe.some((l) => l.startsWith("probe containers list"))).toBe(true);
+      });
+    }
+    for (const args of [
+      ["versions", "deploy"], ["rollback"], ["delete", "fleet-test"],
+      ["deploy", "--containers-rollout", "immediate"], ["deploy", "--name", "fleet-test"],
+      ["deploy", "--var", "X:1"], ["deploy", "--minify"], ["deploy", "extra-word"],
+    ]) {
+      test(`"${args.join(" ")}" is NOT plain: refused, the probe never runs`, () => {
+        deployed();
+        builtDigests([deployedImage]);
+        const r = deploy(args, 1);
+        expect(r.code).toBe(1);
+        expect(r.wrangler).toEqual([]);
+        expect(r.docker).toEqual([]);
+        expect(r.probe.filter((l) => l.includes("containers"))).toEqual([]);
+        // deploy.sh itself never started the probe script.
+        expect(r.err).not.toContain("deploy-containers:");
+      });
+    }
+  });
+
   test("config with no containers at all -> undeterminable, refused", () => {
     writeConfig({ name: "fleet-test" });
     expectHard(deploy([], 1), "no containers");
@@ -755,6 +869,26 @@ describe("deploy.sh records every rescue-gate override durably (#40)", () => {
   test("no override needed (rescue passes, target matches): nothing recorded", () => {
     expect(deploy([], 0).code).toBe(0);
     expect(existsSync(logPath())).toBe(false);
+  });
+
+  // PR #60 review F3: --var/--define values and a secrets file path may be
+  // secrets. The record keeps flag names only.
+  test("flag values never land in the record: --var, --var=, --define, --secrets-file", () => {
+    const r = deploy(["deploy", "--var", "API_KEY:s3cr3t-one", "--var=K2:s3cr3t-two", "--define", "D:s3cr3t-three",
+      "--secrets-file", "s3cr3t-four.json", "--allow-unrescued"], 1, gitUser("Op Tester"));
+    expect(r.code, r.err).toBe(0);
+    const raw = readFileSync(logPath(), "utf8");
+    expect(raw).not.toContain("s3cr3t");
+    expect(raw).not.toContain("API_KEY");
+    expect(records()[0].command).toBe("deploy --var --var --define --secrets-file");
+  });
+
+  test("-e keeps its env value (not secret, needed to know the target)", () => {
+    const base = withImage("fleet-test");
+    writeConfig({ ...base, env: { staging: { durable_objects: base.durable_objects, containers: base.containers } } });
+    setCreds("https://fleet-test-staging.example.workers.dev");
+    deploy(["deploy", "-e", "staging", "--allow-unrescued"], 1, gitUser("Op Tester"));
+    expect(records()[0].command).toBe("deploy -e staging");
   });
 
   test("the record cannot be written -> refused (an override must leave a trace)", () => {

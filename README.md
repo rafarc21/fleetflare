@@ -746,15 +746,20 @@ the loss of that work. Never call a bare `wrangler deploy`: it skips the gate.
 Issue #40: a Worker-only `deploy` does not need the flag. When rescue-all
 fails, `scripts/deploy-containers-changed.ts` builds each container image as
 wrangler will and compares it with the deployed container application
-(`wrangler containers list`/`info`, read-only): same registry digest and same
-`max_instances`/`instance_type` -> no container is replaced, the failure is a
+(`wrangler containers list`/`info`, read-only): same registry digest, same
+`max_instances`/`instance_type`, and the same logs setting wrangler derives
+from the Worker's top-level `observability` -> no container is replaced, the failure is a
 WARNING, the deploy proceeds. An image or settings change, a first deploy, or
 anything it cannot tell (no docker, offline, a container key it does not
-compare) stays refused. The probe needs docker and a logged-in wrangler; an
+compare, top-level `unsafe`, a DO migration deleting/renaming/transferring a
+container class) stays refused. Only `deploy`, `-e`/`--env` and `--profile`
+qualify; any other flag keeps the gate hard. The probe needs docker and a logged-in wrangler; an
 image never pushed from this machine counts as changed. Every override
 (`--allow-unrescued`, or that Worker-only pass) appends one JSON line to
 `~/.fleet/deploy-overrides.jsonl`: time, command, target Worker, target
-check, rescue-all verdict, operator (git `user.name`, else `$USER`).
+check, rescue-all verdict, operator (git `user.name`, else `$USER`). Flag
+values are never recorded (`--var`, `--define`, `--secrets-file` may carry
+secrets): flag names only, plus the `-e` env.
 
 ---
 
