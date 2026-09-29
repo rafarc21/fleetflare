@@ -162,6 +162,12 @@ function rescue(): string {
   return sh(rescuePushCmd(REPO, STUDIO, root)).out;
 }
 
+/** Issue #39: stdout minus the per-worktree RESCUE_WT report lines, for the
+ *  assertions that pin the overall verdict line exactly. */
+function bare(out: string): string {
+  return out.split("\n").filter((l) => !l.startsWith("RESCUE_WT ")).join("\n");
+}
+
 function rescueRefs(): string[] {
   return sh(`git -C ${origin} for-each-ref --format='%(refname)' refs/heads/fleet/rescue/`).out.split("\n").filter(Boolean);
 }
@@ -173,7 +179,7 @@ describe("#217 — rescue-push never saves a tool marker as work", () => {
 
     const out = rescue();
 
-    expect(out).toBe(RESCUE_MARKERS_ONLY);
+    expect(bare(out)).toBe(RESCUE_MARKERS_ONLY);
     expect(rescueRefs()).toEqual([]);
     expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(before);
   });
@@ -192,7 +198,7 @@ describe("#217 — rescue-push never saves a tool marker as work", () => {
 
   test("a clean tree is still RESCUE_CLEAN", () => {
     sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 && rm -rf .claude`);
-    expect(rescue()).toBe(RESCUE_CLEAN);
+    expect(bare(rescue())).toBe(RESCUE_CLEAN);
   });
 });
 
@@ -246,7 +252,7 @@ describe("#251 — rescue-push walks every git worktree, not just the main check
     // initial commit) — so nothing anywhere is real, unpushed work.
     const out = rescue();
 
-    expect(out).toBe(RESCUE_MARKERS_ONLY);
+    expect(bare(out)).toBe(RESCUE_MARKERS_ONLY);
     expect(rescueRefs()).toEqual([]);
   });
 });
@@ -575,7 +581,7 @@ describe("#263 N1 — a local branch not checked out anywhere still gets its unp
     // leaves it clean and already fully on origin, so this asserts no NEW,
     // redundant push for it happens as a side effect of the branch walk).
     const out = rescue();
-    expect(out).toBe(RESCUE_MARKERS_ONLY);
+    expect(bare(out)).toBe(RESCUE_MARKERS_ONLY);
     expect(rescueRefs()).toEqual([]);
   });
 });
@@ -970,11 +976,11 @@ describe("#266 — rescueSnapshotCmd saves a dirty tree WITHOUT touching the liv
   test("no checkout, clean tree, and markers-only all read exactly like rescuePushCmd", () => {
     expect(sh(rescueSnapshotCmd(REPO, "nope", join(dir, "no-such-workspace"))).out).toBe(RESCUE_NO_CHECKOUT);
     sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 && rm -rf .claude`);
-    expect(snapshot()).toBe(RESCUE_CLEAN);
+    expect(bare(snapshot())).toBe(RESCUE_CLEAN);
   });
 
   test("markers-only: nothing pushed, and rescueSnapshotCmd never even builds a throwaway index for it", () => {
-    expect(snapshot()).toBe(RESCUE_MARKERS_ONLY);
+    expect(bare(snapshot())).toBe(RESCUE_MARKERS_ONLY);
     expect(rescueRefs()).toEqual([]);
   });
 
@@ -2101,4 +2107,27 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
       });
     }
   });
+});
+
+// Issue #39: the operator needs one line per worktree after every rescue —
+// pushed (which ref), nothing to push, or failed (which step). Both builders.
+describe("#39 — one RESCUE_WT line per worktree", () => {
+  for (const [label, cmdFn] of RESCUE_CMDS) {
+    test(`${label}: clean checkout + dirty member worktree → checkout nothing, member pushed <its ref>`, () => {
+      writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "wip.md"), "member work\n");
+      const out = sh(cmdFn(REPO, STUDIO, root)).out;
+      expect(out).toMatch(/^RESCUE_WT checkout nothing$/m);
+      const pushed = /^RESCUE_PUSHED (\S+) 1 files$/m.exec(out)![1];
+      expect(pushed).toContain("/wt/agent-a1b2-");
+      expect(out).toMatch(new RegExp(`^RESCUE_WT agent-a1b2 pushed ${pushed}$`, "m"));
+      expect(out.split("\n").filter((l) => l.startsWith("RESCUE_WT "))).toHaveLength(2);
+    });
+
+    test(`${label}: a push that fails → RESCUE_WT checkout failed push`, () => {
+      installSlowPostReceiveHook(3);
+      writeFileSync(join(checkout, "notes.md"), "work behind a slow remote hook\n");
+      const out = sh(cmdFn(REPO, STUDIO, root, 1)).out;
+      expect(out).toMatch(/^RESCUE_WT checkout failed push$/m);
+    });
+  }
 });

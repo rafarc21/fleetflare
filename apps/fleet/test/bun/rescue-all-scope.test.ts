@@ -507,4 +507,20 @@ test("no failures: final line says pre-deploy gate SAFE, never UNSAFE; exit 0", 
   expect(result.exitCode).toBe(0);
   expect(lines.at(-1)).toContain("pre-deploy gate SAFE");
   expect(errs.some((l) => l.includes("UNSAFE"))).toBe(false);
+
+// Issue #39: a line per worktree under each studio, on success and on a
+// confirmed failure.
+test("#39: every worktree's outcome is printed under its studio", async () => {
+  const { deps, lines } = fakeDeps({
+    studios: [studio("websites--pilot"), studio("websites--web-studio")],
+    rescueStudio: async (id) => id === "websites--pilot"
+      ? { ok: true, pushes: [{ branch: "fleet/rescue/x", files: 1, kind: "files" }],
+          worktrees: [{ worktree: "checkout", outcome: "nothing" }, { worktree: "agent-a1", outcome: "pushed", detail: "fleet/rescue/x" }] }
+      : { ok: false, error: "rescue-snapshot failed: ...", worktrees: [{ worktree: "checkout", outcome: "failed", detail: "push" }] },
+  });
+  const result = await runRescueAll(flags(), deps);
+  expect(lines).toContain("  websites--pilot  checkout: nothing to push");
+  expect(lines).toContain("  websites--pilot  agent-a1: pushed fleet/rescue/x");
+  expect(lines).toContain("  websites--web-studio  checkout: FAILED (push)");
+  expect(result.exitCode).toBe(1);
 });
