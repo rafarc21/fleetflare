@@ -507,6 +507,7 @@ test("no failures: final line says pre-deploy gate SAFE, never UNSAFE; exit 0", 
   expect(result.exitCode).toBe(0);
   expect(lines.at(-1)).toContain("pre-deploy gate SAFE");
   expect(errs.some((l) => l.includes("UNSAFE"))).toBe(false);
+});
 
 // Issue #39: a line per worktree under each studio, on success and on a
 // confirmed failure.
