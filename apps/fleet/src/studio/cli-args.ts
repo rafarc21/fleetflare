@@ -172,6 +172,10 @@ export type CliCommand =
   // execing or pushing anything. Never touches a stopped studio: an exec
   // would start it (the same #113 F1 reason `destroy` already guards).
   | { cmd: "rescue-all"; repo: string | null; dryRun: boolean }
+  // Issue #53: stall alarm + opt-in reap of idle studios with no open task.
+  // Dry-run unless --apply. `repo` null = the CWD's git remote. Never takes
+  // --force or --discard-unsynced: reap only ever destroys the safe way.
+  | { cmd: "reap"; apply: boolean; idleMs: number; repo: string | null }
   // P5 §9's memory pass. Two words for the same reason `task` is: `memory` is
   // a noun with operations on it, and the survey is the one you run first.
   | { cmd: "memory-ls" }
@@ -319,6 +323,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     args: "[--repo owner/repo] [--dry-run]",
     summary: "Run rescue-push against every studio that is RUNNING OR DEGRADED — the pre-image-deploy gate: an image rollout replaces every studio's container with no rescue mechanism of its own running. Commits and pushes uncommitted work (main checkout and every member git worktree, each to its own fleet/rescue/... ref), plus every local branch not checked out anywhere and every stash entry holding unpushed work (repo-wide, so a member subagent's own stash or an abandoned branch is never invisible), and prints what it saved, or 'nothing to rescue' for a clean one. A push rejected non-fast-forward (a branch moved on origin) retries once to a freshly generated ref before it counts as a failure. Prints 'skipped <id> (<state>)' for a stopped/provisioning studio and 'skipped <id>: container not running' for a stale registry answer — neither is a failure. --repo scopes to one repo; --dry-run lists which studios WOULD be rescued without execing or pushing anything. Exits non-zero only on a genuine rescue failure, and ends with a verdict: 'pre-deploy gate SAFE', or '<n>/<attempted> attempted studios not rescued (<f> push FAILED, <t> TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy'. `bun run deploy` (scripts/deploy.sh) runs it first and refuses on UNSAFE unless --allow-unrescued.",
   },
+  reap: {
+    args: "[--idle 30m] [--repo owner/repo] [--dry-run|--apply]",
+    summary: "Idle studios bill with zero events; this finds them. Scope: the repo you are standing in, or --repo. Every run prints a STALL line (at most once per 15m per studio) for a running studio IDLE >= 10m that still holds an open board task. Bare (or --dry-run) lists which running studios are IDLE >= --idle (default 30m, minimum 5m; s/m/h) with NO open task, and why each other one is skipped — touches nothing. --apply, per candidate, one at a time: a live pre-check; rescue-push; a fresh board read for this studio; a final live read (must answer within 30s) that shows the lead idle since the threshold, an empty input box, no member row, and no counter or running work in the footer; then a plain destroy (never --force, never --discard-unsynced — the Worker re-checks tasks and re-runs rescue). Any failure or doubt skips that studio; a failed rescue, a refused destroy, or 3 live-read refusals in a row back it off 30m. Reaps nothing when the board read fails, returns 0 rows, or returns under half the rows of the last good read. Local state: ~/.fleet/reap-state.json (a corrupt one is kept aside as .corrupt-<time> and that poll reaps nothing); one run at a time per state file. Built to run from a coordinator's loop, e.g. every 60s.",
+  },
   "task-junior-sweep": {
     args: "junior-sweep [--dry-run|--apply]",
     summary: "Delete junior (Workers AI) authorization records whose task is already closed, reopened, terminal (completed/failed/canceled) or gone, for the repo you are standing in. Bare (or --dry-run) only REPORTS would-revoke/kept/error per task; --apply deletes. Revoking is the only write, so re-running is safe; a task that cannot be read is kept and named.",
@@ -332,6 +340,16 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Opt this Mac into the junior skill (Workers AI delegation, skills/junior/SKILL.md). enable symlinks ~/.claude/skills/junior to this checkout and stores the Cloudflare account id in ~/.config/fleet/junior.json; disable removes only that symlink; status prints whether it is on, the account, and which auth path a call would take. Local only — never touches the Worker or any studio.",
   },
 };
+
+/** Issue #53: "90s" | "5m" | "2h" -> ms; anything else (bare numbers, zero,
+ *  fractions, other units) null. */
+export function parseIdleDuration(raw: string): number | null {
+  const m = /^(\d+)([smh])$/.exec(raw);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (n <= 0) return null;
+  return n * (m[2] === "s" ? 1000 : m[2] === "m" ? 60_000 : 3_600_000);
+}
 
 /** `fleet ls`, `fleet task show <n>` — the command line for one verb. */
 function verbLine(cmd: string, help: VerbHelp): string {
@@ -743,6 +761,40 @@ export function parseCliArgs(argv: string[]): CliCommand {
         return usage(`unexpected ${JSON.stringify(token)}`);
       }
       return { cmd: "rescue-all", repo, dryRun };
+    }
+    // Issue #53.
+    case "reap": {
+      const rest = argv.slice(1);
+      let apply: boolean | null = null;
+      let idleMs = 30 * 60_000;
+      let repo: string | null = null;
+      for (let i = 0; i < rest.length; i++) {
+        const t = rest[i]!;
+        if (t === "--apply" || t === "--dry-run") {
+          if (apply !== null) return usage("give --apply or --dry-run once");
+          apply = t === "--apply";
+          continue;
+        }
+        const idle = /^--idle(?:=(.*))?$/.exec(t);
+        if (idle) {
+          const raw = idle[1] ?? rest[++i];
+          const ms = raw === undefined ? null : parseIdleDuration(raw);
+          if (ms === null) return usage("--idle needs a duration like 5m or 2h");
+          // Review item 6: below 5m, "idle" is a lead between two tool calls.
+          if (ms < 5 * 60_000) return usage("--idle must be at least 5m");
+          idleMs = ms;
+          continue;
+        }
+        const r = /^--repo(?:=(.*))?$/.exec(t);
+        if (r) {
+          const value = r[1] ?? rest[++i];
+          if (!value) return usage("--repo needs a value");
+          repo = value;
+          continue;
+        }
+        return usage(`unexpected ${JSON.stringify(t)}`);
+      }
+      return { cmd: "reap", apply: apply ?? false, idleMs, repo };
     }
     case "task":
       return parseTask(argv.slice(1));

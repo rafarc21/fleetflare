@@ -44,6 +44,11 @@ import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, title
 import { repairFailureLine, discardNote, destroyPath } from "./repair-failure";
 import { requestDestroy } from "./destroy-outcome";
 import {
+  formatIdleAlarm, emptyReapState, runReap, REAP_LIVE_READ_MAX_MS, type ReapDeps, type ReapFlags, type ReapState,
+} from "./reap";
+import { mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import {
   formatReady, formatCheckedAt, readyOverride, formatSession, formatState, formatSessionGuards,
   formatSurvivalBriefs,
   formatObservedLines, formatActivity,
@@ -570,6 +575,9 @@ export async function cmdLs(creds: Credentials, fresh: boolean, orcaDeps: OrcaDe
   console.log(formatTable(studios, new Date(), orca.rows));
   // #299: stdout, not stderr — survives `fleet ls 2>&1 | grep`-style reads.
   if (orca.footer && studios.length > 0) console.log(orca.footer);
+  // Issue #53: idle studios bill with zero events; say so above the caveat.
+  const idle = formatIdleAlarm(studios, new Date());
+  if (idle) console.log(idle);
   console.log(READY_CAVEAT);
   for (const line of formatSessionGuards(studios)) console.log(line);
   // Issue #249 (PR4b) round 2, item 2: a survival re-brief still owed, or one
@@ -1801,6 +1809,189 @@ export async function cmdRescueAll(creds: Credentials, flags: RescueAllFlags): P
 }
 
 // ---------------------------------------------------------------------------
+// fleet reap — issue #53. Policy lives in cli/reap.ts; this is the wiring.
+
+/** Where reap keeps its backoff, stall-alarm and board-floor memory. */
+export const REAP_STATE_PATH = join(homedir(), ".fleet", "reap-state.json");
+
+/** Review F1: every plain read reap makes is bounded. A hung read must never
+ *  sit between the last live read and a destroy, nor stall a poll. */
+export const REAP_READ_TIMEOUT_MS = 20_000;
+/** A lock file older than this is a crashed run's, and is taken over. */
+export const REAP_LOCK_STALE_MS = 15 * 60_000;
+
+async function fetchJson(url: string, headers: Record<string, string>, timeoutMs: number): Promise<unknown> {
+  const res = await fetch(url, { headers: { ...headers, Accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 300)}`);
+  return res.json();
+}
+
+function isStringMap(v: unknown): v is Record<string, string> {
+  return typeof v === "object" && v !== null && !Array.isArray(v) && Object.values(v).every((x) => typeof x === "string");
+}
+
+function isCountMap(v: unknown): v is Record<string, number> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+    && Object.values(v).every((x) => typeof x === "number" && Number.isInteger(x) && x >= 0);
+}
+
+/** Review F5: the state file's exact shape, or null. Absent maps are fine
+ *  (older file); present-but-wrong is not. */
+export function parseReapState(raw: string): ReapState | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const p = parsed as Record<string, unknown>;
+  const out = emptyReapState();
+  if (p.backoffUntil !== undefined) { if (!isStringMap(p.backoffUntil)) return null; out.backoffUntil = p.backoffUntil; }
+  if (p.stallAlarmAt !== undefined) { if (!isStringMap(p.stallAlarmAt)) return null; out.stallAlarmAt = p.stallAlarmAt; }
+  if (p.boardRows !== undefined) { if (!isCountMap(p.boardRows)) return null; out.boardRows = p.boardRows; }
+  if (p.refusals !== undefined) { if (!isCountMap(p.refusals)) return null; out.refusals = p.refusals; }
+  return out;
+}
+
+/**
+ * The real `ReapDeps`: the SAME routes `fleet ls`, `fleet task ls --studio`,
+ * `fleet rescue-all`, `fleet inspect` and `fleet destroy` already call. The
+ * destroy is `destroyPath(false, false)` by construction — reap never
+ * passes --force or --discard-unsynced. Exported for the wiring test.
+ */
+export function reapDeps(
+  creds: Credentials, repo: string, statePath: string, log: (line: string) => void,
+  orcaDeps: OrcaDeps = defaultOrcaDeps(),
+  opts: { readTimeoutMs?: number } = {},
+): ReapDeps {
+  const headers = accessHeaders(creds);
+  const repoQ = `repo=${encodeURIComponent(repo)}`;
+  const readMs = opts.readTimeoutMs ?? REAP_READ_TIMEOUT_MS;
+  return {
+    now: () => new Date(),
+    listStudios: async () => {
+      const body = await fetchJson(new URL("/studio/", creds.workerUrl).toString(), headers, readMs);
+      if (!Array.isArray(body)) throw new Error("studio listing was not a JSON array");
+      return body as StudioStatus[];
+    },
+    listBoard: async () => {
+      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}`), headers, readMs);
+      if (!Array.isArray(body)) throw new Error("board listing was not a JSON array");
+      return body as BoardTask[];
+    },
+    studioTasks: async (id) => {
+      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}&assignedTo=${encodeURIComponent(id)}`), headers, readMs);
+      if (!Array.isArray(body)) throw new Error("task listing was not a JSON array");
+      return body as BoardTask[];
+    },
+    inspect: async (id) => {
+      // Bounded at the core's own live-read budget: a later answer is refused anyway.
+      const out = await requestInspect(studioUrl(creds, id, "/inspect"), headers, { timeoutMs: REAP_LIVE_READ_MAX_MS });
+      if (!out.ok) return { ok: false, message: out.message };
+      const body = out.body as Partial<InspectBody> & { ok?: boolean; error?: string; observed?: Observed };
+      if (body.ok !== true || typeof body.tail !== "string") return { ok: false, message: body.error ?? "inspect answered not ok" };
+      return {
+        ok: true, tail: body.tail,
+        capturedAt: typeof body.capturedAt === "number" ? body.capturedAt : null,
+        activity: body.observed?.activity ?? null,
+      };
+    },
+    rescue: async (id) => {
+      try {
+        const res = await fetch(studioUrl(creds, id, "/rescue"), rescueFetchInit(headers, RESCUE_ALL_STUDIO_TIMEOUT_MS));
+        if (!res.ok) return { ok: false, error: `${res.status} ${(await res.text()).slice(0, 300)}` };
+        const outcome = (await res.json()) as RescueAllOutcome;
+        return outcome.ok === true ? { ok: true } : { ok: false, error: outcome.error ?? "rescue answered not ok" };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    destroy: async (id) => {
+      const report = await requestDestroy(
+        { destroy: studioUrl(creds, id, destroyPath(false, false)), status: studioUrl(creds, id, "/status") }, headers, id,
+      );
+      for (const line of report.lines) log(`  ${id}  ${line}`);
+      if (report.teardown) {
+        const removal = await removeStudioWorkspace(id, orcaDeps);
+        for (const line of describeWorkspaceRemoval(id, removal)) log(`  ${id}  ${line}`);
+      }
+      if (report.status?.state === "stopped") return { outcome: "destroyed" };
+      return { outcome: report.kind === "http-error" ? "refused" : "unknown", message: report.lines.join(" ") || report.kind };
+    },
+    loadState: async () => {
+      let raw: string;
+      try {
+        raw = await readFile(statePath, "utf8");
+      } catch {
+        return emptyReapState();
+      }
+      const state = parseReapState(raw);
+      if (state) return state;
+      // Kept aside, never silently overwritten: the operator can read it.
+      const aside = `${statePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      await rename(statePath, aside);
+      throw new Error(`state file was corrupt or the wrong shape; kept aside at ${aside}`);
+    },
+    saveState: async (state) => {
+      await mkdir(dirname(statePath), { recursive: true });
+      const tmp = `${statePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      await writeFile(tmp, JSON.stringify(state, null, 2));
+      await rename(tmp, statePath);
+    },
+    log,
+  };
+}
+
+/** Review F5: one reap per state file at a time. The lock is an exclusively
+ *  created file; a second run refuses rather than racing the state or the
+ *  destroys. A lock older than REAP_LOCK_STALE_MS (a crashed run) is taken over.
+ *  `fn` gets `refresh`, which re-stamps the lock's mtime: runReap calls it once
+ *  per candidate (ReapDeps.heartbeat), so a live run with several candidates
+ *  never looks stale — only a run that stopped refreshing does. */
+export async function withReapLock<T>(statePath: string, fn: (refresh: () => Promise<void>) => Promise<T>): Promise<T> {
+  const lock = `${statePath}.lock`;
+  await mkdir(dirname(statePath), { recursive: true });
+  const take = () => writeFile(lock, `${process.pid} ${new Date().toISOString()}\n`, { flag: "wx" });
+  try {
+    await take();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    const age = Date.now() - (await stat(lock)).mtimeMs;
+    if (age < REAP_LOCK_STALE_MS) {
+      throw new Error(`another fleet reap holds ${lock} (${Math.round(age / 1000)}s old); refusing to run alongside it`);
+    }
+    await unlink(lock);
+    await take();
+  }
+  const refresh = async () => {
+    const now = new Date();
+    await utimes(lock, now, now);
+  };
+  try {
+    return await fn(refresh);
+  } finally {
+    await unlink(lock).catch(() => {});
+  }
+}
+
+async function cmdReap(creds: Credentials, flags: Omit<ReapFlags, "repo"> & { repo: string | null }): Promise<void> {
+  let repo = flags.repo;
+  if (repo === null) {
+    const detected = await detectRepo();
+    reportRepo("fleet reap", detected);
+    repo = detected.slug;
+  }
+  if (!repo) {
+    console.error("fleet reap: no repo — stand in a repo checkout or pass --repo owner/name. Never fleet-wide.");
+    process.exit(1);
+  }
+  const { exitCode } = await withReapLock(REAP_STATE_PATH, (refresh) =>
+    runReap({ ...flags, repo }, { ...reapDeps(creds, repo, REAP_STATE_PATH, (l) => console.log(l)), heartbeat: refresh }));
+  if (exitCode !== 0) process.exit(exitCode);
+}
+
+// ---------------------------------------------------------------------------
 // paste upload — shared by `fleet paste` and attach's ctrl-v intercept.
 // pngpaste only ever produces PNG, so Content-Type is fixed.
 
@@ -2286,6 +2477,8 @@ async function main(): Promise<void> {
       return cmdRescueGc(creds, parsed.apply, parsed.olderThanDays);
     case "rescue-all":
       return cmdRescueAll(creds, { repo: parsed.repo, dryRun: parsed.dryRun });
+    case "reap":
+      return cmdReap(creds, { apply: parsed.apply, idleMs: parsed.idleMs, repo: parsed.repo });
     case "memory-ls":
       return cmdMemoryLs(creds);
     case "memory-compact":
