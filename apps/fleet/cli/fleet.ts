@@ -1381,6 +1381,26 @@ async function cmdTaskReap(creds: Credentials, apply: boolean): Promise<void> {
 }
 
 /**
+ * `fleet task junior-sweep [--dry-run|--apply]` — issue #35. One POST to the
+ * Worker's `/tasks/junior-sweep` route; same cwd repo convention as reap.
+ */
+async function cmdTaskJuniorSweep(creds: Credentials, apply: boolean): Promise<void> {
+  const detected = await detectRepo();
+  reportRepo("fleet task junior-sweep", detected);
+  const result = (await boardRequest(creds, "fleet task junior-sweep", "/tasks/junior-sweep", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apply, ...(detected.slug ? { repo: detected.slug } : {}) }),
+  })) as { repo: string; apply: boolean; results: { number: number; outcome: string; reason: string }[] };
+  console.log(`fleet task junior-sweep ${result.apply ? "(--apply)" : "(dry-run)"} — ${result.repo}`);
+  if (result.results.length === 0) {
+    console.log("  (no junior records)");
+    return;
+  }
+  for (const r of result.results) console.log(`  #${r.number}: ${r.outcome} — ${r.reason}`);
+}
+
+/**
  * `fleet rescue-gc [--older-than N] [--dry-run|--apply]` — issue #217. One
  * POST to the Worker's `/tasks/rescue-gc` route (src/board/routes.ts), which
  * runs src/studio/rescue-gc.ts's rule against real GitHub; this side only
@@ -2253,6 +2273,8 @@ async function main(): Promise<void> {
       return cmdTaskState(creds, parsed.number, parsed.to);
     case "task-reap":
       return cmdTaskReap(creds, parsed.apply);
+    case "task-junior-sweep":
+      return cmdTaskJuniorSweep(creds, parsed.apply);
     case "rescue-gc":
       return cmdRescueGc(creds, parsed.apply, parsed.olderThanDays);
     case "rescue-all":

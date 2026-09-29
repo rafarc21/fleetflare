@@ -24,6 +24,8 @@
 // authorized. That is a DISPLAY use, not a security one, and this file is
 // deliberately the only place that decides the real thing.
 import { deleteFlag, getFlag, setFlag } from "../state";
+import { GitHubError } from "../board/api";
+import { TERMINAL_TASK_STATES, type BoardTask } from "../board/types";
 
 function authzKey(repo: string, issueNumber: number): string {
   return `junior-auth:${repo.toLowerCase()}:${issueNumber}`;
@@ -86,4 +88,60 @@ export async function revokeJuniorAuthorization(
   db: D1Database, repo: string, issueNumber: number,
 ): Promise<void> {
   await deleteFlag(db, authzKey(repo, issueNumber));
+}
+
+/** Issue #35: one record's verdict from sweepJuniorAuthorizations. */
+export interface JuniorSweepOutcome {
+  number: number;
+  outcome: "kept" | "would-revoke" | "revoked" | "error";
+  reason: string;
+}
+
+/**
+ * Issue #35: records written before #25 deployed (or while the webhook was
+ * down) can belong to tasks already finished. For every record in `repo`,
+ * read the task and revoke when it is closed, reopened, terminal, or gone
+ * (404). Dry-run unless `apply`. Revoking is the only write, so a re-run is a
+ * no-op and a wrong guess costs a maestro one re-file, never an unearned
+ * grant. A read that fails any other way keeps the record and says why.
+ */
+export async function sweepJuniorAuthorizations(
+  db: D1Database, repo: string, getTask: (repo: string, issueNumber: number) => Promise<BoardTask>, apply: boolean,
+): Promise<JuniorSweepOutcome[]> {
+  const prefix = `junior-auth:${repo.toLowerCase()}:`;
+  // LIKE treats `_` as a wildcard and repo names may hold one: the exact
+  // prefix check below is what actually decides.
+  const rows = await db.prepare(`SELECT key FROM fleet_state WHERE key LIKE ?`).bind(`${prefix}%`).all<{ key: string }>();
+  const numbers = rows.results
+    .filter((r) => r.key.startsWith(prefix) && /^\d+$/.test(r.key.slice(prefix.length)))
+    .map((r) => Number(r.key.slice(prefix.length)))
+    .sort((a, b) => a - b);
+  const out: JuniorSweepOutcome[] = [];
+  for (const number of numbers) {
+    let reason: string | null;
+    try {
+      const task = await getTask(repo, number);
+      if (!task.open) reason = "closed";
+      else if (task.reopened === true) reason = "reopened";
+      else if (task.state !== null && TERMINAL_TASK_STATES.includes(task.state)) reason = task.state;
+      else reason = null;
+      if (reason === null) {
+        out.push({ number, outcome: "kept", reason: task.state === null ? "state drifted (no single state label)" : task.state });
+        continue;
+      }
+    } catch (err) {
+      if (err instanceof GitHubError && err.status === 404) {
+        reason = "task not found";
+      } else {
+        out.push({ number, outcome: "error", reason: err instanceof Error ? err.message : String(err) });
+        continue;
+      }
+    }
+    if (apply) {
+      await revokeJuniorAuthorization(db, repo, number);
+      console.log(`junior sweep: revoked ${repo}#${number} (${reason})`);
+    }
+    out.push({ number, outcome: apply ? "revoked" : "would-revoke", reason });
+  }
+  return out;
 }

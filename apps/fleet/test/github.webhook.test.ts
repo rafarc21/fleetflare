@@ -6,6 +6,7 @@ import { readSince } from "../src/events/log";
 import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
 import { recordStudio } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
+import { isJuniorAuthorized, recordJuniorAuthorization } from "../src/junior/authz";
 
 const SECRET = "hook-secret";
 let sent: { body: any }[] = [];
@@ -1613,5 +1614,62 @@ describe("github webhook -> auto-close on promote (board issue #8)", () => {
     expect(msg).toContain(REPO);
     expect(msg).toContain("2/3");
     errors.mockRestore();
+  });
+});
+
+// Issue #35: a label change made anywhere (GitHub UI, a studio's own gh
+// token) is seen here. Any terminal label added OR removed, or a close,
+// revokes the task's junior record: revoking only, never granting, so a
+// relabel terminal -> live can no longer bring junior back.
+describe("issues webhook — junior revoke (issue #35)", () => {
+  const STUDIO = "websites--web-studio";
+  const issues = (action: string, extra: Record<string, unknown> = {}, repo = "acme-org/websites") => JSON.stringify({
+    action, issue: { number: 7 }, repository: { full_name: repo }, sender: { login: "someone" }, ...extra,
+  });
+  async function seed(): Promise<void> {
+    await recordJuniorAuthorization(env.DB, "acme-org/websites", 7, STUDIO, 1000);
+  }
+
+  for (const [label, action] of [["canceled", "labeled"], ["completed", "unlabeled"], ["failed", "labeled"]] as const) {
+    it(`${action} ${label}: record revoked`, async () => {
+      await seed();
+      const body = issues(action, { label: { name: label } });
+      expect((await post(body, await sign(body), "issues")).status).toBe(200);
+      await drainLast();
+      expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(false);
+    });
+  }
+
+  it("closed: record revoked", async () => {
+    await seed();
+    const body = issues("closed");
+    await post(body, await sign(body), "issues");
+    await drainLast();
+    expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(false);
+  });
+
+  it("a live label added, or a non-state label: record kept", async () => {
+    await seed();
+    for (const name of ["working", "junior", "bug"]) {
+      const body = issues("labeled", { label: { name } });
+      await post(body, await sign(body), "issues");
+      await drainLast();
+    }
+    expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(true);
+  });
+
+  it("unsigned delivery: nothing revoked", async () => {
+    await seed();
+    const body = issues("labeled", { label: { name: "canceled" } });
+    expect((await post(body, "sha256=nope", "issues")).status).toBe(401);
+    expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(true);
+  });
+
+  it("another repo's same issue number: untouched", async () => {
+    await seed();
+    const body = issues("labeled", { label: { name: "canceled" } }, "acme-org/other");
+    await post(body, await sign(body), "issues");
+    await drainLast();
+    expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(true);
   });
 });
