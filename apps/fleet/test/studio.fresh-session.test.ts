@@ -101,10 +101,16 @@ describe("provisionWithStorage — freshSession arms the force upload (issue #37
     const status = await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient");
     expect(map.get(SESSION_FORCE_KEY)).toBe(true);
     expect(status.error).toContain(`sessions/${REPO}--scratch/aside/`);
+    // PR #46 review: the row says the override is armed, like clear-session-guard.
+    expect(status.sessionForceArmedAt).toBe(NOW);
   });
 
   it("nothing moved, not confirmed, or no flag: not armed", async () => {
-    for (const [stdout, fresh] of [[`${FRESH_SESSION_MARKER} none\n`, true], ["", true], ["", false]] as const) {
+    for (const [stdout, fresh] of [
+      [`${FRESH_SESSION_MARKER} none\n`, true], ["", true], ["", false],
+      // PR #46 review: every move failed — nothing left the tar, nothing to force.
+      [`${FRESH_SESSION_MARKER} failed /root/.claude/projects/-workspace-acmeclient/x.jsonl\n`, true],
+    ] as const) {
       const { d } = deps(stdout);
       const { map, storage } = mapStorage();
       await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", ...(fresh ? { freshSession: true } : {}) }, "example-org/acmeclient");

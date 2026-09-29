@@ -114,4 +114,26 @@ suite("#37 — aside dirs leave the main tar and ship on their own", () => {
     expect(r.code).toBe(0);
     expect(r.stdout.trim()).toBe("");
   });
+
+  // PR #46 review: the raw size is checked BEFORE tar, and a failed pack
+  // leaves no staging file behind.
+  test("raw dir over the cap: prints `oversize <bytes>`, never tars, stages nothing", () => {
+    const r = sh(asidePackCmd(ASIDE, home, sync, "64k", 1000));
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toMatch(/^oversize \d+$/);
+    expect(existsSync(join(sync, "aside")) ? readdirSync(join(sync, "aside")) : []).toEqual([]);
+  });
+
+  test("a failing tar leaves no staging file behind and exits non-zero", () => {
+    mkdirSync(join(sync, "aside"), { recursive: true });
+    // An unreadable member makes tar fail after it has started writing.
+    const bad = join(home, ".claude", "projects", ASIDE, "unreadable.jsonl");
+    writeFileSync(bad, "x\n");
+    spawnSync("chmod", ["000", bad]);
+    const r = sh(asidePackCmd(ASIDE, home, sync, "64k"));
+    spawnSync("chmod", ["644", bad]);
+    if (process.getuid?.() === 0) return; // root reads mode-000 files: no failure to observe
+    expect(r.code).not.toBe(0);
+    expect(readdirSync(join(sync, "aside"))).toEqual([]);
+  });
 });

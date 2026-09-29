@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
   syncSessionTick, restorePlan, tarAndStatCmd, singleReadCmd, splitCmd, partReadCmd,
-  sessionDailyPrefix, SESSION_SYNC_DIR, SESSION_TAR_PATH, SESSION_EXCLUDES_PATH, asideListCmd,
+  sessionDailyPrefix, SESSION_SYNC_DIR, SESSION_TAR_PATH, SESSION_EXCLUDES_PATH, asideListCmd, asidePackCmd, ASIDE_SHIP_KEY,
   SESSION_DAILY_DATE_KEY, SESSION_BURN_WATERMARK_KEY, BURN_KEY, SESSION_GUARD_KEY, SESSION_FORCE_KEY,
   type SessionSyncDeps, type SessionSyncStorage,
 } from "../src/studio/session-sync";
@@ -4415,5 +4415,58 @@ describe("container/studio-bringup.sh — window-size staleness investigation (b
     // No rebind: tmux's prefix is set via `set -g prefix`, never present here.
     expect(src()).not.toContain("set -g prefix");
     expect(src()).not.toContain("set-option -g prefix");
+  });
+});
+
+// PR #46 review: the periodic cycle ships aside dirs (#37), and a failure
+// there is visible on the row, never only in a log. A throwing aside ship
+// never costs the burn mirror.
+describe("syncSessionCycle — aside sessions (issue #37, PR #46 review)", () => {
+  const DIR = "fleet-aside-20260929T100000Z-42--workspace-websites";
+  const burn: Burn = {
+    turns: 1, inputTokens: 10, outputTokens: 5, costUsd: 0,
+    window5hStart: "2026-08-16T00:00:00.000Z", window5hOutput: 5,
+  };
+
+  it("lists and packs the aside dir; a failed pack lands on the row as NOT shipped", async () => {
+    const deps = fakeSyncDeps();
+    const inner = deps.exec;
+    deps.exec = async (cmd: string) => {
+      if (cmd === asideListCmd()) { deps.execCalls.push(cmd); return { code: 0, stdout: `${DIR}\n`, stderr: "" }; }
+      if (cmd === asidePackCmd(DIR)) { deps.execCalls.push(cmd); return { code: 2, stdout: "", stderr: "tar: disk full" }; }
+      return inner(cmd);
+    };
+    const storage = fakeCycleStorage({ status: cycleStatus(), burn });
+    const recorded: StudioStatus[] = [];
+    await syncSessionCycle(deps, storage, STUDIO_ID, async (st) => { recorded.push(st); });
+
+    expect(deps.execCalls).toContain(asideListCmd());
+    expect(deps.execCalls).toContain(asidePackCmd(DIR));
+    const row = recorded.at(-1)!;
+    expect(row.asideShip?.failed).toEqual([{ dir: DIR, reason: expect.stringContaining("disk full") }]);
+  });
+
+  it("an aside ship that THROWS (list exec dies) never stops the burn mirror, and is on the row", async () => {
+    const deps = fakeSyncDeps();
+    const inner = deps.exec;
+    deps.exec = async (cmd: string) => {
+      if (cmd === asideListCmd()) throw new Error("Session 'sandbox-default' shell exited");
+      return inner(cmd);
+    };
+    const storage = fakeCycleStorage({ status: cycleStatus(), burn });
+    const recorded: StudioStatus[] = [];
+    await syncSessionCycle(deps, storage, STUDIO_ID, async (st) => { recorded.push(st); });
+
+    expect(recorded.some((st) => st.burn?.turns === 1)).toBe(true);
+    expect(recorded.at(-1)!.asideShip?.failed[0].reason).toContain("shell exited");
+  });
+
+  it("clean aside ship clears a prior failure from the row", async () => {
+    const deps = fakeSyncDeps();
+    const storage = fakeCycleStorage({ status: cycleStatus(), burn });
+    await storage.put(ASIDE_SHIP_KEY, { at: "2026-09-29T00:00:00.000Z", failed: [{ dir: DIR, reason: "old" }] });
+    const recorded: StudioStatus[] = [];
+    await syncSessionCycle(deps, storage, STUDIO_ID, async (st) => { recorded.push(st); });
+    expect(recorded.at(-1)!.asideShip).toBeNull();
   });
 });

@@ -40,7 +40,9 @@
 // function taking its dependencies as arguments.
 import type { StudioStatus } from "./types";
 import { STATUS_KEY, DESTROYING_KEY, freshStatus, bumpDestroyEpoch, type StudioStorage } from "./provision";
-import { syncSessionTick, shipAsideSessions, type SessionSyncDeps, type SessionSyncStorage } from "./session-sync";
+import {
+  syncSessionTick, shipAsideSessions, asideNotShippedNote, type SessionSyncDeps, type SessionSyncStorage,
+} from "./session-sync";
 import { redactSecrets } from "./redact";
 import {
   rescuePush, harvestLearnings, archiveDoneRecords, learningsLostNote, deliveredTaskIn, recordSnapshotOnSuccess, containerAnswers, CONTAINER_PROBE_MS,
@@ -229,11 +231,15 @@ export async function destroyWithSync(
       await clearConsumedForceStamp(storage);
     }
     // Issue #37: fresh-session aside dirs ship on their own; last chance.
+    // PR #46 review: an aside that did not ship is named on the stopped row.
+    let asideNote: string | null;
     try {
-      await shipAsideSessions(syncDeps, idFallback);
+      asideNote = asideNotShippedNote((await shipAsideSessions(syncDeps, idFallback)).failed);
     } catch (err) {
       console.error(`studio ${idFallback}: pre-destroy aside session ship failed, continuing`, err);
+      asideNote = asideNotShippedNote([{ dir: "(listing)", reason: err instanceof Error ? err.message : String(err) }]);
     }
+    if (asideNote) unrescued = unrescued ? `${unrescued}; ${asideNote}` : asideNote;
     try {
       const rescue = await rescuePush(syncDeps, repo, idFallback);
       if (rescue.pushed) {

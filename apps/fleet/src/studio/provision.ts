@@ -3497,7 +3497,11 @@ export async function provisionWithStorage(
   // one-shot force upload `fleet clear-session-guard` arms: the old `latest`
   // is kept under superseded/ by the upload itself, and a blank candidate
   // (claude has not written yet) still waits.
-  if (freshSessionMoved) await storage.put(SESSION_FORCE_KEY, true);
+  if (freshSessionMoved) {
+    await storage.put(SESSION_FORCE_KEY, true);
+    // PR #46 review: the row says so, like clear-session-guard does.
+    status = { ...status, sessionForceArmedAt: deps.now() };
+  }
   await storage.put(STATUS_KEY, status);
   // Issue #100 N1: the container is up again, so no destroy is in flight —
   // including one that died before its own `finally` could say so.

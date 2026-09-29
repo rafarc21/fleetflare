@@ -203,7 +203,9 @@ The ones worth knowing before you need them:
   session snapshot (an oversize one would block every sync); next sync
   ships each aside dir once to R2 `sessions/<id>/aside/<dir>/` (parts +
   `manifest.json` with sha256; concat parts in order, check sha, `tar -xzf`).
-  Over 256 MiB: stays on disk, logged every tick. Also arms one forced
+  Over 1 GiB raw / 256 MiB packed, or any ship failure: stays on disk,
+  `fleet ls` prints `ASIDE <id>: NOT SHIPPED <dir> (<reason>)`; recycle /
+  destroy name it on the row. Also arms one forced
   upload so the fresh session replaces `latest` (old kept under
   `superseded/`). Row's error line names where (#28, #37).
   503 `the Durable Object did not answer` = every repair verb dead the same

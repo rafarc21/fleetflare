@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  tarAndStatCmd, singleReadCmd, asideListCmd, type SessionSyncDeps, type SessionSyncStorage,
+  tarAndStatCmd, singleReadCmd, asideListCmd, asidePackCmd, type SessionSyncDeps, type SessionSyncStorage,
 } from "../src/studio/session-sync";
 import {
   STATUS_KEY, DESTROY_EPOCH_KEY, readDestroyEpoch, type StudioStorage, type RoleEnv, type StudioEnv,
@@ -483,5 +483,33 @@ describe("runDestroy", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.refused).toBe(true);
     expect(destroy).not.toHaveBeenCalled();
+  });
+});
+
+// PR #46 review: an aside dir that could not ship before destroy is named on
+// the stopped row, like an unrescued worktree.
+describe("destroy — unshipped aside named on the row (PR #46 review)", () => {
+  it("pack fails: destroy proceeds, stopped row names the dir", async () => {
+    const DIR = "fleet-aside-20260929T100000Z-42--workspace-websites";
+    const base = fakeSyncDeps();
+    const syncDeps = {
+      ...base,
+      exec: async (cmd: string) => {
+        if (cmd === asideListCmd()) return { code: 0, stdout: `${DIR}\n`, stderr: "" };
+        if (cmd === asidePackCmd(DIR)) return { code: 2, stdout: "", stderr: "tar: disk full" };
+        return base.exec(cmd);
+      },
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await destroyWithSync(
+        syncDeps, fakeCombinedStorage(), STUDIO_ID, vi.fn(async () => {}), vi.fn(async () => {}), REPO,
+        noopResolveMemoryRepo, noopCommit,
+      );
+      expect(result.state).toBe("stopped");
+      expect(result.error).toContain(`aside session NOT shipped: ${DIR}`);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });

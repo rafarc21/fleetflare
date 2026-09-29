@@ -59,7 +59,7 @@ import {
 } from "./member-alerts";
 import type { MemguardKillLogEntry } from "./memguard-log";
 import {
-  syncSessionTick, shipAsideSessions, BURN_KEY, SYNC_SESSION_SECONDS, SESSION_GUARD_KEY, SESSION_MARK_KEY, SESSION_FORCE_KEY,
+  syncSessionTick, shipAsideSessions, asideNotShippedNote, ASIDE_SHIP_KEY, BURN_KEY, SYNC_SESSION_SECONDS, SESSION_GUARD_KEY, SESSION_MARK_KEY, SESSION_FORCE_KEY,
   BURN_PERSIST_ERROR_KEY,
   type SessionSyncDeps, type SessionSyncStorage, type SyncResult,
 } from "./session-sync";
@@ -1354,14 +1354,17 @@ export async function recycleWithSync(
     await clearConsumedForceStamp(storage);
   }
   let rescueDiscarded: string | null = null;
+  // PR #46 review: an aside dir that did not ship before teardown is named.
+  let asideUnshipped: string | null = null;
   // Issue #16: appended to every row this recycle writes after rescue.
   const withDiscardNote = (error: string | null): string | null =>
-    rescueDiscarded ? (error ? `${error}; ${rescueDiscarded}` : rescueDiscarded) : error;
+    [error, rescueDiscarded, asideUnshipped].filter((p): p is string => p !== null).join("; ") || null;
   // Issue #37: fresh-session aside dirs ship on their own; last chance.
   if (alive) try {
-    await shipAsideSessions(syncDeps, idFallback);
+    asideUnshipped = asideNotShippedNote((await shipAsideSessions(syncDeps, idFallback)).failed);
   } catch (err) {
     console.error(`studio ${idFallback}: pre-destroy aside session ship failed, continuing`, err);
+    asideUnshipped = asideNotShippedNote([{ dir: "(listing)", reason: err instanceof Error ? err.message : String(err) }]);
   }
   if (alive) try {
     const rescue = await rescuePush(syncDeps, cfg.repo, idFallback);
@@ -2095,9 +2098,12 @@ export async function mirrorBurnToRegistry(
   // is never folded into `sessionGuard` above.
   const burnPersistError = await storage.get(BURN_PERSIST_ERROR_KEY);
   const forceArmed = (await storage.get(SESSION_FORCE_KEY)) === true;
+  // PR #46 review: unshipped aside dirs are on the row, like the guard.
+  const asideShip = await storage.get(ASIDE_SHIP_KEY);
   const updated: StudioStatus = {
     ...status,
     burn,
+    ...(asideShip === undefined ? {} : { asideShip }),
     ...(sessionGuard === undefined ? {} : { sessionGuard }),
     ...(burnPersistError === undefined ? {} : { burnPersistError }),
     sessionForceArmedAt: forceArmed ? (status.sessionForceArmedAt ?? null) : null,
@@ -2697,10 +2703,19 @@ export async function syncSessionCycle(
     console.error(`studio ${idFallback}: session sync tick failed`, err);
   }
   // Issue #37: its own try — an aside failure never costs the main sync.
+  // PR #46 review: its failures ride the row (mirrorBurnToRegistry below).
   try {
-    await shipAsideSessions(syncDeps, idFallback);
+    const at = syncDeps.now().toISOString();
+    let failed: { dir: string; reason: string }[];
+    try {
+      failed = (await shipAsideSessions(syncDeps, idFallback)).failed;
+    } catch (err) {
+      console.error(`studio ${idFallback}: aside session ship failed`, err);
+      failed = [{ dir: "(listing)", reason: err instanceof Error ? err.message : String(err) }];
+    }
+    await storage.put(ASIDE_SHIP_KEY, failed.length > 0 ? { at, failed } : null);
   } catch (err) {
-    console.error(`studio ${idFallback}: aside session ship failed`, err);
+    console.error(`studio ${idFallback}: aside ship record failed`, err);
   }
   try {
     await mirrorBurnToRegistry(storage, recordStudioFn);

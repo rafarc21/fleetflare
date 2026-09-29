@@ -274,6 +274,9 @@ export interface SessionSyncStorage {
    * `BURN_ALERTED_WINDOW_KEY` already use elsewhere in this interface).
    */
   get(key: typeof SESSION_FORCE_KEY): Promise<true | undefined>;
+  // PR #46 review: the last aside ship's failures, for the row (fleet ls).
+  get(key: typeof ASIDE_SHIP_KEY): Promise<AsideShipRecord | null | undefined>;
+  put(key: typeof ASIDE_SHIP_KEY, value: AsideShipRecord | null): Promise<void>;
   put(key: typeof SESSION_FORCE_KEY, value: true): Promise<void>;
   /**
    * Consumes the override (`syncSessionTick`, after a successful forced
@@ -604,6 +607,15 @@ const ASIDE_MARKER = ".fleet-shipped";
 /** 256 MiB (64 parts of SESSION_SPLIT_PART): bounds one tick's exec count.
  *  Larger is reported every tick and left on disk, never half-shipped. */
 export const SESSION_ASIDE_MAX = 268_435_456;
+/** PR #46 review: the raw dir is measured BEFORE tar. 1 GiB raw (transcripts
+ *  compress ~4x, so roughly SESSION_ASIDE_MAX gzipped): above it, never tar. */
+export const SESSION_ASIDE_RAW_MAX = 1_073_741_824;
+
+/** PR #46 review: DO storage key for the last aside ship's failures, mirrored
+ *  onto the row (StudioStatus.asideShip) so `fleet ls` shows an aside that is
+ *  not reaching R2. `null` = the last ship had nothing failing. */
+export const ASIDE_SHIP_KEY = "asideShip";
+export interface AsideShipRecord { at: string; failed: { dir: string; reason: string }[] }
 
 /** Unshipped aside dirs, one name per line. Exits 0 when there are none. */
 export function asideListCmd(home = SESSION_HOME): string {
@@ -619,16 +631,29 @@ function asideTar(dir: string, syncDir: string): string {
 }
 
 /** Tars one aside dir, verifies it, splits it; prints size then sha256.
+ *  PR #46 review: the raw dir is measured FIRST (`du -sb`); over `rawMax` it
+ *  prints `oversize <bytes>` and never tars. A failed tar/verify/split removes
+ *  its own staging files (no `exit`: this runs in the long-lived exec shell).
  *  `dir` is validated by the caller (ASIDE_DIR_RE) — never shell-quoted
  *  user input. */
-export function asidePackCmd(dir: string, home = SESSION_HOME, syncDir = SESSION_SYNC_DIR, part = SESSION_SPLIT_PART): string {
+export function asidePackCmd(
+  dir: string, home = SESSION_HOME, syncDir = SESSION_SYNC_DIR, part = SESSION_SPLIT_PART,
+  rawMax = SESSION_ASIDE_RAW_MAX,
+): string {
   const t = asideTar(dir, syncDir);
   return (
-    `umask 077; mkdir -p ${syncDir}/aside && ` +
-    `tar -C ${home}/.claude/projects --exclude=${dir}/${ASIDE_MARKER} -czf ${t} ${dir} && gzip -t ${t} && ` +
+    `umask 077; mkdir -p ${syncDir}/aside && sz=$(du -sb ${home}/.claude/projects/${dir} | cut -f1) && ` +
+    `if [ "$sz" -gt ${rawMax} ]; then echo "oversize $sz"; else ` +
+    `{ tar -C ${home}/.claude/projects --exclude=${dir}/${ASIDE_MARKER} -czf ${t} ${dir} && gzip -t ${t} && ` +
     `rm -f ${t}.part-* && split -b ${part} -d -a 4 ${t} ${t}.part- && ` +
-    `stat -c %s ${t} && sha256sum ${t} | cut -d' ' -f1`
+    `stat -c %s ${t} && sha256sum ${t} | cut -d' ' -f1; } || { rm -f ${t} ${t}.part-*; false; }; fi`
   );
+}
+
+/** PR #46 review: staging copy removed after a Worker-side failure. */
+export function asideCleanCmd(dir: string, syncDir = SESSION_SYNC_DIR): string {
+  const t = asideTar(dir, syncDir);
+  return `rm -f ${t} ${t}.part-*`;
 }
 
 export function asidePartReadCmd(dir: string, index: number, syncDir = SESSION_SYNC_DIR): string {
@@ -664,9 +689,15 @@ export async function shipAsideSessions(
   const shipped: string[] = [];
   const failed: { dir: string; reason: string }[] = [];
   for (const dir of dirs) {
+    let packed = false;
     try {
       const pack = await deps.exec(asidePackCmd(dir));
       if (pack.code !== 0) throw new Error(`pack failed (${pack.code}): ${pack.stderr.slice(0, 300)}`);
+      const oversize = /^oversize (\d+)$/.exec(pack.stdout.trim());
+      if (oversize) {
+        throw new Error(`aside dir ${oversize[1]} bytes raw exceeds SESSION_ASIDE_RAW_MAX ${SESSION_ASIDE_RAW_MAX}; left on disk, not shipped`);
+      }
+      packed = true;
       const [sizeLine, shaLine] = pack.stdout.trim().split("\n").map((l) => l.trim());
       const size = Number.parseInt(sizeLine ?? "", 10);
       if (!Number.isFinite(size) || size <= 0 || !/^[0-9a-f]+$/.test(shaLine ?? "")) {
@@ -696,6 +727,10 @@ export async function shipAsideSessions(
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`syncSession ${id}: aside ${dir} NOT shipped: ${reason}`);
       failed.push({ dir, reason });
+      // PR #46 review: never leave a half-shipped staging copy behind.
+      if (packed) {
+        try { await deps.exec(asideCleanCmd(dir)); } catch { /* next tick re-packs over it */ }
+      }
     }
   }
   return { shipped, failed };
@@ -1177,4 +1212,9 @@ async function parseBurn(
     console.error(`syncSession ${id}: burn parsing failed, session sync itself still succeeded`, err);
     return false;
   }
+}
+
+/** PR #46 review: one line per unshipped aside, for a row note. */
+export function asideNotShippedNote(failed: { dir: string; reason: string }[]): string | null {
+  return failed.length === 0 ? null : failed.map((f) => `aside session NOT shipped: ${f.dir} (${f.reason})`).join("; ");
 }

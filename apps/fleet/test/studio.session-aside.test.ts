@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  shipAsideSessions, asideListCmd, asidePackCmd, asideMarkCmd, SESSION_ASIDE_MAX, type SessionSyncDeps,
+  shipAsideSessions, asideListCmd, asidePackCmd, asideMarkCmd, asideCleanCmd, SESSION_ASIDE_MAX, SESSION_ASIDE_RAW_MAX,
+  type SessionSyncDeps,
 } from "../src/studio/session-sync";
 import { SESSION_SINGLE_READ_MAX } from "../src/studio/archive";
 
@@ -101,5 +102,44 @@ describe("shipAsideSessions (issue #37)", () => {
     expect(await shipAsideSessions(d, ID)).toEqual({ shipped: [], failed: [] });
     expect(execs).toEqual([asideListCmd()]);
     expect(puts).toEqual([]);
+  });
+});
+
+// PR #46 review: measure the dir BEFORE tarring it, and never leave staging
+// files behind a failure.
+describe("shipAsideSessions — size first, staging cleaned (PR #46 review)", () => {
+  it("pack reports the raw dir over SESSION_ASIDE_RAW_MAX: nothing read, not marked, reason names the cap", async () => {
+    const { d, execs, puts } = deps((cmd) => {
+      if (cmd === asideListCmd()) return { code: 0, stdout: `${DIR}\n` };
+      if (cmd === asidePackCmd(DIR)) return { code: 0, stdout: `oversize ${SESSION_ASIDE_RAW_MAX + 1}\n` };
+      return { code: 0, stdout: "" };
+    });
+    const r = await shipAsideSessions(d, ID);
+    expect(r.failed[0].reason).toContain("SESSION_ASIDE_RAW_MAX");
+    expect(puts).toEqual([]);
+    expect(execs.some((c) => c.includes(".part-0000") && c.startsWith("base64"))).toBe(false);
+    expect(execs).not.toContain(asideMarkCmd(DIR));
+  });
+
+  it("a Worker-side failure after pack (short part) cleans the staging copy", async () => {
+    const { d, execs } = deps((cmd) => {
+      if (cmd === asideListCmd()) return { code: 0, stdout: `${DIR}\n` };
+      if (cmd === asidePackCmd(DIR)) return { code: 0, stdout: "100\nabc\n" };
+      if (cmd === asideCleanCmd(DIR)) return { code: 0, stdout: "" };
+      if (cmd.startsWith("base64")) return { code: 0, stdout: b64(40) };
+      return { code: 0, stdout: "" };
+    });
+    await shipAsideSessions(d, ID);
+    expect(execs).toContain(asideCleanCmd(DIR));
+  });
+
+  it("compressed tar over SESSION_ASIDE_MAX: staging cleaned too", async () => {
+    const { d, execs } = deps((cmd) => {
+      if (cmd === asideListCmd()) return { code: 0, stdout: `${DIR}\n` };
+      if (cmd === asidePackCmd(DIR)) return { code: 0, stdout: `${SESSION_ASIDE_MAX + 1}\nabc\n` };
+      return { code: 0, stdout: "" };
+    });
+    await shipAsideSessions(d, ID);
+    expect(execs).toContain(asideCleanCmd(DIR));
   });
 });

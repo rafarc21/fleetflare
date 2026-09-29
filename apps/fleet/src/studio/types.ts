@@ -294,6 +294,9 @@ export interface StudioStatus {
    * could not tell. Written by provision.ts's runProvision/runRestart only.
    */
   sessionAdoption?: { sessionId: string; fromKey: string; at: string } | null;
+  /** PR #46 review: the last aside ship's failures (session-sync.ts's
+   *  ASIDE_SHIP_KEY), mirrored by mirrorBurnToRegistry; `fleet ls` prints them. */
+  asideShip?: { at: string; failed: { dir: string; reason: string }[] } | null;
 }
 
 export interface ProvisionConfig {
