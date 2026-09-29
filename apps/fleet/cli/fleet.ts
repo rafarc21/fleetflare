@@ -43,6 +43,9 @@ import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
 import { repairFailureLine, discardNote, destroyPath } from "./repair-failure";
 import { requestDestroy } from "./destroy-outcome";
+import { formatIdleAlarm, emptyReapState, runReap, type ReapDeps, type ReapFlags, type ReapState } from "./reap";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import {
   formatReady, formatCheckedAt, readyOverride, formatSession, formatState, formatSessionGuards,
   formatSurvivalBriefs,
@@ -570,6 +573,9 @@ export async function cmdLs(creds: Credentials, fresh: boolean, orcaDeps: OrcaDe
   console.log(formatTable(studios, new Date(), orca.rows));
   // #299: stdout, not stderr — survives `fleet ls 2>&1 | grep`-style reads.
   if (orca.footer && studios.length > 0) console.log(orca.footer);
+  // Issue #53: idle studios bill with zero events; say so above the caveat.
+  const idle = formatIdleAlarm(studios, new Date());
+  if (idle) console.log(idle);
   console.log(READY_CAVEAT);
   for (const line of formatSessionGuards(studios)) console.log(line);
   // Issue #249 (PR4b) round 2, item 2: a survival re-brief still owed, or one
@@ -1801,6 +1807,111 @@ export async function cmdRescueAll(creds: Credentials, flags: RescueAllFlags): P
 }
 
 // ---------------------------------------------------------------------------
+// fleet reap — issue #53. Policy lives in cli/reap.ts; this is the wiring.
+
+/** Where reap keeps its backoff, stall-alarm and board-floor memory. */
+export const REAP_STATE_PATH = join(homedir(), ".fleet", "reap-state.json");
+
+async function fetchJson(url: string, init: RequestInit & { timeout?: boolean } = {}): Promise<unknown> {
+  const res = await fetch(url, init);
+  if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 300)}`);
+  return res.json();
+}
+
+/**
+ * The real `ReapDeps`: the SAME routes `fleet ls`, `fleet task ls --studio`,
+ * `fleet rescue-all`, `fleet inspect` and `fleet destroy` already call. The
+ * destroy is `destroyPath(false, false)` by construction — reap never
+ * passes --force or --discard-unsynced. Exported for the wiring test.
+ */
+export function reapDeps(
+  creds: Credentials, repo: string, statePath: string, log: (line: string) => void,
+  orcaDeps: OrcaDeps = defaultOrcaDeps(),
+): ReapDeps {
+  const headers = accessHeaders(creds);
+  const repoQ = `repo=${encodeURIComponent(repo)}`;
+  return {
+    now: () => new Date(),
+    listStudios: () => onboardListStudios(creds),
+    listBoard: async () => {
+      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}`), { headers });
+      if (!Array.isArray(body)) throw new Error("board listing was not a JSON array");
+      return body as BoardTask[];
+    },
+    studioTasks: async (id) => {
+      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}&assignedTo=${encodeURIComponent(id)}`), { headers });
+      if (!Array.isArray(body)) throw new Error("task listing was not a JSON array");
+      return body as BoardTask[];
+    },
+    inspect: async (id) => {
+      const out = await requestInspect(studioUrl(creds, id, "/inspect"), headers);
+      if (!out.ok) return { ok: false, message: out.message };
+      const body = out.body as Partial<InspectBody> & { ok?: boolean; error?: string; observed?: Observed };
+      if (body.ok !== true || typeof body.tail !== "string") return { ok: false, message: body.error ?? "inspect answered not ok" };
+      return {
+        ok: true, tail: body.tail,
+        capturedAt: typeof body.capturedAt === "number" ? body.capturedAt : null,
+        activity: body.observed?.activity ?? null,
+      };
+    },
+    rescue: async (id) => {
+      try {
+        const res = await fetch(studioUrl(creds, id, "/rescue"), rescueFetchInit(headers, RESCUE_ALL_STUDIO_TIMEOUT_MS));
+        if (!res.ok) return { ok: false, error: `${res.status} ${(await res.text()).slice(0, 300)}` };
+        const outcome = (await res.json()) as RescueAllOutcome;
+        return outcome.ok === true ? { ok: true } : { ok: false, error: outcome.error ?? "rescue answered not ok" };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    destroy: async (id) => {
+      const report = await requestDestroy(
+        { destroy: studioUrl(creds, id, destroyPath(false, false)), status: studioUrl(creds, id, "/status") }, headers, id,
+      );
+      for (const line of report.lines) log(`  ${id}  ${line}`);
+      if (report.teardown) {
+        const removal = await removeStudioWorkspace(id, orcaDeps);
+        for (const line of describeWorkspaceRemoval(id, removal)) log(`  ${id}  ${line}`);
+      }
+      if (report.status?.state === "stopped") return { outcome: "destroyed" };
+      return { outcome: report.kind === "http-error" ? "refused" : "unknown", message: report.lines.join(" ") || report.kind };
+    },
+    loadState: async () => {
+      let raw: string;
+      try {
+        raw = await readFile(statePath, "utf8");
+      } catch {
+        return emptyReapState();
+      }
+      const parsed = JSON.parse(raw) as Partial<ReapState>;
+      return { ...emptyReapState(), ...parsed };
+    },
+    saveState: async (state) => {
+      await mkdir(dirname(statePath), { recursive: true });
+      const tmp = `${statePath}.tmp`;
+      await writeFile(tmp, JSON.stringify(state, null, 2));
+      await rename(tmp, statePath);
+    },
+    log,
+  };
+}
+
+async function cmdReap(creds: Credentials, flags: Omit<ReapFlags, "repo"> & { repo: string | null }): Promise<void> {
+  let repo = flags.repo;
+  if (repo === null) {
+    const detected = await detectRepo();
+    reportRepo("fleet reap", detected);
+    repo = detected.slug;
+  }
+  if (!repo) {
+    console.error("fleet reap: no repo — stand in a repo checkout or pass --repo owner/name. Never fleet-wide.");
+    process.exit(1);
+  }
+  const { exitCode } = await runReap({ ...flags, repo }, reapDeps(creds, repo, REAP_STATE_PATH, (l) => console.log(l)));
+  if (exitCode !== 0) process.exit(exitCode);
+}
+
+// ---------------------------------------------------------------------------
 // paste upload — shared by `fleet paste` and attach's ctrl-v intercept.
 // pngpaste only ever produces PNG, so Content-Type is fixed.
 
@@ -2286,6 +2397,8 @@ async function main(): Promise<void> {
       return cmdRescueGc(creds, parsed.apply, parsed.olderThanDays);
     case "rescue-all":
       return cmdRescueAll(creds, { repo: parsed.repo, dryRun: parsed.dryRun });
+    case "reap":
+      return cmdReap(creds, { apply: parsed.apply, idleMs: parsed.idleMs, repo: parsed.repo });
     case "memory-ls":
       return cmdMemoryLs(creds);
     case "memory-compact":
