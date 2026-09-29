@@ -195,6 +195,8 @@ The ones worth knowing before you need them:
   `nothing to push`, or `FAILED (<step>)` (#39). A ref from a shallow clone
   is a parentless snapshot: diff by tree, `git diff <base> <ref>`, never
   `git show`.
+  **Rescue failed OR could not confirm (killed exec, dead shell, deadline) →
+  recycle and destroy REFUSE (409), naming why (#62).**
   **Container cannot answer → rescue impossible → recycle REFUSES (409)** and
   names last synced snapshot age (#96). `--discard-unsynced` proceeds,
   discarding everything since. Measured 2026-09-24: 3 such recycles cost up
@@ -254,6 +256,11 @@ full sequence, end to end:
    (`fleet task state <n> canceled`), reassign it (`fleet task assign <n>
    <role>`), or pass `--force`. A task named as having drifted labels (not
    exactly one state label) needs its labels fixed by hand on GitHub.
+   **Follow-up work is invisible to this guard (#54).** A merge
+   auto-completes the task; anything typed into the lead afterwards is not
+   on the board, so the studio reads idle and can be destroyed mid-work.
+   File every follow-up as a task, BEFORE the merge:
+   `fleet task new --continues <n> ...` (assigned to task n's studio).
    `--force` skips the open-task check entirely, AND (#104) also skips the
    rescue on a wedged container — it counts as `--discard-unsynced`. Know both
    before passing it on a studio you have not actually confirmed is done.

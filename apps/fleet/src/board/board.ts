@@ -26,7 +26,7 @@ import {
   JUNIOR_LABEL,
   type BoardTask, type BoardTaskView, type EnvelopeDoc, type TaskState, type CloseReason,
 } from "./types";
-import type { BoardComment, IssueInput, ListIssuesQuery } from "./api";
+import { GitHubError, type BoardComment, type IssueInput, type ListIssuesQuery } from "./api";
 import { parseRepoSlug } from "../studio/repo";
 // Type-only, and from reach.ts not auth.ts — same reason src/studio/repo.ts
 // does: this module touches no Env and no binding. See github/reach.ts.
@@ -144,6 +144,9 @@ async function resolveMilestone(api: BoardApi, repo: string, title: string): Pro
 export async function createTask(
   api: BoardApi, repo: string, raw: unknown, onAssigned?: OnAssigned,
 ): Promise<BoardResult<BoardTask>> {
+  const lineage = await resolveContinues(api, repo, raw);
+  if (!lineage.ok) return lineage;
+  raw = lineage.value;
   const parsed = parseBrief(raw);
   if (!parsed.ok) return { ok: false, status: 400, message: parsed.message };
   const brief = parsed.brief;
@@ -198,6 +201,40 @@ export async function createTask(
 async function findByKey(api: BoardApi, repo: string, key: string): Promise<BoardTask | null> {
   const marker = taskKeyMarker(key);
   return (await api.listIssues(repo, {})).filter((t) => t.body.includes(marker)).at(-1) ?? null;
+}
+
+/**
+ * Issue #54: `continues: <n>` files a follow-up to task #n. A merge
+ * auto-completes #n; follow-up typed into the lead is invisible to the board,
+ * so the studio held no open task and was reaped mid-work. The follow-up
+ * becomes a real task: assigned to #n's studio unless the caller names one
+ * (read from #n, never retyped), and "Continues #n." heads its objective.
+ * Returns the brief to parse, `continues` consumed.
+ */
+async function resolveContinues(api: BoardApi, repo: string, raw: unknown): Promise<BoardResult<unknown>> {
+  if (typeof raw !== "object" || raw === null || !("continues" in raw)) return { ok: true, value: raw };
+  const { continues, ...rest } = raw as Record<string, unknown>;
+  if (typeof continues !== "number" || !Number.isInteger(continues) || continues < 1) {
+    return { ok: false, status: 400, message: "continues must be a task number (a positive integer)" };
+  }
+  let prior: BoardTask;
+  try {
+    prior = await api.getIssue(repo, continues);
+  } catch (err) {
+    if (err instanceof GitHubError && err.status === 404) {
+      return { ok: false, status: 404, message: `task #${continues} not found in ${repo} -- nothing to continue` };
+    }
+    throw err;
+  }
+  const given = typeof rest.assignee === "string" && rest.assignee.trim() !== "";
+  if (!given && prior.assignee === null) {
+    return {
+      ok: false, status: 400,
+      message: `task #${continues} has no studio to continue with -- pass --studio <id>`,
+    };
+  }
+  const objective = typeof rest.objective === "string" ? `Continues #${continues}.\n\n${rest.objective}` : rest.objective;
+  return { ok: true, value: { ...rest, objective, ...(given ? {} : { assignee: prior.assignee }) } };
 }
 
 /**

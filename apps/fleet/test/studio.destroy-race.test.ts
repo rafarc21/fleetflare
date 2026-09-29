@@ -236,7 +236,8 @@ function makeHarness(opts: {
       destroyWriteBoundary = db.writes.length;
       destroyStartBoundary = baseStart.mock.calls.length + baseStartOnly.mock.calls.length;
     });
-    return opts.respond?.(cmd) ?? { code: 0, stdout: "", stderr: "" };
+    // Issue #62: a real rescue verdict — unparseable output is an UNCONFIRMED rescue now, which refuses.
+    return opts.respond?.(cmd) ?? { code: 0, stdout: cmd.includes("status --porcelain") ? "RESCUE_CLEAN" : "", stderr: "" };
   });
   const provisionDeps: ProvisionDeps = {
     sbExec, recordStudio: async (s: StudioStatus) => { db.writes.push(JSON.stringify(s)); }, now: () => new Date().toISOString(),
