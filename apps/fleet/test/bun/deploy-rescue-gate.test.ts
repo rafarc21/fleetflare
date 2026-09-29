@@ -346,6 +346,33 @@ describe("deploy.sh refuses when wrangler's target Worker is not the credentials
     expect(deploy(["delete", "fleet-test", "--force"], 0).code).toBe(0);
   });
 
+  // PR #44 hold: the real ops config names container images relative to the
+  // app dir (./container/Dockerfile). Read from the ops checkout, that path
+  // does not exist; the check must read the copy wrangler actually gets.
+  const withImage = (name: string) => ({
+    name,
+    durable_objects: { bindings: [{ name: "STUDIO", class_name: "StudioDO" }] },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["StudioDO"] }],
+    containers: [{ class_name: "StudioDO", image: "./container/Dockerfile", max_instances: 1 }],
+  });
+
+  test("config with a relative container image (./container/Dockerfile, present in the app dir only) -> passes", () => {
+    mkdirSync(join(fleet, "container"));
+    writeFileSync(join(fleet, "container", "Dockerfile"), "FROM scratch\n");
+    writeConfig(withImage("fleet-test"));
+    const r = deploy(["deploy"], 0);
+    expect(r.code, r.err).toBe(0);
+    expect(r.log).toEqual(["fleet rescue-all", "wrangler deploy -c wrangler.local.jsonc"]);
+  });
+
+  test("same relative-image config, creds on another Worker -> still refused as a mismatch", () => {
+    mkdirSync(join(fleet, "container"));
+    writeFileSync(join(fleet, "container", "Dockerfile"), "FROM scratch\n");
+    writeConfig(withImage("fleet-test"));
+    setCreds("https://fleet-other.example.workers.dev");
+    expectRefused(deploy(["deploy"], 0), "MISMATCH", "fleet-other.example.workers.dev");
+  });
+
   test("mismatch with --allow-unrescued: loud WARNING naming both, deploy proceeds", () => {
     setCreds("https://fleet-other.example.workers.dev");
     const r = deploy(["--allow-unrescued"], 0);

@@ -339,6 +339,13 @@ if version_lt "$WRANGLER_INSTALLED" "$WRANGLER_LOCKED"; then
   exit 1
 fi
 
+# Copied BEFORE the gate (PR #44 hold): the #36 target check must read the
+# exact file wrangler gets, from wrangler's cwd. The ops config names its
+# container images relative to this app dir (./container/Dockerfile); read
+# in the ops checkout, wrangler's config reader throws on them.
+LOCAL_CONFIG="$FLEET_DIR/wrangler.local.jsonc"
+cp "$FLEET_CONFIG" "$LOCAL_CONFIG"
+
 # Issue #20: the pre-deploy rescue gate, run here and not left to a README
 # `fleet rescue-all && bun run deploy` convention (a bare `bun run deploy`
 # skipped it). rescue-all pushes every running studio's unpushed work before
@@ -355,7 +362,7 @@ if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
   TARGET_RC=0
   RESCUE_RC=0
   if command -v bun >/dev/null 2>&1; then
-    bun "$FLEET_DIR/scripts/deploy-target.ts" "$FLEET_CONFIG" ${ARGS[@]+"${ARGS[@]}"} >&2 || TARGET_RC=$?
+    (cd "$FLEET_DIR" && bun scripts/deploy-target.ts wrangler.local.jsonc ${ARGS[@]+"${ARGS[@]}"}) >&2 || TARGET_RC=$?
   else
     echo "deploy.sh: bun not found on PATH -- cannot check the target or run fleet rescue-all." >&2
     TARGET_RC=127
@@ -382,9 +389,6 @@ if replaces_containers ${ARGS[@]+"${ARGS[@]}"}; then
     fi
   fi
 fi
-
-LOCAL_CONFIG="$FLEET_DIR/wrangler.local.jsonc"
-cp "$FLEET_CONFIG" "$LOCAL_CONFIG"
 
 cd "$FLEET_DIR"
 if ((${#ARGS[@]})); then
