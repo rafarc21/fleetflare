@@ -437,6 +437,19 @@ describe("fleet task state — board task #131", () => {
 // `--force` handling takes (top-level switch), adapted here inside
 // parseTask's own "reap" branch. Bare and `--dry-run` are the SAME
 // non-executing posture; `--apply` is the only flag that closes anything.
+describe("fleet task new --continues — issue #54", () => {
+  const base = ["task", "new", "--title", "T", "--objective", "O", "--output", "F", "--boundaries", "B"];
+  it("--continues N rides the brief as a number", () => {
+    const r = parseCliArgs([...base, "--continues", "7"]);
+    expect(r).toMatchObject({ cmd: "task-new", brief: { continues: 7 } });
+    expect(parseCliArgs([...base, "--continues=12"])).toMatchObject({ cmd: "task-new", brief: { continues: 12 } });
+  });
+  it("a non-number is usage", () => {
+    expect(parseCliArgs([...base, "--continues", "seven"])).toMatchObject({ cmd: "usage" });
+    expect(parseCliArgs([...base, "--continues", "0"])).toMatchObject({ cmd: "usage" });
+  });
+});
+
 describe("fleet task reap --terminal — issue #55", () => {
   it("--terminal is a dry run; with --apply it applies; flag order free", () => {
     expect(parseCliArgs(["task", "reap", "--terminal"])).toEqual({ cmd: "task-reap", apply: false, terminal: true });
