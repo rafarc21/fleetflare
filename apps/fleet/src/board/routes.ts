@@ -388,7 +388,7 @@ async function handleTaskReapRoute(
 }
 
 /**
- * Issue #35: `POST /studio/board/tasks/junior-sweep {apply?, repo?}` — same
+ * Issue #35: `POST /studio/board/tasks/junior-sweep {apply?, repo?, after?, limit?}` — same
  * shape and repo resolution as tasks/reap. Dry-run unless `apply: true`.
  * src/junior/authz.ts's sweepJuniorAuthorizations decides; this only wires
  * the board read.
@@ -400,9 +400,15 @@ async function handleJuniorSweepRoute(req: Request, env: Env, api: BoardApi, rea
   const repoResult = await resolveBoardRepo({ reachRepo: reach }, { requested: body.repo, defaultSlug: env.AGENT_REPO });
   if (!repoResult.ok) return respond(repoResult);
   const repo = repoResult.value;
+  // Issue #41: one page per request; `next` feeds the caller's `after`.
+  const whole = (v: unknown, min: number) => v === undefined || (Number.isInteger(v) && (v as number) >= min);
+  if (!whole(body.after, 0) || !whole(body.limit, 1)) {
+    return new Response("after must be an integer >= 0 and limit an integer >= 1", { status: 400 });
+  }
+  const page = { after: body.after as number | undefined, limit: body.limit as number | undefined };
   try {
-    const results = await sweepJuniorAuthorizations(env.DB, repo, (r, n) => api.getIssue(r, n), apply);
-    return Response.json({ repo, apply, results });
+    const { results, next } = await sweepJuniorAuthorizations(env.DB, repo, (r, n) => api.getIssue(r, n), apply, page);
+    return Response.json({ repo, apply, results, next });
   } catch (err) {
     return upstreamFailure(err, req.method, new URL(req.url).pathname);
   }

@@ -285,6 +285,30 @@ describe("handleBoard", () => {
     expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(false);
   });
 
+  it("#41: junior-sweep pages: `after` resumes, `next` says where", async () => {
+    authorized();
+    for (const n of [12, 13]) await recordJuniorAuthorization(testEnv.DB, "acme-org/websites", n, "acme--web-studio", 1000);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })) });
+    const first = await handleBoard(
+      req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ limit: 1 }) }), testEnv, api, reach,
+    );
+    expect(await first.json()).toMatchObject({ next: 12, results: [{ number: 12 }] });
+    const second = await handleBoard(
+      req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ limit: 1, after: 12 }) }), testEnv, api, reach,
+    );
+    expect(await second.json()).toMatchObject({ next: null, results: [{ number: 13 }] });
+  });
+
+  it("#41: junior-sweep refuses a bad after/limit", async () => {
+    authorized();
+    for (const bad of [{ after: -1 }, { after: "3" }, { limit: 0 }, { limit: 1.5 }]) {
+      const res = await handleBoard(
+        req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify(bad) }), testEnv, fakeApi(), reach,
+      );
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+    }
+  });
+
   it("#35: junior-sweep is POST only", async () => {
     authorized();
     expect((await handleBoard(req("/studio/board/tasks/junior-sweep"), testEnv, fakeApi(), reach)).status).toBe(405);

@@ -90,6 +90,10 @@ export async function revokeJuniorAuthorization(
   await deleteFlag(db, authzKey(repo, issueNumber));
 }
 
+/** Issue #41: records read per sweep call. Each is one GitHub read; the
+ *  Worker caps subrequests per request, so a backlog goes in pages. */
+export const JUNIOR_SWEEP_PAGE = 40;
+
 /** Issue #35: one record's verdict from sweepJuniorAuthorizations. */
 export interface JuniorSweepOutcome {
   number: number;
@@ -107,7 +111,8 @@ export interface JuniorSweepOutcome {
  */
 export async function sweepJuniorAuthorizations(
   db: D1Database, repo: string, getTask: (repo: string, issueNumber: number) => Promise<BoardTask>, apply: boolean,
-): Promise<JuniorSweepOutcome[]> {
+  page: { limit?: number; after?: number } = {},
+): Promise<{ results: JuniorSweepOutcome[]; next: number | null }> {
   const prefix = `junior-auth:${repo.toLowerCase()}:`;
   // LIKE treats `_` as a wildcard and repo names may hold one: the exact
   // prefix check below is what actually decides.
@@ -116,8 +121,13 @@ export async function sweepJuniorAuthorizations(
     .filter((r) => r.key.startsWith(prefix) && /^\d+$/.test(r.key.slice(prefix.length)))
     .map((r) => Number(r.key.slice(prefix.length)))
     .sort((a, b) => a - b);
+  // Issue #41: one page past `after`; `next` = the last number read, null
+  // once nothing is left. Revoked records vanish, so the cursor is a number.
+  const pending = numbers.filter((n) => n > (page.after ?? 0));
+  const batch = pending.slice(0, page.limit ?? JUNIOR_SWEEP_PAGE);
+  const next = pending.length > batch.length ? batch[batch.length - 1] : null;
   const out: JuniorSweepOutcome[] = [];
-  for (const number of numbers) {
+  for (const number of batch) {
     let reason: string | null;
     try {
       const task = await getTask(repo, number);
@@ -143,5 +153,5 @@ export async function sweepJuniorAuthorizations(
     }
     out.push({ number, outcome: apply ? "revoked" : "would-revoke", reason });
   }
-  return out;
+  return { results: out, next };
 }

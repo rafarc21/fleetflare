@@ -1390,17 +1390,26 @@ async function cmdTaskReap(creds: Credentials, apply: boolean): Promise<void> {
 async function cmdTaskJuniorSweep(creds: Credentials, apply: boolean): Promise<void> {
   const detected = await detectRepo();
   reportRepo("fleet task junior-sweep", detected);
-  const result = (await boardRequest(creds, "fleet task junior-sweep", "/tasks/junior-sweep", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apply, ...(detected.slug ? { repo: detected.slug } : {}) }),
-  })) as { repo: string; apply: boolean; results: { number: number; outcome: string; reason: string }[] };
-  console.log(`fleet task junior-sweep ${result.apply ? "(--apply)" : "(dry-run)"} — ${result.repo}`);
-  if (result.results.length === 0) {
+  type Page = { repo: string; apply: boolean; results: { number: number; outcome: string; reason: string }[]; next: number | null };
+  // Issue #41: the Worker sweeps one page per request; follow `next`.
+  const results: Page["results"] = [];
+  let after: number | null = null;
+  let page: Page;
+  do {
+    page = (await boardRequest(creds, "fleet task junior-sweep", "/tasks/junior-sweep", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apply, ...(detected.slug ? { repo: detected.slug } : {}), ...(after === null ? {} : { after }) }),
+    })) as Page;
+    results.push(...page.results);
+    after = page.next ?? null;
+  } while (after !== null);
+  console.log(`fleet task junior-sweep ${page.apply ? "(--apply)" : "(dry-run)"} — ${page.repo}`);
+  if (results.length === 0) {
     console.log("  (no junior records)");
     return;
   }
-  for (const r of result.results) console.log(`  #${r.number}: ${r.outcome} — ${r.reason}`);
+  for (const r of results) console.log(`  #${r.number}: ${r.outcome} — ${r.reason}`);
 }
 
 /**

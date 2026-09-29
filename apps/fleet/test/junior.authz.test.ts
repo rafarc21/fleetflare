@@ -7,7 +7,9 @@
 // test/junior.route.test.ts exercises end to end.
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import { recordJuniorAuthorization, isJuniorAuthorized, revokeJuniorAuthorization, sweepJuniorAuthorizations } from "../src/junior/authz";
+import {
+  recordJuniorAuthorization, isJuniorAuthorized, revokeJuniorAuthorization, sweepJuniorAuthorizations, JUNIOR_SWEEP_PAGE,
+} from "../src/junior/authz";
 import { GitHubError } from "../src/board/api";
 import type { BoardTask } from "../src/board/types";
 
@@ -86,7 +88,8 @@ describe("sweepJuniorAuthorizations (issue #35)", () => {
 
   it("dry-run: reports, deletes nothing", async () => {
     await seedAll();
-    const r = await sweepJuniorAuthorizations(env.DB, REPO, getTask, false);
+    const { results: r, next } = await sweepJuniorAuthorizations(env.DB, REPO, getTask, false);
+    expect(next).toBeNull();
     expect(r.map((x) => [x.number, x.outcome])).toEqual([
       [1, "kept"], [2, "would-revoke"], [3, "would-revoke"], [4, "would-revoke"], [5, "would-revoke"], [6, "error"], [7, "kept"],
     ]);
@@ -95,14 +98,48 @@ describe("sweepJuniorAuthorizations (issue #35)", () => {
 
   it("apply: deletes terminal/closed/reopened/gone only; idempotent; other repo untouched", async () => {
     await seedAll();
-    const r = await sweepJuniorAuthorizations(env.DB, REPO, getTask, true);
+    const { results: r } = await sweepJuniorAuthorizations(env.DB, REPO, getTask, true);
     expect(r.filter((x) => x.outcome === "revoked").map((x) => x.number)).toEqual([2, 3, 4, 5]);
     expect(r.find((x) => x.number === 6)!.reason).toContain("github 502");
     for (const n of [1, 6, 7]) expect(await isJuniorAuthorized(env.DB, REPO, n, STUDIO)).toBe(true);
     for (const n of [2, 3, 4, 5]) expect(await isJuniorAuthorized(env.DB, REPO, n, STUDIO)).toBe(false);
     expect(await isJuniorAuthorized(env.DB, "acme-org/other", 2, STUDIO)).toBe(true);
-    const again = await sweepJuniorAuthorizations(env.DB, REPO, getTask, true);
+    const { results: again } = await sweepJuniorAuthorizations(env.DB, REPO, getTask, true);
     expect(again.map((x) => x.number)).toEqual([1, 6, 7]);
     expect(again.some((x) => x.outcome === "revoked")).toBe(false);
   });
+
+  // Issue #41: one GitHub read per record. A big backlog must not blow the
+  // Worker's per-request subrequest limit: a page, then a cursor to resume.
+  it("pages: at most `limit` reads per call, `next` resumes, null when done", async () => {
+    await seedAll();
+    const reads: number[] = [];
+    const counted = async (r: string, n: number) => { reads.push(n); return getTask(r, n); };
+    const a = await sweepJuniorAuthorizations(env.DB, REPO, counted, false, { limit: 3 });
+    expect(a.results.map((x) => x.number)).toEqual([1, 2, 3]);
+    expect(a.next).toBe(3);
+    const b = await sweepJuniorAuthorizations(env.DB, REPO, counted, false, { limit: 3, after: a.next! });
+    expect(b.results.map((x) => x.number)).toEqual([4, 5, 6]);
+    const c = await sweepJuniorAuthorizations(env.DB, REPO, counted, false, { limit: 3, after: b.next! });
+    expect(c.results.map((x) => x.number)).toEqual([7]);
+    expect(c.next).toBeNull();
+    expect(reads).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  });
+
+  it("a page that lands exactly on the last record says so (next null)", async () => {
+    await seedAll();
+    const r = await sweepJuniorAuthorizations(env.DB, REPO, getTask, false, { limit: 7 });
+    expect(r.results).toHaveLength(7);
+    expect(r.next).toBeNull();
+  });
+
+  it("uncapped call is capped by default at JUNIOR_SWEEP_PAGE reads", async () => {
+    await env.DB.prepare("DELETE FROM fleet_state").run();
+    for (let n = 1; n <= JUNIOR_SWEEP_PAGE + 5; n++) await recordJuniorAuthorization(env.DB, REPO, n, STUDIO, 1000);
+    let reads = 0;
+    const r = await sweepJuniorAuthorizations(env.DB, REPO, async (_r, n) => { reads++; return t(n); }, false);
+    expect(reads).toBe(JUNIOR_SWEEP_PAGE);
+    expect(r.next).toBe(JUNIOR_SWEEP_PAGE);
+  });
 });
+
