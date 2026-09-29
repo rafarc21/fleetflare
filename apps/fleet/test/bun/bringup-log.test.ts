@@ -172,6 +172,8 @@ const SECRET_SPECIMENS = [
   "ANTHROPIC error with sk-ant-oat01-AbCd_eF-gHiJkLmNoP0123456789 in the message",
   "spawn auth fsp_0123456789abcdef rejected",
   "curl -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig' https://api.github.com",
+  // Issue #67: a traced git push echoes its credential header.
+  "git -c http.extraHeader='Authorization: Basic eC1hY2Nlc3MtdG9rZW46ZmFrZS10b2tlbg==' push origin HEAD",
 ].join("\n");
 
 function shellRedact(input: string): string {
@@ -198,6 +200,7 @@ describe("studio-bringup.sh bringup_redact — the same shapes redactSecrets cov
       "gho_zzzz1111",
       "ghu_qqqq2222",
       "ghr_wwww3333",
+      "eC1hY2Nlc3MtdG9rZW46ZmFrZS10b2tlbg==",
       "tskey-auth-kXyZ12CNTRL-abcdefGHIJ2345",
       "sk-ant-oat01-AbCd_eF-gHiJkLmNoP0123456789",
       "fsp_0123456789abcdef",
@@ -383,11 +386,28 @@ describe("studio-bringup.sh bring-up log — the hollow-container run reads back
 // redactSecrets ever learns a new shape, this file must learn a specimen for
 // it too, or the shell filter can fall behind without a single test turning
 // red.
+// Issue #67: the Basic-auth rule, shell and Worker in step beyond the one
+// specimen: any case, header-scoped (prose left alone), value gone.
+describe("bringup_redact and redactSecrets agree on Authorization: Basic (issue #67)", () => {
+  const lines = [
+    "> authorization: basic eC1hY2Nlc3M6c2VjcmV0 <",
+    "AUTHORIZATION:BASIC dXNlcjpwYXNz",
+    "basic auth failed for user x",
+  ].join("\n");
+  test("same output, and no base64 value survives", () => {
+    const out = shellRedact(lines);
+    expect(out.trimEnd()).toBe(redactSecrets(lines).trimEnd());
+    expect(out).not.toContain("eC1hY2Nlc3M6c2VjcmV0");
+    expect(out).not.toContain("dXNlcjpwYXNz");
+    expect(out).toContain("basic auth failed for user x");
+  });
+});
+
 describe("redaction coverage — the specimen list tracks redactSecrets itself", () => {
   test("one specimen per regex declared in src/studio/redact.ts", () => {
     const src = readFileSync(join(import.meta.dir, "../../src/studio/redact.ts"), "utf8");
     const declared = src.match(/^const [A-Z0-9_]+_RE = \//gm) ?? [];
-    expect(declared.length).toBe(7);
+    expect(declared.length).toBe(8);
     // Each specimen line carries exactly one shape; the count must agree.
     expect(SECRET_SPECIMENS.split("\n").length).toBe(declared.length);
   });
