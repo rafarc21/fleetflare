@@ -350,6 +350,12 @@ against a Worker that does not exist yet will prompt to create it as a draft
 Worker — accept that prompt; the real deploy later in this walkthrough fills
 the rest in.
 
+`secret put`/`secret delete`/`secret bulk` skip the pre-deploy rescue gate
+(issue #36). Measured on a throwaway Worker with one running container: each
+deploys a new Worker version and restarts the Durable Object, but the
+container kept its boot id. No work lost. Catch: a secret copied into a
+container at start stays OLD there until it next starts (`fleet recycle`).
+
 `AGENT_REPO` deserves its own callout: set it to YOUR fork
 (`<you>/fleetflare`, matching the `git clone` above), never to the upstream
 repo you forked from (e.g. `your-org/fleet`) — it is the fleet's own repo,

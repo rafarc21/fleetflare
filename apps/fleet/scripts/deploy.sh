@@ -75,6 +75,11 @@
 #     not provably the fleet ~/.fleet/credentials points rescue-all at, or
 #     cannot be determined (see scripts/deploy-target.ts). Same
 #     --allow-unrescued override.
+#   `secret put`/`secret delete`/`secret bulk` are NOT gated (issue #36,
+#   measured 2026-09-29 on a throwaway Worker with one running container):
+#   each deploys a new Worker version and restarts the Durable Object, but
+#   the container kept the same boot id throughout -- no work lost. A secret
+#   copied into a container at start stays OLD there until it next starts.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

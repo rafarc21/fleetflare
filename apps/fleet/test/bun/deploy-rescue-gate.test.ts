@@ -126,6 +126,12 @@ describe("deploy.sh runs rescue-all before a container-replacing command (#20)",
     ["deploy", "--dry-run"],
     ["versions", "list"],
     ["whoami"],
+    // Issue #36 (b), measured on a throwaway Worker: secret put/delete/bulk
+    // deploy a new Worker version and restart the Durable Object, but the
+    // running container kept its boot id. Nothing to rescue: ungated.
+    ["secret", "put", "X"],
+    ["secret", "delete", "X"],
+    ["secret", "bulk", "secrets.json"],
     ["containers", "list"],
     ["containers", "info", "abc123"],
     ["containers", "images", "delete", "img:tag"],
