@@ -31,6 +31,7 @@ import { parseGitRemote, repoIdSegment, studioIdForTarget, studioIdIn } from "..
 import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior } from "./junior";
 import { sweepAllPages, type SweepPage } from "./junior-sweep";
+import { reapTerminalAll, type TerminalPage } from "./reap-terminal";
 import { runTaskStateTransition, type TaskStateFetchResult } from "../src/studio/task-state";
 import type { ReapOutcome } from "../src/studio/task-reap";
 import { formatRescueReport, type RescueWorktree } from "../src/studio/rescue";
@@ -1373,9 +1374,24 @@ async function cmdTaskState(creds: Credentials, number: number, to: TaskState): 
  * exits 1 on any non-ok response, so that case needs no special handling
  * here.
  */
-async function cmdTaskReap(creds: Credentials, apply: boolean): Promise<void> {
+async function cmdTaskReap(creds: Credentials, apply: boolean, terminal = false): Promise<void> {
   const detected = await detectRepo();
   reportRepo("fleet task reap", detected);
+  if (terminal) {
+    // Issue #55: one page of closes per request; follow `remaining`.
+    const t = await reapTerminalAll(async () => (await boardRequest(creds, "fleet task reap", "/tasks/reap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apply, terminal: true, ...(detected.slug ? { repo: detected.slug } : {}) }),
+    })) as TerminalPage);
+    console.log(`fleet task reap --terminal ${t.apply ? "(--apply)" : "(dry-run)"} — ${t.repo}`);
+    if (t.results.length === 0) console.log("  (no open issue in a terminal state)");
+    for (const r of t.results) {
+      console.log(`  #${r.number} (${r.state}): ${r.outcome} as ${r.reason}${r.error ? ` — ${r.error}` : ""}`);
+    }
+    if (t.remaining > 0) console.log(`  ${t.remaining} left: a page closed nothing; re-run after checking the errors above`);
+    return;
+  }
   const result = (await boardRequest(creds, "fleet task reap", "/tasks/reap", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2476,7 +2492,7 @@ async function main(): Promise<void> {
     case "task-state":
       return cmdTaskState(creds, parsed.number, parsed.to);
     case "task-reap":
-      return cmdTaskReap(creds, parsed.apply);
+      return cmdTaskReap(creds, parsed.apply, parsed.terminal === true);
     case "task-junior-sweep":
       return cmdTaskJuniorSweep(creds, parsed.apply);
     case "rescue-gc":

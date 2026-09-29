@@ -158,7 +158,8 @@ export type CliCommand =
   // routing). `apply: false` (bare, or the explicit `--dry-run` synonym) is
   // the default and only ever REPORTS; `apply: true` (`--apply`) performs
   // the real close through the same idempotent action a push webhook uses.
-  | { cmd: "task-reap"; apply: boolean }
+  // Issue #55: `--terminal` = close open issues already in a terminal state.
+  | { cmd: "task-reap"; apply: boolean; terminal?: true }
   // Issue #35: delete junior records whose task is already finished.
   | { cmd: "task-junior-sweep"; apply: boolean }
   // Issue #217: delete fleet/rescue/* branches that hold no work (older than
@@ -332,8 +333,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Delete junior (Workers AI) authorization records whose task is already closed, reopened, terminal (completed/failed/canceled) or gone, for the repo you are standing in. Bare (or --dry-run) only REPORTS would-revoke/kept/error per task; --apply deletes. Revoking is the only write, so re-running is safe; a task that cannot be read is kept and named.",
   },
   "task-reap": {
-    args: "reap [--dry-run|--apply]",
-    summary: "Deterministic backfill: every open task whose latest envelope names a PR now on the default branch. Bare (or --dry-run) only REPORTS would-close/skipped(why); --apply actually closes the GitHub issue and moves the board to completed, the SAME idempotent action a push webhook uses. The only coverage for a repo on the token auth path, where no webhook is ever sent.",
+    args: "reap [--terminal] [--dry-run|--apply]",
+    summary: "Deterministic backfill: every open task whose latest envelope names a PR now on the default branch. Bare (or --dry-run) only REPORTS would-close/skipped(why); --apply actually closes the GitHub issue and moves the board to completed, the SAME idempotent action a push webhook uses. The only coverage for a repo on the token auth path, where no webhook is ever sent. --terminal instead closes every OPEN issue whose board state is already completed (as completed) or canceled/failed (as not planned); labels are left as they are.",
   },
   junior: {
     args: "enable [--account <id>] | disable | status",
@@ -523,10 +524,15 @@ function parseTask(argv: string[]): CliCommand {
     // uses in parseCliArgs' top-level switch (parseFlags below only knows
     // value-taking `--k v`/`--k=v` flags), adapted here since `reap` lives
     // inside parseTask's own grammar rather than the top-level one.
-    if (rest.length === 0) return { cmd: "task-reap", apply: false };
-    if (rest.length === 1 && rest[0] === "--dry-run") return { cmd: "task-reap", apply: false };
-    if (rest.length === 1 && rest[0] === "--apply") return { cmd: "task-reap", apply: true };
-    return usage(`unexpected ${JSON.stringify(rest[0])}`);
+    // Issue #55: `--terminal` may join either, in any order.
+    const terminal = rest.includes("--terminal");
+    const modes = rest.filter((a) => a !== "--terminal");
+    const tail = terminal ? { terminal: true as const } : {};
+    if (rest.filter((a) => a === "--terminal").length > 1) return usage(`unexpected "--terminal"`);
+    if (modes.length === 0) return { cmd: "task-reap", apply: false, ...tail };
+    if (modes.length === 1 && modes[0] === "--dry-run") return { cmd: "task-reap", apply: false, ...tail };
+    if (modes.length === 1 && modes[0] === "--apply") return { cmd: "task-reap", apply: true, ...tail };
+    return usage(`unexpected ${JSON.stringify(modes[0])}`);
   }
   // Issue #35: same bare-flag grammar as `reap` just above.
   if (sub === "junior-sweep") {

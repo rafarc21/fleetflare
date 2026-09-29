@@ -700,10 +700,12 @@ export async function listPullCommits(token: string, repo: string, pullNumber: n
  * reap's backfill) is closing a task the board itself already tracked as
  * genuinely done, never "not planned" or "duplicate".
  */
-export async function closeIssue(token: string, repo: string, number: number): Promise<void> {
+export async function closeIssue(
+  token: string, repo: string, number: number, reason: "completed" | "not_planned" = "completed",
+): Promise<void> {
   await ghJson<unknown>(
     `https://api.github.com/repos/${repo}/issues/${number}`,
-    { method: "PATCH", headers: GH_HEADERS(token), body: JSON.stringify({ state: "closed", state_reason: "completed" }) },
+    { method: "PATCH", headers: GH_HEADERS(token), body: JSON.stringify({ state: "closed", state_reason: reason }) },
     `close issue ${repo}#${number}`,
   );
 }

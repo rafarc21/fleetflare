@@ -26,6 +26,10 @@ export type TaskState = (typeof TASK_STATES)[number];
 
 /** Finished work. None of these closes the issue — sprint close does. */
 export const TERMINAL_TASK_STATES: readonly TaskState[] = ["completed", "failed", "canceled"];
+
+/** GitHub's own close reason. Issue #55: a canceled or failed task closes as
+ *  "not_planned", so a closed issue still says whether the work landed. */
+export type CloseReason = "completed" | "not_planned";
 /** Work still owed: what a studio may be briefed on. */
 export const LIVE_TASK_STATES: readonly TaskState[] = ["submitted", "working", "input_required"];
 

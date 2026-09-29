@@ -24,7 +24,7 @@ import { parseEnvelope, parseEnvelopeComment, renderEnvelopeComment } from "./en
 import {
   isStaleBacklog, isTaskState, studioLabel, taskAssignees, taskStates, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES,
   JUNIOR_LABEL,
-  type BoardTask, type BoardTaskView, type EnvelopeDoc, type TaskState,
+  type BoardTask, type BoardTaskView, type EnvelopeDoc, type TaskState, type CloseReason,
 } from "./types";
 import type { BoardComment, IssueInput, ListIssuesQuery } from "./api";
 import { parseRepoSlug } from "../studio/repo";
@@ -57,7 +57,7 @@ export interface BoardApi {
   // Board issue #8: the one write auto-close-on-promote needs that no prior
   // board write covers — every issue helper before this was read/label/
   // comment only. See src/board/close-action.ts, the one caller.
-  closeIssue: (repo: string, number: number) => Promise<void>;
+  closeIssue: (repo: string, number: number, reason?: CloseReason) => Promise<void>;
 }
 
 /** Same shape src/studio/repo.ts's WorkRepoResult uses: a status and a
@@ -213,9 +213,13 @@ async function findByKey(api: BoardApi, repo: string, key: string): Promise<Boar
  *   - more than one — two writers, and no way to know which is current
  *   - a different one than the caller expected — someone moved it
  *
- * GitHub's own open/closed is deliberately untouched: a terminal board state
- * leaves the issue OPEN, and closing it is sprint close's job (§5), which is
- * a later task. Two writers of "is this task done" is the drift class again.
+ * Issue #55: a terminal state also CLOSES the issue (completed = GitHub's
+ * "completed", canceled/failed = "not_planned"). It used to leave it open
+ * for a sprint close that never shipped: 226 finished tasks sat open in one
+ * repo, and "open issues keep growing" was read as a growing backlog. The
+ * close goes AFTER the label, so a failed close leaves a terminal label on
+ * an open issue -- and the same terminal transition onto itself retries
+ * just the close.
  */
 export async function transitionTask(
   api: BoardApi, repo: string, number: number, raw: unknown,
@@ -260,7 +264,7 @@ export async function transitionTask(
   // A no-op transition writes nothing rather than removing and re-adding the
   // same label: two API calls whose only visible effect is a pair of
   // timeline events saying nothing happened.
-  if (from === to) return { ok: true, value: task };
+  if (from === to) return closeIfTerminal(api, repo, task);
 
   // Issue #248: an open-state label on a closed issue says "in flight" where
   // GitHub says done. The Worker does not reopen issues, so it refuses.
@@ -283,7 +287,61 @@ export async function transitionTask(
   // succeeded, so the label set is known, and a third round trip would only
   // add a window for someone else's write to be reported as ours.
   const labels = [...task.labels.filter((l) => l !== from), to];
-  return { ok: true, value: { ...task, state: to, labels } };
+  return closeIfTerminal(api, repo, { ...task, state: to, labels });
+}
+
+/** Issue #55: closes per `reap --terminal` call. Each is one GitHub write;
+ *  the Worker caps subrequests per request, so a big backlog goes in pages. */
+export const TERMINAL_CLOSE_PAGE = 40;
+
+export interface TerminalCloseOutcome {
+  number: number;
+  state: TaskState;
+  outcome: "would-close" | "closed" | "error";
+  reason: CloseReason;
+  error?: string;
+}
+
+/**
+ * Issue #55: the backlog of terminal tasks whose issue is still open -- left
+ * by transitions from before #55, or by a close that failed. Dry-run unless
+ * `apply`; with it, closes up to TERMINAL_CLOSE_PAGE and reports how many are
+ * left. Only the issue's open/closed changes: labels are already terminal.
+ * An ambiguous label set (state null) is not this function's to decide.
+ */
+export async function closeTerminalTasks(
+  api: BoardApi, repo: string, apply: boolean,
+): Promise<{ results: TerminalCloseOutcome[]; remaining: number }> {
+  const stale = (await api.listIssues(repo, {}))
+    .filter((t) => t.open && t.state !== null && TERMINAL_TASK_STATES.includes(t.state))
+    .sort((a, b) => a.number - b.number);
+  const reasonOf = (state: TaskState): CloseReason => (state === "completed" ? "completed" : "not_planned");
+  if (!apply) {
+    return {
+      results: stale.map((t) => ({ number: t.number, state: t.state as TaskState, outcome: "would-close", reason: reasonOf(t.state as TaskState) })),
+      remaining: 0,
+    };
+  }
+  const results: TerminalCloseOutcome[] = [];
+  for (const t of stale.slice(0, TERMINAL_CLOSE_PAGE)) {
+    const state = t.state as TaskState;
+    const reason = reasonOf(state);
+    try {
+      await api.closeIssue(repo, t.number, reason);
+      results.push({ number: t.number, state, outcome: "closed", reason });
+    } catch (err) {
+      results.push({ number: t.number, state, outcome: "error", reason, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return { results, remaining: Math.max(0, stale.length - TERMINAL_CLOSE_PAGE) };
+}
+
+/** Issue #55: a task in a terminal state whose issue is still open gets it
+ *  closed, with the reason its state implies. Anything else is returned as is. */
+async function closeIfTerminal(api: BoardApi, repo: string, task: BoardTask): Promise<BoardResult<BoardTask>> {
+  if (!task.open || task.state === null || !TERMINAL_TASK_STATES.includes(task.state)) return { ok: true, value: task };
+  await api.closeIssue(repo, task.number, task.state === "completed" ? "completed" : "not_planned");
+  return { ok: true, value: { ...task, open: false } };
 }
 
 /**

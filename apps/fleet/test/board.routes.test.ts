@@ -268,6 +268,25 @@ describe("handleBoard", () => {
     expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(true);
   });
 
+  // Issue #55: `fleet task reap --terminal` -- no reap port needed at all.
+  it("#55: POST /tasks/reap {terminal:true} dry-runs, then closes with apply", async () => {
+    authorized();
+    const closeIssue = vi.fn(async () => {});
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [task({ number: 12, state: "canceled", labels: ["canceled"] })]),
+      closeIssue,
+    });
+    const dry = await handleBoard(req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ terminal: true }) }), testEnv, api, reach);
+    expect(await dry.json()).toMatchObject({ repo: "acme-org/websites", apply: false, terminal: true, remaining: 0,
+      results: [{ number: 12, outcome: "would-close", reason: "not_planned" }] });
+    expect(closeIssue).not.toHaveBeenCalled();
+    const applied = await handleBoard(
+      req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ terminal: true, apply: true }) }), testEnv, api, reach,
+    );
+    expect(await applied.json()).toMatchObject({ results: [{ number: 12, outcome: "closed" }] });
+    expect(closeIssue).toHaveBeenCalledWith("acme-org/websites", 12, "not_planned");
+  });
+
   // Issue #35: the one-shot sweep's route, same shape as tasks/reap.
   it("#35: POST /tasks/junior-sweep dry-runs by default and revokes only with apply:true", async () => {
     authorized();
@@ -1058,7 +1077,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const body = await res.json() as { apply: boolean; results: unknown[] };
     expect(body.apply).toBe(true);
     expect(body.results).toEqual([{ taskNumber: 12, prNumber: 9, outcome: "closed", sha: "abc123" }]);
-    expect(api.closeIssue).toHaveBeenCalledWith("acme-org/websites", 12);
+    expect(api.closeIssue).toHaveBeenCalledWith("acme-org/websites", 12, "completed");
     expect(api.createComment).toHaveBeenCalledWith(
       "acme-org/websites", 12, expect.stringContaining("closed by abc123, promoted to main"),
     );

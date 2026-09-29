@@ -35,7 +35,7 @@ import {
 import {
   createTask, transitionTask, commentEnvelope, listTasks, showTask, resolveBoardRepo, assignTask,
   commentStudioEnvelope, showStudioTask, transitionStudioTask, resolveBriefPrompt, resolveLatestAssignedBrief,
-  openAssignedTasks,
+  openAssignedTasks, closeTerminalTasks,
   type BoardApi, type BoardResult, type ListTasksQuery, type OnAssigned,
 } from "./board";
 import { recordJuniorAuthorization, revokeJuniorAuthorization, sweepJuniorAuthorizations } from "../junior/authz";
@@ -85,7 +85,7 @@ export function githubBoardApi(env: Env, leakDeps: Partial<LeakGuardDeps> = {}):
     listMilestones: async (repo) => listMilestones(await token(repo), repo),
     branchExists: async (repo, branch) => branchExists(await token(repo), repo, branch),
     commitExists: async (repo, sha) => commitExists(await token(repo), repo, sha),
-    closeIssue: async (repo, number) => closeIssueApi(await token(repo), repo, number),
+    closeIssue: async (repo, number, reason) => closeIssueApi(await token(repo), repo, number, reason),
   }, leakGuard({ ...realLeakDeps(env, token), ...leakDeps }));
 }
 
@@ -353,6 +353,17 @@ async function handleTaskReapRoute(
   const repoResult = await resolveBoardRepo({ reachRepo: reach }, { requested: body.repo, defaultSlug: env.AGENT_REPO });
   if (!repoResult.ok) return respond(repoResult);
   const repo = repoResult.value;
+
+  // Issue #55: `reap --terminal` closes open issues already in a terminal
+  // board state. Needs no PR evidence, so no reap port.
+  if (body.terminal === true) {
+    try {
+      const { results, remaining } = await closeTerminalTasks(api, repo, apply);
+      return Response.json({ repo, apply, terminal: true, results, remaining });
+    } catch (err) {
+      return upstreamFailure(err, req.method, new URL(req.url).pathname);
+    }
+  }
 
   try {
     const defaultBranch = await reapPort.getDefaultBranch(repo);
