@@ -8,7 +8,7 @@
 import { test, expect, describe } from "bun:test";
 import {
   runReap, formatIdleAlarm, parseIdleDuration, emptyReapState,
-  REAP_BACKOFF_MS, STALL_ALARM_EVERY_MS, STALL_AFTER_MS,
+  REAP_BACKOFF_MS, STALL_ALARM_EVERY_MS, STALL_AFTER_MS, REAP_LIVE_READ_MAX_MS,
   type ReapDeps, type ReapFlags, type ReapInspect, type ReapState, type ReapDestroyResult,
 } from "../../cli/reap";
 import { REAL_WEBSTUDIO_PANE } from "../fixtures/rate-limit-panes";
@@ -26,16 +26,26 @@ const WEB = "acmeclient--web-studio";
 // A real captured idle pane (turn ended, empty input box), with its member
 // row and its "7 shells" chrome removed: the one shape reap may act on.
 const MEMBER_ROW = /\n[^\n]*◯ frontend-developer[^\n]*/;
-const CLEAN_IDLE = REAL_WEBSTUDIO_PANE.replace(MEMBER_ROW, "")
-  .replace(" · 7 shells still running", "").replace(" · 7 shells", "");
+// The captured input box held typed-but-unsent text; emptied here.
+const TYPED = "❯\u00a0check on task 2 progress"; // claude draws a no-break space after ❯
+const strip = (p: string) => p.replace(" · 7 shells still running", "").replace(" · 7 shells", "");
+const CLEAN_IDLE = strip(REAL_WEBSTUDIO_PANE.replace(MEMBER_ROW, "")).replace(TYPED, "❯\u00a0");
+// Idle, clean chrome, but text typed into the input box and not yet sent.
+const IDLE_WITH_TYPED_TEXT = strip(REAL_WEBSTUDIO_PANE.replace(MEMBER_ROW, ""));
 // The clean pane with a live spinner on its status line: a running turn and
 // NOTHING else to trip on (no member row, no shells) — isolates the frame check.
 const CLEAN_WORKING = CLEAN_IDLE.replace("✻ Cooked for 36m 35s", "✻ Cogitating… (3s · esc to interrupt)");
 // Same idle pane, member row still under the footer: the lead is idle but a
 // background agent may still be running.
-const IDLE_WITH_MEMBER = REAL_WEBSTUDIO_PANE.replace(" · 7 shells still running", "").replace(" · 7 shells", "");
+const IDLE_WITH_MEMBER = strip(REAL_WEBSTUDIO_PANE).replace(TYPED, "❯\u00a0");
 // Same idle pane, background shells still running.
-const IDLE_WITH_SHELLS = REAL_WEBSTUDIO_PANE.replace(MEMBER_ROW, "");
+const IDLE_WITH_SHELLS = REAL_WEBSTUDIO_PANE.replace(MEMBER_ROW, "").replace(TYPED, "❯\u00a0");
+// Clean idle pane whose footer carries a counter reap does not know.
+const IDLE_WITH_UNKNOWN_COUNTER = CLEAN_IDLE.replace("⏵⏵ bypass permissions on ·", "⏵⏵ bypass permissions on · 2 monitors ·");
+// Clean idle pane whose turn-ended row says background work is still running.
+const IDLE_WITH_BG_TASK = CLEAN_IDLE.replace("✻ Cooked for 36m 35s", "✻ Cooked for 36m 35s · 1 background task still running");
+// Every studio in a real board has task history (state=all); never zero rows.
+const HISTORY: BoardTask[] = [task(1, WEB, "completed", false)];
 
 function activity(state: Activity["state"], idleForMs: number, observedAgoMs = 0): Activity {
   return {
@@ -72,7 +82,11 @@ interface World {
   studios: StudioStatus[];
   board: BoardTask[] | Error;
   studioTasks?: (id: string) => BoardTask[] | Error;
-  inspect?: (id: string) => ReapInspect;
+  /** n = 1 for the cheap pre-check, 2 for the read right before destroy. */
+  inspect?: (id: string, n: number) => ReapInspect;
+  /** Runs after each call is recorded; may move the fake clock. */
+  after?: (call: string, clock: { t: number }) => void;
+  loadStateError?: Error;
   rescue?: (id: string) => { ok: true } | { ok: false; error: string };
   destroy?: (id: string) => ReapDestroyResult;
   state?: ReapState;
@@ -87,33 +101,43 @@ function fake(w: World) {
   const calls: string[] = [];
   const lines: string[] = [];
   let saved: ReapState | null = null;
+  const clock = { t: (w.now ?? NOW).getTime() };
+  const inspects = new Map<string, number>();
+  const push = (c: string) => { calls.push(c); w.after?.(c, clock); };
   const deps: ReapDeps = {
-    now: () => w.now ?? NOW,
+    now: () => new Date(clock.t),
     listStudios: async () => w.studios,
     listBoard: async () => {
-      calls.push("board");
+      push("board");
       if (w.board instanceof Error) throw w.board;
       return w.board;
     },
     studioTasks: async (id) => {
-      calls.push(`tasks:${id}`);
+      push(`tasks:${id}`);
       const r = w.studioTasks ? w.studioTasks(id) : [];
       if (r instanceof Error) throw r;
       return r;
     },
     inspect: async (id) => {
-      calls.push(`inspect:${id}`);
-      return w.inspect ? w.inspect(id) : goodInspect();
+      const n = (inspects.get(id) ?? 0) + 1;
+      inspects.set(id, n);
+      push(`inspect:${id}`);
+      const r = w.inspect ? w.inspect(id, n) : goodInspect();
+      // A real capture is stamped when it is taken: at the (possibly moved) clock.
+      return r.ok && r.capturedAt === NOW.getTime() / 1000 ? { ...r, capturedAt: clock.t / 1000 } : r;
     },
     rescue: async (id) => {
-      calls.push(`rescue:${id}`);
+      push(`rescue:${id}`);
       return w.rescue ? w.rescue(id) : { ok: true };
     },
     destroy: async (id) => {
-      calls.push(`destroy:${id}`);
+      push(`destroy:${id}`);
       return w.destroy ? w.destroy(id) : { outcome: "destroyed" };
     },
-    loadState: async () => structuredClone(w.state ?? emptyReapState()),
+    loadState: async () => {
+      if (w.loadStateError) throw w.loadStateError;
+      return structuredClone(w.state ?? emptyReapState());
+    },
     saveState: async (s) => { saved = s; },
     log: (line) => lines.push(line),
   };
@@ -124,37 +148,39 @@ const IDLE_45 = () => studio(PILOT, activity("idle", 45 * MIN));
 
 describe("reap — the happy path", () => {
   test("idle past the threshold, no open task, rescue ok, live pane idle -> destroyed, rescue first", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [] });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY });
     const out = await runReap(flags(), f.deps);
     expect(out.exitCode).toBe(0);
-    expect(f.calls).toEqual(["board", `rescue:${PILOT}`, `inspect:${PILOT}`, `tasks:${PILOT}`, `destroy:${PILOT}`]);
+    expect(f.calls).toEqual([
+      "board", `inspect:${PILOT}`, `rescue:${PILOT}`, `tasks:${PILOT}`, `inspect:${PILOT}`, `destroy:${PILOT}`,
+    ]);
     expect(f.lines.some((l) => l.startsWith(`REAPED ${PILOT}`))).toBe(true);
   });
 });
 
 describe("reap — never a studio with a running turn", () => {
   test("listing says WORKING -> no rescue, no destroy", async () => {
-    const f = fake({ studios: [studio(PILOT, activity("working", 45 * MIN))], board: [] });
+    const f = fake({ studios: [studio(PILOT, activity("working", 45 * MIN))], board: HISTORY });
     await runReap(flags(), f.deps);
     expect(f.calls.filter((c) => c.startsWith("rescue") || c.startsWith("destroy"))).toEqual([]);
   });
 
   for (const state of ["waiting-members", "waiting-question", "limit", "unknown"] as const) {
     test(`listing says ${state} -> no destroy`, async () => {
-      const f = fake({ studios: [studio(PILOT, activity(state, 45 * MIN))], board: [] });
+      const f = fake({ studios: [studio(PILOT, activity(state, 45 * MIN))], board: HISTORY });
       await runReap(flags(), f.deps);
       expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
     });
   }
 
   test("listing activity missing -> no destroy", async () => {
-    const f = fake({ studios: [studio(PILOT, null)], board: [] });
+    const f = fake({ studios: [studio(PILOT, null)], board: HISTORY });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
   test("listing activity stale (mirror older than its budget) -> no destroy", async () => {
-    const f = fake({ studios: [studio(PILOT, activity("idle", 45 * MIN, 20 * MIN))], board: [] });
+    const f = fake({ studios: [studio(PILOT, activity("idle", 45 * MIN, 20 * MIN))], board: HISTORY });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("rescue") || c.startsWith("destroy"))).toBe(false);
   });
@@ -162,13 +188,13 @@ describe("reap — never a studio with a running turn", () => {
   test("a current member alert -> no destroy", async () => {
     const s = studio(PILOT, activity("idle", 45 * MIN));
     s.observed!.memberAlerts = [{ kind: "member-gone", at: NOW.toISOString(), detail: "x", confidence: "inferred" } as never];
-    const f = fake({ studios: [s], board: [] });
+    const f = fake({ studios: [s], board: HISTORY });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
   test("idle but below the threshold -> no destroy", async () => {
-    const f = fake({ studios: [studio(PILOT, activity("idle", 10 * MIN))], board: [] });
+    const f = fake({ studios: [studio(PILOT, activity("idle", 10 * MIN))], board: HISTORY });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("rescue") || c.startsWith("destroy"))).toBe(false);
   });
@@ -179,7 +205,7 @@ describe("reap — never a studio with a running turn", () => {
         studio(PILOT, activity("idle", 45 * MIN), { state: "stopped" }),
         studio(WEB, activity("idle", 45 * MIN), { state: "degraded" }),
       ],
-      board: [],
+      board: HISTORY,
     });
     await runReap(flags(), f.deps);
     expect(f.calls).toEqual(["board"]);
@@ -187,7 +213,7 @@ describe("reap — never a studio with a running turn", () => {
 
   test("the live pane shows a running turn at destroy time -> no destroy", async () => {
     const f = fake({
-      studios: [IDLE_45()], board: [],
+      studios: [IDLE_45()], board: HISTORY,
       inspect: () => ({ ...goodInspect(), tail: WORKING_GLYPH_DOT_FOOTER_ESC_PANE }),
     });
     await runReap(flags(), f.deps);
@@ -195,49 +221,49 @@ describe("reap — never a studio with a running turn", () => {
   });
 
   test("the live pane shows a running turn, no member row, no shells -> no destroy", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), tail: CLEAN_WORKING }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), tail: CLEAN_WORKING }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
   test("the live pane is idle but a member row sits under the footer -> no destroy", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_MEMBER }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_MEMBER }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
   test("the live pane is idle but background shells still run -> no destroy", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_SHELLS }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_SHELLS }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
   test("the DO's own activity says working at destroy time -> no destroy", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), activity: activity("working", 45 * MIN) }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), activity: activity("working", 45 * MIN) }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
   test("the DO's own activity is stale at destroy time -> no destroy", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), activity: activity("idle", 45 * MIN, 5 * MIN) }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), activity: activity("idle", 45 * MIN, 5 * MIN) }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
   test("the DO's own idle began after the threshold window (a turn ran since the listing) -> no destroy", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), activity: activity("idle", 1 * MIN) }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), activity: activity("idle", 1 * MIN) }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
   test("the live capture is old -> no destroy", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ...goodInspect(), capturedAt: NOW.getTime() / 1000 - 600 }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), capturedAt: NOW.getTime() / 1000 - 600 }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
   test("inspect fails -> no destroy", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], inspect: () => ({ ok: false, message: "container did not answer" }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ok: false, message: "container did not answer" }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
@@ -299,24 +325,122 @@ describe("reap — open task: stall alarm, not reap", () => {
 
 describe("reap — the race: a task filed between list and destroy", () => {
   test("fresh per-studio read shows a live task -> skip", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], studioTasks: () => [task(9, PILOT, "submitted")] });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, studioTasks: () => [task(9, PILOT, "submitted")] });
     await runReap(flags(), f.deps);
     expect(f.calls).toContain(`tasks:${PILOT}`);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
   test("fresh per-studio read fails -> skip", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], studioTasks: () => new Error("502") });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, studioTasks: () => new Error("502") });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
   });
 
-  test("the fresh task read happens after rescue and inspect, right before destroy", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [] });
+  test("the fresh task read happens after rescue; the last live read is the call right before destroy", async () => {
+    const f = fake({ studios: [IDLE_45()], board: HISTORY });
     await runReap(flags(), f.deps);
-    const i = f.calls.indexOf(`tasks:${PILOT}`);
-    expect(f.calls[i + 1]).toBe(`destroy:${PILOT}`);
-    expect(i).toBeGreaterThan(f.calls.indexOf(`inspect:${PILOT}`));
+    const d = f.calls.indexOf(`destroy:${PILOT}`);
+    expect(f.calls[d - 1]).toBe(`inspect:${PILOT}`);
+    expect(f.calls.indexOf(`tasks:${PILOT}`)).toBeGreaterThan(f.calls.indexOf(`rescue:${PILOT}`));
+  });
+});
+
+// Review F1: the gap between the last live read and the destroy must be
+// bounded. A slow board read may not sit inside it, and a turn that starts
+// while reap is busy must be seen.
+describe("reap — F1: bounded gap between live read and destroy", () => {
+  test("a turn starts during a slow fresh board read -> the final live read sees it -> skip", async () => {
+    const f = fake({
+      studios: [IDLE_45()], board: HISTORY,
+      after: (c, clock) => { if (c.startsWith("tasks:")) clock.t += 5 * MIN; },
+      inspect: (_id, n) => (n === 1 ? goodInspect() : { ...goodInspect(), tail: CLEAN_WORKING }),
+    });
+    await runReap(flags(), f.deps);
+    expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
+  });
+
+  test("the final live read itself took longer than the budget -> skip", async () => {
+    let n = 0;
+    const f = fake({
+      studios: [IDLE_45()], board: HISTORY,
+      // The final inspect answers 60s after it was asked.
+      after: (c, clock) => { if (c.startsWith("inspect:") && ++n === 2) clock.t += 60_000; },
+      inspect: () => ({ ...goodInspect(), capturedAt: NOW.getTime() / 1000 - 1, activity: activity("idle", 45 * MIN) }),
+    });
+    await runReap(flags(), f.deps);
+    expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
+  });
+
+  test("REAP_LIVE_READ_MAX_MS is at most 30s", () => {
+    expect(REAP_LIVE_READ_MAX_MS).toBeLessThanOrEqual(30_000);
+  });
+
+  test("a pre-check that is not idle means no rescue at all (no rescue-branch noise)", async () => {
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), tail: CLEAN_WORKING }) });
+    await runReap(flags(), f.deps);
+    expect(f.calls.some((c) => c.startsWith("rescue"))).toBe(false);
+  });
+
+  test("3 live-read refusals in a row -> back off 30m", async () => {
+    let state = emptyReapState();
+    for (let i = 0; i < 3; i++) {
+      const f = fake({ studios: [IDLE_45()], board: HISTORY, state, inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_SHELLS }) });
+      await runReap(flags(), f.deps);
+      state = f.saved()!;
+    }
+    expect(state.backoffUntil[PILOT]).toBeDefined();
+  });
+});
+
+describe("reap — F2/F3: live pane chrome", () => {
+  test("typed-but-unsent text in the input box -> no destroy", async () => {
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_TYPED_TEXT }) });
+    await runReap(flags(), f.deps);
+    expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
+  });
+
+  test("an unknown counter in the footer -> no destroy", async () => {
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_UNKNOWN_COUNTER }) });
+    await runReap(flags(), f.deps);
+    expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
+  });
+
+  test("a background task still running on the turn-ended row -> no destroy", async () => {
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, inspect: () => ({ ...goodInspect(), tail: IDLE_WITH_BG_TASK }) });
+    await runReap(flags(), f.deps);
+    expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
+  });
+});
+
+describe("reap — F4/F5: scope and state", () => {
+  test("a studio with no repoSlug is never reaped, even when its id matches", async () => {
+    const f = fake({ studios: [studio(PILOT, activity("idle", 45 * MIN), { repoSlug: null })], board: HISTORY });
+    await runReap(flags(), f.deps);
+    expect(f.calls).toEqual(["board"]);
+  });
+
+  test("zero board rows -> reap nothing this poll (a board with history is never empty)", async () => {
+    const f = fake({ studios: [IDLE_45()], board: [] });
+    const out = await runReap(flags(), f.deps);
+    expect(out.exitCode).toBe(1);
+    expect(f.calls).toEqual(["board"]);
+  });
+
+  test("state unreadable -> floor unknown -> reap nothing this poll", async () => {
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, loadStateError: new Error("corrupt") });
+    const out = await runReap(flags(), f.deps);
+    expect(out.exitCode).toBe(1);
+    expect(f.calls.some((c) => c.startsWith("rescue") || c.startsWith("destroy"))).toBe(false);
+    expect(f.saved()!.boardRows[REPO]).toBe(1);
+  });
+
+  test("the floor is keyed on the lowercased repo", async () => {
+    const state = { ...emptyReapState(), boardRows: { [REPO]: 10 } };
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, state });
+    const out = await runReap(flags({ repo: "Example-Org/AcmeClient" }), f.deps);
+    expect(out.exitCode).toBe(1);
+    expect(f.calls).toEqual(["board"]);
   });
 });
 
@@ -330,7 +454,7 @@ describe("reap — board read failure and floor", () => {
 
   test("board rows fall below half the last good read -> reap nothing this poll, keep the baseline", async () => {
     const state = { ...emptyReapState(), boardRows: { [REPO]: 10 } };
-    const f = fake({ studios: [IDLE_45()], board: [], state });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, state });
     const out = await runReap(flags(), f.deps);
     expect(out.exitCode).toBe(1);
     expect(f.calls).toEqual(["board"]);
@@ -347,7 +471,7 @@ describe("reap — board read failure and floor", () => {
   });
 
   test("listing studios fails -> non-zero exit, nothing else called", async () => {
-    const f = fake({ studios: [], board: [] });
+    const f = fake({ studios: [], board: HISTORY });
     f.deps.listStudios = async () => { throw new Error("401"); };
     const out = await runReap(flags(), f.deps);
     expect(out.exitCode).toBe(1);
@@ -357,7 +481,7 @@ describe("reap — board read failure and floor", () => {
 
 describe("reap — rescue failure, 409 and backoff", () => {
   test("rescue fails -> skip, no destroy, back off 30m", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], rescue: () => ({ ok: false, error: "RESCUE_FAILED checkout push" }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, rescue: () => ({ ok: false, error: "RESCUE_FAILED checkout push" }) });
     await runReap(flags(), f.deps);
     expect(f.calls.some((c) => c.startsWith("destroy"))).toBe(false);
     expect(Date.parse(f.saved()!.backoffUntil[PILOT]!)).toBe(NOW.getTime() + REAP_BACKOFF_MS);
@@ -365,30 +489,31 @@ describe("reap — rescue failure, 409 and backoff", () => {
   });
 
   test("destroy refused (409) -> back off 30m", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], destroy: () => ({ outcome: "refused", message: "409 destroy refused" }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, destroy: () => ({ outcome: "refused", message: "409 destroy refused" }) });
     await runReap(flags(), f.deps);
     expect(f.saved()!.backoffUntil[PILOT]).toBeDefined();
   });
 
   test("destroy outcome unknown -> back off 30m", async () => {
-    const f = fake({ studios: [IDLE_45()], board: [], destroy: () => ({ outcome: "unknown", message: "timed out" }) });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, destroy: () => ({ outcome: "unknown", message: "timed out" }) });
     await runReap(flags(), f.deps);
     expect(f.saved()!.backoffUntil[PILOT]).toBeDefined();
   });
 
   test("inside the backoff window -> nothing attempted; after it -> tried again", async () => {
     const state = { ...emptyReapState(), backoffUntil: { [PILOT]: new Date(NOW.getTime() + 10 * MIN).toISOString() } };
-    const inside = fake({ studios: [IDLE_45()], board: [], state });
+    const inside = fake({ studios: [IDLE_45()], board: HISTORY, state });
     await runReap(flags(), inside.deps);
     expect(inside.calls).toEqual(["board"]);
-    const after = fake({ studios: [IDLE_45()], board: [], state, now: new Date(NOW.getTime() + 11 * MIN) });
+    const after = fake({ studios: [IDLE_45()], board: HISTORY, state, now: new Date(NOW.getTime() + 11 * MIN) });
     await runReap(flags(), after.deps);
-    expect(after.calls).toContain(`rescue:${PILOT}`);
+    // Attempted again: the live pre-check runs (the fake's DO stamp is stale by now, so it stops there).
+    expect(after.calls).toContain(`inspect:${PILOT}`);
   });
 
   test("a successful destroy clears its state entries", async () => {
     const state = { ...emptyReapState(), backoffUntil: { [PILOT]: new Date(NOW.getTime() - MIN).toISOString() } };
-    const f = fake({ studios: [IDLE_45()], board: [], state });
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, state });
     await runReap(flags(), f.deps);
     expect(f.saved()!.backoffUntil[PILOT]).toBeUndefined();
   });
@@ -396,7 +521,7 @@ describe("reap — rescue failure, 409 and backoff", () => {
 
 describe("reap — dry-run", () => {
   test("dry-run lists what would be reaped and why, and calls no rescue, inspect or destroy", async () => {
-    const f = fake({ studios: [IDLE_45(), studio(WEB, activity("working", 45 * MIN))], board: [] });
+    const f = fake({ studios: [IDLE_45(), studio(WEB, activity("working", 45 * MIN))], board: HISTORY });
     const out = await runReap(flags({ apply: false }), f.deps);
     expect(out.exitCode).toBe(0);
     expect(f.calls).toEqual(["board"]);
@@ -410,7 +535,7 @@ describe("reap — dry-run", () => {
 describe("reap — registry derived each poll, scope", () => {
   test("studios of another repo are never touched", async () => {
     const other = studio("otherrepo--pilot", activity("idle", 45 * MIN), { repoSlug: "example-org/otherrepo" });
-    const f = fake({ studios: [other], board: [] });
+    const f = fake({ studios: [other], board: HISTORY });
     await runReap(flags(), f.deps);
     expect(f.calls).toEqual(["board"]);
   });
@@ -421,7 +546,7 @@ describe("reap — registry derived each poll, scope", () => {
       backoffUntil: { "acmeclient--gone": new Date(NOW.getTime() + 10 * MIN).toISOString() },
       stallAlarmAt: { "acmeclient--gone": NOW.toISOString() },
     };
-    const f = fake({ studios: [], board: [], state });
+    const f = fake({ studios: [], board: HISTORY, state });
     await runReap(flags(), f.deps);
     expect(f.saved()!.backoffUntil).toEqual({});
     expect(f.saved()!.stallAlarmAt).toEqual({});
@@ -429,7 +554,7 @@ describe("reap — registry derived each poll, scope", () => {
 
   test("one studio's thrown step never stops the next studio", async () => {
     const f = fake({
-      studios: [IDLE_45(), studio(WEB, activity("idle", 45 * MIN))], board: [],
+      studios: [IDLE_45(), studio(WEB, activity("idle", 45 * MIN))], board: HISTORY,
       rescue: (id) => { if (id === PILOT) throw new Error("boom"); return { ok: true }; },
     });
     await runReap(flags(), f.deps);

@@ -12,34 +12,43 @@
 //   1. Registry DERIVED each poll: GET /studio/ + one board listing for the
 //      scope repo. Never a hand-kept list (a hand list went stale and alarmed
 //      on 100+ dead entries — the issue's own measurement).
-//   2. Board-read floor: a listing that throws, or that returns fewer than
-//      half the rows of the last good read, reaps NOTHING this poll. The
-//      listing is state=all (closed tasks keep their state labels), so its
-//      row count only grows in normal use; a sudden drop is a bad read.
+//   2. Board-read floor: a listing that throws, returns 0 rows, or returns
+//      fewer than half the rows of the last good read reaps NOTHING this
+//      poll. So does a state file that cannot be trusted (floor unknown).
+//      The listing is state=all (closed tasks keep their state labels), so
+//      its row count only grows in normal use; a sudden drop is a bad read.
 //   3. STALL alarm: running + IDLE >= 10m WITH a live task -> one line, at
 //      most once per 15m per studio. Runs in dry-run too.
-//   4. Reap candidate: running + IDLE >= threshold + NO live task + no member
-//      alert + not backing off. Dry-run (the default) prints the candidates
-//      and stops there.
+//   4. Reap candidate: running + repoSlug == scope repo + IDLE >= threshold
+//      + NO live task + no member alert + not backing off. Dry-run (the
+//      default) prints the candidates and stops there.
 //   5. --apply, per candidate, one at a time:
-//        a. rescue-push (POST /rescue). Anything but a clean ok -> skip,
+//        a. live pre-check (GET /inspect, see e). Not idle -> skip, no rescue.
+//        b. rescue-push (POST /rescue). Anything but a clean ok -> skip,
 //           back off 30m. Never --discard-unsynced, never --force.
-//        b. live read (GET /inspect): the DO's own activity (90s budget)
-//           must still say idle since >= threshold, AND this capture of the
-//           pane must read idle with no member row under the footer and no
-//           background shells. Anything else -> skip.
-//        c. fresh per-studio task read, right before destroy: a task filed
-//           since the listing wins the race. Read failure -> skip.
-//        d. destroy WITHOUT --force: the Worker re-checks open tasks (fail
+//        c. fresh per-studio task read: a task filed since the listing wins
+//           the race. Read failure -> skip.
+//        d. FINAL live read, the call right before destroy, answering within
+//           30s (review F1: no slow call may sit in that gap).
+//        e. a live read passes only when the DO's own activity (90s budget)
+//           says idle since >= threshold, the capture reads idle, the input
+//           box holds an empty prompt, no member row sits under the footer,
+//           and the footer/status carry no counter or running work.
+//        f. destroy WITHOUT --force: the Worker re-checks open tasks (fail
 //           closed) and re-runs rescue (409 on a confirmed failure). Refused
 //           or unknown outcome -> back off 30m.
+//      3 live-read refusals in a row also back off 30m.
+//
+// Named residual: the Worker's destroy itself (probe, sync, rescue, stop)
+// takes seconds to minutes and never checks for a turn. A turn that starts
+// inside that window is rescued by destroy's own rescue unless that rescue
+// dies with an unconfirmed error (issue #62).
 import type { StudioStatus } from "../src/studio/types";
 import type { Activity } from "../src/studio/activity";
 import { readActivityFrame, agentPanelRows } from "../src/studio/activity";
 import type { BoardTask } from "../src/board/types";
 import { studioLabel, TERMINAL_TASK_STATES } from "../src/board/types";
-import { parseStudioId } from "../src/studio/ids";
-import { repoIdSegment } from "../src/studio/repo";
+import { footerAtBottom, aboveAgentPanel, RULE_LINE } from "../src/studio/failover";
 export { parseIdleDuration } from "../src/studio/cli-args";
 import { ACTIVITY_DO_STALE_SECONDS, ACTIVITY_MIRROR_STALE_SECONDS, formatAge } from "./readiness-format";
 
@@ -53,6 +62,11 @@ export const STALL_ALARM_EVERY_MS = 15 * 60_000;
 export const REAP_DEFAULT_IDLE_MS = 30 * 60_000;
 /** The live pane capture must be at least this fresh to count as evidence. */
 export const REAP_CAPTURE_MAX_AGE_MS = 120_000;
+/** Review F1: the FINAL live read (the call right before destroy) must answer
+ *  within this, or the gap it leaves before destroy is not bounded. */
+export const REAP_LIVE_READ_MAX_MS = 30_000;
+/** This many live-read refusals in a row back a studio off (review item 6). */
+export const REAP_REFUSALS_BEFORE_BACKOFF = 3;
 
 export interface ReapFlags {
   /** false = dry-run (the default): report only. */
@@ -68,12 +82,14 @@ export interface ReapState {
   backoffUntil: Record<string, string>;
   /** studio id -> ISO instant of its last STALL line. */
   stallAlarmAt: Record<string, string>;
-  /** repo -> row count of the last board listing that passed the floor. */
+  /** lowercased repo -> row count of the last board listing that passed the floor. */
   boardRows: Record<string, number>;
+  /** studio id -> live-read refusals in a row while a candidate. */
+  refusals: Record<string, number>;
 }
 
 export function emptyReapState(): ReapState {
-  return { backoffUntil: {}, stallAlarmAt: {}, boardRows: {} };
+  return { backoffUntil: {}, stallAlarmAt: {}, boardRows: {}, refusals: {} };
 }
 
 /** GET /studio/:id/inspect, reduced to what reap reads. `capturedAt` is epoch
@@ -96,15 +112,18 @@ export interface ReapDeps {
   inspect: (id: string) => Promise<ReapInspect>;
   rescue: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   destroy: (id: string) => Promise<ReapDestroyResult>;
+  /** Throws when the state cannot be trusted (corrupt, wrong shape): reap then
+   *  treats the board floor as unknown and reaps nothing this poll. */
   loadState: () => Promise<ReapState>;
   saveState: (state: ReapState) => Promise<void>;
   log: (line: string) => void;
 }
 
+/** Review F4: owner/name must match exactly. A row with no repoSlug (an old
+ *  studio, cloned from the fleet default) is never in scope: its id segment
+ *  drops the owner, so two orgs' same-named repos would collide. */
 function inScope(s: StudioStatus, repo: string): boolean {
-  if (s.repoSlug) return s.repoSlug.toLowerCase() === repo.toLowerCase();
-  const segment = repoIdSegment(repo.split("/")[1] ?? repo);
-  return segment !== null && parseStudioId(s.id)?.repo === segment;
+  return s.repoSlug !== null && s.repoSlug !== undefined && s.repoSlug.toLowerCase() === repo;
 }
 
 /** Live = open AND not in a terminal board state. A drifted task (no state
@@ -174,7 +193,37 @@ function liveReadRefusal(read: ReapInspect, idleMs: number, now: Date): string |
   const members = (agentPanelRows(read.tail) ?? "").split("\n")
     .filter((l) => l.trim() !== "" && !/^\s*(?:❯\s*)?[●◯⏺]\s+main\s*$/.test(l));
   if (members.length > 0) return "live pane shows a member row under the footer";
-  if (/\b\d+ (?:background )?shells?\b/.test(read.tail)) return "live pane shows background shells running";
+  return chromeRefusal(read.tail);
+}
+
+/** Words in claude's chrome that mean something still runs under the lead. */
+const RUNNING_WORDS = /running|background|shells?\b|monitors?\b|tasks?\b|agents? working/i;
+
+/**
+ * Review F2/F3: the chrome around the input box. The input box must hold ONLY
+ * an empty `❯` row (typed-but-unsent text is an operator mid-sentence). The
+ * footer must carry no counter at all (`7 shells`, `2 monitors`, anything
+ * with a digit — an unknown counter is unknown, so skip), and neither the
+ * footer nor the last status row may mention running/background work.
+ */
+function chromeRefusal(tail: string): string | null {
+  const lines = tail.replace(/\s+$/, "").split("\n");
+  const footer = footerAtBottom(lines);
+  if (footer < 0) return "live pane footer not found";
+  if (/\d/.test(lines[footer]) || RUNNING_WORDS.test(lines[footer])) {
+    return `live pane footer carries a counter: ${lines[footer].trim()}`;
+  }
+  const head = aboveAgentPanel(lines.join("\n")).split("\n");
+  const status = [...head].reverse().find((l) => /^\s*✻ /.test(l));
+  if (status && RUNNING_WORDS.test(status)) return `live pane status reports running work: ${status.trim()}`;
+  let i = footer - 1;
+  while (i >= 0 && lines[i].trim() === "") i--;
+  if (i < 0 || !RULE_LINE.test(lines[i])) return "live pane input box not found";
+  const bottom = i--;
+  while (i >= 0 && !RULE_LINE.test(lines[i])) i--;
+  if (i < 0) return "live pane input box not found";
+  const box = lines.slice(i + 1, bottom).filter((l) => l.trim() !== "");
+  if (box.length !== 1 || !/^\s*❯\s*$/.test(box[0])) return "live pane input box holds unsent text";
   return null;
 }
 
@@ -188,19 +237,24 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
     return { exitCode: 1 };
   }
   let state: ReapState;
+  // Review F5: a state that cannot be trusted loses the board floor. Reap
+  // nothing this poll; the listing below becomes the new baseline.
+  let floorUnknown = false;
   try {
     state = await deps.loadState();
   } catch (err) {
-    deps.log(`fleet reap: state unreadable (${err instanceof Error ? err.message : String(err)}) — starting empty`);
+    deps.log(`fleet reap: state unreadable (${err instanceof Error ? err.message : String(err)}) — floor unknown, reaping nothing this poll`);
     state = emptyReapState();
+    floorUnknown = true;
   }
+  const repo = flags.repo.toLowerCase();
   // Registry-derived: forget every studio the registry no longer has.
   const known = new Set(studios.map((s) => s.id));
-  for (const map of [state.backoffUntil, state.stallAlarmAt]) {
+  for (const map of [state.backoffUntil, state.stallAlarmAt, state.refusals]) {
     for (const id of Object.keys(map)) if (!known.has(id)) delete map[id];
   }
 
-  const running = studios.filter((s) => s.state === "running" && inScope(s, flags.repo));
+  const running = studios.filter((s) => s.state === "running" && inScope(s, repo));
   const exit = async (code: number) => {
     await deps.saveState(state);
     return { exitCode: code };
@@ -213,7 +267,13 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
     deps.log(`fleet reap: board read failed (${err instanceof Error ? err.message : String(err)}) — reaping nothing this poll`);
     return exit(1);
   }
-  const prevRows = state.boardRows[flags.repo];
+  // A repo that uses the board always has task history (state=all): zero rows
+  // is a bad read, never "nothing assigned to anyone".
+  if (board.length === 0) {
+    deps.log("fleet reap: board read returned 0 rows — reaping nothing this poll");
+    return exit(1);
+  }
+  const prevRows = state.boardRows[repo];
   if (prevRows !== undefined && board.length < Math.ceil(prevRows / 2)) {
     deps.log(
       `fleet reap: board read floor — ${board.length} row(s), last good read had ${prevRows}; ` +
@@ -221,7 +281,8 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
     );
     return exit(1);
   }
-  state.boardRows[flags.repo] = board.length;
+  state.boardRows[repo] = board.length;
+  if (floorUnknown) return exit(1);
 
   const candidates: { s: StudioStatus; idleMs: number }[] = [];
   for (const s of running) {
@@ -262,6 +323,8 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
     }
     candidates.push({ s, idleMs });
   }
+  const candidateIds = new Set(candidates.map((c) => c.s.id));
+  for (const id of Object.keys(state.refusals)) if (!candidateIds.has(id)) delete state.refusals[id];
 
   if (!flags.apply) {
     for (const { s, idleMs } of candidates) {
@@ -272,15 +335,33 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
   }
 
   const backOff = (id: string, why: string) => {
-    state.backoffUntil[id] = new Date(now.getTime() + REAP_BACKOFF_MS).toISOString();
+    state.backoffUntil[id] = new Date(deps.now().getTime() + REAP_BACKOFF_MS).toISOString();
+    delete state.refusals[id];
     deps.log(`skip ${id}: ${why} — backing off ${formatAge(REAP_BACKOFF_MS / 1000)}`);
+  };
+  const refused = (id: string, why: string) => {
+    const n = (state.refusals[id] ?? 0) + 1;
+    if (n >= REAP_REFUSALS_BEFORE_BACKOFF) { backOff(id, `${why} (${n} live-read refusals in a row)`); return; }
+    state.refusals[id] = n;
+    deps.log(`skip ${id}: ${why}`);
+  };
+  /** One live read, judged. Review F1: its own duration counts — a read that
+   *  answers late leaves an unbounded gap before whatever comes next. */
+  const liveRead = async (id: string): Promise<string | null> => {
+    const askedAt = deps.now().getTime();
+    const read = await deps.inspect(id);
+    const answeredAt = deps.now();
+    if (answeredAt.getTime() - askedAt > REAP_LIVE_READ_MAX_MS) return "live read answered too late";
+    return liveReadRefusal(read, flags.idleMs, answeredAt);
   };
   for (const { s, idleMs } of candidates) {
     try {
+      // Cheap pre-check first: a studio that is not idle right now gets no
+      // rescue exec and no rescue branch (review item 6: noise).
+      const pre = await liveRead(s.id);
+      if (pre) { refused(s.id, pre); continue; }
       const rescue = await deps.rescue(s.id);
       if (!rescue.ok) { backOff(s.id, `rescue failed: ${rescue.error}`); continue; }
-      const refusal = liveReadRefusal(await deps.inspect(s.id), flags.idleMs, deps.now());
-      if (refusal) { deps.log(`skip ${s.id}: ${refusal}`); continue; }
       let fresh: BoardTask[];
       try {
         fresh = await deps.studioTasks(s.id);
@@ -293,10 +374,15 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
         deps.log(`skip ${s.id}: task ${live.map((t) => `#${t.number}`).join(", ")} filed since the listing`);
         continue;
       }
+      // Review F1: the LAST read before destroy is the live one, so no board
+      // read, rescue or other slow call sits between it and the destroy.
+      const last = await liveRead(s.id);
+      if (last) { refused(s.id, last); continue; }
       const result = await deps.destroy(s.id);
       if (result.outcome !== "destroyed") { backOff(s.id, `destroy ${result.outcome}: ${result.message}`); continue; }
       delete state.backoffUntil[s.id];
       delete state.stallAlarmAt[s.id];
+      delete state.refusals[s.id];
       deps.log(`REAPED ${s.id}: ${idleWord(idleMs)}, no open task, rescued, destroyed`);
     } catch (err) {
       backOff(s.id, `error: ${err instanceof Error ? err.message : String(err)}`);

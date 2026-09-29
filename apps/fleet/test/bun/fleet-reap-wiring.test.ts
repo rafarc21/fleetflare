@@ -3,10 +3,10 @@
 // the pure-core suite (fleet-reap.test.ts) cannot: which routes are hit, and
 // that the destroy never carries force or discard-unsynced. No real fleet.
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdLs, reapDeps } from "../../cli/fleet";
+import { cmdLs, reapDeps, withReapLock } from "../../cli/fleet";
 import { runReap } from "../../cli/reap";
 import type { OrcaDeps } from "../../cli/orca-workspace";
 import type { StudioStatus } from "../../src/studio/types";
@@ -16,7 +16,13 @@ const ID = "acmeclient--pilot";
 const REPO = "example-org/acmeclient";
 const MIN = 60_000;
 const CLEAN_IDLE = REAL_WEBSTUDIO_PANE.replace(/\n[^\n]*◯ frontend-developer[^\n]*/, "")
-  .replace(" · 7 shells still running", "").replace(" · 7 shells", "");
+  .replace(" · 7 shells still running", "").replace(" · 7 shells", "")
+  .replace("❯\u00a0check on task 2 progress", "❯\u00a0");
+const HISTORY = [{
+  number: 1, url: "", title: "t1", body: "", state: "completed", labels: [], assignee: null, milestone: null,
+  open: false, updatedAt: new Date().toISOString(),
+}];
+let slowBoardMs = 0;
 
 function idleActivity(forMs: number) {
   const now = Date.now();
@@ -43,7 +49,11 @@ beforeAll(() => {
       const u = new URL(req.url);
       seen.push(`${req.method} ${u.pathname}${u.search}`);
       if (u.pathname === "/studio/") return Response.json([row()]);
-      if (u.pathname === "/studio/board/tasks") return Response.json([]);
+      if (u.pathname === "/studio/board/tasks") {
+        const body = u.searchParams.has("assignedTo") ? [] : HISTORY;
+        if (slowBoardMs > 0) return Bun.sleep(slowBoardMs).then(() => Response.json(body));
+        return Response.json(body);
+      }
       if (u.pathname === `/studio/${ID}/rescue`) return Response.json({ ok: true, pushes: [] });
       if (u.pathname === `/studio/${ID}/inspect`) {
         return Response.json({
@@ -57,7 +67,7 @@ beforeAll(() => {
   });
 });
 afterAll(() => server.stop(true));
-beforeEach(() => { seen.length = 0; });
+beforeEach(() => { seen.length = 0; slowBoardMs = 0; });
 
 const NOT_UNDER_ORCA: OrcaDeps = {
   env: { TERM_PROGRAM: "Apple_Terminal" },
@@ -82,13 +92,14 @@ test("reap --apply hits list, board (scoped), rescue, inspect, per-studio tasks,
   expect(seen).toEqual([
     "GET /studio/",
     `GET /studio/board/tasks?${repoQ}`,
-    `POST /studio/${ID}/rescue`,
     `GET /studio/${ID}/inspect`,
+    `POST /studio/${ID}/rescue`,
     `GET /studio/board/tasks?${repoQ}&assignedTo=${ID}`,
+    `GET /studio/${ID}/inspect`,
     `POST /studio/${ID}/destroy`,
   ]);
   expect(lines.some((l) => l.startsWith(`REAPED ${ID}`))).toBe(true);
-  expect(JSON.parse(readFileSync(statePath, "utf8")).boardRows[REPO]).toBe(0);
+  expect(JSON.parse(readFileSync(statePath, "utf8")).boardRows[REPO]).toBe(1);
 });
 
 test("reap dry-run touches only the two reads", async () => {
@@ -107,4 +118,48 @@ test("fleet ls prints the IDLE line for a studio idle >= 10m", async () => {
     console.log = realLog;
   }
   expect(out.some((l) => l.startsWith("IDLE >= 10m") && l.includes(`${ID} IDLE 45m`))).toBe(true);
+});
+
+// Review F1: no reap read may hang. A board read slower than the budget
+// aborts, and the poll reaps nothing.
+test("a hung board read aborts at the read budget and reaps nothing", async () => {
+  slowBoardMs = 3_000;
+  const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");
+  const started = Date.now();
+  const out = await runReap(
+    { apply: true, idleMs: 30 * MIN, repo: REPO },
+    reapDeps(creds(), REPO, statePath, () => {}, NOT_UNDER_ORCA, { readTimeoutMs: 200 }),
+  );
+  expect(out.exitCode).toBe(1);
+  expect(Date.now() - started).toBeLessThan(2_000);
+  expect(seen.some((s) => s.startsWith("POST "))).toBe(false);
+});
+
+// Review F5: a state file that cannot be trusted is kept aside, never
+// silently overwritten, and the poll reaps nothing (its floor is unknown).
+for (const [name, content] of [["corrupt JSON", "{not json"], ["wrong types", JSON.stringify({ backoffUntil: 5, boardRows: { x: "y" } })]]) {
+  test(`state file with ${name}: kept aside, reap nothing this poll`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "reap-"));
+    const statePath = join(dir, "reap-state.json");
+    writeFileSync(statePath, content);
+    const out = await runReap({ apply: true, idleMs: 30 * MIN, repo: REPO }, reapDeps(creds(), REPO, statePath, () => {}, NOT_UNDER_ORCA));
+    expect(out.exitCode).toBe(1);
+    expect(seen.some((s) => s.startsWith("POST "))).toBe(false);
+    const aside = readdirSync(dir).filter((f) => f.startsWith("reap-state.json.corrupt-"));
+    expect(aside.length).toBe(1);
+    expect(readFileSync(join(dir, aside[0]!), "utf8")).toBe(content);
+    expect(JSON.parse(readFileSync(statePath, "utf8")).boardRows[REPO]).toBe(1);
+  });
+}
+
+test("a second reap on the same state file refuses while the first holds the lock", async () => {
+  const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");
+  let release!: () => void;
+  const first = withReapLock(statePath, () => new Promise<number>((r) => { release = () => r(0); }));
+  await Bun.sleep(10);
+  await expect(withReapLock(statePath, async () => 0)).rejects.toThrow(/another fleet reap/);
+  release();
+  expect(await first).toBe(0);
+  expect(existsSync(`${statePath}.lock`)).toBe(false);
+  expect(await withReapLock(statePath, async () => 7)).toBe(7);
 });

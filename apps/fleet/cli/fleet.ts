@@ -43,8 +43,10 @@ import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
 import { repairFailureLine, discardNote, destroyPath } from "./repair-failure";
 import { requestDestroy } from "./destroy-outcome";
-import { formatIdleAlarm, emptyReapState, runReap, type ReapDeps, type ReapFlags, type ReapState } from "./reap";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import {
+  formatIdleAlarm, emptyReapState, runReap, REAP_LIVE_READ_MAX_MS, type ReapDeps, type ReapFlags, type ReapState,
+} from "./reap";
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   formatReady, formatCheckedAt, readyOverride, formatSession, formatState, formatSessionGuards,
@@ -1812,10 +1814,44 @@ export async function cmdRescueAll(creds: Credentials, flags: RescueAllFlags): P
 /** Where reap keeps its backoff, stall-alarm and board-floor memory. */
 export const REAP_STATE_PATH = join(homedir(), ".fleet", "reap-state.json");
 
-async function fetchJson(url: string, init: RequestInit & { timeout?: boolean } = {}): Promise<unknown> {
-  const res = await fetch(url, init);
+/** Review F1: every plain read reap makes is bounded. A hung read must never
+ *  sit between the last live read and a destroy, nor stall a poll. */
+export const REAP_READ_TIMEOUT_MS = 20_000;
+/** A lock file older than this is a crashed run's, and is taken over. */
+export const REAP_LOCK_STALE_MS = 15 * 60_000;
+
+async function fetchJson(url: string, headers: Record<string, string>, timeoutMs: number): Promise<unknown> {
+  const res = await fetch(url, { headers: { ...headers, Accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 300)}`);
   return res.json();
+}
+
+function isStringMap(v: unknown): v is Record<string, string> {
+  return typeof v === "object" && v !== null && !Array.isArray(v) && Object.values(v).every((x) => typeof x === "string");
+}
+
+function isCountMap(v: unknown): v is Record<string, number> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+    && Object.values(v).every((x) => typeof x === "number" && Number.isInteger(x) && x >= 0);
+}
+
+/** Review F5: the state file's exact shape, or null. Absent maps are fine
+ *  (older file); present-but-wrong is not. */
+export function parseReapState(raw: string): ReapState | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const p = parsed as Record<string, unknown>;
+  const out = emptyReapState();
+  if (p.backoffUntil !== undefined) { if (!isStringMap(p.backoffUntil)) return null; out.backoffUntil = p.backoffUntil; }
+  if (p.stallAlarmAt !== undefined) { if (!isStringMap(p.stallAlarmAt)) return null; out.stallAlarmAt = p.stallAlarmAt; }
+  if (p.boardRows !== undefined) { if (!isCountMap(p.boardRows)) return null; out.boardRows = p.boardRows; }
+  if (p.refusals !== undefined) { if (!isCountMap(p.refusals)) return null; out.refusals = p.refusals; }
+  return out;
 }
 
 /**
@@ -1827,24 +1863,31 @@ async function fetchJson(url: string, init: RequestInit & { timeout?: boolean } 
 export function reapDeps(
   creds: Credentials, repo: string, statePath: string, log: (line: string) => void,
   orcaDeps: OrcaDeps = defaultOrcaDeps(),
+  opts: { readTimeoutMs?: number } = {},
 ): ReapDeps {
   const headers = accessHeaders(creds);
   const repoQ = `repo=${encodeURIComponent(repo)}`;
+  const readMs = opts.readTimeoutMs ?? REAP_READ_TIMEOUT_MS;
   return {
     now: () => new Date(),
-    listStudios: () => onboardListStudios(creds),
+    listStudios: async () => {
+      const body = await fetchJson(new URL("/studio/", creds.workerUrl).toString(), headers, readMs);
+      if (!Array.isArray(body)) throw new Error("studio listing was not a JSON array");
+      return body as StudioStatus[];
+    },
     listBoard: async () => {
-      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}`), { headers });
+      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}`), headers, readMs);
       if (!Array.isArray(body)) throw new Error("board listing was not a JSON array");
       return body as BoardTask[];
     },
     studioTasks: async (id) => {
-      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}&assignedTo=${encodeURIComponent(id)}`), { headers });
+      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}&assignedTo=${encodeURIComponent(id)}`), headers, readMs);
       if (!Array.isArray(body)) throw new Error("task listing was not a JSON array");
       return body as BoardTask[];
     },
     inspect: async (id) => {
-      const out = await requestInspect(studioUrl(creds, id, "/inspect"), headers);
+      // Bounded at the core's own live-read budget: a later answer is refused anyway.
+      const out = await requestInspect(studioUrl(creds, id, "/inspect"), headers, { timeoutMs: REAP_LIVE_READ_MAX_MS });
       if (!out.ok) return { ok: false, message: out.message };
       const body = out.body as Partial<InspectBody> & { ok?: boolean; error?: string; observed?: Observed };
       if (body.ok !== true || typeof body.tail !== "string") return { ok: false, message: body.error ?? "inspect answered not ok" };
@@ -1883,17 +1926,46 @@ export function reapDeps(
       } catch {
         return emptyReapState();
       }
-      const parsed = JSON.parse(raw) as Partial<ReapState>;
-      return { ...emptyReapState(), ...parsed };
+      const state = parseReapState(raw);
+      if (state) return state;
+      // Kept aside, never silently overwritten: the operator can read it.
+      const aside = `${statePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      await rename(statePath, aside);
+      throw new Error(`state file was corrupt or the wrong shape; kept aside at ${aside}`);
     },
     saveState: async (state) => {
       await mkdir(dirname(statePath), { recursive: true });
-      const tmp = `${statePath}.tmp`;
+      const tmp = `${statePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
       await writeFile(tmp, JSON.stringify(state, null, 2));
       await rename(tmp, statePath);
     },
     log,
   };
+}
+
+/** Review F5: one reap per state file at a time. The lock is an exclusively
+ *  created file; a second run refuses rather than racing the state or the
+ *  destroys. A lock older than REAP_LOCK_STALE_MS (a crashed run) is taken over. */
+export async function withReapLock<T>(statePath: string, fn: () => Promise<T>): Promise<T> {
+  const lock = `${statePath}.lock`;
+  await mkdir(dirname(statePath), { recursive: true });
+  const take = () => writeFile(lock, `${process.pid} ${new Date().toISOString()}\n`, { flag: "wx" });
+  try {
+    await take();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    const age = Date.now() - (await stat(lock)).mtimeMs;
+    if (age < REAP_LOCK_STALE_MS) {
+      throw new Error(`another fleet reap holds ${lock} (${Math.round(age / 1000)}s old); refusing to run alongside it`);
+    }
+    await unlink(lock);
+    await take();
+  }
+  try {
+    return await fn();
+  } finally {
+    await unlink(lock).catch(() => {});
+  }
 }
 
 async function cmdReap(creds: Credentials, flags: Omit<ReapFlags, "repo"> & { repo: string | null }): Promise<void> {
@@ -1907,7 +1979,8 @@ async function cmdReap(creds: Credentials, flags: Omit<ReapFlags, "repo"> & { re
     console.error("fleet reap: no repo — stand in a repo checkout or pass --repo owner/name. Never fleet-wide.");
     process.exit(1);
   }
-  const { exitCode } = await runReap({ ...flags, repo }, reapDeps(creds, repo, REAP_STATE_PATH, (l) => console.log(l)));
+  const { exitCode } = await withReapLock(REAP_STATE_PATH, () =>
+    runReap({ ...flags, repo }, reapDeps(creds, repo, REAP_STATE_PATH, (l) => console.log(l))));
   if (exitCode !== 0) process.exit(exitCode);
 }
 

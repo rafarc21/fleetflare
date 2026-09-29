@@ -657,6 +657,11 @@ describe("fleet reap — issue #53", () => {
     expect(parseCliArgs(["reap", "--apply", "--dry-run"]).cmd).toBe("usage");
     expect(parseCliArgs(["reap", "--repo"]).cmd).toBe("usage");
   });
+  it("--idle below 5m is refused (review item 6); exactly 5m is allowed", () => {
+    expect(parseCliArgs(["reap", "--idle", "4m"]).cmd).toBe("usage");
+    expect(parseCliArgs(["reap", "--idle", "299s"]).cmd).toBe("usage");
+    expect(parseCliArgs(["reap", "--idle", "300s"])).toEqual({ cmd: "reap", apply: false, idleMs: 5 * 60_000, repo: null });
+  });
 });
 
 // Task 8: `fleet junior enable|disable|status` — local opt-in, never touches

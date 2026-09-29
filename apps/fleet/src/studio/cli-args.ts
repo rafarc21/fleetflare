@@ -325,7 +325,7 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   },
   reap: {
     args: "[--idle 30m] [--repo owner/repo] [--dry-run|--apply]",
-    summary: "Idle studios bill with zero events; this finds them. Scope: the repo you are standing in, or --repo. Every run prints a STALL line (at most once per 15m per studio) for a running studio IDLE >= 10m that still holds an open board task. Bare (or --dry-run) lists which running studios are IDLE >= --idle (default 30m; s/m/h) with NO open task, and why each other one is skipped — touches nothing. --apply, per candidate, one at a time: rescue-push first; then a live read that must show the lead idle since the threshold with no member row and no background shells; then a fresh board read for this studio; then a plain destroy (never --force, never --discard-unsynced — the Worker re-checks tasks and re-runs rescue). Any failure or doubt skips that studio; a failed rescue or refused destroy backs it off 30m. Reaps nothing when the board read fails or returns under half the rows of the last good read. Local state: ~/.fleet/reap-state.json. Built to run from a coordinator's loop, e.g. every 60s.",
+    summary: "Idle studios bill with zero events; this finds them. Scope: the repo you are standing in, or --repo. Every run prints a STALL line (at most once per 15m per studio) for a running studio IDLE >= 10m that still holds an open board task. Bare (or --dry-run) lists which running studios are IDLE >= --idle (default 30m, minimum 5m; s/m/h) with NO open task, and why each other one is skipped — touches nothing. --apply, per candidate, one at a time: a live pre-check; rescue-push; a fresh board read for this studio; a final live read (must answer within 30s) that shows the lead idle since the threshold, an empty input box, no member row, and no counter or running work in the footer; then a plain destroy (never --force, never --discard-unsynced — the Worker re-checks tasks and re-runs rescue). Any failure or doubt skips that studio; a failed rescue, a refused destroy, or 3 live-read refusals in a row back it off 30m. Reaps nothing when the board read fails, returns 0 rows, or returns under half the rows of the last good read. Local state: ~/.fleet/reap-state.json (a corrupt one is kept aside as .corrupt-<time> and that poll reaps nothing); one run at a time per state file. Built to run from a coordinator's loop, e.g. every 60s.",
   },
   "task-junior-sweep": {
     args: "junior-sweep [--dry-run|--apply]",
@@ -779,7 +779,9 @@ export function parseCliArgs(argv: string[]): CliCommand {
         if (idle) {
           const raw = idle[1] ?? rest[++i];
           const ms = raw === undefined ? null : parseIdleDuration(raw);
-          if (ms === null) return usage("--idle needs a duration like 90s, 5m or 2h");
+          if (ms === null) return usage("--idle needs a duration like 5m or 2h");
+          // Review item 6: below 5m, "idle" is a lead between two tool calls.
+          if (ms < 5 * 60_000) return usage("--idle must be at least 5m");
           idleMs = ms;
           continue;
         }
