@@ -450,10 +450,10 @@ write is refused. A refusal names the pattern's line number, never the term.
 A studio whose work repo is private gets the gate switched off. See
 `apps/fleet/src/leak-gate.ts`.
 
-**Write proxy** (on by default; issue #7): the wrappers above run inside the
-container, and container root can step around them. So a studio whose work
-repo is public (or whose visibility cannot be confirmed) holds a **read-only**
-GitHub credential, and its writes go through the Worker instead: `git push` is
+**Write proxy** (off by default, per repo; issue #7): the wrappers above run
+inside the container, and container root can step around them. For a work repo
+listed in `FLEET_WRITE_PROXY_REPOS` (a `vars` entry, comma-separated
+`owner/name`), its studios hold a **read-only** GitHub credential, and its writes go through the Worker instead: `git push` is
 rewritten (`pushInsteadOf`) to `/fleet/git/...`, which parses the pack, scans
 every ref name, commit, tag, file and path against the same denylist, and only
 then forwards the identical bytes to GitHub with the Worker's own token; `gh pr
@@ -473,8 +473,9 @@ write). Pushes over 16 MiB are refused; split them. Operator setup:
   also set `FLEET_RESCUE_GITHUB_TOKEN` (a PAT that can write only that repo).
   Otherwise rescue goes to origin through the proxy.
 - Restart running studios after deploying (new image, new credential).
-- `FLEET_WRITE_PROXY=off` (a `vars` entry) turns it off and hands studios
-  their write credential again. See `apps/fleet/src/write-proxy/`.
+- Unset or unlisted = the pre-proxy behaviour: deploying changes nothing until
+  a repo is listed. Removing a repo hands its studios their write credential
+  again at the next refresh. See `apps/fleet/src/write-proxy/`.
 
 **`FLEET_RESCUE_REMOTE`** (optional, strongly recommended when your fork is
 public): the `owner/name` slug of a PRIVATE repo that receives rescue

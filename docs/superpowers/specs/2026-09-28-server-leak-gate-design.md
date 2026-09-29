@@ -30,14 +30,15 @@ Non-goals:
 ## 3. Write mode per studio
 
 One decision, `writeModeFor(env, repo, isPrivate)` (`mode.ts`):
-- `direct` — `FLEET_WRITE_PROXY=off`, OR (work repo CONFIRMED private AND
+- `direct` — work repo NOT on `FLEET_WRITE_PROXY_REPOS`, OR (work repo CONFIRMED private AND
   App auth). App token = `repositories: [repo]` only.
 - `proxy` — everything else. Visibility lookup error = public = `proxy`.
   PAT + private repo = `proxy` too: PAT writes every repo of its owner,
   public ones included (review finding). Scan skipped there (confirmed
   private), routing kept.
 
-Default ON. `FLEET_WRITE_PROXY=off` = operator kill switch (logged per
+Default OFF (#13 review, rollout): `FLEET_WRITE_PROXY_REPOS` lists the work
+repos to proxy; unset = deploy changes nothing. Was: default on, kill switch (logged per
 provision). Same fail-closed read as #2's `applyLeakGate`.
 
 Used by: credential mint (§4), container config (§7), both routes (§5, §6
@@ -244,7 +245,9 @@ Prints the URL like gh does.
 `applyLeakGate` grows one step: write-mode config (§5.8) + marker. Same
 fail-closed rules: step fails in `proxy` mode → row note; the token is
 already read-only, so a failed config means writes FAIL, never leak.
-Credential refresh (every 50 min) re-evaluates mode.
+Credential refresh (every 50 min) re-evaluates mode and applies its git
+config FIRST; proxy config fails = credential not swapped (#13 review:
+never a read-only credential without proxy routing).
 
 ## 8. Rescue
 
@@ -278,7 +281,7 @@ Credential refresh (every 50 min) re-evaluates mode.
    narrowing needs nothing new.
 3. `FLEET_OPS_REPO` + denylist: already required by #2.
 4. Deploy rebuilds the studio image (new `fleet-gh-proxy`).
-5. Kill switch: `FLEET_WRITE_PROXY=off`.
+5. Enable per repo: `FLEET_WRITE_PROXY_REPOS=owner/name,...` (vars). Unlist = off.
 6. Existing studios: restart to pick up read token + config.
 7. **Rotate the write PAT** (PAT fleets): every pre-#7 studio held it.
 8. PAT fleets: read PAT must also read private blueprint + ops repos

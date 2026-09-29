@@ -51,7 +51,7 @@ and pull requests at minimum, since studios push branches and open PRs.
 | Credential | Location | File mode |
 |---|---|---|
 | Claude OAuth token | Container process environment, inherited by the tmux server and every pane (`apps/fleet/src/studio/do.ts:2500-2510`) | n/a |
-| GitHub token (App or PAT) | `/workspace/.git-credentials`, plus `$HOME/.config/gh/hosts.yml` for `gh` (`apps/fleet/src/studio/credentials.ts:114-130`). Read-only when the work repo is public (issue #7, `apps/fleet/src/write-proxy/mode.ts`); writes go through the Worker's scanning proxy | `hosts.yml` is 600; `.git-credentials` gets no explicit chmod |
+| GitHub token (App or PAT) | `/workspace/.git-credentials`, plus `$HOME/.config/gh/hosts.yml` for `gh` (`apps/fleet/src/studio/credentials.ts:114-130`). Read-only when the work repo is on `FLEET_WRITE_PROXY_REPOS` (issue #7, `apps/fleet/src/write-proxy/mode.ts`); writes then go through the Worker's scanning proxy | `hosts.yml` is 600; `.git-credentials` gets no explicit chmod |
 | Blueprint-repo GitHub token | `/workspace/.git-credentials-blueprint` (`apps/fleet/src/studio/credentials.ts:204-216`) | no explicit chmod |
 | Tailscale auth key, spawn token | Process environment (`apps/fleet/src/studio/do.ts:2677-2679`) | n/a |
 
