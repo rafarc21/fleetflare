@@ -87,7 +87,8 @@ describe("deploy.sh runs rescue-all before a container-replacing command (#20)",
   });
 
   for (const args of [["deploy"], ["deploy", "--minify"], ["versions", "deploy"], ["rollback"], ["delete"], ["--profile", "x", "deploy"],
-    ["containers", "delete", "abc123"], ["-e", "prod", "containers", "delete", "abc123"], ["containers", "--json", "delete", "abc123"]]) {
+    ["containers", "delete", "abc123"], ["-e", "prod", "containers", "delete", "abc123"], ["containers", "--json", "delete", "abc123"],
+    ["containers", "--profile", "list", "delete", "abc123"]]) {
     test(`"${args.join(" ")}" is gated: rescue-all exit 1 refuses it`, () => {
       const r = deploy(args, 1);
       expect(r.code).toBe(1);
