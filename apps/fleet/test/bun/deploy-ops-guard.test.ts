@@ -43,6 +43,11 @@ beforeEach(() => {
   writeFileSync(join(local, "wrangler"), `#!/bin/sh\necho "wrangler $*" >> "${calls}"\n`);
   chmodSync(join(local, "wrangler"), 0o755);
   setWranglerVersions("4.141.0", "4.141.0");
+  // Issue #20: deploy.sh runs `bun cli/fleet.ts rescue-all` before a deploy.
+  // A passing stub: this suite is about the ops guard only
+  // (deploy-rescue-gate.test.ts covers the rescue gate).
+  mkdirSync(join(fleet, "cli"));
+  writeFileSync(join(fleet, "cli", "fleet.ts"), "process.exit(0);\n");
   const bin = join(root, "bin");
   mkdirSync(bin);
   writeFileSync(join(bin, "wrangler"), `#!/bin/sh\necho "PATH-wrangler $*" >> "${calls}"\n`);

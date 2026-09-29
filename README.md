@@ -650,8 +650,16 @@ since every placeholder they needed (the R2 bucket name in step 2,
 ```bash
 bun run migrate:local    # apps/fleet/migrations/ against a local D1 for `wrangler dev`, via scripts/deploy.sh
 bun run migrate:remote   # apps/fleet/migrations/ against your real D1, via scripts/deploy.sh
-bun run deploy           # scripts/deploy.sh -> wrangler deploy -c wrangler.local.jsonc
+bun run deploy --allow-unrescued   # FIRST deploy only (see below): scripts/deploy.sh -> wrangler deploy -c wrangler.local.jsonc
 ```
+
+**Why `--allow-unrescued` the first time:** `bun run deploy` gates itself
+(issue #20). Before a container-replacing command it runs `fleet rescue-all`,
+which needs a live Worker and `~/.fleet/credentials` to list studios. Before
+the first deploy neither exists, so the gate fails closed. No studio runs
+yet, so nothing can be lost. The flag is consumed by `deploy.sh`, never
+passed to wrangler, and prints a loud WARNING. Every later deploy: plain
+`bun run deploy`.
 
 Install the CLIs, then point `~/.fleet/credentials` (step 6 above) at the
 worker address `bun run deploy` just printed and confirm it end-to-end:
@@ -665,14 +673,15 @@ Then provision your first studio — see "Daily use" below for the CLI
 commands. A `degraded` response's `error` field names which step failed
 (blueprint fetch, clone, or bring-up) and is already secret-scrubbed.
 
-Once you have running studios, gate every *subsequent* deploy on `fleet
-rescue-all [--repo R] [--dry-run]` first (see "Things that will bite you"
-below) — it exits non-zero if any studio's rescue attempt failed, so a deploy
-script can run it and stop before `bun run deploy` on a non-zero exit:
-
-```bash
-fleet rescue-all && bun run deploy
-```
+Every *subsequent* `bun run deploy` rescues first (issue #20): before any
+command that replaces the studio containers (a bare deploy, `deploy` without
+`--dry-run`, `versions deploy`, `rollback`, `delete`, `containers delete`),
+`scripts/deploy.sh`
+runs `fleet rescue-all` and refuses if it exits non-zero — `rescue-all
+reported FAILED -- pre-deploy gate UNSAFE`. See "Things that will bite you"
+below. Read-only commands and `d1 migrations` never run it. Pass
+`--allow-unrescued` later only after reading the FAILED rows and accepting
+the loss of that work. Never call a bare `wrangler deploy`: it skips the gate.
 
 ---
 
@@ -723,8 +732,9 @@ rollout. Plan a deploy as a container replacement, always.
 **A rollout replacement does not run the rescue push.** `recycle` and `destroy`
 rescue uncommitted work to a branch first; a convergence-driven replacement does
 not. Work that lives only in a container filesystem can be lost by a deploy.
-Run `fleet rescue-all [--repo R] [--dry-run]` (issue #251) right before every
-`bun run deploy` as the pre-deploy gate — it commits and pushes every
+`bun run deploy` runs `fleet rescue-all` (issue #251) itself as the
+pre-deploy gate (issue #20; `--allow-unrescued` overrides, loudly) — it
+commits and pushes every
 running AND degraded studio's uncommitted work (main checkout and every
 member git worktree, each to its own `fleet/rescue/...` ref), plus every
 local branch not checked out anywhere and every stash entry holding unpushed
@@ -738,8 +748,10 @@ main-checkout-only special case. A push rejected non-fast-forward retries
 once to a freshly generated ref before it counts as a failure. It prints a
 `skipped <id> (<state>)` row for every stopped/provisioning studio and for
 any studio the container itself reports isn't actually running, and
-exits non-zero only on a genuine rescue failure — script the deploy on that
-exit code. Push as you go regardless.
+exits non-zero only on a genuine rescue failure. Its last line is the
+verdict: `pre-deploy gate SAFE`, or `<n>/<attempted> attempted studios not
+rescued (<f> push FAILED, <t> TIMED OUT) -- pre-deploy gate UNSAFE; do NOT
+deploy` on stderr. A "container not running" skip is not attempted. Push as you go regardless.
 
 **Rollout convergence takes minutes.** `wrangler containers info` keeps
 reporting the old digest with an `active_rollout_id` until it finishes. A studio

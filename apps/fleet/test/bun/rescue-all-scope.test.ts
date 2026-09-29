@@ -25,8 +25,9 @@ function flags(over: Partial<RescueAllFlags> = {}): RescueAllFlags {
 function fakeDeps(over: {
   studios?: StudioStatus[];
   rescueStudio?: (id: string) => Promise<RescueAllOutcome>;
-} = {}): { deps: RescueAllDeps; lines: string[]; rescueCalls: string[] } {
+} = {}): { deps: RescueAllDeps; lines: string[]; errs: string[]; rescueCalls: string[] } {
   const lines: string[] = [];
+  const errs: string[] = [];
   const rescueCalls: string[] = [];
   const deps: RescueAllDeps = {
     listStudios: async () => over.studios ?? [],
@@ -35,8 +36,9 @@ function fakeDeps(over: {
       return over.rescueStudio ? over.rescueStudio(id) : { ok: true, pushes: [] };
     },
     log: (line: string) => lines.push(line),
+    error: (line: string) => errs.push(line),
   };
-  return { deps, lines, rescueCalls };
+  return { deps, lines, errs, rescueCalls };
 }
 
 // ---------------------------------------------------------------------------
@@ -437,4 +439,72 @@ test("the real production default concurrency is 5 (RESCUE_ALL_CONCURRENCY_LIMIT
   expect(peak).toBeLessThanOrEqual(5);
   expect(peak).toBeGreaterThan(1); // proves this is genuinely concurrent, not accidentally serialized
   expect(result.exitCode).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// Issue #20: exit 1 alone was easy to miss. The run ends with ONE verdict
+// line that says, in words, whether deploying is safe. The denominator is
+// the studios ATTEMPTED (a "container not running" skip is not one), and
+// the words tell a push failure from a timeout.
+
+test("mixed: n/attempted, push FAILED and TIMED OUT counted apart, UNSAFE on stderr; exit 1", async () => {
+  const { deps, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b"), studio("websites--c")],
+    rescueStudio: async (id) =>
+      id === "websites--a" ? { ok: false, error: "push rejected" }
+        : id === "websites--b" ? { ok: false, error: "timed out", timedOut: true }
+          : { ok: true, pushes: [] },
+  });
+  const result = await runRescueAll(flags(), deps);
+  expect(result.exitCode).toBe(1);
+  expect(errs.at(-1)).toBe(
+    "fleet rescue-all: 2/3 attempted studios not rescued (1 push FAILED, 1 TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy",
+  );
+});
+
+test("1 FAILED + 2 'container not running' skips: denominator is the 1 attempted, and it says every push failed", async () => {
+  const { deps, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b"), studio("websites--c")],
+    rescueStudio: async (id) =>
+      id === "websites--a" ? { ok: false, error: "push rejected" } : { ok: false, error: "not running" },
+  });
+  const result = await runRescueAll(flags(), deps);
+  expect(result.exitCode).toBe(1);
+  expect(errs.at(-1)).toBe(
+    "fleet rescue-all: every push failed (1/1 attempted studios not rescued: 1 push FAILED, 0 TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy",
+  );
+});
+
+test("every attempted studio TIMED OUT: says every rescue timed out, never 'push failed'", async () => {
+  const { deps, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b")],
+    rescueStudio: async () => ({ ok: false, error: "timed out", timedOut: true }),
+  });
+  const result = await runRescueAll(flags(), deps);
+  expect(result.exitCode).toBe(1);
+  expect(errs.at(-1)).toBe(
+    "fleet rescue-all: every rescue timed out (2/2 attempted studios not rescued: 0 push FAILED, 2 TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy",
+  );
+});
+
+test("every attempted studio failed, mixed push FAILED and TIMED OUT: says no studio rescued", async () => {
+  const { deps, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b")],
+    rescueStudio: async (id) =>
+      id === "websites--a" ? { ok: false, error: "push rejected" } : { ok: false, error: "timed out", timedOut: true },
+  });
+  await runRescueAll(flags(), deps);
+  expect(errs.at(-1)).toBe(
+    "fleet rescue-all: no studio rescued (2/2 attempted studios not rescued: 1 push FAILED, 1 TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy",
+  );
+});
+
+test("no failures: final line says pre-deploy gate SAFE, never UNSAFE; exit 0", async () => {
+  const { deps, lines, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b", "stopped")],
+  });
+  const result = await runRescueAll(flags(), deps);
+  expect(result.exitCode).toBe(0);
+  expect(lines.at(-1)).toContain("pre-deploy gate SAFE");
+  expect(errs.some((l) => l.includes("UNSAFE"))).toBe(false);
 });

@@ -1458,6 +1458,8 @@ export interface RescueAllDeps {
    *  for a studio this module's own filter did not already select. */
   rescueStudio: (id: string) => Promise<RescueAllOutcome>;
   log: (line: string) => void;
+  /** Issue #20: stderr — carries the UNSAFE verdict. */
+  error: (line: string) => void;
 }
 export interface RescueAllFlags {
   repo: string | null;
@@ -1597,6 +1599,10 @@ export async function runRescueAll(flags: RescueAllFlags, deps: RescueAllDeps): 
   const timeoutMs = flags.timeoutMs ?? RESCUE_ALL_STUDIO_TIMEOUT_MS;
   const concurrency = flags.concurrency ?? RESCUE_ALL_CONCURRENCY_LIMIT;
   let failures = 0;
+  // Issue #20: the verdict's own counts. `timedOut` is a subset of
+  // `failures`; `notRunning` studios were never attempted.
+  let timedOut = 0;
+  let notRunning = 0;
   for (const s of outOfScope) deps.log(`skipped  ${s.id} (${s.state})`);
   if (targets.length === 0) deps.log("fleet rescue-all: no running studios in scope");
   // Issue #359, measured live 2026-09-26: this used to be a sequential
@@ -1638,6 +1644,7 @@ export async function runRescueAll(flags: RescueAllFlags, deps: RescueAllDeps): 
       // DO — its own `ctx.container.running` gate answered first. That is a
       // skip, not a failure: nothing was attempted, nothing was lost.
       if (outcome.error === "not running") {
+        notRunning++;
         deps.log(`skipped  ${s.id}: container not running ${elapsed}`);
       } else if (outcome.timedOut) {
         // Issue #359: a distinct TIMEOUT verdict, never folded into FAILED —
@@ -1646,6 +1653,7 @@ export async function runRescueAll(flags: RescueAllFlags, deps: RescueAllDeps): 
         // (RESCUE_FAILED, already named in `error` on the FAILED branch
         // below). Still counts toward the same non-zero-exit contract.
         failures++;
+        timedOut++;
         deps.log(`TIMEOUT  ${s.id}: ${outcome.error} ${elapsed}`);
       } else {
         failures++;
@@ -1659,7 +1667,24 @@ export async function runRescueAll(flags: RescueAllFlags, deps: RescueAllDeps): 
       for (const p of outcome.pushes) deps.log(`rescued  ${s.id}: ${p.branch} (${p.files} ${p.kind}) ${elapsed}`);
     }
   });
-  return { exitCode: failures > 0 ? 1 : 0 };
+  // Issue #20: exit 1 alone was easy to miss (and `&&` was the whole gate).
+  // One verdict line, in words, last.
+  // Denominator = studios attempted (a "container not running" skip is not
+  // one); a push failure and a timeout are named apart.
+  if (failures > 0) {
+    const attempted = targets.length - notRunning;
+    const count = `${failures}/${attempted} attempted studios not rescued`;
+    const kinds = `${failures - timedOut} push FAILED, ${timedOut} TIMED OUT`;
+    let what = `${count} (${kinds})`;
+    if (failures === attempted) {
+      const every = timedOut === 0 ? "every push failed" : timedOut === failures ? "every rescue timed out" : "no studio rescued";
+      what = `${every} (${count}: ${kinds})`;
+    }
+    deps.error(`fleet rescue-all: ${what} -- pre-deploy gate UNSAFE; do NOT deploy`);
+    return { exitCode: 1 };
+  }
+  deps.log("fleet rescue-all: no failures -- pre-deploy gate SAFE");
+  return { exitCode: 0 };
 }
 
 /**
@@ -1743,6 +1768,7 @@ export async function cmdRescueAll(creds: Credentials, flags: RescueAllFlags): P
       return (await res.json()) as RescueAllOutcome;
     },
     log: (line) => console.log(line),
+    error: (line) => console.error(line),
   });
   if (exitCode !== 0) process.exit(exitCode);
 }
