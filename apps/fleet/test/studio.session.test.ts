@@ -20,7 +20,7 @@ import {
   harvestLearnings, harvestRecordCmd, HARVEST_NO_RECORD, type CommitLearningFile, type ResolveMemoryRepo,
   archiveDoneRecords, doneRecordsListCmd, type DoneRecordPorts,
   DONE_RECORD_HASHES_KEY, type DoneRecordHashStorage,
-  mirrorBurnToRegistry, checkAndRecordReadiness, syncSessionCycle, clearSessionGuard,
+  mirrorBurnToRegistry, checkAndRecordReadiness, syncSessionCycle, clearSessionGuard, RECYCLE_REFUSED_PREFIX,
 } from "../src/studio/do";
 import {
   sessionLatestKey, sessionDailyKey, SESSION_SINGLE_READ_MAX, SESSION_SPLIT_PART,
@@ -3478,21 +3478,48 @@ describe("recycleWithSync — sync before rescue-push before destroy, destroy be
     expect(order).toEqual(["rescue-push", "destroy"]);
   });
 
-  it("a throwing rescue-push does not prevent destroy/awaitReady/provision from running (same best-effort posture as pre-recycle session sync)", async () => {
+  // Issue #62: an UNCONFIRMED rescue (exec throws or is killed) is unknown
+  // state: recycle refuses like a confirmed failure, container untouched.
+  // `--discard-unsynced` proceeds and the row names it.
+  it("#62: a throwing rescue-push REFUSES recycle — destroy/awaitReady/provision never run", async () => {
     const syncDeps = fakeSyncDeps({ rescue: null }); // rescue-push's own exec throws
     const destroy = vi.fn(async () => {});
     const awaitReady = vi.fn(async () => {});
     const provisionFn = vi.fn(async () => ({ id: STUDIO_ID, state: "running" }) as StudioStatus);
-    const recordStudioFn = vi.fn(async () => {});
-    const storage = fakeCombinedStorage();
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const result = await recycleWithSync(syncDeps, storage, STUDIO_ID, destroy, awaitReady, provisionFn, recordStudioFn, CFG, noopResolveMemoryRepo, noopCommit);
-      expect(destroy).toHaveBeenCalledTimes(1); // recycle proceeded despite rescue-push's throw
-      expect(awaitReady).toHaveBeenCalledTimes(1);
-      expect(provisionFn).toHaveBeenCalledWith(CFG);
+      const syncedAt = new Date(new Date(`${TODAY}T12:00:00.000Z`).getTime() - 63 * 60_000);
+      const message = await recycleWithSync(
+        syncDeps, fakeCombinedStorage(), STUDIO_ID, destroy, awaitReady, provisionFn, vi.fn(async () => {}), CFG,
+        noopResolveMemoryRepo, noopCommit, { discardUnsynced: false, lastSyncedAt: async () => syncedAt },
+      ).then(() => "", (err: Error) => err.message);
+      expect(message.startsWith(RECYCLE_REFUSED_PREFIX)).toBe(true);
+      expect(message).toContain("could not confirm");
+      // Same price the probe refusal quotes: the last synced snapshot's age.
+      expect(message).toContain("(1h 3m old)");
+      expect(message).toContain(`fleet recycle ${STUDIO_ID} --discard-unsynced`);
+      expect(destroy).not.toHaveBeenCalled();
+      expect(awaitReady).not.toHaveBeenCalled();
+      expect(provisionFn).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("#62: a throwing rescue-push + --discard-unsynced → recycle proceeds, row names the unconfirmed rescue", async () => {
+    const syncDeps = fakeSyncDeps({ rescue: null });
+    const destroy = vi.fn(async () => {});
+    const provisionFn = vi.fn(async () => ({ id: STUDIO_ID, state: "running" }) as StudioStatus);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await recycleWithSync(
+        syncDeps, fakeCombinedStorage(), STUDIO_ID, destroy, async () => {}, provisionFn, vi.fn(async () => {}), CFG,
+        noopResolveMemoryRepo, noopCommit, { discardUnsynced: true, lastSyncedAt: async () => undefined },
+      );
+      expect(destroy).toHaveBeenCalledTimes(1);
       expect(result.state).toBe("running");
-      expect(errSpy).toHaveBeenCalled(); // the rescue failure was logged, not silently dropped
+      expect(result.error).toContain("unconfirmed rescue-push");
+      expect(result.error).toContain("--discard-unsynced");
     } finally {
       errSpy.mockRestore();
     }

@@ -14,7 +14,7 @@ import {
   ensureSpawnToken, recycleWithSync, checkAndRecordReadiness,
   checkProvisionedGated, wakeStudioWith,
   provisionWithFreshVerdict, SPAWN_TOKEN_KEY, RECYCLE_REFUSED_PREFIX,
-  statusDetailWithStorage, clearSessionGuard,
+  statusDetailWithStorage, clearSessionGuard, RESCUE_CLEAN,
   type SpawnTokenStorage, type ProvisionedVerdict,
 } from "../src/studio/do";
 import { runDestroy, type DestroyOutcome } from "../src/studio/destroy";
@@ -242,6 +242,9 @@ function fakeStudioNamespace(
         if (verdict === null) throw new Error("Session 'sandbox-default' shell exited (exit code: 0)");
         return { code: 0, stdout: verdict === undefined ? PROVISIONED_OK : (verdict.stdout ?? ""), stderr: "" };
       }
+      // Issue #62: rescue-push answers a real verdict — an unparseable one is
+      // now an UNCONFIRMED rescue, which refuses destroy/recycle.
+      if (cmd.includes("status --porcelain")) return { code: 0, stdout: RESCUE_CLEAN, stderr: "" };
       return { code: 0, stdout: cmd.startsWith("mkdir -p") ? "0\n1758067200" : "", stderr: "" }; // #202: size + tar-start watermark
     },
     r2Put: async () => {},

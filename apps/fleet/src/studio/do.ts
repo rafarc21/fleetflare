@@ -77,7 +77,7 @@ import {
   getObserved, mergeObserved, isIncarnationToken, computeAdoptedVerdict,
   type Observed, type ObservedSession, type ObservedStorage, type BringupVia,
 } from "./observed";
-import { recycleRefusal, recycleRescueFailedRefusal, recycleCostLine, RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
+import { recycleRefusal, recycleRescueFailedRefusal, recycleRescueUnconfirmedRefusal, recycleCostLine, RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
 import { sessionLatestKey } from "./archive";
 export { RECYCLE_REFUSED_PREFIX };
 // Issue #38: the bring-up log's Worker-side half. Deliberately its own import
@@ -1427,17 +1427,23 @@ export async function recycleWithSync(
     }
   } catch (err) {
     // Issue #16: a CONFIRMED rescue failure refuses, exactly like destroy.ts.
-    // Every other throw (a killed exec, the shell dying) means "cannot tell"
-    // and stays best-effort — destroy.ts's posture for those, unchanged.
+    // Issue #62: so does an UNCONFIRMED one (a killed exec, the shell dying,
+    // the deadline): "cannot tell" is unknown state, not "nothing lost".
+    // `--discard-unsynced` is the stated way past either.
     if (err instanceof RescuePushFailedError && err.worktrees.length > 0) rescueReport = formatRescueReport(err.worktrees);
-    if (err instanceof RescuePushFailedError && !guard.discardUnsynced) {
-      const perWorktree = rescueReport ? ` Worktrees: ${rescueReport.join("; ")}.` : "";
-      throw new Error(recycleRescueFailedRefusal(idFallback, redactSecrets(err.message) + perWorktree));
+    const reason = redactSecrets(err instanceof Error ? err.message : String(err));
+    if (!guard.discardUnsynced) {
+      if (err instanceof RescuePushFailedError) {
+        const perWorktree = rescueReport ? ` Worktrees: ${rescueReport.join("; ")}.` : "";
+        throw new Error(recycleRescueFailedRefusal(idFallback, reason + perWorktree));
+      }
+      const lastSyncedAt = await guard.lastSyncedAt().catch(() => undefined);
+      throw new Error(recycleRescueUnconfirmedRefusal(idFallback, reason, lastSyncedAt, syncDeps.now()));
     }
-    console.error(`studio ${idFallback}: pre-destroy rescue-push failed, continuing`, err);
-    if (err instanceof RescuePushFailedError) {
-      rescueDiscarded = `recycled with a confirmed rescue-push failure: ${redactSecrets(err.message)} (--discard-unsynced)`;
-    }
+    console.error(`studio ${idFallback}: pre-destroy rescue-push failed, continuing (--discard-unsynced)`, err);
+    rescueDiscarded = err instanceof RescuePushFailedError
+      ? `recycled with a confirmed rescue-push failure: ${reason} (--discard-unsynced)`
+      : `recycled with an unconfirmed rescue-push (${reason}) (--discard-unsynced)`;
   }
   if (alive) try {
     // #367 round 2: `storage` (StudioStorage & SessionSyncStorage) does not

@@ -214,6 +214,8 @@ describe("recycle guard — a failed probe refuses instead of silently discardin
         execCalls.push(cmd);
         if (cmd.startsWith("mkdir -p")) return { code: 0, stdout: "0\n1758067200", stderr: "" }; // #202: size + tar-start watermark
         if (cmd === provisionedCheckCmd(CFG.repo)) return { code: 0, stdout: PROVISIONED_OK, stderr: "" };
+        // Issue #62: a real rescue verdict (an unparseable one refuses now).
+        if (cmd.includes("status --porcelain")) return { code: 0, stdout: "RESCUE_CLEAN", stderr: "" };
         return { code: 0, stdout: "ok", stderr: "" };
       },
     };

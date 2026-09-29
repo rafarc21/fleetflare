@@ -180,6 +180,8 @@ function fakeDeps(candidate: Uint8Array, opts: { r2?: Map<string, Uint8Array>; n
     deleted,
     exec: async (cmd: string) => {
       if (cmd.startsWith("mkdir -p")) return { code: 0, stdout: `${candidate.length}\n1758067200`, stderr: "" }; // #202: size + tar-start watermark
+      // Issue #62: a real rescue verdict — unparseable output is an UNCONFIRMED rescue now, which refuses.
+      if (cmd.includes("status --porcelain")) return { code: 0, stdout: "RESCUE_CLEAN", stderr: "" };
       return { code: 0, stdout: b64(candidate), stderr: "" };
     },
     r2Put: async (key, bytes) => {
