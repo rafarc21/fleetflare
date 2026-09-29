@@ -91,6 +91,9 @@ describe("runResume — the org-chart gate", () => {
   it('400s instance "next" — a resume names the studio it wakes', async () => {
     const res = await runResume(deps([status()]), MAESTRO, { role: "web-studio", instance: "next" });
     expect(res.status).toBe(400);
+    // Said in words: without the explicit refusal it still 400s ("bad
+    // instance"), but the caller would not learn why.
+    expect(await res.text()).toContain('never "next"');
   });
 
   it("404s an instance that does not exist — resume never creates", async () => {
