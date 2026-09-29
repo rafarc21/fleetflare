@@ -150,6 +150,23 @@ test("--dry-run with nothing running says so and still exits 0", async () => {
   expect(result.exitCode).toBe(0);
 });
 
+// Issue #40 item 3: a dry run rescued nothing, so it must never print a
+// deploy verdict. A "SAFE" line there would read as a green light for
+// `fleet rescue-all --dry-run && deploy`. Studios whose rescue WOULD fail
+// prove the dry run neither runs them nor judges them.
+test("--dry-run prints no pre-deploy verdict (SAFE or UNSAFE) and nothing on stderr, even when rescues would fail", async () => {
+  const { deps, rescueCalls, lines, errs } = fakeDeps({
+    studios: [studio("websites--a"), studio("websites--b")],
+    rescueStudio: async () => ({ ok: false, error: "push rejected" }),
+  });
+  const result = await runRescueAll(flags({ dryRun: true }), deps);
+  expect(result.exitCode).toBe(0);
+  expect(rescueCalls).toEqual([]);
+  expect(errs).toEqual([]);
+  expect([...lines, ...errs].filter((l) => /pre-deploy gate|SAFE|do NOT deploy/.test(l))).toEqual([]);
+  expect(lines.filter((l) => l.startsWith("would rescue"))).toHaveLength(2);
+});
+
 // ---------------------------------------------------------------------------
 // Per-studio reporting: clean vs rescued vs failed.
 

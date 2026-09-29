@@ -727,7 +727,11 @@ checks target (issue #36): `rescue-all` rescues the fleet
 (plus `--env`/`-e`, `CLOUDFLARE_ENV`, `--name`). `scripts/deploy-target.ts`
 reads the config with the pinned wrangler's own reader. The credentials host
 must EXACTLY equal one of that Worker's route/custom-domain hosts (a wildcard
-route proves nothing), or `<worker-name>.<subdomain>.workers.dev`. Mismatch
+route proves nothing), or `<worker-name>.<subdomain>.workers.dev` where
+`<subdomain>` is the DEPLOYING account's own (issue #48: a read-only lookup
+via `wrangler whoami`/`wrangler auth token` and the Cloudflare API; needs
+network and a logged-in wrangler; set `CLOUDFLARE_ACCOUNT_ID` when the login
+sees several accounts). Mismatch
 refuses, naming both. Undeterminable target refuses too: no credentials,
 unknown env, a second `-c`/`--config`, `--cwd`, `--env-file`, inline short
 flags (`-e=prod`, `-eprod`; write `-e prod`), `WRANGLER_CI_OVERRIDE_NAME`, a
@@ -738,6 +742,19 @@ container app id names no Worker). To deploy another fleet, point
 `~/.fleet/credentials` at it first. Pass
 `--allow-unrescued` later only after reading the FAILED rows and accepting
 the loss of that work. Never call a bare `wrangler deploy`: it skips the gate.
+
+Issue #40: a Worker-only `deploy` does not need the flag. When rescue-all
+fails, `scripts/deploy-containers-changed.ts` builds each container image as
+wrangler will and compares it with the deployed container application
+(`wrangler containers list`/`info`, read-only): same registry digest and same
+`max_instances`/`instance_type` -> no container is replaced, the failure is a
+WARNING, the deploy proceeds. An image or settings change, a first deploy, or
+anything it cannot tell (no docker, offline, a container key it does not
+compare) stays refused. The probe needs docker and a logged-in wrangler; an
+image never pushed from this machine counts as changed. Every override
+(`--allow-unrescued`, or that Worker-only pass) appends one JSON line to
+`~/.fleet/deploy-overrides.jsonl`: time, command, target Worker, target
+check, rescue-all verdict, operator (git `user.name`, else `$USER`).
 
 ---
 

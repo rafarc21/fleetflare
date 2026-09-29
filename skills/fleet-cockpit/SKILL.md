@@ -445,6 +445,10 @@ Worker, no creds) needs it. Gate also refuses when wrangler's target Worker
 (config + `--env`/`CLOUDFLARE_ENV` + `--name`) is not the fleet
 `~/.fleet/credentials` names (issue #36) — else it rescues the wrong fleet
 and says SAFE. Deploying another fleet: point credentials at it first.
+A workers.dev creds host must be on the deploying account's subdomain
+(issue #48). Worker-only deploy (same image digest + container settings):
+rescue-all failure only WARNS (issue #40). Overrides logged to
+`~/.fleet/deploy-overrides.jsonl`.
 rescue-all commits and pushes
 every RUNNING AND DEGRADED studio's uncommitted work (the main checkout AND
 every member git worktree, each independently, each to its own
