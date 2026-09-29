@@ -1200,12 +1200,21 @@ async function cmdTaskNew(creds: Credentials, brief: TaskBriefArgs): Promise<voi
 }
 
 async function cmdTaskLs(
-  creds: Credentials, query: { milestone?: string; state?: string; assignedTo?: string },
+  creds: Credentials, query: { milestone?: string; state?: string; assignedTo?: string; repo?: string },
 ): Promise<void> {
-  const detected = await detectRepo();
-  reportRepo("fleet task ls", detected);
   const params = new URLSearchParams();
-  if (detected.slug) params.set("repo", detected.slug);
+  // Issue #63: --repo wins. Else the cwd's remote; with none and --studio,
+  // the Worker reads that studio's own repo (or refuses), never a guess.
+  if (query.repo !== undefined) {
+    console.error(`fleet task ls: target repo ${query.repo} (--repo, overriding CWD detection)`);
+    params.set("repo", query.repo);
+  } else {
+    const detected = await detectRepo();
+    if (detected.slug) console.error(`fleet task ls: target repo ${detected.slug} (from git remote origin)`);
+    else if (query.assignedTo !== undefined) console.error(`fleet task ls: ${detected.reason} — using ${query.assignedTo}'s own repo`);
+    else reportRepo("fleet task ls", detected);
+    if (detected.slug) params.set("repo", detected.slug);
+  }
   if (query.milestone !== undefined) params.set("milestone", query.milestone);
   if (query.state !== undefined) params.set("state", query.state);
   if (query.assignedTo !== undefined) params.set("assignedTo", query.assignedTo);

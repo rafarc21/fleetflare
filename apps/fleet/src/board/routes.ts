@@ -48,6 +48,7 @@ import { runRescueGc, type RescueBranch } from "../studio/rescue-gc";
 import { listStudios } from "../studio/registry";
 import { isSpawnTokenShaped, resolveSpawnParent, SPAWN_TOKEN_HEADER } from "../studio/spawn";
 import { parseStudioId } from "../studio/ids";
+import { repoIdSegment } from "../studio/repo";
 import type { StudioStatus } from "../studio/types";
 import { JUNIOR_LABEL, TERMINAL_TASK_STATES, type BoardTask } from "./types";
 import { guardBoardApi, leakGuard, LeakGateError, type LeakGuardDeps } from "./leak";
@@ -614,6 +615,39 @@ async function assignRepoPreflight(
   return null;
 }
 
+/**
+ * Issue #63: the board `fleet task ls --studio <id>` reads. The CLI sends the
+ * cwd's git remote, or nothing outside a checkout -- and nothing used to mean
+ * the fleet default repo, silently the wrong board for a studio on another
+ * repo. The studio's registry row decides: no repo sent = its repo; a repo
+ * sent that is not its repo = refused. With no row to ask, the id's own repo
+ * segment must match the board's, else refused -- never a guessed board.
+ */
+async function lsRepoForStudio(
+  deps: AssignWakeDeps, studioId: string, requested: string | undefined, defaultSlug: string,
+): Promise<{ ok: true; repo: string | undefined } | { ok: false; reason: string }> {
+  let row: { state: string; repoSlug: string | null } | null = null;
+  try {
+    row = await deps.studioState(studioId);
+  } catch { /* no row to ask: the id check below decides */ }
+  if (requested === undefined && row?.repoSlug) return { ok: true, repo: row.repoSlug };
+  const target = requested ?? defaultSlug;
+  if (row?.repoSlug) {
+    const check = await checkAssignRepo(deps, studioId, target);
+    return check.ok ? { ok: true, repo: requested } : { ok: false, reason: check.reason };
+  }
+  const idSegment = parseStudioId(studioId)?.repo;
+  const boardSegment = repoIdSegment(target.split("/").pop() ?? "");
+  if (idSegment !== undefined && idSegment !== boardSegment) {
+    return {
+      ok: false,
+      reason: `${studioId} is not a studio of ${target} (its id names repo "${idSegment}") and the fleet has no ` +
+        "registry row to say which repo it is -- run from that repo's checkout, or pass --repo owner/name",
+    };
+  }
+  return { ok: true, repo: requested };
+}
+
 export async function handleBoard(
   req: Request, env: Env,
   api: BoardApi = githubBoardApi(env),
@@ -665,7 +699,14 @@ export async function handleBoard(
   // cwd's git remote and sends — as a query param on reads, in the body on
   // writes. Absent means the fleet's own repo, and resolveBoardRepo owns
   // every decision about it, including whether the fleet can reach it.
-  const requested = method === "POST" ? body.repo : url.searchParams.get("repo") ?? undefined;
+  let requested = method === "POST" ? body.repo : url.searchParams.get("repo") ?? undefined;
+  // Issue #63: a listing filtered to one studio reads THAT studio's board.
+  const lsStudio = method === "GET" && number === null ? url.searchParams.get("assignedTo") : null;
+  if (lsStudio !== null && parseStudioId(lsStudio)) {
+    const own = await lsRepoForStudio(assignWake, lsStudio, requested as string | undefined, env.AGENT_REPO);
+    if (!own.ok) return new Response(own.reason, { status: 409 });
+    requested = own.repo;
+  }
   const repo = await resolveBoardRepo({ reachRepo: reach }, {
     requested, defaultSlug: env.AGENT_REPO,
   });
