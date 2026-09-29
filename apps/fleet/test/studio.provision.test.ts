@@ -825,6 +825,39 @@ describe("runProvision wiring — rescue-branch discovery runs after the clone, 
     expect(discover!.env).toEqual({ FLEET_RESCUE_TOKEN: "fake-token-value" });
   });
 
+  // PR #42 review: rescue and discovery must share ONE decision. StudioDO
+  // cannot be constructed here (see studio.backup-guard.test.ts's #94 block),
+  // so the wiring is source-pinned: one resolveRescueTarget call site, and
+  // both ports route through it. Repointing either one fails this test.
+  it("do.ts: rescue (syncDeps) and discovery (deps) both route through the one rescueTarget decision", () => {
+    const src: string = (env as unknown as { TEST_STUDIO_DO_SRC: string }).TEST_STUDIO_DO_SRC;
+    const body = (sig: string) => {
+      const start = src.indexOf(sig);
+      expect(start).toBeGreaterThan(-1);
+      return src.slice(start, src.indexOf("\n  }", start));
+    };
+    expect(src.split("resolveRescueTarget(").length - 1).toBe(1);
+    expect(body("  private rescueTarget(")).toContain("resolveRescueTarget(");
+    expect(body("  private deps(): ProvisionDeps {"))
+      .toContain(`rescueTarget: (slug: string) => this.rescueTarget(async () => slug, "discovery"),`);
+    expect(body("  private syncDeps("))
+      .toContain("rescueTarget: () => this.rescueTarget(() => this.workRepoSlug(null)),");
+  });
+
+  it("a stalled-origin skip line on discovery's stderr is logged by the Worker too", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const skipped = "studio-bringup: rescue discovery skipped (could not list origin's branches into /workspace/.fleet/remote-branches.txt)";
+      const deps = dispatchingDeps([], (cmd) =>
+        cmd.includes("ls-remote --heads origin") ? { code: 0, stdout: "", stderr: skipped } : undefined);
+      const status = await provisionWithStorage(deps, fakeStorage(), { repo: "websites", role: "scratch" }, REPO_SLUG);
+      expect(status.state).toBe("running");
+      expect(errSpy.mock.calls.some((args) => args.join(" ").includes(skipped))).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
   it("deps.rescueTarget throwing falls back to origin-only discovery; provisioning still lands 'running'", async () => {
     const cmds: string[] = [];
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});

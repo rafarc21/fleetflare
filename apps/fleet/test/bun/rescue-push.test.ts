@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { createServer, type Server, type Socket } from "node:net";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -2195,6 +2196,10 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
       expect(sh(`git -C ${fresh} rev-parse refs/heads/${name}`).out).toBe(sh(`git -C ${origin} rev-parse ${ref}`).out);
       expect(sh(`git -C ${fresh} rev-parse refs/heads/${name}-rescue-remote`).out).toBe(sh(`git -C ${priv} rev-parse ${ref}`).out);
       expect(r.err).toContain(`${name}-rescue-remote`);
+      // PR #42 review: the local branch may be the lead's own, not origin's;
+      // the line names only what discovery actually knows.
+      expect(r.err).toContain(`local branch ${name} already exists at a different commit`);
+      expect(r.err).not.toContain("exists on origin AND");
     });
 
     test("same ref on both remotes, same commit: fetched once, no duplicate branch", () => {
@@ -2233,6 +2238,71 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
 
       expect(r.code).toBe(0);
       expect(sh(`git -C ${fresh} show ${name}:notes.md`).out).toBe("shallow work");
+    });
+
+    /**
+     * PR #42 review (same class as the #14 review): a server that accepts
+     * and never answers held discovery -- and the provision -- to the 600 s
+     * exec deadline, and the WARNING relay never ran. Every discovery git
+     * call now runs under `timeout -k`. The stalled server accepts, reads,
+     * never writes; the kernel completes the handshake from the listen
+     * backlog, so git stalls even while spawnSync blocks this event loop.
+     * spawnSync's own 60 s timeout keeps a regression a failure, not a hang.
+     */
+    describe("a stalled remote never holds provision past the discovery bound", () => {
+      let server: Server;
+      const sockets: Socket[] = [];
+      let stalled = "";
+      beforeAll(async () => {
+        server = createServer((sock) => {
+          sockets.push(sock);
+          sock.on("data", () => {});
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const addr = server.address();
+        if (!addr || typeof addr === "string") throw new Error("stalled server has no port");
+        stalled = `http://127.0.0.1:${addr.port}/rescue.git`;
+      });
+      afterAll(() => {
+        for (const s of sockets) s.destroy();
+        server.close();
+      });
+
+      function shBounded(cmd: string): { code: number; err: string; ms: number } {
+        const t0 = Date.now();
+        const r = Bun.spawnSync({ cmd: ["bash", "-c", cmd], cwd: dir, stdout: "pipe", stderr: "pipe", timeout: 60_000,
+          env: { ...process.env, PATH: BASE_PATH } });
+        return { code: r.exitCode ?? -1, err: r.stderr.toString(), ms: Date.now() - t0 };
+      }
+
+      test("stalled private remote: ends within the bound, WARNING, origin refs still fetched", () => {
+        writeFileSync(join(checkout, "notes.md"), "origin work\n");
+        expect(rescue()).toContain(RESCUE_PUSHED_PREFIX);
+        const originName = branchOf(rescueRefs()[0]);
+        const fresh = freshClone("fresh-stalled-priv");
+
+        const r = shBounded(discoverRescueRefsCmd(fresh, STUDIO, listFile(), { remoteUrl: stalled, realGit: REAL_GIT }, 2));
+
+        expect(r.code).toBe(0);
+        expect(r.ms).toBeLessThan(20_000);
+        expect(sh(`git -C ${fresh} rev-parse --verify refs/heads/${originName}`).code).toBe(0);
+        expect(r.err).toContain("WARNING: rescue discovery could not list the private rescue remote");
+      }, 70_000);
+
+      test("stalled origin: ends within the bound, says so, private refs still fetched", () => {
+        writeFileSync(join(checkout, "notes.md"), "private work\n");
+        expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
+        const name = branchOf(privRescueRef());
+        const fresh = freshClone("fresh-stalled-origin");
+        sh(`git -C ${fresh} remote set-url origin ${stalled}`);
+
+        const r = shBounded(discoverRescueRefsCmd(fresh, STUDIO, listFile(), { remoteUrl: priv, realGit: REAL_GIT }, 2));
+
+        expect(r.code).toBe(0);
+        expect(r.ms).toBeLessThan(20_000);
+        expect(r.err).toContain("rescue discovery skipped");
+        expect(sh(`git -C ${fresh} rev-parse --verify refs/heads/${name}`).code).toBe(0);
+      }, 70_000);
     });
 
     test("FLEET_RESCUE_TOKEN rides a credential helper on the private list + fetch, never argv", () => {

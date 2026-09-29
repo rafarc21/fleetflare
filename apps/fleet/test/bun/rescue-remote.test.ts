@@ -77,3 +77,44 @@ describe("resolveRescueTarget", () => {
     expect(logged()).toMatch(/503 visibility.*origin.*leak-gated/);
   });
 });
+
+// PR #42 review: provision's discovery resolves the same target every
+// provision. The expected cases (unset, private work repo) are silent there;
+// the push-path wording ("rescue pushes go to origin") would be false noise.
+// Real failures (visibility, mint) still log, worded for discovery.
+describe("resolveRescueTarget, purpose discovery", () => {
+  test("unset: origin, nothing logged", async () => {
+    expect(await resolveRescueTarget({}, async () => "x", PUBLIC, "discovery")).toEqual({});
+    expect(logged()).toBe("");
+  });
+
+  test("private work repo: origin, no mint, nothing logged", async () => {
+    let minted = false;
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" },
+      async () => { minted = true; return "x"; }, async () => true, "discovery");
+    expect(t).toEqual({});
+    expect(minted).toBe(false);
+    expect(logged()).toBe("");
+  });
+
+  test("visibility check throws: origin, logged as discovery, never as a rescue push", async () => {
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" },
+      async () => "x", async () => { throw new Error("503 visibility"); }, "discovery");
+    expect(t).toEqual({});
+    expect(logged()).toMatch(/rescue discovery: .*503 visibility.*origin only/);
+    expect(logged()).not.toContain("rescue pushes");
+  });
+
+  test("mint fails: origin, logged as discovery, never as a rescue push", async () => {
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" },
+      async () => { throw new Error("422 nope"); }, PUBLIC, "discovery");
+    expect(t).toEqual({});
+    expect(logged()).toMatch(/rescue discovery: .*422 nope.*origin only/);
+    expect(logged()).not.toContain("rescue pushes");
+  });
+
+  test("public work repo: same target as the push path", async () => {
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => "ghs_fake", PUBLIC, "discovery");
+    expect(t).toEqual({ remoteUrl: "https://github.com/acme/rescue-vault.git", env: { [RESCUE_TOKEN_ENV]: "ghs_fake" } });
+  });
+});
