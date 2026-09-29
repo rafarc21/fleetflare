@@ -105,13 +105,13 @@ export interface Env {
    */
   FLEET_RESCUE_REMOTE?: string;
   /**
-   * Issue #7, optional, NOT a secret: `off` turns the write proxy off -- every
-   * studio gets its pre-#7 WRITE credential again. Anything else (unset
-   * included) = on: a studio on a public (or unknown) work repo holds a
-   * read-only credential and pushes/gh-writes through /fleet/git and
-   * /fleet/gh. See src/write-proxy/mode.ts.
+   * Issue #7, optional, NOT a secret: the work repos (`owner/name`, comma
+   * separated) whose studios hold a read-only credential and push/gh-write
+   * through /fleet/git and /fleet/gh. Unset = off everywhere: a deploy
+   * changes nothing until the operator lists a repo and restarts its
+   * studios. See src/write-proxy/mode.ts.
    */
-  FLEET_WRITE_PROXY?: string;
+  FLEET_WRITE_PROXY_REPOS?: string;
   /**
    * Issue #7, PAT fleets only: a read-only fine-grained PAT handed to studios
    * in proxy mode. GITHUB_READ_TOKEN_<OWNER> (same naming as

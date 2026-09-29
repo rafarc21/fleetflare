@@ -6,6 +6,7 @@ import {
   ensureSpawnToken, loadOrMintSpawnToken, SPAWN_TOKEN_KEY, type SpawnTokenStorage,
 } from "../src/studio/do";
 import { hashSpawnToken } from "../src/studio/org";
+import { writeProxyConfigCmd } from "../src/write-proxy/container-config";
 import {
   provisionWithStorage, restartWithStorage, STATUS_KEY, ROLE_ENV_KEY,
   type ProvisionDeps, type StudioStorage, type RoleEnv,
@@ -202,6 +203,53 @@ describe("runRefreshCredential", () => {
     const result = await runRefreshCredential(deps);
     expect(result).toEqual({ ok: true, lastRefresh: NOW_ISO });
     expect(deps.sbExec).toHaveBeenCalledWith(credentialClearCmd());
+  });
+
+  // #13 review, HIGH: the credential refresh (every 50 min) must never leave
+  // a studio with a read-only credential and no proxy config. The mode is
+  // resolved ONCE; its git config goes in first; a failed proxy config means
+  // the credential is not swapped at all.
+  describe("write proxy mode (issue #7)", () => {
+    const URL = "https://fleet.example.workers.dev";
+
+    it("proxy: config exec'd BEFORE the credential, mint told the mode", async () => {
+      const calls: string[] = [];
+      const deps = fakeRefreshDeps({
+        writeProxy: { workerUrl: URL, mode: vi.fn(async () => "proxy" as const) },
+        mintToken: vi.fn(async () => "ghs_read"),
+        sbExec: vi.fn(async (cmd: string) => { calls.push(cmd); return { code: 0, stdout: "", stderr: "" }; }),
+      });
+      expect((await runRefreshCredential(deps)).ok).toBe(true);
+      expect(calls).toEqual([writeProxyConfigCmd("proxy", URL), credentialWriteCmd()]);
+      expect(deps.mintToken).toHaveBeenCalledWith("proxy");
+    });
+
+    it("proxy config fails: refresh fails, credential NOT swapped, nothing minted", async () => {
+      const calls: string[] = [];
+      const deps = fakeRefreshDeps({
+        writeProxy: { workerUrl: URL, mode: vi.fn(async () => "proxy" as const) },
+        sbExec: vi.fn(async (cmd: string) => {
+          calls.push(cmd);
+          return cmd === writeProxyConfigCmd("proxy", URL) ? { code: 1, stdout: "", stderr: "boom" } : { code: 0, stdout: "", stderr: "" };
+        }),
+      });
+      const result = await runRefreshCredential(deps);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("write proxy config failed");
+      expect(calls).toEqual([writeProxyConfigCmd("proxy", URL)]);
+      expect(deps.mintToken).not.toHaveBeenCalled();
+    });
+
+    it("direct: proxy keys removed, then the credential as before", async () => {
+      const calls: string[] = [];
+      const deps = fakeRefreshDeps({
+        writeProxy: { workerUrl: URL, mode: vi.fn(async () => "direct" as const) },
+        sbExec: vi.fn(async (cmd: string) => { calls.push(cmd); return { code: 0, stdout: "", stderr: "" }; }),
+      });
+      expect((await runRefreshCredential(deps)).ok).toBe(true);
+      expect(calls).toEqual([writeProxyConfigCmd("direct", URL), credentialWriteCmd()]);
+      expect(deps.mintToken).toHaveBeenCalledWith("direct");
+    });
   });
 
   it("a non-zero sbExec exit becomes ok:false with a stderr-derived error", async () => {

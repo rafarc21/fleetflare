@@ -100,7 +100,8 @@ export { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, st
 
 import { mintSpawnToken, hashSpawnToken } from "./org";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
-import { containerToken, studioCredential, writeModeFor } from "../write-proxy/mode";
+import { containerToken, resolveWriteMode, studioCredential, writeModeFor, type WriteMode } from "../write-proxy/mode";
+import { writeProxyConfigCmd } from "../write-proxy/container-config";
 import {
   fetchRepoFile, createRepoFile, upsertRepoFile, listOpenPullNumbers, repoIsPrivate,
   // Issue #249 (PR4b): the survival re-brief's three GitHub reads, all from
@@ -191,8 +192,12 @@ export const SHIP_TRANSCRIPT_SECONDS = 30;
 
 export interface RefreshDeps {
   /** Issue #7: null = no credential for this studio (proxy mode, no read
-   *  token) -- the container's credential files are cleared instead. */
-  mintToken: () => Promise<string | null>;
+   *  token) -- the container's credential files are cleared instead. Gets
+   *  the mode `writeProxy` resolved (undefined when that port is absent). */
+  mintToken: (mode?: WriteMode) => Promise<string | null>;
+  /** Issue #7 (#13 review): the write mode, resolved once per refresh, and
+   *  the Worker URL its git config points at. Absent = no proxy step. */
+  writeProxy?: { workerUrl: string; mode: () => Promise<WriteMode> };
   // `env`: the credential write's token rides here (#110 review), never in `cmd`.
   sbExec: (cmd: string, env?: Record<string, string>) => Promise<{ code: number; stdout: string; stderr: string }>;
   recordStudio: (status: StudioStatus) => Promise<void>;
@@ -226,7 +231,18 @@ export async function runRefreshCredential(
   deps: RefreshDeps,
 ): Promise<{ ok: true; lastRefresh: string } | { ok: false; error: string }> {
   try {
-    const token = await deps.mintToken();
+    // Issue #7: git config for the mode FIRST. A studio must never hold a
+    // read-only credential without the proxy config that makes pushes work:
+    // a failed proxy config leaves the credential as it was.
+    let mode: WriteMode | undefined;
+    if (deps.writeProxy) {
+      mode = await deps.writeProxy.mode();
+      const cfg = await deps.sbExec(writeProxyConfigCmd(mode, deps.writeProxy.workerUrl));
+      if (cfg.code !== 0 && mode === "proxy") {
+        throw new Error(`write proxy config failed (${cfg.code}): ${cfg.stderr.slice(0, 500)} -- credential not swapped`);
+      }
+    }
+    const token = await deps.mintToken(mode);
     const res = token === null
       ? await deps.sbExec(credentialClearCmd())
       : await deps.sbExec(credentialWriteCmd(), tokenEnv(token));
@@ -4443,7 +4459,7 @@ export class StudioDO extends Sandbox<Env> {
       memoryToken: async () => {
         if (opsRepo === null) throw new Error("FLEET_OPS_REPO is unset -- no memory token to mint");
         // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts).
-        const token = await containerToken(this.env, opsRepo, { contents: "read" });
+        const token = await containerToken(this.env, await this.workRepoSlug(null), opsRepo, { contents: "read" });
         if (token === null) throw new Error("no read-only token for the ops repo -- set GITHUB_READ_TOKEN");
         return token;
       },
@@ -4531,7 +4547,7 @@ export class StudioDO extends Sandbox<Env> {
       writeBlueprintCredential: async (blueprintRepo: string) => {
         try {
           // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts).
-          const token = await containerToken(this.env, blueprintRepo, { contents: "read" });
+          const token = await containerToken(this.env, await this.workRepoSlug(null), blueprintRepo, { contents: "read" });
           if (token === null) {
             return { ok: false as const, error: "no read-only token for the blueprint repo -- set GITHUB_READ_TOKEN (a public blueprint still clones anonymously)" };
           }
@@ -5013,9 +5029,12 @@ export class StudioDO extends Sandbox<Env> {
     return {
       // Issue #7: read-only unless the work repo is confirmed private (or the
       // operator switched the write proxy off). See write-proxy/mode.ts.
-      mintToken: () => studioCredential(this.env, workRepoSlug, {
-        isPrivate: async (repo) => repoIsPrivate(await mintRepoToken(this.env, repo, { permissions: { contents: "read" } }), repo),
-      }),
+      mintToken: (mode?: WriteMode) => studioCredential(this.env, workRepoSlug, mode ?? "direct"),
+      writeProxy: {
+        workerUrl: this.env.WORKER_PUBLIC_URL,
+        mode: () => resolveWriteMode(this.env, workRepoSlug,
+          async (repo) => repoIsPrivate(await mintRepoToken(this.env, repo, { permissions: { contents: "read" } }), repo)),
+      },
       sbExec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.refresh, env }),
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
       notify: async (message: string) => {
@@ -5107,7 +5126,8 @@ export class StudioDO extends Sandbox<Env> {
     // Issue #7: never the fleet's write PAT (containerToken); PAT fleets bring
     // a rescue-only token. And only for a rescue repo confirmed private.
     return resolveRescueTarget(this.env,
-      async (repo) => (await containerToken(this.env, repo, { contents: "write" })) ?? (this.env.FLEET_RESCUE_GITHUB_TOKEN || null),
+      async (repo) => (await containerToken(this.env, await workRepoSlug(), repo, { contents: "write" }))
+        ?? (this.env.FLEET_RESCUE_GITHUB_TOKEN || null),
       async () => {
         const slug = await workRepoSlug();
         return repoIsPrivate(await mintRepoToken(this.env, slug), slug);

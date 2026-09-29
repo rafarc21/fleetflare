@@ -9,14 +9,16 @@ import {
 
 const REPO = "example-org/demo";
 const envOf = (vars: Record<string, string>) => vars as unknown as Env;
-const APP = { GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k", GITHUB_INSTALLATION_ID: "2" };
+// #13 review: off unless the work repo is listed. Every fixture below lists REPO.
+const ON = { FLEET_WRITE_PROXY_REPOS: "example-org/demo" };
+const APP = { ...ON, GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k", GITHUB_INSTALLATION_ID: "2" };
 
 describe("writeProxyOn", () => {
-  it("is on unless FLEET_WRITE_PROXY is exactly off", () => {
-    expect(writeProxyOn({})).toBe(true);
-    expect(writeProxyOn({ FLEET_WRITE_PROXY: "" })).toBe(true);
-    expect(writeProxyOn({ FLEET_WRITE_PROXY: "on" })).toBe(true);
-    expect(writeProxyOn({ FLEET_WRITE_PROXY: "off" })).toBe(false);
+  it("is off unless the work repo is on FLEET_WRITE_PROXY_REPOS (deploy changes nothing)", () => {
+    expect(writeProxyOn({}, REPO)).toBe(false);
+    expect(writeProxyOn({ FLEET_WRITE_PROXY_REPOS: "" }, REPO)).toBe(false);
+    expect(writeProxyOn({ FLEET_WRITE_PROXY_REPOS: "example-org/other" }, REPO)).toBe(false);
+    expect(writeProxyOn({ FLEET_WRITE_PROXY_REPOS: "example-org/other, Example-Org/Demo" }, REPO)).toBe(true);
   });
 });
 
@@ -28,14 +30,14 @@ describe("resolveWriteMode", () => {
     expect(await resolveWriteMode(envOf(APP), REPO, async () => true)).toBe("direct");
   });
   it("confirmed private repo on a PAT = proxy: the PAT also writes the owner's public repos", async () => {
-    expect(await resolveWriteMode(envOf({ GITHUB_TOKEN: "w" }), REPO, async () => true)).toBe("proxy");
+    expect(await resolveWriteMode(envOf({ ...ON, GITHUB_TOKEN: "w" }), REPO, async () => true)).toBe("proxy");
   });
   it("a visibility lookup that throws reads as public = proxy (fail closed)", async () => {
     expect(await resolveWriteMode(envOf(APP), REPO, async () => { throw new Error("github down"); })).toBe("proxy");
   });
-  it("kill switch = direct without asking visibility", async () => {
+  it("repo not listed = direct without asking visibility", async () => {
     const isPrivate = vi.fn(async () => false);
-    expect(await resolveWriteMode(envOf({ ...APP, FLEET_WRITE_PROXY: "off" }), REPO, isPrivate)).toBe("direct");
+    expect(await resolveWriteMode(envOf({ ...APP, FLEET_WRITE_PROXY_REPOS: "" }), REPO, isPrivate)).toBe("direct");
     expect(isPrivate).not.toHaveBeenCalled();
   });
 });
@@ -66,29 +68,28 @@ describe("studioReadToken", () => {
 });
 
 describe("studioCredential", () => {
-  const env = envOf({ GITHUB_TOKEN: "write", GITHUB_READ_TOKEN: "read" });
+  const env = envOf({ ...ON, GITHUB_TOKEN: "write", GITHUB_READ_TOKEN: "read" });
 
-  it("direct mode (App, private repo) = the write credential, as before #7", async () => {
+  it("direct = the write credential, as before #7", async () => {
     const app = envOf(APP);
     const mint = vi.fn(async () => "write-minted");
-    expect(await studioCredential(app, REPO, { isPrivate: async () => true, mint })).toBe("write-minted");
+    expect(await studioCredential(app, REPO, "direct", mint)).toBe("write-minted");
     expect(mint).toHaveBeenCalledWith(app, REPO);
   });
 
-  it("proxy mode: a failed read mint = null (credential cleared), never a stale write token", async () => {
+  it("proxy: a failed read mint = null (credential cleared), never a stale write token", async () => {
     const mint = vi.fn(async () => { throw new Error("mint 500"); });
-    expect(await studioCredential(envOf(APP), REPO, { isPrivate: async () => false, mint })).toBeNull();
+    expect(await studioCredential(envOf(APP), REPO, "proxy", mint)).toBeNull();
   });
 
-  it("proxy mode = the read credential", async () => {
+  it("proxy = the read credential", async () => {
     const mint = vi.fn(async () => "write-minted");
-    expect(await studioCredential(env, REPO, { isPrivate: async () => false, mint })).toBe("read");
+    expect(await studioCredential(env, REPO, "proxy", mint)).toBe("read");
   });
 
-  it("proxy mode with no read token = null, never the write PAT", async () => {
+  it("proxy with no read token = null, never the write PAT", async () => {
     const mint = vi.fn(async () => "write-minted");
-    const bare = envOf({ GITHUB_TOKEN: "write" });
-    expect(await studioCredential(bare, REPO, { isPrivate: async () => false, mint })).toBeNull();
+    expect(await studioCredential(envOf({ ...ON, GITHUB_TOKEN: "write" }), REPO, "proxy", mint)).toBeNull();
   });
 });
 
@@ -99,25 +100,25 @@ describe("containerToken", () => {
   it("App: the repo-scoped mint, narrowed as asked", async () => {
     const mint = vi.fn(async () => "ghs_x");
     const app = envOf(APP);
-    expect(await containerToken(app, REPO, { contents: "read" }, mint)).toBe("ghs_x");
-    expect(mint).toHaveBeenCalledWith(app, REPO, { permissions: { contents: "read" } });
+    expect(await containerToken(app, REPO, "example-org/blueprint", { contents: "read" }, mint)).toBe("ghs_x");
+    expect(mint).toHaveBeenCalledWith(app, "example-org/blueprint", { permissions: { contents: "read" } });
   });
 
   it("PAT + read: the read PAT, else null -- never the write PAT", async () => {
     const mint = vi.fn(async () => "write");
-    expect(await containerToken(envOf({ GITHUB_TOKEN: "write", GITHUB_READ_TOKEN: "read" }), REPO, { contents: "read" }, mint)).toBe("read");
-    expect(await containerToken(envOf({ GITHUB_TOKEN: "write" }), REPO, { contents: "read" }, mint)).toBeNull();
+    expect(await containerToken(envOf({ ...ON, GITHUB_TOKEN: "write", GITHUB_READ_TOKEN: "read" }), REPO, REPO, { contents: "read" }, mint)).toBe("read");
+    expect(await containerToken(envOf({ ...ON, GITHUB_TOKEN: "write" }), REPO, REPO, { contents: "read" }, mint)).toBeNull();
     expect(mint).not.toHaveBeenCalled();
   });
 
   it("PAT + write: null (a PAT cannot be scoped to one repo)", async () => {
     const mint = vi.fn(async () => "write");
-    expect(await containerToken(envOf({ GITHUB_TOKEN: "write", GITHUB_READ_TOKEN: "read" }), REPO, { contents: "write" }, mint)).toBeNull();
+    expect(await containerToken(envOf({ ...ON, GITHUB_TOKEN: "write", GITHUB_READ_TOKEN: "read" }), REPO, REPO, { contents: "write" }, mint)).toBeNull();
   });
 
-  it("kill switch: the pre-#7 mint", async () => {
+  it("work repo not listed: the pre-#7 mint", async () => {
     const mint = vi.fn(async () => "write");
-    const off = envOf({ GITHUB_TOKEN: "write", FLEET_WRITE_PROXY: "off" });
-    expect(await containerToken(off, REPO, { contents: "read" }, mint)).toBe("write");
+    const off = envOf({ GITHUB_TOKEN: "write" });
+    expect(await containerToken(off, REPO, "example-org/blueprint", { contents: "read" }, mint)).toBe("write");
   });
 });

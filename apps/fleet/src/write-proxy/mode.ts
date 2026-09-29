@@ -7,10 +7,11 @@
  * token. The wrapper gate (#2) cannot be the last line: container root can
  * call the real git/gh/curl with any credential it holds.
  *
- * "direct": the pre-#7 write credential. Only for a work repo CONFIRMED
- * private (the leak gate is off there too, see provision.ts's applyLeakGate)
- * or with the operator kill switch FLEET_WRITE_PROXY=off. A visibility lookup
- * that fails reads as public: fail closed.
+ * "direct": the pre-#7 write credential. For every work repo NOT on
+ * FLEET_WRITE_PROXY_REPOS (off by default: a deploy changes nothing for a
+ * running studio until the operator lists its repo), and for a listed repo
+ * CONFIRMED private on the App. A visibility lookup that fails reads as
+ * public: fail closed.
  */
 import type { Env } from "../env";
 import { mintRepoToken, repoOwner, resolveRepoAuthKind } from "../github/auth";
@@ -22,8 +23,11 @@ export const STUDIO_READ_PERMISSIONS: Record<string, string> = {
   contents: "read", pull_requests: "read", issues: "read",
 };
 
-export function writeProxyOn(env: { FLEET_WRITE_PROXY?: string }): boolean {
-  return env.FLEET_WRITE_PROXY !== "off";
+/** On only for a work repo listed in FLEET_WRITE_PROXY_REPOS (comma or
+ *  whitespace separated `owner/name`, case-insensitive). Unset = off. */
+export function writeProxyOn(env: { FLEET_WRITE_PROXY_REPOS?: string }, workRepo: string): boolean {
+  const list = (env.FLEET_WRITE_PROXY_REPOS ?? "").split(/[\s,]+/).map((r) => r.trim().toLowerCase()).filter(Boolean);
+  return list.includes(workRepo.toLowerCase());
 }
 
 /**
@@ -33,14 +37,14 @@ export function writeProxyOn(env: { FLEET_WRITE_PROXY?: string }): boolean {
  * always proxied (the scan itself is skipped for a confirmed-private repo).
  */
 export function writeModeFor(env: Env, repo: string, isPrivate: boolean): WriteMode {
-  if (!writeProxyOn(env)) return "direct";
+  if (!writeProxyOn(env, repo)) return "direct";
   return isPrivate && resolveRepoAuthKind(env, repo) === "app" ? "direct" : "proxy";
 }
 
 export async function resolveWriteMode(
   env: Env, repo: string, isPrivate: (repo: string) => Promise<boolean>,
 ): Promise<WriteMode> {
-  if (!writeProxyOn(env)) return "direct";
+  if (!writeProxyOn(env, repo)) return "direct";
   let priv = false;
   try {
     priv = (await isPrivate(repo)) === true;
@@ -78,14 +82,13 @@ export async function studioReadToken(
   return null;
 }
 
-/** What do.ts's refresh writes into the container: null = clear it. In
- *  proxy mode a failed mint is null too, so a stale credential never lingers. */
+/** What do.ts's refresh writes into the container for an already-resolved
+ *  mode: null = clear it. In proxy mode a failed mint is null too, so a stale
+ *  credential never lingers. */
 export async function studioCredential(
-  env: Env, repo: string,
-  deps: { isPrivate: (repo: string) => Promise<boolean>; mint?: typeof mintRepoToken },
+  env: Env, repo: string, mode: WriteMode, mint: typeof mintRepoToken = mintRepoToken,
 ): Promise<string | null> {
-  const mint = deps.mint ?? mintRepoToken;
-  if (await resolveWriteMode(env, repo, deps.isPrivate) === "direct") return mint(env, repo);
+  if (mode === "direct") return mint(env, repo);
   try {
     return await studioReadToken(env, repo, mint);
   } catch (err) {
@@ -98,12 +101,14 @@ export async function studioCredential(
  * Any OTHER GitHub token bound for a container (blueprint clone, memory
  * clone, rescue push). App: the repo-scoped mint, narrowed to `permissions`.
  * PAT: `permissions` cannot narrow a PAT, so only a read request is served,
- * from the read PAT; anything else is null. Kill switch: the pre-#7 mint.
+ * from the read PAT; anything else is null. `workRepo` = the studio's own:
+ * not on FLEET_WRITE_PROXY_REPOS = the pre-#7 mint, unchanged.
  */
 export async function containerToken(
-  env: Env, repo: string, permissions: Record<string, string>, mint: typeof mintRepoToken = mintRepoToken,
+  env: Env, workRepo: string, repo: string, permissions: Record<string, string>,
+  mint: typeof mintRepoToken = mintRepoToken,
 ): Promise<string | null> {
-  if (!writeProxyOn(env) || resolveRepoAuthKind(env, repo) === "app") return mint(env, repo, { permissions });
+  if (!writeProxyOn(env, workRepo) || resolveRepoAuthKind(env, repo) === "app") return mint(env, repo, { permissions });
   if (!Object.values(permissions).every((v) => v === "read")) return null;
   return studioReadToken(env, repo, mint);
 }
