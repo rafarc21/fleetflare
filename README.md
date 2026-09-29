@@ -450,6 +450,33 @@ write is refused. A refusal names the pattern's line number, never the term.
 A studio whose work repo is private gets the gate switched off. See
 `apps/fleet/src/leak-gate.ts`.
 
+**Write proxy** (off by default, per repo; issue #7): the wrappers above run
+inside the container, and container root can step around them. For a work repo
+listed in `FLEET_WRITE_PROXY_REPOS` (a `vars` entry, comma-separated
+`owner/name`), its studios hold a **read-only** GitHub credential, and its writes go through the Worker instead: `git push` is
+rewritten (`pushInsteadOf`) to `/fleet/git/...`, which parses the pack, scans
+every ref name, commit, tag, file and path against the same denylist, and only
+then forwards the identical bytes to GitHub with the Worker's own token; `gh pr
+create|edit|ready|comment|review` and `gh issue create|edit|comment` go to
+`/fleet/gh` the same way. Other `gh` writes fail at GitHub (the token cannot
+write). Pushes over 16 MiB are refused; split them. Operator setup:
+
+- GitHub App fleets: nothing. The studio's token is narrowed to read at mint time.
+- PAT fleets: `scripts/deploy.sh secret put GITHUB_READ_TOKEN` with a read-only
+  fine-grained PAT (`GITHUB_READ_TOKEN_<OWNER>` per owner, like
+  `GITHUB_TOKEN_<OWNER>`). Without one, studios read their public repo
+  anonymously (low `gh` rate limits); the write PAT never reaches them.
+  The read PAT also needs read access to a private blueprint or ops repo.
+  PAT studios on a private repo are proxied too: a PAT can write every repo
+  of its owner. Rotate the write PAT once deployed: earlier studios held it.
+- Rescue to `FLEET_RESCUE_REMOTE` needs that repo to be private; PAT fleets
+  also set `FLEET_RESCUE_GITHUB_TOKEN` (a PAT that can write only that repo).
+  Otherwise rescue goes to origin through the proxy.
+- Restart running studios after deploying (new image, new credential).
+- Unset or unlisted = the pre-proxy behaviour: deploying changes nothing until
+  a repo is listed. Removing a repo hands its studios their write credential
+  again at the next refresh. See `apps/fleet/src/write-proxy/`.
+
 **`FLEET_RESCUE_REMOTE`** (optional, strongly recommended when your fork is
 public): the `owner/name` slug of a PRIVATE repo that receives rescue
 pushes (`fleet/rescue/*` and friends) instead of `origin`, for studios whose
@@ -733,7 +760,8 @@ fleet task ls               # the board for this repo
 fleet task new --title T --objective O --output F --boundaries B
 fleet provision <id>        # heal a half-built studio, same container
                             # --fresh-session (also on recycle): start claude without
-                            # --continue; old session moved aside, never deleted
+                            # --continue; old session moved aside, never deleted,
+                            # shipped to R2 sessions/<id>/aside/<dir>/ on its own
 fleet recycle <id>          # new container on the current image; rescues first
                             # refuses if rescue impossible; --discard-unsynced overrides
 fleet destroy <id>          # stop for good; rescues first; refuses if rescue impossible

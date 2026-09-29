@@ -524,6 +524,19 @@ describe("formatState (cli/readiness-format.ts)", () => {
 describe("formatSessionGuards (cli/readiness-format.ts) — issue #94", () => {
   const row = (id: string, sessionGuard?: StudioStatus["sessionGuard"]) => ({ id, sessionGuard }) as StudioStatus;
 
+  // PR #46 review (#37): an aside session not reaching R2 is on `fleet ls`.
+  it("one ASIDE line per unshipped aside dir; silent when asideShip is null", () => {
+    const lines = formatSessionGuards([
+      { id: "e--x", asideShip: null } as StudioStatus,
+      { id: "f--x", asideShip: { at: "2026-09-29T10:00:00.000Z", failed: [
+        { dir: "fleet-aside-1-k", reason: "aside dir 2000000000 bytes raw exceeds SESSION_ASIDE_RAW_MAX 1073741824; left on disk, not shipped" },
+      ] } } as StudioStatus,
+    ]);
+    expect(lines).toEqual([
+      "ASIDE f--x: NOT SHIPPED fleet-aside-1-k as of 2026-09-29T10:00:00.000Z (aside dir 2000000000 bytes raw exceeds SESSION_ASIDE_RAW_MAX 1073741824; left on disk, not shipped)",
+    ]);
+  });
+
   it("one line per studio whose last candidate was displaced; silent for the rest", () => {
     const lines = formatSessionGuards([
       row("a--x"),

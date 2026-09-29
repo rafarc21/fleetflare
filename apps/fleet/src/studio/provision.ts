@@ -38,6 +38,7 @@ import { redactSecrets } from "./redact";
 import { DenylistDialectError, LEAK_DENYLIST_PATH, OPS_DENYLIST_PATH, denylistFileContent, parseDenylist } from "../leak-gate";
 import { isDeadlineExit, KILL_GRACE_SECONDS } from "./exec-deadline";
 import { ghBlockCmd } from "./gh-wrapper";
+import { writeProxyConfigCmd } from "../write-proxy/container-config";
 import { STUDIO_TMUX, withStudioTmux } from "./tmux";
 // Issue #38: a restart has only the studio ID to work from, and the repo
 // segment of that id IS the checkout directory under /workspace. ids.ts
@@ -46,7 +47,7 @@ import { buildStudioId, parseStudioId } from "./ids";
 import { repoIdSegment } from "./repo";
 import { parseFleetJson, parseRoleFile, assertRoleInFleet, roleBringupEnv } from "./blueprint";
 import { parseStudioFile, validateMemberFile, studioBringupEnv, type Studio, type MemberFile } from "./studio-blueprint";
-import { restorePlan, sessionDailyPrefix, dailyKeeperKeys, type RestoreAction } from "./session-sync";
+import { restorePlan, sessionDailyPrefix, dailyKeeperKeys, SESSION_FORCE_KEY, type RestoreAction } from "./session-sync";
 import { sessionStats, newestMark, SessionArchiveFormatError, type SessionMark } from "./burn";
 import { MEMORY_INDEX_PATH } from "../memory/index-file";
 import { memoryIndexPrompt } from "../memory/prompt";
@@ -105,7 +106,7 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
   memoryRepo?: string | null;
   /** Issue #341: a token that can read `memoryRepo` (usually private). Rides
    *  the clone's exec env only. */
-  memoryToken?: () => Promise<string>;
+  memoryToken?: (workRepoSlug: string) => Promise<string>;
   /**
    * Issue #330 round 2: the resolved `FLEET_OPS_REPO` slug (resolveOpsRepo's
    * own result), or `null`/absent when unset — `resolveBringupEnv` cannot
@@ -216,7 +217,7 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
    * happens not to need one. do.ts's real `deps()` wires it to
    * blueprintCredentialWriteCmd + mintRepoToken.
    */
-  writeBlueprintCredential?: (blueprintRepo: string, id: string) =>
+  writeBlueprintCredential?: (blueprintRepo: string, id: string, workRepoSlug: string) =>
     Promise<{ ok: true } | { ok: false; error: string }>;
   /**
    * Issue #253 — the studio git-safety config + the /usr/local/bin/git
@@ -254,6 +255,12 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
    * wrote. `{}`, absence or a throw = origin-only discovery.
    */
   rescueTarget?: (workRepoSlug: string) => Promise<RescueTarget>;
+  /**
+   * Issue #7: route pushes and gh writes through the Worker. `mode` gets the
+   * same visibility answer as the gate above (unknown = public) and decides
+   * (write-proxy/mode.ts's writeModeFor). Absent = no step.
+   */
+  writeProxy?: { workerUrl: string; mode: (slug: string, isPrivate: boolean) => "direct" | "proxy" };
   /**
    * Maestro correction #10 — issue #90 (currently blocked, but also touches
    * `runProvision`/`runRestart` directly) makes widening either function's
@@ -352,6 +359,8 @@ export interface StudioStorage {
   put(key: typeof OPERATION_KEY, value: OperationInFlight | null): Promise<void>;
   put(key: typeof DESTROYING_KEY, value: string | null): Promise<void>;
   put(key: typeof DESTROY_EPOCH_KEY, value: number): Promise<void>;
+  // Issue #37: armed by a --fresh-session provision (see provisionWithStorage).
+  put(key: typeof SESSION_FORCE_KEY, value: boolean): Promise<void>;
 }
 
 /**
@@ -1566,11 +1575,12 @@ async function resolveMemoryIndex(deps: ProvisionDeps): Promise<string | null> {
  * configured. Never degrades provisioning: memoryCloneCmd is fail-soft, and a
  * token mint or exec that throws is logged here.
  */
-async function refreshMemoryClone(deps: ProvisionDeps, id: string): Promise<void> {
+async function refreshMemoryClone(deps: ProvisionDeps, id: string, workRepoSlug: string): Promise<void> {
   const repo = deps.memoryRepo ?? null;
   if (repo === null) return;
   try {
-    const env = deps.memoryToken ? { [MEMORY_TOKEN_ENV]: await deps.memoryToken() } : undefined;
+    // Issue #7: the work repo decides what the token may be (write-proxy/mode.ts).
+    const env = deps.memoryToken ? { [MEMORY_TOKEN_ENV]: await deps.memoryToken(workRepoSlug) } : undefined;
     await deps.sbExec(memoryCloneCmd(repo), env);
   } catch (err) {
     console.error(`studio ${id}: memory clone failed, proceeding without it`, err instanceof Error ? err.message : String(err));
@@ -2114,10 +2124,10 @@ async function pickRestoreSource(
  * clone for it, so there is nothing here to authenticate.
  */
 async function maybeWriteBlueprintCredential(
-  deps: ProvisionDeps, bringupEnv: RoleEnv | StudioEnv, id: string,
+  deps: ProvisionDeps, bringupEnv: RoleEnv | StudioEnv, id: string, workRepoSlug: string,
 ): Promise<void> {
   if (!("BLUEPRINT_REPO" in bringupEnv)) return;
-  const cred = await deps.writeBlueprintCredential?.(bringupEnv.BLUEPRINT_REPO, id);
+  const cred = await deps.writeBlueprintCredential?.(bringupEnv.BLUEPRINT_REPO, id, workRepoSlug);
   if (cred && !cred.ok) {
     console.error(`studio ${id}: blueprint credential write failed, skills may be missing`, cred.error);
   }
@@ -2181,6 +2191,23 @@ async function applyLeakGate(deps: ProvisionDeps, id: string, workRepoSlug: stri
   } catch (err) {
     console.error(`studio ${id}: leak gate privacy lookup failed, treating ${workRepoSlug} as public`,
       err instanceof Error ? err.message : String(err));
+  }
+
+  // Issue #7. A failed exec leaves pushes pointed at GitHub on the read-only
+  // token: they fail, they never leak. Noted on the row.
+  if (deps.writeProxy) {
+    const mode = deps.writeProxy.mode(workRepoSlug, isPrivate);
+    let ok = false;
+    try {
+      const res = await deps.sbExec(writeProxyConfigCmd(mode, deps.writeProxy.workerUrl));
+      ok = res.code === 0;
+      if (!ok) console.error(`studio ${id}: write proxy config failed (${res.code})`, res.stderr.slice(0, 500));
+    } catch (err) {
+      console.error(`studio ${id}: write proxy config failed`, err instanceof Error ? err.message : String(err));
+    }
+    if (!ok) {
+      notes.push(`write proxy: git config failed (${mode}) -- pushes and gh writes from this studio fail until the next restart.`);
+    }
   }
 
   let content: string | null = null;
@@ -2291,7 +2318,11 @@ export async function runProvision(
   cfg: ProvisionConfig,
   fleetRepoSlug: string,
   existing: StudioStatus | null,
-): Promise<{ status: StudioStatus; roleEnv: RoleEnv | StudioEnv | null; keepAlive: boolean | null }> {
+): Promise<{
+  status: StudioStatus; roleEnv: RoleEnv | StudioEnv | null; keepAlive: boolean | null;
+  /** Issue #37: a --fresh-session bring-up confirmed it moved a session aside. */
+  freshSessionMoved?: boolean;
+}> {
   const id = buildStudioId(cfg);
   // Dynamic repo selection (P4a) — see resolveWorkRepoSlug's own doc comment
   // for the precedence and why each step is there.
@@ -2321,6 +2352,7 @@ export async function runProvision(
   // Issue #28: where a --fresh-session bring-up put the old session. Same
   // channel: a discard nobody is told about is the thing this must never be.
   let freshSessionNote: string | null = null;
+  let freshSessionMoved = false;
 
   try {
     const resolved = await resolveBringupEnv(deps, cfg, fleetRepoSlug, workRepoSlug);
@@ -2331,7 +2363,7 @@ export async function runProvision(
     // Board task #149: the blueprint clone below (studio-bringup.sh) needs
     // its OWN credential before it runs, same reasoning do.ts's provision()
     // already applies to the work-repo credential and the clone it precedes.
-    await maybeWriteBlueprintCredential(deps, resolved.bringupEnv, id);
+    await maybeWriteBlueprintCredential(deps, resolved.bringupEnv, id, workRepoSlug);
     // Issue #253: git-safety config + the git wrapper, before the clone below
     // ever gives this container something to push.
     await applyStudioGitSafety(deps, id);
@@ -2368,7 +2400,7 @@ export async function runProvision(
         err instanceof Error ? err.message : String(err),
       );
     }
-    await refreshMemoryClone(deps, id);
+    await refreshMemoryClone(deps, id, workRepoSlug);
 
     // Task 3 (P2 plane 2): own try/catch, deliberately NOT folded into this
     // function's outer one — a restore failure must never degrade
@@ -2423,7 +2455,11 @@ export async function runProvision(
     // Issue #146: on a fresh container it is bring-up's own adopt, after the
     // restore untar, that finds the session.
     adoption = keepAdopted(adoption, parseSessionAdoption(bringupRes.stdout, deps.now()));
-    if (cfg.freshSession) freshSessionNote = freshSessionNoteFor(parseFreshSession(bringupRes.stdout));
+    if (cfg.freshSession) {
+      const moved = parseFreshSession(bringupRes.stdout);
+      freshSessionNote = freshSessionNoteFor(moved, id);
+      freshSessionMoved = moved !== null && moved.some((m) => !m.startsWith("failed "));
+    }
 
     // Board issue #28 — the missing observation. `bringupRes.code === 0`
     // (and, above it, `cloneRes.code === 0`) prove those two execs ran to
@@ -2501,7 +2537,7 @@ export async function runProvision(
   }
 
   await deps.recordStudio(status);
-  return { status, roleEnv, keepAlive };
+  return { status, roleEnv, keepAlive, ...(freshSessionMoved ? { freshSessionMoved } : {}) };
 }
 
 /**
@@ -2574,15 +2610,17 @@ export async function runRestart(
     // attempt never created /opt/blueprint/.git), or a studio whose
     // credential mint failed/was never attempted keeps retrying the clone on
     // every restart, forever.
-    await maybeWriteBlueprintCredential(deps, roleEnv, status.id);
+    // Issue #7: the row's own repo, resolved once for every port below.
+    const rowRepoSlug = resolveWorkRepoSlug(null, existing, fleetRepoSlug);
+    await maybeWriteBlueprintCredential(deps, roleEnv, status.id, rowRepoSlug);
     // Issue #253: a rollout-replaced container's fresh filesystem carries
     // none of this config either — re-apply on every restart, same
     // reasoning as the blueprint credential just above.
     await applyStudioGitSafety(deps, status.id);
     // Issue #1: fresh filesystem = no scanner, no wrapper, no gate file.
-    leakGateNote = await applyLeakGate(deps, status.id, resolveWorkRepoSlug(null, existing, fleetRepoSlug));
+    leakGateNote = await applyLeakGate(deps, status.id, rowRepoSlug);
     // Issue #341: a replaced container lost /opt/memory too.
-    await refreshMemoryClone(deps, status.id);
+    await refreshMemoryClone(deps, status.id, rowRepoSlug);
 
     // THE CLONE. Issue #76, and the reason every rollout-replaced container
     // stayed bare no matter how often it was restarted or healed.
@@ -2960,7 +2998,7 @@ export function parseFreshSession(stdout: string): string[] | null {
 }
 
 /** Issue #28: the row note for a --fresh-session bring-up. */
-export function freshSessionNoteFor(moved: string[] | null): string {
+export function freshSessionNoteFor(moved: string[] | null, studioId: string): string {
   if (moved === null) {
     return "fresh session not confirmed: bring-up printed no FLEET_SESSION_FRESH line (older image?) -- " +
       "the old session was NOT moved aside and claude may have resumed it";
@@ -2968,7 +3006,13 @@ export function freshSessionNoteFor(moved: string[] | null): string {
   const failed = moved.filter((m) => m.startsWith("failed ")).map((m) => m.slice("failed ".length));
   const aside = moved.filter((m) => !m.startsWith("failed "));
   const parts: string[] = [];
-  if (aside.length > 0) parts.push(`fresh session: old session moved aside to ${aside.join(", ")} (kept, ships with the session snapshot)`);
+  // Issue #37: aside dirs leave the main snapshot and ship on their own.
+  if (aside.length > 0) {
+    parts.push(
+      `fresh session: old session moved aside to ${aside.join(", ")} (kept on disk; the next session sync ` +
+      `ships it to R2 under sessions/${studioId}/aside/<dir>/)`,
+    );
+  }
   if (failed.length > 0) parts.push(`fresh session: could not move ${failed.join(", ")} -- left in place`);
   if (parts.length === 0) parts.push("fresh session: no old session to move aside");
   return parts.join("; ");
@@ -3432,8 +3476,9 @@ export async function provisionWithStorage(
   let status: StudioStatus;
   let roleEnv: RoleEnv | StudioEnv | null;
   let keepAlive: boolean | null;
+  let freshSessionMoved: boolean | undefined;
   try {
-    ({ status, roleEnv, keepAlive } = await runProvision(
+    ({ status, roleEnv, keepAlive, freshSessionMoved } = await runProvision(
       { ...provisionDeps, recordStudio: guardRecordStudio(deps, ctx) }, cfg, fleetRepoSlug, existing,
     ));
     // Review round 3 (issue #85 PR1), MUST-FIX 9 (maestro correction #4):
@@ -3477,6 +3522,17 @@ export async function provisionWithStorage(
   // Fleet Spawn P3, Task 4 (R-P3-6): same null-guard, same reason — a failed
   // resolve must not clobber a PREVIOUSLY resolved keepAlive either.
   if (keepAlive !== null) await storage.put(KEEP_ALIVE_KEY, keepAlive);
+  // Issue #37: the old session left the main snapshot (it ships as its own
+  // aside archive), so the sync guard's baseline — its newest file — is gone
+  // from every later candidate, which would be displaced forever. The same
+  // one-shot force upload `fleet clear-session-guard` arms: the old `latest`
+  // is kept under superseded/ by the upload itself, and a blank candidate
+  // (claude has not written yet) still waits.
+  if (freshSessionMoved) {
+    await storage.put(SESSION_FORCE_KEY, true);
+    // PR #46 review: the row says so, like clear-session-guard does.
+    status = { ...status, sessionForceArmedAt: deps.now() };
+  }
   await storage.put(STATUS_KEY, status);
   // Issue #100 N1: the container is up again, so no destroy is in flight —
   // including one that died before its own `finally` could say so.

@@ -659,8 +659,9 @@ MANIFEST="$RESTORE_DIR/manifest.json"
 # `--continue` into the same wedge. No adopt. Every entry of the root key and
 # of each `<root>--claude-worktrees-*` key except `memory/` moves (never
 # deleted) into `fleet-aside-<ts>-<key>`: a flat sibling, so burn.ts keeps
-# keying each transcript by its own id and the session tar ships it to R2,
-# and a prefix the adopt's worktree glob can never match, so no later heal
+# keying each transcript by its own id and session sync ships it to R2 as its
+# own archive (issue #37: kept out of the main tar, so an oversize one cannot
+# block every later sync), and a prefix the adopt's worktree glob can never match, so no later heal
 # pulls it back. One `FLEET_SESSION_FRESH moved <dir>` stdout line per
 # destination (`none` if nothing moved) for the Worker; the same to the log.
 # A failed move says so and leaves that entry where it was: the launch guard

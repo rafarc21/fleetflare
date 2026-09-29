@@ -1807,6 +1807,19 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
     expect(rescueRefs()).toEqual([]);
   });
 
+  // Issue #7 review, finding 4: proxy mode sets a global pushInsteadOf that
+  // rewrites every github.com push to the Worker -- the rescue URL too. The
+  // rescue push pins its own URL (longest pushInsteadOf match wins).
+  test("rescuePushCmd: an ambient pushInsteadOf covering the private remote does not redirect it", () => {
+    sh(`git -C ${checkout} config url./nonexistent/hijack/.pushInsteadOf ${dir}/`);
+    writeFileSync(join(checkout, "notes.md"), "private work\n");
+
+    const out = pushPriv();
+
+    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(privRefs().some((r) => r.includes("fleet/rescue/"))).toBe(true);
+  });
+
   test("rescuePushCmd, dirty member worktree: its wt/ ref lands on the private remote, NOT origin", () => {
     writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "wip.md"), "member work\n");
 
@@ -2424,4 +2437,58 @@ describe("#39 — one RESCUE_WT line per worktree", () => {
       expect(out).toMatch(/^RESCUE_WT checkout failed push$/m);
     });
   }
+});
+
+/**
+ * Issue #49: destroy 409 `failed [checkout (push)]` on a CLEAN checkout whose
+ * HEAD already equals its branch on origin. Provision clones `--depth 1`
+ * (implies `--single-branch`), so a branch the lead pushed itself gets no
+ * `refs/remotes/origin/<branch>`, and `rev-list --not --remotes` counts its
+ * already-pushed commits as ahead. Rescue then pushes to that REAL branch,
+ * where the repo's own pre-push hook runs (#359: real branches keep hooks);
+ * a hook resolving `@{u}` on an upstream-less branch dies with
+ * `fatal: no upstream configured for branch` — and no stderr reached the 409.
+ */
+describe("#49 — a clean checkout whose HEAD is already on origin is nothing to rescue", () => {
+  function upstreamHook(): void {
+    const hooksDir = mkdtempSync(join(tmpdir(), "fleet-upstream-hook-"));
+    writeFileSync(join(hooksDir, "pre-push"), "#!/bin/sh\ngit rev-parse --abbrev-ref '@{u}' >/dev/null || exit 1\n");
+    chmodSync(join(hooksDir, "pre-push"), 0o755);
+    sh(`git -C ${checkout} config core.hooksPath ${hooksDir}`);
+  }
+  /** The lead's own PR branch, pushed by refspec: on origin, but no tracking
+   *  ref and no upstream here (what a single-branch clone leaves). */
+  function pushedPrBranch(): void {
+    sh(`cd ${checkout} && git checkout -q -b task/pr && git commit -q --allow-empty -m "pr work" && ` +
+      `git push -q origin HEAD:refs/heads/task/pr && git update-ref -d refs/remotes/origin/task/pr; ` +
+      `git branch --unset-upstream 2>/dev/null; true`);
+    sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 2>/dev/null; rm -rf .claude; true`);
+  }
+
+  for (const [label, cmdFn] of RESCUE_CMDS) {
+    test(`${label}: HEAD == origin's branch, no tracking ref, upstream hook installed → RESCUE_CLEAN, no push, no failure`, () => {
+      pushedPrBranch();
+      upstreamHook();
+      const before = sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out;
+
+      const r = sh(cmdFn(REPO, STUDIO, root));
+
+      expect(r.out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(r.out).not.toContain(RESCUE_PUSHED_PREFIX);
+      expect(bare(r.out)).toBe(RESCUE_CLEAN);
+      expect(r.out).toMatch(/^RESCUE_WT checkout nothing$/m);
+      expect(sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out).toBe(before);
+    });
+  }
+
+  test("a GENUINE unpushed commit on that branch still fails under the hook — and the push stderr is surfaced", () => {
+    pushedPrBranch();
+    sh(`cd ${checkout} && git commit -q --allow-empty -m "really unpushed"`);
+    upstreamHook();
+
+    const r = sh(rescuePushCmd(REPO, STUDIO, root));
+
+    expect(r.out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
+    expect(r.err).toContain("no upstream configured");
+  });
 });

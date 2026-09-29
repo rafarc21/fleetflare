@@ -59,7 +59,7 @@ import {
 } from "./member-alerts";
 import type { MemguardKillLogEntry } from "./memguard-log";
 import {
-  syncSessionTick, BURN_KEY, SYNC_SESSION_SECONDS, SESSION_GUARD_KEY, SESSION_MARK_KEY, SESSION_FORCE_KEY,
+  syncSessionTick, shipAsideSessions, asideNotShippedNote, ASIDE_SHIP_KEY, BURN_KEY, SYNC_SESSION_SECONDS, SESSION_GUARD_KEY, SESSION_MARK_KEY, SESSION_FORCE_KEY,
   BURN_PERSIST_ERROR_KEY,
   type SessionSyncDeps, type SessionSyncStorage, type SyncResult,
 } from "./session-sync";
@@ -94,12 +94,14 @@ import { juniorEnabled } from "../junior/gate";
 // sandbox-free module so the bun:test lane can ask real git which
 // credential it picks — see credentials.ts's own header. Re-exported
 // here so every existing `from "./do"` importer is unchanged.
-import { credentialWriteCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV } from "./credentials";
+import { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV } from "./credentials";
 import { leakGateInstallCmd } from "./gh-wrapper";
-export { credentialWriteCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV };
+export { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV };
 
 import { mintSpawnToken, hashSpawnToken } from "./org";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
+import { containerToken, resolveWriteMode, studioCredential, writeModeFor, type WriteMode } from "../write-proxy/mode";
+import { writeProxyConfigCmd } from "../write-proxy/container-config";
 import {
   fetchRepoFile, createRepoFile, upsertRepoFile, listOpenPullNumbers, repoIsPrivate,
   // Issue #249 (PR4b): the survival re-brief's three GitHub reads, all from
@@ -189,7 +191,13 @@ export const REFRESH_SECONDS = 3000;
 export const SHIP_TRANSCRIPT_SECONDS = 30;
 
 export interface RefreshDeps {
-  mintToken: () => Promise<string>;
+  /** Issue #7: null = no credential for this studio (proxy mode, no read
+   *  token) -- the container's credential files are cleared instead. Gets
+   *  the mode `writeProxy` resolved (undefined when that port is absent). */
+  mintToken: (mode?: WriteMode) => Promise<string | null>;
+  /** Issue #7 (#13 review): the write mode, resolved once per refresh, and
+   *  the Worker URL its git config points at. Absent = no proxy step. */
+  writeProxy?: { workerUrl: string; mode: () => Promise<WriteMode> };
   // `env`: the credential write's token rides here (#110 review), never in `cmd`.
   sbExec: (cmd: string, env?: Record<string, string>) => Promise<{ code: number; stdout: string; stderr: string }>;
   recordStudio: (status: StudioStatus) => Promise<void>;
@@ -223,8 +231,21 @@ export async function runRefreshCredential(
   deps: RefreshDeps,
 ): Promise<{ ok: true; lastRefresh: string } | { ok: false; error: string }> {
   try {
-    const token = await deps.mintToken();
-    const res = await deps.sbExec(credentialWriteCmd(), tokenEnv(token));
+    // Issue #7: git config for the mode FIRST. A studio must never hold a
+    // read-only credential without the proxy config that makes pushes work:
+    // a failed proxy config leaves the credential as it was.
+    let mode: WriteMode | undefined;
+    if (deps.writeProxy) {
+      mode = await deps.writeProxy.mode();
+      const cfg = await deps.sbExec(writeProxyConfigCmd(mode, deps.writeProxy.workerUrl));
+      if (cfg.code !== 0 && mode === "proxy") {
+        throw new Error(`write proxy config failed (${cfg.code}): ${cfg.stderr.slice(0, 500)} -- credential not swapped`);
+      }
+    }
+    const token = await deps.mintToken(mode);
+    const res = token === null
+      ? await deps.sbExec(credentialClearCmd())
+      : await deps.sbExec(credentialWriteCmd(), tokenEnv(token));
     if (res.code !== 0) {
       throw new Error(`credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
     }
@@ -1375,11 +1396,24 @@ export async function recycleWithSync(
     await clearConsumedForceStamp(storage);
   }
   let rescueDiscarded: string | null = null;
+  // PR #46 review: an aside dir that did not ship before teardown is named.
+  let asideUnshipped: string | null = null;
   // Issue #39: every worktree's outcome, for the row this recycle returns.
   let rescueReport: string[] | null = null;
   // Issue #16: appended to every row this recycle writes after rescue.
   const withDiscardNote = (error: string | null): string | null =>
-    rescueDiscarded ? (error ? `${error}; ${rescueDiscarded}` : rescueDiscarded) : error;
+    {
+      // No note: the row's error exactly as it was (undefined stays undefined).
+      const notes = [rescueDiscarded, asideUnshipped].filter((n): n is string => n !== null);
+      return notes.length === 0 ? error : [error, ...notes].filter((p): p is string => !!p).join("; ");
+    };
+  // Issue #37: fresh-session aside dirs ship on their own; last chance.
+  if (alive) try {
+    asideUnshipped = asideNotShippedNote((await shipAsideSessions(syncDeps, idFallback)).failed);
+  } catch (err) {
+    console.error(`studio ${idFallback}: pre-destroy aside session ship failed, continuing`, err);
+    asideUnshipped = asideNotShippedNote([{ dir: "(listing)", reason: err instanceof Error ? err.message : String(err) }]);
+  }
   if (alive) try {
     const rescue = await rescuePush(syncDeps, cfg.repo, idFallback);
     if (rescue.worktrees) rescueReport = formatRescueReport(rescue.worktrees);
@@ -2118,9 +2152,12 @@ export async function mirrorBurnToRegistry(
   // is never folded into `sessionGuard` above.
   const burnPersistError = await storage.get(BURN_PERSIST_ERROR_KEY);
   const forceArmed = (await storage.get(SESSION_FORCE_KEY)) === true;
+  // PR #46 review: unshipped aside dirs are on the row, like the guard.
+  const asideShip = await storage.get(ASIDE_SHIP_KEY);
   const updated: StudioStatus = {
     ...status,
     burn,
+    ...(asideShip === undefined ? {} : { asideShip }),
     ...(sessionGuard === undefined ? {} : { sessionGuard }),
     ...(burnPersistError === undefined ? {} : { burnPersistError }),
     sessionForceArmedAt: forceArmed ? (status.sessionForceArmedAt ?? null) : null,
@@ -2718,6 +2755,21 @@ export async function syncSessionCycle(
     await recordSnapshotOnSuccess(observedStorage, result, now);
   } catch (err) {
     console.error(`studio ${idFallback}: session sync tick failed`, err);
+  }
+  // Issue #37: its own try — an aside failure never costs the main sync.
+  // PR #46 review: its failures ride the row (mirrorBurnToRegistry below).
+  try {
+    const at = syncDeps.now().toISOString();
+    let failed: { dir: string; reason: string }[];
+    try {
+      failed = (await shipAsideSessions(syncDeps, idFallback)).failed;
+    } catch (err) {
+      console.error(`studio ${idFallback}: aside session ship failed`, err);
+      failed = [{ dir: "(listing)", reason: err instanceof Error ? err.message : String(err) }];
+    }
+    await storage.put(ASIDE_SHIP_KEY, failed.length > 0 ? { at, failed } : null);
+  } catch (err) {
+    console.error(`studio ${idFallback}: aside ship record failed`, err);
   }
   try {
     await mirrorBurnToRegistry(storage, recordStudioFn);
@@ -4464,9 +4516,14 @@ export class StudioDO extends Sandbox<Env> {
       memoryRepo: opsRepo,
       // #346 (on #339): scoped to the ops repo AND narrowed to read -- this
       // token rides into the container (exec env of the clone).
-      memoryToken: async () => {
+      memoryToken: async (workRepoSlug: string) => {
         if (opsRepo === null) throw new Error("FLEET_OPS_REPO is unset -- no memory token to mint");
-        return mintRepoToken(this.env, opsRepo, { permissions: { contents: "read" } });
+        // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts).
+        // The work repo comes from provision: on a first provision the row
+        // has none yet, and reading it would fall back to AGENT_REPO.
+        const token = await containerToken(this.env, workRepoSlug, opsRepo, { contents: "read" });
+        if (token === null) throw new Error("no read-only token for the ops repo -- set GITHUB_READ_TOKEN");
+        return token;
       },
       // Issue #330: the operator's house-rules overlay, from the same ops
       // repo -- through its OWN port, a token scoped to that repo and
@@ -4549,9 +4606,14 @@ export class StudioDO extends Sandbox<Env> {
       // blueprint clone only ever needs to be READ (fleet.json, a role file,
       // org.json), never pushed to, so the mint itself is denied write from
       // the start rather than merely being scoped to the right repo.
-      writeBlueprintCredential: async (blueprintRepo: string) => {
+      writeBlueprintCredential: async (blueprintRepo: string, _id: string, workRepoSlug: string) => {
         try {
-          const token = await mintRepoToken(this.env, blueprintRepo, { permissions: { contents: "read" } });
+          // Issue #7: never the write PAT on a PAT fleet (write-proxy/mode.ts);
+          // work repo from provision, as memoryToken above.
+          const token = await containerToken(this.env, workRepoSlug, blueprintRepo, { contents: "read" });
+          if (token === null) {
+            return { ok: false as const, error: "no read-only token for the blueprint repo -- set GITHUB_READ_TOKEN (a public blueprint still clones anonymously)" };
+          }
           const res = await sbExec(this, blueprintCredentialWriteCmd(blueprintRepo), { ...EXEC_CLASSES.provision, env: tokenEnv(token) });
           if (res.code !== 0) {
             throw new Error(`blueprint credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
@@ -4578,6 +4640,11 @@ export class StudioDO extends Sandbox<Env> {
       workRepoIsPrivate: async (slug: string) => repoIsPrivate(await mint(slug), slug),
       // Issue #30: discovery reads the same remote rescue writes to.
       rescueTarget: (slug: string) => this.rescueTarget(async () => slug, "discovery"),
+      // Issue #7: same visibility answer drives the push/gh routing.
+      writeProxy: {
+        workerUrl: this.env.WORKER_PUBLIC_URL,
+        mode: (slug: string, isPrivate: boolean) => writeModeFor(this.env, slug, isPrivate),
+      },
       // Board #350: the repo gate and the presign-GET mint. Both optional on
       // ProvisionDeps (install-cache.ts's InstallCacheRestoreDeps doc
       // comment) — wired here unconditionally, since the gate itself (empty
@@ -5023,7 +5090,14 @@ export class StudioDO extends Sandbox<Env> {
    */
   private refreshDeps(workRepoSlug: string): RefreshDeps {
     return {
-      mintToken: () => mintRepoToken(this.env, workRepoSlug),
+      // Issue #7: read-only unless the work repo is confirmed private (or the
+      // operator switched the write proxy off). See write-proxy/mode.ts.
+      mintToken: (mode?: WriteMode) => studioCredential(this.env, workRepoSlug, mode ?? "direct"),
+      writeProxy: {
+        workerUrl: this.env.WORKER_PUBLIC_URL,
+        mode: () => resolveWriteMode(this.env, workRepoSlug,
+          async (repo) => repoIsPrivate(await mintRepoToken(this.env, repo, { permissions: { contents: "read" } }), repo)),
+      },
       sbExec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.refresh, env }),
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
       notify: async (message: string) => {
@@ -5112,13 +5186,17 @@ export class StudioDO extends Sandbox<Env> {
   private rescueTarget(
     workRepoSlug: () => Promise<string>, purpose: "push" | "discovery" = "push",
   ): Promise<RescueTarget> {
+    // Issue #7: never the fleet's write PAT (containerToken); PAT fleets bring
+    // a rescue-only token. And only for a rescue repo confirmed private.
     // Issue #45: discovery only reads the remote — read token, not write.
-    return resolveRescueTarget(this.env, (repo) =>
-      mintRepoToken(this.env, repo, { permissions: rescueMintPermissions(purpose) }),
-    async () => {
-      const slug = await workRepoSlug();
-      return repoIsPrivate(await mintRepoToken(this.env, slug), slug);
-    }, purpose);
+    return resolveRescueTarget(this.env,
+      async (repo) => (await containerToken(this.env, await workRepoSlug(), repo, rescueMintPermissions(purpose)))
+        ?? (this.env.FLEET_RESCUE_GITHUB_TOKEN || null),
+      async () => {
+        const slug = await workRepoSlug();
+        return repoIsPrivate(await mintRepoToken(this.env, slug), slug);
+      }, purpose,
+      async (repo) => repoIsPrivate(await mintRepoToken(this.env, repo, { permissions: { contents: "read" } }), repo));
   }
 
   /**

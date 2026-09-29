@@ -22,7 +22,9 @@ describe("rescue token permissions (issue #45)", () => {
     const start = src.indexOf("  private rescueTarget(");
     expect(start).toBeGreaterThan(-1);
     const body = src.slice(start, src.indexOf("\n  }", start));
-    expect(body).toContain("permissions: rescueMintPermissions(purpose)");
+    // Issue #7 routes the mint through containerToken; the permissions it
+    // asks for still come from the purpose, never a hard-coded write.
+    expect(body).toContain("containerToken(this.env, await workRepoSlug(), repo, rescueMintPermissions(purpose))");
     // Issue #45 item 6: rescue's own port passes NO purpose — the default
     // must stay "push" (write), or rescue would push with a read token.
     expect(body).toContain('purpose: "push" | "discovery" = "push"');

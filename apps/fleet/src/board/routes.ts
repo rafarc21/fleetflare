@@ -92,7 +92,7 @@ export function githubBoardApi(env: Env, leakDeps: Partial<LeakGuardDeps> = {}):
 /** Visibility via the board's own token; the denylist via a contents:read
  *  token on the ops repo -- same port as do.ts's opsFileFetcher, inlined
  *  because do.ts imports this file. No ops repo = no list = fail closed. */
-function realLeakDeps(env: Env, token: (repo: string) => Promise<string>): LeakGuardDeps {
+export function realLeakDeps(env: Env, token: (repo: string) => Promise<string>): LeakGuardDeps {
   return {
     isPrivate: async (repo) => repoIsPrivate(await token(repo), repo),
     fetchDenylist: async () => {

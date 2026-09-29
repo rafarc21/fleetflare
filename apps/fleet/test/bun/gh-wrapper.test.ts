@@ -3,7 +3,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { denylistFileContent } from "../../src/leak-gate";
-import { ghBlockCmd, leakGateInstallCmd, STUDIO_GH_ALIAS_REFUSAL, STUDIO_GH_LEAK_REFUSAL } from "../../src/studio/gh-wrapper";
+import {
+  ghBlockCmd, leakGateInstallCmd, STUDIO_GH_ALIAS_REFUSAL, STUDIO_GH_LEAK_REFUSAL, STUDIO_GH_PROXY_MISSING,
+} from "../../src/studio/gh-wrapper";
 
 /**
  * Issue #1 -- the container `gh` wrapper. Real bash, a fake real gh that
@@ -64,6 +66,7 @@ function studio(denylist: string | null): Studio {
     ghWrapperPath: join(bin, "gh"),
     realGh: real,
     denylistPath: list,
+    writeProxyMarker: join(d, "write-proxy"),
   });
   const env = { PATH: `${bin}:${realDir}:${sysDir}:${SYS_PATH}` };
   const s: Studio = {
@@ -495,5 +498,76 @@ describe("leakGateInstallCmd", () => {
     expect(cmd).toContain("'/usr/local/bin/fleet-leak-scan'");
     expect(cmd).toContain("'/usr/local/bin/gh'");
     expect(cmd.endsWith(`[ "$(command -v gh)" = '/usr/local/bin/gh' ] && chmod 0755 '/usr/bin/gh'`)).toBe(true);
+  });
+});
+
+// Issue #7: proxy mode. The studio's gh token is read-only, so write verbs go
+// to fleet-gh-proxy (the Worker's /fleet/gh) AFTER the wrapper's own scan.
+describe("gh wrapper: write proxy dispatch", () => {
+  function proxied(client = true): Studio {
+    const s = installed();
+    writeFileSync(join(s.dir, "write-proxy"), "https://fleet.example\n");
+    if (client) {
+      const c = join(s.dir, "real", "fleet-gh-proxy");
+      writeFileSync(c, `#!/bin/bash\nprintf '%s\\0' "$@" > '${s.dir}/proxy-argv'\ncat > '${s.dir}/proxy-stdin'\nexit 0\n`);
+      chmodSync(c, 0o755);
+    }
+    return s;
+  }
+  const proxyArgv = (s: Studio) => {
+    const f = join(s.dir, "proxy-argv");
+    return existsSync(f) ? readFileSync(f, "utf8").split("\0").slice(0, -1) : null;
+  };
+
+  for (const verb of [["pr", "create"], ["pr", "edit"], ["pr", "ready"], ["pr", "comment"], ["pr", "review"],
+    ["issue", "create"], ["issue", "edit"], ["issue", "comment"]]) {
+    test(`${verb.join(" ")} goes to fleet-gh-proxy with identical argv (mutant: no dispatch)`, () => {
+      const s = proxied();
+      const args = [...verb, "--body", "clean text"];
+      expect(s.gh(args).code).toBe(0);
+      expect(proxyArgv(s)).toEqual(args);
+      expect(s.realArgv()).toBeNull();
+    });
+  }
+
+  test("-R before the verb still dispatches", () => {
+    const s = proxied();
+    expect(s.gh(["-R", "example-org/demo", "pr", "comment", "3", "-b", "x"]).code).toBe(0);
+    expect(proxyArgv(s)).toEqual(["-R", "example-org/demo", "pr", "comment", "3", "-b", "x"]);
+  });
+
+  test("the wrapper's own scan still runs first", () => {
+    const s = proxied();
+    const r = s.gh(["pr", "comment", "3", "-b", "acmeclient"]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(STUDIO_GH_LEAK_REFUSAL);
+    expect(proxyArgv(s)).toBeNull();
+  });
+
+  test("captured stdin reaches the proxy client", () => {
+    const s = proxied();
+    expect(s.gh(["pr", "comment", "3", "--body-file", "-"], "from stdin").code).toBe(0);
+    expect(readFileSync(join(s.dir, "proxy-stdin"), "utf8")).toBe("from stdin");
+  });
+
+  test("reads still go to the real gh", () => {
+    const s = proxied();
+    expect(s.gh(["pr", "view", "3"]).code).toBe(0);
+    expect(s.realArgv()).toEqual(["pr", "view", "3"]);
+    expect(proxyArgv(s)).toBeNull();
+  });
+
+  test("no marker = no dispatch (direct mode)", () => {
+    const s = installed();
+    expect(s.gh(["pr", "comment", "3", "-b", "x"]).code).toBe(0);
+    expect(s.realArgv()).toEqual(["pr", "comment", "3", "-b", "x"]);
+  });
+
+  test("marker but no client (old image): refused, never handed to real gh", () => {
+    const s = proxied(false);
+    const r = s.gh(["pr", "create", "-t", "t", "-b", "b"]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(STUDIO_GH_PROXY_MISSING);
+    expect(s.realArgv()).toBeNull();
   });
 });

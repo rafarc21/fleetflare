@@ -375,5 +375,10 @@ COPY container/studio-adopt.sh /opt/fleet/studio-adopt.sh
 # Issue #169: memory guard, started by studio-bringup.sh's memguard step.
 # Plain TS run by the base image's own bun; no dependencies.
 COPY container/memguard.ts /opt/fleet/memguard.ts
-RUN chmod 0755 /opt/fleet/studio-bringup.sh /opt/fleet/studio-shell.sh /opt/fleet/studio-fleet /opt/fleet/studio-adopt.sh \
-    && ln -sf /opt/fleet/studio-fleet /usr/local/bin/fleet
+# Issue #7: write-proxy client. In proxy mode the gh wrapper hands gh write
+# verbs (pr create/edit/ready/comment/review, issue create/edit/comment) here;
+# it posts them to the Worker's /fleet/gh. Plain TS run by bun.
+COPY container/gh-proxy.ts /opt/fleet/gh-proxy.ts
+RUN chmod 0755 /opt/fleet/studio-bringup.sh /opt/fleet/studio-shell.sh /opt/fleet/studio-fleet /opt/fleet/studio-adopt.sh /opt/fleet/gh-proxy.ts \
+    && ln -sf /opt/fleet/studio-fleet /usr/local/bin/fleet \
+    && ln -sf /opt/fleet/gh-proxy.ts /usr/local/bin/fleet-gh-proxy

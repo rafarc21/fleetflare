@@ -133,6 +133,16 @@ export function credentialWriteCmd(): string {
 }
 
 /**
+ * Issue #7: proxy mode with no read token to hand out. The container keeps NO
+ * GitHub credential -- a stale write token from before the switch must not
+ * linger -- and reads its public work repo anonymously. The helper line stays
+ * so a later credentialWriteCmd needs nothing re-registered.
+ */
+export function credentialClearCmd(): string {
+  return `rm -f /workspace/.git-credentials "$HOME/.config/gh/hosts.yml"`;
+}
+
+/**
  * Board task #149 — the blueprint clone's OWN credential
  * (container/studio-bringup.sh, `git clone
  * "https://github.com/${BLUEPRINT_REPO}.git" /opt/blueprint`). Everything
