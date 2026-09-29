@@ -222,4 +222,20 @@ describe("telegram webhook", () => {
     expect(attempts).toBe(1);
     expect(await readSince(env.DB, "cto", 0)).toHaveLength(1);
   });
+
+  // Issue #7 (#13 review): the legacy AgentDO container gets a WRITE token
+  // for AGENT_REPO and has no write-proxy wrappers. A repo routed through the
+  // write proxy must not get one this way: the dispatch is skipped.
+  it("AGENT_REPO on FLEET_WRITE_PROXY_REPOS: the agent is never started, no write token minted", async () => {
+    let started = 0;
+    const e = {
+      ...env, FLEET_WRITE_PROXY_REPOS: env.AGENT_REPO,
+      AGENT: { idFromName: (n: string) => n, get: () => ({ fetch: async () => { started++; return new Response("{}"); } }) },
+    } as unknown as Env;
+    const res = await handleTelegramWebhook(update("do the thing"), e, "websites");
+    expect(res.status).toBe(200);
+    expect(started).toBe(0);
+    expect(await readSince(env.DB, "cto", 0)).toHaveLength(1);
+  });
 });
+
