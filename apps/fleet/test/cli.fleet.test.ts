@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { fleetTotals } from "../cli/fleet-totals";
 import {
   formatReady, formatCheckedAt, formatAge, readyOverride, formatSession, formatState, formatSessionGuards,
-  formatObservedLines, formatSurvivalBriefs, formatActivity, ACTIVITY_DO_STALE_SECONDS,
+  formatObservedLines, formatSurvivalBriefs, formatActivity, ACTIVITY_DO_STALE_SECONDS, lsJsonRows,
 } from "../cli/readiness-format";
 import type { StudioStatus } from "../src/studio/types";
 import type { Burn } from "../src/studio/burn";
@@ -1145,3 +1145,46 @@ describe("formatActivity (cli/readiness-format.ts)", () => {
     });
   });
 });
+
+// Issue #70 ask 4: coordinators scraped the table (and blank attach tabs) to
+// learn what each lead was doing. `fleet ls --json`: one machine-readable
+// lead state per studio, from the same data the ACTIVITY column renders.
+describe("lsJsonRows (issue #70)", () => {
+  const NOW = new Date("2026-09-25T12:02:00.000Z");
+  const act = (o: Partial<Activity>): Activity => ({
+    state: "idle", since: "2026-09-25T12:00:00.000Z", anchored: true,
+    observedAt: "2026-09-25T12:01:30.000Z", source: "pane", reason: null, membersTickingAt: null, ...o,
+  });
+  const row = (o: Partial<StudioStatus>) => lsJsonRows([status(o)], NOW)[0];
+
+  it("working / idle / waiting-* straight from the verdict, with since + the ACTIVITY text", () => {
+    const r = row({ id: "demo--web-studio", repoSlug: "example-org/demo",
+      observed: { ...emptyObserved(), activity: act({ state: "working", since: "2026-09-25T12:01:20.000Z" }) } });
+    expect(r).toEqual({ id: "demo--web-studio", state: "running", repo: "example-org/demo",
+      lead: "working", leadSince: "2026-09-25T12:01:20.000Z", limitResetsAt: null, activity: "WORKING 40s" });
+    expect(row({ observed: { ...emptyObserved(), activity: act({ state: "waiting-question" }) } }).lead).toBe("waiting-question");
+  });
+
+  it("limit with its reset time; modal when the limit menu is up", () => {
+    const until = "2026-09-25T15:00:00.000Z";
+    const seenAt = "2026-09-25T11:30:00.000Z";
+    const r = row({ rateLimited: { until, seenAt } });
+    expect(r.lead).toBe("limit");
+    expect(r.limitResetsAt).toBe(until);
+    expect(r.leadSince).toBe(seenAt);
+    expect(row({ rateLimited: { until: null, seenAt, select: true } }).lead).toBe("modal");
+  });
+
+  it("no verdict, or a stale one, is unknown -- never a guess", () => {
+    expect(row({}).lead).toBe("unknown");
+    const stale = act({ state: "working", observedAt: "2026-09-25T10:00:00.000Z" });
+    expect(row({ observed: { ...emptyObserved(), activity: stale } }).lead).toBe("unknown");
+  });
+
+  it("a studio that is not running has no lead", () => {
+    const r = row({ state: "stopped", observed: { ...emptyObserved(), activity: act({ state: "working" }) } });
+    expect(r.lead).toBe("stopped");
+    expect(r.leadSince).toBeNull();
+  });
+});
+

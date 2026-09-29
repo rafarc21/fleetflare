@@ -12,15 +12,15 @@ describe("parseCliArgs", () => {
   // operator reaches for when something looks wrong, and fanning an exec out
   // to every studio there is how it becomes the slowest.
   it("ls takes no argument and is NOT fresh by default", () => {
-    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false });
+    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false });
   });
 
   it("ls --fresh asks for a live check per studio", () => {
-    expect(parseCliArgs(["ls", "--fresh"])).toEqual({ cmd: "ls", fresh: true });
+    expect(parseCliArgs(["ls", "--fresh"])).toEqual({ cmd: "ls", fresh: true, json: false });
   });
 
   it("ls ignores a stray extra token (only the first two argv slots are read)", () => {
-    expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false });
+    expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false, json: false });
   });
 
   // Issue #37's second half: there was no way to ask for the truth NOW. The
@@ -454,6 +454,14 @@ describe("fleet task new --continues — issue #54", () => {
   it("a non-number is usage", () => {
     expect(parseCliArgs([...base, "--continues", "seven"])).toMatchObject({ cmd: "usage" });
     expect(parseCliArgs([...base, "--continues", "0"])).toMatchObject({ cmd: "usage" });
+  });
+});
+
+describe("fleet ls --json — issue #70", () => {
+  it("--json sets json; combines with --fresh", () => {
+    expect(parseCliArgs(["ls", "--json"])).toEqual({ cmd: "ls", fresh: false, json: true });
+    expect(parseCliArgs(["ls", "--fresh", "--json"])).toEqual({ cmd: "ls", fresh: true, json: true });
+    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false });
   });
 });
 

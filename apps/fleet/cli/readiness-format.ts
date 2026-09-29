@@ -397,6 +397,43 @@ export function formatActivity(status: StudioStatus, now: Date, staleAfterSecond
   return base;
 }
 
+/** Issue #70 ask 4: one studio's lead, machine-readable (`fleet ls --json`). */
+export interface LsJsonRow {
+  id: string;
+  state: StudioStatus["state"];
+  repo: string | null;
+  /** stopped = not live; modal = limit menu up; limit = usage limit;
+   *  unknown = no verdict or a stale one; else the ACTIVITY verdict. */
+  lead: "stopped" | "modal" | "limit" | "unknown" | "working" | "idle" | "waiting-members" | "waiting-question";
+  /** When the lead entered that state, ISO, or null when not known. */
+  leadSince: string | null;
+  limitResetsAt: string | null;
+  /** The ACTIVITY column's own text, unchanged. */
+  activity: string;
+}
+
+/** The same data the ACTIVITY column renders, as a lead state per studio. */
+export function lsJsonRows(
+  studios: StudioStatus[], now: Date, staleAfterSeconds: number = ACTIVITY_MIRROR_STALE_SECONDS,
+): LsJsonRow[] {
+  return studios.map((s) => {
+    const base = { id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds) };
+    if (s.state !== "running" && s.state !== "degraded") return { ...base, lead: "stopped", leadSince: null, limitResetsAt: null };
+    const rl = s.rateLimited;
+    if (rl?.select) return { ...base, lead: "modal", leadSince: rl.seenAt, limitResetsAt: rl.until ?? null };
+    const until = rl?.until ?? null;
+    if (rl && (until === null || (!Number.isNaN(Date.parse(until)) && Date.parse(until) > now.getTime()))) {
+      return { ...base, lead: "limit", leadSince: rl.seenAt, limitResetsAt: until };
+    }
+    const a = s.observed?.activity ?? null;
+    if (!a || ageSeconds(a.observedAt, now) > staleAfterSeconds || a.state === "unknown") {
+      return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
+    }
+    if (a.state === "limit") return { ...base, lead: "limit", leadSince: a.since, limitResetsAt: null };
+    return { ...base, lead: a.state, leadSince: a.since, limitResetsAt: null };
+  });
+}
+
 /**
  * STATE column. Issue #95: a studio recorded `stopped` whose container the
  * Worker's detector saw RUNNING is billing while the registry says off, so

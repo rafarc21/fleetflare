@@ -53,7 +53,7 @@ import { dirname } from "node:path";
 import {
   formatReady, formatCheckedAt, readyOverride, formatSession, formatState, formatSessionGuards,
   formatSurvivalBriefs,
-  formatObservedLines, formatActivity,
+  formatObservedLines, formatActivity, lsJsonRows,
 } from "./readiness-format";
 import { formatTaskTable, formatTaskShow, formatAssignWake } from "./task-format";
 import type { AssignWakeReport } from "../src/board/assign-wake";
@@ -558,7 +558,9 @@ async function refreshAll(creds: Credentials, studios: StudioStatus[]): Promise<
   }));
 }
 
-export async function cmdLs(creds: Credentials, fresh: boolean, orcaDeps: OrcaDeps = defaultOrcaDeps()): Promise<void> {
+export async function cmdLs(
+  creds: Credentials, fresh: boolean, orcaDeps: OrcaDeps = defaultOrcaDeps(), json = false,
+): Promise<void> {
   // Task 5 (P2 plane 3): explicit, now that GET /studio/ content-negotiates
   // on Accept (routes.ts) — without this, a future default change there
   // could silently start handing the CLI an HTML page instead of the JSON
@@ -575,6 +577,11 @@ export async function cmdLs(creds: Credentials, fresh: boolean, orcaDeps: OrcaDe
   // printed; bare `fleet ls` prints what the registry already has, and the
   // CHECKED column says how old each of those verdicts is.
   const studios = fresh ? await refreshAll(creds, recorded) : recorded;
+  // Issue #70 ask 4: machine-readable lead state, nothing else on stdout.
+  if (json) {
+    console.log(JSON.stringify(lsJsonRows(studios, new Date()), null, 2));
+    return;
+  }
   for (const line of formatLsHead(studios)) console.log(line);
   const orca = await readStudioRows(studios, orcaDeps);
   console.log(formatTable(studios, new Date(), orca.rows));
@@ -2467,7 +2474,7 @@ async function main(): Promise<void> {
   const creds = await loadCredentials();
   switch (parsed.cmd) {
     case "ls":
-      return cmdLs(creds, parsed.fresh);
+      return cmdLs(creds, parsed.fresh, defaultOrcaDeps(), parsed.json);
     case "check":
       return cmdCheck(creds, parsed.id);
     case "clear-session-guard":
