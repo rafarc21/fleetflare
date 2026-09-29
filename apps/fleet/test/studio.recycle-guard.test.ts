@@ -505,3 +505,31 @@ describe("recycle guard — a CONFIRMED rescue-push failure refuses (issue #16)"
     }
   });
 });
+
+// Issue #39: recycle's row names every worktree's rescue outcome; a refusal
+// names them too, not only the failed one.
+describe("recycle — per-worktree rescue report (issue #39)", () => {
+  it("success: the returned row carries one line per worktree", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const stdout = `RESCUE_WT checkout nothing\nRESCUE_WT agent-a1 pushed fleet/rescue/x\n${RESCUE_PUSHED_PREFIX} fleet/rescue/x 1 files`;
+      const result = await runLive(stdout, false).promise;
+      expect(result.rescueReport).toEqual(["checkout: nothing to push", "agent-a1: pushed fleet/rescue/x"]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("refusal: names every worktree's outcome", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const stdout = `RESCUE_WT checkout nothing\n${RESCUE_FAILED_PREFIX} agent-a1 push\nRESCUE_WT agent-a1 failed push`;
+      const message = await runLive(stdout, false).promise.then(() => "", (err: Error) => err.message);
+      expect(message.startsWith(RECYCLE_REFUSED_PREFIX)).toBe(true);
+      expect(message).toContain("checkout: nothing to push");
+      expect(message).toContain("agent-a1: FAILED (push)");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});

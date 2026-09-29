@@ -782,6 +782,14 @@ verdict: `pre-deploy gate SAFE`, or `<n>/<attempted> attempted studios not
 rescued (<f> push FAILED, <t> TIMED OUT) -- pre-deploy gate UNSAFE; do NOT
 deploy` on stderr. A "container not running" skip is not attempted. Push as you go regardless.
 
+After every rescue, `fleet rescue-all` and `fleet recycle` print one line per
+worktree: `<worktree>: pushed <ref>`, `<worktree>: nothing to push`, or
+`<worktree>: FAILED (<step>)`. A rescue ref pushed from a `--depth 1` clone to
+a remote without its history is a PARENTLESS snapshot (commit message
+`fleet rescue snapshot of <sha> (shallow clone)`): `git show` / `git log -p`
+list its whole tree as added. Diff it by tree instead:
+`git fetch origin <ref> && git diff <base> FETCH_HEAD`.
+
 **Rollout convergence takes minutes.** `wrangler containers info` keeps
 reporting the old digest with an `active_rollout_id` until it finishes. A studio
 spawned or recycled before convergence gets the old image.

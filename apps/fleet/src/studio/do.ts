@@ -501,7 +501,7 @@ export async function restartWithSync(
 
 import {
   rescuePushCmd, rescueSnapshotCmd, RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX,
-  RESCUE_FAILED_PREFIX, resolveRescueTarget, type RescueTarget,
+  RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport, type RescueWorktree, type RescueTarget,
 } from "./rescue";
 // Moved to src/studio/rescue.ts (pure, so a bun test runs it against real
 // git — issue #217); re-exported so every existing import keeps working.
@@ -549,6 +549,9 @@ export interface RescueResult {
    * asserts with `toEqual`, so those keep matching unchanged.
    */
   pushes?: { branch: string; files: number; kind: RescuePushKind }[];
+  /** Issue #39: one entry per worktree rescue.ts walked (RESCUE_WT lines).
+   *  Absent when the script printed none, so every older `toEqual` holds. */
+  worktrees?: RescueWorktree[];
 }
 
 /**
@@ -575,15 +578,19 @@ export interface RescueResult {
 export class RescuePushFailedError extends Error {
   readonly pushes: { branch: string; files: number; kind: RescuePushKind }[];
   readonly fails: { worktree: string; step: string; detail?: string }[];
+  /** Issue #39: every worktree's outcome, the ones that did not fail too. */
+  readonly worktrees: RescueWorktree[];
   constructor(
     message: string,
     pushes: { branch: string; files: number; kind: RescuePushKind }[],
     fails: { worktree: string; step: string; detail?: string }[],
+    worktrees: RescueWorktree[] = [],
   ) {
     super(message);
     this.name = "RescuePushFailedError";
     this.pushes = pushes;
     this.fails = fails;
+    this.worktrees = worktrees;
   }
 }
 
@@ -687,10 +694,22 @@ async function parseRescueExecResult(
       `${res.stdout.trim().slice(0, 500) || "no output"}`,
     );
   }
-  const out = res.stdout.trim();
-  if (out === RESCUE_NO_CHECKOUT) return { pushed: false, branch: null, files: 0, skipped: "no checkout" };
-  if (out === RESCUE_CLEAN) return { pushed: false, branch: null, files: 0, skipped: "clean" };
-  if (out === RESCUE_MARKERS_ONLY) return { pushed: false, branch: null, files: 0, skipped: "nothing to rescue (only tool markers)" };
+  // Issue #39: the per-worktree report lines come out FIRST, so every check
+  // below sees exactly the output it always did. A RESCUE_WT line that does
+  // not parse stays in, and so fails closed as unrecognisable output.
+  const wtLine = new RegExp(`^${RESCUE_WT_PREFIX} (\\S+) (pushed|nothing|failed|unknown)(?: (.+))?$`);
+  const worktrees: RescueWorktree[] = [];
+  const rest: string[] = [];
+  for (const raw of res.stdout.trim().split("\n")) {
+    const m = wtLine.exec(raw.trim());
+    if (m) worktrees.push({ worktree: m[1], outcome: m[2] as RescueWorktree["outcome"], ...(m[3] !== undefined ? { detail: m[3] } : {}) });
+    else rest.push(raw);
+  }
+  const wt = worktrees.length > 0 ? { worktrees } : {};
+  const out = rest.join("\n").trim();
+  if (out === RESCUE_NO_CHECKOUT) return { pushed: false, branch: null, files: 0, skipped: "no checkout", ...wt };
+  if (out === RESCUE_CLEAN) return { pushed: false, branch: null, files: 0, skipped: "clean", ...wt };
+  if (out === RESCUE_MARKERS_ONLY) return { pushed: false, branch: null, files: 0, skipped: "nothing to rescue (only tool markers)", ...wt };
   // Issue #251: one line per worktree actually rescued.
   const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
   // Issue #371, PR #376 review round 2 (maestro must-fix): the `remote:`
@@ -757,6 +776,7 @@ async function parseRescueExecResult(
     return {
       pushed: true, branch: pushes[0].branch, files: pushes[0].files, kind: pushes[0].kind,
       ...(pushes.length > 1 ? { pushes } : {}),
+      ...wt,
     };
   }
   const stderr = res.stderr.trim();
@@ -768,7 +788,7 @@ async function parseRescueExecResult(
     const failedDesc = fails.map((f) => `${f.worktree} (${f.step}${f.detail ? `: ${f.detail}` : ""})`).join(", ");
     throw new RescuePushFailedError(
       `${label} failed: pushed [${pushedDesc}], failed [${failedDesc}]${stderr ? `: ${stderr.slice(0, 500)}` : ""}`,
-      pushes, fails,
+      pushes, fails, worktrees,
     );
   }
   throw new Error(`${label} failed (exit ${res.code}${stderr ? `: ${stderr.slice(0, 500)}` : ""}): ${out || "no output"}`);
@@ -1354,11 +1374,14 @@ export async function recycleWithSync(
     await clearConsumedForceStamp(storage);
   }
   let rescueDiscarded: string | null = null;
+  // Issue #39: every worktree's outcome, for the row this recycle returns.
+  let rescueReport: string[] | null = null;
   // Issue #16: appended to every row this recycle writes after rescue.
   const withDiscardNote = (error: string | null): string | null =>
     rescueDiscarded ? (error ? `${error}; ${rescueDiscarded}` : rescueDiscarded) : error;
   if (alive) try {
     const rescue = await rescuePush(syncDeps, cfg.repo, idFallback);
+    if (rescue.worktrees) rescueReport = formatRescueReport(rescue.worktrees);
     if (rescue.pushed) {
       for (const p of rescue.pushes ?? [{ branch: rescue.branch!, files: rescue.files, kind: rescue.kind! }]) {
         // Issue #266: the label now matches what was actually counted —
@@ -1370,8 +1393,10 @@ export async function recycleWithSync(
     // Issue #16: a CONFIRMED rescue failure refuses, exactly like destroy.ts.
     // Every other throw (a killed exec, the shell dying) means "cannot tell"
     // and stays best-effort — destroy.ts's posture for those, unchanged.
+    if (err instanceof RescuePushFailedError && err.worktrees.length > 0) rescueReport = formatRescueReport(err.worktrees);
     if (err instanceof RescuePushFailedError && !guard.discardUnsynced) {
-      throw new Error(recycleRescueFailedRefusal(idFallback, redactSecrets(err.message)));
+      const perWorktree = rescueReport ? ` Worktrees: ${rescueReport.join("; ")}.` : "";
+      throw new Error(recycleRescueFailedRefusal(idFallback, redactSecrets(err.message) + perWorktree));
     }
     console.error(`studio ${idFallback}: pre-destroy rescue-push failed, continuing`, err);
     if (err instanceof RescuePushFailedError) {
@@ -1537,6 +1562,7 @@ export async function recycleWithSync(
       };
       // Issue #16: a discarded confirmed rescue failure is always on the row.
       fresh.error = withDiscardNote(fresh.error);
+      if (rescueReport) fresh.rescueReport = rescueReport;
       await storage.put(STATUS_KEY, fresh);
       await recordStudioFn(fresh);
       // Board issue #213: bring-up verified (never before this point) — see
@@ -1567,7 +1593,9 @@ export async function recycleWithSync(
       // failure would appear in, and the studio is one `fleet status` away
       // from the truth.
       const note = redactSecrets(`provisioned, but NOT verified: ${verdict.reason}`);
-      const unverified: StudioStatus = { ...status, error: withDiscardNote(note), readiness };
+      const unverified: StudioStatus = {
+        ...status, error: withDiscardNote(note), readiness, ...(rescueReport ? { rescueReport } : {}),
+      };
       await storage.put(STATUS_KEY, unverified);
       await recordStudioFn(unverified);
       console.error(`studio ${idFallback}: recycle could not verify the studio (${verdict.reason}); reporting unverified success`);
@@ -6006,7 +6034,8 @@ export class StudioDO extends Sandbox<Env> {
    * to report) and the full list of rescue refs actually pushed otherwise.
    */
   async rescueNow(): Promise<
-    { ok: true; pushes: { branch: string; files: number; kind: RescuePushKind }[] } | { ok: false; error: string }
+    | { ok: true; pushes: { branch: string; files: number; kind: RescuePushKind }[]; worktrees?: RescueWorktree[] }
+    | { ok: false; error: string; worktrees?: RescueWorktree[] }
   > {
     if (this.ctx.container?.running !== true) return { ok: false, error: "not running" };
     const repo = parseStudioId(this.selfId())?.repo ?? this.selfId();
@@ -6015,9 +6044,14 @@ export class StudioDO extends Sandbox<Env> {
       return {
         ok: true,
         pushes: result.pushed ? (result.pushes ?? [{ branch: result.branch!, files: result.files, kind: result.kind! }]) : [],
+        // Issue #39: rescue-all prints one line per worktree.
+        ...(result.worktrees ? { worktrees: result.worktrees } : {}),
       };
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      return {
+        ok: false, error: err instanceof Error ? err.message : String(err),
+        ...(err instanceof RescuePushFailedError && err.worktrees.length > 0 ? { worktrees: err.worktrees } : {}),
+      };
     }
   }
 

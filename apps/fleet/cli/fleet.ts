@@ -32,6 +32,7 @@ import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior } from "./junior";
 import { runTaskStateTransition, type TaskStateFetchResult } from "../src/studio/task-state";
 import type { ReapOutcome } from "../src/studio/task-reap";
+import { formatRescueReport, type RescueWorktree } from "../src/studio/rescue";
 import type { RescueGcOutcome } from "../src/studio/rescue-gc";
 import type { RepoReach } from "../src/github/reach";
 import { fleetTotals, formatFleetTotalsLine } from "./fleet-totals";
@@ -1034,6 +1035,8 @@ async function cmdRecycle(creds: Credentials, id: string, discardUnsynced: boole
   }
   const studio = (await res.json()) as StudioStatus;
   console.log(formatTable([studio]));
+  // Issue #39: the pre-destroy rescue, one line per worktree.
+  for (const line of studio.rescueReport ?? []) console.log(`rescue: ${line}`);
   if (discardUnsynced) console.error(discardNote(id));
   // Same rule as `fleet spawn`: this path also leaves a studio running, so it
   // also owes that studio a visible row in Orca's sidebar. Idempotent, so a
@@ -1470,8 +1473,8 @@ export interface RescueAllPush { branch: string; files: number; kind: "files" | 
  *  never honestly name which rescue.ts step failed (no response arrived to
  *  read a step from); the latter already does, in `error`, unchanged. */
 export type RescueAllOutcome =
-  | { ok: true; pushes: RescueAllPush[] }
-  | { ok: false; error: string; timedOut?: boolean };
+  | { ok: true; pushes: RescueAllPush[]; worktrees?: RescueWorktree[] }
+  | { ok: false; error: string; timedOut?: boolean; worktrees?: RescueWorktree[] };
 export interface RescueAllDeps {
   listStudios: () => Promise<StudioStatus[]>;
   /** One rescue-push exec against a single RUNNING studio — never called
@@ -1686,6 +1689,8 @@ export async function runRescueAll(flags: RescueAllFlags, deps: RescueAllDeps): 
       // for a dirty-tree rescue, "3 commits" for a clean-but-unpushed one.
       for (const p of outcome.pushes) deps.log(`rescued  ${s.id}: ${p.branch} (${p.files} ${p.kind}) ${elapsed}`);
     }
+    // Issue #39: then one line per worktree, success or confirmed failure.
+    for (const line of formatRescueReport(outcome.worktrees ?? [])) deps.log(`  ${s.id}  ${line}`);
   });
   // Issue #20: exit 1 alone was easy to miss (and `&&` was the whole gate).
   // One verdict line, in words, last.
