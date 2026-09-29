@@ -17,7 +17,7 @@ import { listStudios, expireBurnWindow, claimStudioRow } from "./registry";
 import { renderTerminalPage } from "./page";
 import { renderGridPage, scrubPreview, type GridCard } from "./grid";
 import {
-  runSpawn, resolveSpawnParent, resolveSpawnPolicy, resolveMaxStudios, isSpawnTokenShaped,
+  runSpawn, runResume, resolveSpawnParent, resolveSpawnPolicy, resolveMaxStudios, isSpawnTokenShaped,
   SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type SpawnParent,
 } from "./spawn";
 import { reachRepo, repoTokenMinter, type RepoReach } from "../github/auth";
@@ -275,7 +275,12 @@ export async function handleFleetSpawn(
   const parent = await resolveSpawnParent(await deps.listStudios(), presented);
   if (!parent) return new Response("unauthorized", { status: 401 });
 
-  return runSpawn(deps, parent, await spawnBody(req));
+  // Issue #59: `resume: true` starts a stopped instance under the same gate.
+  // Only on this machine surface — the operator already has /provision. A
+  // body without it (every pre-#59 binary) is the spawn it always was.
+  const body = await spawnBody(req);
+  if ((body as { resume?: unknown } | null)?.resume === true) return runResume(deps, parent, body);
+  return runSpawn(deps, parent, body);
 }
 
 /**

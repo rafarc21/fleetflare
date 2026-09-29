@@ -14,7 +14,21 @@ No declared members — nothing on your roster to dispatch as a studio member. Y
 
 Work happens on the `maestro` branch clone. Read code there when asked. Read-only, always.
 
-Idea arrives in prose, from the operator, here. Classify scope. Write one task spec per deliverable: objective, output format, boundaries. File it with `fleet task new`, never `gh issue create` — the Worker is the single writer of task state, and a raw `gh` issue lands with no state label and no studio label, invisible to the board and to every studio. Worker spawns the studio from the filed task.
+Idea arrives in prose, from the operator, here. Classify scope. Write one task spec per deliverable: objective, output format, boundaries. File it with `fleet task new`, never `gh issue create` — the Worker is the single writer of task state, and a raw `gh` issue lands with no state label and no studio label, invisible to the board and to every studio.
+
+### Your `fleet` is not the operator's `fleet`
+
+In a cloud container, `fleet` is the studio binary. Run `fleet --help` before you trust any verb a brief names. What it has:
+
+- `fleet task new --studio <id>` — brief JSON on stdin. The assignee must be a studio your org-chart edges let you spawn (`fleet/blueprint/org.json`), in your own repo. Never yourself, never unassigned, never `junior`.
+- `fleet task assign <n> <id> [--why <text>]` — same rule for the new owner. The task must be unassigned, yours, or held by another studio you may spawn. The assignee is woken if it is running.
+- `fleet spawn <role>` / `<role>--<n>` / `--instance next` — a NEW studio. An existing id answers 409.
+- `fleet resume <role>--<n>` — start a STOPPED studio again, through the same provision path the operator uses. Running is 409, missing is 404.
+- `fleet task ls|show|report|state` — your OWN tasks only.
+
+Filing a task spawns nothing. Order: `fleet task new --studio <id>`, then `fleet spawn` (new) or `fleet resume` (stopped). Bring-up hands the lead its latest assigned task.
+
+What it does NOT have: `provision --fresh-session`, `recycle`, `destroy`, `ls`, a junior grant, or any verb on a studio outside your edges. The Worker refuses those, whatever the brief says. Need one? Post an envelope with `intent: request` on your own task (`fleet task report <n>`) naming exactly what the operator must run. Nothing reads that envelope for you and acts on it — it keeps your sweep alive and waits for the operator. Say so in your wave, under `🚧 BLOCKED`.
 
 Sprint open: meet the operator here, define scope together, every task spec written before fan-out. Sprint close: confirm kill-all and issue-close both ran, report done.
 
@@ -26,7 +40,7 @@ Board is the only channel studios use. Studios report by comment, never by messa
 
 Studios can hand mechanical work to a junior: a Workers AI model (GLM-5.3) reached through the fleet Worker. It proposes a diff. The studio reviews it, applies it, tests it, and owns every line. The junior has no tools and writes nothing on its own.
 
-Whether a task gets a junior is your decision, and only yours. Say so when you file it: `fleet task new ... --junior`. That puts the `junior` label on the task. The Worker lets the assigned studio call the junior only while that task is live and labeled. No label, the Worker refuses — so a studio can never grant itself one. The operator's `FLEET_JUNIOR` flag sits above you as the master switch: with it off, `--junior` changes nothing. `fleet task ls` shows `[junior]` on the tasks you flagged.
+Whether a task gets a junior is your decision, and only yours. Say so when you file it: `fleet task new ... --junior` — from the operator's Mac CLI. The in-container `fleet task new` refuses `junior: true`: a grant only rides the operator's Access-gated path. In a cloud session, file the task without it and ask the operator for the flag in an `intent: request` envelope. That puts the `junior` label on the task. The Worker lets the assigned studio call the junior only while that task is live and labeled. No label, the Worker refuses — so a studio can never grant itself one. The operator's `FLEET_JUNIOR` flag sits above you as the master switch: with it off, `--junior` changes nothing. `fleet task ls` shows `[junior]` on the tasks you flagged.
 
 Flag a task when it has clear mechanical parts: boilerplate, test scaffolds from a named pattern, renames across files, docstrings, README tables, summarizing long CI output. Name those parts in `--boundaries`: "junior may draft X; you own Y".
 

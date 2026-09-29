@@ -319,6 +319,83 @@ export function readInstanceRequest(body: unknown): number | "next" | null {
   return raw;
 }
 
+/**
+ * Issue #59: may studio `parent` DIRECT studio `targetId` — file a task for
+ * it, hand it one, resume it? The same gate runSpawn applies (maySpawn over
+ * org.json edges, caller role -> target ROLE; every instance inherits its
+ * role's edges), plus the two facts spawn gets for free by building the child
+ * id itself: the target lives in the caller's own repo segment, and is not
+ * the caller. Pure; the caller has already resolved `org` server-side.
+ */
+export function mayDirect(
+  org: Org, parent: SpawnParent, targetId: string,
+): { ok: true } | { ok: false; status: number; message: string } {
+  const target = parseStudioId(targetId);
+  if (!target) return { ok: false, status: 400, message: `${JSON.stringify(targetId)} is not a studio id` };
+  if (target.full === parent.id) {
+    return { ok: false, status: 403, message: "a studio does not direct itself — report your own work with an envelope" };
+  }
+  if (target.repo !== parent.repo || !maySpawn(org, parent.role, target.role)) {
+    return { ok: false, status: 403, message: `${target.full} is outside ${parent.id}'s org-chart edges` };
+  }
+  return { ok: true };
+}
+
+/**
+ * Issue #59: `{role, instance, resume: true}` on /fleet/spawn — start a
+ * STOPPED studio again. The gate is runSpawn's own, in runSpawn's own order
+ * (shape, then org edge BEFORE any existence check, so a caller with no edge
+ * learns nothing about which studios exist). The start is the StudioDO's own
+ * provision(), the same call the operator's POST /studio/:id/provision makes:
+ * rescue discovery, the start gate, bring-up delivery of the latest assigned
+ * brief — nothing here is a second way to start a container.
+ *
+ * Narrower than the operator route on purpose: only a `stopped` row (a live
+ * lead is never re-provisioned from under it), never a new id (that is
+ * spawn), and only a studio bound to the caller's own work repo.
+ */
+export async function runResume(deps: SpawnDeps, parent: SpawnParent, body: unknown): Promise<Response> {
+  const requested = (body as { role?: unknown } | null)?.role;
+  if (typeof requested !== "string" || requested.length === 0) return new Response("bad role", { status: 400 });
+  const roleProbe = parseStudioId(buildStudioId({ repo: parent.repo, role: requested }));
+  if (!roleProbe || roleProbe.role !== requested) return new Response("bad role", { status: 400 });
+  const wanted = readInstanceRequest(body);
+  if (wanted === null || wanted === "next") {
+    return new Response("resume names one instance — a positive integer, never \"next\"", { status: 400 });
+  }
+  const target = parseStudioId(buildStudioId({ repo: parent.repo, role: requested, instance: wanted }));
+  if (!target) return new Response("bad instance", { status: 400 });
+
+  let policy: SpawnPolicy;
+  try {
+    policy = await deps.fetchPolicy();
+  } catch (err) {
+    console.error(`resume: org.json unavailable for ${parent.id}`, err);
+    return new Response("org unavailable", { status: 503 });
+  }
+  const gate = mayDirect(policy.org, parent, target.full);
+  if (!gate.ok) return new Response(gate.message, { status: gate.status });
+
+  const row = (await deps.listStudios()).find((r) => r.id === target.full);
+  if (!row) return new Response(`no studio ${target.full} — resume never creates one; spawn it`, { status: 404 });
+  if (row.state !== "stopped") {
+    return new Response(`${target.full} is ${row.state}, not stopped — resume only starts a stopped studio`, { status: 409 });
+  }
+  const bound = (row.repoSlug ?? null)?.toLowerCase() ?? null;
+  const mine = (parent.repoSlug ?? null)?.toLowerCase() ?? null;
+  if (bound !== mine) {
+    return new Response(`${target.full} is bound to another work repo than ${parent.id}`, { status: 403 });
+  }
+
+  // No `spawnedBy`: a resume does not re-parent the studio. No `briefPrompt`:
+  // bring-up falls back to the latest task assigned to it on the board.
+  return Response.json(await deps.provisionChild(target.full, {
+    repo: target.repo, role: target.role,
+    ...(target.instance === 1 ? {} : { instance: target.instance }),
+    repoSlug: parent.repoSlug,
+  }));
+}
+
 /** Issue #296: how many numbers a `"next"` spawn tries after losing races. */
 const MAX_CLAIM_ATTEMPTS = 20;
 
