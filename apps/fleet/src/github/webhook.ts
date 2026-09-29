@@ -1,4 +1,6 @@
 import type { Env } from "../env";
+import { revokeJuniorAuthorization } from "../junior/authz";
+import { TERMINAL_TASK_STATES } from "../board/types";
 import { recentApprovalsFor } from "../approvals/store";
 import { sendCard } from "../telegram/api";
 import { agentForProject, telegramConfig } from "../agents/registry";
@@ -92,6 +94,34 @@ function stoppedWakeSkipKey(studioId: string): string {
  * caller has already committed to a 200, and the 20-minute sweep re-detects
  * any delta a missed wake would have carried.
  */
+/**
+ * Issue #35: a label change made OUTSIDE the Worker (the GitHub UI, a
+ * studio's own gh token) never passed board/routes.ts's revoke. Any terminal
+ * state label added or removed, or a close, deletes the task's junior record
+ * here. Removing a terminal label is the terminal -> live relabel itself; the
+ * add catches it earlier. Revoke only, never grant; a bad payload or a D1
+ * error is logged and the delivery still answers 200 like every other event.
+ */
+async function revokeJuniorOnIssueEvent(env: Env, body: string): Promise<void> {
+  try {
+    const p = JSON.parse(body) as {
+      action?: string; label?: { name?: string }; issue?: { number?: number }; repository?: { full_name?: string };
+    };
+    const repo = p.repository?.full_name;
+    const number = p.issue?.number;
+    if (typeof repo !== "string" || typeof number !== "number") return;
+    const label = p.label?.name ?? "";
+    const terminal = (TERMINAL_TASK_STATES as readonly string[]).includes(label);
+    const why = p.action === "closed" ? "closed"
+      : (p.action === "labeled" || p.action === "unlabeled") && terminal ? `${p.action} ${label}` : null;
+    if (why === null) return;
+    await revokeJuniorAuthorization(env.DB, repo, number);
+    console.log(`junior: revoked ${repo}#${number} on issues webhook (${why})`);
+  } catch (err) {
+    console.error("junior: issues webhook revoke failed", err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function wakeMaestro(env: Env, event: string, body: string, now: number): Promise<void> {
   let payload: unknown;
   try {
@@ -566,6 +596,7 @@ export async function handleGithubWebhook(
     // delivery budget is 10s, while a wake's own exec can take up to 30s, so
     // this must not block the response either.
     if (event === "issue_comment") ctx.waitUntil(wakeTaskOnComment(env, body));
+    if (event === "issues") await revokeJuniorOnIssueEvent(env, body);
     return new Response("ok");
   }
 

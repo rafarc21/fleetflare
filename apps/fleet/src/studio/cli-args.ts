@@ -159,6 +159,8 @@ export type CliCommand =
   // the default and only ever REPORTS; `apply: true` (`--apply`) performs
   // the real close through the same idempotent action a push webhook uses.
   | { cmd: "task-reap"; apply: boolean }
+  // Issue #35: delete junior records whose task is already finished.
+  | { cmd: "task-junior-sweep"; apply: boolean }
   // Issue #217: delete fleet/rescue/* branches that hold no work (older than
   // N days, and every commit already on the default branch or only tool
   // markers). Dry-run unless --apply.
@@ -316,6 +318,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   "rescue-all": {
     args: "[--repo owner/repo] [--dry-run]",
     summary: "Run rescue-push against every studio that is RUNNING OR DEGRADED — the pre-image-deploy gate: an image rollout replaces every studio's container with no rescue mechanism of its own running. Commits and pushes uncommitted work (main checkout and every member git worktree, each to its own fleet/rescue/... ref), plus every local branch not checked out anywhere and every stash entry holding unpushed work (repo-wide, so a member subagent's own stash or an abandoned branch is never invisible), and prints what it saved, or 'nothing to rescue' for a clean one. A push rejected non-fast-forward (a branch moved on origin) retries once to a freshly generated ref before it counts as a failure. Prints 'skipped <id> (<state>)' for a stopped/provisioning studio and 'skipped <id>: container not running' for a stale registry answer — neither is a failure. --repo scopes to one repo; --dry-run lists which studios WOULD be rescued without execing or pushing anything. Exits non-zero only on a genuine rescue failure.",
+  },
+  "task-junior-sweep": {
+    args: "junior-sweep [--dry-run|--apply]",
+    summary: "Delete junior (Workers AI) authorization records whose task is already closed, reopened, terminal (completed/failed/canceled) or gone, for the repo you are standing in. Bare (or --dry-run) only REPORTS would-revoke/kept/error per task; --apply deletes. Revoking is the only write, so re-running is safe; a task that cannot be read is kept and named.",
   },
   "task-reap": {
     args: "reap [--dry-run|--apply]",
@@ -502,6 +508,12 @@ function parseTask(argv: string[]): CliCommand {
     if (rest.length === 0) return { cmd: "task-reap", apply: false };
     if (rest.length === 1 && rest[0] === "--dry-run") return { cmd: "task-reap", apply: false };
     if (rest.length === 1 && rest[0] === "--apply") return { cmd: "task-reap", apply: true };
+    return usage(`unexpected ${JSON.stringify(rest[0])}`);
+  }
+  // Issue #35: same bare-flag grammar as `reap` just above.
+  if (sub === "junior-sweep") {
+    if (rest.length === 0 || (rest.length === 1 && rest[0] === "--dry-run")) return { cmd: "task-junior-sweep", apply: false };
+    if (rest.length === 1 && rest[0] === "--apply") return { cmd: "task-junior-sweep", apply: true };
     return usage(`unexpected ${JSON.stringify(rest[0])}`);
   }
   if (sub !== "new" && sub !== "ls") return usage(`unknown task command ${JSON.stringify(sub ?? "")}`);

@@ -268,6 +268,28 @@ describe("handleBoard", () => {
     expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(true);
   });
 
+  // Issue #35: the one-shot sweep's route, same shape as tasks/reap.
+  it("#35: POST /tasks/junior-sweep dry-runs by default and revokes only with apply:true", async () => {
+    authorized();
+    await recordJuniorAuthorization(testEnv.DB, "acme-org/websites", 12, "acme--web-studio", 1000);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"] })) });
+    const dry = await handleBoard(req("/studio/board/tasks/junior-sweep", { method: "POST", body: "{}" }), testEnv, api, reach);
+    expect(dry.status).toBe(200);
+    const dryBody = (await dry.json()) as { repo: string; apply: boolean; results: { number: number; outcome: string }[] };
+    expect(dryBody).toMatchObject({ repo: "acme-org/websites", apply: false, results: [{ number: 12, outcome: "would-revoke" }] });
+    expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(true);
+    const applied = await handleBoard(
+      req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ apply: true }) }), testEnv, api, reach,
+    );
+    expect(((await applied.json()) as { results: { outcome: string }[] }).results[0].outcome).toBe("revoked");
+    expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(false);
+  });
+
+  it("#35: junior-sweep is POST only", async () => {
+    authorized();
+    expect((await handleBoard(req("/studio/board/tasks/junior-sweep"), testEnv, fakeApi(), reach)).status).toBe(405);
+  });
+
   it("409s a transition the Worker did not initiate", async () => {
     authorized();
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })) });

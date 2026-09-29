@@ -38,7 +38,7 @@ import {
   openAssignedTasks,
   type BoardApi, type BoardResult, type ListTasksQuery, type OnAssigned,
 } from "./board";
-import { recordJuniorAuthorization, revokeJuniorAuthorization } from "../junior/authz";
+import { recordJuniorAuthorization, revokeJuniorAuthorization, sweepJuniorAuthorizations } from "../junior/authz";
 import { wakeOnAssign, checkAssignRepo, type AssignWakeDeps, type AssignWakeReport } from "./assign-wake";
 import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify";
 import { openTasksWithLatestPr } from "./pr-landed";
@@ -387,6 +387,27 @@ async function handleTaskReapRoute(
   }
 }
 
+/**
+ * Issue #35: `POST /studio/board/tasks/junior-sweep {apply?, repo?}` — same
+ * shape and repo resolution as tasks/reap. Dry-run unless `apply: true`.
+ * src/junior/authz.ts's sweepJuniorAuthorizations decides; this only wires
+ * the board read.
+ */
+async function handleJuniorSweepRoute(req: Request, env: Env, api: BoardApi, reach: RepoReachFetch): Promise<Response> {
+  if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+  const body = await jsonBody(req);
+  const apply = body.apply === true;
+  const repoResult = await resolveBoardRepo({ reachRepo: reach }, { requested: body.repo, defaultSlug: env.AGENT_REPO });
+  if (!repoResult.ok) return respond(repoResult);
+  const repo = repoResult.value;
+  try {
+    const results = await sweepJuniorAuthorizations(env.DB, repo, (r, n) => api.getIssue(r, n), apply);
+    return Response.json({ repo, apply, results });
+  } catch (err) {
+    return upstreamFailure(err, req.method, new URL(req.url).pathname);
+  }
+}
+
 /** One BoardResult -> one Response. HTTP semantics are decided in board.ts,
  *  beside the rule that produced them; this only carries them out. */
 function respond<T>(result: BoardResult<T>): Response {
@@ -599,6 +620,9 @@ export async function handleBoard(
   // alternative.
   if (url.pathname === "/studio/board/tasks/reap") {
     return handleTaskReapRoute(req, env, api, reach, reapPort);
+  }
+  if (url.pathname === "/studio/board/tasks/junior-sweep") {
+    return handleJuniorSweepRoute(req, env, api, reach);
   }
   if (url.pathname === "/studio/board/tasks/rescue-gc") {
     return handleRescueGcRoute(req, env, reach, rescueGcPort);
