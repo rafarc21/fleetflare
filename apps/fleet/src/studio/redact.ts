@@ -54,9 +54,6 @@ const TAILSCALE_KEY_RE = /tskey-auth-[A-Za-z0-9-]+/g;
 const ANTHROPIC_KEY_RE = /sk-ant-[A-Za-z0-9_-]+/g;
 const FLEET_SPAWN_TOKEN_RE = /fsp_[0-9a-f]+/g;
 const BEARER_RE = /Bearer\s+\S+/gi;
-// Issue #58: rescue push stderr now reaches the 409 (#49); a traced git can
-// echo `Authorization: Basic <base64 user:token>`. Scheme word kept as written.
-const BASIC_RE = /(authorization:\s*basic)\s+[A-Za-z0-9+/=]+/gi;
 
 export function redactSecrets(s: string): string {
   return s
@@ -66,6 +63,5 @@ export function redactSecrets(s: string): string {
     .replace(TAILSCALE_KEY_RE, "«redacted»")
     .replace(ANTHROPIC_KEY_RE, "«redacted»")
     .replace(FLEET_SPAWN_TOKEN_RE, "«redacted»")
-    .replace(BEARER_RE, "Bearer «redacted»")
-    .replace(BASIC_RE, "$1 «redacted»");
+    .replace(BEARER_RE, "Bearer «redacted»");
 }
