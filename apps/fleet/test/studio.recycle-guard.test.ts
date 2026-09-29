@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   recycleWithSync, RECYCLE_REFUSED_PREFIX, decideHeal, RESCUE_FAILED_PREFIX, RESCUE_PUSHED_PREFIX, HARVEST_NO_RECORD,
 } from "../src/studio/do";
+import { asideListCmd, asidePackCmd, asideMarkCmd } from "../src/studio/session-sync";
+const RESCUE_CLEAN_LINE = "RESCUE_CLEAN";
 import {
   PROVISIONED_OK, provisionedCheckCmd, STATUS_KEY, OPERATION_KEY, OPERATION_STALE_MS, provisionWithStorage,
   BRINGUP_CMD, type StudioStorage, type ProvisionDeps, type OperationInFlight,
@@ -503,5 +505,33 @@ describe("recycle guard — a CONFIRMED rescue-push failure refuses (issue #16)"
     } finally {
       errSpy.mockRestore();
     }
+  });
+});
+
+// Issue #37: an aside dir ships before the container is destroyed — the
+// recycle's pre-teardown sync is its last chance.
+describe("recycle — aside sessions ship before destroy (issue #37)", () => {
+  it("lists, packs, ships and marks the aside dir, all before destroy", async () => {
+    const DIR = "fleet-aside-20260929T100000Z-42--workspace-websites";
+    const order: string[] = [];
+    const d = liveDeps(RESCUE_CLEAN_LINE);
+    const inner = d.exec;
+    d.exec = async (cmd: string, env?: Record<string, string>) => {
+      if (cmd === asideListCmd()) { order.push("list"); return { code: 0, stdout: `${DIR}\n`, stderr: "" }; }
+      if (cmd === asidePackCmd(DIR)) return { code: 0, stdout: "10\nabc\n", stderr: "" };
+      if (cmd.includes(`${DIR}.tar.gz.part-`)) return { code: 0, stdout: btoa("x".repeat(10)), stderr: "" };
+      if (cmd === asideMarkCmd(DIR)) { order.push("mark"); return { code: 0, stdout: "", stderr: "" }; }
+      return env ? inner(cmd, env) : inner(cmd);
+    };
+    const puts: string[] = [];
+    d.r2Put = async (key: string) => { puts.push(key); };
+    const destroy = vi.fn(async () => { order.push("destroy"); });
+    const provision = vi.fn(async () => ({ id: ID, state: "running", error: null }) as StudioStatus);
+    await recycleWithSync(
+      d, storage(), ID, destroy, async () => {}, provision, async () => {}, CFG,
+      async () => "unused", async () => {}, { discardUnsynced: false, lastSyncedAt: async () => SYNCED_63_MIN_AGO },
+    );
+    expect(puts).toContain(`sessions/${ID}/aside/${DIR}/manifest.json`);
+    expect(order).toEqual(["list", "mark", "destroy"]);
   });
 });

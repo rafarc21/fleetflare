@@ -40,7 +40,7 @@
 // function taking its dependencies as arguments.
 import type { StudioStatus } from "./types";
 import { STATUS_KEY, DESTROYING_KEY, freshStatus, bumpDestroyEpoch, type StudioStorage } from "./provision";
-import { syncSessionTick, type SessionSyncDeps, type SessionSyncStorage } from "./session-sync";
+import { syncSessionTick, shipAsideSessions, type SessionSyncDeps, type SessionSyncStorage } from "./session-sync";
 import { redactSecrets } from "./redact";
 import {
   rescuePush, harvestLearnings, archiveDoneRecords, learningsLostNote, deliveredTaskIn, recordSnapshotOnSuccess, containerAnswers, CONTAINER_PROBE_MS,
@@ -227,6 +227,12 @@ export async function destroyWithSync(
       // "force-next-sync armed since <T>" for a studio whose override was
       // already spent.
       await clearConsumedForceStamp(storage);
+    }
+    // Issue #37: fresh-session aside dirs ship on their own; last chance.
+    try {
+      await shipAsideSessions(syncDeps, idFallback);
+    } catch (err) {
+      console.error(`studio ${idFallback}: pre-destroy aside session ship failed, continuing`, err);
     }
     try {
       const rescue = await rescuePush(syncDeps, repo, idFallback);

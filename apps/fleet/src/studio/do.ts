@@ -59,7 +59,7 @@ import {
 } from "./member-alerts";
 import type { MemguardKillLogEntry } from "./memguard-log";
 import {
-  syncSessionTick, BURN_KEY, SYNC_SESSION_SECONDS, SESSION_GUARD_KEY, SESSION_MARK_KEY, SESSION_FORCE_KEY,
+  syncSessionTick, shipAsideSessions, BURN_KEY, SYNC_SESSION_SECONDS, SESSION_GUARD_KEY, SESSION_MARK_KEY, SESSION_FORCE_KEY,
   BURN_PERSIST_ERROR_KEY,
   type SessionSyncDeps, type SessionSyncStorage, type SyncResult,
 } from "./session-sync";
@@ -1357,6 +1357,12 @@ export async function recycleWithSync(
   // Issue #16: appended to every row this recycle writes after rescue.
   const withDiscardNote = (error: string | null): string | null =>
     rescueDiscarded ? (error ? `${error}; ${rescueDiscarded}` : rescueDiscarded) : error;
+  // Issue #37: fresh-session aside dirs ship on their own; last chance.
+  if (alive) try {
+    await shipAsideSessions(syncDeps, idFallback);
+  } catch (err) {
+    console.error(`studio ${idFallback}: pre-destroy aside session ship failed, continuing`, err);
+  }
   if (alive) try {
     const rescue = await rescuePush(syncDeps, cfg.repo, idFallback);
     if (rescue.pushed) {
@@ -2689,6 +2695,12 @@ export async function syncSessionCycle(
     await recordSnapshotOnSuccess(observedStorage, result, now);
   } catch (err) {
     console.error(`studio ${idFallback}: session sync tick failed`, err);
+  }
+  // Issue #37: its own try — an aside failure never costs the main sync.
+  try {
+    await shipAsideSessions(syncDeps, idFallback);
+  } catch (err) {
+    console.error(`studio ${idFallback}: aside session ship failed`, err);
   }
   try {
     await mirrorBurnToRegistry(storage, recordStudioFn);
