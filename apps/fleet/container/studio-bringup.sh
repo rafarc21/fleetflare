@@ -652,10 +652,53 @@ MANIFEST="$RESTORE_DIR/manifest.json"
 # sessionAdoption, and to stderr for the bring-up log. Bounded like the
 # Worker's own call. No repo in the id, or no script (older image), is a
 # no-op. FLEET_STUDIO_ADOPT is a test seam; production never sets it.
+#
+# Issue #28: FLEET_FRESH_SESSION=1 (`fleet provision|recycle --fresh-session`,
+# one bring-up only -- the Worker never persists it) is the escape hatch for a
+# session claude cannot resume: every heal would otherwise adopt it and
+# `--continue` into the same wedge. No adopt. Every entry of the root key and
+# of each `<root>--claude-worktrees-*` key except `memory/` moves (never
+# deleted) into `fleet-aside-<ts>-<key>`: a flat sibling, so burn.ts keeps
+# keying each transcript by its own id and the session tar ships it to R2,
+# and a prefix the adopt's worktree glob can never match, so no later heal
+# pulls it back. One `FLEET_SESSION_FRESH moved <dir>` stdout line per
+# destination (`none` if nothing moved) for the Worker; the same to the log.
+# A failed move says so and leaves that entry where it was: the launch guard
+# then still sees it, which is a wedge, never a loss.
 # >>> session-adopt >>>
 bringup_step session-adopt
 adopt_script="${FLEET_STUDIO_ADOPT:-/opt/fleet/studio-adopt.sh}"
-if [ -n "${STUDIO_ID:-}" ] && [ -x "$adopt_script" ]; then
+if [ "${FLEET_FRESH_SESSION:-}" = "1" ] && [ -n "${STUDIO_ID:-}" ]; then
+  fresh_projects="$HOME/.claude/projects"
+  fresh_root="$(printf '%s' "/workspace/${STUDIO_ID%%--*}" | tr -c 'a-zA-Z0-9' '-')"
+  fresh_ts="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  fresh_moved=0
+  for fresh_dir in "$fresh_projects/$fresh_root" "$fresh_projects/$fresh_root"--claude-worktrees-*; do
+    [ -d "$fresh_dir" ] || continue
+    fresh_key="$(basename -- "$fresh_dir")"
+    fresh_aside="fleet-aside-$fresh_ts-$fresh_key"
+    fresh_here=0
+    for fresh_entry in "$fresh_dir"/* "$fresh_dir"/.[!.]*; do
+      [ -e "$fresh_entry" ] || continue
+      [ "$(basename -- "$fresh_entry")" = memory ] && continue
+      if mkdir -p -- "$fresh_projects/$fresh_aside" && mv -- "$fresh_entry" "$fresh_projects/$fresh_aside/"; then
+        fresh_here=1
+      else
+        echo "FLEET_SESSION_FRESH failed $fresh_entry"
+        echo "studio-bringup: fresh session: could not move $fresh_entry aside -- left in place" >&2
+      fi
+    done
+    if [ "$fresh_here" = "1" ]; then
+      fresh_moved=$((fresh_moved + 1))
+      echo "FLEET_SESSION_FRESH moved ~/.claude/projects/$fresh_aside"
+      echo "studio-bringup: fresh session: moved $fresh_key aside to ~/.claude/projects/$fresh_aside (issue #28)" >&2
+    fi
+  done
+  if [ "$fresh_moved" = "0" ]; then
+    echo "FLEET_SESSION_FRESH none"
+    echo "studio-bringup: fresh session: no session to move aside" >&2
+  fi
+elif [ -n "${STUDIO_ID:-}" ] && [ -x "$adopt_script" ]; then
   # 2>&1: the script's own skip line (#155) belongs in the bring-up log.
   adopt_line="$(timeout -k 2 15 "$adopt_script" "${STUDIO_ID%%--*}" 2>&1 || echo "FLEET_SESSION_ADOPT failed")"
   printf '%s\n' "$adopt_line"

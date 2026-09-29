@@ -21,6 +21,11 @@
 import { TASK_STATES, isTaskState, type TaskState } from "../board/types";
 import { LIVENESS_RULE } from "./recycle-cost";
 
+/** Issue #28: shared by provision's and recycle's help. */
+const FRESH_SESSION_HELP =
+  "--fresh-session starts claude WITHOUT --continue, for a session it cannot resume: bring-up moves the old session " +
+  "aside (never deletes; it ships with the next session snapshot) and the row names where. This one bring-up only.";
+
 export type CliCommand =
   // Issue #37: `fresh` opts into a live container check per studio before the
   // table is printed. Bare `fleet ls` stays one D1 read — the issue's own
@@ -60,7 +65,7 @@ export type CliCommand =
   // it already exists, exactly as before). Same bespoke "no value, just
   // presence" shape `destroy --force` and `recycle --discard-unsynced` use.
   | { cmd: "spawn"; role: string; newInstance: boolean }
-  | { cmd: "provision"; id: string }
+  | { cmd: "provision"; id: string; freshSession: boolean }
   // Issue #37: one studio, checked LIVE, right now. The container check
   // (provision.ts's provisionedCheckCmd) always tested the right things;
   // until this verb, nothing exposed it on demand, so the only way to tell a
@@ -101,7 +106,7 @@ export type CliCommand =
   // re-provisions on the CURRENT image — see src/studio/do.ts's recycle()
   // for why provision/restart alone can never do this.
   // Issue #96: `discardUnsynced` is the only way past the failed-probe guard.
-  | { cmd: "recycle"; id: string; discardUnsynced: boolean }
+  | { cmd: "recycle"; id: string; discardUnsynced: boolean; freshSession: boolean }
   // Board task #124: recycle can never leave a studio STOPPED — it always
   // reprovisions. `destroy` runs the same pre-destroy sequence (session
   // sync, rescue-push, learning-harvest — src/studio/destroy.ts) and then
@@ -249,8 +254,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Create a studio for <role> in the repo you are standing in (maestro, web-studio, release-studio, pilot, scratch). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them.",
   },
   provision: {
-    args: "<id>",
-    summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict.",
+    args: "<id> [--fresh-session]",
+    summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict. " + FRESH_SESSION_HELP,
   },
   check: {
     args: "<id>",
@@ -265,8 +270,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Read a studio WITHOUT attaching: pane_current_command for tmux studio:claude, whether the checkout exists, and the last ~60 pane lines via `tmux capture-pane -p`. Never opens the pty, never sends a keystroke, never resizes the shared terminal — the corruption `fleet attach` risks on an operator's own live view. Refuses a STOPPED studio outright (reading it would start its container and bill silently).",
   },
   recycle: {
-    args: "<id> [--discard-unsynced]",
-    summary: "Destroy the container and reprovision on the CURRENT image, then verify and report THAT verdict. The only way an image change reaches a running studio. Loses the container filesystem; the session is rescued first. If the container cannot answer, nothing can be rescued: recycle REFUSES (409) and names the age of the last synced snapshot it would restore. --discard-unsynced proceeds anyway, discarding everything since. " + LIVENESS_RULE,
+    args: "<id> [--discard-unsynced] [--fresh-session]",
+    summary: "Destroy the container and reprovision on the CURRENT image, then verify and report THAT verdict. The only way an image change reaches a running studio. Loses the container filesystem; the session is rescued first. If the container cannot answer, nothing can be rescued: recycle REFUSES (409) and names the age of the last synced snapshot it would restore. --discard-unsynced proceeds anyway, discarding everything since. " + FRESH_SESSION_HELP + " " + LIVENESS_RULE,
   },
   destroy: {
     args: "<id> [--force] [--discard-unsynced]",
@@ -635,15 +640,26 @@ export function parseCliArgs(argv: string[]): CliCommand {
       if (rest.length === 1 && rest[0] === "--new") return { cmd: "spawn", role: arg, newInstance: true };
       return usage(`unexpected ${JSON.stringify(rest[0])}`);
     }
-    case "provision":
-      return arg ? { cmd: "provision", id: arg } : { cmd: "usage", message: CLI_USAGE };
-    // Issue #96: same bespoke shape as `destroy --force` below, same reasons.
-    case "recycle": {
-      if (!arg || arg === "--discard-unsynced") return { cmd: "usage", message: CLI_USAGE };
+    // Issue #28: `--fresh-session`, same bespoke flag shape as recycle's own.
+    case "provision": {
+      if (!arg || arg.startsWith("--")) return { cmd: "usage", message: CLI_USAGE };
       const rest = argv.slice(2);
-      if (rest.length === 0) return { cmd: "recycle", id: arg, discardUnsynced: false };
-      if (rest.length === 1 && rest[0] === "--discard-unsynced") return { cmd: "recycle", id: arg, discardUnsynced: true };
+      if (rest.length === 0) return { cmd: "provision", id: arg, freshSession: false };
+      if (rest.length === 1 && rest[0] === "--fresh-session") return { cmd: "provision", id: arg, freshSession: true };
       return usage(`unexpected ${JSON.stringify(rest[0])}`);
+    }
+    // Issue #96: same bespoke shape as `destroy --force` below, same reasons.
+    // Issue #28: plus `--fresh-session`, either order, each at most once.
+    case "recycle": {
+      if (!arg || arg.startsWith("--")) return { cmd: "usage", message: CLI_USAGE };
+      const rest = argv.slice(2);
+      const known = ["--discard-unsynced", "--fresh-session"];
+      const stray = rest.find((f, i) => !known.includes(f) || rest.indexOf(f) !== i);
+      if (stray !== undefined) return usage(`unexpected ${JSON.stringify(stray)}`);
+      return {
+        cmd: "recycle", id: arg,
+        discardUnsynced: rest.includes("--discard-unsynced"), freshSession: rest.includes("--fresh-session"),
+      };
     }
     case "check":
       return arg ? { cmd: "check", id: arg } : { cmd: "usage", message: CLI_USAGE };

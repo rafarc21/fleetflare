@@ -973,7 +973,7 @@ async function cmdSpawn(creds: Credentials, role: string, newInstance: boolean):
  * below); routes.ts's own `req.json().catch(() => ({}))` reads `{}` and an
  * absent body identically, so neither shape means "blueprintRef override".
  */
-async function cmdProvision(creds: Credentials, id: string): Promise<void> {
+async function cmdProvision(creds: Credentials, id: string, freshSession = false): Promise<void> {
   // Dynamic repo selection (P4a): unlike spawn, this command is ADDRESSED by
   // a studio id, and that id already names a repo segment. The detected repo
   // is sent only when the two agree — re-provisioning `websites--pilot`
@@ -990,7 +990,7 @@ async function cmdProvision(creds: Credentials, id: string): Promise<void> {
   const detectedSegment = detected.slug === null ? null : repoIdSegment(detected.slug.split("/")[1]);
   const matchesId = detectedSegment !== null && detectedSegment === parseStudioId(id)?.repo;
   if (matchesId) reportRepo("fleet provision", detected);
-  const res = await fetch(studioUrl(creds, id, "/provision"), {
+  const res = await fetch(studioUrl(creds, id, freshSession ? "/provision?fresh-session=true" : "/provision"), {
     method: "POST",
     headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
     body: JSON.stringify(matchesId ? { repo: detected.slug } : {}),
@@ -1018,10 +1018,12 @@ async function cmdProvision(creds: Credentials, id: string): Promise<void> {
  * empty POST is all routes.ts's recycle branch accepts (it takes no
  * blueprintRef override, unlike provision).
  */
-async function cmdRecycle(creds: Credentials, id: string, discardUnsynced: boolean): Promise<void> {
+async function cmdRecycle(creds: Credentials, id: string, discardUnsynced: boolean, freshSession = false): Promise<void> {
   // #96: without the flag, a container that cannot answer makes the Worker
   // refuse (409) and name the age of the snapshot a recycle would restore.
-  const path = discardUnsynced ? "/recycle?discard-unsynced=true" : "/recycle";
+  // Issue #28: --fresh-session rides the same query string.
+  const q = [discardUnsynced ? "discard-unsynced=true" : "", freshSession ? "fresh-session=true" : ""].filter(Boolean).join("&");
+  const path = q ? `/recycle?${q}` : "/recycle";
   const res = await fetch(studioUrl(creds, id, path), {
     method: "POST",
     headers: accessHeaders(creds),
@@ -2206,9 +2208,9 @@ async function main(): Promise<void> {
     case "spawn":
       return cmdSpawn(creds, parsed.role, parsed.newInstance);
     case "provision":
-      return cmdProvision(creds, parsed.id);
+      return cmdProvision(creds, parsed.id, parsed.freshSession);
     case "recycle":
-      return cmdRecycle(creds, parsed.id, parsed.discardUnsynced);
+      return cmdRecycle(creds, parsed.id, parsed.discardUnsynced, parsed.freshSession);
     case "destroy":
       return cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced);
     case "task-new":
