@@ -1,3 +1,4 @@
+import { formatRescueReport } from "../src/studio/rescue";
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
@@ -2390,7 +2391,9 @@ describe("rescuePushCmd — the shell shape rescue-push commits and pushes with"
     const cmd = rescuePushCmd("websites", STUDIO_ID);
 
     expect(cmd).toContain("/workspace/websites/.git");
-    expect(cmd).toContain('rescue_one "/workspace/websites" "checkout" "checkout"');
+    // Issue #39: called through rescue_wt, which reports the worktree.
+    expect(cmd).toContain('rescue_wt "/workspace/websites" "checkout" "checkout"');
+    expect(cmd).toContain("rescue_one() {");
     expect(cmd).toContain('git -C "$w" status --porcelain');
     expect(cmd).toContain("git -C \"$w\" rev-parse --abbrev-ref HEAD");
     expect(cmd).toContain('git -C "$w" add -A');
@@ -4468,5 +4471,45 @@ describe("syncSessionCycle — aside sessions (issue #37, PR #46 review)", () =>
     const recorded: StudioStatus[] = [];
     await syncSessionCycle(deps, storage, STUDIO_ID, async (st) => { recorded.push(st); });
     expect(recorded.at(-1)!.asideShip).toBeNull();
+  });
+});
+
+// Issue #39: rescue.ts's per-worktree RESCUE_WT lines ride out on the result
+// (and on the confirmed-failure error), without changing any verdict.
+describe("rescuePush — per-worktree report (issue #39)", () => {
+  it("pushed + nothing: worktrees carried, verdict unchanged", async () => {
+    const out = "RESCUE_WT checkout nothing\nRESCUE_WT agent-a1 pushed fleet/rescue/pilot/wt/agent-a1-20260925060000\n" +
+      "RESCUE_PUSHED fleet/rescue/pilot/wt/agent-a1-20260925060000 1 files";
+    const r = await rescuePush(fakeSyncDeps({ rescue: { code: 0, stdout: out } }), "fleetflare", STUDIO_ID);
+    expect(r.pushed).toBe(true);
+    expect(r.branch).toBe("fleet/rescue/pilot/wt/agent-a1-20260925060000");
+    expect(r.worktrees).toEqual([
+      { worktree: "checkout", outcome: "nothing" },
+      { worktree: "agent-a1", outcome: "pushed", detail: "fleet/rescue/pilot/wt/agent-a1-20260925060000" },
+    ]);
+  });
+
+  it("all nothing: still RESCUE_CLEAN, worktrees carried", async () => {
+    const r = await rescuePush(fakeSyncDeps({ rescue: { code: 0, stdout: `RESCUE_WT checkout nothing\n${RESCUE_CLEAN}` } }), "fleetflare", STUDIO_ID);
+    expect(r).toEqual({ pushed: false, branch: null, files: 0, skipped: "clean", worktrees: [{ worktree: "checkout", outcome: "nothing" }] });
+  });
+
+  it("confirmed failure: the error carries every worktree's line", async () => {
+    const out = `RESCUE_WT checkout nothing\n${RESCUE_FAILED_PREFIX} agent-a1 push\nRESCUE_WT agent-a1 failed push`;
+    const err = await rescuePush(fakeSyncDeps({ rescue: { code: 0, stdout: out } }), "fleetflare", STUDIO_ID).then(() => null, (e) => e);
+    expect(err.worktrees).toEqual([{ worktree: "checkout", outcome: "nothing" }, { worktree: "agent-a1", outcome: "failed", detail: "push" }]);
+  });
+
+  it("a malformed RESCUE_WT line fails closed", async () => {
+    await expect(rescuePush(fakeSyncDeps({ rescue: { code: 0, stdout: `RESCUE_WT checkout exploded\n${RESCUE_CLEAN}` } }), "fleetflare", STUDIO_ID))
+      .rejects.toThrow();
+  });
+
+  it("formatRescueReport: one human line per worktree", () => {
+    expect(formatRescueReport([
+      { worktree: "checkout", outcome: "nothing" },
+      { worktree: "agent-a1", outcome: "pushed", detail: "fleet/rescue/x" },
+      { worktree: "agent-a2", outcome: "failed", detail: "budget 3 not attempted" },
+    ])).toEqual(["checkout: nothing to push", "agent-a1: pushed fleet/rescue/x", "agent-a2: FAILED (budget 3 not attempted)"]);
   });
 });

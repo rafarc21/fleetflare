@@ -520,7 +520,11 @@ export async function handleStudio(
     // Same output-boundary redaction /check and /provisioned already apply
     // to container-echoed text — a rejected push's error can carry a repo
     // URL/credential fragment from git's own stderr.
-    return Response.json(result.ok ? result : { ok: false, error: redactSecrets(result.error) });
+    return Response.json(result.ok ? result : {
+      ok: false, error: redactSecrets(result.error),
+      // Issue #39: worktree ids, refs and step names only — no git stderr.
+      ...(result.worktrees ? { worktrees: result.worktrees } : {}),
+    });
   }
   /**
    * Board #140 (#94 follow-up, HOLD fix): the operator's escape from a sync

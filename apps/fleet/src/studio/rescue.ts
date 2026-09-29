@@ -168,6 +168,50 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
 }
 
 /**
+ * Issue #39: the operator's per-worktree report. After each worktree,
+ * `rescue_wt` prints ONE `RESCUE_WT <id> pushed <ref> | nothing | failed
+ * <step...>` line, derived from what `rescue_one` itself printed (captured
+ * through a temp file, so rescue_one still runs in THIS shell and its
+ * fail/any/markers globals survive). Additive: every existing line is echoed
+ * through unchanged, and do.ts strips these before its own verdict parse.
+ * No temp file (mktemp failed) = rescue_one runs bare and the line says
+ * `unknown`, never a guessed outcome.
+ */
+export const RESCUE_WT_PREFIX = "RESCUE_WT";
+
+export interface RescueWorktree {
+  worktree: string;
+  outcome: "pushed" | "nothing" | "failed" | "unknown";
+  /** pushed: the ref; failed: the step (and any detail after it). */
+  detail?: string;
+}
+
+/** Issue #39: one human line per worktree, for recycle's row and rescue-all. */
+export function formatRescueReport(worktrees: RescueWorktree[]): string[] {
+  return worktrees.map((w) => {
+    if (w.outcome === "pushed") return `${w.worktree}: pushed ${w.detail}`;
+    if (w.outcome === "nothing") return `${w.worktree}: nothing to push`;
+    if (w.outcome === "failed") return `${w.worktree}: FAILED (${w.detail})`;
+    return `${w.worktree}: outcome unknown (see rescue lines)`;
+  });
+}
+
+function rescueWtFn(): string {
+  return (
+    `rescue_wt() {\n` +
+    `  local id="$2" f l\n` +
+    `  if ! f="$(mktemp)"; then rescue_one "$@"; echo "${RESCUE_WT_PREFIX} $id unknown"; return; fi\n` +
+    `  rescue_one "$@" >"$f"\n` +
+    `  cat "$f"\n` +
+    `  if l="$(grep -m1 "^${RESCUE_FAILED_PREFIX} $id " "$f")"; then echo "${RESCUE_WT_PREFIX} $id failed \${l#* * }"\n` +
+    `  elif l="$(grep -m1 "^${RESCUE_PUSHED_PREFIX} " "$f")"; then l="\${l#* }"; echo "${RESCUE_WT_PREFIX} $id pushed \${l%% *}"\n` +
+    `  else echo "${RESCUE_WT_PREFIX} $id nothing"; fi\n` +
+    `  rm -- "$f" 2>/dev/null || true\n` +
+    `}\n`
+  );
+}
+
+/**
  * Board issue #359, fresh review round 3: the ORIGINAL fix for "rescue-all
  * times out on a busy studio" only added a client-side budget for the WHOLE
  * multi-push walk (cli/fleet.ts's RESCUE_ALL_STUDIO_TIMEOUT_MS) — a single
@@ -656,7 +700,7 @@ export function rescuePushCmd(
     // only when BOTH attempts failed — that, and only that, is a genuine
     // RESCUE_FAILED. Never a `+`/`--force` retry: the fallback ref is BRAND
     // NEW, so a plain push is never rejected on it for the same reason.
-    rescueTryPushFn(identity, pushTimeoutSeconds) +
+    rescueTryPushFn(identity, pushTimeoutSeconds) + rescueWtFn() +
     `rescue_push() {\n` +
     `  local w="$1" id="$2" target="$3" generated="$4" perr prc ftarget nv\n` +
     // Issue #359, measured live 2026-09-26: a slow or hanging pre-push hook
@@ -793,7 +837,7 @@ export function rescuePushCmd(
     // that happening to be true forever. `</dev/null` on both calls means
     // every command `rescue_one` runs — this one and any future one — gets a
     // stdin that reads EOF immediately, never the outer here-string.
-    `rescue_one "${dir}" "checkout" "checkout" </dev/null\n` +
+    `rescue_wt "${dir}" "checkout" "checkout" </dev/null\n` +
     // C5: worktree paths are read one per line from a here-string, never
     // word-split from a bare `$(...)` — a path containing a space survives.
     // A "prunable" worktree (registered, directory gone) is skipped
@@ -852,7 +896,7 @@ export function rescuePushCmd(
     `    [ "$w" = "${dir}" ] && continue\n` +
     `    [ -d "$w" ] || continue\n` +
     `    wid=$(basename "$(git -C "$w" rev-parse --git-dir)")\n` +
-    `    rescue_one "$w" "$wid" "member" </dev/null\n` +
+    `    rescue_wt "$w" "$wid" "member" </dev/null\n` +
     `  done <<< "$wtlist"\n` +
     `fi\n` +
     // PR #263 round 3, N1: a local branch holding commits with no
@@ -1171,7 +1215,7 @@ export function rescueSnapshotCmd(
     // `HEAD` for the non-mutating branches below, or a bare commit SHA for
     // the snapshot branch) instead of always `HEAD` — never a `+`/`--force`
     // retry, same reasoning as rescuePushCmd's own N3 comment.
-    rescueTryPushFn(identity, pushTimeoutSeconds) +
+    rescueTryPushFn(identity, pushTimeoutSeconds) + rescueWtFn() +
     `rescue_push() {\n` +
     `  local w="$1" id="$2" target="$3" ref="$4" perr prc ftarget\n` +
     // Issue #359: unlike rescuePushCmd's own rescue_push (above), `$target`
@@ -1292,7 +1336,7 @@ export function rescueSnapshotCmd(
     `  fi\n` +
     `}\n` +
     // N4 stdin-isolation posture, unchanged from rescuePushCmd.
-    `rescue_one "${dir}" "checkout" "checkout" </dev/null\n` +
+    `rescue_wt "${dir}" "checkout" "checkout" </dev/null\n` +
     `wtporcelain="$(git -C ${dir} worktree list --porcelain)"\n` +
     `wtlist="$(printf '%s\\n' "$wtporcelain" | sed -n 's/^worktree //p')"\n` +
     // checked_out builder, unchanged from rescuePushCmd (round 4 Finding 1 +
@@ -1312,7 +1356,7 @@ export function rescueSnapshotCmd(
     `    [ "$w" = "${dir}" ] && continue\n` +
     `    [ -d "$w" ] || continue\n` +
     `    wid=$(basename "$(git -C "$w" rev-parse --git-dir)")\n` +
-    `    rescue_one "$w" "$wid" "member" </dev/null\n` +
+    `    rescue_wt "$w" "$wid" "member" </dev/null\n` +
     `  done <<< "$wtlist"\n` +
     `fi\n` +
     // N1 branch walk: unchanged from rescuePushCmd -- pushes an EXISTING

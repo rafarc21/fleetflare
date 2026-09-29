@@ -297,6 +297,9 @@ export interface StudioStatus {
   /** PR #46 review: the last aside ship's failures (session-sync.ts's
    *  ASIDE_SHIP_KEY), mirrored by mirrorBurnToRegistry; `fleet ls` prints them. */
   asideShip?: { at: string; failed: { dir: string; reason: string }[] } | null;
+  /** Issue #39: recycle's pre-destroy rescue, one human line per worktree
+   *  (rescue.ts's formatRescueReport). Set only by the recycle that ran it. */
+  rescueReport?: string[];
 }
 
 export interface ProvisionConfig {
