@@ -165,6 +165,15 @@ describe("handleGhProxy", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("a scanner that throws (not a LeakGateError) refuses with 503; GitHub never called", async () => {
+    const { send, ports, calls } = await setup();
+    ports.check = async () => { throw new Error("regex engine exploded"); };
+    const res = await send({ op: "comment", number: 5, body: "clean" });
+    expect(res.status).toBe(503);
+    expect(await res.text()).not.toContain("exploded");
+    expect(calls).toHaveLength(0);
+  });
+
   it("a confirmed-private work repo skips the scan", async () => {
     const { send, calls } = await setup({ isPrivate: true });
     expect((await send({ op: "comment", number: 5, body: "acmeclient" })).status).toBe(201);

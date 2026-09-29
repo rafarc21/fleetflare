@@ -57,6 +57,17 @@ describe("writeProxyConfigCmd", () => {
     expect(r.out).toContain(`password=${TOKEN}`);
   });
 
+  // #13 review, surviving mutant: git CONCATENATES matching helpers in config
+  // order; without the '' reset an earlier bare helper answers first.
+  test("proxy: an earlier bare credential.helper does not answer for the Worker (list reset)", () => {
+    const h = home();
+    h.sh(`git config --global credential.helper '!f() { echo username=u; echo password=WRONG; }; f'`);
+    h.apply("proxy");
+    const r = h.sh("git credential fill", `url=${WORKER}/fleet/git/github.com/example-org/demo.git\n\n`);
+    expect(r.out).toContain(`password=${TOKEN}`);
+    expect(r.out).not.toContain("WRONG");
+  });
+
   test("proxy: github.com credentials are not answered by the Worker helper", () => {
     const h = home();
     h.apply("proxy");

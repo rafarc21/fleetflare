@@ -243,6 +243,34 @@ describe("handleGitProxy: receive-pack", () => {
     expect(upstreamCalls).toHaveLength(0);
   });
 
+  // #13 review, surviving mutants.
+  it("a scanner that throws (not a LeakGateError) refuses, never forwards", async () => {
+    const { ports, auth, upstreamCalls } = await setup();
+    ports.check = async () => { throw new Error("regex engine exploded"); };
+    const res = await handleGitProxy(new Request(`${BASE}/git-receive-pack`, {
+      method: "POST", headers: { ...auth, "content-type": "application/x-git-receive-pack-request" }, body: await pushBody(),
+    }), ports);
+    const text = await decode(res);
+    expect(text).toContain("ng refs/heads/feature fleet: leak gate: scanner error");
+    expect(text).not.toContain("exploded");
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  it("a shallow line in the push request is refused, never forwarded", async () => {
+    const { push, upstreamCalls } = await setup();
+    const body = await pushBody();
+    const shallow = concat([pkt(`shallow ${"4".repeat(40)}\n`), body]);
+    expect((await push(shallow)).status).toBe(400);
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  it("bytes after the pack trailer are refused, never forwarded", async () => {
+    const { push, upstreamCalls } = await setup();
+    const res = await push(concat([await pushBody(), new Uint8Array([0x00])]));
+    expect(await decode(res)).toContain("ng refs/heads/feature fleet: write proxy:");
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
   it("an unparseable request is 400", async () => {
     const { push, upstreamCalls } = await setup();
     expect((await push(enc.encode("zzzz"))).status).toBe(400);
