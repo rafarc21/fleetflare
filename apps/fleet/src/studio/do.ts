@@ -501,7 +501,7 @@ export async function restartWithSync(
 
 import {
   rescuePushCmd, rescueSnapshotCmd, RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX,
-  RESCUE_FAILED_PREFIX, resolveRescueTarget,
+  RESCUE_FAILED_PREFIX, resolveRescueTarget, type RescueTarget,
 } from "./rescue";
 // Moved to src/studio/rescue.ts (pure, so a bun test runs it against real
 // git — issue #217); re-exported so every existing import keeps working.
@@ -4547,6 +4547,8 @@ export class StudioDO extends Sandbox<Env> {
       installLeakGate: () =>
         installLeakGatePort((cmd) => sbExec(this, cmd, EXEC_CLASSES.provision)),
       workRepoIsPrivate: async (slug: string) => repoIsPrivate(await mint(slug), slug),
+      // Issue #30: discovery reads the same remote rescue writes to.
+      rescueTarget: (slug: string) => this.rescueTarget(async () => slug),
       // Board #350: the repo gate and the presign-GET mint. Both optional on
       // ProvisionDeps (install-cache.ts's InstallCacheRestoreDeps doc
       // comment) — wired here unconditionally, since the gate itself (empty
@@ -5069,13 +5071,22 @@ export class StudioDO extends Sandbox<Env> {
       // Issue #1 piece 5: FLEET_RESCUE_REMOTE + a contents:write token scoped
       // to it; unset or a failed mint → origin, leak-gated, loudly (rescue.ts).
       // Issue #24: only for a PUBLIC work repo; private or unknown → origin.
-      rescueTarget: () => resolveRescueTarget(this.env, (repo) =>
-        mintRepoToken(this.env, repo, { permissions: { contents: "write" } }),
-      async () => {
-        const slug = await this.workRepoSlug(null);
-        return repoIsPrivate(await mintRepoToken(this.env, slug), slug);
-      }),
+      rescueTarget: () => this.rescueTarget(() => this.workRepoSlug(null)),
     };
+  }
+
+  /**
+   * Issue #30: the ONE rescue-target decision. Rescue (syncDeps above) pushes
+   * to it; provision's discovery (deps().rescueTarget) lists + fetches from
+   * it, so discovery reads exactly what rescue wrote.
+   */
+  private rescueTarget(workRepoSlug: () => Promise<string>): Promise<RescueTarget> {
+    return resolveRescueTarget(this.env, (repo) =>
+      mintRepoToken(this.env, repo, { permissions: { contents: "write" } }),
+    async () => {
+      const slug = await workRepoSlug();
+      return repoIsPrivate(await mintRepoToken(this.env, slug), slug);
+    });
   }
 
   /**

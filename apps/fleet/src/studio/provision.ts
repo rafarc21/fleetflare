@@ -59,6 +59,7 @@ import {
   mergeObserved, bringupLeftLeadUntouched, resolveSnapshotAge,
 } from "./observed";
 import { JUNIOR_HOUSE_RULE } from "../junior/gate";
+import { rescuePushPrelude, type RescuePushOptions, type RescueTarget } from "./rescue";
 
 /**
  * Dependency seam — mirrors src/agents/do.ts's `LoopDeps`/src/deploy/do.ts's
@@ -247,6 +248,12 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
    * false, a throw, or absence = public: the denylist is delivered (fail closed).
    */
   workRepoIsPrivate?: (slug: string) => Promise<boolean>;
+  /**
+   * Issue #30: where rescue pushes go -- do.ts wires the SAME
+   * resolveRescueTarget call its rescue uses, so discovery reads what rescue
+   * wrote. `{}`, absence or a throw = origin-only discovery.
+   */
+  rescueTarget?: (workRepoSlug: string) => Promise<RescueTarget>;
   /**
    * Maestro correction #10 — issue #90 (currently blocked, but also touches
    * `runProvision`/`runRestart` directly) makes widening either function's
@@ -852,7 +859,26 @@ export function guardedCloneCmd(workRepoSlug: string, targetDir: string): string
  *  checkout was a real bug, not a style choice. */
 export const REMOTE_BRANCHES_LIST_FILE = "/workspace/.fleet/remote-branches.txt";
 
-export function discoverRescueRefsCmd(targetDir: string, studio: string, listFile = REMOTE_BRANCHES_LIST_FILE): string {
+/**
+ * Issue #30: `rescue` is the SAME target rescue pushes to (do.ts's
+ * resolveRescueTarget, via ProvisionDeps.rescueTarget). `remoteUrl` set = a
+ * public work repo whose rescues land on the private rescue remote, so that
+ * remote is listed + fetched too, after origin. Absent (`{}`: private work
+ * repo, remote unset, mint failed) = origin only, byte-identical to before.
+ * Token: FLEET_RESCUE_TOKEN in exec env, expanded by a credential helper
+ * (rescuePushPrelude), never argv.
+ *
+ * Precedence when one ref name exists on BOTH remotes: origin's copy keeps
+ * the branch name (fetched first, same as before #30). Same commit on the
+ * private remote = nothing more to fetch. Different commit = the private
+ * copy lands as `<name>-rescue-remote`, loudly. Neither is dropped.
+ *
+ * Private remote unreachable = one loud WARNING line; origin's results stand
+ * and the command still exits 0.
+ */
+export function discoverRescueRefsCmd(
+  targetDir: string, studio: string, listFile = REMOTE_BRANCHES_LIST_FILE, rescue: RescuePushOptions = {},
+): string {
   const listDir = listFile.slice(0, listFile.lastIndexOf("/"));
   const flatPrefix = `refs/heads/fleet/rescue/${studio}-`;
   // PR #263 round 4 (#251 review, Finding 2): rescue.ts's round 3 N1/N2 push
@@ -892,7 +918,7 @@ export function discoverRescueRefsCmd(targetDir: string, studio: string, listFil
   const wtPrefix = `${nestedPrefix}wt/`;
   const pattern =
     `${flatPrefix}[0-9]{14}$|${nestedPrefix}[0-9]{14}/checkout/[^[:space:]]+$|${wtPrefix}[^[:space:]]+-[0-9]{14}$`;
-  return (
+  const originCmd = (
     `{ mkdir -p ${listDir} && ` +
     `git -C ${targetDir} ls-remote --heads origin > ${listFile} && ` +
     `grep -oE '${pattern}' ${listFile} | sort -u | while IFS= read -r ref; do ` +
@@ -902,6 +928,27 @@ export function discoverRescueRefsCmd(targetDir: string, studio: string, listFil
     // PR #312 round 3: still never fails provisioning, but no longer silent --
     // an unwritable list dir or a failed ls-remote used to vanish into `|| true`.
     `done; } || echo "studio-bringup: rescue discovery skipped (could not list origin's branches into ${listFile})" >&2`
+  );
+  if (rescue.remoteUrl === undefined) return originCmd;
+  // Issue #30. GIT_TERMINAL_PROMPT=0: a missing token fails, never waits.
+  const rgit = `GIT_TERMINAL_PROMPT=0 "\${__rgit[@]}" -C ${targetDir}`;
+  return (
+    `${originCmd}\n` +
+    `{ ${rescuePushPrelude(rescue)}` +
+    `__rl="$(${rgit} ls-remote --heads "$__rdest")" && ` +
+    `{ printf '%s\\n' "$__rl" | grep -oE '${pattern}' | sort -u | while IFS= read -r ref; do ` +
+    `name="\${ref#refs/heads/}"; ` +
+    `sha="$(printf '%s\\n' "$__rl" | awk -v r="$ref" '$2 == r { print $1 }')"; ` +
+    `have="$(git -C ${targetDir} rev-parse -q --verify "refs/heads/$name" 2>/dev/null)"; ` +
+    // Same commit already fetched from origin: nothing to add.
+    `[ "$have" = "$sha" ] && continue; ` +
+    `if [ -n "$have" ]; then ` +
+    `echo "studio-bringup: rescue branch $name exists on origin AND the private rescue remote with different commits -- origin's kept as $name, the private remote's fetched as $name-rescue-remote" >&2; ` +
+    `name="$name-rescue-remote"; fi; ` +
+    `if ${rgit} fetch "$__rdest" "$ref:$name" </dev/null; then ` +
+    `echo "studio-bringup: found rescued work from a prior incarnation of this studio on branch $name (private rescue remote) -- fetched (not checked out), see git log $name" >&2; ` +
+    `else echo "studio-bringup: WARNING: could not fetch rescue branch $ref from the private rescue remote -- fetch it by hand" >&2; fi; ` +
+    `done; }; } || echo "studio-bringup: WARNING: rescue discovery could not list the private rescue remote -- rescued work there NOT fetched; origin results kept" >&2`
   );
 }
 
@@ -2287,7 +2334,19 @@ export async function runProvision(
     // exec practically never returns nonzero either; this catches the case
     // sbExec itself throws (e.g. the sandbox connection drops mid-call).
     try {
-      await deps.sbExec(discoverRescueRefsCmd(`/workspace/${cfg.repo}`, id));
+      // Issue #30: a target failure must not cost origin's discovery.
+      let target: RescueTarget = {};
+      try {
+        target = (await deps.rescueTarget?.(workRepoSlug)) ?? {};
+      } catch (err) {
+        console.error(`studio ${id}: rescue target lookup failed, discovering from origin only`,
+          err instanceof Error ? err.message : String(err));
+      }
+      const res = await deps.sbExec(
+        discoverRescueRefsCmd(`/workspace/${cfg.repo}`, id, undefined, { remoteUrl: target.remoteUrl }), target.env);
+      for (const line of res.stderr.split("\n")) {
+        if (line.includes("WARNING")) console.error(`studio ${id}: ${line}`);
+      }
     } catch (err) {
       console.error(
         `studio ${id}: rescue-branch discovery failed, proceeding without it`,
