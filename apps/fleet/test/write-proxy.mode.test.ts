@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Env } from "../src/env";
 import {
-  writeProxyOn, resolveWriteMode, readTokenEnvName, studioReadToken, studioCredential,
+  writeProxyOn, writeModeFor, resolveWriteMode, readTokenEnvName, studioReadToken, studioCredential,
   STUDIO_READ_PERMISSIONS, containerToken,
 } from "../src/write-proxy/mode";
 
@@ -14,11 +14,33 @@ const ON = { FLEET_WRITE_PROXY_REPOS: "example-org/demo" };
 const APP = { ...ON, GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k", GITHUB_INSTALLATION_ID: "2" };
 
 describe("writeProxyOn", () => {
+  it("malformed entries (a URL, a .git suffix) are logged and never match", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(writeProxyOn({ FLEET_WRITE_PROXY_REPOS: "https://github.com/example-org/demo, example-org/demo.git" }, REPO)).toBe(false);
+    const logged = err.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(logged).toContain("https://github.com/example-org/demo");
+    expect(logged).toContain("example-org/demo.git");
+    err.mockRestore();
+  });
+
   it("is off unless the work repo is on FLEET_WRITE_PROXY_REPOS (deploy changes nothing)", () => {
     expect(writeProxyOn({}, REPO)).toBe(false);
     expect(writeProxyOn({ FLEET_WRITE_PROXY_REPOS: "" }, REPO)).toBe(false);
     expect(writeProxyOn({ FLEET_WRITE_PROXY_REPOS: "example-org/other" }, REPO)).toBe(false);
     expect(writeProxyOn({ FLEET_WRITE_PROXY_REPOS: "example-org/other, Example-Org/Demo" }, REPO)).toBe(true);
+  });
+});
+
+describe("writeModeFor", () => {
+  it("unlisted repo = direct, whatever the visibility and provider", () => {
+    const off = envOf({ GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k", GITHUB_INSTALLATION_ID: "2" });
+    expect(writeModeFor(off, REPO, false)).toBe("direct");
+    expect(writeModeFor(envOf({ GITHUB_TOKEN: "w" }), REPO, true)).toBe("direct");
+  });
+  it("listed: App + private = direct; public or PAT = proxy", () => {
+    expect(writeModeFor(envOf(APP), REPO, true)).toBe("direct");
+    expect(writeModeFor(envOf(APP), REPO, false)).toBe("proxy");
+    expect(writeModeFor(envOf({ ...ON, GITHUB_TOKEN: "w" }), REPO, true)).toBe("proxy");
   });
 });
 

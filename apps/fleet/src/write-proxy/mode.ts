@@ -25,8 +25,19 @@ export const STUDIO_READ_PERMISSIONS: Record<string, string> = {
 
 /** On only for a work repo listed in FLEET_WRITE_PROXY_REPOS (comma or
  *  whitespace separated `owner/name`, case-insensitive). Unset = off. */
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
 export function writeProxyOn(env: { FLEET_WRITE_PROXY_REPOS?: string }, workRepo: string): boolean {
-  const list = (env.FLEET_WRITE_PROXY_REPOS ?? "").split(/[\s,]+/).map((r) => r.trim().toLowerCase()).filter(Boolean);
+  const list: string[] = [];
+  for (const raw of (env.FLEET_WRITE_PROXY_REPOS ?? "").split(/[\s,]+/)) {
+    if (raw === "") continue;
+    // A URL or a `.git` suffix would silently match nothing: say so.
+    if (!REPO_RE.test(raw) || raw.toLowerCase().endsWith(".git")) {
+      console.error(`write proxy: FLEET_WRITE_PROXY_REPOS entry ${JSON.stringify(raw)} is not owner/name -- ignored`);
+      continue;
+    }
+    list.push(raw.toLowerCase());
+  }
   return list.includes(workRepo.toLowerCase());
 }
 
