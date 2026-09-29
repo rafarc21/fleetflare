@@ -522,7 +522,8 @@ export async function restartWithSync(
 
 import {
   rescuePushCmd, rescueSnapshotCmd, RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX,
-  RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport, type RescueWorktree, type RescueTarget,
+  RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport, rescueMintPermissions,
+  type RescueWorktree, type RescueTarget,
 } from "./rescue";
 // Moved to src/studio/rescue.ts (pure, so a bun test runs it against real
 // git — issue #217); re-exported so every existing import keeps working.
@@ -5187,8 +5188,9 @@ export class StudioDO extends Sandbox<Env> {
   ): Promise<RescueTarget> {
     // Issue #7: never the fleet's write PAT (containerToken); PAT fleets bring
     // a rescue-only token. And only for a rescue repo confirmed private.
+    // Issue #45: discovery only reads the remote — read token, not write.
     return resolveRescueTarget(this.env,
-      async (repo) => (await containerToken(this.env, await workRepoSlug(), repo, { contents: "write" }))
+      async (repo) => (await containerToken(this.env, await workRepoSlug(), repo, rescueMintPermissions(purpose)))
         ?? (this.env.FLEET_RESCUE_GITHUB_TOKEN || null),
       async () => {
         const slug = await workRepoSlug();
