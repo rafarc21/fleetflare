@@ -883,6 +883,26 @@ describe("deploy.sh records every rescue-gate override durably (#40)", () => {
     expect(records()[0].command).toBe("deploy --var --var --define --secrets-file");
   });
 
+  // Issue #69: wrangler's --var/--define take EVERY following word until the
+  // next flag. Dropping only the first leaked the rest into the record.
+  test("multi-value --var / --var= / --define: every value dropped, not only the first", () => {
+    const r = deploy(["deploy", "--var", "A:s3cr3t-one", "B:s3cr3t-two", "--var=C:s3cr3t-three", "D:s3cr3t-four",
+      "--define", "E:s3cr3t-five", "F:s3cr3t-six", "--allow-unrescued"], 1, gitUser("Op Tester"));
+    expect(r.code, r.err).toBe(0);
+    const raw = readFileSync(logPath(), "utf8");
+    expect(raw).not.toContain("s3cr3t");
+    expect(records()[0].command).toBe("deploy --var --var --define");
+  });
+
+  test("-e after a multi-value --var still keeps its env value", () => {
+    const base = withImage("fleet-test");
+    writeConfig({ ...base, env: { staging: { durable_objects: base.durable_objects, containers: base.containers } } });
+    setCreds("https://fleet-test-staging.example.workers.dev");
+    deploy(["deploy", "--var", "A:s3cr3t-one", "B:s3cr3t-two", "-e", "staging", "--allow-unrescued"], 1, gitUser("Op Tester"));
+    expect(readFileSync(logPath(), "utf8")).not.toContain("s3cr3t");
+    expect(records()[0].command).toBe("deploy --var -e staging");
+  });
+
   test("-e keeps its env value (not secret, needed to know the target)", () => {
     const base = withImage("fleet-test");
     writeConfig({ ...base, env: { staging: { durable_objects: base.durable_objects, containers: base.containers } } });

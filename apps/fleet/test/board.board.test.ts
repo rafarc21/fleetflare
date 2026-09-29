@@ -1332,3 +1332,62 @@ describe("closeTerminalTasks", () => {
   });
 });
 
+// Issue #54: a merge auto-completes a task; follow-up typed into the lead is
+// invisible to the board, so the studio holds no open task and gets reaped
+// mid-work. `continues` files the follow-up as a real task, to the SAME
+// studio, read from the finished one rather than retyped.
+describe("createTask — continues (issue #54)", () => {
+  const FINISHED = task({ number: 7, state: "completed", labels: ["completed", "studio:demo--web-studio"],
+    assignee: "demo--web-studio", open: false });
+
+  it("no --studio: assigned to the continued task's studio, lineage in the body", async () => {
+    const createIssue = vi.fn(async () => task({ number: 8 }));
+    const api = fakeApi({ getIssue: vi.fn(async () => FINISHED), createIssue });
+    const res = await createTask(api, "o/r", { ...brief, continues: 7 });
+    expect(res.ok).toBe(true);
+    expect(api.getIssue).toHaveBeenCalledWith("o/r", 7);
+    const input = (createIssue.mock.calls[0] as unknown[])[1] as { labels: string[]; body: string };
+    expect(input.labels).toContain("studio:demo--web-studio");
+    expect(input.body).toContain("Continues #7.");
+  });
+
+  it("explicit --studio wins; lineage kept", async () => {
+    const createIssue = vi.fn(async () => task({ number: 8 }));
+    const api = fakeApi({ getIssue: vi.fn(async () => FINISHED), createIssue });
+    await createTask(api, "o/r", { ...brief, continues: 7, assignee: "demo--release-studio" });
+    const input = (createIssue.mock.calls[0] as unknown[])[1] as { labels: string[]; body: string };
+    expect(input.labels).toContain("studio:demo--release-studio");
+    expect(input.labels).not.toContain("studio:demo--web-studio");
+    expect(input.body).toContain("Continues #7.");
+  });
+
+  it("continued task has no studio and none given: 400, nothing filed", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 7, assignee: null })) });
+    const res = await createTask(api, "o/r", { ...brief, continues: 7 });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(400);
+    expect(res.message).toContain("#7");
+    expect(api.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("continued task does not exist: 404, nothing filed", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => { throw new GitHubError(404, "Not Found"); }) });
+    const res = await createTask(api, "o/r", { ...brief, continues: 99 });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(404);
+    expect(api.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("continues must be a positive integer", async () => {
+    for (const bad of [0, -1, 1.5, "7"]) {
+      const api = fakeApi();
+      const res = await createTask(api, "o/r", { ...brief, continues: bad });
+      expect(res.ok, JSON.stringify(bad)).toBe(false);
+      if (!res.ok) expect(res.status).toBe(400);
+      expect(api.createIssue).not.toHaveBeenCalled();
+    }
+  });
+});
+
