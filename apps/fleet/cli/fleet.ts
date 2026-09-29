@@ -30,6 +30,7 @@ import { parseStudioId } from "../src/studio/ids";
 import { parseGitRemote, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
 import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior } from "./junior";
+import { sweepAllPages, type SweepPage } from "./junior-sweep";
 import { runTaskStateTransition, type TaskStateFetchResult } from "../src/studio/task-state";
 import type { ReapOutcome } from "../src/studio/task-reap";
 import { formatRescueReport, type RescueWorktree } from "../src/studio/rescue";
@@ -1390,11 +1391,12 @@ async function cmdTaskReap(creds: Credentials, apply: boolean): Promise<void> {
 async function cmdTaskJuniorSweep(creds: Credentials, apply: boolean): Promise<void> {
   const detected = await detectRepo();
   reportRepo("fleet task junior-sweep", detected);
-  const result = (await boardRequest(creds, "fleet task junior-sweep", "/tasks/junior-sweep", {
+  // Issue #41: the Worker sweeps one page per request; follow `next`.
+  const result = await sweepAllPages(async (after) => (await boardRequest(creds, "fleet task junior-sweep", "/tasks/junior-sweep", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apply, ...(detected.slug ? { repo: detected.slug } : {}) }),
-  })) as { repo: string; apply: boolean; results: { number: number; outcome: string; reason: string }[] };
+    body: JSON.stringify({ apply, ...(detected.slug ? { repo: detected.slug } : {}), ...(after === null ? {} : { after }) }),
+  })) as SweepPage);
   console.log(`fleet task junior-sweep ${result.apply ? "(--apply)" : "(dry-run)"} — ${result.repo}`);
   if (result.results.length === 0) {
     console.log("  (no junior records)");

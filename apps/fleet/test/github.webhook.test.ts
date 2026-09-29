@@ -47,6 +47,9 @@ let getCalls = 0;
 // so a mutant that swapped one for the other would pass every existing
 // assertion here. Reset per test.
 let rpcCalls: { name: string; method: string }[] = [];
+// Issue #41: runs inside the maestro's wakeStudio, so a test can observe
+// what had already happened when the (possibly slow) wake began. Reset per test.
+let onWake: (() => Promise<void>) | null = null;
 
 function envWithStudio() {
   return {
@@ -58,6 +61,7 @@ function envWithStudio() {
         getCalls++;
         return {
           wakeStudio: async (prompt: string) => {
+            await onWake?.();
             wakes.push([name as string, prompt]);
             rpcCalls.push({ name: name as string, method: "wakeStudio" });
             return wakeOutcome;
@@ -147,6 +151,7 @@ beforeEach(async () => {
   wakeOutcome = { ok: true };
   getCalls = 0;
   rpcCalls = [];
+  onWake = null;
   lastCtx = null;
   realFetch = globalThis.fetch;
   globalThis.fetch = (async (_i: any, init: any) => {
@@ -1639,6 +1644,20 @@ describe("issues webhook — junior revoke (issue #35)", () => {
       expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(false);
     });
   }
+
+  // Issue #41: GitHub cancels a delivery after 10s, and the maestro wake can
+  // take far longer. The revoke must already be done when the wake starts.
+  it("the revoke lands BEFORE the maestro wake starts", async () => {
+    await seed();
+    let authorizedAtWake: boolean | null = null;
+    onWake = async () => { authorizedAtWake = await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO); };
+    // A titled issue: the maestro wake digest needs one (wake-events.ts).
+    const body = issues("labeled", { label: { name: "canceled" }, issue: { number: 7, title: "t", state: "open" } });
+    expect((await post(body, await sign(body), "issues")).status).toBe(200);
+    await drainLast();
+    expect(wakes.map(([id]) => id)).toContain("websites--maestro");
+    expect(authorizedAtWake).toBe(false);
+  });
 
   it("closed: record revoked", async () => {
     await seed();

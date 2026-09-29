@@ -587,6 +587,10 @@ export async function handleGithubWebhook(
    */
   const event = req.headers.get("x-github-event");
   if (event !== "push") {
+    // Issue #41: the revoke FIRST. GitHub cancels a delivery after 10s and
+    // the maestro wake below can outlast that; a cancelled request must not
+    // take the revoke with it.
+    if (event === "issues") await revokeJuniorOnIssueEvent(env, body);
     if (event) await wakeMaestro(env, event, body, now());
     // Board issue #236: an ADDITIONAL, targeted wake for the commented-on
     // task's own assignee — independent of wakeMaestro above, which still
@@ -596,7 +600,6 @@ export async function handleGithubWebhook(
     // delivery budget is 10s, while a wake's own exec can take up to 30s, so
     // this must not block the response either.
     if (event === "issue_comment") ctx.waitUntil(wakeTaskOnComment(env, body));
-    if (event === "issues") await revokeJuniorOnIssueEvent(env, body);
     return new Response("ok");
   }
 
