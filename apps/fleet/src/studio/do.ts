@@ -3056,9 +3056,12 @@ export async function recordContainerStop(
  *  stop, the heal marker and the operation lock. Heal reasons can quote
  *  container output, so they are scrubbed here like `error` is. */
 export async function statusDetailWithStorage(
-  storage: StudioStorage & Pick<LastStopStorage, "get">, idFallback: string,
+  storage: StudioStorage & Pick<LastStopStorage, "get">, idFallback: string, destroyCallsInFlight = false,
 ): Promise<
-  StudioStatus & { lastStop: LastStop | null; healAttempt: HealAttempt | null; operationInFlight: OperationInFlight | null }
+  StudioStatus & {
+    lastStop: LastStop | null; healAttempt: HealAttempt | null; operationInFlight: OperationInFlight | null;
+    destroyInFlight: boolean;
+  }
 > {
   const heal = (await storage.get(HEAL_ATTEMPT_KEY)) ?? null;
   const op = (await storage.get(OPERATION_KEY)) ?? null;
@@ -3068,6 +3071,10 @@ export async function statusDetailWithStorage(
     healAttempt: heal && { ...heal, reason: redactSecrets(heal.reason) },
     // A lock past OPERATION_STALE_MS is not in flight — decideHeal ignores it too.
     operationInFlight: op && destroyingMarkerFresh(op.since, new Date()) ? op : null,
+    // Issue #86: a destroy call still running in this DO (its probe, sync and
+    // rescue come before DESTROYING_KEY is written), or the marker itself.
+    // `fleet reap` reads it to tell a raced destroy from a refusal.
+    destroyInFlight: destroyCallsInFlight || destroyingMarkerFresh(await storage.get(DESTROYING_KEY), new Date()),
   };
 }
 
@@ -5579,7 +5586,7 @@ export class StudioDO extends Sandbox<Env> {
    *  so /status agrees with `fleet ls`/`fleet check` rather than being the
    *  one caller `observed` forgot. */
   async getStatusDetail(): Promise<Awaited<ReturnType<typeof statusDetailWithStorage>> & { observed: Observed }> {
-    const detail = await statusDetailWithStorage(this.ctx.storage, this.selfId());
+    const detail = await statusDetailWithStorage(this.ctx.storage, this.selfId(), this.destroyInFlightCount > 0);
     // Issue #221: `observed.activity` rides this response too — see
     // `getObservedWithActivity`'s own doc comment.
     return { ...detail, observed: await getObservedWithActivity(this.ctx.storage) };

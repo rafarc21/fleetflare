@@ -99,8 +99,19 @@ export type ReapInspect =
   | { ok: false; message: string };
 
 export type ReapDestroyResult =
-  | { outcome: "destroyed" }
+  | { outcome: "destroyed" | "already-stopped" | "in-progress" }
   | { outcome: "refused" | "unknown"; message: string };
+
+/** Issue #86: a destroy that did not answer "destroyed" raced another one
+ *  (an operator's) when the row, read right after, is stopped or reports a
+ *  destroy in flight. Either is the outcome reap wanted. Else null. */
+export function destroyRaceOutcome(
+  row: { state: StudioStatus["state"]; destroyInFlight?: boolean } | null,
+): "already-stopped" | "in-progress" | null {
+  if (row === null) return null;
+  if (row.state === "stopped") return "already-stopped";
+  return row.destroyInFlight === true ? "in-progress" : null;
+}
 
 export interface ReapDeps {
   now: () => Date;
@@ -389,11 +400,21 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
       const last = await liveRead(s.id);
       if (last) { refused(s.id, last); continue; }
       const result = await deps.destroy(s.id);
-      if (result.outcome !== "destroyed") { backOff(s.id, `destroy ${result.outcome}: ${result.message}`); continue; }
+      if (result.outcome === "refused" || result.outcome === "unknown") {
+        backOff(s.id, `destroy ${result.outcome}: ${result.message}`);
+        continue;
+      }
       delete state.backoffUntil[s.id];
       delete state.stallAlarmAt[s.id];
       delete state.refusals[s.id];
-      deps.log(`REAPED ${s.id}: ${idleWord(idleMs)}, no open task, rescued, destroyed`);
+      if (result.outcome === "in-progress") {
+        // Not retried while that destroy runs: a second rescue would race it.
+        state.backoffUntil[s.id] = new Date(deps.now().getTime() + REAP_BACKOFF_MS).toISOString();
+        deps.log(`REAPED ${s.id}: ${idleWord(idleMs)}, no open task, rescued; another destroy already in progress`);
+        continue;
+      }
+      const how = result.outcome === "already-stopped" ? "already stopped by another destroy" : "destroyed";
+      deps.log(`REAPED ${s.id}: ${idleWord(idleMs)}, no open task, rescued, ${how}`);
     } catch (err) {
       backOff(s.id, `error: ${err instanceof Error ? err.message : String(err)}`);
     }

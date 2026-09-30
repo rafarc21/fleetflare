@@ -44,9 +44,9 @@ import { requestInspect, renderInspect, formatSessionForceArmedLine, type Inspec
 import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
 import { repairFailureLine, discardNote, destroyPath } from "./repair-failure";
-import { requestDestroy } from "./destroy-outcome";
+import { requestDestroy, readStatus, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome";
 import {
-  formatIdleAlarm, emptyReapState, runReap, REAP_LIVE_READ_MAX_MS, type ReapDeps, type ReapFlags, type ReapState,
+  formatIdleAlarm, emptyReapState, runReap, destroyRaceOutcome, REAP_LIVE_READ_MAX_MS, type ReapDeps, type ReapFlags, type ReapState,
 } from "./reap";
 import { mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -1951,12 +1951,20 @@ export function reapDeps(
       const report = await requestDestroy(
         { destroy: studioUrl(creds, id, destroyPath(false, false)), status: studioUrl(creds, id, "/status") }, headers, id,
       );
-      for (const line of report.lines) log(`  ${id}  ${line}`);
-      if (report.teardown) {
+      // Issue #86: not "destroyed" -> read the row once. Stopped, or another
+      // destroy in flight, means this one raced an operator's: success.
+      let race: "already-stopped" | "in-progress" | null = null;
+      if (report.status?.state !== "stopped") {
+        const row = await readStatus(studioUrl(creds, id, "/status"), headers, fetch, DESTROY_STATUS_TIMEOUT_MS);
+        race = row.ok ? destroyRaceOutcome(row.status as StudioStatus & { destroyInFlight?: boolean }) : null;
+      }
+      if (race === null) for (const line of report.lines) log(`  ${id}  ${line}`);
+      if (report.teardown || race === "already-stopped") {
         const removal = await removeStudioWorkspace(id, orcaDeps);
         for (const line of describeWorkspaceRemoval(id, removal)) log(`  ${id}  ${line}`);
       }
       if (report.status?.state === "stopped") return { outcome: "destroyed" };
+      if (race !== null) return { outcome: race };
       return { outcome: report.kind === "http-error" ? "refused" : "unknown", message: report.lines.join(" ") || report.kind };
     },
     loadState: async () => {
