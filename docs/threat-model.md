@@ -114,6 +114,11 @@ true of the git wrapper that refuses pushes to the default branch: its own
 comment names `gh pr merge`, `gh api` ref updates and calling
 `/usr/bin/git` directly as uncovered (`apps/fleet/src/studio/credentials.ts:471-490`).
 Treat all three as guard rails against mistakes, not against an adversary.
+For a repo on `FLEET_WRITE_PROXY_REPOS` the push half of that gap is closed
+server-side: the studio's token is read-only, so every push goes through the
+Worker's write proxy, which refuses the default branch whatever path the push
+took (`apps/fleet/src/write-proxy/git-route.ts`, issue #34). Unlisted repos keep
+the wrapper as their only guard.
 `memguard` is a memory watchdog and has no security role
 (`apps/fleet/container/memguard.ts:1-11`).
 
