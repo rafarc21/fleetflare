@@ -65,6 +65,29 @@ export function flattenPrompt(prompt: string): string {
  *     for the limit/select modal above; failover.ts's strict detector
  *     already knows both shapes as alternatives in MODAL_FOOTER_LINE, this
  *     loose gate did not),
+ *   - the ▔-ruled top of ANY select-style modal, or the permission prompt's
+ *     own question "Do you want to proceed?" (#146 — a Claude Code version
+ *     that rewords its footer yet again reopens exactly the hole #144
+ *     closed, because both footer entries above are exact literals. The
+ *     fix generalizes on the modal's OPENER instead, which failover.ts's
+ *     own MODAL_BLOCK_START comment already establishes as shape claude
+ *     draws for every select-style menu — limit modal, permission prompt,
+ *     plan-mode choice — "without forking this regex or hardcoding footer
+ *     text". A bare numbered-option-row pattern ("❯ 1. ...") was considered
+ *     and REJECTED: it would match the ghost-composer row this file's own
+ *     "#141 review" describe block pins as NOT a modal
+ *     (test/studio.wake-race.test.ts, `"❯ 1. Upgrade deps"`), and it would
+ *     reopen the false-positive class PR #102's first cut already got
+ *     burned by — a lead's own numbered prose (status update, plan,
+ *     checklist), pinned in test/fixtures/rate-limit-panes.ts's
+ *     `NOT_DETECTED` corpus, fixtures (d)/(e)/(f)/(g), several of which sit
+ *     inside LOOSE_TAIL_LINES. No lead's own prose prints a bare row of ▔
+ *     box-drawing glyphs or the literal question "Do you want to proceed?",
+ *     so neither conflicts with that corpus or the ghost-composer pin. The
+ *     limit modal's own opener, "What do you want to do?", was deliberately
+ *     left OUT: NOT_DETECTED fixture (h) quotes that exact line in prose,
+ *     and the two entries above already cover the same modal shape via its
+ *     ▔ rule),
  *   - "(Run )/rate-limit-options" at the start of the row, or
  *   - a #53 headline as the whole row,
  * optionally inside a box border (a cursor only after a border). claude's
@@ -93,6 +116,11 @@ const ROW_TAIL = "[[:space:]]*(│)?[[:space:]]*$";
 export const LOOSE_LIMIT_PATTERNS: readonly string[] = [
   `${ROW_LEAD}Enter to confirm · Esc to cancel${ROW_TAIL}`,
   `${ROW_LEAD}Esc to cancel · Tab to amend · ctrl\\+e to explain${ROW_TAIL}`,
+  // #146: the ▔-ruled top of ANY select-style modal, and the permission
+  // prompt's own question — footer-wording-independent, see this array's
+  // own doc comment above for why a bare numbered-row pattern is not here.
+  `${ROW_LEAD}▔+${ROW_TAIL}`,
+  `${ROW_LEAD}Do you want to proceed\\?${ROW_TAIL}`,
   `${ROW_LEAD}(Run )?/rate-limit-options`,
   `${ROW_LEAD}(${RATE_LIMIT_HEADLINES.join("|")})${ROW_TAIL}`,
 ];

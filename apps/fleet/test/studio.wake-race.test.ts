@@ -190,7 +190,10 @@ describe("gate 3 loose check anchors on modal ROWS (#141 review)", () => {
     const outcome = await gated(exec);
     expect(outcome.ok).toBe(false);
     expect(outcome.skipped).toBeUndefined();
-    expect(outcome.error).toContain("Enter to confirm · Esc to cancel");
+    // #146: the ▔ rule opens V1's modal BEFORE its footer, and the loose
+    // check now recognizes that opener too — it is the first matching row
+    // in the tail, so it is what gets named here now, not the footer.
+    expect(outcome.error).toContain("▔");
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     logWakeOutcome("wake", outcome);
     expect(errors).toHaveBeenCalledTimes(1);
