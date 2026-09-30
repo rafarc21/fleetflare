@@ -109,7 +109,24 @@ export const SESSION_LIMIT_HEADLINE = "You've hit your session limit";
  * requires one of those two grammars to accept a candidate.
  */
 export const DEAD_ACCOUNT_HEADLINE = "Your organization has disabled Claude subscription access for Claude Code";
-const DEAD_ACCOUNT_LINE = /^\s*⎿\s+Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead\s*$/;
+/** The full sentence, unwrapped — what a wrapped capture's lines must
+ *  reconstruct exactly (trim each line, join with one space) to count.
+ *  Review fix pass (2026-09-30): a REAL pane (studio on a disabled account,
+ *  2026-09-30, ~120-col pane) showed this WRAPPED across two rows, drawn
+ *  with claude's own message glyph (`●`), not the fabricated single `⎿` line
+ *  the original detector matched — that shape never happens on a real pane. */
+const DEAD_ACCOUNT_FULL_TEXT =
+  "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access";
+/** The line this message STARTS on: claude's own message glyph (both
+ *  measured forms, see TRANSCRIPT_GLYPH's own doc comment), immediately
+ *  followed by the sentence's own first words — never merely CONTAINING
+ *  them (a `⎿` tool-output line, or prose, quoting the sentence mid-line
+ *  must not match this). */
+const DEAD_ACCOUNT_START_LINE = /^\s*[⏺●]\s+Your organization has disabled Claude subscription access for Claude Code\b/;
+/** How many physical rows the wrapped sentence may span. Two is what both
+ *  measured widths (120-col real pane, hand-wrapped 80-col) need; generous
+ *  headroom for a narrower pane without being unbounded. */
+const DEAD_ACCOUNT_WRAP_LINES = 3;
 
 /**
  * Issue #106: every inline limit headline, each with a pattern for the START
@@ -450,17 +467,32 @@ function inlineLimitBlock(lines: string[], now?: Date, sighting?: LimitSighting 
 }
 
 /**
- * Issue #141 — the org-disabled-subscription message. Same bottom-anchoring
- * discipline as an inline limit block (lastLineMatching + endsInIdleInputBox),
- * but no reset/hint grammar at all: the line is complete on its own, so
- * there is nothing to scan forward for the way inlineLimitBlock scans for a
- * hint line or a hint-less RESETS match.
+ * Issue #141 — the org-disabled-subscription message (issue #141) — permanent,
+ * never a select modal, never a reset. Unlike an inline limit block, it has no
+ * hint line and no resets grammar at all: the FULL SENTENCE, however it
+ * wrapped, is the only signal. Bottom-anchored (endsInIdleInputBox) the same
+ * way an inline limit block is.
+ *
+ * Review fix pass (2026-09-30): rewritten to be wrap-tolerant — the original
+ * detector matched one fabricated, unwrapped `⎿` line that a real pane never
+ * draws. This scans forward from the message's own start line
+ * (DEAD_ACCOUNT_START_LINE) up to DEAD_ACCOUNT_WRAP_LINES rows, stopping at
+ * the next transcript glyph, and accepts only an EXACT reconstruction of the
+ * full sentence — not a substring match, so a quoted copy inside a `⎿`
+ * tool-output line or prose never fires this.
  */
 function deadAccountBlock(lines: string[]): PaneVerdict | null {
-  const at = lastLineMatching(lines, DEAD_ACCOUNT_LINE);
+  const at = lastLineMatching(lines, DEAD_ACCOUNT_START_LINE);
   if (at < 0) return null;
-  if (!endsInIdleInputBox(lines.slice(at + 1))) return null;
-  return { kind: "modal", headline: DEAD_ACCOUNT_HEADLINE, marker: "dead-account", inline: true, dead: true };
+  for (let end = at + 1; end <= Math.min(at + DEAD_ACCOUNT_WRAP_LINES, lines.length); end++) {
+    if (end < lines.length && TRANSCRIPT_GLYPH.test(lines[end])) break;
+    const joined = lines.slice(at, end).map((l) => l.trim()).join(" ").replace(/^[⏺●]\s+/, "");
+    if (joined === DEAD_ACCOUNT_FULL_TEXT) {
+      if (!endsInIdleInputBox(lines.slice(end))) return null;
+      return { kind: "modal", headline: DEAD_ACCOUNT_HEADLINE, marker: "dead-account", inline: true, dead: true };
+    }
+  }
+  return null;
 }
 
 /**

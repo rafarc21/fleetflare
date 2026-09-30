@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { detectRateLimitModal, PANE_CAPTURE_MARKER, DEAD_ACCOUNT_HEADLINE } from "../src/studio/failover";
-import { ORG_DISABLED_PANE, NOT_DETECTED_141 } from "./fixtures/rate-limit-panes";
+import { ORG_DISABLED_PANE, ORG_DISABLED_PANE_80COL, NOT_DETECTED_141 } from "./fixtures/rate-limit-panes";
 
 // ---------------------------------------------------------------------------
 // Issue #141 — "Your organization has disabled Claude subscription access for
@@ -18,8 +18,15 @@ function captured(first: string, second = first): string {
 }
 
 describe("detectRateLimitModal — issue #141 dead account (org disabled subscription access)", () => {
-  it("fires on the org-disabled pane: a dead, inline, permanent modal", () => {
+  it("fires on the org-disabled pane: a dead, inline, permanent modal (real pane, ~120 cols, wrapped)", () => {
     const v = detectRateLimitModal(captured(ORG_DISABLED_PANE));
+    expect(v).toEqual({
+      kind: "modal", headline: DEAD_ACCOUNT_HEADLINE, marker: "dead-account", inline: true, dead: true,
+    });
+  });
+
+  it("fires the same way on the 80-col hand-wrap — wrap-width-agnostic", () => {
+    const v = detectRateLimitModal(captured(ORG_DISABLED_PANE_80COL));
     expect(v).toEqual({
       kind: "modal", headline: DEAD_ACCOUNT_HEADLINE, marker: "dead-account", inline: true, dead: true,
     });
@@ -33,7 +40,7 @@ describe("detectRateLimitModal — issue #141 dead account (org disabled subscri
 
   it("a turn in flight (pane repaints) never fires, even on the same wording", () => {
     const a = ORG_DISABLED_PANE;
-    const b = ORG_DISABLED_PANE.replace("Opening the PR for the pilot fix.", "Opening the PR for the pilot fix..");
+    const b = ORG_DISABLED_PANE.replace("your admin to enable access", "your admin to enable access.");
     const v = detectRateLimitModal(captured(a, b));
     expect(v.kind).toBe("working");
   });

@@ -481,16 +481,28 @@ export const SESSION_LIMIT_LOGIN_HINT_PANE = inlineBlock([
 ]);
 
 /**
- * Issue #141 — the org-disabled-subscription line. Never resets (not a rate
- * limit at all: a human outside this fleet has to re-enable the account), and
- * not a select-style modal (no numbered options, no Enter/Esc footer) — one
- * self-contained `⎿` line, then straight back to claude's own idle input box.
- * NOT MEASURED verbatim against a real pane; the line itself is the exact
- * wording named in the board issue.
+ * Issue #141, review fix pass (2026-09-30) — REAL pane, ~120 cols: studio on a
+ * disabled account. Never resets (not a rate limit at all: a human outside
+ * this fleet has to re-enable the account), and not a select-style modal (no
+ * numbered options, no Enter/Esc footer) — but this is claude's OWN MESSAGE,
+ * drawn with its own message-start glyph (`●`, not `⎿`), and it WRAPS: the
+ * original fixture's fabricated single `⎿` line never happened on a real
+ * pane. Glyph is `●` here — see AGENT_PANEL_LINE's own doc comment: claude
+ * has drawn its message-start glyph as either `⏺` or `●`, by version.
  */
-export const ORG_DISABLED_PANE = inlineBlock([
-  "  ⎿  Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead",
-]);
+export const ORG_DISABLED_PANE = [
+  "● Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask",
+  "  your admin to enable access",
+  "", ...RULE_PROMPT,
+].join("\n");
+
+/** Same message, hand-wrapped at 80 cols — proves the detector matches
+ *  regardless of exact wrap position, not just the one real capture above. */
+export const ORG_DISABLED_PANE_80COL = [
+  "● Your organization has disabled Claude subscription access for Claude Code ·",
+  "  Use an Anthropic API key instead, or ask your admin to enable access",
+  "", ...RULE_PROMPT,
+].join("\n");
 
 /** Issue #141: a lead reporting ON this feature must never look like a lead
  *  that HIT it — same "idle prose talking about the limit" discipline as the
@@ -502,6 +514,18 @@ export const NOT_DETECTED_141: Record<string, string> = {
     "  subscription access for Claude Code\" instead of resetting.",
     "", ...BOX_PROMPT,
   ].join("\n"),
+  // Review fix pass (2026-09-30): the exact canonical sentence, but QUOTED
+  // inside a `⎿` tool-output line, not printed as claude's OWN message — a
+  // mutant that weakened the glyph anchor from "the glyph is IMMEDIATELY
+  // followed by this sentence" to "this sentence appears somewhere on the
+  // line" would flip this from pass to fail.
+  "issue #141 quoted inside a tool-output/report line, not the pane's own message":
+    [
+      "⏺ Filed #141.",
+      "  ⎿  Filed #141: accounts sometimes print \"Your organization has disabled Claude subscription access for " +
+        "Claude Code · Use an Anthropic API key instead, or ask your admin to enable access\" verbatim.",
+      "", ...RULE_PROMPT,
+    ].join("\n"),
 };
 
 /** Issue #106 item 4: a #53 headline quoted in prose ABOVE a real V2 block. */
