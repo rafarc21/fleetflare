@@ -752,6 +752,46 @@ describe("decideAccountClears/applyAccountClears — decided before the containe
     await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
     expect(recorded).toHaveLength(0);
   });
+
+  // PR #147 merge fix (maestro review, 2026-09-30): merging #131/#135's
+  // "borrowedAccount/borrowedFromRepo clear alongside the #273 r2 flag-off
+  // stale-clear" fix (review round 2 finding 2, originally landed ONLY in
+  // launchAccountOrRefuse's own inline commitOkClears=true branch — see the
+  // "clearForceMappedAccount / launchAccountOrRefuse — the borrow flags
+  // clear too" describe block far below) widened `accountClears` itself so
+  // EVERY caller shares it, including this decide/apply path —
+  // provisionUngated/restartUngated/recycle's post-destroy closure. Until
+  // this test, nothing drove decideAccountClears/applyAccountClears with
+  // claudeAccount/borrowedAccount/borrowedFromRepo all seeded, so the
+  // widened branch was never exercised through this path at all.
+  it("decide/apply also clears borrowedAccount/borrowedFromRepo (not just claudeAccount/rateLimited) when the #273 r2 flag-off clear fires", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 }); // FLEET_AUTO_FAILOVER unset -> off
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({
+      claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      rateLimited: observation,
+      borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      borrowedFromRepo: "repo-b",
+    }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+
+    // provisionUngated's/restartUngated's/recycle's post-destroy closure's
+    // own entry call — flag off, so this resolves the mapped slot, not the
+    // recorded (stale) account.
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+
+    const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot
+    await mutateToLaunchedAccount(storage, launch.name); // sbAwaitReady -> onStart, simulated
+    await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.claudeAccount ?? null).toBeNull();
+    expect(row.rateLimited ?? null).toBeNull();
+    expect(row.borrowedAccount ?? null).toBeNull();
+    expect(row.borrowedFromRepo ?? null).toBeNull();
+  });
 });
 
 // Issue #134 review round 4: the identical decide-before/apply-after-success

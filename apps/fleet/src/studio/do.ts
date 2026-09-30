@@ -3480,7 +3480,7 @@ function accountClears(
  */
 export async function decideAccountClears(
   env: Env, storage: StudioStorage, launch: Extract<LaunchAccount, { ok: true }>,
-): Promise<Pick<StudioStatus, "claudeAccount" | "rateLimited"> | null> {
+): Promise<Pick<StudioStatus, "claudeAccount" | "rateLimited" | "borrowedAccount" | "borrowedFromRepo"> | null> {
   const existing = (await storage.get(STATUS_KEY)) ?? null;
   return accountClears(env, existing, launch);
 }
