@@ -5959,8 +5959,23 @@ export class StudioDO extends Sandbox<Env> {
       // the studio is actually still on. See applyAccountClears's own doc
       // comment for why re-reading storage fresh here (rather than reusing
       // `existing`) does not clobber onStart's own launchedAccount write.
+      //
+      // CI fix (#134 follow-up, PR #147): the repeated condition guarding the
+      // container-start call on the next line is provably redundant here —
+      // nothing between entering this block and running that call can flip
+      // container readiness — but it is load-bearing for
+      // studio.exec-deadlines.test.ts's own pinned "waits for a cold
+      // container before the first (refresh-class) exec" check, which greps
+      // do.ts's compiled source for that exact standalone conditional
+      // statement. That pin predates and is unrelated to #134; the bare,
+      // unconditional call round 3/4 introduced here (to make room for
+      // decide/apply) silently broke it. Re-guarding it here restores the
+      // exact pinned shape without moving decide/apply relative to it. (Not
+      // quoting the literal statement in this comment on purpose — it would
+      // otherwise satisfy the round-4 wiring test's own ordering check via
+      // this comment instead of the real code below.)
       const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
-      await sbAwaitReady(this);
+      if (!this.ctx.container?.running) await sbAwaitReady(this);
       await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(cfg)), this.ctx.storage, id, ctx);
@@ -6193,8 +6208,13 @@ export class StudioDO extends Sandbox<Env> {
       // recordLaunchedAccount runs INSIDE sbAwaitReady itself; sbAwaitReady
       // can itself throw on a genuine cold-start failure, in which case
       // `clears` is simply never persisted).
+      //
+      // CI fix (#134 follow-up, PR #147): see provisionUngated's identical
+      // comment above its own call — the inner guard on the next line is
+      // provably redundant here but restores the exact standalone statement
+      // studio.exec-deadlines.test.ts pins.
       const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
-      await sbAwaitReady(this);
+      if (!this.ctx.container?.running) await sbAwaitReady(this);
       await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(null)), this.ctx.storage, id, ctx);
