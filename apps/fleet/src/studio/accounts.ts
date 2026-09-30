@@ -191,14 +191,24 @@ const NULL_UNTIL_CEILING_MS = 24 * 60 * 60 * 1000;
  * renamed while the studio was running on it) still returns null: there is no
  * position to wrap FROM. Degrading and naming the account is the honest
  * answer, same as before #102.
+ *
+ * Issue #103 — `reserved`: account names that are UNCONDITIONALLY excluded,
+ * skipped exactly like a live fleet-wide limit regardless of what `limits`
+ * says about them. This is what lets a caller keep a wrap off an account that
+ * is some OTHER repo's own `CLAUDE_ACCOUNT_BY_REPO`-mapped primary (see
+ * `otherRepoPrimaries` below): that boundary is a fixed reservation, not a
+ * limit sighting, so it must hold even for an account nobody has ever seen
+ * exhausted. Defaults to empty so every call site written before #103 keeps
+ * its old behaviour exactly.
  */
 export function nextClaudeAccount(
   accounts: ClaudeAccount[], currentName: string | null | undefined,
-  limits: AccountLimits = {}, now: Date = new Date(),
+  limits: AccountLimits = {}, now: Date = new Date(), reserved: Set<string> = new Set(),
 ): ClaudeAccount | null {
   const idx = currentIndex(accounts, currentName);
   if (idx < 0 || accounts.length === 0) return null;
   const isFree = (a: ClaudeAccount): boolean => {
+    if (reserved.has(a.name)) return false;
     if (!(a.name in limits)) return true;
     const { until, seenAt } = limits[a.name];
     if (until !== null) return Date.parse(until) <= now.getTime();
@@ -294,6 +304,34 @@ export function parseAccountMap(raw: string | undefined): Record<string, number>
     }
   }
   return map;
+}
+
+/**
+ * Issue #103 — the cross-repo boundary a wrap-around search must never
+ * cross: every account `CLAUDE_ACCOUNT_BY_REPO` maps to some OTHER repo,
+ * named as its secret. #271's own scoping (failover.ts's `scopedAccounts`)
+ * only ever excludes accounts BEFORE the CALLING studio's own mapped
+ * primary, walking backward from where it starts; nothing stopped a wrap
+ * from walking FORWARD onto an account reserved for a different repo
+ * entirely, four slots away, that repo's own primary and nobody else's to
+ * use. Fed to `nextClaudeAccount`'s `reserved` param, which skips a name in
+ * it unconditionally — same treatment as a live fleet-wide limit.
+ *
+ * `ownRepo`'s OWN mapped slot is never in the result: a repo's own primary is
+ * exactly where it starts and is free to land back on (the whole point of the
+ * #103 fix — wrap back to it rather than steal someone else's). `null`, or a
+ * repo the map does not mention, reserves every mapped slot: an unmapped
+ * caller has no "own" entry to exempt, so every entry in the map belongs to
+ * some OTHER repo from its point of view.
+ */
+export function otherRepoPrimaries(env: ClaudeAccountEnv, ownRepo: string | null): Set<string> {
+  const map = parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO);
+  const reserved = new Set<string>();
+  for (const [repo, slot] of Object.entries(map)) {
+    if (repo === ownRepo) continue;
+    reserved.add(claudeAccountVarName(slot));
+  }
+  return reserved;
 }
 
 /** Issue #271: auto-failover is OFF unless FLEET_AUTO_FAILOVER is exactly "on". */
