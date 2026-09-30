@@ -1158,11 +1158,18 @@ function repoQuery(slug: string | null): string {
  *  same-studio re-assign that lands no board write at all (#158's deliberate
  *  nudge to an idle lead). Printed rather than dropped: a studio that was
  *  given work and never heard about it is the whole of that issue. */
-type AssignedTask = BoardTask & { wake?: AssignWakeReport };
+type AssignedTask = BoardTask & { wake?: AssignWakeReport; pathWarnings?: string[] };
 
 function reportAssignWake(task: AssignedTask): void {
   const line = formatAssignWake(task.wake);
   if (line !== null) console.log(line);
+}
+
+/** Board issue #112 / #70 ask 8: one advisory line per path-claim overlap,
+ *  printed the same way `reportRepo`'s own lines already are — stderr, since
+ *  these are diagnostics for the human, not part of the table's stdout. */
+function reportPathWarnings(task: AssignedTask): void {
+  for (const w of task.pathWarnings ?? []) console.error(`fleet task new: ${w}`);
 }
 
 /** Board tasks assigned to one studio, for the Orca row title (board #39).
@@ -1212,6 +1219,7 @@ async function cmdTaskNew(creds: Credentials, brief: TaskBriefArgs): Promise<voi
   const task = (await res.json()) as AssignedTask;
   console.log(formatTaskTable([task]));
   reportAssignWake(task);
+  reportPathWarnings(task);
 }
 
 async function cmdTaskLs(
