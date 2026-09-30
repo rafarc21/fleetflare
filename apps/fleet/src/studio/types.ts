@@ -218,6 +218,35 @@ export interface StudioStatus {
    */
   claudeAccountMovedVia?: "modal" | "inline" | null;
   /**
+   * Review round 1 (#102 review, 2026-09-30) — the block-key (failover.ts's
+   * `limitBlockKey`) the no-flapping guard compares a NEW inline observation
+   * against, or `null` when none is known. Fixes the escape hatch being
+   * UNREACHABLE for a genuinely new limit: the old guard suppressed ANY inline
+   * verdict within FLAP_GUARD_MINUTES of a `"modal"`-via switch, so a
+   * genuinely NEW limit on the studio's own new account that happened to
+   * render inline was indistinguishable from a stale `--continue` redraw of
+   * the OLD account's leftover transcript.
+   *
+   * Written on every completed switch: for an `"inline"`-via switch, the same
+   * value as `failoverBlock` (the block that justified it — redundant with
+   * that field, kept separate so this one's meaning never depends on which
+   * kind of switch wrote it). For a `"modal"`-via switch (a select-style
+   * modal has no block of its own), the studio's CURRENTLY-tracked
+   * LIMIT_SIGHTING_KEY block, if any — the best available stand-in for
+   * "whatever inline text this transcript might still redraw", since a select
+   * modal's own capture can never also carry an inline block (the two are
+   * position-exclusive in detectLimitOnScreen). `null` when no such sighting
+   * exists: there is then nothing this switch was justified by, or already
+   * knew about, to compare a later inline observation against, so the guard
+   * must not suppress it — see runAccountFailover's own no-flapping doc
+   * comment for the full rule.
+   *
+   * Cleared alongside `failoverBlock` on the same "forget" trigger (a static
+   * pane with claude's footer and no limit on it) — this is not the block that
+   * survives a redraw either.
+   */
+  claudeAccountMovedBlock?: string | null;
+  /**
    * Issue #289: the account this studio's container was actually LAUNCHED
    * on -- written when the container starts (StudioDO.onStart, from the same
    * launchAccount call that filled its CLAUDE_CODE_OAUTH_TOKEN) and by a

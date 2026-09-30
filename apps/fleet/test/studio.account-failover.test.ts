@@ -22,7 +22,7 @@ import { STUDIO_TMUX } from "../src/studio/tmux";
 // opposed to this file's own MODAL_PANE, a select-style modal) — reused from
 // the shared fixture set rather than a second, drifting copy of the same
 // pane shape.
-import { SESSION_LIMIT_LOGIN_HINT_PANE as INLINE_LIMIT_PANE } from "./fixtures/rate-limit-panes";
+import { SESSION_LIMIT_LOGIN_HINT_PANE as INLINE_LIMIT_PANE, WEEKLY_LIMIT_PANE } from "./fixtures/rate-limit-panes";
 
 // ---------------------------------------------------------------------------
 // Issue #53 — fail over to a second account when one is exhausted.
@@ -768,20 +768,65 @@ describe("runAccountFailover — no flapping (issue #102)", () => {
   // this same fixture for the identical reason).
   const FLAP_NOW = new Date("2026-09-23T10:00:00.000Z");
   const MOVED_AT = new Date(FLAP_NOW.getTime() - 2 * 60_000).toISOString(); // 2 minutes ago
+  // INLINE_LIMIT_PANE's own block-key (failover.ts's limitBlockKey): what a
+  // select-modal switch would have recorded as `claudeAccountMovedBlock` had
+  // it already known about this exact block (a prior sighting) at the moment
+  // it fired.
+  const INLINE_LIMIT_KEY = "You've hit your session limit · 1:30pm (UTC)";
 
-  it("an inline limit block within FLAP_GUARD_MINUTES of the last move is NOT enough to move again", async () => {
+  // Review round 1 (#102 review, 2026-09-30), finding 2 — the escape hatch
+  // must distinguish a genuine STALE REDRAW (same block-key as whatever this
+  // studio already knew about when the select-modal switch fired) from a
+  // GENUINELY NEW/different inline limit on the account it is now on. Only
+  // the former is suppressed.
+  it("a stale redraw matching the block already known at the switch IS suppressed", async () => {
     const h = harness({
       accounts: TWO_ACCOUNTS,
       pane: captured(INLINE_LIMIT_PANE),
       now: FLAP_NOW,
       initial: status({
         claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2", claudeAccountMovedAt: MOVED_AT, claudeAccountMovedVia: "modal",
+        claudeAccountMovedBlock: INLINE_LIMIT_KEY,
       }),
     });
     const out = await run(h);
     expect(out.kind).toBe("flap-guarded");
     expect(h.relaunches).toBe(0);
     expect((await h.storage.get(STATUS_KEY))?.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+  });
+
+  // The bug: the OLD guard suppressed ANY inline verdict within the cooldown
+  // window after a "modal"-via switch, with no regard for whether it matched
+  // anything the switch actually knew about. A genuinely new limit — here, a
+  // DIFFERENT block (weekly, not session) on an account the select-modal
+  // switch never saw any inline content on at all (claudeAccountMovedBlock
+  // absent, i.e. "the switch itself was NOT justified by an inline block at
+  // all") — must not be suppressed.
+  it("issue #102 review round 1: a genuinely new, differently-keyed inline limit is NOT suppressed", async () => {
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(WEEKLY_LIMIT_PANE),
+      now: FLAP_NOW,
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2", claudeAccountMovedAt: MOVED_AT, claudeAccountMovedVia: "modal",
+      }),
+    });
+    const out = await run(h);
+    expect(out.kind).toBe("switched");
+  });
+
+  it("a genuinely new limit is not suppressed even when a DIFFERENT block was known at the switch", async () => {
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(WEEKLY_LIMIT_PANE),
+      now: FLAP_NOW,
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2", claudeAccountMovedAt: MOVED_AT, claudeAccountMovedVia: "modal",
+        claudeAccountMovedBlock: INLINE_LIMIT_KEY,
+      }),
+    });
+    const out = await run(h);
+    expect(out.kind).toBe("switched");
   });
 
   it("a genuine select-style modal overrides the guard and moves the studio immediately", async () => {
@@ -791,13 +836,14 @@ describe("runAccountFailover — no flapping (issue #102)", () => {
       now: FLAP_NOW,
       initial: status({
         claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2", claudeAccountMovedAt: MOVED_AT, claudeAccountMovedVia: "modal",
+        claudeAccountMovedBlock: INLINE_LIMIT_KEY,
       }),
     });
     const out = await run(h);
     expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_2", to: "CLAUDE_CODE_OAUTH_TOKEN" });
   });
 
-  it("outside the cooldown window, an inline block moves the studio normally", async () => {
+  it("outside the cooldown window, a matching inline block still moves the studio normally", async () => {
     const longAgo = new Date(FLAP_NOW.getTime() - (FLAP_GUARD_MINUTES + 1) * 60_000).toISOString();
     const h = harness({
       accounts: TWO_ACCOUNTS,
@@ -805,6 +851,7 @@ describe("runAccountFailover — no flapping (issue #102)", () => {
       now: FLAP_NOW,
       initial: status({
         claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2", claudeAccountMovedAt: longAgo, claudeAccountMovedVia: "modal",
+        claudeAccountMovedBlock: INLINE_LIMIT_KEY,
       }),
     });
     const out = await run(h);
