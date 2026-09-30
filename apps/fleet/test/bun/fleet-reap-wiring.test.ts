@@ -2,7 +2,7 @@
 // the `fleet ls` idle line, against a fake Worker on localhost. Proves what
 // the pure-core suite (fleet-reap.test.ts) cannot: which routes are hit, and
 // that the destroy never carries force or discard-unsynced. No real fleet.
-import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import { runReap } from "../../cli/reap";
 import type { OrcaDeps } from "../../cli/orca-workspace";
 import type { StudioStatus } from "../../src/studio/types";
 import { REAL_WEBSTUDIO_PANE } from "../fixtures/rate-limit-panes";
+import { probeRefusal, rescueUnconfirmedRefusal } from "../fixtures/destroy-refusals";
 
 const ID = "acmeclient--pilot";
 const REPO = "example-org/acmeclient";
@@ -23,6 +24,9 @@ const HISTORY = [{
   open: false, updatedAt: new Date().toISOString(),
 }];
 let slowBoardMs = 0;
+/** Per test: what POST /destroy and GET /status answer. null = the defaults. */
+let destroyAnswer: (() => Response) | null = null;
+let statusAnswer: (() => Response) | null = null;
 
 function idleActivity(forMs: number) {
   const now = Date.now();
@@ -61,13 +65,15 @@ beforeAll(() => {
           capturedAt: Math.floor(Date.now() / 1000), observed: { activity: idleActivity(45 * MIN) },
         });
       }
+      if (u.pathname === `/studio/${ID}/destroy` && destroyAnswer) return destroyAnswer();
       if (u.pathname === `/studio/${ID}/destroy`) return Response.json(row("stopped"));
+      if (u.pathname === `/studio/${ID}/status` && statusAnswer) return statusAnswer();
       return new Response("not found", { status: 404 });
     },
   });
 });
 afterAll(() => server.stop(true));
-beforeEach(() => { seen.length = 0; slowBoardMs = 0; });
+beforeEach(() => { seen.length = 0; slowBoardMs = 0; destroyAnswer = null; statusAnswer = null; });
 
 const NOT_UNDER_ORCA: OrcaDeps = {
   env: { TERM_PROGRAM: "Apple_Terminal" },
@@ -185,4 +191,58 @@ test("a second reap on the same state file refuses while the first holds the loc
   expect(await first).toBe(0);
   expect(existsSync(`${statePath}.lock`)).toBe(false);
   expect(await withReapLock(statePath, async () => 7)).toBe(7);
+});
+
+// #87 review: reapDeps().destroy composes requestDestroy + one status read +
+// destroyRaceOutcome. A real Worker refusal on a studio still running with no
+// other destroy in flight must stay a REFUSAL (back-off), never a race success.
+describe("reapDeps().destroy composition — real 409s stay refused (#80/#86)", () => {
+  const deps = (lines: string[]) => reapDeps(
+    creds(), REPO, join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json"), (l) => lines.push(l), NOT_UNDER_ORCA,
+  );
+  const refusals: [string, string][] = [
+    ["rescue unconfirmed", rescueUnconfirmedRefusal(ID, "rescue exec killed after 300s")],
+    ["probe timeout", probeRefusal(ID)],
+  ];
+  for (const [name, body] of refusals) {
+    test(`409 ${name}, row running, no destroy in flight -> refused, the 409 text logged and carried`, async () => {
+      destroyAnswer = () => new Response(body, { status: 409 });
+      statusAnswer = () => Response.json({ ...row("running"), destroyInFlight: false });
+      const lines: string[] = [];
+      const out = await deps(lines).destroy(ID);
+      expect(out.outcome).toBe("refused");
+      expect(out.outcome === "refused" && out.message).toContain("destroy refused");
+      expect(lines.join("\n")).toContain("destroy refused");
+      expect(seen).toContain(`GET /studio/${ID}/status`);
+    });
+
+    test(`409 ${name}, whole reap run -> backs off, never REAPED`, async () => {
+      destroyAnswer = () => new Response(body, { status: 409 });
+      statusAnswer = () => Response.json({ ...row("running"), destroyInFlight: false });
+      const lines: string[] = [];
+      await runReap({ apply: true, idleMs: 30 * MIN, repo: REPO }, deps(lines));
+      expect(lines.some((l) => l.startsWith("REAPED"))).toBe(false);
+      expect(lines.some((l) => l.includes("destroy refused") && l.includes("backing off"))).toBe(true);
+    });
+  }
+
+  test("409, status read fails -> still refused (an unread row is never a race)", async () => {
+    destroyAnswer = () => new Response(refusals[1][1], { status: 409 });
+    statusAnswer = () => new Response("boom", { status: 500 });
+    expect((await deps([]).destroy(ID)).outcome).toBe("refused");
+  });
+
+  test("409, row now stopped -> already-stopped", async () => {
+    destroyAnswer = () => new Response(refusals[1][1], { status: 409 });
+    statusAnswer = () => Response.json(row("stopped"));
+    expect((await deps([]).destroy(ID)).outcome).toBe("already-stopped");
+  });
+
+  test("409, row running with a destroy in flight -> in-progress, the 409 text not logged", async () => {
+    destroyAnswer = () => new Response(refusals[1][1], { status: 409 });
+    statusAnswer = () => Response.json({ ...row("running"), destroyInFlight: true });
+    const lines: string[] = [];
+    expect((await deps(lines).destroy(ID)).outcome).toBe("in-progress");
+    expect(lines.join("\n")).not.toContain("destroy refused");
+  });
 });
