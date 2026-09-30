@@ -1,6 +1,6 @@
 import type { Env } from "../env";
 import { parseStudioId } from "./ids";
-import { getStudioRow } from "./registry";
+import { getStudioRowLookup } from "./registry";
 import type { StudioStatus, StudioDOClass } from "./types";
 // The pure role->class functions live in their own Env-free module — see
 // that file's own header for why: provision.ts needs doClassForRole without
@@ -70,10 +70,23 @@ export function getStudioStubForRow(env: Env, row: Pick<StudioStatus, "id" | "do
  * blind doClassForRole — round 2's consistency rule, not a behavior change
  * for this read-only call). Every other case (row exists, doClass present OR
  * absent) uses the recorded value, never role.
+ *
+ * Issue #136: a row that EXISTS but fails to parse is a third case, and
+ * must NOT fall into the "never provisioned" branch above — a malformed
+ * row might belong to a studio already running under STUDIO, and a fresh
+ * role-derived guess (realDoClassForRole) could route it to STUDIO_BIG
+ * instead, the same orphan-risk class #107 closed for the other two cases.
+ * Forced to the safe default (`"STUDIO"`, never computed from role) with a
+ * loud, distinct log — getStudioRowLookup already logs the parse failure
+ * itself; this logs the routing decision forced because of it.
  */
 export async function getStudioStub(env: Env, id: string): Promise<ReturnType<Env["STUDIO"]["get"]>> {
-  const row = await getStudioRow(env, id);
-  if (row) return getStudioStubForRow(env, row);
+  const result = await getStudioRowLookup(env, id);
+  if (result.kind === "found") return getStudioStubForRow(env, result.row);
+  if (result.kind === "malformed") {
+    console.error(`getStudioStub: MALFORMED row for ${id} -- forcing STUDIO, never role-derived (issue #136)`);
+    return getStudioStubForRow(env, { id, doClass: "STUDIO" });
+  }
   const parsed = parseStudioId(id);
   return getStudioStubForRow(env, { id, doClass: realDoClassForRole(env, parsed?.role ?? "") });
 }

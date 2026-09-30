@@ -59,6 +59,12 @@ export function flattenPrompt(prompt: string): string {
  * So the check is anchored on MODAL ROWS, never phrases: within the bottom
  * LOOSE_TAIL_LINES non-blank rows, a row that IS
  *   - the select footer "Enter to confirm · Esc to cancel",
+ *   - the permission-prompt footer "Esc to cancel · Tab to amend · ctrl+e to
+ *     explain" (#144 — claude draws a DIFFERENT footer for an ordinary
+ *     permission prompt, "Do you want to proceed? / ❯ 1. Yes / 2. No", than
+ *     for the limit/select modal above; failover.ts's strict detector
+ *     already knows both shapes as alternatives in MODAL_FOOTER_LINE, this
+ *     loose gate did not),
  *   - "(Run )/rate-limit-options" at the start of the row, or
  *   - a #53 headline as the whole row,
  * optionally inside a box border (a cursor only after a border). claude's
@@ -70,7 +76,12 @@ export function flattenPrompt(prompt: string): string {
  * POSIX ERE, C-locale safe, one list for both sides: the container's
  * `grep -E` reads it as is; the Worker swaps `[[:space:]]` for `\s`
  * (looseLimitOnScreen). `(│)?`, never `│?` — in the C locale `?` would bind
- * to the last BYTE of `│`. No `\s`, `\b` or `{n,}`.
+ * to the last BYTE of `│`. No `\s`, `\b` or `{n,}`. `ctrl\\+e`, never
+ * `ctrl\+e`: these patterns are JS STRING literals (fed to both `grep -E`
+ * and `new RegExp`), not regex literals — `\+` in a JS string is an
+ * unrecognized escape and silently collapses to a bare `+` (one-or-more),
+ * losing the literal match entirely; the doubled backslash is what actually
+ * reaches the string's contents as `\+`.
  *
  * Inline limit headlines ("You've hit your session limit · resets …") are
  * NOT here: typing under one lands in claude's input box, which is harmless,
@@ -81,6 +92,7 @@ const ROW_LEAD = "^[[:space:]]*(│[[:space:]]*(❯[[:space:]]*)?)?";
 const ROW_TAIL = "[[:space:]]*(│)?[[:space:]]*$";
 export const LOOSE_LIMIT_PATTERNS: readonly string[] = [
   `${ROW_LEAD}Enter to confirm · Esc to cancel${ROW_TAIL}`,
+  `${ROW_LEAD}Esc to cancel · Tab to amend · ctrl\\+e to explain${ROW_TAIL}`,
   `${ROW_LEAD}(Run )?/rate-limit-options`,
   `${ROW_LEAD}(${RATE_LIMIT_HEADLINES.join("|")})${ROW_TAIL}`,
 ];

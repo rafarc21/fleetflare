@@ -38,7 +38,7 @@ import {
 // schedule, nothing more.
 import {
   resolveClaudeAccounts, claudeAccountToken, launchAccount, autoFailoverOn, accountDisplay, otherRepoPrimaries,
-  type LaunchAccount,
+  repoForAccount, parseAccountMap, type LaunchAccount,
 } from "./accounts";
 import {
   runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, MEMBERS_TICKING_KEY, type FailoverDeps,
@@ -60,6 +60,7 @@ import {
 import {
   LIMIT_SIGHTING_KEY, type LimitSighting,
   accountLimitStateKey, encodeAccountLimitState, decodeAccountLimitState,
+  accountBurnStateKey, encodeAccountBurnState, decodeAccountBurnState,
 } from "./rate-limit";
 import type { AccountLimits, ClaudeAccount } from "./accounts";
 // Issue #102: the fleet-wide per-account limit record lives in D1
@@ -133,7 +134,7 @@ import {
 import { sendCard } from "../telegram/api";
 import { parseLearnings, parseEnvelopeComment } from "../board/envelope";
 import { assignedBriefResolver, openTaskChecker, githubBoardApi } from "../board/routes";
-import { listTasks, resolveLatestAssignedBrief, autoStartSubmittedTasks } from "../board/board";
+import { listTasks, openTasksNeedingRebrief, autoStartSubmittedTasks } from "../board/board";
 // Issue #249 (PR4b): "live" is the board's own state, not GitHub's open flag —
 // a terminal state leaves the issue open, and a finished task's branch is not
 // work a fresh lead needs re-briefed on. Same filter
@@ -1866,11 +1867,26 @@ export async function switchedBlockIn(storage: StudioStorage): Promise<string | 
 }
 
 /**
- * Board issue #213: the dedup marker `deliverAssignedTaskOnBringup` (below)
- * reads before waking — the number of the task it last DELIVERED to this
- * studio, or null if it has never delivered one. Storing only the last
- * number is enough: `resolveLatestAssignedBrief`'s own "newest wins"
- * resolution means a studio has exactly one current live task at a time.
+ * Board issue #213: originally the dedup marker `deliverAssignedTaskOnBringup`
+ * (below) gated its wake on — the number of the task it last DELIVERED to
+ * this studio, or null if it has never delivered one.
+ *
+ * Issue #137: that gate moved. Recording only the last number, forever, with
+ * no notion of container identity, meant a task delivered once was never
+ * re-delivered again on ANY later bring-up for that same task — even after
+ * the container behind the pane was fully destroyed and rebuilt (an image
+ * rollout) and a fresh lead had zero memory of ever hearing about it.
+ * `deliverAssignedTaskOnBringup`'s own gate now reads
+ * `Observed.taskWakesDeliveredFor` instead (observed.ts), scoped to the
+ * bring-up's `incarnation` token — the same per-incarnation discipline
+ * `survivalBriefDeliveredFor` already uses.
+ *
+ * This marker ITSELF is UNCHANGED and still written on every landed wake
+ * (`recordDeliveredTask`, below): `harvestLearnings`'s own teardown read
+ * (`deliveredTaskIn`, called from `recycleWithSync` and `destroy.ts`) still
+ * wants exactly this — "the single most-recently-delivered task number,
+ * forever, not incarnation-scoped" — as the task whose completion record to
+ * harvest learnings from. The two concerns just no longer share one marker.
  *
  * Its own key, off StudioStorage's overloads — same reason LIMIT_SIGHTING_KEY
  * above keeps its own rather than widening the shared interface for a single
@@ -1961,12 +1977,38 @@ export async function sweepWake(
  * `wakeStudioWith`/`sweepWake` above delegate their own gating to
  * `runGatedWake` rather than reimplementing it.
  *
- * At-most-once per task id: `deliveredTaskIn` is the dedup marker, written
- * ONLY on a landed wake (`outcome.ok`). A refusal — stopped again mid-race, a
- * limit modal on screen, single-flight busy — persists nothing, so the very
- * next provision/restart/recycle naturally retries: no separate retry queue
- * needed, because each of the three choke points calls this again on its own
- * next run.
+ * Issue #137 widened this two ways:
+ *
+ *  1. SCOPE. `boardLookup` used to resolve `resolveLatestAssignedBrief`'s
+ *     single "newest" open task; it now resolves `openTasksNeedingRebrief`'s
+ *     full list of every open `working`/`input_required` task, so a studio
+ *     holding two or more live tasks gets every one re-typed, not just the
+ *     most recent.
+ *  2. DEDUP. At-most-once per task id PER INCARNATION, not forever:
+ *     `deliveredTaskIn`/`recordDeliveredTask` (`DELIVERED_TASK_KEY`, above)
+ *     are still written on every landed wake, UNCHANGED, but they are no
+ *     longer what this function reads to decide whether to wake — that
+ *     marker's own doc comment explains why (it is now only
+ *     `harvestLearnings`'s teardown pointer). The actual gate is
+ *     `taskWakesDeliveredIn`/`recordTaskWakeDelivered` (below), scoped to the
+ *     `incarnation` param: a container replacement (a NEW incarnation token)
+ *     earns every open task exactly one fresh wake again, even one that had
+ *     already been delivered before the replacement — the gap that left leads
+ *     idle after an image rollout until a human hand-retyped every task.
+ *     `incarnation === null` uses the key `""` rather than skipping the
+ *     record outright (unlike `deliverSurvivalBriefOnBringup`'s own null
+ *     handling): this preserves the OLD marker's "forever, no reset" behavior
+ *     for a studio whose incarnation-token write keeps failing, rather than
+ *     regressing it to "never delivers" — real incarnation tokens
+ *     (`crypto.randomUUID()`) are never the empty string, so this never
+ *     collides with a genuine one.
+ *
+ * A refusal on any one task — stopped again mid-race, a limit modal on
+ * screen, single-flight busy — persists nothing FOR THAT TASK, so the very
+ * next provision/restart/recycle naturally retries it: no separate retry
+ * queue needed, because each of the three choke points calls this again on
+ * its own next run. Other tasks in the same `boardLookup` batch are still
+ * attempted in the same call — one refusal does not block the rest.
  *
  * DI shape mirrors `wakeStudioWith`'s own reasoning (this file's header): a
  * `boardLookup` thunk and a `wake` thunk, both injected rather than reaching
@@ -1983,23 +2025,61 @@ export async function sweepWake(
  * AFTER the dedup check (a duplicate wake into a live pane is harmless; a
  * wake into a container destroy just tore down is not) and RIGHT BEFORE
  * `wake`, so it catches a destroy landing anywhere up to that point,
- * including during `boardLookup` itself. Defaults to "never moved" so every
+ * including during `boardLookup` itself. Issue #137: now checked per task,
+ * inside the loop — a destroy observed mid-loop STOPS the whole loop rather
+ * than merely skipping the one task, since the container it would type into
+ * is gone for every remaining task too. Defaults to "never moved" so every
  * existing caller in this test suite that does not pass one keeps this
  * function's pre-fix-round behavior unchanged, the same trailing-optional
  * shape `recycleWithSync`'s own `ctx`/`observedStorage` params use.
  */
 export async function deliverAssignedTaskOnBringup(
   storage: StudioStorage,
-  boardLookup: () => Promise<{ taskNumber: number; title: string } | null>,
-  wake: (prompt: string) => Promise<WakeOutcome>,
+  incarnation: string | null,
+  boardLookup: () => Promise<{ taskNumber: number; title: string }[]>,
+  wake: (prompt: string, taskNumber: number) => Promise<WakeOutcome>,
   moved: () => Promise<boolean> = async () => false,
 ): Promise<void> {
-  const task = await boardLookup();
-  if (task === null) return;
-  if ((await deliveredTaskIn(storage)) === task.taskNumber) return;
-  if (await moved()) return;
-  const outcome = await wake(assignDigest({ number: task.taskNumber, title: task.title }));
-  if (outcome.ok) await recordDeliveredTask(storage, task.taskNumber);
+  const tasks = await boardLookup();
+  if (tasks.length === 0) return;
+  const incarnationKey = incarnation ?? "";
+  const delivered = await taskWakesDeliveredIn(storage, incarnationKey);
+  for (const task of tasks) {
+    if (delivered.has(task.taskNumber)) continue;
+    if (await moved()) return;
+    const outcome = await wake(assignDigest({ number: task.taskNumber, title: task.title }), task.taskNumber);
+    if (outcome.ok) {
+      await recordDeliveredTask(storage, task.taskNumber);
+      await recordTaskWakeDelivered(storage, incarnationKey, task.taskNumber);
+      delivered.add(task.taskNumber);
+    }
+  }
+}
+
+/** Issue #137: reads `Observed.taskWakesDeliveredFor` scoped to
+ *  `incarnationKey` — the set of task numbers already re-delivered a bring-up
+ *  wake for the CURRENT incarnation. A record for a DIFFERENT incarnation
+ *  (or no record at all) reads as empty; that reset is the fix
+ *  `deliverAssignedTaskOnBringup`'s own doc comment describes. Cast the same
+ *  way `deliveredTaskIn`/`recordDeliveredTask` already cast `storage` to
+ *  their own narrow port — `StudioStorage` has no `OBSERVED_KEY` overload,
+ *  and `getObserved`/`mergeObserved` want `ObservedStorage`. */
+async function taskWakesDeliveredIn(storage: StudioStorage, incarnationKey: string): Promise<Set<number>> {
+  const record = (await getObserved(storage as unknown as ObservedStorage)).taskWakesDeliveredFor ?? null;
+  return record !== null && record.incarnation === incarnationKey ? new Set(record.numbers) : new Set();
+}
+
+/** Issue #137: records one more task number delivered for `incarnationKey`,
+ *  read-patch-write. Called ONLY after a wake lands — same "write only on a
+ *  landed wake" discipline `recordDeliveredTask` (above) and
+ *  survival-delivery.ts's own markers already follow. A prior record for a
+ *  DIFFERENT incarnation is superseded outright (it describes a container
+ *  that is gone), not merged into. */
+async function recordTaskWakeDelivered(storage: StudioStorage, incarnationKey: string, taskNumber: number): Promise<void> {
+  const observed = await getObserved(storage as unknown as ObservedStorage);
+  const record = observed.taskWakesDeliveredFor ?? null;
+  const numbers = record !== null && record.incarnation === incarnationKey ? [...record.numbers, taskNumber] : [taskNumber];
+  await mergeObserved(storage as unknown as ObservedStorage, { taskWakesDeliveredFor: { incarnation: incarnationKey, numbers } });
 }
 
 /**
@@ -2167,6 +2247,12 @@ async function withBringupLogTail(syncDeps: SessionSyncDeps, reason: string): Pr
 export async function mirrorBurnToRegistry(
   storage: StudioStorage & SessionSyncStorage,
   recordStudioFn: (status: StudioStatus) => Promise<void>,
+  // Issue #131 (Stage B) — optional, like every other port added to this
+  // file after its first callers: absent (every existing call site) mirrors
+  // burn exactly as before, no account-burn write at all. Present, it is
+  // called with this studio's OWN account name and its 5h-window output,
+  // the same tick this function already mirrors both onto the registry row.
+  accountBurnWrite?: ((name: string, window5hOutput: number) => Promise<void>) | null,
 ): Promise<void> {
   const status = await storage.get(STATUS_KEY);
   const burn = await storage.get(BURN_KEY);
@@ -2194,6 +2280,15 @@ export async function mirrorBurnToRegistry(
   };
   await storage.put(STATUS_KEY, updated);
   await recordStudioFn(updated);
+  // Issue #131 (Stage B): the account this studio is actually running on —
+  // #289's own field, the best available signal for "currently on", same
+  // choice launchFields (below) makes for booting a recycled container.
+  // `null`/absent (never launched under #289, or a refused launch) writes
+  // nothing — there is no account name to key the row on.
+  const account = typeof updated.launchedAccount === "string" ? updated.launchedAccount : null;
+  if (accountBurnWrite && account !== null) {
+    await accountBurnWrite(account, updated.burn?.window5hOutput ?? 0);
+  }
 }
 
 /**
@@ -2778,6 +2873,13 @@ export async function syncSessionCycle(
   // in-memory half is then simply not in effect, though the storage lease
   // below still is.
   installCacheGuard?: { inFlight: boolean } | null,
+  // Issue #131 (Stage B): the account-burn mirror write (do.ts's own
+  // `writeFleetAccountBurn`, D1-backed) — kept OUT of this function's own
+  // body, wired by the caller, same "this file stays D1-free" boundary every
+  // other D1-touching port here already respects (see accountLimits' own
+  // wiring at failoverDeps() below). Absent: mirrorBurnToRegistry runs
+  // exactly as it did before this feature, no account-burn write at all.
+  accountBurnWrite?: ((name: string, window5hOutput: number) => Promise<void>) | null,
 ): Promise<void> {
   try {
     const now = syncDeps.now().toISOString();
@@ -2802,7 +2904,7 @@ export async function syncSessionCycle(
     console.error(`studio ${idFallback}: aside ship record failed`, err);
   }
   try {
-    await mirrorBurnToRegistry(storage, recordStudioFn);
+    await mirrorBurnToRegistry(storage, recordStudioFn, accountBurnWrite);
   } catch (err) {
     console.error(`studio ${idFallback}: burn mirror failed`, err);
   }
@@ -3235,6 +3337,51 @@ async function writeFleetAccountLimit(
 }
 
 /**
+ * Issue #131 (Stage B) — the fleet-wide read half of FailoverDeps.accountBurn,
+ * the exact same shape readFleetAccountLimits above reads for accountLimits:
+ * one fleet_state row per configured account, read in parallel, only on the
+ * (already rare) borrow second pass. A row this studio never wrote (another
+ * studio's own mirror, or none at all) reads back identically to one this
+ * studio wrote itself.
+ */
+async function readFleetAccountBurn(
+  db: D1Database, accounts: ClaudeAccount[],
+): Promise<Record<string, { window5hOutput: number }>> {
+  const burn: Record<string, { window5hOutput: number }> = {};
+  await Promise.all(accounts.map(async (a) => {
+    const state = decodeAccountBurnState(await getFlag(db, accountBurnStateKey(a.name)));
+    if (state) burn[a.name] = { window5hOutput: state.window5hOutput };
+  }));
+  return burn;
+}
+
+/**
+ * Issue #131 (Stage B) — the fleet-wide write half, called from
+ * mirrorBurnToRegistry (below) on the SAME 300s tick every studio already
+ * mirrors its own burn on: one fleet_state row, keyed by account NAME (never
+ * a studio id), so every OTHER studio's own borrow second pass sees it. A
+ * studio with no known account (never launched under #289) writes nothing —
+ * there is no account name to key the row on.
+ *
+ * RESIDUAL, stated per this feature's own plan doc: unlike
+ * `StudioStatus.burn` itself (registry.ts's `expireBurnWindow`, issue #181),
+ * this mirrored figure is never read-time-expired against the 5h window —
+ * `AccountBurnState` carries no `window5hStart` (the plan doc's own shape is
+ * `{ window5hOutput: number }` alone). A stopped studio's last mirrored
+ * figure for its account therefore freezes, same residual #181 fixed for the
+ * per-studio figure but NOT extended here — a borrow decision sizing a
+ * stale-but-nonzero number against a genuinely-idle account is a worse
+ * outcome than picking list order, never a wrong SWITCH (accountIsFree, the
+ * fleet-wide LIMIT map, is still what decides whether a candidate is usable
+ * at all; burn only orders free candidates against each other).
+ */
+async function writeFleetAccountBurn(
+  db: D1Database, name: string, window5hOutput: number, now: number,
+): Promise<void> {
+  await setFlag(db, accountBurnStateKey(name), encodeAccountBurnState({ window5hOutput }), now);
+}
+
+/**
  * Issue #354: the DO's in-memory start config — the token the NEXT container
  * start boots (`envVars`) and the account onStart then records (`envAccount`)
  * — derived from ONE account name, so the two can never disagree. Every site
@@ -3275,10 +3422,22 @@ export class LaunchRefusedError extends Error {
  * `commitOkClears: false` because they cannot yet tell whether (or when)
  * this call's container touch will actually happen. Pure (no I/O) so every
  * path shares it without a caller-vs-callee read mismatch.
+ *
+ * Review round 2 (maestro review of PR #135), finding 2: `borrowedAccount`/
+ * `borrowedFromRepo` clear alongside `claudeAccount` whenever the `#273 r2`
+ * flag-off stale-clear fires — folded in here, the ONE place every caller
+ * (the inline `commitOkClears: true` branch below, AND every
+ * `decideAccountClears`/`applyAccountClears` caller: `provisionUngated`,
+ * `restartUngated`, recycle's post-destroy closure) shares, rather than
+ * duplicated only in the inline branch. A stale `borrowedAccount` surviving
+ * ANY of those paths would make the next hand-back check (failover.ts,
+ * gated on exactly this field) fire against a studio that is not actually
+ * borrowing anything any more — see `clearForceMappedAccount`'s own doc
+ * comment (below) for the identical reasoning on its own, separate clear.
  */
 function accountClears(
   env: Env, existing: StudioStatus | null, launch: Extract<LaunchAccount, { ok: true }>,
-): Pick<StudioStatus, "claudeAccount" | "rateLimited"> | null {
+): Pick<StudioStatus, "claudeAccount" | "rateLimited" | "borrowedAccount" | "borrowedFromRepo"> | null {
   // #273 r2: flag off, an earlier failover's recorded account is stale — this
   // launch is on the mapped one, so the row stops naming the old one.
   const clearClaudeAccount = !autoFailoverOn(env) && existing?.claudeAccount != null;
@@ -3295,7 +3454,7 @@ function accountClears(
     && typeof existing?.launchedAccount === "string" && existing.launchedAccount !== launch.name;
   if (!clearClaudeAccount && !clearRateLimited) return null;
   return {
-    ...(clearClaudeAccount ? { claudeAccount: null } : {}),
+    ...(clearClaudeAccount ? { claudeAccount: null, borrowedAccount: null, borrowedFromRepo: null } : {}),
     ...(clearRateLimited ? { rateLimited: null } : {}),
   };
 }
@@ -3356,7 +3515,7 @@ export async function decideAccountClears(
  */
 export async function applyAccountClears(
   storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
-  clears: Pick<StudioStatus, "claudeAccount" | "rateLimited"> | null, ctx: OpCtx,
+  clears: Pick<StudioStatus, "claudeAccount" | "rateLimited" | "borrowedAccount" | "borrowedFromRepo"> | null, ctx: OpCtx,
 ): Promise<void> {
   if (clears === null) return;
   if (await ctx.moved()) return;
@@ -3365,6 +3524,100 @@ export async function applyAccountClears(
   const cleared: StudioStatus = { ...existing, ...clears };
   await storage.put(STATUS_KEY, cleared);
   await recordStudioFn(cleared);
+}
+
+/**
+ * Board task #131 ask 2: `fleet recycle <id> --account mapped`. With
+ * FLEET_AUTO_FAILOVER=on, `launchAccount` serves a RECORDED account verbatim,
+ * without even consulting CLAUDE_ACCOUNT_BY_REPO (see that function's own doc
+ * comment) — a map change never reaches a studio an earlier failover recorded
+ * elsewhere. This clears `claudeAccount` (and the `claudeAccountMovedAt`/
+ * `claudeAccountMovedVia`/`claudeAccountMovedBlock` "we're on a non-default
+ * account" audit trail, since a forced-mapped recycle deliberately puts the
+ * studio back on its plain mapped slot, not a failover-moved one) so the very
+ * next `launchAccount` resolution falls through to the mapped slot.
+ *
+ * Called from `StudioDO.recycle()` itself, as the VERY FIRST thing it does —
+ * before recycle's own first `launchAccountOrRefuse` call — never as a
+ * separate route-level pre-step fired before `stub.recycle()` is even
+ * invoked. A route-level clear would reopen the exact race issue #328 closed:
+ * a concurrently-running `runAccountFailover` could rewrite `claudeAccount`
+ * in the gap between a route-level clear and recycle()'s own first read.
+ * Landing the clear inside recycle()'s own atomic flow means BOTH
+ * `launchAccountOrRefuse` calls recycle() makes (the entry-time refusal check
+ * and the later, freshly re-read in-closure resolve — see that closure's own
+ * #328 round 2/3 comment) see the cleared state.
+ */
+export async function clearForceMappedAccount(
+  storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
+): Promise<void> {
+  const existing = (await storage.get(STATUS_KEY)) ?? null;
+  if (existing == null) return;
+  if (
+    existing.claudeAccount == null && existing.claudeAccountMovedAt == null &&
+    existing.claudeAccountMovedVia == null && existing.claudeAccountMovedBlock == null &&
+    // Review round 2 (maestro review of PR #135), finding 2: these two must
+    // be clear too, not just the three above — see the write below.
+    existing.borrowedAccount == null && existing.borrowedFromRepo == null
+  ) {
+    return;
+  }
+  const cleared: StudioStatus = {
+    ...existing,
+    claudeAccount: null, claudeAccountMovedAt: null, claudeAccountMovedVia: null, claudeAccountMovedBlock: null,
+    // Review round 2 (maestro review of PR #135), finding 2 — left set
+    // before this fix: a stale `borrowedAccount` surviving a forced-mapped
+    // recycle made the NEXT hand-back check (failover.ts, gated on exactly
+    // this field) fire spuriously against a studio that was never actually
+    // borrowing anything any more, killing the fresh lead this recycle just
+    // launched out from under it. Cleared alongside the other three
+    // "we're on a non-default account" fields for the identical reason: a
+    // forced-mapped recycle puts the studio back on its plain mapped slot,
+    // not a failover-moved (or borrowed) one.
+    borrowedAccount: null, borrowedFromRepo: null,
+  };
+  await storage.put(STATUS_KEY, cleared);
+  await recordStudioFn(cleared);
+}
+
+/**
+ * Review round 2 (maestro review of PR #135), Minor finding — `recycle()`'s
+ * own `cfg.forceMappedAccount` clear (`clearForceMappedAccount`, just above)
+ * must not run at all when the MAPPED slot itself cannot launch: before this
+ * fix, a missing mapped secret still wiped `claudeAccount`/the moved-audit
+ * trail (via `clearForceMappedAccount`) before `launchAccountOrRefuse`
+ * discovered the slot was unlaunchable and refused — no container was ever
+ * touched (correct), but the row lost information on what was, underneath,
+ * still a no-op refusal. This is called FIRST, before the clear, so a
+ * refusal leaves the row exactly as it was.
+ *
+ * Deliberately not `launchAccountOrRefuse` itself: that function always
+ * resolves against `existing?.claudeAccount` (the RECORDED account) when
+ * `FLEET_AUTO_FAILOVER` is on, which is exactly the resolution `--account
+ * mapped` exists to bypass. `launchAccount(env, repo, null)` forces the
+ * MAPPED slot's own resolution instead, regardless of the flag or any
+ * recorded account — the exact question this verb is asking.
+ *
+ * On refusal, writes the SAME `degraded`/error shape `launchAccountOrRefuse`
+ * already writes for an ordinary refusal (so `fleet ls` shows why, same as
+ * any other refused launch) and throws the same `LaunchRefusedError` — but
+ * leaves `claudeAccount` and every other field this call does not own
+ * completely untouched, since nothing here was ever cleared to begin with.
+ */
+export async function refuseUnlessMappedAccountLaunchable(
+  env: Env, id: string, storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
+): Promise<void> {
+  const launch = launchAccount(env, parseStudioId(id)?.repo ?? null, null);
+  if (launch.ok) return;
+  const existing = (await storage.get(STATUS_KEY)) ?? null;
+  const base = existing ?? {
+    id, tailscaleHost: null, lastRefresh: null, lastRefreshError: null, burn: null,
+    spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+  };
+  const refused: StudioStatus = { ...base, id, state: "degraded", error: launch.error, launchedAccount: null };
+  await storage.put(STATUS_KEY, refused);
+  await recordStudioFn(refused);
+  throw new LaunchRefusedError(launch.error);
 }
 
 /**
@@ -3417,6 +3670,14 @@ export async function launchAccountOrRefuse(
   const existing = (await storage.get(STATUS_KEY)) ?? null;
   const launch = launchAccount(env, parseStudioId(id)?.repo ?? null, existing?.claudeAccount ?? null);
   if (launch.ok) {
+    // #273 r2: flag off, an earlier failover's recorded account is stale — this
+    // launch is on the mapped one, so the row stops naming the old one.
+    // Review round 2 (maestro review of PR #135), finding 2: `borrowedAccount`/
+    // `borrowedFromRepo` clear alongside it — folded into `accountClears`
+    // itself (see that function's own doc comment) rather than duplicated
+    // here, so every caller shares the identical fix: a stale borrow flag
+    // surviving a flag-off launch would make the next hand-back check fire
+    // against a studio that is not actually borrowing anything any more.
     if (commitOkClears) {
       const clears = accountClears(env, existing, launch);
       if (clears !== null && existing !== null) {
@@ -5046,20 +5307,9 @@ export class StudioDO extends Sandbox<Env> {
     return resolveWorkRepoSlug(cfg, existing, this.env.AGENT_REPO);
   }
 
-  /**
-   * Board issue #213: this DO's real board lookup for
-   * `deliverAssignedTaskOnBringup`'s `boardLookup` thunk — resolves the
-   * studio's currently assigned open task (if any) down to just the two
-   * fields `assignDigest` needs.
-   *
-   * `workRepoSlug` is lowercased before the lookup: `resolveLatestAssignedBrief`
-   * matches against the board's OWN stored slug casing, and
-   * assignedBriefResolver (src/board/routes.ts) already lowercases the exact
-   * same way for the exact same reason — a case mismatch here would silently
-   * fail to match a task that IS assigned.
-   */
   /** Issue #86: the lead started a turn — its submitted tasks go to working.
-   *  Lowercased for the same reason as `assignedTaskOnBoard` below. */
+   *  Lowercased for the same reason as `openTasksNeedingRebrief`'s own
+   *  `workRepoSlug` handling below. */
   private async autoStartSubmitted(): Promise<void> {
     const repo = (await this.workRepoSlug(null)).toLowerCase();
     const res = await autoStartSubmittedTasks(githubBoardApi(this.env), repo, this.selfId());
@@ -5088,15 +5338,27 @@ export class StudioDO extends Sandbox<Env> {
     logWakeOutcome("stale background-shell nudge", outcome);
   }
 
-  private async assignedTaskOnBoard(workRepoSlug: string): Promise<{ taskNumber: number; title: string } | null> {
-    const brief = await resolveLatestAssignedBrief(githubBoardApi(this.env), workRepoSlug.toLowerCase(), this.selfId());
-    return brief === null ? null : { taskNumber: brief.taskNumber, title: brief.title };
+  /**
+   * Board issue #213, widened by issue #137: this DO's real board lookup for
+   * `deliverAssignedTaskOnBringup`'s `boardLookup` thunk — resolves EVERY
+   * open `working`/`input_required` task currently assigned to this studio
+   * (`openTasksNeedingRebrief`, board.ts), not only the single newest one.
+   *
+   * `workRepoSlug` is lowercased before the lookup: `openTasksNeedingRebrief`
+   * (like `resolveLatestAssignedBrief` before it) matches against the board's
+   * OWN stored slug casing, and assignedBriefResolver (src/board/routes.ts)
+   * already lowercases the exact same way for the exact same reason — a case
+   * mismatch here would silently fail to match a task that IS assigned.
+   */
+  private async openTasksNeedingRebriefOnBoard(workRepoSlug: string): Promise<{ taskNumber: number; title: string }[]> {
+    return openTasksNeedingRebrief(githubBoardApi(this.env), workRepoSlug.toLowerCase(), this.selfId());
   }
 
   /**
-   * Board issue #213: wires `deliverAssignedTaskOnBringup` (do.ts's own
-   * standalone extraction, tested with no DO construction in test/studio.
-   * wake-gate.test.ts) to this DO's real board lookup and real wake.
+   * Board issue #213, widened by issue #137: wires `deliverAssignedTaskOnBringup`
+   * (do.ts's own standalone extraction, tested with no DO construction in
+   * test/studio.wake-gate.test.ts) to this DO's real board lookup and real
+   * wake.
    *
    * Called from all three bring-up choke points — `provision()`,
    * `restartUngated()`, and `recycle()`'s wiring into `recycleWithSync` —
@@ -5111,10 +5373,16 @@ export class StudioDO extends Sandbox<Env> {
    * `repoSlug` onto STATUS_KEY and `workRepoSlug` reads storage, not `cfg`
    * alone.
    *
+   * Issue #137: the `incarnation` token is read here, the same way
+   * `deliverSurvivalOnBringup` (below) reads it — `(await
+   * getObserved(this.ctx.storage)).incarnation` — and threaded through as
+   * `deliverAssignedTaskOnBringup`'s new 2nd param, so its per-incarnation
+   * dedup gate has a real container identity to key off.
+   *
    * `ctx` is the SAME OpCtx threaded through from whichever choke point
    * called this (provision's own `allowingStart`-scoped ctx, recycle's own
    * ctx, restartUngated's own ctx) — `() => ctx.moved()` is
-   * `deliverAssignedTaskOnBringup`'s 4th `moved` param, so a destroy landing
+   * `deliverAssignedTaskOnBringup`'s 5th `moved` param, so a destroy landing
    * mid-bring-up vetoes the delivery exactly like issue #174 already vetoes
    * every other bring-up write.
    *
@@ -5125,23 +5393,20 @@ export class StudioDO extends Sandbox<Env> {
    * A REFUSED wake (stopped, limit modal, single-flight busy) is not an
    * error, but it must still leave a trace: the corrected NO-WAKE message
    * (#229) now PROMISES delivery on bring-up, and a silent refusal would
-   * make that promise false with nothing in the logs to show it.
+   * make that promise false with nothing in the logs to show it — issue #137:
+   * the wake closure now receives `taskNumber` as its own 2nd argument
+   * (rather than a captured outer variable), since a single bring-up can now
+   * refuse more than one task and each refusal must name ITS OWN task.
    */
   private async deliverTaskOnBringup(cfg: ProvisionConfig | null, ctx: OpCtx): Promise<void> {
     try {
       const workRepoSlug = await this.workRepoSlug(cfg);
-      // Captured by the boardLookup closure below so the wake closure (which
-      // only receives the already-rendered `prompt`, not the task itself) can
-      // still name the task in a refusal's log line.
-      let taskNumber: number | undefined;
+      const incarnation = (await getObserved(this.ctx.storage)).incarnation;
       await deliverAssignedTaskOnBringup(
         this.ctx.storage,
-        async () => {
-          const task = await this.assignedTaskOnBoard(workRepoSlug);
-          taskNumber = task?.taskNumber;
-          return task;
-        },
-        async (prompt) => {
+        incarnation,
+        () => this.openTasksNeedingRebriefOnBoard(workRepoSlug),
+        async (prompt, taskNumber) => {
           const outcome = await this.wakeStudioOnAssignment(prompt);
           if (!outcome.ok) logWakeOutcome(`studio ${this.selfId()}: bring-up delivery of #${taskNumber}`, outcome);
           return outcome;
@@ -5462,8 +5727,8 @@ export class StudioDO extends Sandbox<Env> {
    *
    * NOT MERGED INTO ONE TYPED MESSAGE, the review's other offered option,
    * because the two deliveries own SEPARATE at-most-once markers —
-   * `DELIVERED_TASK_KEY` per task number, `survivalBriefDeliveredFor` per
-   * incarnation — each written only on its own landed wake. One message means
+   * `taskWakesDeliveredFor` per task per incarnation, `survivalBriefDeliveredFor`
+   * per incarnation — each written only on its own landed wake. One message means
    * one wake outcome deciding both, so a refusal would either re-deliver a task
    * pointer that already landed or suppress a re-brief that never did. Two
    * sequential wakes keep each feature's guarantee its own.
@@ -5698,6 +5963,13 @@ export class StudioDO extends Sandbox<Env> {
       // where an unswitched studio is; cards name labels.
       autoFailover: autoFailoverOn(this.env),
       primary: this.primaryAccount(),
+      // Review round 3 (2nd review of PR #135, 2026-09-30) — see
+      // FailoverDeps.primaryIsMapped's own doc comment (failover.ts) for why
+      // `primary != null` alone can never gate the borrowedAccount write:
+      // `primaryAccount()` above never returns null in the no-map case, it
+      // falls back to the first configured account. THIS is the actual
+      // discriminator — a genuine CLAUDE_ACCOUNT_BY_REPO entry for this repo.
+      primaryIsMapped: this.primaryIsMapped(),
       // Issue #103: this repo's own mapped primary must never be excluded
       // for itself — only accounts CLAUDE_ACCOUNT_BY_REPO reserves for a
       // DIFFERENT repo are.
@@ -5711,6 +5983,16 @@ export class StudioDO extends Sandbox<Env> {
         read: () => readFleetAccountLimits(this.env.DB, resolveClaudeAccounts(this.env)),
         write: (name: string, until: string | null, seenAt: string) => writeFleetAccountLimit(this.env.DB, name, until, seenAt),
       },
+      // Issue #131 (Stage B): fleet-wide per-account 5h burn, same D1-backed
+      // shape/reasoning as accountLimits just above, read only on the borrow
+      // second pass.
+      accountBurn: {
+        read: () => readFleetAccountBurn(this.env.DB, resolveClaudeAccounts(this.env)),
+      },
+      // Issue #131 (Stage B): names the repo a borrowed account is reserved
+      // for, in the loud "borrowed"/"returned" notify messages only — never a
+      // failover decision (that stays keyed on `reservedAccounts` above).
+      otherRepoOf: (name: string) => repoForAccount(this.env, name),
       exec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.sync, env }),
       now: () => new Date(),
       notify: async (message: string) => {
@@ -5739,6 +6021,17 @@ export class StudioDO extends Sandbox<Env> {
   private primaryAccount(): string | null {
     const launch = launchAccount(this.env, parseStudioId(this.selfId())?.repo ?? null, null);
     return launch.ok ? launch.name : null;
+  }
+
+  /** Review round 3 (2nd review of PR #135, 2026-09-30) — true only when THIS
+   *  studio's own repo is a genuine KEY in the parsed `CLAUDE_ACCOUNT_BY_REPO`
+   *  map, never merely because `primaryAccount()` above resolved to SOME
+   *  account (it always does, mapped or not — see that method's own "first
+   *  set account" fallback). See failover.ts's `FailoverDeps.primaryIsMapped`
+   *  for the full reasoning this method exists to satisfy. */
+  private primaryIsMapped(): boolean {
+    const repo = parseStudioId(this.selfId())?.repo ?? null;
+    return repo !== null && parseAccountMap(this.env.CLAUDE_ACCOUNT_BY_REPO)[repo] !== undefined;
   }
 
   /** The account this studio is recorded on (StudioStatus.claudeAccount), for
@@ -6327,6 +6620,20 @@ export class StudioDO extends Sandbox<Env> {
    * two covers does not come back.
    */
   async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {
+    // Board task #131 ask 2: `fleet recycle <id> --account mapped`. This
+    // clear runs FIRST — before either launchAccountOrRefuse call below — so
+    // both see the cleared state and fall through to CLAUDE_ACCOUNT_BY_REPO's
+    // mapped slot rather than a stale recorded (possibly failed-over)
+    // account. See clearForceMappedAccount's own doc comment for why this
+    // lives here, inside recycle()'s own atomic flow, rather than as a
+    // route-level pre-step.
+    if (cfg.forceMappedAccount) {
+      // Review round 2 (maestro review of PR #135), Minor finding: refuse
+      // BEFORE clearing — see refuseUnlessMappedAccountLaunchable's own doc
+      // comment.
+      await refuseUnlessMappedAccountLaunchable(this.env, this.selfId(), this.ctx.storage, this.recordFn());
+      await clearForceMappedAccount(this.ctx.storage, this.recordFn());
+    }
     // Issue #271: refuse BEFORE recycle's destroy — an unlaunchable account
     // must not cost a running studio its container. Issue #328 fix round 2:
     // this resolution is NOT reused below — recycleWithSync's pre-destroy
@@ -6817,6 +7124,10 @@ export class StudioDO extends Sandbox<Env> {
         // Round 3 review, item 3: the SAME guard object every tick this
         // isolate runs — see installCacheSaveGuard's own doc comment above.
         this.installCacheSaveGuard,
+        // Issue #131 (Stage B): mirrors this studio's own 5h-window burn onto
+        // its account's fleet-wide row, so another studio's own borrow
+        // second pass (failoverDeps().accountBurn, above) can read it.
+        (name: string, window5hOutput: number) => writeFleetAccountBurn(this.env.DB, name, window5hOutput, Date.now()),
       ),
       () => this.rearm("syncSession", SYNC_SESSION_SECONDS),
       "syncSession",

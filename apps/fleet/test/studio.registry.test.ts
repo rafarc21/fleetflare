@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { env } from "cloudflare:test";
-import { listStudios, recordStudio, getStudioRow } from "../src/studio/registry";
+import { listStudios, recordStudio, getStudioRow, getStudioRowLookup } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
 import { emptyObserved } from "../src/studio/observed";
 
@@ -140,6 +140,33 @@ describe("studio registry", () => {
       .bind("studio:websites--broken2", "{not valid json", Date.now())
       .run();
     expect(await getStudioRow(env, "websites--broken2")).toBeNull();
+  });
+
+  // Issue #136: getStudioRow's own null-for-both contract (test above) is
+  // right for its existing callers, but profile.ts's getStudioStub needs to
+  // tell "never provisioned" apart from "has a row, can't read it" -- see
+  // getStudioRowLookup's own doc comment in registry.ts. Three states, one
+  // test per state, same raw-SQL-insert technique the malformed-row test
+  // above already uses.
+  describe("getStudioRowLookup", () => {
+    it("is absent for an id with no row at all", async () => {
+      expect(await getStudioRowLookup(env, "websites--neverwritten")).toEqual({ kind: "absent" });
+    });
+
+    it("is malformed for a row that fails to parse, distinct from absent", async () => {
+      await env.DB
+        .prepare(`INSERT INTO fleet_state (key, value, ts) VALUES (?, ?, ?)`)
+        .bind("studio:websites--broken3", "{not valid json", Date.now())
+        .run();
+      expect(await getStudioRowLookup(env, "websites--broken3")).toEqual({ kind: "malformed" });
+    });
+
+    it("is found with the parsed row for a real, well-formed row", async () => {
+      await recordStudio(env, status({ id: "websites--reg8" }));
+      const result = await getStudioRowLookup(env, "websites--reg8");
+      expect(result.kind).toBe("found");
+      expect(result.kind === "found" && stored(result.row)).toEqual(status({ id: "websites--reg8" }));
+    });
   });
 
   // Fleet ls readiness fix ("a dead studio looks alive"): readiness.reason

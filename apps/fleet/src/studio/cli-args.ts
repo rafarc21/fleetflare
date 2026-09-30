@@ -109,7 +109,11 @@ export type CliCommand =
   // re-provisions on the CURRENT image — see src/studio/do.ts's recycle()
   // for why provision/restart alone can never do this.
   // Issue #96: `discardUnsynced` is the only way past the failed-probe guard.
-  | { cmd: "recycle"; id: string; discardUnsynced: boolean; freshSession: boolean }
+  // Board task #131 ask 2: `forceMappedAccount`, present (`true`) only when
+  // `--account mapped` was given — same "optional, only present when true"
+  // discipline `destroy`'s own `park?: true` (issue #59) already established,
+  // so every recycle parsed before this field existed keeps its exact shape.
+  | { cmd: "recycle"; id: string; discardUnsynced: boolean; freshSession: boolean; forceMappedAccount?: true }
   // Board task #124: recycle can never leave a studio STOPPED — it always
   // reprovisions. `destroy` runs the same pre-destroy sequence (session
   // sync, rescue-push, learning-harvest — src/studio/destroy.ts) and then
@@ -295,8 +299,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Read a studio WITHOUT attaching: pane_current_command for tmux studio:claude, whether the checkout exists, and the last ~60 pane lines via `tmux capture-pane -p`. Never opens the pty, never sends a keystroke, never resizes the shared terminal — the corruption `fleet attach` risks on an operator's own live view. Refuses a STOPPED studio outright (reading it would start its container and bill silently).",
   },
   recycle: {
-    args: "<id> [--discard-unsynced] [--fresh-session]",
-    summary: "Destroy the container and reprovision on the CURRENT image, then verify and report THAT verdict. The only way an image change reaches a running studio. Loses the container filesystem; the session is rescued first. If the container cannot answer, nothing can be rescued: recycle REFUSES (409) and names the age of the last synced snapshot it would restore. It also refuses when rescue-push fails or cannot confirm the work was saved (killed exec, dead shell, deadline), naming why. --discard-unsynced proceeds anyway, discarding everything since. " + FRESH_SESSION_HELP + " " + LIVENESS_RULE,
+    args: "<id> [--discard-unsynced] [--fresh-session] [--account mapped]",
+    summary: "Destroy the container and reprovision on the CURRENT image, then verify and report THAT verdict. The only way an image change reaches a running studio. Loses the container filesystem; the session is rescued first. If the container cannot answer, nothing can be rescued: recycle REFUSES (409) and names the age of the last synced snapshot it would restore. It also refuses when rescue-push fails or cannot confirm the work was saved (killed exec, dead shell, deadline), naming why. --discard-unsynced proceeds anyway, discarding everything since. " + FRESH_SESSION_HELP + " " + LIVENESS_RULE + " Board task #131: with FLEET_AUTO_FAILOVER=on, a studio that ever failed over relaunches on its RECORDED account forever after, never the map — a later CLAUDE_ACCOUNT_BY_REPO change never reaches it. --account mapped clears that recorded account (and its moved-audit trail) before the container is touched, so this recycle relaunches on the repo's plain mapped slot instead (rescue still runs first, same as any recycle). The only value accepted is the literal \"mapped\".",
   },
   destroy: {
     args: "<id> [--force] [--discard-unsynced] [--park]",
@@ -742,15 +746,33 @@ export function parseCliArgs(argv: string[]): CliCommand {
     }
     // Issue #96: same bespoke shape as `destroy --force` below, same reasons.
     // Issue #28: plus `--fresh-session`, either order, each at most once.
+    // Board task #131 ask 2: plus `--account mapped` — the one VALUE-taking
+    // flag this bespoke parser handles, pulled out of `rest` BEFORE the
+    // boolean-flag scan below so that scan never sees either of its two
+    // tokens (`--account` itself, or its value). Kept bespoke rather than
+    // routing through `parseFlags` (used by `task new` et al.): that function
+    // is task-only today and widening it for this one caller costs more than
+    // the lines below.
     case "recycle": {
       if (!arg || arg.startsWith("--")) return { cmd: "usage", message: CLI_USAGE };
       const rest = argv.slice(2);
+      const accountIdx = rest.indexOf("--account");
+      let forceMappedAccount = false;
+      let flagTokens = rest;
+      if (accountIdx !== -1) {
+        if (rest.indexOf("--account", accountIdx + 1) !== -1) return usage("--account was given twice");
+        const value = rest[accountIdx + 1];
+        if (value !== "mapped") return usage('fleet recycle: --account only accepts "mapped"');
+        forceMappedAccount = true;
+        flagTokens = [...rest.slice(0, accountIdx), ...rest.slice(accountIdx + 2)];
+      }
       const known = ["--discard-unsynced", "--fresh-session"];
-      const stray = rest.find((f, i) => !known.includes(f) || rest.indexOf(f) !== i);
+      const stray = flagTokens.find((f, i) => !known.includes(f) || flagTokens.indexOf(f) !== i);
       if (stray !== undefined) return usage(`unexpected ${JSON.stringify(stray)}`);
       return {
         cmd: "recycle", id: arg,
-        discardUnsynced: rest.includes("--discard-unsynced"), freshSession: rest.includes("--fresh-session"),
+        discardUnsynced: flagTokens.includes("--discard-unsynced"), freshSession: flagTokens.includes("--fresh-session"),
+        ...(forceMappedAccount ? { forceMappedAccount: true } : {}),
       };
     }
     case "check":

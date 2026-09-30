@@ -4,6 +4,7 @@ import {
   requireAssignedTask, showStudioTask, commentStudioEnvelope, resolveBriefPrompt, resolveLatestAssignedBrief,
   assignTask, transitionStudioTask, openAssignedTasks, findLiveAssignedTask,
   closeTerminalTasks, TERMINAL_CLOSE_PAGE, autoStartSubmittedTasks, LEAD_TASK_STATES,
+  openTasksNeedingRebrief, REBRIEF_TASK_STATES,
   type BoardApi,
 } from "../src/board/board";
 import { parseEnvelopeComment, renderEnvelopeComment, parseEnvelope } from "../src/board/envelope";
@@ -1306,6 +1307,83 @@ describe("resolveLatestAssignedBrief — board state, not issue open (#124 follo
       ]),
     });
     expect(await resolveLatestAssignedBrief(api, "o/r", MINE)).toBeNull();
+  });
+});
+
+// Issue #137: the bring-up re-delivery wake's own board read — widened from
+// resolveLatestAssignedBrief's single "newest" task to every open task still
+// genuinely in flight, so a container replacement leaves no assigned task
+// un-rebriefed.
+describe("openTasksNeedingRebrief — bring-up re-delivery's board read (issue #137)", () => {
+  const MINE = "fleetflare--web-studio";
+  const mine = (number: number, state: BoardTask["state"], title = "A task", updatedAt = "2026-09-24T00:00:00Z") =>
+    task({ number, state, title, updatedAt, labels: [...(state ? [state] : []), studioLabel(MINE)], assignee: MINE });
+
+  it("no open tasks assigned to this studio: empty, never throws", async () => {
+    const api = fakeApi({ listIssues: vi.fn(async () => []) });
+    expect(await openTasksNeedingRebrief(api, "o/r", MINE)).toEqual([]);
+  });
+
+  it("listIssues throwing resolves to [] (fail-open, board hiccup must never block bring-up)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const api = fakeApi({ listIssues: vi.fn(async () => { throw new Error("upstream unreachable"); }) });
+    await expect(openTasksNeedingRebrief(api, "o/r", MINE)).resolves.toEqual([]);
+    vi.restoreAllMocks();
+  });
+
+  it("submitted/working/input_required qualify — awaiting_merge and terminal states are excluded", async () => {
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [
+        mine(1, "submitted"), mine(2, "working"), mine(3, "input_required"),
+        mine(4, "awaiting_merge"), mine(5, "completed"), mine(6, "failed"), mine(7, "canceled"),
+      ]),
+    });
+    const result = await openTasksNeedingRebrief(api, "o/r", MINE);
+    expect(result.map((t) => t.taskNumber).sort()).toEqual([1, 2, 3]);
+  });
+
+  // Reviewer fix-first on #143/#137: `wakeOnAssign` (assign-wake.ts) refuses
+  // to type into a STOPPED studio and says so explicitly — "Provision it and
+  // the task is delivered on bring-up" — a promise only THIS function keeps.
+  // A task assigned while its studio was stopped sits in `submitted` with no
+  // wake ever sent; if `openTasksNeedingRebrief` dropped `submitted`, that
+  // promise would be a lie and the lead would never see the task at all.
+  // Exercises the REAL board-query filter (not a hand-built list handed
+  // straight to the delivery loop, which would hide this bug entirely — see
+  // studio.wake-gate.test.ts / studio.destroy-race.test.ts, neither of which
+  // goes through this function).
+  it("a submitted task (assigned while the studio was stopped, never woken) is returned too", async () => {
+    const api = fakeApi({ listIssues: vi.fn(async () => [mine(9, "submitted", "Stopped at assign time")]) });
+    const result = await openTasksNeedingRebrief(api, "o/r", MINE);
+    expect(result).toEqual([{ taskNumber: 9, title: "Stopped at assign time" }]);
+  });
+
+  it("a closed issue in a live state does not count — must be open too", async () => {
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [{ ...mine(8, "working"), open: false }]),
+    });
+    expect(await openTasksNeedingRebrief(api, "o/r", MINE)).toEqual([]);
+  });
+
+  it("multiple open live tasks: every one is returned, newest-updated first", async () => {
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [
+        mine(10, "working", "Older", "2026-09-20T00:00:00Z"),
+        mine(11, "input_required", "Newest", "2026-09-29T00:00:00Z"),
+        mine(12, "working", "Middle", "2026-09-24T00:00:00Z"),
+      ]),
+    });
+    const result = await openTasksNeedingRebrief(api, "o/r", MINE);
+    expect(result).toEqual([
+      { taskNumber: 11, title: "Newest" },
+      { taskNumber: 12, title: "Middle" },
+      { taskNumber: 10, title: "Older" },
+    ]);
+  });
+
+  it("REBRIEF_TASK_STATES is exactly submitted + working + input_required — same as LIVE_TASK_STATES", () => {
+    expect(REBRIEF_TASK_STATES).toEqual(["submitted", "working", "input_required"]);
+    expect(REBRIEF_TASK_STATES).toEqual(LIVE_TASK_STATES);
   });
 });
 

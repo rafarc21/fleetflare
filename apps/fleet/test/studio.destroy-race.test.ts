@@ -9,6 +9,7 @@ import { destroyWithSync } from "../src/studio/destroy";
 import type { SessionSyncStorage } from "../src/studio/session-sync";
 import type { StudioState, StudioStatus, ProvisionConfig } from "../src/studio/types";
 import { assignDigest } from "../src/board/assign-wake";
+import { BRINGUP_TOKEN_WRITE_SECTION } from "../src/studio/observed";
 
 // ---------------------------------------------------------------------------
 // Issue #152 — a genuine destroy EPOCH, replacing the prior (insufficient)
@@ -1128,10 +1129,18 @@ describe("K23 — restart: readiness check never execs once the op's ctx has mov
 //
 // Pinned here, through the REAL StudioDO verbs (provision/restartStudio/
 // recycle), using the SAME makeHarness this suite's other describes already
-// use. `assignedTaskOnBoard` and `wakeStudioOnAssignment` are the two seams
-// `deliverTaskOnBringup` calls through (do.ts) — overridden here exactly like
-// deps()/refreshDeps()/syncDeps() already are inside makeHarness itself,
-// Object.assign onto the fake `this`, no DO construction.
+// use. `openTasksNeedingRebriefOnBoard` and `wakeStudioOnAssignment` are the
+// two seams `deliverTaskOnBringup` calls through (do.ts) — overridden here
+// exactly like deps()/refreshDeps()/syncDeps() already are inside makeHarness
+// itself, Object.assign onto the fake `this`, no DO construction.
+//
+// Issue #137 widened `deliverAssignedTaskOnBringup`'s `boardLookup` from a
+// single task-or-null to an array, so `boardLookup` below now returns
+// `[task]` or `[]` — the wake mock's own shape (called with just a rendered
+// `prompt` string) is UNCHANGED, since `wakeStudioOnAssignment` itself is
+// still called with only `prompt`; the new per-task `taskNumber` argument is
+// consumed one layer up, inside `deliverTaskOnBringup`'s own wrapping
+// closure, purely for its refusal log line.
 // ---------------------------------------------------------------------------
 
 describe("board issue #213 (fix round) — bring-up task delivery honors the #174 destroy-epoch guard", () => {
@@ -1147,15 +1156,16 @@ describe("board issue #213 (fix round) — bring-up task delivery honors the #17
   const inconclusiveRespond = (cmd: string) =>
     (cmd.includes("pane_current_command") ? { code: 0, stdout: PROVISIONED_UNKNOWN, stderr: "" } : undefined);
 
-  /** Wires `assignedTaskOnBoard`/`wakeStudioOnAssignment` test doubles onto an
-   *  already-built harness's `doObj` — the two seams `deliverTaskOnBringup`
-   *  calls through. `onLookup` fires INSIDE the board-lookup call itself, so a
-   *  test can simulate a destroy landing during that exact round trip (the
-   *  same shape studio.wake-gate.test.ts's own `lookup` fake uses for the
-   *  unit-level version of this same guarantee). Assertions run OUTSIDE
-   *  `wake`/`boardLookup` themselves — never inside a callback
-   *  deliverAssignedTaskOnBringup's own total try/catch could swallow — so a
-   *  wrong call shape fails the test for real, not silently. */
+  /** Wires `openTasksNeedingRebriefOnBoard`/`wakeStudioOnAssignment` test
+   *  doubles onto an already-built harness's `doObj` — the two seams
+   *  `deliverTaskOnBringup` calls through. `onLookup` fires INSIDE the
+   *  board-lookup call itself, so a test can simulate a destroy landing
+   *  during that exact round trip (the same shape studio.wake-gate.test.ts's
+   *  own `lookup` fake uses for the unit-level version of this same
+   *  guarantee). Assertions run OUTSIDE `wake`/`boardLookup` themselves —
+   *  never inside a callback `deliverAssignedTaskOnBringup`'s own total
+   *  try/catch could swallow — so a wrong call shape fails the test for
+   *  real, not silently. */
   function withDelivery(h: Harness, opts: {
     task?: { taskNumber: number; title: string } | null;
     onLookup?: () => void;
@@ -1163,7 +1173,8 @@ describe("board issue #213 (fix round) — bring-up task delivery honors the #17
   } = {}) {
     const boardLookup = vi.fn(async () => {
       opts.onLookup?.();
-      return opts.task === undefined ? TASK : opts.task;
+      const task = opts.task === undefined ? TASK : opts.task;
+      return task === null ? [] : [task];
     });
     const readinessAtWake: Array<string | undefined> = [];
     const wake = vi.fn(async (_prompt: string) => {
@@ -1173,7 +1184,7 @@ describe("board issue #213 (fix round) — bring-up task delivery honors the #17
       readinessAtWake.push((h.map.get(STATUS_KEY) as StudioStatus | undefined)?.readiness?.kind);
       return opts.wakeOutcome?.() ?? { ok: true };
     });
-    Object.assign(h.doObj, { assignedTaskOnBoard: boardLookup, wakeStudioOnAssignment: wake });
+    Object.assign(h.doObj, { openTasksNeedingRebriefOnBoard: boardLookup, wakeStudioOnAssignment: wake });
     return { boardLookup, wake, readinessAtWake };
   }
 
@@ -1275,6 +1286,41 @@ describe("board issue #213 (fix round) — bring-up task delivery honors the #17
     await h.doObj.restartStudio();
 
     expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  // PR #143 fix-first review coverage gap: `recordBringupObservation`
+  // (provision.ts ~3329) mints a BRAND NEW `crypto.randomUUID()` on EVERY
+  // bring-up unconditionally, not only when a real container replacement
+  // happened — unlike `deliverSurvivalOnBringup`'s own allowlist-gated
+  // feature, this delivery path shares none of that restriction. The dedup
+  // test right above only proves "one wake total" because this harness's
+  // `provisionedRespond` never answers the bring-up-observation exec with a
+  // successful token write, so `Observed.incarnation` never actually changes
+  // between the two calls — the SAME gap the reviewer's own note calls out
+  // ("the destroy-race harness never changes the token, so add one test that
+  // does"). This test arms that exec for real (matching on
+  // `BRINGUP_TOKEN_WRITE_SECTION`, observed.ts), so `provision()` and the
+  // following `restartStudio()` each mint and persist a genuinely different
+  // incarnation token, and pins that the SAME still-open task earns a SEPARATE
+  // wake on each — the incarnation-scoped dedup (`taskWakesDeliveredFor`)
+  // correctly treats each as a fresh container identity, end-to-end through
+  // the real StudioDO methods (not just at the do.ts-unit level
+  // studio.wake-gate.test.ts already covers).
+  it("provision, then restartStudio, for the SAME task, but a DIFFERENT incarnation each time: TWO wakes — the token change earns a fresh delivery", async () => {
+    const respondWithTokenWrite = (cmd: string) => {
+      if (cmd.includes("pane_current_command")) return { code: 0, stdout: PROVISIONED_OK, stderr: "" };
+      if (cmd.includes(BRINGUP_TOKEN_WRITE_SECTION)) {
+        return { code: 0, stdout: `${BRINGUP_TOKEN_WRITE_SECTION}\nyes\n`, stderr: "" };
+      }
+      return undefined;
+    };
+    const h = makeHarness({ state: "stopped", respond: respondWithTokenWrite });
+    const { wake } = withDelivery(h);
+
+    await h.doObj.provision(cfg());
+    await h.doObj.restartStudio();
+
+    expect(wake).toHaveBeenCalledTimes(2);
   });
 });
 

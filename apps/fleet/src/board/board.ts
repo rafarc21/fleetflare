@@ -1169,6 +1169,58 @@ export async function resolveLatestAssignedBrief(
   return { prompt, taskNumber: newest.number, title: newest.title };
 }
 
+/** Issue #137, PR #143 fix-first review: which live states earn a bring-up
+ *  re-delivery wake. Originally narrower than `LIVE_TASK_STATES` — `submitted`
+ *  was excluded on the theory that the ordinary fresh-assignment wake
+ *  (`wakeOnAssign`, assign-wake.ts) already covers it. That theory is wrong:
+ *  `wakeOnAssign` itself REFUSES to type into a STOPPED studio at assignment
+ *  time (its own refusal message: "no wake was sent, because starting its
+ *  container costs money silently. Provision it and the task is delivered on
+ *  bring-up."), leaving the task in `submitted` with no wake ever sent. Only
+ *  the bring-up path (this filter) keeps that promise, so `submitted` has to
+ *  qualify here too — making this byte-identical to `LIVE_TASK_STATES`. Kept
+ *  as its own named export anyway: it is a SEPARATE policy decision ("what
+ *  earns a bring-up re-delivery wake") from LIVE_TASK_STATES's ("what counts
+ *  as work still owed"), even though the two currently agree on every state. */
+export const REBRIEF_TASK_STATES: readonly TaskState[] = LIVE_TASK_STATES;
+
+/**
+ * Issue #137: every OPEN task currently assigned to `studioId` in a
+ * `REBRIEF_TASK_STATES` state (`submitted`, `working`, or `input_required`)
+ * — the sibling of `resolveLatestAssignedBrief`
+ * above, widened from "the single newest assigned task" to "every task still
+ * genuinely in flight", because a container replacement leaves a fresh pane
+ * with zero memory of ANY of them, not only the most recent one.
+ *
+ * Same `listTasks(api, repo, {assignedTo: studioId})` call
+ * `resolveLatestAssignedBrief` makes, and the same fail-open-to-`[]` posture
+ * on a thrown error or `{ok:false}` (logged, then answered `[]`) — a board
+ * hiccup at bring-up must never block provisioning, exactly as that
+ * function's own doc comment argues.
+ *
+ * Sorted newest-updated-first, same `updatedAt` proxy
+ * `resolveLatestAssignedBrief` uses — every entry here gets delivered, so the
+ * order does not change the outcome, only makes it deterministic to test.
+ */
+export async function openTasksNeedingRebrief(
+  api: BoardApi, repo: string, studioId: string,
+): Promise<{ taskNumber: number; title: string }[]> {
+  let result: BoardResult<BoardTaskView[]>;
+  try {
+    result = await listTasks(api, repo, { assignedTo: studioId });
+  } catch (err) {
+    console.error(`board: open-tasks-needing-rebrief lookup failed for ${studioId}@${repo}`, err);
+    return [];
+  }
+  if (!result.ok) {
+    console.error(`board: open-tasks-needing-rebrief lookup failed for ${studioId}@${repo} (${result.status}): ${result.message}`);
+    return [];
+  }
+  const open = result.value.filter((t) => t.open && t.state !== null && REBRIEF_TASK_STATES.includes(t.state));
+  const sorted = [...open].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  return sorted.map((t) => ({ taskNumber: t.number, title: t.title }));
+}
+
 /**
  * The one live task, if any, that `studioId` currently holds — open, not
  * drifted, in a LIVE_TASK_STATES state, carrying THIS studio's own

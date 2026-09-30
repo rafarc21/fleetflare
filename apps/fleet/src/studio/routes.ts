@@ -822,6 +822,11 @@ export async function handleStudio(
       ...(recycleCard === null ? {} : { projectCard: recycleCard }),
       // Issue #28: same query param as the provision route above.
       ...(url.searchParams.get("fresh-session") === "true" ? { freshSession: true } : {}),
+      // Board task #131 ask 2: `fleet recycle <id> --account mapped` —
+      // cli-args.ts is the only validator of the value (refuses anything
+      // other than the literal "mapped"), so this route just reads the
+      // boolean outcome straight off the query string.
+      ...(url.searchParams.get("account") === "mapped" ? { forceMappedAccount: true } : {}),
     };
     // Second review pass (2026-08-20): a live run found destroy+reprovision
     // racing — see do.ts's recycleWithSync/sbAwaitReady for the mechanism.
