@@ -100,8 +100,32 @@ export interface RecycleReport {
   status: StudioStatus | null;
   /** Operator-facing lines, in order. */
   lines: string[];
+  /**
+   * Review round 2 (maestro, FIX-FIRST), finding 2 — three distinct values,
+   * on purpose, so a caller/script can tell these apart by exit code alone
+   * without parsing `kind`:
+   *
+   *   0  `ok` / `timeout-provisioned` — confirmed success.
+   *   1  `http-error`                 — a real, definitive verdict FROM the
+   *                                     Worker (a 409 refusal, a 500):
+   *                                     something to fix and retry.
+   *   2  `timeout-pending` / `timeout-unknown` — this side genuinely does
+   *                                     not know the outcome. Not a refusal,
+   *                                     not evidence of failure — check
+   *                                     `fleet ls`. Deliberately NOT the
+   *                                     same code as `http-error`: reusing
+   *                                     `1` for both would make "the Worker
+   *                                     refused this" and "we don't know"
+   *                                     indistinguishable to a script that
+   *                                     only reads the exit code.
+   */
   exitCode: number;
 }
+
+/** The distinct exit code for both timeout-shaped "we don't know" outcomes —
+ *  see `RecycleReport.exitCode`'s own doc comment above for the convention
+ *  this is part of. */
+const RECYCLE_UNKNOWN_EXIT_CODE = 2;
 
 export interface RecycleUrls {
   recycle: string;
@@ -297,7 +321,7 @@ async function pollAfterNoAnswer(
           `after ${deps.attempts} status polls over ${windowS}s — recycle still running, check fleet ls. ` +
           "The outcome is not known yet.",
       ],
-      exitCode: 1,
+      exitCode: RECYCLE_UNKNOWN_EXIT_CODE,
     };
   }
 
@@ -310,6 +334,6 @@ async function pollAfterNoAnswer(
         `(${deps.attempts} tries over ${windowS}s; last: ${lastWhy ?? "no reason recorded"}) — ` +
         `the outcome of this recycle is UNKNOWN, not a verdict. Check fleet ls.`,
     ],
-    exitCode: 1,
+    exitCode: RECYCLE_UNKNOWN_EXIT_CODE,
   };
 }
