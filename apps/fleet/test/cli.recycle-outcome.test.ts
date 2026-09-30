@@ -268,6 +268,25 @@ describe("the recycle request's own budget", () => {
     expect(RECYCLE_POLL_ATTEMPTS).toBe(6);
     expect(RECYCLE_POLL_INTERVAL_MS).toBe(10_000);
   });
+
+  // Review round 2, fix 3: the two tests above only pin the CONSTANTS, which
+  // stay green even if `pollAfterNoAnswer`'s own loop ignored them (e.g. a
+  // hardcoded `for (let i = 0; i < 6; i++)`). This test proves the bound is
+  // actually load-bearing: a `/status` that NEVER satisfies `bringupLanded`
+  // must be called EXACTLY `RECYCLE_POLL_ATTEMPTS` times, not "some number
+  // <= it" — an off-by-one or a hardcoded loop bound would show up here even
+  // if it happened to equal 6 today.
+  it("a status that never lands this recycle's bring-up is polled EXACTLY RECYCLE_POLL_ATTEMPTS times, not merely a bounded-ish number", async () => {
+    const { fetchImpl, calls } = fakeSlowWorker([
+      async () => Response.json(statusRow("running", session({ via: "provision", at: "2026-09-30T12:00:05.000Z" }))),
+    ]);
+    const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
+
+    expect(report.kind).toBe("timeout-pending");
+    const statusCalls = calls.filter((u) => u.endsWith("/status"));
+    expect(statusCalls).toHaveLength(RECYCLE_POLL_ATTEMPTS);
+    expect(statusCalls.length).toBe(6);
+  });
 });
 
 // The confirmed-outcome gate, pinned in cli/fleet.ts's own source: the Orca/
