@@ -384,6 +384,24 @@ describe("runTaskReap — a landed PR closes only a task it claims (#248)", () =
     expect(close).toHaveBeenCalledWith(107, "abc");
   });
 
+  // Board issue #110: `awaiting_merge` gets NO carve-out here, unlike
+  // `input_required` above — reap is state-agnostic except for that one
+  // parked exception, so a task the lead itself marked "done, PR's up" is
+  // closed exactly like a `working` task once its PR lands and claims it.
+  // This is what makes "merge auto-completes the task" work for the new
+  // state with ZERO changes to task-reap.ts.
+  it("an awaiting_merge task whose PR landed and claims it is closed, same as working (#110)", async () => {
+    const close = vi.fn(async () => ({ ok: true, outcome: "closed" as const }));
+    const d = deps({
+      listOpenTasks: async () => [{ taskNumber: 107, prNumber: 151, state: "awaiting_merge" }],
+      checkLanded: async () => ({ landed: true, sha: "abc" }),
+      prClaims: async (pr, task) => pr === 151 && task === 107,
+      close,
+    });
+    expect(await runTaskReap(d, true)).toEqual([{ taskNumber: 107, prNumber: 151, outcome: "closed", sha: "abc" }]);
+    expect(close).toHaveBeenCalledWith(107, "abc");
+  });
+
   it("a thrown prClaims is skipped for that task alone", async () => {
     const d = deps({
       listOpenTasks: async () => [{ taskNumber: 107, prNumber: 150 }],
