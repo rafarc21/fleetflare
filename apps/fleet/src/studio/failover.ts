@@ -1683,11 +1683,32 @@ export async function runAccountFailover(
     // never comes once the studio is happily running on a borrowed account.
     // Guarded on `rowNow.borrowedAccount` so the overwhelming majority of
     // ticks (never borrowed) pay nothing beyond that one field read.
-    if (deps.autoFailover && rowNow.borrowedAccount && deps.primary) {
+    //
+    // Review round 2 (maestro review of PR #135), finding 1 — this whole
+    // `"working"` branch fires on ANY working verdict, including a THINKING
+    // lead: `verdict.repainted` is set whenever the two captures differed
+    // (PANE_QUIESCE_SECONDS apart), which is precisely "a turn is in
+    // flight" — the exact signal `forget` just above already refuses to act
+    // on for the identical reason. Hand-back's own `accountSwitchCmd`
+    // (`respawn-pane -k`) kills whatever is running in the pane, so firing
+    // it mid-turn loses in-flight work; skipping it here costs nothing but
+    // one more 300s tick before the studio genuinely comes home. Likewise
+    // gated on a FRESH `OPERATION_KEY` — the same lock the `heal` check
+    // above already reads before its own write, and the same lock the
+    // ordinary switch path further below takes for its own container-exec-
+    // then-DO-patch two-step: a concurrent provision/restart/recycle/
+    // failover already touching this container must not be interrupted by
+    // hand-back's own respawn-pane. Neither guard errors — a skipped tick
+    // just leaves the studio borrowed for one more cycle, and the next tick
+    // tries again.
+    if (deps.autoFailover && rowNow.borrowedAccount && deps.primary && !verdict.repainted) {
       const ownPrimary = deps.accounts.find((a) => a.name === deps.primary);
       if (ownPrimary) {
         const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
-        if (accountIsFree(ownPrimary, limits, deps.now())) {
+        if (
+          accountIsFree(ownPrimary, limits, deps.now())
+          && !operationLockFresh(await storage.get(OPERATION_KEY), deps.now())
+        ) {
           return handBack(deps, storage, studioId, rowNow, ownPrimary, recordStudioFn);
         }
       }
