@@ -97,6 +97,21 @@ export const RATE_LIMIT_MODAL_MARKERS = [
 export const SESSION_LIMIT_HEADLINE = "You've hit your session limit";
 
 /**
+ * Issue #141 — "Your organization has disabled Claude subscription access for
+ * Claude Code · Use an Anthropic API key instead": NOT a rate limit (nothing
+ * about it ever resets — a human has to re-enable the account outside this
+ * fleet) and NOT a select-style modal (no numbered options, no Enter/Esc
+ * footer). One self-contained `⎿` line, then straight back to claude's own
+ * idle input box — same shape as the "out of usage credits" inline block, but
+ * with no separate hint row and no RESETS-parseable clause at all, which is
+ * why it is detected independently below (`deadAccountBlock`) rather than
+ * folded into INLINE_LIMIT_HEADLINES/inlineLimitBlock, whose `block()` closure
+ * requires one of those two grammars to accept a candidate.
+ */
+export const DEAD_ACCOUNT_HEADLINE = "Your organization has disabled Claude subscription access for Claude Code";
+const DEAD_ACCOUNT_LINE = /^\s*⎿\s+Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead\s*$/;
+
+/**
  * Issue #106: every inline limit headline, each with a pattern for the START
  * of its line as printed. Counted from rate_limit entries in real transcripts,
  * 2026-09-24: session 83, monthly spend 19 (its reset clause names the session
@@ -355,7 +370,9 @@ export type PaneVerdict =
   // `inline` (issue #99): an inline limit block — printed above claude's own
   // input box, no options. Every other modal is a numbered select whose
   // options include a spend path, and never carries it.
-  | { kind: "modal"; headline: string | null; marker: string; resets?: string; inline?: true }
+  // `dead` (issue #141): the org-disabled-subscription message — permanent,
+  // never a select modal, never a reset.
+  | { kind: "modal"; headline: string | null; marker: string; resets?: string; inline?: true; dead?: true }
   // `repainted`: the two captures differed. A static pane with no limit is
   // evidence the limit is gone; a repainting one is evidence of nothing.
   // `stale` (PR #144 review): the inline block at the bottom WOULD have matched
@@ -430,6 +447,20 @@ function inlineLimitBlock(lines: string[], now?: Date, sighting?: LimitSighting 
     return block(j, `/${hint[1]}`);
   }
   return null;
+}
+
+/**
+ * Issue #141 — the org-disabled-subscription message. Same bottom-anchoring
+ * discipline as an inline limit block (lastLineMatching + endsInIdleInputBox),
+ * but no reset/hint grammar at all: the line is complete on its own, so
+ * there is nothing to scan forward for the way inlineLimitBlock scans for a
+ * hint line or a hint-less RESETS match.
+ */
+function deadAccountBlock(lines: string[]): PaneVerdict | null {
+  const at = lastLineMatching(lines, DEAD_ACCOUNT_LINE);
+  if (at < 0) return null;
+  if (!endsInIdleInputBox(lines.slice(at + 1))) return null;
+  return { kind: "modal", headline: DEAD_ACCOUNT_HEADLINE, marker: "dead-account", inline: true, dead: true };
 }
 
 /**
@@ -724,7 +755,8 @@ export function detectRateLimitModal(stdout: string, now?: Date, sighting?: Limi
 export function detectLimitOnScreen(screen: string, now?: Date, sighting?: LimitSighting | null): PaneVerdict {
   const lines = screen.replace(/\s+$/, "").split("\n").slice(-MODAL_TAIL_LINES);
   const inline = inlineLimitBlock(lines, now, sighting);
-  return orgLimitModal(lines) ?? (inline?.kind === "modal" ? inline : null) ?? bottomLimitModal(lines) ?? inline
+  return orgLimitModal(lines) ?? deadAccountBlock(lines) ?? (inline?.kind === "modal" ? inline : null)
+    ?? bottomLimitModal(lines) ?? inline
     ?? { kind: "working", reason: "no limit block or limit modal at the bottom of the pane" };
 }
 
@@ -1056,7 +1088,9 @@ export interface FailoverDeps {
    */
   accountLimits?: {
     read(): Promise<AccountLimits>;
-    write(name: string, until: string | null, seenAt: string): Promise<void>;
+    /** `dead` (issue #141): true only for the org-disabled-subscription
+     *  observation — see rate-limit.ts's RateLimitObservation.dead. */
+    write(name: string, until: string | null, seenAt: string, dead?: true): Promise<void>;
   };
   /**
    * Issue #131 (Stage B) — fleet-wide per-account 5h-window burn, mirrored the
@@ -1332,15 +1366,23 @@ function firstSighting(block: string, printed: string | null, now: Date, as: "li
 
 /** The row's limit observation for a modal verdict. Returns `prior` itself
  *  when nothing changed, so the caller can tell "nothing new". An inline
- *  block's until and seenAt come from its FIRST sighting (#127). */
+ *  block's until and seenAt come from its FIRST sighting (#127). Issue #141:
+ *  `dead` is compared too, so a dead sighting is never discarded as
+ *  "unchanged" before the dead flag itself is captured on the very first
+ *  tick (a dead verdict's `until` is always null, same as a plain unreadable
+ *  inline block's, so `until`/`select` alone cannot tell the two apart). */
 function limitObservation(
   verdict: Extract<PaneVerdict, { kind: "modal" }>, now: Date, prior: RateLimitObservation | null,
   sighting: LimitSighting | null,
 ): RateLimitObservation {
   const select = !verdict.inline;
   const until = sighting ? sighting.until : verdict.resets ? parseResetUtc(verdict.resets, now) : null;
-  if (prior && prior.until === until && !!prior.select === select) return prior;
-  return { until, seenAt: sighting?.seenAt ?? now.toISOString(), ...(select ? { select: true as const } : {}) };
+  const dead = verdict.dead === true;
+  if (prior && prior.until === until && !!prior.select === select && !!prior.dead === dead) return prior;
+  return {
+    until, seenAt: sighting?.seenAt ?? now.toISOString(),
+    ...(select ? { select: true as const } : {}), ...(dead ? { dead: true as const } : {}),
+  };
 }
 
 /**
@@ -1877,7 +1919,7 @@ export async function runAccountFailover(
   // never-switched studio's `null` to the real first-account name; an empty
   // fleet (no accounts at all) has no name to mark.
   if (deps.accountLimits && from !== null && limitChanged) {
-    await deps.accountLimits.write(from, seen.until, seen.seenAt);
+    await deps.accountLimits.write(from, seen.until, seen.seenAt, seen.dead);
   }
   // Issue #271: a studio starts at its mapped primary, so accounts before it
   // were never its to try — computed once, reused below for both the

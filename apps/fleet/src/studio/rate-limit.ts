@@ -18,6 +18,9 @@ export interface RateLimitObservation {
   /** A numbered select modal (V1, V3, #53), not an inline block: it stays on
    *  screen until someone presses Esc, whatever the clock says. */
   select?: true;
+  /** Issue #141 — a dead account (org disabled subscription access): permanent,
+   *  no clock ends it. */
+  dead?: true;
 }
 
 /**
@@ -185,6 +188,10 @@ export interface AccountLimitState {
   until: string | null;
   /** When this sighting was recorded, ISO. */
   seenAt: string;
+  /** Issue #141 — set once an account is confirmed dead (org disabled
+   *  subscription access): no auto-expiry, unlike a null `until`'s
+   *  NULL_UNTIL_CEILING_MS grace. */
+  dead?: true;
 }
 
 export function encodeAccountLimitState(state: AccountLimitState): string {
@@ -206,11 +213,12 @@ export function decodeAccountLimitState(raw: string | null): AccountLimitState |
     typeof parsed !== "object" || parsed === null
     || !("seenAt" in parsed) || typeof (parsed as { seenAt: unknown }).seenAt !== "string"
     || !("until" in parsed) || !(typeof (parsed as { until: unknown }).until === "string" || (parsed as { until: unknown }).until === null)
+    || ("dead" in parsed && (parsed as { dead: unknown }).dead !== true)
   ) {
     return null;
   }
   const p = parsed as AccountLimitState;
-  return { until: p.until, seenAt: p.seenAt };
+  return { until: p.until, seenAt: p.seenAt, ...(p.dead ? { dead: true as const } : {}) };
 }
 
 /**
@@ -262,6 +270,8 @@ export function decodeAccountBurnState(raw: string | null): AccountBurnState | n
 
 /**
  * The row's words while the limit holds:
+ *   - "claude account dead — org disabled subscription access (ff <id>)" —
+ *     issue #141: permanent, no clock ever ends it;
  *   - "rate-limited until 13:30Z" — a readable reset still ahead;
  *   - "limit modal open — Esc to dismiss (ff <id>)" — a select modal, which
  *     no clock ends;
@@ -274,6 +284,7 @@ export function formatRateLimited(
   rl: RateLimitObservation | null | undefined, now: Date, studioId = "<id>",
 ): string | null {
   if (!rl) return null;
+  if (rl.dead) return `claude account dead — org disabled subscription access (ff ${studioId})`;
   if (rl.select) return `limit modal open — Esc to dismiss (ff ${studioId})`;
   const until = rl.until === null ? NaN : new Date(rl.until).getTime();
   if (Number.isNaN(until)) return "rate-limited (reset time not shown)";
