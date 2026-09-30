@@ -115,7 +115,7 @@ import {
 import { sendCard } from "../telegram/api";
 import { parseLearnings, parseEnvelopeComment } from "../board/envelope";
 import { assignedBriefResolver, openTaskChecker, githubBoardApi } from "../board/routes";
-import { listTasks, resolveLatestAssignedBrief } from "../board/board";
+import { listTasks, resolveLatestAssignedBrief, autoStartSubmittedTasks } from "../board/board";
 // Issue #249 (PR4b): "live" is the board's own state, not GitHub's open flag —
 // a terminal state leaves the issue open, and a finished task's branch is not
 // work a fresh lead needs re-briefed on. Same filter
@@ -585,10 +585,9 @@ export interface RescueResult {
  * retry (rescue.ts's `rescue_push`) already exhausted both attempts. Every
  * OTHER throw here (a killed exec, an unparseable exit, the exec call itself
  * throwing — e.g. the sandbox session shell dying outright) stays a plain
- * `Error`: those mean "we cannot tell", not "we confirmed a loss", and
- * destroy.ts's own best-effort posture for THOSE is unchanged from round 1 —
- * only a genuine, confirmed failure gets destroy.ts's new refusal gate
- * (`DestroyGuard.discardUnsynced`), because only this class carries proof.
+ * `Error`: those mean "we cannot tell", not "we confirmed a loss". Issue
+ * #62: destroy and recycle refuse on BOTH (only the 409's wording differs);
+ * this class is what lets them name the confirmed worktree(s).
  *
  * Issue #371 (#362 follow-up): one `step` value, `"budget"`, now optionally
  * carries a THIRD field — `detail` — the remaining-seconds count rescue.ts's
@@ -622,13 +621,10 @@ export class RescuePushFailedError extends Error {
  * push rejected, no remote reachable, the exec itself throwing) —
  * deliberately the SAME contract syncSessionTick (session-sync.ts) already
  * has, for the same reason: this function has no way to know whether ITS
- * failure is safe to ignore, only its caller does. Every call site wraps
- * this exactly like every existing call site already wraps syncSessionTick
- * — try/catch, log, proceed with the kill regardless (constraint from this
- * task's own brief: "a failed rescue must NOT block the kill... a container
- * that cannot be destroyed is worse than lost work, and the work is already
- * lost in that case" — by the time this throws, the commit/push never
- * landed, so there is nothing left here to protect by blocking).
+ * failure is safe to ignore, only its caller does. Issue #62: destroy and
+ * recycle refuse (409) on ANY throw here, confirmed or not, unless the
+ * caller passed --discard-unsynced — the original "never block the kill"
+ * posture lost unpushed work whenever the rescue could not tell.
  *
  * `studio` is the DO's own id (do.ts's `idFallback` at the call site),
  * threaded through ONLY to name a generated rescue ref (rescuePushCmd's own
@@ -640,9 +636,9 @@ export class RescuePushFailedError extends Error {
  * truncated tail that happens to look like a complete, well-formed
  * RESCUE_PUSHED line. And any `RESCUE_FAILED <wt> <step>` line (rescue.ts)
  * always throws, even beside real RESCUE_PUSHED lines from OTHER worktrees
- * in the same run — the thrown message names both, so the caller's log line
- * (destroy.ts/do.ts's own "pre-destroy rescue-push failed, continuing")
- * carries which ref(s) actually landed and which worktree(s) didn't.
+ * in the same run — the thrown message names both, so the caller's 409 (or,
+ * under --discard-unsynced, its log line and row note) carries which ref(s)
+ * actually landed and which worktree(s) didn't.
  */
 export async function rescuePush(deps: SessionSyncDeps, repo: string, studio: string): Promise<RescueResult> {
   // Issue #335: `undefined` for the skipped positional args triggers
@@ -681,13 +677,10 @@ export async function rescueSnapshot(deps: SessionSyncDeps, repo: string, studio
  * push rejected, no remote reachable, the exec itself throwing) —
  * deliberately the SAME contract syncSessionTick (session-sync.ts) already
  * has, for the same reason: this function has no way to know whether ITS
- * failure is safe to ignore, only its caller does. Every call site wraps
- * this exactly like every existing call site already wraps syncSessionTick
- * — try/catch, log, proceed with the kill regardless (constraint from this
- * task's own brief: "a failed rescue must NOT block the kill... a container
- * that cannot be destroyed is worse than lost work, and the work is already
- * lost in that case" — by the time this throws, the commit/push never
- * landed, so there is nothing left here to protect by blocking).
+ * failure is safe to ignore, only its caller does. Issue #62: destroy and
+ * recycle refuse (409) on ANY throw here, confirmed or not, unless the
+ * caller passed --discard-unsynced — the original "never block the kill"
+ * posture lost unpushed work whenever the rescue could not tell.
  *
  * PR #263 round 2, C1: two more ways this exec's output must NEVER read as
  * success. `isDeadlineExit` (exec-deadline.ts, #104/#110) is checked BEFORE
@@ -695,9 +688,9 @@ export async function rescueSnapshot(deps: SessionSyncDeps, repo: string, studio
  * truncated tail that happens to look like a complete, well-formed
  * RESCUE_PUSHED line. And any `RESCUE_FAILED <wt> <step>` line (rescue.ts)
  * always throws, even beside real RESCUE_PUSHED lines from OTHER worktrees
- * in the same run — the thrown message names both, so the caller's log line
- * (destroy.ts/do.ts's own "pre-destroy rescue-push failed, continuing")
- * carries which ref(s) actually landed and which worktree(s) didn't.
+ * in the same run — the thrown message names both, so the caller's 409 (or,
+ * under --discard-unsynced, its log line and row note) carries which ref(s)
+ * actually landed and which worktree(s) didn't.
  *
  * Issue #266: factored out of `rescuePush` so `rescueSnapshot` (above) can
  * share the identical parse — `rescuePushCmd` and `rescueSnapshotCmd` emit
@@ -3063,9 +3056,12 @@ export async function recordContainerStop(
  *  stop, the heal marker and the operation lock. Heal reasons can quote
  *  container output, so they are scrubbed here like `error` is. */
 export async function statusDetailWithStorage(
-  storage: StudioStorage & Pick<LastStopStorage, "get">, idFallback: string,
+  storage: StudioStorage & Pick<LastStopStorage, "get">, idFallback: string, destroyCallsInFlight = false,
 ): Promise<
-  StudioStatus & { lastStop: LastStop | null; healAttempt: HealAttempt | null; operationInFlight: OperationInFlight | null }
+  StudioStatus & {
+    lastStop: LastStop | null; healAttempt: HealAttempt | null; operationInFlight: OperationInFlight | null;
+    destroyInFlight: boolean;
+  }
 > {
   const heal = (await storage.get(HEAL_ATTEMPT_KEY)) ?? null;
   const op = (await storage.get(OPERATION_KEY)) ?? null;
@@ -3075,6 +3071,10 @@ export async function statusDetailWithStorage(
     healAttempt: heal && { ...heal, reason: redactSecrets(heal.reason) },
     // A lock past OPERATION_STALE_MS is not in flight — decideHeal ignores it too.
     operationInFlight: op && destroyingMarkerFresh(op.since, new Date()) ? op : null,
+    // Issue #86: a destroy call still running in this DO (its probe, sync and
+    // rescue come before DESTROYING_KEY is written), or the marker itself.
+    // `fleet reap` reads it to tell a raced destroy from a refusal.
+    destroyInFlight: destroyCallsInFlight || destroyingMarkerFresh(await storage.get(DESTROYING_KEY), new Date()),
   };
 }
 
@@ -3697,6 +3697,7 @@ async function applyActivityVerdict(
   recordStudioFn: ((status: StudioStatus) => Promise<void>) | undefined,
   paneVerdict: FrameVerdict,
   hookHeartbeat: HookHeartbeat | null | undefined,
+  onLeadWorking?: () => Promise<void>,
 ): Promise<void> {
   const activityStatus = await storage.get(STATUS_KEY);
   const activityOpFresh = operationLockFresh(await storage.get(OPERATION_KEY), deps.now());
@@ -3713,6 +3714,36 @@ async function applyActivityVerdict(
   if (prevActivity?.state !== nextAct.state && recordStudioFn) {
     const fresh = await storage.get(STATUS_KEY);
     if (fresh) await recordStudioFn(await withObserved(storage, fresh));
+  }
+  if (onLeadWorking && nextAct.state === "working" && prevActivity?.state !== "working") {
+    await autoWorking(deps, storage as unknown as AutoWorkingStorage, onLeadWorking);
+  }
+}
+
+/** Issue #86: DO key holding the last auto submitted->working attempt, ISO. */
+export const AUTO_WORKING_KEY = "autoWorkingAt";
+/** At most one board read per studio per this window: a lead enters
+ *  `working` on every turn, and each attempt is a GitHub listing. */
+export const AUTO_WORKING_EVERY_MS = 10 * 60_000;
+
+type AutoWorkingStorage = {
+  get(key: typeof AUTO_WORKING_KEY): Promise<string | undefined>;
+  put(key: typeof AUTO_WORKING_KEY, value: string): Promise<void>;
+};
+
+/** Issue #86: the lead just started a turn. Leads never flip their own task
+ *  to working, so the board read `submitted` while they worked. Rate-bound,
+ *  and never fails the tick: a board hiccup waits for the next window. */
+async function autoWorking(
+  deps: ShipDeps, storage: AutoWorkingStorage, onLeadWorking: () => Promise<void>,
+): Promise<void> {
+  const last = Date.parse((await storage.get(AUTO_WORKING_KEY)) ?? "");
+  if (Number.isFinite(last) && deps.now().getTime() - last < AUTO_WORKING_EVERY_MS) return;
+  await storage.put(AUTO_WORKING_KEY, deps.now().toISOString());
+  try {
+    await onLeadWorking();
+  } catch (err) {
+    console.error("auto submitted->working failed, next window retries", err);
   }
 }
 
@@ -3849,6 +3880,7 @@ export async function runShipTickWithObservation(
   recordStudioFn?: (status: StudioStatus) => Promise<void>,
   deadlineMs: number = SHIP_EXEC_DEADLINE_MS,
   archive?: { doneRecords: DoneRecordPorts; resolveOpsRepo: ResolveMemoryRepo },
+  onLeadWorking?: () => Promise<void>,
 ): Promise<ShipResult> {
   const observedBefore = await getObserved(storage);
   const adoptionToken = observedBefore.incarnation === null ? crypto.randomUUID() : undefined;
@@ -4094,7 +4126,7 @@ export async function runShipTickWithObservation(
   // the SAME write path a successful probe uses (this file's own
   // `applyActivityVerdict`, above `runShipTickWithObservation`).
   if (result.paneVerdict !== undefined) {
-    await applyActivityVerdict(deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat);
+    await applyActivityVerdict(deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat, onLeadWorking);
   }
 
   // Issue #311 (PR3 addendum) — member alerts, same "independent of every
@@ -4705,6 +4737,17 @@ export class StudioDO extends Sandbox<Env> {
    * same way for the exact same reason — a case mismatch here would silently
    * fail to match a task that IS assigned.
    */
+  /** Issue #86: the lead started a turn — its submitted tasks go to working.
+   *  Lowercased for the same reason as `assignedTaskOnBoard` below. */
+  private async autoStartSubmitted(): Promise<void> {
+    const repo = (await this.workRepoSlug(null)).toLowerCase();
+    const res = await autoStartSubmittedTasks(githubBoardApi(this.env), repo, this.selfId());
+    if (res.moved.length > 0) {
+      console.log(`studio ${this.selfId()}: lead working — task ${res.moved.map((n) => `#${n}`).join(", ")} submitted -> working`);
+    }
+    for (const e of res.errors) console.error(`studio ${this.selfId()}: auto submitted->working: ${e}`);
+  }
+
   private async assignedTaskOnBoard(workRepoSlug: string): Promise<{ taskNumber: number; title: string } | null> {
     const brief = await resolveLatestAssignedBrief(githubBoardApi(this.env), workRepoSlug.toLowerCase(), this.selfId());
     return brief === null ? null : { taskNumber: brief.taskNumber, title: brief.title };
@@ -5586,7 +5629,7 @@ export class StudioDO extends Sandbox<Env> {
    *  so /status agrees with `fleet ls`/`fleet check` rather than being the
    *  one caller `observed` forgot. */
   async getStatusDetail(): Promise<Awaited<ReturnType<typeof statusDetailWithStorage>> & { observed: Observed }> {
-    const detail = await statusDetailWithStorage(this.ctx.storage, this.selfId());
+    const detail = await statusDetailWithStorage(this.ctx.storage, this.selfId(), this.destroyInFlightCount > 0);
     // Issue #221: `observed.activity` rides this response too — see
     // `getObservedWithActivity`'s own doc comment.
     return { ...detail, observed: await getObservedWithActivity(this.ctx.storage) };
@@ -6234,6 +6277,7 @@ export class StudioDO extends Sandbox<Env> {
             (s) => recordStudio(this.env, s),
             undefined,
             { doneRecords: this.doneRecordPorts(), resolveOpsRepo: this.memoryDeps().resolveMemoryRepo },
+            () => this.autoStartSubmitted(),
           );
         } catch (err) {
           console.error("studio transcript ship failed", err);

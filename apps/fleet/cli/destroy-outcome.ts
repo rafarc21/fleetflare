@@ -101,7 +101,7 @@ export interface DestroyOpts {
 
 /** One bounded GET /studio/:id/status. Never throws: a read that did not
  *  happen is a named reason, not an exception. */
-async function readStatus(
+export async function readStatus(
   url: string, headers: Record<string, string>, fetchImpl: typeof fetch, timeoutMs: number,
 ): Promise<{ ok: true; status: StudioStatus } | { ok: false; why: string }> {
   let res: Response;

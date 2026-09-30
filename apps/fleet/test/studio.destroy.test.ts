@@ -9,7 +9,10 @@ import {
   rescuePushCmd, RESCUE_CLEAN, RESCUE_FAILED_PREFIX, harvestRecordCmd, HARVEST_NO_RECORD, doneRecordsListCmd,
   type CommitLearningFile, type ResolveMemoryRepo,
 } from "../src/studio/do";
-import { destroyWithSync, runDestroy, DESTROY_REFUSED_PREFIX, type DestroyGuard } from "../src/studio/destroy";
+import {
+  destroyWithSync, runDestroy, DESTROY_REFUSED_PREFIX, destroyRefusal, destroyRescueUnconfirmedRefusal, type DestroyGuard,
+} from "../src/studio/destroy";
+import { probeRefusal, rescueUnconfirmedRefusal } from "./fixtures/destroy-refusals";
 import { getObserved, type ObservedStorage } from "../src/studio/observed";
 import type { StudioStatus } from "../src/studio/types";
 
@@ -212,6 +215,9 @@ describe("destroyWithSync", () => {
         // Same price the probe refusal quotes: the last synced snapshot's age.
         expect(message).toContain("last synced snapshot (age unknown");
         expect(message).toContain(`fleet destroy ${STUDIO_ID} --discard-unsynced`);
+        // #62 follow-up: never offer --force here — it ALSO skips the
+        // open-board-task check. Same single override as every refusal.
+        expect(message).not.toContain("--force");
         expect(destroy).not.toHaveBeenCalled();
         expect(await readDestroyEpoch(storage)).toBe(0);
       } finally {
@@ -545,5 +551,16 @@ describe("destroy — unshipped aside named on the row (PR #46 review)", () => {
     } finally {
       errSpy.mockRestore();
     }
+  });
+});
+
+// #87 review: the bun-lane reap wiring test replays these 409 bodies.
+describe("destroy refusal fixtures match the Worker's own text", () => {
+  it("probe refusal", () => {
+    expect(probeRefusal(STUDIO_ID)).toBe(destroyRefusal(STUDIO_ID, null, new Date()));
+  });
+  it("rescue-unconfirmed refusal", () => {
+    expect(rescueUnconfirmedRefusal(STUDIO_ID, "exec killed")).toBe(
+      destroyRescueUnconfirmedRefusal(STUDIO_ID, "exec killed", null, new Date()));
   });
 });

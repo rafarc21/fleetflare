@@ -17,7 +17,7 @@ import { listStudios, expireBurnWindow, claimStudioRow, claimStoppedRow } from "
 import { renderTerminalPage } from "./page";
 import { renderGridPage, scrubPreview, type GridCard } from "./grid";
 import {
-  runSpawn, runResume, resolveSpawnParent, resolveSpawnPolicy, resolveMaxStudios, isSpawnTokenShaped,
+  runSpawn, runResume, resolveSpawnParent, resolveSpawnPolicy, resolveMaxStudios, liveStudioCount, isSpawnTokenShaped,
   SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type ResumeDeps, type SpawnParent,
 } from "./spawn";
 import { reachRepo, repoTokenMinter, type RepoReach } from "../github/auth";
@@ -657,9 +657,10 @@ export async function handleStudio(
     // lose the ability to heal a studio it already counts.
     const existingRows = await listStudios(env);
     const maxStudios = resolveMaxStudios(env.MAX_STUDIOS);
-    if (existingRows.length >= maxStudios && !existingRows.some((r) => r.id === id.full)) {
+    const live = liveStudioCount(existingRows);
+    if (live >= maxStudios && !existingRows.some((r) => r.id === id.full)) {
       return new Response(
-        `fleet is at capacity (${existingRows.length}/${maxStudios} studios) — cannot provision "${id.full}"`,
+        `fleet is at capacity (${live}/${maxStudios} live studios) — cannot provision "${id.full}"`,
         { status: 409 },
       );
     }

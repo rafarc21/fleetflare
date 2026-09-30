@@ -254,6 +254,26 @@ describe("POST /fleet/tasks/<n>/assign — a studio hands a task to a child", ()
     }
   });
 
+  // Merge with main (#81): the operator's assign refuses an id no studio
+  // carries (409); the studio assign follows it. Create does not: the
+  // maestro files a task, THEN spawns the studio for it.
+  it("409s an assign to an edged id with no registry row, and writes nothing", async () => {
+    const { token, rows } = await tokenFor(MAESTRO);
+    const api = fakeApi();
+    const wake = { ...wakeDeps(), studioState: async () => null };
+    const res = await handleFleetBoard(post("/fleet/tasks/71/assign", token, { assignee: CHILD }), testEnv, api, rows, policy, wake);
+    expect(res.status).toBe(409);
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("files a task for an edged id with no registry row yet — spawn follows", async () => {
+    const { token, rows } = await tokenFor(MAESTRO);
+    const api = fakeApi();
+    const wake = { ...wakeDeps(), studioState: async () => null };
+    const res = await handleFleetBoard(post("/fleet/tasks", token, { ...BRIEF, assignee: CHILD }), testEnv, api, rows, policy, wake);
+    expect(res.status).toBe(200);
+  });
+
   it("a failed, open task is assignable — the retry", async () => {
     const { token, rows } = await tokenFor(MAESTRO);
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "failed", labels: ["failed"] })) });

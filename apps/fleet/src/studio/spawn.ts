@@ -72,6 +72,12 @@ export function isSpawnTokenShaped(raw: string | null): raw is string {
 // and the test suite reference the SAME number rather than a re-typed copy.
 export const DEFAULT_MAX_STUDIOS = 100;
 
+/** Issue #81: what the cap counts. A `stopped` row (destroy keeps it) runs no
+ *  container; 62 of them held a fleet at 100/100 with 3 studios running. */
+export function liveStudioCount(rows: StudioStatus[]): number {
+  return rows.filter((r) => r.state !== "stopped").length;
+}
+
 /**
  * Parses `env.MAX_STUDIOS` into the fleet-wide studio cap. Defensive by
  * design, same posture as every other env-sourced numeric this codebase
@@ -402,7 +408,8 @@ export async function runResume(deps: ResumeDeps, parent: SpawnParent, body: unk
     return new Response(`role "${requested}" is not declared in fleet.json roles — not resuming it`, { status: 400 });
   }
 
-  const row = (await deps.listStudios()).find((r) => r.id === target.full);
+  const rows = await deps.listStudios();
+  const row = rows.find((r) => r.id === target.full);
   if (!row) return new Response(`no studio ${target.full} — resume never creates one; spawn it`, { status: 404 });
   if (row.state !== "stopped") {
     return new Response(`${target.full} is ${row.state}, not stopped — resume only starts a stopped studio`, { status: 409 });
@@ -428,6 +435,17 @@ export async function runResume(deps: ResumeDeps, parent: SpawnParent, body: unk
     return new Response(
       `${target.full} is in its resume cooldown — ` +
       (Number.isFinite(stoppedAt) ? `resumable from ${new Date(opensAt).toISOString()}` : "its stop time is unknown"),
+      { status: 409 },
+    );
+  }
+
+  // Merge with main (#81): the cap counts LIVE studios, so this stopped row
+  // is free and a resume makes it live. Only the operator's own provision
+  // may heal past the cap; a studio's resume may not.
+  const live = liveStudioCount(rows);
+  if (live >= deps.maxStudios) {
+    return new Response(
+      `fleet is at capacity (${live}/${deps.maxStudios} live studios) — cannot resume "${target.full}"`,
       { status: 409 },
     );
   }
@@ -565,9 +583,10 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
   // is strictly better than the old failure mode (max_instances refusing the
   // CONTAINER produced a degraded studio, not a clean rejection) — this
   // check is what makes that the normal case again, not just the rare one.
-  if (rows.length >= deps.maxStudios) {
+  const live = liveStudioCount(rows);
+  if (live >= deps.maxStudios) {
     return new Response(
-      `fleet is at capacity (${rows.length}/${deps.maxStudios} studios) — cannot spawn "${child.full}"`,
+      `fleet is at capacity (${live}/${deps.maxStudios} live studios) — cannot spawn "${child.full}"`,
       { status: 409 },
     );
   }

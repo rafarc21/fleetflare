@@ -65,8 +65,15 @@ export interface TaskStateDeps<C = unknown> {
  * return value follows.
  */
 export async function runTaskStateTransition<C>(
-  deps: TaskStateDeps<C>, creds: C, number: number, to: string,
+  deps: TaskStateDeps<C>, creds: C, number: number, to: string, opts: { fromNone?: boolean } = {},
 ): Promise<TaskStateResult> {
+  // Issue #82: a task with NO state label has no `from` to read. "none" asks
+  // the Worker's repair path, which refuses unless there really are zero.
+  if (opts.fromNone === true) {
+    const repaired = await deps.transition(creds, number, "none", to);
+    if (!repaired.ok) return repaired;
+    return { ok: true, from: "none", to: repaired.state };
+  }
   const current = await deps.getCurrentState(creds, number);
   if (!current.ok) return current;
   const result = await deps.transition(creds, number, current.state, to);

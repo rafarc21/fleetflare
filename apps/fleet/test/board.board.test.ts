@@ -3,7 +3,7 @@ import {
   createTask, transitionTask, commentEnvelope, listTasks, showTask, resolveBoardRepo,
   requireAssignedTask, showStudioTask, commentStudioEnvelope, resolveBriefPrompt, resolveLatestAssignedBrief,
   assignTask, transitionStudioTask, openAssignedTasks, findLiveAssignedTask,
-  closeTerminalTasks, TERMINAL_CLOSE_PAGE,
+  closeTerminalTasks, TERMINAL_CLOSE_PAGE, autoStartSubmittedTasks,
   type BoardApi,
 } from "../src/board/board";
 import { parseEnvelopeComment, renderEnvelopeComment, parseEnvelope } from "../src/board/envelope";
@@ -1391,3 +1391,142 @@ describe("createTask — continues (issue #54)", () => {
   });
 });
 
+// Issue #82: two 500s mid-transition left an issue with ZERO state labels.
+// The CAS then refused every repair, and destroy refused to free the studio.
+describe("transitionTask — a failed label add never strands zero labels (issue #82)", () => {
+  it("the add is retried once: a transient failure still lands the new state", async () => {
+    const addLabels = vi.fn().mockRejectedValueOnce(new Error("GitHub 500")).mockResolvedValueOnce(undefined);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), addLabels });
+    const res = await transitionTask(api, "o/r", 12, { from: "working", to: "input_required" });
+    expect(res.ok).toBe(true);
+    expect(addLabels).toHaveBeenCalledTimes(2);
+    expect(addLabels).toHaveBeenLastCalledWith("o/r", 12, ["input_required"]);
+  });
+
+  it("the add fails twice: the old label is put back, and the failure still surfaces", async () => {
+    const addLabels = vi.fn(async (_r: string, _n: number, labels: string[]) => {
+      if (labels[0] === "input_required") throw new Error("GitHub 500");
+    });
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), addLabels });
+    await expect(transitionTask(api, "o/r", 12, { from: "working", to: "input_required" })).rejects.toThrow("GitHub 500");
+    expect(addLabels).toHaveBeenLastCalledWith("o/r", 12, ["working"]);
+  });
+});
+
+// Issue #86 item 3: a GitHub 500 on the label REMOVE left the task open;
+// destroy then refused. The remove gets the same one retry the add has.
+describe("transitionTask — a failed label remove is retried once (issue #86)", () => {
+  it("a transient 500 on the remove: retried, the transition lands", async () => {
+    const removeLabel = vi.fn().mockRejectedValueOnce(new GitHubError(500, "GitHub 500")).mockResolvedValueOnce(undefined);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), removeLabel });
+    const res = await transitionTask(api, "o/r", 12, { from: "working", to: "completed" });
+    expect(res.ok).toBe(true);
+    expect(removeLabel).toHaveBeenCalledTimes(2);
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 12, ["completed"]);
+  });
+
+  it("the retry answers 404 (the first remove landed despite its 500): removed, the transition lands", async () => {
+    const removeLabel = vi.fn()
+      .mockRejectedValueOnce(new GitHubError(500, "GitHub 500"))
+      .mockRejectedValueOnce(new GitHubError(404, "Label does not exist"));
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), removeLabel });
+    const res = await transitionTask(api, "o/r", 12, { from: "working", to: "completed" });
+    expect(res.ok).toBe(true);
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 12, ["completed"]);
+  });
+
+  it("the remove fails twice: the failure surfaces, nothing is added", async () => {
+    const removeLabel = vi.fn(async () => { throw new GitHubError(500, "GitHub 500"); });
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), removeLabel });
+    await expect(transitionTask(api, "o/r", 12, { from: "working", to: "completed" })).rejects.toThrow("GitHub 500");
+    expect(removeLabel).toHaveBeenCalledTimes(2);
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("a first-try 404 is not swallowed: the label was never there", async () => {
+    const removeLabel = vi.fn(async () => { throw new GitHubError(404, "Label does not exist"); });
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), removeLabel });
+    await expect(transitionTask(api, "o/r", 12, { from: "working", to: "completed" })).rejects.toThrow("Label does not exist");
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+});
+
+describe("transitionTask — from \"none\" repairs a zero-label task (issue #82)", () => {
+  it("zero state labels: writes the target, logs the repair, removes nothing", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: null, labels: ["studio:demo--web-studio"] })) });
+    const res = await transitionTask(api, "o/r", 12, { from: "none", to: "working" });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.state).toBe("working");
+    expect(api.removeLabel).not.toHaveBeenCalled();
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 12, ["working"]);
+    expect(vi.mocked(api.createComment).mock.calls[0][2]).toContain("repaired");
+  });
+
+  it("a repair into a terminal state closes the issue too (#55)", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: null, labels: [] })) });
+    const res = await transitionTask(api, "o/r", 12, { from: "none", to: "completed" });
+    expect(res.ok).toBe(true);
+    expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12, "completed");
+  });
+
+  for (const labels of [["working"], ["working", "completed"]]) {
+    it(`refused (409) when the issue carries ${labels.length} state label(s) — repair is for zero only`, async () => {
+      const api = fakeApi({ getIssue: vi.fn(async () => task({ state: null, labels })) });
+      const res = await transitionTask(api, "o/r", 12, { from: "none", to: "working" });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.status).toBe(409);
+      expect(api.addLabels).not.toHaveBeenCalled();
+    });
+  }
+});
+
+// Issue #86 item 4: leads never flip their own task to working, so the
+// board read `submitted` while a lead visibly worked. The DO calls this on
+// the lead's first observed working turn.
+describe("autoStartSubmittedTasks (issue #86)", () => {
+  const STUDIO = "demo--web-studio";
+  const mine = (n: number, over: Partial<BoardTask> = {}) =>
+    task({ number: n, labels: ["submitted", studioLabel(STUDIO)], assignee: STUDIO, ...over });
+
+  it("asks GitHub for this studio's submitted tasks only, and moves each open one to working", async () => {
+    const issues = new Map([[12, mine(12)], [13, mine(13)]]);
+    const listIssues = vi.fn(async () => [...issues.values()]);
+    const getIssue = vi.fn(async (_r: string, n: number) => issues.get(n)!);
+    const api = fakeApi({ listIssues, getIssue });
+    const res = await autoStartSubmittedTasks(api, "o/r", STUDIO);
+    expect(listIssues).toHaveBeenCalledWith("o/r", { labels: ["submitted", studioLabel(STUDIO)] });
+    expect(res).toEqual({ moved: [12, 13], errors: [] });
+    expect(api.removeLabel).toHaveBeenCalledWith("o/r", 12, "submitted");
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 12, ["working"]);
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 13, ["working"]);
+  });
+
+  it("a closed submitted task is left alone", async () => {
+    const closed = mine(14, { open: false });
+    const api = fakeApi({ listIssues: vi.fn(async () => [closed]), getIssue: vi.fn(async () => closed) });
+    expect(await autoStartSubmittedTasks(api, "o/r", STUDIO)).toEqual({ moved: [], errors: [] });
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("a task moved since the listing (CAS refusal) is an error line, never a throw; the rest still move", async () => {
+    const moved = mine(12, { state: "working", labels: ["working", studioLabel(STUDIO)] });
+    const issues = new Map([[12, moved], [13, mine(13)]]);
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [mine(12), mine(13)]),
+      getIssue: vi.fn(async (_r: string, n: number) => issues.get(n)!),
+    });
+    const res = await autoStartSubmittedTasks(api, "o/r", STUDIO);
+    expect(res.moved).toEqual([13]);
+    expect(res.errors).toHaveLength(1);
+    expect(res.errors[0]).toContain("#12");
+  });
+
+  it("a GitHub failure is an error line, never a throw", async () => {
+    const api = fakeApi({ listIssues: vi.fn(async () => { throw new GitHubError(502, "down"); }) });
+    const res = await autoStartSubmittedTasks(api, "o/r", STUDIO);
+    expect(res.moved).toEqual([]);
+    expect(res.errors[0]).toContain("down");
+  });
+});

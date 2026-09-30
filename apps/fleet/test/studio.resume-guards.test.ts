@@ -89,6 +89,20 @@ describe("runResume — parked, not destroyed", () => {
     expect(provisioned).toEqual([]);
   });
 
+  // Merge with main (#81): the cap counts LIVE studios, so a stopped row is
+  // free — and a resume makes it live again. A studio's resume respects the
+  // cap; only the operator's own provision may heal past it.
+  it("409s at capacity: a resume would add a live studio past the cap", async () => {
+    const provisioned: string[] = [];
+    const live = Array.from({ length: 3 }, (_, i) => row({ id: `websites--filler-${i}`, state: "running" }));
+    const d = deps([row(), ...live], provisioned);
+    d.maxStudios = 3;
+    const res = await runResume(d, MAESTRO, RESUME);
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain("capacity");
+    expect(provisioned).toEqual([]);
+  });
+
   it("400s a role fleet.json no longer declares, even with an edge", async () => {
     const provisioned: string[] = [];
     const res = await runResume(deps([row()], provisioned, ["maestro"]), MAESTRO, RESUME);

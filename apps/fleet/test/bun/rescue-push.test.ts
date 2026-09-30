@@ -2605,3 +2605,99 @@ describe("#58 — on-origin check: budgeted, fail-safe, push URL aware; every pu
     expect(sh(`git -C ${elsewhere} for-each-ref --format='%(refname)'`).out).toContain("refs/heads/task/pr");
   });
 });
+
+/**
+ * Issue #80: destroy 409 `failed [checkout (push)]` with NO stderr on
+ * finished studios whose work was already on origin, after #52/#65.
+ * (a) #52 matched exact tips only: once origin's branch moved PAST the
+ *     checkout's HEAD (another push to the PR branch), HEAD was "ahead",
+ *     rescue pushed to that real branch, and a repo pre-push hook failed it.
+ *     HEAD reachable from origin's same-named branch tip = already saved.
+ * (b) a push killed by its timeout prints nothing, so the 409 carried no
+ *     reason at all. Every push failure now names one.
+ */
+describe("#80 — HEAD already reachable from origin is nothing to rescue; a push failure always names a reason", () => {
+  function prBranchThenOriginMovesAhead(): void {
+    sh(`cd ${checkout} && git checkout -q -b task/pr && git commit -q --allow-empty -m "pr work" && ` +
+      `git push -q origin HEAD:refs/heads/task/pr && git update-ref -d refs/remotes/origin/task/pr; ` +
+      `git branch --unset-upstream 2>/dev/null; true`);
+    sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 2>/dev/null; rm -rf .claude; true`);
+    // Someone else (a reviewer, the maestro, GitHub's "update branch") moves
+    // the PR branch on origin past this checkout's HEAD.
+    const other = join(dir, "other-clone-80");
+    sh(`git clone -q ${origin} ${other} 2>/dev/null && git -C ${other} fetch -q origin task/pr && ` +
+      `git -C ${other} checkout -q -b task/pr FETCH_HEAD && git -C ${other} commit -q --allow-empty -m "review fixup" && ` +
+      `git -C ${other} push -q origin HEAD:refs/heads/task/pr`);
+  }
+  function upstreamHook(): void {
+    const hooksDir = mkdtempSync(join(tmpdir(), "fleet-upstream-hook-80-"));
+    writeFileSync(join(hooksDir, "pre-push"), "#!/bin/sh\ngit rev-parse --abbrev-ref '@{u}' >/dev/null || exit 1\n");
+    chmodSync(join(hooksDir, "pre-push"), 0o755);
+    sh(`git -C ${checkout} config core.hooksPath ${hooksDir}`);
+  }
+
+  for (const [label, cmdFn] of RESCUE_CMDS) {
+    test(`${label}: clean HEAD is an ANCESTOR of origin's moved branch tip (+ upstream hook) → RESCUE_CLEAN, no push`, () => {
+      prBranchThenOriginMovesAhead();
+      upstreamHook();
+      const before = sh(`git -C ${origin} for-each-ref --format='%(refname) %(objectname)'`).out;
+
+      const r = sh(cmdFn(REPO, STUDIO, root));
+
+      expect(r.out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(bare(r.out)).toBe(RESCUE_CLEAN);
+      expect(sh(`git -C ${origin} for-each-ref --format='%(refname) %(objectname)'`).out).toBe(before);
+    });
+  }
+
+  test("a genuinely unpushed commit on top of that branch still pushes (never a false clean)", () => {
+    prBranchThenOriginMovesAhead();
+    sh(`cd ${checkout} && git commit -q --allow-empty -m "really unpushed"`);
+    const r = sh(rescuePushCmd(REPO, STUDIO, root));
+    expect(bare(r.out)).not.toBe(RESCUE_CLEAN);
+    expect(r.out).toContain(RESCUE_PUSHED_PREFIX);
+  });
+
+  /** Production shape (#49): a `--depth 1` single-branch clone of main. The
+   *  lead branches task/pr, commits A, pushes it (no tracking ref: the clone
+   *  maps main only). Then origin's task/pr moves to B, A's child. */
+  function shallowAtOldTip(): { sroot: string; scheckout: string } {
+    const sroot = join(dir, "workspace-shallow-80");
+    const scheckout = join(sroot, REPO);
+    mkdirSync(sroot, { recursive: true });
+    sh(`git clone -q --depth 1 file://${origin} ${scheckout}`);
+    sh(`cd ${scheckout} && git checkout -q -b task/pr && git commit -q --allow-empty -m A && git push -q origin HEAD:refs/heads/task/pr`);
+    sh(`cd ${checkout} && git fetch -q origin task/pr && git checkout -q -b task/pr FETCH_HEAD && ` +
+      `git commit -q --allow-empty -m B && git push -q origin HEAD:refs/heads/task/pr`);
+    return { sroot, scheckout };
+  }
+
+  test("depth-1 clone, HEAD an ancestor of origin's moved tip → RESCUE_CLEAN; the check fetch moves no remote-tracking ref", () => {
+    const { sroot, scheckout } = shallowAtOldTip();
+    // A wide fetch refspec, as a full clone has: a fetch naming task/pr would
+    // opportunistically write refs/remotes/origin/task/pr unless --refmap= .
+    sh(`git -C ${scheckout} config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'`);
+    const r = sh(rescuePushCmd(REPO, STUDIO, sroot));
+    expect(bare(r.out)).toBe(RESCUE_CLEAN);
+    expect(sh(`git -C ${scheckout} for-each-ref refs/remotes/origin/task/pr refs/fleet-rescue-check/`).out).toBe("");
+  });
+
+  test("depth-1 clone: the tip fetch FAILS while ls-remote works → push runs, never RESCUE_CLEAN", () => {
+    const { sroot, scheckout } = shallowAtOldTip();
+    // A held lock on the scratch ref: ls-remote answers, the fetch cannot write.
+    sh(`mkdir -p ${scheckout}/.git/refs/fleet-rescue-check && touch ${scheckout}/.git/refs/fleet-rescue-check/tip.lock`);
+    const r = sh(rescuePushCmd(REPO, STUDIO, sroot));
+    expect(bare(r.out)).not.toBe(RESCUE_CLEAN);
+    expect(r.out).toMatch(new RegExp(`^(${RESCUE_PUSHED_PREFIX}|${RESCUE_FAILED_PREFIX}) `, "m"));
+  });
+
+  for (const [label, cmdFn] of RESCUE_CMDS) {
+    test(`${label}: a push KILLED by its timeout still names a reason on stderr`, () => {
+      installSlowPostReceiveHook(3);
+      writeFileSync(join(checkout, "notes.md"), "work behind a slow remote hook\n");
+      const r = sh(cmdFn(REPO, STUDIO, root, 1));
+      expect(r.out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
+      expect(r.err).toMatch(/killed after 1s/);
+    });
+  }
+});

@@ -12,15 +12,15 @@ describe("parseCliArgs", () => {
   // operator reaches for when something looks wrong, and fanning an exec out
   // to every studio there is how it becomes the slowest.
   it("ls takes no argument and is NOT fresh by default", () => {
-    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false });
+    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false });
   });
 
   it("ls --fresh asks for a live check per studio", () => {
-    expect(parseCliArgs(["ls", "--fresh"])).toEqual({ cmd: "ls", fresh: true });
+    expect(parseCliArgs(["ls", "--fresh"])).toEqual({ cmd: "ls", fresh: true, json: false });
   });
 
   it("ls ignores a stray extra token (only the first two argv slots are read)", () => {
-    expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false });
+    expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false, json: false });
   });
 
   // Issue #37's second half: there was no way to ask for the truth NOW. The
@@ -437,6 +437,13 @@ describe("fleet task state — board task #131", () => {
 // `--force` handling takes (top-level switch), adapted here inside
 // parseTask's own "reap" branch. Bare and `--dry-run` are the SAME
 // non-executing posture; `--apply` is the only flag that closes anything.
+describe("fleet task ls --repo — issue #63", () => {
+  it("--repo rides the query", () => {
+    expect(parseCliArgs(["task", "ls", "--studio", "acmeclient--web-studio", "--repo", "example-org/acmeclient"]))
+      .toEqual({ cmd: "task-ls", query: { assignedTo: "acmeclient--web-studio", repo: "example-org/acmeclient" } });
+  });
+});
+
 describe("fleet task new --continues — issue #54", () => {
   const base = ["task", "new", "--title", "T", "--objective", "O", "--output", "F", "--boundaries", "B"];
   it("--continues N rides the brief as a number", () => {
@@ -447,6 +454,25 @@ describe("fleet task new --continues — issue #54", () => {
   it("a non-number is usage", () => {
     expect(parseCliArgs([...base, "--continues", "seven"])).toMatchObject({ cmd: "usage" });
     expect(parseCliArgs([...base, "--continues", "0"])).toMatchObject({ cmd: "usage" });
+  });
+});
+
+describe("fleet ls --json — issue #70", () => {
+  it("--json sets json; combines with --fresh", () => {
+    expect(parseCliArgs(["ls", "--json"])).toEqual({ cmd: "ls", fresh: false, json: true });
+    expect(parseCliArgs(["ls", "--fresh", "--json"])).toEqual({ cmd: "ls", fresh: true, json: true });
+    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false });
+  });
+});
+
+describe("fleet task state --from-none — issue #82", () => {
+  it("--from-none after the positionals sets fromNone", () => {
+    expect(parseCliArgs(["task", "state", "12", "completed", "--from-none"]))
+      .toEqual({ cmd: "task-state", number: 12, to: "completed", fromNone: true });
+  });
+  it("without it the shape is unchanged; anything else extra is usage", () => {
+    expect(parseCliArgs(["task", "state", "12", "completed"])).toEqual({ cmd: "task-state", number: 12, to: "completed" });
+    expect(parseCliArgs(["task", "state", "12", "completed", "--force"])).toMatchObject({ cmd: "usage" });
   });
 });
 

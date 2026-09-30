@@ -263,10 +263,12 @@ export async function transitionTask(
 ): Promise<BoardResult<BoardTask>> {
   const body = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
   const vocabulary = TASK_STATES.join("|");
-  if (!isTaskState(body.from)) {
+  // Issue #82: "none" = repair a task left with ZERO state labels.
+  if (!isTaskState(body.from) && body.from !== "none") {
     return {
       ok: false, status: 400,
-      message: `transition needs "from" — the state the caller believes this task is in — one of ${vocabulary}`,
+      message: `transition needs "from" — the state the caller believes this task is in — one of ${vocabulary}, ` +
+        `or "none" to repair a task carrying no state label`,
     };
   }
   if (!isTaskState(body.to)) {
@@ -277,6 +279,7 @@ export async function transitionTask(
 
   const task = await api.getIssue(repo, number);
   const observed = taskStates(task.labels);
+  if (from === "none") return repairStateless(api, repo, number, task, observed, to);
   if (observed.length === 0) {
     return {
       ok: false, status: 409,
@@ -317,14 +320,120 @@ export async function transitionTask(
   // rather than two. Both are drift and both are refused by the checks above
   // — but "no state" reads unambiguously as an interrupted write, while two
   // labels reads as two writers, which is the more expensive diagnosis.
-  await api.removeLabel(repo, number, from);
-  await api.addLabels(repo, number, [to]);
+  await removeStateWithRetry(api, repo, number, from);
+  await addStateAfterRemove(api, repo, number, from, to);
 
   // Returned from what was just written rather than re-read: these two calls
   // succeeded, so the label set is known, and a third round trip would only
   // add a window for someone else's write to be reported as ours.
   const labels = [...task.labels.filter((l) => l !== from), to];
   return closeIfTerminal(api, repo, { ...task, state: to, labels });
+}
+
+/**
+ * Issue #86: a GitHub 500 on the remove left the task in its old state and
+ * the destroy that waited on it refused. Retried once, like the add. A 404
+ * on the retry means the first remove landed despite its 500: removed. A
+ * first-try 404 is another writer (the CAS just read the label) and surfaces.
+ */
+async function removeStateWithRetry(api: BoardApi, repo: string, number: number, from: TaskState): Promise<void> {
+  try {
+    await api.removeLabel(repo, number, from);
+    return;
+  } catch (err) {
+    if (err instanceof GitHubError && err.status === 404) throw err;
+  }
+  try {
+    await api.removeLabel(repo, number, from);
+  } catch (err) {
+    if (err instanceof GitHubError && err.status === 404) return;
+    throw err;
+  }
+}
+
+/**
+ * Issue #82: the add after a remove failed twice (GitHub 500s) and left the
+ * issue with ZERO state labels, which every CAS then refuses. Retried once;
+ * if it still fails, the old label goes back (best effort) and the original
+ * failure propagates -- the task reads as it did before the attempt.
+ */
+async function addStateAfterRemove(api: BoardApi, repo: string, number: number, from: TaskState, to: TaskState): Promise<void> {
+  try {
+    await api.addLabels(repo, number, [to]);
+    return;
+  } catch {
+    // one retry below
+  }
+  try {
+    await api.addLabels(repo, number, [to]);
+  } catch (err) {
+    try {
+      await api.addLabels(repo, number, [from]);
+    } catch (restoreErr) {
+      console.error(`board: task #${number} in ${repo} left with no state label; restoring "${from}" failed too`, restoreErr);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Issue #82: `from: "none"` -- the repair for a task carrying ZERO state
+ * labels (an interrupted transition). Refused unless there really are zero:
+ * one label is an ordinary CAS, two are two writers. The repair is logged on
+ * the issue. Same closed-issue rule and terminal close as any transition.
+ */
+async function repairStateless(
+  api: BoardApi, repo: string, number: number, task: BoardTask, observed: TaskState[], to: TaskState,
+): Promise<BoardResult<BoardTask>> {
+  if (observed.length > 0) {
+    return {
+      ok: false, status: 409,
+      message: `task #${number} carries ${observed.length} state label(s) (${observed.join(", ")}) — ` +
+        `from "none" repairs only a task with no state label`,
+    };
+  }
+  if (!task.open && LIVE_TASK_STATES.includes(to)) {
+    return {
+      ok: false, status: 409,
+      message: `task #${number} is closed on GitHub; the Worker does not reopen issues, so it will not label it "${to}" — ` +
+        "reopen the issue first, or file a new task",
+    };
+  }
+  await api.addLabels(repo, number, [to]);
+  await api.createComment(repo, number, `board: state repaired: no state label -> ${to}`);
+  return closeIfTerminal(api, repo, { ...task, state: to, labels: [...task.labels, to] });
+}
+
+/**
+ * Issue #86: leads never flipped their own task to `working` (the brief asks
+ * them to), so the board read `submitted` while a lead visibly worked. The
+ * studio DO calls this on the lead's first observed working turn: every open
+ * task assigned to `studioId` still at `submitted` moves to `working`, each
+ * through `transitionTask`'s own CAS. Never throws: a failure is a line.
+ */
+export async function autoStartSubmittedTasks(
+  api: BoardApi, repo: string, studioId: string,
+): Promise<{ moved: number[]; errors: string[] }> {
+  const moved: number[] = [];
+  const errors: string[] = [];
+  let tasks: BoardTask[];
+  try {
+    const listed = await listTasks(api, repo, { state: "submitted", assignedTo: studioId });
+    if (!listed.ok) return { moved, errors: [listed.message] };
+    tasks = listed.value.filter((t) => t.open);
+  } catch (err) {
+    return { moved, errors: [err instanceof Error ? err.message : String(err)] };
+  }
+  for (const t of tasks) {
+    try {
+      const res = await transitionTask(api, repo, t.number, { from: "submitted", to: "working" });
+      if (res.ok) moved.push(t.number);
+      else errors.push(`#${t.number}: ${res.message}`);
+    } catch (err) {
+      errors.push(`#${t.number}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return { moved, errors };
 }
 
 /** Issue #55: closes per `reap --terminal` call. Each is one GitHub write;

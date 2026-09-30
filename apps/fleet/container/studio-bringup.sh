@@ -105,7 +105,8 @@ bringup_redact() {
     -e 's/tskey-auth-[A-Za-z0-9-]+/«redacted»/g' \
     -e 's/sk-ant-[A-Za-z0-9_-]+/«redacted»/g' \
     -e 's/fsp_[0-9a-f]+/«redacted»/g' \
-    -e 's/[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]+/Bearer «redacted»/g'
+    -e 's/[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]+/Bearer «redacted»/g' \
+    -e 's|([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]:[[:space:]]*[Bb][Aa][Ss][Ii][Cc])[[:space:]]+[A-Za-z0-9+/=]+|\1 «redacted»|g'
 }
 
 # One log line: timestamp, run id, message. Redacted on the way in, so the

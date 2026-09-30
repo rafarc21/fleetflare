@@ -51,6 +51,7 @@ import {
   type SpawnParent, type SpawnPolicy,
 } from "../studio/spawn";
 import { parseStudioId } from "../studio/ids";
+import { repoIdSegment } from "../studio/repo";
 import type { StudioStatus } from "../studio/types";
 import { JUNIOR_LABEL, TERMINAL_TASK_STATES, taskAssignees, type BoardTask } from "./types";
 import { guardBoardApi, leakGuard, LeakGateError, type LeakGuardDeps } from "./leak";
@@ -602,11 +603,26 @@ async function revokeJuniorAuthorizationIfTerminal(
  * repo check, not a re-implementation of that grammar check.
  */
 async function assignRepoPreflight(
-  deps: AssignWakeDeps, repo: string, rawAssignee: unknown,
+  deps: AssignWakeDeps, repo: string, rawAssignee: unknown, requireRow = false,
 ): Promise<Response | null> {
   if (typeof rawAssignee !== "string") return null;
   const studioId = rawAssignee.trim();
   if (!parseStudioId(studioId)) return null;
+  // Issue #81: a task on an id no studio carries sits unworked, silently.
+  // Confirmed absent only: a registry read that throws lets it through.
+  if (requireRow) {
+    let row: unknown = undefined;
+    try {
+      row = await deps.studioState(studioId);
+    } catch { /* unknown: allow */ }
+    if (row === null) {
+      return new Response(
+        `${studioId} is not in the fleet registry -- no studio would ever work this task. ` +
+          `Spawn it first (ff <role> "<task>" files and spawns together), or name a studio fleet ls shows.`,
+        { status: 409 },
+      );
+    }
+  }
   const check = await checkAssignRepo(deps, studioId, repo);
   if (!check.ok) return new Response(check.reason, { status: 409 });
   // Issue #295 bug 2: a canonical-lookup failure lets the write through
@@ -615,6 +631,39 @@ async function assignRepoPreflight(
   // other non-fatal Worker-side notices (see `withAssignWake`, below).
   if (check.warning) console.warn(`board: ${check.warning}`);
   return null;
+}
+
+/**
+ * Issue #63: the board `fleet task ls --studio <id>` reads. The CLI sends the
+ * cwd's git remote, or nothing outside a checkout -- and nothing used to mean
+ * the fleet default repo, silently the wrong board for a studio on another
+ * repo. The studio's registry row decides: no repo sent = its repo; a repo
+ * sent that is not its repo = refused. With no row to ask, the id's own repo
+ * segment must match the board's, else refused -- never a guessed board.
+ */
+async function lsRepoForStudio(
+  deps: AssignWakeDeps, studioId: string, requested: string | undefined, defaultSlug: string,
+): Promise<{ ok: true; repo: string | undefined } | { ok: false; reason: string }> {
+  let row: { state: string; repoSlug: string | null } | null = null;
+  try {
+    row = await deps.studioState(studioId);
+  } catch { /* no row to ask: the id check below decides */ }
+  if (requested === undefined && row?.repoSlug) return { ok: true, repo: row.repoSlug };
+  const target = requested ?? defaultSlug;
+  if (row?.repoSlug) {
+    const check = await checkAssignRepo(deps, studioId, target);
+    return check.ok ? { ok: true, repo: requested } : { ok: false, reason: check.reason };
+  }
+  const idSegment = parseStudioId(studioId)?.repo;
+  const boardSegment = repoIdSegment(target.split("/").pop() ?? "");
+  if (idSegment !== undefined && idSegment !== boardSegment) {
+    return {
+      ok: false,
+      reason: `${studioId} is not a studio of ${target} (its id names repo "${idSegment}") and the fleet has no ` +
+        "registry row to say which repo it is -- run from that repo's checkout, or pass --repo owner/name",
+    };
+  }
+  return { ok: true, repo: requested };
 }
 
 export async function handleBoard(
@@ -668,7 +717,14 @@ export async function handleBoard(
   // cwd's git remote and sends — as a query param on reads, in the body on
   // writes. Absent means the fleet's own repo, and resolveBoardRepo owns
   // every decision about it, including whether the fleet can reach it.
-  const requested = method === "POST" ? body.repo : url.searchParams.get("repo") ?? undefined;
+  let requested = method === "POST" ? body.repo : url.searchParams.get("repo") ?? undefined;
+  // Issue #63: a listing filtered to one studio reads THAT studio's board.
+  const lsStudio = method === "GET" && number === null ? url.searchParams.get("assignedTo") : null;
+  if (lsStudio !== null && parseStudioId(lsStudio)) {
+    const own = await lsRepoForStudio(assignWake, lsStudio, requested as string | undefined, env.AGENT_REPO);
+    if (!own.ok) return new Response(own.reason, { status: 409 });
+    requested = own.repo;
+  }
   const repo = await resolveBoardRepo({ reachRepo: reach }, {
     requested, defaultSlug: env.AGENT_REPO,
   });
@@ -686,7 +742,8 @@ export async function handleBoard(
         // `return await`, not `return`: inside this try, an un-awaited
         // promise's rejection skips the catch below and escapes as a Worker
         // exception (edge 500) instead of upstreamFailure's 502 (PR #142).
-        const createPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee);
+        // Issue #81: ff files BEFORE it spawns (cli/ff.ts fileTask), marked pendingSpawn.
+        const createPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee, body.pendingSpawn !== true);
         if (createPreflight) return createPreflight;
         return await withAssignWake(assignWake, repo.value, async (onAssigned) => {
           const result = await createTask(api, repo.value, body, onAssigned);
@@ -728,7 +785,8 @@ export async function handleBoard(
       const mode = action === "adopt" ? "adopt" as const : "reassign" as const;
       // Issue #284 round 2: same pre-write repo-mismatch gate as the create
       // path above — see `assignRepoPreflight`'s own doc comment.
-      const assignPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee);
+      // Issue #81: reassign needs a real studio; adopt is ff's, which spawns next.
+      const assignPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee, action === "assign");
       if (assignPreflight) return assignPreflight;
       return await withAssignWake(assignWake, repo.value, (onAssigned) =>
         assignTask(api, repo.value, number, body, { mode, onAssigned }));
@@ -971,7 +1029,8 @@ export async function handleFleetBoard(
       const holders = taskAssignees(current.labels).filter((o) => o !== studio.id && o !== to);
       const taken = await directGate(policy, studio, holders);
       if (taken) return taken;
-      const preflight = await assignRepoPreflight(assignWake, repo.value, to);
+      // Merge with main (#81): same ghost-studio refusal the operator assign has.
+      const preflight = await assignRepoPreflight(assignWake, repo.value, to, true);
       if (preflight) return preflight;
       return await withAssignWake(assignWake, repo.value, (onAssigned) =>
         assignTask(api, repo.value, number, body, { mode: "reassign", onAssigned }));

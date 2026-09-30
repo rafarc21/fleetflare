@@ -32,7 +32,8 @@ export type CliCommand =
   // ruling is explicit ("Do NOT make `fleet ls` always check live — it fans
   // out an exec per studio"), because this is the first command an operator
   // runs when something looks wrong and it must stay instant.
-  | { cmd: "ls"; fresh: boolean }
+  // Issue #70 ask 4: `json` = one machine-readable lead state per studio.
+  | { cmd: "ls"; fresh: boolean; json: boolean }
   // Board task #125: a pure, read-only preflight for a repo the fleet has
   // never talked to before — run from inside ANY git repo, not necessarily
   // this one. Zero-argument, same grammar as `ls`.
@@ -121,7 +122,8 @@ export type CliCommand =
   // three operations on it; flags rather than positionals, because a brief is
   // four fields and no positional order survives that.
   | { cmd: "task-new"; brief: TaskBriefArgs }
-  | { cmd: "task-ls"; query: { milestone?: string; state?: string; assignedTo?: string } }
+  // Issue #63: `repo` = `--repo`, overriding the cwd's git remote.
+  | { cmd: "task-ls"; query: { milestone?: string; state?: string; assignedTo?: string; repo?: string } }
   | { cmd: "task-show"; number: number }
   // Board task #119: mechanically re-checks the newest §6 result envelope's
   // own `verification` block — a followability check, never a gate. Same
@@ -150,7 +152,8 @@ export type CliCommand =
   // (src/studio/task-state.ts's runTaskStateTransition), because a caller
   // typing what it BELIEVES the state to be is exactly the stale value the
   // route's own compare-and-swap exists to catch.
-  | { cmd: "task-state"; number: number; to: TaskState }
+  // Issue #82: `fromNone` = `--from-none`, repair a task with no state label.
+  | { cmd: "task-state"; number: number; to: TaskState; fromNone?: true }
   // Board issue #8: deterministic backfill for a task whose PR merged/
   // promoted to the default branch but was never auto-closed — the ONLY
   // coverage for a repo whose owner resolves to the token auth path, where
@@ -240,8 +243,8 @@ export interface VerbHelp {
 
 export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHelp> = {
   ls: {
-    args: "[--fresh]",
-    summary: "Every studio: id, repo, state, READY (provisioned/bare/\"?\" unknown, do.ts's periodic container check — the registry's own state/error can be stale, trust READY; READY may also read replaced/unreachable/unverified, issue #85, when the ship tick's own evidence contradicts the last container-side check), SESSION (resumed/fresh/LOST/\"?\", whether the live lead actually continued its history or started over, plus how old the last shipped snapshot is), CHECKED (how old that verdict is — up to 300s by default), tailnet host, burn, last activity (git commits — a quiet LAST ACTIVITY column means no recent commits, not that the studio is unhealthy; check READY/SESSION for that), error. Read-only. --fresh re-checks every studio live first (one container exec each, slower) instead of reading the last recorded verdict.",
+    args: "[--fresh] [--json]",
+    summary: "Every studio: id, repo, state, READY (provisioned/bare/\"?\" unknown, do.ts's periodic container check — the registry's own state/error can be stale, trust READY; READY may also read replaced/unreachable/unverified, issue #85, when the ship tick's own evidence contradicts the last container-side check), SESSION (resumed/fresh/LOST/\"?\", whether the live lead actually continued its history or started over, plus how old the last shipped snapshot is), CHECKED (how old that verdict is — up to 300s by default), tailnet host, burn, last activity (git commits — a quiet LAST ACTIVITY column means no recent commits, not that the studio is unhealthy; check READY/SESSION for that), error. Read-only. --fresh re-checks every studio live first (one container exec each, slower) instead of reading the last recorded verdict. --json prints only a JSON array: per studio id, state, repo, lead (working/idle/waiting-members/waiting-question/limit/modal/unknown/stopped), leadSince, limitResetsAt and the ACTIVITY text (issue #70).",
   },
   onboard: {
     args: "",
@@ -292,8 +295,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given.",
   },
   "task-ls": {
-    args: "ls [--sprint S] [--state submitted|working|input_required|completed|failed|canceled] [--studio ID]",
-    summary: "List board tasks for the repo you are standing in.",
+    args: "ls [--sprint S] [--state submitted|working|input_required|completed|failed|canceled] [--studio ID] [--repo owner/name]",
+    summary: "List board tasks for the repo you are standing in, or --repo. With --studio and no git remote, the studio's own repo is read; a repo that is not that studio's is refused, never guessed (issue #63).",
   },
   "task-show": {
     args: "show <n>",
@@ -316,8 +319,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Move task <n> to another studio: old studio label off, new one on, state back to submitted, lineage commented (from, to, when, why). Earlier comments stay — they are what the previous studio did. A bare role means that role's FIRST instance in the repo you are standing in; issue #269 also accepts `pilot--2` (that role's instance 2, same repo) and a full studio id (`websites--pilot`, `websites--pilot--2`), which needs no repo context at all.",
   },
   "task-state": {
-    args: `state <n> <to: ${TASK_STATES.join("|")}>`,
-    summary: "Move task <n> to a new board state via the Worker's own compare-and-swap: reads the CURRENT state first and sends it as \"from\", so a stale caller gets the route's own 409 verbatim instead of overwriting someone else's write. Operator-invoked only — nothing auto-closes a task.",
+    args: `state <n> <to: ${TASK_STATES.join("|")}> [--from-none]`,
+    summary: "Move task <n> to a new board state via the Worker's own compare-and-swap: reads the CURRENT state first and sends it as \"from\", so a stale caller gets the route's own 409 verbatim instead of overwriting someone else's write. Operator-invoked only — nothing auto-closes a task. --from-none repairs a task left with NO state label (an interrupted transition): the Worker refuses unless there really are zero, and logs the repair on the issue (issue #82).",
   },
   "rescue-gc": {
     args: "[--older-than N] [--dry-run|--apply]",
@@ -433,7 +436,7 @@ export function renderHelp(): string {
  *  sprint board at all, and nothing on screen would say so. */
 const TASK_FLAGS: Record<string, readonly string[]> = {
   new: ["title", "objective", "output", "boundaries", "sprint", "studio", "repo", "continues"],
-  ls: ["sprint", "state", "studio"],
+  ls: ["sprint", "state", "studio", "repo"],
   assign: ["why"],
 };
 
@@ -509,7 +512,9 @@ function parseTask(argv: string[]): CliCommand {
     // closed TASK_STATES vocabulary, rather than deferred to the server: a
     // typo'd state name is a usage error with the vocabulary listed, not a
     // wasted round trip that the route would 400 on anyway.
-    const [rawNumber, to] = rest;
+    const [rawNumber, to, ...extra] = rest;
+    const fromNone = extra.length === 1 && extra[0] === "--from-none";
+    if (extra.length > 0 && !fromNone) return usage(`unexpected ${JSON.stringify(extra[0])}`);
     if (rawNumber === undefined || !/^\d+$/.test(rawNumber)) {
       return usage("fleet task state needs an issue number: fleet task state <n> <to>");
     }
@@ -518,7 +523,7 @@ function parseTask(argv: string[]): CliCommand {
         `fleet task state needs a valid target state: fleet task state <n> <to> — one of ${TASK_STATES.join("|")}`,
       );
     }
-    return { cmd: "task-state", number: Number(rawNumber), to };
+    return { cmd: "task-state", number: Number(rawNumber), to, ...(fromNone ? { fromNone: true as const } : {}) };
   }
   if (sub === "reap") {
     // Zero positionals, one optional bare boolean flag — NOT the
@@ -581,10 +586,11 @@ function parseTask(argv: string[]): CliCommand {
   if ("bad" in parsed) return usage(`unexpected ${JSON.stringify(parsed.bad)}`);
 
   if (sub === "ls") {
-    const query: { milestone?: string; state?: string; assignedTo?: string } = {};
+    const query: { milestone?: string; state?: string; assignedTo?: string; repo?: string } = {};
     if (parsed.sprint !== undefined) query.milestone = parsed.sprint;
     if (parsed.state !== undefined) query.state = parsed.state;
     if (parsed.studio !== undefined) query.assignedTo = parsed.studio;
+    if (parsed.repo !== undefined) query.repo = parsed.repo;
     return { cmd: "task-ls", query };
   }
 
@@ -632,7 +638,7 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // positional to collide with), keeping `ls`'s own long-standing "a stray
     // extra token is ignored" grammar exactly as it was for everything else.
     case "ls":
-      return { cmd: "ls", fresh: argv.slice(1).includes("--fresh") };
+      return { cmd: "ls", fresh: argv.slice(1).includes("--fresh"), json: argv.slice(1).includes("--json") };
     case "onboard":
       return { cmd: "onboard" };
     // Issue #216: `--repo <owner/repo>` (value form or `--repo=value`),

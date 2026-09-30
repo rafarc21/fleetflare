@@ -44,16 +44,16 @@ import { requestInspect, renderInspect, formatSessionForceArmedLine, type Inspec
 import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
 import { repairFailureLine, discardNote, destroyPath } from "./repair-failure";
-import { requestDestroy } from "./destroy-outcome";
+import { requestDestroy, readStatus, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome";
 import {
-  formatIdleAlarm, emptyReapState, runReap, REAP_LIVE_READ_MAX_MS, type ReapDeps, type ReapFlags, type ReapState,
+  formatIdleAlarm, emptyReapState, runReap, destroyRaceOutcome, REAP_LIVE_READ_MAX_MS, type ReapDeps, type ReapFlags, type ReapState,
 } from "./reap";
 import { mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   formatReady, formatCheckedAt, readyOverride, formatSession, formatState, formatSessionGuards,
   formatSurvivalBriefs,
-  formatObservedLines, formatActivity,
+  formatObservedLines, formatActivity, lsJsonRows,
 } from "./readiness-format";
 import { formatTaskTable, formatTaskShow, formatAssignWake } from "./task-format";
 import type { AssignWakeReport } from "../src/board/assign-wake";
@@ -558,7 +558,9 @@ async function refreshAll(creds: Credentials, studios: StudioStatus[]): Promise<
   }));
 }
 
-export async function cmdLs(creds: Credentials, fresh: boolean, orcaDeps: OrcaDeps = defaultOrcaDeps()): Promise<void> {
+export async function cmdLs(
+  creds: Credentials, fresh: boolean, orcaDeps: OrcaDeps = defaultOrcaDeps(), json = false,
+): Promise<void> {
   // Task 5 (P2 plane 3): explicit, now that GET /studio/ content-negotiates
   // on Accept (routes.ts) — without this, a future default change there
   // could silently start handing the CLI an HTML page instead of the JSON
@@ -575,6 +577,11 @@ export async function cmdLs(creds: Credentials, fresh: boolean, orcaDeps: OrcaDe
   // printed; bare `fleet ls` prints what the registry already has, and the
   // CHECKED column says how old each of those verdicts is.
   const studios = fresh ? await refreshAll(creds, recorded) : recorded;
+  // Issue #70 ask 4: machine-readable lead state, nothing else on stdout.
+  if (json) {
+    console.log(JSON.stringify(lsJsonRows(studios, new Date()), null, 2));
+    return;
+  }
   for (const line of formatLsHead(studios)) console.log(line);
   const orca = await readStudioRows(studios, orcaDeps);
   console.log(formatTable(studios, new Date(), orca.rows));
@@ -1200,12 +1207,21 @@ async function cmdTaskNew(creds: Credentials, brief: TaskBriefArgs): Promise<voi
 }
 
 async function cmdTaskLs(
-  creds: Credentials, query: { milestone?: string; state?: string; assignedTo?: string },
+  creds: Credentials, query: { milestone?: string; state?: string; assignedTo?: string; repo?: string },
 ): Promise<void> {
-  const detected = await detectRepo();
-  reportRepo("fleet task ls", detected);
   const params = new URLSearchParams();
-  if (detected.slug) params.set("repo", detected.slug);
+  // Issue #63: --repo wins. Else the cwd's remote; with none and --studio,
+  // the Worker reads that studio's own repo (or refuses), never a guess.
+  if (query.repo !== undefined) {
+    console.error(`fleet task ls: target repo ${query.repo} (--repo, overriding CWD detection)`);
+    params.set("repo", query.repo);
+  } else {
+    const detected = await detectRepo();
+    if (detected.slug) console.error(`fleet task ls: target repo ${detected.slug} (from git remote origin)`);
+    else if (query.assignedTo !== undefined) console.error(`fleet task ls: ${detected.reason} — using ${query.assignedTo}'s own repo`);
+    else reportRepo("fleet task ls", detected);
+    if (detected.slug) params.set("repo", detected.slug);
+  }
   if (query.milestone !== undefined) params.set("milestone", query.milestone);
   if (query.state !== undefined) params.set("state", query.state);
   if (query.assignedTo !== undefined) params.set("assignedTo", query.assignedTo);
@@ -1314,7 +1330,9 @@ async function taskStateFetchCurrent(
     return {
       ok: false, status: 409,
       message: `task #${number} carries no single board state label (labels: ${view.task.labels.join(", ") || "none"}) ` +
-        "— there is no \"from\" this CLI can read to transition it safely",
+        "— there is no \"from\" this CLI can read to transition it safely. " +
+        "If it has NO state label at all (an interrupted transition), repair it: " +
+        `fleet task state ${number} <to> --from-none`,
     };
   }
   return { ok: true, state: view.task.state };
@@ -1345,7 +1363,7 @@ async function taskStateFetchTransition(
  * exits 1, the same posture `boardRequest` already establishes for every
  * other board verb in this file.
  */
-async function cmdTaskState(creds: Credentials, number: number, to: TaskState): Promise<void> {
+async function cmdTaskState(creds: Credentials, number: number, to: TaskState, fromNone = false): Promise<void> {
   const detected = await detectRepo();
   reportRepo("fleet task state", detected);
 
@@ -1354,7 +1372,7 @@ async function cmdTaskState(creds: Credentials, number: number, to: TaskState): 
       getCurrentState: (c, n) => taskStateFetchCurrent(c, n, detected.slug),
       transition: (c, n, from, toState) => taskStateFetchTransition(c, n, from, toState, detected.slug),
     },
-    creds, number, to,
+    creds, number, to, { fromNone },
   );
 
   if (!result.ok) {
@@ -1933,12 +1951,20 @@ export function reapDeps(
       const report = await requestDestroy(
         { destroy: studioUrl(creds, id, destroyPath(false, false)), status: studioUrl(creds, id, "/status") }, headers, id,
       );
-      for (const line of report.lines) log(`  ${id}  ${line}`);
-      if (report.teardown) {
+      // Issue #86: not "destroyed" -> read the row once. Stopped, or another
+      // destroy in flight, means this one raced an operator's: success.
+      let race: "already-stopped" | "in-progress" | null = null;
+      if (report.status?.state !== "stopped") {
+        const row = await readStatus(studioUrl(creds, id, "/status"), headers, fetch, DESTROY_STATUS_TIMEOUT_MS);
+        race = row.ok ? destroyRaceOutcome(row.status as StudioStatus & { destroyInFlight?: boolean }) : null;
+      }
+      if (race === null) for (const line of report.lines) log(`  ${id}  ${line}`);
+      if (report.teardown || race === "already-stopped") {
         const removal = await removeStudioWorkspace(id, orcaDeps);
         for (const line of describeWorkspaceRemoval(id, removal)) log(`  ${id}  ${line}`);
       }
       if (report.status?.state === "stopped") return { outcome: "destroyed" };
+      if (race !== null) return { outcome: race };
       return { outcome: report.kind === "http-error" ? "refused" : "unknown", message: report.lines.join(" ") || report.kind };
     },
     loadState: async () => {
@@ -2458,7 +2484,7 @@ async function main(): Promise<void> {
   const creds = await loadCredentials();
   switch (parsed.cmd) {
     case "ls":
-      return cmdLs(creds, parsed.fresh);
+      return cmdLs(creds, parsed.fresh, defaultOrcaDeps(), parsed.json);
     case "check":
       return cmdCheck(creds, parsed.id);
     case "clear-session-guard":
@@ -2490,7 +2516,7 @@ async function main(): Promise<void> {
     case "task-assign":
       return cmdTaskAssign(creds, parsed.number, parsed.target, parsed.why);
     case "task-state":
-      return cmdTaskState(creds, parsed.number, parsed.to);
+      return cmdTaskState(creds, parsed.number, parsed.to, parsed.fromNone === true);
     case "task-reap":
       return cmdTaskReap(creds, parsed.apply, parsed.terminal === true);
     case "task-junior-sweep":

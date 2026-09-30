@@ -29,15 +29,25 @@ const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const warnedEntries = new Set<string>();
 
 export function writeProxyOn(env: { FLEET_WRITE_PROXY_REPOS?: string }, workRepo: string): boolean {
+  return repoListed("FLEET_WRITE_PROXY_REPOS", env.FLEET_WRITE_PROXY_REPOS, workRepo);
+}
+
+/** Issue #34: the operator's explicit, per-repo override of the proxy's
+ *  default-branch refusal. Unset = refused everywhere. */
+export function defaultBranchPushAllowed(env: { FLEET_WRITE_PROXY_DEFAULT_BRANCH_REPOS?: string }, repo: string): boolean {
+  return repoListed("FLEET_WRITE_PROXY_DEFAULT_BRANCH_REPOS", env.FLEET_WRITE_PROXY_DEFAULT_BRANCH_REPOS, repo);
+}
+
+function repoListed(varName: string, raw0: string | undefined, workRepo: string): boolean {
   const list: string[] = [];
-  for (const raw of (env.FLEET_WRITE_PROXY_REPOS ?? "").split(/[\s,]+/)) {
+  for (const raw of (raw0 ?? "").split(/[\s,]+/)) {
     if (raw === "") continue;
     // A URL or a `.git` suffix would silently match nothing: say so.
     if (!REPO_RE.test(raw) || raw.toLowerCase().endsWith(".git")) {
       // Once per isolate: this runs on every refresh, route and provision.
       if (!warnedEntries.has(raw)) {
         warnedEntries.add(raw);
-        console.error(`write proxy: FLEET_WRITE_PROXY_REPOS entry ${JSON.stringify(raw)} is not owner/name -- ignored`);
+        console.error(`write proxy: ${varName} entry ${JSON.stringify(raw)} is not owner/name -- ignored`);
       }
       continue;
     }

@@ -308,6 +308,18 @@ describe("statusDetailWithStorage — what /status now answers", () => {
     expect((await statusDetailWithStorage(storage, STUDIO_ID)).operationInFlight).toBeNull();
   });
 
+  // Issue #86 item 2: reap's destroy racing an operator's destroy reads this
+  // to tell "another destroy is running" from a real refusal.
+  it("destroyInFlight: a fresh DESTROYING marker, or a destroy call running in this DO", async () => {
+    const fresh = fakeStorage({ [STATUS_KEY]: running(), [DESTROYING_KEY]: new Date(Date.now() - 60_000).toISOString() });
+    expect((await statusDetailWithStorage(fresh.storage, STUDIO_ID)).destroyInFlight).toBe(true);
+    const stale = fakeStorage({ [STATUS_KEY]: running(), [DESTROYING_KEY]: new Date(Date.now() - 16 * 60_000).toISOString() });
+    expect((await statusDetailWithStorage(stale.storage, STUDIO_ID)).destroyInFlight).toBe(false);
+    const none = fakeStorage({ [STATUS_KEY]: running() });
+    expect((await statusDetailWithStorage(none.storage, STUDIO_ID)).destroyInFlight).toBe(false);
+    expect((await statusDetailWithStorage(none.storage, STUDIO_ID, true)).destroyInFlight).toBe(true);
+  });
+
   it("answers null for each when nothing was ever recorded", async () => {
     const { storage } = fakeStorage();
     const detail = await statusDetailWithStorage(storage, STUDIO_ID);

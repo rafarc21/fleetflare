@@ -378,6 +378,38 @@ describe("runSpawn — MAX_STUDIOS cap (R-P3-3)", () => {
     expect(provisioned).toBe(false);
   });
 
+  // Issue #81: destroy leaves a `stopped` row, and 62 of them held the cap at
+  // 100/100 while 3 studios ran. A stopped row runs no container.
+  it("stopped rows do not count: 100 stopped + 0 live, cap 100 -> spawn proceeds", async () => {
+    const deps = capDeps(0, DEFAULT_MAX_STUDIOS);
+    deps.listStudios = async () => fillerRows(100).map((r) => ({ ...r, state: "stopped" as const }));
+    expect((await runSpawn(deps, CAP_PARENT, { role: "release" })).status).toBe(200);
+  });
+
+  // Refs #81: only `stopped` is exempt. A studio still coming up (or
+  // degraded) holds a container and must count, or a burst of spawns during
+  // provisioning would sail past the cap.
+  for (const state of ["provisioning", "degraded"] as const) {
+    it(`${state} rows count toward the cap`, async () => {
+      const deps = capDeps(0, 5);
+      deps.listStudios = async () => fillerRows(5).map((r) => ({ ...r, state }));
+      const res = await runSpawn(deps, CAP_PARENT, { role: "release" });
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain("5/5");
+    });
+  }
+
+  it("the cap still bites on live rows; the 409 counts live studios", async () => {
+    const deps = capDeps(0, 5);
+    deps.listStudios = async () => [
+      ...fillerRows(5),
+      ...Array.from({ length: 3 }, (_, i) => status({ id: `websites--gone-${i}`, state: "stopped" })),
+    ];
+    const res = await runSpawn(deps, CAP_PARENT, { role: "release" });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain("5/5");
+  });
+
   it("respects a non-default maxStudios from deps, not a hardcoded 100", async () => {
     expect((await runSpawn(capDeps(4, 5), CAP_PARENT, { role: "release" })).status).toBe(200);
     expect((await runSpawn(capDeps(5, 5), CAP_PARENT, { role: "release" })).status).toBe(409);

@@ -518,6 +518,32 @@ export const HOUSE_RULES = [
   "wedged. Recovered only by `recycle --discard-unsynced`, losing 22 min of",
   "conversation.",
   "",
+  // Issue #70 ask 3: that ceiling, as a rule rather than an anecdote.
+  "This container has a memory ceiling of about 11.6 GiB. The full test",
+  "suite together with two bundler builds exceeds it and wedges the studio.",
+  "Never run the full test suite and a bundler build at the same time. Run",
+  "the tests your change touches; leave the full set to CI or the merge gate.",
+  "",
+  // Issue #85: lead deadlocks, the most common failure of a ~30-studio night
+  // run (2026-09-29/30). One rule per measured deadlock.
+  "## House rules — never block on nothing",
+  "",
+  "Never end a turn waiting for a notification. A scheduled wake can fail",
+  "and never arrive. To learn how a job went, read the background task's",
+  "output file and the screen yourself. If nothing is still running, act.",
+  "",
+  "Before you wait on a job, check it is alive. Its shell or process must",
+  "still exist. A dead job is rerun or reported, never waited on.",
+  "",
+  "Never use AskUserQuestion (or any menu that waits for an answer) in a",
+  "studio. Nobody is at this terminal to answer it. Write the blocker into",
+  "the task's issue and move to the next piece of work.",
+  "",
+  "Run the tests your change touches, then push with `LEFTHOOK=0 git push`.",
+  "The full suite belongs to CI or the merge gate. `LEFTHOOK=0` skips only",
+  "the repo's own lefthook hooks; the fleet's own push checks still run.",
+  "Never use it to get past a push that was refused.",
+  "",
   // Board issue #235, measured 2026-09-25 by the BETA maestro: a studio
   // container carries neither CLOUDFLARE_API_TOKEN (what wrangler reads) nor
   // CLOUDFLARE_DEPLOY_TOKEN (env.ts, do.ts, deploy-server.ts — the fleet's

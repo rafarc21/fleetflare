@@ -207,10 +207,24 @@ function rescueOnOriginFn(pushTimeoutSeconds: number): string {
     // Issue #58: budgeted like every push. Out of budget = no listing =
     // "not on origin", so the push path (and its own budget refusal) runs.
     `      if rescue_budget_ok on-origin >/dev/null; then ` +
-    `__rheads="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" ls-remote --heads origin </dev/null 2>/dev/null | cut -f1)"; fi\n` +
+    `__rheads="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" ls-remote --heads origin </dev/null 2>/dev/null)"; fi\n` +
     `    fi\n` +
     `  fi\n` +
-    `  [ -n "$2" ] && printf '%s\\n' "$__rheads" | grep -qx -e "$2"\n` +
+    `  [ -n "$2" ] || return 1\n` +
+    `  printf '%s\\n' "$__rheads" | cut -f1 | grep -qx -e "$2" && return 0\n` +
+    // Issue #80: origin's same-named branch moved PAST this sha (another push
+    // to the PR branch). Exact tips miss it; fetch that one tip into a scratch
+    // ref (budgeted, bounded, never the real branch) and ask ancestry. Any
+    // failure = not on origin, so the push still runs. `grep -F`: a branch
+    // name is not a regex. `--refmap=`: a configured wide fetch refspec must
+    // not move refs/remotes/origin/<branch> behind the lead's back.
+    `  [ -n "\${3:-}" ] || return 1\n` +
+    `  printf '%s\\n' "$__rheads" | cut -f2 | grep -Fqx -e "refs/heads/$3" || return 1\n` +
+    `  rescue_budget_ok on-origin >/dev/null || return 1\n` +
+    `  timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" fetch -q --no-tags --refmap= origin "+refs/heads/$3:refs/fleet-rescue-check/tip" </dev/null >/dev/null 2>&1 || return 1\n` +
+    `  git -C "$1" merge-base --is-ancestor "$2" refs/fleet-rescue-check/tip 2>/dev/null; __ranc=$?\n` +
+    `  git -C "$1" update-ref -d refs/fleet-rescue-check/tip 2>/dev/null\n` +
+    `  [ "$__ranc" = 0 ]\n` +
     `}\n`
   );
 }
@@ -220,7 +234,7 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
     `timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push $nv "$__rdest" "${src}:refs/heads/$ref" 2>&1 1>/dev/null`;
   return (
     `rescue_try_push() {\n` +
-    `  local w="$1" nv="$2" src="$3" ref="$4" snap\n` +
+    `  local w="$1" nv="$2" src="$3" ref="$4" snap prc\n` +
     // PR #65 review: an early budget return must not leave the PREVIOUS
     // push's stderr in perr for the caller to report as this one's.
     `  perr=""\n` +
@@ -229,12 +243,21 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
     // EVERY push, silently (a budget line here would land in rescue_push's
     // captured stdout): out of budget = a confirmed push failure, never an
     // exec killed by the server deadline mid-push.
-    `  rescue_budget_ok "$ref" >/dev/null || return 1\n` +
-    `  perr="$(${push("$src")})" && return 0\n` +
+    // Issue #80: every failed return leaves a reason in perr — a push killed
+    // by its timeout prints nothing, and the 409 carried no reason at all.
+    `  rescue_budget_ok "$ref" >/dev/null || { perr="push to $ref not attempted: rescue budget exhausted"; return 1; }\n` +
+    `  perr="$(${push("$src")})"; prc=$?\n` +
+    `  [ "$prc" = 0 ] && return 0\n` +
+    `  if [ -z "$perr" ]; then perr="push to $ref failed (code $prc) with no output"; ` +
+    `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="push to $ref killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
     `  printf '%s' "$perr" | grep -qi 'shallow update not allowed' || return 1\n` +
     `  snap=$(git -C "$w" ${identity} commit-tree "$src^{tree}" -m "fleet rescue snapshot of $(git -C "$w" rev-parse "$src") (shallow clone)" 2>/dev/null) || return 1\n` +
-    `  rescue_budget_ok "$ref" >/dev/null || return 1\n` +
-    `  perr="$(${push("$snap")})"\n` +
+    `  rescue_budget_ok "$ref" >/dev/null || { perr="snapshot push to $ref not attempted: rescue budget exhausted"; return 1; }\n` +
+    `  perr="$(${push("$snap")})"; prc=$?\n` +
+    `  [ "$prc" = 0 ] && return 0\n` +
+    `  if [ -z "$perr" ]; then perr="snapshot push to $ref failed (code $prc) with no output"; ` +
+    `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="snapshot push to $ref killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
+    `  return 1\n` +
     `}\n`
   );
 }
@@ -882,7 +905,7 @@ export function rescuePushCmd(
     `    wahead=$(git -C "$w" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
     `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
     // Issue #49: already an origin tip = already saved, nothing to push.
-    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead"; then\n` +
+    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
     `      rescue_target "$w" "$mode" "$id"\n` +
     // Issue #371: same single check ahead of the attempt+nff-retry pair as
     // the dirty-tree branch above.
@@ -1068,7 +1091,7 @@ export function rescuePushCmd(
     `    bahead=$(git -C ${dir} rev-list --count "refs/heads/$b" --not --remotes </dev/null 2>/dev/null); brc=$?\n` +
     `    if [ "$brc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} checkout:$b rev-list"; fail=$((fail+1)); continue; fi\n` +
     // Issue #49: same already-on-origin check as rescue_one's.
-    `    if [ -n "$bahead" ] && [ "$bahead" != "0" ] && ! rescue_on_origin ${dir} "$(git -C ${dir} rev-parse -q --verify "refs/heads/$b" </dev/null 2>/dev/null)"; then\n` +
+    `    if [ -n "$bahead" ] && [ "$bahead" != "0" ] && ! rescue_on_origin ${dir} "$(git -C ${dir} rev-parse -q --verify "refs/heads/$b" </dev/null 2>/dev/null)" "$b"; then\n` +
     `      btarget="fleet/rescue/${studio}/$runts/checkout/$b"\n` +
     // Issue #371: checked once before this loop-body's own single push
     // attempt (this branch never retries — its target is already a freshly
@@ -1401,7 +1424,7 @@ export function rescueSnapshotCmd(
     `    wahead=$(git -C "$w" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
     `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
     // Issue #49: already an origin tip = already saved, nothing to push.
-    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead"; then\n` +
+    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
     // PR #312 round 3 (MED): snapshot_target() here too, never the
     // checked-out branch's own name. A live studio still owns that branch:
     // pushing its unpushed commits there (and moving the local tracking ref
@@ -1472,7 +1495,7 @@ export function rescueSnapshotCmd(
     `    bahead=$(git -C ${dir} rev-list --count "refs/heads/$b" --not --remotes </dev/null 2>/dev/null); brc=$?\n` +
     `    if [ "$brc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} checkout:$b rev-list"; fail=$((fail+1)); continue; fi\n` +
     // Issue #49: same already-on-origin check as rescue_one's.
-    `    if [ -n "$bahead" ] && [ "$bahead" != "0" ] && ! rescue_on_origin ${dir} "$(git -C ${dir} rev-parse -q --verify "refs/heads/$b" </dev/null 2>/dev/null)"; then\n` +
+    `    if [ -n "$bahead" ] && [ "$bahead" != "0" ] && ! rescue_on_origin ${dir} "$(git -C ${dir} rev-parse -q --verify "refs/heads/$b" </dev/null 2>/dev/null)" "$b"; then\n` +
     `      btarget="fleet/rescue/${studio}/$runts/checkout/$b"\n` +
     // Issue #371: same single check ahead of this loop body's own single push
     // attempt as rescuePushCmd's own identical branch-walk guard above.

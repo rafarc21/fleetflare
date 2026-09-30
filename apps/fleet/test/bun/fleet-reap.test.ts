@@ -7,14 +7,14 @@
 // bun:test lane (CLI code, same reason rescue-all-scope.test.ts gives).
 import { test, expect, describe } from "bun:test";
 import {
-  runReap, formatIdleAlarm, parseIdleDuration, emptyReapState,
+  runReap, formatIdleAlarm, parseIdleDuration, emptyReapState, destroyRaceOutcome,
   REAP_BACKOFF_MS, STALL_ALARM_EVERY_MS, STALL_AFTER_MS, REAP_LIVE_READ_MAX_MS,
   type ReapDeps, type ReapFlags, type ReapInspect, type ReapState, type ReapDestroyResult,
 } from "../../cli/reap";
 import { REAL_WEBSTUDIO_PANE } from "../fixtures/rate-limit-panes";
 import { WORKING_GLYPH_DOT_FOOTER_ESC_PANE } from "../fixtures/activity-panes";
 import type { StudioStatus } from "../../src/studio/types";
-import type { Activity } from "../../src/studio/activity";
+import { type Activity, nextActivity, readActivityFrame } from "../../src/studio/activity";
 import type { BoardTask, TaskState } from "../../src/board/types";
 
 const NOW = new Date("2026-09-29T12:00:00.000Z");
@@ -311,6 +311,19 @@ describe("reap — open task: stall alarm, not reap", () => {
     await runReap(flags(), later.deps);
     expect(later.lines.some((l) => l.startsWith(`STALL ${PILOT}`))).toBe(true);
   });
+
+  // #86: a lead waiting on its own background shell/monitor is not idle.
+  // The mirror is built the way the DO builds it: prev idle 12m, this frame.
+  for (const [name, pane] of [["shells", IDLE_WITH_SHELLS], ["monitors", IDLE_WITH_UNKNOWN_COUNTER], ["background task", IDLE_WITH_BG_TASK]] as const) {
+    test(`idle frame with live ${name} + open task -> no STALL line, no idle alarm`, async () => {
+      const mirrored = nextActivity(activity("idle", 12 * MIN, 30_000), readActivityFrame(pane), null, null, NOW);
+      const studios = [studio(PILOT, mirrored)];
+      const f = fake({ studios, board: [task(7, PILOT)] });
+      await runReap(flags(), f.deps);
+      expect(f.lines.some((l) => l.startsWith("STALL"))).toBe(false);
+      expect(formatIdleAlarm(studios, NOW)).toBeNull();
+    });
+  }
 
   test("the STALL alarm runs in dry-run too", async () => {
     const f = fake({ studios: [studio(PILOT, activity("idle", 12 * MIN))], board: [task(7, PILOT)] });
@@ -638,5 +651,36 @@ describe("parseIdleDuration", () => {
   });
   test("rejects anything else", () => {
     for (const bad of ["5", "m", "-5m", "5d", "", "1.5h"]) expect(parseIdleDuration(bad)).toBeNull();
+  });
+});
+
+// Issue #86 item 2: the reaper's destroy raced an operator's destroy and
+// answered "container did not answer 8s probe". Already stopped / another
+// destroy in flight is the outcome reap wanted: success, not an error.
+describe("reap — destroy racing another destroy", () => {
+  test("destroy answers already-stopped -> REAPED, no back-off", async () => {
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, destroy: () => ({ outcome: "already-stopped" }) });
+    await runReap(flags(), f.deps);
+    expect(f.lines.some((l) => l.startsWith(`REAPED ${PILOT}`) && l.includes("already stopped"))).toBe(true);
+    expect(f.lines.some((l) => l.includes("backing off"))).toBe(false);
+    expect(f.saved()!.backoffUntil[PILOT]).toBeUndefined();
+  });
+
+  test("destroy answers in-progress -> REAPED line naming it, no error back-off line, not retried next poll", async () => {
+    const f = fake({ studios: [IDLE_45()], board: HISTORY, destroy: () => ({ outcome: "in-progress" }) });
+    await runReap(flags(), f.deps);
+    expect(f.lines.some((l) => l.startsWith(`REAPED ${PILOT}`) && l.includes("another destroy"))).toBe(true);
+    expect(f.lines.some((l) => l.includes("backing off"))).toBe(false);
+    const next = fake({ studios: [IDLE_45()], board: HISTORY, state: f.saved()!, now: new Date(NOW.getTime() + MIN) });
+    await runReap(flags(), next.deps);
+    expect(next.calls.some((c) => c.startsWith("rescue") || c.startsWith("destroy"))).toBe(false);
+  });
+
+  test("destroyRaceOutcome: stopped row -> already-stopped; destroy in flight -> in-progress; else null", () => {
+    expect(destroyRaceOutcome({ state: "stopped" })).toBe("already-stopped");
+    expect(destroyRaceOutcome({ state: "running", destroyInFlight: true })).toBe("in-progress");
+    expect(destroyRaceOutcome({ state: "running", destroyInFlight: false })).toBeNull();
+    expect(destroyRaceOutcome({ state: "running" })).toBeNull();
+    expect(destroyRaceOutcome(null)).toBeNull();
   });
 });
