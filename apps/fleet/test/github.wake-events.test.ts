@@ -55,14 +55,83 @@ describe("maestroIdFor", () => {
 });
 
 describe("deltaDigest", () => {
+  // Board #111: `repo`'s own maestro id is `websites--maestro` (see
+  // maestroIdFor's own tests above), so this fixture's label now names
+  // maestro's OWN assignment -- under the #111 ownership filter this is
+  // what demonstrates "own task wakes"; a DIFFERENT studio's label here
+  // would now correctly return null (see the "does not wake" cases below).
   it("names what fired, the task, and its new state", () => {
     const d = deltaDigest("issues", {
       action: "labeled", repository: repo,
-      issue: { number: 131, title: "fleet task state verb", state: "open", labels: [{ name: "studio:web-studio" }, { name: "in-flight" }] },
+      issue: { number: 131, title: "fleet task state verb", state: "open", labels: [{ name: "studio:websites--maestro" }, { name: "in-flight" }] },
     });
     expect(d).toBe(
-      'WAKE EVENT(issues.labeled) acme-org/websites #131 "fleet task state verb" state=open labels=studio:web-studio,in-flight',
+      'WAKE EVENT(issues.labeled) acme-org/websites #131 "fleet task state verb" state=open labels=studio:websites--maestro,in-flight',
     );
+  });
+
+  // Board #111: a task assigned to some OTHER lane already gets its own
+  // targeted wake (board #236's wakeTaskOnComment/wakeOnComment) -- a
+  // second, generic maestro wake for the same delta is pure noise.
+  it("REFUSES to wake maestro for an issues event on a task assigned to a DIFFERENT studio", () => {
+    expect(deltaDigest("issues", {
+      action: "labeled", repository: repo,
+      issue: { number: 131, title: "fleet task state verb", state: "open", labels: [{ name: "studio:websites--web-studio" }] },
+    })).toBeNull();
+  });
+
+  it("wakes maestro for an issues event on a task assigned to maestro itself", () => {
+    const d = deltaDigest("issues", {
+      action: "labeled", repository: repo,
+      issue: { number: 131, title: "fleet task state verb", state: "open", labels: [{ name: "studio:websites--maestro" }] },
+    });
+    expect(d).toBe(
+      'WAKE EVENT(issues.labeled) acme-org/websites #131 "fleet task state verb" state=open labels=studio:websites--maestro',
+    );
+  });
+
+  it("wakes maestro for an issues event on a backlog task (no studio: label at all)", () => {
+    const d = deltaDigest("issues", {
+      action: "labeled", repository: repo,
+      issue: { number: 131, title: "fleet task state verb", state: "open", labels: [{ name: "in-flight" }] },
+    });
+    expect(d).toContain("#131");
+  });
+
+  // Ambiguous (more than one studio: label) is treated as maestro's own --
+  // label drift is exactly what maestro, not a lane, should see.
+  it("wakes maestro on an ambiguous (two studio: labels) task -- drift is maestro's business", () => {
+    const d = deltaDigest("issues", {
+      action: "labeled", repository: repo,
+      issue: {
+        number: 131, title: "fleet task state verb", state: "open",
+        labels: [{ name: "studio:websites--web-studio" }, { name: "studio:websites--other-studio" }],
+      },
+    });
+    expect(d).toContain("#131");
+  });
+
+  it("REFUSES to wake maestro for an issue_comment on a task assigned to a DIFFERENT studio", () => {
+    expect(deltaDigest("issue_comment", {
+      action: "created", repository: repo,
+      issue: {
+        number: 131, title: "fleet task state verb", state: "open",
+        labels: [{ name: "studio:websites--web-studio" }],
+      },
+      comment: { user: { login: "rafarc21" }, body: "hi" },
+    })).toBeNull();
+  });
+
+  it("wakes maestro for an issue_comment on a task assigned to maestro itself", () => {
+    const d = deltaDigest("issue_comment", {
+      action: "created", repository: repo,
+      issue: {
+        number: 131, title: "fleet task state verb", state: "open",
+        labels: [{ name: "studio:websites--maestro" }],
+      },
+      comment: { user: { login: "rafarc21" }, body: "hi" },
+    });
+    expect(d).toContain("#131");
   });
 
   it("carries who commented and what they said, trimmed to one line", () => {
@@ -84,6 +153,26 @@ describe("deltaDigest", () => {
     expect(d).toBe(
       'WAKE EVENT(pull_request.closed) acme-org/websites PR #138 "blueprint: maestro supervision" state=closed merged=true draft=false',
     );
+  });
+
+  it("still wakes on pull_request.opened, unaffected by the synchronize skip", () => {
+    const d = deltaDigest("pull_request", {
+      action: "opened", repository: repo,
+      pull_request: { number: 139, title: "a new PR", state: "open", merged: false, draft: false },
+    });
+    expect(d).toBe(
+      'WAKE EVENT(pull_request.opened) acme-org/websites PR #139 "a new PR" state=open merged=false draft=false',
+    );
+  });
+
+  // Board #111: maestro itself never holds a PR -- only the studios/lanes it
+  // supervises do -- so every synchronize (fired on every push to a PR
+  // branch) is inherently noise from maestro's own perspective.
+  it("REFUSES to wake on pull_request.synchronize -- maestro never holds a PR", () => {
+    expect(deltaDigest("pull_request", {
+      action: "synchronize", repository: repo,
+      pull_request: { number: 138, title: "blueprint: maestro supervision", state: "open", merged: false, draft: false },
+    })).toBeNull();
   });
 
   it("reports a finished CI run's verdict, its workflow and its branch", () => {
