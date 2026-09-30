@@ -293,6 +293,7 @@ describe("wakeCmd — the loose scan's row anchors hold under grep -E (#144)", (
     ["a #53 headline", "WAKE: yesterday You've hit your usage limit was on screen; it is gone now"],
     ["the permission-prompt footer (#144)",
       "WAKE #144 retry — pane said Esc to cancel · Tab to amend · ctrl+e to explain, so nothing was typed"],
+    ["the ▔ rule (#146)", "WAKE #146 retry — pane showed a row of ▔▔▔ characters, so nothing was typed"],
   ];
   for (const [name, prompt] of MID_ROW) {
     test(`an echoing composer and a prompt carrying ${name} mid-row: Enter sent, and the next wake lands`, () => {
@@ -314,6 +315,7 @@ describe("wakeCmd — the loose scan's row anchors hold under grep -E (#144)", (
     "❯ Run /rate-limit-options to see what you can do.",
     "❯ You've hit your usage limit",
     "❯ Esc to cancel · Tab to amend · ctrl+e to explain",
+    "❯ ▔▔▔▔▔▔▔▔",
   ]) {
     test(`a ghost suggestion ${JSON.stringify(ghost)}: the wake lands`, () => {
       const t = fakeTmux(composer(ghost));

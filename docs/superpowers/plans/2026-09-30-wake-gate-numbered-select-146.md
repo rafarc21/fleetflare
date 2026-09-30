@@ -55,40 +55,62 @@ footer-wording-independent and structurally safe: the modal's OPENER.
   prints a bare row of repeated ▔ box-drawing characters — it is a UI-only
   glyph, not something a human or a lead types. Zero hits in the `NOT_DETECTED`
   corpus or any pinned "the wake lands" row.
-- `"Do you want to proceed?"` — the literal question text of an ordinary
-  permission prompt, named explicitly in issue #146. Zero hits in the
-  `NOT_DETECTED` corpus or any pinned "the wake lands" row.
+
+**`"Do you want to proceed?"` standalone was tried and REJECTED** (code
+review on #146, finding 1). Unlike every other entry in `LOOSE_LIMIT_PATTERNS`
+(an exact TUI footer, a product-specific headline, a slash command), that
+sentence is ordinary English a lead could plausibly end a genuinely-idle turn
+on — "I found three approaches for the migration. Do you want to proceed?" —
+with no test proving it safe against ordinary prose (the `NOT_DETECTED`
+corpus covers numbered-list false positives, a different failure mode, not
+this one). It needs no entry of its own anyway: every measured real
+permission-prompt pane (`REAL_PERMISSION_PROMPT_TAIL_PANE`,
+`REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE`) draws the ▔ rule directly above
+the question, so the ▔ entry above already refuses the same modal one row
+earlier — the question is covered TRANSITIVELY, never matched on its own
+wording.
 
 `"What do you want to do?"` (the limit modal's own opener, also already part
 of `MODAL_BLOCK_START`) was considered for symmetry but NOT added: the
 `NOT_DETECTED` corpus's fixture (h) ("V1's modal quoted in prose, then more
 output") contains that exact line, and while that fixture is the STRICT
 detector's trap case rather than the loose gate's, adding the opener as a
-loose-gate whole-row pattern was not worth the risk for a phrase the two
-entries above already make redundant (a `▔` rule always opens the same
-modal). Dropped rather than risk a false positive that would silently block
-every later wake on an idle screen (#141 review's own stated cost of a loose
-false positive).
+loose-gate whole-row pattern was not worth the risk for a phrase the ▔ entry
+above already makes redundant (a `▔` rule always opens the same modal).
+Dropped rather than risk a false positive that would silently block every
+later wake on an idle screen (#141 review's own stated cost of a loose false
+positive).
 
-Both new entries reuse the array's existing `ROW_LEAD`/`ROW_TAIL` anchors
+The new entry reuses the array's existing `ROW_LEAD`/`ROW_TAIL` anchors
 (row-only, `(│)?` bound to a GROUP never to a byte, no `\s`/`\b`/`{n,}`), the
-same discipline every other entry in `LOOSE_LIMIT_PATTERNS` already follows.
-Because `LOOSE_LIMIT_PATTERNS` is the ONE array that feeds both the JS-side
-check (`looseLimitOnScreen`) and the shell-embedded `grep -E` inside
-`wakeCmd`'s `scan` function, adding entries to it is the WHOLE fix — no
-separate shell logic, no restructuring `looseLimitOnScreen` into something
-stateful or multi-line. This mirrors exactly how #144 landed its own fix.
+same discipline every other entry in `LOOSE_LIMIT_PATTERNS` already follows —
+and, per code review finding 2, is held to the same MID_ROW/TRAILING/GHOST
+anchoring proof every other entry already has (see Test, below). Because
+`LOOSE_LIMIT_PATTERNS` is the ONE array that feeds both the JS-side check
+(`looseLimitOnScreen`) and the shell-embedded `grep -E` inside `wakeCmd`'s
+`scan` function, adding an entry to it is the WHOLE fix — no separate shell
+logic, no restructuring `looseLimitOnScreen` into something stateful or
+multi-line. This mirrors exactly how #144 landed its own fix.
 
 ## Fix
 
 ```
-`${ROW_LEAD}▔+${ROW_TAIL}`,
-`${ROW_LEAD}Do you want to proceed\\?${ROW_TAIL}`,
+`${ROW_LEAD}(▔)+${ROW_TAIL}`,
 ```
 
-(`\\?` — a JS STRING literal escaping a literal `?` for both `grep -E` and
-`new RegExp`, same discipline the file's own doc comment already states for
-`ctrl\\+e`.)
+One entry, not two: see "`Do you want to proceed?` standalone was tried and
+REJECTED" above.
+
+`(▔)+`, never bare `▔+` — the same C-locale byte-binding trap this file's
+doc comment already names for `(│)?` applies here too. MEASURED: `LC_ALL=C
+grep -E '▔+'` against ten repeated ▔ characters does NOT match (the `+`
+binds to the last BYTE of the multibyte glyph, not the whole character);
+wrapped in a group, `(▔)+` matches correctly. This was caught only after
+dropping the redundant `"Do you want to proceed?"` literal per finding 1
+above — with both entries present, the literal's match masked the broken
+`▔+` one under `grep -E`, so `test/bun/wake-guard.test.ts`'s real-shell lane
+stayed green even though the container guard was silently not using the
+opener check at all.
 
 ## Test
 
@@ -107,8 +129,19 @@ stateful or multi-line. This mirrors exactly how #144 landed its own fix.
    `send-keys` calls and `__FLEET_WAKE__ refused-before modal` in stdout —
    proving the in-container `grep -E` guard refuses it too, not just the JS
    side.
+4. Code review finding 2: `▔+` gets the same MID_ROW/TRAILING/GHOST proof
+   every other `LOOSE_LIMIT_PATTERNS` entry already has, in both
+   `test/studio.wake-race.test.ts`'s `"the loose patterns' row anchors are
+   load-bearing (#144, mutants N1/N8)"` describe block and the mirrored one in
+   `test/bun/wake-guard.test.ts` — a MID_ROW case (the phrase embedded inside
+   a composer echo of the wake's own text), a TRAILING case (the phrase opens
+   the row but prose follows), and a GHOST case (the same text as a column-0
+   composer suggestion, no border). All three must land (`outcome.ok ===
+   true` / `__FLEET_WAKE__ sent`), proving `ROW_LEAD`/`ROW_TAIL` are
+   load-bearing for this entry too — a mutant stripping the anchors from just
+   this entry would otherwise pass every existing test.
 
 RED before the `LOOSE_LIMIT_PATTERNS` change (lands as `ok: true` / `sent`),
 GREEN after. No behavior change to the existing pinned #141/#144 anchor
-tests: the new patterns are whole-row literal alternatives that no
+tests: the new pattern is a whole-row literal alternative that no
 `NOT_DETECTED` fixture, ghost-composer row or MID_ROW/TRAILING case contains.
