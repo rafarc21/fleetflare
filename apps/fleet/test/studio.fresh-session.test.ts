@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   adoptWorktreeSessionCmd, runProvision, provisionWithStorage, BRINGUP_CMD, FRESH_SESSION_MARKER,
+  FRESH_SESSION_PENDING_KEY,
   type ProvisionDeps, type StudioStorage,
 } from "../src/studio/provision";
 import { SESSION_FORCE_KEY } from "../src/studio/session-sync";
@@ -116,5 +117,72 @@ describe("provisionWithStorage — freshSession arms the force upload (issue #37
       await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", ...(fresh ? { freshSession: true } : {}) }, "example-org/acmeclient");
       expect(map.has(SESSION_FORCE_KEY)).toBe(false);
     }
+  });
+});
+
+// Issue #100: a --fresh-session provision whose bring-up exec fails mid-way
+// (a real 500, timeout, or any other throw) must not silently drop the
+// operator's fresh-session intent — the NEXT plain `fleet provision` (no
+// flag) must still apply it, not resume whatever stale session the
+// container happens to hold. See FRESH_SESSION_PENDING_KEY's own doc
+// comment (provision.ts) for the mechanism.
+describe("provisionWithStorage — a failed --fresh-session attempt stays pending (issue #100)", () => {
+  function mapStorage() {
+    const map = new Map<string, unknown>();
+    const storage = {
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"],
+    } as StudioStorage;
+    return { map, storage };
+  }
+
+  /** Same fixture as `deps()` above, except the bring-up exec fails on its
+   *  FIRST call (a real exec failure — "the route 500s mid-way", the
+   *  issue's own test spec) and succeeds on every call after. */
+  function flakyBringupDeps(bringupStdoutOnceHealthy: string) {
+    const calls: Array<{ cmd: string; env?: Record<string, string> }> = [];
+    let bringupCalls = 0;
+    const d: ProvisionDeps = {
+      sbExec: vi.fn(async (cmd: string, env?: Record<string, string>) => {
+        calls.push({ cmd, env });
+        if (cmd === BRINGUP_CMD) {
+          bringupCalls++;
+          if (bringupCalls === 1) return { code: 1, stdout: "", stderr: "bring-up died: HTTP error! status: 500" };
+          return { code: 0, stdout: bringupStdoutOnceHealthy, stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      }),
+      recordStudio: async () => {},
+      now: () => NOW,
+      fetchBlueprintFile: vi.fn(async (_repo: string, path: string) => {
+        if (path === "fleet.json") return JSON.stringify({ blueprint: { repo: "example-org/fleet", ref: "main" }, roles: ["scratch"], instance_type: "standard-2" });
+        if (path === "fleet/blueprint/org.json") return JSON.stringify({ edges: {}, gates: {} });
+        if (path.startsWith("fleet/blueprint/studios/")) throw new Error(`fetch ${path}@main failed (404): Not Found`);
+        return "---\nname: scratch\nskills: []\nallowedTools: Bash(git *)\nmay_spawn: []\nreports_to: operator\ngates: []\n---\nhi\n";
+      }),
+    };
+    return { d, calls };
+  }
+
+  it("the retry (no flag) still skips adopt, sets FLEET_FRESH_SESSION=1, and reports success — never a silent resume", async () => {
+    const { d, calls } = flakyBringupDeps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { map, storage } = mapStorage();
+
+    // 1) operator asks for a fresh session; the bring-up exec 500s mid-way.
+    const first = await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient");
+    expect(first.state).toBe("degraded");
+    expect(map.get(FRESH_SESSION_PENDING_KEY)).toBe(true);
+
+    // 2) operator retries WITHOUT --fresh-session, exactly per the field
+    // report ("retry `fleet provision <id>` (no flag)").
+    calls.length = 0;
+    const second = await provisionWithStorage(d, storage, { repo: REPO, role: "scratch" }, "example-org/acmeclient");
+
+    expect(calls.map((c) => c.cmd)).not.toContain(ADOPT_CMD);
+    const bringup = calls.find((c) => c.cmd === BRINGUP_CMD)!;
+    expect(bringup.env?.FLEET_FRESH_SESSION).toBe("1");
+    expect(second.state).toBe("running");
+    expect(second.error).toContain(ASIDE);
+    expect(map.get(FRESH_SESSION_PENDING_KEY)).toBe(false);
   });
 });
