@@ -302,6 +302,16 @@ describe("otherRepoPrimaries (issue #103)", () => {
     expect(otherRepoPrimaries(env, "repo-a")).toEqual(new Set());
     expect(otherRepoPrimaries(envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: "" }), "repo-a")).toEqual(new Set());
   });
+
+  it("two repos colliding on the same (already-invalid) slot never reserves that slot against either", () => {
+    // CLAUDE_ACCOUNT_BY_REPO mapping two repos to the same slot is already an
+    // invalid config, but the exclusion must still be by SLOT NUMBER, not by
+    // repo key: from repo-a's own point of view slot 2 is ITS primary too,
+    // even though "repo-b" also maps there, so it must never be reserved
+    // against repo-a.
+    const env = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: '{"repo-a":2,"repo-b":2}' });
+    expect(otherRepoPrimaries(env, "repo-a")).toEqual(new Set());
+  });
 });
 
 describe("earliestAccountReset (issue #102 requirement 3)", () => {
