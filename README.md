@@ -31,11 +31,15 @@ A studio's id is `<repo>--<role>` — say hello to `fleet ls`:
 
 ```
 $ fleet ls
-ID                          ROLE             STATE      READY   BURN/HR
-acme-site--maestro          maestro          running    yes     $0.04
-acme-site--web-studio       web-studio       running    yes     $0.15
-acme-docs--release-studio   release-studio   degraded   no      $0.06
+ID                          STATE      READY                 BURN
+acme-site--maestro          running    provisioned           12400o/5h:3100
+acme-site--web-studio       running    provisioned           8200o/5h:1900
+acme-docs--release-studio   degraded   bare: no session       0o/5h:0
 ```
+
+(Trimmed for readability — the real table has more columns too: REPO,
+SESSION, ACTIVITY, ACCOUNT, HOST, ERROR. BURN reads `<cumulative output
+tokens>o/5h:<tokens in the current 5h bucket>`.)
 
 **Status:** Fleetflare runs a real fleet daily across several repositories.
 It is not a turnkey product — it assumes Cloudflare, GitHub, Claude Code, and
@@ -280,8 +284,9 @@ bun run bun-test    # container-level tests; needs tmux and Chromium
 
 Both test lanes matter. `bun run test` alone is half the suite.
 
-GitHub Actions runs both lanes on every pull request — see
-[docs/operations.md](docs/operations.md) for the workflows, what triggers
+GitHub Actions runs `english` on every pull request, and `check` whenever the
+diff touches the paths it watches — see
+[docs/operations.md](docs/operations.md) for both workflows and what triggers
 them, and the (now superseded) Mac-based local-ci daemon.
 
 ### Repository layout
