@@ -177,8 +177,11 @@ export const PROMPT_LINE = /^\s*❯(?!\s*\d+\.\s)(?:\s.*)?$/;
  *  `aboveAgentPanel`), so widening it here cannot swallow a real `⏺` message
  *  line from the transcript ABOVE the footer, where `⏺` always means. */
 export const AGENT_PANEL_LINE = /^\s*(?:❯\s*)?[●◯⏺]\s+\S/;
-/** How many wrapped rows of queued prompt text the input box may hold. */
-const QUEUED_TEXT_ROWS = 3;
+/** How many wrapped rows of queued prompt text the input box may hold.
+ *  Exported (issue #108 fix-first, PR #118) so activity.ts's
+ *  `extractLastVisibleLine` can skip the SAME box shape as one chrome block,
+ *  rather than re-deriving or hardcoding this bound a second time. */
+export const QUEUED_TEXT_ROWS = 3;
 
 /**
  * Fix pass B: does everything AFTER a limit block say "this turn ended, and

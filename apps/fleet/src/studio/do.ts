@@ -47,7 +47,7 @@ import {
   type SurvivalSources, type SurvivalTaskRef,
 } from "./survival-delivery";
 import {
-  nextActivity, ACTIVITY_KEY, clearActivityState,
+  nextActivity, ACTIVITY_KEY, clearActivityState, extractLastVisibleLine, truncateLine,
   backgroundShellAgeMs, BACKGROUND_SHELL_STALE_MS,
   type Activity, type ActivityStorage, type FrameVerdict, type HookHeartbeat,
 } from "./activity";
@@ -4273,6 +4273,23 @@ export async function runShipTickWithObservation(
   // not happen in production, defended anyway).
   if (result.paneFrame !== undefined) {
     await applyMemberAlerts(deps, storage, recordStudioFn, result.paneFrame, result.memguardKills ?? []);
+  }
+
+  // Issue #108 (#70 ask 4 remainder) — the lead's last visible message line,
+  // same "independent of every branch above" placement as activity/member
+  // alerts, right beside them. Rides mergeObserved's own read-patch-write
+  // (no separate DO key, no eager recordStudioFn call here — see
+  // Observed.lastMessageLine's own doc comment for why): the existing 300s
+  // mirrorBurnToRegistry cadence (or a transition-triggered recordStudioFn
+  // elsewhere in this function) is what carries it to D1.
+  //
+  // Finding 1 (post-ship code review) — redactSecrets runs on the FULL,
+  // untruncated line, truncateLine only after: the same order grid.ts's
+  // scrubPreview uses, and for the same reason (a secret straddling the
+  // truncation boundary must still be caught whole).
+  if (result.paneFrame !== undefined) {
+    const line = extractLastVisibleLine(result.paneFrame);
+    await mergeObserved(storage, { lastMessageLine: line === null ? null : truncateLine(redactSecrets(line)) });
   }
 
   const now = deps.now().toISOString();

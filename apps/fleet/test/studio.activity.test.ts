@@ -8,7 +8,7 @@
 import { describe, it, expect } from "vitest";
 import {
   readActivityFrame, nextActivity, clearActivityState, ACTIVITY_KEY, type Activity,
-  parseHookHeartbeat, type HookHeartbeat,
+  parseHookHeartbeat, type HookHeartbeat, extractLastVisibleLine, LAST_LINE_MAX_CHARS,
   backgroundShellAgeMs, BACKGROUND_SHELL_STALE_MS,
 } from "../src/studio/activity";
 import { MEMBERS_TICKING_KEY } from "../src/studio/failover";
@@ -262,6 +262,197 @@ describe("readActivityFrame — idle", () => {
 describe("readActivityFrame — unknown", () => {
   it("DEAD_FRAME (claude's last frame, dead, above a bash prompt) reads unknown: claude not on screen", () => {
     expect(readActivityFrame(DEAD_FRAME)).toEqual({ kind: "unknown", reason: "claude not on screen" });
+  });
+});
+
+// Issue #108 (#70 ask 4 remainder) — the lead's last VISIBLE message line,
+// PURE extraction from one pane frame. Reuses every chrome pattern this file
+// already imports/defines to decide "is this the lead's status chrome" —
+// never a fresh copy of the same detection.
+describe("extractLastVisibleLine", () => {
+  const IDLE_INPUT_BOX = ["", "─".repeat(68), "❯ ", "─".repeat(68), "  ⏵⏵ bypass permissions on (shift+tab to cycle)"];
+
+  it("a working frame with real assistant/tool-output text above the footer returns the last non-blank content line, trimmed", () => {
+    const frame = [
+      "⏺ Done (90 tool uses · 281.2k tokens · 18m 53s)",
+      "",
+      "✻ Cogitating… (3s · esc to interrupt)",
+      "",
+      "─".repeat(68),
+      "❯ ",
+      "─".repeat(68),
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("⏺ Done (90 tool uses · 281.2k tokens · 18m 53s)");
+  });
+
+  it("an idle frame whose content above the input box is blank/only chrome returns null", () => {
+    const frame = ["", ...IDLE_INPUT_BOX].join("\n");
+    expect(extractLastVisibleLine(frame)).toBeNull();
+  });
+
+  it("an empty frame returns null", () => {
+    expect(extractLastVisibleLine("")).toBeNull();
+    expect(extractLastVisibleLine("   \n  \n")).toBeNull();
+  });
+
+  // Finding 1 (post-ship code review) — truncation moved OUT of this pure
+  // extractor entirely (see `truncateLine`'s own doc comment for why): a
+  // content line longer than LAST_LINE_MAX_CHARS must come back whole, so
+  // do.ts can redact the FULL line before truncating it, never the reverse.
+  it("a content line longer than LAST_LINE_MAX_CHARS is returned whole, untruncated", () => {
+    const long = "x".repeat(250);
+    const frame = [long, ...IDLE_INPUT_BOX].join("\n");
+    const result = extractLastVisibleLine(frame);
+    expect(result).toBe(long);
+    expect(result?.length).toBe(250);
+    expect(result?.length).toBeGreaterThan(LAST_LINE_MAX_CHARS);
+  });
+
+  it("a real content line sitting directly above the idle input box is returned, the box itself skipped", () => {
+    const frame = ["Some real message here.", ...IDLE_INPUT_BOX].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Some real message here.");
+  });
+
+  // Finding 2 (post-ship code review) — the chrome-skip coverage below never
+  // exercised a live status/spinner line, a turn-ended row, the
+  // waiting-members row, the question-modal shape, or the "no footer at all"
+  // fallback branch. Each fixture puts the real answer directly BEHIND the
+  // chrome line under test, proving the chrome itself is skipped rather than
+  // returned as "the message".
+  it("skips a live status/spinner line (SPINNER_TIMER_LINE shape) sitting above the idle input box", () => {
+    const frame = [
+      "Real message before the spinner.",
+      "✻ Cogitating… (3s · esc to interrupt)",
+      ...IDLE_INPUT_BOX,
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message before the spinner.");
+  });
+
+  it("skips a TURN_ENDED_LINE row ('✻ Cooked for 36m 35s') sitting above the idle input box", () => {
+    const frame = [
+      "Real message before the turn-ended row.",
+      "✻ Cooked for 36m 35s",
+      ...IDLE_INPUT_BOX,
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message before the turn-ended row.");
+  });
+
+  it("skips a WAITING_MEMBERS_LINE row ('✻ Waiting for 2 background agents to finish')", () => {
+    const frame = [
+      "Real message before waiting on members.",
+      "✻ Waiting for 2 background agents to finish",
+      "",
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message before waiting on members.");
+  });
+
+  // Only the modal's own block-start rule and footer are chrome this
+  // function skips (its own doc comment); a real question/option line
+  // between them is ordinary content this narrow function does not also
+  // recognise, so this fixture keeps the modal shape to just those two
+  // lines — the ones the finding asks this function to prove it skips.
+  it("skips a question-modal block (MODAL_BLOCK_START + MODAL_FOOTER_LINE), no footer chrome present", () => {
+    const frame = [
+      "Real message before the question.",
+      "▔".repeat(68),
+      "   Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message before the question.");
+  });
+
+  it("footerAtBottom's 'no footer found' fallback: a frame with no recognisable footer at all still skips its own trailing chrome line", () => {
+    const frame = [
+      "Real message with no footer anywhere below it.",
+      "✻ Cooked for 36m 35s",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message with no footer anywhere below it.");
+  });
+
+  // Issue #108 fix-first (PR #118, maestro review) — the idle input box is
+  // ONE chrome block (open rule, `❯` row, up to QUEUED_TEXT_ROWS wrapped
+  // continuation rows, close rule), not three independently-matched line
+  // patterns. The wrapped continuation rows match neither RULE_LINE nor
+  // PROMPT_LINE — a line-by-line scan alone surfaces one of THEM as "the
+  // lead's last message" instead of skipping the whole box, which can leak
+  // queued/pasted operator text (secret-shaped tokens split across rows
+  // included — see the next test) onto `fleet ls --json`.
+  const RULE = "─".repeat(68);
+
+  it("an idle input box with wrapped continuation rows is skipped as ONE block, not scanned row by row", () => {
+    const frame = [
+      "Real message above the box.",
+      "",
+      RULE,
+      "❯ some queued",
+      "text that wraps",
+      "across two rows",
+      RULE,
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message above the box.");
+  });
+
+  it("a secret-shaped token split across two continuation rows is never returned, even though neither half matches redact.ts's own pattern alone", () => {
+    const row1 = "sk-ant-";
+    const row2 = "api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    // Confirm the split genuinely defeats redact.ts's ANTHROPIC_KEY_RE
+    // (/sk-ant-[A-Za-z0-9_-]+/) per row before relying on it below.
+    expect(/sk-ant-[A-Za-z0-9_-]+/.test(row1)).toBe(false);
+    expect(/sk-ant-[A-Za-z0-9_-]+/.test(row2)).toBe(false);
+    const frame = [
+      "Real message above the box.",
+      "",
+      RULE,
+      "❯ ",
+      row1,
+      row2,
+      RULE,
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message above the box.");
+  });
+
+  it("an idle input box with exactly QUEUED_TEXT_ROWS (3) continuation rows is still skipped as ONE block, not scanned row by row", () => {
+    const row1 = "sk-ant-";
+    const row2 = "api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    // Confirm the split genuinely defeats redact.ts's ANTHROPIC_KEY_RE
+    // (/sk-ant-[A-Za-z0-9_-]+/) per row before relying on it below.
+    expect(/sk-ant-[A-Za-z0-9_-]+/.test(row1)).toBe(false);
+    expect(/sk-ant-[A-Za-z0-9_-]+/.test(row2)).toBe(false);
+    const frame = [
+      "Real message above the box.",
+      "",
+      RULE,
+      "❯ ",
+      row1,
+      row2,
+      "final continuation row",
+      RULE,
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message above the box.");
+  });
+
+  // Fallback contract (documented on extractLastVisibleLine's own doc
+  // comment): when no well-formed closing rule is found within
+  // QUEUED_TEXT_ROWS of the opening rule — a corrupted/truncated capture —
+  // this falls back to the OLD per-line chrome scan for the whole span
+  // rather than inventing new "not a real box" handling. That means a
+  // continuation row of a genuinely malformed box can still surface as "the
+  // message" here; this is a known, accepted edge case (a malformed capture
+  // already fails other detectors, e.g. `endsInIdleInputBox`), not a silent
+  // regression.
+  it("a malformed/unclosed idle input box (no closing rule within bound) falls back to the old per-line chrome scan", () => {
+    const frame = [
+      "Real message above malformed box.",
+      RULE,
+      "❯ ",
+      "continuation row one, never closed",
+      "continuation row two, never closed",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("continuation row two, never closed");
   });
 });
 

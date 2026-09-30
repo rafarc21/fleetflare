@@ -14,7 +14,7 @@
  */
 import {
   footerAtBottom, aboveAgentPanel, TURN_ENDED_LINE, RULE_LINE, PROMPT_LINE, AGENT_PANEL_LINE,
-  MODAL_FOOTER_LINE, MODAL_BLOCK_START, MEMBERS_TICKING_KEY,
+  MODAL_FOOTER_LINE, MODAL_BLOCK_START, MEMBERS_TICKING_KEY, QUEUED_TEXT_ROWS,
   // Issue #311 — cleared alongside ACTIVITY_KEY/MEMBERS_TICKING_KEY by
   // clearActivityState, below. Defined in failover.ts, not member-alerts.ts
   // — see that constant's own doc comment for why.
@@ -196,6 +196,105 @@ export function readActivityFrame(frame: string): FrameVerdict {
     return { kind: "idle" };
   }
   return { kind: "unknown", reason: "unrecognised frame" };
+}
+
+/** Board issue #108 (#70 ask 4 remainder) — a rendered `lastLine` this long
+ *  would dwarf everything else in a `fleet ls --json` row; truncated with a
+ *  trailing `…` past this many characters. Applied by `truncateLine`, below,
+ *  and ONLY ever at the do.ts write boundary, AFTER `redactSecrets` has
+ *  already run on the full, untruncated line (see `truncateLine`'s own doc
+ *  comment for why the order matters). */
+export const LAST_LINE_MAX_CHARS = 200;
+
+/**
+ * Board issue #108 (#70 ask 4 remainder) — the lead's last VISIBLE message
+ * line, so a coordinator reading `fleet ls --json` can tell roughly WHAT the
+ * lead is doing/saying without attaching to the pane. PURE, no redaction and
+ * no truncation here — both belong at the write boundary, do.ts's ship tick,
+ * in that order: `redactSecrets` first, `truncateLine` second (grid.ts's
+ * scrubPreview already establishes this exact order and reasoning: redacting
+ * the full value before slicing is what keeps a secret straddling the slice
+ * boundary from surviving the cut half-caught — see that function's own doc
+ * comment).
+ *
+ * Reuses EVERY chrome pattern this file already imports/defines to decide
+ * "is this the lead's own status chrome" rather than a second, drifting
+ * definition of the same question: `footerAtBottom` anchors the search to
+ * content ABOVE the bottom footer — the same span `readActivityFrame` calls
+ * `head`, MINUS the footer line itself (which `head`, via `aboveAgentPanel`,
+ * still includes but this function deliberately never returns as "the
+ * lead's message") — then walks backward skipping blank lines, a candidate
+ * status line, a turn-ended row, the idle input box, the waiting-members
+ * line, and a select-style modal's own footer/block-start — every one of
+ * these is chrome `readActivityFrame` itself already treats as "not the
+ * lead's own message". The first surviving line is the answer.
+ *
+ * Issue #108 fix-first (PR #118, maestro review) — the idle input box is
+ * treated as ONE chrome block (its opening rule through its closing rule,
+ * inclusive), not three independently-matched line patterns: the box's own
+ * 1-3 wrapped continuation rows (`endsInIdleInputBox`'s `QUEUED_TEXT_ROWS`,
+ * failover.ts) match neither RULE_LINE nor PROMPT_LINE, so scanning line by
+ * line alone could surface queued/pasted operator text — a secret-shaped
+ * token split across two rows included, defeating redact.ts's per-line
+ * pattern on each half — as "the lead's last message". The LAST such box
+ * (closest to the footer, the live one) is found first and skipped whole; if
+ * its closing rule cannot be found within QUEUED_TEXT_ROWS, the capture is
+ * treated as malformed and this falls back to the old per-line scan.
+ */
+export function extractLastVisibleLine(frame: string): string | null {
+  const trimmed = frame.replace(/\s+$/, "");
+  if (trimmed === "") return null;
+  const lines = trimmed.split("\n");
+  const footerIdx = footerAtBottom(lines);
+  const content = footerIdx >= 0 ? lines.slice(0, footerIdx) : lines;
+
+  // Find the idle input box closest to the footer and, if well-formed, skip
+  // it as one block by starting the per-line scan above its opening rule.
+  let scanEnd = content.length - 1;
+  for (let j = content.length - 2; j >= 0; j--) {
+    if (!RULE_LINE.test(content[j]) || !PROMPT_LINE.test(content[j + 1] ?? "")) continue;
+    for (let k = j + 2; k < content.length && k <= j + 2 + QUEUED_TEXT_ROWS; k++) {
+      if (RULE_LINE.test(content[k])) { scanEnd = j - 1; break; }
+    }
+    break;
+  }
+
+  for (let i = scanEnd; i >= 0; i--) {
+    const line = content[i];
+    if (line.trim() === "") continue;
+    if (isCandidateStatusLine(line)) continue;
+    if (RULE_LINE.test(line)) continue;
+    if (PROMPT_LINE.test(line)) continue;
+    if (TURN_ENDED_LINE.test(line)) continue;
+    if (WAITING_MEMBERS_LINE.test(line)) continue;
+    if (MODAL_FOOTER_LINE.test(line)) continue;
+    if (MODAL_BLOCK_START.test(line)) continue;
+    return line.trim();
+  }
+  return null;
+}
+
+/**
+ * Board issue #108, Finding 1 (post-ship code review) — the truncation half
+ * of `extractLastVisibleLine`'s old, wrong-order contract, moved to run
+ * AFTER `redactSecrets` at the do.ts call site rather than before it inside
+ * this file's own pure extractor. Slicing before redacting is only
+ * accidentally safe today because every `redact.ts` pattern is an
+ * open-ended quantifier (`ghs_[A-Za-z0-9]+`, `sk-ant-[A-Za-z0-9_-]+`, etc) —
+ * a truncated match still gets caught in practice — but a future
+ * FIXED-length secret shape would silently leak a partial token through
+ * this exact field under that order. Mirrors grid.ts's scrubPreview:
+ * redact the full value first, slice second.
+ *
+ * `.slice` here is UTF-16-code-unit-based, not surrogate-pair-aware — a
+ * truncation boundary could in principle land inside an astral-plane emoji
+ * and split it. Left as-is: every glyph claude's own chrome/prose actually
+ * draws is BMP, so this is a cosmetic, unmeasured edge case, not worth the
+ * extra complexity `transcript.ts`'s `trimPartialLeadingUtf8` pays for a
+ * genuinely-measured one.
+ */
+export function truncateLine(s: string): string {
+  return s.length > LAST_LINE_MAX_CHARS ? `${s.slice(0, LAST_LINE_MAX_CHARS)}…` : s;
 }
 
 /**

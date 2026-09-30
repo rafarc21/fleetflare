@@ -1176,8 +1176,15 @@ describe("lsJsonRows (issue #70)", () => {
     const r = row({ id: "demo--web-studio", repoSlug: "example-org/demo",
       observed: { ...emptyObserved(), activity: act({ state: "working", since: "2026-09-25T12:01:20.000Z" }) } });
     expect(r).toEqual({ id: "demo--web-studio", state: "running", repo: "example-org/demo",
-      lead: "working", leadSince: "2026-09-25T12:01:20.000Z", limitResetsAt: null, activity: "WORKING 40s" });
+      lead: "working", leadSince: "2026-09-25T12:01:20.000Z", limitResetsAt: null, activity: "WORKING 40s",
+      lastLine: null });
     expect(row({ observed: { ...emptyObserved(), activity: act({ state: "waiting-question" }) } }).lead).toBe("waiting-question");
+  });
+
+  it("issue #108: observed.lastMessageLine flows through to row.lastLine unchanged", () => {
+    const r = row({ observed: { ...emptyObserved(), lastMessageLine: "Fixed the bug, running tests now." } });
+    expect(r.lastLine).toBe("Fixed the bug, running tests now.");
+    expect(row({}).lastLine).toBeNull();
   });
 
   it("limit with its reset time; modal when the limit menu is up", () => {
