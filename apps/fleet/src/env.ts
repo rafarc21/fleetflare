@@ -113,6 +113,12 @@ export interface Env {
    */
   FLEET_WRITE_PROXY_REPOS?: string;
   /**
+   * Issue #34, optional, NOT a secret: repos (`owner/name`, comma separated)
+   * whose DEFAULT branch the write proxy may push. Unset = the proxy refuses
+   * every update, force or delete of a repo's default branch.
+   */
+  FLEET_WRITE_PROXY_DEFAULT_BRANCH_REPOS?: string;
+  /**
    * Issue #7, PAT fleets only: a read-only fine-grained PAT handed to studios
    * in proxy mode. GITHUB_READ_TOKEN_<OWNER> (same naming as
    * GITHUB_TOKEN_<OWNER>) wins for that owner. Unset = the studio gets no

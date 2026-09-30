@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Env } from "../src/env";
 import {
-  writeProxyOn, writeModeFor, resolveWriteMode, readTokenEnvName, studioReadToken, studioCredential,
+  writeProxyOn, writeModeFor, resolveWriteMode, defaultBranchPushAllowed, readTokenEnvName, studioReadToken, studioCredential,
   STUDIO_READ_PERMISSIONS, containerToken,
 } from "../src/write-proxy/mode";
 
@@ -154,3 +154,12 @@ describe("containerToken", () => {
     expect(await containerToken(off, REPO, "example-org/blueprint", { contents: "read" }, mint)).toBe("write");
   });
 });
+
+describe("defaultBranchPushAllowed (issue #34)", () => {
+  it("off unless the repo is on FLEET_WRITE_PROXY_DEFAULT_BRANCH_REPOS", () => {
+    expect(defaultBranchPushAllowed({}, REPO)).toBe(false);
+    expect(defaultBranchPushAllowed({ FLEET_WRITE_PROXY_DEFAULT_BRANCH_REPOS: "example-org/other" }, REPO)).toBe(false);
+    expect(defaultBranchPushAllowed({ FLEET_WRITE_PROXY_DEFAULT_BRANCH_REPOS: "Example-Org/Demo" }, REPO)).toBe(true);
+  });
+});
+

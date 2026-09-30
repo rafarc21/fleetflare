@@ -43,6 +43,30 @@ export interface GitProxyPorts {
    *  upload-pack, write for receive-pack. Adds the Authorization header. */
   upstream: (url: string, init: RequestInit, access: "read" | "write", repo: string) => Promise<Response>;
   check: LeakCheck;
+  /** Issue #34: the repo's default branch name, from GitHub. Throws when it
+   *  cannot be read -- every push is then refused (fail closed). */
+  defaultBranch: (repo: string) => Promise<string>;
+  /** Issue #34: operator config (never a request field) lifting the
+   *  default-branch refusal for this repo. */
+  allowDefaultBranch: (repo: string) => boolean;
+}
+
+/**
+ * Issue #34: default-branch lookups, cached per repo for `ttlMs`. A failed
+ * lookup is never cached, so the next push asks again.
+ */
+export function defaultBranchCache(
+  lookup: (repo: string) => Promise<string>, ttlMs: number, now: () => number = Date.now,
+): (repo: string) => Promise<string> {
+  const cache = new Map<string, { branch: string; at: number }>();
+  return async (repo) => {
+    const key = repo.toLowerCase();
+    const hit = cache.get(key);
+    if (hit && now() - hit.at <= ttlMs) return hit.branch;
+    const branch = await lookup(repo);
+    cache.set(key, { branch, at: now() });
+    return branch;
+  };
 }
 
 const text = (body: string, status: number, headers: Record<string, string> = {}) =>
@@ -165,6 +189,23 @@ async function receivePack(req: Request, ports: GitProxyPorts, repo: string, ups
       headers: { "content-type": "application/x-git-receive-pack-result", "cache-control": "no-cache" },
     });
   };
+
+  // Issue #34: no push moves the default branch -- update, force or delete.
+  // Checked before the pack is read: cheapest refusal first.
+  if (!ports.allowDefaultBranch(repo)) {
+    let branch: string;
+    try {
+      branch = await ports.defaultBranch(repo);
+    } catch {
+      return refuse(`fleet: write proxy: cannot confirm the default branch of ${repo} -- refusing this push (fail closed)`, 403);
+    }
+    const target = `refs/heads/${branch}`;
+    if (refs.includes(target)) {
+      return refuse(
+        `fleet: write proxy: ${target} is the default branch -- studios never push it; open a PR`, 403,
+      );
+    }
+  }
 
   let texts: string;
   try {

@@ -8,7 +8,9 @@ import { leakGuard } from "../board/leak";
 import { realLeakDeps } from "../board/routes";
 import { listStudios } from "../studio/registry";
 import { mintRepoToken, repoOwner, repoToken, resolveRepoAuthKind } from "../github/auth";
-import { handleGitProxy } from "./git-route";
+import { defaultBranchCache, handleGitProxy } from "./git-route";
+import { getDefaultBranch } from "../github/api";
+import { defaultBranchPushAllowed } from "./mode";
 import { workerWriteToken } from "./gh-route";
 
 async function workerReadToken(env: Env, repo: string): Promise<string> {
@@ -16,11 +18,20 @@ async function workerReadToken(env: Env, repo: string): Promise<string> {
   return mintRepoToken(env, repo, { permissions: { contents: "read" } });
 }
 
+/** Issue #34: per isolate, 5 minutes; the Worker's env is fixed per isolate. */
+let branchLookup: ((repo: string) => Promise<string>) | null = null;
+const DEFAULT_BRANCH_TTL_MS = 5 * 60_000;
+
 export async function handleFleetGit(req: Request, env: Env): Promise<Response> {
   return handleGitProxy(req, {
     rows: () => listStudios(env),
     defaultRepo: env.AGENT_REPO,
     check: leakGuard(realLeakDeps(env, (repo) => workerReadToken(env, repo))),
+    defaultBranch: (repo) => {
+      branchLookup ??= defaultBranchCache(async (r) => getDefaultBranch(await workerReadToken(env, r), r), DEFAULT_BRANCH_TTL_MS);
+      return branchLookup(repo);
+    },
+    allowDefaultBranch: (repo) => defaultBranchPushAllowed(env, repo),
     upstream: async (url, init, access, repo) => {
       const token = access === "write"
         // Not narrowed: a push touching .github/workflows needs the App's

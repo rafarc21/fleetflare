@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { handleGitProxy, PUSH_BODY_CAP, type GitProxyPorts } from "../src/write-proxy/git-route";
+import { handleGitProxy, PUSH_BODY_CAP, defaultBranchCache, type GitProxyPorts } from "../src/write-proxy/git-route";
 import { leakGuard } from "../src/board/leak";
 import { pkt, FLUSH, ZERO_OID } from "../src/write-proxy/pktline";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
@@ -73,7 +73,10 @@ const ADVERT = concat([
   FLUSH,
 ]);
 
-async function setup(opts: { list?: string | Error; repoSlug?: string | null; isPrivate?: boolean } = {}) {
+async function setup(opts: {
+  list?: string | Error; repoSlug?: string | null; isPrivate?: boolean;
+  defaultBranch?: string | Error; allowDefaultBranch?: boolean;
+} = {}) {
   const token = mintSpawnToken();
   const upstreamCalls: { url: string; method: string; access: string; body: Uint8Array | null; headers: Headers }[] = [];
   const ports: GitProxyPorts = {
@@ -91,6 +94,12 @@ async function setup(opts: { list?: string | Error; repoSlug?: string | null; is
       if (url.endsWith("git-receive-pack")) return new Response("upstream-report", { headers: { "content-type": "application/x-git-receive-pack-result" } });
       return new Response("upload-pack-reply", { headers: { "content-type": "application/x-git-upload-pack-advertisement" } });
     }),
+    defaultBranch: async () => {
+      const b = opts.defaultBranch ?? "main";
+      if (b instanceof Error) throw b;
+      return b;
+    },
+    allowDefaultBranch: () => opts.allowDefaultBranch ?? false,
     check: leakGuard({
       isPrivate: async () => opts.isPrivate ?? false,
       fetchDenylist: async () => {
@@ -306,3 +315,73 @@ describe("handleGitProxy: receive-pack", () => {
     expect(upstreamCalls).toHaveLength(1);
   });
 });
+
+// Issue #34: the proxy sees every ref a push moves, so it refuses the default
+// branch itself -- update, force, delete -- which the in-container wrapper
+// cannot guarantee (rebase -x, hooks, real git by path). Fail closed when the
+// default branch cannot be read. Only operator config lifts it.
+describe("handleGitProxy: default branch (issue #34)", () => {
+  it("a push to the default branch is refused with a clear message; upstream never called", async () => {
+    const { push, upstreamCalls } = await setup();
+    const text = await decode(await push(await pushBody({ ref: "refs/heads/main" })));
+    expect(text).toContain("ng refs/heads/main fleet: write proxy: refs/heads/main is the default branch");
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  it("deleting the default branch is refused", async () => {
+    const { push, upstreamCalls } = await setup();
+    expect(await decode(await push(await pushBody({ del: true, ref: "refs/heads/main" })))).toContain("is the default branch");
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  it("the repo's real default branch is what counts, not the word main", async () => {
+    const { push, upstreamCalls } = await setup({ defaultBranch: "trunk" });
+    expect(await decode(await push(await pushBody({ ref: "refs/heads/trunk" })))).toContain("is the default branch");
+    expect(await (await push(await pushBody({ ref: "refs/heads/main" }))).text()).toBe("upstream-report");
+    expect(upstreamCalls).toHaveLength(1);
+  });
+
+  it("default branch unknown: every push refused (fail closed)", async () => {
+    const { push, upstreamCalls } = await setup({ defaultBranch: new Error("github down") });
+    const text = await decode(await push(await pushBody()));
+    expect(text).toContain("ng refs/heads/feature fleet: write proxy: cannot confirm the default branch");
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  it("no report-status requested: a plain 403", async () => {
+    const { push } = await setup();
+    const res = await push(await pushBody({ ref: "refs/heads/main", caps: "ofs-delta" }));
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("default branch");
+  });
+
+  it("operator override (config) lets it through, lookup not needed", async () => {
+    const { push, upstreamCalls } = await setup({ allowDefaultBranch: true, defaultBranch: new Error("never asked") });
+    expect(await (await push(await pushBody({ ref: "refs/heads/main" }))).text()).toBe("upstream-report");
+    expect(upstreamCalls).toHaveLength(1);
+  });
+
+  it("a feature push is unaffected (guard on)", async () => {
+    const { push, upstreamCalls } = await setup();
+    expect(await (await push(await pushBody())).text()).toBe("upstream-report");
+    expect(upstreamCalls).toHaveLength(1);
+  });
+});
+
+describe("defaultBranchCache (issue #34)", () => {
+  it("one lookup per repo per TTL; a failure is never cached", async () => {
+    let now = 0;
+    let calls = 0;
+    let fail = true;
+    const get = defaultBranchCache(async () => { calls++; if (fail) throw new Error("502"); return "main"; }, 60_000, () => now);
+    await expect(get("o/r")).rejects.toThrow("502");
+    fail = false;
+    expect(await get("o/r")).toBe("main");
+    expect(await get("O/R")).toBe("main");
+    expect(calls).toBe(2);
+    now = 60_001;
+    expect(await get("o/r")).toBe("main");
+    expect(calls).toBe(3);
+  });
+});
+
