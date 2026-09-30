@@ -3354,13 +3354,26 @@ export async function clearForceMappedAccount(
   if (existing == null) return;
   if (
     existing.claudeAccount == null && existing.claudeAccountMovedAt == null &&
-    existing.claudeAccountMovedVia == null && existing.claudeAccountMovedBlock == null
+    existing.claudeAccountMovedVia == null && existing.claudeAccountMovedBlock == null &&
+    // Review round 2 (maestro review of PR #135), finding 2: these two must
+    // be clear too, not just the three above — see the write below.
+    existing.borrowedAccount == null && existing.borrowedFromRepo == null
   ) {
     return;
   }
   const cleared: StudioStatus = {
     ...existing,
     claudeAccount: null, claudeAccountMovedAt: null, claudeAccountMovedVia: null, claudeAccountMovedBlock: null,
+    // Review round 2 (maestro review of PR #135), finding 2 — left set
+    // before this fix: a stale `borrowedAccount` surviving a forced-mapped
+    // recycle made the NEXT hand-back check (failover.ts, gated on exactly
+    // this field) fire spuriously against a studio that was never actually
+    // borrowing anything any more, killing the fresh lead this recycle just
+    // launched out from under it. Cleared alongside the other three
+    // "we're on a non-default account" fields for the identical reason: a
+    // forced-mapped recycle puts the studio back on its plain mapped slot,
+    // not a failover-moved (or borrowed) one.
+    borrowedAccount: null, borrowedFromRepo: null,
   };
   await storage.put(STATUS_KEY, cleared);
   await recordStudioFn(cleared);
@@ -3381,8 +3394,14 @@ export async function launchAccountOrRefuse(
   if (launch.ok) {
     // #273 r2: flag off, an earlier failover's recorded account is stale — this
     // launch is on the mapped one, so the row stops naming the old one.
+    // Review round 2 (maestro review of PR #135), finding 2: `borrowedAccount`/
+    // `borrowedFromRepo` clear alongside it — same stale-hand-back hazard
+    // `clearForceMappedAccount`'s own identical fix addresses (that doc
+    // comment has the full reasoning): a stale borrow flag surviving a
+    // flag-off launch would make the next hand-back check fire against a
+    // studio that is not actually borrowing anything any more.
     if (!autoFailoverOn(env) && existing?.claudeAccount != null) {
-      const cleared: StudioStatus = { ...existing, claudeAccount: null };
+      const cleared: StudioStatus = { ...existing, claudeAccount: null, borrowedAccount: null, borrowedFromRepo: null };
       await storage.put(STATUS_KEY, cleared);
       await recordStudioFn(cleared);
     }
