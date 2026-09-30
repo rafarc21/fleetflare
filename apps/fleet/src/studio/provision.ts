@@ -554,6 +554,13 @@ export const OPERATION_STALE_MS = 15 * 60 * 1000;
  * un-consumed fresh-session request never goes stale on its own -- an
  * operator who asked for fresh a week ago still wants fresh, not a silent
  * expiry back to resume.
+ *
+ * Issue #115: there is a SECOND clearing path besides the confirmed-`running`
+ * one above -- an explicit `cfg.cancelFreshSession === true` cancel, handled
+ * in `provisionWithStorage`, clears this key UNCONDITIONALLY and FIRST,
+ * before `runProvision` ever runs, regardless of whether any provision ever
+ * reaches `state: "running"`. See the cancel's own call-site comment in
+ * `provisionWithStorage` for the mechanism.
  */
 export const FRESH_SESSION_PENDING_KEY = "freshSessionPending";
 
