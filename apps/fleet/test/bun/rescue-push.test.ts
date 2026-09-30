@@ -2658,6 +2658,39 @@ describe("#80 — HEAD already reachable from origin is nothing to rescue; a pus
     expect(r.out).toContain(RESCUE_PUSHED_PREFIX);
   });
 
+  /** Production shape (#49): a `--depth 1` single-branch clone of main. The
+   *  lead branches task/pr, commits A, pushes it (no tracking ref: the clone
+   *  maps main only). Then origin's task/pr moves to B, A's child. */
+  function shallowAtOldTip(): { sroot: string; scheckout: string } {
+    const sroot = join(dir, "workspace-shallow-80");
+    const scheckout = join(sroot, REPO);
+    mkdirSync(sroot, { recursive: true });
+    sh(`git clone -q --depth 1 file://${origin} ${scheckout}`);
+    sh(`cd ${scheckout} && git checkout -q -b task/pr && git commit -q --allow-empty -m A && git push -q origin HEAD:refs/heads/task/pr`);
+    sh(`cd ${checkout} && git fetch -q origin task/pr && git checkout -q -b task/pr FETCH_HEAD && ` +
+      `git commit -q --allow-empty -m B && git push -q origin HEAD:refs/heads/task/pr`);
+    return { sroot, scheckout };
+  }
+
+  test("depth-1 clone, HEAD an ancestor of origin's moved tip → RESCUE_CLEAN; the check fetch moves no remote-tracking ref", () => {
+    const { sroot, scheckout } = shallowAtOldTip();
+    // A wide fetch refspec, as a full clone has: a fetch naming task/pr would
+    // opportunistically write refs/remotes/origin/task/pr unless --refmap= .
+    sh(`git -C ${scheckout} config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'`);
+    const r = sh(rescuePushCmd(REPO, STUDIO, sroot));
+    expect(bare(r.out)).toBe(RESCUE_CLEAN);
+    expect(sh(`git -C ${scheckout} for-each-ref refs/remotes/origin/task/pr refs/fleet-rescue-check/`).out).toBe("");
+  });
+
+  test("depth-1 clone: the tip fetch FAILS while ls-remote works → push runs, never RESCUE_CLEAN", () => {
+    const { sroot, scheckout } = shallowAtOldTip();
+    // A held lock on the scratch ref: ls-remote answers, the fetch cannot write.
+    sh(`mkdir -p ${scheckout}/.git/refs/fleet-rescue-check && touch ${scheckout}/.git/refs/fleet-rescue-check/tip.lock`);
+    const r = sh(rescuePushCmd(REPO, STUDIO, sroot));
+    expect(bare(r.out)).not.toBe(RESCUE_CLEAN);
+    expect(r.out).toMatch(new RegExp(`^(${RESCUE_PUSHED_PREFIX}|${RESCUE_FAILED_PREFIX}) `, "m"));
+  });
+
   for (const [label, cmdFn] of RESCUE_CMDS) {
     test(`${label}: a push KILLED by its timeout still names a reason on stderr`, () => {
       installSlowPostReceiveHook(3);

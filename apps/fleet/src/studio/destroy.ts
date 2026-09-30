@@ -82,7 +82,7 @@ export interface DestroyGuard {
   lastSyncedAt?: () => Promise<Date | null | undefined>;
 }
 
-function destroyRefusal(id: string, lastSyncedAt: Date | null | undefined, now: Date): string {
+export function destroyRefusal(id: string, lastSyncedAt: Date | null | undefined, now: Date): string {
   return DESTROY_REFUSED_PREFIX +
     `the container did not answer an ${CONTAINER_PROBE_MS / 1000}s probe, so session sync, rescue-push and ` +
     "learning harvest cannot run. " + recycleCostLine(lastSyncedAt, now, "the next provision") + " " +
@@ -110,7 +110,7 @@ function destroyRescueFailedRefusal(id: string, err: RescuePushFailedError): str
  *  deadline): unknown state, refused like a confirmed failure. Offers only
  *  --discard-unsynced, like every refusal: --force also skips the
  *  open-board-task check, so it is never the suggested way past. */
-function destroyRescueUnconfirmedRefusal(id: string, reason: string, lastSyncedAt: Date | null | undefined, now: Date): string {
+export function destroyRescueUnconfirmedRefusal(id: string, reason: string, lastSyncedAt: Date | null | undefined, now: Date): string {
   return DESTROY_REFUSED_PREFIX +
     `rescue-push could not confirm this studio's work was saved before destroy (${reason}); ` +
     "unpushed work may be lost. " + recycleCostLine(lastSyncedAt, now, "the next provision") + " " +
