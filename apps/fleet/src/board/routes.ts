@@ -853,9 +853,11 @@ function upstreamFailure(err: unknown, method: string, pathname: string): Respon
 // being exact about what did NOT change with it. A studio still writes no
 // GitHub label: it holds a spawn token, not a GitHub credential, and the only
 // thing that ever calls the labels API is this Worker. What it may now do is
-// ASK the Worker to move ITS OWN task within a three-state allowlist
-// (board.ts's LEAD_TASK_STATES) that deliberately excludes `completed`. The
-// operator surface above keeps the full vocabulary, behind Cloudflare Access.
+// ASK the Worker to move ITS OWN task within a four-state allowlist
+// (board.ts's LEAD_TASK_STATES — working, input_required, awaiting_merge,
+// failed; board issue #110 added the third of those) that deliberately
+// excludes `completed`. The operator surface above keeps the full
+// vocabulary, behind Cloudflare Access.
 
 /** `/fleet/tasks`, optionally one task number, optionally one action. Same
  *  grammar as BOARD_ROUTE_RE above minus `adopt`, `assign` and `verify`: a

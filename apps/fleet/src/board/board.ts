@@ -863,7 +863,7 @@ export async function resolveBoardRepo(
 //      (src/studio/spawn.ts's resolveSpawnParent), never read from a request.
 //   2. A studio never writes state ITSELF. Board issue #41 narrows that from
 //      "a studio never moves a task" to "a studio never writes a LABEL": it
-//      may ASK the Worker to move its own task within a three-state allowlist
+//      may ASK the Worker to move its own task within a four-state allowlist
 //      (transitionStudioTask below), and the Worker is still the only thing
 //      that touches GitHub. Posting a result envelope still moves nothing,
 //      exactly as commentEnvelope above already refuses to.
