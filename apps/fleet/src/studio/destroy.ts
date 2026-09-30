@@ -51,6 +51,7 @@ import {
 } from "./do";
 import type { ObservedStorage } from "./observed";
 import { recycleCostLine, LIVENESS_RULE } from "./recycle-cost";
+import { TASK_STATES } from "../board/types";
 
 /** Every probe refusal starts with this — the same prefix convention as
  *  recycle's RECYCLE_REFUSED_PREFIX (recycle-cost.ts). runDestroy turns it
@@ -446,7 +447,7 @@ export async function runDestroy(
       const drifted = result.drifted ?? [];
       const driftNote = drifted.length
         ? `; ${drifted.map((n) => `#${n}`).join(", ")} ${drifted.length === 1 ? "has" : "have"} drifted state labels `
-          + "(not exactly one of submitted/working/input_required/completed/failed/canceled) — fix them by hand on GitHub"
+          + `(not exactly one of ${TASK_STATES.join("/")}) — fix them by hand on GitHub`
         : "";
       return {
         ok: false, refused: true,
