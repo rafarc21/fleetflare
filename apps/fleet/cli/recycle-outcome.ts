@@ -34,6 +34,7 @@ import { repairFailureLine } from "./repair-failure";
 // of which repair verb triggered it, so there is no reason to duplicate
 // either constant.
 import { readStatus } from "./status-poll";
+import type { StatusWithOperation } from "./status-poll";
 import { DESTROY_CLIENT_TIMEOUT_MS, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome";
 import type { StudioStatus } from "../src/studio/types";
 
@@ -257,14 +258,42 @@ export async function requestRecycle(
  *      measured incident to anchor it, exactly the kind of unfounded
  *      constant this codebase's own plan docs warn against inventing. If a
  *      real false-success incident is ever measured, that measurement is
- *      what should size the fix, not a guess made here. */
-function bringupLanded(status: StudioStatus, startedAt: Date): boolean {
+ *      what should size the fix, not a guess made here.
+ *
+ *  Board issue #149 addendum, follow-up from #139 review: the three checks
+ *  above are all about FRESHNESS of timestamps the Worker wrote — none of
+ *  them is about WHO wrote them or WHY. `checkAndRecordReadiness` (do.ts's
+ *  periodic `syncSession` tick, "Board issue #24 fix") runs on its own
+ *  schedule, independent of whether a recycle is in flight against the same
+ *  studio, and `fleet ls --fresh` can trigger an on-demand readiness check
+ *  too — neither takes or checks `OPERATION_KEY`. Either can stamp a fresh
+ *  `readiness.checkedAt` purely by coincidence of timing, with nothing to
+ *  do with THIS recycle's own bring-up. Combined with a `session.at` that
+ *  is ALSO already fresh (stamped by `provisionCore`'s own bring-up steps,
+ *  well before recycle's own post-provision readiness check even runs —
+ *  see the ordering bug this function's own review-round-2 fix above
+ *  already had to account for), a poll could land inside a window where all
+ *  three checks pass even though recycle's own operation has not finished
+ *  — is possibly still running, or about to flip the row to degraded.
+ *
+ *  `status.operationInFlight` (GET /status's own JSON body, do.ts's
+ *  `statusDetailWithStorage` — `OPERATION_KEY`/`OperationInFlight`,
+ *  src/studio/provision.ts) is written non-null for the ENTIRE span of
+ *  recycle's own atomic destroy-to-reprovision window and cleared only once
+ *  that whole operation has finished, success or throw. Once it reads
+ *  `null`, recycle's own operation is provably no longer in progress at
+ *  all — so a session/readiness pair that ALSO looks fresh at that same
+ *  instant cannot be a snapshot taken mid-operation. Requiring
+ *  `operationInFlight === null` as a fourth condition closes this
+ *  specific window without weakening any of the other three. */
+function bringupLanded(status: StatusWithOperation, startedAt: Date): boolean {
   if (status.state !== "running") return false;
   const session = status.observed?.session;
   if (!session || session.via !== "recycle") return false;
   if (new Date(session.at) < startedAt) return false;
   if (status.readiness == null) return false;
-  return new Date(status.readiness.checkedAt) >= startedAt;
+  if (new Date(status.readiness.checkedAt) < startedAt) return false;
+  return status.operationInFlight === null;
 }
 
 /** The whole point of #133, mirroring #203's own `pollAfterNoAnswer`: ask the

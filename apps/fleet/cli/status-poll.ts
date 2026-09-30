@@ -14,12 +14,22 @@
 // comment), and a status-read deadline is the same number regardless of
 // caller. Only `readStatus` itself moved; the two constants did not.
 import type { StudioStatus } from "../src/studio/types";
+import type { OperationInFlight } from "../src/studio/provision";
+
+// Board issue #149: GET /studio/:id/status's real JSON body already carries
+// `operationInFlight` (do.ts's `statusDetailWithStorage` return type,
+// ~line 3193) — it was just not previously visible to this module's own
+// `StudioStatus`-typed return value. Widening here, rather than narrowing a
+// caller's cast, keeps the type honest about what the route actually
+// returns: every caller of `readStatus` reads a real `/status` body that
+// carries this field at runtime regardless of whether the type said so.
+export type StatusWithOperation = StudioStatus & { operationInFlight: OperationInFlight | null };
 
 /** One bounded GET /studio/:id/status. Never throws: a read that did not
  *  happen is a named reason, not an exception. */
 export async function readStatus(
   url: string, headers: Record<string, string>, fetchImpl: typeof fetch, timeoutMs: number,
-): Promise<{ ok: true; status: StudioStatus } | { ok: false; why: string }> {
+): Promise<{ ok: true; status: StatusWithOperation } | { ok: false; why: string }> {
   let res: Response;
   try {
     res = await fetchImpl(url, {
@@ -31,7 +41,7 @@ export async function readStatus(
   }
   if (!res.ok) return { ok: false, why: `HTTP ${res.status} ${(await res.text().catch(() => "")).trim().slice(0, 200)}`.trim() };
   try {
-    return { ok: true, status: (await res.json()) as StudioStatus };
+    return { ok: true, status: (await res.json()) as StatusWithOperation };
   } catch {
     return { ok: false, why: `HTTP ${res.status}, but the body was not JSON` };
   }
