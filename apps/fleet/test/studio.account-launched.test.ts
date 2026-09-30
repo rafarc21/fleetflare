@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import {
-  launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch, clearForceMappedAccount,
-  refuseUnlessMappedAccountLaunchable,
+  launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch,
+  decideAccountClears, applyAccountClears, clearForceMappedAccount, refuseUnlessMappedAccountLaunchable,
 } from "../src/studio/do";
 import { withAccountDisplay } from "../src/studio/registry";
-import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
+import { STATUS_KEY, NEVER_MOVED_CTX, type StudioStorage, type OpCtx } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { MAIN_ROWS } from "./fixtures/account-rows-main";
@@ -141,7 +141,9 @@ describe("StudioDO wiring (source) — #292 r2", () => {
     const site = "({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));";
     const sites = doSrc.split("\n").filter((l) => l.includes(site));
     expect(sites.length).toBe(2);
-    const paired = doSrc.match(/const launch = await launchAccountOrRefuse\(this\.env, this\.ctx\.storage, id, this\.recordFn\(\)\);\n(    \/\/[^\n]*\n)?    \(\{ envVars: this\.envVars, envAccount: this\.envAccount \} = launchFields\(this\.env, id, spawnToken, launch\.name\)\);/g);
+    // #134 review round 2: both sites now pass `commitOkClears: false` (a
+    // trailing `, false`) — see launchAccountOrRefuse's own doc comment.
+    const paired = doSrc.match(/const launch = await launchAccountOrRefuse\(this\.env, this\.ctx\.storage, id, this\.recordFn\(\), false\);\n(    \/\/[^\n]*\n)?    \(\{ envVars: this\.envVars, envAccount: this\.envAccount \} = launchFields\(this\.env, id, spawnToken, launch\.name\)\);/g);
     expect(paired?.length).toBe(2);
   });
 });
@@ -258,7 +260,9 @@ describe("StudioDO.recycle wiring — envAccount re-derived fresh, not reused fr
   // — so `envVars`/`envAccount` provably come from the SAME resolved `launch`,
   // not two separate reads that merely happen to agree today.
   it("no await runs between the fresh launch resolving and envVars/envAccount both being set from it", () => {
-    const launchStmt = "const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn());";
+    // #134 review round 4: this call now passes `false` (5th arg) too — see
+    // the round 4 describe blocks further down for why.
+    const launchStmt = "const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);";
     const launchStmtIdx = closureBody.indexOf(launchStmt);
     expect(launchStmtIdx).toBeGreaterThan(-1);
     const afterLaunch = launchStmtIdx + launchStmt.length;
@@ -387,6 +391,525 @@ describe("end-state sanity check (not a regression test): a map change + recycle
     const shown = withAccountDisplay(env, row);
     expect(shown.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(shown.claudeAccountNext).toBeUndefined();
+  });
+});
+
+// Issue #134: a studio recycled (or otherwise relaunched through
+// launchAccountOrRefuse) onto a DIFFERENT account than the one it was last
+// launched on carries a `rateLimited` observation that necessarily describes
+// the OLD account — nothing else clears it, so `fleet ls`/`fleet recycle`
+// kept printing "rate-limited until <time>" for a studio actually healthy on
+// the new account. The fix: launchAccountOrRefuse's own `launch.ok` branch
+// clears `rateLimited` too, exactly when the resolved account differs from
+// `existing.launchedAccount` and a `rateLimited` observation is present.
+describe("launchAccountOrRefuse clears a stale rateLimited on an account change (#134)", () => {
+  const FUTURE = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const SEEN = new Date().toISOString();
+
+  it("recorded limited on account 1, repo mapped to account 2, failover off: relaunches on 2 and drops rateLimited", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const storage = fakeStorage(status({
+      launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN",
+      rateLimited: { until: FUTURE, seenAt: SEEN },
+    }));
+    const recorded: StudioStatus[] = [];
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", async (s) => { recorded.push(s); });
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited ?? null).toBeNull();
+  });
+
+  it("no account change (already on the mapped account): rateLimited is left untouched", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({
+      launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      rateLimited: observation,
+    }));
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", async () => {});
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited).toEqual(observation);
+  });
+
+  it("never launched before (no launchedAccount recorded): rateLimited is left untouched", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({ rateLimited: observation }));
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", async () => {});
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited).toEqual(observation);
+  });
+});
+
+// Issue #134 review round 1: recycle() calls launchAccountOrRefuse TWICE —
+// once at its own entry, before recycleWithSync has even probed the
+// container (let alone destroyed it), and again fresh, immediately before
+// the post-destroy container actually starts. recycleWithSync can still
+// refuse outright between those two calls (a failed probe, or a confirmed
+// rescue-push failure, without --discard-unsynced) — destroy() never runs
+// and the studio never moves. A clear committed at the ENTRY call would
+// then falsely claim a studio that stayed exactly where it was is no longer
+// rate-limited / no longer on its old account. `commitOkClears=false` (the
+// 5th, optional param) is how the entry call still does its existing job —
+// refuse early on an unlaunchable account — without committing that clear;
+// only the second, post-destroy call (which defaults to `commitOkClears:
+// true`) may actually commit it.
+describe("launchAccountOrRefuse(..., commitOkClears=false) — the entry-time recycle call never commits a clear (#134 review round 1)", () => {
+  const FUTURE = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const SEEN = new Date().toISOString();
+
+  it("account change + a set rateLimited: still resolves the mapped account, but the row is untouched", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const storage = fakeStorage(status({
+      launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN",
+      rateLimited: { until: FUTURE, seenAt: SEEN },
+    }));
+    const recorded: StudioStatus[] = [];
+    const launch = await launchAccountOrRefuse(
+      env, storage, "demosite-life--pilot", async (s) => { recorded.push(s); }, false,
+    );
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited).toEqual({ until: FUTURE, seenAt: SEEN }); // NOT cleared
+    expect(row.launchedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN"); // untouched too
+    expect(recorded).toHaveLength(0); // no write at all on this call
+  });
+
+  it("same shape, but the auto-failover-off claudeAccount clear is also suppressed", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const storage = fakeStorage(status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }));
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", async () => {}, false);
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3"); // NOT cleared
+  });
+
+  it("a refusal still writes the degraded row exactly as before — commitOkClears only gates the OK branch", async () => {
+    const missing = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const storage = fakeStorage(status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }));
+    await expect(launchAccountOrRefuse(missing, storage, "demosite-life--pilot", async () => {}, false)).rejects.toThrow();
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.state).toBe("degraded");
+  });
+
+  // The actual recycle() sequence, composed at the primitive level with the
+  // real functions (same convention as the "#328 fix round 2" primitive-level
+  // describe block above): entry call (commitOkClears=false) resolves the
+  // mapped account but writes nothing; recycleWithSync then refuses (probe
+  // failed / rescue-push failed, no --discard-unsynced) — destroy() and the
+  // second launchAccountOrRefuse call never run. The row must still show the
+  // ORIGINAL rateLimited sighting afterward, not a false "healthy" clear.
+  it("entry call + a subsequent recycle-path refusal (no destroy, no second call): rateLimited survives", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN", rateLimited: observation }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+
+    // recycle()'s own entry-time call.
+    const entryLaunch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+    expect(entryLaunch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+
+    // recycleWithSync refuses here (simulated) — destroy() is never called,
+    // so the awaitReady closure's own second launchAccountOrRefuse call never
+    // runs either. Nothing further touches storage.
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited).toEqual(observation); // still set: the studio never moved
+    expect(row.launchedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN"); // still the old account too
+  });
+
+  // Same sequence, but recycleWithSync does NOT refuse this time — destroy()
+  // runs, and the second, post-destroy call resolves fresh and commits the
+  // clear via decide/apply (issue #134 review round 4: the closure's own
+  // launchAccountOrRefuse call also passes commitOkClears=false and commits
+  // only through decideAccountClears -> sbAwaitReady -> applyAccountClears —
+  // see the round 4 describe blocks further down for that mechanism's own
+  // dedicated coverage, including the throw case this test does not exercise).
+  it("entry call + a successful recycle (destroy ran, second call commits via decide/apply): rateLimited is dropped", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN", rateLimited: observation }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+
+    await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false); // entry call
+
+    // destroy() ran (simulated); the awaitReady closure's own fresh call.
+    const freshLaunch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+    expect(freshLaunch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+
+    // decide (pre-touch) -> sbAwaitReady's own onStart write (simulated) ->
+    // apply (post-success, no concurrent destroy).
+    const clears = await decideAccountClears(env, storage, freshLaunch);
+    const existingRow = (await storage.get(STATUS_KEY))!;
+    await storage.put(STATUS_KEY, { ...existingRow, launchedAccount: freshLaunch.name });
+    await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited ?? null).toBeNull();
+  });
+});
+
+// Issue #134 review round 1: pins the wiring itself, the same source-pinning
+// convention the "#328" blocks above use (the DO cannot be constructed under
+// vitest-pool-workers) — the primitive-level tests above prove the MECHANISM
+// works; this proves recycle() actually calls it that way.
+describe("StudioDO.recycle wiring — the entry-time launchAccountOrRefuse call never commits a clear (#134 review round 1)", () => {
+  const doSrc: string = (testEnv as unknown as { TEST_STUDIO_DO_SRC: string }).TEST_STUDIO_DO_SRC;
+  const body = (sig: string): string => {
+    const start = doSrc.indexOf(sig);
+    if (start === -1) throw new Error(`not found: ${sig}`);
+    return doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
+  };
+  const recycleBody = body("async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {");
+
+  it("the entry-time call (before recycleWithSync) passes commitOkClears=false", () => {
+    // Pinned to the slice BEFORE `recycleWithSync(` specifically, not
+    // `recycleBody` as a whole: the post-destroy closure's own call below
+    // (`const launch = await launchAccountOrRefuse(...)`) also ends in the
+    // exact same `, false);` text (it's a superstring of this literal, since
+    // "const launch = " is just a prefix) — and, more importantly,
+    // provisionUngated/restartUngated's own `false)` call sites live outside
+    // `recycleBody` entirely but a plain `doSrc`-wide check would still have
+    // caught them. Slicing to this call specifically (it's the only
+    // `launchAccountOrRefuse` in recycle() before `recycleWithSync(` even
+    // appears) is what actually proves THIS call site still passes `false`,
+    // rather than "this text exists somewhere in recycle()'s body".
+    const entrySlice = recycleBody.slice(0, recycleBody.indexOf("recycleWithSync("));
+    expect(entrySlice).toContain(
+      "await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);",
+    );
+  });
+
+  // #134 review round 4: this test's own original claim — "keeps the
+  // default, it DOES commit [inline]" — is no longer true: round 4 found
+  // `sbAwaitReady` can itself throw after the closure's `launchAccountOrRefuse`
+  // resolves, so this call now ALSO passes `false` and commits via the
+  // decide/apply split instead (see the round 4 describe blocks further
+  // down for that mechanism and its own wiring proof). What is still true,
+  // and still worth pinning here: this closure remains the only place a
+  // clear can ever actually land for a recycle, now via `applyAccountClears`
+  // rather than an inline commit.
+  it("the post-destroy call (inside the awaitReady closure) also resolves with commitOkClears=false — it commits via decide/apply, not inline", () => {
+    const closureStart = recycleBody.indexOf("async () => {");
+    const closureEnd = recycleBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);", closureStart)
+      + "await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);".length;
+    const closureBody = recycleBody.slice(closureStart, closureEnd);
+    expect(closureBody).toContain(
+      "const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);",
+    );
+    expect(closureBody).toContain("await decideAccountClears(this.env, this.ctx.storage, launch);");
+    expect(closureBody).toContain("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);");
+  });
+});
+
+// Issue #134 review round 2: `provisionUngated`/`restartUngated` are BOTH
+// idempotent (studio.routes.test.ts's "provision idempotent" coverage;
+// restartStudio is likewise callable on a live container) and, on an
+// already-`running` container, skip the actual container start entirely
+// (`if (!this.ctx.container?.running) await sbAwaitReady(this)`) — the live
+// tmux session keeps running on whatever token it booted with. Committing
+// launchAccountOrRefuse's ok-branch clear unconditionally on these two paths
+// (round 1's fix, before this round) reopened exactly #134's own bug through
+// provision/restart instead of recycle: a rate-limited, still-running studio
+// whose repo gets remapped would have its row falsely cleared the moment
+// `fleet provision`/`fleet restart` resolved the new account, even though
+// the container never moved.
+//
+// Review round 3 found that a single "read fresh, decide, write" step,
+// placed BEFORE `sbAwaitReady` to dodge onStart's own launchedAccount write
+// (`sbAwaitReady` wraps `startAndWaitForPorts`, which — per
+// @cloudflare/containers' pinned compiled source — runs `await
+// this.state.setHealthy(); await this.onStart();` itself, before resolving,
+// and this file's own `onStart` unconditionally calls
+// `recordLaunchedAccount`, writing `launchedAccount: this.envAccount` into
+// the SAME row), committed the clear too EARLY: `sbAwaitReady` is
+// documented to throw on a genuine cold-start failure (timeout, bad image,
+// a rollout killing the container mid-boot — see `healDiedInRollout`/
+// `ROLLOUT_EXIT_MARKER` for a measured instance), and nothing undid an
+// already-persisted clear if it did.
+//
+// Round 4's fix splits DECIDE (reads the pre-touch snapshot, computes the
+// patch — must run before `sbAwaitReady`, for round 3's reason) from APPLY
+// (writes the patch — must run only in `sbAwaitReady`'s own SUCCESS
+// continuation, never from a catch, never unconditionally). `decide` can
+// safely run early because it's pure computation carried in a local
+// variable, not a write; the throw-safety comes entirely from `apply` never
+// running unless `sbAwaitReady` actually returned.
+//
+// Three scenarios below, composed at the primitive level (same convention
+// as the #328 "race the fix closes" block): the guard skips the start
+// entirely (decide/apply never run at all); the cold start succeeds
+// (decide, then the onStart-equivalent write, then apply — clears
+// correctly); and the cold start THROWS (decide ran, but apply never does —
+// nothing persists). `mutateToLaunchedAccount` stands in for exactly what
+// onStart's `recordLaunchedAccount` does to the row.
+describe("decideAccountClears/applyAccountClears — decided before the container touch, applied only once it succeeds (#134 review round 4)", () => {
+  const FUTURE = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const SEEN = new Date().toISOString();
+
+  // Stands in for onStart's recordLaunchedAccount, which runs INSIDE
+  // sbAwaitReady itself, before it resolves.
+  async function mutateToLaunchedAccount(storage: StudioStorage, name: string): Promise<void> {
+    const existing = (await storage.get(STATUS_KEY))!;
+    await storage.put(STATUS_KEY, { ...existing, launchedAccount: name });
+  }
+
+  function seeded(): { env: Env; storage: StudioStorage; recordFn: (s: StudioStatus) => Promise<void>; observation: { until: string; seenAt: string } } {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN", rateLimited: observation }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+    return { env, storage, recordFn, observation };
+  }
+
+  it("outcome 1 — container already running (guard skips the start entirely): rateLimited survives untouched", async () => {
+    const { env, storage, recordFn, observation } = seeded();
+
+    // provisionUngated's/restartUngated's own entry call.
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+
+    // The container-running guard is true: the whole `!running` branch —
+    // decideAccountClears, sbAwaitReady, AND applyAccountClears — is
+    // SKIPPED, exactly as production does. Nothing further touches storage.
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited).toEqual(observation); // still set: the container never moved
+    expect(row.launchedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN"); // still the old account too
+  });
+
+  it("outcome 2 — cold start SUCCEEDS: decide, then onStart's write, then apply — rateLimited clears correctly", async () => {
+    const { env, storage, recordFn, observation: _observation } = seeded();
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+
+    const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot
+    await mutateToLaunchedAccount(storage, launch.name); // sbAwaitReady -> onStart, simulated
+    // sbAwaitReady resolved successfully: its success continuation runs.
+    // No concurrent destroy landed either (NEVER_MOVED_CTX).
+    await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited ?? null).toBeNull(); // cleared, as #134 requires
+    expect(row.launchedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2"); // onStart's own write still lands
+  });
+
+  it("outcome 3 — cold start THROWS: decide ran, apply never does — rateLimited is NOT cleared (#134 review round 4)", async () => {
+    const { env, storage, recordFn, observation } = seeded();
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+
+    const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot, decided
+    expect(clears).not.toBeNull(); // there WAS something to clear
+    // sbAwaitReady throws here (a genuine cold-start failure) — production
+    // code never reaches the `applyAccountClears` line below it; this test
+    // proves that by simply never calling it.
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited).toEqual(observation); // never persisted: the row is untouched
+    expect(row.launchedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN"); // onStart never got to run either
+  });
+
+  // Issue #134 review round 5: sbAwaitReady resolving SUCCESSFULLY is not,
+  // by itself, proof no concurrent destroy landed while it was running — a
+  // `fleet destroy` racing this exact window can finish after this studio's
+  // own operation started, and applyAccountClears's fresh read could
+  // otherwise land AFTER destroy's own final write and clobber it. Same
+  // `ctx.moved()` guard every other post-container-touch write in this file
+  // already uses (do.ts:1505/5963/6195's own `if (await ctx.moved())`
+  // checks) — applied here too.
+  it("outcome 4 — sbAwaitReady succeeds, but a concurrent destroy landed first: apply skips the write entirely (#134 review round 5)", async () => {
+    const { env, storage, recordFn, observation } = seeded();
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+
+    const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot, decided
+    expect(clears).not.toBeNull();
+    await mutateToLaunchedAccount(storage, launch.name); // sbAwaitReady -> onStart, simulated
+    // A concurrent destroy landed (its own epoch bump) sometime during
+    // sbAwaitReady — same shape test/studio.replacement.test.ts's own
+    // `ctx: OpCtx = { epoch: 0, moved: async () => moved }` fixture uses.
+    const movedCtx: OpCtx = { epoch: 0, moved: async () => true };
+    await applyAccountClears(storage, recordFn, clears, movedCtx);
+
+    const row = (await storage.get(STATUS_KEY))!;
+    // The write never happened at all: rateLimited is exactly whatever it
+    // was the instant before this function ran (here: still the stale
+    // observation) — NOT "correctly cleared" and NOT the pre-touch value
+    // either, simply untouched, so a real destroy's own later write (which
+    // this test does not simulate, since applyAccountClears returning
+    // early is the whole point) is never at risk of being clobbered.
+    expect(row.rateLimited).toEqual(observation);
+  });
+
+  it("no stale fields on the row at all: decide returns null, apply is a no-op", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }));
+    const recorded: StudioStatus[] = [];
+    const recordFn = async (s: StudioStatus) => { recorded.push(s); await storage.put(STATUS_KEY, s); };
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+    const clears = await decideAccountClears(env, storage, launch);
+    expect(clears).toBeNull();
+    await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
+    expect(recorded).toHaveLength(0);
+  });
+
+  // PR #147 merge fix (maestro review, 2026-09-30): merging #131/#135's
+  // "borrowedAccount/borrowedFromRepo clear alongside the #273 r2 flag-off
+  // stale-clear" fix (review round 2 finding 2, originally landed ONLY in
+  // launchAccountOrRefuse's own inline commitOkClears=true branch — see the
+  // "clearForceMappedAccount / launchAccountOrRefuse — the borrow flags
+  // clear too" describe block far below) widened `accountClears` itself so
+  // EVERY caller shares it, including this decide/apply path —
+  // provisionUngated/restartUngated/recycle's post-destroy closure. Until
+  // this test, nothing drove decideAccountClears/applyAccountClears with
+  // claudeAccount/borrowedAccount/borrowedFromRepo all seeded, so the
+  // widened branch was never exercised through this path at all.
+  it("decide/apply also clears borrowedAccount/borrowedFromRepo (not just claudeAccount/rateLimited) when the #273 r2 flag-off clear fires", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 }); // FLEET_AUTO_FAILOVER unset -> off
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({
+      claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      rateLimited: observation,
+      borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      borrowedFromRepo: "repo-b",
+    }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+
+    // provisionUngated's/restartUngated's/recycle's post-destroy closure's
+    // own entry call — flag off, so this resolves the mapped slot, not the
+    // recorded (stale) account.
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+
+    const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot
+    await mutateToLaunchedAccount(storage, launch.name); // sbAwaitReady -> onStart, simulated
+    await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.claudeAccount ?? null).toBeNull();
+    expect(row.rateLimited ?? null).toBeNull();
+    expect(row.borrowedAccount ?? null).toBeNull();
+    expect(row.borrowedFromRepo ?? null).toBeNull();
+  });
+});
+
+// Issue #134 review round 4: the identical decide-before/apply-after-success
+// split, applied to recycle()'s post-destroy closure too — its own
+// `launchAccountOrRefuse` + `sbAwaitReady` pair had the textually-identical
+// exposure (commit immediately on resolve, before `sbAwaitReady`, which can
+// itself throw) even though destroy() had already unconditionally run.
+// Pre-existing across rounds 1-3 (not a round-4 regression), fixed in the
+// same pass since the restructuring was already in flight.
+describe("recycle's post-destroy closure — decide/apply around a throwing start (#134 review round 4)", () => {
+  const FUTURE = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const SEEN = new Date().toISOString();
+
+  it("sbAwaitReady throws: decide ran, apply never does — rateLimited is NOT cleared, even though destroy() already happened", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN", rateLimited: observation }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+
+    // recycle()'s own entry call (decides nothing, per round 1).
+    await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+    // destroy() ran (simulated) — the closure's own fresh call.
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+    const clears = await decideAccountClears(env, storage, launch);
+    expect(clears).not.toBeNull();
+    // sbAwaitReady throws here — recycleWithSync's own catch reads the row
+    // next; applyAccountClears is never reached.
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited).toEqual(observation); // still set: the row is exactly as it was before this closure ran
+  });
+});
+
+// Issue #134 review round 4: pins the wiring itself (the DO cannot be
+// constructed under vitest-pool-workers, same convention as every other
+// source-pinning block in this file) — the primitive-level tests above
+// prove the MECHANISM (decide/apply, split around a possibly-throwing
+// call); this proves provisionUngated/restartUngated actually call it that
+// way, in that order.
+describe("StudioDO.provisionUngated/restartUngated wiring — decide before sbAwaitReady, apply only after it succeeds (#134 review round 4)", () => {
+  const doSrc: string = (testEnv as unknown as { TEST_STUDIO_DO_SRC: string }).TEST_STUDIO_DO_SRC;
+  const body = (sig: string): string => {
+    const start = doSrc.indexOf(sig);
+    if (start === -1) throw new Error(`not found: ${sig}`);
+    return doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
+  };
+  const coldStartBlock = (fnBody: string): string => {
+    const guardStart = fnBody.indexOf("if (!this.ctx.container?.running) {");
+    if (guardStart === -1) throw new Error("cold-start guard not found");
+    const guardEnd = fnBody.indexOf("\n    }\n", guardStart);
+    return fnBody.slice(guardStart, guardEnd);
+  };
+
+  for (const [name, sig] of [
+    ["provisionUngated", "private async provisionUngated(cfg: ProvisionConfig, via: BringupVia, ctx: OpCtx): Promise<StudioStatus> {"],
+    ["restartUngated", "private async restartUngated(via: BringupVia, ctx: OpCtx): Promise<StudioStatus> {"],
+  ] as const) {
+    describe(name, () => {
+      const fnBody = body(sig);
+
+      it("the launchAccountOrRefuse call passes commitOkClears=false", () => {
+        expect(fnBody).toContain("this.recordFn(), false);");
+      });
+
+      it("decideAccountClears, sbAwaitReady, applyAccountClears run in that exact order, inside the cold-start guard", () => {
+        const block = coldStartBlock(fnBody);
+        const decideIdx = block.indexOf("const clears = await decideAccountClears(this.env, this.ctx.storage, launch);");
+        const awaitReadyIdx = block.indexOf("await sbAwaitReady(this);");
+        const applyIdx = block.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);");
+        expect(decideIdx).toBeGreaterThan(-1);
+        expect(awaitReadyIdx).toBeGreaterThan(-1);
+        expect(applyIdx).toBeGreaterThan(-1);
+        expect(decideIdx).toBeLessThan(awaitReadyIdx);
+        expect(awaitReadyIdx).toBeLessThan(applyIdx);
+      });
+
+      it("applyAccountClears does NOT run outside the cold-start guard (unconditionally)", () => {
+        const outside = fnBody.slice(0, fnBody.indexOf("if (!this.ctx.container?.running) {"))
+          + fnBody.slice(fnBody.indexOf("\n    }\n", fnBody.indexOf("if (!this.ctx.container?.running) {")));
+        expect(outside).not.toContain("applyAccountClears(");
+      });
+    });
+  }
+});
+
+// Issue #134 review round 4: the same wiring proof for recycle()'s
+// post-destroy closure — its `launchAccountOrRefuse` call now also passes
+// `false`, and `decideAccountClears`/`sbAwaitReady`/`applyAccountClears` run
+// in the same strict order, with no `!running` guard needed (destroy() has
+// already unconditionally run by the time this closure executes).
+describe("StudioDO.recycle wiring — decide before sbAwaitReady, apply only after it succeeds (#134 review round 4)", () => {
+  const doSrc: string = (testEnv as unknown as { TEST_STUDIO_DO_SRC: string }).TEST_STUDIO_DO_SRC;
+  const body = (sig: string): string => {
+    const start = doSrc.indexOf(sig);
+    if (start === -1) throw new Error(`not found: ${sig}`);
+    return doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
+  };
+  const recycleBody = body("async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {");
+  const closureStart = recycleBody.indexOf("async () => {");
+  const closureEnd = recycleBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);", closureStart)
+    + "await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);".length;
+  const closureBody = recycleBody.slice(closureStart, closureEnd);
+
+  it("the closure's own launchAccountOrRefuse call passes commitOkClears=false", () => {
+    expect(closureBody).toContain(
+      "const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);",
+    );
+  });
+
+  it("decideAccountClears, sbAwaitReady, applyAccountClears run in that exact order", () => {
+    const decideIdx = closureBody.indexOf("const clears = await decideAccountClears(this.env, this.ctx.storage, launch);");
+    const awaitReadyIdx = closureBody.indexOf("await sbAwaitReady(this);");
+    const applyIdx = closureBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);");
+    expect(decideIdx).toBeGreaterThan(-1);
+    expect(awaitReadyIdx).toBeGreaterThan(-1);
+    expect(applyIdx).toBeGreaterThan(-1);
+    expect(decideIdx).toBeLessThan(awaitReadyIdx);
+    expect(awaitReadyIdx).toBeLessThan(applyIdx);
   });
 });
 

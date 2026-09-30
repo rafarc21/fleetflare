@@ -1,0 +1,399 @@
+# Clear stale `rateLimited` when a launch resolves to a different account (board issue #134)
+
+## Root cause
+
+`launchAccountOrRefuse()` (`src/studio/do.ts`) already resolves recycle's
+account correctly: with `FLEET_AUTO_FAILOVER` off it ignores the studio's
+previously-recorded account entirely and resolves straight to the repo's
+`CLAUDE_ACCOUNT_BY_REPO`-mapped slot (confirmed by the existing #328
+"end-state sanity check" test at the bottom of
+`test/studio.account-launched.test.ts`). Account selection is not the bug.
+
+`StudioStatus.rateLimited` is a per-row field whose *content* (`{until,
+seenAt}`) is an observation that was necessarily made while the studio was
+running on the account it was launched on at the time — not a property of
+the studio row in general. `recycle()`'s own `StudioStatus` writes spread
+`...existing` forward (see `recycle()`'s doc comment), so a stale
+`rateLimited` observation made on account A rides along untouched after a
+recycle that resolves and launches happily on account B. The only code
+paths that ever clear `rateLimited` are `runAccountFailover`'s live-pane
+recovery detection (`failover.ts`, ~300s cadence) and the degraded-recovery
+path (`do.ts`, ~30s cadence, `recovery.shouldHeal`) — both require fresh
+screen evidence and neither runs as part of `launchAccountOrRefuse`'s own
+account-resolution step. Neither is a refusal gate: there is no code
+anywhere in the recycle/provision/restart path that reads `.rateLimited` to
+decide whether to launch.
+
+The practical effect: `fleet ls` / `fleet recycle`'s own table
+(`formatTable`, `formatRateLimited`) keeps printing "rate-limited until
+`<time>`" for a studio that is, in fact, running fine on the newly-mapped
+account — because the row's `rateLimited` field was never invalidated by
+the account change. This reads exactly like "recycle refused", even though
+the container was destroyed and relaunched correctly. It is a stale-display
+bug, not a refusal bug — but skills/fleet-cockpit/SKILL.md correctly
+instructs operators/agents to treat "rate-limited until `<time>`" as "do
+not recycle", so the stale display causes them to stop investigating a
+studio that is actually healthy.
+
+## The fix
+
+In `launchAccountOrRefuse()`'s `if (launch.ok)` branch, fold one more
+condition into the existing single read-modify-write that already clears a
+stale `claudeAccount` when auto-failover is off: also clear
+`rateLimited: null` when the account this call resolved to (`launch.name`)
+differs from the account the studio was last launched on
+(`existing?.launchedAccount`), and `existing?.rateLimited` is currently set.
+
+Guards against over-clearing:
+- only clear when `existing?.rateLimited != null` (nothing to do otherwise);
+- only clear when `existing?.launchedAccount` is a non-null string AND it
+  differs from `launch.name` — a studio that has never launched, or is
+  re-launching on the SAME account, keeps its `rateLimited` untouched.
+
+`state`/`error`/`failoverBlock` are left alone. No D1/AccountLimits read is
+added: if the new account also turns out to be rate-limited, the existing
+30s/300s live-pane recovery paths will re-observe and re-set `rateLimited`
+correctly on their own next tick — skipping that check here is deliberate.
+
+Both the existing `claudeAccount` cleanup and the new `rateLimited` cleanup
+land in the same `storage.put`/`recordStudioFn` call, rather than two
+separate writes.
+
+## Test plan
+
+Add to `test/studio.account-launched.test.ts`, alongside the existing
+"#328" describe blocks, using the file's existing fixtures
+(`envWith`, `ALL`, `MAP_2`, `fakeStorage`, `status`, `STATUS_KEY`,
+`launchAccountOrRefuse`):
+
+1. A studio recorded on account 1 with a set `rateLimited` observation, repo
+   mapped to account 2, auto-failover off → `launchAccountOrRefuse` resolves
+   `CLAUDE_CODE_OAUTH_TOKEN_2` and the stored row's `rateLimited` becomes
+   `null`.
+2. A companion test proving no over-clearing: the studio's mapped/launched
+   account does not change (or has never launched) → `rateLimited` is left
+   untouched on the stored row.
+
+Run with `vitest run test/studio.account-launched.test.ts` (this repo's
+`test` script is `vitest run`, under `@cloudflare/vitest-pool-workers`) —
+RED before the fix, GREEN after. No full suite, no build, run alone.
+
+## Review round 1 addendum: the entry-time call must not commit
+
+A fresh-context code review caught a regression in the opposite direction:
+`recycle()` calls `launchAccountOrRefuse` TWICE — once at its own entry,
+before `recycleWithSync` has even probed the container (let alone destroyed
+it), and again, fresh, immediately before the post-destroy container
+actually starts (inside the `awaitReady` closure, issue #328). Unconditional
+commits meant the ENTRY call's clear (`claudeAccount`, `rateLimited`) could
+land in storage even when `recycleWithSync` then refuses outright — a failed
+probe, or a confirmed rescue-push failure, without `--discard-unsynced` —
+so `destroy()` never runs and the studio never moves anywhere. That left a
+studio that stayed exactly where it was with a row falsely claiming it was
+no longer rate-limited / no longer on its old account — the mirror image of
+#134's own original bug.
+
+Fix: `launchAccountOrRefuse` grew a 5th, optional `commitOkClears = true`
+parameter. `recycle()`'s entry call passes `false` — it still does its
+existing job (refuse early on an unlaunchable account, with that refusal's
+row write unaffected by the flag) without committing either clear.
+
+CORRECTION (round 2 found this claim false — see the round 2 addendum
+below): this section originally claimed "every other call site (provision,
+restart) is a single call with no such refuse-after-resolve window... since
+provision/restart start fresh." That is wrong: `provisionUngated` and
+`restartUngated` are BOTH idempotent and skip the actual container start
+when it is already running, which turns out to be the exact same class of
+gap recycle's entry call has. See the round 2 addendum for the real fix.
+
+New tests, same file: a `commitOkClears=false` unit-level describe block
+(resolves the account, writes nothing); a primitive-level composition
+mirroring recycle()'s actual two-call sequence, once with a simulated
+refusal in between (rateLimited survives) and once with a simulated
+successful destroy+relaunch (rateLimited is dropped by the second call); and
+a source-pinning describe block (same convention as the existing "#328"
+blocks — the DO cannot be constructed under vitest-pool-workers) asserting
+the entry call's literal text carries `, false)` and the closure's call does
+not. Also updated the stale comment above the closure (previously claimed
+the entry call's clear was "already performed... if it was going to" — no
+longer true now that it never commits).
+
+## Review round 2 addendum: provision/restart had the identical gap
+
+A second fresh-context review found round 1's own doc comment claim false:
+"provision/restart start fresh, no refuse-after-resolve window." In truth,
+`provisionUngated` (do.ts) is explicitly idempotent (studio.routes.test.ts's
+"provision idempotent" coverage exercises a second POST against an
+already-running studio) and `restartUngated` is likewise callable against a
+live container. Both guard their actual container start with
+`if (!this.ctx.container?.running) await sbAwaitReady(this)` — on an
+already-running container, that guard is false and the start is SKIPPED
+entirely. The live tmux session keeps running on whatever
+`CLAUDE_CODE_OAUTH_TOKEN` it booted with (`studioEnvVars`'s own doc comment:
+frozen at boot, never re-read without a fresh start); `launchedAccount` (the
+field the clear-guard compares against) is only written by `onStart`, which
+never fires when the guard skips the start either.
+
+So `fleet provision <id>` / `fleet restart <id>` against a studio that is
+rate-limited on account A, still running, whose repo has since been
+remapped to account B: round 1's fix resolved B and, because
+`commitOkClears` defaulted to `true` at these two call sites, immediately
+nulled `claudeAccount`/`rateLimited` on the row — even though the container
+never moved and is still genuinely running (and rate-limited) on A. The
+exact false-"healthy" bug #134 exists to fix, reopened through
+provision/restart instead of recycle.
+
+Fix: `provisionUngated`/`restartUngated` now call `launchAccountOrRefuse`
+with `commitOkClears: false`, same as recycle's entry call, and commit the
+clear themselves via a newly-extracted `commitAccountClears` helper (do.ts)
+— but only INSIDE the `if (!this.ctx.container?.running) { await
+sbAwaitReady(this); ... }` branch, i.e. only once a cold start has actually
+happened. `commitAccountClears` re-reads storage fresh (same reasoning as
+recycle's own second call: nothing durable is assumed to still hold from
+whenever the resolving call ran) and shares its clear-computation logic
+(extracted into a pure, no-I/O `accountClears` helper) with
+`launchAccountOrRefuse`'s own inline `commitOkClears: true` path, so there
+is exactly one copy of the merge logic. `launchAccountOrRefuse`'s own doc
+comment and this plan's round 1 addendum (above) are both corrected to
+name the real gap.
+
+New tests, same file: a `commitAccountClears` primitive-level describe
+block (guard skips the start → `rateLimited` survives; guard runs a cold
+start → `commitAccountClears` drops it; a no-op row → no write), and a
+source-pinning describe block (same convention as every other such block
+in this file) proving `commitAccountClears` is called from INSIDE each
+function's cold-start guard, never outside it, and that both functions'
+`launchAccountOrRefuse` calls carry `, false)`. The existing "#292 r2"
+`StudioDO wiring (source)` test (which pins the literal 4-arg call text) was
+updated to expect the new 5-arg `, false)` form instead.
+
+Verified both new source-pinning tests actually catch the regression they
+guard against: temporarily reverted `provisionUngated`'s call back to the
+old unconditional 4-arg + no-branch shape → 3 tests failed as expected →
+restored → 55/55 green again.
+
+## Review round 3 addendum: round 2's placement inside the branch was itself wrong
+
+A third fresh-context review found that round 2's fix, while correctly
+GATED (only committing inside the cold-start branch), placed the commit in
+the WRONG position within that branch:
+
+```ts
+if (!this.ctx.container?.running) {
+  await sbAwaitReady(this);
+  await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);
+}
+```
+
+`sbAwaitReady` wraps `startAndWaitForPorts` (sandbox-api.ts), which — per
+the pinned `@cloudflare/containers` compiled source — runs `await
+this.state.setHealthy(); await this.onStart();` itself, BEFORE it resolves.
+This file's own `onStart` unconditionally calls `recordLaunchedAccount`,
+which writes `launchedAccount: this.envAccount` (already reassigned to
+`launch.name` a few lines above) into the exact same `STATUS_KEY` row
+`commitAccountClears` reads. So by the time `commitAccountClears` ran
+(AFTER `sbAwaitReady`), `existing.launchedAccount` already equalled
+`launch.name` — `accountClears`'s own `existing.launchedAccount !==
+launch.name` guard could never be true on this path, and the `rateLimited`
+clear (the actual point of #134) silently never fired on a real cold start
+through provision/restart. The `claudeAccount` clear was unaffected
+(`onStart` doesn't touch that field).
+
+Fix: swap the two lines — commit BEFORE `sbAwaitReady`, still inside the
+same `!running` branch (so it still never fires when the guard is about to
+skip the start — round 2's gating was correct, only the internal ordering
+was not):
+
+```ts
+if (!this.ctx.container?.running) {
+  await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);
+  await sbAwaitReady(this);
+}
+```
+
+This is the exact ordering recycle()'s own post-destroy closure already
+uses successfully (`launchAccountOrRefuse`'s inline commit happens before
+its own `await sbAwaitReady(this)` call) — round 2's fix diverged from that
+established pattern without reason; round 3's fix brings it back in line.
+
+Self-check (traced by hand, not only re-run tests): confirmed no OTHER
+storage write inside `sbAwaitReady`'s call chain touches `STATUS_KEY`.
+`ContainerState.setHealthy` writes only `CONTAINER_STATE_KEY`; the
+Sandbox base class's own `onStart` calls `currentRuntime.markStarted()`
+(writes only `CURRENT_RUNTIME_IDENTITY_STORAGE_KEY`), a fire-and-forget
+`checkVersionCompatibility()` (no storage writes at all, logging only,
+and not awaited besides), and `pruneTunnelsForRestart` (writes only the
+tunnel port-map keys). The only `STATUS_KEY` writer anywhere in that whole
+chain is this file's own `onStart` → `recordLaunchedAccount`. Moving the
+commit before `sbAwaitReady` is therefore sufficient to close the race —
+there is no second hidden writer to also account for.
+
+New/changed tests: the round 2 `commitAccountClears` primitive-level
+describe block now includes a `mutateToLaunchedAccount` helper standing in
+for exactly what `onStart`'s `recordLaunchedAccount` does, with two
+scenarios — the round 2 BUG reproduced (commit AFTER the simulated write:
+`rateLimited` never clears) and the round 3 FIX (commit BEFORE it:
+`rateLimited` clears correctly, and the simulated `onStart` write still
+lands afterward) — proving BEHAVIORALLY why the order matters, not only by
+source position. The source-pinning describe block was updated to assert
+`commitAccountClears` runs BEFORE `sbAwaitReady`, not after.
+
+Verified the updated source-pinning test catches this exact regression:
+temporarily swapped `provisionUngated`'s two lines back to the round 2
+(buggy) order → the "commitAccountClears runs INSIDE the cold-start guard,
+BEFORE sbAwaitReady" test failed as expected → restored → 56/56 green
+again.
+
+## Review round 4 addendum: round 3 traded one ordering bug for its mirror image
+
+A fourth fresh-context review found that round 3's fix — commit BEFORE
+`sbAwaitReady` — dodged the onStart-clobber race but reopened the OTHER
+half of the same problem: `sbAwaitReady` is documented to throw on a
+genuine cold-start failure (timeout, bad image, a rollout killing the
+container mid-boot — `healDiedInRollout`/`ROLLOUT_EXIT_MARKER` in do.ts
+exists because exactly that was measured in production on 2026-09-24, on
+this same heal path). Nothing caught that throw between round 3's commit
+and the caller — it propagated straight out, but `rateLimited: null` had
+ALREADY been persisted before the failure. For the automatic bare-container
+heal path (`runScheduledTick` → `healBareContainer` → `restartStudio
+("heal")` → `restartUngated`, wrapped in a try/catch that only
+`console.error`s, do.ts ~2850-2866) this is fully unattended: a studio
+genuinely rate-limited on account A, remapped to account B, goes bare, the
+heal tries B, commits the clear, the start then fails — the row is left
+silently, permanently claiming "not rate-limited" for a studio that never
+actually got anywhere. #134's own harm class, reintroduced by the fix meant
+to close it.
+
+Recycle's post-destroy closure had the textually-identical exposure
+(`launchAccountOrRefuse`'s own default `commitOkClears=true` commits
+immediately on resolve, before its own `sbAwaitReady` call) — pre-existing
+across rounds 1-3 (not a round-3 regression), flagged non-blocking but
+fixed in this same pass since the restructuring was already in flight.
+
+**Fix**: split "decide" from "apply" rather than choosing between
+"commit before" (safe on failure, broken on success — round 2) and "commit
+after" (round 3's mirror bug). Two new exported functions replace
+`commitAccountClears`:
+
+- `decideAccountClears(env, storage, launch)` — reads the pre-touch
+  snapshot (same timing round 3 already established, for the same reason:
+  onStart's `recordLaunchedAccount` write happens INSIDE `sbAwaitReady`
+  itself) and returns the clear patch as a plain value, performing no
+  write.
+- `applyAccountClears(storage, recordStudioFn, clears)` — re-reads storage
+  FRESH (so it sees onStart's own already-landed `launchedAccount` write)
+  and merges the pre-decided patch onto that fresh row. A `null` patch is a
+  no-op.
+
+All three commit sites (`provisionUngated`, `restartUngated`, recycle's
+post-destroy closure) now follow the identical three-line shape:
+`decide` → `await sbAwaitReady(this)` → `apply`, with no try/catch — plain
+sequential control flow is what makes this safe: if `sbAwaitReady` throws,
+the `apply` line is simply never reached, and the thrown error propagates
+exactly as it always did (recycleWithSync's own catch, or
+provision/restart's own uncaught-to-caller shape). `decide` is pure
+computation held in a local variable, so running it early carries no
+persistence risk.
+
+`launchAccountOrRefuse`'s own `commitOkClears: true` inline-commit path is
+left in place (still exercised by this file's own primitive-level tests,
+and kept as the function's original, simpler shape) but is, after this
+round, no longer used by ANY production call site — every real caller now
+resolves with `false` and commits through `decideAccountClears`/
+`applyAccountClears` instead. `launchAccountOrRefuse`'s own doc comment,
+and the "Calling launchAccountOrRefuse twice in one recycle is safe"
+comment above recycle's closure, are both updated to reflect this.
+
+**Final trace** (three possible outcomes per commit site, confirming the
+clear lands in exactly one of them):
+
+- `provisionUngated`/`restartUngated` (each guarded by
+  `if (!this.ctx.container?.running)`): (1) container already running —
+  the whole guarded block, decide/sbAwaitReady/apply, is skipped entirely,
+  clear never lands; (2) cold start succeeds — decide (pre-touch), onStart
+  runs inside `sbAwaitReady`, apply (fresh read, merges the patch) — clear
+  lands, exactly once; (3) cold start throws — decide already ran (held
+  locally, unwritten), the throw from `sbAwaitReady` propagates immediately
+  since there is no try/catch, `apply` is never reached — clear never
+  lands.
+- recycle's post-destroy closure (no `!running` guard — it only ever runs
+  immediately after `destroy()` has unconditionally completed, so outcome
+  (1) above is structurally unreachable here): (2) `sbAwaitReady`
+  succeeds — clear lands, exactly once, same shape as above; (3)
+  `sbAwaitReady` throws — decide already ran (unwritten), the throw
+  propagates out of the closure into `recycleWithSync`'s own try/catch,
+  which builds its degraded status from a FRESH `storage.get` — since
+  nothing was ever applied, that fresh read still carries the original,
+  un-cleared `rateLimited`/`claudeAccount`. Clear never lands.
+
+New/changed tests: a `decideAccountClears`/`applyAccountClears`
+primitive-level describe block covering all three provision/restart
+outcomes (guard-skip, success, throw) plus a no-stale-fields no-op case; a
+companion describe block for recycle's closure's own throw case; and two
+source-pinning describe blocks (provisionUngated/restartUngated, and
+recycle's closure) asserting the strict `decide` → `sbAwaitReady` → `apply`
+ordering. Two pre-existing tests whose literal-text assertions depended on
+the OLD (pre-round-4) call shape were updated: the "#328 fix round 2" "no
+await runs between..." test (the closure's `launchAccountOrRefuse` call now
+carries a trailing `, false`), and the "#134 review round 1" "keeps the
+default — it DOES commit" test, whose own premise round 4 makes false
+(rewritten to assert the new decide/apply shape instead, with a note
+explaining why).
+
+Verified the new source-pinning test for provisionUngated/restartUngated
+catches the exact round-3-style regression: temporarily reordered
+`provisionUngated`'s three lines back to `sbAwaitReady` → `decide` →
+`apply` (mimicking what an "apply after success, but decide too late"
+mistake would look like) → the ordering assertion failed as expected →
+restored → 59/59 green again.
+
+## Review round 5 addendum: applyAccountClears missed the ctx.moved() guard
+
+A fifth fresh-context review found that `applyAccountClears` never checked
+`ctx.moved()` — the same destroy-epoch guard every OTHER write following a
+container-touching await in these same three functions already uses
+(do.ts:1505/1521's own checks right after `recycleWithSync`'s
+`awaitReady()`, and the provisionUngated/restartUngated tick-arming guards
+a few lines below this fix's own call sites). `sbAwaitReady` resolving
+successfully is not proof no concurrent `fleet destroy` landed while it was
+running — that destroy can finish AFTER `applyAccountClears`'s own fresh
+`storage.get` would otherwise run, and clobber destroy's carefully built
+final row (rescue notes, `unrescued` text, final `state`) with a stale
+intermediate snapshot plus the two now-cleared fields. `ctx` was already in
+scope at all three call sites (the same `ctx` used a few lines later for
+the analogous downstream tick-arming check) but was never threaded into
+`applyAccountClears` itself.
+
+**Fix**: `applyAccountClears` takes a 4th parameter, `ctx: OpCtx`, and
+checks `await ctx.moved()` FIRST — before even reading storage — returning
+immediately (no write at all) if a destroy has landed. All three call
+sites now pass their own already-in-scope `ctx` straight through. Because
+the check lives inside `applyAccountClears` itself rather than being
+duplicated at each of the three call sites, all three automatically share
+the identical guard with no risk of one site's copy drifting from
+another's.
+
+**Final trace, extended**: at each of the 3 sites, `applyAccountClears` now
+runs to completion (commits the clear) in exactly ONE of four outcomes —
+(1) the preceding await (`sbAwaitReady`/`awaitReady()`) throws → never
+reached (round 4's fix); (2) a concurrent destroy landed (`ctx.moved()` is
+true) → returns immediately, no write (round 5's fix); (3) the
+provision/restart container-running guard skipped the whole branch →
+never reached at all (round 2's fix; N/A for recycle's closure, which has
+no such guard); (4) none of the above → commits, exactly once. Confirmed
+by direct inspection: all three call sites (`provisionUngated`,
+`restartUngated`, recycle's post-destroy closure) pass their own `ctx`
+into the identical `applyAccountClears`, so the guard is centralized, not
+duplicated per site.
+
+New test: a 4th primitive-level outcome ("outcome 4") in the existing
+decide/apply describe block — decide computes a real clear, the simulated
+onStart write lands, then `applyAccountClears` is called with a `ctx` whose
+`moved()` resolves `true` (same `{ epoch, moved: async () => ... }` shape
+`test/studio.replacement.test.ts`'s own fixture already uses) — asserting
+the row is left completely untouched (not "correctly cleared", not
+reverted to the pre-touch snapshot — simply never written). Verified this
+test actually exercises the real guard (not a simulated shape): temporarily
+removed the `if (await ctx.moved()) return;` line from `applyAccountClears`
+itself → the new test failed exactly as expected (row was cleared instead
+of surviving) → restored → 60/60 green again.
