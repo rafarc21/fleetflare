@@ -7,7 +7,9 @@ import {
   type BoardApi,
 } from "../src/board/board";
 import { parseEnvelopeComment, renderEnvelopeComment, parseEnvelope } from "../src/board/envelope";
-import { studioLabel, taskAssignees, type BoardTask } from "../src/board/types";
+import {
+  studioLabel, taskAssignees, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES, type BoardTask,
+} from "../src/board/types";
 import type { RepoReach } from "../src/github/reach";
 import { GitHubError } from "../src/board/api";
 
@@ -824,6 +826,24 @@ describe("assignTask / createTask — the onAssigned hook (board issue #41)", ()
 // coordinator moves it by hand — and any monitor watching board state reads
 // `submitted` on a healthy working studio and concludes it stalled. That is a
 // false negative in the expensive direction.
+
+// Board issue #110: `awaiting_merge` — self-reported by a lead, "I'm done,
+// PR's up", NOT terminal (the issue stays open until merge) and NOT live
+// (a studio may not be briefed on it).
+describe("TASK_STATES vocabulary (board issue #110)", () => {
+  it("includes awaiting_merge, after input_required and before the terminal states", () => {
+    expect(TASK_STATES).toContain("awaiting_merge");
+    expect(TASK_STATES.indexOf("awaiting_merge")).toBe(TASK_STATES.indexOf("input_required") + 1);
+  });
+
+  it("is NOT terminal — the issue must stay open until merge", () => {
+    expect(TERMINAL_TASK_STATES).not.toContain("awaiting_merge");
+  });
+
+  it("is NOT live — the lead already finished its part, a studio is not briefed on it", () => {
+    expect(LIVE_TASK_STATES).not.toContain("awaiting_merge");
+  });
+});
 
 describe("transitionStudioTask — a lead moves its OWN task, and only so far", () => {
   const MINE = "websites--web-studio";

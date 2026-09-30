@@ -6,8 +6,20 @@
 // Two rulings are encoded here rather than left to callers:
 //
 //   1. The state vocabulary is A2A's, borrowed verbatim, so a later migration
-//      to that protocol is a RENAME and not a rewrite. Six states, closed
-//      set, no synonyms.
+//      to that protocol is a RENAME and not a rewrite. Seven states, closed
+//      set, no synonyms — `awaiting_merge` (board issue #110) is the one
+//      exception to "borrowed verbatim": it names a shape this fleet's own
+//      PR-review workflow needed (lead finished, PR open, waiting on a
+//      human merge) that A2A's own vocabulary has no word for. It sits
+//      between `input_required` and the terminal states on purpose: it is
+//      SELF-REPORTED by the lead (same as `working`/`input_required`, see
+//      LEAD_TASK_STATES below), not verified by anyone, so it cannot be
+//      terminal (TERMINAL_TASK_STATES) — the issue stays open until the
+//      merge actually lands (src/studio/task-reap.ts's runTaskReap, whose
+//      merge check is already state-agnostic, catches that). And it is not
+//      "live" work (LIVE_TASK_STATES) either — the lead's part is done, so a
+//      fresh studio has nothing to be briefed on and a destroy/reap gate has
+//      nothing left to protect.
 //   2. The Worker is the board's SINGLE WRITER of state. Agents never label,
 //      close, or reopen an issue. That is what kills the state-drift class
 //      the websites fleet already paid for once — a merged PR whose issue
@@ -20,7 +32,7 @@
 // transition on it.
 
 export const TASK_STATES = [
-  "submitted", "working", "input_required", "completed", "failed", "canceled",
+  "submitted", "working", "input_required", "awaiting_merge", "completed", "failed", "canceled",
 ] as const;
 export type TaskState = (typeof TASK_STATES)[number];
 
