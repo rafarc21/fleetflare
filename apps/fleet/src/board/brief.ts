@@ -233,8 +233,10 @@ export function renderBriefPrompt(
     // `submitted` while the studio worked, which every monitor watching the
     // board read as a stalled studio.
     `Move your own state as you go: \`fleet task state ${task.number} working\` the moment you start, ` +
-      `then \`input_required\` if you are blocked on an answer, or \`failed\` if you cannot finish. ` +
-      "Those three, and no others.",
+      `then \`input_required\` if you are blocked on an answer, \`awaiting_merge\` once you have ` +
+      `reported your result (\`fleet task report\`) with a PR and there is nothing left for you to do ` +
+      `but wait on the merge, or \`failed\` if you cannot finish. ` +
+      "Those four, and no others.",
     "",
     "You may NOT mark this task `completed`. That is the verdict of whoever verifies the work, " +
       "not of whoever did it — report your result and let the verifier close it. " +
