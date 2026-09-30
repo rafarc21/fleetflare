@@ -139,9 +139,20 @@ function studio(pane: string, opts: {
     put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"],
   };
   const execs: string[] = [];
+  // Issue #102: the fleet-wide accountLimits store, wired exactly as do.ts's
+  // own failoverDeps() wires it (D1 there, a plain Map here) -- this single
+  // studio's own successive switches accumulate into it precisely as a real
+  // fleet's would, which is what still makes the LAST account genuinely
+  // "exhausted" once every other one has, in turn, shown this same studio its
+  // limit (see "fix C item 2" below).
+  const accountLimits = new Map<string, { until: string | null; seenAt: string }>();
   const deps: FailoverDeps = {
     autoFailover: true,
     accounts: opts.accounts ?? ACCOUNTS, now: () => now,
+    accountLimits: {
+      read: async () => Object.fromEntries(accountLimits),
+      write: async (name: string, until: string | null, seenAt: string) => { accountLimits.set(name, { until, seenAt }); },
+    },
     exec: vi.fn(async (cmd: string) => {
       execs.push(cmd);
       return { code: 0, stdout: cmd === paneCaptureCmd() ? current : "", stderr: "" };

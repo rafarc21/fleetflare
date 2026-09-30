@@ -16,8 +16,8 @@
  * this feature's usual reason (do.ts imports "@cloudflare/sandbox"; see
  * provision.ts's header). do.ts wires the ports and owns the schedule.
  */
-import type { ClaudeAccount } from "./accounts";
-import { accountsTried, nextClaudeAccount } from "./accounts";
+import type { ClaudeAccount, AccountLimits } from "./accounts";
+import { accountsTried, nextClaudeAccount, earliestAccountReset } from "./accounts";
 import { STATUS_KEY, OPERATION_KEY, watchForDestroy, operationLockFresh, type StudioStorage } from "./provision";
 import { redactSecrets } from "./redact";
 import {
@@ -664,14 +664,24 @@ function bottomLimitModal(lines: string[]): PaneVerdict | null {
  *     wake goes through, and the account keeps refusing until the real reset.
  *     One missed switch per edge, twice a year, per zone that observes DST.
  *   - AFTER A SELECT-MODAL SWITCH, A `--continue` REDRAW OF THE PERSISTED
- *     LIMIT MESSAGE IS UNGUARDED. Select modals are deliberately not
- *     redraw-guarded (a select modal on the next account is that account's
- *     own limit). But the transcript the switched-off account left behind can
- *     still hold an INLINE limit message, and `--continue` redraws that. It
- *     would key on its own headline + reset, so the first tick after the
- *     switch could read it as a new inline limit and switch again. UNMEASURED
- *     — no capture of this sequence exists; it is written down because the
- *     code path admits it, not because it was seen.
+ *     LIMIT MESSAGE IS GUARDED ONLY WHEN THE BLOCK WAS ALREADY KNOWN. Select
+ *     modals are deliberately not redraw-guarded (a select modal on the next
+ *     account is that account's own limit). The transcript the switched-off
+ *     account left behind can still hold an INLINE limit message that
+ *     `--continue` redraws; the no-flapping guard below
+ *     (`claudeAccountMovedBlock`, review round 1, #102 review, 2026-09-30)
+ *     catches this ONLY when this studio already had a LIMIT_SIGHTING_KEY
+ *     sighting for that exact block at the moment the select-modal switch
+ *     fired. An inline message that was printed but never sighted (it never
+ *     matched the strict idle-ending shape this file requires — see the
+ *     detection doc comment below) leaves `claudeAccountMovedBlock: null`, so
+ *     its `--continue` redraw is NOT suppressed and could read as a new
+ *     inline limit and switch again. UNMEASURED — no capture of this sequence
+ *     exists; it is written down because the code path admits it, not because
+ *     it was seen. Traded deliberately (finding 2, same review): the OLD,
+ *     unconditional guard suppressed every genuinely new inline limit on a
+ *     freshly-switched account for up to FLAP_GUARD_MINUTES too, which
+ *     measured far more often than this residual ever has.
  * The cost of each false positive is a kill-and-`--continue` of a lead that
  * was already doing nothing, not a lost turn; of each false negative, one
  * missed switch.
@@ -847,6 +857,21 @@ export interface FailoverDeps {
   /** Issue #271: how cards name an account (`<label> (<secret name>)`).
    *  Absent: the secret name. */
   display?: (name: string) => string;
+  /**
+   * Issue #102 — fleet-wide per-account limit state (fleet_state via
+   * src/state.ts, do.ts's own read/write), read once per tick and handed to
+   * accounts.ts's nextClaudeAccount so a switch skips ANY account a limit has
+   * ever been seen on — not only this row's own past. `write` is called
+   * whenever THIS studio's own observation of its current account's limit
+   * changes, so every OTHER studio's own next failover decision sees it too.
+   * Absent (every caller/test that predates this feature): no fleet-wide
+   * skip — nextClaudeAccount then wraps seeing every OTHER account as free,
+   * same as a fleet with no recorded limits at all.
+   */
+  accountLimits?: {
+    read(): Promise<AccountLimits>;
+    write(name: string, until: string | null, seenAt: string): Promise<void>;
+  };
 }
 
 export type FailoverOutcome =
@@ -857,6 +882,11 @@ export type FailoverOutcome =
   // tick logs it (do.ts logs every outcome but `no-modal`): a guard collision
   // — a NEW limit printed with the same reset text — is otherwise silent.
   | { kind: "rerender"; block: string }
+  // Issue #102: the no-flapping guard skipped an inline-only block within
+  // FLAP_GUARD_MINUTES of the last switch. Its own kind, same reason
+  // `rerender` has one — a skipped move nobody can see in a tail is a
+  // decision nobody can audit.
+  | { kind: "flap-guarded"; reason: string }
   | { kind: "switched"; from: string | null; to: string }
   | { kind: "exhausted"; tried: string[] }
   // Issue #271: auto-failover off, another account existed, none was used.
@@ -876,13 +906,19 @@ export type FailoverOutcome =
  * Deterministic in its inputs, which is what makes the anti-loop guard below a
  * plain string comparison: the same exhausted studio produces the same message
  * every tick, so a second tick can see it has already said this.
+ *
+ * `earliestReset` (issue #102 requirement 3) — the earliest fleet-wide reset
+ * among the accounts just tried (accounts.ts's earliestAccountReset), or null
+ * when none of them have a readable one. Appended, never required: every
+ * caller that predates #102 passes nothing and gets exactly today's message.
  */
-export function exhaustedMessage(studioId: string, tried: string[]): string {
+export function exhaustedMessage(studioId: string, tried: string[], earliestReset?: string | null): string {
   const names = tried.length > 0 ? tried.join(", ") : "none configured";
   return (
     `${exhaustedMessagePrefix(studioId)} in tmux studio:claude ` +
     `and every account has been tried (${names}). No switch attempted. ` +
-    `Add another CLAUDE_CODE_OAUTH_TOKEN_<n> secret to give the fleet somewhere to go.`
+    `Add another CLAUDE_CODE_OAUTH_TOKEN_<n> secret to give the fleet somewhere to go.` +
+    (earliestReset ? ` Earliest reset: ${earliestReset}.` : "")
   );
 }
 
@@ -1090,6 +1126,16 @@ export function evaluateDegradedRecovery(
 }
 
 /**
+ * Issue #102 — the no-flapping cooldown, in minutes. One SYNC_SESSION_SECONDS
+ * tick (300s = 5m, session-sync.ts): long enough for a just-completed switch's
+ * `--continue` resume to finish drawing its own transcript (the redraw window
+ * the guard exists to cover — see runAccountFailover's own doc comment at the
+ * check), short enough that a genuinely new limit on the very next tick is
+ * still caught the tick after that, rather than sitting silently blocked.
+ */
+export const FLAP_GUARD_MINUTES = 5;
+
+/**
  * One failover step, for one studio. Called from do.ts's syncSession cycle.
  *
  * Does NOTHING unless the pane is showing the modal — the common case is one
@@ -1183,7 +1229,12 @@ export async function runAccountFailover(
     // comment for why claudeOnScreen/parked/recovered live there now, not
     // here.
     const recovery = evaluateDegradedRecovery(existing, studioId, screen, deps.now(), sighting);
-    const forget = !verdict.repainted && recovery.claudeOnScreen && existing.failoverBlock != null;
+    // Review round 1 (#102 review, 2026-09-30): claudeAccountMovedBlock is
+    // forgotten on the same trigger as failoverBlock — it is not the block
+    // that survives a redraw either, and a select-modal switch can carry one
+    // (from `sighting`) even when `failoverBlock` itself is null.
+    const forget = !verdict.repainted && recovery.claudeOnScreen
+      && (existing.failoverBlock != null || existing.claudeAccountMovedBlock != null);
     // PR #144 review: a block already STALE when first seen is recorded too,
     // or it comes back in its next daily window and fires.
     if (verdict.stale && sighting?.block !== verdict.stale.block) {
@@ -1254,7 +1305,7 @@ export async function runAccountFailover(
       const cleared: StudioStatus = {
         ...existing,
         rateLimited: null,
-        ...(forget ? { failoverBlock: null } : {}),
+        ...(forget ? { failoverBlock: null, claudeAccountMovedBlock: null } : {}),
         ...(clearedAt !== null ? { state: "running" as const, error: null, exhaustionClearedAt: clearedAt } : {}),
       };
       await storage.put(STATUS_KEY, cleared);
@@ -1273,6 +1324,50 @@ export async function runAccountFailover(
   const key = verdict.inline ? limitBlockKey(verdict) : null;
   if (key !== null && existing.failoverBlock === key) {
     return { kind: "rerender", block: key };
+  }
+  // Issue #102 — no flapping. Guards ONLY the one path with a genuinely
+  // unguarded residual: a switch that matched a SELECT-style modal
+  // (`claudeAccountMovedVia === "modal"`) always records `failoverBlock:
+  // null` (select modals have no block key), so the `rerender` check above
+  // cannot catch a `--continue` redraw of an INLINE message the switched-off
+  // account's transcript still holds. An `"inline"`-via switch is already
+  // protected by its own `failoverBlock`/`rerender` pairing — a DIFFERENT
+  // inline key after one is trusted immediately, cooldown or not — and a
+  // genuine SELECT-style modal (`!verdict.inline`) always overrides the guard
+  // either way: claude can never redraw one of those from a resumed
+  // transcript.
+  //
+  // Review round 1 (#102 review, 2026-09-30), finding 2 — the escape hatch
+  // was UNREACHABLE for a genuinely new limit: the guard used to fire on ANY
+  // inline verdict in the window, so a genuinely NEW limit on the studio's
+  // OWN NEW account that happened to render inline (session/weekly/monthly-
+  // spend blocks — measured, INLINE_LIMIT_HEADLINES's own doc comment, the
+  // overwhelmingly common shape) was indistinguishable from a stale
+  // `--continue` redraw of the OLD account's leftover transcript.
+  //
+  // Fixed by reusing the SAME comparison primitive the redraw guard above
+  // already uses (`limitBlockKey`/`key`), via `claudeAccountMovedBlock`
+  // (types.ts): the block-key this studio already knew about — from its own
+  // LIMIT_SIGHTING_KEY, since a select modal's own capture can never also
+  // carry an inline block (position-exclusive in detectLimitOnScreen) — at
+  // the moment the select-modal switch fired, or `null` when it knew of none.
+  // ONLY a NEW inline observation whose key MATCHES that recorded one is a
+  // genuine stale redraw and is suppressed; a DIFFERENTLY-keyed block, or one
+  // appearing when nothing at all was known at switch time
+  // (`claudeAccountMovedBlock` null/absent), is trusted immediately.
+  if (
+    verdict.inline && existing.claudeAccountMovedVia === "modal" && existing.claudeAccountMovedAt != null
+    && existing.claudeAccountMovedBlock != null && existing.claudeAccountMovedBlock === key
+  ) {
+    const movedMs = Date.parse(existing.claudeAccountMovedAt);
+    if (!Number.isNaN(movedMs) && deps.now().getTime() - movedMs < FLAP_GUARD_MINUTES * 60_000) {
+      return {
+        kind: "flap-guarded",
+        reason:
+          `studio moved accounts within the last ${FLAP_GUARD_MINUTES}m via a select-style modal, and this inline ` +
+          `limit block matches the one it already knew about then — a stale --continue redraw, not new evidence`,
+      };
+    }
   }
   // Issue #127: remember the FIRST sighting of this block (the detector
   // above already judged staleness from it). Written only when it changes,
@@ -1300,19 +1395,43 @@ export async function runAccountFailover(
   // message an operator reads say "moved from nothing". accountsTried's last
   // entry is that resolution, reused rather than re-derived.
   const from = accountsTried(deps.accounts, current).at(-1) ?? current;
-  const candidate = nextClaudeAccount(deps.accounts, current);
+  // Issue #102: this account is limited RIGHT NOW — mark it FLEET-WIDE (every
+  // studio's own next failover decision reads this, not only this row's own
+  // sighting) whenever the observation actually changed. `from` resolves a
+  // never-switched studio's `null` to the real first-account name; an empty
+  // fleet (no accounts at all) has no name to mark.
+  if (deps.accountLimits && from !== null && limitChanged) {
+    await deps.accountLimits.write(from, seen.until, seen.seenAt);
+  }
+  // Issue #271: a studio starts at its mapped primary, so accounts before it
+  // were never its to try — computed once, reused below for both the
+  // wrap-around search range and the "tried" list.
+  const start = deps.primary ? Math.max(0, deps.accounts.findIndex((a) => a.name === deps.primary)) : 0;
+  // Issue #102: a stale recorded `current` from BEFORE the primary (#273 r2)
+  // must still be able to step FORWARD into scope, so the search range
+  // extends back to cover it; a `current` already at or past the primary
+  // never wraps BEHIND it — an account before a repo's mapped primary is
+  // never that repo's to use, wrap or no wrap.
+  const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
+  const scopedAccounts = deps.accounts.slice(currentIdx < 0 ? start : Math.min(start, currentIdx));
+  const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
+  const candidate = nextClaudeAccount(scopedAccounts, current, limits, deps.now());
   // Issue #271: with auto-failover off, a studio that COULD move is parked
   // instead — marked and carded once, never switched. With nowhere to go the
   // message is today's, so a single-account fleet reads exactly as before.
   const next = deps.autoFailover ? candidate : null;
 
   if (!next) {
-    // Issue #271: a studio starts at its mapped primary, so accounts before
-    // it were never its to try.
-    const start = deps.primary ? Math.max(0, deps.accounts.findIndex((a) => a.name === deps.primary)) : 0;
-    const tried = accountsTried(deps.accounts, current).slice(start);
+    const tried = deps.accounts.map((a) => a.name).slice(start);
     const parkedOn = candidate ? (from ?? tried.at(-1) ?? "CLAUDE_CODE_OAUTH_TOKEN") : null;
-    const message = parkedOn !== null ? parkedMessage(studioId, show(parkedOn)) : exhaustedMessage(studioId, tried.map(show));
+    // Issue #102 requirement 3: every account genuinely exhausted (parkedOn
+    // null means nextClaudeAccount found nowhere to go at all) — the
+    // earliest fleet-wide reset among them, so `fleet ls`/the degraded
+    // message can say when a retry might work instead of just "no switch".
+    const earliestReset = parkedOn === null ? earliestAccountReset(scopedAccounts, limits, deps.now()) : null;
+    const message = parkedOn !== null
+      ? parkedMessage(studioId, show(parkedOn))
+      : exhaustedMessage(studioId, tried.map(show), earliestReset);
     // The anti-loop guard. This studio has already been degraded for exactly
     // this reason, so there is nothing new to record and nobody new to tell.
     if (existing.state === "degraded" && existing.error === message) {
@@ -1356,7 +1475,21 @@ export async function runAccountFailover(
     claudeAccount: next.name,
     // #289: a completed switch is a launch on the new account.
     ...(failed ? {} : { launchedAccount: next.name }),
+    // Issue #102: WHEN this switch landed, and HOW it matched — the
+    // no-flapping guard above reads both, unconditionally on `failed` for the
+    // same reason `claudeAccount: next.name` already is (the account changed
+    // either way; only the relaunch's own success is conditional).
+    claudeAccountMovedAt: deps.now().toISOString(),
+    claudeAccountMovedVia: verdict.inline ? "inline" : "modal",
     failoverBlock: key,
+    // Review round 1 (#102 review, 2026-09-30), finding 2 — the no-flapping
+    // guard's own comparison key (types.ts's own doc comment states the full
+    // rule): `key` itself for an inline-via switch (the same value
+    // `failoverBlock` just got), or the block this studio already knew about
+    // from an earlier tick (`sighting`, read at the TOP of this call, before
+    // this tick's own observation) for a select-modal-via switch — `null`
+    // when it knew of none.
+    claudeAccountMovedBlock: key ?? sighting?.block ?? null,
     // A completed switch is a new account: the old one's limit is not its.
     rateLimited: failed ? existing.rateLimited : null,
   };
