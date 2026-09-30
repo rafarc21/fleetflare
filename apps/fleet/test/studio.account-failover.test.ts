@@ -1436,6 +1436,44 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
     expect(h.notices[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN_2");
   });
 
+  // Code review, 2026-09-30 (this issue's own review pass): handBack's own
+  // doc comment above already STATES the missing observedStorage bring-up
+  // re-verification as a deliberate, bounded residual — but nothing had ever
+  // driven a hand-back WITH observedStorage passed to pin what that residual
+  // actually does. This test is that pin: it proves, by running the code
+  // rather than by reading its doc comment, that a hand-back leaves whatever
+  // session-verdict/incarnation data observedStorage already held completely
+  // untouched — no bring-up observation exec at all, unlike the ordinary
+  // switch path just above (runAccountFailover — incarnation token write
+  // (issue #85)) which always runs one. NOT a behavior change: handBack
+  // itself is untouched by this test.
+  it("hand-back does not re-verify observedStorage (residual, tracked)", async () => {
+    const h = harness({
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
+        borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
+      }),
+      // account 2 (own primary) carries no entry at all — fleet-wide free again.
+    });
+    // Seed observedStorage with the same incarnation-token shape the
+    // ordinary switch path itself writes (issue #85) — something concrete
+    // to prove UNCHANGED by the hand-back below.
+    await mergeObserved(h.storage, { incarnation: "pre-handback-incarnation-token", lastShipOkAt: "2026-09-20T00:00:00.000Z" });
+    const before = await getObserved(h.storage);
+
+    const out = await runAccountFailover(h.deps, h.storage, STUDIO_ID, async (s) => { h.recorded.push(s); }, h.storage);
+
+    expect(out).toEqual({ kind: "returned", from: "CLAUDE_CODE_OAUTH_TOKEN_4", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    // No bring-up observation exec at all — handBack skips it entirely,
+    // unlike the ordinary switch path (which always runs BRINGUP_TOKEN_WRITE_SECTION).
+    expect(h.execs.some((c) => c.includes(BRINGUP_TOKEN_WRITE_SECTION))).toBe(false);
+    const after = await getObserved(h.storage);
+    expect(after.incarnation).toBe(before.incarnation);
+    expect(after.session).toBe(before.session);
+    expect(after).toEqual(before);
+  });
+
   it("not yet borrowed, own primary free, no limit on screen: hand-back never fires (nothing to hand back)", async () => {
     const h = harness({
       accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",

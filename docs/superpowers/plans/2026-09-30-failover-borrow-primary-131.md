@@ -343,6 +343,17 @@ inline in `do.ts`'s own comments).
   comment for the three things it does NOT do and why (no redraw-guard
   bookkeeping, no `claudeAccountMovedVia`, no `observedStorage` bring-up
   re-verification — stated as a residual, not silently dropped).
+
+  Review round 2 (2026-09-30): the `observedStorage` residual above was
+  stated but unproven — no test had ever driven a hand-back WITH
+  `observedStorage` passed. Now pinned by
+  `test/studio.account-failover.test.ts`'s `"hand-back does not re-verify
+  observedStorage (residual, tracked)"`, which seeds `incarnation`/
+  `lastShipOkAt` before a hand-back and asserts the whole `Observed` record
+  is byte-identical after — proof, not just doc-comment assertion, that
+  session-verdict/incarnation data goes stale across a hand-back. Candidate
+  for a follow-up issue if `fleet inspect`'s session-verdict display after a
+  hand-back turns out to matter in practice (not filed here).
 - `apps/fleet/src/studio/types.ts` — `StudioStatus` gains
   `borrowedAccount?: string | null` and `borrowedFromRepo?: string | null`.
 - `apps/fleet/src/studio/rate-limit.ts` — new `accountBurnStateKey`,
