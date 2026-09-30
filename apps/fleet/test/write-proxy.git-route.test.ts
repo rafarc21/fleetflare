@@ -328,6 +328,24 @@ describe("handleGitProxy: default branch (issue #34)", () => {
     expect(upstreamCalls).toHaveLength(0);
   });
 
+  // Refs #34: every command counts, not the first. A mutant checking only
+  // the first ref survived.
+  it("several refs, default branch NOT first: the whole push is refused", async () => {
+    const { push, upstreamCalls } = await setup();
+    const caps = "report-status side-band-64k ofs-delta agent=git/2.50";
+    const body = concat([
+      pkt(`${OLD} ${NEW} refs/heads/feature\0${caps}\n`),
+      pkt(`${OLD} ${NEW} refs/heads/other\n`),
+      pkt(`${OLD} ${NEW} refs/heads/main\n`),
+      FLUSH,
+      await makePack([{ type: 1, data: commit("clean change") }]),
+    ]);
+    const text = await decode(await push(body));
+    expect(text).toContain("is the default branch");
+    for (const ref of ["refs/heads/feature", "refs/heads/other", "refs/heads/main"]) expect(text).toContain(`ng ${ref}`);
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
   it("deleting the default branch is refused", async () => {
     const { push, upstreamCalls } = await setup();
     expect(await decode(await push(await pushBody({ del: true, ref: "refs/heads/main" })))).toContain("is the default branch");
