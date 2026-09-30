@@ -2727,6 +2727,31 @@ describe("repair verbs name the failing side (#96)", () => {
     expect(rcfg).toEqual([[undefined, false], [true, true]]);
   });
 
+  // Issue #115: `--no-fresh-session` rides `?no-fresh-session=true` on the
+  // provision route only (recycle's own `--fresh-session` is untouched — see
+  // the plan doc's explicit out-of-scope note) and reaches the DO as
+  // cfg.cancelFreshSession for that ONE call. Absent = the field is absent.
+  // Sending BOTH params at once is refused outright (400), never silently
+  // resolved either way.
+  it("#115: provision ?no-fresh-session=true reaches the DO as cfg.cancelFreshSession; both at once is a 400", async () => {
+    authorized();
+    const { testEnv, fakeNs } = envWithFakeStudio();
+    const stub = fakeNs.get();
+    const provision = vi.fn(async () => ({ id: STUDIO_ID, state: "running" }) as StudioStatus);
+    const ns = { ...fakeNs, get: () => ({ ...stub, provision }) };
+    const e = { ...testEnv, STUDIO: ns } as unknown as Env;
+    await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/provision`, { method: "POST" }), e);
+    await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/provision?no-fresh-session=true`, { method: "POST" }), e);
+    const pcfg = (provision.mock.calls as unknown[][]).map((c) => (c[0] as ProvisionConfig).cancelFreshSession);
+    expect(pcfg).toEqual([undefined, true]);
+
+    const res = await handleStudio(
+      authorizedReq(`/studio/${STUDIO_ID}/provision?fresh-session=true&no-fresh-session=true`, { method: "POST" }), e,
+    );
+    expect(res.status).toBe(400);
+    expect(provision.mock.calls.length).toBe(2);
+  });
+
   it("inspect: a DO failure says only what is known — the container may or may not have been reached", async () => {
     authorized();
     const res = await handleStudio(
