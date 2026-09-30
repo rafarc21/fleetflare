@@ -477,6 +477,40 @@ describe("clearForceMappedAccount — the primitive recycle()'s forced-mapped cl
   });
 });
 
+// Review round 2 (maestro review of PR #135), finding 2 — clearForceMappedAccount
+// left borrowedAccount/borrowedFromRepo set, and so did the sibling #273 r2
+// stale-clear in launchAccountOrRefuse. A stale borrow flag surviving either
+// one makes the NEXT hand-back check (failover.ts, gated on exactly that
+// field) fire against a studio that is not actually borrowing anything any
+// more, killing the fresh lead the clear just launched out from under it.
+describe("clearForceMappedAccount / launchAccountOrRefuse — the borrow flags clear too (review round 2 finding 2)", () => {
+  it("clearForceMappedAccount clears borrowedAccount/borrowedFromRepo alongside the moved-audit trail", async () => {
+    const storage = fakeStorage(status({
+      claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
+      borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
+    }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+    await clearForceMappedAccount(storage, recordFn);
+    const cleared = (await storage.get(STATUS_KEY))!;
+    expect(cleared.borrowedAccount).toBeNull();
+    expect(cleared.borrowedFromRepo).toBeNull();
+  });
+
+  it("the #273 r2 flag-off stale-clear in launchAccountOrRefuse also clears borrowedAccount/borrowedFromRepo", async () => {
+    const off = envWith(ALL); // FLEET_AUTO_FAILOVER unset -> off
+    const storage = fakeStorage(status({
+      claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", borrowedFromRepo: "repo-b",
+    }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+    await launchAccountOrRefuse(off, storage, "demosite-life--pilot", recordFn);
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.claudeAccount).toBeNull();
+    expect(row.borrowedAccount).toBeNull();
+    expect(row.borrowedFromRepo).toBeNull();
+  });
+});
+
 describe("withAccountDisplay — the column shows the LAUNCHED account (#289)", () => {
   const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
 
