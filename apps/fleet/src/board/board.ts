@@ -1169,16 +1169,25 @@ export async function resolveLatestAssignedBrief(
   return { prompt, taskNumber: newest.number, title: newest.title };
 }
 
-/** Issue #137: which live states earn a bring-up re-delivery wake. Narrower
- *  than `LIVE_TASK_STATES`: `submitted` is excluded on purpose — a submitted
- *  task has not been started yet, so the ordinary fresh-assignment wake
- *  (`wakeOnAssign`, assign-wake.ts) already covers it, and re-sending it here
- *  too would be a duplicate wake, not a recovery. */
-export const REBRIEF_TASK_STATES: readonly TaskState[] = ["working", "input_required"];
+/** Issue #137, PR #143 fix-first review: which live states earn a bring-up
+ *  re-delivery wake. Originally narrower than `LIVE_TASK_STATES` — `submitted`
+ *  was excluded on the theory that the ordinary fresh-assignment wake
+ *  (`wakeOnAssign`, assign-wake.ts) already covers it. That theory is wrong:
+ *  `wakeOnAssign` itself REFUSES to type into a STOPPED studio at assignment
+ *  time (its own refusal message: "no wake was sent, because starting its
+ *  container costs money silently. Provision it and the task is delivered on
+ *  bring-up."), leaving the task in `submitted` with no wake ever sent. Only
+ *  the bring-up path (this filter) keeps that promise, so `submitted` has to
+ *  qualify here too — making this byte-identical to `LIVE_TASK_STATES`. Kept
+ *  as its own named export anyway: it is a SEPARATE policy decision ("what
+ *  earns a bring-up re-delivery wake") from LIVE_TASK_STATES's ("what counts
+ *  as work still owed"), even though the two currently agree on every state. */
+export const REBRIEF_TASK_STATES: readonly TaskState[] = LIVE_TASK_STATES;
 
 /**
- * Issue #137: every OPEN task currently assigned to `studioId` that is
- * `working` or `input_required` — the sibling of `resolveLatestAssignedBrief`
+ * Issue #137: every OPEN task currently assigned to `studioId` in a
+ * `REBRIEF_TASK_STATES` state (`submitted`, `working`, or `input_required`)
+ * — the sibling of `resolveLatestAssignedBrief`
  * above, widened from "the single newest assigned task" to "every task still
  * genuinely in flight", because a container replacement leaves a fresh pane
  * with zero memory of ANY of them, not only the most recent one.

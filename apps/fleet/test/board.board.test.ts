@@ -1331,7 +1331,7 @@ describe("openTasksNeedingRebrief — bring-up re-delivery's board read (issue #
     vi.restoreAllMocks();
   });
 
-  it("only working/input_required qualify — submitted, awaiting_merge and terminal states are excluded", async () => {
+  it("submitted/working/input_required qualify — awaiting_merge and terminal states are excluded", async () => {
     const api = fakeApi({
       listIssues: vi.fn(async () => [
         mine(1, "submitted"), mine(2, "working"), mine(3, "input_required"),
@@ -1339,7 +1339,23 @@ describe("openTasksNeedingRebrief — bring-up re-delivery's board read (issue #
       ]),
     });
     const result = await openTasksNeedingRebrief(api, "o/r", MINE);
-    expect(result.map((t) => t.taskNumber).sort()).toEqual([2, 3]);
+    expect(result.map((t) => t.taskNumber).sort()).toEqual([1, 2, 3]);
+  });
+
+  // Reviewer fix-first on #143/#137: `wakeOnAssign` (assign-wake.ts) refuses
+  // to type into a STOPPED studio and says so explicitly — "Provision it and
+  // the task is delivered on bring-up" — a promise only THIS function keeps.
+  // A task assigned while its studio was stopped sits in `submitted` with no
+  // wake ever sent; if `openTasksNeedingRebrief` dropped `submitted`, that
+  // promise would be a lie and the lead would never see the task at all.
+  // Exercises the REAL board-query filter (not a hand-built list handed
+  // straight to the delivery loop, which would hide this bug entirely — see
+  // studio.wake-gate.test.ts / studio.destroy-race.test.ts, neither of which
+  // goes through this function).
+  it("a submitted task (assigned while the studio was stopped, never woken) is returned too", async () => {
+    const api = fakeApi({ listIssues: vi.fn(async () => [mine(9, "submitted", "Stopped at assign time")]) });
+    const result = await openTasksNeedingRebrief(api, "o/r", MINE);
+    expect(result).toEqual([{ taskNumber: 9, title: "Stopped at assign time" }]);
   });
 
   it("a closed issue in a live state does not count — must be open too", async () => {
@@ -1365,8 +1381,9 @@ describe("openTasksNeedingRebrief — bring-up re-delivery's board read (issue #
     ]);
   });
 
-  it("REBRIEF_TASK_STATES is exactly working + input_required", () => {
-    expect(REBRIEF_TASK_STATES).toEqual(["working", "input_required"]);
+  it("REBRIEF_TASK_STATES is exactly submitted + working + input_required — same as LIVE_TASK_STATES", () => {
+    expect(REBRIEF_TASK_STATES).toEqual(["submitted", "working", "input_required"]);
+    expect(REBRIEF_TASK_STATES).toEqual(LIVE_TASK_STATES);
   });
 });
 
