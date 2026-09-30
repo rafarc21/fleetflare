@@ -3,7 +3,7 @@ import {
   createTask, transitionTask, commentEnvelope, listTasks, showTask, resolveBoardRepo,
   requireAssignedTask, showStudioTask, commentStudioEnvelope, resolveBriefPrompt, resolveLatestAssignedBrief,
   assignTask, transitionStudioTask, openAssignedTasks, findLiveAssignedTask,
-  closeTerminalTasks, TERMINAL_CLOSE_PAGE,
+  closeTerminalTasks, TERMINAL_CLOSE_PAGE, autoStartSubmittedTasks,
   type BoardApi,
 } from "../src/board/board";
 import { parseEnvelopeComment, renderEnvelopeComment, parseEnvelope } from "../src/board/envelope";
@@ -1482,3 +1482,51 @@ describe("transitionTask — from \"none\" repairs a zero-label task (issue #82)
   }
 });
 
+// Issue #86 item 4: leads never flip their own task to working, so the
+// board read `submitted` while a lead visibly worked. The DO calls this on
+// the lead's first observed working turn.
+describe("autoStartSubmittedTasks (issue #86)", () => {
+  const STUDIO = "demo--web-studio";
+  const mine = (n: number, over: Partial<BoardTask> = {}) =>
+    task({ number: n, labels: ["submitted", studioLabel(STUDIO)], assignee: STUDIO, ...over });
+
+  it("asks GitHub for this studio's submitted tasks only, and moves each open one to working", async () => {
+    const issues = new Map([[12, mine(12)], [13, mine(13)]]);
+    const listIssues = vi.fn(async () => [...issues.values()]);
+    const getIssue = vi.fn(async (_r: string, n: number) => issues.get(n)!);
+    const api = fakeApi({ listIssues, getIssue });
+    const res = await autoStartSubmittedTasks(api, "o/r", STUDIO);
+    expect(listIssues).toHaveBeenCalledWith("o/r", { labels: ["submitted", studioLabel(STUDIO)] });
+    expect(res).toEqual({ moved: [12, 13], errors: [] });
+    expect(api.removeLabel).toHaveBeenCalledWith("o/r", 12, "submitted");
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 12, ["working"]);
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 13, ["working"]);
+  });
+
+  it("a closed submitted task is left alone", async () => {
+    const closed = mine(14, { open: false });
+    const api = fakeApi({ listIssues: vi.fn(async () => [closed]), getIssue: vi.fn(async () => closed) });
+    expect(await autoStartSubmittedTasks(api, "o/r", STUDIO)).toEqual({ moved: [], errors: [] });
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("a task moved since the listing (CAS refusal) is an error line, never a throw; the rest still move", async () => {
+    const moved = mine(12, { state: "working", labels: ["working", studioLabel(STUDIO)] });
+    const issues = new Map([[12, moved], [13, mine(13)]]);
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [mine(12), mine(13)]),
+      getIssue: vi.fn(async (_r: string, n: number) => issues.get(n)!),
+    });
+    const res = await autoStartSubmittedTasks(api, "o/r", STUDIO);
+    expect(res.moved).toEqual([13]);
+    expect(res.errors).toHaveLength(1);
+    expect(res.errors[0]).toContain("#12");
+  });
+
+  it("a GitHub failure is an error line, never a throw", async () => {
+    const api = fakeApi({ listIssues: vi.fn(async () => { throw new GitHubError(502, "down"); }) });
+    const res = await autoStartSubmittedTasks(api, "o/r", STUDIO);
+    expect(res.moved).toEqual([]);
+    expect(res.errors[0]).toContain("down");
+  });
+});

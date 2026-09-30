@@ -115,7 +115,7 @@ import {
 import { sendCard } from "../telegram/api";
 import { parseLearnings, parseEnvelopeComment } from "../board/envelope";
 import { assignedBriefResolver, openTaskChecker, githubBoardApi } from "../board/routes";
-import { listTasks, resolveLatestAssignedBrief } from "../board/board";
+import { listTasks, resolveLatestAssignedBrief, autoStartSubmittedTasks } from "../board/board";
 // Issue #249 (PR4b): "live" is the board's own state, not GitHub's open flag —
 // a terminal state leaves the issue open, and a finished task's branch is not
 // work a fresh lead needs re-briefed on. Same filter
@@ -3697,6 +3697,7 @@ async function applyActivityVerdict(
   recordStudioFn: ((status: StudioStatus) => Promise<void>) | undefined,
   paneVerdict: FrameVerdict,
   hookHeartbeat: HookHeartbeat | null | undefined,
+  onLeadWorking?: () => Promise<void>,
 ): Promise<void> {
   const activityStatus = await storage.get(STATUS_KEY);
   const activityOpFresh = operationLockFresh(await storage.get(OPERATION_KEY), deps.now());
@@ -3713,6 +3714,36 @@ async function applyActivityVerdict(
   if (prevActivity?.state !== nextAct.state && recordStudioFn) {
     const fresh = await storage.get(STATUS_KEY);
     if (fresh) await recordStudioFn(await withObserved(storage, fresh));
+  }
+  if (onLeadWorking && nextAct.state === "working" && prevActivity?.state !== "working") {
+    await autoWorking(deps, storage as unknown as AutoWorkingStorage, onLeadWorking);
+  }
+}
+
+/** Issue #86: DO key holding the last auto submitted->working attempt, ISO. */
+export const AUTO_WORKING_KEY = "autoWorkingAt";
+/** At most one board read per studio per this window: a lead enters
+ *  `working` on every turn, and each attempt is a GitHub listing. */
+export const AUTO_WORKING_EVERY_MS = 10 * 60_000;
+
+type AutoWorkingStorage = {
+  get(key: typeof AUTO_WORKING_KEY): Promise<string | undefined>;
+  put(key: typeof AUTO_WORKING_KEY, value: string): Promise<void>;
+};
+
+/** Issue #86: the lead just started a turn. Leads never flip their own task
+ *  to working, so the board read `submitted` while they worked. Rate-bound,
+ *  and never fails the tick: a board hiccup waits for the next window. */
+async function autoWorking(
+  deps: ShipDeps, storage: AutoWorkingStorage, onLeadWorking: () => Promise<void>,
+): Promise<void> {
+  const last = Date.parse((await storage.get(AUTO_WORKING_KEY)) ?? "");
+  if (Number.isFinite(last) && deps.now().getTime() - last < AUTO_WORKING_EVERY_MS) return;
+  await storage.put(AUTO_WORKING_KEY, deps.now().toISOString());
+  try {
+    await onLeadWorking();
+  } catch (err) {
+    console.error("auto submitted->working failed, next window retries", err);
   }
 }
 
@@ -3849,6 +3880,7 @@ export async function runShipTickWithObservation(
   recordStudioFn?: (status: StudioStatus) => Promise<void>,
   deadlineMs: number = SHIP_EXEC_DEADLINE_MS,
   archive?: { doneRecords: DoneRecordPorts; resolveOpsRepo: ResolveMemoryRepo },
+  onLeadWorking?: () => Promise<void>,
 ): Promise<ShipResult> {
   const observedBefore = await getObserved(storage);
   const adoptionToken = observedBefore.incarnation === null ? crypto.randomUUID() : undefined;
@@ -4094,7 +4126,7 @@ export async function runShipTickWithObservation(
   // the SAME write path a successful probe uses (this file's own
   // `applyActivityVerdict`, above `runShipTickWithObservation`).
   if (result.paneVerdict !== undefined) {
-    await applyActivityVerdict(deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat);
+    await applyActivityVerdict(deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat, onLeadWorking);
   }
 
   // Issue #311 (PR3 addendum) — member alerts, same "independent of every
@@ -4705,6 +4737,17 @@ export class StudioDO extends Sandbox<Env> {
    * same way for the exact same reason — a case mismatch here would silently
    * fail to match a task that IS assigned.
    */
+  /** Issue #86: the lead started a turn — its submitted tasks go to working.
+   *  Lowercased for the same reason as `assignedTaskOnBoard` below. */
+  private async autoStartSubmitted(): Promise<void> {
+    const repo = (await this.workRepoSlug(null)).toLowerCase();
+    const res = await autoStartSubmittedTasks(githubBoardApi(this.env), repo, this.selfId());
+    if (res.moved.length > 0) {
+      console.log(`studio ${this.selfId()}: lead working — task ${res.moved.map((n) => `#${n}`).join(", ")} submitted -> working`);
+    }
+    for (const e of res.errors) console.error(`studio ${this.selfId()}: auto submitted->working: ${e}`);
+  }
+
   private async assignedTaskOnBoard(workRepoSlug: string): Promise<{ taskNumber: number; title: string } | null> {
     const brief = await resolveLatestAssignedBrief(githubBoardApi(this.env), workRepoSlug.toLowerCase(), this.selfId());
     return brief === null ? null : { taskNumber: brief.taskNumber, title: brief.title };
@@ -6233,6 +6276,7 @@ export class StudioDO extends Sandbox<Env> {
             (s) => recordStudio(this.env, s),
             undefined,
             { doneRecords: this.doneRecordPorts(), resolveOpsRepo: this.memoryDeps().resolveMemoryRepo },
+            () => this.autoStartSubmitted(),
           );
         } catch (err) {
           console.error("studio transcript ship failed", err);
