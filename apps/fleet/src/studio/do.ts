@@ -3380,6 +3380,46 @@ export async function clearForceMappedAccount(
 }
 
 /**
+ * Review round 2 (maestro review of PR #135), Minor finding — `recycle()`'s
+ * own `cfg.forceMappedAccount` clear (`clearForceMappedAccount`, just above)
+ * must not run at all when the MAPPED slot itself cannot launch: before this
+ * fix, a missing mapped secret still wiped `claudeAccount`/the moved-audit
+ * trail (via `clearForceMappedAccount`) before `launchAccountOrRefuse`
+ * discovered the slot was unlaunchable and refused — no container was ever
+ * touched (correct), but the row lost information on what was, underneath,
+ * still a no-op refusal. This is called FIRST, before the clear, so a
+ * refusal leaves the row exactly as it was.
+ *
+ * Deliberately not `launchAccountOrRefuse` itself: that function always
+ * resolves against `existing?.claudeAccount` (the RECORDED account) when
+ * `FLEET_AUTO_FAILOVER` is on, which is exactly the resolution `--account
+ * mapped` exists to bypass. `launchAccount(env, repo, null)` forces the
+ * MAPPED slot's own resolution instead, regardless of the flag or any
+ * recorded account — the exact question this verb is asking.
+ *
+ * On refusal, writes the SAME `degraded`/error shape `launchAccountOrRefuse`
+ * already writes for an ordinary refusal (so `fleet ls` shows why, same as
+ * any other refused launch) and throws the same `LaunchRefusedError` — but
+ * leaves `claudeAccount` and every other field this call does not own
+ * completely untouched, since nothing here was ever cleared to begin with.
+ */
+export async function refuseUnlessMappedAccountLaunchable(
+  env: Env, id: string, storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
+): Promise<void> {
+  const launch = launchAccount(env, parseStudioId(id)?.repo ?? null, null);
+  if (launch.ok) return;
+  const existing = (await storage.get(STATUS_KEY)) ?? null;
+  const base = existing ?? {
+    id, tailscaleHost: null, lastRefresh: null, lastRefreshError: null, burn: null,
+    spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+  };
+  const refused: StudioStatus = { ...base, id, state: "degraded", error: launch.error, launchedAccount: null };
+  await storage.put(STATUS_KEY, refused);
+  await recordStudioFn(refused);
+  throw new LaunchRefusedError(launch.error);
+}
+
+/**
  * Issue #271: the gate provision, restart and recycle pass before touching a
  * container. A repo mapped to an account whose secret is not set REFUSES:
  * the row goes `degraded` with the reason (the operator reads it in `fleet
@@ -6213,6 +6253,10 @@ export class StudioDO extends Sandbox<Env> {
     // lives here, inside recycle()'s own atomic flow, rather than as a
     // route-level pre-step.
     if (cfg.forceMappedAccount) {
+      // Review round 2 (maestro review of PR #135), Minor finding: refuse
+      // BEFORE clearing — see refuseUnlessMappedAccountLaunchable's own doc
+      // comment.
+      await refuseUnlessMappedAccountLaunchable(this.env, this.selfId(), this.ctx.storage, this.recordFn());
       await clearForceMappedAccount(this.ctx.storage, this.recordFn());
     }
     // Issue #271: refuse BEFORE recycle's destroy — an unlaunchable account
