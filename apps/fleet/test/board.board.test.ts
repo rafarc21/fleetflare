@@ -1391,3 +1391,56 @@ describe("createTask — continues (issue #54)", () => {
   });
 });
 
+// Issue #82: two 500s mid-transition left an issue with ZERO state labels.
+// The CAS then refused every repair, and destroy refused to free the studio.
+describe("transitionTask — a failed label add never strands zero labels (issue #82)", () => {
+  it("the add is retried once: a transient failure still lands the new state", async () => {
+    const addLabels = vi.fn().mockRejectedValueOnce(new Error("GitHub 500")).mockResolvedValueOnce(undefined);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), addLabels });
+    const res = await transitionTask(api, "o/r", 12, { from: "working", to: "input_required" });
+    expect(res.ok).toBe(true);
+    expect(addLabels).toHaveBeenCalledTimes(2);
+    expect(addLabels).toHaveBeenLastCalledWith("o/r", 12, ["input_required"]);
+  });
+
+  it("the add fails twice: the old label is put back, and the failure still surfaces", async () => {
+    const addLabels = vi.fn(async (_r: string, _n: number, labels: string[]) => {
+      if (labels[0] === "input_required") throw new Error("GitHub 500");
+    });
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), addLabels });
+    await expect(transitionTask(api, "o/r", 12, { from: "working", to: "input_required" })).rejects.toThrow("GitHub 500");
+    expect(addLabels).toHaveBeenLastCalledWith("o/r", 12, ["working"]);
+  });
+});
+
+describe("transitionTask — from \"none\" repairs a zero-label task (issue #82)", () => {
+  it("zero state labels: writes the target, logs the repair, removes nothing", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: null, labels: ["studio:demo--web-studio"] })) });
+    const res = await transitionTask(api, "o/r", 12, { from: "none", to: "working" });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.state).toBe("working");
+    expect(api.removeLabel).not.toHaveBeenCalled();
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 12, ["working"]);
+    expect(vi.mocked(api.createComment).mock.calls[0][2]).toContain("repaired");
+  });
+
+  it("a repair into a terminal state closes the issue too (#55)", async () => {
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: null, labels: [] })) });
+    const res = await transitionTask(api, "o/r", 12, { from: "none", to: "completed" });
+    expect(res.ok).toBe(true);
+    expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12, "completed");
+  });
+
+  for (const labels of [["working"], ["working", "completed"]]) {
+    it(`refused (409) when the issue carries ${labels.length} state label(s) — repair is for zero only`, async () => {
+      const api = fakeApi({ getIssue: vi.fn(async () => task({ state: null, labels })) });
+      const res = await transitionTask(api, "o/r", 12, { from: "none", to: "working" });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.status).toBe(409);
+      expect(api.addLabels).not.toHaveBeenCalled();
+    });
+  }
+});
+

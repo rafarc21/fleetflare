@@ -1330,7 +1330,9 @@ async function taskStateFetchCurrent(
     return {
       ok: false, status: 409,
       message: `task #${number} carries no single board state label (labels: ${view.task.labels.join(", ") || "none"}) ` +
-        "— there is no \"from\" this CLI can read to transition it safely",
+        "— there is no \"from\" this CLI can read to transition it safely. " +
+        "If it has NO state label at all (an interrupted transition), repair it: " +
+        `fleet task state ${number} <to> --from-none`,
     };
   }
   return { ok: true, state: view.task.state };
@@ -1361,7 +1363,7 @@ async function taskStateFetchTransition(
  * exits 1, the same posture `boardRequest` already establishes for every
  * other board verb in this file.
  */
-async function cmdTaskState(creds: Credentials, number: number, to: TaskState): Promise<void> {
+async function cmdTaskState(creds: Credentials, number: number, to: TaskState, fromNone = false): Promise<void> {
   const detected = await detectRepo();
   reportRepo("fleet task state", detected);
 
@@ -1370,7 +1372,7 @@ async function cmdTaskState(creds: Credentials, number: number, to: TaskState): 
       getCurrentState: (c, n) => taskStateFetchCurrent(c, n, detected.slug),
       transition: (c, n, from, toState) => taskStateFetchTransition(c, n, from, toState, detected.slug),
     },
-    creds, number, to,
+    creds, number, to, { fromNone },
   );
 
   if (!result.ok) {
@@ -2506,7 +2508,7 @@ async function main(): Promise<void> {
     case "task-assign":
       return cmdTaskAssign(creds, parsed.number, parsed.target, parsed.why);
     case "task-state":
-      return cmdTaskState(creds, parsed.number, parsed.to);
+      return cmdTaskState(creds, parsed.number, parsed.to, parsed.fromNone === true);
     case "task-reap":
       return cmdTaskReap(creds, parsed.apply, parsed.terminal === true);
     case "task-junior-sweep":

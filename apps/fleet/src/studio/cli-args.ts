@@ -152,7 +152,8 @@ export type CliCommand =
   // (src/studio/task-state.ts's runTaskStateTransition), because a caller
   // typing what it BELIEVES the state to be is exactly the stale value the
   // route's own compare-and-swap exists to catch.
-  | { cmd: "task-state"; number: number; to: TaskState }
+  // Issue #82: `fromNone` = `--from-none`, repair a task with no state label.
+  | { cmd: "task-state"; number: number; to: TaskState; fromNone?: true }
   // Board issue #8: deterministic backfill for a task whose PR merged/
   // promoted to the default branch but was never auto-closed — the ONLY
   // coverage for a repo whose owner resolves to the token auth path, where
@@ -318,8 +319,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Move task <n> to another studio: old studio label off, new one on, state back to submitted, lineage commented (from, to, when, why). Earlier comments stay — they are what the previous studio did. A bare role means that role's FIRST instance in the repo you are standing in; issue #269 also accepts `pilot--2` (that role's instance 2, same repo) and a full studio id (`websites--pilot`, `websites--pilot--2`), which needs no repo context at all.",
   },
   "task-state": {
-    args: `state <n> <to: ${TASK_STATES.join("|")}>`,
-    summary: "Move task <n> to a new board state via the Worker's own compare-and-swap: reads the CURRENT state first and sends it as \"from\", so a stale caller gets the route's own 409 verbatim instead of overwriting someone else's write. Operator-invoked only — nothing auto-closes a task.",
+    args: `state <n> <to: ${TASK_STATES.join("|")}> [--from-none]`,
+    summary: "Move task <n> to a new board state via the Worker's own compare-and-swap: reads the CURRENT state first and sends it as \"from\", so a stale caller gets the route's own 409 verbatim instead of overwriting someone else's write. Operator-invoked only — nothing auto-closes a task. --from-none repairs a task left with NO state label (an interrupted transition): the Worker refuses unless there really are zero, and logs the repair on the issue (issue #82).",
   },
   "rescue-gc": {
     args: "[--older-than N] [--dry-run|--apply]",
@@ -511,7 +512,9 @@ function parseTask(argv: string[]): CliCommand {
     // closed TASK_STATES vocabulary, rather than deferred to the server: a
     // typo'd state name is a usage error with the vocabulary listed, not a
     // wasted round trip that the route would 400 on anyway.
-    const [rawNumber, to] = rest;
+    const [rawNumber, to, ...extra] = rest;
+    const fromNone = extra.length === 1 && extra[0] === "--from-none";
+    if (extra.length > 0 && !fromNone) return usage(`unexpected ${JSON.stringify(extra[0])}`);
     if (rawNumber === undefined || !/^\d+$/.test(rawNumber)) {
       return usage("fleet task state needs an issue number: fleet task state <n> <to>");
     }
@@ -520,7 +523,7 @@ function parseTask(argv: string[]): CliCommand {
         `fleet task state needs a valid target state: fleet task state <n> <to> — one of ${TASK_STATES.join("|")}`,
       );
     }
-    return { cmd: "task-state", number: Number(rawNumber), to };
+    return { cmd: "task-state", number: Number(rawNumber), to, ...(fromNone ? { fromNone: true as const } : {}) };
   }
   if (sub === "reap") {
     // Zero positionals, one optional bare boolean flag — NOT the

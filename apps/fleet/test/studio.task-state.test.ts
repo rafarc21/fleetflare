@@ -63,3 +63,23 @@ describe("runTaskStateTransition", () => {
     expect(transition).not.toHaveBeenCalled();
   });
 });
+
+// Issue #82: `--from-none` repairs a task left with zero state labels. There
+// is no current state to read, so the read is skipped and "none" is sent;
+// the Worker still refuses unless the issue really has zero.
+describe("runTaskStateTransition — fromNone (issue #82)", () => {
+  it("skips the read and sends from \"none\"", async () => {
+    const deps = baseDeps();
+    const result = await runTaskStateTransition(deps, CREDS, 42, "completed", { fromNone: true });
+    expect(deps.getCurrentState).not.toHaveBeenCalled();
+    expect(deps.transition).toHaveBeenCalledWith(CREDS, 42, "none", "completed");
+    expect(result).toEqual({ ok: true, from: "none", to: "completed" });
+  });
+
+  it("the Worker's refusal comes back verbatim", async () => {
+    const transition = vi.fn(async (): Promise<TaskStateFetchResult> => ({ ok: false, status: 409, message: "carries 1 state label" }));
+    const result = await runTaskStateTransition(baseDeps({ transition }), CREDS, 42, "completed", { fromNone: true });
+    expect(result).toEqual({ ok: false, status: 409, message: "carries 1 state label" });
+  });
+});
+
