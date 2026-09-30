@@ -697,6 +697,68 @@ describe("runAccountFailover — (a) a pane showing the rate-limit modal trigger
   });
 });
 
+// ---------------------------------------------------------------------------
+// Second, independent fresh-context review of PR #135 (2026-09-30), review
+// round 3 — the generalized write condition landed by finding 4 above
+// (`deps.primary != null && next.name !== deps.primary`) is gated on
+// `deps.primary != null`, but do.ts's REAL `failoverDeps()` wires `primary:
+// this.primaryAccount()`, and `primaryAccount()`/accounts.ts's
+// `launchAccount` NEVER returns null in the no-map case — it falls through to
+// `accounts[0]`. So in production `deps.primary` is a string for every studio
+// with at least one CLAUDE_CODE_OAUTH_TOKEN* secret set, whether or not
+// CLAUDE_ACCOUNT_BY_REPO maps this repo at all. The `!= null` guard is true
+// only inside this file's own harness (where `primary` defaults to
+// `undefined`), never in real deployment.
+//
+// Concretely: a plain multi-account fleet that never configured
+// CLAUDE_ACCOUNT_BY_REPO (the original, pre-#271 #53 feature) fails over from
+// account 1 to account 2 — an entirely ordinary switch — and the old write
+// condition wrongly sets `borrowedAccount` to account 2 anyway, arming
+// hand-back to later kill+relaunch the pane back onto account 1, unrequested,
+// for a fleet that never opted into Stage B at all.
+//
+// Fix: `FailoverDeps.primaryIsMapped` — true only when THIS studio's repo has
+// a genuine CLAUDE_ACCOUNT_BY_REPO entry, false (the harness's own safe
+// default, matching production's real no-map behaviour) otherwise. The write
+// condition gates on THIS, not on `deps.primary != null`.
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — review round 3: borrowedAccount must stay null for a repo with no CLAUDE_ACCOUNT_BY_REPO entry (2nd review of PR #135)", () => {
+  it("a plain multi-account fleet with no map: an ordinary rate-limit switch never sets borrowedAccount", async () => {
+    // `primary: "CLAUDE_CODE_OAUTH_TOKEN"` reproduces production's REAL
+    // shape for an unmapped repo: primaryAccount() falls back to the first
+    // configured account, so `deps.primary` is a non-null string even though
+    // no CLAUDE_ACCOUNT_BY_REPO entry exists for this repo at all.
+    // `primaryIsMapped` is deliberately omitted — the harness's own safe
+    // default must match that no-map production reality.
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN" });
+    const out = await run(h);
+
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    const last = h.recorded.at(-1)!;
+    expect(last.borrowedAccount).toBeNull();
+    expect(last.borrowedFromRepo).toBeNull();
+  });
+
+  it("continuing from that state, hand-back never fires even once the original account looks free again", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN" });
+    await run(h);
+    expect((await h.storage.get(STATUS_KEY))?.borrowedAccount).toBeNull();
+
+    // A later tick finds the pane idle (claude's own working/idle shape) —
+    // exactly the tick hand-back's own guard fires on, gated on
+    // `rowNow.borrowedAccount`. Since the switch above correctly never set
+    // it, this must be an ordinary no-op tick, never a hand-back.
+    h.setPane(captured(IDLE_PANE));
+    const out = await run(h);
+
+    expect(out.kind).not.toBe("returned");
+    // Exactly the one respawn-pane from the original switch above — no
+    // second one from a wrongly-fired hand-back.
+    expect(h.execs.filter((c) => c.includes("respawn-pane"))).toHaveLength(1);
+    expect(h.relaunches).toBe(1);
+  });
+});
+
 describe("runAccountFailover — (b) a pane mid-turn triggers NO switch", () => {
   it("a lead mid-turn is never switched, even when its own output quotes the modal strings", async () => {
     const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(MID_TURN_PANE_A, MID_TURN_PANE_B) });
