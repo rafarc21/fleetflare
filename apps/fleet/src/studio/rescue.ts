@@ -246,14 +246,14 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
     `  rescue_budget_ok "$ref" >/dev/null || { perr="push to $ref not attempted: rescue budget exhausted"; return 1; }\n` +
     `  perr="$(${push("$src")})"; prc=$?\n` +
     `  [ "$prc" = 0 ] && return 0\n` +
-    `  if [ -z "$perr" ]; then perr="push to $ref failed with exit $prc and no output"; ` +
+    `  if [ -z "$perr" ]; then perr="push to $ref failed (code $prc) with no output"; ` +
     `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="push to $ref killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
     `  printf '%s' "$perr" | grep -qi 'shallow update not allowed' || return 1\n` +
     `  snap=$(git -C "$w" ${identity} commit-tree "$src^{tree}" -m "fleet rescue snapshot of $(git -C "$w" rev-parse "$src") (shallow clone)" 2>/dev/null) || return 1\n` +
     `  rescue_budget_ok "$ref" >/dev/null || { perr="snapshot push to $ref not attempted: rescue budget exhausted"; return 1; }\n` +
     `  perr="$(${push("$snap")})"; prc=$?\n` +
     `  [ "$prc" = 0 ] && return 0\n` +
-    `  if [ -z "$perr" ]; then perr="snapshot push to $ref failed with exit $prc and no output"; ` +
+    `  if [ -z "$perr" ]; then perr="snapshot push to $ref failed (code $prc) with no output"; ` +
     `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="snapshot push to $ref killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
     `  return 1\n` +
     `}\n`
