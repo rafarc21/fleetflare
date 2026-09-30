@@ -3,7 +3,7 @@ import type { RepoReach } from "../src/github/reach";
 import { env } from "cloudflare:test";
 import worker from "../src/index";
 import * as authModule from "../src/studio/auth";
-import { handleStudio, handleFleetSpawn, type BlueprintFetch } from "../src/studio/routes";
+import { handleStudio, handleFleetSpawn, spawnDeps, type BlueprintFetch } from "../src/studio/routes";
 import {
   resolveSpawnParent, isSpawnTokenShaped, resolveSpawnPolicy, runSpawn,
   resolveMaxStudios, DEFAULT_MAX_STUDIOS, readInstanceRequest,
@@ -14,7 +14,7 @@ import {
 } from "../src/studio/org";
 import { ensureSpawnToken, SPAWN_TOKEN_KEY, type SpawnTokenStorage } from "../src/studio/do";
 import {
-  provisionWithStorage, type ProvisionDeps, type StudioStorage, type RoleEnv,
+  provisionWithStorage, STATUS_KEY, type ProvisionDeps, type StudioStorage, type RoleEnv,
   type HealAttempt,
   type OperationInFlight,
 } from "../src/studio/provision";
@@ -1422,5 +1422,104 @@ describe("runSpawn -> maestro re-arm", () => {
     const maestroParent: SpawnParent = { id: "websites--maestro", repo: "websites", role: "maestro", repoSlug: "acme-org/websites" };
     expect((await runSpawn(deps, maestroParent, { role: "maestro" })).status).toBe(200);
     expect(woke).toEqual([]);
+  });
+});
+
+/** Same shape as fakeStudioNamespace() above, but its own fleet.json
+ *  declares whichever `roles` the caller passes (the module-level
+ *  FAKE_FLEET_JSON doesn't carry "release-studio" — no other test in this
+ *  file needs a BIG_PROFILE_ROLES role), and its studioFilePath fetch 404s
+ *  so provisionWithStorage falls through to the ordinary role path — a
+ *  studio.md fixture is unrelated to what this issue's routing test is
+ *  proving. */
+function fakeStudioNamespaceForRoles(roles: string[]) {
+  const storages = new Map<string, StudioStorage & SpawnTokenStorage>();
+  const provisioned: ProvisionConfig[] = [];
+  const fleetJson = JSON.stringify({ blueprint: { repo: REPO_SLUG, ref: "v1.0.0" }, roles });
+  const deps: ProvisionDeps = {
+    sbExec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+    recordStudio: (status: StudioStatus) => recordStudio(env as unknown as Env, status),
+    now: () => "2026-08-17T00:00:00.000Z",
+    fetchBlueprintFile: async (_repo: string, path: string) => {
+      if (path.endsWith("fleet.json")) return fleetJson;
+      if (path.endsWith("org.json")) return FAKE_ORG_JSON;
+      // Not-found shape isNotFoundError (provision.ts) reads for: "no such
+      // studio directory" — falls through to the role path below.
+      if (path.includes("/studios/")) throw new Error(`fetch ${path} failed (404): not found`);
+      return FAKE_ROLE_MD;
+    },
+  };
+  function storageFor(id: string): StudioStorage & SpawnTokenStorage {
+    let storage = storages.get(id);
+    if (!storage) {
+      storage = fakeStorage();
+      storages.set(id, storage);
+    }
+    return storage;
+  }
+  return {
+    idFromName: (name: string) => name as unknown as DurableObjectId,
+    get: (id: DurableObjectId) => {
+      const name = id as unknown as string;
+      const storage = storageFor(name);
+      return {
+        provision: async (cfg: ProvisionConfig) => {
+          provisioned.push(cfg);
+          await ensureSpawnToken(storage, name, deps.recordStudio);
+          return provisionWithStorage(deps, storage, cfg, REPO_SLUG);
+        },
+      } as unknown as ReturnType<Env["STUDIO"]["get"]>;
+    },
+    provisioned,
+    storageFor,
+  };
+}
+
+// Issue #107 (#70 ask 3): routes.ts's REAL spawnDeps/provisionChild — no
+// faked dispatch of its own — routed against TWO fake namespaces, one per
+// binding, so this proves the actual call path (spawnDeps -> profile.ts's
+// getStudioStub -> studioNamespace) picks env.STUDIO_BIG for a
+// release-studio child, not just that studioNamespace does so in isolation
+// (that's test/studio.profile.test.ts's job). A live container-backed DO
+// cannot be constructed under vitest-pool-workers (see fakeStudioNamespace's
+// own comment above), so both namespaces here are the same kind of fake
+// test/studio.spawn.test.ts already uses for env.STUDIO everywhere else.
+describe("spawnDeps().provisionChild — issue #107 role routing is real, not just unit-tested in isolation", () => {
+  it("a release-studio child provisions into whatever env.STUDIO_BIG is bound to, never env.STUDIO", async () => {
+    const big = fakeStudioNamespaceForRoles(["pilot", "release-studio"]);
+    const small = fakeStudioNamespaceForRoles(["pilot", "release-studio"]);
+    const testEnv = { ...env, STUDIO: small, STUDIO_BIG: big, AGENT_REPO: REPO_SLUG } as unknown as Env;
+    const { fetchFile } = fakeBlueprintFetch();
+    const deps = spawnDeps(testEnv, fetchFile, async () => ({ ok: true as const, value: "" }));
+
+    const childId = "websites--release-studio";
+    await deps.provisionChild(childId, { repo: "websites", role: "release-studio", spawnedBy: PARENT_ID });
+
+    // env.STUDIO_BIG.get(env.STUDIO_BIG.idFromName(childId)) resolves to a
+    // real stub, backed by the SAME storage `provisionChild`'s own DO-stub
+    // dispatch just wrote through — proving the routing is real, not just
+    // that the right fake object got called in isolation.
+    expect(big.get(big.idFromName(childId))).toBeTruthy();
+    const stored = (await big.storageFor(childId).get(STATUS_KEY)) as StudioStatus | undefined;
+    expect(stored?.id).toBe(childId);
+    expect(big.provisioned).toEqual([{ repo: "websites", role: "release-studio", spawnedBy: PARENT_ID }]);
+
+    // The default namespace never saw this child at all.
+    expect(small.provisioned).toEqual([]);
+    expect(await small.storageFor(childId).get(STATUS_KEY)).toBeUndefined();
+  });
+
+  it("an ordinary role's child still provisions into env.STUDIO, never env.STUDIO_BIG", async () => {
+    const big = fakeStudioNamespace();
+    const small = fakeStudioNamespace();
+    const testEnv = { ...env, STUDIO: small, STUDIO_BIG: big, AGENT_REPO: REPO_SLUG } as unknown as Env;
+    const { fetchFile } = fakeBlueprintFetch();
+    const deps = spawnDeps(testEnv, fetchFile, async () => ({ ok: true as const, value: "" }));
+
+    const childId = "websites--release";
+    await deps.provisionChild(childId, { repo: "websites", role: "release", spawnedBy: PARENT_ID });
+
+    expect(small.provisioned).toEqual([{ repo: "websites", role: "release", spawnedBy: PARENT_ID }]);
+    expect(big.provisioned).toEqual([]);
   });
 });
