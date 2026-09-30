@@ -101,6 +101,71 @@ describe("createTask", () => {
     expect(api.createIssue).not.toHaveBeenCalled();
   });
 
+  // Board issue #112 / #70 ask 8: a lightweight WARN-not-refuse check —
+  // never refuses creation, only attaches `pathWarnings` naming the
+  // overlapping PR(s)/task(s).
+  describe("path overlap warning (#112)", () => {
+    const overlapBrief = {
+      title: "t", objective: "Touches apps/fleet/src/board/board.ts directly.",
+      outputFormat: "f", boundaries: "b",
+    };
+
+    it("warns when the brief's path also appears in an open PR's changed files", async () => {
+      const api = fakeApi({
+        listOpenPullFiles: vi.fn(async () => [
+          { number: 245, files: ["apps/fleet/src/board/board.ts"] },
+        ]),
+      });
+      const res = await createTask(api, "o/r", overlapBrief);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.value.pathWarnings).toBeDefined();
+      expect(res.value.pathWarnings!.length).toBeGreaterThan(0);
+      expect(res.value.pathWarnings!.join("\n")).toContain("#245");
+    });
+
+    it("warns when the brief's path also appears in another OPEN task's body, never a terminal one", async () => {
+      const other = task({
+        number: 201, state: "working", labels: ["working"],
+        body: "## Objective\n\nAlso touches apps/fleet/src/board/board.ts.\n",
+      });
+      const dead = task({
+        number: 202, state: "failed", open: false, labels: ["failed"],
+        body: "## Objective\n\nAlso touches apps/fleet/src/board/board.ts.\n",
+      });
+      const api = fakeApi({ listIssues: vi.fn(async () => [other, dead]) });
+      const res = await createTask(api, "o/r", overlapBrief);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.value.pathWarnings).toBeDefined();
+      const joined = res.value.pathWarnings!.join("\n");
+      expect(joined).toContain("#201");
+      expect(joined).not.toContain("#202");
+    });
+
+    it("no path-looking text in the brief: pathWarnings is absent and neither extra read fires", async () => {
+      const api = fakeApi();
+      const res = await createTask(api, "o/r", brief);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.value.pathWarnings).toBeUndefined();
+      expect(api.listOpenPullFiles).not.toHaveBeenCalled();
+      // The base fakeApi's own listIssues call count stays at 0: nothing
+      // beyond the idempotency-key path (absent here) reads it either.
+      expect(api.listIssues).not.toHaveBeenCalled();
+    });
+
+    it("fails open: listOpenPullFiles throwing still lets the task succeed, with no pathWarnings", async () => {
+      const api = fakeApi({
+        listOpenPullFiles: vi.fn(async () => { throw new Error("github down"); }),
+      });
+      const res = await createTask(api, "o/r", overlapBrief);
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.value.pathWarnings).toBeUndefined();
+    });
+  });
+
   // Task 5: the maestro's per-task authorization for the junior skill.
   it("createTask writes the junior label in the same single create call", async () => {
     const api = fakeApi();
