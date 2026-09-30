@@ -5,9 +5,11 @@ import type { StudioStatus, StudioDOClass } from "./types";
 // The pure role->class functions live in their own Env-free module — see
 // that file's own header for why: provision.ts needs doClassForRole without
 // pulling this file's Env/registry.ts import chain into the `cli`/`bun`
-// type-check project. Re-exported here so every EXISTING consumer of this
-// file (test/studio.profile.test.ts, routes.ts) keeps importing them from
-// "./profile" unchanged.
+// type-check project. Re-exported here only so test/studio.profile.test.ts
+// (the sole remaining importer — routes.ts now uses realDoClassForRole
+// below) can exercise it alongside this file's other exports; it is
+// env-blind and must never feed a WRITE — see realDoClassForRole's doc
+// comment.
 import { isBigProfileRole, doClassForRole, BIG_PROFILE_ROLES } from "./container-class";
 
 export { BIG_PROFILE_ROLES, isBigProfileRole, doClassForRole };
