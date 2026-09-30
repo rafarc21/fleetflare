@@ -174,27 +174,62 @@ export async function requestRecycle(
  *  bring-up landed, not merely that SOME bring-up (possibly an old one that
  *  predates this call, possibly a different verb entirely) did.
  *
- *  Clock-skew caveat, deliberately NOT compensated for: `startedAt` is this
- *  side's own (CLI) clock; `session.at` is stamped by the Worker on
- *  Cloudflare's edge. The two are never synchronized here, so this
- *  comparison trusts them to agree closely enough. The failure this
- *  produces is ASYMMETRIC:
+ *  Review round 2 (maestro, FIX-FIRST), finding 1 — the ORDERING bug this
+ *  function used to miss, not just a clock-skew edge case: do.ts's
+ *  `recycleWithSync` runs `provisionCore`'s bring-up FIRST (which stamps
+ *  `observed.session` with `via: "recycle"` and a fresh `at`) and only THEN
+ *  runs its own post-provision readiness check (`recycleVerdict`,
+ *  `EXEC_CLASSES.readiness`, up to 60s). During that window the row already
+ *  reads `state: "running"` with a fresh `via: "recycle"` session — the OLD
+ *  version of this check accepted that alone — but the readiness check can
+ *  still come back "bare", which flips `state` to `"degraded"` and makes
+ *  do.ts throw (the Worker answers 500, not 200). A poll landing inside that
+ *  window used to report a false `timeout-provisioned` success for a studio
+ *  about to be marked degraded.
+ *
+ *  The fix: also require `status.readiness` to exist and its own
+ *  `checkedAt` to be at/after `startedAt`. This closes the gap because
+ *  do.ts writes `readiness` with a fresh `checkedAt` on EVERY one of
+ *  `recycleVerdict`'s three outcomes — `provisioned` (do.ts ~line 1600),
+ *  `inconclusive` (~1628, a deliberate operator ruling: an unverifiable
+ *  check still reports success), and `bare`/degraded (~1652, where `state`
+ *  itself flips away from `"running"`, which this function's own
+ *  `state !== "running"` check already rejects once THAT write lands). So
+ *  once both `state === "running"` AND `readiness.checkedAt >= startedAt`
+ *  are true, the only two ways to get there are the `provisioned` or
+ *  `inconclusive` branches — both genuinely terminal, real successes for
+ *  THIS recycle, never the degraded one. Before any readiness write for
+ *  this recycle lands at all, `readiness.checkedAt` is either absent or
+ *  still dated from before `startedAt`, so this function correctly holds
+ *  off.
+ *
+ *  Clock-skew caveat, deliberately NOT compensated for, and now NARROWER
+ *  than before this fix: `startedAt` is this side's own (CLI) clock;
+ *  `session.at` and `readiness.checkedAt` are both stamped by the Worker on
+ *  Cloudflare's edge. The two are never synchronized here, so both
+ *  comparisons trust the two clocks to agree closely enough. The failure
+ *  this produces is still ASYMMETRIC:
  *    - CLI clock ahead of the Worker's (or the two agree): at worst this
  *      rejects a genuinely-just-landed bring-up as not-yet-proven, which
  *      only costs an extra `timeout-pending` poll cycle or two — a safe,
  *      recoverable direction (the true state is still "running", the CLI
  *      just doesn't claim victory a beat early).
  *    - Worker clock ahead of the CLI's: a STALE row from an unrelated,
- *      already-finished OLDER `via: "recycle"` bring-up can satisfy `at >=
- *      startedAt` even though it has nothing to do with THIS call, reporting
+ *      already-finished OLDER `via: "recycle"` bring-up can satisfy BOTH
+ *      `session.at >= startedAt` AND `readiness.checkedAt >= startedAt`
+ *      even though it has nothing to do with THIS call, reporting
  *      `timeout-provisioned` (a false success) for a recycle that might
  *      still be pending or might have failed outright. This is the risky
  *      direction, and this function does not guard against it — no NTP
- *      handshake, no skew budget, nothing. Accepted because: (1) both sides
- *      are Cloudflare-adjacent infrastructure (a CLI on an operator's
- *      machine talking to a Worker), not systems with an adversarial or
- *      wildly divergent clock; (2) a skew-tolerance window would need its
- *      own magic number with no principled way to size it without a real
+ *      handshake, no skew budget, nothing. Requiring TWO independent
+ *      fresh-looking stamps (rather than one) shrinks this from "any
+ *      stale row with a recent-looking session" to "a stale row where BOTH
+ *      of its own timestamps independently look fresh" — a much smaller
+ *      surface, but not zero. Accepted because: (1) both sides are
+ *      Cloudflare-adjacent infrastructure (a CLI on an operator's machine
+ *      talking to a Worker), not systems with an adversarial or wildly
+ *      divergent clock; (2) a skew-tolerance window would need its own
+ *      magic number with no principled way to size it without a real
  *      measured incident to anchor it, exactly the kind of unfounded
  *      constant this codebase's own plan docs warn against inventing. If a
  *      real false-success incident is ever measured, that measurement is
@@ -203,7 +238,9 @@ function bringupLanded(status: StudioStatus, startedAt: Date): boolean {
   if (status.state !== "running") return false;
   const session = status.observed?.session;
   if (!session || session.via !== "recycle") return false;
-  return new Date(session.at) >= startedAt;
+  if (new Date(session.at) < startedAt) return false;
+  if (status.readiness == null) return false;
+  return new Date(status.readiness.checkedAt) >= startedAt;
 }
 
 /** The whole point of #133, mirroring #203's own `pollAfterNoAnswer`: ask the
