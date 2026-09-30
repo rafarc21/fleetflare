@@ -798,3 +798,55 @@ is a real, reachable bug, not a residual to document; it was escalated back
 rather than patched over with a doc comment, per this review round's own
 instruction to stop rather than design a fix under a "just document it"
 framing. Left OUTSTANDING pending a decision on the actual fix.
+
+### Round 3 finding — severity assessment and resolution (lead review, 2026-09-30)
+
+Independently re-traced the same path and re-verified both load-bearing
+claims directly against the code before accepting them:
+
+- **Hand-back's hard precondition on `deps.primary`.** Its only call site
+  (`failover.ts`, inside `runAccountFailover`'s `verdict.kind === "working"`
+  branch) reads `if (deps.autoFailover && rowNow.borrowedAccount &&
+  deps.primary && !verdict.repainted)`; `handBack(...)` is called from
+  nowhere else in the file. With `primary` null the whole block is skipped —
+  no exec, no pane kill, no relaunch — and control falls through to `{ kind:
+  "recovered", ... }` or `{ kind: "no-modal", ... }`. Confirmed: a hard
+  precondition, no other path.
+- **`failoverDeps()` is never cached.** do.ts's `failoverDeps()` has exactly
+  one call site, `this.failoverDeps()` passed inline as an argument at
+  `StudioDO.syncSession()` -> `syncSessionCycle` (do.ts:6709), which runs on
+  the fixed `SYNC_SESSION_SECONDS` cadence. Both `primary` and
+  `primaryIsMapped` are computed by fresh private-method calls
+  (`this.primaryAccount()`, `this.primaryIsMapped()`) inside that same
+  literal, with no instance field, memoization or other cache anywhere in the
+  class holding a stale copy. Confirmed: fresh every tick.
+
+One nuance the original escalation's "ordinary account operation is
+unaffected" framing understated, found while re-tracing: `current` (the
+switch target's anchor) does resolve from `existing.launchedAccount`/
+`claudeAccount`, never from `deps.primary`, exactly as claimed — but the
+wrap-search *scope* (`start`, a few lines below `current` in
+`runAccountFailover`) is computed directly from `deps.primary` and collapses
+to `0` when it is null, widening the ordinary first pass to the whole account
+list instead of primary-forward-only. This is bounded, not destructive:
+`reserved` (the #103 cross-repo boundary) is threaded through unchanged
+regardless of anchor, so the widened first pass can still only reach an
+account the dedicated unclaimed-spare tier (`firstFreeAccount`) already
+treats as fair game — never another repo's reserved primary. Folded into the
+doc comment below rather than treated as a separate finding.
+
+**Conclusion**: real and reachable (confirmed), but BOUNDED (hand-back stays
+inert, ordinary switching keeps working and never crosses the reserved-primary
+boundary, the only side effect is a widened-but-still-safe search scope) and
+SELF-CORRECTING (both fresh every tick, fixed the tick after the secret is
+restored). Not a fourth urgent code-fix bug — documented rather than
+code-fixed. Resolution: an explicit, accurate doc comment (not "unreachable")
+on `FailoverDeps.primaryIsMapped` in `failover.ts`, stating the trigger,
+the bounded/non-destructive behavior while active (including the anchor
+nuance above), and the self-correcting mechanism — same "state every residual
+explicitly" convention this feature's other residuals (`observedStorage`,
+`AccountBurnState`'s no-expiry) already follow. Left OUTSTANDING (in the
+sense of "a follow-up issue could still narrow the anchor-widening side
+effect") only if the anchor nuance above ever turns out to matter in
+practice; not filed, since it cannot by itself land a studio on a boundary
+#103 forbids.

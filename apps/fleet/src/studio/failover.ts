@@ -979,6 +979,53 @@ export interface FailoverDeps {
    * Absent (every caller/test that predates this field): `undefined` reads
    * falsy in the write condition below, the same safe "never opted into
    * Stage B" default production now gives an unmapped repo.
+   *
+   * RESIDUAL, stated rather than hidden (round 3 review escalation, resolved
+   * 2026-09-30): this field can itself read `true` while `primary` above
+   * reads `null` — REACHABLE, not merely theoretical. Trigger: a studio
+   * already RUNNING on a recorded, non-primary account (`FLEET_AUTO_FAILOVER`
+   * on, `launchAccount`'s recorded-account fast path, accounts.ts) keeps
+   * running untouched if an operator later deletes the MAPPED slot's own
+   * secret without recycling the studio — do.ts's `primaryAccount()` then
+   * refuses that now-secretless slot on every later tick, while
+   * `primaryIsMapped()` stays true (it checks only that the map KEY exists,
+   * never the secret).
+   *
+   * BOUNDED AND NON-DESTRUCTIVE while this holds: hand-back's own guard
+   * (runAccountFailover, `deps.autoFailover && rowNow.borrowedAccount &&
+   * deps.primary && !verdict.repainted`) has exactly one call site and
+   * requires `deps.primary` truthy as a hard precondition — with `primary`
+   * null it simply never fires: no `accountSwitchCmd`, no pane kill, no
+   * relaunch. A skipped hand-back just leaves the studio on its current
+   * account for one more tick, same as any other skipped tick (the fresh
+   * op-lock / mid-turn guards beside it skip the same way). Ordinary account
+   * switching, driven by genuine exhaustion observed on the pane, keeps
+   * working throughout: its target account (`current`, runAccountFailover)
+   * resolves from `existing.launchedAccount`/`claudeAccount`, never from
+   * `primary`, and it never crosses the #103 cross-repo reserved-primary
+   * boundary (`reserved` is threaded into `nextClaudeAccount`/
+   * `firstFreeAccount` untouched either way). One narrower side effect: the
+   * wrap-search anchor (`start`, computed from `deps.primary` a few lines
+   * into runAccountFailover) collapses to 0 while primary is null, widening
+   * the ordinary first pass to the WHOLE account list instead of
+   * primary-forward-only — it can still only land on an account the
+   * dedicated unclaimed-spare tier (`firstFreeAccount`) already treats as
+   * fair game, never a reserved primary.
+   *
+   * SELF-CORRECTING: `primary` and this field are both recomputed FRESH from
+   * live `this.env` on every tick — do.ts's `failoverDeps()` is never cached
+   * or memoized, called fresh inline at its one call site
+   * (`StudioDO.syncSession()` -> `syncSessionCycle`, every
+   * `SYNC_SESSION_SECONDS`) — so the moment the missing secret is restored,
+   * `primary` resolves again on the very next tick and hand-back's guard
+   * evaluates normally, using whatever `borrowedAccount` is still on the row
+   * from before.
+   *
+   * The precondition itself — deleting a slot's secret while a studio is
+   * actively running on it, without a recycle — is an anomalous operator
+   * action outside this feature's normal operating envelope, not something
+   * ordinary failover/borrow/hand-back operation would ever produce on its
+   * own.
    */
   primaryIsMapped?: boolean;
   /**
