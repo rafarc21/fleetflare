@@ -1639,6 +1639,76 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
       expect(out).toEqual({ kind: "borrowed", from: OWN_CHAIN.name, to: RESERVED_OTHER.name, fromRepo: "repo-b" });
     });
   });
+
+  // -------------------------------------------------------------------
+  // Review round 2 (maestro review of PR #135), finding 4 — once tier 2
+  // (above) can land a studio on an account positioned BEFORE its own
+  // primary, the #273 r2 widening (`Math.min(start, currentIdx)`) would,
+  // left unguarded, let a LATER tick's ordinary first pass wrap back onto
+  // ANOTHER pre-primary account too (violating #271) the moment that
+  // borrowed account also became limited.
+  // -------------------------------------------------------------------
+  describe("scope stays anchored while actively borrowed (review round 2, finding 4)", () => {
+    it("write-condition regression pin: a plain first-pass landing on a non-primary own-chain slot ALSO keeps borrowedAccount set, not just a reserved-primary borrow", async () => {
+      const SPARE_BORROWED: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_6", token: "sk-ant-oat01-" + "m".repeat(40) };
+      const PRIMARY: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
+      const OWN_CHAIN_SLOT: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 };
+      const h = harness({
+        accounts: [SPARE_BORROWED, PRIMARY, OWN_CHAIN_SLOT], pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+        initial: status({
+          claudeAccount: SPARE_BORROWED.name, launchedAccount: SPARE_BORROWED.name,
+          borrowedAccount: SPARE_BORROWED.name, borrowedFromRepo: null,
+        }),
+        // The borrowed spare hits its own limit too; own primary is STILL
+        // limited; the rest of the own chain (account 3) is free — pass 1
+        // wraps to it, landing on a non-primary account yet again.
+        accountLimits: { [SPARE_BORROWED.name]: LIVE_UNTIL, [PRIMARY.name]: LIVE_UNTIL },
+      });
+      const out = await run(h);
+      expect(out).toEqual({ kind: "switched", from: SPARE_BORROWED.name, to: OWN_CHAIN_SLOT.name });
+      const last = h.recorded.at(-1)!;
+      // The OLD, buggy write cleared this here — `isBorrow` is false (this
+      // landed via the ordinary first pass, never the reserved-primary
+      // borrow pass) even though the studio is STILL away from its own
+      // primary. Hand-back would then never have fired again once the
+      // primary freed up.
+      expect(last.borrowedAccount).toBe(OWN_CHAIN_SLOT.name);
+      expect(last.borrowedFromRepo).toBeNull();
+    });
+
+    it("the search anchor never widens back to include an account before `start` while borrowed, even when one would otherwise be picked", async () => {
+      // List order: [X (a free unclaimed spare, BEFORE the borrowed
+      // account), the currently-borrowed account (now ALSO limited), Y (a
+      // SECOND free unclaimed spare, BETWEEN the borrowed account and
+      // primary — exactly the position the old #273 r2 widening bug would
+      // expose to the ordinary first pass), primary (limited), a reserved
+      // other-repo primary. If the first pass's own scope had widened back
+      // to cover `current` (the old bug), stepping FORWARD from it would
+      // land on Y (the very next position) — never X, which sits BEFORE
+      // `current` and was never reachable by that widening even under the
+      // old bug. Landing on X instead proves the first pass's own scope
+      // stayed anchored at `start`: X is reachable ONLY via tier 2's own
+      // explicit, list-order scan, never via the first pass stepping
+      // forward from an out-of-scope `current`.
+      const X: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_6", token: "sk-ant-oat01-" + "h".repeat(40) };
+      const CUR: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_7", token: "sk-ant-oat01-" + "i".repeat(40) };
+      const Y: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_8", token: "sk-ant-oat01-" + "j".repeat(40) };
+      const PRIMARY: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
+      const RESERVED: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_9", token: "sk-ant-oat01-" + "k".repeat(40) };
+      const h = harness({
+        accounts: [X, CUR, Y, PRIMARY, RESERVED], pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+        initial: status({
+          claudeAccount: CUR.name, launchedAccount: CUR.name, borrowedAccount: CUR.name, borrowedFromRepo: null,
+        }),
+        accountLimits: { [CUR.name]: LIVE_UNTIL, [PRIMARY.name]: LIVE_UNTIL },
+        reservedAccounts: new Set([RESERVED.name]),
+      });
+      const out = await run(h);
+      expect(out).toEqual({ kind: "switched", from: CUR.name, to: X.name });
+      const last = h.recorded.at(-1)!;
+      expect(last.borrowedAccount).toBe(X.name);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
