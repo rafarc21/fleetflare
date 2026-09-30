@@ -7,6 +7,7 @@ import { DESTROY_CLIENT_TIMEOUT_MS } from "../cli/destroy-outcome";
 import { EXEC_CLASSES } from "../src/studio/sandbox-api";
 import type { StudioStatus } from "../src/studio/types";
 import type { ObservedSession } from "../src/studio/observed";
+import type { OperationInFlight } from "../src/studio/provision";
 
 // Board task #133, measured 2026-09-30: `fleet recycle <id>` on a studio
 // whose lead sat on a limit modal never returned (killed after 15 min) even
@@ -35,12 +36,17 @@ function session(over: Partial<ObservedSession> = {}): ObservedSession {
 function statusRow(
   state: StudioStatus["state"], observedSession?: ObservedSession | null,
   readiness?: StudioStatus["readiness"],
-): StudioStatus {
+  // Board issue #149: defaults to `null` (the common/normal case — no
+  // operation in flight), so every EXISTING call site that does not care
+  // about this field keeps passing unchanged.
+  operationInFlight: OperationInFlight | null = null,
+): StudioStatus & { operationInFlight: OperationInFlight | null } {
   return {
     id: ID, state, tailscaleHost: null, lastRefresh: null,
     error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
     observed: observedSession === undefined ? undefined : { session: observedSession } as StudioStatus["observed"],
     readiness,
+    operationInFlight,
   };
 }
 
@@ -195,6 +201,50 @@ describe("requestRecycle — a recycle request that times out never reports a ve
 
     expect(report.kind).toBe("timeout-pending");
     expect(report.lines.join("\n")).not.toMatch(/\bfailed\b/i);
+  });
+
+  // Board issue #149, follow-up from #139 review: `checkAndRecordReadiness`
+  // (do.ts's periodic syncSession tick, ~2824) and `fleet ls --fresh` can
+  // BOTH stamp a fresh `readiness.checkedAt` onto a studio's row
+  // independently of whether a recycle is actually running against it —
+  // neither takes or checks `OPERATION_KEY`. A row can therefore satisfy all
+  // THREE of today's conditions (fresh `via: "recycle"` session, fresh
+  // readiness) purely by that coincidence, while recycle's own operation is
+  // still genuinely in flight (and could still flip to degraded moments
+  // later). `operationInFlight` (already returned by GET /status, do.ts's
+  // `statusDetailWithStorage`) is the one signal that tells "recycle's own
+  // atomic operation has fully finished" apart from "some unrelated
+  // readiness write happened to land at a convenient-looking time" — this
+  // test seeds exactly that coincidence and proves it must NOT report
+  // success while the lock is still held.
+  it("all three existing conditions look fresh, but operationInFlight is still non-null: stays timeout-pending, never a false success (#149)", async () => {
+    const { fetchImpl } = fakeSlowWorker([
+      async () => Response.json(statusRow(
+        "running", session({ at: "2026-09-30T12:00:05.000Z" }),
+        { kind: "provisioned", checkedAt: "2026-09-30T12:00:06.000Z" },
+        { op: "recycle", since: "2026-09-30T12:00:00.000Z" },
+      )),
+    ]);
+    const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
+
+    expect(report.kind).toBe("timeout-pending");
+    expect(report.lines.join("\n")).not.toMatch(/\bfailed\b/i);
+  });
+
+  it("the same row, but operationInFlight is null: recycle's own operation has finished — reports success (#149)", async () => {
+    const { fetchImpl, calls } = fakeSlowWorker([
+      async () => Response.json(statusRow(
+        "running", session({ at: "2026-09-30T12:00:05.000Z" }),
+        { kind: "provisioned", checkedAt: "2026-09-30T12:00:06.000Z" },
+        null,
+      )),
+    ]);
+    const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
+
+    expect(report.kind).toBe("timeout-provisioned");
+    expect(report.exitCode).toBe(0);
+    expect(report.lines.join("\n")).toContain("recycle SUCCEEDED");
+    expect(calls.filter((u) => u.endsWith("/status"))).toHaveLength(1);
   });
 
   it("timed-out request, status unreachable every attempt: timeout-unknown, never \"failed\"", async () => {
