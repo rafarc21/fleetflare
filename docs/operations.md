@@ -78,6 +78,28 @@ while the real work runs underneath.
 reads `claude` for a lead mid-turn, a lead waiting on subagents, and a lead
 stopped at a prompt alike.
 
+## Clearing a dead claude account
+
+Issue #141: an account whose org disabled Claude subscription access answers
+every request with "Your organization has disabled Claude subscription
+access for Claude Code · Use an Anthropic API key instead, or ask your admin
+to enable access" — permanent, no reset, so failover marks it `dead` in
+`fleet_state` (D1) and never selects it again, with NO auto-expiry (unlike an
+ordinary rate-limit sighting, which self-clears after 24h). `fleet ls` shows
+it — `dead account: <name> — seen <timestamp> — ...` — even when no studio is
+currently parked on it, since several accounts can go dead in one org-wide
+disable while every studio has already failed off them.
+
+Once the org re-enables the account (or you've replaced its token), clear the
+D1 row by hand — nothing does this automatically:
+
+    wrangler d1 execute fleet --remote --command \
+      "DELETE FROM fleet_state WHERE key = 'account-limit:CLAUDE_CODE_OAUTH_TOKEN_2'"
+
+(substitute the real secret name — `CLAUDE_CODE_OAUTH_TOKEN`, `_2`, `_3`, ...
+— `fleet ls`'s "dead account:" line names it). The account is eligible for
+failover again on the very next tick that reads the fleet-wide limit map.
+
 ## CI
 
 GitHub Actions runs natively on this repository — two workflows, on every
