@@ -28,7 +28,7 @@ import {
   type SurvivalBriefPending,
 } from "../src/studio/observed";
 import type { WakeOutcome } from "../src/studio/wake";
-import type { EnvelopeArtifact } from "../src/board/types";
+import { TERMINAL_TASK_STATES, LIVE_TASK_STATES, type EnvelopeArtifact } from "../src/board/types";
 import { env } from "cloudflare:test";
 import { REAL_WEBSTUDIO_PANE } from "./fixtures/rate-limit-panes";
 
@@ -1087,6 +1087,67 @@ describe("a board READ FAILURE defers; a genuinely EMPTY board still delivers", 
     // that would render "could not check" and still get delivered + marked.
     expect(src).toContain("return { defer: `board unreachable: ${err instanceof Error ? err.message : String(err)}` };");
     expect(src).not.toContain("tasks = { ok: false as const, reason:");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Board issue #110 — `survivalTasks`'s own "live" means NOT TERMINAL, not
+// positive LIVE_TASK_STATES membership (the opposite direction from the
+// openAssignedTasks/liveTasksOf fix elsewhere in this feature). An
+// `awaiting_merge` task has exactly the kind of artifact (a reported PR)
+// survival re-brief exists to re-check; excluding it here is a real gap, not
+// a stylistic one. `survivalTasks` is private and StudioDO cannot be
+// constructed under vitest-pool-workers (do.ts's own header) — no fixture
+// here fabricates a DO or a fake board. Instead the EXACT filter expression
+// is pulled out of the real, live do.ts source text (same TEST_STUDIO_DO_SRC
+// pinning every other `it` in this file already uses) and executed as real
+// code against task fixtures covering the whole vocabulary, so this goes red
+// against the pre-fix `LIVE_TASK_STATES.includes(t.state)` expression and
+// green only once the filter is genuinely "not terminal".
+// ---------------------------------------------------------------------------
+
+describe("survivalTasks — crash-survival re-brief means NOT TERMINAL, not positively live (#110)", () => {
+  type Predicate = (
+    t: { open: boolean; state: string | null },
+    TERMINAL_TASK_STATES: readonly string[],
+    LIVE_TASK_STATES: readonly string[],
+  ) => boolean;
+
+  function extractedFilter(): (t: { open: boolean; state: string | null }) => boolean {
+    const src = env.TEST_STUDIO_DO_SRC;
+    const m = /const live = result\.value\.filter\(\(t\) => (.+)\);/.exec(src);
+    if (!m) throw new Error("survivalTasks's `live` filter line not found in do.ts source");
+    // The extracted expression may reference TERMINAL_TASK_STATES and/or
+    // LIVE_TASK_STATES by name — both real imports, not stand-ins, so the
+    // predicate below is genuinely the shipped expression, not a paraphrase.
+    const raw = new Function("t", "TERMINAL_TASK_STATES", "LIVE_TASK_STATES", `return (${m[1]});`) as Predicate;
+    return (t) => raw(t, TERMINAL_TASK_STATES, LIVE_TASK_STATES);
+  }
+
+  it("an awaiting_merge task (open, with a PR artifact already reported) IS included", () => {
+    expect(extractedFilter()({ open: true, state: "awaiting_merge" })).toBe(true);
+  });
+
+  it("completed, failed and canceled tasks are NOT included — they are finished, nothing to re-check", () => {
+    const filter = extractedFilter();
+    for (const state of TERMINAL_TASK_STATES) {
+      expect(filter({ open: true, state })).toBe(false);
+    }
+  });
+
+  it("submitted, working and input_required are still included — the pre-existing live states", () => {
+    const filter = extractedFilter();
+    for (const state of LIVE_TASK_STATES) {
+      expect(filter({ open: true, state })).toBe(true);
+    }
+  });
+
+  it("a drifted (null) state is excluded, unchanged from before this fix", () => {
+    expect(extractedFilter()({ open: true, state: null })).toBe(false);
+  });
+
+  it("a closed task is excluded regardless of state", () => {
+    expect(extractedFilter()({ open: false, state: "awaiting_merge" })).toBe(false);
   });
 });
 
