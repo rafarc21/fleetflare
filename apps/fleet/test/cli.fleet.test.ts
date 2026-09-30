@@ -1047,6 +1047,14 @@ describe("formatActivity (cli/readiness-format.ts)", () => {
     expect(formatActivity(s, NOW)).toBe("LIMIT · modal — Esc (ff demosite-life--pilot)");
   });
 
+  it("issue #141: DEAD · org disabled subscription access — outranks the select-modal branch too", () => {
+    const s = status({
+      rateLimited: { until: null, seenAt: "2026-09-25T12:00:00.000Z", dead: true },
+      observed: { ...emptyObserved(), activity: activity({ state: "limit" }) },
+    });
+    expect(formatActivity(s, NOW)).toBe("DEAD · org disabled subscription access");
+  });
+
   it("LIMIT outranks a stale-looking activity entry underneath it", () => {
     const s = status({
       rateLimited: { until: "2026-09-25T13:30:00.000Z", seenAt: "2026-09-25T12:00:00.000Z" },
@@ -1195,6 +1203,14 @@ describe("lsJsonRows (issue #70)", () => {
     expect(r.limitResetsAt).toBe(until);
     expect(r.leadSince).toBe(seenAt);
     expect(row({ rateLimited: { until: null, seenAt, select: true } }).lead).toBe("modal");
+  });
+
+  it("issue #141: dead — permanent, no limitResetsAt, never falls through to 'modal' or 'limit'", () => {
+    const seenAt = "2026-09-25T11:30:00.000Z";
+    const r = row({ rateLimited: { until: null, seenAt, dead: true } });
+    expect(r.lead).toBe("dead");
+    expect(r.leadSince).toBe(seenAt);
+    expect(r.limitResetsAt).toBeNull();
   });
 
   it("no verdict, or a stale one, is unknown -- never a guess", () => {

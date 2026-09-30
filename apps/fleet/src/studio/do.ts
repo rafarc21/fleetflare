@@ -3321,19 +3321,28 @@ async function readFleetAccountLimits(db: D1Database, accounts: ClaudeAccount[])
     const state = decodeAccountLimitState(await getFlag(db, accountLimitStateKey(a.name)));
     // Review round 1 (#102 review, 2026-09-30): `seenAt` rides along too, not
     // just `until` — accounts.ts's `isFree` needs it for a `null`-until
-    // entry's staleness ceiling (NULL_UNTIL_CEILING_MS).
-    if (state) limits[a.name] = { until: state.until, seenAt: state.seenAt };
+    // entry's staleness ceiling (NULL_UNTIL_CEILING_MS). Issue #141: `dead`
+    // rides along too, and is NEVER subject to that ceiling.
+    if (state) limits[a.name] = { until: state.until, seenAt: state.seenAt, ...(state.dead ? { dead: true as const } : {}) };
   }));
   return limits;
 }
 
 /** Issue #102 — the fleet-wide write half: one fleet_state row, keyed by
  *  account NAME (never a studio id), so every studio's own next
- *  `readFleetAccountLimits` sees it. */
+ *  `readFleetAccountLimits` sees it. Issue #141: `dead` is passed through
+ *  unchanged to `encodeAccountLimitState` — no auto-expiry TTL logic here,
+ *  the D1 row itself is written with no different treatment than any other
+ *  account-limit sighting; only `accountIsFree`'s own read of it treats it
+ *  as permanent. */
 async function writeFleetAccountLimit(
-  db: D1Database, name: string, until: string | null, seenAt: string,
+  db: D1Database, name: string, until: string | null, seenAt: string, dead?: true,
 ): Promise<void> {
-  await setFlag(db, accountLimitStateKey(name), encodeAccountLimitState({ until, seenAt }), Date.parse(seenAt));
+  await setFlag(
+    db, accountLimitStateKey(name),
+    encodeAccountLimitState({ until, seenAt, ...(dead ? { dead: true as const } : {}) }),
+    Date.parse(seenAt),
+  );
 }
 
 /**
@@ -5825,7 +5834,8 @@ export class StudioDO extends Sandbox<Env> {
       // header), wired here where `this.env.DB` already lives.
       accountLimits: {
         read: () => readFleetAccountLimits(this.env.DB, resolveClaudeAccounts(this.env)),
-        write: (name: string, until: string | null, seenAt: string) => writeFleetAccountLimit(this.env.DB, name, until, seenAt),
+        write: (name: string, until: string | null, seenAt: string, dead?: true) =>
+          writeFleetAccountLimit(this.env.DB, name, until, seenAt, dead),
       },
       // Issue #131 (Stage B): fleet-wide per-account 5h burn, same D1-backed
       // shape/reasoning as accountLimits just above, read only on the borrow
