@@ -1050,11 +1050,17 @@ async function cmdProvision(creds: Credentials, id: string, freshSession = false
  * empty POST is all routes.ts's recycle branch accepts (it takes no
  * blueprintRef override, unlike provision).
  */
-async function cmdRecycle(creds: Credentials, id: string, discardUnsynced: boolean, freshSession = false): Promise<void> {
+async function cmdRecycle(
+  creds: Credentials, id: string, discardUnsynced: boolean, freshSession = false, forceMappedAccount = false,
+): Promise<void> {
   // #96: without the flag, a container that cannot answer makes the Worker
   // refuse (409) and name the age of the snapshot a recycle would restore.
   // Issue #28: --fresh-session rides the same query string.
-  const q = [discardUnsynced ? "discard-unsynced=true" : "", freshSession ? "fresh-session=true" : ""].filter(Boolean).join("&");
+  // Board task #131 ask 2: --account mapped, same query-string convention.
+  const q = [
+    discardUnsynced ? "discard-unsynced=true" : "", freshSession ? "fresh-session=true" : "",
+    forceMappedAccount ? "account=mapped" : "",
+  ].filter(Boolean).join("&");
   const path = q ? `/recycle?${q}` : "/recycle";
   const res = await fetch(studioUrl(creds, id, path), {
     method: "POST",
@@ -2535,7 +2541,7 @@ async function main(): Promise<void> {
     case "provision":
       return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession);
     case "recycle":
-      return cmdRecycle(creds, parsed.id, parsed.discardUnsynced, parsed.freshSession);
+      return cmdRecycle(creds, parsed.id, parsed.discardUnsynced, parsed.freshSession, parsed.forceMappedAccount === true);
     case "destroy":
       return cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced, parsed.park === true);
     case "task-new":

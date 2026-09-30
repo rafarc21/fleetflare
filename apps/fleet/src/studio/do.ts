@@ -3258,6 +3258,47 @@ export class LaunchRefusedError extends Error {
 }
 
 /**
+ * Board task #131 ask 2: `fleet recycle <id> --account mapped`. With
+ * FLEET_AUTO_FAILOVER=on, `launchAccount` serves a RECORDED account verbatim,
+ * without even consulting CLAUDE_ACCOUNT_BY_REPO (see that function's own doc
+ * comment) — a map change never reaches a studio an earlier failover recorded
+ * elsewhere. This clears `claudeAccount` (and the `claudeAccountMovedAt`/
+ * `claudeAccountMovedVia`/`claudeAccountMovedBlock` "we're on a non-default
+ * account" audit trail, since a forced-mapped recycle deliberately puts the
+ * studio back on its plain mapped slot, not a failover-moved one) so the very
+ * next `launchAccount` resolution falls through to the mapped slot.
+ *
+ * Called from `StudioDO.recycle()` itself, as the VERY FIRST thing it does —
+ * before recycle's own first `launchAccountOrRefuse` call — never as a
+ * separate route-level pre-step fired before `stub.recycle()` is even
+ * invoked. A route-level clear would reopen the exact race issue #328 closed:
+ * a concurrently-running `runAccountFailover` could rewrite `claudeAccount`
+ * in the gap between a route-level clear and recycle()'s own first read.
+ * Landing the clear inside recycle()'s own atomic flow means BOTH
+ * `launchAccountOrRefuse` calls recycle() makes (the entry-time refusal check
+ * and the later, freshly re-read in-closure resolve — see that closure's own
+ * #328 round 2/3 comment) see the cleared state.
+ */
+export async function clearForceMappedAccount(
+  storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
+): Promise<void> {
+  const existing = (await storage.get(STATUS_KEY)) ?? null;
+  if (existing == null) return;
+  if (
+    existing.claudeAccount == null && existing.claudeAccountMovedAt == null &&
+    existing.claudeAccountMovedVia == null && existing.claudeAccountMovedBlock == null
+  ) {
+    return;
+  }
+  const cleared: StudioStatus = {
+    ...existing,
+    claudeAccount: null, claudeAccountMovedAt: null, claudeAccountMovedVia: null, claudeAccountMovedBlock: null,
+  };
+  await storage.put(STATUS_KEY, cleared);
+  await recordStudioFn(cleared);
+}
+
+/**
  * Issue #271: the gate provision, restart and recycle pass before touching a
  * container. A repo mapped to an account whose secret is not set REFUSES:
  * the row goes `degraded` with the reason (the operator reads it in `fleet
@@ -6067,6 +6108,16 @@ export class StudioDO extends Sandbox<Env> {
    * two covers does not come back.
    */
   async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {
+    // Board task #131 ask 2: `fleet recycle <id> --account mapped`. This
+    // clear runs FIRST — before either launchAccountOrRefuse call below — so
+    // both see the cleared state and fall through to CLAUDE_ACCOUNT_BY_REPO's
+    // mapped slot rather than a stale recorded (possibly failed-over)
+    // account. See clearForceMappedAccount's own doc comment for why this
+    // lives here, inside recycle()'s own atomic flow, rather than as a
+    // route-level pre-step.
+    if (cfg.forceMappedAccount) {
+      await clearForceMappedAccount(this.ctx.storage, this.recordFn());
+    }
     // Issue #271: refuse BEFORE recycle's destroy — an unlaunchable account
     // must not cost a running studio its container. Issue #328 fix round 2:
     // this resolution is NOT reused below — recycleWithSync's pre-destroy

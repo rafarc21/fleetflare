@@ -470,6 +470,22 @@ export interface ProvisionConfig {
    */
   cancelFreshSession?: boolean;
   /**
+   * Board task #131 ask 2: `fleet recycle <id> --account mapped`. With
+   * FLEET_AUTO_FAILOVER=on, `launchAccount` (src/studio/accounts.ts) serves a
+   * studio's RECORDED account verbatim, without even consulting
+   * CLAUDE_ACCOUNT_BY_REPO — a map change never reaches a studio an earlier
+   * failover recorded elsewhere, and until this field existed the only lever
+   * was flipping failover off and recycling. `true` only when the operator
+   * passed `--account mapped` — `do.ts`'s `recycle()` then clears the
+   * recorded account (and its moved-audit trail) as the very first thing it
+   * does, before touching the container, so the studio relaunches on its
+   * plain mapped slot instead. Absent/false: an ordinary recycle, unaffected.
+   * Only ever set from routes.ts's `?account=mapped` query param, same
+   * "resolved by the Worker, never read straight from a request body"
+   * posture as every other override on this type.
+   */
+  forceMappedAccount?: true;
+  /**
    * Dynamic repo selection (P4a): the full `owner/repo` of the WORK repo to
    * clone. Absent means "whatever this studio is already bound to, else the
    * fleet default" — runProvision resolves that fallback, which is what
