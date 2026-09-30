@@ -156,8 +156,8 @@ describe("container/studio-fleet — the board verbs (P4a-2)", () => {
   // is ACTIVELY working used to sit at `submitted` until a coordinator moved
   // it by hand, so every monitor read a healthy studio as stalled.
   describe("task state <n> <to> (board issue #41)", () => {
-    it("offers exactly the three states a lead may set", () => {
-      expect(src()).toContain('const LEAD_TASK_STATES = ["working", "input_required", "failed"];');
+    it("offers exactly the four states a lead may set", () => {
+      expect(src()).toContain('const LEAD_TASK_STATES = ["working", "input_required", "awaiting_merge", "failed"];');
     });
 
     it("refuses `completed` in the CLI itself, naming who owns that verdict — no request is even built", () => {
@@ -176,9 +176,15 @@ describe("container/studio-fleet — the board verbs (P4a-2)", () => {
       expect(src()).not.toContain("gh issue");
     });
 
-    it("the help text says which three states, and that completed is not one of them", () => {
-      expect(src()).toContain("fleet task state <n> <working|input_required|failed>");
+    it("the help text says which four states, and that completed is not one of them", () => {
+      expect(src()).toContain("fleet task state <n> <working|input_required|awaiting_merge|failed>");
       expect(src()).toContain("You cannot mark your own task completed");
+    });
+
+    it("the help text explains what awaiting_merge means (board issue #110)", () => {
+      expect(src()).toContain("awaiting_merge");
+      expect(src()).toContain("PR");
+      expect(src()).toContain("waiting");
     });
 
     it("prints the before -> after the Worker actually wrote, not the state that was asked for", () => {
