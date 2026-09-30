@@ -174,9 +174,61 @@ repo-wide ones).
   run's own trend (worse, not better) plus this container's own documented
   memory-ceiling/wedge risk from repeated heavy-gate runs made a third
   attempt the wrong call, not a more thorough one.
-- **No PR opened, no completion record written** by this developer: per
-  this role's own framing, PR/merge/deploy is the lead's job, and the task's
-  own "Completion record" section is explicitly conditional on "Code Review
-  and QA both pass" — neither has run yet (the lead dispatches them next).
-  Reported back to the lead instead, with branch name and this real
-  verification output.
+- **No PR opened, no completion record written** by this developer at the
+  time this section was first written: per this role's own framing, PR/
+  merge/deploy is the lead's job, and the task's own "Completion record"
+  section is explicitly conditional on "Code Review and QA both pass" —
+  neither had run yet. Both have since run (the lead's own message): Code
+  Review approved with no blockers, QA passed. PR opened by the lead:
+  https://github.com/rafarc21/fleetflare/pull/128 (closes #112). The
+  completion record `/workspace/.fleet/done/112.json` (outside the repo
+  checkout, never committed) was written after that confirmation.
+
+## Fix round: merge `main` (PR #128 CI went red)
+
+`main` had moved 9 commits ahead of the branch point (9b7c213 -> 149779c)
+by the time PR #128's CI ran. One of those 9, `b219438` ("maestro
+in-container: resume, instance spawn, task new/assign under org-chart gate
+— #59 (#75)"), added a new file, `test/board.fleet-directs.test.ts`, with
+its own `fakeApi(): BoardApi` literal that predates this task's
+`listOpenPullFiles` addition to the `BoardApi` interface — missing field,
+`TS2322`. It was the only new `BoardApi`-literal fixture among those 9
+commits (confirmed by the coordinator's own grep of
+`function fakeApi`/`function fakeBoardApi`/`: BoardApi = {` across
+`origin/main`).
+
+Two of the 9 new commits also touched files this task already changed —
+`src/board/routes.ts` (b219438: org-chart-gated `/fleet/tasks` create/
+assign, `directGate`, `PolicyFetch`) and `cli/fleet.ts` (b219438 + 191040e:
+fresh-session cancel path). `git merge origin/main` (merge, not rebase —
+the branch is already pushed and PR-open) resolved BOTH with zero
+conflicts: this task's changes (the `listOpenPullFiles` import/wiring near
+the top of `routes.ts`'s `githubBoardApi`, `AssignedTask.pathWarnings` +
+`reportPathWarnings` in `fleet.ts`) and main's new changes (the org-chart
+gate machinery further down `routes.ts`, the fresh-session flags in
+`fleet.ts`) touched non-overlapping regions of both files. Verified by
+grepping the merged files for both sets of symbols — every one present
+exactly once, no duplication, no silent drop.
+
+Fixed the ONE real gap (`board.fleet-directs.test.ts`'s missing
+`listOpenPullFiles` mock) with the same one-line pattern as the 8 fixtures
+already patched earlier in this task. Checked its brief fixture for the
+same "accidentally looks like a path" trap the earlier `board.board.test.ts`
+fix caught (`"open/close"`) — this file's `BRIEF` (`"Ship it"`, `"A PR"`,
+`"Touch nothing else"`) has no slash, so no hidden trigger.
+
+### Verification (this round)
+
+- `flock /tmp/fleet-gate.lock bun run check` (5-tsconfig repo-wide
+  typecheck, post-merge) — exit 0, clean.
+- `bun x vitest run test/board.fleet-directs.test.ts
+  test/board.path-overlap.test.ts test/board.board.test.ts
+  test/board.routes.test.ts test/board.fleet-routes.test.ts
+  test/board.leak.test.ts` (every file that imports `src/board/routes` or
+  `src/board/board`, i.e. every file that could see either side of the
+  merge) — 6 files, 315/315 tests pass.
+
+Full `bun x vitest run` deliberately NOT rerun for this fix round (already
+run once in full earlier this task, per the one-heavy-gate-at-a-time
+budget) — the targeted set above covers every file that imports anything
+touched by the merge's conflict-adjacent regions.
