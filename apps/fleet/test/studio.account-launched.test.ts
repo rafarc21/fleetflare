@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { env as testEnv } from "cloudflare:test";
-import { launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch } from "../src/studio/do";
+import {
+  launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch, commitAccountClears,
+} from "../src/studio/do";
 import { withAccountDisplay } from "../src/studio/registry";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
@@ -138,7 +140,9 @@ describe("StudioDO wiring (source) — #292 r2", () => {
     const site = "({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));";
     const sites = doSrc.split("\n").filter((l) => l.includes(site));
     expect(sites.length).toBe(2);
-    const paired = doSrc.match(/const launch = await launchAccountOrRefuse\(this\.env, this\.ctx\.storage, id, this\.recordFn\(\)\);\n(    \/\/[^\n]*\n)?    \(\{ envVars: this\.envVars, envAccount: this\.envAccount \} = launchFields\(this\.env, id, spawnToken, launch\.name\)\);/g);
+    // #134 review round 2: both sites now pass `commitOkClears: false` (a
+    // trailing `, false`) — see launchAccountOrRefuse's own doc comment.
+    const paired = doSrc.match(/const launch = await launchAccountOrRefuse\(this\.env, this\.ctx\.storage, id, this\.recordFn\(\), false\);\n(    \/\/[^\n]*\n)?    \(\{ envVars: this\.envVars, envAccount: this\.envAccount \} = launchFields\(this\.env, id, spawnToken, launch\.name\)\);/g);
     expect(paired?.length).toBe(2);
   });
 });
@@ -562,6 +566,121 @@ describe("StudioDO.recycle wiring — the entry-time launchAccountOrRefuse call 
     );
     expect(closureBody).not.toContain("this.recordFn(), false)");
   });
+});
+
+// Issue #134 review round 2: `provisionUngated`/`restartUngated` are BOTH
+// idempotent (studio.routes.test.ts's "provision idempotent" coverage;
+// restartStudio is likewise callable on a live container) and, on an
+// already-`running` container, skip the actual container start entirely
+// (`if (!this.ctx.container?.running) await sbAwaitReady(this)`) — the live
+// tmux session keeps running on whatever token it booted with. Committing
+// launchAccountOrRefuse's ok-branch clear unconditionally on these two paths
+// (round 1's fix, before this round) reopened exactly #134's own bug through
+// provision/restart instead of recycle: a rate-limited, still-running studio
+// whose repo gets remapped would have its row falsely cleared the moment
+// `fleet provision`/`fleet restart` resolved the new account, even though
+// the container never moved.
+//
+// Fix: both call sites now resolve with `commitOkClears: false` and commit
+// via `commitAccountClears` themselves, ONLY inside the cold-start branch —
+// mirrored here at the primitive level, the same convention the #328/#134
+// round-1 primitive-level blocks above use.
+describe("commitAccountClears — only committed once the container touch actually happens (#134 review round 2)", () => {
+  const FUTURE = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const SEEN = new Date().toISOString();
+
+  it("resolved with commitOkClears=false, container already running (guard skips the start): rateLimited survives untouched", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN", rateLimited: observation }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+
+    // provisionUngated's/restartUngated's own entry call.
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+
+    // The container-running guard is true (a live container): sbAwaitReady
+    // and commitAccountClears are both SKIPPED, exactly as production does.
+    // Nothing further touches storage.
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited).toEqual(observation); // still set: the container never moved
+    expect(row.launchedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN"); // still the old account too
+  });
+
+  it("resolved with commitOkClears=false, container NOT running (guard runs a cold start): commitAccountClears drops rateLimited", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN", rateLimited: observation }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+
+    // The container-running guard is false: sbAwaitReady ran (simulated —
+    // nothing here depends on a real container), then commitAccountClears.
+    await commitAccountClears(env, storage, recordFn, launch);
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited ?? null).toBeNull();
+  });
+
+  it("no stale fields on the row at all: a no-op, no write", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }));
+    const recorded: StudioStatus[] = [];
+    const recordFn = async (s: StudioStatus) => { recorded.push(s); await storage.put(STATUS_KEY, s); };
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+    await commitAccountClears(env, storage, recordFn, launch);
+    expect(recorded).toHaveLength(0);
+  });
+});
+
+// Issue #134 review round 2: pins the wiring itself (the DO cannot be
+// constructed under vitest-pool-workers, same convention as every other
+// source-pinning block in this file) — the primitive-level tests above
+// prove the MECHANISM; this proves provisionUngated/restartUngated actually
+// call it that way.
+describe("StudioDO.provisionUngated/restartUngated wiring — commitAccountClears runs only inside the cold-start branch (#134 review round 2)", () => {
+  const doSrc: string = (testEnv as unknown as { TEST_STUDIO_DO_SRC: string }).TEST_STUDIO_DO_SRC;
+  const body = (sig: string): string => {
+    const start = doSrc.indexOf(sig);
+    if (start === -1) throw new Error(`not found: ${sig}`);
+    return doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
+  };
+  const coldStartBlock = (fnBody: string): string => {
+    const guardStart = fnBody.indexOf("if (!this.ctx.container?.running) {");
+    if (guardStart === -1) throw new Error("cold-start guard not found");
+    const guardEnd = fnBody.indexOf("\n    }\n", guardStart);
+    return fnBody.slice(guardStart, guardEnd);
+  };
+
+  for (const [name, sig] of [
+    ["provisionUngated", "private async provisionUngated(cfg: ProvisionConfig, via: BringupVia, ctx: OpCtx): Promise<StudioStatus> {"],
+    ["restartUngated", "private async restartUngated(via: BringupVia, ctx: OpCtx): Promise<StudioStatus> {"],
+  ] as const) {
+    describe(name, () => {
+      const fnBody = body(sig);
+
+      it("the launchAccountOrRefuse call passes commitOkClears=false", () => {
+        expect(fnBody).toContain("this.recordFn(), false);");
+      });
+
+      it("commitAccountClears runs INSIDE the cold-start guard, after sbAwaitReady", () => {
+        const block = coldStartBlock(fnBody);
+        const awaitReadyIdx = block.indexOf("await sbAwaitReady(this);");
+        const commitIdx = block.indexOf("await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);");
+        expect(awaitReadyIdx).toBeGreaterThan(-1);
+        expect(commitIdx).toBeGreaterThan(-1);
+        expect(awaitReadyIdx).toBeLessThan(commitIdx);
+      });
+
+      it("commitAccountClears does NOT run outside the cold-start guard (unconditionally)", () => {
+        const outside = fnBody.slice(0, fnBody.indexOf("if (!this.ctx.container?.running) {"))
+          + fnBody.slice(fnBody.indexOf("\n    }\n", fnBody.indexOf("if (!this.ctx.container?.running) {")));
+        expect(outside).not.toContain("commitAccountClears(");
+      });
+    });
+  }
 });
 
 describe("withAccountDisplay — the column shows the LAUNCHED account (#289)", () => {

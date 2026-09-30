@@ -96,12 +96,15 @@ no longer rate-limited / no longer on its old account — the mirror image of
 Fix: `launchAccountOrRefuse` grew a 5th, optional `commitOkClears = true`
 parameter. `recycle()`'s entry call passes `false` — it still does its
 existing job (refuse early on an unlaunchable account, with that refusal's
-row write unaffected by the flag) without committing either clear. Every
-other call site (provision, restart, and recycle's own second, post-destroy
-call) keeps the default `true`: none of those has a refuse-after-resolve
-window between the call and the account actually being used, since
-destroy() has either not happened at all (provision/restart start fresh) or
-has already unconditionally happened (recycle's second call).
+row write unaffected by the flag) without committing either clear.
+
+CORRECTION (round 2 found this claim false — see the round 2 addendum
+below): this section originally claimed "every other call site (provision,
+restart) is a single call with no such refuse-after-resolve window... since
+provision/restart start fresh." That is wrong: `provisionUngated` and
+`restartUngated` are BOTH idempotent and skip the actual container start
+when it is already running, which turns out to be the exact same class of
+gap recycle's entry call has. See the round 2 addendum for the real fix.
 
 New tests, same file: a `commitOkClears=false` unit-level describe block
 (resolves the account, writes nothing); a primitive-level composition
@@ -114,3 +117,57 @@ the entry call's literal text carries `, false)` and the closure's call does
 not. Also updated the stale comment above the closure (previously claimed
 the entry call's clear was "already performed... if it was going to" — no
 longer true now that it never commits).
+
+## Review round 2 addendum: provision/restart had the identical gap
+
+A second fresh-context review found round 1's own doc comment claim false:
+"provision/restart start fresh, no refuse-after-resolve window." In truth,
+`provisionUngated` (do.ts) is explicitly idempotent (studio.routes.test.ts's
+"provision idempotent" coverage exercises a second POST against an
+already-running studio) and `restartUngated` is likewise callable against a
+live container. Both guard their actual container start with
+`if (!this.ctx.container?.running) await sbAwaitReady(this)` — on an
+already-running container, that guard is false and the start is SKIPPED
+entirely. The live tmux session keeps running on whatever
+`CLAUDE_CODE_OAUTH_TOKEN` it booted with (`studioEnvVars`'s own doc comment:
+frozen at boot, never re-read without a fresh start); `launchedAccount` (the
+field the clear-guard compares against) is only written by `onStart`, which
+never fires when the guard skips the start either.
+
+So `fleet provision <id>` / `fleet restart <id>` against a studio that is
+rate-limited on account A, still running, whose repo has since been
+remapped to account B: round 1's fix resolved B and, because
+`commitOkClears` defaulted to `true` at these two call sites, immediately
+nulled `claudeAccount`/`rateLimited` on the row — even though the container
+never moved and is still genuinely running (and rate-limited) on A. The
+exact false-"healthy" bug #134 exists to fix, reopened through
+provision/restart instead of recycle.
+
+Fix: `provisionUngated`/`restartUngated` now call `launchAccountOrRefuse`
+with `commitOkClears: false`, same as recycle's entry call, and commit the
+clear themselves via a newly-extracted `commitAccountClears` helper (do.ts)
+— but only INSIDE the `if (!this.ctx.container?.running) { await
+sbAwaitReady(this); ... }` branch, i.e. only once a cold start has actually
+happened. `commitAccountClears` re-reads storage fresh (same reasoning as
+recycle's own second call: nothing durable is assumed to still hold from
+whenever the resolving call ran) and shares its clear-computation logic
+(extracted into a pure, no-I/O `accountClears` helper) with
+`launchAccountOrRefuse`'s own inline `commitOkClears: true` path, so there
+is exactly one copy of the merge logic. `launchAccountOrRefuse`'s own doc
+comment and this plan's round 1 addendum (above) are both corrected to
+name the real gap.
+
+New tests, same file: a `commitAccountClears` primitive-level describe
+block (guard skips the start → `rateLimited` survives; guard runs a cold
+start → `commitAccountClears` drops it; a no-op row → no write), and a
+source-pinning describe block (same convention as every other such block
+in this file) proving `commitAccountClears` is called from INSIDE each
+function's cold-start guard, never outside it, and that both functions'
+`launchAccountOrRefuse` calls carry `, false)`. The existing "#292 r2"
+`StudioDO wiring (source)` test (which pins the literal 4-arg call text) was
+updated to expect the new 5-arg `, false)` form instead.
+
+Verified both new source-pinning tests actually catch the regression they
+guard against: temporarily reverted `provisionUngated`'s call back to the
+old unconditional 4-arg + no-branch shape → 3 tests failed as expected →
+restored → 55/55 green again.

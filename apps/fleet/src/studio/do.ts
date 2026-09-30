@@ -3264,6 +3264,66 @@ export class LaunchRefusedError extends Error {
 }
 
 /**
+ * Issue #134 review round 2: the ok-branch clears (`claudeAccount`,
+ * `rateLimited`) are only ever CORRECT to commit once the container is
+ * genuinely about to run on `launch.name` — never merely because a launch
+ * resolved. `launchAccountOrRefuse`'s own inline commit (its
+ * `commitOkClears` branch, below) covers the callers for which resolving
+ * IS the commit point; `commitAccountClears` (exported further down) is the
+ * same computation, re-read fresh from storage, for callers that resolved
+ * with `commitOkClears: false` because they cannot yet tell whether this
+ * call's container touch will actually happen. Pure (no I/O) so both paths
+ * share it without a caller-vs-callee read mismatch.
+ */
+function accountClears(
+  env: Env, existing: StudioStatus | null, launch: Extract<LaunchAccount, { ok: true }>,
+): Pick<StudioStatus, "claudeAccount" | "rateLimited"> | null {
+  // #273 r2: flag off, an earlier failover's recorded account is stale — this
+  // launch is on the mapped one, so the row stops naming the old one.
+  const clearClaudeAccount = !autoFailoverOn(env) && existing?.claudeAccount != null;
+  // #134: a `rateLimited` sighting describes whatever account the studio
+  // was launched on when it was recorded — once this launch resolves to a
+  // DIFFERENT account than `existing.launchedAccount`, that sighting no
+  // longer describes the account the studio is about to run on, so it
+  // cannot be left standing (fleet ls would keep printing "rate-limited"
+  // for a studio actually healthy on its new account). Deliberately no D1
+  // read here: the existing 30s/300s live-pane recovery paths will
+  // re-observe and re-set `rateLimited` on their own next tick if the new
+  // account turns out to also be limited.
+  const clearRateLimited = existing?.rateLimited != null
+    && typeof existing?.launchedAccount === "string" && existing.launchedAccount !== launch.name;
+  if (!clearClaudeAccount && !clearRateLimited) return null;
+  return {
+    ...(clearClaudeAccount ? { claudeAccount: null } : {}),
+    ...(clearRateLimited ? { rateLimited: null } : {}),
+  };
+}
+
+/**
+ * Issue #134 review round 2: committed by a caller that resolved
+ * `launchAccountOrRefuse` with `commitOkClears: false` — `provisionUngated`/
+ * `restartUngated`/recycle's post-destroy closure all call this ONLY once
+ * they know this call's container touch actually happened (a cold start, or
+ * recycle's unconditional post-destroy start) — never when the
+ * container-running guard (`!this.ctx.container?.running`) is about to skip
+ * the start and the studio keeps running, unmoved, on whatever account it
+ * already booted with. A fresh `storage.get` (not the resolving call's own
+ * snapshot): nothing durable is assumed to still hold from whenever that
+ * call ran.
+ */
+export async function commitAccountClears(
+  env: Env, storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
+  launch: Extract<LaunchAccount, { ok: true }>,
+): Promise<void> {
+  const existing = (await storage.get(STATUS_KEY)) ?? null;
+  const clears = accountClears(env, existing, launch);
+  if (clears === null || existing === null) return;
+  const cleared: StudioStatus = { ...existing, ...clears };
+  await storage.put(STATUS_KEY, cleared);
+  await recordStudioFn(cleared);
+}
+
+/**
  * Issue #271: the gate provision, restart and recycle pass before touching a
  * container. A repo mapped to an account whose secret is not set REFUSES:
  * the row goes `degraded` with the reason (the operator reads it in `fleet
@@ -3271,26 +3331,31 @@ export class LaunchRefusedError extends Error {
  * starve the other repo. A launchable studio writes nothing beyond clearing
  * what's stale on the row (see `commitOkClears` below).
  *
- * `commitOkClears` (issue #134 review round 1): recycle() calls this TWICE —
- * once at its own entry, BEFORE recycleWithSync has even probed the
- * container, let alone destroyed it (recycleWithSync can still refuse
- * outright — a failed probe or a confirmed rescue-push failure without
- * `--discard-unsynced` — and neither destroy() nor a relaunch ever happens);
- * and again, fresh, immediately before the post-destroy container actually
- * starts (the awaitReady closure below, in recycle()). A resolved-`ok`
- * launch's clears (`claudeAccount`, `rateLimited`) describe what is about to
- * become true ONCE the studio actually moves onto the newly-resolved
- * account — at the ENTRY call, that has not happened yet, and might never
- * happen this recycle at all. Committing them there would leave a studio
- * that never destroyed/relaunched (recycleWithSync refused) with a row that
- * falsely claims it is no longer rate-limited / no longer on the old
- * account, even though nothing moved. Only the SECOND call's clears may
- * land: it only ever runs once `destroy()` has already unconditionally
- * happened, so by then the studio truly is about to run on the account this
- * call resolves to. `commitOkClears` defaults to `true` (every other call
- * site — provision, restart — is a single call with no such refuse-after-
- * resolve window); recycle()'s entry call is the one place that passes
- * `false`.
+ * `commitOkClears`: resolving a launch is NOT, by itself, proof the studio
+ * is about to run on it — `provisionUngated`/`restartUngated` are both
+ * idempotent (studio.routes.test.ts's "provision idempotent" coverage;
+ * `restartStudio` is likewise callable on a live container) and, on an
+ * already-`running` container, skip the actual container start entirely
+ * (their own `if (!this.ctx.container?.running) await sbAwaitReady(this)`
+ * guard) — the live tmux session keeps running on whatever token it booted
+ * with (see `studioEnvVars`'s own doc comment: frozen at boot, never
+ * re-read without a fresh start). recycle() has the identical gap in its
+ * OWN entry call, structurally: it resolves before recycleWithSync has even
+ * probed the container, and recycleWithSync can still refuse outright
+ * (failed probe, or a confirmed rescue-push failure without
+ * `--discard-unsynced`) — destroy() never runs and the studio never moves.
+ * In every one of these cases, committing a resolved-`ok` clear
+ * (`claudeAccount`, `rateLimited`) describes what is about to become true
+ * ONCE the studio actually moves onto the newly-resolved account — and is
+ * simply false if that move never happens. `commitOkClears` defaults to
+ * `true` for the direct, no-alternative-path callers (recycle's own
+ * post-destroy closure, and this function's own refusal branch below, which
+ * is unaffected by the flag either way); `provisionUngated`, `restartUngated`
+ * and recycle's entry call all pass `false` and instead call
+ * `commitAccountClears` (above) themselves, at the point each has actually
+ * confirmed the container touch is happening (or, for recycle's entry call,
+ * never — that call exists only to refuse early, its resolution is never
+ * carried forward at all; see recycle()'s own comment).
  */
 export async function launchAccountOrRefuse(
   env: Env, storage: StudioStorage, id: string, recordStudioFn: (status: StudioStatus) => Promise<void>,
@@ -3299,28 +3364,13 @@ export async function launchAccountOrRefuse(
   const existing = (await storage.get(STATUS_KEY)) ?? null;
   const launch = launchAccount(env, parseStudioId(id)?.repo ?? null, existing?.claudeAccount ?? null);
   if (launch.ok) {
-    // #273 r2: flag off, an earlier failover's recorded account is stale — this
-    // launch is on the mapped one, so the row stops naming the old one.
-    const clearClaudeAccount = commitOkClears && !autoFailoverOn(env) && existing?.claudeAccount != null;
-    // #134: a `rateLimited` sighting describes whatever account the studio
-    // was launched on when it was recorded — once this launch resolves to a
-    // DIFFERENT account than `existing.launchedAccount`, that sighting no
-    // longer describes the account the studio is about to run on, so it
-    // cannot be left standing (fleet ls would keep printing "rate-limited"
-    // for a studio actually healthy on its new account). Deliberately no D1
-    // read here: the existing 30s/300s live-pane recovery paths will
-    // re-observe and re-set `rateLimited` on their own next tick if the new
-    // account turns out to also be limited.
-    const clearRateLimited = commitOkClears && existing?.rateLimited != null
-      && typeof existing?.launchedAccount === "string" && existing.launchedAccount !== launch.name;
-    if (clearClaudeAccount || clearRateLimited) {
-      const cleared: StudioStatus = {
-        ...existing,
-        ...(clearClaudeAccount ? { claudeAccount: null } : {}),
-        ...(clearRateLimited ? { rateLimited: null } : {}),
-      };
-      await storage.put(STATUS_KEY, cleared);
-      await recordStudioFn(cleared);
+    if (commitOkClears) {
+      const clears = accountClears(env, existing, launch);
+      if (clears !== null && existing !== null) {
+        const cleared: StudioStatus = { ...existing, ...clears };
+        await storage.put(STATUS_KEY, cleared);
+        await recordStudioFn(cleared);
+      }
     }
     return launch;
   }
@@ -5827,13 +5877,27 @@ export class StudioDO extends Sandbox<Env> {
     );
     // Issue #271: a repo mapped to an unset account refuses here, before any
     // container touch, with the reason on the row.
-    const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, id, this.recordFn());
+    //
+    // Issue #134 review round 2: `false` — provision() is idempotent and can
+    // run against an already-running container (studio.routes.test.ts's
+    // "provision idempotent" coverage), in which case the guard right below
+    // skips the actual start and this resolution never reaches a container
+    // at all. Committing an ok-branch clear here regardless of that outcome
+    // would falsely report a studio that never moved as no longer
+    // rate-limited / no longer on its old account. commitAccountClears below
+    // runs ONLY inside the cold-start branch, once the start actually did.
+    const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, id, this.recordFn(), false);
     // Issue #354 (the #348 shape, here too): both fields from the ONE launch.
     ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));
     // #110 review: the refresh write below is this path's FIRST container
     // touch, and the SDK waits for a cold container inside that exec. Wait
     // here, under bring-up's own budget, so the refresh budget never has to.
-    if (!this.ctx.container?.running) await sbAwaitReady(this);
+    if (!this.ctx.container?.running) {
+      await sbAwaitReady(this);
+      // Issue #134 review round 2: the container just actually started on
+      // `launch.name` — only now may the row's stale-field clears commit.
+      await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);
+    }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(cfg)), this.ctx.storage, id, ctx);
     const status = await provisionWithStorage(
       this.deps(), this.ctx.storage, cfg, this.env.AGENT_REPO, via, this.ctx.storage, ctx,
@@ -6046,13 +6110,23 @@ export class StudioDO extends Sandbox<Env> {
     );
     // Issue #271: a repo mapped to an unset account refuses here, before any
     // container touch, with the reason on the row.
-    const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, id, this.recordFn());
+    //
+    // Issue #134 review round 2: `false` — restartStudio is likewise
+    // callable against an already-live container, in which case the guard
+    // right below skips the actual start; see provisionUngated's identical
+    // comment above its own call for the full reasoning.
+    const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, id, this.recordFn(), false);
     // Issue #354 (the #348 shape, here too): both fields from the ONE launch.
     ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));
     // #110 review: the refresh write below is this path's FIRST container
     // touch, and the SDK waits for a cold container inside that exec. Wait
     // here, under bring-up's own budget, so the refresh budget never has to.
-    if (!this.ctx.container?.running) await sbAwaitReady(this);
+    if (!this.ctx.container?.running) {
+      await sbAwaitReady(this);
+      // Issue #134 review round 2: the container just actually started on
+      // `launch.name` — only now may the row's stale-field clears commit.
+      await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);
+    }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(null)), this.ctx.storage, id, ctx);
     const restarted = await restartWithSync(
       this.deps(), this.syncDeps("sync"), this.ctx.storage, id, this.env.AGENT_REPO, via, this.ctx.storage, ctx,
