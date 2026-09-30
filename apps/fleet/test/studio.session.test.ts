@@ -1304,7 +1304,7 @@ describe("syncSessionCycle — snapshot freshness (issue #85)", () => {
     await observedStorage.put(OBSERVED_KEY, {
       incarnation: null, replacedAt: null, execFailures: 0, unreachableSince: null,
       lastShipOkAt: null, lastSnapshotAt: "2026-08-15T00:00:00.000Z", session: null, activity: null,
-      memberAlerts: null,
+      memberAlerts: null, lastMessageLine: null,
     });
 
     await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
