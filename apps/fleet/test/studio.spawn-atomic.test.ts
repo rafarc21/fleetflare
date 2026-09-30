@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import { runSpawn, type SpawnDeps, type SpawnParent } from "../src/studio/spawn";
 import { spawnDeps } from "../src/studio/routes";
-import { listStudios, recordStudio } from "../src/studio/registry";
+import { listStudios, recordStudio, getStudioRow } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
 
 // ---------------------------------------------------------------------------
@@ -86,5 +86,38 @@ describe('runSpawn — instance allocation is atomic (#296)', () => {
       PARENT, { role: "release", instance: "next" },
     )).rejects.toThrow("container would not start");
     expect((await listStudios(env)).map((r) => r.id)).toEqual(["websites--release"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #107 follow-up — the claim placeholder itself must already carry the
+// requested role's doClass. Between claimStudioId's write and
+// provisionChild's own DO-recorded write there is a real window (a project
+// card fetch, DO dispatch, ensureSpawnToken's own write) during which ANY
+// other reader hitting getStudioRow/getStudioStub for this exact id would
+// see the placeholder — a `release-studio` (BIG_PROFILE_ROLES) child with no
+// doClass reads as the default STUDIO namespace, misrouting to a DO that was
+// never provisioned. Captured here by reading the row back from inside a
+// provisionChild fake, BEFORE it does anything of its own — that read sees
+// exactly what claimStudioId wrote and nothing claimStudioId's caller added
+// after the fact.
+// ---------------------------------------------------------------------------
+describe("runSpawn — the claim placeholder carries the requested role's doClass (#107)", () => {
+  it('a "release-studio" child\'s CLAIMED placeholder is already STUDIO_BIG, before provisionChild runs', async () => {
+    let placeholderDoClassAtProvisionStart: string | undefined;
+    const res = await runSpawn(
+      realDeps({
+        fetchPolicy: async () => ({ org: { edges: { pilot: ["release-studio"] }, gates: {} }, roles: ["pilot", "release-studio"] }),
+        provisionChild: async (childId: string) => {
+          placeholderDoClassAtProvisionStart = (await getStudioRow(env, childId))?.doClass;
+          const row = status({ id: childId, state: "running" });
+          await recordStudio(env, row);
+          return row;
+        },
+      }),
+      PARENT, { role: "release-studio", instance: "next" },
+    );
+    expect(res.status).toBe(200);
+    expect(placeholderDoClassAtProvisionStart).toBe("STUDIO_BIG");
   });
 });
