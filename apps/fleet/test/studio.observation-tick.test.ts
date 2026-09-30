@@ -10,6 +10,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   incarnationPatch, runShipTickWithObservation, ExecUnreachableError,
   SHIP_EXEC_DEADLINE_MS, SHIP_TRANSCRIPT_SECONDS, doneRecordsListCmd, ARCHIVE_DEADLINE_MS,
+  AUTO_WORKING_KEY, AUTO_WORKING_EVERY_MS,
 } from "../src/studio/do";
 import { emptyObserved, getObserved, isUnreachable, OBSERVED_KEY, type Observed, type ObservedStorage } from "../src/studio/observed";
 import { STATUS_KEY, OPERATION_KEY, type OperationInFlight, type StudioStorage } from "../src/studio/provision";
@@ -1998,5 +1999,63 @@ describe("runShipTickWithObservation — completion-record archive on the period
     await runShipTickWithObservation(deps, storage, "websites--pilot", undefined, 5000);
 
     expect(execCalls.some((c) => c === doneRecordsListCmd())).toBe(false);
+  });
+});
+
+// Issue #86 item 4: the lead's first observed working turn moves its
+// submitted task to working (the DO wires `onLeadWorking` to the board).
+describe("runShipTickWithObservation — onLeadWorking (issue #86)", () => {
+  const NOW = new Date("2026-09-30T12:00:00.000Z");
+  const deps = (pane: string): ShipDeps => ({
+    exec: vi.fn(async () => ({ code: 0, stdout: stdoutWithPane(pane), stderr: "" })),
+    r2Put: vi.fn(async () => {}),
+    now: () => NOW,
+  });
+  const idleBefore: Activity = {
+    state: "idle", since: "2026-09-30T11:50:00.000Z", anchored: true, observedAt: "2026-09-30T11:59:30.000Z",
+    source: "pane", reason: null, membersTickingAt: null,
+  };
+  const run = (pane: string, storage: ReturnType<typeof fakeStorage>, cb: () => Promise<void>) =>
+    runShipTickWithObservation(deps(pane), storage, "websites--pilot", undefined, 5000, undefined, cb);
+
+  it("idle -> working: called once, the attempt stamped", async () => {
+    const storage = fakeStorage({ status: status(), activity: idleBefore });
+    const cb = vi.fn(async () => {});
+    await run(WORKING_PANE, storage, cb);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(storage.map.get(AUTO_WORKING_KEY)).toBe(NOW.toISOString());
+  });
+
+  it("working -> working: not called", async () => {
+    const storage = fakeStorage({ status: status(), activity: { ...idleBefore, state: "working" } });
+    const cb = vi.fn(async () => {});
+    await run(WORKING_PANE, storage, cb);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("idle -> idle: not called", async () => {
+    const storage = fakeStorage({ status: status(), activity: idleBefore });
+    const cb = vi.fn(async () => {});
+    await run(IDLE_PANE, storage, cb);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("at most once per AUTO_WORKING_EVERY_MS: a recent attempt skips, an old one does not", async () => {
+    const recent = fakeStorage({ status: status(), activity: idleBefore });
+    recent.map.set(AUTO_WORKING_KEY, new Date(NOW.getTime() - AUTO_WORKING_EVERY_MS + 1000).toISOString());
+    const cb1 = vi.fn(async () => {});
+    await run(WORKING_PANE, recent, cb1);
+    expect(cb1).not.toHaveBeenCalled();
+    const old = fakeStorage({ status: status(), activity: idleBefore });
+    old.map.set(AUTO_WORKING_KEY, new Date(NOW.getTime() - AUTO_WORKING_EVERY_MS).toISOString());
+    const cb2 = vi.fn(async () => {});
+    await run(WORKING_PANE, old, cb2);
+    expect(cb2).toHaveBeenCalledTimes(1);
+  });
+
+  it("a throwing callback never fails the tick; activity is still stored", async () => {
+    const storage = fakeStorage({ status: status(), activity: idleBefore });
+    await expect(run(WORKING_PANE, storage, async () => { throw new Error("GitHub 502"); })).resolves.toBeDefined();
+    expect((storage.map.get(ACTIVITY_KEY) as Activity).state).toBe("working");
   });
 });

@@ -383,6 +383,38 @@ async function repairStateless(
   return closeIfTerminal(api, repo, { ...task, state: to, labels: [...task.labels, to] });
 }
 
+/**
+ * Issue #86: leads never flipped their own task to `working` (the brief asks
+ * them to), so the board read `submitted` while a lead visibly worked. The
+ * studio DO calls this on the lead's first observed working turn: every open
+ * task assigned to `studioId` still at `submitted` moves to `working`, each
+ * through `transitionTask`'s own CAS. Never throws: a failure is a line.
+ */
+export async function autoStartSubmittedTasks(
+  api: BoardApi, repo: string, studioId: string,
+): Promise<{ moved: number[]; errors: string[] }> {
+  const moved: number[] = [];
+  const errors: string[] = [];
+  let tasks: BoardTask[];
+  try {
+    const listed = await listTasks(api, repo, { state: "submitted", assignedTo: studioId });
+    if (!listed.ok) return { moved, errors: [listed.message] };
+    tasks = listed.value.filter((t) => t.open);
+  } catch (err) {
+    return { moved, errors: [err instanceof Error ? err.message : String(err)] };
+  }
+  for (const t of tasks) {
+    try {
+      const res = await transitionTask(api, repo, t.number, { from: "submitted", to: "working" });
+      if (res.ok) moved.push(t.number);
+      else errors.push(`#${t.number}: ${res.message}`);
+    } catch (err) {
+      errors.push(`#${t.number}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return { moved, errors };
+}
+
 /** Issue #55: closes per `reap --terminal` call. Each is one GitHub write;
  *  the Worker caps subrequests per request, so a big backlog goes in pages. */
 export const TERMINAL_CLOSE_PAGE = 40;
