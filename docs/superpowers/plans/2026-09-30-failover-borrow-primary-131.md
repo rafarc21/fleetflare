@@ -706,3 +706,63 @@ pre-existing Stage B borrow/hand-back test. Final full-file counts and the
 three gate commands' results are in the dispatch's own report back to the
 lead (not duplicated here to avoid the doc drifting from the actual
 terminal output).
+
+## Fix-first round, review 2 (2nd, independent review of PR #135, 2026-09-30)
+
+A second fresh-context review caught a real production regression in this
+round's own finding-4 write-condition change, above: the generalized write
+condition gated `borrowedAccount` on `deps.primary != null`, reasoning (per
+that finding's own doc comment) that "every caller that predates #271 keeps
+the plain pre-#271 shape" for an absent primary. That reasoning holds inside
+this file's own `harness()` — `primary` defaults to `undefined` there — but
+NOT in real deployment: do.ts's `failoverDeps()` always wires `primary:
+this.primaryAccount()`, and `primaryAccount()` -> accounts.ts's
+`launchAccount` never returns null in the no-map case, it falls through to
+`accounts[0]`. So `deps.primary` is a non-null string for every studio with
+at least one `CLAUDE_CODE_OAUTH_TOKEN*` secret set, mapped repo or not.
+
+Concretely: a plain multi-account fleet that never configured
+`CLAUDE_ACCOUNT_BY_REPO` (the original, pre-#271 #53 feature) fails its lead
+over from account 1 to account 2 — an entirely ordinary switch — and the old
+write condition wrongly recorded it as a "borrow" (`borrowedAccount:
+"CLAUDE_CODE_OAUTH_TOKEN_2"`). The next tick to find the pane idle would then
+run hand-back: kill+relaunch the pane to force it back to account 1,
+uninvited, for a fleet that never opted into Stage B semantics at all.
+
+**Fix**: a new `FailoverDeps.primaryIsMapped: boolean` (optional, default
+`false` — the safe "never opted into Stage B" shape) — true only when THIS
+studio's own repo is a genuine KEY in the parsed `CLAUDE_ACCOUNT_BY_REPO` map
+(`parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO)[repo] !== undefined`), computed
+in do.ts's new `primaryIsMapped()` private method and wired into
+`failoverDeps()` alongside `primary`. The write condition in `failover.ts`
+now gates on `deps.primaryIsMapped && next.name !== deps.primary`, replacing
+`deps.primary != null && next.name !== deps.primary` — `deps.primary` itself
+is unchanged and still used for the name comparison; only the "is this a
+REAL mapped primary" gate changed. `types.ts`'s `StudioStatus.borrowedAccount`
+doc comment was also updated: it now states plainly that the field is never
+set at all for a studio whose repo has no `CLAUDE_ACCOUNT_BY_REPO` entry.
+
+**RED test** (`test/studio.account-failover.test.ts`, new describe block
+"review round 3: borrowedAccount must stay null for a repo with no
+CLAUDE_ACCOUNT_BY_REPO entry"): mirrors the existing "(a) a pane showing the
+rate-limit modal triggers exactly ONE switch" fixture shape (two plain
+accounts, no map), but passes `primary: "CLAUDE_CODE_OAUTH_TOKEN"` to
+reproduce production's real no-map wiring (`primaryAccount()`'s fallback),
+with `primaryIsMapped` deliberately omitted (the harness's own safe default).
+First test: after the ordinary switch, `borrowedAccount`/`borrowedFromRepo`
+are `null`. Second test: continuing from that state, a later idle-pane tick
+never fires hand-back (`out.kind` is not `"returned"`, exactly one
+`respawn-pane` exec total — the original switch's, never a second one).
+Confirmed RED against the unfixed code first (`borrowedAccount` read back as
+`"CLAUDE_CODE_OAUTH_TOKEN_2"` in both), then GREEN after the fix.
+
+Every existing genuinely-`#271`-mapped Stage B test (the whole "borrow
+another repo's primary (issue #131, Stage B)" describe block, including its
+nested "tier 2" and "scope stays anchored while actively borrowed" blocks —
+13 `harness()` calls in total) now passes `primaryIsMapped: true` explicitly,
+alongside the `primary` it already passed, so they keep testing the
+genuinely-mapped case they were meant to. The golden `#103`/`#117` regression
+test and the other plain `#271`-labelled-primary tests outside that block
+(which never assert on `borrowedAccount`) were left unmodified — their
+assertions do not depend on this gate either way, confirmed by running them
+unchanged.
