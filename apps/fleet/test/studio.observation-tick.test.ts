@@ -22,6 +22,7 @@ import { ACTIVITY_KEY, type Activity } from "../src/studio/activity";
 import { MEMBERS_TICKING_KEY } from "../src/studio/failover";
 import { MEMBER_ALERTS_KEY, MEMBER_ROWS_KEY, type MemberAlert } from "../src/studio/member-alerts";
 import { exhaustedMessage } from "../src/studio/failover";
+import { redactSecrets } from "../src/studio/redact";
 
 /** UTF-8 aware base64 — a pane frame carries claude's own box-drawing/emoji
  *  glyphs, which plain `btoa` throws on outright (Latin1 only). */
@@ -2057,5 +2058,53 @@ describe("runShipTickWithObservation — onLeadWorking (issue #86)", () => {
     const storage = fakeStorage({ status: status(), activity: idleBefore });
     await expect(run(WORKING_PANE, storage, async () => { throw new Error("GitHub 502"); })).resolves.toBeDefined();
     expect((storage.map.get(ACTIVITY_KEY) as Activity).state).toBe("working");
+  });
+});
+
+// Issue #108 (#70 ask 4 remainder) — Observed.lastMessageLine, extracted from
+// the SAME paneFrame the ship tick already captures every 30s, redacted at
+// this write boundary, and left alone (never reset to null) when the tick's
+// own paneFrame is absent (old image, or a exec that never reached the pane
+// section) — same "absent means don't touch it" discipline paneVerdict/
+// hookHeartbeat already follow in this file.
+describe("runShipTickWithObservation — lastMessageLine (issue #108)", () => {
+  function deps(stdout: string, now = "2026-09-25T12:00:00.000Z") {
+    return {
+      exec: vi.fn(async () => ({ code: 0, stdout, stderr: "" })),
+      r2Put: vi.fn(async () => {}),
+      now: () => new Date(now),
+    };
+  }
+
+  function paneWithMessage(msg: string): string {
+    return ["⏺ Done.", msg, "", "─".repeat(68), "❯ ", "─".repeat(68), "  ⏵⏵ bypass permissions on (shift+tab to cycle)"].join("\n");
+  }
+
+  it("a tick whose paneFrame carries a real content line stores it as lastMessageLine", async () => {
+    const storage = fakeStorage({ status: status({ id: "websites--pilot" }) });
+    const msg = "Fixed the auth bug, tests are green now.";
+    await runShipTickWithObservation(deps(stdoutWithPane(paneWithMessage(msg))), storage, "websites--pilot", undefined, 5000);
+    const observed = await getObserved(storage);
+    expect(observed.lastMessageLine).toBe(msg);
+  });
+
+  it("a secret-shaped token in the last content line is redacted before it is stored, never the raw secret", async () => {
+    const storage = fakeStorage({ status: status({ id: "websites--pilot" }) });
+    const msg = "Pushed with token ghs_abcdEFGH1234 to remote.";
+    await runShipTickWithObservation(deps(stdoutWithPane(paneWithMessage(msg))), storage, "websites--pilot", undefined, 5000);
+    const observed = await getObserved(storage);
+    expect(observed.lastMessageLine).toBe(redactSecrets(msg));
+    expect(observed.lastMessageLine).not.toContain("ghs_");
+    expect(observed.lastMessageLine).toContain("«redacted»");
+  });
+
+  it("a tick with no paneFrame at all (old-image or absent section) leaves lastMessageLine untouched", async () => {
+    const storage = fakeStorage({
+      status: status({ id: "websites--pilot" }),
+      observed: { ...emptyObserved(), lastMessageLine: "previous message" },
+    });
+    await runShipTickWithObservation(deps(stdoutWithPane(null)), storage, "websites--pilot", undefined, 5000);
+    const observed = await getObserved(storage);
+    expect(observed.lastMessageLine).toBe("previous message");
   });
 });

@@ -8,7 +8,7 @@
 import { describe, it, expect } from "vitest";
 import {
   readActivityFrame, nextActivity, clearActivityState, ACTIVITY_KEY, type Activity,
-  parseHookHeartbeat, type HookHeartbeat,
+  parseHookHeartbeat, type HookHeartbeat, extractLastVisibleLine, LAST_LINE_MAX_CHARS,
 } from "../src/studio/activity";
 import { MEMBERS_TICKING_KEY } from "../src/studio/failover";
 import { MEMBER_ALERTS_KEY, MEMBER_ROWS_KEY } from "../src/studio/member-alerts";
@@ -260,6 +260,51 @@ describe("readActivityFrame — idle", () => {
 describe("readActivityFrame — unknown", () => {
   it("DEAD_FRAME (claude's last frame, dead, above a bash prompt) reads unknown: claude not on screen", () => {
     expect(readActivityFrame(DEAD_FRAME)).toEqual({ kind: "unknown", reason: "claude not on screen" });
+  });
+});
+
+// Issue #108 (#70 ask 4 remainder) — the lead's last VISIBLE message line,
+// PURE extraction from one pane frame. Reuses every chrome pattern this file
+// already imports/defines to decide "is this the lead's status chrome" —
+// never a fresh copy of the same detection.
+describe("extractLastVisibleLine", () => {
+  const IDLE_INPUT_BOX = ["", "─".repeat(68), "❯ ", "─".repeat(68), "  ⏵⏵ bypass permissions on (shift+tab to cycle)"];
+
+  it("a working frame with real assistant/tool-output text above the footer returns the last non-blank content line, trimmed", () => {
+    const frame = [
+      "⏺ Done (90 tool uses · 281.2k tokens · 18m 53s)",
+      "",
+      "✻ Cogitating… (3s · esc to interrupt)",
+      "",
+      "─".repeat(68),
+      "❯ ",
+      "─".repeat(68),
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("⏺ Done (90 tool uses · 281.2k tokens · 18m 53s)");
+  });
+
+  it("an idle frame whose content above the input box is blank/only chrome returns null", () => {
+    const frame = ["", ...IDLE_INPUT_BOX].join("\n");
+    expect(extractLastVisibleLine(frame)).toBeNull();
+  });
+
+  it("an empty frame returns null", () => {
+    expect(extractLastVisibleLine("")).toBeNull();
+    expect(extractLastVisibleLine("   \n  \n")).toBeNull();
+  });
+
+  it("a content line longer than 200 chars is truncated to 200 chars plus an ellipsis", () => {
+    const long = "x".repeat(250);
+    const frame = [long, ...IDLE_INPUT_BOX].join("\n");
+    const result = extractLastVisibleLine(frame);
+    expect(result).toBe(`${"x".repeat(LAST_LINE_MAX_CHARS)}…`);
+    expect(result?.length).toBe(LAST_LINE_MAX_CHARS + 1);
+  });
+
+  it("a real content line sitting directly above the idle input box is returned, the box itself skipped", () => {
+    const frame = ["Some real message here.", ...IDLE_INPUT_BOX].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Some real message here.");
   });
 });
 
