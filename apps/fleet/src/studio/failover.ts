@@ -664,14 +664,24 @@ function bottomLimitModal(lines: string[]): PaneVerdict | null {
  *     wake goes through, and the account keeps refusing until the real reset.
  *     One missed switch per edge, twice a year, per zone that observes DST.
  *   - AFTER A SELECT-MODAL SWITCH, A `--continue` REDRAW OF THE PERSISTED
- *     LIMIT MESSAGE IS UNGUARDED. Select modals are deliberately not
- *     redraw-guarded (a select modal on the next account is that account's
- *     own limit). But the transcript the switched-off account left behind can
- *     still hold an INLINE limit message, and `--continue` redraws that. It
- *     would key on its own headline + reset, so the first tick after the
- *     switch could read it as a new inline limit and switch again. UNMEASURED
- *     — no capture of this sequence exists; it is written down because the
- *     code path admits it, not because it was seen.
+ *     LIMIT MESSAGE IS GUARDED ONLY WHEN THE BLOCK WAS ALREADY KNOWN. Select
+ *     modals are deliberately not redraw-guarded (a select modal on the next
+ *     account is that account's own limit). The transcript the switched-off
+ *     account left behind can still hold an INLINE limit message that
+ *     `--continue` redraws; the no-flapping guard below
+ *     (`claudeAccountMovedBlock`, review round 1, #102 review, 2026-09-30)
+ *     catches this ONLY when this studio already had a LIMIT_SIGHTING_KEY
+ *     sighting for that exact block at the moment the select-modal switch
+ *     fired. An inline message that was printed but never sighted (it never
+ *     matched the strict idle-ending shape this file requires — see the
+ *     detection doc comment below) leaves `claudeAccountMovedBlock: null`, so
+ *     its `--continue` redraw is NOT suppressed and could read as a new
+ *     inline limit and switch again. UNMEASURED — no capture of this sequence
+ *     exists; it is written down because the code path admits it, not because
+ *     it was seen. Traded deliberately (finding 2, same review): the OLD,
+ *     unconditional guard suppressed every genuinely new inline limit on a
+ *     freshly-switched account for up to FLAP_GUARD_MINUTES too, which
+ *     measured far more often than this residual ever has.
  * The cost of each false positive is a kill-and-`--continue` of a lead that
  * was already doing nothing, not a lost turn; of each false negative, one
  * missed switch.
@@ -1219,7 +1229,12 @@ export async function runAccountFailover(
     // comment for why claudeOnScreen/parked/recovered live there now, not
     // here.
     const recovery = evaluateDegradedRecovery(existing, studioId, screen, deps.now(), sighting);
-    const forget = !verdict.repainted && recovery.claudeOnScreen && existing.failoverBlock != null;
+    // Review round 1 (#102 review, 2026-09-30): claudeAccountMovedBlock is
+    // forgotten on the same trigger as failoverBlock — it is not the block
+    // that survives a redraw either, and a select-modal switch can carry one
+    // (from `sighting`) even when `failoverBlock` itself is null.
+    const forget = !verdict.repainted && recovery.claudeOnScreen
+      && (existing.failoverBlock != null || existing.claudeAccountMovedBlock != null);
     // PR #144 review: a block already STALE when first seen is recorded too,
     // or it comes back in its next daily window and fires.
     if (verdict.stale && sighting?.block !== verdict.stale.block) {
@@ -1290,7 +1305,7 @@ export async function runAccountFailover(
       const cleared: StudioStatus = {
         ...existing,
         rateLimited: null,
-        ...(forget ? { failoverBlock: null } : {}),
+        ...(forget ? { failoverBlock: null, claudeAccountMovedBlock: null } : {}),
         ...(clearedAt !== null ? { state: "running" as const, error: null, exhaustionClearedAt: clearedAt } : {}),
       };
       await storage.put(STATUS_KEY, cleared);
@@ -1315,23 +1330,42 @@ export async function runAccountFailover(
   // (`claudeAccountMovedVia === "modal"`) always records `failoverBlock:
   // null` (select modals have no block key), so the `rerender` check above
   // cannot catch a `--continue` redraw of an INLINE message the switched-off
-  // account's transcript still holds. Within FLAP_GUARD_MINUTES of exactly
-  // THAT kind of switch, an inline block alone is not enough, on its own, to
-  // move the studio again. An `"inline"`-via switch is already protected by
-  // its own `failoverBlock`/`rerender` pairing — a DIFFERENT inline key after
-  // one is trusted immediately, cooldown or not — and a genuine SELECT-style
-  // modal (`!verdict.inline`) always overrides the guard either way: claude
-  // can never redraw one of those from a resumed transcript.
+  // account's transcript still holds. An `"inline"`-via switch is already
+  // protected by its own `failoverBlock`/`rerender` pairing — a DIFFERENT
+  // inline key after one is trusted immediately, cooldown or not — and a
+  // genuine SELECT-style modal (`!verdict.inline`) always overrides the guard
+  // either way: claude can never redraw one of those from a resumed
+  // transcript.
+  //
+  // Review round 1 (#102 review, 2026-09-30), finding 2 — the escape hatch
+  // was UNREACHABLE for a genuinely new limit: the guard used to fire on ANY
+  // inline verdict in the window, so a genuinely NEW limit on the studio's
+  // OWN NEW account that happened to render inline (session/weekly/monthly-
+  // spend blocks — measured, INLINE_LIMIT_HEADLINES's own doc comment, the
+  // overwhelmingly common shape) was indistinguishable from a stale
+  // `--continue` redraw of the OLD account's leftover transcript.
+  //
+  // Fixed by reusing the SAME comparison primitive the redraw guard above
+  // already uses (`limitBlockKey`/`key`), via `claudeAccountMovedBlock`
+  // (types.ts): the block-key this studio already knew about — from its own
+  // LIMIT_SIGHTING_KEY, since a select modal's own capture can never also
+  // carry an inline block (position-exclusive in detectLimitOnScreen) — at
+  // the moment the select-modal switch fired, or `null` when it knew of none.
+  // ONLY a NEW inline observation whose key MATCHES that recorded one is a
+  // genuine stale redraw and is suppressed; a DIFFERENTLY-keyed block, or one
+  // appearing when nothing at all was known at switch time
+  // (`claudeAccountMovedBlock` null/absent), is trusted immediately.
   if (
     verdict.inline && existing.claudeAccountMovedVia === "modal" && existing.claudeAccountMovedAt != null
+    && existing.claudeAccountMovedBlock != null && existing.claudeAccountMovedBlock === key
   ) {
     const movedMs = Date.parse(existing.claudeAccountMovedAt);
     if (!Number.isNaN(movedMs) && deps.now().getTime() - movedMs < FLAP_GUARD_MINUTES * 60_000) {
       return {
         kind: "flap-guarded",
         reason:
-          `studio moved accounts within the last ${FLAP_GUARD_MINUTES}m via a select-style modal — an inline ` +
-          `limit block alone will not move it again; another select-style modal would`,
+          `studio moved accounts within the last ${FLAP_GUARD_MINUTES}m via a select-style modal, and this inline ` +
+          `limit block matches the one it already knew about then — a stale --continue redraw, not new evidence`,
       };
     }
   }
@@ -1448,6 +1482,14 @@ export async function runAccountFailover(
     claudeAccountMovedAt: deps.now().toISOString(),
     claudeAccountMovedVia: verdict.inline ? "inline" : "modal",
     failoverBlock: key,
+    // Review round 1 (#102 review, 2026-09-30), finding 2 — the no-flapping
+    // guard's own comparison key (types.ts's own doc comment states the full
+    // rule): `key` itself for an inline-via switch (the same value
+    // `failoverBlock` just got), or the block this studio already knew about
+    // from an earlier tick (`sighting`, read at the TOP of this call, before
+    // this tick's own observation) for a select-modal-via switch — `null`
+    // when it knew of none.
+    claudeAccountMovedBlock: key ?? sighting?.block ?? null,
     // A completed switch is a new account: the old one's limit is not its.
     rateLimited: failed ? existing.rateLimited : null,
   };
