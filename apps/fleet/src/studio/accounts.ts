@@ -272,19 +272,35 @@ export function nextBorrowedAccount(
 }
 
 /**
- * Review round 2 (maestro review of PR #135), finding 3 — a plain,
+ * Review round 2 (maestro review of PR #135), finding 3/4 — a plain,
  * position-0-inclusive scan in LIST ORDER: the first account in `accounts`
  * that is neither `reserved` (someone else's mapped primary) nor fleet-wide
- * limited. Failover.ts's own second-tier "unclaimed spare" pass: an account
- * positioned BEFORE this studio's own mapped primary that is ALSO not
- * reserved for another repo — nobody's primary, a genuine blind spot
- * neither the first pass (scoped to this studio's own chain) nor the borrow
- * pass (scoped to `reserved` names only) ever looks at.
+ * limited. Two different callers in failover.ts share this exact shape for
+ * two different reasons:
+ *
+ *   - finding 3's own tier 2 (the "unclaimed spare" pass, tried BETWEEN the
+ *     first pass's own scoped chain and the third pass's reserved-primary
+ *     borrow): an account positioned BEFORE this studio's own mapped primary
+ *     that is ALSO not reserved for another repo — nobody's primary, a
+ *     genuine blind spot neither the first pass (scoped to this studio's own
+ *     chain) nor the borrow pass (scoped to `reserved` names only) ever
+ *     looks at;
+ *   - finding 4's own fallback for the first pass itself, when the studio's
+ *     recorded `current` is not a member of `scopedAccounts` at all (an
+ *     active borrow positioned before the search anchor): `nextClaudeAccount`
+ *     needs a position to step FORWARD from, and an out-of-scope `current`
+ *     has none — passing it unchanged returns null immediately (current not
+ *     found), and passing `null` (nextClaudeAccount's own "no recorded
+ *     account" convention) wrongly SKIPS position 0 (that convention treats
+ *     position 0 as "already there"). Neither models "not anywhere in this
+ *     list right now, so every position — including the first — is a
+ *     genuine candidate", which is exactly what this scan is.
  *
  * List order, not lowest-burn: unlike `nextBorrowedAccount`'s own
  * reserved-primary pass, there is no fairness concern between spares nobody
- * has claimed — the first free one wins, same "first match in order" rule
- * the ordinary forward wrap already uses everywhere else in this file.
+ * has claimed, or between this studio's own scoped accounts — the first free
+ * one wins, same "first match in order" rule the ordinary forward wrap
+ * already uses everywhere else in this file.
  */
 export function firstFreeAccount(
   accounts: ClaudeAccount[], reserved: Set<string>, limits: AccountLimits = {}, now: Date = new Date(),

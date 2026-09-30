@@ -1811,17 +1811,41 @@ export async function runAccountFailover(
   // were never its to try — computed once, reused below for both the
   // wrap-around search range and the "tried" list.
   const start = deps.primary ? Math.max(0, deps.accounts.findIndex((a) => a.name === deps.primary)) : 0;
+  const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
+  // Review round 2 (maestro review of PR #135), finding 4 — the #273 r2
+  // widening just below (a stale recorded `current` from BEFORE the primary
+  // stepping FORWARD into scope) must NOT apply while this studio is in an
+  // ACTIVE borrow: widening it then would expose an account positioned
+  // before the primary to the ordinary first-pass wrap below, which #271
+  // forbids landing on outside the two dedicated tiers further down.
+  // `existing.borrowedAccount` is the discriminator — set ONLY by a genuine
+  // Stage-B switch (finding 3's own unclaimed-spare tier, or a
+  // reserved-primary borrow), never by the #273 r2 stale-legacy case: that
+  // field did not exist before Stage B, and every #273 r2 test leaves it
+  // unset, so this never changes that fixture's own anchor.
+  const borrowedActive = existing.borrowedAccount != null;
   // Issue #102: a stale recorded `current` from BEFORE the primary (#273 r2)
   // must still be able to step FORWARD into scope, so the search range
   // extends back to cover it; a `current` already at or past the primary
   // never wraps BEHIND it — an account before a repo's mapped primary is
-  // never that repo's to use, wrap or no wrap.
-  const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
-  const anchor = currentIdx < 0 ? start : Math.min(start, currentIdx);
+  // never that repo's to use, wrap or no wrap. Not while actively borrowed —
+  // see `borrowedActive` above.
+  const anchor = borrowedActive ? start : (currentIdx < 0 ? start : Math.min(start, currentIdx));
   const scopedAccounts = deps.accounts.slice(anchor);
   const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
   const reserved = deps.reservedAccounts ?? new Set();
-  const candidate = nextClaudeAccount(scopedAccounts, current, limits, deps.now(), reserved);
+  // Review round 2, finding 4 — `current` falls OUTSIDE `scopedAccounts`
+  // only in the new borrowed-before-`start` case the anchor above pins:
+  // every other caller still lands inside it by construction. Ordinary
+  // `nextClaudeAccount(scopedAccounts, current, ...)` cannot handle that
+  // case on its own — see `firstFreeAccount`'s own doc comment for why
+  // (there is no position to step FORWARD from, and its own `null`
+  // convention wrongly skips position 0 rather than treating it as a
+  // genuine candidate).
+  const currentOutOfScope = borrowedActive && currentIdx >= 0 && currentIdx < anchor;
+  const candidate = currentOutOfScope
+    ? firstFreeAccount(scopedAccounts, reserved, limits, deps.now())
+    : nextClaudeAccount(scopedAccounts, current, limits, deps.now(), reserved);
   // Review round 2 (maestro review of PR #135), finding 3 — tier 2, tried
   // ONLY once the first pass just above found nothing: an "unclaimed spare"
   // — an account positioned BEFORE this studio's own primary (never visible
