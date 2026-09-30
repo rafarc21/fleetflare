@@ -1,11 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  resolveClaudeAccounts, nextClaudeAccount, claudeAccountToken, accountsTried,
+  resolveClaudeAccounts, nextClaudeAccount, claudeAccountToken, accountsTried, earliestAccountReset,
   MAX_CLAUDE_ACCOUNTS, claudeAccountVarName, type ClaudeAccount,
 } from "../src/studio/accounts";
 import {
   detectRateLimitModal, paneCaptureCmd, accountSwitchCmd, runAccountFailover, FLEET_TOKEN_ENV,
-  exhaustedMessage, RATE_LIMIT_HEADLINES, RATE_LIMIT_MODAL_MARKERS,
+  exhaustedMessage, RATE_LIMIT_HEADLINES, RATE_LIMIT_MODAL_MARKERS, FLAP_GUARD_MINUTES,
   PANE_CAPTURE_MARKER, MODAL_TAIL_LINES, type FailoverDeps,
 } from "../src/studio/failover";
 import { STATUS_KEY, OPERATION_KEY, OPERATION_STALE_MS, type StudioStorage } from "../src/studio/provision";
@@ -18,6 +18,11 @@ import {
   BRINGUP_TOKEN_WRITE_SECTION, SESSION_FOUND_SECTION, SESSION_CONTINUE_SECTION, SESSION_CWD_SECTION,
 } from "../src/studio/observed";
 import { STUDIO_TMUX } from "../src/studio/tmux";
+// Issue #102's no-flapping tests need a genuine INLINE limit block (as
+// opposed to this file's own MODAL_PANE, a select-style modal) — reused from
+// the shared fixture set rather than a second, drifting copy of the same
+// pane shape.
+import { SESSION_LIMIT_LOGIN_HINT_PANE as INLINE_LIMIT_PANE } from "./fixtures/rate-limit-panes";
 
 // ---------------------------------------------------------------------------
 // Issue #53 — fail over to a second account when one is exhausted.
@@ -186,8 +191,31 @@ describe("nextClaudeAccount", () => {
     expect(nextClaudeAccount(accounts, null)).toEqual(accounts[1]);
   });
 
-  it("only ever moves FORWARD through the list — the last account has no next", () => {
-    expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN_2")).toBeNull();
+  // Issue #102 (CTO decision 2026-09-30) supersedes #53's forward-only rule:
+  // the fleet now WRAPS around to the account with free room, immediately.
+  it("issue #102: WRAPS to the first account when the last one has nowhere forward to go", () => {
+    expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN_2")).toEqual(accounts[0]);
+  });
+
+  it("issue #102: skips an account with a live fleet-wide limit and wraps past it", () => {
+    const three: ClaudeAccount[] = [...accounts, { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 }];
+    const now = new Date("2026-09-23T14:00:00.000Z");
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN: new Date(now.getTime() + 60_000).toISOString() };
+    // On CLAUDE_CODE_OAUTH_TOKEN_3 (the last slot): forward wrap would land on
+    // account 1 first, but it is still live-limited, so account 2 is next.
+    expect(nextClaudeAccount(three, "CLAUDE_CODE_OAUTH_TOKEN_3", limits, now)).toEqual(accounts[1]);
+  });
+
+  it("issue #102: an account whose recorded reset has already passed counts as free again", () => {
+    const now = new Date("2026-09-23T14:00:00.000Z");
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN: new Date(now.getTime() - 1000).toISOString() };
+    expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN_2", limits, now)).toEqual(accounts[0]);
+  });
+
+  it("issue #102: every OTHER account still live-limited (or an unreadable reset) — nowhere to go, null", () => {
+    const now = new Date("2026-09-23T14:00:00.000Z");
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN: null };
+    expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN_2", limits, now)).toBeNull();
   });
 
   it("an account name no longer in the secrets has no next — degrade, never wrap to the start", () => {
@@ -205,6 +233,29 @@ describe("nextClaudeAccount", () => {
     expect(claudeAccountToken(accounts, null)).toBe(TOKEN_1);
     expect(claudeAccountToken(accounts, "CLAUDE_CODE_OAUTH_TOKEN_9")).toBe(TOKEN_1);
     expect(claudeAccountToken([], null)).toBe("");
+  });
+});
+
+describe("earliestAccountReset (issue #102 requirement 3)", () => {
+  const accounts: ClaudeAccount[] = [
+    { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 },
+    { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 },
+  ];
+  const now = new Date("2026-09-23T14:00:00.000Z");
+
+  it("the earliest still-live reset among the limited accounts", () => {
+    const later = new Date(now.getTime() + 2 * 60_000).toISOString();
+    const earlier = new Date(now.getTime() + 60_000).toISOString();
+    expect(earliestAccountReset(accounts, {
+      CLAUDE_CODE_OAUTH_TOKEN: later, CLAUDE_CODE_OAUTH_TOKEN_2: earlier,
+    }, now)).toBe(earlier);
+  });
+
+  it("null when no account has a readable, still-live reset", () => {
+    expect(earliestAccountReset(accounts, {}, now)).toBeNull();
+    expect(earliestAccountReset(accounts, { CLAUDE_CODE_OAUTH_TOKEN: null }, now)).toBeNull();
+    const past = new Date(now.getTime() - 1000).toISOString();
+    expect(earliestAccountReset(accounts, { CLAUDE_CODE_OAUTH_TOKEN: past }, now)).toBeNull();
   });
 });
 
@@ -347,6 +398,10 @@ interface Harness {
   relaunches: number;
   notices: string[];
   setPane(stdout: string): void;
+  /** Issue #102: the fleet-wide fake `accountLimits` store, exposed so a test
+   *  can seed another account as ALREADY limited (fleet-wide, from some other
+   *  studio's own sighting) before running this one. */
+  accountLimits: Map<string, { until: string | null; seenAt: string }>;
 }
 
 function harness(opts: {
@@ -357,6 +412,9 @@ function harness(opts: {
   autoFailover?: boolean;
   primary?: string | null;
   display?: (name: string) => string;
+  now?: Date;
+  /** Issue #102: seed a fleet-wide limit fixture, `{ name: until }`. */
+  accountLimits?: Record<string, string | null>;
 }): Harness {
   const execs: string[] = [];
   const recorded: StudioStatus[] = [];
@@ -364,8 +422,11 @@ function harness(opts: {
   let pane = opts.pane;
   let relaunches = 0;
   const storage = fakeStorage(opts.initial ?? status()) as StudioStorage & ObservedStorage;
+  const accountLimits = new Map<string, { until: string | null; seenAt: string }>(
+    Object.entries(opts.accountLimits ?? {}).map(([name, until]) => [name, { until, seenAt: NOW.toISOString() }]),
+  );
   const h: Harness = {
-    execs, recorded, notices, storage,
+    execs, recorded, notices, storage, accountLimits,
     get relaunches() { return relaunches; },
     setPane: (stdout: string) => { pane = stdout; },
     deps: {
@@ -373,7 +434,13 @@ function harness(opts: {
       autoFailover: opts.autoFailover ?? true,
       ...(opts.primary !== undefined ? { primary: opts.primary } : {}),
       ...(opts.display ? { display: opts.display } : {}),
-      now: () => NOW,
+      now: () => opts.now ?? NOW,
+      accountLimits: {
+        read: async () => Object.fromEntries([...accountLimits].map(([name, v]) => [name, v.until])),
+        write: async (name: string, until: string | null, seenAt: string) => {
+          accountLimits.set(name, { until, seenAt });
+        },
+      },
       exec: vi.fn(async (cmd: string) => {
         execs.push(cmd);
         if (cmd === paneCaptureCmd()) return { code: 0, stdout: pane, stderr: "" };
@@ -503,11 +570,17 @@ describe("runAccountFailover — (b) a pane mid-turn triggers NO switch", () => 
 });
 
 describe("runAccountFailover — (c) with every account exhausted the studio ends degraded and does NOT loop", () => {
+  // Issue #102: with wrap-around, "every account exhausted" now means every
+  // OTHER account is ALSO fleet-wide limited — seeded here via accountLimits,
+  // exactly as another studio's own sighting would fleet-wide-mark it.
+  const ALL_LIMITED = { CLAUDE_CODE_OAUTH_TOKEN: new Date(NOW.getTime() + 60 * 60_000).toISOString() };
+
   it("degrades, naming every account tried, and relaunches nothing", async () => {
     const h = harness({
       accounts: TWO_ACCOUNTS,
       pane: captured(MODAL_PANE),
       initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }),
+      accountLimits: ALL_LIMITED,
     });
     const out = await run(h);
 
@@ -520,6 +593,59 @@ describe("runAccountFailover — (c) with every account exhausted the studio end
     expect(stored?.error).toContain("CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(h.relaunches).toBe(0);
     expect(h.execs.filter((c) => c.includes("respawn-pane"))).toHaveLength(0);
+  });
+
+  // Issue #102 requirement 1: with NO fleet-wide limit recorded against the
+  // account wrap would land on, the studio moves there immediately — the
+  // whole point of "the fleet moves the studio to the next account WITH FREE
+  // ROOM, immediately" rather than staying stuck on the last slot.
+  it("issue #102: wraps to the first account instead of degrading, when it is free", async () => {
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(MODAL_PANE),
+      initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }),
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_2", to: "CLAUDE_CODE_OAUTH_TOKEN" });
+    expect((await h.storage.get(STATUS_KEY))?.state).toBe("running");
+  });
+
+  // Issue #102 requirement 1: an account fleet-wide marked limited becomes a
+  // candidate again once its OWN recorded reset has passed — "an account
+  // whose reset has passed counts as free again", even with no code change
+  // and no operator action, just the clock.
+  it("issue #102: wraps to an account once its fleet-wide reset has passed", async () => {
+    const justPassed = { CLAUDE_CODE_OAUTH_TOKEN: new Date(NOW.getTime() - 1000).toISOString() };
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(MODAL_PANE),
+      initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }),
+      accountLimits: justPassed,
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_2", to: "CLAUDE_CODE_OAUTH_TOKEN" });
+  });
+
+  // Issue #102 requirement 2: fleet-wide, not per-studio. THIS studio's own
+  // sighting of its current account's limit must be visible to a SECOND,
+  // otherwise-unrelated studio's own next failover decision.
+  it("issue #102: one studio's own sighting marks the account fleet-wide for a DIFFERENT studio", async () => {
+    const first = harness({
+      accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE),
+      initial: status({ id: "fleetflare--studio-a", claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN" }),
+    });
+    await run(first);
+    // The second studio shares the SAME fleet-wide accountLimits store, and
+    // starts on the account the first studio just marked limited.
+    const second = harness({
+      accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE),
+      initial: status({ id: "fleetflare--studio-b", claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }),
+    });
+    second.deps.accountLimits!.read = () => first.deps.accountLimits!.read();
+    const out = await runAccountFailover(second.deps, second.storage, "fleetflare--studio-b", async (s) => { second.recorded.push(s); });
+    // Both accounts now read limited fleet-wide (first marked TOKEN, second's
+    // own tick marks TOKEN_2) — nowhere for the second studio to go either.
+    expect(out.kind).toBe("exhausted");
   });
 
   it("one account configured and exhausted degrades immediately rather than restarting it", async () => {
@@ -540,6 +666,7 @@ describe("runAccountFailover — (c) with every account exhausted the studio end
       accounts: TWO_ACCOUNTS,
       pane: captured(MODAL_PANE),
       initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }),
+      accountLimits: ALL_LIMITED,
     });
     await run(h);
     const writesAfterFirst = h.recorded.length;
@@ -560,6 +687,7 @@ describe("runAccountFailover — (c) with every account exhausted the studio end
       accounts: TWO_ACCOUNTS,
       pane: captured(MODAL_PANE),
       initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }),
+      accountLimits: ALL_LIMITED,
     });
     await run(h);
     h.deps.accounts = [...TWO_ACCOUNTS, { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 }];
@@ -575,6 +703,104 @@ describe("runAccountFailover — (c) with every account exhausted the studio end
     const msg = exhaustedMessage(STUDIO_ID, ["CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_2"]);
     expect(msg).toContain("CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(msg).not.toContain("sk-ant-");
+  });
+
+  // Issue #102 requirement 3: "show earliest reset in fleet ls" — fleet ls
+  // renders StudioStatus.error verbatim (ff.ts's oneLine(row.error)), so the
+  // earliest reset reaching THIS message is what reaches the operator.
+  it("issue #102: a genuinely exhausted studio's degraded message names the earliest fleet-wide reset", async () => {
+    const earlier = new Date(NOW.getTime() + 60_000).toISOString();
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(MODAL_PANE),
+      initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }),
+      accountLimits: { CLAUDE_CODE_OAUTH_TOKEN: earlier },
+    });
+    await run(h);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.error).toContain(`Earliest reset: ${earlier}`);
+  });
+
+  it("exhaustedMessage appends the earliest reset only when given one", () => {
+    const reset = "2026-09-23T19:00:00.000Z";
+    expect(exhaustedMessage(STUDIO_ID, ["CLAUDE_CODE_OAUTH_TOKEN"], reset)).toContain(`Earliest reset: ${reset}.`);
+    expect(exhaustedMessage(STUDIO_ID, ["CLAUDE_CODE_OAUTH_TOKEN"])).not.toContain("Earliest reset");
+    expect(exhaustedMessage(STUDIO_ID, ["CLAUDE_CODE_OAUTH_TOKEN"], null)).not.toContain("Earliest reset");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #102 — no flapping. A studio moved onto a new account is trusted
+// there for FLAP_GUARD_MINUTES: an inline-only limit block (the shape
+// `--continue` can redraw un-guarded after a select-modal switch, per
+// runAccountFailover's own residual notes) within that window does not move
+// it again; a genuine select-style modal always does, since claude can never
+// redraw one of those from a resumed transcript.
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — no flapping (issue #102)", () => {
+  // INLINE_LIMIT_PANE's own printed reset is "1:30pm (UTC)" — a session-limit
+  // time-only reset is live only within its 5h window (rate-limit.ts's
+  // isResetStale), so `now` here is fixed well inside that window rather than
+  // reusing the file's outer NOW (14:00Z, at which this exact fixture reads
+  // as stale — see studio.failover-106.test.ts's own `at(...)` calls against
+  // this same fixture for the identical reason).
+  const FLAP_NOW = new Date("2026-09-23T10:00:00.000Z");
+  const MOVED_AT = new Date(FLAP_NOW.getTime() - 2 * 60_000).toISOString(); // 2 minutes ago
+
+  it("an inline limit block within FLAP_GUARD_MINUTES of the last move is NOT enough to move again", async () => {
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(INLINE_LIMIT_PANE),
+      now: FLAP_NOW,
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2", claudeAccountMovedAt: MOVED_AT, claudeAccountMovedVia: "modal",
+      }),
+    });
+    const out = await run(h);
+    expect(out.kind).toBe("flap-guarded");
+    expect(h.relaunches).toBe(0);
+    expect((await h.storage.get(STATUS_KEY))?.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+  });
+
+  it("a genuine select-style modal overrides the guard and moves the studio immediately", async () => {
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(MODAL_PANE),
+      now: FLAP_NOW,
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2", claudeAccountMovedAt: MOVED_AT, claudeAccountMovedVia: "modal",
+      }),
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_2", to: "CLAUDE_CODE_OAUTH_TOKEN" });
+  });
+
+  it("outside the cooldown window, an inline block moves the studio normally", async () => {
+    const longAgo = new Date(FLAP_NOW.getTime() - (FLAP_GUARD_MINUTES + 1) * 60_000).toISOString();
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(INLINE_LIMIT_PANE),
+      now: FLAP_NOW,
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2", claudeAccountMovedAt: longAgo, claudeAccountMovedVia: "modal",
+      }),
+    });
+    const out = await run(h);
+    expect(out.kind).toBe("switched");
+  });
+
+  it("a completed switch stamps claudeAccountMovedAt and claudeAccountMovedVia", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE) });
+    await run(h);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.claudeAccountMovedAt).toBe(NOW.toISOString());
+    expect(stored?.claudeAccountMovedVia).toBe("modal");
+  });
+
+  it("an inline-block-triggered switch stamps claudeAccountMovedVia as inline", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(INLINE_LIMIT_PANE), now: FLAP_NOW });
+    await run(h);
+    expect((await h.storage.get(STATUS_KEY))?.claudeAccountMovedVia).toBe("inline");
   });
 });
 
