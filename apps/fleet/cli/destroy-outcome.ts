@@ -24,6 +24,13 @@
 // measured case proves that reading is often wrong.
 import { repairFailureLine } from "./repair-failure";
 import type { StudioStatus } from "../src/studio/types";
+// Board task #133: `readStatus` moved to its own module (cli/status-poll.ts)
+// so cli/recycle-outcome.ts can share it without importing this destroy-
+// specific module. Re-exported here, verbatim signature, so this module's one
+// existing consumer (cli/fleet.ts's `import { requestDestroy, readStatus,
+// DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome"`) needs no change.
+import { readStatus } from "./status-poll";
+export { readStatus };
 
 /**
  * How long this side waits for POST /studio/:id/destroy before it stops
@@ -97,28 +104,6 @@ export interface DestroyOpts {
   pollIntervalMs?: number;
   statusTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
-}
-
-/** One bounded GET /studio/:id/status. Never throws: a read that did not
- *  happen is a named reason, not an exception. */
-export async function readStatus(
-  url: string, headers: Record<string, string>, fetchImpl: typeof fetch, timeoutMs: number,
-): Promise<{ ok: true; status: StudioStatus } | { ok: false; why: string }> {
-  let res: Response;
-  try {
-    res = await fetchImpl(url, {
-      headers: { ...headers, Accept: "application/json" },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (err) {
-    return { ok: false, why: err instanceof Error ? err.message : String(err) };
-  }
-  if (!res.ok) return { ok: false, why: `HTTP ${res.status} ${(await res.text().catch(() => "")).trim().slice(0, 200)}`.trim() };
-  try {
-    return { ok: true, status: (await res.json()) as StudioStatus };
-  } catch {
-    return { ok: false, why: `HTTP ${res.status}, but the body was not JSON` };
-  }
 }
 
 /**
