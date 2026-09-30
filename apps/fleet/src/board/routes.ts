@@ -600,11 +600,26 @@ async function revokeJuniorAuthorizationIfTerminal(
  * repo check, not a re-implementation of that grammar check.
  */
 async function assignRepoPreflight(
-  deps: AssignWakeDeps, repo: string, rawAssignee: unknown,
+  deps: AssignWakeDeps, repo: string, rawAssignee: unknown, requireRow = false,
 ): Promise<Response | null> {
   if (typeof rawAssignee !== "string") return null;
   const studioId = rawAssignee.trim();
   if (!parseStudioId(studioId)) return null;
+  // Issue #81: a task on an id no studio carries sits unworked, silently.
+  // Confirmed absent only: a registry read that throws lets it through.
+  if (requireRow) {
+    let row: unknown = undefined;
+    try {
+      row = await deps.studioState(studioId);
+    } catch { /* unknown: allow */ }
+    if (row === null) {
+      return new Response(
+        `${studioId} is not in the fleet registry -- no studio would ever work this task. ` +
+          `Spawn it first (ff <role> "<task>" files and spawns together), or name a studio fleet ls shows.`,
+        { status: 409 },
+      );
+    }
+  }
   const check = await checkAssignRepo(deps, studioId, repo);
   if (!check.ok) return new Response(check.reason, { status: 409 });
   // Issue #295 bug 2: a canonical-lookup failure lets the write through
@@ -724,7 +739,8 @@ export async function handleBoard(
         // `return await`, not `return`: inside this try, an un-awaited
         // promise's rejection skips the catch below and escapes as a Worker
         // exception (edge 500) instead of upstreamFailure's 502 (PR #142).
-        const createPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee);
+        // Issue #81: ff files BEFORE it spawns (cli/ff.ts fileTask), marked pendingSpawn.
+        const createPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee, body.pendingSpawn !== true);
         if (createPreflight) return createPreflight;
         return await withAssignWake(assignWake, repo.value, async (onAssigned) => {
           const result = await createTask(api, repo.value, body, onAssigned);
@@ -766,7 +782,8 @@ export async function handleBoard(
       const mode = action === "adopt" ? "adopt" as const : "reassign" as const;
       // Issue #284 round 2: same pre-write repo-mismatch gate as the create
       // path above — see `assignRepoPreflight`'s own doc comment.
-      const assignPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee);
+      // Issue #81: reassign needs a real studio; adopt is ff's, which spawns next.
+      const assignPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee, action === "assign");
       if (assignPreflight) return assignPreflight;
       return await withAssignWake(assignWake, repo.value, (onAssigned) =>
         assignTask(api, repo.value, number, body, { mode, onAssigned }));

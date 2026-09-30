@@ -466,6 +466,11 @@ describe("verdictOutcome", () => {
 describe("ffTaskBrief — the two sections a one-liner cannot supply", () => {
   const brief = () => ffTaskBrief("fix the header", "websites--web-studio");
 
+  // Issue #81: ff files before it spawns; the Worker lets that one through.
+  it("marks the create pendingSpawn", () => {
+    expect(brief().pendingSpawn).toBe(true);
+  });
+
   it("the one-liner is both the title and the objective", () => {
     expect(brief().title).toBe("fix the header");
     expect(brief().objective).toBe("fix the header");

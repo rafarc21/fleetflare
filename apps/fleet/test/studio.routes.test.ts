@@ -1747,6 +1747,19 @@ describe("POST /studio/:id/provision — MAX_STUDIOS cap", () => {
     expect(sbExecFake).not.toHaveBeenCalled();
   });
 
+  it("#81: 100 STOPPED rows do not hold the cap -- a new id provisions", async () => {
+    authorized();
+    for (let i = 0; i < 100; i++) {
+      await recordStudio(env, {
+        id: `websites--gone-${i}`, state: "stopped", tailscaleHost: null, lastRefresh: null,
+        error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      });
+    }
+    const { testEnv } = envWithFakeStudio(vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })));
+    const res = await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/provision`, { method: "POST" }), testEnv);
+    expect(res.status).toBe(200);
+  });
+
   it("100 existing studios, one of them THIS id: re-provisioning it is exempt from the cap (idempotent recovery must survive a full fleet)", async () => {
     authorized();
     await seedFillerRows(99);

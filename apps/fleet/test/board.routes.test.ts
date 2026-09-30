@@ -8,6 +8,7 @@ import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
 import { GitHubError } from "../src/board/api";
 import type { BoardApi } from "../src/board/board";
 import type { BoardTask } from "../src/board/types";
+import { recordStudio } from "../src/studio/registry";
 import type { Env } from "../src/env";
 import { isJuniorAuthorized, recordJuniorAuthorization , JUNIOR_SWEEP_PAGE } from "../src/junior/authz";
 
@@ -55,6 +56,13 @@ const reach = async (slug: string): Promise<RepoReach> =>
   ["acme-org/websites", "acme-org/beta"].includes(slug.toLowerCase())
     ? { reachable: true }
     : { reachable: false, remedy: "is not reachable by this fleet" };
+
+/** Issue #81: create/assign now refuse a studio with no registry row, so a
+ *  test that assigns to one records it first. */
+async function seedStudio(id: string): Promise<void> {
+  await recordStudio(testEnv, { id, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null });
+}
 
 function authorized() {
   vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
@@ -152,6 +160,7 @@ describe("handleBoard", () => {
   describe("POST /tasks — junior authorization record (B1)", () => {
     it("records D1 authorization for the created task's assignee when the brief asks for junior", async () => {
       authorized();
+    await seedStudio("acme--web-studio");
       const created = task({ number: 55, labels: ["submitted", "studio:acme--web-studio", "junior"], assignee: "acme--web-studio" });
       const api = fakeApi({ createIssue: vi.fn(async () => created) });
       const res = await handleBoard(
@@ -197,6 +206,7 @@ describe("handleBoard", () => {
 
   it("POST /tasks/:n/assign answers 502 when GitHub fails — never an escaped throw", async () => {
     authorized();
+    await seedStudio("websites--web-studio");
     const api = fakeApi({ getIssue: vi.fn(async () => { throw new GitHubError(500, "GET failed (500)"); }) });
     const res = await handleBoard(
       req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: "websites--web-studio" }) }),
@@ -423,6 +433,7 @@ describe("handleBoard", () => {
 
   it("POST /tasks/:n/assign reassigns and comments the lineage", async () => {
     authorized();
+    await seedStudio("websites--release-studio");
     const api = fakeApi({
       getIssue: vi.fn(async () => task({
         number: 42, state: "working", labels: ["working", "studio:websites--web-studio"],
@@ -1342,6 +1353,64 @@ describe("GET /tasks?assignedTo= — the studio's own board (issue #63)", () => 
       { state: "running", repoSlug: "acme-org/beta" });
     expect(res.status).toBe(200);
     expect(listIssues.mock.calls[0][0]).toBe("acme-org/beta");
+  });
+});
+
+// Issue #81: `task new --studio <id>` accepted an id whose spawn had just
+// failed; the task sat submitted on a studio that did not exist. Operator
+// create and assign now refuse an id with no registry row. `ff` files BEFORE
+// it spawns (cli/ff.ts fileTask) and says so with `pendingSpawn`.
+describe("create/assign to a studio with no registry row (issue #81)", () => {
+  const GHOST = "websites--ghost-studio";
+  const wake = (row: { state: string; repoSlug: string | null } | null) => ({
+    studioState: vi.fn(async () => row),
+    wake: vi.fn(async () => ({ ok: true as const })),
+    resolveCanonicalRepo: vi.fn(async (slug: string) => slug),
+  });
+  const brief = { title: "T", objective: "O", outputFormat: "F", boundaries: "B" };
+
+  it("task new --studio <ghost>: 409 naming the id, nothing filed", async () => {
+    authorized();
+    const api = fakeApi();
+    const res = await handleBoard(req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, assignee: GHOST }) }),
+      testEnv, api, reach, undefined, undefined, wake(null));
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain(GHOST);
+    expect(api.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("ff's pendingSpawn create is allowed: the spawn right after makes the row", async () => {
+    authorized();
+    const api = fakeApi();
+    const res = await handleBoard(req("/studio/board/tasks", { method: "POST",
+      body: JSON.stringify({ ...brief, assignee: GHOST, pendingSpawn: true }) }), testEnv, api, reach, undefined, undefined, wake(null));
+    expect(res.status).toBe(200);
+    expect(api.createIssue).toHaveBeenCalled();
+  });
+
+  it("a stopped studio still has a row: allowed (provision it to wake)", async () => {
+    authorized();
+    const api = fakeApi();
+    const res = await handleBoard(req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, assignee: GHOST }) }),
+      testEnv, api, reach, undefined, undefined, wake({ state: "stopped", repoSlug: "acme-org/websites" }));
+    expect(res.status).toBe(200);
+  });
+
+  it("task assign <n> <ghost>: 409, nothing written", async () => {
+    authorized();
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 42, state: "submitted", labels: ["submitted"], assignee: null })) });
+    const res = await handleBoard(req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: GHOST }) }),
+      testEnv, api, reach, undefined, undefined, wake(null));
+    expect(res.status).toBe(409);
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("adopt (ff <role> <n>, spawns right after) is unchanged", async () => {
+    authorized();
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 42, state: "submitted", labels: ["submitted"], assignee: null })) });
+    const res = await handleBoard(req("/studio/board/tasks/42/adopt", { method: "POST", body: JSON.stringify({ assignee: GHOST }) }),
+      testEnv, api, reach, undefined, undefined, wake(null));
+    expect(res.status).toBe(200);
   });
 });
 
