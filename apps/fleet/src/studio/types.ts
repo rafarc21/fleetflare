@@ -283,11 +283,16 @@ export interface StudioStatus {
    * primary, or an actual cross-repo borrow of some OTHER repo's own mapped
    * primary (`nextBorrowedAccount`'s second pass, once every account
    * reserved for THIS repo is exhausted at once). NOT narrower than that —
-   * review round 3 (2nd review of PR #135, 2026-09-30) generalized this from
-   * "only a genuine cross-repo borrow" to "away from primary at all", so
-   * hand-back's own `rowNow.borrowedAccount` gate — the ONLY thing that ever
-   * brings a studio back to its primary — never goes stale partway through a
-   * chain of non-primary switches. The account NAME, same "safe to
+   * review round 2 (maestro review of PR #135, 2026-09-30), finding 4
+   * generalized this from "only a genuine cross-repo borrow" to "away from
+   * primary at all", so hand-back's own `rowNow.borrowedAccount` gate — the
+   * ONLY thing that ever brings a studio back to its primary — never goes
+   * stale partway through a chain of non-primary switches. Round 3 (2nd,
+   * independent review of PR #135, 2026-09-30) did not touch this
+   * generalization — it only added the `primaryIsMapped` gate on top (see
+   * `FailoverDeps.primaryIsMapped`'s own doc comment, failover.ts), so the
+   * write condition never fires at all for a studio whose own repo has no
+   * mapped primary. The account NAME, same "safe to
    * log/store/card" discipline `claudeAccount` itself already documents —
    * never a token.
    *

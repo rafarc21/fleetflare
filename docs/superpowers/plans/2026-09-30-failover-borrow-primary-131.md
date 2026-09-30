@@ -766,3 +766,35 @@ test and the other plain `#271`-labelled-primary tests outside that block
 (which never assert on `borrowedAccount`) were left unmodified — their
 assertions do not depend on this gate either way, confirmed by running them
 unchanged.
+
+## Round 3 review outcome (3rd review of PR #135, 2026-09-30)
+
+A third review round APPROVED the `primaryIsMapped` fix above as correct and
+well-tested, with two non-blocking documentation nits. Nit 1 (`types.ts`'s
+`borrowedAccount` doc comment misattributed the round-2 write-condition
+generalization to round 3) is fixed by this pass.
+
+Nit 2 — `do.ts`'s `primaryIsMapped()` checks only that the repo is a KEY in
+`CLAUDE_ACCOUNT_BY_REPO`, never whether that slot's secret is actually set —
+was raised as "likely unreachable" (the reviewer's theory: `launchAccountOrRefuse`
+already refuses/degrades a studio whose mapped secret is missing, before any
+container starts). Verification found this theory does NOT hold:
+`launchAccountOrRefuse` only gates provision/restart/recycle, not the
+periodic sync tick. A studio already RUNNING on a recorded, non-primary
+account (`FLEET_AUTO_FAILOVER=on`, `launchAccount`'s recorded-account fast
+path) keeps running unaffected if an operator later deletes the mapped
+slot's secret without recycling — `do.ts`'s `syncSession()` never re-checks
+launchability, so `failoverDeps()` on every later tick reports
+`primaryIsMapped: true` alongside `primary: null` (`primaryAccount()` ->
+`launchAccount(env, repo, null)` now refuses the now-secretless mapped slot)
+for an otherwise healthy, running studio. `runAccountFailover`'s own account
+selection (`current`/`launchedAccount`-anchored) does not depend on
+`deps.primary` being accurate, so a later switch still fires, and the write
+condition (`deps.primaryIsMapped && next.name !== deps.primary`,
+`failover.ts`) then sets `borrowedAccount` permanently — `next.name` can
+never equal a permanently-`null` `deps.primary` — while hand-back's own gate
+(`deps.primary` truthy, `failover.ts` line ~1731) can never fire either. This
+is a real, reachable bug, not a residual to document; it was escalated back
+rather than patched over with a doc comment, per this review round's own
+instruction to stop rather than design a fix under a "just document it"
+framing. Left OUTSTANDING pending a decision on the actual fix.
