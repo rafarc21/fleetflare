@@ -480,6 +480,30 @@ export const SESSION_LIMIT_LOGIN_HINT_PANE = inlineBlock([
   "     /login to switch to an API usage-billed account.",
 ]);
 
+/**
+ * Issue #141 — the org-disabled-subscription line. Never resets (not a rate
+ * limit at all: a human outside this fleet has to re-enable the account), and
+ * not a select-style modal (no numbered options, no Enter/Esc footer) — one
+ * self-contained `⎿` line, then straight back to claude's own idle input box.
+ * NOT MEASURED verbatim against a real pane; the line itself is the exact
+ * wording named in the board issue.
+ */
+export const ORG_DISABLED_PANE = inlineBlock([
+  "  ⎿  Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead",
+]);
+
+/** Issue #141: a lead reporting ON this feature must never look like a lead
+ *  that HIT it — same "idle prose talking about the limit" discipline as the
+ *  main NOT_DETECTED map above, kept as its own small export so the new
+ *  detector's own test file can pull in just this one fixture. */
+export const NOT_DETECTED_141: Record<string, string> = {
+  "prose reporting on issue #141, not the pane": [
+    "⏺ Filed #141: some accounts print \"Your organization has disabled Claude",
+    "  subscription access for Claude Code\" instead of resetting.",
+    "", ...BOX_PROMPT,
+  ].join("\n"),
+};
+
 /** Issue #106 item 4: a #53 headline quoted in prose ABOVE a real V2 block. */
 export const ORG_HEADLINE_PROSE_ABOVE_V2_PANE = [
   "⏺ Yesterday's modal said You've hit your org's monthly spend limit, today's",
