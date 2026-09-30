@@ -31,7 +31,8 @@ import {
 // credentials.ts's header) — this file wires their ports and owns the
 // schedule, nothing more.
 import {
-  resolveClaudeAccounts, claudeAccountToken, launchAccount, autoFailoverOn, accountDisplay, type LaunchAccount,
+  resolveClaudeAccounts, claudeAccountToken, launchAccount, autoFailoverOn, accountDisplay, otherRepoPrimaries,
+  type LaunchAccount,
 } from "./accounts";
 import {
   runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, MEMBERS_TICKING_KEY, type FailoverDeps,
@@ -5497,6 +5498,10 @@ export class StudioDO extends Sandbox<Env> {
       // where an unswitched studio is; cards name labels.
       autoFailover: autoFailoverOn(this.env),
       primary: this.primaryAccount(),
+      // Issue #103: this repo's own mapped primary must never be excluded
+      // for itself — only accounts CLAUDE_ACCOUNT_BY_REPO reserves for a
+      // DIFFERENT repo are.
+      reservedAccounts: otherRepoPrimaries(this.env, parseStudioId(this.selfId())?.repo ?? null),
       display: (name: string) => accountDisplay(this.env, name),
       // Issue #102: fleet-wide per-account limit state, D1-backed (fleet_state
       // via ../state.ts) -- kept OUT of accounts.ts/failover.ts on purpose
