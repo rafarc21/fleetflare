@@ -215,11 +215,13 @@ function rescueOnOriginFn(pushTimeoutSeconds: number): string {
     // Issue #80: origin's same-named branch moved PAST this sha (another push
     // to the PR branch). Exact tips miss it; fetch that one tip into a scratch
     // ref (budgeted, bounded, never the real branch) and ask ancestry. Any
-    // failure = not on origin, so the push still runs.
+    // failure = not on origin, so the push still runs. `grep -F`: a branch
+    // name is not a regex. `--refmap=`: a configured wide fetch refspec must
+    // not move refs/remotes/origin/<branch> behind the lead's back.
     `  [ -n "\${3:-}" ] || return 1\n` +
-    `  printf '%s\\n' "$__rheads" | cut -f2 | grep -qx -e "refs/heads/$3" || return 1\n` +
+    `  printf '%s\\n' "$__rheads" | cut -f2 | grep -Fqx -e "refs/heads/$3" || return 1\n` +
     `  rescue_budget_ok on-origin >/dev/null || return 1\n` +
-    `  timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" fetch -q --no-tags origin "+refs/heads/$3:refs/fleet-rescue-check/tip" </dev/null >/dev/null 2>&1 || return 1\n` +
+    `  timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" fetch -q --no-tags --refmap= origin "+refs/heads/$3:refs/fleet-rescue-check/tip" </dev/null >/dev/null 2>&1 || return 1\n` +
     `  git -C "$1" merge-base --is-ancestor "$2" refs/fleet-rescue-check/tip 2>/dev/null; __ranc=$?\n` +
     `  git -C "$1" update-ref -d refs/fleet-rescue-check/tip 2>/dev/null\n` +
     `  [ "$__ranc" = 0 ]\n` +
