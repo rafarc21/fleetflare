@@ -249,6 +249,21 @@ export interface Observed {
    * the ship tick has a baseline and has seen no replacement since.
    */
   restarts?: RestartLog;
+  /**
+   * Board issue #108 (#70 ask 4 remainder) — the lead's last visible,
+   * non-chrome message line: redacted (`redactSecrets`, at the ship-tick
+   * write boundary), bounded (activity.ts's `LAST_LINE_MAX_CHARS`), so a
+   * coordinator reading `fleet ls --json` can tell roughly WHAT the lead is
+   * doing/saying without attaching to the pane.
+   *
+   * Rides `mergeObserved` the same way `session`/`lastShipOkAt` do — NOT its
+   * own DO-storage key the way `activity`/`memberAlerts` are, because this
+   * field has no since/anchored state-machine semantics of its own, only
+   * "the latest known value". `null` before the first ship tick extracts a
+   * line, or when the most recent pane frame had no non-chrome content to
+   * extract (every visible line was chrome, or the pane was empty).
+   */
+  lastMessageLine: string | null;
 }
 
 /**
@@ -311,7 +326,7 @@ export function emptyObserved(): Observed {
   return {
     incarnation: null, replacedAt: null, execFailures: 0, unreachableSince: null,
     lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
-    survivalBriefDeliveredFor: null, survivalBriefPending: null,
+    survivalBriefDeliveredFor: null, survivalBriefPending: null, lastMessageLine: null,
   };
 }
 

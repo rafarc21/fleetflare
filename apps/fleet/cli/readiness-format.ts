@@ -410,6 +410,9 @@ export interface LsJsonRow {
   limitResetsAt: string | null;
   /** The ACTIVITY column's own text, unchanged. */
   activity: string;
+  /** The lead's last visible, non-chrome message line — redacted, bounded;
+   *  issue #108 (#70 ask 4 remainder). */
+  lastLine: string | null;
 }
 
 /** The same data the ACTIVITY column renders, as a lead state per studio. */
@@ -417,7 +420,10 @@ export function lsJsonRows(
   studios: StudioStatus[], now: Date, staleAfterSeconds: number = ACTIVITY_MIRROR_STALE_SECONDS,
 ): LsJsonRow[] {
   return studios.map((s) => {
-    const base = { id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds) };
+    const base = {
+      id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds),
+      lastLine: s.observed?.lastMessageLine ?? null,
+    };
     if (s.state !== "running" && s.state !== "degraded") return { ...base, lead: "stopped", leadSince: null, limitResetsAt: null };
     const rl = s.rateLimited;
     if (rl?.select) return { ...base, lead: "modal", leadSince: rl.seenAt, limitResetsAt: rl.until ?? null };

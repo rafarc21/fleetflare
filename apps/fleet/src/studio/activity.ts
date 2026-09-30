@@ -185,6 +185,51 @@ export function readActivityFrame(frame: string): FrameVerdict {
   return { kind: "unknown", reason: "unrecognised frame" };
 }
 
+/** Board issue #108 (#70 ask 4 remainder) — a rendered `lastLine` this long
+ *  would dwarf everything else in a `fleet ls --json` row; truncated with a
+ *  trailing `…` past this many characters (see extractLastVisibleLine). */
+export const LAST_LINE_MAX_CHARS = 200;
+
+/**
+ * Board issue #108 (#70 ask 4 remainder) — the lead's last VISIBLE message
+ * line, so a coordinator reading `fleet ls --json` can tell roughly WHAT the
+ * lead is doing/saying without attaching to the pane. PURE, no redaction
+ * here (the write boundary, do.ts's ship tick, applies `redactSecrets` — the
+ * same "clean at the point the raw value is first held" convention every
+ * other `Observed` field follows, observed.ts's own header).
+ *
+ * Reuses EVERY chrome pattern this file already imports/defines to decide
+ * "is this the lead's own status chrome" rather than a second, drifting
+ * definition of the same question: `footerAtBottom` anchors the search to
+ * content ABOVE the bottom footer (exactly `readActivityFrame`'s own
+ * `head`), then walks backward skipping blank lines, a candidate status
+ * line, a turn-ended row, the idle input box's own rule/prompt lines, the
+ * waiting-members line, and a select-style modal's own footer/block-start —
+ * every one of these is chrome `readActivityFrame` itself already treats as
+ * "not the lead's own message". The first surviving line is the answer.
+ */
+export function extractLastVisibleLine(frame: string): string | null {
+  const trimmed = frame.replace(/\s+$/, "");
+  if (trimmed === "") return null;
+  const lines = trimmed.split("\n");
+  const footerIdx = footerAtBottom(lines);
+  const content = footerIdx >= 0 ? lines.slice(0, footerIdx) : lines;
+  for (let i = content.length - 1; i >= 0; i--) {
+    const line = content[i];
+    if (line.trim() === "") continue;
+    if (isCandidateStatusLine(line)) continue;
+    if (RULE_LINE.test(line)) continue;
+    if (PROMPT_LINE.test(line)) continue;
+    if (TURN_ENDED_LINE.test(line)) continue;
+    if (WAITING_MEMBERS_LINE.test(line)) continue;
+    if (MODAL_FOOTER_LINE.test(line)) continue;
+    if (MODAL_BLOCK_START.test(line)) continue;
+    const stripped = line.trim();
+    return stripped.length > LAST_LINE_MAX_CHARS ? `${stripped.slice(0, LAST_LINE_MAX_CHARS)}…` : stripped;
+  }
+  return null;
+}
+
 /**
  * Task 4's panel-diff leg (WAITING MEMBERS via the existing 300s two-capture
  * probe): the agent-panel rows below the footer, joined, or null when there
