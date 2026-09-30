@@ -1096,7 +1096,7 @@ async function cmdRecycle(creds: Credentials, id: string, discardUnsynced: boole
  * failure there degrades to one stderr line, never a non-zero exit for a
  * destroy that otherwise succeeded.
  */
-async function cmdDestroy(creds: Credentials, id: string, force: boolean, discardUnsynced: boolean): Promise<void> {
+async function cmdDestroy(creds: Credentials, id: string, force: boolean, discardUnsynced: boolean, park = false): Promise<void> {
   // Board task #203: the request is `requestDestroy`'s, not a bare fetch —
   // it carries a deadline and, when that deadline (or any other transport
   // failure) hits, it polls GET /studio/:id/status and reports the TRUE
@@ -1104,7 +1104,7 @@ async function cmdDestroy(creds: Credentials, id: string, force: boolean, discar
   // out." for a destroy that had SUCCEEDED, and skipped the Orca teardown
   // below. See cli/destroy-outcome.ts's header.
   const report = await requestDestroy(
-    { destroy: studioUrl(creds, id, destroyPath(force, discardUnsynced)), status: studioUrl(creds, id, "/status") },
+    { destroy: studioUrl(creds, id, destroyPath(force, discardUnsynced, park)), status: studioUrl(creds, id, "/status") },
     accessHeaders(creds), id,
   );
   for (const line of report.lines) console.error(line);
@@ -2504,7 +2504,7 @@ async function main(): Promise<void> {
     case "recycle":
       return cmdRecycle(creds, parsed.id, parsed.discardUnsynced, parsed.freshSession);
     case "destroy":
-      return cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced);
+      return cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced, parsed.park === true);
     case "task-new":
       return cmdTaskNew(creds, parsed.brief);
     case "task-ls":

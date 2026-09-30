@@ -45,11 +45,21 @@
  * SERVER's captured environment at bring-up (FLEET_WORKER_URL from the new
  * WORKER_PUBLIC_URL wrangler var, FLEET_SPAWN_TOKEN from Fleet Spawn P3 Task
  * 1) — every pane, including this one, inherits both with no extra wiring.
+ *
+ * Issue #59 narrows the "no create verb" rule above a second time. A
+ * coordinating studio (a cloud maestro) had no way to file a task for, hand a
+ * task to, or restart a stopped instance of a studio it may already SPAWN. It
+ * now has `task new`, `task assign`, `resume` and instance-targeted `spawn` —
+ * all limited server-side to the studios its org-chart edges let it spawn,
+ * in its own repo, never itself. The Worker is still the single writer, and
+ * this script still holds no policy: it only shapes the ask.
  */
 
-const HELP = `usage: fleet spawn <role>
+const HELP = `usage: fleet spawn <role>[--<n>] [--instance <n>|next]
+       fleet resume <role>[--<n>] [--instance <n>]
        fleet task ls | fleet task show <n> | fleet task report <n>
        fleet task state <n> <working|input_required|failed>
+       fleet task new [--studio <id>] | fleet task assign <n> <studio-id> [--why <text>]
        fleet memory ls | fleet memory compact
 
   fleet spawn <role>    Spawn a peer studio under THIS studio's org-chart
@@ -57,7 +67,18 @@ const HELP = `usage: fleet spawn <role>
                         by the Worker — this script only proves WHICH studio
                         is asking, never what it may do). Prints the child's
                         id and state on success, the server's error body
-                        otherwise.
+                        otherwise. <role>--<n> or --instance <n> names one
+                        instance; --instance next takes the lowest free one.
+                        A studio that already exists is a 409.
+
+  fleet resume <role>--<n>
+                        Start a studio the operator PARKED (fleet destroy
+                        --park) again. Same org-chart edges as spawn, same
+                        provision path the operator uses. Only a parked,
+                        stopped studio in your own repo, 10+ minutes after it
+                        stopped. Destroyed (not parked) is a 403, running or
+                        already resuming a 409, missing a 404. Never retry a
+                        resume that timed out: check its state later.
 
   fleet task ls         The tasks assigned to THIS studio. Nobody else's.
   fleet task show <n>   One of them, with its brief and every comment.
@@ -94,6 +115,23 @@ const HELP = `usage: fleet spawn <role>
                         did it — report your result and let the verifier
                         close it. You also cannot cancel a task or move
                         anybody else's.
+
+  fleet task new [--studio <id>]
+                        File a task for a studio your edges let you spawn.
+                        The brief JSON comes from STDIN: title, objective,
+                        outputFormat, boundaries, and assignee (or --studio).
+                        Never for yourself, never unassigned, never with a
+                        junior (that is the operator's call):
+
+                          fleet task new --studio websites--web-studio--2 <<'EOF'
+                          {"title": "...", "objective": "...",
+                           "outputFormat": "...", "boundaries": "..."}
+                          EOF
+
+  fleet task assign <n> <studio-id> [--why <text>]
+                        Hand task <n> to a studio your edges let you spawn.
+                        The task must be unassigned, yours, or held by another
+                        such studio. The assignee is woken.
 
   fleet memory ls       Fleet memory, measured: every index line, plus each
                         file's citation count, age and verdict.
@@ -139,7 +177,11 @@ const SPAWN_TOKEN_HEADER = "X-Fleet-Spawn-Token";
  *  identifiers instead of loose prose. */
 export type Command =
   | { kind: "help" }
-  | { kind: "spawn"; role: string }
+  // Issue #59: `instance` absent means instance 1, exactly the pre-#59 body.
+  | { kind: "spawn"; role: string; instance?: number | "next" }
+  | { kind: "resume"; role: string; instance?: number }
+  | { kind: "task-new"; studio?: string }
+  | { kind: "task-assign"; number: number; studio: string; why?: string }
   | { kind: "task-ls" }
   | { kind: "task-show"; number: number }
   | { kind: "task-report"; number: number }
@@ -155,12 +197,42 @@ export function parseArgs(argv: string[]): Command {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") return { kind: "help" };
   if (argv[0] === "task") return parseTaskArgs(argv.slice(1));
   if (argv[0] === "memory") return parseMemoryArgs(argv.slice(1));
-  if (argv[0] !== "spawn") {
-    return { kind: "usage-error", message: `unknown command "${argv[0]}" — expected "spawn", "task" or "memory"` };
+  if (argv[0] !== "spawn" && argv[0] !== "resume") {
+    return { kind: "usage-error", message: `unknown command "${argv[0]}" — expected "spawn", "resume", "task" or "memory"` };
   }
+  const verb = argv[0];
   const role = argv[1];
-  if (!role) return { kind: "usage-error", message: "spawn: missing <role>" };
-  return { kind: "spawn", role };
+  if (!role) return { kind: "usage-error", message: `${verb}: missing <role>` };
+  const target = parseTarget(role, argv.slice(2));
+  if ("message" in target) return { kind: "usage-error", message: `${verb}: ${target.message}` };
+  if (verb === "spawn") return { kind: "spawn", ...target };
+  if (target.instance === "next") {
+    return { kind: "usage-error", message: "resume: --instance next is not a studio — name the stopped instance to start" };
+  }
+  return { kind: "resume", role: target.role, ...(target.instance === undefined ? {} : { instance: target.instance }) };
+}
+
+/**
+ * Issue #59: `<role>--<n>` or `<role> --instance <n|next>` -> {role, instance}.
+ * Only a trailing all-digit segment is split off. Anything else (a repo
+ * prefix, say) is sent verbatim for the Worker to refuse: this script never
+ * decides which studio a caller may reach.
+ */
+export function parseTarget(
+  raw: string, rest: string[],
+): { role: string; instance?: number | "next" } | { message: string } {
+  const m = /^(.+)--([0-9]+)$/.exec(raw);
+  const role = m ? m[1] : raw;
+  let instance: number | "next" | undefined = m ? Number(m[2]) : undefined;
+  if (rest.length > 0) {
+    if (rest[0] !== "--instance" || rest.length !== 2) return { message: `unexpected ${JSON.stringify(rest.join(" "))}` };
+    if (instance !== undefined) return { message: "instance named twice — use <role>--<n> or --instance <n>, not both" };
+    const v = rest[1];
+    if (v === "next") instance = "next";
+    else if (/^[0-9]+$/.test(v) && Number(v) >= 1) instance = Number(v);
+    else return { message: `--instance ${JSON.stringify(v)} — expected a positive integer or next` };
+  }
+  return instance === undefined ? { role } : { role, instance };
 }
 
 /**
@@ -177,8 +249,28 @@ const LEAD_TASK_STATES = ["working", "input_required", "failed"];
 export function parseTaskArgs(argv: string[]): Command {
   const [sub, raw, to] = argv;
   if (sub === "ls") return { kind: "task-ls" };
+  // Issue #59: the two verbs that DIRECT a child studio. The Worker gates
+  // both on the caller's org-chart edges; this parser only shapes the ask.
+  if (sub === "new") {
+    const rest = argv.slice(1);
+    if (rest.length === 0) return { kind: "task-new" };
+    if (rest[0] === "--studio" && rest.length === 2) return { kind: "task-new", studio: rest[1] };
+    return { kind: "usage-error", message: "task new: expected [--studio <id>] and the brief JSON on stdin" };
+  }
+  if (sub === "assign") {
+    if (raw === undefined || !/^[0-9]+$/.test(raw)) {
+      return { kind: "usage-error", message: "task assign: missing or non-numeric <n> (the board issue number)" };
+    }
+    if (to === undefined || to.startsWith("--")) return { kind: "usage-error", message: "task assign: missing <studio-id>" };
+    const rest = argv.slice(3);
+    if (rest.length === 0) return { kind: "task-assign", number: Number(raw), studio: to };
+    if (rest[0] === "--why" && rest.length >= 2) {
+      return { kind: "task-assign", number: Number(raw), studio: to, why: rest.slice(1).join(" ") };
+    }
+    return { kind: "usage-error", message: "task assign: expected <n> <studio-id> [--why <text>]" };
+  }
   if (sub !== "show" && sub !== "report" && sub !== "state") {
-    return { kind: "usage-error", message: `unknown task command "${sub ?? ""}" — expected ls, show, report or state` };
+    return { kind: "usage-error", message: `unknown task command "${sub ?? ""}" — expected ls, show, report, state, new or assign` };
   }
   if (raw === undefined || !/^[0-9]+$/.test(raw)) {
     return { kind: "usage-error", message: `task ${sub}: missing or non-numeric <n> (the board issue number)` };
@@ -262,13 +354,15 @@ export function resolveEnv(env: Record<string, string | undefined>): SpawnEnv | 
 
 /** Builds the exact request /fleet/spawn expects — see spawn.ts's own
  *  SPAWN_TOKEN_HEADER/spawnBody doc comments for the contract this mirrors. */
-export function buildSpawnRequest(env: SpawnEnv, role: string): { url: string; init: RequestInit } {
+export function buildSpawnRequest(
+  env: SpawnEnv, role: string, extra: { instance?: number | "next"; resume?: true } = {},
+): { url: string; init: RequestInit } {
   return {
     url: new URL("/fleet/spawn", env.workerUrl).toString(),
     init: {
       method: "POST",
       headers: { [SPAWN_TOKEN_HEADER]: env.token, "content-type": "application/json" },
-      body: JSON.stringify({ role }),
+      body: JSON.stringify({ role, ...extra }),
     },
   };
 }
@@ -294,6 +388,20 @@ export function buildTaskRequest(
       },
   };
 }
+
+/** Review round 1 (M1): how long `fleet resume` waits for its one request.
+ *  A bring-up can take minutes; past this the Worker may still be starting
+ *  the studio. `FLEET_RESUME_TIMEOUT_MS` overrides (tests use it). */
+const RESUME_TIMEOUT_MS = 300_000;
+
+export function resumeTimeoutMs(raw: string | undefined): number {
+  const n = Number(raw);
+  return raw !== undefined && Number.isInteger(n) && n > 0 ? n : RESUME_TIMEOUT_MS;
+}
+
+const RESUME_NO_RETRY =
+  "studio-fleet: do not retry the resume — the Worker may still be starting that studio, and a second " +
+  "resume is refused (409) while it does. Check its state on your next wake or sweep instead.";
 
 /** One task row as `fleet task ls` prints it. The url is the actionable half
  *  — a lead pastes it into its own envelope's artifacts. */
@@ -334,6 +442,7 @@ async function main(): Promise<void> {
     res = await fetch(built.url, built.init);
   } catch (err) {
     console.error(`studio-fleet: request to ${built.url} failed: ${err instanceof Error ? err.message : String(err)}`);
+    if (cmd.kind === "resume") console.error(RESUME_NO_RETRY);
     process.exit(1);
   }
 
@@ -357,15 +466,51 @@ async function main(): Promise<void> {
 async function buildRequest(
   env: SpawnEnv, cmd: Command,
 ): Promise<{ what: string; url: string; init: RequestInit; render: (json: unknown) => string }> {
-  if (cmd.kind === "spawn") {
-    const { url, init } = buildSpawnRequest(env, cmd.role);
+  if (cmd.kind === "spawn" || cmd.kind === "resume") {
+    const { url, init } = buildSpawnRequest(env, cmd.role, {
+      ...(cmd.instance === undefined ? {} : { instance: cmd.instance }),
+      ...(cmd.kind === "resume" ? { resume: true as const } : {}),
+    });
+    // Review round 1 (M1): a resume runs a whole bring-up. Give up after a
+    // deadline rather than hold the socket forever — and never retry: this
+    // is ONE request, and main() tells the lead not to send another.
+    if (cmd.kind === "resume") init.signal = AbortSignal.timeout(resumeTimeoutMs(process.env.FLEET_RESUME_TIMEOUT_MS));
     return {
-      what: "spawn", url, init,
+      what: cmd.kind, url, init,
       render: (json) => {
         const status = json as { id?: string; state?: string };
-        return `spawned ${status.id ?? "?"} (${status.state ?? "?"})`;
+        return `${cmd.kind === "resume" ? "resumed" : "spawned"} ${status.id ?? "?"} (${status.state ?? "?"})`;
       },
     };
+  }
+  if (cmd.kind === "task-new") {
+    // Same stdin channel as `task report`: a brief is multi-line JSON.
+    const text = await Bun.stdin.text();
+    if (text.trim() === "") {
+      console.error("studio-fleet: task new reads the brief JSON from stdin — see `fleet --help`");
+      process.exit(1);
+    }
+    let brief: Record<string, unknown>;
+    try {
+      brief = JSON.parse(text);
+    } catch {
+      console.error("studio-fleet: task new: stdin is not JSON");
+      process.exit(1);
+    }
+    const body = JSON.stringify(cmd.studio === undefined ? brief : { ...brief, assignee: cmd.studio });
+    const { url, init } = buildTaskRequest(env, "", body);
+    return {
+      what: "task new", url, init,
+      render: (json) => {
+        const t = json as { number?: number; url?: string };
+        return `filed task #${t.number ?? "?"}: ${t.url ?? "(no url)"}`;
+      },
+    };
+  }
+  if (cmd.kind === "task-assign") {
+    const body = JSON.stringify({ assignee: cmd.studio, ...(cmd.why === undefined ? {} : { why: cmd.why }) });
+    const { url, init } = buildTaskRequest(env, `/${cmd.number}/assign`, body);
+    return { what: "task assign", url, init, render: () => `task ${cmd.number} assigned to ${cmd.studio}` };
   }
   if (cmd.kind === "task-ls") {
     const { url, init } = buildTaskRequest(env, "");
