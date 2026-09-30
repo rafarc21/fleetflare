@@ -32,7 +32,7 @@ import {
 // schedule, nothing more.
 import {
   resolveClaudeAccounts, claudeAccountToken, launchAccount, autoFailoverOn, accountDisplay, otherRepoPrimaries,
-  type LaunchAccount,
+  repoForAccount, type LaunchAccount,
 } from "./accounts";
 import {
   runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, MEMBERS_TICKING_KEY, type FailoverDeps,
@@ -54,6 +54,7 @@ import {
 import {
   LIMIT_SIGHTING_KEY, type LimitSighting,
   accountLimitStateKey, encodeAccountLimitState, decodeAccountLimitState,
+  accountBurnStateKey, encodeAccountBurnState, decodeAccountBurnState,
 } from "./rate-limit";
 import type { AccountLimits, ClaudeAccount } from "./accounts";
 // Issue #102: the fleet-wide per-account limit record lives in D1
@@ -2161,6 +2162,12 @@ async function withBringupLogTail(syncDeps: SessionSyncDeps, reason: string): Pr
 export async function mirrorBurnToRegistry(
   storage: StudioStorage & SessionSyncStorage,
   recordStudioFn: (status: StudioStatus) => Promise<void>,
+  // Issue #131 (Stage B) — optional, like every other port added to this
+  // file after its first callers: absent (every existing call site) mirrors
+  // burn exactly as before, no account-burn write at all. Present, it is
+  // called with this studio's OWN account name and its 5h-window output,
+  // the same tick this function already mirrors both onto the registry row.
+  accountBurnWrite?: ((name: string, window5hOutput: number) => Promise<void>) | null,
 ): Promise<void> {
   const status = await storage.get(STATUS_KEY);
   const burn = await storage.get(BURN_KEY);
@@ -2188,6 +2195,15 @@ export async function mirrorBurnToRegistry(
   };
   await storage.put(STATUS_KEY, updated);
   await recordStudioFn(updated);
+  // Issue #131 (Stage B): the account this studio is actually running on —
+  // #289's own field, the best available signal for "currently on", same
+  // choice launchFields (below) makes for booting a recycled container.
+  // `null`/absent (never launched under #289, or a refused launch) writes
+  // nothing — there is no account name to key the row on.
+  const account = typeof updated.launchedAccount === "string" ? updated.launchedAccount : null;
+  if (accountBurnWrite && account !== null) {
+    await accountBurnWrite(account, updated.burn?.window5hOutput ?? 0);
+  }
 }
 
 /**
@@ -2772,6 +2788,13 @@ export async function syncSessionCycle(
   // in-memory half is then simply not in effect, though the storage lease
   // below still is.
   installCacheGuard?: { inFlight: boolean } | null,
+  // Issue #131 (Stage B): the account-burn mirror write (do.ts's own
+  // `writeFleetAccountBurn`, D1-backed) — kept OUT of this function's own
+  // body, wired by the caller, same "this file stays D1-free" boundary every
+  // other D1-touching port here already respects (see accountLimits' own
+  // wiring at failoverDeps() below). Absent: mirrorBurnToRegistry runs
+  // exactly as it did before this feature, no account-burn write at all.
+  accountBurnWrite?: ((name: string, window5hOutput: number) => Promise<void>) | null,
 ): Promise<void> {
   try {
     const now = syncDeps.now().toISOString();
@@ -2796,7 +2819,7 @@ export async function syncSessionCycle(
     console.error(`studio ${idFallback}: aside ship record failed`, err);
   }
   try {
-    await mirrorBurnToRegistry(storage, recordStudioFn);
+    await mirrorBurnToRegistry(storage, recordStudioFn, accountBurnWrite);
   } catch (err) {
     console.error(`studio ${idFallback}: burn mirror failed`, err);
   }
@@ -3226,6 +3249,51 @@ async function writeFleetAccountLimit(
   db: D1Database, name: string, until: string | null, seenAt: string,
 ): Promise<void> {
   await setFlag(db, accountLimitStateKey(name), encodeAccountLimitState({ until, seenAt }), Date.parse(seenAt));
+}
+
+/**
+ * Issue #131 (Stage B) — the fleet-wide read half of FailoverDeps.accountBurn,
+ * the exact same shape readFleetAccountLimits above reads for accountLimits:
+ * one fleet_state row per configured account, read in parallel, only on the
+ * (already rare) borrow second pass. A row this studio never wrote (another
+ * studio's own mirror, or none at all) reads back identically to one this
+ * studio wrote itself.
+ */
+async function readFleetAccountBurn(
+  db: D1Database, accounts: ClaudeAccount[],
+): Promise<Record<string, { window5hOutput: number }>> {
+  const burn: Record<string, { window5hOutput: number }> = {};
+  await Promise.all(accounts.map(async (a) => {
+    const state = decodeAccountBurnState(await getFlag(db, accountBurnStateKey(a.name)));
+    if (state) burn[a.name] = { window5hOutput: state.window5hOutput };
+  }));
+  return burn;
+}
+
+/**
+ * Issue #131 (Stage B) — the fleet-wide write half, called from
+ * mirrorBurnToRegistry (below) on the SAME 300s tick every studio already
+ * mirrors its own burn on: one fleet_state row, keyed by account NAME (never
+ * a studio id), so every OTHER studio's own borrow second pass sees it. A
+ * studio with no known account (never launched under #289) writes nothing —
+ * there is no account name to key the row on.
+ *
+ * RESIDUAL, stated per this feature's own plan doc: unlike
+ * `StudioStatus.burn` itself (registry.ts's `expireBurnWindow`, issue #181),
+ * this mirrored figure is never read-time-expired against the 5h window —
+ * `AccountBurnState` carries no `window5hStart` (the plan doc's own shape is
+ * `{ window5hOutput: number }` alone). A stopped studio's last mirrored
+ * figure for its account therefore freezes, same residual #181 fixed for the
+ * per-studio figure but NOT extended here — a borrow decision sizing a
+ * stale-but-nonzero number against a genuinely-idle account is a worse
+ * outcome than picking list order, never a wrong SWITCH (accountIsFree, the
+ * fleet-wide LIMIT map, is still what decides whether a candidate is usable
+ * at all; burn only orders free candidates against each other).
+ */
+async function writeFleetAccountBurn(
+  db: D1Database, name: string, window5hOutput: number, now: number,
+): Promise<void> {
+  await setFlag(db, accountBurnStateKey(name), encodeAccountBurnState({ window5hOutput }), now);
 }
 
 /**
@@ -5569,6 +5637,16 @@ export class StudioDO extends Sandbox<Env> {
         read: () => readFleetAccountLimits(this.env.DB, resolveClaudeAccounts(this.env)),
         write: (name: string, until: string | null, seenAt: string) => writeFleetAccountLimit(this.env.DB, name, until, seenAt),
       },
+      // Issue #131 (Stage B): fleet-wide per-account 5h burn, same D1-backed
+      // shape/reasoning as accountLimits just above, read only on the borrow
+      // second pass.
+      accountBurn: {
+        read: () => readFleetAccountBurn(this.env.DB, resolveClaudeAccounts(this.env)),
+      },
+      // Issue #131 (Stage B): names the repo a borrowed account is reserved
+      // for, in the loud "borrowed"/"returned" notify messages only — never a
+      // failover decision (that stays keyed on `reservedAccounts` above).
+      otherRepoOf: (name: string) => repoForAccount(this.env, name),
       exec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.sync, env }),
       now: () => new Date(),
       notify: async (message: string) => {
@@ -6568,6 +6646,10 @@ export class StudioDO extends Sandbox<Env> {
         // Round 3 review, item 3: the SAME guard object every tick this
         // isolate runs — see installCacheSaveGuard's own doc comment above.
         this.installCacheSaveGuard,
+        // Issue #131 (Stage B): mirrors this studio's own 5h-window burn onto
+        // its account's fleet-wide row, so another studio's own borrow
+        // second pass (failoverDeps().accountBurn, above) can read it.
+        (name: string, window5hOutput: number) => writeFleetAccountBurn(this.env.DB, name, window5hOutput, Date.now()),
       ),
       () => this.rearm("syncSession", SYNC_SESSION_SECONDS),
       "syncSession",

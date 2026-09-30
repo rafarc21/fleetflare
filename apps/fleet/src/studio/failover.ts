@@ -17,7 +17,7 @@
  * provision.ts's header). do.ts wires the ports and owns the schedule.
  */
 import type { ClaudeAccount, AccountLimits } from "./accounts";
-import { accountsTried, nextClaudeAccount, earliestAccountReset } from "./accounts";
+import { accountsTried, nextClaudeAccount, earliestAccountReset, nextBorrowedAccount, accountIsFree } from "./accounts";
 import { STATUS_KEY, OPERATION_KEY, watchForDestroy, operationLockFresh, type StudioStorage } from "./provision";
 import { redactSecrets } from "./redact";
 import {
@@ -984,6 +984,30 @@ export interface FailoverDeps {
     read(): Promise<AccountLimits>;
     write(name: string, until: string | null, seenAt: string): Promise<void>;
   };
+  /**
+   * Issue #131 (Stage B) — fleet-wide per-account 5h-window burn, mirrored the
+   * same way `accountLimits` is (do.ts's `mirrorBurnToRegistry` writes it,
+   * wherever burn already reaches the registry; a parallel `account-burn:
+   * <name>` fleet_state row, rate-limit.ts's `accountBurnStateKey`). Read only
+   * on the borrow second pass (accounts.ts's `nextBorrowedAccount`), which
+   * only ever runs once the first pass has already found nowhere to go — see
+   * that function's own doc comment for why LOWEST burn, not list order,
+   * orders the candidates there. Absent (every caller/test that predates this
+   * feature): the second pass treats every candidate as 0 burn, i.e. ties on
+   * list order — never a crash, never a skipped candidate.
+   */
+  accountBurn?: {
+    read(): Promise<Record<string, { window5hOutput: number }>>;
+  };
+  /**
+   * Issue #131 (Stage B) — accounts.ts's `repoForAccount`, wired here for the
+   * SAME reason `display` is: a pure naming lookup, never a failover
+   * decision. Used only to name the repo a borrowed account belongs to, in
+   * the loud "borrowed"/"returned" notify messages (`borrowedMessage`,
+   * `returnedMessage`) — absent, or an account the map does not (or no
+   * longer) mention, and the message names the account alone.
+   */
+  otherRepoOf?: (name: string) => string | null;
 }
 
 export type FailoverOutcome =
@@ -1000,6 +1024,16 @@ export type FailoverOutcome =
   // decision nobody can audit.
   | { kind: "flap-guarded"; reason: string }
   | { kind: "switched"; from: string | null; to: string }
+  // Issue #131 (Stage B) — the borrow second pass landed: `to` is some OTHER
+  // repo's own mapped primary (never a routine candidate — see
+  // nextBorrowedAccount's own doc comment for when this is even reachable),
+  // and `fromRepo` names the repo it was borrowed from (null when the map no
+  // longer names one, for display only).
+  | { kind: "borrowed"; from: string | null; to: string; fromRepo: string | null }
+  // Issue #131 (Stage B) — hand-back: a studio that was on `from` (the
+  // borrowed account) moved back to its own mapped primary, `to`, because a
+  // periodic tick observed it free again.
+  | { kind: "returned"; from: string | null; to: string }
   | { kind: "exhausted"; tried: string[] }
   // Issue #271: auto-failover off, another account existed, none was used.
   | { kind: "parked"; account: string }
@@ -1087,6 +1121,39 @@ export function switchedMessage(
   return (
     `claude account switch: ${studioId} matched the rate-limit modal ("${headline}") in tmux studio:claude ` +
     `and moved from ${from ?? "its first account"} to ${to}. claude was relaunched with its own resume.`
+  );
+}
+
+/**
+ * Issue #131 (Stage B) — "log it loudly". What an operator is told when a
+ * studio borrows another repo's own mapped primary: names BOTH repos (its
+ * own, and the one the account is reserved for), so the alert is legible on
+ * its own, without a second lookup at `CLAUDE_ACCOUNT_BY_REPO`, about exactly
+ * the boundary #103/#117 exist to protect — this is the one deliberate,
+ * bounded exception to it.
+ */
+export function borrowedMessage(
+  studioId: string, from: string | null, to: string, ownRepo: string | null, borrowedFromRepo: string | null,
+  headline: string,
+): string {
+  return (
+    `claude account BORROW: ${studioId} (repo ${ownRepo ?? "?"}) matched the rate-limit modal ("${headline}") ` +
+    `in tmux studio:claude and moved from ${from ?? "its first account"} to ${to} — every account reserved for ` +
+    `${ownRepo ?? "this repo"} was limited, so it borrowed ${to}, ${borrowedFromRepo ?? "another repo"}'s own ` +
+    `mapped primary. Hand-back is automatic the moment ${ownRepo ?? "this repo"}'s own primary frees up again. ` +
+    `claude was relaunched with its own resume.`
+  );
+}
+
+/**
+ * Issue #131 (Stage B) — hand-back's own notify. `from` is the borrowed
+ * account the studio is moving OFF of; `to` is always this studio's own
+ * mapped primary.
+ */
+export function returnedMessage(studioId: string, from: string | null, to: string, show: (name: string) => string): string {
+  return (
+    `claude account RETURN: ${studioId} moved back from the borrowed account ${from !== null ? show(from) : "(unknown)"} ` +
+    `to its own mapped primary ${show(to)} — the primary is free again. claude was relaunched with its own resume.`
   );
 }
 
@@ -1274,6 +1341,76 @@ export const AUTO_CONTINUE_PROMPT = "usage limit reset — resuming";
  *  back to null on fire either way — see StudioStatus.autoContinueAt's own
  *  doc comment). */
 const AUTO_CONTINUE_RETRY_MS = 60 * 60_000;
+
+/**
+ * Issue #131 (Stage B) — the hand-back switch: move a studio off a borrowed
+ * account back onto its own mapped primary. Called from runAccountFailover's
+ * `working` branch (see that branch's own doc comment for WHY there, and why
+ * no separate periodic hook is needed) the moment a periodic tick observes
+ * the primary free again.
+ *
+ * Mirrors the shape of the ordinary account switch further down in this file
+ * (exec the switch, relaunch, record, notify) but deliberately does LESS:
+ *   - no redraw-guard bookkeeping (`failoverBlock`/`claudeAccountMovedBlock`
+ *     are cleared, not set) — there is no limit block to key a future guard
+ *     on, since hand-back fires on a CLEAN pane, not a freshly-observed one;
+ *   - no `claudeAccountMovedVia` — that field's only reader is the
+ *     no-flapping guard, which exists to judge whether a fresh INLINE
+ *     observation is a stale `--continue` redraw of a SELECT-modal switch;
+ *     hand-back is neither, so leaving it unset (rather than mislabelling it
+ *     `"modal"`) keeps that guard's own meaning intact for whatever switch
+ *     comes next;
+ *   - no `observedStorage` bring-up re-verification (the incarnation-token
+ *     write + session-verdict machinery near the bottom of
+ *     `runAccountFailover`) — that exists specifically for a FRESH
+ *     limit-triggered switch's own post-switch session-verdict write; a
+ *     hand-back is not one, and STATED as a residual in this feature's own
+ *     plan doc rather than silently left out.
+ */
+async function handBack(
+  deps: FailoverDeps, storage: StudioStorage, studioId: string, existing: StudioStatus,
+  ownPrimary: ClaudeAccount, recordStudioFn: (status: StudioStatus) => Promise<void>,
+): Promise<FailoverOutcome> {
+  const from = existing.borrowedAccount ?? null;
+  const switchRes = await deps.exec(accountSwitchCmd(), tokenEnv(ownPrimary.token));
+  const relaunchRes = switchRes.code === 0
+    ? await deps.relaunch()
+    : { code: switchRes.code, stdout: "", stderr: switchRes.stderr };
+  const failed = switchRes.code !== 0 || relaunchRes.code !== 0;
+  const show = deps.display ?? ((name: string) => name);
+  const error = failed
+    ? redactSecrets(
+        `claude account hand-back to ${ownPrimary.name} did not complete (exit ${relaunchRes.code}): ` +
+        `${relaunchRes.stderr.slice(0, 500)}`,
+      )
+    : null;
+  const returned: StudioStatus = {
+    ...existing,
+    state: failed ? "degraded" : "running",
+    error,
+    claudeAccount: ownPrimary.name,
+    // #289: a completed switch is a launch on the new account.
+    ...(failed ? {} : { launchedAccount: ownPrimary.name }),
+    claudeAccountMovedAt: deps.now().toISOString(),
+    // See this function's own doc comment for why this is cleared, not set.
+    claudeAccountMovedVia: null,
+    failoverBlock: null,
+    claudeAccountMovedBlock: null,
+    // The whole point: no longer borrowed, whether the switch landed or not
+    // — same "attempted regardless of success" treatment `claudeAccount`
+    // itself already gets above.
+    borrowedAccount: null,
+    borrowedFromRepo: null,
+  };
+  await storage.put(STATUS_KEY, returned);
+  // Issue #354: the in-memory start config follows the ROW before any other
+  // await, same ordering the ordinary switch path uses below.
+  if (!failed) await deps.onSwitched?.(ownPrimary.name);
+  await recordStudioFn(returned);
+  const message = returnedMessage(studioId, from, ownPrimary.name, show);
+  await deps.notify(failed ? `${message} RELAUNCH FAILED: ${error}` : message);
+  return { kind: "returned", from, to: ownPrimary.name };
+}
 
 /**
  * Issue #109 — is an auto-continue attempt DUE, given the row's own
@@ -1518,6 +1655,7 @@ export async function runAccountFailover(
     const heal = recovery.shouldHeal
       && !operationLockFresh(await storage.get(OPERATION_KEY), deps.now());
     const clearedAt = heal ? deps.now().toISOString() : null;
+    let rowNow = existing;
     if (existing.rateLimited || forget || clearedAt !== null) {
       const cleared: StudioStatus = {
         ...existing,
@@ -1532,6 +1670,27 @@ export async function runAccountFailover(
       };
       await storage.put(STATUS_KEY, cleared);
       await recordStudioFn(cleared);
+      rowNow = cleared;
+    }
+    // Issue #131 (Stage B) — hand-back. This exact tick already runs on a
+    // FIXED CADENCE (SYNC_SESSION_SECONDS, do.ts's syncSessionCycle)
+    // regardless of whether a limit is currently observed — confirmed by
+    // reading do.ts's own call site before writing this code, not assumed;
+    // see this feature's plan doc for the full finding. `verdict.kind ===
+    // "working"` (this whole branch) is precisely "nothing is currently
+    // broken on this pane", which is the state hand-back must fire in — an
+    // operator cannot wait for a FRESH limit sighting that, by definition,
+    // never comes once the studio is happily running on a borrowed account.
+    // Guarded on `rowNow.borrowedAccount` so the overwhelming majority of
+    // ticks (never borrowed) pay nothing beyond that one field read.
+    if (deps.autoFailover && rowNow.borrowedAccount && deps.primary) {
+      const ownPrimary = deps.accounts.find((a) => a.name === deps.primary);
+      if (ownPrimary) {
+        const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
+        if (accountIsFree(ownPrimary, limits, deps.now())) {
+          return handBack(deps, storage, studioId, rowNow, ownPrimary, recordStudioFn);
+        }
+      }
     }
     if (clearedAt !== null) return { kind: "recovered", clearedAt };
     return { kind: "no-modal", reason: verdict.reason };
@@ -1638,10 +1797,33 @@ export async function runAccountFailover(
   const scopedAccounts = deps.accounts.slice(currentIdx < 0 ? start : Math.min(start, currentIdx));
   const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
   const candidate = nextClaudeAccount(scopedAccounts, current, limits, deps.now(), deps.reservedAccounts ?? new Set());
+  // Issue #131 (Stage B) — the borrow second pass, entered ONLY when the
+  // first pass just above found NOTHING (`candidate === null`): this
+  // studio's own chain (the reserved-primaries-respecting wrap #103/#117
+  // protect) is genuinely exhausted, not merely skipped as reserved the way
+  // an account in `scopedAccounts` with a live fleet-wide limit is. Borrowing
+  // is the fleet's last resort, never a routine candidate — a reserved
+  // account with the lowest burn must NEVER outrank a free account still in
+  // this studio's own chain, which is exactly why this is gated on
+  // `candidate === null` rather than computed unconditionally and compared
+  // against it. `deps.accountBurn` is read lazily, here, on this already-rare
+  // path only — the overwhelming majority of ticks (first pass finds
+  // somewhere to go) never pay for it.
+  const borrowed = candidate === null && deps.autoFailover
+    ? nextBorrowedAccount(
+        deps.accounts, deps.reservedAccounts ?? new Set(), limits,
+        deps.accountBurn ? await deps.accountBurn.read() : {}, deps.now(),
+      )
+    : null;
   // Issue #271: with auto-failover off, a studio that COULD move is parked
   // instead — marked and carded once, never switched. With nowhere to go the
   // message is today's, so a single-account fleet reads exactly as before.
-  const next = deps.autoFailover ? candidate : null;
+  const next = deps.autoFailover ? (candidate ?? borrowed) : null;
+  // Issue #131 (Stage B): true only when `next` came from the second pass —
+  // every downstream decision (the outcome kind, the StudioStatus borrow
+  // fields, the notify wording) reads off this ONE flag, so they can never
+  // disagree about which pass actually landed the switch.
+  const isBorrow = candidate === null && borrowed !== null;
 
   if (!next) {
     const tried = deps.accounts.map((a) => a.name).slice(start);
@@ -1758,6 +1940,16 @@ export async function runAccountFailover(
     claudeAccountMovedBlock: key ?? sighting?.block ?? null,
     // A completed switch is a new account: the old one's limit is not its.
     rateLimited: failed ? existing.rateLimited : null,
+    // Issue #131 (Stage B): set only when THIS switch is the borrow second
+    // pass landing (`isBorrow`); cleared on every other completed switch,
+    // including a plain first-pass wrap that happens to land while this
+    // studio was previously borrowed — that studio found somewhere in its
+    // OWN chain again, so it is no longer borrowing anything, same
+    // "attempted regardless of success" treatment `claudeAccount` itself
+    // gets just above.
+    ...(isBorrow
+      ? { borrowedAccount: next.name, borrowedFromRepo: deps.otherRepoOf?.(next.name) ?? null }
+      : { borrowedAccount: null, borrowedFromRepo: null }),
   };
   await storage.put(STATUS_KEY, switched);
   // Issue #354: the in-memory start config follows the ROW before any other
@@ -1837,10 +2029,17 @@ export async function runAccountFailover(
       if (!alreadyLocked) await storage.put(OPERATION_KEY, null);
     }
   }
-  await deps.notify(
-    failed
-      ? `${switchedMessage(studioId, from === null ? null : show(from), show(next.name), verdict.headline ?? verdict.marker)} RELAUNCH FAILED: ${error}`
-      : switchedMessage(studioId, from === null ? null : show(from), show(next.name), verdict.headline ?? verdict.marker),
-  );
-  return { kind: "switched", from, to: next.name };
+  // Issue #131 (Stage B) — "log it loudly": a borrow names both repos, never
+  // just the plain switchedMessage every other landing gets.
+  const borrowedFromRepo = isBorrow ? (deps.otherRepoOf?.(next.name) ?? null) : null;
+  const message = isBorrow
+    ? borrowedMessage(
+        studioId, from === null ? null : show(from), show(next.name),
+        parseStudioId(existing.id)?.repo ?? null, borrowedFromRepo, verdict.headline ?? verdict.marker,
+      )
+    : switchedMessage(studioId, from === null ? null : show(from), show(next.name), verdict.headline ?? verdict.marker);
+  await deps.notify(failed ? `${message} RELAUNCH FAILED: ${error}` : message);
+  return isBorrow
+    ? { kind: "borrowed", from, to: next.name, fromRepo: borrowedFromRepo }
+    : { kind: "switched", from, to: next.name };
 }

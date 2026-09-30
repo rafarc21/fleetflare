@@ -275,6 +275,33 @@ export interface StudioStatus {
    */
   claudeAccountMovedBlock?: string | null;
   /**
+   * Issue #131 (Stage B) — set only while this studio is currently on a
+   * BORROWED account: some OTHER repo's own `CLAUDE_ACCOUNT_BY_REPO`-mapped
+   * primary, landed on only because every account reserved for THIS studio's
+   * own repo (its own chain, accounts.ts's `nextClaudeAccount` first pass)
+   * was exhausted at once (failover.ts's `nextBorrowedAccount` second pass).
+   * The account NAME, same "safe to log/store/card" discipline
+   * `claudeAccount` itself already documents — never a token.
+   *
+   * Cleared (`null`) the moment a hand-back switch lands, whether it
+   * succeeded or not — same "attempted regardless of success" treatment a
+   * completed switch's `claudeAccount`/`launchedAccount` fields already get.
+   * `undefined`/absent: never borrowed, or borrowed before this field
+   * existed — readers treat the two identically, same as every other
+   * optional account field on this type.
+   */
+  borrowedAccount?: string | null;
+  /**
+   * Issue #131 (Stage B) — which repo's own primary `borrowedAccount` is,
+   * for logging/audit only (never read to decide anything — the failover
+   * DECISION is keyed on the `reservedAccounts` SET alone, accounts.ts's
+   * `repoForAccount` is a pure display lookup). `null` when the borrowed
+   * account's slot is not (or no longer) in `CLAUDE_ACCOUNT_BY_REPO` at all —
+   * an operator alert then names the account alone, same fallback
+   * `accountDisplay` already gives an unlabelled account.
+   */
+  borrowedFromRepo?: string | null;
+  /**
    * Issue #289: the account this studio's container was actually LAUNCHED
    * on -- written when the container starts (StudioDO.onStart, from the same
    * launchAccount call that filled its CLAUDE_CODE_OAUTH_TOKEN) and by a

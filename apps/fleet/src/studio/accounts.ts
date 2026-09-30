@@ -207,20 +207,68 @@ export function nextClaudeAccount(
 ): ClaudeAccount | null {
   const idx = currentIndex(accounts, currentName);
   if (idx < 0 || accounts.length === 0) return null;
-  const isFree = (a: ClaudeAccount): boolean => {
-    if (reserved.has(a.name)) return false;
-    if (!(a.name in limits)) return true;
-    const { until, seenAt } = limits[a.name];
-    if (until !== null) return Date.parse(until) <= now.getTime();
-    // Review round 1 (#102 review, 2026-09-30) — see NULL_UNTIL_CEILING_MS's
-    // own doc comment: a `null` until must not blacklist an account forever.
-    return now.getTime() - Date.parse(seenAt) > NULL_UNTIL_CEILING_MS;
-  };
+  const isFree = (a: ClaudeAccount): boolean => !reserved.has(a.name) && accountIsFree(a, limits, now);
   for (let step = 1; step < accounts.length; step++) {
     const candidate = accounts[(idx + step) % accounts.length];
     if (isFree(candidate)) return candidate;
   }
   return null;
+}
+
+/**
+ * Issue #131 (Stage B) — extracted from `nextClaudeAccount`'s own `isFree`
+ * closure (its doc comment above states the rule in full: no entry in
+ * `limits` is free; a passed `until` is free again; a `null`-until entry is
+ * free once `now - seenAt` exceeds NULL_UNTIL_CEILING_MS) so every OTHER
+ * caller that needs to ask "is this account free right now" — the borrow
+ * second pass's `nextBorrowedAccount` below, and failover.ts's own hand-back
+ * check ("is the studio's own primary free again") — judges freeness by the
+ * EXACT same rule the first pass always has, never a second, drifting copy
+ * of the null-until staleness ceiling. Deliberately does NOT take `reserved`:
+ * reservation is a boundary about WHICH studio may use an account, not about
+ * whether the account is limited, and the two callers above each apply it (or
+ * not) on their own terms.
+ */
+export function accountIsFree(a: ClaudeAccount, limits: AccountLimits, now: Date): boolean {
+  if (!(a.name in limits)) return true;
+  const { until, seenAt } = limits[a.name];
+  if (until !== null) return Date.parse(until) <= now.getTime();
+  // Review round 1 (#102 review, 2026-09-30) — see NULL_UNTIL_CEILING_MS's
+  // own doc comment: a `null` until must not blacklist an account forever.
+  return now.getTime() - Date.parse(seenAt) > NULL_UNTIL_CEILING_MS;
+}
+
+/**
+ * Issue #131 (Stage B) — the borrow second pass. Called ONLY when the first
+ * pass (`nextClaudeAccount`, above) already returned null: this studio's own
+ * chain is genuinely exhausted, not merely skipped as reserved. Considers
+ * ONLY the accounts `reserved` names (every other repo's own mapped primary
+ * — accounts.ts's own `otherRepoPrimaries`), filtered to free
+ * (`accountIsFree`, the identical rule the first pass uses), and picks the
+ * LOWEST 5h-window burn among them — not list order, unlike the first pass's
+ * forward wrap, since a borrow has no "next in line" to respect: it is
+ * picking the least-loaded account to lean on, a different question than
+ * "which account comes next".
+ *
+ * `burn` mirrors `limits`'s own "absent means nothing observed" shape: an
+ * account with no entry in it reads as 0 burn, not excluded — an account
+ * nobody has ever mirrored burn for is exactly the kind of account this pass
+ * should prefer, not skip. Ties keep the first (list-order) match, same
+ * stability rule a plain `<` comparison gives for free.
+ */
+export function nextBorrowedAccount(
+  accounts: ClaudeAccount[], reserved: Set<string>, limits: AccountLimits = {},
+  burn: Record<string, { window5hOutput: number }> = {}, now: Date = new Date(),
+): ClaudeAccount | null {
+  let best: ClaudeAccount | null = null;
+  let bestBurn = Infinity;
+  for (const a of accounts) {
+    if (!reserved.has(a.name)) continue;
+    if (!accountIsFree(a, limits, now)) continue;
+    const b = burn[a.name]?.window5hOutput ?? 0;
+    if (b < bestBurn) { bestBurn = b; best = a; }
+  }
+  return best;
 }
 
 /**
@@ -336,6 +384,26 @@ export function otherRepoPrimaries(env: ClaudeAccountEnv, ownRepo: string | null
     reserved.add(claudeAccountVarName(slot));
   }
   return reserved;
+}
+
+/**
+ * Issue #131 (Stage B) — the reverse of `otherRepoPrimaries`: which repo (if
+ * any) `CLAUDE_ACCOUNT_BY_REPO` maps `name`'s slot to. Used ONLY for naming a
+ * borrowed account in an operator-facing message (failover.ts's
+ * `borrowedMessage`) — never for a failover DECISION, which stays keyed on
+ * the `otherRepoPrimaries` SET alone. `null` for an unmapped slot, a name
+ * outside the list, or an absent/empty map — the caller then falls back to
+ * naming the account alone, same as `accountDisplay` does for an unlabelled
+ * one.
+ */
+export function repoForAccount(env: ClaudeAccountEnv, name: string): string | null {
+  const slot = slotOf(name);
+  if (slot === null) return null;
+  const map = parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO);
+  for (const [repo, s] of Object.entries(map)) {
+    if (s === slot) return repo;
+  }
+  return null;
 }
 
 /** Issue #271: auto-failover is OFF unless FLEET_AUTO_FAILOVER is exactly "on". */
