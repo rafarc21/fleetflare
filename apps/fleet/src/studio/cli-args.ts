@@ -66,7 +66,9 @@ export type CliCommand =
   // it already exists, exactly as before). Same bespoke "no value, just
   // presence" shape `destroy --force` and `recycle --discard-unsynced` use.
   | { cmd: "spawn"; role: string; newInstance: boolean }
-  | { cmd: "provision"; id: string; freshSession: boolean }
+  // Issue #115: `cancelFreshSession` — `--no-fresh-session`, mutually
+  // exclusive with `freshSession` above.
+  | { cmd: "provision"; id: string; freshSession: boolean; cancelFreshSession: boolean }
   // Issue #37: one studio, checked LIVE, right now. The container check
   // (provision.ts's provisionedCheckCmd) always tested the right things;
   // until this verb, nothing exposed it on demand, so the only way to tell a
@@ -267,8 +269,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Create a studio for <role> in the repo you are standing in (maestro, web-studio, release-studio, pilot, scratch). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them.",
   },
   provision: {
-    args: "<id> [--fresh-session]",
-    summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict. " + FRESH_SESSION_HELP,
+    args: "<id> [--fresh-session|--no-fresh-session]",
+    summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict. " + FRESH_SESSION_HELP + " Issue #115: --no-fresh-session cancels a pending fresh-session intent left armed by a PRIOR --fresh-session attempt that failed before it was confirmed — that intent otherwise keeps forcing every later provision (flagged or not) to run fresh until one finally succeeds; this call clears it explicitly and proceeds as an ordinary (non-fresh) provision. `fleet ls` shows a pending intent as \"FRESH SESSION <id>: fresh-session pending\".",
   },
   check: {
     args: "<id>",
@@ -690,12 +692,21 @@ export function parseCliArgs(argv: string[]): CliCommand {
       return usage(`unexpected ${JSON.stringify(rest[0])}`);
     }
     // Issue #28: `--fresh-session`, same bespoke flag shape as recycle's own.
+    // Issue #115: plus `--no-fresh-session` — same "each at most once,
+    // unknown flag never silently ignored" posture recycle's own two-flag
+    // parsing (below) already uses, plus the two are mutually exclusive
+    // (never both honored on the same call — see ProvisionConfig
+    // .cancelFreshSession's own doc comment).
     case "provision": {
       if (!arg || arg.startsWith("--")) return { cmd: "usage", message: CLI_USAGE };
       const rest = argv.slice(2);
-      if (rest.length === 0) return { cmd: "provision", id: arg, freshSession: false };
-      if (rest.length === 1 && rest[0] === "--fresh-session") return { cmd: "provision", id: arg, freshSession: true };
-      return usage(`unexpected ${JSON.stringify(rest[0])}`);
+      const known = ["--fresh-session", "--no-fresh-session"];
+      const stray = rest.find((f, i) => !known.includes(f) || rest.indexOf(f) !== i);
+      if (stray !== undefined) return usage(`unexpected ${JSON.stringify(stray)}`);
+      const freshSession = rest.includes("--fresh-session");
+      const cancelFreshSession = rest.includes("--no-fresh-session");
+      if (freshSession && cancelFreshSession) return usage("--fresh-session and --no-fresh-session are mutually exclusive");
+      return { cmd: "provision", id: arg, freshSession, cancelFreshSession };
     }
     // Issue #96: same bespoke shape as `destroy --force` below, same reasons.
     // Issue #28: plus `--fresh-session`, either order, each at most once.

@@ -183,6 +183,8 @@ describe("provisionWithStorage — a failed --fresh-session attempt stays pendin
     const first = await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient");
     expect(first.state).toBe("degraded");
     expect(map.get(FRESH_SESSION_PENDING_KEY)).toBe(true);
+    // Issue #115: the returned/persisted row mirrors the pending marker too.
+    expect(first.freshSessionPending).toBe(true);
 
     // 2) operator retries WITHOUT --fresh-session, exactly per the field
     // report ("retry `fleet provision <id>` (no flag)").
@@ -195,5 +197,69 @@ describe("provisionWithStorage — a failed --fresh-session attempt stays pendin
     expect(second.state).toBe("running");
     expect(second.error).toContain(ASIDE);
     expect(map.get(FRESH_SESSION_PENDING_KEY)).toBe(false);
+    expect(second.freshSessionPending).toBe(false);
+  });
+});
+
+// Issue #115: "add cancel path + show in fleet ls" — a stuck
+// FRESH_SESSION_PENDING_KEY previously had no way to be cleared other than a
+// SUCCESSFUL, CONFIRMED fresh-session attempt. `cfg.cancelFreshSession`
+// (`fleet provision <id> --no-fresh-session`) clears it explicitly, before
+// runProvision ever runs, and wins over any freshSession request also
+// present on the same call.
+describe("provisionWithStorage — cfg.cancelFreshSession clears a stuck pending intent (issue #115)", () => {
+  function mapStorage() {
+    const map = new Map<string, unknown>();
+    const storage = {
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"],
+    } as StudioStorage;
+    return { map, storage };
+  }
+
+  it("clears an armed FRESH_SESSION_PENDING_KEY UNCONDITIONALLY, before runProvision ever runs, and the retry is an ordinary (non-fresh) call", async () => {
+    const { d, calls } = deps("");
+    const { map, storage } = mapStorage();
+    // Arm the marker directly, as a prior failed --fresh-session attempt would.
+    await storage.put(FRESH_SESSION_PENDING_KEY, true);
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", cancelFreshSession: true }, "example-org/acmeclient",
+    );
+
+    expect(calls.map((c) => c.cmd)).toContain(ADOPT_CMD);
+    expect(calls.find((c) => c.cmd === BRINGUP_CMD)!.env).not.toHaveProperty("FLEET_FRESH_SESSION");
+    expect(status.state).toBe("running");
+    expect(map.get(FRESH_SESSION_PENDING_KEY)).toBe(false);
+    expect(status.freshSessionPending).toBe(false);
+  });
+
+  it("cancelling an already-clear pending intent is a safe no-op", async () => {
+    const { d, calls } = deps("");
+    const { map, storage } = mapStorage();
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", cancelFreshSession: true }, "example-org/acmeclient",
+    );
+
+    expect(calls.map((c) => c.cmd)).toContain(ADOPT_CMD);
+    expect(status.state).toBe("running");
+    expect(map.get(FRESH_SESSION_PENDING_KEY)).toBe(false);
+    expect(status.freshSessionPending).toBe(false);
+  });
+
+  it("cancel wins over freshSession also present on the same call — never both honored", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { map, storage } = mapStorage();
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true, cancelFreshSession: true }, "example-org/acmeclient",
+    );
+
+    expect(calls.map((c) => c.cmd)).toContain(ADOPT_CMD);
+    expect(calls.find((c) => c.cmd === BRINGUP_CMD)!.env).not.toHaveProperty("FLEET_FRESH_SESSION");
+    expect(status.state).toBe("running");
+    expect(map.get(FRESH_SESSION_PENDING_KEY)).toBe(false);
+    expect(status.freshSessionPending).toBe(false);
   });
 });
