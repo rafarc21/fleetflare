@@ -200,8 +200,11 @@ export function nextClaudeAccount(
   if (idx < 0 || accounts.length === 0) return null;
   const isFree = (a: ClaudeAccount): boolean => {
     if (!(a.name in limits)) return true;
-    const { until } = limits[a.name];
-    return until !== null && Date.parse(until) <= now.getTime();
+    const { until, seenAt } = limits[a.name];
+    if (until !== null) return Date.parse(until) <= now.getTime();
+    // Review round 1 (#102 review, 2026-09-30) — see NULL_UNTIL_CEILING_MS's
+    // own doc comment: a `null` until must not blacklist an account forever.
+    return now.getTime() - Date.parse(seenAt) > NULL_UNTIL_CEILING_MS;
   };
   for (let step = 1; step < accounts.length; step++) {
     const candidate = accounts[(idx + step) % accounts.length];
