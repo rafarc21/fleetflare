@@ -72,6 +72,12 @@ export function isSpawnTokenShaped(raw: string | null): raw is string {
 // and the test suite reference the SAME number rather than a re-typed copy.
 export const DEFAULT_MAX_STUDIOS = 100;
 
+/** Issue #81: what the cap counts. A `stopped` row (destroy keeps it) runs no
+ *  container; 62 of them held a fleet at 100/100 with 3 studios running. */
+export function liveStudioCount(rows: StudioStatus[]): number {
+  return rows.filter((r) => r.state !== "stopped").length;
+}
+
 /**
  * Parses `env.MAX_STUDIOS` into the fleet-wide studio cap. Defensive by
  * design, same posture as every other env-sourced numeric this codebase
@@ -433,9 +439,10 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
   // is strictly better than the old failure mode (max_instances refusing the
   // CONTAINER produced a degraded studio, not a clean rejection) — this
   // check is what makes that the normal case again, not just the rare one.
-  if (rows.length >= deps.maxStudios) {
+  const live = liveStudioCount(rows);
+  if (live >= deps.maxStudios) {
     return new Response(
-      `fleet is at capacity (${rows.length}/${deps.maxStudios} studios) — cannot spawn "${child.full}"`,
+      `fleet is at capacity (${live}/${deps.maxStudios} live studios) — cannot spawn "${child.full}"`,
       { status: 409 },
     );
   }

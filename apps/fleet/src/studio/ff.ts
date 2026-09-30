@@ -125,7 +125,7 @@ export const FF_DEFAULT_BOUNDARIES =
 /** The full brief `ff <role> "<task>"` files. Pure, so the exact wording that
  *  lands on a real issue is the wording a test asserts on. */
 export function ffTaskBrief(task: string, assignee: string): {
-  title: string; objective: string; outputFormat: string; boundaries: string; assignee: string;
+  title: string; objective: string; outputFormat: string; boundaries: string; assignee: string; pendingSpawn: true;
 } {
   return {
     title: task,
@@ -133,6 +133,8 @@ export function ffTaskBrief(task: string, assignee: string): {
     outputFormat: FF_DEFAULT_OUTPUT,
     boundaries: FF_DEFAULT_BOUNDARIES,
     assignee,
+    // Issue #81: filed before its studio exists; the Worker allows that here.
+    pendingSpawn: true,
   };
 }
 
