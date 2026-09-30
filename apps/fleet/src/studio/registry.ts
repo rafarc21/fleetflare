@@ -274,6 +274,29 @@ export function withAccountDisplay(env: Env, row: StudioStatus): StudioStatus {
   return { ...row, claudeAccount: "?", claudeAccountNext: next.name };
 }
 
+/**
+ * Issue #107 fix-first: one studio's row, or null if it has never been
+ * written. Used by profile.ts's getStudioStub to find a RECORDED DO class
+ * without a full-table scan — listStudios (below) reads every row; this
+ * reads one, by primary key, the same D1 `.first()` idiom src/state.ts's
+ * getFlag already uses. A malformed row is treated the same as absent
+ * (null) — same "one bad row must not become a hard failure" posture
+ * listStudios already takes for the whole-table case, just at N=1.
+ */
+export async function getStudioRow(env: Env, id: string): Promise<StudioStatus | null> {
+  const row = await env.DB
+    .prepare(`SELECT value FROM fleet_state WHERE key = ?`)
+    .bind(studioKey(id))
+    .first<{ value: string }>();
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value) as StudioStatus;
+  } catch (err) {
+    console.error(`getStudioRow: malformed fleet_state row for ${id}`, err);
+    return null;
+  }
+}
+
 export async function listStudios(env: Env, now: Date = new Date()): Promise<StudioStatus[]> {
   const res = await env.DB
     .prepare(`SELECT value FROM fleet_state WHERE key LIKE ? ORDER BY key ASC`)

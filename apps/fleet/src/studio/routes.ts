@@ -12,7 +12,7 @@
 import type { Env } from "../env";
 import { verifyAccess } from "./auth";
 import { parseStudioId } from "./ids";
-import { getStudioStub } from "./profile";
+import { getStudioStub, getStudioStubForRow, doClassForRole } from "./profile";
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { TERMINAL_PATH } from "./terminal";
 import { PASTE_MIME_EXT, PASTE_MAX_BYTES } from "./paste";
@@ -110,7 +110,7 @@ async function renderStudioGrid(env: Env): Promise<Response> {
     studios.map(async (s): Promise<GridCard> => {
       let preview = "";
       try {
-        const stub = getStudioStub(env, s.id);
+        const stub = getStudioStubForRow(env, s);
         preview = scrubPreview(await stub.getTranscriptTail());
       } catch (err) {
         console.error(`grid: transcript tail read failed for ${s.id}`, err);
@@ -220,7 +220,7 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
     // it introduces no new way for a spawn to fail.
     provisionChild: async (childId: string, cfg: ProvisionConfig) => {
       const projectCard = await resolveProjectCard(env, cfg.repo);
-      const stub = getStudioStub(env, childId);
+      const stub = getStudioStubForRow(env, { id: childId, doClass: doClassForRole(cfg.role) });
       return stub.provision(projectCard === null ? cfg : { ...cfg, projectCard });
     },
     resolveBrief,
@@ -231,7 +231,7 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
     // studio needs waking. runSpawn already guards the maestro-spawning-
     // itself case and swallows a failure, so nothing is re-checked here.
     notifyMaestro: async (studioId: string, prompt: string) => {
-      const outcome = await getStudioStub(env, studioId).wakeStudio(prompt);
+      const outcome = await (await getStudioStub(env, studioId)).wakeStudio(prompt);
       logWakeOutcome(`spawn: maestro wake (${studioId})`, outcome);
     },
     maxStudios: resolveMaxStudios(env.MAX_STUDIOS),
@@ -403,7 +403,7 @@ export async function handleStudio(
   const id = parseStudioId(rawId);
   if (!id) return new Response("bad studio id", { status: 400 });
 
-  const stub = getStudioStub(env, id.full);
+  const stub = await getStudioStub(env, id.full);
 
   if (action === "status" && req.method === "GET") {
     return Response.json(burnView(await stub.getStatusDetail()));

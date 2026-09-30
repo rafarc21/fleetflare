@@ -1,38 +1,55 @@
 import type { Env } from "../env";
 import { parseStudioId } from "./ids";
+import { getStudioRow } from "./registry";
+import type { StudioStatus } from "./types";
+// The pure role->class functions live in their own Env-free module — see
+// that file's own header for why: provision.ts needs doClassForRole without
+// pulling this file's Env/registry.ts import chain into the `cli`/`bun`
+// type-check project. Re-exported here so every EXISTING consumer of this
+// file (test/studio.profile.test.ts, routes.ts) keeps importing them from
+// "./profile" unchanged.
+import { isBigProfileRole, doClassForRole, BIG_PROFILE_ROLES } from "./container-class";
 
-// Issue #107 (#70 ask 3): container instance_type is fixed per Durable
-// Object CONTAINER CLASS at deploy time (wrangler.jsonc containers[]) — see
-// blueprint.ts's Role.instance_type doc comment for the full ruling. This is
-// the actual per-role selection that ruling says is missing: a role in this
-// set provisions into the STUDIO_BIG container class instead of the default
-// STUDIO one. release-studio is first because it runs heavy local-ci gates
-// (full test suite + bundler builds) and hits the memory ceiling — see
-// docs/superpowers/specs/2026-09-25-release-studio-ci-steward-design.md.
-export const BIG_PROFILE_ROLES: ReadonlySet<string> = new Set(["release-studio"]);
+export { BIG_PROFILE_ROLES, isBigProfileRole, doClassForRole };
 
-/** True when `role` provisions into the bigger container class. */
-export function isBigProfileRole(role: string): boolean {
-  return BIG_PROFILE_ROLES.has(role);
+/**
+ * The DO namespace a studio routes through, given its RECORDED class.
+ * `row.doClass` absent means STUDIO, unconditionally — never re-derived
+ * from role (see StudioStatus.doClass). Falls back to `env.STUDIO`, logged,
+ * when `env.STUDIO_BIG` itself is missing from Env (an older/forked fleet
+ * config, or local `wrangler dev` before the operator adds the binding) —
+ * a routing helper must degrade, never throw, when a binding it wants isn't
+ * there yet.
+ */
+export function studioNamespace(env: Env, row: Pick<StudioStatus, "id" | "doClass">): Env["STUDIO"] {
+  if (row.doClass === "STUDIO_BIG") {
+    if (env.STUDIO_BIG) return env.STUDIO_BIG;
+    console.warn(`profile: studio ${row.id} is recorded STUDIO_BIG but env.STUDIO_BIG is unset -- falling back to STUDIO`);
+  }
+  return env.STUDIO;
+}
+
+/** The DO stub for a row you already have in hand — no extra read. Use this
+ *  when the caller already fetched/built the StudioStatus row (the grid
+ *  renderer, a fresh spawn that knows its own role). */
+export function getStudioStubForRow(env: Env, row: Pick<StudioStatus, "id" | "doClass">): ReturnType<Env["STUDIO"]["get"]> {
+  const ns = studioNamespace(env, row);
+  return ns.get(ns.idFromName(row.id));
 }
 
 /**
- * The DO namespace a studio id's role routes through — env.STUDIO_BIG for a
- * BIG_PROFILE_ROLES role, env.STUDIO otherwise. An id that fails to parse
- * (defensive only — every real caller already validates the id first) falls
- * back to the default namespace rather than throwing: this is a routing
- * helper, not a validator.
+ * The DO stub for a bare studio id — looks up its registry row for the
+ * RECORDED class. A row that does not exist at all (this id has never been
+ * provisioned, ever) is the ONE case a fresh role-based class is chosen —
+ * there is no existing container identity to protect yet, and this is
+ * exactly the value provision.ts's freshStatus is about to independently
+ * compute (same pure function, same input, guaranteed to agree — see that
+ * function's own comment). Every other case (row exists, doClass present OR
+ * absent) uses the recorded value, never role.
  */
-export function studioNamespace(env: Env, id: string): Env["STUDIO"] {
+export async function getStudioStub(env: Env, id: string): Promise<ReturnType<Env["STUDIO"]["get"]>> {
+  const row = await getStudioRow(env, id);
+  if (row) return getStudioStubForRow(env, row);
   const parsed = parseStudioId(id);
-  return parsed && isBigProfileRole(parsed.role) ? env.STUDIO_BIG : env.STUDIO;
-}
-
-/** The DO stub for a studio id — routes through studioNamespace above.
- *  Replaces the `env.STUDIO.get(env.STUDIO.idFromName(id))` one-liner that
- *  used to appear at every call site; now every call site routes through
- *  this one function instead of hardcoding env.STUDIO. */
-export function getStudioStub(env: Env, id: string): ReturnType<Env["STUDIO"]["get"]> {
-  const ns = studioNamespace(env, id);
-  return ns.get(ns.idFromName(id));
+  return getStudioStubForRow(env, { id, doClass: doClassForRole(parsed?.role ?? "") });
 }

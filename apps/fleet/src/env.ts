@@ -23,8 +23,15 @@ export interface Env {
    * this file already has). profile.ts's studioNamespace/getStudioStub are
    * the ONLY code that should read this binding directly — every other call
    * site routes through those instead of naming STUDIO/STUDIO_BIG itself.
+   *
+   * Issue #107 fix-first (operator, 2026-09-30): OPTIONAL, genuinely — an
+   * older/forked fleet config's wrangler.jsonc can predate this binding
+   * entirely, or a local `wrangler dev` may not have added it yet.
+   * profile.ts's studioNamespace falls back to `env.STUDIO` (with a
+   * console.warn) whenever it needs this binding and finds it missing,
+   * rather than throwing — see that function's own doc comment.
    */
-  STUDIO_BIG: DurableObjectNamespace<StudioDO>;
+  STUDIO_BIG?: DurableObjectNamespace<StudioDO>;
   /** P2 transcript/session archival (src/studio/archive.ts owns the key
    * formats; shipping/sync loops are later tasks). Private — raw terminal
    * bytes, never scrubbed (see archive.ts's header). */

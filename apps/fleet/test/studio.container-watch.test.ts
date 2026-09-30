@@ -106,7 +106,7 @@ describe("watchStoppedContainers (issue #95 cron fan-out)", () => {
     const probed: string[] = [];
     await watchStoppedContainers(
       [status({ id: "a--maestro" }), status({ id: "b--pilot", state: "running" }), status({ id: "c--web-studio" })],
-      async (id) => { probed.push(id); },
+      async (s) => { probed.push(s.id); },
     );
     expect(probed).toEqual(["a--maestro", "c--web-studio"]);
   });
@@ -115,7 +115,7 @@ describe("watchStoppedContainers (issue #95 cron fan-out)", () => {
     const probed: string[] = [];
     await watchStoppedContainers(
       [status({ id: "a--maestro" }), status({ id: "c--web-studio" })],
-      async (id) => { probed.push(id); if (id === "a--maestro") throw new Error("DO unreachable"); },
+      async (s) => { probed.push(s.id); if (s.id === "a--maestro") throw new Error("DO unreachable"); },
     );
     expect(probed).toEqual(["a--maestro", "c--web-studio"]);
   });

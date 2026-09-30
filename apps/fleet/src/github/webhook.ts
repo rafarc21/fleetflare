@@ -167,7 +167,7 @@ async function wakeMaestro(env: Env, event: string, body: string, now: number): 
     // own pair of flags: a redundant write of "0" is free, and this is what
     // makes the NEXT stop episode log again instead of a permanent mute.
     await setFlag(env.DB, skipKey, "0", now);
-    const outcome = await getStudioStub(env, studioId).wakeStudio(digest);
+    const outcome = await (await getStudioStub(env, studioId)).wakeStudio(digest);
     logWakeOutcome(`maestro wake (${studioId})`, outcome);
   } catch (err) {
     console.error(`maestro wake threw (${studioId})`, err);
@@ -264,7 +264,7 @@ async function wakeTaskOnComment(env: Env, body: string): Promise<void> {
         // that omits it) must normalize to `null`, not `undefined`.
         return row ? { state: row.state, repoSlug: row.repoSlug ?? null } : null;
       },
-      wake: (id, prompt) => getStudioStub(env, id).wakeStudioOnAssignment(prompt),
+      wake: async (id, prompt) => (await getStudioStub(env, id)).wakeStudioOnAssignment(prompt),
       resolveCanonicalRepo: async (slug) => resolveCanonicalRepoName(await mint(slug), slug),
     };
     const task = { number: issue.number, title: issue.title, repo };

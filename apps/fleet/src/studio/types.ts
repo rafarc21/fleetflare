@@ -5,6 +5,10 @@ import type { SessionGuard, BurnPersistError } from "./session-sync";
 
 export type StudioState = "provisioning" | "running" | "degraded" | "stopped";
 
+/** Issue #107 fix-first: which StudioDO container class a studio's
+ *  container actually lives in. */
+export type StudioDOClass = "STUDIO" | "STUDIO_BIG";
+
 /**
  * Fleet ls readiness fix ("a dead studio looks alive" — P5a Task 5's
  * Finding 2, live-measured: 3 of 4 studios bare, `fleet ls` showed every one
@@ -34,6 +38,23 @@ export interface StudioStatus {
   tailscaleHost: string | null;
   lastRefresh: string | null;
   error: string | null;
+  /**
+   * Issue #107 fix-first (operator, 2026-09-30): the DO container class
+   * this studio's container was ACTUALLY created under. Recorded exactly
+   * ONCE, by provision.ts's freshStatus, at the moment this id's row is
+   * first ever written — never recomputed from the role name on any later
+   * read. This is load-bearing, not cosmetic: STUDIO and STUDIO_BIG are
+   * separate Durable Object namespaces, so re-deriving "which namespace
+   * does this role belong to today" on every request would silently route
+   * an already-running studio (created before this field existed, or
+   * before its role was added to profile.ts's BIG_PROFILE_ROLES) to a
+   * brand-new, empty DO in the other namespace the moment the role-set
+   * changes — orphaning the real one. Absent (every row written before
+   * this field existed) means "STUDIO", matching exactly what that studio
+   * already is. See profile.ts's studioNamespace/getStudioStub for the
+   * read side, and freshStatus for the one write site.
+   */
+  doClass?: StudioDOClass;
   /**
    * Review round 1, C2: `state`/`error` are a SHARED channel — provision
    * and restart write the same fields the GitHub token refresh loop does,

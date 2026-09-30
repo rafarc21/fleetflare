@@ -8,7 +8,7 @@ import { staleTasks, rearmKey, alertedKey, shouldAlert } from "./tasks/watchdog"
 import type { TaskRecord } from "./tasks/loop";
 import { handleStudio, handleFleetSpawn } from "./studio/routes";
 import { listStudios } from "./studio/registry";
-import { getStudioStub } from "./studio/profile";
+import { getStudioStubForRow } from "./studio/profile";
 import { isWatchMinute, watchStoppedContainers } from "./studio/container-watch";
 import { handleBoard, handleFleetBoard } from "./board/routes";
 import { handleMemory } from "./memory/routes";
@@ -176,7 +176,7 @@ export default {
     if (isWatchMinute(controller.scheduledTime ?? Date.now())) {
       try {
         await watchStoppedContainers(
-          await listStudios(env), (id) => getStudioStub(env, id).watchContainer(),
+          await listStudios(env), (s) => getStudioStubForRow(env, s).watchContainer(),
         );
       } catch (err) {
         console.error("container watch sweep failed", err);

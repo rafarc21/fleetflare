@@ -483,7 +483,7 @@ function realAssignWake(env: Env): AssignWakeDeps {
       // own doc comment already documents for this exact ambiguity.
       return row ? { state: row.state, repoSlug: row.repoSlug ?? null } : null;
     },
-    wake: (studioId, prompt) => getStudioStub(env, studioId).wakeStudioOnAssignment(prompt),
+    wake: async (studioId, prompt) => (await getStudioStub(env, studioId)).wakeStudioOnAssignment(prompt),
     // Issue #284 round 2 (issue #268's own fix, reused): GitHub's canonical
     // owner/name for a possibly-stale `repoSlug` — see assign-wake.ts's
     // `AssignWakeDeps.resolveCanonicalRepo` for why a live lookup, not a
