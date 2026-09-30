@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   resolveClaudeAccounts, nextClaudeAccount, claudeAccountToken, accountsTried, earliestAccountReset,
   MAX_CLAUDE_ACCOUNTS, claudeAccountVarName, otherRepoPrimaries, nextBorrowedAccount, repoForAccount,
+  accountIsFree,
   type ClaudeAccount,
 } from "../src/studio/accounts";
 import {
@@ -23,7 +24,7 @@ import { STUDIO_TMUX } from "../src/studio/tmux";
 // opposed to this file's own MODAL_PANE, a select-style modal) — reused from
 // the shared fixture set rather than a second, drifting copy of the same
 // pane shape.
-import { SESSION_LIMIT_LOGIN_HINT_PANE as INLINE_LIMIT_PANE, WEEKLY_LIMIT_PANE } from "./fixtures/rate-limit-panes";
+import { SESSION_LIMIT_LOGIN_HINT_PANE as INLINE_LIMIT_PANE, WEEKLY_LIMIT_PANE, ORG_DISABLED_PANE } from "./fixtures/rate-limit-panes";
 
 // ---------------------------------------------------------------------------
 // Issue #53 — fail over to a second account when one is exhausted.
@@ -242,6 +243,27 @@ describe("nextClaudeAccount", () => {
 
   it("an account name no longer in the secrets has no next — degrade, never wrap to the start", () => {
     expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN_7")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------
+  // Issue #141 — a `dead` account (org disabled subscription access) must
+  // NEVER become eligible again, unlike a plain null-until entry, which the
+  // review-round-1 fix just above deliberately DOES let clear after 24h. This
+  // is the core regression this feature must never allow.
+  // -------------------------------------------------------------------
+  it("issue #141: a dead account stays excluded PAST the 24h null-until ceiling — no auto-expiry", () => {
+    const now = new Date("2026-09-23T14:00:00.000Z");
+    const seenAt = new Date(now.getTime() - 25 * 60 * 60_000).toISOString(); // 25h ago
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN: { until: null, seenAt, dead: true as const } };
+    expect(accountIsFree(accounts[0], limits, now)).toBe(false);
+  });
+
+  it("issue #141: nextClaudeAccount finds nowhere to go when the only other account is dead", () => {
+    const now = new Date("2026-09-23T14:00:00.000Z");
+    const limits = {
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: null, seenAt: now.toISOString(), dead: true as const },
+    };
+    expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN", limits, now)).toBeNull();
   });
 
   // -------------------------------------------------------------------
@@ -537,8 +559,9 @@ interface Harness {
   setPane(stdout: string): void;
   /** Issue #102: the fleet-wide fake `accountLimits` store, exposed so a test
    *  can seed another account as ALREADY limited (fleet-wide, from some other
-   *  studio's own sighting) before running this one. */
-  accountLimits: Map<string, { until: string | null; seenAt: string }>;
+   *  studio's own sighting) before running this one. Issue #141: `dead` rides
+   *  along too, so a test can seed/observe a permanently-dead entry. */
+  accountLimits: Map<string, { until: string | null; seenAt: string; dead?: true }>;
   /** Issue #131 (Stage B): how many times `deps.accountBurn.read` was called
    *  — the mutation-style proof that the borrow second pass is never even
    *  consulted when the first pass already found somewhere to go. */
@@ -582,7 +605,7 @@ function harness(opts: {
   let relaunches = 0;
   let accountBurnReads = 0;
   const storage = fakeStorage(opts.initial ?? status()) as StudioStorage & ObservedStorage;
-  const accountLimits = new Map<string, { until: string | null; seenAt: string }>(
+  const accountLimits = new Map<string, { until: string | null; seenAt: string; dead?: true }>(
     Object.entries(opts.accountLimits ?? {}).map(([name, until]) => [name, { until, seenAt: NOW.toISOString() }]),
   );
   const h: Harness = {
@@ -601,8 +624,8 @@ function harness(opts: {
       now: () => opts.now ?? NOW,
       accountLimits: {
         read: async () => Object.fromEntries(accountLimits),
-        write: async (name: string, until: string | null, seenAt: string) => {
-          accountLimits.set(name, { until, seenAt });
+        write: async (name: string, until: string | null, seenAt: string, dead?: true) => {
+          accountLimits.set(name, { until, seenAt, ...(dead ? { dead: true as const } : {}) });
         },
       },
       accountBurn: {
@@ -704,6 +727,50 @@ describe("runAccountFailover — (a) a pane showing the rate-limit modal trigger
     expect(out.kind).toBe("no-modal");
     expect(h.execs.filter((c) => c.includes("respawn-pane"))).toHaveLength(1);
     expect(h.relaunches).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #141 — a pane showing the org-disabled-subscription message marks the
+// FROM account dead (fleet-wide, no auto-expiry) and switches off it exactly
+// the way an exhausted account does — the same switch pipeline, no parallel
+// one.
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — issue #141: a dead account (org disabled subscription access) is marked dead and switched off", () => {
+  it("switches to the second account, and marks the FROM account dead fleet-wide", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(ORG_DISABLED_PANE) });
+    const out = await run(h);
+
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toMatchObject({ dead: true });
+  });
+
+  it("never auto-expires: a LATER tick, 30 days on, still refuses to wrap back onto the dead account", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(ORG_DISABLED_PANE) });
+    await run(h); // marks CLAUDE_CODE_OAUTH_TOKEN dead, switches to CLAUDE_CODE_OAUTH_TOKEN_2
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toMatchObject({ dead: true });
+
+    // 30 days later, the studio (now on CLAUDE_CODE_OAUTH_TOKEN_2) hits its
+    // own limit and would ordinarily wrap back to CLAUDE_CODE_OAUTH_TOKEN. A
+    // plain null-until entry would have cleared long ago
+    // (NULL_UNTIL_CEILING_MS, 24h) — a dead one must not, so there is nowhere
+    // left to go at all.
+    const later = new Date(NOW.getTime() + 30 * 24 * 60 * 60_000);
+    const h2 = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(MODAL_PANE),
+      now: later,
+      initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }),
+    });
+    // Share the same fleet-wide store the first tick wrote.
+    h2.deps.accountLimits!.read = () => h.deps.accountLimits!.read();
+    const out2 = await run(h2);
+
+    expect(out2).toEqual({ kind: "exhausted", tried: ["CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_2"] });
+    // The dead entry itself must still read back dead — this tick's own
+    // write (keyed to its OWN current account, CLAUDE_CODE_OAUTH_TOKEN_2)
+    // must never have touched or cleared it.
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toMatchObject({ dead: true });
   });
 });
 
