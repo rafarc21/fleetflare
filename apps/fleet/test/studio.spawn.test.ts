@@ -1588,6 +1588,35 @@ describe("getStudioStub — issue #107 orphan-risk fix (recorded doClass wins ov
     const stub = await getStudioStub(testEnv, id) as unknown as { marker: string; id: string };
     expect(stub.marker).toBe("big");
   });
+
+  // Issue #136: the fourth instance of the #107 orphan-risk class, caught in
+  // that PR's own review. getStudioRow (and, before this fix, getStudioStub
+  // through it) returns the SAME null for "never provisioned" and "has a
+  // row, but it's malformed JSON and unreadable" -- so a malformed row used
+  // to fall into getStudioStub's "never provisioned" branch and get a FRESH,
+  // role-derived doClass via realDoClassForRole, which resolves STUDIO_BIG
+  // for a release-studio id whenever env.STUDIO_BIG is bound. That is wrong:
+  // the malformed row might belong to a studio that has actually been
+  // running under STUDIO all along, and a role-derived guess could orphan it
+  // exactly the way #107 closed for the "row absent"/"row recorded" cases.
+  // Same raw-SQL-insert technique the malformed-row tests in
+  // studio.registry.test.ts already use; same fakeMarkedNamespace stub-
+  // identity technique this file's own getStudioStub tests above already
+  // established, so STUDIO and STUDIO_BIG resolve to distinguishable
+  // markers. Confirmed genuinely RED before the fix: getStudioStub used to
+  // resolve marker "big" here, since the real test env has STUDIO_BIG bound.
+  it("a malformed release-studio row routes to STUDIO, never STUDIO_BIG, even when STUDIO_BIG is bound", async () => {
+    const testEnv = { ...env, STUDIO: fakeMarkedNamespace("default"), STUDIO_BIG: fakeMarkedNamespace("big") } as unknown as Env;
+    const id = "acme--release-studio";
+    await env.DB
+      .prepare(`INSERT INTO fleet_state (key, value, ts) VALUES (?, ?, ?)`)
+      .bind(`studio:${id}`, "{not valid json", Date.now())
+      .run();
+
+    const stub = await getStudioStub(testEnv, id) as unknown as { marker: string; id: string };
+    expect(stub.marker).toBe("default");
+    expect(stub.id).toBe(id);
+  });
 });
 
 // Issue #107 fix-first round 2 — the batched-rollout scenario the whole
