@@ -21,6 +21,7 @@ import {
   archiveDoneRecords, doneRecordsListCmd, type DoneRecordPorts,
   DONE_RECORD_HASHES_KEY, type DoneRecordHashStorage,
   mirrorBurnToRegistry, checkAndRecordReadiness, syncSessionCycle, clearSessionGuard, RECYCLE_REFUSED_PREFIX,
+  clearForceMappedAccount,
 } from "../src/studio/do";
 import {
   sessionLatestKey, sessionDailyKey, SESSION_SINGLE_READ_MAX, SESSION_SPLIT_PART,
@@ -3870,6 +3871,68 @@ describe("recycleWithSync — sync before rescue-push before destroy, destroy be
     expect(recorded).toHaveLength(1);
     expect(recorded[0].state).toBe("degraded");
     expect(recorded[0].error).toContain("never became ready");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review round 2 (maestro review of PR #135), finding 5a — the existing
+// `--account mapped` tests (studio.account-launched.test.ts) only pin SOURCE
+// ORDER: that `cfg.forceMappedAccount` is checked, and `clearForceMappedAccount`
+// called, before recycle()'s first `launchAccountOrRefuse(` call. None of
+// them actually drive recycleWithSync's own pre-destroy rescue/sync phase
+// (containerAnswers/syncSessionTick/rescuePush/harvestLearnings) to prove it
+// still genuinely runs once a forced-mapped clear has landed — a mutant that
+// made `forceMappedAccount: true` silently skip that phase would sail
+// through the source-order pin untouched. This composes the same two
+// primitives `StudioDO.recycle()` itself composes — `clearForceMappedAccount`
+// first, then the real `recycleWithSync` — and reuses the EXACT assertion
+// shape the "sync before rescue-push before destroy" test above already
+// uses, so a regression here fails the identical way that one would.
+// ---------------------------------------------------------------------------
+describe("recycleWithSync — forced-mapped clear composes without skipping rescue (#131 ask 2, review round 2 finding 5a)", () => {
+  const CFG: ProvisionConfig = { repo: "websites", role: "pilot", forceMappedAccount: true };
+
+  it("rescue-push and the rest of the pre-destroy phase still run, in the same order, after the forced-mapped clear", async () => {
+    const syncDeps = fakeSyncDeps();
+    const order = syncDeps.execCalls;
+    const destroy = vi.fn(async () => { order.push("destroy"); });
+    const awaitReady = vi.fn(async () => { order.push("awaitReady"); });
+    const provisionFn = vi.fn(async (cfg: ProvisionConfig) => {
+      order.push(`provision:${cfg.repo}--${cfg.role}`);
+      return { id: STUDIO_ID, state: "running" } as StudioStatus;
+    });
+    const recordStudioFn = vi.fn(async () => {});
+    const storage = fakeCombinedStorage({
+      status: {
+        id: STUDIO_ID, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+        lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", claudeAccountMovedAt: "2026-09-29T00:00:00Z",
+        claudeAccountMovedVia: "inline", claudeAccountMovedBlock: "rate-limit",
+      },
+    });
+
+    // recycle()'s own entry-time act, gated on cfg.forceMappedAccount — run
+    // here exactly as StudioDO.recycle() runs it, before recycleWithSync.
+    await clearForceMappedAccount(storage, recordStudioFn);
+    // The clear landed (the mechanism studio.account-launched.test.ts's own
+    // primitive-composition test already pins) — the real assertion this
+    // test adds is what happens NEXT.
+    expect((await storage.get(STATUS_KEY))?.claudeAccount ?? null).toBeNull();
+
+    const result = await recycleWithSync(
+      syncDeps, storage, STUDIO_ID, destroy, awaitReady, provisionFn, recordStudioFn, CFG, noopResolveMemoryRepo, noopCommit,
+    );
+
+    // Byte-identical to the plain-recycle order the sibling test above pins
+    // — a mutant that special-cased `forceMappedAccount` to bypass any of
+    // these steps fails here, not just the source-order grep.
+    expect(order).toEqual([
+      "printf ok",
+      tarAndStatCmd(), singleReadCmd(), asideListCmd(), rescuePushCmd(CFG.repo, STUDIO_ID), harvestRecordCmd(CFG.repo, null),
+      "destroy", "awaitReady", "provision:websites--pilot",
+      provisionedCheckCmd(CFG.repo),
+    ]);
+    expect(result.state).toBe("running");
   });
 });
 
