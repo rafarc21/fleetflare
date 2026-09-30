@@ -46,6 +46,7 @@ import { closeTaskOnPromote } from "./close-action";
 import { runTaskReap, type ReapDeps, type LandedCheck } from "../studio/task-reap";
 import { runRescueGc, type RescueBranch } from "../studio/rescue-gc";
 import { listStudios } from "../studio/registry";
+import { getStudioStub } from "../studio/profile";
 import {
   isSpawnTokenShaped, resolveSpawnParent, resolveSpawnPolicy, mayDirect, SPAWN_TOKEN_HEADER,
   type SpawnParent, type SpawnPolicy,
@@ -486,7 +487,7 @@ function realAssignWake(env: Env): AssignWakeDeps {
       // own doc comment already documents for this exact ambiguity.
       return row ? { state: row.state, repoSlug: row.repoSlug ?? null } : null;
     },
-    wake: (studioId, prompt) => env.STUDIO.get(env.STUDIO.idFromName(studioId)).wakeStudioOnAssignment(prompt),
+    wake: async (studioId, prompt) => (await getStudioStub(env, studioId)).wakeStudioOnAssignment(prompt),
     // Issue #284 round 2 (issue #268's own fix, reused): GitHub's canonical
     // owner/name for a possibly-stale `repoSlug` — see assign-wake.ts's
     // `AssignWakeDeps.resolveCanonicalRepo` for why a live lookup, not a

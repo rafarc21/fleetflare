@@ -3,7 +3,7 @@ import type { RepoReach } from "../src/github/reach";
 import { env } from "cloudflare:test";
 import worker from "../src/index";
 import * as authModule from "../src/studio/auth";
-import { handleStudio, handleFleetSpawn, type BlueprintFetch } from "../src/studio/routes";
+import { handleStudio, handleFleetSpawn, spawnDeps, type BlueprintFetch } from "../src/studio/routes";
 import {
   resolveSpawnParent, isSpawnTokenShaped, resolveSpawnPolicy, runSpawn,
   resolveMaxStudios, DEFAULT_MAX_STUDIOS, readInstanceRequest,
@@ -14,11 +14,12 @@ import {
 } from "../src/studio/org";
 import { ensureSpawnToken, SPAWN_TOKEN_KEY, type SpawnTokenStorage } from "../src/studio/do";
 import {
-  provisionWithStorage, type ProvisionDeps, type StudioStorage, type RoleEnv,
+  provisionWithStorage, STATUS_KEY, type ProvisionDeps, type StudioStorage, type RoleEnv,
   type HealAttempt,
   type OperationInFlight,
 } from "../src/studio/provision";
-import { recordStudio, listStudios } from "../src/studio/registry";
+import { recordStudio, listStudios, getStudioRow } from "../src/studio/registry";
+import { getStudioStub } from "../src/studio/profile";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
 
@@ -1422,5 +1423,197 @@ describe("runSpawn -> maestro re-arm", () => {
     const maestroParent: SpawnParent = { id: "websites--maestro", repo: "websites", role: "maestro", repoSlug: "acme-org/websites" };
     expect((await runSpawn(deps, maestroParent, { role: "maestro" })).status).toBe(200);
     expect(woke).toEqual([]);
+  });
+});
+
+/** Same shape as fakeStudioNamespace() above, but its own fleet.json
+ *  declares whichever `roles` the caller passes (the module-level
+ *  FAKE_FLEET_JSON doesn't carry "release-studio" — no other test in this
+ *  file needs a BIG_PROFILE_ROLES role), and its studioFilePath fetch 404s
+ *  so provisionWithStorage falls through to the ordinary role path — a
+ *  studio.md fixture is unrelated to what this issue's routing test is
+ *  proving. */
+function fakeStudioNamespaceForRoles(roles: string[]) {
+  const storages = new Map<string, StudioStorage & SpawnTokenStorage>();
+  const provisioned: ProvisionConfig[] = [];
+  const fleetJson = JSON.stringify({ blueprint: { repo: REPO_SLUG, ref: "v1.0.0" }, roles });
+  const deps: ProvisionDeps = {
+    sbExec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+    recordStudio: (status: StudioStatus) => recordStudio(env as unknown as Env, status),
+    now: () => "2026-08-17T00:00:00.000Z",
+    fetchBlueprintFile: async (_repo: string, path: string) => {
+      if (path.endsWith("fleet.json")) return fleetJson;
+      if (path.endsWith("org.json")) return FAKE_ORG_JSON;
+      // Not-found shape isNotFoundError (provision.ts) reads for: "no such
+      // studio directory" — falls through to the role path below.
+      if (path.includes("/studios/")) throw new Error(`fetch ${path} failed (404): not found`);
+      return FAKE_ROLE_MD;
+    },
+  };
+  function storageFor(id: string): StudioStorage & SpawnTokenStorage {
+    let storage = storages.get(id);
+    if (!storage) {
+      storage = fakeStorage();
+      storages.set(id, storage);
+    }
+    return storage;
+  }
+  return {
+    idFromName: (name: string) => name as unknown as DurableObjectId,
+    get: (id: DurableObjectId) => {
+      const name = id as unknown as string;
+      const storage = storageFor(name);
+      return {
+        provision: async (cfg: ProvisionConfig) => {
+          provisioned.push(cfg);
+          await ensureSpawnToken(storage, name, deps.recordStudio);
+          return provisionWithStorage(deps, storage, cfg, REPO_SLUG);
+        },
+      } as unknown as ReturnType<Env["STUDIO"]["get"]>;
+    },
+    provisioned,
+    storageFor,
+  };
+}
+
+// Issue #107 (#70 ask 3): routes.ts's REAL spawnDeps/provisionChild — no
+// faked dispatch of its own — routed against TWO fake namespaces, one per
+// binding, so this proves the actual call path (spawnDeps -> profile.ts's
+// getStudioStub -> studioNamespace) picks env.STUDIO_BIG for a
+// release-studio child, not just that studioNamespace does so in isolation
+// (that's test/studio.profile.test.ts's job). A live container-backed DO
+// cannot be constructed under vitest-pool-workers (see fakeStudioNamespace's
+// own comment above), so both namespaces here are the same kind of fake
+// test/studio.spawn.test.ts already uses for env.STUDIO everywhere else.
+describe("spawnDeps().provisionChild — issue #107 role routing is real, not just unit-tested in isolation", () => {
+  it("a release-studio child provisions into whatever env.STUDIO_BIG is bound to, never env.STUDIO", async () => {
+    const big = fakeStudioNamespaceForRoles(["pilot", "release-studio"]);
+    const small = fakeStudioNamespaceForRoles(["pilot", "release-studio"]);
+    const testEnv = { ...env, STUDIO: small, STUDIO_BIG: big, AGENT_REPO: REPO_SLUG } as unknown as Env;
+    const { fetchFile } = fakeBlueprintFetch();
+    const deps = spawnDeps(testEnv, fetchFile, async () => ({ ok: true as const, value: "" }));
+
+    const childId = "websites--release-studio";
+    await deps.provisionChild(childId, { repo: "websites", role: "release-studio", spawnedBy: PARENT_ID });
+
+    // env.STUDIO_BIG.get(env.STUDIO_BIG.idFromName(childId)) resolves to a
+    // real stub, backed by the SAME storage `provisionChild`'s own DO-stub
+    // dispatch just wrote through — proving the routing is real, not just
+    // that the right fake object got called in isolation.
+    expect(big.get(big.idFromName(childId))).toBeTruthy();
+    const stored = (await big.storageFor(childId).get(STATUS_KEY)) as StudioStatus | undefined;
+    expect(stored?.id).toBe(childId);
+    expect(big.provisioned).toEqual([{ repo: "websites", role: "release-studio", spawnedBy: PARENT_ID }]);
+
+    // The default namespace never saw this child at all.
+    expect(small.provisioned).toEqual([]);
+    expect(await small.storageFor(childId).get(STATUS_KEY)).toBeUndefined();
+  });
+
+  it("an ordinary role's child still provisions into env.STUDIO, never env.STUDIO_BIG", async () => {
+    const big = fakeStudioNamespace();
+    const small = fakeStudioNamespace();
+    const testEnv = { ...env, STUDIO: small, STUDIO_BIG: big, AGENT_REPO: REPO_SLUG } as unknown as Env;
+    const { fetchFile } = fakeBlueprintFetch();
+    const deps = spawnDeps(testEnv, fetchFile, async () => ({ ok: true as const, value: "" }));
+
+    const childId = "websites--release";
+    await deps.provisionChild(childId, { repo: "websites", role: "release", spawnedBy: PARENT_ID });
+
+    expect(small.provisioned).toEqual([{ repo: "websites", role: "release", spawnedBy: PARENT_ID }]);
+    expect(big.provisioned).toEqual([]);
+  });
+});
+
+/** Same distinguishable-fake-namespace shape test/studio.profile.test.ts
+ *  uses for its own pure-function tests — `get` tags which namespace
+ *  served the stub, so a test can tell them apart without a real DO. */
+function fakeMarkedNamespace(marker: "default" | "big") {
+  return {
+    idFromName: (name: string) => name as unknown as DurableObjectId,
+    get: (id: DurableObjectId) => ({ marker, id: id as unknown as string }),
+  } as unknown as Env["STUDIO"];
+}
+
+// Issue #107 orphan-risk fix-first (operator, 2026-09-30): getStudioStub's
+// own async, real-D1-backed row lookup. STUDIO and STUDIO_BIG are two
+// entirely separate DO namespaces — re-deriving which one a role belongs to
+// on every read would silently re-route an ALREADY-RUNNING studio (created
+// before this field existed, or before its role joined BIG_PROFILE_ROLES)
+// to a brand-new, empty DO the moment the role-set changes, orphaning the
+// real one. These tests write real rows into the same D1 `fleet_state`
+// table recordStudio/listStudios use (via the `env` cloudflare:test binding
+// this file already shares), not a fake registry — the DB-backed lookup
+// itself is exactly what needs proving, not just the pure routing rule
+// test/studio.profile.test.ts's studioNamespace tests already cover.
+describe("getStudioStub — issue #107 orphan-risk fix (recorded doClass wins over role)", () => {
+  it("a pre-#107 release-studio row (no doClass recorded) stays on STUDIO, never STUDIO_BIG", async () => {
+    const testEnv = { ...env, STUDIO: fakeMarkedNamespace("default"), STUDIO_BIG: fakeMarkedNamespace("big") } as unknown as Env;
+    const id = "acme--release-studio";
+    // Hand-built literal, deliberately WITHOUT doClass — the exact shape a
+    // row written before this field ever existed has. (freshStatus itself
+    // never stamps doClass either, round 2 onward — see its own doc
+    // comment — but this literal is built by hand regardless, so this test
+    // does not depend on that detail either way.)
+    const preExisting: StudioStatus = {
+      id, state: "running", tailscaleHost: "acme-release.example-tailnet.ts.net",
+      lastRefresh: "2026-01-01T00:00:00.000Z", error: null, lastRefreshError: null,
+      burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+    };
+    await recordStudio(testEnv, preExisting);
+
+    const stub = await getStudioStub(testEnv, id) as unknown as { marker: string; id: string };
+    expect(stub.marker).toBe("default");
+    expect(stub.id).toBe(id);
+  });
+
+  it("a bare, never-recorded release-studio id resolves fresh to STUDIO_BIG", async () => {
+    const testEnv = { ...env, STUDIO: fakeMarkedNamespace("default"), STUDIO_BIG: fakeMarkedNamespace("big") } as unknown as Env;
+    const id = "othercorp--release-studio";
+
+    const stub = await getStudioStub(testEnv, id) as unknown as { marker: string; id: string };
+    expect(stub.marker).toBe("big");
+    expect(stub.id).toBe(id);
+  });
+
+  it("a row explicitly recorded STUDIO_BIG resolves there, even if the role later left BIG_PROFILE_ROLES", async () => {
+    const testEnv = { ...env, STUDIO: fakeMarkedNamespace("default"), STUDIO_BIG: fakeMarkedNamespace("big") } as unknown as Env;
+    const id = "acme--release-studio";
+    const recorded: StudioStatus = {
+      id, state: "running", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
+      burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null, doClass: "STUDIO_BIG",
+    };
+    await recordStudio(testEnv, recorded);
+
+    const stub = await getStudioStub(testEnv, id) as unknown as { marker: string; id: string };
+    expect(stub.marker).toBe("big");
+  });
+});
+
+// Issue #107 fix-first round 2 — the batched-rollout scenario the whole
+// round exists to close: a row written WHILE env.STUDIO_BIG is genuinely
+// undefined must stay a stable record of what actually happened (STUDIO),
+// even after an operator later deploys the real binding. Re-deriving from
+// role on every read would self-upgrade the row the moment STUDIO_BIG
+// appears and orphan the studio that has been running under STUDIO the
+// whole time.
+describe("claimStudioId -> getStudioStub across a simulated batched rollout (#107 fix-first round 2)", () => {
+  it("claimStudioId stamps an EXPLICIT STUDIO (from role+env), not just an absent field, while STUDIO_BIG is undefined", async () => {
+    const childId = "acme--release-studio";
+    const envDuringRollout = { ...env, STUDIO_BIG: undefined } as unknown as Env;
+    const { claimStudioId } = spawnDeps(envDuringRollout, async () => { throw new Error("unused"); }, async () => ({ ok: true as const, value: "" }));
+
+    const release = await claimStudioId(childId, {
+      id: childId, state: "provisioning", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+    });
+    expect(release).not.toBeNull();
+    expect((await getStudioRow(env, childId))?.doClass).toBe("STUDIO");
+
+    // The operator finally deploys the StudioBigDO binding -- a DIFFERENT
+    // env, STUDIO_BIG now present, reading the SAME row back.
+    const envAfterRollout = { ...env, STUDIO: fakeMarkedNamespace("default"), STUDIO_BIG: fakeMarkedNamespace("big") } as unknown as Env;
+    const stub = await getStudioStub(envAfterRollout, childId) as unknown as { marker: string; id: string };
+    expect(stub.marker).toBe("default"); // still STUDIO -- the row never self-upgrades
   });
 });

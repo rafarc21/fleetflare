@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { env } from "cloudflare:test";
-import { listStudios, recordStudio } from "../src/studio/registry";
+import { listStudios, recordStudio, getStudioRow } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
 import { emptyObserved } from "../src/studio/observed";
 
@@ -130,6 +130,16 @@ describe("studio registry", () => {
 
     const all = await listStudios(env);
     expect(all.map((s) => s.id)).toEqual(["websites--reg7"]);
+  });
+
+  // Same one-bad-row posture as listStudios above, at N=1: getStudioRow's
+  // own malformed-JSON branch (registry.ts) had no direct unit test.
+  it("getStudioRow returns null for a malformed row instead of throwing", async () => {
+    await env.DB
+      .prepare(`INSERT INTO fleet_state (key, value, ts) VALUES (?, ?, ?)`)
+      .bind("studio:websites--broken2", "{not valid json", Date.now())
+      .run();
+    expect(await getStudioRow(env, "websites--broken2")).toBeNull();
   });
 
   // Fleet ls readiness fix ("a dead studio looks alive"): readiness.reason

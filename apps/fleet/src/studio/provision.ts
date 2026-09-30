@@ -763,7 +763,17 @@ export interface HealAttempt {
  *  Exported since P3 Task 2: do.ts's ensureSpawnToken publishes the spawn
  *  token hash before any provisioning has run, so it may be the first thing
  *  ever to write this studio's status — and it must write the SAME defaults
- *  every other entry point does, not a hand-rolled near-copy. */
+ *  every other entry point does, not a hand-rolled near-copy.
+ *
+ *  Issue #107 fix-first round 2: deliberately does NOT stamp `doClass`.
+ *  This file is Env-free by design (see this file's own header), so it has
+ *  no way to know whether env.STUDIO_BIG is actually reachable in THIS
+ *  deploy — computing it from role alone here would risk exactly the lie
+ *  doClassForRole's own doc comment (container-class.ts) warns against. The
+ *  one caller that can genuinely be first-to-write a row, do.ts's
+ *  ensureSpawnToken, threads its own Env-aware value down as an explicit
+ *  parameter instead (see that function's own doc comment) — this only
+ *  supplies every OTHER field's zero value. */
 export function freshStatus(id: string): StudioStatus {
   return {
     id, state: "provisioning", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,

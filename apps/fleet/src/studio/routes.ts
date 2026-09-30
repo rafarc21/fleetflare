@@ -1,15 +1,18 @@
 // Carries no import of "@cloudflare/sandbox" or of do.ts's `StudioDO` VALUE
 // (a type-only reference flows through `Env`, below, and is erased at build
-// time) — it needs neither. Dispatch to the DO goes through the plain
-// `env.STUDIO.get(env.STUDIO.idFromName(...))` stub (identical to how
-// src/agents/do.ts and src/telegram/webhook.ts already call AgentDO), not
-// `getSandbox()` — confirmed equivalent for custom RPC methods; see
-// sandbox-api.ts's provenance notes, section (a). Keeping the SDK out of
-// this module also keeps it trivially importable from tests, which is how
-// every /studio/* route is covered.
+// time) — it needs neither. Dispatch to the DO goes through profile.ts's
+// `getStudioStub(env, id)` (issue #107: it, not this file, is now the one
+// place that names `env.STUDIO`/`env.STUDIO_BIG` directly — see that file's
+// header), a thin wrapper around the same `env.STUDIO.get(env.STUDIO.
+// idFromName(...))` stub shape src/agents/do.ts and src/telegram/webhook.ts
+// already use for AgentDO, not `getSandbox()` — confirmed equivalent for
+// custom RPC methods; see sandbox-api.ts's provenance notes, section (a).
+// Keeping the SDK out of this module also keeps it trivially importable
+// from tests, which is how every /studio/* route is covered.
 import type { Env } from "../env";
 import { verifyAccess } from "./auth";
 import { parseStudioId } from "./ids";
+import { getStudioStub, getStudioStubForRow, realDoClassForRole } from "./profile";
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { TERMINAL_PATH } from "./terminal";
 import { PASTE_MIME_EXT, PASTE_MAX_BYTES } from "./paste";
@@ -89,8 +92,10 @@ function redactObservedSession(observed: Observed): Observed {
  * renders it. Lives here, not grid.ts, for the same reason page.ts's own
  * render half never dispatches to a DO stub — routes.ts is this feature's
  * one file allowed to import "@cloudflare/sandbox" transitively via `Env`'s
- * type-only `StudioDO` reference and call `env.STUDIO.get(...)` (see this
- * file's own header comment).
+ * type-only `StudioDO` reference and call `getStudioStub(env, ...)` (see
+ * this file's own header comment; issue #107 moved the literal
+ * `env.STUDIO.get(...)` one-liner into profile.ts, but the transitive SDK
+ * import stays confined to this module the same way).
  *
  * Per-studio hot-tail reads are isolated with their own try/catch — the
  * same "one bad row must not fail the whole listing" posture
@@ -105,7 +110,7 @@ async function renderStudioGrid(env: Env): Promise<Response> {
     studios.map(async (s): Promise<GridCard> => {
       let preview = "";
       try {
-        const stub = env.STUDIO.get(env.STUDIO.idFromName(s.id));
+        const stub = getStudioStubForRow(env, s);
         preview = scrubPreview(await stub.getTranscriptTail());
       } catch (err) {
         console.error(`grid: transcript tail read failed for ${s.id}`, err);
@@ -215,21 +220,44 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
     // it introduces no new way for a spawn to fail.
     provisionChild: async (childId: string, cfg: ProvisionConfig) => {
       const projectCard = await resolveProjectCard(env, cfg.repo);
-      const stub = env.STUDIO.get(env.STUDIO.idFromName(childId));
+      // Issue #107 fix-first round 2: realDoClassForRole, not the blind
+      // doClassForRole — this stub resolution is env/role-dependent, and
+      // realDoClassForRole is the only function that should ever make that
+      // call (see its own doc comment). The STUB this resolves to was
+      // already correct in effect (getStudioStubForRow's own
+      // studioNamespace re-checks env.STUDIO_BIG truthiness before honoring
+      // a "STUDIO_BIG" value), but using the blind helper here was the same
+      // footgun pattern that caused the other two write-site bugs this round
+      // fixes — consistency, not a behavior change for this call site alone.
+      const stub = getStudioStubForRow(env, { id: childId, doClass: realDoClassForRole(env, cfg.role) });
       return stub.provision(projectCard === null ? cfg : { ...cfg, projectCard });
     },
     resolveBrief,
     // Phase 2, task 4: the "studio spawned" re-arm. Same DO-stub shape
-    // provisionChild uses just above, so this file stays the only place that
-    // knows a studio id resolves to a STUDIO stub. runSpawn already guards
-    // the maestro-spawning-itself case and swallows a failure, so nothing is
-    // re-checked here.
+    // provisionChild uses just above — issue #107: which STUDIO/STUDIO_BIG
+    // namespace a given id resolves to now lives in profile.ts, not here,
+    // but this is still the one place in routes.ts that knows a spawned
+    // studio needs waking. runSpawn already guards the maestro-spawning-
+    // itself case and swallows a failure, so nothing is re-checked here.
     notifyMaestro: async (studioId: string, prompt: string) => {
-      const outcome = await env.STUDIO.get(env.STUDIO.idFromName(studioId)).wakeStudio(prompt);
+      const outcome = await (await getStudioStub(env, studioId)).wakeStudio(prompt);
       logWakeOutcome(`spawn: maestro wake (${studioId})`, outcome);
     },
     maxStudios: resolveMaxStudios(env.MAX_STUDIOS),
-    claimStudioId: (_childId: string, placeholder: StudioStatus) => claimStudioRow(env, placeholder),
+    // Issue #107 fix-first round 2: this IS a first-ever write for
+    // `childId`'s row (see StudioStatus.doClass's own doc comment) —
+    // provision.ts's freshStatus is not the only site that can be. spawn.ts
+    // no longer stamps doClass itself (it has no Env — see that file's own
+    // header), so this wrapper is where the write-safe value is computed:
+    // realDoClassForRole(env, role), from the SAME role provisionChild
+    // (just above) will resolve moments later, so a reader that hits this
+    // placeholder before the DO's own write lands (getStudioRow/
+    // getStudioStub, mid-spawn) still resolves the right namespace instead
+    // of falling back to the default.
+    claimStudioId: (childId: string, placeholder: StudioStatus) => {
+      const role = parseStudioId(childId)?.role ?? "";
+      return claimStudioRow(env, { ...placeholder, doClass: realDoClassForRole(env, role) });
+    },
     // Issue #59 review round 1 (M1): resume's atomic stopped -> provisioning flip.
     claimStopped: (studioId: string) => claimStoppedRow(env, studioId),
     now: () => new Date(),
@@ -405,7 +433,7 @@ export async function handleStudio(
   const id = parseStudioId(rawId);
   if (!id) return new Response("bad studio id", { status: 400 });
 
-  const stub = env.STUDIO.get(env.STUDIO.idFromName(id.full));
+  const stub = await getStudioStub(env, id.full);
 
   if (action === "status" && req.method === "GET") {
     return Response.json(burnView(await stub.getStatusDetail()));

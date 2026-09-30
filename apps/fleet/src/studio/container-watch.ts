@@ -60,12 +60,12 @@ export async function observeContainer(
  */
 export async function watchStoppedContainers(
   studios: StudioStatus[],
-  probe: (id: string) => Promise<unknown>,
+  probe: (s: StudioStatus) => Promise<unknown>,
 ): Promise<void> {
   for (const s of studios) {
     if (s.state !== "stopped") continue;
     try {
-      await probe(s.id);
+      await probe(s);
     } catch (err) {
       console.error(`container watch failed for ${s.id}`, err);
     }

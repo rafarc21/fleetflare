@@ -1,7 +1,7 @@
 import { Sandbox } from "@cloudflare/sandbox";
 import { resolveMemoryRepo as memoryRepoFromEnv } from "../memory/store";
 import type { Env } from "../env";
-import type { ProvisionConfig, StudioStatus, StudioReadiness } from "./types";
+import type { ProvisionConfig, StudioStatus, StudioReadiness, StudioDOClass } from "./types";
 import type { SessionMark } from "./burn";
 import {
   sbExec, sbWriteFile, sbSetKeepAlive, sbAttachPty, sbAwaitReady, sbContainerBooting, EXEC_CLASSES, isDeadlineExit,
@@ -16,6 +16,12 @@ import type { QuiescenceDeps } from "./quiescence";
 import { TerminalBridge, TERMINAL_PATH } from "./terminal";
 import { recordStudio, listStudios } from "./registry";
 import { buildStudioId, parseStudioId } from "./ids";
+// Issue #107 fix-first round 2: the ONLY function that should ever decide
+// what doClass value gets WRITTEN to a row — see its own doc comment. This
+// file has full Env (no cli/bun type-check constraint applies here, unlike
+// provision.ts), so it computes the real value and threads it into
+// ensureSpawnToken below rather than letting that Env-blind call guess.
+import { realDoClassForRole } from "./profile";
 import {
   provisionWithStorage, getStatusWithStorage, restartWithStorage, freshStatus, provisionedCheckCmd, PROVISIONED_OK,
   PROVISIONED_UNKNOWN, harnessExpectation, ROLE_ENV_KEY,
@@ -3450,11 +3456,30 @@ export async function loadOrMintSpawnToken(storage: SpawnTokenStorage): Promise<
  * wrappers — mirrorBurnToRegistry above is the first, for the same reason:
  * do.ts is this feature's composition root, and stamping one field onto the
  * status is not the wrappers' read/compute/write job.
+ *
+ * Issue #107 fix-first round 2: `doClass` is this function's one other seam
+ * onto a fresh row, alongside `idFallback` — a call here may, per the
+ * paragraph above, be the very first write a studio's row ever gets, and
+ * freshStatus (provision.ts) deliberately no longer stamps doClass itself
+ * (it has no Env, so it cannot know whether env.STUDIO_BIG is actually
+ * reachable in THIS deploy — see freshStatus's own doc comment). This file
+ * DOES have Env, so its two real callers (provision(), restartStudio())
+ * compute profile.ts's realDoClassForRole(this.env, role) and pass it here.
+ * Applied ONLY when `existing` is genuinely absent (`undefined` — a fresh
+ * row, this function's own storage read moments above, not a later-arriving
+ * `existing` parameter some other caller passed in already contaminated by
+ * a prior write) — an existing row's doClass, once recorded, is never moved
+ * by a later hint,
+ * matching StudioStatus.doClass's own "never overwritten" rule. Optional,
+ * and defaulting to "don't stamp," so every pre-existing caller (test
+ * fixtures that never pass a 4th argument) keeps compiling and keeps the
+ * same safe behavior it always had.
  */
 export async function ensureSpawnToken(
   storage: SpawnTokenStorage & StudioStorage,
   idFallback: string,
   recordStudioFn: (status: StudioStatus) => Promise<void>,
+  doClass?: StudioDOClass,
 ): Promise<string> {
   const token = await loadOrMintSpawnToken(storage);
   const existing = await storage.get(STATUS_KEY);
@@ -3462,6 +3487,7 @@ export async function ensureSpawnToken(
   if (existing?.spawnTokenHash === tokenHash) return token;
   const status: StudioStatus = {
     ...(existing ?? freshStatus(idFallback)),
+    ...(existing === undefined && doClass !== undefined ? { doClass } : {}),
     spawnTokenHash: tokenHash,
   };
   await storage.put(STATUS_KEY, status);
@@ -5749,9 +5775,16 @@ export class StudioDO extends Sandbox<Env> {
     // instead of publishing a hash that container could never match. See its
     // own doc comment for why reminting could not work, and for the operator
     // rotation procedure that replaced it.
+    //
+    // Issue #107 fix-first round 2: doClass is computed here, with full Env
+    // in scope, rather than inside ensureSpawnToken/freshStatus (both
+    // deliberately Env-blind) — see realDoClassForRole's own doc comment for
+    // why a role-only guess is unsafe to persist.
+    const doClass = realDoClassForRole(this.env, cfg.role);
     const spawnToken = await ensureSpawnToken(
       this.ctx.storage, id,
       async (s: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, s)),
+      doClass,
     );
     // Issue #271: a repo mapped to an unset account refuses here, before any
     // container touch, with the reason on the row.
@@ -5959,9 +5992,18 @@ export class StudioDO extends Sandbox<Env> {
     // On the ordinary path this just reads back what provision stored; for a
     // pre-P3 studio it mints AND publishes the hash, which is the only thing
     // that lets a healed token ever authenticate a /fleet/spawn call.
+    //
+    // Issue #107 fix-first round 2: a restart's target already has a row
+    // (you restart something already provisioned), so the "fresh row" branch
+    // inside ensureSpawnToken is a genuinely degenerate case here — but the
+    // value is computed anyway, for the same safety reasoning provision()
+    // uses. No ProvisionConfig is available at this call site (a restart has
+    // only the id), so the role is read back off the id itself.
+    const doClass = realDoClassForRole(this.env, parseStudioId(id)?.role ?? "");
     const spawnToken = await ensureSpawnToken(
       this.ctx.storage, id,
       async (s: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, s)),
+      doClass,
     );
     // Issue #271: a repo mapped to an unset account refuses here, before any
     // container touch, with the reason on the row.
@@ -6820,6 +6862,16 @@ export class StudioDO extends Sandbox<Env> {
     return pasteWithStorage({ writeFile: (path, b) => sbWriteFile(this, path, b) }, this.ctx.storage, contentType, bytes);
   }
 }
+
+/**
+ * Issue #107 (#70 ask 3): identical to StudioDO in every way — same class
+ * body, zero behavior difference — except its OWN container class, so
+ * wrangler.jsonc can give it a different instance_type. profile.ts routes a
+ * BIG_PROFILE_ROLES role's studio id here instead of StudioDO. See that
+ * file's header for why a role-keyed static predicate, not this class
+ * itself, is where the actual role logic lives.
+ */
+export class StudioBigDO extends StudioDO {}
 
 /**
  * `ProvisionDeps.applyStudioGitSafety`'s body (issue #253), lifted OUT of

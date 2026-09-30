@@ -399,7 +399,12 @@ describe("the destroy race, TICK side (#100 N5)", () => {
 
 describe("spawn's notifyMaestro shares the skip-is-info rule (#100 N2)", () => {
   it("a stopped maestro's skip logs at info, never as an error", async () => {
-    const env = {
+    // Issue #107 fix-first: getStudioStub (notifyMaestro's own dispatch)
+    // now reads the registry row first, so this needs a real DB binding —
+    // `...env` supplies it (cloudflare:test's own `env`, imported above),
+    // same as every other real-D1-backed test in this file/suite.
+    const testEnv = {
+      ...env,
       STUDIO: {
         idFromName: (n: string) => n,
         get: () => ({ wakeStudio: async () => ({ ok: false, skipped: true, error: "refused: this studio is stopped" }) }),
@@ -407,7 +412,7 @@ describe("spawn's notifyMaestro shares the skip-is-info rule (#100 N2)", () => {
     } as unknown as Env;
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const infos = vi.spyOn(console, "log").mockImplementation(() => {});
-    await spawnDeps(env, vi.fn(), vi.fn()).notifyMaestro("fleetflare--maestro", "WAKE");
+    await spawnDeps(testEnv, vi.fn(), vi.fn()).notifyMaestro("fleetflare--maestro", "WAKE");
     expect(errors).not.toHaveBeenCalled();
     expect(infos.mock.calls.flat().join(" ")).toContain("stopped");
     errors.mockRestore();

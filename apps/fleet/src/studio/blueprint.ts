@@ -47,9 +47,16 @@ export interface Role {
    * nothing real to turn. Sizing a role differently means giving it its own
    * container class (a wrangler.jsonc/Dockerfile change, a deploy, and a
    * provision-time class selection this feature does not add), which is
-   * deploy-config work, not something a role file can express. See
-   * docs/superpowers/OPERATOR-FINISH-LIST.md's P3 section for the operator
-   * framing of this same ruling.
+   * deploy-config work, not something a role file can express.
+   *
+   * Issue #107 (#70 ask 3) built the actual per-role container-class
+   * selection this ruling calls missing — but as a static role-NAME
+   * predicate in `./profile.ts` (`BIG_PROFILE_ROLES`), not by reading this
+   * field. `Studio`-shaped roles (release-studio, web-studio, maestro — the
+   * directory-based ones under `blueprint/studios/`, parsed by
+   * `studio-blueprint.ts`) don't even have an `instance_type` field on their
+   * schema, so this field staying "recorded but never read" is unchanged; it
+   * remains documentation for the operator's own deploy config, nothing more.
    */
   instance_type?: string;
   /**
