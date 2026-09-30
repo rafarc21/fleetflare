@@ -497,10 +497,19 @@ export function loadPreflightCommand(repoRoot: string | null): string | null {
  * itself reads, until now). Null only when STUDIO_ID is absent — a
  * container resolveEnv's own FLEET_WORKER_URL/FLEET_SPAWN_TOKEN check would
  * already have refused before this is ever called in practice.
+ *
+ * `FLEET_REPO_ROOT_BASE` overrides the `/workspace` base itself — absent in
+ * every real container (do.ts's studioEnvVars never sets it), so production
+ * behavior is byte-for-byte unchanged. It exists purely as a test seam: a
+ * real CI runner does not grant write access to the real `/workspace`, so
+ * test/bun/studio-fleet-report-cli.test.ts, which spawns this file as a real
+ * subprocess and needs a real fleet.json on real disk, points this at a
+ * `mkdtempSync` tmpdir instead.
  */
 export function resolveRepoRoot(env: Record<string, string | undefined>): string | null {
   const studioId = env.STUDIO_ID;
-  return studioId ? `/workspace/${studioId.split("--")[0]}` : null;
+  const base = env.FLEET_REPO_ROOT_BASE ?? "/workspace";
+  return studioId ? `${base}/${studioId.split("--")[0]}` : null;
 }
 
 export interface PreflightResult {

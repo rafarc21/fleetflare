@@ -66,6 +66,11 @@ describe("resolveRepoRoot — same STUDIO_ID derivation studio-bringup.sh's own 
   test("STUDIO_ID absent -> null, never a guessed path", () => {
     expect(resolveRepoRoot({})).toBeNull();
   });
+
+  test("FLEET_REPO_ROOT_BASE overrides the /workspace base (test seam; absent in every real container)", () => {
+    expect(resolveRepoRoot({ STUDIO_ID: "fleetflare--web-studio", FLEET_REPO_ROOT_BASE: "/tmp/fake" }))
+      .toBe("/tmp/fake/fleetflare");
+  });
 });
 
 describe("loadPreflightCommand — reads fleet.json from an arbitrary repo root", () => {
