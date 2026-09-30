@@ -161,6 +161,59 @@ function formatUntil(until: Date, now: Date): string {
 }
 
 /**
+ * Issue #102 — the fleet_state (src/state.ts) key holding ONE account's
+ * fleet-wide limit sighting: written by whichever studio first sees that
+ * account limited, read by every studio's own next failover decision
+ * (accounts.ts's nextClaudeAccount) so one studio hitting a limit marks it
+ * for all, not only for its own row. Prefixed and per-account, never a single
+ * blob, so N accounts are N independent fleet_state rows — one studio's write
+ * can never race another account's.
+ */
+const ACCOUNT_LIMIT_STATE_PREFIX = "account-limit:";
+export function accountLimitStateKey(accountName: string): string {
+  return `${ACCOUNT_LIMIT_STATE_PREFIX}${accountName}`;
+}
+
+/** The value stored at accountLimitStateKey(name) — JSON, `fleet_state.value`
+ *  is TEXT. Same two fields as LimitSighting's own until/seenAt, kept
+ *  separate from that type: LimitSighting is a Durable Object's own per-block
+ *  sighting, this is D1's fleet-wide per-ACCOUNT one, and the two must never
+ *  be read as interchangeable even though their shape matches today. */
+export interface AccountLimitState {
+  /** ISO instant the limit resets, or null when the pane printed none — see
+   *  accounts.ts's AccountLimits for what null means to nextClaudeAccount. */
+  until: string | null;
+  /** When this sighting was recorded, ISO. */
+  seenAt: string;
+}
+
+export function encodeAccountLimitState(state: AccountLimitState): string {
+  return JSON.stringify(state);
+}
+
+/** `null` for a key never written, or a value that is not this shape — never
+ *  thrown: a corrupt fleet_state row must read as "not limited", not crash a
+ *  failover tick that has nothing to do with writing it. */
+export function decodeAccountLimitState(raw: string | null): AccountLimitState | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed !== "object" || parsed === null
+    || !("seenAt" in parsed) || typeof (parsed as { seenAt: unknown }).seenAt !== "string"
+    || !("until" in parsed) || !(typeof (parsed as { until: unknown }).until === "string" || (parsed as { until: unknown }).until === null)
+  ) {
+    return null;
+  }
+  const p = parsed as AccountLimitState;
+  return { until: p.until, seenAt: p.seenAt };
+}
+
+/**
  * The row's words while the limit holds:
  *   - "rate-limited until 13:30Z" — a readable reset still ahead;
  *   - "limit modal open — Esc to dismiss (ff <id>)" — a select modal, which

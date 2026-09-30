@@ -191,6 +191,33 @@ export interface StudioStatus {
    */
   claudeAccount?: string | null;
   /**
+   * Issue #102 — WHEN a completed account switch last wrote `claudeAccount`,
+   * ISO. failover.ts's own no-flapping guard reads it: an INLINE limit block
+   * (the one shape `--continue` can redraw un-guarded after a SELECT-modal
+   * switch — see runAccountFailover's own residual notes) within
+   * FLAP_GUARD_MINUTES of this timestamp is not, on its own, trusted as fresh
+   * evidence to move the studio again; a genuine select-style modal always is,
+   * since claude never redraws one of those from a resumed transcript.
+   * `null`/absent: never switched, or switched before this field existed —
+   * the guard is then simply never armed.
+   */
+  claudeAccountMovedAt?: string | null;
+  /**
+   * Issue #102 — HOW the last completed switch matched: `"modal"` for a
+   * genuine SELECT-style modal (verdict.inline falsy — never redraw-guarded,
+   * since claude can't redraw one of those from a resumed transcript), or
+   * `"inline"` for an inline limit block. The no-flapping guard fires ONLY
+   * after a `"modal"` switch: that is the one path with an UNGUARDED residual
+   * (see runAccountFailover's own doc comment) — the switched-off account's
+   * transcript can still hold an old inline message that `--continue` redraws
+   * on the very next capture, with no `failoverBlock` recorded to catch it
+   * (a select switch always writes `failoverBlock: null`). An `"inline"`
+   * switch already IS `failoverBlock`-guarded against its own redraw (the
+   * `rerender` check), so a DIFFERENT inline key after one is trusted as a
+   * genuinely new limit immediately, cooldown or not.
+   */
+  claudeAccountMovedVia?: "modal" | "inline" | null;
+  /**
    * Issue #289: the account this studio's container was actually LAUNCHED
    * on -- written when the container starts (StudioDO.onStart, from the same
    * launchAccount call that filled its CLAUDE_CODE_OAUTH_TOKEN) and by a
