@@ -14,12 +14,12 @@ function body(sig: string): string {
   return src.slice(start, src.indexOf("\n}\n", start));
 }
 
-describe("fleet destroy — both flags reach the route", () => {
-  test("cmdDestroy builds its path from BOTH flags", () => {
-    expect(body("async function cmdDestroy(")).toContain("destroyPath(force, discardUnsynced)");
+describe("fleet destroy — every flag reaches the route", () => {
+  test("cmdDestroy builds its path from every flag (issue #59 adds --park)", () => {
+    expect(body("async function cmdDestroy(")).toContain("destroyPath(force, discardUnsynced, park)");
   });
 
-  test("the dispatcher hands cmdDestroy the parsed discard flag", () => {
-    expect(src).toContain("cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced)");
+  test("the dispatcher hands cmdDestroy the parsed discard and park flags", () => {
+    expect(src).toContain("cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced, parsed.park === true)");
   });
 });

@@ -118,8 +118,8 @@
     //
     // ACCESS_TEAM_DOMAIN / ACCESS_AUD (Access JWT verification for /studio/*,
     // P1 auth.ts) intentionally NOT here. Set both with
-    // `scripts/deploy.sh secret put` instead (README's Quickstart, step
-    // 4/5) — a committed var of the same
+    // `scripts/deploy.sh secret put` instead (docs/setup.md's Quickstart,
+    // step 4/5) — a committed var of the same
     // name would collide with the secret at deploy time (wrangler rejects or
     // shadows it). Secrets are authoritative.
   },

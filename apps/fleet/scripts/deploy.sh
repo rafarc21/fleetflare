@@ -106,7 +106,7 @@ FLEET_CONFIG="${FLEET_CONFIG:-${FLEET_OPS_DIR}/fleet/wrangler.jsonc}"
 
 if [[ ! -f "$FLEET_CONFIG" ]]; then
   echo "deploy.sh: refusing to deploy — config file not found: $FLEET_CONFIG" >&2
-  echo "deploy.sh: set FLEET_CONFIG (or FLEET_OPS_DIR, whose default path this derives) to point at your real wrangler.jsonc, e.g. in a local checkout of your private ops repo. See README.md's \"Quickstart from zero\" section." >&2
+  echo "deploy.sh: set FLEET_CONFIG (or FLEET_OPS_DIR, whose default path this derives) to point at your real wrangler.jsonc, e.g. in a local checkout of your private ops repo. See docs/setup.md's \"Quickstart from zero\" section." >&2
   exit 1
 fi
 

@@ -18,10 +18,11 @@ import { SECTION_ACTIVITY_HOOK, type TranscriptStorage, type ShipDeps } from "..
 import type { StudioStatus } from "../src/studio/types";
 import { SessionBusyError } from "../src/studio/sandbox-api";
 import { readyOverride } from "../cli/readiness-format";
-import { ACTIVITY_KEY, type Activity } from "../src/studio/activity";
+import { ACTIVITY_KEY, LAST_LINE_MAX_CHARS, type Activity } from "../src/studio/activity";
 import { MEMBERS_TICKING_KEY } from "../src/studio/failover";
 import { MEMBER_ALERTS_KEY, MEMBER_ROWS_KEY, type MemberAlert } from "../src/studio/member-alerts";
 import { exhaustedMessage } from "../src/studio/failover";
+import { redactSecrets } from "../src/studio/redact";
 
 /** UTF-8 aware base64 — a pane frame carries claude's own box-drawing/emoji
  *  glyphs, which plain `btoa` throws on outright (Latin1 only). */
@@ -2057,5 +2058,93 @@ describe("runShipTickWithObservation — onLeadWorking (issue #86)", () => {
     const storage = fakeStorage({ status: status(), activity: idleBefore });
     await expect(run(WORKING_PANE, storage, async () => { throw new Error("GitHub 502"); })).resolves.toBeDefined();
     expect((storage.map.get(ACTIVITY_KEY) as Activity).state).toBe("working");
+  });
+});
+
+// Issue #108 (#70 ask 4 remainder) — Observed.lastMessageLine, extracted from
+// the SAME paneFrame the ship tick already captures every 30s, redacted at
+// this write boundary, and left alone (never reset to null) when the tick's
+// own paneFrame is absent (old image, or a exec that never reached the pane
+// section) — same "absent means don't touch it" discipline paneVerdict/
+// hookHeartbeat already follow in this file.
+describe("runShipTickWithObservation — lastMessageLine (issue #108)", () => {
+  function deps(stdout: string, now = "2026-09-25T12:00:00.000Z") {
+    return {
+      exec: vi.fn(async () => ({ code: 0, stdout, stderr: "" })),
+      r2Put: vi.fn(async () => {}),
+      now: () => new Date(now),
+    };
+  }
+
+  function paneWithMessage(msg: string): string {
+    return ["⏺ Done.", msg, "", "─".repeat(68), "❯ ", "─".repeat(68), "  ⏵⏵ bypass permissions on (shift+tab to cycle)"].join("\n");
+  }
+
+  it("a tick whose paneFrame carries a real content line stores it as lastMessageLine", async () => {
+    const storage = fakeStorage({ status: status({ id: "websites--pilot" }) });
+    const msg = "Fixed the auth bug, tests are green now.";
+    await runShipTickWithObservation(deps(stdoutWithPane(paneWithMessage(msg))), storage, "websites--pilot", undefined, 5000);
+    const observed = await getObserved(storage);
+    expect(observed.lastMessageLine).toBe(msg);
+  });
+
+  it("a secret-shaped token in the last content line is redacted before it is stored, never the raw secret", async () => {
+    const storage = fakeStorage({ status: status({ id: "websites--pilot" }) });
+    const msg = "Pushed with token ghs_abcdEFGH1234 to remote.";
+    await runShipTickWithObservation(deps(stdoutWithPane(paneWithMessage(msg))), storage, "websites--pilot", undefined, 5000);
+    const observed = await getObserved(storage);
+    expect(observed.lastMessageLine).toBe(redactSecrets(msg));
+    expect(observed.lastMessageLine).not.toContain("ghs_");
+    expect(observed.lastMessageLine).toContain("«redacted»");
+  });
+
+  // Finding 1 (post-ship code review) — redact FIRST, truncate SECOND. Mirrors
+  // grid.ts's own scrubPreview, which redacts the full tail before slicing
+  // specifically so a secret straddling the slice boundary is still caught
+  // whole (see that function's own doc comment). Truncating first, as the
+  // original code did, is only accidentally safe today because every
+  // redact.ts pattern is an open-ended quantifier (`[A-Za-z0-9_-]+` etc) — a
+  // future FIXED-length secret shape could leak a partial token through this
+  // exact field. This fixture positions a secret-shaped token so the naive
+  // "truncate then redact" order slices INSIDE the token, well before its
+  // real end, permanently dropping the real trailing prose (" end") and
+  // stamping a misleading "…" where no genuine truncation was needed — the
+  // fixed order redacts the full untruncated line first (collapsing the
+  // 207-char token down to the short "«redacted»" marker), so the whole
+  // line easily fits under LAST_LINE_MAX_CHARS and no truncation happens at
+  // all.
+  it("a secret-shaped token straddling the truncation boundary is redacted on the FULL line before truncation, not after (regression, issue #108 finding 1)", async () => {
+    const storage = fakeStorage({ status: status({ id: "websites--pilot" }) });
+    const secret = `sk-ant-${"a".repeat(200)}`;
+    const msg = `token ${secret} end`;
+    await runShipTickWithObservation(deps(stdoutWithPane(paneWithMessage(msg))), storage, "websites--pilot", undefined, 5000);
+    const observed = await getObserved(storage);
+    expect(observed.lastMessageLine).toBe("token «redacted» end");
+    expect(observed.lastMessageLine).not.toMatch(/a{3,}/);
+    expect(observed.lastMessageLine).not.toMatch(/…$/);
+  });
+
+  // Finding 1/2 (post-ship code review) — truncation moved OUT of
+  // extractLastVisibleLine (activity.ts) and into this call site, applied
+  // AFTER redactSecrets; this is the truncation coverage that used to live
+  // on extractLastVisibleLine's own unit test, re-homed here since it is now
+  // do.ts's own behaviour, not activity.ts's.
+  it("a content line longer than LAST_LINE_MAX_CHARS (no secret involved) is truncated with a trailing ellipsis", async () => {
+    const storage = fakeStorage({ status: status({ id: "websites--pilot" }) });
+    const long = "x".repeat(250);
+    await runShipTickWithObservation(deps(stdoutWithPane(paneWithMessage(long))), storage, "websites--pilot", undefined, 5000);
+    const observed = await getObserved(storage);
+    expect(observed.lastMessageLine).toBe(`${"x".repeat(LAST_LINE_MAX_CHARS)}…`);
+    expect(observed.lastMessageLine?.length).toBe(LAST_LINE_MAX_CHARS + 1);
+  });
+
+  it("a tick with no paneFrame at all (old-image or absent section) leaves lastMessageLine untouched", async () => {
+    const storage = fakeStorage({
+      status: status({ id: "websites--pilot" }),
+      observed: { ...emptyObserved(), lastMessageLine: "previous message" },
+    });
+    await runShipTickWithObservation(deps(stdoutWithPane(null)), storage, "websites--pilot", undefined, 5000);
+    const observed = await getObserved(storage);
+    expect(observed.lastMessageLine).toBe("previous message");
   });
 });

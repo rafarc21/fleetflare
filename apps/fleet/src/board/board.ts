@@ -19,7 +19,7 @@
 // nothing here infers deploy truth from a label — that is measured from
 // branch + host, never from the board.
 
-import { parseBrief, renderBriefPrompt, renderTaskBody, taskKeyMarker } from "./brief";
+import { parseBrief, renderBriefPrompt, renderTaskBody, taskKeyMarker, type TaskBrief } from "./brief";
 import { parseEnvelope, parseEnvelopeComment, renderEnvelopeComment } from "./envelope";
 import {
   isStaleBacklog, isTaskState, studioLabel, taskAssignees, taskStates, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES,
@@ -27,6 +27,7 @@ import {
   type BoardTask, type BoardTaskView, type EnvelopeDoc, type TaskState, type CloseReason,
 } from "./types";
 import { GitHubError, type BoardComment, type IssueInput, type ListIssuesQuery } from "./api";
+import { extractPaths, findPathOverlaps, formatPathOverlapWarnings } from "./path-overlap";
 import { parseRepoSlug } from "../studio/repo";
 // Type-only, and from reach.ts not auth.ts — same reason src/studio/repo.ts
 // does: this module touches no Env and no binding. See github/reach.ts.
@@ -58,6 +59,9 @@ export interface BoardApi {
   // board write covers — every issue helper before this was read/label/
   // comment only. See src/board/close-action.ts, the one caller.
   closeIssue: (repo: string, number: number, reason?: CloseReason) => Promise<void>;
+  // Board issue #112 / #70 ask 8: every open PR's changed files, for the
+  // path-claim overlap check. See pathClaimWarnings below, the one caller.
+  listOpenPullFiles: (repo: string) => Promise<{ number: number; files: string[] }[]>;
 }
 
 /** Same shape src/studio/repo.ts's WorkRepoResult uses: a status and a
@@ -134,6 +138,44 @@ async function resolveMilestone(api: BoardApi, repo: string, title: string): Pro
 }
 
 /**
+ * Board issue #112 / #70 ask 8: does this brief's own path-looking text
+ * overlap a path something else already claims — an open PR's changed
+ * files, or another open task's own brief? Never refuses; only warns —
+ * the issue's own title says so ("warn on path overlap").
+ *
+ * `extractPaths` over the brief's own free-text fields first, and an empty
+ * result returns `[]` immediately, before either GitHub read: most briefs
+ * describe BEHAVIOR, not files, and this keeps ordinary task creation just
+ * as cheap as it is today for that overwhelmingly common case.
+ *
+ * Tasks are filtered to LIVE ones (LIVE_TASK_STATES) other than `selfNumber`
+ * — a task's own just-created issue would otherwise "overlap" itself, and a
+ * terminal (completed/failed/canceled) task is not a live claim on anything.
+ *
+ * The whole body is wrapped in try/catch and FAILS OPEN: any throw is logged
+ * and swallowed to `[]`. Same posture `fireOnAssigned` above documents for
+ * the assign-wake hook — a GitHub read going down must never refuse a task
+ * that otherwise validated, and this is a WARN, so an unreachable warning
+ * mechanism is strictly better silent than blocking.
+ */
+async function pathClaimWarnings(
+  api: BoardApi, repo: string, brief: TaskBrief, selfNumber: number,
+): Promise<string[]> {
+  const briefPaths = extractPaths([brief.title, brief.objective, brief.outputFormat, brief.boundaries].join("\n"));
+  if (briefPaths.length === 0) return [];
+  try {
+    const [prClaims, tasks] = await Promise.all([api.listOpenPullFiles(repo), api.listIssues(repo, {})]);
+    const taskClaims = tasks
+      .filter((t) => t.number !== selfNumber && t.state !== null && LIVE_TASK_STATES.includes(t.state))
+      .map((t) => ({ number: t.number, paths: extractPaths(t.body) }));
+    return formatPathOverlapWarnings(findPathOverlaps(briefPaths, prClaims, taskClaims));
+  } catch (err) {
+    console.error(`board: path-claim overlap check failed for ${repo}`, err);
+    return [];
+  }
+}
+
+/**
  * One task = one deliverable of substantial scope (§5), opened `submitted`.
  *
  * The six state labels do not have to exist in the repo first: GitHub creates
@@ -143,7 +185,7 @@ async function resolveMilestone(api: BoardApi, repo: string, title: string): Pro
  */
 export async function createTask(
   api: BoardApi, repo: string, raw: unknown, onAssigned?: OnAssigned,
-): Promise<BoardResult<BoardTask>> {
+): Promise<BoardResult<BoardTask & { pathWarnings?: string[] }>> {
   const lineage = await resolveContinues(api, repo, raw);
   if (!lineage.ok) return lineage;
   raw = lineage.value;
@@ -189,7 +231,8 @@ export async function createTask(
   // studio label went on in the create call above, so a lead that is up has a
   // task it will otherwise never hear about.
   if (brief.assignee !== null) await fireOnAssigned(onAssigned, brief.assignee, created);
-  return { ok: true, value: created };
+  const warnings = await pathClaimWarnings(api, repo, brief, created.number);
+  return { ok: true, value: warnings.length > 0 ? { ...created, pathWarnings: warnings } : created };
 }
 
 /** Issue #139: the task an earlier attempt with this key already filed, or

@@ -626,6 +626,21 @@ describe("formatSessionGuards (cli/readiness-format.ts) — issue #94", () => {
       "BURN PERSIST l--x: FAILED since 2026-09-25T00:00:00.000Z (value too large)",
     ]);
   });
+
+  // Issue #115: a stuck FRESH_SESSION_PENDING_KEY (provision.ts) was
+  // previously invisible on `fleet ls` — this closes that gap, mirrored from
+  // do.ts's mirrorBurnToRegistry the same way sessionForceArmedAt is.
+  it("a pending fresh-session intent gets its own line, silent once cleared", () => {
+    const pending = { id: "m--x", freshSessionPending: true } as StudioStatus;
+    const cleared = { id: "n--x", freshSessionPending: false } as StudioStatus;
+    const neverPending = { id: "o--x" } as StudioStatus;
+
+    expect(formatSessionGuards([pending])).toEqual([
+      "FRESH SESSION m--x: fresh-session pending",
+    ]);
+    expect(formatSessionGuards([cleared])).toEqual([]);
+    expect(formatSessionGuards([neverPending])).toEqual([]);
+  });
 });
 
 // Board issue #85 review, BLOCKER 2: `fleet inspect` used to read
@@ -1161,8 +1176,15 @@ describe("lsJsonRows (issue #70)", () => {
     const r = row({ id: "demo--web-studio", repoSlug: "example-org/demo",
       observed: { ...emptyObserved(), activity: act({ state: "working", since: "2026-09-25T12:01:20.000Z" }) } });
     expect(r).toEqual({ id: "demo--web-studio", state: "running", repo: "example-org/demo",
-      lead: "working", leadSince: "2026-09-25T12:01:20.000Z", limitResetsAt: null, activity: "WORKING 40s" });
+      lead: "working", leadSince: "2026-09-25T12:01:20.000Z", limitResetsAt: null, activity: "WORKING 40s",
+      lastLine: null });
     expect(row({ observed: { ...emptyObserved(), activity: act({ state: "waiting-question" }) } }).lead).toBe("waiting-question");
+  });
+
+  it("issue #108: observed.lastMessageLine flows through to row.lastLine unchanged", () => {
+    const r = row({ observed: { ...emptyObserved(), lastMessageLine: "Fixed the bug, running tests now." } });
+    expect(r.lastLine).toBe("Fixed the bug, running tests now.");
+    expect(row({}).lastLine).toBeNull();
   });
 
   it("limit with its reset time; modal when the limit menu is up", () => {

@@ -4,7 +4,7 @@
 #
 # This is for LOCAL DEVELOPMENT ONLY. The deployed Worker never reads this
 # file — its secrets are set individually with `wrangler secret put <NAME>`
-# (see README.md's Quickstart, step 5, for the full list and order). Anything
+# (see docs/setup.md's Quickstart, step 5, for the full list and order). Anything
 # non-secret (repo names, ids that aren't credentials, feature flags) lives in
 # wrangler.jsonc's `vars` instead, in both places, and does not belong here —
 # see wrangler.example.jsonc.
@@ -20,8 +20,8 @@ CLAUDE_CODE_OAUTH_TOKEN=dev-only
 GITHUB_WEBHOOK_SECRET=dev-only
 CLOUDFLARE_DEPLOY_TOKEN=dev-only
 
-# GitHub App private key, PKCS#8, one line (see README's Quickstart step 3 for
-# the PKCS#1 -> PKCS#8 `openssl pkcs8` conversion). Leave the header/footer in
+# GitHub App private key, PKCS#8, one line (see docs/setup.md's Quickstart
+# step 3 for the PKCS#1 -> PKCS#8 `openssl pkcs8` conversion). Leave the header/footer in
 # place; strip only the newlines inside the body.
 GITHUB_APP_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----...-----END PRIVATE KEY-----
 

@@ -13,12 +13,12 @@ import { parseStudioId } from "./ids";
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { TERMINAL_PATH } from "./terminal";
 import { PASTE_MIME_EXT, PASTE_MAX_BYTES } from "./paste";
-import { listStudios, expireBurnWindow, claimStudioRow } from "./registry";
+import { listStudios, expireBurnWindow, claimStudioRow, claimStoppedRow } from "./registry";
 import { renderTerminalPage } from "./page";
 import { renderGridPage, scrubPreview, type GridCard } from "./grid";
 import {
-  runSpawn, resolveSpawnParent, resolveSpawnPolicy, resolveMaxStudios, liveStudioCount, isSpawnTokenShaped,
-  SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type SpawnParent,
+  runSpawn, runResume, resolveSpawnParent, resolveSpawnPolicy, resolveMaxStudios, liveStudioCount, isSpawnTokenShaped,
+  SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type ResumeDeps, type SpawnParent,
 } from "./spawn";
 import { reachRepo, repoTokenMinter, type RepoReach } from "../github/auth";
 import { fetchRepoFile } from "../github/api";
@@ -190,7 +190,7 @@ function repoDeps(reach: RepoReachFetch): WorkRepoDeps {
  */
 export type BriefResolve = SpawnDeps["resolveBrief"];
 
-export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: BriefResolve): SpawnDeps {
+export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: BriefResolve): ResumeDeps {
   // Memoised for the lifetime of ONE request (spawnDeps is built per call),
   // the same lazy-once idiom githubBlueprintFetch above uses for its token:
   // /fleet/spawn reads the registry twice — once to resolve the parent from
@@ -230,6 +230,9 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
     },
     maxStudios: resolveMaxStudios(env.MAX_STUDIOS),
     claimStudioId: (_childId: string, placeholder: StudioStatus) => claimStudioRow(env, placeholder),
+    // Issue #59 review round 1 (M1): resume's atomic stopped -> provisioning flip.
+    claimStopped: (studioId: string) => claimStoppedRow(env, studioId),
+    now: () => new Date(),
   };
 }
 
@@ -275,7 +278,12 @@ export async function handleFleetSpawn(
   const parent = await resolveSpawnParent(await deps.listStudios(), presented);
   if (!parent) return new Response("unauthorized", { status: 401 });
 
-  return runSpawn(deps, parent, await spawnBody(req));
+  // Issue #59: `resume: true` starts a stopped instance under the same gate.
+  // Only on this machine surface — the operator already has /provision. A
+  // body without it (every pre-#59 binary) is the spawn it always was.
+  const body = await spawnBody(req);
+  if ((body as { resume?: unknown } | null)?.resume === true) return runResume(deps, parent, body);
+  return runSpawn(deps, parent, body);
 }
 
 /**
@@ -691,6 +699,15 @@ export async function handleStudio(
     // estate row) provisions exactly as this route did before P5c — the
     // key is omitted rather than set to undefined so the RPC payload is
     // byte-identical to the pre-P5c one in that case.
+    // Issue #115: `?fresh-session=true` and `?no-fresh-session=true` are
+    // mutually exclusive — refused outright rather than silently resolved
+    // either way (cancel winning, say), same posture cli-args.ts's own
+    // `--fresh-session`/`--no-fresh-session` parsing already takes.
+    const wantsFresh = url.searchParams.get("fresh-session") === "true";
+    const wantsCancelFresh = url.searchParams.get("no-fresh-session") === "true";
+    if (wantsFresh && wantsCancelFresh) {
+      return new Response("fresh-session and no-fresh-session are mutually exclusive", { status: 400 });
+    }
     const projectCard = await resolveProjectCard(env, id.repo);
     const cfg: ProvisionConfig = {
       // Issue #269: the instance comes off the id this route was ADDRESSED
@@ -704,7 +721,10 @@ export async function handleStudio(
       blueprintRef, repoSlug: repo.slug, briefPrompt,
       ...(projectCard === null ? {} : { projectCard }),
       // Issue #28: one bring-up with a fresh claude session, old one set aside.
-      ...(url.searchParams.get("fresh-session") === "true" ? { freshSession: true } : {}),
+      ...(wantsFresh ? { freshSession: true } : {}),
+      // Issue #115: an explicit clear of a stuck FRESH_SESSION_PENDING_KEY —
+      // see ProvisionConfig.cancelFreshSession's own doc comment.
+      ...(wantsCancelFresh ? { cancelFreshSession: true } : {}),
     };
     try {
       return Response.json(burnView(await stub.provision(cfg)));
@@ -827,8 +847,14 @@ export async function handleStudio(
     const force = url.searchParams.get("force") === "true";
     // #113 M3: recycle's --discard-unsynced, for destroy — same query name.
     const discardUnsynced = url.searchParams.get("discard-unsynced") === "true";
+    // Issue #59 review round 1: `?park=true` stops the studio RESUMABLE by a
+    // studio whose edges reach it (StudioStatus.parked). Sent only when set,
+    // so a plain destroy's RPC is the byte-identical pre-#59 call.
+    const park = url.searchParams.get("park") === "true";
     try {
-      const result = await stub.destroyStudio(force, discardUnsynced);
+      const result = park
+        ? await stub.destroyStudio(force, discardUnsynced, true)
+        : await stub.destroyStudio(force, discardUnsynced);
       if (!result.ok) return new Response(result.reason, { status: 409 });
       return Response.json(burnView(result.status));
     } catch (err) {

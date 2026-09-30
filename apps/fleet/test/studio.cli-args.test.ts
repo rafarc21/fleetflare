@@ -138,7 +138,9 @@ describe("parseCliArgs", () => {
   });
 
   it("provision requires an id", () => {
-    expect(parseCliArgs(["provision", "websites--scratch"])).toEqual({ cmd: "provision", id: "websites--scratch", freshSession: false });
+    expect(parseCliArgs(["provision", "websites--scratch"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false,
+    });
     expect(parseCliArgs(["provision"])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });
 
@@ -159,7 +161,7 @@ describe("parseCliArgs", () => {
   // Issue #28.
   it("--fresh-session: provision and recycle, in any order with --discard-unsynced; repeats and strays are usage errors", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session"])).toEqual({
-      cmd: "provision", id: "websites--scratch", freshSession: true,
+      cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false,
     });
     expect(parseCliArgs(["recycle", "websites--scratch", "--fresh-session"])).toEqual({
       cmd: "recycle", id: "websites--scratch", discardUnsynced: false, freshSession: true,
@@ -172,6 +174,20 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--force"]).cmd).toBe("usage");
     expect(parseCliArgs(["provision", "--fresh-session"])).toEqual({ cmd: "usage", message: CLI_USAGE });
     expect(parseCliArgs(["recycle", "websites--scratch", "--fresh-session", "--fresh-session"]).cmd).toBe("usage");
+  });
+
+  // Issue #115: `--no-fresh-session` cancels a pending fresh-session intent
+  // (FRESH_SESSION_PENDING_KEY) — same bespoke flag shape as `--fresh-session`
+  // above, mutually exclusive with it, each at most once, unknown flag never
+  // silently ignored (recycle's own two-flag parsing's own posture).
+  it("--no-fresh-session: cancels a pending intent; mutually exclusive with --fresh-session; repeats and strays are usage errors", () => {
+    expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: true,
+    });
+    expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session", "--no-fresh-session"]).cmd).toBe("usage");
+    expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--fresh-session"]).cmd).toBe("usage");
+    expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--no-fresh-session"]).cmd).toBe("usage");
+    expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--bogus"]).cmd).toBe("usage");
   });
 
   // Issue #35.
@@ -365,6 +381,124 @@ describe("parseCliArgs: task", () => {
     expect(res.brief.boundaries).toBe("--junior");
     expect(res.brief.assignee).toBe("a");
     expect(res.brief.junior).toBeUndefined();
+  });
+
+  // Issue #113 ask 9: `--provision [--fresh-session]` lets `task new` boot or
+  // heal the assigned studio in the same call, instead of leaving a filed
+  // task's "NO WAKE" to a human running a second `fleet provision <id>`.
+  // `--provision` and `--fresh-session` are TWO MORE bare booleans, extracted
+  // in the exact same loop as `--junior` above — the same value-slot
+  // protection (a flag's VALUE that happens to equal the literal string
+  // "--provision" is never mistaken for the bare flag) comes for free.
+  it("task new --studio x --provision succeeds with provision: true and no freshSession key", () => {
+    const res = parseCliArgs(["task", "new", ...flags, "--studio", "x", "--provision"]);
+    expect(res).toEqual({
+      cmd: "task-new",
+      brief: {
+        title: "Build the board",
+        objective: "A Worker-side board module.",
+        outputFormat: "A PR, tests green.",
+        boundaries: "No sprint close.",
+        assignee: "x",
+      },
+      provision: true,
+    });
+  });
+
+  it("task new --continues 7 --provision succeeds: --continues alone names a target studio", () => {
+    const res = parseCliArgs(["task", "new", ...flags, "--continues", "7", "--provision"]);
+    expect(res.cmd).toBe("task-new");
+    if (res.cmd !== "task-new") return;
+    expect(res.provision).toBe(true);
+    expect(res.freshSession).toBeUndefined();
+  });
+
+  it("task new --studio x --provision --fresh-session sets both flags", () => {
+    const res = parseCliArgs(["task", "new", ...flags, "--studio", "x", "--provision", "--fresh-session"]);
+    expect(res).toEqual({
+      cmd: "task-new",
+      brief: {
+        title: "Build the board",
+        objective: "A Worker-side board module.",
+        outputFormat: "A PR, tests green.",
+        boundaries: "No sprint close.",
+        assignee: "x",
+      },
+      provision: true,
+      freshSession: true,
+    });
+  });
+
+  it("task new --fresh-session without --provision is a usage error naming --provision", () => {
+    const res = parseCliArgs(["task", "new", ...flags, "--studio", "x", "--fresh-session"]);
+    expect(res.cmd).toBe("usage");
+    if (res.cmd !== "usage") return;
+    expect(res.message).toContain("--provision");
+  });
+
+  it("task new --provision with no --studio and no --continues is a usage error naming what's missing", () => {
+    const res = parseCliArgs(["task", "new", ...flags, "--provision"]);
+    expect(res.cmd).toBe("usage");
+    if (res.cmd !== "usage") return;
+    expect(res.message).toContain("--studio");
+    expect(res.message).toContain("--continues");
+  });
+
+  // Same protection the --junior value-slot test above proves: a value that
+  // happens to equal "--provision" must stay that flag's literal value, never
+  // flip provision to true.
+  it("a --provision VALUE (e.g. --boundaries --provision) is not the bare boolean flag", () => {
+    const res = parseCliArgs([
+      "task", "new",
+      "--title", "t",
+      "--objective", "o",
+      "--output", "f",
+      "--boundaries", "--provision",
+      "--studio", "a",
+    ]);
+    expect(res.cmd).toBe("task-new");
+    if (res.cmd !== "task-new") return;
+    expect(res.brief.boundaries).toBe("--provision");
+    expect(res.brief.assignee).toBe("a");
+    expect((res as { provision?: true }).provision).toBeUndefined();
+  });
+
+  // Same protection, for --fresh-session: a value that happens to equal
+  // "--fresh-session" must stay that flag's literal value, never flip
+  // freshSession to true.
+  it("a --fresh-session VALUE (e.g. --boundaries --fresh-session) is not the bare boolean flag", () => {
+    const res = parseCliArgs([
+      "task", "new",
+      "--title", "t",
+      "--objective", "o",
+      "--output", "f",
+      "--boundaries", "--fresh-session",
+      "--provision",
+      "--studio", "x",
+    ]);
+    expect(res.cmd).toBe("task-new");
+    if (res.cmd !== "task-new") return;
+    expect(res.brief.boundaries).toBe("--fresh-session");
+    expect(res.provision).toBe(true);
+    expect(res.freshSession).toBeUndefined();
+  });
+
+  // Regression pin: plain `task new` (no --provision/--fresh-session at all)
+  // must keep returning EXACTLY { cmd: "task-new", brief: {...} } — no
+  // `provision`/`freshSession` keys leaking in, false or otherwise. The
+  // pre-existing tests above (lines ~267-276, ~280) already pin this shape;
+  // this one pins it explicitly against the new fields.
+  it("plain task new carries no provision/freshSession keys at all", () => {
+    const res = parseCliArgs(["task", "new", ...flags]);
+    expect(res).toEqual({
+      cmd: "task-new",
+      brief: {
+        title: "Build the board",
+        objective: "A Worker-side board module.",
+        outputFormat: "A PR, tests green.",
+        boundaries: "No sprint close.",
+      },
+    });
   });
 });
 

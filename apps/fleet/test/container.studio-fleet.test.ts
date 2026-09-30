@@ -55,9 +55,9 @@ describe("container/studio-fleet — source assertions", () => {
     );
   });
 
-  it("only \"spawn\", \"task\" and \"memory\" are recognised commands; anything else is a usage error naming what it expected", () => {
-    expect(src()).toContain('if (argv[0] !== "spawn") {');
-    expect(src()).toContain('expected "spawn", "task" or "memory"');
+  it("only \"spawn\", \"resume\", \"task\" and \"memory\" are recognised commands; anything else is a usage error naming what it expected", () => {
+    expect(src()).toContain('if (argv[0] !== "spawn" && argv[0] !== "resume") {');
+    expect(src()).toContain('expected "spawn", "resume", "task" or "memory"');
     // P5 §9: the Release Studio runs the compaction pass from inside its own
     // container at sprint close, so the verb has to exist on THIS binary.
     expect(src()).toContain('if (argv[0] === "memory") return parseMemoryArgs(argv.slice(1));');
@@ -68,7 +68,7 @@ describe("container/studio-fleet — source assertions", () => {
   });
 
   it("spawn requires a role argument", () => {
-    expect(src()).toContain('if (!role) return { kind: "usage-error", message: "spawn: missing <role>" };');
+    expect(src()).toContain('if (!role) return { kind: "usage-error", message: `${verb}: missing <role>` };');
   });
 
   it("a usage error exits 1", () => {
@@ -99,7 +99,9 @@ describe("container/studio-fleet — source assertions", () => {
     expect(src()).toContain('new URL("/fleet/spawn", env.workerUrl).toString()');
     expect(src()).toContain('method: "POST",');
     expect(src()).toContain("headers: { [SPAWN_TOKEN_HEADER]: env.token,");
-    expect(src()).toContain("body: JSON.stringify({ role }),");
+    // Issue #59: `extra` is empty for a bare `spawn <role>`, so the body stays
+    // byte-identical to the pre-#59 `{role}` (test/bun/studio-fleet-directs).
+    expect(src()).toContain("body: JSON.stringify({ role, ...extra }),");
   });
 
   it("a non-ok response prints the server's own error body and exits 1 (never swallowed)", () => {
@@ -116,7 +118,7 @@ describe("container/studio-fleet — source assertions", () => {
   });
 
   it("success prints the child's id and state, not the raw response verbatim", () => {
-    expect(src()).toContain('return `spawned ${status.id ?? "?"} (${status.state ?? "?"})`;');
+    expect(src()).toContain('return `${cmd.kind === "resume" ? "resumed" : "spawned"} ${status.id ?? "?"} (${status.state ?? "?"})`;');
   });
 
   it("never logs the spawn token itself under any code path (grep for the literal env var name, not just usage)", () => {
@@ -141,15 +143,17 @@ describe("container/studio-fleet — the board verbs (P4a-2)", () => {
   it("task ls / show <n> / report <n> / state <n> <to> are the four, and <n> must be numeric", () => {
     expect(src()).toContain('if (sub === "ls") return { kind: "task-ls" };');
     expect(src()).toContain('if (sub !== "show" && sub !== "report" && sub !== "state") {');
-    expect(src()).toContain("expected ls, show, report or state");
+    expect(src()).toContain("expected ls, show, report, state, new or assign");
     expect(src()).toContain("missing or non-numeric <n>");
   });
 
-  it("there is still NO create verb — a studio does not open tasks", () => {
-    // Not a convention this script keeps: the Worker serves no such route to
-    // a spawn token (src/board/routes.ts's FLEET_BOARD_ROUTE_RE). Pinned here
-    // so adding one to this CLI cannot pass unnoticed.
-    expect(src()).not.toContain('"task-new"');
+  it("issue #59: task new / assign exist and hold no policy — the Worker gates both on org-chart edges", () => {
+    // The CLI only shapes the ask. Every refusal (non-edge, other repo, self,
+    // junior, unassigned) is the Worker's: test/board.fleet-directs.test.ts.
+    expect(src()).toContain('if (sub === "new") {');
+    expect(src()).toContain('if (sub === "assign") {');
+    expect(src()).toContain("buildTaskRequest(env, `/${cmd.number}/assign`, body)");
+    expect(src()).not.toContain("maySpawn");
   });
 
   // Board issue #41, half two: the verb that closes the loop. A task a lead
@@ -225,5 +229,76 @@ describe("container/studio-fleet — the board verbs (P4a-2)", () => {
 
   it("an empty listing says so rather than printing nothing", () => {
     expect(src()).toContain('return "(no tasks assigned to this studio)";');
+  });
+});
+
+// --- Board issue #105: pre-gate ---------------------------------------------
+//
+// The behavioral coverage for these functions (real fleet.json fixtures,
+// a real subprocess in runPreflight, a real timeout kill, and the full CLI
+// wired end to end against a fake Worker) lives in
+// test/bun/studio-fleet-pregate.test.ts and
+// test/bun/studio-fleet-report-cli.test.ts — this file cannot execute
+// container/studio-fleet at all (vitest-pool-workers runs inside workerd,
+// which cannot spawn a real bun subprocess; see this file's own header).
+// What is pinned here is the CONTRACT: the exact identifiers and wiring a
+// future edit must not silently weaken.
+
+describe("container/studio-fleet — pre-gate (board issue #105)", () => {
+  it("has its own tiny fleet.json preflight parse, duplicated from blueprint.ts's FleetConfig rather than imported", () => {
+    expect(src()).toContain("export function parseFleetPreflight(json: string): string | null {");
+    // Same "own literal, never import the Worker's src/ tree" convention
+    // SPAWN_TOKEN_HEADER/LEAD_TASK_STATES already keep — see this file's
+    // own header.
+    expect(src()).not.toMatch(/from ["']\.\.\/src/);
+  });
+
+  it("resolves the repo root from STUDIO_ID, the SAME derivation studio-bringup.sh's claude-launch step uses — never the calling shell's cwd", () => {
+    expect(src()).toContain("export function resolveRepoRoot(env: Record<string, string | undefined>): string | null {");
+    expect(src()).toContain('const base = env.FLEET_REPO_ROOT_BASE ?? "/workspace";');
+    expect(src()).toContain('`${base}/${studioId.split("--")[0]}`');
+  });
+
+  it("runs the declared command as a real subprocess with a 30-second timeout and a kill on overrun", () => {
+    expect(src()).toContain("const PREFLIGHT_TIMEOUT_MS = 30_000;");
+    expect(src()).toContain("export function runPreflight(cmd: string, cwd: string, timeoutMs: number = PREFLIGHT_TIMEOUT_MS): PreflightResult {");
+    expect(src()).toContain('cmd: ["sh", "-c", cmd],');
+    expect(src()).toContain("killSignal: \"SIGKILL\"");
+    // A timed-out process (Bun reports exitCode null) reads as exit 124 — a
+    // FAILED gate, never a silent pass and never a hang.
+    expect(src()).toContain("proc.exitCode ?? 124");
+  });
+
+  it('the refusal rule is scoped to EXACTLY intent "result" + status "ok" — every other combination still runs and attaches the pre-gate but is never refused', () => {
+    expect(src()).toContain(
+      "export function evaluatePreGate(\n  intent: unknown, status: unknown, preflight: PreflightResult | null,\n): { refuse: boolean; reason?: string } {",
+    );
+    expect(src()).toContain("if (preflight === null || preflight.exit === 0) return { refuse: false };");
+    expect(src()).toContain('if (intent !== "result" || status !== "ok") return { refuse: false };');
+  });
+
+  it("task report: no preflight declared is a COMPLETE no-op — the raw stdin body is posted byte for byte, never parsed", () => {
+    expect(src()).toContain("const preflightCmd = loadPreflightCommand(repoRoot);");
+    expect(src()).toContain("let finalBody = body;");
+    expect(src()).toContain("if (preflightCmd !== null) {");
+  });
+
+  it("task report: a refused pre-gate prints the reason to stderr and exits 1 WITHOUT ever building the POST", () => {
+    expect(src()).toMatch(/if \(gate\.refuse\) \{\s*console\.error\(`studio-fleet: \$\{gate\.reason\}`\);\s*process\.exit\(1\);/);
+    // The refusal check runs strictly before buildTaskRequest is called for
+    // the envelope path — a refused report must never reach the fetch at all.
+    const refuseIdx = src().indexOf("if (gate.refuse) {");
+    const buildIdx = src().indexOf("buildTaskRequest(env, `/${cmd.number}/envelope`, finalBody)");
+    expect(refuseIdx).toBeGreaterThan(-1);
+    expect(buildIdx).toBeGreaterThan(refuseIdx);
+  });
+
+  it("a posted envelope carries the pre-gate result under `pre_gate` when one was declared and run", () => {
+    expect(src()).toContain("envelope.pre_gate = preflight;");
+  });
+
+  it("the help text documents the feature and its no-fleet.json no-op", () => {
+    expect(src()).toContain("Board issue #105 (pre-gate)");
+    expect(src()).toContain('this is a complete no-op');
   });
 });
