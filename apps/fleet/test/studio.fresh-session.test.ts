@@ -107,15 +107,26 @@ describe("provisionWithStorage — freshSession arms the force upload (issue #37
   });
 
   it("nothing moved, not confirmed, or no flag: not armed", async () => {
-    for (const [stdout, fresh] of [
-      [`${FRESH_SESSION_MARKER} none\n`, true], ["", true], ["", false],
+    for (const [stdout, fresh, expectedPending] of [
+      // Flag honored, nothing to move: vacuously satisfied — pending clears.
+      [`${FRESH_SESSION_MARKER} none\n`, true, false],
+      // Review round 1 (issue #100): bring-up exits 0 (status.state stays
+      // "running") but prints no FLEET_SESSION_FRESH line at all — the move
+      // was never confirmed, so FRESH_SESSION_PENDING_KEY must stay armed so
+      // a LATER flagless retry still forces fresh, not silently resume.
+      ["", true, true],
+      ["", false, undefined],
       // PR #46 review: every move failed — nothing left the tar, nothing to force.
-      [`${FRESH_SESSION_MARKER} failed /root/.claude/projects/-workspace-acmeclient/x.jsonl\n`, true],
+      // Review round 1 (issue #100): a failed move is not a confirmed one
+      // either — pending must stay armed here too, same reasoning as above.
+      [`${FRESH_SESSION_MARKER} failed /root/.claude/projects/-workspace-acmeclient/x.jsonl\n`, true, true],
     ] as const) {
       const { d } = deps(stdout);
       const { map, storage } = mapStorage();
-      await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", ...(fresh ? { freshSession: true } : {}) }, "example-org/acmeclient");
+      const status = await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", ...(fresh ? { freshSession: true } : {}) }, "example-org/acmeclient");
+      expect(status.state).toBe("running");
       expect(map.has(SESSION_FORCE_KEY)).toBe(false);
+      expect(map.get(FRESH_SESSION_PENDING_KEY)).toBe(expectedPending);
     }
   });
 });
