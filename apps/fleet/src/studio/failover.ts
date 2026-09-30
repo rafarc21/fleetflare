@@ -704,13 +704,19 @@ function bottomLimitModal(lines: string[]): PaneVerdict | null {
  *   - B: a transcript RE-RENDER. MEASURED 2026-09-24 (#106): `claude --resume`
  *     redraws a persisted limit block with its hint. runAccountFailover skips
  *     an INLINE block whose headline + reset equal the ones recorded at the
- *     last switch, until a still pane with claude's footer and no limit
- *     retires that record. Select modals are never guarded: `--continue`
- *     does not redraw them. A new account limited by the very same headline
- *     and reset text before then COLLIDES and is skipped; the only trace is
- *     the `rerender` outcome the tick logs. A RESET-LESS inline block (out of
- *     usage credits) keys on its headline alone, so the next account's own
- *     out-of-credits block reads as that redraw until the record retires.
+ *     last switch, until EITHER a still pane with claude's footer and no
+ *     limit retires that record, OR FLAP_GUARD_MINUTES has passed since the
+ *     switch (maestro review of PR #152, 2026-09-30, item 1 — a NO-VARIABLE-
+ *     TEXT block, the dead-account message, produces the identical key for
+ *     every account that shows it, so an unbounded version of this guard
+ *     suppressed a genuinely second dead account forever). Select modals are
+ *     never guarded: `--continue` does not redraw them. A new account limited
+ *     by the very same headline and reset text within that window COLLIDES
+ *     and is skipped; the only trace is the `rerender` outcome the tick logs.
+ *     A RESET-LESS inline block (out of usage credits, or the dead-account
+ *     message) keys on its headline alone, so the next account's own
+ *     identically-keyed block reads as that redraw until the record retires
+ *     or the window passes.
  *   - B: the first sighting (LIMIT_SIGHTING_KEY) is never cleared, only
  *     replaced by a different block. A genuinely new limit with identical
  *     headline + reset text reads stale for its whole window.
@@ -1871,8 +1877,26 @@ export async function runAccountFailover(
   // Inline blocks only (PR #144 review): a select modal is not a transcript
   // message, so `--continue` never redraws it — the same modal on the next
   // account is that account's limit, and must walk on to exhausted.
+  //
+  // Maestro review of PR #152 (2026-09-30), item 1 — this check used to have
+  // NO time bound at all, on the assumption that a genuinely new limit always
+  // produces a DIFFERENT key (a different headline or reset). The
+  // dead-account message (issue #141) breaks that assumption: it has NO
+  // variable text at all, so a SECOND account that is ALSO genuinely,
+  // currently dead produces the exact same key as the FIRST account's own
+  // departure evidence — and the guard used to suppress it as a "rerender"
+  // FOREVER, so the second account was never marked dead and the switch never
+  // happened. Bounded the same way the select-modal flap-guard just below
+  // already is: past FLAP_GUARD_MINUTES since the switch, a still-matching
+  // inline block is trusted as fresh evidence for the CURRENT account, not
+  // presumed to be an infinite `--continue` echo of the one just departed. A
+  // genuine `--continue` redraw only ever replays ONCE, right at relaunch;
+  // real, ongoing evidence that persists past this window is real.
   const key = verdict.inline ? limitBlockKey(verdict) : null;
-  if (key !== null && existing.failoverBlock === key) {
+  const movedRecently = existing.claudeAccountMovedAt != null
+    && !Number.isNaN(Date.parse(existing.claudeAccountMovedAt))
+    && deps.now().getTime() - Date.parse(existing.claudeAccountMovedAt) < FLAP_GUARD_MINUTES * 60_000;
+  if (key !== null && existing.failoverBlock === key && movedRecently) {
     return { kind: "rerender", block: key };
   }
   // Issue #102 — no flapping. Guards ONLY the one path with a genuinely
@@ -1881,11 +1905,10 @@ export async function runAccountFailover(
   // null` (select modals have no block key), so the `rerender` check above
   // cannot catch a `--continue` redraw of an INLINE message the switched-off
   // account's transcript still holds. An `"inline"`-via switch is already
-  // protected by its own `failoverBlock`/`rerender` pairing — a DIFFERENT
-  // inline key after one is trusted immediately, cooldown or not — and a
-  // genuine SELECT-style modal (`!verdict.inline`) always overrides the guard
-  // either way: claude can never redraw one of those from a resumed
-  // transcript.
+  // protected by its own `failoverBlock`/`rerender` pairing, ALSO bounded by
+  // FLAP_GUARD_MINUTES since review round above — and a genuine SELECT-style
+  // modal (`!verdict.inline`) always overrides the guard either way: claude
+  // can never redraw one of those from a resumed transcript.
   //
   // Review round 1 (#102 review, 2026-09-30), finding 2 — the escape hatch
   // was UNREACHABLE for a genuinely new limit: the guard used to fire on ANY

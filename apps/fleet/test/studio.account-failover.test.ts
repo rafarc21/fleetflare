@@ -671,6 +671,12 @@ const TWO_ACCOUNTS: ClaudeAccount[] = [
   { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 },
 ];
 
+const THREE_ACCOUNTS: ClaudeAccount[] = [
+  { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 },
+  { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 },
+  { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 },
+];
+
 async function run(h: Harness) {
   return runAccountFailover(h.deps, h.storage, STUDIO_ID, async (s) => { h.recorded.push(s); });
 }
@@ -794,6 +800,48 @@ describe("runAccountFailover — issue #141: a dead account (org disabled subscr
     // write (keyed to its OWN current account, CLAUDE_CODE_OAUTH_TOKEN_2)
     // must never have touched or cleared it.
     expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toMatchObject({ dead: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Maestro review of PR #152 (2026-09-30), item 1 — the dead-account message
+// carries NO variable text at all (headline, no resets), so
+// limitBlockKey(verdict) is IDENTICAL for every account that shows it. This
+// is exactly the real-world shape: an org-wide disable kills SEVERAL accounts
+// at once. The rerender guard above used to have NO time bound at all —
+// unlike the select-modal flap-guard right below it — on the assumption that
+// a genuinely new limit always produces a DIFFERENT key (a different
+// reset/headline). The dead-account message breaks that assumption: a
+// SECOND, genuinely dead account produces the SAME key as the first
+// account's own departure evidence, and was suppressed as a stale
+// `--continue` rerender FOREVER — never marked dead, never switched off.
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — issue #141 review: a same-keyed dead-account block on the NEXT account, past the flap window, is trusted (not suppressed forever)", () => {
+  it("tick 1 switches account 1 off (dead); tick 2 (same now) is correctly rerender-guarded; tick 3 (past the flap window) marks account 2 dead and switches on", async () => {
+    const h = harness({ accounts: THREE_ACCOUNTS, pane: captured(ORG_DISABLED_PANE) });
+
+    // Tick 1: account 1's own screen shows the dead message.
+    const out1 = await run(h);
+    expect(out1).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toMatchObject({ dead: true });
+
+    // Tick 2, SAME now, SAME harness (existing/failoverBlock/claudeAccountMovedAt
+    // carry over from storage): the SAME pane now represents account 2's own
+    // screen — genuinely ALSO dead — but this tick is still within the flap
+    // window right after the switch, so a --continue redraw ambiguity
+    // genuinely exists this soon. This is CORRECT, expected behavior, not a
+    // bug on its own.
+    const out2 = await run(h);
+    expect(out2.kind).toBe("rerender");
+
+    // Tick 3: advance past FLAP_GUARD_MINUTES since the switch. The SAME
+    // dead-account pane is now trusted as fresh evidence for account 2, not
+    // presumed to be an infinite echo of account 1's own departure — account
+    // 2 gets marked dead fleet-wide and the studio switches to account 3.
+    h.deps.now = () => new Date(NOW.getTime() + (FLAP_GUARD_MINUTES + 1) * 60_000);
+    const out3 = await run(h);
+    expect(out3).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_2", to: "CLAUDE_CODE_OAUTH_TOKEN_3" });
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN_2")).toMatchObject({ dead: true });
   });
 });
 
