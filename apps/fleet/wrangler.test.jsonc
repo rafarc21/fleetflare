@@ -2,8 +2,8 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   // Issue #329 critical fix round: the fleet's real, account-specific
   // wrangler.jsonc no longer lives in this repo at all (see
-  // apps/fleet/scripts/deploy.sh's header and the root README's Deploy
-  // section) — it lives in the private rafarc21/fleetflare-ops repo on the
+  // apps/fleet/scripts/deploy.sh's header and docs/setup.md's Quickstart
+  // from zero intro) — it lives in the private rafarc21/fleetflare-ops repo on the
   // operator's own deploy machine. That means `bun run test` can no longer
   // depend on it, or on any operator config being present anywhere, ever
   // (a fresh clone has none). This file is the fake-but-VALID stand-in
