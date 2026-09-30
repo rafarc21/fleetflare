@@ -249,7 +249,8 @@ describe("container/studio-fleet — pre-gate (board issue #105)", () => {
 
   it("resolves the repo root from STUDIO_ID, the SAME derivation studio-bringup.sh's claude-launch step uses — never the calling shell's cwd", () => {
     expect(src()).toContain("export function resolveRepoRoot(env: Record<string, string | undefined>): string | null {");
-    expect(src()).toContain('`/workspace/${studioId.split("--")[0]}`');
+    expect(src()).toContain('const base = env.FLEET_REPO_ROOT_BASE ?? "/workspace";');
+    expect(src()).toContain('`${base}/${studioId.split("--")[0]}`');
   });
 
   it("runs the declared command as a real subprocess with a 30-second timeout and a kill on overrun", () => {
