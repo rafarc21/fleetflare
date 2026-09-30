@@ -5403,8 +5403,8 @@ export class StudioDO extends Sandbox<Env> {
    *
    * NOT MERGED INTO ONE TYPED MESSAGE, the review's other offered option,
    * because the two deliveries own SEPARATE at-most-once markers —
-   * `DELIVERED_TASK_KEY` per task number, `survivalBriefDeliveredFor` per
-   * incarnation — each written only on its own landed wake. One message means
+   * `taskWakesDeliveredFor` per task per incarnation, `survivalBriefDeliveredFor`
+   * per incarnation — each written only on its own landed wake. One message means
    * one wake outcome deciding both, so a refusal would either re-deliver a task
    * pointer that already landed or suppress a re-brief that never did. Two
    * sequential wakes keep each feature's guarantee its own.

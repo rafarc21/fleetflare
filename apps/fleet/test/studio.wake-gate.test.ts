@@ -574,4 +574,39 @@ describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up deli
     expect(wake).not.toHaveBeenCalled();
     expect(storage.map.get(DELIVERED_TASK_KEY)).toBeUndefined();
   });
+
+  // The `moved` check above only proves the veto fires when a destroy lands
+  // BEFORE any wake in the batch (the `lookup` fake flips it during the board
+  // round trip, ahead of task A's own check). The loop checks `moved()` once
+  // PER TASK, immediately before that task's own `wake()` call — so a destroy
+  // landing AFTER task A's wake has already landed, but before task B's own
+  // check, must veto B while leaving A's already-landed delivery alone. `moved`
+  // here starts false and flips true only once the first `wake()` call has
+  // itself resolved, standing in for a destroy that completes in the gap
+  // between task A's wake and task B's `moved` check.
+  it("a destroy landing between two tasks' wakes: task A's wake lands and is recorded, task B's is vetoed and nothing persists for it", async () => {
+    const storage = fakeStorage(status("running"));
+    const OTHER = { taskNumber: 900, title: "A second open task" };
+    const boardLookup = vi.fn(async () => [TASK, OTHER]);
+    let wakeCalls = 0;
+    const wake = vi.fn(async () => {
+      wakeCalls++;
+      return { ok: true };
+    });
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake, async () => wakeCalls >= 1);
+    // Task A's wake fired and landed — task B's never did.
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake).toHaveBeenCalledWith(assignDigest({ number: TASK.taskNumber, title: TASK.title }), TASK.taskNumber);
+    // Task A's delivery was recorded (the OLD "last delivered" marker names it).
+    expect(storage.map.get(DELIVERED_TASK_KEY)).toBe(TASK.taskNumber);
+
+    // Nothing was persisted for task B: a later bring-up on the SAME
+    // incarnation, with the destroy no longer in the way, still sees B as
+    // undelivered and wakes it — while A, already recorded, is correctly
+    // NOT re-woken.
+    const retryWake = vi.fn(async () => ({ ok: true }));
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, retryWake);
+    expect(retryWake).toHaveBeenCalledTimes(1);
+    expect(retryWake).toHaveBeenCalledWith(assignDigest({ number: OTHER.taskNumber, title: OTHER.title }), OTHER.taskNumber);
+  });
 });
