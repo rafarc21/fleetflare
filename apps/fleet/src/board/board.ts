@@ -1169,6 +1169,49 @@ export async function resolveLatestAssignedBrief(
   return { prompt, taskNumber: newest.number, title: newest.title };
 }
 
+/** Issue #137: which live states earn a bring-up re-delivery wake. Narrower
+ *  than `LIVE_TASK_STATES`: `submitted` is excluded on purpose — a submitted
+ *  task has not been started yet, so the ordinary fresh-assignment wake
+ *  (`wakeOnAssign`, assign-wake.ts) already covers it, and re-sending it here
+ *  too would be a duplicate wake, not a recovery. */
+export const REBRIEF_TASK_STATES: readonly TaskState[] = ["working", "input_required"];
+
+/**
+ * Issue #137: every OPEN task currently assigned to `studioId` that is
+ * `working` or `input_required` — the sibling of `resolveLatestAssignedBrief`
+ * above, widened from "the single newest assigned task" to "every task still
+ * genuinely in flight", because a container replacement leaves a fresh pane
+ * with zero memory of ANY of them, not only the most recent one.
+ *
+ * Same `listTasks(api, repo, {assignedTo: studioId})` call
+ * `resolveLatestAssignedBrief` makes, and the same fail-open-to-`[]` posture
+ * on a thrown error or `{ok:false}` (logged, then answered `[]`) — a board
+ * hiccup at bring-up must never block provisioning, exactly as that
+ * function's own doc comment argues.
+ *
+ * Sorted newest-updated-first, same `updatedAt` proxy
+ * `resolveLatestAssignedBrief` uses — every entry here gets delivered, so the
+ * order does not change the outcome, only makes it deterministic to test.
+ */
+export async function openTasksNeedingRebrief(
+  api: BoardApi, repo: string, studioId: string,
+): Promise<{ taskNumber: number; title: string }[]> {
+  let result: BoardResult<BoardTaskView[]>;
+  try {
+    result = await listTasks(api, repo, { assignedTo: studioId });
+  } catch (err) {
+    console.error(`board: open-tasks-needing-rebrief lookup failed for ${studioId}@${repo}`, err);
+    return [];
+  }
+  if (!result.ok) {
+    console.error(`board: open-tasks-needing-rebrief lookup failed for ${studioId}@${repo} (${result.status}): ${result.message}`);
+    return [];
+  }
+  const open = result.value.filter((t) => t.open && t.state !== null && REBRIEF_TASK_STATES.includes(t.state));
+  const sorted = [...open].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  return sorted.map((t) => ({ taskNumber: t.number, title: t.title }));
+}
+
 /**
  * The one live task, if any, that `studioId` currently holds — open, not
  * drifted, in a LIVE_TASK_STATES state, carrying THIS studio's own
