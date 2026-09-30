@@ -440,6 +440,26 @@ describe("parseCliArgs: task", () => {
     expect((res as { provision?: true }).provision).toBeUndefined();
   });
 
+  // Same protection, for --fresh-session: a value that happens to equal
+  // "--fresh-session" must stay that flag's literal value, never flip
+  // freshSession to true.
+  it("a --fresh-session VALUE (e.g. --boundaries --fresh-session) is not the bare boolean flag", () => {
+    const res = parseCliArgs([
+      "task", "new",
+      "--title", "t",
+      "--objective", "o",
+      "--output", "f",
+      "--boundaries", "--fresh-session",
+      "--provision",
+      "--studio", "x",
+    ]);
+    expect(res.cmd).toBe("task-new");
+    if (res.cmd !== "task-new") return;
+    expect(res.brief.boundaries).toBe("--fresh-session");
+    expect(res.provision).toBe(true);
+    expect(res.freshSession).toBeUndefined();
+  });
+
   // Regression pin: plain `task new` (no --provision/--fresh-session at all)
   // must keep returning EXACTLY { cmd: "task-new", brief: {...} } — no
   // `provision`/`freshSession` keys leaking in, false or otherwise. The
