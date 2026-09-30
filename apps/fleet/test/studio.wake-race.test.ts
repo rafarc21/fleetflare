@@ -15,6 +15,7 @@ import type { StudioStatus } from "../src/studio/types";
 import {
   V1_STOP_AND_WAIT_PANE, V2_SESSION_LIMIT_PANE, REAL_PILOT_PANE, REAL_PANE_CAPTURED_AT,
 } from "./fixtures/rate-limit-panes";
+import { REAL_PERMISSION_PROMPT_TAIL_PANE } from "./fixtures/activity-panes";
 
 const NOW = new Date("2026-09-24T12:20:00.000Z");
 const STUDIO_ID = "fleetflare--maestro";
@@ -43,6 +44,10 @@ describe("gate 3 is LOOSE: unseen modal shapes are refused before any keystroke"
       "│ Enter to confirm · Esc to cancel             │",
       "╰──────────────────────────────────────────────╯",
     ].join("\n")],
+    // #144: an ordinary permission prompt ("Do you want to proceed? / ❯ 1.
+    // Yes / 2. No") draws a DIFFERENT footer than the limit modal's own —
+    // this is the regression fixture proving the loose gate now catches it.
+    ["permission prompt (not the limit modal's footer)", REAL_PERMISSION_PROMPT_TAIL_PANE],
   ];
   for (const [name, screen] of UNSEEN) {
     it(`refuses: ${name}`, async () => {
