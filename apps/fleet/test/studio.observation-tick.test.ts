@@ -2098,6 +2098,32 @@ describe("runShipTickWithObservation — lastMessageLine (issue #108)", () => {
     expect(observed.lastMessageLine).toContain("«redacted»");
   });
 
+  // Finding 1 (post-ship code review) — redact FIRST, truncate SECOND. Mirrors
+  // grid.ts's own scrubPreview, which redacts the full tail before slicing
+  // specifically so a secret straddling the slice boundary is still caught
+  // whole (see that function's own doc comment). Truncating first, as the
+  // original code did, is only accidentally safe today because every
+  // redact.ts pattern is an open-ended quantifier (`[A-Za-z0-9_-]+` etc) — a
+  // future FIXED-length secret shape could leak a partial token through this
+  // exact field. This fixture positions a secret-shaped token so the naive
+  // "truncate then redact" order slices INSIDE the token, well before its
+  // real end, permanently dropping the real trailing prose (" end") and
+  // stamping a misleading "…" where no genuine truncation was needed — the
+  // fixed order redacts the full untruncated line first (collapsing the
+  // 207-char token down to the short "«redacted»" marker), so the whole
+  // line easily fits under LAST_LINE_MAX_CHARS and no truncation happens at
+  // all.
+  it("a secret-shaped token straddling the truncation boundary is redacted on the FULL line before truncation, not after (regression, issue #108 finding 1)", async () => {
+    const storage = fakeStorage({ status: status({ id: "websites--pilot" }) });
+    const secret = `sk-ant-${"a".repeat(200)}`;
+    const msg = `token ${secret} end`;
+    await runShipTickWithObservation(deps(stdoutWithPane(paneWithMessage(msg))), storage, "websites--pilot", undefined, 5000);
+    const observed = await getObserved(storage);
+    expect(observed.lastMessageLine).toBe("token «redacted» end");
+    expect(observed.lastMessageLine).not.toMatch(/a{3,}/);
+    expect(observed.lastMessageLine).not.toMatch(/…$/);
+  });
+
   it("a tick with no paneFrame at all (old-image or absent section) leaves lastMessageLine untouched", async () => {
     const storage = fakeStorage({
       status: status({ id: "websites--pilot" }),
