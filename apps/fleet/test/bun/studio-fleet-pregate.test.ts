@@ -13,6 +13,14 @@ import { join } from "node:path";
 // carries the source-pin coverage for the CLI wiring around these, since
 // vitest-pool-workers itself cannot execute a Bun-specific module — see that
 // file's own header).
+//
+// tsc cannot resolve this specifier at all (TS2307): its own module
+// resolution requires a real extension to append candidates to, and this
+// filename has none — that is a static-checker limitation, not a runtime
+// one (Bun's own resolver, exercised every time this file actually runs,
+// has no such trouble; `bun -e 'import("./container/studio-fleet")...'` was
+// used to confirm that directly before writing this file).
+// @ts-expect-error TS2307 — see the paragraph above.
 const mod = await import("../../container/studio-fleet");
 const { parseFleetPreflight, loadPreflightCommand, resolveRepoRoot, runPreflight, evaluatePreGate } = mod as {
   parseFleetPreflight: (json: string) => string | null;
