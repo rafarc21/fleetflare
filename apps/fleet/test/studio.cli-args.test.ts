@@ -465,6 +465,17 @@ describe("fleet ls --json — issue #70", () => {
   });
 });
 
+describe("fleet task state --from-none — issue #82", () => {
+  it("--from-none after the positionals sets fromNone", () => {
+    expect(parseCliArgs(["task", "state", "12", "completed", "--from-none"]))
+      .toEqual({ cmd: "task-state", number: 12, to: "completed", fromNone: true });
+  });
+  it("without it the shape is unchanged; anything else extra is usage", () => {
+    expect(parseCliArgs(["task", "state", "12", "completed"])).toEqual({ cmd: "task-state", number: 12, to: "completed" });
+    expect(parseCliArgs(["task", "state", "12", "completed", "--force"])).toMatchObject({ cmd: "usage" });
+  });
+});
+
 describe("fleet task reap --terminal — issue #55", () => {
   it("--terminal is a dry run; with --apply it applies; flag order free", () => {
     expect(parseCliArgs(["task", "reap", "--terminal"])).toEqual({ cmd: "task-reap", apply: false, terminal: true });
