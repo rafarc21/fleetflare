@@ -35,6 +35,7 @@ function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
     branchExists: vi.fn(async () => true),
     commitExists: vi.fn(async () => true),
     closeIssue: vi.fn(async () => {}),
+    listOpenPullFiles: vi.fn(async () => []),
     ...overrides,
   };
 }
@@ -43,7 +44,13 @@ const brief = {
   title: "Build the task board",
   objective: "Worker-side board module.",
   outputFormat: "A PR.",
-  boundaries: "No sprint open/close.",
+  // Issue #112: no "/" here on purpose — this text is reused by nearly
+  // every createTask test in this file, and extractPaths (board issue #112
+  // / #70 ask 8) would otherwise read "open/close" as a path claim and
+  // trigger the new pathClaimWarnings network calls these tests never
+  // intend to exercise. See the dedicated "createTask — path overlap
+  // warning" describe block below for the tests that DO exercise it.
+  boundaries: "No sprint open or close.",
 };
 
 describe("createTask", () => {

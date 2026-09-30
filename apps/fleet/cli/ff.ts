@@ -279,7 +279,7 @@ export async function fileTask(
     body,
   }), repoSlug ? { ...brief, repo: repoSlug } : brief, key, retryDelaysMs, sleep);
   if (!res.ok) fail(taskNewFailureLine(res.status, await res.text(), key));
-  const filed = (await res.json()) as BoardTask & { wake?: AssignWakeReport };
+  const filed = (await res.json()) as BoardTask & { wake?: AssignWakeReport; pathWarnings?: string[] };
   say(`filed #${filed.number} -> ${studioId}`);
   say(`  ${filed.url}`);
   say(`  output format and boundaries defaulted — edit the issue to narrow them`);
@@ -290,6 +290,8 @@ export async function fileTask(
   // that lead its first turn, carrying this brief in its system prompt.
   const wake = formatAssignWake(filed.wake);
   if (wake !== null) say(`  ${wake}`);
+  // Board issue #112 / #70 ask 8: one advisory line per path-claim overlap.
+  for (const w of filed.pathWarnings ?? []) say(`  ${w}`);
   return filed.number;
 }
 

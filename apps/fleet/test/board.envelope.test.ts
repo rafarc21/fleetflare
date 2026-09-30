@@ -291,6 +291,7 @@ describe("commentEnvelope verifies PR artifacts", () => {
       branchExists: vi.fn(async () => true),
       commitExists: vi.fn(async () => true),
     closeIssue: vi.fn(async () => {}),
+      listOpenPullFiles: vi.fn(async () => []),
       ...rest,
     };
   }
