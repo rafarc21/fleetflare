@@ -17,7 +17,9 @@
  * provision.ts's header). do.ts wires the ports and owns the schedule.
  */
 import type { ClaudeAccount, AccountLimits } from "./accounts";
-import { accountsTried, nextClaudeAccount, earliestAccountReset, nextBorrowedAccount, accountIsFree } from "./accounts";
+import {
+  accountsTried, nextClaudeAccount, earliestAccountReset, nextBorrowedAccount, accountIsFree, firstFreeAccount,
+} from "./accounts";
 import { STATUS_KEY, OPERATION_KEY, watchForDestroy, operationLockFresh, type StudioStorage } from "./provision";
 import { redactSecrets } from "./redact";
 import {
@@ -1815,36 +1817,53 @@ export async function runAccountFailover(
   // never wraps BEHIND it — an account before a repo's mapped primary is
   // never that repo's to use, wrap or no wrap.
   const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
-  const scopedAccounts = deps.accounts.slice(currentIdx < 0 ? start : Math.min(start, currentIdx));
+  const anchor = currentIdx < 0 ? start : Math.min(start, currentIdx);
+  const scopedAccounts = deps.accounts.slice(anchor);
   const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
-  const candidate = nextClaudeAccount(scopedAccounts, current, limits, deps.now(), deps.reservedAccounts ?? new Set());
-  // Issue #131 (Stage B) — the borrow second pass, entered ONLY when the
-  // first pass just above found NOTHING (`candidate === null`): this
-  // studio's own chain (the reserved-primaries-respecting wrap #103/#117
-  // protect) is genuinely exhausted, not merely skipped as reserved the way
-  // an account in `scopedAccounts` with a live fleet-wide limit is. Borrowing
-  // is the fleet's last resort, never a routine candidate — a reserved
-  // account with the lowest burn must NEVER outrank a free account still in
-  // this studio's own chain, which is exactly why this is gated on
-  // `candidate === null` rather than computed unconditionally and compared
-  // against it. `deps.accountBurn` is read lazily, here, on this already-rare
-  // path only — the overwhelming majority of ticks (first pass finds
-  // somewhere to go) never pay for it.
-  const borrowed = candidate === null && deps.autoFailover
+  const reserved = deps.reservedAccounts ?? new Set();
+  const candidate = nextClaudeAccount(scopedAccounts, current, limits, deps.now(), reserved);
+  // Review round 2 (maestro review of PR #135), finding 3 — tier 2, tried
+  // ONLY once the first pass just above found nothing: an "unclaimed spare"
+  // — an account positioned BEFORE this studio's own primary (never visible
+  // to the first pass, which only ever scans `scopedAccounts`) that is ALSO
+  // not `reserved` for another repo (never visible to the third pass below
+  // either, which only ever considers `reserved` names) — a genuine blind
+  // spot the original two passes left between them. List order, never
+  // lowest-burn (see `firstFreeAccount`'s own doc comment) — tried BEFORE
+  // the third pass: a plain free spare nobody has claimed must never lose
+  // to someone else's mapped primary.
+  const outOfScopeSpare = candidate === null && deps.autoFailover
+    ? firstFreeAccount(deps.accounts.slice(0, anchor), reserved, limits, deps.now())
+    : null;
+  // Issue #131 (Stage B) — the borrow third pass, entered ONLY when BOTH
+  // passes above found NOTHING (`candidate === null && outOfScopeSpare ===
+  // null`): this studio's own chain (the reserved-primaries-respecting wrap
+  // #103/#117 protect) AND every unclaimed spare are genuinely exhausted,
+  // not merely skipped as reserved the way an account in `scopedAccounts`
+  // with a live fleet-wide limit is. Borrowing is the fleet's last resort,
+  // never a routine candidate — a reserved account with the lowest burn
+  // must NEVER outrank a free account still in this studio's own chain or a
+  // plain unclaimed spare, which is exactly why this is gated on both
+  // passes returning null rather than computed unconditionally and compared
+  // against them. `deps.accountBurn` is read lazily, here, on this
+  // already-rare path only — the overwhelming majority of ticks (an earlier
+  // pass finds somewhere to go) never pay for it.
+  const borrowed = candidate === null && outOfScopeSpare === null && deps.autoFailover
     ? nextBorrowedAccount(
-        deps.accounts, deps.reservedAccounts ?? new Set(), limits,
+        deps.accounts, reserved, limits,
         deps.accountBurn ? await deps.accountBurn.read() : {}, deps.now(),
       )
     : null;
   // Issue #271: with auto-failover off, a studio that COULD move is parked
   // instead — marked and carded once, never switched. With nowhere to go the
   // message is today's, so a single-account fleet reads exactly as before.
-  const next = deps.autoFailover ? (candidate ?? borrowed) : null;
-  // Issue #131 (Stage B): true only when `next` came from the second pass —
-  // every downstream decision (the outcome kind, the StudioStatus borrow
-  // fields, the notify wording) reads off this ONE flag, so they can never
-  // disagree about which pass actually landed the switch.
-  const isBorrow = candidate === null && borrowed !== null;
+  const next = deps.autoFailover ? (candidate ?? outOfScopeSpare ?? borrowed) : null;
+  // Issue #131 (Stage B): true only when `next` came from the THIRD
+  // (reserved-primary) pass — every downstream decision (the outcome kind,
+  // the StudioStatus borrow fields, the notify wording) reads off this ONE
+  // flag, so they can never disagree about which pass actually landed the
+  // switch.
+  const isBorrow = candidate === null && outOfScopeSpare === null && borrowed !== null;
 
   if (!next) {
     const tried = deps.accounts.map((a) => a.name).slice(start);
@@ -1961,15 +1980,27 @@ export async function runAccountFailover(
     claudeAccountMovedBlock: key ?? sighting?.block ?? null,
     // A completed switch is a new account: the old one's limit is not its.
     rateLimited: failed ? existing.rateLimited : null,
-    // Issue #131 (Stage B): set only when THIS switch is the borrow second
-    // pass landing (`isBorrow`); cleared on every other completed switch,
-    // including a plain first-pass wrap that happens to land while this
-    // studio was previously borrowed — that studio found somewhere in its
-    // OWN chain again, so it is no longer borrowing anything, same
-    // "attempted regardless of success" treatment `claudeAccount` itself
-    // gets just above.
-    ...(isBorrow
-      ? { borrowedAccount: next.name, borrowedFromRepo: deps.otherRepoOf?.(next.name) ?? null }
+    // Review round 2 (maestro review of PR #135), finding 4 (write-condition
+    // half) — generalized from `isBorrow` (true only for the third,
+    // reserved-primary pass): ANY switch that lands the studio somewhere
+    // other than its own configured primary now keeps `borrowedAccount` set
+    // (updating it when the studio moves from one non-own account to
+    // another), so hand-back's own `rowNow.borrowedAccount` gate — the ONLY
+    // thing that ever brings a studio back to its primary — never goes
+    // stale partway through a chain of non-primary switches (tier 2's own
+    // unclaimed spare included: without this, the first plain own-chain
+    // switch after landing on a tier-2 spare would silently clear the flag,
+    // and hand-back would never fire again). Cleared ONLY by a switch that
+    // lands exactly on `deps.primary` — a genuine return, whether via this
+    // ordinary path or via `handBack`'s own dedicated one. Guarded on
+    // `deps.primary != null` too: with no primary configured at all there is
+    // no "home" to track being away from, so this stays the plain pre-#271
+    // shape (never set) for every caller that predates that feature.
+    // `borrowedFromRepo` stays keyed on `isBorrow` specifically: an
+    // unclaimed spare (tier 2) or a plain own-chain landing was never
+    // "borrowed FROM" any repo, so it carries no such repo to name.
+    ...(deps.primary != null && next.name !== deps.primary
+      ? { borrowedAccount: next.name, borrowedFromRepo: isBorrow ? (deps.otherRepoOf?.(next.name) ?? null) : null }
       : { borrowedAccount: null, borrowedFromRepo: null }),
   };
   await storage.put(STATUS_KEY, switched);

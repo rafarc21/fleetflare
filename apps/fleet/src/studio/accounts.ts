@@ -272,6 +272,31 @@ export function nextBorrowedAccount(
 }
 
 /**
+ * Review round 2 (maestro review of PR #135), finding 3 — a plain,
+ * position-0-inclusive scan in LIST ORDER: the first account in `accounts`
+ * that is neither `reserved` (someone else's mapped primary) nor fleet-wide
+ * limited. Failover.ts's own second-tier "unclaimed spare" pass: an account
+ * positioned BEFORE this studio's own mapped primary that is ALSO not
+ * reserved for another repo — nobody's primary, a genuine blind spot
+ * neither the first pass (scoped to this studio's own chain) nor the borrow
+ * pass (scoped to `reserved` names only) ever looks at.
+ *
+ * List order, not lowest-burn: unlike `nextBorrowedAccount`'s own
+ * reserved-primary pass, there is no fairness concern between spares nobody
+ * has claimed — the first free one wins, same "first match in order" rule
+ * the ordinary forward wrap already uses everywhere else in this file.
+ */
+export function firstFreeAccount(
+  accounts: ClaudeAccount[], reserved: Set<string>, limits: AccountLimits = {}, now: Date = new Date(),
+): ClaudeAccount | null {
+  for (const a of accounts) {
+    if (reserved.has(a.name)) continue;
+    if (accountIsFree(a, limits, now)) return a;
+  }
+  return null;
+}
+
+/**
  * Issue #102 requirement 3 — "all exhausted: … show earliest reset in fleet
  * ls". The earliest `until` among `accounts` that `limits` records as
  * currently limited as of `now`, or null when none of them have a readable
