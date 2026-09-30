@@ -265,6 +265,36 @@ grep during this dispatch — worth re-checking whether it is the syncSession
 tick itself, and whether that tick runs on a fixed cadence regardless of
 observed state, before assuming hand-back "just works" off it.)
 
+### Open question — RESOLVED (Stage B, 2026-09-30)
+
+Grepped every call site of `runAccountFailover(` in `apps/fleet/src` (test
+files each construct their own harness and call it directly; production has
+exactly one call site). The one production call site is `do.ts:2818`, inside
+`syncSessionCycle` — and `syncSessionCycle` is NOT gated on any observed
+state: `StudioDO.syncSession()` (`do.ts`, the scheduled alarm callback) calls
+it unconditionally via `runScheduledTick`, on the fixed `SYNC_SESSION_SECONDS`
+cadence (the alarm reschedules itself in a `finally`, "unconditionally, exactly
+as before" per that method's own doc comment), and `syncSessionCycle` itself
+runs its steps — session sync, aside-ship, `mirrorBurnToRegistry`, THEN
+`runAccountFailover`, THEN the readiness check — each in its own try/catch,
+none gated on whether a limit was ever seen. `runAccountFailover` itself then
+unconditionally execs `paneCaptureCmd()` and computes a fresh `verdict` on
+every single tick, whether or not anything is currently wrong: a healthy
+studio runs this exact code path every 300s and gets `verdict.kind ===
+"working"` (the "no limit, pane is clean" branch) every time.
+
+That settles the question: `runAccountFailover`'s own periodicity is already
+independent of a fresh limit sighting, so the hand-back check does NOT need a
+new hook parallel to `evaluateDegradedRecovery` — `evaluateDegradedRecovery`
+itself is called FROM inside this same already-periodic `working` branch (see
+`runAccountFailover`'s own `if (verdict.kind === "working")` block), which is
+exactly the existing precedent this feature follows: the hand-back check is
+added as one more step inside that same branch, guarded on
+`existing.borrowedAccount` being set so the overwhelming majority of ticks (a
+studio that has never borrowed anything) pay nothing beyond one field read.
+No new alarm, no new schedule, no new call site — the tick that already runs
+on a fixed cadence regardless of observed state is reused exactly as it is.
+
 ### Must-not-regress
 
 The reserved-primaries regression test at
@@ -286,3 +316,154 @@ its own Verification output) to this same document when it lands, rather
 than starting a new plan doc — same convention this repo already uses for
 multi-round fixes within one issue (see e.g. the #328 fix rounds documented
 inline in `do.ts`'s own comments).
+
+## Files touched (Stage B)
+
+- `apps/fleet/src/studio/accounts.ts` — extracted `accountIsFree` from
+  `nextClaudeAccount`'s own `isFree` closure (same rule, now shared); new
+  `nextBorrowedAccount` (the borrow second pass: among `reserved` accounts,
+  free, lowest 5h burn first); new `repoForAccount` (the reverse of
+  `otherRepoPrimaries`, display-only, for naming a borrowed account's repo in
+  an operator message).
+- `apps/fleet/src/studio/failover.ts` — `FailoverDeps` gains optional
+  `accountBurn` (read-only, mirrors `accountLimits`' shape) and `otherRepoOf`
+  (display-only repo-name lookup); `FailoverOutcome` gains `"borrowed"` and
+  `"returned"`; new `borrowedMessage`/`returnedMessage`; the exhaustion path
+  (inside `runAccountFailover`) now tries `nextBorrowedAccount` when the first
+  pass (`nextClaudeAccount`) returns `null` and `deps.autoFailover` is true,
+  tracked via one `isBorrow` flag that drives the outcome kind, the
+  `StudioStatus.borrowedAccount`/`borrowedFromRepo` fields and the notify
+  wording; the `working`-verdict branch (already runs every
+  `SYNC_SESSION_SECONDS` regardless of observed state — see the resolved open
+  question above) gains a hand-back check, gated on
+  `existing.borrowedAccount` being set and the studio's own `deps.primary`
+  reading free again (`accountIsFree`); new private `handBack` performs the
+  hand-back switch (exec + relaunch + record + notify), deliberately
+  reusing less machinery than the ordinary switch — see `handBack`'s own doc
+  comment for the three things it does NOT do and why (no redraw-guard
+  bookkeeping, no `claudeAccountMovedVia`, no `observedStorage` bring-up
+  re-verification — stated as a residual, not silently dropped).
+- `apps/fleet/src/studio/types.ts` — `StudioStatus` gains
+  `borrowedAccount?: string | null` and `borrowedFromRepo?: string | null`.
+- `apps/fleet/src/studio/rate-limit.ts` — new `accountBurnStateKey`,
+  `AccountBurnState`, `encodeAccountBurnState`, `decodeAccountBurnState` —
+  the exact parallel `account-burn:<name>` sibling of
+  `accountLimitStateKey`/`AccountLimitState`/`encodeAccountLimitState`/
+  `decodeAccountLimitState`.
+- `apps/fleet/src/studio/do.ts` — new `readFleetAccountBurn`/
+  `writeFleetAccountBurn` (the D1-backed read/write half of
+  `FailoverDeps.accountBurn`, parallel to `readFleetAccountLimits`/
+  `writeFleetAccountLimit`); `mirrorBurnToRegistry` gains an optional
+  trailing `accountBurnWrite` port, called with this studio's own
+  `launchedAccount` and `burn.window5hOutput` whenever wired (absent: mirrors
+  exactly as before — every existing 2-arg call site, including every test,
+  is untouched); `syncSessionCycle` gains a parallel optional trailing
+  `accountBurnWrite` parameter, threaded down to `mirrorBurnToRegistry`;
+  `StudioDO.syncSession()`'s one production call wires it to
+  `writeFleetAccountBurn(this.env.DB, …)`; `failoverDeps()` gains
+  `accountBurn.read` (wired to `readFleetAccountBurn`) and `otherRepoOf`
+  (wired to `repoForAccount`). Did NOT touch `clearForceMappedAccount` or
+  `recycle()`'s account-clear step — Stage A's own territory, untouched.
+- `apps/fleet/test/studio.account-failover.test.ts` — new
+  `describe("repoForAccount …")`, `describe("nextBorrowedAccount …")`, and
+  `describe("runAccountFailover — borrow another repo's primary …")` blocks;
+  `harness()` gains `accountBurn`/`otherRepoOf` options and an
+  `accountBurnReads` counter (the mutation-style proof's own instrument). The
+  existing `describe("runAccountFailover — auto-failover ON with a mapped
+  primary (#271)")` block, including the golden #103 test at its original
+  line, is UNCHANGED.
+- This plan doc.
+
+### RESIDUAL, stated rather than hidden
+
+`readFleetAccountBurn`'s mirrored figure is never read-time-expired against
+the 5h window the way `StudioStatus.burn` itself is (`registry.ts`'s
+`expireBurnWindow`, issue #181): `AccountBurnState` carries only
+`window5hOutput`, per this plan doc's own original shape, with no
+`window5hStart` to expire it against. A stopped studio's last mirrored figure
+for its account therefore freezes at whatever it held when the container went
+down, the same shape of staleness #181 fixed for the per-studio figure but
+not extended here. The consequence is bounded: `accountIsFree` (the
+fleet-wide LIMIT map) is what decides whether a borrow candidate is usable at
+all; a stale burn figure can only mis-ORDER two already-free candidates
+against each other, never turn an exhausted account into a usable one or vice
+versa. Documented here rather than fixed, given the scope of this dispatch —
+a natural follow-up for whoever next touches this fleet-wide burn mirror.
+
+## Verification (Stage B)
+
+RED confirmed first, the same way Stage A's own verification did: with only
+`test/studio.account-failover.test.ts` changed (the five new `describe`
+blocks plus the `harness()` extensions) and every implementation file
+(`accounts.ts`, `do.ts`, `failover.ts`, `rate-limit.ts`, `types.ts`) stashed
+back to `origin/main`'s Stage-A state, the full file was run:
+
+```
+$ cd apps/fleet && npx vitest run test/studio.account-failover.test.ts
+ Test Files  1 failed (1)
+      Tests  11 failed | 98 passed (109)
+```
+
+12 new tests were added; 11 failed (`nextBorrowedAccount is not a function`,
+`repoForAccount is not a function`, and `{ kind: "no-modal" }`/
+`{ kind: "exhausted" }`/`{ kind: "switched" }` where `"borrowed"`/`"returned"`
+was expected). The 12th ("not yet borrowed, own primary free, no limit on
+screen: hand-back never fires") passed even against the stashed
+implementation, by construction — it asserts the ABSENCE of new behavior
+(`existing.borrowedAccount` is never set, so there is nothing for a hand-back
+check to act on whether or not one exists), so it is a true negative, not a
+false pass; 98 pre-existing tests in the same file were unaffected either
+way. Then implementation restored, same file GREEN:
+
+```
+$ cd apps/fleet && npx vitest run test/studio.account-failover.test.ts
+ Test Files  1 passed (1)
+      Tests  109 passed (109)
+```
+
+Two things this run proves directly:
+
+- the golden #103/#117 regression test (line ~1281 pre-Stage-B, unmodified)
+  still passes unchanged — the reserved-primaries wrap never lands on another
+  repo's primary in the ordinary (non-total-exhaustion) case;
+- the new sibling test in the must-not-regress section above (same fixture,
+  own primary ALSO limited) passes with `{ kind: "borrowed", … }` — proving
+  the stricter condition is what gates the borrow path, not a loosened
+  reservation check;
+- the mutation-style test ("the first pass's own free candidate wins, and the
+  second pass is never even consulted") passes, AND asserts
+  `h.accountBurnReads === 0` — not just that the outcome was `"switched"`,
+  but that `deps.accountBurn.read` was never even called, so a mutant that
+  ran both passes unconditionally and compared burn globally (reopening
+  #103/#117's starvation bug) would fail this test even if it happened to
+  pick the right winner by coincidence.
+
+Full gate, run ONE AT A TIME per this repo's own memory-ceiling rule (never
+concurrently with another heavy gate), all exit 0:
+
+```
+$ cd apps/fleet && flock /tmp/fleet-gate.lock bun run check
+$ tsc --noEmit && tsc --noEmit -p container && tsc --noEmit -p cli && tsc --noEmit -p test-integration && tsc --noEmit -p test
+(clean, exit 0)
+
+$ cd apps/fleet && flock /tmp/fleet-gate.lock bun run test
+$ vitest run
+...
+ Test Files  151 passed (151)
+      Tests  5288 passed (5288)
+   Duration  275.20s
+(exit 0)
+
+$ cd apps/fleet && flock /tmp/fleet-gate.lock bun run english-check
+$ bun run scripts/english-check.ts
+english-check: clean
+(exit 0)
+```
+
+5288 = Stage A's own 5276 baseline + 12 new tests (the three new `describe`
+blocks: `repoForAccount`, `nextBorrowedAccount`, and `runAccountFailover —
+borrow another repo's primary`), 151 test files unchanged in count. Zero
+regressions across the full suite, including every `runAccountFailover`
+describe block and `nextClaudeAccount`/`otherRepoPrimaries (issue #103)`/
+`earliestAccountReset (issue #102 requirement 3)` block this task's own
+must-not-regress section named.
