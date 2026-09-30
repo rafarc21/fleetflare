@@ -1,37 +1,92 @@
+<div align="center">
+
 # Fleetflare
+
+### 🚀 Run coding agents as long-lived cloud studios, not laptop processes.
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![Runtime](https://img.shields.io/badge/runtime-Cloudflare%20Workers-orange)
 ![CLI](https://img.shields.io/badge/cli-Bun-000000)
+![CI](https://github.com/rafarc21/fleetflare/actions/workflows/fleet-check.yml/badge.svg)
 
-Run coding agents as long-lived cloud studios instead of processes on your
-laptop. Each **studio** is a Cloudflare Container running one Claude Code
-session — the **lead** — plus the member subagents it dispatches, wired to a
-**GitHub Issues board**: work arrives as an issue, the studio reports back
-with a comment on that same issue, and there's no separate dashboard to keep
-in sync.
+</div>
 
-<!-- TODO: screenshot/GIF of a running studio here -->
+Each **studio** is a Cloudflare Container running one Claude Code session —
+the **lead** — plus the member subagents it dispatches, wired to a **GitHub
+Issues board**: work arrives as an issue, the studio reports back with a
+comment on that same issue, and there's no separate dashboard to keep in
+sync.
+
+**What you get:**
+
+- ☁️ **A cloud studio, not a laptop process** — survives a closed laptop, a
+  lost network, and a reboot, and costs zero local RAM while it works.
+- 🗂️ **Your GitHub Issues board as the only dashboard** — a studio picks up
+  work as an issue and reports back on that same issue, so there is nothing
+  new to keep in sync.
+- 👀 **Total visibility, nothing spent in the dark** — `fleet ls` lists every
+  running studio, its readiness, and its burn, live from your terminal.
+
+A studio's id is `<repo>--<role>` — say hello to `fleet ls`:
+
+```
+$ fleet ls
+ID                          ROLE             STATE      READY   BURN/HR
+acme-site--maestro          maestro          running    yes     $0.04
+acme-site--web-studio       web-studio       running    yes     $0.15
+acme-docs--release-studio   release-studio   degraded   no      $0.06
+```
 
 **Status:** Fleetflare runs a real fleet daily across several repositories.
-It is not a turnkey product — expect to read code when something surprises
-you. ([full status](#status) below.)
+It is not a turnkey product — it assumes Cloudflare, GitHub, Claude Code, and
+an editor that can host terminals, and expects you to read code when
+something surprises you. [docs/operations.md](docs/operations.md) tells you
+which surprises to expect first.
 
 ---
 
-## Why this exists
+## ✨ Features
 
-- Local agents are bounded by local RAM. Measured on a 24 GB machine: 84
-  worktrees, 135 node/claude processes, 7.2 GB resident, and everything
-  slows down together.
-- A cloud studio costs zero local memory and survives a closed laptop, a
-  lost network, and a reboot.
-- The tradeoff is honest: you can no longer see the work by glancing at a
-  terminal. So every running studio gets a visible row and a live terminal
-  (in [Orca](docs/setup.md#requirements) or plain `fleet ls`/`fleet
-  attach`), and nothing spends money where you cannot see it.
+- ☁️ **Cloud-native, not laptop-bound.** Local agents are bounded by local
+  RAM — measured on a 24 GB machine: 84 worktrees, 135 node/claude
+  processes, 7.2 GB resident, and everything slows down together. A cloud
+  studio costs zero local memory and keeps running through a closed laptop
+  or a reboot.
+- 👀 **Visible by default.** The tradeoff of moving work off your screen is
+  honest, so every running studio gets a visible row and a live terminal (in
+  [Orca](docs/setup.md#requirements) or plain `fleet ls`/`fleet attach`), and
+  nothing spends money where you cannot see it.
+- 🙅 **Leads never implement.** A PreToolUse hook refuses a lead's
+  `Edit`/`Write` and its file-writing Bash forms, so implementation is always
+  dispatched to member subagents — enforced in code, not asked for in a
+  prompt.
+- 🧯 **Rescue-first lifecycle.** `fleet recycle` and `fleet destroy` rescue
+  uncommitted work to its own branch before touching a container, and refuse
+  outright if that rescue is impossible (loudly overridable, never silent).
+- 🎭 **A role per job.** `maestro` coordinates and never implements;
+  `web-studio` and `release-studio` carry members; `pilot` and `scratch` are
+  lightweight. One studio per role per repo — parallelism beyond that comes
+  from the members inside each studio.
+- 🤖 **Optional extras when you want them.** Delegate mechanical edits to a
+  Workers AI model with the opt-in `junior`/GLM skill, or let a studio that
+  hits its Claude usage limit fail over to the next configured account with
+  `FLEET_AUTO_FAILOVER=on`. Both off by default. See
+  [docs/setup.md](docs/setup.md).
 
-## How it fits together
+### Key concepts
+
+| Concept | What it means |
+|---|---|
+| **studio** | One Cloudflare container running one Claude Code session (the lead) plus the member subagents it dispatches. |
+| **lead** | The Claude Code session in a studio's tmux window 0. Never implements directly — a hook forces it to dispatch to members. |
+| **maestro** | The role that coordinates a repo's work and never implements; one of the roles alongside `web-studio`, `release-studio`, `pilot`, `scratch`. |
+| **board** | The GitHub Issues in your target repo. Labels are the state machine work moves through. |
+| **rescue** | Before any deploy that replaces containers, `fleet rescue-all` commits and pushes every studio's uncommitted work to its own `fleet/rescue/...` branch so nothing is lost. See [docs/operations.md](docs/operations.md). |
+| **junior / GLM** | The opt-in `FLEET_JUNIOR` skill: studios can delegate mechanical, low-risk edits to a Workers AI model (GLM) and review its diff before applying. See [docs/setup.md](docs/setup.md). |
+| **account failover** | With `FLEET_AUTO_FAILOVER=on`, a studio that hits its Claude usage limit switches to the next configured `CLAUDE_CODE_OAUTH_TOKEN_<n>` automatically. Off by default. See [docs/setup.md](docs/setup.md). |
+| **leak gate** | Always on: a studio whose work repo is public (or unconfirmed) refuses any push or `gh` write matching a private denylist. |
+
+## 🧠 How it works
 
 | Piece | What it is |
 |---|---|
@@ -54,48 +109,65 @@ A studio's id is `<repo>--<role>`, for example `acme-site--web-studio`. That
 id is an address: it becomes a DNS label, a board assignment label, and the
 registry key. Dots and underscores in a repo name fold to hyphens.
 
-## Leads never implement
-
-A PreToolUse hook refuses a lead's `Edit`/`Write` and its file-writing Bash
-forms, so implementation is dispatched to member subagents. This is enforced
-in code, not asked for in a prompt.
-
 ## 🚀 Quickstart
 
 There is one real path here: deploy your own Worker to your own Cloudflare
 account. How long that takes depends on how many of the pieces below you
-already have on hand — a Cloudflare account, a GitHub PAT, a Claude Code
-OAuth token — not on the length of this guide.
+already have on hand, not on the length of this guide.
+
+**Prerequisites**
+
+- [ ] A Cloudflare account
+- [ ] A GitHub personal access token (a fine-grained PAT is the default)
+- [ ] A Claude Code OAuth token
+- [ ] [Bun](https://bun.sh) installed locally
+
+**1. Clone and install**
 
 ```bash
 git clone https://github.com/<you>/fleetflare
 cd fleetflare/apps/fleet
 bun install
+```
 
+**2. Point at your ops checkout**
+
+```bash
 export FLEET_OPS_DIR="$HOME/fleetflare-ops"   # wherever your private ops-repo-shaped checkout lives; add this to your shell profile so it survives new terminals
 mkdir -p "$FLEET_OPS_DIR/fleet"
 cp wrangler.example.jsonc "$FLEET_OPS_DIR/fleet/wrangler.jsonc"
 ```
 
-From there you need: a Cloudflare D1 database and R2 bucket, GitHub auth (a
+<details>
+<summary>What else this needs (Cloudflare D1/R2, GitHub auth, Access, secrets)</summary>
+
+You need: a Cloudflare D1 database and R2 bucket, GitHub auth (a
 fine-grained PAT is the default), Cloudflare Access in front of the Worker,
 and the essential secrets — `CLAUDE_CODE_OAUTH_TOKEN`,
 `GITHUB_WEBHOOK_SECRET`, `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `GITHUB_TOKEN` —
 set one at a time with `scripts/deploy.sh secret put <NAME>` (never a bare
-`wrangler secret put`). Then:
+`wrangler secret put`). Every resource, every secret, Claude accounts, and
+why `--allow-unrescued` is needed the first time: full walkthrough in
+**[docs/setup.md](docs/setup.md)**.
+
+</details>
+
+**3. Migrate and deploy**
 
 ```bash
 bun run migrate:local    # apps/fleet/migrations/ against a local D1 for `wrangler dev`, via scripts/deploy.sh
 bun run migrate:remote   # apps/fleet/migrations/ against your real D1, via scripts/deploy.sh
-bun run deploy --allow-unrescued   # FIRST deploy only (see below): scripts/deploy.sh -> wrangler deploy -c wrangler.local.jsonc
+bun run deploy --allow-unrescued   # FIRST deploy only (see docs/setup.md): scripts/deploy.sh -> wrangler deploy -c wrangler.local.jsonc
+```
+
+**4. Link the CLI**
+
+```bash
 bun link            # from apps/fleet — provides `fleet` and `ff`
 fleet ls            # must list studios (even zero of them), not 401/403
 ```
 
-Full walkthrough — every resource, every secret, Claude accounts, and why
-`--allow-unrescued` is needed the first time: **[docs/setup.md](docs/setup.md)**.
-
-## Daily use
+## 🕹️ Daily use
 
 From inside any repo you want a studio for:
 
@@ -129,34 +201,25 @@ carry members. `pilot` and `scratch` are lightweight. A studio id is
 `<repo>--<role>`, so one repo supports one studio per role — parallelism beyond
 that comes from members inside each studio, which is the intended shape.
 
-## Key concepts
+## 🛡️ Safety
 
-| Concept | What it means |
-|---|---|
-| **studio** | One Cloudflare container running one Claude Code session (the lead) plus the member subagents it dispatches. |
-| **lead** | The Claude Code session in a studio's tmux window 0. Never implements directly — a hook forces it to dispatch to members. |
-| **maestro** | The role that coordinates a repo's work and never implements; one of the roles alongside `web-studio`, `release-studio`, `pilot`, `scratch`. |
-| **board** | The GitHub Issues in your target repo. Labels are the state machine work moves through. |
-| **rescue** | Before any deploy that replaces containers, `fleet rescue-all` commits and pushes every studio's uncommitted work to its own `fleet/rescue/...` branch so nothing is lost. See [docs/operations.md](docs/operations.md). |
-| **junior / GLM** | The opt-in `FLEET_JUNIOR` skill: studios can delegate mechanical, low-risk edits to a Workers AI model (GLM) and review its diff before applying. See [docs/setup.md](docs/setup.md). |
-| **account failover** | With `FLEET_AUTO_FAILOVER=on`, a studio that hits its Claude usage limit switches to the next configured `CLAUDE_CODE_OAUTH_TOKEN_<n>` automatically. Off by default. See [docs/setup.md](docs/setup.md). |
-| **leak gate** | Always on: a studio whose work repo is public (or unconfirmed) refuses any push or `gh` write matching a private denylist. |
-
-## Safety features
-
-- **Leak gate** (always on) — a studio whose work repo is public, or whose
+- 🔓 **Leak gate** (always on) — a studio whose work repo is public, or whose
   visibility cannot be confirmed, refuses any `git push` or `gh`
   issue/pr/api/release/gist write whose text matches a private denylist.
-- **Write proxy** (opt-in, per repo) — a listed repo's studios hold a
+- 🔁 **Write proxy** (opt-in, per repo) — a listed repo's studios hold a
   read-only GitHub credential; their writes are scanned against the same
   denylist and forwarded by the Worker instead.
-- **No studio ever holds a Cloudflare deploy credential** — a lead asked to
+- 🔑 **No studio ever holds a Cloudflare deploy credential** — a lead asked to
   `wrangler deploy` or run a remote migration itself is expected to refuse.
-- **Cloudflare Access** sits in front of the terminal endpoint (`/studio/*`),
+- 🚪 **Cloudflare Access** sits in front of the terminal endpoint (`/studio/*`),
   since it is a shell.
-- **`fleet recycle` and `fleet destroy` rescue uncommitted work first** and
+- 💾 **`fleet recycle` and `fleet destroy` rescue uncommitted work first** and
   refuse if the rescue is impossible (`--discard-unsynced`/`--force`
   override, loudly).
+
+Read [docs/threat-model.md](docs/threat-model.md) before deploying: a studio
+runs its agent as root in a container that holds real credentials. Report
+vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## ❓ FAQ
 
@@ -195,15 +258,33 @@ Bash forms, enforced in code. Implementation is always dispatched to member
 subagents.
 
 **Does deploying lose in-progress work?**
-Every deploy replaces every container, but `bun run deploy` runs `fleet
-rescue-all` first and refuses to proceed if any studio's uncommitted work
-cannot be rescued. See [docs/operations.md](docs/operations.md).
+`bun run deploy` runs `fleet rescue-all` first and refuses to proceed if any
+studio's uncommitted work cannot be rescued. Since container images build
+reproducibly, a deploy that only touches Worker source keeps the same image
+digest and leaves running studios untouched; a deploy that changes
+`container/` replaces the containers built from it, which is exactly what
+the rescue gate protects. See [docs/operations.md](docs/operations.md).
 
 **Do I need Claude Code specifically, or can I use another AI coding tool?**
 The studio image runs the Claude Code CLI as the lead today — this project
 is not yet tool-agnostic.
 
-## Repository layout
+## 🧪 Development
+
+```bash
+cd apps/fleet
+bun run check       # types, all tsconfig projects
+bun run test        # vitest-pool-workers
+bun run bun-test    # container-level tests; needs tmux and Chromium
+```
+
+Both test lanes matter. `bun run test` alone is half the suite.
+
+GitHub Actions runs both lanes on every pull request — see
+[docs/operations.md](docs/operations.md) for the workflows, what triggers
+them, and the (now superseded) Mac-based local-ci daemon.
+
+### Repository layout
 
 ```
 apps/fleet/          the Worker, the CLI, the container image
@@ -216,35 +297,7 @@ skills/             operator and agent skills
 docs/               plans and design records
 ```
 
-## Development
-
-```bash
-cd apps/fleet
-bun run check       # types, all tsconfig projects
-bun run test        # vitest-pool-workers
-bun run bun-test    # container-level tests; needs tmux and Chromium
-```
-
-Both test lanes matter. `bun run test` alone is half the suite.
-
-CI runs on the operator's Mac, not GitHub Actions — see
-[docs/operations.md](docs/operations.md) for the local-ci daemon, lanes, and
-`known-flaky.txt`.
-
-## Status
-
-Fleetflare runs a real fleet daily across several repositories. It is not a
-turnkey product: it assumes Cloudflare, GitHub, Claude Code, and an editor that
-can host terminals. Expect to read code when something surprises you — and
-[docs/operations.md](docs/operations.md) tells you which surprises to expect
-first.
-
-## Security and license
-
-Read [docs/threat-model.md](docs/threat-model.md) before deploying: a studio
-runs its agent as root in a container that holds real credentials. Report
-vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
-Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
+## 📜 License
 
 Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE) and
-[NOTICE](NOTICE).
+[NOTICE](NOTICE). Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
