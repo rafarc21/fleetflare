@@ -19,7 +19,7 @@ you. ([full status](#status) below.)
 
 ---
 
-## 🎯 Why this exists
+## Why this exists
 
 - Local agents are bounded by local RAM. Measured on a 24 GB machine: 84
   worktrees, 135 node/claude processes, 7.2 GB resident, and everything
@@ -31,7 +31,7 @@ you. ([full status](#status) below.)
   (in [Orca](docs/setup.md#requirements) or plain `fleet ls`/`fleet
   attach`), and nothing spends money where you cannot see it.
 
-## 🧩 How it fits together
+## How it fits together
 
 | Piece | What it is |
 |---|---|
@@ -54,7 +54,7 @@ A studio's id is `<repo>--<role>`, for example `acme-site--web-studio`. That
 id is an address: it becomes a DNS label, a board assignment label, and the
 registry key. Dots and underscores in a repo name fold to hyphens.
 
-## 🧠 Leads never implement
+## Leads never implement
 
 A PreToolUse hook refuses a lead's `Edit`/`Write` and its file-writing Bash
 forms, so implementation is dispatched to member subagents. This is enforced
@@ -95,7 +95,7 @@ fleet ls            # must list studios (even zero of them), not 401/403
 Full walkthrough — every resource, every secret, Claude accounts, and why
 `--allow-unrescued` is needed the first time: **[docs/setup.md](docs/setup.md)**.
 
-## 🕹️ Daily use
+## Daily use
 
 From inside any repo you want a studio for:
 
@@ -129,7 +129,7 @@ carry members. `pilot` and `scratch` are lightweight. A studio id is
 `<repo>--<role>`, so one repo supports one studio per role — parallelism beyond
 that comes from members inside each studio, which is the intended shape.
 
-## 📚 Key concepts
+## Key concepts
 
 | Concept | What it means |
 |---|---|
@@ -142,7 +142,7 @@ that comes from members inside each studio, which is the intended shape.
 | **account failover** | With `FLEET_AUTO_FAILOVER=on`, a studio that hits its Claude usage limit switches to the next configured `CLAUDE_CODE_OAUTH_TOKEN_<n>` automatically. Off by default. See [docs/setup.md](docs/setup.md). |
 | **leak gate** | Always on: a studio whose work repo is public (or unconfirmed) refuses any push or `gh` write matching a private denylist. |
 
-## 🔒 Safety features
+## Safety features
 
 - **Leak gate** (always on) — a studio whose work repo is public, or whose
   visibility cannot be confirmed, refuses any `git push` or `gh`
@@ -203,7 +203,7 @@ cannot be rescued. See [docs/operations.md](docs/operations.md).
 The studio image runs the Claude Code CLI as the lead today — this project
 is not yet tool-agnostic.
 
-## 📁 Repository layout
+## Repository layout
 
 ```
 apps/fleet/          the Worker, the CLI, the container image
@@ -216,7 +216,7 @@ skills/             operator and agent skills
 docs/               plans and design records
 ```
 
-## 🛠️ Development
+## Development
 
 ```bash
 cd apps/fleet

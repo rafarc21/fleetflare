@@ -21,8 +21,8 @@ bun run bun-test    # container-level tests; needs tmux and Chromium
 
 Both test lanes matter: `bun run test` alone is half the suite. The
 `bun-test` lane executes real shell and a real tmux server. Run it inside a
-Linux container (see the CI section of the README), never on a machine where
-`TMUX` is set to a session you care about.
+Linux container (see the CI section of [docs/operations.md](docs/operations.md)),
+never on a machine where `TMUX` is set to a session you care about.
 
 From the repository root:
 
@@ -38,7 +38,8 @@ bun run apps/fleet/scripts/english-check.ts
 - All repository content is English: code, comments, docs, issues, commit
   messages and pull request text.
 - CI is the `local-ci/*` commit status on your pull request head (see the
-  README's CI section). A maintainer runs it; there is no hosted CI.
+  CI section of [docs/operations.md](docs/operations.md)). A maintainer runs
+  it; there is no hosted CI.
 
 ## License
 
