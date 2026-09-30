@@ -387,6 +387,55 @@ describe("end-state sanity check (not a regression test): a map change + recycle
   });
 });
 
+// Issue #134: a studio recycled (or otherwise relaunched through
+// launchAccountOrRefuse) onto a DIFFERENT account than the one it was last
+// launched on carries a `rateLimited` observation that necessarily describes
+// the OLD account — nothing else clears it, so `fleet ls`/`fleet recycle`
+// kept printing "rate-limited until <time>" for a studio actually healthy on
+// the new account. The fix: launchAccountOrRefuse's own `launch.ok` branch
+// clears `rateLimited` too, exactly when the resolved account differs from
+// `existing.launchedAccount` and a `rateLimited` observation is present.
+describe("launchAccountOrRefuse clears a stale rateLimited on an account change (#134)", () => {
+  const FUTURE = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const SEEN = new Date().toISOString();
+
+  it("recorded limited on account 1, repo mapped to account 2, failover off: relaunches on 2 and drops rateLimited", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const storage = fakeStorage(status({
+      launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN",
+      rateLimited: { until: FUTURE, seenAt: SEEN },
+    }));
+    const recorded: StudioStatus[] = [];
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", async (s) => { recorded.push(s); });
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited ?? null).toBeNull();
+  });
+
+  it("no account change (already on the mapped account): rateLimited is left untouched", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({
+      launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      rateLimited: observation,
+    }));
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", async () => {});
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited).toEqual(observation);
+  });
+
+  it("never launched before (no launchedAccount recorded): rateLimited is left untouched", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({ rateLimited: observation }));
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", async () => {});
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited).toEqual(observation);
+  });
+});
+
 describe("withAccountDisplay — the column shows the LAUNCHED account (#289)", () => {
   const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
 
