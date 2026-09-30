@@ -200,7 +200,7 @@ describe("nextClaudeAccount", () => {
   it("issue #102: skips an account with a live fleet-wide limit and wraps past it", () => {
     const three: ClaudeAccount[] = [...accounts, { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 }];
     const now = new Date("2026-09-23T14:00:00.000Z");
-    const limits = { CLAUDE_CODE_OAUTH_TOKEN: new Date(now.getTime() + 60_000).toISOString() };
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN: { until: new Date(now.getTime() + 60_000).toISOString(), seenAt: now.toISOString() } };
     // On CLAUDE_CODE_OAUTH_TOKEN_3 (the last slot): forward wrap would land on
     // account 1 first, but it is still live-limited, so account 2 is next.
     expect(nextClaudeAccount(three, "CLAUDE_CODE_OAUTH_TOKEN_3", limits, now)).toEqual(accounts[1]);
@@ -208,13 +208,34 @@ describe("nextClaudeAccount", () => {
 
   it("issue #102: an account whose recorded reset has already passed counts as free again", () => {
     const now = new Date("2026-09-23T14:00:00.000Z");
-    const limits = { CLAUDE_CODE_OAUTH_TOKEN: new Date(now.getTime() - 1000).toISOString() };
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN: { until: new Date(now.getTime() - 1000).toISOString(), seenAt: now.toISOString() } };
     expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN_2", limits, now)).toEqual(accounts[0]);
   });
 
   it("issue #102: every OTHER account still live-limited (or an unreadable reset) — nowhere to go, null", () => {
     const now = new Date("2026-09-23T14:00:00.000Z");
-    const limits = { CLAUDE_CODE_OAUTH_TOKEN: null };
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN: { until: null, seenAt: now.toISOString() } };
+    expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN_2", limits, now)).toBeNull();
+  });
+
+  // ---------------------------------------------------------------------
+  // Review round 1 (#102 review, 2026-09-30), finding 1 — a `null`-until
+  // entry (a select-style modal sighting) must not blacklist an account
+  // FOREVER: nothing ever re-probes it, since `nextClaudeAccount` skips it on
+  // every future wrap. A bounded staleness ceiling (NULL_UNTIL_CEILING_MS,
+  // 24h) gives the fleet a chance to re-probe instead.
+  // ---------------------------------------------------------------------
+  it("issue #102 review round 1: a null-until entry seen long ago (30 days) is free again, not a permanent deadlock", () => {
+    const now = new Date("2026-09-23T14:00:00.000Z");
+    const seenAt = new Date(now.getTime() - 30 * 24 * 60 * 60_000).toISOString();
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN: { until: null, seenAt } };
+    expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN_2", limits, now)).toEqual(accounts[0]);
+  });
+
+  it("issue #102 review round 1: a FRESH null-until entry (seen 1 minute ago) still correctly excludes the account", () => {
+    const now = new Date("2026-09-23T14:00:00.000Z");
+    const seenAt = new Date(now.getTime() - 60_000).toISOString();
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN: { until: null, seenAt } };
     expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN_2", limits, now)).toBeNull();
   });
 
@@ -247,15 +268,16 @@ describe("earliestAccountReset (issue #102 requirement 3)", () => {
     const later = new Date(now.getTime() + 2 * 60_000).toISOString();
     const earlier = new Date(now.getTime() + 60_000).toISOString();
     expect(earliestAccountReset(accounts, {
-      CLAUDE_CODE_OAUTH_TOKEN: later, CLAUDE_CODE_OAUTH_TOKEN_2: earlier,
+      CLAUDE_CODE_OAUTH_TOKEN: { until: later, seenAt: now.toISOString() },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: earlier, seenAt: now.toISOString() },
     }, now)).toBe(earlier);
   });
 
   it("null when no account has a readable, still-live reset", () => {
     expect(earliestAccountReset(accounts, {}, now)).toBeNull();
-    expect(earliestAccountReset(accounts, { CLAUDE_CODE_OAUTH_TOKEN: null }, now)).toBeNull();
+    expect(earliestAccountReset(accounts, { CLAUDE_CODE_OAUTH_TOKEN: { until: null, seenAt: now.toISOString() } }, now)).toBeNull();
     const past = new Date(now.getTime() - 1000).toISOString();
-    expect(earliestAccountReset(accounts, { CLAUDE_CODE_OAUTH_TOKEN: past }, now)).toBeNull();
+    expect(earliestAccountReset(accounts, { CLAUDE_CODE_OAUTH_TOKEN: { until: past, seenAt: now.toISOString() } }, now)).toBeNull();
   });
 });
 
@@ -436,7 +458,7 @@ function harness(opts: {
       ...(opts.display ? { display: opts.display } : {}),
       now: () => opts.now ?? NOW,
       accountLimits: {
-        read: async () => Object.fromEntries([...accountLimits].map(([name, v]) => [name, v.until])),
+        read: async () => Object.fromEntries(accountLimits),
         write: async (name: string, until: string | null, seenAt: string) => {
           accountLimits.set(name, { until, seenAt });
         },

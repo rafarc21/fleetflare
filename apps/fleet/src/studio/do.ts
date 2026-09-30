@@ -3197,7 +3197,10 @@ async function readFleetAccountLimits(db: D1Database, accounts: ClaudeAccount[])
   const limits: AccountLimits = {};
   await Promise.all(accounts.map(async (a) => {
     const state = decodeAccountLimitState(await getFlag(db, accountLimitStateKey(a.name)));
-    if (state) limits[a.name] = state.until;
+    // Review round 1 (#102 review, 2026-09-30): `seenAt` rides along too, not
+    // just `until` — accounts.ts's `isFree` needs it for a `null`-until
+    // entry's staleness ceiling (NULL_UNTIL_CEILING_MS).
+    if (state) limits[a.name] = { until: state.until, seenAt: state.seenAt };
   }));
   return limits;
 }

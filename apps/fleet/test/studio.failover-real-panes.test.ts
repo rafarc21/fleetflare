@@ -145,13 +145,13 @@ function studio(pane: string, opts: {
   // fleet's would, which is what still makes the LAST account genuinely
   // "exhausted" once every other one has, in turn, shown this same studio its
   // limit (see "fix C item 2" below).
-  const accountLimits = new Map<string, string | null>();
+  const accountLimits = new Map<string, { until: string | null; seenAt: string }>();
   const deps: FailoverDeps = {
     autoFailover: true,
     accounts: opts.accounts ?? ACCOUNTS, now: () => now,
     accountLimits: {
       read: async () => Object.fromEntries(accountLimits),
-      write: async (name: string, until: string | null) => { accountLimits.set(name, until); },
+      write: async (name: string, until: string | null, seenAt: string) => { accountLimits.set(name, { until, seenAt }); },
     },
     exec: vi.fn(async (cmd: string) => {
       execs.push(cmd);

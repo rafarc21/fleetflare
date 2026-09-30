@@ -115,14 +115,44 @@ export function claudeAccountToken(accounts: ClaudeAccount[], currentName: strin
 }
 
 /**
- * Issue #102 — an account name to the ISO instant its fleet-wide-observed
- * limit resets, or `null` when a limit was seen but printed no readable reset
- * (an "unknown reset" that never clears by the clock alone, same as
- * rate-limit.ts's RateLimitObservation.until). An account with NO entry here
- * has never been seen limited (by ANY studio — see failover.ts's
- * FailoverDeps.accountLimits) and is free.
+ * Issue #102 — one account's fleet-wide-observed limit: the ISO instant it
+ * resets, or `null` when a limit was seen but printed no readable reset (an
+ * "unknown reset", same as rate-limit.ts's RateLimitObservation.until), and
+ * WHEN that sighting was recorded (ISO) — review round 1 (#102 review,
+ * 2026-09-30): `seenAt` is what lets `isFree` give a `null`-until entry a
+ * staleness ceiling instead of blacklisting the account forever (see
+ * NULL_UNTIL_CEILING_MS below). An account with NO entry here has never been
+ * seen limited (by ANY studio — see failover.ts's FailoverDeps.accountLimits)
+ * and is free.
  */
-export type AccountLimits = Record<string, string | null>;
+export interface AccountLimitEntry {
+  until: string | null;
+  seenAt: string;
+}
+export type AccountLimits = Record<string, AccountLimitEntry>;
+
+/**
+ * RESIDUAL/FIX, review round 1 (#102 review, 2026-09-30) — a `null`-until
+ * entry (a select-style modal sighting: it never carries a parseable reset
+ * text, see failover.ts's `limitObservation`) used to blacklist an account
+ * FOREVER: nothing ever routes a studio back onto it to re-probe whether the
+ * underlying limit (a monthly/org spend cap) has actually cleared, since
+ * `nextClaudeAccount` skips it on every future wrap. That is exactly the #53
+ * incident shape this whole feature exists to fix, made WORSE: a true deadlock
+ * with no self-healing path.
+ *
+ * The fix is a bounded staleness ceiling: a `null`-until entry counts as
+ * limited only while `now - seenAt` is within this window; past it, `isFree`
+ * treats the account as free again, giving the fleet a chance to re-probe and
+ * either observe a fresh sighting with a real reset, or find the account
+ * genuinely healthy. 24h, matching failover.ts's own DAY_MS/`firstSighting`
+ * day-boundary granularity (this module imports nothing — see this file's own
+ * header — so the constant is repeated here, not imported): Claude's
+ * documented limits are daily/weekly/monthly, and no more precise a figure for
+ * "how long a select-modal limit typically lasts" exists anywhere else in this
+ * codebase.
+ */
+const NULL_UNTIL_CEILING_MS = 24 * 60 * 60 * 1000;
 
 /**
  * CTO decision 2026-09-30 (issue #102) — the account to fail over TO, or null
@@ -141,9 +171,14 @@ export type AccountLimits = Record<string, string | null>;
  *   - an entry with a `until` at or before `now`: the reset has passed, free
  *     again — the fleet's own words for the rule ("an account whose reset has
  *     passed counts as free again");
- *   - an entry with `until` still ahead of `now`, or `until: null` (a limit
- *     seen with no readable reset, so the clock can never clear it): limited,
- *     skipped.
+ *   - an entry with `until` still ahead of `now`: limited, skipped;
+ *   - an entry with `until: null` (a limit seen with no readable reset, so the
+ *     clock can never clear it — a select-style modal sighting, see
+ *     failover.ts's `limitObservation`): limited, skipped, UNLESS
+ *     `now - seenAt` exceeds NULL_UNTIL_CEILING_MS, in which case it counts as
+ *     free again too — review round 1 (#102 review, 2026-09-30), see
+ *     NULL_UNTIL_CEILING_MS's own doc comment for why a `null` until must not
+ *     blacklist an account forever.
  *
  * Anti-loop is now the limits map, not the list order: an account already
  * limited is skipped on every lap around the list, so a studio can only ever
@@ -165,7 +200,7 @@ export function nextClaudeAccount(
   if (idx < 0 || accounts.length === 0) return null;
   const isFree = (a: ClaudeAccount): boolean => {
     if (!(a.name in limits)) return true;
-    const until = limits[a.name];
+    const { until } = limits[a.name];
     return until !== null && Date.parse(until) <= now.getTime();
   };
   for (let step = 1; step < accounts.length; step++) {
@@ -189,7 +224,7 @@ export function earliestAccountReset(
   let earliest: string | null = null;
   for (const a of accounts) {
     if (!(a.name in limits)) continue;
-    const until = limits[a.name];
+    const { until } = limits[a.name];
     if (until === null || Date.parse(until) <= now.getTime()) continue;
     if (earliest === null || Date.parse(until) < Date.parse(earliest)) earliest = until;
   }
