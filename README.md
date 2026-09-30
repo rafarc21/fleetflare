@@ -459,7 +459,13 @@ every ref name, commit, tag, file and path against the same denylist, and only
 then forwards the identical bytes to GitHub with the Worker's own token; `gh pr
 create|edit|ready|comment|review` and `gh issue create|edit|comment` go to
 `/fleet/gh` the same way. Other `gh` writes fail at GitHub (the token cannot
-write). Pushes over 16 MiB are refused; split them. Operator setup:
+write). Pushes over 16 MiB are refused; split them. The proxy also refuses any
+update, force-push or delete of the repo's default branch (issue #34), read
+from GitHub and cached for 5 minutes; if it cannot be read, every push to that
+repo is refused. Studios land changes through PRs. To let a repo's default
+branch be pushed through the proxy anyway, list it in
+`FLEET_WRITE_PROXY_DEFAULT_BRANCH_REPOS` (a `vars` entry, comma-separated
+`owner/name`); nothing in a request can lift it. Operator setup:
 
 - GitHub App fleets: nothing. The studio's token is narrowed to read at mint time.
 - PAT fleets: `scripts/deploy.sh secret put GITHUB_READ_TOKEN` with a read-only
