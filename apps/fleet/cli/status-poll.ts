@@ -1,10 +1,18 @@
 // Board task #203's `readStatus` helper, split out of cli/destroy-outcome.ts
 // (which keeps re-exporting it, so its one existing import site in
 // cli/fleet.ts needs no change) so board task #133's cli/recycle-outcome.ts
-// can share it without importing destroy-outcome.ts's own destroy-specific
-// `requestDestroy`. A status read is a DO storage read — GET
-// /studio/:id/status — no matter which repair verb (destroy, recycle, a
-// future one) triggered it, so this one bounded read belongs to neither.
+// can import the bounded status read directly, once, instead of duplicating
+// it. A status read is a DO storage read — GET /studio/:id/status — no
+// matter which repair verb (destroy, recycle, a future one) triggered it,
+// so the read itself belongs to neither destroy- nor recycle-specific code.
+//
+// This does NOT fully decouple recycle-outcome.ts from destroy-outcome.ts:
+// recycle-outcome.ts still imports `DESTROY_CLIENT_TIMEOUT_MS` and
+// `DESTROY_STATUS_TIMEOUT_MS` from there, and that coupling is intentional
+// — recycle's own client-side timeout budget genuinely derives from
+// destroy's own (see recycle-outcome.ts's `RECYCLE_CLIENT_TIMEOUT_MS` doc
+// comment), and a status-read deadline is the same number regardless of
+// caller. Only `readStatus` itself moved; the two constants did not.
 import type { StudioStatus } from "../src/studio/types";
 
 /** One bounded GET /studio/:id/status. Never throws: a read that did not

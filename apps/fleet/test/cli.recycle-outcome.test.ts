@@ -105,6 +105,43 @@ describe("requestRecycle — a recycle request that times out never reports a ve
     expect(report.lines.join("\n")).not.toMatch(/\bfailed\b/i);
   });
 
+  // Clock-skew edge case (`bringupLanded`'s own doc comment): `startedAt` is
+  // this CLI's own clock, `session.at` is stamped by the Worker on
+  // Cloudflare's edge — never reconciled here. The two tests below prove
+  // both directions of that asymmetry are understood, not silently ignored.
+  it("a Worker clock running a hair BEHIND the CLI's reports the safe failure mode: an extra timeout-pending, never a crash or a false success", async () => {
+    // Same real event as the very first test in this file (a genuine recycle
+    // bring-up, `via: "recycle"`), but the Worker's own clock stamped `at`
+    // one second BEFORE this side's `startedAt` — a lagging server clock,
+    // not a stale row. `bringupLanded`'s strict `>=` reads this as
+    // not-yet-proven: the safe direction (never a crash, never a false
+    // success) — costs one extra poll cycle at worst.
+    const { fetchImpl } = fakeSlowWorker([
+      async () => Response.json(statusRow("running", session({ via: "recycle", at: "2026-09-30T11:59:59.000Z" }))),
+    ]);
+    const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
+
+    expect(report.kind).toBe("timeout-pending");
+    expect(report.lines.join("\n")).not.toMatch(/\bfailed\b/i);
+  });
+
+  it("documents the ACCEPTED risk: a Worker clock running ahead can make a stale via=recycle row satisfy the timestamp check (false success, not guarded against)", async () => {
+    // This row is from a bring-up that, in real wall-clock terms, finished
+    // BEFORE this call's own POST ever fired -- but the Worker's clock, if
+    // running ahead of this CLI's, could stamp `at` with a value that still
+    // reads at/after `startedAt`. bringupLanded has no way to tell this
+    // apart from a genuine, freshly-landed bring-up: it is not fixed, only
+    // named in its own doc comment. This test exists to prove that
+    // limitation is understood and pinned, not silently reintroduced by a
+    // future "improvement" that starts guessing at skew tolerance.
+    const { fetchImpl } = fakeSlowWorker([
+      async () => Response.json(statusRow("running", session({ via: "recycle", at: "2026-09-30T12:00:00.001Z" }))),
+    ]);
+    const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
+
+    expect(report.kind).toBe("timeout-provisioned");
+  });
+
   it("timed-out request, status unreachable every attempt: timeout-unknown, never \"failed\"", async () => {
     const { fetchImpl, calls } = fakeSlowWorker([
       async () => { throw new Error("connect ECONNREFUSED 10.0.0.1:443"); },

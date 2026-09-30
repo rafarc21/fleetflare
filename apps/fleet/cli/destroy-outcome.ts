@@ -25,9 +25,14 @@
 import { repairFailureLine } from "./repair-failure";
 import type { StudioStatus } from "../src/studio/types";
 // Board task #133: `readStatus` moved to its own module (cli/status-poll.ts)
-// so cli/recycle-outcome.ts can share it without importing this destroy-
-// specific module. Re-exported here, verbatim signature, so this module's one
-// existing consumer (cli/fleet.ts's `import { requestDestroy, readStatus,
+// so cli/recycle-outcome.ts can import it directly instead of duplicating it
+// (recycle-outcome.ts imports it from status-poll.ts, not through this
+// re-export — see status-poll.ts's own header). recycle-outcome.ts still
+// legitimately imports DESTROY_CLIENT_TIMEOUT_MS/DESTROY_STATUS_TIMEOUT_MS
+// from THIS module below, since recycle's own budget genuinely derives from
+// destroy's — that dependency was never the thing being removed. Re-exported
+// here, verbatim signature, so THIS module's one existing consumer
+// (cli/fleet.ts's `import { requestDestroy, readStatus,
 // DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome"`) needs no change.
 import { readStatus } from "./status-poll";
 export { readStatus };

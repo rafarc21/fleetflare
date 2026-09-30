@@ -159,6 +159,62 @@ old-`via` test, the stale-`at` test, and the later-poll success test dropped
 from 3 status calls to 1) — confirmed the `via`/`at` guard is load-bearing,
 not decorative. Reverted, reconfirmed 10/10 green.
 
+## Fresh review round 1 (2026-09-30) — a factually wrong header comment, and an undocumented clock-skew edge case
+
+Finding 1 (block): `status-poll.ts`'s and `destroy-outcome.ts`'s header
+comments both claimed the `readStatus` extraction let
+`cli/recycle-outcome.ts` "share it without importing destroy-outcome.ts's
+own destroy-specific code" — false as written, since `recycle-outcome.ts`
+imported `readStatus` THROUGH `destroy-outcome.ts`'s re-export (`import {
+readStatus, DESTROY_CLIENT_TIMEOUT_MS, DESTROY_STATUS_TIMEOUT_MS } from
+"./destroy-outcome"`), and separately needed `DESTROY_CLIENT_TIMEOUT_MS`/
+`DESTROY_STATUS_TIMEOUT_MS` from that same module regardless. The stated
+goal (avoid the destroy-specific dependency) was never achieved by the code
+as written — `status-poll.ts` had exactly one real consumer, destroy-
+outcome.ts's own re-export of itself. Fixed by having `recycle-outcome.ts`
+import `readStatus` directly from `./status-poll` (a separate `import`
+statement from the one pulling `DESTROY_CLIENT_TIMEOUT_MS`/
+`DESTROY_STATUS_TIMEOUT_MS` from `./destroy-outcome`), and rewriting both
+header comments to say the honest thing: the extraction removes `readStatus`
+duplication only; the dependency on destroy's two timeout constants is real
+and intentional (the budget math genuinely derives from destroy's own — see
+`RECYCLE_CLIENT_TIMEOUT_MS`'s own doc comment), not something this change
+tries to eliminate. `cli/fleet.ts`'s existing `import { requestDestroy,
+readStatus, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome"` needed no
+change either way — confirmed still resolves (destroy-outcome.ts still
+re-exports `readStatus`).
+
+Finding 2 (should-fix): `bringupLanded`'s `new Date(session.at) >= startedAt`
+compares two clocks that are never reconciled — `startedAt` is this CLI's
+own local clock, `session.at` is stamped by the Worker on Cloudflare's edge.
+Every existing test shared one clock source for both sides, so this never
+got exercised. The risk is ASYMMETRIC: a Worker clock lagging the CLI's can
+only cause an extra `timeout-pending` cycle (safe — the true state is still
+"running", this side just doesn't claim victory a beat early); a Worker
+clock running AHEAD of the CLI's could let a stale row from an unrelated,
+already-finished OLDER `via: "recycle"` bring-up satisfy `at >= startedAt`
+and get reported `timeout-provisioned` — a false success — for a call that
+might still be pending or might have failed outright. Not fixed with a skew-
+tolerance window (no real measured incident exists to size one from — an
+invented budget would just be a second unfounded magic number); instead
+documented explicitly in `bringupLanded`'s own doc comment, and pinned with
+two new tests: one showing the safe direction (`at` a second BEFORE
+`startedAt`, same real event, stays `timeout-pending`), one explicitly
+proving — not fixing — the risky direction (`at` a millisecond AFTER
+`startedAt` still reads `timeout-provisioned`), so a future "improvement"
+that starts guessing at skew tolerance has a test in its way rather than
+silently reintroducing the same undocumented gap.
+
+### Round 1 re-verification (2026-09-30)
+
+- Scoped vitest (`test/cli.recycle-outcome.test.ts` +
+  `test/cli.destroy-outcome.test.ts`): 23 pass, 0 fail (12 + 11 — the 2 new
+  clock-skew tests, no regressions).
+- `bun run check` — clean, re-run after both fixes.
+- `bun run test` (full suite, alone) — 152 files / 5277 tests pass, 0 fail
+  (2 more than the prior run, matching the 2 new tests).
+- `bun run english-check` — clean.
+
 ## Deliberately out of scope
 
 - `cmdProvision` (`cli/fleet.ts`) has the identical bare-fetch gap (no

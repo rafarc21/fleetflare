@@ -25,7 +25,16 @@
 // weaker (a bare `running` check) would call an untouched, already-running
 // container a recycle success.
 import { repairFailureLine } from "./repair-failure";
-import { readStatus, DESTROY_CLIENT_TIMEOUT_MS, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome";
+// `readStatus` comes straight from status-poll.ts, not through
+// destroy-outcome.ts's re-export of it — see status-poll.ts's own header for
+// why. `DESTROY_CLIENT_TIMEOUT_MS`/`DESTROY_STATUS_TIMEOUT_MS` DO come from
+// destroy-outcome.ts, and that dependency is real, not incidental: recycle's
+// own budget genuinely derives from destroy's (see RECYCLE_CLIENT_TIMEOUT_MS's
+// own doc comment below), and a status read is the same operation regardless
+// of which repair verb triggered it, so there is no reason to duplicate
+// either constant.
+import { readStatus } from "./status-poll";
+import { DESTROY_CLIENT_TIMEOUT_MS, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome";
 import type { StudioStatus } from "../src/studio/types";
 
 /**
@@ -163,7 +172,33 @@ export async function requestRecycle(
 
 /** The recycle-specific verdict: does this row prove THIS call's own recycle
  *  bring-up landed, not merely that SOME bring-up (possibly an old one that
- *  predates this call, possibly a different verb entirely) did. */
+ *  predates this call, possibly a different verb entirely) did.
+ *
+ *  Clock-skew caveat, deliberately NOT compensated for: `startedAt` is this
+ *  side's own (CLI) clock; `session.at` is stamped by the Worker on
+ *  Cloudflare's edge. The two are never synchronized here, so this
+ *  comparison trusts them to agree closely enough. The failure this
+ *  produces is ASYMMETRIC:
+ *    - CLI clock ahead of the Worker's (or the two agree): at worst this
+ *      rejects a genuinely-just-landed bring-up as not-yet-proven, which
+ *      only costs an extra `timeout-pending` poll cycle or two — a safe,
+ *      recoverable direction (the true state is still "running", the CLI
+ *      just doesn't claim victory a beat early).
+ *    - Worker clock ahead of the CLI's: a STALE row from an unrelated,
+ *      already-finished OLDER `via: "recycle"` bring-up can satisfy `at >=
+ *      startedAt` even though it has nothing to do with THIS call, reporting
+ *      `timeout-provisioned` (a false success) for a recycle that might
+ *      still be pending or might have failed outright. This is the risky
+ *      direction, and this function does not guard against it — no NTP
+ *      handshake, no skew budget, nothing. Accepted because: (1) both sides
+ *      are Cloudflare-adjacent infrastructure (a CLI on an operator's
+ *      machine talking to a Worker), not systems with an adversarial or
+ *      wildly divergent clock; (2) a skew-tolerance window would need its
+ *      own magic number with no principled way to size it without a real
+ *      measured incident to anchor it, exactly the kind of unfounded
+ *      constant this codebase's own plan docs warn against inventing. If a
+ *      real false-success incident is ever measured, that measurement is
+ *      what should size the fix, not a guess made here. */
 function bringupLanded(status: StudioStatus, startedAt: Date): boolean {
   if (status.state !== "running") return false;
   const session = status.observed?.session;
