@@ -47,6 +47,7 @@ import {
 } from "./survival-delivery";
 import {
   nextActivity, ACTIVITY_KEY, clearActivityState,
+  backgroundShellAgeMs, BACKGROUND_SHELL_STALE_MS,
   type Activity, type ActivityStorage, type FrameVerdict, type HookHeartbeat,
 } from "./activity";
 import {
@@ -3729,6 +3730,17 @@ function withDeadline<T>(work: Promise<T>, ms: number, label: string): Promise<T
  * call site, where no exec result exists at all) means exactly what it
  * means for `paneVerdict` there too: no evidence this tick, `nextActivity`
  * falls back to the pane axis alone, unchanged from PR3a.
+ *
+ * Issue #106 — `onStaleBackgroundShell` mirrors `onLeadWorking`'s own shape
+ * just below it (an edge-triggered, rate-bound side effect keyed on a state
+ * transition, factored into its own small helper — `staleShellNudge`,
+ * matching `autoWorking`'s own shape exactly). The edge is computed from
+ * `backgroundShellAgeMs`: THIS tick's age crosses `BACKGROUND_SHELL_STALE_MS`
+ * while the PREVIOUS tick's age (computed the same way from `prevActivity`,
+ * which is null on the very first tick) did not — never on every tick the
+ * age merely stays stale, which would fire on every 30s tick indefinitely
+ * without `staleShellNudge`'s own separate rate limit even having a chance
+ * to matter for the FIRST nudge.
  */
 async function applyActivityVerdict(
   deps: ShipDeps,
@@ -3737,6 +3749,7 @@ async function applyActivityVerdict(
   paneVerdict: FrameVerdict,
   hookHeartbeat: HookHeartbeat | null | undefined,
   onLeadWorking?: () => Promise<void>,
+  onStaleBackgroundShell?: () => Promise<void>,
 ): Promise<void> {
   const activityStatus = await storage.get(STATUS_KEY);
   const activityOpFresh = operationLockFresh(await storage.get(OPERATION_KEY), deps.now());
@@ -3756,6 +3769,28 @@ async function applyActivityVerdict(
   }
   if (onLeadWorking && nextAct.state === "working" && prevActivity?.state !== "working") {
     await autoWorking(deps, storage as unknown as AutoWorkingStorage, onLeadWorking);
+  }
+  if (onStaleBackgroundShell) {
+    const nextAge = backgroundShellAgeMs(nextAct, deps.now());
+    // The previous tick's OWN age, as of the moment IT was observed —
+    // `backgroundShellSince` carries forward UNCHANGED while the flavour
+    // holds (activity.ts's own "holds while unchanged" doc comment), so
+    // `prevActivity.backgroundShellSince` is frequently the exact SAME
+    // timestamp `nextAct.backgroundShellSince` just carried forward too.
+    // Measuring "the previous tick's age" against THIS tick's `deps.now()`
+    // would therefore reproduce `nextAge` itself (same since, same now),
+    // making `wasStale` always equal `nowStale` — the edge could then only
+    // ever fire on the one tick right after the flavour first started
+    // (`prevActivity` not yet carrying the flavour at all), never on the
+    // real 15-minute crossing. Anchoring against `prevActivity.observedAt`
+    // instead answers "how stale was it AS OF the last look", which is the
+    // genuinely earlier reading an edge check needs.
+    const prevAge = prevActivity ? backgroundShellAgeMs(prevActivity, new Date(prevActivity.observedAt)) : null;
+    const nowStale = nextAge !== null && nextAge >= BACKGROUND_SHELL_STALE_MS;
+    const wasStale = prevAge !== null && prevAge >= BACKGROUND_SHELL_STALE_MS;
+    if (nowStale && !wasStale) {
+      await staleShellNudge(deps, storage as unknown as StaleShellNudgeStorage, onStaleBackgroundShell);
+    }
   }
 }
 
@@ -3785,6 +3820,52 @@ async function autoWorking(
     console.error("auto submitted->working failed, next window retries", err);
   }
 }
+
+/** Issue #106: DO key holding the last stale-background-shell nudge attempt, ISO. */
+export const STALE_SHELL_NUDGE_KEY = "staleShellNudgeAt";
+/** Same 15-minute budget as `BACKGROUND_SHELL_STALE_MS` itself (activity.ts)
+ *  — a flapping tick that crosses the staleness edge more than once inside
+ *  one window still gets at most one wake. */
+export const STALE_SHELL_NUDGE_EVERY_MS = 15 * 60_000;
+
+type StaleShellNudgeStorage = {
+  get(key: typeof STALE_SHELL_NUDGE_KEY): Promise<string | undefined>;
+  put(key: typeof STALE_SHELL_NUDGE_KEY, value: string): Promise<void>;
+};
+
+/** Issue #106: the lead's own turn is idle, but the footer/status line has
+ *  shown a background-shell/monitor/task counter for `BACKGROUND_SHELL_
+ *  STALE_MS` straight — long enough that it may simply be a dead job the
+ *  lead forgot about (blueprint.ts's own "never block on nothing" house
+ *  rule). Rate-bound the same shape `autoWorking` above already uses, and
+ *  never fails the tick: a wake gate refusal (stopped, limit modal, etc.) or
+ *  a transient failure just waits for the next crossing/window. */
+async function staleShellNudge(
+  deps: ShipDeps, storage: StaleShellNudgeStorage, onStaleBackgroundShell: () => Promise<void>,
+): Promise<void> {
+  const last = Date.parse((await storage.get(STALE_SHELL_NUDGE_KEY)) ?? "");
+  if (Number.isFinite(last) && deps.now().getTime() - last < STALE_SHELL_NUDGE_EVERY_MS) return;
+  await storage.put(STALE_SHELL_NUDGE_KEY, deps.now().toISOString());
+  try {
+    await onStaleBackgroundShell();
+  } catch (err) {
+    console.error("stale background-shell nudge failed, next window retries", err);
+  }
+}
+
+/** Issue #106 — the nudge itself, typed into the lead's own pane via
+ *  `wakeStudioWith` (StudioDO.shipTranscript's own real `onStaleBackgroundShell`
+ *  callback). Addresses the lead as "you", same as this file's other wake
+ *  prompts (see `deliverAssignedTaskOnBringup`'s own `assignDigest` pointer
+ *  format), and names the exact house rule it is enforcing (blueprint.ts's
+ *  "never block on nothing" — "never type into a limit modal" is the SAME
+ *  refusal `runGatedWake`'s own limit-modal gate already gives this wake for
+ *  free, stated here too so the lead's own next turn carries the same
+ *  reminder). */
+export const STALE_BACKGROUND_SHELL_NUDGE_PROMPT =
+  "Background shell counter has been showing in the footer for 15+ minutes with your own turn idle. " +
+  "Re-read its output (tail the log / check the Monitor) — rerun it or report what you found. " +
+  "Never type into a limit modal.";
 
 /**
  * Set equality on `kind`+`name` identity ONLY — used ONLY to decide whether
@@ -3920,6 +4001,7 @@ export async function runShipTickWithObservation(
   deadlineMs: number = SHIP_EXEC_DEADLINE_MS,
   archive?: { doneRecords: DoneRecordPorts; resolveOpsRepo: ResolveMemoryRepo },
   onLeadWorking?: () => Promise<void>,
+  onStaleBackgroundShell?: () => Promise<void>,
 ): Promise<ShipResult> {
   const observedBefore = await getObserved(storage);
   const adoptionToken = observedBefore.incarnation === null ? crypto.randomUUID() : undefined;
@@ -4165,7 +4247,9 @@ export async function runShipTickWithObservation(
   // the SAME write path a successful probe uses (this file's own
   // `applyActivityVerdict`, above `runShipTickWithObservation`).
   if (result.paneVerdict !== undefined) {
-    await applyActivityVerdict(deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat, onLeadWorking);
+    await applyActivityVerdict(
+      deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat, onLeadWorking, onStaleBackgroundShell,
+    );
   }
 
   // Issue #311 (PR3 addendum) — member alerts, same "independent of every
@@ -4785,6 +4869,25 @@ export class StudioDO extends Sandbox<Env> {
       console.log(`studio ${this.selfId()}: lead working — task ${res.moved.map((n) => `#${n}`).join(", ")} submitted -> working`);
     }
     for (const e of res.errors) console.error(`studio ${this.selfId()}: auto submitted->working: ${e}`);
+  }
+
+  /** Issue #106 — the real `onStaleBackgroundShell` callback, wired at
+   *  `shipTranscript()`'s own call site next to `autoStartSubmitted` above.
+   *  Reuses `wakeStudioWith` (issue #100) exactly the way `wakeStudio()`
+   *  itself does below — `runGatedWake`'s stopped/limit-modal gates, single-
+   *  flighted through the SAME `this.wakeLock` so this scheduled-tick nudge
+   *  can never race an operator- or webhook-triggered wake into the same
+   *  pane. `isMaestro()`/`armSweep()` are threaded through unchanged from
+   *  `wakeStudio()`'s own call shape even though this nudge is not itself an
+   *  assignment — a landed wake into a maestro studio still means "maestro
+   *  just heard from the Worker", the same signal `wakeStudio()` already
+   *  re-arms the crash sweep on. */
+  private async notifyStaleBackgroundShell(): Promise<void> {
+    const outcome = await singleFlightWake(this.wakeLock, () => wakeStudioWith(
+      this.ctx.storage, (cmd: string) => sbExec(this, cmd, EXEC_CLASSES.wake), this.isMaestro(), () => this.armSweep(),
+      STALE_BACKGROUND_SHELL_NUDGE_PROMPT, undefined, this.selfId(),
+    ));
+    logWakeOutcome("stale background-shell nudge", outcome);
   }
 
   private async assignedTaskOnBoard(workRepoSlug: string): Promise<{ taskNumber: number; title: string } | null> {
@@ -6325,6 +6428,7 @@ export class StudioDO extends Sandbox<Env> {
             undefined,
             { doneRecords: this.doneRecordPorts(), resolveOpsRepo: this.memoryDeps().resolveMemoryRepo },
             () => this.autoStartSubmitted(),
+            () => this.notifyStaleBackgroundShell(),
           );
         } catch (err) {
           console.error("studio transcript ship failed", err);
