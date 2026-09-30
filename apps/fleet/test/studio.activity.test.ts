@@ -367,6 +367,70 @@ describe("extractLastVisibleLine", () => {
     ].join("\n");
     expect(extractLastVisibleLine(frame)).toBe("Real message with no footer anywhere below it.");
   });
+
+  // Issue #108 fix-first (PR #118, maestro review) — the idle input box is
+  // ONE chrome block (open rule, `❯` row, up to QUEUED_TEXT_ROWS wrapped
+  // continuation rows, close rule), not three independently-matched line
+  // patterns. The wrapped continuation rows match neither RULE_LINE nor
+  // PROMPT_LINE — a line-by-line scan alone surfaces one of THEM as "the
+  // lead's last message" instead of skipping the whole box, which can leak
+  // queued/pasted operator text (secret-shaped tokens split across rows
+  // included — see the next test) onto `fleet ls --json`.
+  const RULE = "─".repeat(68);
+
+  it("an idle input box with wrapped continuation rows is skipped as ONE block, not scanned row by row", () => {
+    const frame = [
+      "Real message above the box.",
+      "",
+      RULE,
+      "❯ some queued",
+      "text that wraps",
+      "across two rows",
+      RULE,
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message above the box.");
+  });
+
+  it("a secret-shaped token split across two continuation rows is never returned, even though neither half matches redact.ts's own pattern alone", () => {
+    const row1 = "sk-ant-";
+    const row2 = "api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    // Confirm the split genuinely defeats redact.ts's ANTHROPIC_KEY_RE
+    // (/sk-ant-[A-Za-z0-9_-]+/) per row before relying on it below.
+    expect(/sk-ant-[A-Za-z0-9_-]+/.test(row1)).toBe(false);
+    expect(/sk-ant-[A-Za-z0-9_-]+/.test(row2)).toBe(false);
+    const frame = [
+      "Real message above the box.",
+      "",
+      RULE,
+      "❯ ",
+      row1,
+      row2,
+      RULE,
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message above the box.");
+  });
+
+  // Fallback contract (documented on extractLastVisibleLine's own doc
+  // comment): when no well-formed closing rule is found within
+  // QUEUED_TEXT_ROWS of the opening rule — a corrupted/truncated capture —
+  // this falls back to the OLD per-line chrome scan for the whole span
+  // rather than inventing new "not a real box" handling. That means a
+  // continuation row of a genuinely malformed box can still surface as "the
+  // message" here; this is a known, accepted edge case (a malformed capture
+  // already fails other detectors, e.g. `endsInIdleInputBox`), not a silent
+  // regression.
+  it("a malformed/unclosed idle input box (no closing rule within bound) falls back to the old per-line chrome scan", () => {
+    const frame = [
+      "Real message above malformed box.",
+      RULE,
+      "❯ ",
+      "continuation row one, never closed",
+      "continuation row two, never closed",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("continuation row two, never closed");
+  });
 });
 
 describe("readActivityFrame — the negative corpus never reads working", () => {
