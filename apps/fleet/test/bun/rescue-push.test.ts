@@ -1923,6 +1923,12 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
   // a shallow push ("shallow update not allowed") -- it lacks the parents
   // behind the shallow boundary. Rescue now pushes a parentless snapshot of
   // the same tree instead: the content survives, the history cut does not.
+  //
+  // Issue #140: a real, non-empty, disjoint-history private remote can
+  // reject the exact same underlying gap with DIFFERENT wording ("did not
+  // receive expected object <sha>", not "shallow update not allowed") --
+  // see this block's own issue #140 test below, and rescueTryPushFn's doc
+  // comment in rescue.ts for the live git-source verification of why.
   describe("issue #16 — a --depth 1 checkout still rescues to an empty private remote", () => {
     beforeEach(() => {
       const origin3 = join(dir, "origin3.git");
