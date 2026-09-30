@@ -294,17 +294,78 @@ describe("extractLastVisibleLine", () => {
     expect(extractLastVisibleLine("   \n  \n")).toBeNull();
   });
 
-  it("a content line longer than 200 chars is truncated to 200 chars plus an ellipsis", () => {
+  // Finding 1 (post-ship code review) — truncation moved OUT of this pure
+  // extractor entirely (see `truncateLine`'s own doc comment for why): a
+  // content line longer than LAST_LINE_MAX_CHARS must come back whole, so
+  // do.ts can redact the FULL line before truncating it, never the reverse.
+  it("a content line longer than LAST_LINE_MAX_CHARS is returned whole, untruncated", () => {
     const long = "x".repeat(250);
     const frame = [long, ...IDLE_INPUT_BOX].join("\n");
     const result = extractLastVisibleLine(frame);
-    expect(result).toBe(`${"x".repeat(LAST_LINE_MAX_CHARS)}…`);
-    expect(result?.length).toBe(LAST_LINE_MAX_CHARS + 1);
+    expect(result).toBe(long);
+    expect(result?.length).toBe(250);
+    expect(result?.length).toBeGreaterThan(LAST_LINE_MAX_CHARS);
   });
 
   it("a real content line sitting directly above the idle input box is returned, the box itself skipped", () => {
     const frame = ["Some real message here.", ...IDLE_INPUT_BOX].join("\n");
     expect(extractLastVisibleLine(frame)).toBe("Some real message here.");
+  });
+
+  // Finding 2 (post-ship code review) — the chrome-skip coverage below never
+  // exercised a live status/spinner line, a turn-ended row, the
+  // waiting-members row, the question-modal shape, or the "no footer at all"
+  // fallback branch. Each fixture puts the real answer directly BEHIND the
+  // chrome line under test, proving the chrome itself is skipped rather than
+  // returned as "the message".
+  it("skips a live status/spinner line (SPINNER_TIMER_LINE shape) sitting above the idle input box", () => {
+    const frame = [
+      "Real message before the spinner.",
+      "✻ Cogitating… (3s · esc to interrupt)",
+      ...IDLE_INPUT_BOX,
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message before the spinner.");
+  });
+
+  it("skips a TURN_ENDED_LINE row ('✻ Cooked for 36m 35s') sitting above the idle input box", () => {
+    const frame = [
+      "Real message before the turn-ended row.",
+      "✻ Cooked for 36m 35s",
+      ...IDLE_INPUT_BOX,
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message before the turn-ended row.");
+  });
+
+  it("skips a WAITING_MEMBERS_LINE row ('✻ Waiting for 2 background agents to finish')", () => {
+    const frame = [
+      "Real message before waiting on members.",
+      "✻ Waiting for 2 background agents to finish",
+      "",
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message before waiting on members.");
+  });
+
+  // Only the modal's own block-start rule and footer are chrome this
+  // function skips (its own doc comment); a real question/option line
+  // between them is ordinary content this narrow function does not also
+  // recognise, so this fixture keeps the modal shape to just those two
+  // lines — the ones the finding asks this function to prove it skips.
+  it("skips a question-modal block (MODAL_BLOCK_START + MODAL_FOOTER_LINE), no footer chrome present", () => {
+    const frame = [
+      "Real message before the question.",
+      "▔".repeat(68),
+      "   Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message before the question.");
+  });
+
+  it("footerAtBottom's 'no footer found' fallback: a frame with no recognisable footer at all still skips its own trailing chrome line", () => {
+    const frame = [
+      "Real message with no footer anywhere below it.",
+      "✻ Cooked for 36m 35s",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message with no footer anywhere below it.");
   });
 });
 

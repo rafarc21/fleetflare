@@ -18,7 +18,7 @@ import { SECTION_ACTIVITY_HOOK, type TranscriptStorage, type ShipDeps } from "..
 import type { StudioStatus } from "../src/studio/types";
 import { SessionBusyError } from "../src/studio/sandbox-api";
 import { readyOverride } from "../cli/readiness-format";
-import { ACTIVITY_KEY, type Activity } from "../src/studio/activity";
+import { ACTIVITY_KEY, LAST_LINE_MAX_CHARS, type Activity } from "../src/studio/activity";
 import { MEMBERS_TICKING_KEY } from "../src/studio/failover";
 import { MEMBER_ALERTS_KEY, MEMBER_ROWS_KEY, type MemberAlert } from "../src/studio/member-alerts";
 import { exhaustedMessage } from "../src/studio/failover";
@@ -2122,6 +2122,20 @@ describe("runShipTickWithObservation — lastMessageLine (issue #108)", () => {
     expect(observed.lastMessageLine).toBe("token «redacted» end");
     expect(observed.lastMessageLine).not.toMatch(/a{3,}/);
     expect(observed.lastMessageLine).not.toMatch(/…$/);
+  });
+
+  // Finding 1/2 (post-ship code review) — truncation moved OUT of
+  // extractLastVisibleLine (activity.ts) and into this call site, applied
+  // AFTER redactSecrets; this is the truncation coverage that used to live
+  // on extractLastVisibleLine's own unit test, re-homed here since it is now
+  // do.ts's own behaviour, not activity.ts's.
+  it("a content line longer than LAST_LINE_MAX_CHARS (no secret involved) is truncated with a trailing ellipsis", async () => {
+    const storage = fakeStorage({ status: status({ id: "websites--pilot" }) });
+    const long = "x".repeat(250);
+    await runShipTickWithObservation(deps(stdoutWithPane(paneWithMessage(long))), storage, "websites--pilot", undefined, 5000);
+    const observed = await getObserved(storage);
+    expect(observed.lastMessageLine).toBe(`${"x".repeat(LAST_LINE_MAX_CHARS)}…`);
+    expect(observed.lastMessageLine?.length).toBe(LAST_LINE_MAX_CHARS + 1);
   });
 
   it("a tick with no paneFrame at all (old-image or absent section) leaves lastMessageLine untouched", async () => {

@@ -23,12 +23,19 @@ already imports from `failover.ts` or defines privately in `activity.ts`
 (`footerAtBottom`, `RULE_LINE`, `PROMPT_LINE`, `TURN_ENDED_LINE`,
 `MODAL_FOOTER_LINE`, `MODAL_BLOCK_START`, `isCandidateStatusLine`,
 `WAITING_MEMBERS_LINE`) rather than reinventing chrome detection: it anchors
-to the content above the bottom footer (exactly `readActivityFrame`'s own
-`head`), then walks backward from the end skipping every one of those chrome
-shapes plus blank lines. The first surviving line, trimmed and bounded to
-`LAST_LINE_MAX_CHARS` (200) characters with a trailing `…` when longer, is
-the answer. No redaction happens here — this function is deliberately pure,
-the same as `readActivityFrame` itself.
+to the content above the bottom footer (the same span `readActivityFrame`
+calls `head`, minus the footer line itself), then walks backward from the end
+skipping every one of those chrome shapes plus blank lines. The first
+surviving line, trimmed, is the answer, returned WHOLE — no truncation here
+either. No redaction happens here — this function is deliberately pure, the
+same as `readActivityFrame` itself.
+
+Post-ship review (finding 1) moved truncation OUT of this function and into
+do.ts's own call site, via a new `truncateLine` helper (also in activity.ts,
+bounded to `LAST_LINE_MAX_CHARS` (200) chars with a trailing `…`), applied
+AFTER `redactSecrets` rather than before it — the same order grid.ts's
+`scrubPreview` already uses, so a secret straddling the truncation boundary
+is still caught whole rather than half-cut-off-then-redacted.
 
 **2. `Observed.lastMessageLine` (`apps/fleet/src/studio/observed.ts`).** A new
 `string | null` field on the existing `Observed` record, defaulted to `null`
@@ -44,8 +51,10 @@ value".
 (`if (result.paneFrame !== undefined)`): it calls `extractLastVisibleLine` on
 the tick's own pane frame, redacts the result with the existing
 `redactSecrets` (the same "clean at the write boundary" convention every
-other `Observed` field with raw container-echoed text follows), and merges it
-in via `mergeObserved`. When `paneFrame` is `undefined` (an old image, or an
+other `Observed` field with raw container-echoed text follows), THEN
+truncates the redacted result with `truncateLine` (activity.ts) — redact
+first, truncate second, per finding 1 above — and merges it in via
+`mergeObserved`. When `paneFrame` is `undefined` (an old image, or an
 exec that never reached the pane section), the field is left untouched —
 never reset to `null` — the same "absent means don't touch it" discipline
 `paneVerdict`/`hookHeartbeat` already follow at this exact spot. Deliberately

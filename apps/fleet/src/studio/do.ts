@@ -46,7 +46,7 @@ import {
   type SurvivalSources, type SurvivalTaskRef,
 } from "./survival-delivery";
 import {
-  nextActivity, ACTIVITY_KEY, clearActivityState, extractLastVisibleLine,
+  nextActivity, ACTIVITY_KEY, clearActivityState, extractLastVisibleLine, truncateLine,
   type Activity, type ActivityStorage, type FrameVerdict, type HookHeartbeat,
 } from "./activity";
 import {
@@ -4185,9 +4185,14 @@ export async function runShipTickWithObservation(
   // Observed.lastMessageLine's own doc comment for why): the existing 300s
   // mirrorBurnToRegistry cadence (or a transition-triggered recordStudioFn
   // elsewhere in this function) is what carries it to D1.
+  //
+  // Finding 1 (post-ship code review) — redactSecrets runs on the FULL,
+  // untruncated line, truncateLine only after: the same order grid.ts's
+  // scrubPreview uses, and for the same reason (a secret straddling the
+  // truncation boundary must still be caught whole).
   if (result.paneFrame !== undefined) {
     const line = extractLastVisibleLine(result.paneFrame);
-    await mergeObserved(storage, { lastMessageLine: line === null ? null : redactSecrets(line) });
+    await mergeObserved(storage, { lastMessageLine: line === null ? null : truncateLine(redactSecrets(line)) });
   }
 
   const now = deps.now().toISOString();
