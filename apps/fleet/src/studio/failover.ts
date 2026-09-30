@@ -1669,12 +1669,15 @@ export async function runAccountFailover(
     }
     const degraded: StudioStatus = {
       ...existing, state: "degraded", error: message, claudeAccount: existing.claudeAccount ?? null,
-      // Issue #109: only on the genuinely-exhausted path, never `"parked"`.
+      // Issue #109: only on the SAME eligible path the attempt step itself
+      // evaluates (genuinely exhausted, select-style modal) — an
+      // inline-exhausted row gets no bookkeeping at all, since it is never
+      // acted on and self-clears through the EXISTING #214 recovery.
       // `autoContinueLastTriedAt` is spread from `existing` rather than
       // reset — a message-text refresh (a fresher `earliestReset`) must not
       // silently re-arm the hourly cap (see StudioStatus.autoContinueAt's
       // own doc comment, "message-text refresh" residual).
-      ...(parkedOn === null ? { autoContinueAt: earliestReset, autoContinueLastTriedAt: existing.autoContinueLastTriedAt ?? null } : {}),
+      ...(autoContinueEligible ? { autoContinueAt: earliestReset, autoContinueLastTriedAt: existing.autoContinueLastTriedAt ?? null } : {}),
     };
     await storage.put(STATUS_KEY, degraded);
     await recordStudioFn(degraded);
