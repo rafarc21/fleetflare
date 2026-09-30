@@ -289,6 +289,15 @@ describe("reap — open task: stall alarm, not reap", () => {
     expect(f.calls).toContain(`destroy:${PILOT}`);
   });
 
+  // Board issue #110: awaiting_merge is neither terminal nor live — the
+  // lead's part is already done, so a studio whose only open task is in this
+  // state is eligible for reap, same as one whose only task is terminal.
+  test("an awaiting_merge task does not count as open (reapable) either", async () => {
+    const f = fake({ studios: [IDLE_45()], board: [task(7, PILOT, "awaiting_merge")] });
+    await runReap(flags(), f.deps);
+    expect(f.calls).toContain(`destroy:${PILOT}`);
+  });
+
   test("a drifted (no state label) open task counts as open", async () => {
     const f = fake({ studios: [IDLE_45()], board: [task(7, PILOT, null)] });
     await runReap(flags(), f.deps);
