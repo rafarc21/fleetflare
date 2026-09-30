@@ -565,7 +565,19 @@ describe("StudioDO.recycle wiring — the entry-time launchAccountOrRefuse call 
   const recycleBody = body("async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {");
 
   it("the entry-time call (before recycleWithSync) passes commitOkClears=false", () => {
-    expect(recycleBody).toContain(
+    // Pinned to the slice BEFORE `recycleWithSync(` specifically, not
+    // `recycleBody` as a whole: the post-destroy closure's own call below
+    // (`const launch = await launchAccountOrRefuse(...)`) also ends in the
+    // exact same `, false);` text (it's a superstring of this literal, since
+    // "const launch = " is just a prefix) — and, more importantly,
+    // provisionUngated/restartUngated's own `false)` call sites live outside
+    // `recycleBody` entirely but a plain `doSrc`-wide check would still have
+    // caught them. Slicing to this call specifically (it's the only
+    // `launchAccountOrRefuse` in recycle() before `recycleWithSync(` even
+    // appears) is what actually proves THIS call site still passes `false`,
+    // rather than "this text exists somewhere in recycle()'s body".
+    const entrySlice = recycleBody.slice(0, recycleBody.indexOf("recycleWithSync("));
+    expect(entrySlice).toContain(
       "await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);",
     );
   });
