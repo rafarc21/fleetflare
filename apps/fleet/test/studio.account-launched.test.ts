@@ -582,12 +582,38 @@ describe("StudioDO.recycle wiring — the entry-time launchAccountOrRefuse call 
 // the container never moved.
 //
 // Fix: both call sites now resolve with `commitOkClears: false` and commit
-// via `commitAccountClears` themselves, ONLY inside the cold-start branch —
-// mirrored here at the primitive level, the same convention the #328/#134
-// round-1 primitive-level blocks above use.
-describe("commitAccountClears — only committed once the container touch actually happens (#134 review round 2)", () => {
+// via `commitAccountClears` themselves, ONLY inside the cold-start branch.
+//
+// Review round 3 found round 2's PLACEMENT inside that branch was itself
+// wrong: `sbAwaitReady` wraps `startAndWaitForPorts`, which (per
+// @cloudflare/containers' pinned compiled source) runs `await
+// this.state.setHealthy(); await this.onStart();` BEFORE it resolves —
+// and this file's own `onStart` unconditionally calls
+// `recordLaunchedAccount`, which writes `launchedAccount: this.envAccount`
+// (already `launch.name`) into the SAME row. Calling `commitAccountClears`
+// AFTER `sbAwaitReady` (round 2's original placement) meant it always read
+// `existing.launchedAccount === launch.name` already — `accountClears`'s own
+// `!==` guard could never fire, so the `rateLimited` clear silently no-opped
+// on every real cold start. Fixed placement: commit BEFORE `sbAwaitReady`,
+// still inside the `!running` branch — the same ordering recycle()'s own
+// post-destroy closure already uses successfully.
+//
+// Both scenarios below are composed at the primitive level, same convention
+// as the #328 "race the fix closes" block above: a BUGGY-order case (commit
+// AFTER the onStart-equivalent write — round 2's actual shape) proving why
+// order matters, and the FIXED-order case (commit BEFORE it) proving the
+// real fix works. `mutateToLaunchedAccount` below stands in for exactly what
+// onStart's `recordLaunchedAccount` does to the row.
+describe("commitAccountClears — only committed once the container touch actually happens, in the right order (#134 review round 3)", () => {
   const FUTURE = new Date(Date.now() + 60 * 60 * 1000).toISOString();
   const SEEN = new Date().toISOString();
+
+  // Stands in for onStart's recordLaunchedAccount, which runs INSIDE
+  // sbAwaitReady itself, before it resolves.
+  async function mutateToLaunchedAccount(storage: StudioStorage, name: string): Promise<void> {
+    const existing = (await storage.get(STATUS_KEY))!;
+    await storage.put(STATUS_KEY, { ...existing, launchedAccount: name });
+  }
 
   it("resolved with commitOkClears=false, container already running (guard skips the start): rateLimited survives untouched", async () => {
     const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
@@ -599,29 +625,46 @@ describe("commitAccountClears — only committed once the container touch actual
     const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
     expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
 
-    // The container-running guard is true (a live container): sbAwaitReady
-    // and commitAccountClears are both SKIPPED, exactly as production does.
-    // Nothing further touches storage.
+    // The container-running guard is true (a live container): the whole
+    // `!running` branch — commitAccountClears AND sbAwaitReady — is SKIPPED,
+    // exactly as production does. Nothing further touches storage.
 
     const row = (await storage.get(STATUS_KEY))!;
     expect(row.rateLimited).toEqual(observation); // still set: the container never moved
     expect(row.launchedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN"); // still the old account too
   });
 
-  it("resolved with commitOkClears=false, container NOT running (guard runs a cold start): commitAccountClears drops rateLimited", async () => {
+  it("the round 2 BUG, reproduced: committing AFTER onStart's write never clears rateLimited", async () => {
     const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
     const observation = { until: FUTURE, seenAt: SEEN };
     const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN", rateLimited: observation }));
     const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
-
     const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
 
-    // The container-running guard is false: sbAwaitReady ran (simulated —
-    // nothing here depends on a real container), then commitAccountClears.
+    // Round 2's buggy order: sbAwaitReady (and the onStart write it triggers)
+    // BEFORE commitAccountClears.
+    await mutateToLaunchedAccount(storage, launch.name);
     await commitAccountClears(env, storage, recordFn, launch);
 
     const row = (await storage.get(STATUS_KEY))!;
-    expect(row.rateLimited ?? null).toBeNull();
+    expect(row.rateLimited).toEqual(observation); // BUG: never cleared — launchedAccount already matched launch.name
+  });
+
+  it("the round 3 FIX: committing BEFORE onStart's write correctly clears rateLimited", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+    const observation = { until: FUTURE, seenAt: SEEN };
+    const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN", rateLimited: observation }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+
+    // The fixed order: commitAccountClears BEFORE sbAwaitReady (and the
+    // onStart write it triggers).
+    await commitAccountClears(env, storage, recordFn, launch);
+    await mutateToLaunchedAccount(storage, launch.name); // onStart runs after, inside sbAwaitReady
+
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.rateLimited ?? null).toBeNull(); // cleared, as #134 requires
+    expect(row.launchedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2"); // onStart's own write still lands
   });
 
   it("no stale fields on the row at all: a no-op, no write", async () => {
@@ -635,12 +678,12 @@ describe("commitAccountClears — only committed once the container touch actual
   });
 });
 
-// Issue #134 review round 2: pins the wiring itself (the DO cannot be
+// Issue #134 review round 3: pins the wiring itself (the DO cannot be
 // constructed under vitest-pool-workers, same convention as every other
 // source-pinning block in this file) — the primitive-level tests above
-// prove the MECHANISM; this proves provisionUngated/restartUngated actually
-// call it that way.
-describe("StudioDO.provisionUngated/restartUngated wiring — commitAccountClears runs only inside the cold-start branch (#134 review round 2)", () => {
+// prove the MECHANISM (order matters); this proves provisionUngated/
+// restartUngated actually call it in the correct order.
+describe("StudioDO.provisionUngated/restartUngated wiring — commitAccountClears runs BEFORE sbAwaitReady, inside the cold-start branch (#134 review round 3)", () => {
   const doSrc: string = (testEnv as unknown as { TEST_STUDIO_DO_SRC: string }).TEST_STUDIO_DO_SRC;
   const body = (sig: string): string => {
     const start = doSrc.indexOf(sig);
@@ -665,13 +708,13 @@ describe("StudioDO.provisionUngated/restartUngated wiring — commitAccountClear
         expect(fnBody).toContain("this.recordFn(), false);");
       });
 
-      it("commitAccountClears runs INSIDE the cold-start guard, after sbAwaitReady", () => {
+      it("commitAccountClears runs INSIDE the cold-start guard, BEFORE sbAwaitReady (not after)", () => {
         const block = coldStartBlock(fnBody);
-        const awaitReadyIdx = block.indexOf("await sbAwaitReady(this);");
         const commitIdx = block.indexOf("await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);");
-        expect(awaitReadyIdx).toBeGreaterThan(-1);
+        const awaitReadyIdx = block.indexOf("await sbAwaitReady(this);");
         expect(commitIdx).toBeGreaterThan(-1);
-        expect(awaitReadyIdx).toBeLessThan(commitIdx);
+        expect(awaitReadyIdx).toBeGreaterThan(-1);
+        expect(commitIdx).toBeLessThan(awaitReadyIdx);
       });
 
       it("commitAccountClears does NOT run outside the cold-start guard (unconditionally)", () => {

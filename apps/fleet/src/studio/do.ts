@@ -5885,7 +5885,7 @@ export class StudioDO extends Sandbox<Env> {
     // at all. Committing an ok-branch clear here regardless of that outcome
     // would falsely report a studio that never moved as no longer
     // rate-limited / no longer on its old account. commitAccountClears below
-    // runs ONLY inside the cold-start branch, once the start actually did.
+    // runs ONLY inside the cold-start branch, once a cold start is certain.
     const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, id, this.recordFn(), false);
     // Issue #354 (the #348 shape, here too): both fields from the ONE launch.
     ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));
@@ -5893,10 +5893,23 @@ export class StudioDO extends Sandbox<Env> {
     // touch, and the SDK waits for a cold container inside that exec. Wait
     // here, under bring-up's own budget, so the refresh budget never has to.
     if (!this.ctx.container?.running) {
-      await sbAwaitReady(this);
-      // Issue #134 review round 2: the container just actually started on
-      // `launch.name` — only now may the row's stale-field clears commit.
+      // Issue #134 review round 3: BEFORE sbAwaitReady, not after. onStart
+      // (this file's own, below) runs INSIDE sbAwaitReady itself — per
+      // @cloudflare/containers' pinned compiled source, `startAndWaitForPorts`
+      // runs `await this.state.setHealthy(); await this.onStart();` before it
+      // resolves — and onStart unconditionally calls recordLaunchedAccount,
+      // which writes `launchedAccount: this.envAccount` (already
+      // `launch.name`) into the SAME row commitAccountClears reads.
+      // Committing AFTER sbAwaitReady would read that already-updated
+      // `launchedAccount`, so accountClears' own `existing.launchedAccount
+      // !== launch.name` guard would always read false — the rateLimited
+      // clear, the actual point of #134, would silently never fire on a real
+      // cold start. Committing here, first, reads the row while
+      // `launchedAccount` still names the OLD account — the same ordering
+      // recycle()'s own post-destroy closure already uses (resolve-and-commit
+      // strictly before touching the container).
       await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);
+      await sbAwaitReady(this);
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(cfg)), this.ctx.storage, id, ctx);
     const status = await provisionWithStorage(
@@ -6122,10 +6135,14 @@ export class StudioDO extends Sandbox<Env> {
     // touch, and the SDK waits for a cold container inside that exec. Wait
     // here, under bring-up's own budget, so the refresh budget never has to.
     if (!this.ctx.container?.running) {
-      await sbAwaitReady(this);
-      // Issue #134 review round 2: the container just actually started on
-      // `launch.name` — only now may the row's stale-field clears commit.
+      // Issue #134 review round 3: BEFORE sbAwaitReady, not after — see
+      // provisionUngated's identical comment above its own call for the full
+      // reasoning (onStart's recordLaunchedAccount runs INSIDE sbAwaitReady
+      // itself and would otherwise already have overwritten launchedAccount
+      // by the time this reads it, permanently defeating the rateLimited
+      // clear's own `launchedAccount !== launch.name` guard).
       await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);
+      await sbAwaitReady(this);
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(null)), this.ctx.storage, id, ctx);
     const restarted = await restartWithSync(

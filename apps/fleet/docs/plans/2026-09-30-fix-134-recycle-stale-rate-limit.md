@@ -171,3 +171,75 @@ Verified both new source-pinning tests actually catch the regression they
 guard against: temporarily reverted `provisionUngated`'s call back to the
 old unconditional 4-arg + no-branch shape → 3 tests failed as expected →
 restored → 55/55 green again.
+
+## Review round 3 addendum: round 2's placement inside the branch was itself wrong
+
+A third fresh-context review found that round 2's fix, while correctly
+GATED (only committing inside the cold-start branch), placed the commit in
+the WRONG position within that branch:
+
+```ts
+if (!this.ctx.container?.running) {
+  await sbAwaitReady(this);
+  await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);
+}
+```
+
+`sbAwaitReady` wraps `startAndWaitForPorts` (sandbox-api.ts), which — per
+the pinned `@cloudflare/containers` compiled source — runs `await
+this.state.setHealthy(); await this.onStart();` itself, BEFORE it resolves.
+This file's own `onStart` unconditionally calls `recordLaunchedAccount`,
+which writes `launchedAccount: this.envAccount` (already reassigned to
+`launch.name` a few lines above) into the exact same `STATUS_KEY` row
+`commitAccountClears` reads. So by the time `commitAccountClears` ran
+(AFTER `sbAwaitReady`), `existing.launchedAccount` already equalled
+`launch.name` — `accountClears`'s own `existing.launchedAccount !==
+launch.name` guard could never be true on this path, and the `rateLimited`
+clear (the actual point of #134) silently never fired on a real cold start
+through provision/restart. The `claudeAccount` clear was unaffected
+(`onStart` doesn't touch that field).
+
+Fix: swap the two lines — commit BEFORE `sbAwaitReady`, still inside the
+same `!running` branch (so it still never fires when the guard is about to
+skip the start — round 2's gating was correct, only the internal ordering
+was not):
+
+```ts
+if (!this.ctx.container?.running) {
+  await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);
+  await sbAwaitReady(this);
+}
+```
+
+This is the exact ordering recycle()'s own post-destroy closure already
+uses successfully (`launchAccountOrRefuse`'s inline commit happens before
+its own `await sbAwaitReady(this)` call) — round 2's fix diverged from that
+established pattern without reason; round 3's fix brings it back in line.
+
+Self-check (traced by hand, not only re-run tests): confirmed no OTHER
+storage write inside `sbAwaitReady`'s call chain touches `STATUS_KEY`.
+`ContainerState.setHealthy` writes only `CONTAINER_STATE_KEY`; the
+Sandbox base class's own `onStart` calls `currentRuntime.markStarted()`
+(writes only `CURRENT_RUNTIME_IDENTITY_STORAGE_KEY`), a fire-and-forget
+`checkVersionCompatibility()` (no storage writes at all, logging only,
+and not awaited besides), and `pruneTunnelsForRestart` (writes only the
+tunnel port-map keys). The only `STATUS_KEY` writer anywhere in that whole
+chain is this file's own `onStart` → `recordLaunchedAccount`. Moving the
+commit before `sbAwaitReady` is therefore sufficient to close the race —
+there is no second hidden writer to also account for.
+
+New/changed tests: the round 2 `commitAccountClears` primitive-level
+describe block now includes a `mutateToLaunchedAccount` helper standing in
+for exactly what `onStart`'s `recordLaunchedAccount` does, with two
+scenarios — the round 2 BUG reproduced (commit AFTER the simulated write:
+`rateLimited` never clears) and the round 3 FIX (commit BEFORE it:
+`rateLimited` clears correctly, and the simulated `onStart` write still
+lands afterward) — proving BEHAVIORALLY why the order matters, not only by
+source position. The source-pinning describe block was updated to assert
+`commitAccountClears` runs BEFORE `sbAwaitReady`, not after.
+
+Verified the updated source-pinning test catches this exact regression:
+temporarily swapped `provisionUngated`'s two lines back to the round 2
+(buggy) order → the "commitAccountClears runs INSIDE the cold-start guard,
+BEFORE sbAwaitReady" test failed as expected → restored → 56/56 green
+again.
