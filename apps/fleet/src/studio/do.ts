@@ -3268,12 +3268,13 @@ export class LaunchRefusedError extends Error {
  * `rateLimited`) are only ever CORRECT to commit once the container is
  * genuinely about to run on `launch.name` — never merely because a launch
  * resolved. `launchAccountOrRefuse`'s own inline commit (its
- * `commitOkClears` branch, below) covers the callers for which resolving
- * IS the commit point; `commitAccountClears` (exported further down) is the
- * same computation, re-read fresh from storage, for callers that resolved
- * with `commitOkClears: false` because they cannot yet tell whether this
- * call's container touch will actually happen. Pure (no I/O) so both paths
- * share it without a caller-vs-callee read mismatch.
+ * `commitOkClears` branch, below) covers callers for which resolving IS the
+ * commit point; `decideAccountClears`/`applyAccountClears` (exported
+ * further down) are the same computation, split across a decide-before/
+ * apply-after-success boundary, for callers that resolved with
+ * `commitOkClears: false` because they cannot yet tell whether (or when)
+ * this call's container touch will actually happen. Pure (no I/O) so every
+ * path shares it without a caller-vs-callee read mismatch.
  */
 function accountClears(
   env: Env, existing: StudioStatus | null, launch: Extract<LaunchAccount, { ok: true }>,
@@ -3300,24 +3301,50 @@ function accountClears(
 }
 
 /**
- * Issue #134 review round 2: committed by a caller that resolved
- * `launchAccountOrRefuse` with `commitOkClears: false` — `provisionUngated`/
- * `restartUngated`/recycle's post-destroy closure all call this ONLY once
- * they know this call's container touch actually happened (a cold start, or
- * recycle's unconditional post-destroy start) — never when the
- * container-running guard (`!this.ctx.container?.running`) is about to skip
- * the start and the studio keeps running, unmoved, on whatever account it
- * already booted with. A fresh `storage.get` (not the resolving call's own
- * snapshot): nothing durable is assumed to still hold from whenever that
- * call ran.
+ * Issue #134 review round 4: the DECIDE half of a decide-before/apply-after
+ * split. `provisionUngated`/`restartUngated`/recycle's post-destroy closure
+ * all call this BEFORE their own `sbAwaitReady(this)` call — the same
+ * pre-touch snapshot timing round 3 already established, for the same
+ * reason (onStart's own `recordLaunchedAccount` write runs INSIDE
+ * `sbAwaitReady` itself, before it resolves, and would otherwise make
+ * `accountClears`'s `launchedAccount !== launch.name` guard always read
+ * false). What round 3 got wrong was committing that decision immediately,
+ * in the same step: `sbAwaitReady` is documented to throw on a genuine
+ * cold-start failure (timeout, bad image, a rollout killing the container
+ * mid-boot — see `healDiedInRollout`/`ROLLOUT_EXIT_MARKER` for a measured
+ * instance of exactly this), and a clear committed before that throw stays
+ * persisted even though the studio never actually moved anywhere. Splitting
+ * the decision from the write lets a caller carry the DECISION across a
+ * call that might throw, and only apply it (via `applyAccountClears`,
+ * directly below) in that call's own success continuation — never from a
+ * catch, never unconditionally.
  */
-export async function commitAccountClears(
-  env: Env, storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
-  launch: Extract<LaunchAccount, { ok: true }>,
-): Promise<void> {
+export async function decideAccountClears(
+  env: Env, storage: StudioStorage, launch: Extract<LaunchAccount, { ok: true }>,
+): Promise<Pick<StudioStatus, "claudeAccount" | "rateLimited"> | null> {
   const existing = (await storage.get(STATUS_KEY)) ?? null;
-  const clears = accountClears(env, existing, launch);
-  if (clears === null || existing === null) return;
+  return accountClears(env, existing, launch);
+}
+
+/**
+ * Issue #134 review round 4: the APPLY half — called ONLY once the
+ * caller's own container-start call (`sbAwaitReady`) has already resolved
+ * successfully, never from that call's catch branch and never
+ * unconditionally. Re-reads storage fresh: onStart's `recordLaunchedAccount`
+ * write has, by this point, already landed on the row (it ran INSIDE the
+ * `sbAwaitReady` call the caller just awaited), so merging the pre-decided
+ * `clears` patch onto a FRESH read — rather than onto `decideAccountClears`'s
+ * own pre-touch snapshot — is what keeps this from clobbering that write
+ * back to the old account name. A `null` `clears` (nothing was ever going to
+ * be cleared) is a no-op, same as a missing row.
+ */
+export async function applyAccountClears(
+  storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
+  clears: Pick<StudioStatus, "claudeAccount" | "rateLimited"> | null,
+): Promise<void> {
+  if (clears === null) return;
+  const existing = (await storage.get(STATUS_KEY)) ?? null;
+  if (existing === null) return;
   const cleared: StudioStatus = { ...existing, ...clears };
   await storage.put(STATUS_KEY, cleared);
   await recordStudioFn(cleared);
@@ -3344,18 +3371,27 @@ export async function commitAccountClears(
  * probed the container, and recycleWithSync can still refuse outright
  * (failed probe, or a confirmed rescue-push failure without
  * `--discard-unsynced`) — destroy() never runs and the studio never moves.
- * In every one of these cases, committing a resolved-`ok` clear
- * (`claudeAccount`, `rateLimited`) describes what is about to become true
- * ONCE the studio actually moves onto the newly-resolved account — and is
- * simply false if that move never happens. `commitOkClears` defaults to
- * `true` for the direct, no-alternative-path callers (recycle's own
- * post-destroy closure, and this function's own refusal branch below, which
- * is unaffected by the flag either way); `provisionUngated`, `restartUngated`
- * and recycle's entry call all pass `false` and instead call
- * `commitAccountClears` (above) themselves, at the point each has actually
- * confirmed the container touch is happening (or, for recycle's entry call,
- * never — that call exists only to refuse early, its resolution is never
- * carried forward at all; see recycle()'s own comment).
+ * And even where a container touch DOES follow (recycle's post-destroy
+ * closure, provisionUngated/restartUngated's own cold-start branch),
+ * `sbAwaitReady` can itself throw (a genuine cold-start failure — timeout,
+ * bad image, a rollout killing the container mid-boot) after having
+ * already been committed to. In every one of these cases, committing a
+ * resolved-`ok` clear (`claudeAccount`, `rateLimited`) describes what is
+ * about to become true ONCE the studio actually, successfully moves onto
+ * the newly-resolved account — and is simply false if that move never
+ * happens or never finishes. `commitOkClears` defaults to `true` for
+ * simplicity (this function's original shape, still exercised directly by
+ * this file's own primitive-level tests) and for this function's own
+ * refusal branch below, which is unaffected by the flag either way. No
+ * PRODUCTION call site uses the default any more, though: `provisionUngated`,
+ * `restartUngated`, recycle's entry call, AND recycle's post-destroy closure
+ * all pass `false` and instead call `decideAccountClears`/
+ * `applyAccountClears` (both above) themselves — decide from a pre-touch
+ * snapshot, then commit ONLY in that call's own success continuation, never
+ * unconditionally and never from a catch (see those two functions' own doc
+ * comments for the full reasoning; recycle's entry call decides nothing at
+ * all — it exists only to refuse early, its resolution is never carried
+ * forward; see recycle()'s own comment).
  */
 export async function launchAccountOrRefuse(
   env: Env, storage: StudioStorage, id: string, recordStudioFn: (status: StudioStatus) => Promise<void>,
@@ -5884,8 +5920,9 @@ export class StudioDO extends Sandbox<Env> {
     // skips the actual start and this resolution never reaches a container
     // at all. Committing an ok-branch clear here regardless of that outcome
     // would falsely report a studio that never moved as no longer
-    // rate-limited / no longer on its old account. commitAccountClears below
-    // runs ONLY inside the cold-start branch, once a cold start is certain.
+    // rate-limited / no longer on its old account. The decide/apply pair
+    // below runs ONLY inside the cold-start branch, once a cold start is
+    // certain, and only actually WRITES once that cold start has succeeded.
     const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, id, this.recordFn(), false);
     // Issue #354 (the #348 shape, here too): both fields from the ONE launch.
     ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));
@@ -5893,23 +5930,21 @@ export class StudioDO extends Sandbox<Env> {
     // touch, and the SDK waits for a cold container inside that exec. Wait
     // here, under bring-up's own budget, so the refresh budget never has to.
     if (!this.ctx.container?.running) {
-      // Issue #134 review round 3: BEFORE sbAwaitReady, not after. onStart
-      // (this file's own, below) runs INSIDE sbAwaitReady itself — per
-      // @cloudflare/containers' pinned compiled source, `startAndWaitForPorts`
-      // runs `await this.state.setHealthy(); await this.onStart();` before it
-      // resolves — and onStart unconditionally calls recordLaunchedAccount,
-      // which writes `launchedAccount: this.envAccount` (already
-      // `launch.name`) into the SAME row commitAccountClears reads.
-      // Committing AFTER sbAwaitReady would read that already-updated
-      // `launchedAccount`, so accountClears' own `existing.launchedAccount
-      // !== launch.name` guard would always read false — the rateLimited
-      // clear, the actual point of #134, would silently never fire on a real
-      // cold start. Committing here, first, reads the row while
-      // `launchedAccount` still names the OLD account — the same ordering
-      // recycle()'s own post-destroy closure already uses (resolve-and-commit
-      // strictly before touching the container).
-      await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);
+      // Issue #134 review round 3+4: DECIDE before sbAwaitReady (onStart's
+      // recordLaunchedAccount write runs INSIDE sbAwaitReady itself, before
+      // it resolves, and would otherwise make accountClears' own
+      // `launchedAccount !== launch.name` guard always read false — see
+      // decideAccountClears's own doc comment) but only APPLY it after
+      // sbAwaitReady has actually resolved successfully. `sbAwaitReady` can
+      // itself throw on a genuine cold-start failure (timeout, bad image, a
+      // rollout killing the container mid-boot); if it does, `clears` is
+      // simply never persisted — the row keeps describing whatever account
+      // the studio is actually still on. See applyAccountClears's own doc
+      // comment for why re-reading storage fresh here (rather than reusing
+      // `existing`) does not clobber onStart's own launchedAccount write.
+      const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
       await sbAwaitReady(this);
+      await applyAccountClears(this.ctx.storage, this.recordFn(), clears);
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(cfg)), this.ctx.storage, id, ctx);
     const status = await provisionWithStorage(
@@ -6135,14 +6170,15 @@ export class StudioDO extends Sandbox<Env> {
     // touch, and the SDK waits for a cold container inside that exec. Wait
     // here, under bring-up's own budget, so the refresh budget never has to.
     if (!this.ctx.container?.running) {
-      // Issue #134 review round 3: BEFORE sbAwaitReady, not after — see
-      // provisionUngated's identical comment above its own call for the full
-      // reasoning (onStart's recordLaunchedAccount runs INSIDE sbAwaitReady
-      // itself and would otherwise already have overwritten launchedAccount
-      // by the time this reads it, permanently defeating the rateLimited
-      // clear's own `launchedAccount !== launch.name` guard).
-      await commitAccountClears(this.env, this.ctx.storage, this.recordFn(), launch);
+      // Issue #134 review round 3+4: DECIDE before sbAwaitReady, APPLY only
+      // once it resolves successfully — see provisionUngated's identical
+      // comment above its own call for the full reasoning (onStart's
+      // recordLaunchedAccount runs INSIDE sbAwaitReady itself; sbAwaitReady
+      // can itself throw on a genuine cold-start failure, in which case
+      // `clears` is simply never persisted).
+      const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
       await sbAwaitReady(this);
+      await applyAccountClears(this.ctx.storage, this.recordFn(), clears);
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(null)), this.ctx.storage, id, ctx);
     const restarted = await restartWithSync(
@@ -6349,29 +6385,33 @@ export class StudioDO extends Sandbox<Env> {
       // this fix.
       //
       // Calling launchAccountOrRefuse twice in one recycle is safe: on a
-      // launchable account, the entry call above (issue #134 review round 1)
-      // passes `commitOkClears=false` specifically BECAUSE recycleWithSync
-      // can still refuse between the two calls (a failed probe, or a
-      // confirmed rescue-push failure, without `--discard-unsynced`) —
-      // destroy() never runs and the studio never moves, so an `ok`-branch
-      // clear (`claudeAccount`, `rateLimited`) committed at the entry call
-      // would lie about a studio that stayed exactly where it was. THIS
-      // call, here, is the only one that may actually commit either clear —
-      // it only runs once destroy() has already unconditionally happened
-      // (this closure is recycleWithSync's own post-destroy container-start
-      // step), so by the time it resolves the studio genuinely is about to
-      // run on the account it names. On a refusal, this refuses exactly
-      // where provisionUngated/restartUngated already refuse, before the
-      // new, unlaunchable account's container ever starts, and
-      // recycleWithSync's own surrounding try/catch (see its doc comment on
-      // that catch) already treats every awaitReady failure identically — a
-      // launch refusal reaching it here is not a new case to handle. The
-      // "entry and this call cannot currently disagree on refuse-vs-succeed"
-      // reasoning from earlier review rounds is an invariant of TODAY's
-      // launchAccount/failover behavior, not a structural guarantee. A
-      // future change to either launchAccount or the failover write path
-      // should re-check this paragraph before assuming the two calls can
-      // never diverge.
+      // launchable account, BOTH calls now pass `commitOkClears=false`
+      // (issue #134 review rounds 1 and 4) — neither resolving is, by
+      // itself, treated as proof a clear may land. The entry call above
+      // decides nothing at all (its resolution is never carried forward;
+      // recycleWithSync can still refuse before destroy() ever runs, so
+      // committing there would lie about a studio that stayed exactly where
+      // it was). THIS call, here, is the only one that may actually cause a
+      // clear to land — via `decideAccountClears` (right after this call)
+      // and `applyAccountClears` (right after the `sbAwaitReady` a few lines
+      // below), which only WRITES once that `sbAwaitReady` call has
+      // genuinely resolved successfully. destroy() having already
+      // unconditionally happened makes the DECISION safe to make here (the
+      // studio is definitely leaving its old account); `sbAwaitReady`
+      // actually succeeding is what makes the WRITE safe to commit — a
+      // throw from it (a genuine cold-start failure) leaves the row
+      // exactly as it was, read by recycleWithSync's own catch. On a
+      // refusal, this refuses exactly where provisionUngated/restartUngated
+      // already refuse, before the new, unlaunchable account's container
+      // ever starts, and recycleWithSync's own surrounding try/catch (see
+      // its doc comment on that catch) already treats every awaitReady
+      // failure identically — a launch refusal reaching it here is not a
+      // new case to handle. The "entry and this call cannot currently
+      // disagree on refuse-vs-succeed" reasoning from earlier review rounds
+      // is an invariant of TODAY's launchAccount/failover behavior, not a
+      // structural guarantee. A future change to either launchAccount or
+      // the failover write path should re-check this paragraph before
+      // assuming the two calls can never diverge.
       //
       // Scope, honestly: this (rounds 2+3, together) closes recycle's OWN
       // extra exposure — the pre-destroy phase above, genuinely uncovered by
@@ -6398,16 +6438,31 @@ export class StudioDO extends Sandbox<Env> {
         // ruling) and provisionCore's own ensureSpawnToken republishes its
         // hash exactly as before if it ever needs to.
         const spawnToken = await loadOrMintSpawnToken(this.ctx.storage);
-        const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn());
-        // Review round 3, finding 1: `launch.name` straight from the call
-        // just above, NOT a second (now-removed) claudeAccountName() storage
-        // read — see this closure's own doc comment for why the second read
-        // was never actually atomic with this one, only practically safe on
-        // an unstated DO-input-gate precondition. Both fields below now come
-        // from the ONE resolved `launch`, with no read, storage-only or not,
-        // in between.
+        // Issue #134 review round 4: `false` — this call's own resolution is
+        // no longer, by itself, proof the studio is about to run on
+        // `launch.name`: `sbAwaitReady` below can throw on a genuine
+        // cold-start failure even though destroy() has already
+        // unconditionally happened. See decideAccountClears/
+        // applyAccountClears's own doc comments, and provisionUngated's
+        // identical comment above its own call, for the full reasoning.
+        const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);
+        // Review round 3, finding 1 (issue #328): `launch.name` straight from
+        // the call just above, NOT a second (now-removed) claudeAccountName()
+        // storage read — see this closure's own doc comment for why the
+        // second read was never actually atomic with this one, only
+        // practically safe on an unstated DO-input-gate precondition. Both
+        // fields below now come from the ONE resolved `launch`, with no
+        // read, storage-only or not, in between.
         ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, this.selfId(), spawnToken, launch.name));
+        // Issue #134 review round 4: DECIDE from the pre-touch snapshot here,
+        // APPLY only once sbAwaitReady below has actually resolved
+        // successfully — never from a catch, never unconditionally. A throw
+        // from sbAwaitReady (recycleWithSync's own try/catch, above) now
+        // finds `rateLimited`/`claudeAccount` exactly as they were before
+        // this closure ran, not falsely cleared.
+        const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
         await sbAwaitReady(this);
+        await applyAccountClears(this.ctx.storage, this.recordFn(), clears);
       },
       (c) => this.provisionCore(c, "recycle", ctx),
       async (s: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, s)), cfg,

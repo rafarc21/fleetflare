@@ -243,3 +243,106 @@ temporarily swapped `provisionUngated`'s two lines back to the round 2
 (buggy) order → the "commitAccountClears runs INSIDE the cold-start guard,
 BEFORE sbAwaitReady" test failed as expected → restored → 56/56 green
 again.
+
+## Review round 4 addendum: round 3 traded one ordering bug for its mirror image
+
+A fourth fresh-context review found that round 3's fix — commit BEFORE
+`sbAwaitReady` — dodged the onStart-clobber race but reopened the OTHER
+half of the same problem: `sbAwaitReady` is documented to throw on a
+genuine cold-start failure (timeout, bad image, a rollout killing the
+container mid-boot — `healDiedInRollout`/`ROLLOUT_EXIT_MARKER` in do.ts
+exists because exactly that was measured in production on 2026-09-24, on
+this same heal path). Nothing caught that throw between round 3's commit
+and the caller — it propagated straight out, but `rateLimited: null` had
+ALREADY been persisted before the failure. For the automatic bare-container
+heal path (`runScheduledTick` → `healBareContainer` → `restartStudio
+("heal")` → `restartUngated`, wrapped in a try/catch that only
+`console.error`s, do.ts ~2850-2866) this is fully unattended: a studio
+genuinely rate-limited on account A, remapped to account B, goes bare, the
+heal tries B, commits the clear, the start then fails — the row is left
+silently, permanently claiming "not rate-limited" for a studio that never
+actually got anywhere. #134's own harm class, reintroduced by the fix meant
+to close it.
+
+Recycle's post-destroy closure had the textually-identical exposure
+(`launchAccountOrRefuse`'s own default `commitOkClears=true` commits
+immediately on resolve, before its own `sbAwaitReady` call) — pre-existing
+across rounds 1-3 (not a round-3 regression), flagged non-blocking but
+fixed in this same pass since the restructuring was already in flight.
+
+**Fix**: split "decide" from "apply" rather than choosing between
+"commit before" (safe on failure, broken on success — round 2) and "commit
+after" (round 3's mirror bug). Two new exported functions replace
+`commitAccountClears`:
+
+- `decideAccountClears(env, storage, launch)` — reads the pre-touch
+  snapshot (same timing round 3 already established, for the same reason:
+  onStart's `recordLaunchedAccount` write happens INSIDE `sbAwaitReady`
+  itself) and returns the clear patch as a plain value, performing no
+  write.
+- `applyAccountClears(storage, recordStudioFn, clears)` — re-reads storage
+  FRESH (so it sees onStart's own already-landed `launchedAccount` write)
+  and merges the pre-decided patch onto that fresh row. A `null` patch is a
+  no-op.
+
+All three commit sites (`provisionUngated`, `restartUngated`, recycle's
+post-destroy closure) now follow the identical three-line shape:
+`decide` → `await sbAwaitReady(this)` → `apply`, with no try/catch — plain
+sequential control flow is what makes this safe: if `sbAwaitReady` throws,
+the `apply` line is simply never reached, and the thrown error propagates
+exactly as it always did (recycleWithSync's own catch, or
+provision/restart's own uncaught-to-caller shape). `decide` is pure
+computation held in a local variable, so running it early carries no
+persistence risk.
+
+`launchAccountOrRefuse`'s own `commitOkClears: true` inline-commit path is
+left in place (still exercised by this file's own primitive-level tests,
+and kept as the function's original, simpler shape) but is, after this
+round, no longer used by ANY production call site — every real caller now
+resolves with `false` and commits through `decideAccountClears`/
+`applyAccountClears` instead. `launchAccountOrRefuse`'s own doc comment,
+and the "Calling launchAccountOrRefuse twice in one recycle is safe"
+comment above recycle's closure, are both updated to reflect this.
+
+**Final trace** (three possible outcomes per commit site, confirming the
+clear lands in exactly one of them):
+
+- `provisionUngated`/`restartUngated` (each guarded by
+  `if (!this.ctx.container?.running)`): (1) container already running —
+  the whole guarded block, decide/sbAwaitReady/apply, is skipped entirely,
+  clear never lands; (2) cold start succeeds — decide (pre-touch), onStart
+  runs inside `sbAwaitReady`, apply (fresh read, merges the patch) — clear
+  lands, exactly once; (3) cold start throws — decide already ran (held
+  locally, unwritten), the throw from `sbAwaitReady` propagates immediately
+  since there is no try/catch, `apply` is never reached — clear never
+  lands.
+- recycle's post-destroy closure (no `!running` guard — it only ever runs
+  immediately after `destroy()` has unconditionally completed, so outcome
+  (1) above is structurally unreachable here): (2) `sbAwaitReady`
+  succeeds — clear lands, exactly once, same shape as above; (3)
+  `sbAwaitReady` throws — decide already ran (unwritten), the throw
+  propagates out of the closure into `recycleWithSync`'s own try/catch,
+  which builds its degraded status from a FRESH `storage.get` — since
+  nothing was ever applied, that fresh read still carries the original,
+  un-cleared `rateLimited`/`claudeAccount`. Clear never lands.
+
+New/changed tests: a `decideAccountClears`/`applyAccountClears`
+primitive-level describe block covering all three provision/restart
+outcomes (guard-skip, success, throw) plus a no-stale-fields no-op case; a
+companion describe block for recycle's closure's own throw case; and two
+source-pinning describe blocks (provisionUngated/restartUngated, and
+recycle's closure) asserting the strict `decide` → `sbAwaitReady` → `apply`
+ordering. Two pre-existing tests whose literal-text assertions depended on
+the OLD (pre-round-4) call shape were updated: the "#328 fix round 2" "no
+await runs between..." test (the closure's `launchAccountOrRefuse` call now
+carries a trailing `, false`), and the "#134 review round 1" "keeps the
+default — it DOES commit" test, whose own premise round 4 makes false
+(rewritten to assert the new decide/apply shape instead, with a note
+explaining why).
+
+Verified the new source-pinning test for provisionUngated/restartUngated
+catches the exact round-3-style regression: temporarily reordered
+`provisionUngated`'s three lines back to `sbAwaitReady` → `decide` →
+`apply` (mimicking what an "apply after success, but decide too late"
+mistake would look like) → the ordering assertion failed as expected →
+restored → 59/59 green again.
