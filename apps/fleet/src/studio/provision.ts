@@ -2362,6 +2362,12 @@ export async function runProvision(
   status: StudioStatus; roleEnv: RoleEnv | StudioEnv | null; keepAlive: boolean | null;
   /** Issue #37: a --fresh-session bring-up confirmed it moved a session aside. */
   freshSessionMoved?: boolean;
+  /** Issue #100 review round 1: see freshSessionConfirmed's own doc comment
+   *  above (local variable of the same name) -- true iff the flag was
+   *  actually honored (a marker line printed, no failed entries), which is
+   *  NOT the same thing as freshSessionMoved (false both when unconfirmed
+   *  AND when confirmed-but-nothing-to-move). */
+  freshSessionConfirmed?: boolean;
 }> {
   const id = buildStudioId(cfg);
   // Dynamic repo selection (P4a) — see resolveWorkRepoSlug's own doc comment
@@ -2393,6 +2399,15 @@ export async function runProvision(
   // channel: a discard nobody is told about is the thing this must never be.
   let freshSessionNote: string | null = null;
   let freshSessionMoved = false;
+  // Issue #100 review round 1: distinct from `freshSessionMoved` above, which
+  // is ALSO `false` for the legitimate "flag honored, nothing to move" case
+  // (`moved` is `[]`) -- indistinguishable there from "never confirmed at
+  // all" (`moved === null`, no marker line) or "every move failed" without
+  // this separate flag. `provisionWithStorage` needs exactly this signal to
+  // decide whether FRESH_SESSION_PENDING_KEY may clear: true iff bring-up
+  // printed at least one FLEET_SESSION_FRESH line and none of them failed
+  // (empty array counts as confirmed -- there was nothing to move).
+  let freshSessionConfirmed = false;
 
   try {
     const resolved = await resolveBringupEnv(deps, cfg, fleetRepoSlug, workRepoSlug);
@@ -2499,6 +2514,11 @@ export async function runProvision(
       const moved = parseFreshSession(bringupRes.stdout);
       freshSessionNote = freshSessionNoteFor(moved, id);
       freshSessionMoved = moved !== null && moved.some((m) => !m.startsWith("failed "));
+      // Issue #100 review round 1: see freshSessionConfirmed's own doc
+      // comment above -- `moved !== null` (a marker line printed) and no
+      // entry failed. `[]` (nothing to move) is confirmed; `null` or any
+      // `failed ` entry is not.
+      freshSessionConfirmed = moved !== null && !moved.some((m) => m.startsWith("failed "));
     }
 
     // Board issue #28 — the missing observation. `bringupRes.code === 0`
@@ -2555,6 +2575,14 @@ export async function runProvision(
       sessionAdoption: adoptionRecord(adoption),
     };
   } catch (err) {
+    // Review round 1 (issue #100): server-side diagnostic ONLY, logged
+    // before any redaction — every OTHER nested try/catch in this function
+    // (rescue-branch discovery, install-cache restore, session restore) already
+    // logs its raw error via console.error; this outer catch-all, the one the
+    // historical 500 this issue investigated actually disappeared into, did
+    // not. Does not change what the operator sees: `status.error` below is
+    // still built from the redacted message exactly as before.
+    console.error(`studio ${id}: provision failed`, err instanceof Error ? (err.stack ?? err.message) : String(err));
     // Scrubbed immediately, at the point the raw message is first held —
     // simpler and strictly safer than container/server.ts's "raw in
     // storage, scrub only at the output boundary" split (which exists
@@ -2577,7 +2605,11 @@ export async function runProvision(
   }
 
   await deps.recordStudio(status);
-  return { status, roleEnv, keepAlive, ...(freshSessionMoved ? { freshSessionMoved } : {}) };
+  return {
+    status, roleEnv, keepAlive,
+    ...(freshSessionMoved ? { freshSessionMoved } : {}),
+    ...(freshSessionConfirmed ? { freshSessionConfirmed } : {}),
+  };
 }
 
 /**
@@ -3526,8 +3558,9 @@ export async function provisionWithStorage(
   let roleEnv: RoleEnv | StudioEnv | null;
   let keepAlive: boolean | null;
   let freshSessionMoved: boolean | undefined;
+  let freshSessionConfirmed: boolean | undefined;
   try {
-    ({ status, roleEnv, keepAlive, freshSessionMoved } = await runProvision(
+    ({ status, roleEnv, keepAlive, freshSessionMoved, freshSessionConfirmed } = await runProvision(
       { ...provisionDeps, recordStudio: guardRecordStudio(deps, ctx) }, provisionCfg, fleetRepoSlug, existing,
     ));
     // Review round 3 (issue #85 PR1), MUST-FIX 9 (maestro correction #4):
@@ -3588,7 +3621,20 @@ export async function provisionWithStorage(
   // into "degraded") leaves it armed, so the NEXT provision call — flagged
   // or not — still forces `freshSession: true` rather than silently
   // resuming. See FRESH_SESSION_PENDING_KEY's own doc comment.
-  if (requestedFresh && status.state === "running") await storage.put(FRESH_SESSION_PENDING_KEY, false);
+  //
+  // Review round 1: `state === "running"` alone is NOT enough — it is set by
+  // runProvision purely on bring-up exit code 0 + verifyBringupLanded, and
+  // says nothing about whether the fresh-session move was ever confirmed.
+  // `freshSessionConfirmed` is the real signal (see its own doc comment on
+  // runProvision's return type): false when bring-up printed no
+  // FLEET_SESSION_FRESH line at all, or every entry it printed was
+  // `failed `. Without this, a bring-up that "succeeds" (exit 0) without
+  // confirming the move would still clear the marker, reproducing the exact
+  // bug this fix exists for via a different path than the throw it was
+  // written against.
+  if (requestedFresh && status.state === "running" && freshSessionConfirmed) {
+    await storage.put(FRESH_SESSION_PENDING_KEY, false);
+  }
   await storage.put(STATUS_KEY, status);
   // Issue #100 N1: the container is up again, so no destroy is in flight —
   // including one that died before its own `finally` could say so.
