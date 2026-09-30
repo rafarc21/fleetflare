@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   resolveClaudeAccounts, nextClaudeAccount, claudeAccountToken, accountsTried, earliestAccountReset,
-  MAX_CLAUDE_ACCOUNTS, claudeAccountVarName, otherRepoPrimaries, type ClaudeAccount,
+  MAX_CLAUDE_ACCOUNTS, claudeAccountVarName, otherRepoPrimaries, nextBorrowedAccount, repoForAccount,
+  type ClaudeAccount,
 } from "../src/studio/accounts";
 import {
   detectRateLimitModal, paneCaptureCmd, accountSwitchCmd, runAccountFailover, FLEET_TOKEN_ENV,
@@ -314,6 +315,63 @@ describe("otherRepoPrimaries (issue #103)", () => {
   });
 });
 
+describe("repoForAccount (issue #131, Stage B)", () => {
+  it("the repo CLAUDE_ACCOUNT_BY_REPO maps this account's slot to", () => {
+    const env = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: '{"repo-a":2,"repo-b":4}' });
+    expect(repoForAccount(env, "CLAUDE_CODE_OAUTH_TOKEN_4")).toBe("repo-b");
+  });
+
+  it("null for an unmapped account, a name outside the list, or an absent map", () => {
+    const env = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: '{"repo-a":2}' });
+    expect(repoForAccount(env, "CLAUDE_CODE_OAUTH_TOKEN_4")).toBeNull();
+    expect(repoForAccount(env, "not-a-real-secret")).toBeNull();
+    expect(repoForAccount(envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1 }), "CLAUDE_CODE_OAUTH_TOKEN_2")).toBeNull();
+  });
+});
+
+describe("nextBorrowedAccount (issue #131, Stage B) — the borrow second pass", () => {
+  const four: ClaudeAccount[] = [
+    { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 },
+    { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 },
+    { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 },
+    { name: "CLAUDE_CODE_OAUTH_TOKEN_4", token: "sk-ant-oat01-" + "d".repeat(40) },
+  ];
+
+  it("picks the free reserved account with the LOWEST 5h burn, not list order", () => {
+    const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_3", "CLAUDE_CODE_OAUTH_TOKEN_4"]);
+    const burn = {
+      CLAUDE_CODE_OAUTH_TOKEN_3: { window5hOutput: 9000 },
+      CLAUDE_CODE_OAUTH_TOKEN_4: { window5hOutput: 100 },
+    };
+    expect(nextBorrowedAccount(four, reserved, {}, burn, NOW)?.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+  });
+
+  it("an account absent from the burn map reads as 0 burn — never excluded, and wins over a nonzero one", () => {
+    const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_3", "CLAUDE_CODE_OAUTH_TOKEN_4"]);
+    const burn = { CLAUDE_CODE_OAUTH_TOKEN_3: { window5hOutput: 5 } };
+    expect(nextBorrowedAccount(four, reserved, {}, burn, NOW)?.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+  });
+
+  it("never considers an account outside `reserved`, however low its burn", () => {
+    const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_4"]);
+    const burn = { CLAUDE_CODE_OAUTH_TOKEN_2: { window5hOutput: 0 }, CLAUDE_CODE_OAUTH_TOKEN_4: { window5hOutput: 9000 } };
+    expect(nextBorrowedAccount(four, reserved, {}, burn, NOW)?.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+  });
+
+  it("skips a reserved account that is itself fleet-wide limited, same rule accountIsFree gives the first pass", () => {
+    const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_3", "CLAUDE_CODE_OAUTH_TOKEN_4"]);
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN_4: { until: new Date(NOW.getTime() + 60 * 60_000).toISOString(), seenAt: NOW.toISOString() } };
+    expect(nextBorrowedAccount(four, reserved, limits, {}, NOW)?.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
+  });
+
+  it("null when every reserved candidate is limited, or reserved is empty", () => {
+    expect(nextBorrowedAccount(four, new Set(), {}, {}, NOW)).toBeNull();
+    const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_4"]);
+    const limits = { CLAUDE_CODE_OAUTH_TOKEN_4: { until: new Date(NOW.getTime() + 60 * 60_000).toISOString(), seenAt: NOW.toISOString() } };
+    expect(nextBorrowedAccount(four, reserved, limits, {}, NOW)).toBeNull();
+  });
+});
+
 describe("earliestAccountReset (issue #102 requirement 3)", () => {
   const accounts: ClaudeAccount[] = [
     { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 },
@@ -481,6 +539,10 @@ interface Harness {
    *  can seed another account as ALREADY limited (fleet-wide, from some other
    *  studio's own sighting) before running this one. */
   accountLimits: Map<string, { until: string | null; seenAt: string }>;
+  /** Issue #131 (Stage B): how many times `deps.accountBurn.read` was called
+   *  — the mutation-style proof that the borrow second pass is never even
+   *  consulted when the first pass already found somewhere to go. */
+  accountBurnReads: number;
 }
 
 function harness(opts: {
@@ -497,12 +559,19 @@ function harness(opts: {
   /** Issue #103: accounts that are some OTHER repo's own mapped primary —
    *  never a candidate for THIS studio, regardless of fleet-wide limit state. */
   reservedAccounts?: Set<string>;
+  /** Issue #131 (Stage B): seed a fleet-wide burn fixture for the borrow
+   *  second pass's lowest-burn-first ordering, `{ name: window5hOutput }`. */
+  accountBurn?: Record<string, number>;
+  /** Issue #131 (Stage B): names the repo a borrowed account belongs to, for
+   *  the loud borrow/return notify messages. */
+  otherRepoOf?: (name: string) => string | null;
 }): Harness {
   const execs: string[] = [];
   const recorded: StudioStatus[] = [];
   const notices: string[] = [];
   let pane = opts.pane;
   let relaunches = 0;
+  let accountBurnReads = 0;
   const storage = fakeStorage(opts.initial ?? status()) as StudioStorage & ObservedStorage;
   const accountLimits = new Map<string, { until: string | null; seenAt: string }>(
     Object.entries(opts.accountLimits ?? {}).map(([name, until]) => [name, { until, seenAt: NOW.toISOString() }]),
@@ -510,6 +579,7 @@ function harness(opts: {
   const h: Harness = {
     execs, recorded, notices, storage, accountLimits,
     get relaunches() { return relaunches; },
+    get accountBurnReads() { return accountBurnReads; },
     setPane: (stdout: string) => { pane = stdout; },
     deps: {
       accounts: opts.accounts,
@@ -517,11 +587,20 @@ function harness(opts: {
       ...(opts.primary !== undefined ? { primary: opts.primary } : {}),
       ...(opts.display ? { display: opts.display } : {}),
       ...(opts.reservedAccounts ? { reservedAccounts: opts.reservedAccounts } : {}),
+      ...(opts.otherRepoOf ? { otherRepoOf: opts.otherRepoOf } : {}),
       now: () => opts.now ?? NOW,
       accountLimits: {
         read: async () => Object.fromEntries(accountLimits),
         write: async (name: string, until: string | null, seenAt: string) => {
           accountLimits.set(name, { until, seenAt });
+        },
+      },
+      accountBurn: {
+        read: async () => {
+          accountBurnReads++;
+          return Object.fromEntries(
+            Object.entries(opts.accountBurn ?? {}).map(([name, window5hOutput]) => [name, { window5hOutput }]),
+          );
         },
       },
       exec: vi.fn(async (cmd: string) => {
@@ -1292,6 +1371,124 @@ describe("runAccountFailover — auto-failover ON with a mapped primary (#271)",
       reservedAccounts: new Set(["CLAUDE_CODE_OAUTH_TOKEN_4"]),
     });
     expect(await run(h)).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_3", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #131 (Stage B) — borrow another repo's primary when every account
+// reserved for THIS repo is limited at once, hand back the moment this
+// studio's own primary is free again. The board's reassignment comment
+// explicitly asks for "mutants, no regression in #104/#117 tests" — the
+// golden #103 test just above is left completely untouched; the sibling test
+// below proves the borrow path activates ONLY in the strictly stricter
+// condition (the studio's OWN primary also limited, not merely reserved).
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — borrow another repo's primary (issue #131, Stage B)", () => {
+  const four: ClaudeAccount[] = [
+    ...TWO_ACCOUNTS,
+    { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 },
+    { name: "CLAUDE_CODE_OAUTH_TOKEN_4", token: "sk-ant-oat01-" + "d".repeat(40) },
+  ];
+  const LIVE_UNTIL = new Date(NOW.getTime() + 60 * 60_000).toISOString();
+
+  it("every account reserved for this repo limited (own primary too) + another repo's primary free -> borrows", async () => {
+    const h = harness({
+      accounts: four, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }),
+      // account 2 (own primary) AND account 3 (current) both fleet-wide
+      // limited — the strictly stricter condition than the golden #103 test
+      // above, where account 2 stays free and the studio wraps back to it.
+      accountLimits: { CLAUDE_CODE_OAUTH_TOKEN_2: LIVE_UNTIL, CLAUDE_CODE_OAUTH_TOKEN_3: LIVE_UNTIL },
+      reservedAccounts: new Set(["CLAUDE_CODE_OAUTH_TOKEN_4"]),
+      otherRepoOf: (name) => (name === "CLAUDE_CODE_OAUTH_TOKEN_4" ? "repo-b" : null),
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "borrowed", from: "CLAUDE_CODE_OAUTH_TOKEN_3", to: "CLAUDE_CODE_OAUTH_TOKEN_4", fromRepo: "repo-b" });
+    const last = h.recorded.at(-1)!;
+    expect(last.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+    expect(last.borrowedFromRepo).toBe("repo-b");
+    expect(last.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+    // "Log it loudly" — names both this studio's own repo and the repo whose
+    // primary was borrowed.
+    expect(h.notices[0]).toContain("fleetflare");
+    expect(h.notices[0]).toContain("repo-b");
+    expect(h.notices[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN_4");
+  });
+
+  it("own primary resets -> hand-back moves the studio back immediately", async () => {
+    const h = harness({
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
+        borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
+      }),
+      // account 2 (own primary) carries no entry at all — fleet-wide free again.
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "returned", from: "CLAUDE_CODE_OAUTH_TOKEN_4", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    const last = h.recorded.at(-1)!;
+    expect(last.borrowedAccount).toBeNull();
+    expect(last.borrowedFromRepo).toBeNull();
+    expect(last.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+    expect(last.launchedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+    expect(last.state).toBe("running");
+    expect(h.notices[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN_4");
+    expect(h.notices[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN_2");
+  });
+
+  it("not yet borrowed, own primary free, no limit on screen: hand-back never fires (nothing to hand back)", async () => {
+    const h = harness({
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }),
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "no-modal", reason: expect.any(String) });
+    expect(h.notices).toHaveLength(0);
+  });
+
+  it("lowest-burn-first: two free other-repo primaries, the lower-burn one is chosen, not list order", async () => {
+    const five: ClaudeAccount[] = [
+      ...four,
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_5", token: "sk-ant-oat01-" + "e".repeat(40) },
+    ];
+    const h = harness({
+      accounts: five, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }),
+      accountLimits: { CLAUDE_CODE_OAUTH_TOKEN_2: LIVE_UNTIL, CLAUDE_CODE_OAUTH_TOKEN_3: LIVE_UNTIL },
+      reservedAccounts: new Set(["CLAUDE_CODE_OAUTH_TOKEN_4", "CLAUDE_CODE_OAUTH_TOKEN_5"]),
+      // list order would try account 4 before account 5; burn order must win.
+      accountBurn: { CLAUDE_CODE_OAUTH_TOKEN_4: 500, CLAUDE_CODE_OAUTH_TOKEN_5: 10 },
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "borrowed", from: "CLAUDE_CODE_OAUTH_TOKEN_3", to: "CLAUDE_CODE_OAUTH_TOKEN_5", fromRepo: null });
+  });
+
+  // -------------------------------------------------------------------
+  // Mutation-style proof: the second pass genuinely only runs AFTER the
+  // first pass fails. A reserved account that would be the "lowest burn" if
+  // ever considered must NEVER outrank a free account still in this
+  // studio's own chain — a mutant that ran both passes unconditionally and
+  // picked lowest-burn globally would silently reopen #103/#117's
+  // starvation bug. `accountBurnReads` proves the second pass's own read
+  // port was never even touched, not just that its answer lost.
+  // -------------------------------------------------------------------
+  it("the first pass's own free candidate wins, and the second pass is never even consulted", async () => {
+    const h = harness({
+      accounts: four, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }),
+      // account 3 (current) limited; account 2 (own primary) FREE — the
+      // first pass wraps back to it, same shape the golden #103 test uses.
+      accountLimits: { CLAUDE_CODE_OAUTH_TOKEN_3: LIVE_UNTIL },
+      reservedAccounts: new Set(["CLAUDE_CODE_OAUTH_TOKEN_4"]),
+      // Reserved account 4 is free AND would have the lowest burn of all —
+      // if the second pass ran at all, it would win over account 2.
+      accountBurn: { CLAUDE_CODE_OAUTH_TOKEN_2: 9000, CLAUDE_CODE_OAUTH_TOKEN_4: 0 },
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_3", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    expect(h.accountBurnReads).toBe(0);
+    const last = h.recorded.at(-1)!;
+    expect(last.borrowedAccount).toBeNull();
   });
 });
 
