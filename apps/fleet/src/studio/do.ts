@@ -132,7 +132,7 @@ import { listTasks, resolveLatestAssignedBrief, autoStartSubmittedTasks } from "
 // a terminal state leaves the issue open, and a finished task's branch is not
 // work a fresh lead needs re-briefed on. Same filter
 // `resolveLatestAssignedBrief` already applies.
-import { LIVE_TASK_STATES } from "../board/types";
+import { LIVE_TASK_STATES, TERMINAL_TASK_STATES } from "../board/types";
 // Board issue #213: the SAME one-line pointer format wakeOnAssign already
 // types into a RUNNING studio's pane, reused here for a studio's bring-up —
 // see deliverAssignedTaskOnBringup's own doc comment for why the multi-line
@@ -5047,13 +5047,28 @@ export class StudioDO extends Sandbox<Env> {
    * survived" — the exact silent drop #107 exists to fix. The caller turns a
    * throw into a `Checked` failure, which the composer renders as "could not
    * check (<reason>)".
+   *
+   * Board issue #110: "live" HERE deliberately means NOT TERMINAL, not
+   * positive `LIVE_TASK_STATES` membership — the opposite direction from the
+   * `openAssignedTasks`/`liveTasksOf` fix this same issue made elsewhere.
+   * Those two answer "does a fresh brief or a destroy/reap gate have
+   * anything left to protect", and an `awaiting_merge` task answers NO to
+   * that (the lead's part is done). This function answers a different
+   * question: "does a previously-claimed work artifact (a PR, a branch)
+   * still need re-checking after a crash/restart". An `awaiting_merge` task
+   * HAS exactly such an artifact — the PR the lead already reported — so it
+   * must stay in scope here even though it is correctly excluded from a
+   * fresh brief. The pre-existing `t.state !== null` guard is UNCHANGED by
+   * this fix: a drifted task was already excluded here before #110 and
+   * stays excluded — this pass only swaps which bucket a recognized state
+   * falls into, not what happens to an unrecognized one.
    */
   private async survivalTasks(workRepoSlug: string): Promise<SurvivalTaskRef[]> {
     const api = githubBoardApi(this.env);
     const repo = workRepoSlug.toLowerCase();
     const result = await listTasks(api, repo, { assignedTo: this.selfId() });
     if (!result.ok) throw new Error(`board read failed (${result.status}): ${result.message}`);
-    const live = result.value.filter((t) => t.open && t.state !== null && LIVE_TASK_STATES.includes(t.state));
+    const live = result.value.filter((t) => t.open && t.state !== null && !TERMINAL_TASK_STATES.includes(t.state));
     const refs: SurvivalTaskRef[] = [];
     for (const task of live) {
       const comments = await api.listComments(repo, task.number);

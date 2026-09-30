@@ -3,11 +3,13 @@ import {
   createTask, transitionTask, commentEnvelope, listTasks, showTask, resolveBoardRepo,
   requireAssignedTask, showStudioTask, commentStudioEnvelope, resolveBriefPrompt, resolveLatestAssignedBrief,
   assignTask, transitionStudioTask, openAssignedTasks, findLiveAssignedTask,
-  closeTerminalTasks, TERMINAL_CLOSE_PAGE, autoStartSubmittedTasks,
+  closeTerminalTasks, TERMINAL_CLOSE_PAGE, autoStartSubmittedTasks, LEAD_TASK_STATES,
   type BoardApi,
 } from "../src/board/board";
 import { parseEnvelopeComment, renderEnvelopeComment, parseEnvelope } from "../src/board/envelope";
-import { studioLabel, taskAssignees, type BoardTask } from "../src/board/types";
+import {
+  studioLabel, taskAssignees, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES, type BoardTask,
+} from "../src/board/types";
 import type { RepoReach } from "../src/github/reach";
 import { GitHubError } from "../src/board/api";
 
@@ -897,6 +899,28 @@ describe("assignTask / createTask — the onAssigned hook (board issue #41)", ()
 // `submitted` on a healthy working studio and concludes it stalled. That is a
 // false negative in the expensive direction.
 
+// Board issue #110: `awaiting_merge` — self-reported by a lead, "I'm done,
+// PR's up", NOT terminal (the issue stays open until merge) and NOT live
+// (a studio may not be briefed on it).
+describe("TASK_STATES vocabulary (board issue #110)", () => {
+  it("includes awaiting_merge, after input_required and before the terminal states", () => {
+    expect(TASK_STATES).toContain("awaiting_merge");
+    expect(TASK_STATES.indexOf("awaiting_merge")).toBe(TASK_STATES.indexOf("input_required") + 1);
+  });
+
+  it("is NOT terminal — the issue must stay open until merge", () => {
+    expect(TERMINAL_TASK_STATES).not.toContain("awaiting_merge");
+  });
+
+  it("is NOT live — the lead already finished its part, a studio is not briefed on it", () => {
+    expect(LIVE_TASK_STATES).not.toContain("awaiting_merge");
+  });
+
+  it("LEAD_TASK_STATES includes it — the lead self-reports it, same as working/input_required/failed", () => {
+    expect(LEAD_TASK_STATES).toContain("awaiting_merge");
+  });
+});
+
 describe("transitionStudioTask — a lead moves its OWN task, and only so far", () => {
   const MINE = "websites--web-studio";
   const THEIRS = "websites--release-studio";
@@ -914,13 +938,27 @@ describe("transitionStudioTask — a lead moves its OWN task, and only so far", 
     expect(api.addLabels).toHaveBeenCalledWith("o/r", 42, ["working"]);
   });
 
-  it("moves it to input_required and to failed", async () => {
-    for (const to of ["input_required", "failed"]) {
+  it("moves it to input_required, awaiting_merge and to failed", async () => {
+    for (const to of ["input_required", "awaiting_merge", "failed"]) {
       const api = fakeApi({ getIssue: vi.fn(async () => mine()) });
       const res = await transitionStudioTask(api, "o/r", 42, { to }, MINE);
       expect(res.ok).toBe(true);
       if (res.ok) expect(res.value.state).toBe(to);
     }
+  });
+
+  // Board issue #110: the lead reports "I'm done, PR's up, waiting on merge"
+  // — same self-reported-claim category as working/input_required/failed,
+  // never a verified fact. `completed` stays the verifier's exclusive call.
+  it("moves working -> awaiting_merge", async () => {
+    const api = fakeApi({
+      getIssue: vi.fn(async () => mine({ labels: ["working", studioLabel(MINE)], state: "working" })),
+    });
+    const res = await transitionStudioTask(api, "o/r", 42, { to: "awaiting_merge" }, MINE);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value.state).toBe("awaiting_merge");
+    expect(api.removeLabel).toHaveBeenCalledWith("o/r", 42, "working");
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 42, ["awaiting_merge"]);
   });
 
   it("REFUSES completed — that is the verifier's verdict, never the worker's — and writes no label", async () => {
@@ -931,7 +969,7 @@ describe("transitionStudioTask — a lead moves its OWN task, and only so far", 
     if (res.ok) return;
     expect(res.status).toBe(403);
     expect(res.message).toContain("completed");
-    expect(res.message).toContain("working, input_required, failed");
+    expect(res.message).toContain("working, input_required, awaiting_merge, failed");
     expect(api.addLabels).not.toHaveBeenCalled();
     expect(api.removeLabel).not.toHaveBeenCalled();
   });
@@ -942,7 +980,7 @@ describe("transitionStudioTask — a lead moves its OWN task, and only so far", 
     expect(api.getIssue).not.toHaveBeenCalled();
   });
 
-  it("refuses canceled and submitted too — the allowlist is exactly three states", async () => {
+  it("refuses canceled and submitted too — the allowlist is exactly four states", async () => {
     for (const to of ["canceled", "submitted"]) {
       const api = fakeApi({ getIssue: vi.fn(async () => mine()) });
       const res = await transitionStudioTask(api, "o/r", 42, { to }, MINE);
@@ -1220,6 +1258,23 @@ describe("openAssignedTasks — the destroy guard's board read (#55 defect A)", 
   it("an open task with drifted state (no single state label) blocks — fail closed", async () => {
     const api = fakeApi({ listIssues: vi.fn(async () => [mine(7, null)]) });
     expect(await openAssignedTasks(api, "o/r", MINE)).toEqual({ ok: true, value: [{ number: 7, drifted: true }] });
+  });
+
+  // Board issue #110: awaiting_merge is neither terminal nor live — the
+  // three-way split. `destroy` must NOT be refused for it, unlike the still-
+  // live states below (regression coverage for the existing behaviour).
+  it("an awaiting_merge task does NOT block — the lead's part is done", async () => {
+    const api = fakeApi({ listIssues: vi.fn(async () => [mine(7, "awaiting_merge")]) });
+    expect(await openAssignedTasks(api, "o/r", MINE)).toEqual({ ok: true, value: [] });
+  });
+
+  it("submitted/working/input_required still block — awaiting_merge is the only new exclusion", async () => {
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [mine(1, "submitted"), mine(2, "working"), mine(3, "input_required")]),
+    });
+    expect(await openAssignedTasks(api, "o/r", MINE)).toEqual({ ok: true, value: [
+      { number: 1, drifted: false }, { number: 2, drifted: false }, { number: 3, drifted: false },
+    ] });
   });
 });
 

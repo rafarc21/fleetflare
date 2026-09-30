@@ -37,9 +37,16 @@
  * has is a ROUTE, not a credential: it POSTs a destination, and the Worker —
  * still the only thing in this system holding a GitHub token — decides and
  * writes the label. The destination is restricted server-side to `working`,
- * `input_required` and `failed` (src/board/board.ts's LEAD_TASK_STATES).
- * `completed` is refused, because that is the verdict of whoever VERIFIES the
- * work and never of whoever did it.
+ * `input_required`, `awaiting_merge` (board issue #110 — see below) and
+ * `failed` (src/board/board.ts's LEAD_TASK_STATES). `completed` is refused,
+ * because that is the verdict of whoever VERIFIES the work and never of
+ * whoever did it.
+ *
+ * Board issue #110 adds `awaiting_merge` to that destination list: a lead
+ * that has finished its part and opened a PR reports "I'm done, waiting on
+ * merge" — self-reported, same as `working`/`input_required`, never a
+ * verified fact. The issue stays open; a landed merge still auto-completes
+ * the task through the Worker's own reap pass, not through this route.
  *
  * Both env vars below are injected by do.ts's studioEnvVars into the tmux
  * SERVER's captured environment at bring-up (FLEET_WORKER_URL from the new
@@ -66,7 +73,7 @@ import { readFileSync } from "node:fs";
 const HELP = `usage: fleet spawn <role>[--<n>] [--instance <n>|next]
        fleet resume <role>[--<n>] [--instance <n>]
        fleet task ls | fleet task show <n> | fleet task report <n>
-       fleet task state <n> <working|input_required|failed>
+       fleet task state <n> <working|input_required|awaiting_merge|failed>
        fleet task new [--studio <id>] | fleet task assign <n> <studio-id> [--why <text>]
        fleet memory ls | fleet memory compact
 
@@ -121,12 +128,16 @@ const HELP = `usage: fleet spawn <role>[--<n>] [--instance <n>|next]
                         "preflight" field -> this is a complete no-op.
 
   fleet task state <n> <to>
-                        Move YOUR OWN task to working, input_required or
-                        failed. Do it the moment you start: a task left at
-                        submitted while you work reads as a stalled studio to
-                        every monitor watching the board.
+                        Move YOUR OWN task to working, input_required,
+                        awaiting_merge or failed. Do it the moment you start:
+                        a task left at submitted while you work reads as a
+                        stalled studio to every monitor watching the board.
 
                           fleet task state 41 working
+
+                        awaiting_merge means "I'm done, my PR is open, I'm
+                        waiting on it to merge" — set it once you've reported
+                        your result and opened the PR.
 
                         You cannot mark your own task completed. That is the
                         verdict of whoever VERIFIES the work, not of whoever
@@ -260,7 +271,7 @@ export function parseTarget(
  * of a 403, and lists the options in the message. Same literal-not-imported
  * convention as SPAWN_TOKEN_HEADER above; see this file's own header.
  */
-const LEAD_TASK_STATES = ["working", "input_required", "failed"];
+const LEAD_TASK_STATES = ["working", "input_required", "awaiting_merge", "failed"];
 
 /** `task <sub> [<n>] [<to>]`. Split out for the same reason cli/fleet.ts's own
  *  parseTask is: it is the only command with a second word. */

@@ -190,6 +190,20 @@ describe("renderBriefPrompt — what a lead boots holding", () => {
     expect(text).toContain("failed");
   });
 
+  // Board issue #110: a lead never told `awaiting_merge` exists will never
+  // set it, silently defeating the whole feature — this sentence is the
+  // ONLY place a lead learns which states it may self-set.
+  it("names awaiting_merge and explains when to set it, as the fourth and last self-set state", () => {
+    const text = out();
+    expect(text).toContain("awaiting_merge");
+    expect(text).toContain("Those four, and no others.");
+    // a "why" clause, not just the bare word: tied to having already
+    // reported a result with a PR and having nothing left to do but wait.
+    expect(text.toLowerCase()).toContain("report");
+    expect(text.toLowerCase()).toContain("pr");
+    expect(text.toLowerCase()).toContain("merge");
+  });
+
   it("says outright that the lead cannot mark its own task completed", () => {
     const text = out();
     expect(text).toContain("completed");

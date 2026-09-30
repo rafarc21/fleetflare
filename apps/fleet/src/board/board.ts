@@ -906,7 +906,7 @@ export async function resolveBoardRepo(
 //      (src/studio/spawn.ts's resolveSpawnParent), never read from a request.
 //   2. A studio never writes state ITSELF. Board issue #41 narrows that from
 //      "a studio never moves a task" to "a studio never writes a LABEL": it
-//      may ASK the Worker to move its own task within a three-state allowlist
+//      may ASK the Worker to move its own task within a four-state allowlist
 //      (transitionStudioTask below), and the Worker is still the only thing
 //      that touches GitHub. Posting a result envelope still moves nothing,
 //      exactly as commentEnvelope above already refuses to.
@@ -952,7 +952,7 @@ export async function showStudioTask(
 /**
  * Board issue #41, half two: the ONLY states a lead may move its own task to.
  *
- * Three, and the two that are missing are missing for different reasons:
+ * Four, and the two that are missing are missing for different reasons:
  *
  *   `completed` — the verdict of whoever VERIFIES, never of whoever does the
  *     work. A lead that can mark its own task done is exactly what the
@@ -970,9 +970,17 @@ export async function showStudioTask(
  *     it, and a lead rewinding its own task to "nobody has started" would
  *     erase the very signal this feature exists to produce.
  *
+ * Board issue #110 adds `awaiting_merge` to the states a lead MAY set, not to
+ * the missing two above: it is in the same self-reported-claim category as
+ * `working`/`input_required`/`failed` — the lead saying "I'm done, PR's up,
+ * waiting on merge", not a verified fact. `completed` stays the verifier's
+ * exclusive call regardless of what the lead claims; a merged PR still only
+ * auto-completes the task through src/studio/task-reap.ts's own merge check,
+ * never through this route.
+ *
  * Exported so the refusal message and the tests name one list, not two.
  */
-export const LEAD_TASK_STATES: readonly TaskState[] = ["working", "input_required", "failed"];
+export const LEAD_TASK_STATES: readonly TaskState[] = ["working", "input_required", "awaiting_merge", "failed"];
 
 /**
  * A lead moves the state of its OWN task — board issue #41, half two.
@@ -1222,12 +1230,18 @@ export async function openAssignedTasks(
   // Board #55 defect A: GitHub's open/closed is NOT the board's state — a
   // terminal board state leaves the issue open until sprint close — so
   // `open` alone refused on work the board already called finished and
-  // trained `--force` by reflex. Live = open AND not terminal. A drifted
-  // task (`state` null) stays live: this gate fails closed.
+  // trained `--force` by reflex. Live = open AND in a state a studio still
+  // owns work for. Board issue #110: this used to be computed as "not
+  // terminal", a two-bucket (live vs terminal) model that broke the moment
+  // `awaiting_merge` added a third bucket — neither terminal (the issue must
+  // stay open until merge) nor live (the lead's part is already done, so
+  // `destroy` has nothing left to protect). Positive membership in
+  // LIVE_TASK_STATES is the fix; a drifted task (`state` null) still counts
+  // as live, so this gate still fails closed exactly as before.
   return {
     ok: true,
     value: tasks.value
-      .filter((t) => t.open && !(t.state && TERMINAL_TASK_STATES.includes(t.state)))
+      .filter((t) => t.open && (t.state === null || LIVE_TASK_STATES.includes(t.state)))
       .map((t) => ({ number: t.number, drifted: t.state === null })),
   };
 }

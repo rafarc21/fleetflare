@@ -322,6 +322,13 @@ describe("parseCliArgs: task", () => {
     });
   });
 
+  it("task ls accepts --state awaiting_merge — its own vocabulary is not validated at parse time, but its help text names the full vocabulary (board issue #110)", () => {
+    expect(parseCliArgs(["task", "ls", "--state", "awaiting_merge"])).toEqual({
+      cmd: "task-ls", query: { state: "awaiting_merge" },
+    });
+    expect(VERBS["task-ls"].args).toContain("submitted|working|input_required|awaiting_merge|completed|failed|canceled");
+  });
+
   it("task show takes one issue number and refuses anything else", () => {
     expect(parseCliArgs(["task", "show", "12"])).toEqual({ cmd: "task-show", number: 12 });
     expect(parseCliArgs(["task", "show", "abc"]).cmd).toBe("usage");
@@ -558,7 +565,11 @@ describe("fleet task state — board task #131", () => {
     const parsed = parseCliArgs(["task", "state", "42", "bogus"]);
     expect(parsed.cmd).toBe("usage");
     if (parsed.cmd !== "usage") return;
-    expect(parsed.message).toContain("submitted|working|input_required|completed|failed|canceled");
+    // The message's OWN first line, not the full CLI_USAGE dump appended
+    // after it (which also lists task-ls's own --state vocabulary and would
+    // make this assertion pass on the wrong string).
+    const firstLine = parsed.message.split("\n")[0];
+    expect(firstLine).toContain("submitted|working|input_required|awaiting_merge|completed|failed|canceled");
   });
 
   it("refuses a missing target state rather than defaulting to one", () => {

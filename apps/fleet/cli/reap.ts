@@ -47,7 +47,7 @@ import type { StudioStatus } from "../src/studio/types";
 import type { Activity } from "../src/studio/activity";
 import { readActivityFrame, agentPanelRows } from "../src/studio/activity";
 import type { BoardTask } from "../src/board/types";
-import { studioLabel, TERMINAL_TASK_STATES } from "../src/board/types";
+import { studioLabel, LIVE_TASK_STATES } from "../src/board/types";
 import { footerAtBottom, aboveAgentPanel, RULE_LINE } from "../src/studio/failover";
 export { parseIdleDuration } from "../src/studio/cli-args";
 import { ACTIVITY_DO_STALE_SECONDS, ACTIVITY_MIRROR_STALE_SECONDS, formatAge } from "./readiness-format";
@@ -141,13 +141,19 @@ function inScope(s: StudioStatus, repo: string): boolean {
   return s.repoSlug !== null && s.repoSlug !== undefined && s.repoSlug.toLowerCase() === repo;
 }
 
-/** Live = open AND not in a terminal board state. A drifted task (no state
- *  label) stays live: fail closed, same rule as openAssignedTasks. */
+/** Live = open AND in a state a studio still owns work for; a drifted/no-
+ *  label task still counts as live, fail closed. Board issue #110: this used
+ *  to be "open AND not terminal", a two-bucket model that broke the moment
+ *  `awaiting_merge` added a third bucket (neither terminal nor live — the
+ *  lead's part is done, so this studio is idle even though the issue stays
+ *  open until merge). Positive membership in LIVE_TASK_STATES is the fix,
+ *  same one openAssignedTasks (src/board/board.ts) makes for the same
+ *  reason. */
 function liveTasksOf(id: string, tasks: BoardTask[]): BoardTask[] {
   const label = studioLabel(id);
   return tasks.filter((t) =>
     (t.assignee === id || t.labels.includes(label))
-    && t.open && !(t.state !== null && TERMINAL_TASK_STATES.includes(t.state)));
+    && t.open && (t.state === null || LIVE_TASK_STATES.includes(t.state)));
 }
 
 /** The D1-mirrored activity, only when fresh and IDLE; else null. */

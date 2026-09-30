@@ -15,6 +15,7 @@ import {
 import { probeRefusal, rescueUnconfirmedRefusal } from "./fixtures/destroy-refusals";
 import { getObserved, type ObservedStorage } from "../src/studio/observed";
 import type { StudioStatus } from "../src/studio/types";
+import { TASK_STATES } from "../src/board/types";
 
 // Fleet board task #124: `fleet destroy <id> [--force]`. Same test posture
 // test/studio.session.test.ts's own "recycleWithSync" describe block takes —
@@ -419,7 +420,7 @@ describe("runDestroy", () => {
     );
     expect(result.ok).toBe(false);
     expect(!result.ok && result.reason).toContain(
-      "#7 has drifted state labels (not exactly one of submitted/working/input_required/completed/failed/canceled) — fix them by hand on GitHub",
+      `#7 has drifted state labels (not exactly one of ${TASK_STATES.join("/")}) — fix them by hand on GitHub`,
     );
     expect(destroy).not.toHaveBeenCalled();
   });
