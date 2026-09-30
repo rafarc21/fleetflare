@@ -581,6 +581,28 @@ export function formatSurvivalBriefs(studios: StudioStatus[]): string[] {
 }
 
 /**
+ * Issue #141 review, item 4 — every account the fleet knows is dead, printed
+ * UNCONDITIONALLY (not filtered by which studio is currently on it — a dead
+ * account with no studio parked on it right now is exactly the case a
+ * per-studio view can never surface, and is real: several accounts can go
+ * dead in one org-wide disable while every studio has already moved off of
+ * them). SAME SHAPE AND SAME PLACE as `formatSessionGuards`/
+ * `formatSurvivalBriefs` above: a plain-text trailer under the `fleet ls`
+ * table, fed by `GET /studio/accounts` (src/studio/routes.ts) rather than by
+ * `StudioStatus` — this is fleet-wide account state, not a per-studio field.
+ */
+export function formatDeadAccounts(
+  accounts: { name: string; label: string | null; dead: boolean; seenAt: string | null }[],
+): string[] {
+  const dead = accounts.filter((a) => a.dead);
+  if (dead.length === 0) return [];
+  return dead.map((a) => {
+    const label = a.label ? `${a.label} (${a.name})` : a.name;
+    return `dead account: ${label}${a.seenAt ? ` — seen ${a.seenAt}` : ""} — see docs/operations.md#clearing-a-dead-claude-account to clear it`;
+  });
+}
+
+/**
  * Issue #85 review, BLOCKER 2 — `fleet inspect`'s three "observed" lines
  * (`replaced:`/`unreachable:`/`session:`), extracted into a pure formatter so
  * `cmdInspect` (cli/fleet.ts) never reads `body.observed.*` directly and

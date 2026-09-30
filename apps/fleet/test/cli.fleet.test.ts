@@ -3,6 +3,7 @@ import { fleetTotals } from "../cli/fleet-totals";
 import {
   formatReady, formatCheckedAt, formatAge, readyOverride, formatSession, formatState, formatSessionGuards,
   formatObservedLines, formatSurvivalBriefs, formatActivity, ACTIVITY_DO_STALE_SECONDS, lsJsonRows,
+  formatDeadAccounts,
 } from "../cli/readiness-format";
 import type { StudioStatus } from "../src/studio/types";
 import type { Burn } from "../src/studio/burn";
@@ -959,6 +960,40 @@ describe("formatSurvivalBriefs (cli/readiness-format.ts) — issue #249 round 2"
 
   it("an empty reason renders honestly rather than as a dangling dash", () => {
     expect(formatSurvivalBriefs([row("e--x", pending({ reason: "" }))])[0]).toContain("no reason recorded");
+  });
+});
+
+describe("formatDeadAccounts (cli/readiness-format.ts) — issue #141 review, item 4", () => {
+  it("no dead accounts at all: silent", () => {
+    expect(formatDeadAccounts([])).toEqual([]);
+    expect(formatDeadAccounts([{ name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, seenAt: null }])).toEqual([]);
+  });
+
+  it("one dead account, unlabelled: names the secret and the docs anchor", () => {
+    const lines = formatDeadAccounts([
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: null, dead: true, seenAt: "2026-09-30T12:00:00.000Z" },
+    ]);
+    expect(lines).toEqual([
+      "dead account: CLAUDE_CODE_OAUTH_TOKEN_2 — seen 2026-09-30T12:00:00.000Z — see docs/operations.md#clearing-a-dead-claude-account to clear it",
+    ]);
+  });
+
+  it("one dead account, labelled: label first, secret name in parens", () => {
+    const lines = formatDeadAccounts([
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: "ops@acme.com", dead: true, seenAt: "2026-09-30T12:00:00.000Z" },
+    ]);
+    expect(lines).toEqual([
+      "dead account: ops@acme.com (CLAUDE_CODE_OAUTH_TOKEN_2) — seen 2026-09-30T12:00:00.000Z — see docs/operations.md#clearing-a-dead-claude-account to clear it",
+    ]);
+  });
+
+  it("a non-dead account in the list is never printed, even alongside a dead one", () => {
+    const lines = formatDeadAccounts([
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, seenAt: null },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: null, dead: true, seenAt: "2026-09-30T12:00:00.000Z" },
+    ]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^dead account: CLAUDE_CODE_OAUTH_TOKEN_2\b/);
   });
 });
 

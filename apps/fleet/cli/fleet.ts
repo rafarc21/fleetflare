@@ -53,7 +53,7 @@ import { mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:f
 import { dirname } from "node:path";
 import {
   formatReady, formatCheckedAt, readyOverride, formatSession, formatState, formatSessionGuards,
-  formatSurvivalBriefs,
+  formatSurvivalBriefs, formatDeadAccounts,
   formatObservedLines, formatActivity, lsJsonRows,
 } from "./readiness-format";
 import { formatTaskTable, formatTaskShow, formatAssignWake } from "./task-format";
@@ -599,6 +599,17 @@ export async function cmdLs(
   // the studio has given up retrying. Same place, same shape as the session-guard
   // lines above — see formatSurvivalBriefs' own doc comment.
   for (const line of formatSurvivalBriefs(studios)) console.log(line);
+  // Issue #141 review, item 4: every account the fleet knows is dead,
+  // fleet-wide — including one with no studio currently parked on it, which
+  // the table above can never show. Best-effort: a Worker that predates this
+  // route 404s, and that must never break `fleet ls` itself.
+  const accountsRes = await fetch(new URL("/studio/accounts", creds.workerUrl), {
+    headers: { ...accessHeaders(creds), Accept: "application/json" },
+  });
+  if (accountsRes.ok) {
+    const accounts = (await accountsRes.json()) as { name: string; label: string | null; dead: boolean; seenAt: string | null }[];
+    for (const line of formatDeadAccounts(accounts)) console.log(line);
+  }
   // Fleet Spawn P3, Task 5: omitted for an empty fleet — a "0 turns, 0
   // output tokens" line under "(no studios provisioned)" would be noise,
   // not information.
