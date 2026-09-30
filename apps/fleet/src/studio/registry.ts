@@ -305,26 +305,51 @@ export function withAccountDisplay(env: Env, row: StudioStatus): StudioStatus {
 }
 
 /**
+ * Issue #136: registry.ts's own malformed-row posture (skip-and-log,
+ * "one bad row must not become a hard failure") is right for listStudios
+ * and for getStudioRow's general "give me the row or null" contract — but
+ * profile.ts's getStudioStub needs to tell "this id was never provisioned"
+ * (safe to compute a fresh, role-derived doClass) apart from "this id HAS
+ * a row, but we can't read it" (NOT safe — a malformed row might belong to
+ * a studio already running under STUDIO; computing fresh from role could
+ * send it to STUDIO_BIG instead, the same orphan-risk class #107 closed).
+ * `getStudioRow` stays null-for-both for its existing callers; this is the
+ * one place that needs the third state.
+ */
+export type StudioRowLookup =
+  | { kind: "found"; row: StudioStatus }
+  | { kind: "absent" }
+  | { kind: "malformed" };
+
+export async function getStudioRowLookup(env: Env, id: string): Promise<StudioRowLookup> {
+  const row = await env.DB
+    .prepare(`SELECT value FROM fleet_state WHERE key = ?`)
+    .bind(studioKey(id))
+    .first<{ value: string }>();
+  if (!row) return { kind: "absent" };
+  try {
+    return { kind: "found", row: JSON.parse(row.value) as StudioStatus };
+  } catch (err) {
+    console.error(`getStudioRowLookup: malformed fleet_state row for ${id}`, err);
+    return { kind: "malformed" };
+  }
+}
+
+/**
  * Issue #107 fix-first: one studio's row, or null if it has never been
  * written. Used by profile.ts's getStudioStub to find a RECORDED DO class
  * without a full-table scan — listStudios (below) reads every row; this
  * reads one, by primary key, the same D1 `.first()` idiom src/state.ts's
  * getFlag already uses. A malformed row is treated the same as absent
  * (null) — same "one bad row must not become a hard failure" posture
- * listStudios already takes for the whole-table case, just at N=1.
+ * listStudios already takes for the whole-table case, just at N=1. Issue
+ * #136: this stays null-for-both deliberately (existing callers depend on
+ * it) — getStudioRowLookup above is the one that tells the two apart, for
+ * the one caller (getStudioStub) that needs to.
  */
 export async function getStudioRow(env: Env, id: string): Promise<StudioStatus | null> {
-  const row = await env.DB
-    .prepare(`SELECT value FROM fleet_state WHERE key = ?`)
-    .bind(studioKey(id))
-    .first<{ value: string }>();
-  if (!row) return null;
-  try {
-    return JSON.parse(row.value) as StudioStatus;
-  } catch (err) {
-    console.error(`getStudioRow: malformed fleet_state row for ${id}`, err);
-    return null;
-  }
+  const result = await getStudioRowLookup(env, id);
+  return result.kind === "found" ? result.row : null;
 }
 
 export async function listStudios(env: Env, now: Date = new Date()): Promise<StudioStatus[]> {

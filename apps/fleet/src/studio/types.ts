@@ -72,6 +72,12 @@ export interface StudioStatus {
    * reader that hits the placeholder before the DO's own recordStudio
    * write lands still resolves the right namespace instead of falling
    * back to the default.
+   *
+   * Issue #136: a row that EXISTS but fails to parse (hand-edited data, a
+   * future schema change) is a third case, distinct from absent — it must
+   * NOT get a fresh role-derived guess either, for the same orphan-risk
+   * reason. profile.ts's getStudioStub forces `"STUDIO"` for it, never
+   * role-derived, with a loud log.
    */
   doClass?: StudioDOClass;
   /**
