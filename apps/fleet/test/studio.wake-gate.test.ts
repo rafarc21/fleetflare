@@ -438,70 +438,118 @@ describe("runInspect refuses while a destroy is in flight (#100 N5)", () => {
 // came back healthy on a plain `fleet provision` and never heard about the
 // task. `deliverAssignedTaskOnBringup` is the fix: a wake, typed the SAME
 // way `wakeOnAssign` (assign-wake.ts) already types one into a RUNNING
-// studio, fired after bring-up is verified, at-most-once per task id.
+// studio, fired after bring-up is verified.
+//
+// Board issue #137 widened this twice: (1) EVERY open working/input_required
+// task gets its own wake, not only the single newest one, and (2) the dedup
+// gate is scoped to the bring-up's own `incarnation` token, not the task
+// number alone — `DELIVERED_TASK_KEY` (still asserted on below) is now only
+// `harvestLearnings`'s teardown pointer and no longer gates delivery.
 //
 // Same DI shape as `wakeStudioWith`/`sweepWake` above: a fake StudioStorage
 // and fake thunks, no DO construction (this file's own header explains why
 // that is required, not merely convenient).
 // ---------------------------------------------------------------------------
-describe("deliverAssignedTaskOnBringup — board issue #213's bring-up delivery wake", () => {
+describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up delivery wake", () => {
   const TASK = { taskNumber: 826, title: "Fix the thing" };
+  const INC_1 = "11111111-1111-4111-8111-111111111111";
+  const INC_2 = "22222222-2222-4222-8222-222222222222";
 
   it("a stopped studio with a filed task, then a verified bring-up: exactly one gated wake naming that task", async () => {
     const storage = fakeStorage(status("running"));
-    const boardLookup = vi.fn(async () => TASK);
+    const boardLookup = vi.fn(async () => [TASK]);
     const wake = vi.fn(async () => ({ ok: true }));
-    await deliverAssignedTaskOnBringup(storage, boardLookup, wake);
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake);
     expect(boardLookup).toHaveBeenCalledTimes(1);
     expect(wake).toHaveBeenCalledTimes(1);
     // The SAME one-line pointer format a running studio's assign-time wake
     // uses — never resolveLatestAssignedBrief's own multi-line `prompt`,
     // which would arrive at a live pane as several broken half-prompts.
-    expect(wake).toHaveBeenCalledWith(assignDigest({ number: TASK.taskNumber, title: TASK.title }));
+    expect(wake).toHaveBeenCalledWith(assignDigest({ number: TASK.taskNumber, title: TASK.title }), TASK.taskNumber);
+    // The OLD marker is still written, unconditionally, for harvestLearnings.
     expect(storage.map.get(DELIVERED_TASK_KEY)).toBe(826);
   });
 
   it("no task currently assigned: no wake, nothing recorded", async () => {
     const storage = fakeStorage(status("running"));
-    const boardLookup = vi.fn(async () => null);
+    const boardLookup = vi.fn(async () => []);
     const wake = vi.fn(async () => ({ ok: true }));
-    await deliverAssignedTaskOnBringup(storage, boardLookup, wake);
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake);
     expect(wake).not.toHaveBeenCalled();
     expect(storage.map.get(DELIVERED_TASK_KEY)).toBeUndefined();
   });
 
-  it("a task already delivered: no second wake, across two separate bring-ups on the same storage", async () => {
+  it("a task already delivered: no second wake, across two separate bring-ups on the SAME incarnation", async () => {
     const storage = fakeStorage(status("running"));
-    const boardLookup = vi.fn(async () => TASK);
+    const boardLookup = vi.fn(async () => [TASK]);
     const wake = vi.fn(async () => ({ ok: true }));
-    await deliverAssignedTaskOnBringup(storage, boardLookup, wake);
-    await deliverAssignedTaskOnBringup(storage, boardLookup, wake);
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake);
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake);
     expect(wake).toHaveBeenCalledTimes(1);
     expect(storage.map.get(DELIVERED_TASK_KEY)).toBe(826);
   });
 
+  // Issue #137's own fix, pinned directly: the OLD code recorded
+  // DELIVERED_TASK_KEY forever with no notion of container identity, so a
+  // task delivered once was never re-delivered on any later bring-up for
+  // that same task — even after the container was fully destroyed and
+  // rebuilt (an image rollout). A bring-up with a DIFFERENT incarnation than
+  // the one that last delivered this task must earn a fresh wake.
+  it("board issue #137: the SAME task, on the SAME storage, but a DIFFERENT incarnation — re-delivered, not suppressed", async () => {
+    const storage = fakeStorage(status("running"));
+    const boardLookup = vi.fn(async () => [TASK]);
+    const wake = vi.fn(async () => ({ ok: true }));
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake);
+    await deliverAssignedTaskOnBringup(storage, INC_2, boardLookup, wake);
+    expect(wake).toHaveBeenCalledTimes(2);
+    expect(wake).toHaveBeenNthCalledWith(1, assignDigest({ number: TASK.taskNumber, title: TASK.title }), TASK.taskNumber);
+    expect(wake).toHaveBeenNthCalledWith(2, assignDigest({ number: TASK.taskNumber, title: TASK.title }), TASK.taskNumber);
+  });
+
   it("a limit modal on screen: refused, and NOTHING is persisted, so the next bring-up retries and delivers", async () => {
     const storage = fakeStorage(status("running"));
-    const boardLookup = vi.fn(async () => TASK);
+    const boardLookup = vi.fn(async () => [TASK]);
     const refusedWake = vi.fn(async (): Promise<WakeOutcome> => ({ ok: false, skipped: true, error: "refused: a modal is on screen" }));
-    await deliverAssignedTaskOnBringup(storage, boardLookup, refusedWake);
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, refusedWake);
     expect(refusedWake).toHaveBeenCalledTimes(1);
     expect(storage.map.get(DELIVERED_TASK_KEY)).toBeUndefined();
 
-    // The retry: same task, this time the gate lets the wake land.
+    // The retry: same task, same incarnation, this time the gate lets the
+    // wake land.
     const okWake = vi.fn(async () => ({ ok: true }));
-    await deliverAssignedTaskOnBringup(storage, boardLookup, okWake);
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, okWake);
     expect(okWake).toHaveBeenCalledTimes(1);
     expect(storage.map.get(DELIVERED_TASK_KEY)).toBe(826);
   });
 
-  it("a newer task supersedes the dedup marker — 'newest wins', same as resolveLatestAssignedBrief itself", async () => {
+  it("two simultaneously open tasks in ONE boardLookup call: each gets its own wake, each independently recorded", async () => {
     const storage = fakeStorage(status("running"));
+    const OTHER = { taskNumber: 900, title: "A second open task" };
     const wake = vi.fn(async () => ({ ok: true }));
-    await deliverAssignedTaskOnBringup(storage, async () => TASK, wake);
-    await deliverAssignedTaskOnBringup(storage, async () => ({ taskNumber: 900, title: "Newer task" }), wake);
+    await deliverAssignedTaskOnBringup(storage, INC_1, async () => [TASK, OTHER], wake);
     expect(wake).toHaveBeenCalledTimes(2);
+    expect(wake).toHaveBeenNthCalledWith(1, assignDigest({ number: TASK.taskNumber, title: TASK.title }), TASK.taskNumber);
+    expect(wake).toHaveBeenNthCalledWith(2, assignDigest({ number: OTHER.taskNumber, title: OTHER.title }), OTHER.taskNumber);
+    // The OLD marker only ever holds the LAST one written — "last delivered
+    // wins", unchanged, for harvestLearnings' own teardown read.
     expect(storage.map.get(DELIVERED_TASK_KEY)).toBe(900);
+
+    // Same incarnation, a THIRD bring-up sees the same two tasks still open
+    // plus a newly-assigned one: only the new one gets a fresh wake — the
+    // first two are still correctly deduped within the same incarnation.
+    const THIRD = { taskNumber: 901, title: "A third, newly assigned task" };
+    await deliverAssignedTaskOnBringup(storage, INC_1, async () => [TASK, OTHER, THIRD], wake);
+    expect(wake).toHaveBeenCalledTimes(3);
+    expect(wake).toHaveBeenNthCalledWith(3, assignDigest({ number: THIRD.taskNumber, title: THIRD.title }), THIRD.taskNumber);
+  });
+
+  it("incarnation === null behaves like the old marker always did: forever, no reset", async () => {
+    const storage = fakeStorage(status("running"));
+    const boardLookup = vi.fn(async () => [TASK]);
+    const wake = vi.fn(async () => ({ ok: true }));
+    await deliverAssignedTaskOnBringup(storage, null, boardLookup, wake);
+    await deliverAssignedTaskOnBringup(storage, null, boardLookup, wake);
+    expect(wake).toHaveBeenCalledTimes(1);
   });
 
   // Fix round on issue #213 (PR #229), rebased onto issue #174's OpCtx destroy-
@@ -514,16 +562,51 @@ describe("deliverAssignedTaskOnBringup — board issue #213's bring-up delivery 
   // landing during the board round trip that lookup represents), then still
   // returns a task — proving the veto is a SEPARATE check, not something the
   // dedup logic already covers.
-  it("a destroy landing between deciding to deliver and sending the wake vetoes the send (4th `moved` param)", async () => {
+  it("a destroy landing between deciding to deliver and sending the wake vetoes the send (5th `moved` param)", async () => {
     const storage = fakeStorage(status("running"));
     let moved = false;
     const lookup = vi.fn(async () => {
       moved = true;
-      return TASK;
+      return [TASK];
     });
     const wake = vi.fn(async () => ({ ok: true }));
-    await deliverAssignedTaskOnBringup(storage, lookup, wake, async () => moved);
+    await deliverAssignedTaskOnBringup(storage, INC_1, lookup, wake, async () => moved);
     expect(wake).not.toHaveBeenCalled();
     expect(storage.map.get(DELIVERED_TASK_KEY)).toBeUndefined();
+  });
+
+  // The `moved` check above only proves the veto fires when a destroy lands
+  // BEFORE any wake in the batch (the `lookup` fake flips it during the board
+  // round trip, ahead of task A's own check). The loop checks `moved()` once
+  // PER TASK, immediately before that task's own `wake()` call — so a destroy
+  // landing AFTER task A's wake has already landed, but before task B's own
+  // check, must veto B while leaving A's already-landed delivery alone. `moved`
+  // here starts false and flips true only once the first `wake()` call has
+  // itself resolved, standing in for a destroy that completes in the gap
+  // between task A's wake and task B's `moved` check.
+  it("a destroy landing between two tasks' wakes: task A's wake lands and is recorded, task B's is vetoed and nothing persists for it", async () => {
+    const storage = fakeStorage(status("running"));
+    const OTHER = { taskNumber: 900, title: "A second open task" };
+    const boardLookup = vi.fn(async () => [TASK, OTHER]);
+    let wakeCalls = 0;
+    const wake = vi.fn(async () => {
+      wakeCalls++;
+      return { ok: true };
+    });
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake, async () => wakeCalls >= 1);
+    // Task A's wake fired and landed — task B's never did.
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake).toHaveBeenCalledWith(assignDigest({ number: TASK.taskNumber, title: TASK.title }), TASK.taskNumber);
+    // Task A's delivery was recorded (the OLD "last delivered" marker names it).
+    expect(storage.map.get(DELIVERED_TASK_KEY)).toBe(TASK.taskNumber);
+
+    // Nothing was persisted for task B: a later bring-up on the SAME
+    // incarnation, with the destroy no longer in the way, still sees B as
+    // undelivered and wakes it — while A, already recorded, is correctly
+    // NOT re-woken.
+    const retryWake = vi.fn(async () => ({ ok: true }));
+    await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, retryWake);
+    expect(retryWake).toHaveBeenCalledTimes(1);
+    expect(retryWake).toHaveBeenCalledWith(assignDigest({ number: OTHER.taskNumber, title: OTHER.title }), OTHER.taskNumber);
   });
 });

@@ -42,6 +42,10 @@ describe("observed.ts", () => {
       // line — rides mergeObserved like session/lastShipOkAt, no DO key of
       // its own.
       lastMessageLine: null,
+      // Issue #137: the bring-up task-rebrief's own per-incarnation dedup
+      // record, same optional-means-null reading as survivalBriefDeliveredFor
+      // above.
+      taskWakesDeliveredFor: null,
     });
   });
 

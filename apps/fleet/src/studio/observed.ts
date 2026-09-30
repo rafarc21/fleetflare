@@ -171,10 +171,14 @@ export interface Observed {
   session: ObservedSession | null;
   /** Issue #249 (PR4b) — the `incarnation` token this studio's survival
    *  re-brief (#107/#150) was last DELIVERED against, or null if none has
-   *  been. At-most-once PER INCARNATION, not per task the way board #213's
-   *  own `DELIVERED_TASK_KEY` is: the re-brief describes what survived a
-   *  container replacement, so the container identity is the thing it can
-   *  only usefully be said once about.
+   *  been. At-most-once PER INCARNATION: the re-brief describes what
+   *  survived a container replacement, so the container identity is the
+   *  thing it can only usefully be said once about. Issue #137 gave board
+   *  #213's own bring-up task re-delivery the identical per-incarnation
+   *  discipline — see `taskWakesDeliveredFor` below. (Board #213's
+   *  `DELIVERED_TASK_KEY`, do.ts, is a SEPARATE record that still exists and
+   *  is still per-task-forever, but it no longer gates any delivery; it is
+   *  read only by teardown's `harvestLearnings`.)
    *
    *  Written ONLY after a wake lands (`deliverSurvivalBriefOnBringup`,
    *  survival-delivery.ts), so a refusal (modal on screen, stopped,
@@ -218,6 +222,24 @@ export interface Observed {
    *  OPTIONAL with the same reading `survivalBriefDeliveredFor` above has:
    *  absent means exactly what `null` means, "nothing is owed". */
   survivalBriefPending?: SurvivalBriefPending | null;
+  /** Issue #137: task numbers that have already received a bring-up
+   *  re-delivery wake for THIS incarnation. Reset implicitly: a record whose
+   *  own `incarnation` no longer matches `Observed.incarnation` reads as
+   *  empty, so a container replacement (new incarnation) earns every open
+   *  working/input_required task exactly one fresh wake again, even a task
+   *  that had already been delivered before the replacement — the gap
+   *  `DELIVERED_TASK_KEY` (do.ts) left, because that marker is keyed on the
+   *  task number alone and never expires.
+   *
+   *  Written ONLY after a wake lands (`deliverAssignedTaskOnBringup`, do.ts),
+   *  same discipline `survivalBriefDeliveredFor` above follows. A null
+   *  incarnation uses the key `""` rather than being skipped outright (see
+   *  that function's own doc comment for why the two dedup mechanisms differ
+   *  here).
+   *
+   *  OPTIONAL, same trailing-optional shape `survivalBriefDeliveredFor` above
+   *  uses: absent means "nothing delivered against any incarnation yet". */
+  taskWakesDeliveredFor?: { incarnation: string; numbers: number[] } | null;
   /**
    * Issue #221 (PR3a) — the D1-facing MIRROR of the DO's own `activity` key
    * (activity.ts's `ACTIVITY_KEY`, a genuinely separate storage slot never
@@ -327,6 +349,7 @@ export function emptyObserved(): Observed {
     incarnation: null, replacedAt: null, execFailures: 0, unreachableSince: null,
     lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
     survivalBriefDeliveredFor: null, survivalBriefPending: null, lastMessageLine: null,
+    taskWakesDeliveredFor: null,
   };
 }
 
