@@ -552,6 +552,15 @@ function harness(opts: {
   /** Issue #271: default ON here, so every #53 test below keeps switching. */
   autoFailover?: boolean;
   primary?: string | null;
+  /** Review round 3 (2nd review of PR #135, 2026-09-30) — true only for a
+   *  genuine #271 CLAUDE_ACCOUNT_BY_REPO entry for this repo (see
+   *  FailoverDeps.primaryIsMapped's own doc comment, failover.ts). Absent:
+   *  `false` — the SAFE default, matching production's real no-map shape,
+   *  where `primary` is a non-null string (the first configured account) yet
+   *  no genuine mapping exists. Every plain pre-#271 test below relies on
+   *  this default; every genuinely #271-mapped Stage B test passes it `true`
+   *  explicitly. */
+  primaryIsMapped?: boolean;
   display?: (name: string) => string;
   now?: Date;
   /** Issue #102: seed a fleet-wide limit fixture, `{ name: until }`. */
@@ -585,6 +594,7 @@ function harness(opts: {
       accounts: opts.accounts,
       autoFailover: opts.autoFailover ?? true,
       ...(opts.primary !== undefined ? { primary: opts.primary } : {}),
+      primaryIsMapped: opts.primaryIsMapped ?? false,
       ...(opts.display ? { display: opts.display } : {}),
       ...(opts.reservedAccounts ? { reservedAccounts: opts.reservedAccounts } : {}),
       ...(opts.otherRepoOf ? { otherRepoOf: opts.otherRepoOf } : {}),
@@ -1455,7 +1465,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
 
   it("every account reserved for this repo limited (own primary too) + another repo's primary free -> borrows", async () => {
     const h = harness({
-      accounts: four, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      accounts: four, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
       initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }),
       // account 2 (own primary) AND account 3 (current) both fleet-wide
       // limited — the strictly stricter condition than the golden #103 test
@@ -1485,7 +1495,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
 
   it("own primary resets -> hand-back moves the studio back immediately", async () => {
     const h = harness({
-      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
       initial: status({
         claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
         borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
@@ -1517,7 +1527,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
   // -------------------------------------------------------------------
   it("own primary free, but the pane repainted (a turn in flight): hand-back does NOT fire this tick", async () => {
     const h = harness({
-      accounts: four, pane: captured(MID_TURN_PANE_A, MID_TURN_PANE_B), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      accounts: four, pane: captured(MID_TURN_PANE_A, MID_TURN_PANE_B), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
       initial: status({
         claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
         borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
@@ -1535,7 +1545,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
 
   it("own primary free, pane idle, but OPERATION_KEY holds a FRESH lock: hand-back does NOT fire this tick", async () => {
     const h = harness({
-      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
       initial: status({
         claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
         borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
@@ -1566,7 +1576,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
   // itself is untouched by this test.
   it("hand-back does not re-verify observedStorage (residual, tracked)", async () => {
     const h = harness({
-      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
       initial: status({
         claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
         borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
@@ -1593,7 +1603,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
 
   it("not yet borrowed, own primary free, no limit on screen: hand-back never fires (nothing to hand back)", async () => {
     const h = harness({
-      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
       initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_2", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }),
     });
     const out = await run(h);
@@ -1612,7 +1622,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
   // -------------------------------------------------------------------
   it("ping-pong: hand-back stays borrowed while the primary is STILL limited, and fires the moment it frees up", async () => {
     const h = harness({
-      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
       initial: status({
         claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
         borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
@@ -1640,7 +1650,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
       { name: "CLAUDE_CODE_OAUTH_TOKEN_5", token: "sk-ant-oat01-" + "e".repeat(40) },
     ];
     const h = harness({
-      accounts: five, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      accounts: five, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
       initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }),
       // Review round 2 (maestro review of PR #135), finding 3: account 1
       // (before the primary) is limited too — see the sibling test above.
@@ -1666,7 +1676,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
   // -------------------------------------------------------------------
   it("the first pass's own free candidate wins, and the second pass is never even consulted", async () => {
     const h = harness({
-      accounts: four, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      accounts: four, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
       initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }),
       // account 3 (current) limited; account 2 (own primary) FREE — the
       // first pass wraps back to it, same shape the golden #103 test uses.
@@ -1705,7 +1715,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
 
     it("scans every non-primary account, not just its own chain: the unclaimed spare wins over another repo's reserved primary", async () => {
       const h = harness({
-        accounts: accountsTier2, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+        accounts: accountsTier2, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
         initial: status({ claudeAccount: OWN_CHAIN.name }),
         // own primary AND the rest of the own chain (the current account)
         // both limited; the spare and the reserved other-repo primary are
@@ -1724,7 +1734,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
 
     it("regression pin: when the spare is ALSO limited, it correctly falls through to borrowing the reserved primary", async () => {
       const h = harness({
-        accounts: accountsTier2, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+        accounts: accountsTier2, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
         initial: status({ claudeAccount: OWN_CHAIN.name }),
         accountLimits: { [OWN_PRIMARY.name]: LIVE_UNTIL, [OWN_CHAIN.name]: LIVE_UNTIL, [SPARE.name]: LIVE_UNTIL },
         reservedAccounts: new Set([RESERVED_OTHER.name]),
@@ -1749,7 +1759,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
       const PRIMARY: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
       const OWN_CHAIN_SLOT: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 };
       const h = harness({
-        accounts: [SPARE_BORROWED, PRIMARY, OWN_CHAIN_SLOT], pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+        accounts: [SPARE_BORROWED, PRIMARY, OWN_CHAIN_SLOT], pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
         initial: status({
           claudeAccount: SPARE_BORROWED.name, launchedAccount: SPARE_BORROWED.name,
           borrowedAccount: SPARE_BORROWED.name, borrowedFromRepo: null,
@@ -1791,7 +1801,7 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
       const PRIMARY: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
       const RESERVED: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_9", token: "sk-ant-oat01-" + "k".repeat(40) };
       const h = harness({
-        accounts: [X, CUR, Y, PRIMARY, RESERVED], pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+        accounts: [X, CUR, Y, PRIMARY, RESERVED], pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
         initial: status({
           claudeAccount: CUR.name, launchedAccount: CUR.name, borrowedAccount: CUR.name, borrowedFromRepo: null,
         }),
@@ -1879,8 +1889,8 @@ describe("runAccountFailover — the in-memory start config follows a completed 
 
   // #357 review item 1: the REAL StudioDO.failoverDeps closure, not a
   // test-built stand-in — called on a fake `this` holding only what the
-  // closure reads (env, ctx.storage, selfId, primaryAccount) and the two
-  // fields it must set.
+  // closure reads (env, ctx.storage, selfId, primaryAccount, primaryIsMapped)
+  // and the two fields it must set.
   it("StudioDO's own onSwitched sets BOTH the token it boots and the account it records to the new account", async () => {
     const mem = new Map<string, unknown>();
     const fakeThis = {
@@ -1888,6 +1898,9 @@ describe("runAccountFailover — the in-memory start config follows a completed 
       ctx: { storage: { get: async (k: string) => mem.get(k), put: async (k: string, v: unknown) => { mem.set(k, v); } } },
       selfId: () => STUDIO_ID,
       primaryAccount: () => "CLAUDE_CODE_OAUTH_TOKEN",
+      // Review round 3 (2nd review of PR #135, 2026-09-30): failoverDeps()
+      // now also reads this — see do.ts's own method of the same name.
+      primaryIsMapped: () => false,
       envVars: launchFields(ENV, STUDIO_ID, SPAWN, "CLAUDE_CODE_OAUTH_TOKEN").envVars,
       envAccount: "CLAUDE_CODE_OAUTH_TOKEN" as string | undefined,
     };

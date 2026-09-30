@@ -957,6 +957,31 @@ export interface FailoverDeps {
    *  primary. Absent/null: the first account, as before. */
   primary?: string | null;
   /**
+   * Issue #131 (Stage B) review round 3 (2nd review of PR #135, 2026-09-30) —
+   * true ONLY when THIS studio's own repo has a genuine `CLAUDE_ACCOUNT_BY_REPO`
+   * entry (a real #271 mapped primary); false when `primary` above merely
+   * fell back to the first configured account because no such entry exists.
+   *
+   * WHY THIS EXISTS, AND `primary != null` DOES NOT SUFFICE: `primary` is
+   * NEVER null in real deployment. do.ts's `failoverDeps()` always wires it
+   * from `primaryAccount()` -> accounts.ts's `launchAccount`, which — in the
+   * no-map case — falls through to `accounts[0]` rather than returning null.
+   * So `primary != null` is true for every studio with at least one
+   * CLAUDE_CODE_OAUTH_TOKEN* secret set, mapped repo or not; it was only ever
+   * false inside this file's own test harness, where `primary` defaults to
+   * `undefined`. A generalized write condition gated on that (review round 2,
+   * finding 4) wrongly armed Stage B's borrowedAccount/hand-back machinery
+   * for every PLAIN multi-account fleet that never configured
+   * CLAUDE_ACCOUNT_BY_REPO at all — an ordinary rate-limit switch from
+   * account 1 to account 2 got recorded as a "borrow", and hand-back would
+   * later kill+relaunch the pane to yank it back to account 1, uninvited.
+   *
+   * Absent (every caller/test that predates this field): `undefined` reads
+   * falsy in the write condition below, the same safe "never opted into
+   * Stage B" default production now gives an unmapped repo.
+   */
+  primaryIsMapped?: boolean;
+  /**
    * Issue #103 — the fleet's cross-repo boundary: accounts that are some
    * OTHER repo's own `CLAUDE_ACCOUNT_BY_REPO`-mapped primary (accounts.ts's
    * `otherRepoPrimaries`), which a wrap for THIS studio must never land on,
@@ -2016,14 +2041,23 @@ export async function runAccountFailover(
     // switch after landing on a tier-2 spare would silently clear the flag,
     // and hand-back would never fire again). Cleared ONLY by a switch that
     // lands exactly on `deps.primary` — a genuine return, whether via this
-    // ordinary path or via `handBack`'s own dedicated one. Guarded on
-    // `deps.primary != null` too: with no primary configured at all there is
-    // no "home" to track being away from, so this stays the plain pre-#271
-    // shape (never set) for every caller that predates that feature.
+    // ordinary path or via `handBack`'s own dedicated one.
+    //
+    // Review round 3 (2nd, independent review of PR #135, 2026-09-30) —
+    // FIXED: gated on `deps.primaryIsMapped`, not `deps.primary != null`.
+    // `primary` is never null in real deployment (see that field's own doc
+    // comment above); the old guard therefore armed Stage B's whole
+    // borrowedAccount/hand-back machinery for every PLAIN multi-account
+    // fleet that never configured CLAUDE_ACCOUNT_BY_REPO at all, turning an
+    // ordinary account-1 -> account-2 switch into a recorded "borrow" that
+    // hand-back would later forcibly undo. `primaryIsMapped` is the one
+    // thing that actually distinguishes "this repo opted into #271" from
+    // "primaryAccount() merely fell back to the first configured account" —
+    // see do.ts's `failoverDeps()` for how it is computed.
     // `borrowedFromRepo` stays keyed on `isBorrow` specifically: an
     // unclaimed spare (tier 2) or a plain own-chain landing was never
     // "borrowed FROM" any repo, so it carries no such repo to name.
-    ...(deps.primary != null && next.name !== deps.primary
+    ...(deps.primaryIsMapped && next.name !== deps.primary
       ? { borrowedAccount: next.name, borrowedFromRepo: isBorrow ? (deps.otherRepoOf?.(next.name) ?? null) : null }
       : { borrowedAccount: null, borrowedFromRepo: null }),
   };

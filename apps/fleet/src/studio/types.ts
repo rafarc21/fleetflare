@@ -275,20 +275,36 @@ export interface StudioStatus {
    */
   claudeAccountMovedBlock?: string | null;
   /**
-   * Issue #131 (Stage B) — set only while this studio is currently on a
-   * BORROWED account: some OTHER repo's own `CLAUDE_ACCOUNT_BY_REPO`-mapped
-   * primary, landed on only because every account reserved for THIS studio's
-   * own repo (its own chain, accounts.ts's `nextClaudeAccount` first pass)
-   * was exhausted at once (failover.ts's `nextBorrowedAccount` second pass).
-   * The account NAME, same "safe to log/store/card" discipline
-   * `claudeAccount` itself already documents — never a token.
+   * Issue #131 (Stage B) — set whenever this studio's own repo has a genuine
+   * `CLAUDE_ACCOUNT_BY_REPO` entry (failover.ts's `FailoverDeps.primaryIsMapped`)
+   * AND the studio is currently away from that mapped primary, for ANY
+   * reason: an ordinary in-chain switch that merely stepped forward from
+   * primary, a tier-2 landing on an unclaimed spare positioned before
+   * primary, or an actual cross-repo borrow of some OTHER repo's own mapped
+   * primary (`nextBorrowedAccount`'s second pass, once every account
+   * reserved for THIS repo is exhausted at once). NOT narrower than that —
+   * review round 3 (2nd review of PR #135, 2026-09-30) generalized this from
+   * "only a genuine cross-repo borrow" to "away from primary at all", so
+   * hand-back's own `rowNow.borrowedAccount` gate — the ONLY thing that ever
+   * brings a studio back to its primary — never goes stale partway through a
+   * chain of non-primary switches. The account NAME, same "safe to
+   * log/store/card" discipline `claudeAccount` itself already documents —
+   * never a token.
    *
-   * Cleared (`null`) the moment a hand-back switch lands, whether it
-   * succeeded or not — same "attempted regardless of success" treatment a
+   * NEVER set at all for a studio whose own repo has no `CLAUDE_ACCOUNT_BY_REPO`
+   * entry — such a studio never opted into Stage B borrow/hand-back
+   * semantics, and an ordinary rate-limit switch for it (e.g. account 1 to
+   * account 2 with no map configured at all) must never be mistaken for a
+   * borrow.
+   *
+   * Cleared (`null`) the moment a switch lands exactly on the studio's own
+   * mapped primary — whether via this ordinary path or via `handBack`'s own
+   * dedicated one — attempted regardless of success, same treatment a
    * completed switch's `claudeAccount`/`launchedAccount` fields already get.
-   * `undefined`/absent: never borrowed, or borrowed before this field
-   * existed — readers treat the two identically, same as every other
-   * optional account field on this type.
+   * `undefined`/absent: never borrowed (including every studio with no
+   * mapped primary at all), or borrowed before this field existed — readers
+   * treat the two identically, same as every other optional account field on
+   * this type.
    */
   borrowedAccount?: string | null;
   /**
