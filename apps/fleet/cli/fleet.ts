@@ -45,6 +45,7 @@ import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
 import { repairFailureLine, discardNote, destroyPath } from "./repair-failure";
 import { requestDestroy, readStatus, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome";
+import { requestRecycle } from "./recycle-outcome";
 import {
   formatIdleAlarm, emptyReapState, runReap, destroyRaceOutcome, REAP_LIVE_READ_MAX_MS, type ReapDeps, type ReapFlags, type ReapState,
 } from "./reap";
@@ -1049,6 +1050,14 @@ async function cmdProvision(creds: Credentials, id: string, freshSession = false
  * one. Same shape as cmdProvision just above, deliberately: no body — an
  * empty POST is all routes.ts's recycle branch accepts (it takes no
  * blueprintRef override, unlike provision).
+ *
+ * Board issue #133: the request is `requestRecycle`'s, not a bare fetch — it
+ * carries a deadline and, when that deadline (or any other transport
+ * failure) hits, it polls GET /studio/:id/status and reports the TRUE
+ * outcome. Measured 2026-09-30: a recycle on a studio whose lead sat on a
+ * limit modal never returned (killed after 15 min) even though the container
+ * came back running — the same class of bug #203 already fixed for `fleet
+ * destroy`. See cli/recycle-outcome.ts's own header.
  */
 async function cmdRecycle(creds: Credentials, id: string, discardUnsynced: boolean, freshSession = false): Promise<void> {
   // #96: without the flag, a container that cannot answer makes the Worker
@@ -1056,24 +1065,28 @@ async function cmdRecycle(creds: Credentials, id: string, discardUnsynced: boole
   // Issue #28: --fresh-session rides the same query string.
   const q = [discardUnsynced ? "discard-unsynced=true" : "", freshSession ? "fresh-session=true" : ""].filter(Boolean).join("&");
   const path = q ? `/recycle?${q}` : "/recycle";
-  const res = await fetch(studioUrl(creds, id, path), {
-    method: "POST",
-    headers: accessHeaders(creds),
-  });
-  if (!res.ok) {
-    console.error(repairFailureLine("recycle", res.status, await res.text()));
-    process.exit(1);
+  const report = await requestRecycle(
+    { recycle: studioUrl(creds, id, path), status: studioUrl(creds, id, "/status") },
+    accessHeaders(creds), id,
+  );
+  for (const line of report.lines) console.error(line);
+  if (report.status) console.log(formatTable([report.status]));
+  // ONLY on a confirmed outcome — a plain 200, or a poll that proved THIS
+  // recycle's own bring-up landed. A report whose outcome this side could not
+  // read must never claim the Orca sidebar/rescue-report work below, the
+  // same rule cmdDestroy's own `report.teardown` gate follows for #203.
+  if (report.kind === "ok" || report.kind === "timeout-provisioned") {
+    const studio = report.status as StudioStatus;
+    // Issue #39: the pre-destroy rescue, one line per worktree.
+    for (const line of studio.rescueReport ?? []) console.log(`rescue: ${line}`);
+    if (discardUnsynced) console.error(discardNote(id));
+    // Same rule as `fleet spawn`: this path also leaves a studio running, so
+    // it also owes that studio a visible row in Orca's sidebar. Idempotent,
+    // so a studio that already has one is not given a second.
+    const rowTasks = await listStudioTasks(creds, studio.id);
+    await ensureStudioWorkspace(studio.id, studioWorkspaceTitle(studio.id, rowTasks), defaultOrcaDeps());
   }
-  const studio = (await res.json()) as StudioStatus;
-  console.log(formatTable([studio]));
-  // Issue #39: the pre-destroy rescue, one line per worktree.
-  for (const line of studio.rescueReport ?? []) console.log(`rescue: ${line}`);
-  if (discardUnsynced) console.error(discardNote(id));
-  // Same rule as `fleet spawn`: this path also leaves a studio running, so it
-  // also owes that studio a visible row in Orca's sidebar. Idempotent, so a
-  // studio that already has one is not given a second.
-  const rowTasks = await listStudioTasks(creds, studio.id);
-  await ensureStudioWorkspace(studio.id, studioWorkspaceTitle(studio.id, rowTasks), defaultOrcaDeps());
+  if (report.exitCode !== 0) process.exit(report.exitCode);
 }
 
 /**
