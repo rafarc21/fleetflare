@@ -45,11 +45,29 @@
  * SERVER's captured environment at bring-up (FLEET_WORKER_URL from the new
  * WORKER_PUBLIC_URL wrangler var, FLEET_SPAWN_TOKEN from Fleet Spawn P3 Task
  * 1) — every pane, including this one, inherits both with no extra wiring.
+ *
+ * Issue #59 narrows the "no create verb" rule above a second time. A
+ * coordinating studio (a cloud maestro) had no way to file a task for, hand a
+ * task to, or restart a stopped instance of a studio it may already SPAWN. It
+ * now has `task new`, `task assign`, `resume` and instance-targeted `spawn` —
+ * all limited server-side to the studios its org-chart edges let it spawn,
+ * in its own repo, never itself. The Worker is still the single writer, and
+ * this script still holds no policy: it only shapes the ask.
  */
 
-const HELP = `usage: fleet spawn <role>
+// Board issue #105 (pre-gate): the ONLY node: import this file has ever
+// needed — reading fleet.json off the checkout's own disk to find an
+// optional `preflight` command before `task report` posts. Not a relative
+// import (this file's own header's "ZERO relative imports" rule is about
+// never depending on the Worker's src/ tree, not about avoiding Node's
+// runtime builtins).
+import { readFileSync } from "node:fs";
+
+const HELP = `usage: fleet spawn <role>[--<n>] [--instance <n>|next]
+       fleet resume <role>[--<n>] [--instance <n>]
        fleet task ls | fleet task show <n> | fleet task report <n>
        fleet task state <n> <working|input_required|failed>
+       fleet task new [--studio <id>] | fleet task assign <n> <studio-id> [--why <text>]
        fleet memory ls | fleet memory compact
 
   fleet spawn <role>    Spawn a peer studio under THIS studio's org-chart
@@ -57,7 +75,18 @@ const HELP = `usage: fleet spawn <role>
                         by the Worker — this script only proves WHICH studio
                         is asking, never what it may do). Prints the child's
                         id and state on success, the server's error body
-                        otherwise.
+                        otherwise. <role>--<n> or --instance <n> names one
+                        instance; --instance next takes the lowest free one.
+                        A studio that already exists is a 409.
+
+  fleet resume <role>--<n>
+                        Start a studio the operator PARKED (fleet destroy
+                        --park) again. Same org-chart edges as spawn, same
+                        provision path the operator uses. Only a parked,
+                        stopped studio in your own repo, 10+ minutes after it
+                        stopped. Destroyed (not parked) is a 403, running or
+                        already resuming a 409, missing a 404. Never retry a
+                        resume that timed out: check its state later.
 
   fleet task ls         The tasks assigned to THIS studio. Nobody else's.
   fleet task show <n>   One of them, with its brief and every comment.
@@ -81,6 +110,16 @@ const HELP = `usage: fleet spawn <role>
                         The Worker stamps msg_id, task_id, schema_version and
                         sender — you cannot set them, and you do not need to.
 
+                        Board issue #105 (pre-gate): when this repo's own
+                        fleet.json declares a "preflight" shell command, it
+                        runs HERE, before posting, with a 30-second timeout.
+                        A red pre-gate refuses to post a "result"/"ok"
+                        envelope — fix it, or report a different status
+                        (e.g. "blocked"/"failed") instead. Every other
+                        intent/status still runs and attaches the pre-gate
+                        result but is never refused. No fleet.json
+                        "preflight" field -> this is a complete no-op.
+
   fleet task state <n> <to>
                         Move YOUR OWN task to working, input_required or
                         failed. Do it the moment you start: a task left at
@@ -94,6 +133,23 @@ const HELP = `usage: fleet spawn <role>
                         did it — report your result and let the verifier
                         close it. You also cannot cancel a task or move
                         anybody else's.
+
+  fleet task new [--studio <id>]
+                        File a task for a studio your edges let you spawn.
+                        The brief JSON comes from STDIN: title, objective,
+                        outputFormat, boundaries, and assignee (or --studio).
+                        Never for yourself, never unassigned, never with a
+                        junior (that is the operator's call):
+
+                          fleet task new --studio websites--web-studio--2 <<'EOF'
+                          {"title": "...", "objective": "...",
+                           "outputFormat": "...", "boundaries": "..."}
+                          EOF
+
+  fleet task assign <n> <studio-id> [--why <text>]
+                        Hand task <n> to a studio your edges let you spawn.
+                        The task must be unassigned, yours, or held by another
+                        such studio. The assignee is woken.
 
   fleet memory ls       Fleet memory, measured: every index line, plus each
                         file's citation count, age and verdict.
@@ -139,7 +195,11 @@ const SPAWN_TOKEN_HEADER = "X-Fleet-Spawn-Token";
  *  identifiers instead of loose prose. */
 export type Command =
   | { kind: "help" }
-  | { kind: "spawn"; role: string }
+  // Issue #59: `instance` absent means instance 1, exactly the pre-#59 body.
+  | { kind: "spawn"; role: string; instance?: number | "next" }
+  | { kind: "resume"; role: string; instance?: number }
+  | { kind: "task-new"; studio?: string }
+  | { kind: "task-assign"; number: number; studio: string; why?: string }
   | { kind: "task-ls" }
   | { kind: "task-show"; number: number }
   | { kind: "task-report"; number: number }
@@ -155,12 +215,42 @@ export function parseArgs(argv: string[]): Command {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") return { kind: "help" };
   if (argv[0] === "task") return parseTaskArgs(argv.slice(1));
   if (argv[0] === "memory") return parseMemoryArgs(argv.slice(1));
-  if (argv[0] !== "spawn") {
-    return { kind: "usage-error", message: `unknown command "${argv[0]}" — expected "spawn", "task" or "memory"` };
+  if (argv[0] !== "spawn" && argv[0] !== "resume") {
+    return { kind: "usage-error", message: `unknown command "${argv[0]}" — expected "spawn", "resume", "task" or "memory"` };
   }
+  const verb = argv[0];
   const role = argv[1];
-  if (!role) return { kind: "usage-error", message: "spawn: missing <role>" };
-  return { kind: "spawn", role };
+  if (!role) return { kind: "usage-error", message: `${verb}: missing <role>` };
+  const target = parseTarget(role, argv.slice(2));
+  if ("message" in target) return { kind: "usage-error", message: `${verb}: ${target.message}` };
+  if (verb === "spawn") return { kind: "spawn", ...target };
+  if (target.instance === "next") {
+    return { kind: "usage-error", message: "resume: --instance next is not a studio — name the stopped instance to start" };
+  }
+  return { kind: "resume", role: target.role, ...(target.instance === undefined ? {} : { instance: target.instance }) };
+}
+
+/**
+ * Issue #59: `<role>--<n>` or `<role> --instance <n|next>` -> {role, instance}.
+ * Only a trailing all-digit segment is split off. Anything else (a repo
+ * prefix, say) is sent verbatim for the Worker to refuse: this script never
+ * decides which studio a caller may reach.
+ */
+export function parseTarget(
+  raw: string, rest: string[],
+): { role: string; instance?: number | "next" } | { message: string } {
+  const m = /^(.+)--([0-9]+)$/.exec(raw);
+  const role = m ? m[1] : raw;
+  let instance: number | "next" | undefined = m ? Number(m[2]) : undefined;
+  if (rest.length > 0) {
+    if (rest[0] !== "--instance" || rest.length !== 2) return { message: `unexpected ${JSON.stringify(rest.join(" "))}` };
+    if (instance !== undefined) return { message: "instance named twice — use <role>--<n> or --instance <n>, not both" };
+    const v = rest[1];
+    if (v === "next") instance = "next";
+    else if (/^[0-9]+$/.test(v) && Number(v) >= 1) instance = Number(v);
+    else return { message: `--instance ${JSON.stringify(v)} — expected a positive integer or next` };
+  }
+  return instance === undefined ? { role } : { role, instance };
 }
 
 /**
@@ -177,8 +267,28 @@ const LEAD_TASK_STATES = ["working", "input_required", "failed"];
 export function parseTaskArgs(argv: string[]): Command {
   const [sub, raw, to] = argv;
   if (sub === "ls") return { kind: "task-ls" };
+  // Issue #59: the two verbs that DIRECT a child studio. The Worker gates
+  // both on the caller's org-chart edges; this parser only shapes the ask.
+  if (sub === "new") {
+    const rest = argv.slice(1);
+    if (rest.length === 0) return { kind: "task-new" };
+    if (rest[0] === "--studio" && rest.length === 2) return { kind: "task-new", studio: rest[1] };
+    return { kind: "usage-error", message: "task new: expected [--studio <id>] and the brief JSON on stdin" };
+  }
+  if (sub === "assign") {
+    if (raw === undefined || !/^[0-9]+$/.test(raw)) {
+      return { kind: "usage-error", message: "task assign: missing or non-numeric <n> (the board issue number)" };
+    }
+    if (to === undefined || to.startsWith("--")) return { kind: "usage-error", message: "task assign: missing <studio-id>" };
+    const rest = argv.slice(3);
+    if (rest.length === 0) return { kind: "task-assign", number: Number(raw), studio: to };
+    if (rest[0] === "--why" && rest.length >= 2) {
+      return { kind: "task-assign", number: Number(raw), studio: to, why: rest.slice(1).join(" ") };
+    }
+    return { kind: "usage-error", message: "task assign: expected <n> <studio-id> [--why <text>]" };
+  }
   if (sub !== "show" && sub !== "report" && sub !== "state") {
-    return { kind: "usage-error", message: `unknown task command "${sub ?? ""}" — expected ls, show, report or state` };
+    return { kind: "usage-error", message: `unknown task command "${sub ?? ""}" — expected ls, show, report, state, new or assign` };
   }
   if (raw === undefined || !/^[0-9]+$/.test(raw)) {
     return { kind: "usage-error", message: `task ${sub}: missing or non-numeric <n> (the board issue number)` };
@@ -262,13 +372,15 @@ export function resolveEnv(env: Record<string, string | undefined>): SpawnEnv | 
 
 /** Builds the exact request /fleet/spawn expects — see spawn.ts's own
  *  SPAWN_TOKEN_HEADER/spawnBody doc comments for the contract this mirrors. */
-export function buildSpawnRequest(env: SpawnEnv, role: string): { url: string; init: RequestInit } {
+export function buildSpawnRequest(
+  env: SpawnEnv, role: string, extra: { instance?: number | "next"; resume?: true } = {},
+): { url: string; init: RequestInit } {
   return {
     url: new URL("/fleet/spawn", env.workerUrl).toString(),
     init: {
       method: "POST",
       headers: { [SPAWN_TOKEN_HEADER]: env.token, "content-type": "application/json" },
-      body: JSON.stringify({ role }),
+      body: JSON.stringify({ role, ...extra }),
     },
   };
 }
@@ -295,6 +407,20 @@ export function buildTaskRequest(
   };
 }
 
+/** Review round 1 (M1): how long `fleet resume` waits for its one request.
+ *  A bring-up can take minutes; past this the Worker may still be starting
+ *  the studio. `FLEET_RESUME_TIMEOUT_MS` overrides (tests use it). */
+const RESUME_TIMEOUT_MS = 300_000;
+
+export function resumeTimeoutMs(raw: string | undefined): number {
+  const n = Number(raw);
+  return raw !== undefined && Number.isInteger(n) && n > 0 ? n : RESUME_TIMEOUT_MS;
+}
+
+const RESUME_NO_RETRY =
+  "studio-fleet: do not retry the resume — the Worker may still be starting that studio, and a second " +
+  "resume is refused (409) while it does. Check its state on your next wake or sweep instead.";
+
 /** One task row as `fleet task ls` prints it. The url is the actionable half
  *  — a lead pastes it into its own envelope's artifacts. */
 interface TaskRow { number: number; state: string | null; title: string; url: string }
@@ -307,6 +433,151 @@ interface TaskRow { number: number; state: string | null; title: string; url: st
 export function formatTaskRows(rows: TaskRow[]): string {
   if (rows.length === 0) return "(no tasks assigned to this studio)";
   return rows.map((t) => `#${t.number}  [${t.state ?? "DRIFT"}]  ${t.title}\n    ${t.url}`).join("\n");
+}
+
+// --- Board issue #105: pre-gate ---------------------------------------------
+//
+// fleet.json's own optional `preflight` shell command, run by `task report`
+// before it posts a claimed-done envelope. src/studio/blueprint.ts's
+// FleetConfig carries this SAME field (its own doc comment has the full
+// design rationale) — duplicated here, own tiny parse, rather than imported,
+// for the same reason SPAWN_TOKEN_HEADER/LEAD_TASK_STATES already are (see
+// this file's own header).
+
+/**
+ * fleet.json's `preflight` field, or null on ANY absence or malformed shape
+ * — a missing/broken fleet.json must never block `task report` itself, only
+ * the (optional) pre-gate feature it would have enabled. Mirrors
+ * blueprint.ts's parseFleetJson validation (present-but-blank/wrong-type is
+ * treated as "not declared" here rather than thrown — this script has no
+ * usage-error path for a repo's OWN fleet.json content, only for its own
+ * argv).
+ */
+export function parseFleetPreflight(json: string): string | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const preflight = (raw as Record<string, unknown>).preflight;
+  return typeof preflight === "string" && preflight.trim() !== "" ? preflight : null;
+}
+
+/**
+ * Reads fleet.json from `repoRoot` (any directory — a real checkout in
+ * production, an arbitrary fixture in a test) and returns its declared
+ * preflight command, or null when there is none: no fleet.json at that path,
+ * a fleet.json with no `preflight` field, or `repoRoot` itself null (the
+ * STUDIO_ID-absent case resolveRepoRoot already returns null for). IO is
+ * split out from parseFleetPreflight above so the parse rule itself stays
+ * testable with a bare string, no filesystem involved.
+ */
+export function loadPreflightCommand(repoRoot: string | null): string | null {
+  if (repoRoot === null) return null;
+  let text: string;
+  try {
+    text = readFileSync(`${repoRoot}/fleet.json`, "utf8");
+  } catch {
+    return null;
+  }
+  return parseFleetPreflight(text);
+}
+
+/**
+ * Where THIS studio's own checkout lives, from STUDIO_ID alone — the EXACT
+ * derivation container/studio-bringup.sh's own claude-launch step uses for
+ * `repo_dir` (`/workspace/${STUDIO_ID%%--*}`). Reusing it here, rather than
+ * trusting the calling shell's cwd, is what makes this reliable regardless
+ * of where in the checkout a lead happens to `cd` mid-session — STUDIO_ID
+ * never changes for the container's whole lifetime, and do.ts's
+ * studioEnvVars already injects it into every studio's environment
+ * unconditionally (the same env var `fleet task ls`/`show`/`report` never
+ * itself reads, until now). Null only when STUDIO_ID is absent — a
+ * container resolveEnv's own FLEET_WORKER_URL/FLEET_SPAWN_TOKEN check would
+ * already have refused before this is ever called in practice.
+ *
+ * `FLEET_REPO_ROOT_BASE` overrides the `/workspace` base itself — absent in
+ * every real container (do.ts's studioEnvVars never sets it), so production
+ * behavior is byte-for-byte unchanged. It exists purely as a test seam: a
+ * real CI runner does not grant write access to the real `/workspace`, so
+ * test/bun/studio-fleet-report-cli.test.ts, which spawns this file as a real
+ * subprocess and needs a real fleet.json on real disk, points this at a
+ * `mkdtempSync` tmpdir instead.
+ */
+export function resolveRepoRoot(env: Record<string, string | undefined>): string | null {
+  const studioId = env.STUDIO_ID;
+  const base = env.FLEET_REPO_ROOT_BASE ?? "/workspace";
+  return studioId ? `${base}/${studioId.split("--")[0]}` : null;
+}
+
+export interface PreflightResult {
+  cmd: string;
+  exit: number;
+  output: string;
+}
+
+// Issue #105's own framing: "a 30-second pre-gate". A check that runs longer
+// than this is exactly the CHEAP-check promise broken — treated as a FAILED
+// gate (exit 124, the shell convention for "timed out"), never a hang and
+// never a silent pass.
+const PREFLIGHT_TIMEOUT_MS = 30_000;
+// A reasonably-truncated tail, not the whole thing: a chatty check's output
+// still has to fit in a GitHub issue comment alongside everything else the
+// envelope carries (src/board/envelope.ts's own ENVELOPE_MAX_CHARS is far
+// larger than this, but a pre-gate's output is one field among many, not the
+// whole comment).
+const PREFLIGHT_OUTPUT_MAX_CHARS = 4_000;
+
+/**
+ * Runs fleet.json's declared preflight command in `cwd`, real subprocess,
+ * real kill-on-timeout. `timeoutMs` is a deliberate test seam (this file's
+ * own established convention — compare studio-bringup.sh's own
+ * `FLEET_WORKSPACE` seam): production never passes it, so the default IS the
+ * production value. Bun.spawnSync's own `timeout`/`killSignal` do the
+ * killing directly; there is no separate watchdog to get wrong.
+ */
+export function runPreflight(cmd: string, cwd: string, timeoutMs: number = PREFLIGHT_TIMEOUT_MS): PreflightResult {
+  const proc = Bun.spawnSync({
+    cmd: ["sh", "-c", cmd],
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
+  });
+  const combined = `${proc.stdout.toString()}${proc.stderr.toString()}`;
+  const output = combined.length > PREFLIGHT_OUTPUT_MAX_CHARS
+    ? combined.slice(-PREFLIGHT_OUTPUT_MAX_CHARS)
+    : combined;
+  // A process Bun killed for overrunning `timeout` reports exitCode null —
+  // read as 124 (the shell/coreutils convention for "timed out"), a FAILED
+  // gate, never a hang and never a silently-passing 0.
+  return { cmd, exit: proc.exitCode ?? 124, output };
+}
+
+/**
+ * Issue #105: "RED pre-gate = not done". Refuses to post ONLY the specific
+ * claim a red/timed-out pre-gate contradicts — a "result" envelope reporting
+ * "ok". Every other intent/status (blocked, partial, a request, clarify,
+ * escalate, or any non-"ok" status on a "result") still gets the pre-gate
+ * run and attached by the caller — informative, never refused. Not this
+ * function's job to run the gate or decide what "declared" means; it only
+ * turns one already-computed PreflightResult (or null, meaning "not
+ * declared") into a post/refuse verdict.
+ */
+export function evaluatePreGate(
+  intent: unknown, status: unknown, preflight: PreflightResult | null,
+): { refuse: boolean; reason?: string } {
+  if (preflight === null || preflight.exit === 0) return { refuse: false };
+  if (intent !== "result" || status !== "ok") return { refuse: false };
+  return {
+    refuse: true,
+    reason: `pre-gate failed (exit ${preflight.exit}): \`${preflight.cmd}\` — refusing to post a "result"/"ok" ` +
+      "envelope with a RED pre-gate. Fix it, or report a different status (e.g. \"blocked\"/\"failed\") instead. " +
+      `Output:\n${preflight.output}`,
+  };
 }
 
 async function main(): Promise<void> {
@@ -334,6 +605,7 @@ async function main(): Promise<void> {
     res = await fetch(built.url, built.init);
   } catch (err) {
     console.error(`studio-fleet: request to ${built.url} failed: ${err instanceof Error ? err.message : String(err)}`);
+    if (cmd.kind === "resume") console.error(RESUME_NO_RETRY);
     process.exit(1);
   }
 
@@ -357,15 +629,51 @@ async function main(): Promise<void> {
 async function buildRequest(
   env: SpawnEnv, cmd: Command,
 ): Promise<{ what: string; url: string; init: RequestInit; render: (json: unknown) => string }> {
-  if (cmd.kind === "spawn") {
-    const { url, init } = buildSpawnRequest(env, cmd.role);
+  if (cmd.kind === "spawn" || cmd.kind === "resume") {
+    const { url, init } = buildSpawnRequest(env, cmd.role, {
+      ...(cmd.instance === undefined ? {} : { instance: cmd.instance }),
+      ...(cmd.kind === "resume" ? { resume: true as const } : {}),
+    });
+    // Review round 1 (M1): a resume runs a whole bring-up. Give up after a
+    // deadline rather than hold the socket forever — and never retry: this
+    // is ONE request, and main() tells the lead not to send another.
+    if (cmd.kind === "resume") init.signal = AbortSignal.timeout(resumeTimeoutMs(process.env.FLEET_RESUME_TIMEOUT_MS));
     return {
-      what: "spawn", url, init,
+      what: cmd.kind, url, init,
       render: (json) => {
         const status = json as { id?: string; state?: string };
-        return `spawned ${status.id ?? "?"} (${status.state ?? "?"})`;
+        return `${cmd.kind === "resume" ? "resumed" : "spawned"} ${status.id ?? "?"} (${status.state ?? "?"})`;
       },
     };
+  }
+  if (cmd.kind === "task-new") {
+    // Same stdin channel as `task report`: a brief is multi-line JSON.
+    const text = await Bun.stdin.text();
+    if (text.trim() === "") {
+      console.error("studio-fleet: task new reads the brief JSON from stdin — see `fleet --help`");
+      process.exit(1);
+    }
+    let brief: Record<string, unknown>;
+    try {
+      brief = JSON.parse(text);
+    } catch {
+      console.error("studio-fleet: task new: stdin is not JSON");
+      process.exit(1);
+    }
+    const body = JSON.stringify(cmd.studio === undefined ? brief : { ...brief, assignee: cmd.studio });
+    const { url, init } = buildTaskRequest(env, "", body);
+    return {
+      what: "task new", url, init,
+      render: (json) => {
+        const t = json as { number?: number; url?: string };
+        return `filed task #${t.number ?? "?"}: ${t.url ?? "(no url)"}`;
+      },
+    };
+  }
+  if (cmd.kind === "task-assign") {
+    const body = JSON.stringify({ assignee: cmd.studio, ...(cmd.why === undefined ? {} : { why: cmd.why }) });
+    const { url, init } = buildTaskRequest(env, `/${cmd.number}/assign`, body);
+    return { what: "task assign", url, init, render: () => `task ${cmd.number} assigned to ${cmd.studio}` };
   }
   if (cmd.kind === "task-ls") {
     const { url, init } = buildTaskRequest(env, "");
@@ -424,7 +732,40 @@ async function buildRequest(
     console.error("studio-fleet: task report reads the envelope JSON from stdin — see `fleet --help`");
     process.exit(1);
   }
-  const { url, init } = buildTaskRequest(env, `/${cmd.number}/envelope`, body);
+
+  // Board issue #105 (pre-gate). Absent feature (no fleet.json, or no
+  // `preflight` field) is a COMPLETE no-op: `preflightCmd` is null,
+  // `finalBody` stays `body`, byte for byte, unparsed — every repo without
+  // this feature keeps today's exact behavior, including surviving stdin
+  // that is not even valid JSON (the Worker's own parseEnvelope already
+  // handles that case; this script never needed to parse the envelope
+  // before this feature existed, and still does not when it is not
+  // declared).
+  const repoRoot = resolveRepoRoot(process.env as Record<string, string | undefined>);
+  const preflightCmd = loadPreflightCommand(repoRoot);
+  let finalBody = body;
+  if (preflightCmd !== null) {
+    const preflight = runPreflight(preflightCmd, repoRoot ?? ".");
+    let envelope: Record<string, unknown>;
+    try {
+      envelope = JSON.parse(body) as Record<string, unknown>;
+    } catch (err) {
+      console.error(
+        `studio-fleet: task report envelope is not valid JSON (fleet.json declares a preflight, so it must be ` +
+          `parsed to attach the pre-gate result): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+    const gate = evaluatePreGate(envelope.intent, envelope.status, preflight);
+    if (gate.refuse) {
+      console.error(`studio-fleet: ${gate.reason}`);
+      process.exit(1);
+    }
+    envelope.pre_gate = preflight;
+    finalBody = JSON.stringify(envelope);
+  }
+
+  const { url, init } = buildTaskRequest(env, `/${cmd.number}/envelope`, finalBody);
   return {
     what: "task report", url, init,
     render: (json) => {

@@ -997,7 +997,7 @@ async function cmdSpawn(creds: Credentials, role: string, newInstance: boolean):
  * below); routes.ts's own `req.json().catch(() => ({}))` reads `{}` and an
  * absent body identically, so neither shape means "blueprintRef override".
  */
-async function cmdProvision(creds: Credentials, id: string, freshSession = false): Promise<void> {
+async function cmdProvision(creds: Credentials, id: string, freshSession = false, cancelFreshSession = false): Promise<void> {
   // Dynamic repo selection (P4a): unlike spawn, this command is ADDRESSED by
   // a studio id, and that id already names a repo segment. The detected repo
   // is sent only when the two agree — re-provisioning `websites--pilot`
@@ -1014,7 +1014,15 @@ async function cmdProvision(creds: Credentials, id: string, freshSession = false
   const detectedSegment = detected.slug === null ? null : repoIdSegment(detected.slug.split("/")[1]);
   const matchesId = detectedSegment !== null && detectedSegment === parseStudioId(id)?.repo;
   if (matchesId) reportRepo("fleet provision", detected);
-  const res = await fetch(studioUrl(creds, id, freshSession ? "/provision?fresh-session=true" : "/provision"), {
+  // Issue #115: same query-string convention `?fresh-session=true` already
+  // uses. cli-args.ts's own parsing already refuses both flags at once, so
+  // at most one of these is ever true here.
+  const provisionPath = freshSession
+    ? "/provision?fresh-session=true"
+    : cancelFreshSession
+      ? "/provision?no-fresh-session=true"
+      : "/provision";
+  const res = await fetch(studioUrl(creds, id, provisionPath), {
     method: "POST",
     headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
     body: JSON.stringify(matchesId ? { repo: detected.slug } : {}),
@@ -1096,7 +1104,7 @@ async function cmdRecycle(creds: Credentials, id: string, discardUnsynced: boole
  * failure there degrades to one stderr line, never a non-zero exit for a
  * destroy that otherwise succeeded.
  */
-async function cmdDestroy(creds: Credentials, id: string, force: boolean, discardUnsynced: boolean): Promise<void> {
+async function cmdDestroy(creds: Credentials, id: string, force: boolean, discardUnsynced: boolean, park = false): Promise<void> {
   // Board task #203: the request is `requestDestroy`'s, not a bare fetch —
   // it carries a deadline and, when that deadline (or any other transport
   // failure) hits, it polls GET /studio/:id/status and reports the TRUE
@@ -1104,7 +1112,7 @@ async function cmdDestroy(creds: Credentials, id: string, force: boolean, discar
   // out." for a destroy that had SUCCEEDED, and skipped the Orca teardown
   // below. See cli/destroy-outcome.ts's header.
   const report = await requestDestroy(
-    { destroy: studioUrl(creds, id, destroyPath(force, discardUnsynced)), status: studioUrl(creds, id, "/status") },
+    { destroy: studioUrl(creds, id, destroyPath(force, discardUnsynced, park)), status: studioUrl(creds, id, "/status") },
     accessHeaders(creds), id,
   );
   for (const line of report.lines) console.error(line);
@@ -1150,11 +1158,18 @@ function repoQuery(slug: string | null): string {
  *  same-studio re-assign that lands no board write at all (#158's deliberate
  *  nudge to an idle lead). Printed rather than dropped: a studio that was
  *  given work and never heard about it is the whole of that issue. */
-type AssignedTask = BoardTask & { wake?: AssignWakeReport };
+type AssignedTask = BoardTask & { wake?: AssignWakeReport; pathWarnings?: string[] };
 
 function reportAssignWake(task: AssignedTask): void {
   const line = formatAssignWake(task.wake);
   if (line !== null) console.log(line);
+}
+
+/** Board issue #112 / #70 ask 8: one advisory line per path-claim overlap,
+ *  printed the same way `reportRepo`'s own lines already are — stderr, since
+ *  these are diagnostics for the human, not part of the table's stdout. */
+function reportPathWarnings(task: AssignedTask): void {
+  for (const w of task.pathWarnings ?? []) console.error(`fleet task new: ${w}`);
 }
 
 /** Board tasks assigned to one studio, for the Orca row title (board #39).
@@ -1206,6 +1221,7 @@ async function cmdTaskNew(
   const task = (await res.json()) as AssignedTask;
   console.log(formatTaskTable([task]));
   reportAssignWake(task);
+  reportPathWarnings(task);
   // Issue #113 ask 9: --provision boots or heals the assigned studio in the
   // same call, instead of leaving a filed task's "NO WAKE" (task-format.ts)
   // to a second, separate `fleet provision <id>` run. cli-args.ts's own
@@ -2516,11 +2532,11 @@ async function main(): Promise<void> {
     case "spawn":
       return cmdSpawn(creds, parsed.role, parsed.newInstance);
     case "provision":
-      return cmdProvision(creds, parsed.id, parsed.freshSession);
+      return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession);
     case "recycle":
       return cmdRecycle(creds, parsed.id, parsed.discardUnsynced, parsed.freshSession);
     case "destroy":
-      return cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced);
+      return cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced, parsed.park === true);
     case "task-new":
       return cmdTaskNew(creds, parsed.brief, parsed.provision === true, parsed.freshSession === true);
     case "task-ls":

@@ -66,7 +66,9 @@ export type CliCommand =
   // it already exists, exactly as before). Same bespoke "no value, just
   // presence" shape `destroy --force` and `recycle --discard-unsynced` use.
   | { cmd: "spawn"; role: string; newInstance: boolean }
-  | { cmd: "provision"; id: string; freshSession: boolean }
+  // Issue #115: `cancelFreshSession` — `--no-fresh-session`, mutually
+  // exclusive with `freshSession` above.
+  | { cmd: "provision"; id: string; freshSession: boolean; cancelFreshSession: boolean }
   // Issue #37: one studio, checked LIVE, right now. The container check
   // (provision.ts's provisionedCheckCmd) always tested the right things;
   // until this verb, nothing exposed it on demand, so the only way to tell a
@@ -117,7 +119,7 @@ export type CliCommand =
   // which every other flag-taking verb here still goes through unchanged)
   // — it overrides the refusal that fires when this studio still carries an
   // open assigned board task.
-  | { cmd: "destroy"; id: string; force: boolean; discardUnsynced: boolean }
+  | { cmd: "destroy"; id: string; force: boolean; discardUnsynced: boolean; park?: true }
   // P4 §5's board. Two words rather than one, because `task` is a noun with
   // three operations on it; flags rather than positionals, because a brief is
   // four fields and no positional order survives that.
@@ -277,8 +279,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Create a studio for <role> in the repo you are standing in (maestro, web-studio, release-studio, pilot, scratch). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them.",
   },
   provision: {
-    args: "<id> [--fresh-session]",
-    summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict. " + FRESH_SESSION_HELP,
+    args: "<id> [--fresh-session|--no-fresh-session]",
+    summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict. " + FRESH_SESSION_HELP + " Issue #115: --no-fresh-session cancels a pending fresh-session intent left armed by a PRIOR --fresh-session attempt that failed before it was confirmed — that intent otherwise keeps forcing every later provision (flagged or not) to run fresh until one finally succeeds; this call clears it explicitly and proceeds as an ordinary (non-fresh) provision. `fleet ls` shows a pending intent as \"FRESH SESSION <id>: fresh-session pending\".",
   },
   check: {
     args: "<id>",
@@ -297,8 +299,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Destroy the container and reprovision on the CURRENT image, then verify and report THAT verdict. The only way an image change reaches a running studio. Loses the container filesystem; the session is rescued first. If the container cannot answer, nothing can be rescued: recycle REFUSES (409) and names the age of the last synced snapshot it would restore. It also refuses when rescue-push fails or cannot confirm the work was saved (killed exec, dead shell, deadline), naming why. --discard-unsynced proceeds anyway, discarding everything since. " + FRESH_SESSION_HELP + " " + LIVENESS_RULE,
   },
   destroy: {
-    args: "<id> [--force] [--discard-unsynced]",
-    summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A rescue-push that fails or cannot confirm the work was saved (killed exec, dead shell, deadline) refuses the same way, naming why. A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it.",
+    args: "<id> [--force] [--discard-unsynced] [--park]",
+    summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A rescue-push that fails or cannot confirm the work was saved (killed exec, dead shell, deadline) refuses the same way, naming why. A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it. --park stops it RESUMABLE: a studio whose org-chart edges reach it may `fleet resume` it from its container (after a cooldown). Without --park, only you can start it again.",
   },
   "task-new": {
     args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior] [--provision [--fresh-session]]",
@@ -722,12 +724,21 @@ export function parseCliArgs(argv: string[]): CliCommand {
       return usage(`unexpected ${JSON.stringify(rest[0])}`);
     }
     // Issue #28: `--fresh-session`, same bespoke flag shape as recycle's own.
+    // Issue #115: plus `--no-fresh-session` — same "each at most once,
+    // unknown flag never silently ignored" posture recycle's own two-flag
+    // parsing (below) already uses, plus the two are mutually exclusive
+    // (never both honored on the same call — see ProvisionConfig
+    // .cancelFreshSession's own doc comment).
     case "provision": {
       if (!arg || arg.startsWith("--")) return { cmd: "usage", message: CLI_USAGE };
       const rest = argv.slice(2);
-      if (rest.length === 0) return { cmd: "provision", id: arg, freshSession: false };
-      if (rest.length === 1 && rest[0] === "--fresh-session") return { cmd: "provision", id: arg, freshSession: true };
-      return usage(`unexpected ${JSON.stringify(rest[0])}`);
+      const known = ["--fresh-session", "--no-fresh-session"];
+      const stray = rest.find((f, i) => !known.includes(f) || rest.indexOf(f) !== i);
+      if (stray !== undefined) return usage(`unexpected ${JSON.stringify(stray)}`);
+      const freshSession = rest.includes("--fresh-session");
+      const cancelFreshSession = rest.includes("--no-fresh-session");
+      if (freshSession && cancelFreshSession) return usage("--fresh-session and --no-fresh-session are mutually exclusive");
+      return { cmd: "provision", id: arg, freshSession, cancelFreshSession };
     }
     // Issue #96: same bespoke shape as `destroy --force` below, same reasons.
     // Issue #28: plus `--fresh-session`, either order, each at most once.
@@ -766,13 +777,20 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // own comment already says must never be silently ignored, just at the
     // position 0 (id) instead of position 1 (rest[0]).
     case "destroy": {
-      if (!arg || arg === "--force" || arg === "--discard-unsynced") return { cmd: "usage", message: CLI_USAGE };
+      if (!arg || arg === "--force" || arg === "--discard-unsynced" || arg === "--park") {
+        return { cmd: "usage", message: CLI_USAGE };
+      }
       const rest = argv.slice(2);
       const flags = new Set(rest);
-      const unknown = rest.find((t) => t !== "--force" && t !== "--discard-unsynced");
+      const unknown = rest.find((t) => t !== "--force" && t !== "--discard-unsynced" && t !== "--park");
       if (unknown !== undefined) return usage(`unexpected ${JSON.stringify(unknown)}`);
       if (flags.size !== rest.length) return usage("a flag was given twice");
-      return { cmd: "destroy", id: arg, force: flags.has("--force"), discardUnsynced: flags.has("--discard-unsynced") };
+      // Issue #59 review round 1: `park` only when given, so every existing
+      // destroy parses to the same shape it always did.
+      return {
+        cmd: "destroy", id: arg, force: flags.has("--force"), discardUnsynced: flags.has("--discard-unsynced"),
+        ...(flags.has("--park") ? { park: true } : {}),
+      };
     }
     // Issue #217.
     case "rescue-gc": {

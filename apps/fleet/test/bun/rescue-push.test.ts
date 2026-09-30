@@ -1695,11 +1695,41 @@ describe("#371 review Finding 1 — the budget guard doubles its threshold at re
     expect(serverDeadlineSeconds).toBeGreaterThanOrEqual(singleThreshold);
     expect(serverDeadlineSeconds).toBeLessThan(doubledThreshold);
 
+    // Issue #93: this test's exact-literal assertion below pins `remaining`
+    // to the single value `serverDeadlineSeconds` (10), which only holds if
+    // `now - __rescue_start` (rescue.ts's own `rescue_budget_ok`) reads
+    // exactly 0. `date +%s` truncates to whole seconds, and unlike the sibling
+    // "DOUBLED threshold" test above (which carries ~3s of margin), this test
+    // sits exactly on `rescue_budget_ok`'s own arithmetic with none: on a
+    // loaded runner, real `rescue_target`/`git add`/`git commit --no-verify`
+    // work between `__rescue_start`'s capture and this checkpoint's own `date
+    // +%s` call can occasionally cross a whole-second boundary, ticking
+    // elapsed from 0 to 1 and `remaining` from 10 to 9 -- a correct refusal
+    // that still fails this test's exact-literal `budget 10` match (PRs #44
+    // and #90, neither touching rescue.ts). Pin every `date +%s` call this
+    // script makes to one fixed epoch (same PATH-shim mechanism as "#263 C4"
+    // above, which pins `date -u +%Y%m%d%H%M%S` instead) so `remaining` is
+    // always exactly `serverDeadlineSeconds`, with zero real-wall-clock
+    // dependency. `rescue_target`'s own `date -u +%Y%m%d%H%M%S` timestamp call
+    // falls through to the real `date` unharmed (it's never even reached
+    // here -- the budget check fails first -- but must keep working
+    // regardless).
+    const shimDir = mkdtempSync(join(tmpdir(), "fleet-date-shim-"));
+    writeFileSync(
+      join(shimDir, "date"),
+      '#!/bin/sh\nif [ "$1" = "+%s" ]; then echo 1700000000; else exec /usr/bin/date "$@"; fi\n',
+    );
+    chmodSync(join(shimDir, "date"), 0o755);
+
     const start = Date.now();
     // budgetMarginSeconds=0: keeps this test's own single-vs-doubled midpoint
     // math (above) exact, independent of production's own
     // RESCUE_BUDGET_MARGIN_SECONDS default (rescue.ts).
-    const out = sh(rescuePushCmd(REPO, STUDIO, root, pushTimeoutSeconds, serverDeadlineSeconds, 0)).out;
+    const out = sh(
+      rescuePushCmd(REPO, STUDIO, root, pushTimeoutSeconds, serverDeadlineSeconds, 0),
+      dir,
+      { PATH: `${shimDir}:${BASE_PATH}` },
+    ).out;
     const elapsedMs = Date.now() - start;
 
     expect(out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout budget ${serverDeadlineSeconds} not attempted$`, "m"));

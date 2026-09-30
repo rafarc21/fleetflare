@@ -26,7 +26,7 @@ import {
   closeIssue as closeIssueApi, getDefaultBranch, getPullRequest, commitReachableFromBranch,
   getIssueCloser, type IssueCloser, pullClaimsIssue,
   listMatchingBranches, commitDate, compareFiles, deleteBranch, resolveCanonicalRepoName,
-  repoIsPrivate, fetchRepoFile,
+  repoIsPrivate, fetchRepoFile, listOpenPullFiles,
 } from "../github/api";
 import {
   createIssue, getIssue, listIssues, addLabels, removeLabel,
@@ -46,11 +46,14 @@ import { closeTaskOnPromote } from "./close-action";
 import { runTaskReap, type ReapDeps, type LandedCheck } from "../studio/task-reap";
 import { runRescueGc, type RescueBranch } from "../studio/rescue-gc";
 import { listStudios } from "../studio/registry";
-import { isSpawnTokenShaped, resolveSpawnParent, SPAWN_TOKEN_HEADER } from "../studio/spawn";
+import {
+  isSpawnTokenShaped, resolveSpawnParent, resolveSpawnPolicy, mayDirect, SPAWN_TOKEN_HEADER,
+  type SpawnParent, type SpawnPolicy,
+} from "../studio/spawn";
 import { parseStudioId } from "../studio/ids";
 import { repoIdSegment } from "../studio/repo";
 import type { StudioStatus } from "../studio/types";
-import { JUNIOR_LABEL, TERMINAL_TASK_STATES, type BoardTask } from "./types";
+import { JUNIOR_LABEL, TERMINAL_TASK_STATES, taskAssignees, type BoardTask } from "./types";
 import { guardBoardApi, leakGuard, LeakGateError, type LeakGuardDeps } from "./leak";
 import { OPS_DENYLIST_PATH } from "../leak-gate";
 import { resolveOpsRepo } from "../ops-repo";
@@ -87,6 +90,7 @@ export function githubBoardApi(env: Env, leakDeps: Partial<LeakGuardDeps> = {}):
     branchExists: async (repo, branch) => branchExists(await token(repo), repo, branch),
     commitExists: async (repo, sha) => commitExists(await token(repo), repo, sha),
     closeIssue: async (repo, number, reason) => closeIssueApi(await token(repo), repo, number, reason),
+    listOpenPullFiles: async (repo) => listOpenPullFiles(await token(repo), repo),
   }, leakGuard({ ...realLeakDeps(env, token), ...leakDeps }));
 }
 
@@ -858,10 +862,48 @@ function upstreamFailure(err: unknown, method: string, pathname: string): Respon
 // operator surface above keeps the full vocabulary, behind Cloudflare Access.
 
 /** `/fleet/tasks`, optionally one task number, optionally one action. Same
- *  grammar as BOARD_ROUTE_RE above minus `adopt`, `assign` and `verify`: a
- *  studio does not assign work and does not verify it, so there is no route
- *  for either to be refused at. */
-const FLEET_BOARD_ROUTE_RE = /^\/fleet\/tasks(?:\/(\d+)(?:\/(envelope|state))?)?$/;
+ *  grammar as BOARD_ROUTE_RE above minus `adopt` and `verify`: a studio does
+ *  not verify work, so there is no route for it to be refused at. Issue #59
+ *  added `assign` (and POST on the bare path, create) — both only toward a
+ *  studio the caller's org-chart edges let it spawn. See directGate. */
+const FLEET_BOARD_ROUTE_RE = /^\/fleet\/tasks(?:\/(\d+)(?:\/(envelope|state|assign))?)?$/;
+
+/**
+ * Issue #59: the org chart, as a port. POST /fleet/tasks and
+ * /fleet/tasks/<n>/assign judge the assignee with /fleet/spawn's own gate
+ * (spawn.ts's mayDirect over maySpawn), so they read the SAME policy the SAME
+ * way: fleet.json from the fleet default repo, org.json at its pinned ref,
+ * both through org.ts's caches. Throwing is a 503, never an allow.
+ */
+export type PolicyFetch = () => Promise<SpawnPolicy>;
+
+/** Review round 1: the longest `why` a studio may attach to an assign. */
+const STUDIO_WHY_MAX = 500;
+
+function realPolicyFetch(env: Env): PolicyFetch {
+  const mint = repoTokenMinter(env);
+  return () => resolveSpawnPolicy(
+    async (repo, path, ref) => fetchRepoFile(await mint(repo), repo, path, ref), env.AGENT_REPO,
+  );
+}
+
+/** Issue #59: the gate, or the 503 when the org chart cannot be read. */
+async function directGate(
+  policy: PolicyFetch, parent: SpawnParent, targets: string[],
+): Promise<Response | null> {
+  let org: SpawnPolicy["org"];
+  try {
+    org = (await policy()).org;
+  } catch (err) {
+    console.error(`board: org.json unavailable for ${parent.id}`, err);
+    return new Response("org unavailable", { status: 503 });
+  }
+  for (const target of targets) {
+    const gate = mayDirect(org, parent, target);
+    if (!gate.ok) return new Response(gate.message, { status: gate.status });
+  }
+  return null;
+}
 
 /** Registry rows, as a port — the one dependency of this handler that needs a
  *  D1 binding, so tests inject rows directly. Same seam shape `api` and
@@ -901,6 +943,9 @@ export async function handleFleetBoard(
   req: Request, env: Env,
   api: BoardApi = githubBoardApi(env),
   rows: StudioRowFetch = () => listStudios(env),
+  // Issue #59: the two ports the directing verbs (create, assign) need.
+  policy: PolicyFetch = realPolicyFetch(env),
+  assignWake: AssignWakeDeps = realAssignWake(env),
 ): Promise<Response> {
   const url = new URL(req.url);
   const m = FLEET_BOARD_ROUTE_RE.exec(url.pathname);
@@ -909,7 +954,9 @@ export async function handleFleetBoard(
   const number = rawNumber === undefined ? null : Number(rawNumber);
 
   const method = req.method;
-  const allowed = action === "envelope" || action === "state" ? method === "POST" : method === "GET";
+  const allowed = action !== undefined ? method === "POST"
+    : number === null ? method === "GET" || method === "POST"
+      : method === "GET";
   if (!allowed) return new Response("method not allowed", { status: 405 });
 
   // The shape gate before any I/O, exactly as handleFleetSpawn does it: this
@@ -926,6 +973,69 @@ export async function handleFleetBoard(
   if (!repo.ok) return respond(repo);
 
   try {
+    // Issue #59: a studio files a task for a studio its org-chart edges let it
+    // spawn, and for nobody else. Every check reads the Worker-resolved
+    // `studio` (the token's owner), never a caller claim about itself.
+    if (number === null && method === "POST") {
+      // A junior grant rides only the operator's Access-gated create path
+      // (recordJuniorAuthorizationIfNeeded). Refused, not silently dropped: a
+      // maestro that asked for one must learn it did not get it.
+      if (body.junior === true) {
+        return new Response("a studio cannot grant a junior — ask the operator to file it with --junior", { status: 403 });
+      }
+      if (typeof body.assignee !== "string" || body.assignee.trim() === "") {
+        return new Response('a studio files a task only for a studio it directs — "assignee" is required', { status: 400 });
+      }
+      const refused = await directGate(policy, studio, [body.assignee.trim()]);
+      if (refused) return refused;
+      const preflight = await assignRepoPreflight(assignWake, repo.value, body.assignee);
+      if (preflight) return preflight;
+      // Review round 1, hardening 3: no idempotencyKey on this surface.
+      // createTask REPLAYS any earlier issue carrying the key's marker — one
+      // filed for a studio outside the caller's edges included — and fires
+      // the assign wake on it. A studio's create is never a replay.
+      const { idempotencyKey: _dropped, ...brief } = body;
+      return await withAssignWake(assignWake, repo.value, (onAssigned) => createTask(api, repo.value, brief, onAssigned));
+    }
+    // Issue #59: hand a task to a studio the caller directs. The task may be
+    // taken only from nobody, the caller, or another studio the caller
+    // directs — never from a studio outside its edges.
+    if (number !== null && action === "assign") {
+      if (typeof body.assignee !== "string" || body.assignee.trim() === "") {
+        return new Response('assignment needs "assignee" — the studio id this task moves to', { status: 400 });
+      }
+      const to = body.assignee.trim();
+      // Review round 1, hardening 4: `why` is quoted into the lineage comment
+      // on one `- why:` line. A newline would let a studio write extra
+      // lineage lines or headings of its own. Operator path unchanged.
+      if (body.why !== undefined && body.why !== null) {
+        if (typeof body.why !== "string" || /[\r\n]/.test(body.why) || body.why.length > STUDIO_WHY_MAX) {
+          return new Response(`"why" must be one line of at most ${STUDIO_WHY_MAX} chars`, { status: 400 });
+        }
+      }
+      const refused = await directGate(policy, studio, [to]);
+      if (refused) return refused;
+      const current = await api.getIssue(repo.value, number);
+      // Review round 1, blocker 2: assignTask resets state to `submitted`, so
+      // an assign would reopen finished work. Closed, completed and canceled
+      // are refused here; `failed` stays assignable — handing it to a fresh
+      // studio IS the retry. Studio path only: the operator's assign keeps
+      // its full reach.
+      if (!current.open || current.state === "completed" || current.state === "canceled") {
+        return new Response(
+          `task #${number} is ${current.open ? current.state : "closed"} — a studio does not reopen finished work`,
+          { status: 409 },
+        );
+      }
+      const holders = taskAssignees(current.labels).filter((o) => o !== studio.id && o !== to);
+      const taken = await directGate(policy, studio, holders);
+      if (taken) return taken;
+      // Merge with main (#81): same ghost-studio refusal the operator assign has.
+      const preflight = await assignRepoPreflight(assignWake, repo.value, to, true);
+      if (preflight) return preflight;
+      return await withAssignWake(assignWake, repo.value, (onAssigned) =>
+        assignTask(api, repo.value, number, body, { mode: "reassign", onAssigned }));
+    }
     if (number === null) {
       const query: ListTasksQuery = { assignedTo: studio.id };
       const state = url.searchParams.get("state");

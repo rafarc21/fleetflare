@@ -122,6 +122,23 @@ export interface StudioStatus {
    */
   sessionForceArmedAt?: string | null;
   /**
+   * Issue #115 (#100 follow-up): mirrors provision.ts's own
+   * `FRESH_SESSION_PENDING_KEY` — `true` while a `--fresh-session` attempt
+   * has been requested (or armed by a prior failed attempt) but not yet
+   * CONFIRMED applied, `false` once cleared (a confirmed fresh-session
+   * success, or an explicit `fleet provision <id> --no-fresh-session`
+   * cancel). Before this field existed, a stuck pending intent — one that
+   * kept forcing `freshSession: true` on EVERY later provision, flagged or
+   * not, with no way to cancel and no way to SEE it was armed — was entirely
+   * invisible anywhere an operator could look. Stamped immediately by
+   * `provisionWithStorage` on every call (see FRESH_SESSION_PENDING_KEY's own
+   * doc comment for the write-order rules), and reconfirmed every sync tick
+   * by do.ts's `mirrorBurnToRegistry`, same "stamped immediately + mirrored
+   * every tick" treatment `sessionForceArmedAt` above already gets.
+   * `undefined` only on a row written before this field existed.
+   */
+  freshSessionPending?: boolean;
+  /**
    * Fleet Spawn P3, Task 2 (R-P3-2): the studio id of the PARENT that
    * spawned this one through /fleet/spawn, or the literal "operator" for a
    * spawn the human initiated through /studio/spawn. `null` for a studio
@@ -133,6 +150,17 @@ export interface StudioStatus {
    * status forward and that route never populates the field.
    */
   spawnedBy: string | null;
+  /**
+   * Issue #59 review round 1: written on EVERY completed destroy (destroy.ts's
+   * destroyAndRecord). `true` only when the operator ran `fleet destroy
+   * --park` — a studio stopped on purpose so a coordinating studio may
+   * `fleet resume` it. A plain destroy writes `false`, and absent (a row from
+   * before this field) reads as not parked: resume refuses both.
+   */
+  parked?: boolean;
+  /** Issue #59 review round 1: when the last completed destroy stopped this
+   *  studio. Resume's cooldown counts from it. */
+  stoppedAt?: string | null;
   /**
    * Fleet Spawn P3, Task 2 (R-P3-1/R-P3-7): sha256 hex of this studio's
    * spawn-auth token (org.ts's mintSpawnToken/hashSpawnToken). The TOKEN
@@ -308,6 +336,25 @@ export interface StudioStatus {
    */
   exhaustionClearedAt?: string | null;
   /**
+   * Issue #109: the earliest readable fleet-wide reset among the accounts
+   * tried at the moment this studio's exhaustion was first recorded (reuses
+   * earliestAccountReset, already computed for exhaustedMessage at that call
+   * site) — null when no tried account had a readable reset (the common
+   * case: a select-style modal never prints one). Consumed (set back to
+   * null) the first time an auto-continue attempt fires against it, so a
+   * known reset that does not actually clear the exhaustion falls back to
+   * the same hourly cadence as an unknown one, rather than re-firing every
+   * 5-minute tick forever.
+   */
+  autoContinueAt?: string | null;
+  /**
+   * Issue #109: when an auto-continue attempt (Esc + wake) was last made,
+   * regardless of outcome — the hourly retry-cap clock for an unknown
+   * reset, and the anti-hammer clock for a known one that already fired
+   * once.
+   */
+  autoContinueLastTriedAt?: string | null;
+  /**
    * See StudioReadiness's own doc comment above for what this records.
    * `null`/absent both mean "no verdict recorded yet" — a studio whose first
    * syncSession tick has not fired, or one written by a call site that
@@ -406,6 +453,22 @@ export interface ProvisionConfig {
    * later restart/heal replays does not carry it.
    */
   freshSession?: boolean;
+  /**
+   * Issue #115: `fleet provision <id> --no-fresh-session`. This call's own
+   * explicit clear of a STUCK `FRESH_SESSION_PENDING_KEY` (provision.ts's own
+   * doc comment on that key) — the marker a failed `--fresh-session` attempt
+   * left armed, which no route or CLI verb could previously clear other than
+   * a LATER, successful, CONFIRMED fresh-session attempt. Mutually exclusive
+   * with `freshSession` above at the route layer (routes.ts refuses a request
+   * carrying both, 400, rather than silently resolving the contradiction);
+   * `provisionWithStorage` (provision.ts) also treats this as winning over
+   * any `freshSession` present on the SAME call, as the defensive floor for
+   * any other caller. Cleared UNCONDITIONALLY and FIRST, before `runProvision`
+   * ever runs — same "durability first" ordering the key's own arm side
+   * already uses. The provision then proceeds as an ordinary (non-fresh)
+   * call. Never persisted onto the stored role env, same as `freshSession`.
+   */
+  cancelFreshSession?: boolean;
   /**
    * Dynamic repo selection (P4a): the full `owner/repo` of the WORK repo to
    * clone. Absent means "whatever this studio is already bound to, else the
