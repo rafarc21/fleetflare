@@ -386,6 +386,19 @@ describe("runSpawn — MAX_STUDIOS cap (R-P3-3)", () => {
     expect((await runSpawn(deps, CAP_PARENT, { role: "release" })).status).toBe(200);
   });
 
+  // Refs #81: only `stopped` is exempt. A studio still coming up (or
+  // degraded) holds a container and must count, or a burst of spawns during
+  // provisioning would sail past the cap.
+  for (const state of ["provisioning", "degraded"] as const) {
+    it(`${state} rows count toward the cap`, async () => {
+      const deps = capDeps(0, 5);
+      deps.listStudios = async () => fillerRows(5).map((r) => ({ ...r, state }));
+      const res = await runSpawn(deps, CAP_PARENT, { role: "release" });
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain("5/5");
+    });
+  }
+
   it("the cap still bites on live rows; the 409 counts live studios", async () => {
     const deps = capDeps(0, 5);
     deps.listStudios = async () => [
