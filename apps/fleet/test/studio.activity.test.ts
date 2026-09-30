@@ -412,6 +412,27 @@ describe("extractLastVisibleLine", () => {
     expect(extractLastVisibleLine(frame)).toBe("Real message above the box.");
   });
 
+  it("an idle input box with exactly QUEUED_TEXT_ROWS (3) continuation rows is still skipped as ONE block, not scanned row by row", () => {
+    const row1 = "sk-ant-";
+    const row2 = "api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    // Confirm the split genuinely defeats redact.ts's ANTHROPIC_KEY_RE
+    // (/sk-ant-[A-Za-z0-9_-]+/) per row before relying on it below.
+    expect(/sk-ant-[A-Za-z0-9_-]+/.test(row1)).toBe(false);
+    expect(/sk-ant-[A-Za-z0-9_-]+/.test(row2)).toBe(false);
+    const frame = [
+      "Real message above the box.",
+      "",
+      RULE,
+      "❯ ",
+      row1,
+      row2,
+      "final continuation row",
+      RULE,
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(extractLastVisibleLine(frame)).toBe("Real message above the box.");
+  });
+
   // Fallback contract (documented on extractLastVisibleLine's own doc
   // comment): when no well-formed closing rule is found within
   // QUEUED_TEXT_ROWS of the opening rule — a corrupted/truncated capture —
