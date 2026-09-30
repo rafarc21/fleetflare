@@ -478,3 +478,231 @@ regressions across the full suite, including every `runAccountFailover`
 describe block and `nextClaudeAccount`/`otherRepoPrimaries (issue #103)`/
 `earliestAccountReset (issue #102 requirement 3)` block this task's own
 must-not-regress section named.
+
+## Fix-first round (maestro review of PR #135)
+
+The maestro reviewed PR #135 (this same branch) and returned FIX-FIRST: 4
+bugs, plus 2 mutation-coverage gaps, plus one minor ordering bug — all
+missed by the first code review and QA pass. Each finding below has its own
+RED test, committed before its fix (or, for the two pure coverage gaps,
+committed as a standalone test-only commit with a manual RED/GREEN mutation
+check in place of a production fix). Full commit list at the end of this
+section.
+
+### Finding 1 — hand-back kills a lead mid-turn or during a concurrent operation
+
+`failover.ts`'s hand-back guard (inside the `verdict.kind === "working"`
+branch) fired on ANY working verdict, including a repainting (mid-turn) pane
+— `verdict.repainted`, the same signal `forget` a few lines above already
+refuses to act on — and regardless of whether a fresh `OPERATION_KEY` lock
+was held by a concurrent provision/restart/recycle/failover. Hand-back's own
+`accountSwitchCmd` (`respawn-pane -k`) kills whatever the pane is running, so
+either case lost real, in-flight work.
+
+**Fix**: the guard now also requires `!verdict.repainted` and
+`!operationLockFresh(await storage.get(OPERATION_KEY), deps.now())` — the
+identical op-lock check the `heal` computation a few lines above, and the
+ordinary switch path further below, already make. A skipped tick is not an
+error: the next 300s tick tries again.
+
+**RED test**: `test/studio.account-failover.test.ts`, two new tests in the
+Stage-B borrow/hand-back describe block — a repainting (mid-turn) pane with
+the primary free (hand-back must not fire), and an idle pane with the
+primary free but a FRESH `OPERATION_KEY` held (hand-back must not fire
+either). Both asserted the studio stayed borrowed, no relaunch, no notify.
+
+### Finding 2 — clearing a forced-mapped account left the borrow flags set
+
+`clearForceMappedAccount` (`do.ts`) cleared `claudeAccount`/the three
+moved-audit fields but left `borrowedAccount`/`borrowedFromRepo` set; the
+sibling `#273 r2` flag-off stale-clear inside `launchAccountOrRefuse` had the
+identical gap. A stale `borrowedAccount` surviving either clear makes the
+NEXT hand-back check (gated on exactly that field) fire against a studio
+that is not actually borrowing anything any more, killing the fresh lead the
+clear just launched.
+
+**Fix**: both sites now also clear `borrowedAccount: null, borrowedFromRepo:
+null`; `clearForceMappedAccount`'s own no-op guard was extended to check
+both fields too, so a row that is already fully clear still writes nothing.
+
+**RED test**: `test/studio.account-launched.test.ts`, a new describe block —
+one test per site, each seeding `borrowedAccount`/`borrowedFromRepo` and
+asserting both are null afterward.
+
+### Finding 3 — the borrow gate missed free accounts positioned before the primary
+
+The first pass (`nextClaudeAccount` over `scopedAccounts`) only ever scans
+this studio's own chain (primary forward); the borrow pass only ever scans
+`reserved` names (other repos' mapped primaries). An account that is BOTH
+positioned before this studio's own primary AND not `reserved` for another
+repo — a genuinely unclaimed spare — fell into a blind spot neither pass
+ever looked at, so the old code jumped straight to borrowing another
+repo's own primary while a plain free spare sat unused.
+
+**Fix**: new `accounts.ts` helper `firstFreeAccount(accounts, reserved,
+limits, now)` — a plain, list-order, position-0-inclusive scan for the first
+account that is neither reserved nor limited. `failover.ts`'s exhaustion
+path now tries it as tier 2, between the first pass (own chain) and the
+third pass (borrow a reserved primary): `candidate ?? outOfScopeSpare ??
+borrowed`. `isBorrow` narrows to "landed via the THIRD pass specifically"
+(drives the outcome kind and `borrowedFromRepo`, which only a genuine
+reserved-primary borrow carries).
+
+This fix's own RED test requires `StudioStatus.borrowedAccount` to survive a
+tier-2 landing (not just a third-pass borrow) — so the write-condition half
+of finding 4 (below) was pulled forward into this same fix commit, ahead of
+finding 4's own anchor-widening half. Documented as a deliberate reallocation
+in the finding-3 fix commit message itself.
+
+**RED test**: `test/studio.account-failover.test.ts`, new describe block
+`"tier 2 — an unclaimed spare before this studio's own primary"` — the exact
+fixture the review comment describes: `[repo-B's primary (reserved), a free
+plain spare, this studio's own primary (limited), the rest of its own chain
+(limited)]` → the studio lands on the spare, never on repo-B's primary. A
+second test (regression pin, not itself RED): the spare ALSO limited → falls
+through to borrowing the reserved primary, unchanged. Two existing Stage-B
+fixtures ("every account... limited" / "lowest-burn-first") needed a
+one-line update (marking account 1 limited too) once the blind spot closed —
+account 1 in `four`/`five` was always an unclaimed spare those fixtures never
+accounted for.
+
+### Finding 4 — a borrowed pre-primary account widened later search and lost the borrow flag
+
+Two parts, both rooted in the SAME `#273 r2` widening
+(`Math.min(start, currentIdx)`, meant to let a stale legacy `current` from
+before the primary step FORWARD into scope):
+
+1. **Scope anchor.** Once tier 2 (finding 3) can land a studio on an account
+   positioned before its own primary, a LATER tick with that account as
+   `current` re-triggers the widening — letting the ordinary first pass wrap
+   onto ANOTHER pre-primary account too, violating #271's own "an account
+   before a repo's mapped primary is never that repo's to use". Fixed by
+   gating the widening on `existing.borrowedAccount == null`
+   (`borrowedActive`): the #273 r2 stale-legacy case never sets that field
+   (it predates Stage B), so every #273 r2 test's own anchor is provably
+   unaffected — confirmed by running them, not assumed. When the studio's
+   `current` then falls outside the now-anchored `scopedAccounts`, the first
+   pass falls back to `firstFreeAccount(scopedAccounts, ...)` instead of
+   `nextClaudeAccount`: there is no position to step FORWARD from, and
+   `nextClaudeAccount`'s own `null`-current convention would wrongly skip
+   position 0 (it treats position 0 as "already there") rather than treat it
+   as a genuine candidate.
+2. **Write condition.** Landed as part of finding 3's own fix commit, ahead
+   of this one — see that finding's write-up above for why. Kept here as the
+   second reasoning trail: generalized from `isBorrow` (true only for the
+   third, reserved-primary pass) to `deps.primary != null && next.name !==
+   deps.primary` — ANY switch landing away from the studio's own primary
+   keeps `borrowedAccount` set, cleared only by a genuine return to it.
+   `borrowedFromRepo` stays keyed on the narrower `isBorrow`: an unclaimed
+   spare (or a plain own-chain landing) was never "borrowed FROM" a repo.
+   The two conditions are deliberately INDEPENDENT — `isBorrow` still decides
+   wording (`borrowedMessage` vs `switchedMessage`: "borrowed repo B's
+   primary" reads differently from "switched to a spare"), while the STATE
+   write no longer keys on it alone. Conflating them would have meant either
+   naming a tier-2 landing a "borrow" in the notify (wrong — nobody's account
+   was actually borrowed) or losing hand-back tracking for it (the original
+   bug) — keeping them separate resolves both.
+
+**Why the anchor change is safe for #273 r2**: that fixture's own `current`
+is `existing.claudeAccount` (auto-failover OFF, so `current` actually
+resolves to `deps.primary` itself per the `current` derivation a few lines
+above — `existing.claudeAccount` is only consulted when `deps.autoFailover`
+is true) — `borrowedAccount` was never a field #273 r2 predates Stage B, so
+it is never set in that fixture, and `borrowedActive` is always false there.
+The widening formula is byte-identical to before in that branch.
+
+**Why the write-condition change is safe for the message-wording code**:
+`borrowedMessage`/`switchedMessage`'s own call sites (`isBorrow ? ... : ...`)
+were left untouched — only the `StudioStatus` write's own spread condition
+changed. The two were verified independently: the message-content assertions
+in every Stage-B test (checking `h.notices[0]` substrings) still pass
+unchanged, proving wording never drifted, while the new `borrowedAccount`
+assertions prove the state field now tracks correctly.
+
+**RED test**: `test/studio.account-failover.test.ts`, new describe block
+`"scope stays anchored while actively borrowed"` — the anchor-discriminating
+fixture `[X (free spare, before the borrowed account), CUR (borrowed,
+now limited), Y (free spare, between CUR and primary — exactly where the old
+widening bug would expose), primary (limited), a reserved other-repo
+primary]`: the OLD widened first pass would step forward from `CUR` and find
+Y first (reachable, never X); the FIXED code finds X via tier 2's own
+list-order scan (X is never in scope for the first pass either way). RED:
+old code lands on Y. A sibling regression-pin test (already green after
+finding 3's own commit, not itself RED here) reproduces the "moves to yet
+another account" ping described in the review, confirming `borrowedAccount`
+stays set via the write-condition half.
+
+### Finding 5 — mutant gaps (no production fix; test-only commits)
+
+**5a** (`recycle --account mapped skips rescue` stays green under a
+source-skip mutant): the existing Stage-A tests only grep source order. New
+test in `test/studio.session.test.ts` composes the same two primitives
+`StudioDO.recycle()` itself composes — the real `clearForceMappedAccount`,
+then the real `recycleWithSync` — and reuses the exact exec-order assertion
+the "sync before rescue-push before destroy" test already uses. Verified
+meaningful with a manual mutation (forcing `recycleWithSync`'s own `alive`
+to `false` whenever `cfg.forceMappedAccount` is set, simulating a mutant
+that skips the pre-destroy phase): this was the only failure; reverted
+before the real commit.
+
+**5b** (`hand-back ignores primary still limited` stays green): new
+ping-pong test in `test/studio.account-failover.test.ts` — stays borrowed on
+a tick where the primary is STILL limited, then fires on the very next tick
+once it frees up. Verified meaningful with a manual mutation
+(`accountIsFree(ownPrimary, ...)` → `true` in the hand-back guard): this was
+the only failure; reverted before the real commit.
+
+### Minor — a missing mapped secret refused after already wiping the record
+
+`recycle()` called `clearForceMappedAccount` unconditionally before
+`launchAccountOrRefuse` ever discovered the mapped slot's secret was
+missing. No container was ever touched (correct — the refusal still
+happened), but the row lost `claudeAccount`/the moved-audit trail/the borrow
+flags on what was, underneath, a no-op.
+
+**Fix**: new `do.ts` export `refuseUnlessMappedAccountLaunchable(env, id,
+storage, recordStudioFn)`, called from `recycle()` BEFORE
+`clearForceMappedAccount`. Resolves `launchAccount(env, repo, null)` —
+`null` forces the MAPPED slot's own resolution, bypassing both
+`FLEET_AUTO_FAILOVER`'s recorded-account preference and any recorded
+account, which is exactly what `--account mapped` needs to check — and on
+refusal writes the same `degraded`/error shape `launchAccountOrRefuse`
+already writes (so `fleet ls` shows why) plus throws the same
+`LaunchRefusedError`, without ever calling the clear.
+
+**RED test**: `test/studio.account-launched.test.ts`, new describe block —
+a missing mapped secret: `refuseUnlessMappedAccountLaunchable` throws, and
+`claudeAccount`/the moved-audit trail/the borrow flags are byte-identical to
+before the call. A second test: a launchable mapped slot is a true no-op
+(nothing written, nothing thrown). A third test (source-order pin) confirms
+`recycle()` calls it before `clearForceMappedAccount`.
+
+### Commits (in order; test before fix, per finding, pushed after each)
+
+```
+f49242d test(fleet): RED — hand-back must not fire mid-turn or under a fresh op-lock (finding 1)
+829de3b fix(fleet): hand-back skips mid-turn panes and fresh op-locks (finding 1)
+6ba9aa8 test(fleet): RED — clearForceMappedAccount/#273 r2 clear leave borrowedAccount set (finding 2)
+aafc2d2 fix(fleet): clear borrowedAccount/borrowedFromRepo alongside claudeAccount (finding 2)
+0d6b895 test(fleet): RED — an unclaimed spare before primary loses to a reserved primary (finding 3)
+3a40e51 fix(fleet): scan unclaimed spares before borrowing a reserved primary (finding 3 + finding-4 write-condition)
+1221736 test(fleet): RED — the #273 r2 widening lets the first pass wrap onto an account before primary while borrowed (finding 4)
+cfd0fa1 fix(fleet): keep the search anchored at `start` while actively borrowed (finding 4 anchor)
+7917d3a test(fleet): ping-pong pin — hand-back genuinely gates on the primary's freeness (finding 5b, test-only)
+21c56f5 test(fleet): behavioral pin — recycle --account mapped never skips the rescue phase (finding 5a, test-only)
+c84afb8 test(fleet): RED — a missing mapped secret refuses AFTER wiping the record (Minor finding)
+b84636f fix(fleet): refuse before clearing when the mapped slot's secret is missing (Minor finding)
+```
+
+### Verification
+
+Per-finding: each RED test run in isolation against its own target test file
+before its fix landed (confirmed failing for the stated reason, never a
+typo/syntax error), then GREEN after. Full per-file re-runs after every
+fix (`test/studio.account-failover.test.ts`, `test/studio.account-launched.test.ts`,
+`test/studio.session.test.ts`) confirmed zero regressions throughout,
+including the golden #103/#117 test, every `#271`/`#273 r2` test, and every
+pre-existing Stage B borrow/hand-back test. Final full-file counts and the
+three gate commands' results are in the dispatch's own report back to the
+lead (not duplicated here to avoid the doc drifting from the actual
+terminal output).
