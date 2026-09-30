@@ -6133,7 +6133,7 @@ export class StudioDO extends Sandbox<Env> {
    * (see this file's own header for why destroy.ts is where the board task's
    * label/state stay untouched by construction, not by a special case here).
    */
-  async destroyStudio(force: boolean, discardUnsynced = false): Promise<DestroyOutcome> {
+  async destroyStudio(force: boolean, discardUnsynced = false, park = false): Promise<DestroyOutcome> {
     const workRepoSlug = await this.workRepoSlug(null);
     const repo = parseStudioId(this.selfId())?.repo ?? this.selfId();
     const { resolveMemoryRepo, commitFile } = this.memoryDeps();
@@ -6173,6 +6173,7 @@ export class StudioDO extends Sandbox<Env> {
           lastSyncedAt: () => this.lastSyncedAt(),
         },
         this.ctx.storage,
+        park,
       );
     } finally {
       // Never below 0 — defensive only; a well-formed increment/decrement

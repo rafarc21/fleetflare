@@ -55,9 +55,9 @@ describe("container/studio-fleet — source assertions", () => {
     );
   });
 
-  it("only \"spawn\", \"task\" and \"memory\" are recognised commands; anything else is a usage error naming what it expected", () => {
-    expect(src()).toContain('if (argv[0] !== "spawn") {');
-    expect(src()).toContain('expected "spawn", "task" or "memory"');
+  it("only \"spawn\", \"resume\", \"task\" and \"memory\" are recognised commands; anything else is a usage error naming what it expected", () => {
+    expect(src()).toContain('if (argv[0] !== "spawn" && argv[0] !== "resume") {');
+    expect(src()).toContain('expected "spawn", "resume", "task" or "memory"');
     // P5 §9: the Release Studio runs the compaction pass from inside its own
     // container at sprint close, so the verb has to exist on THIS binary.
     expect(src()).toContain('if (argv[0] === "memory") return parseMemoryArgs(argv.slice(1));');
@@ -68,7 +68,7 @@ describe("container/studio-fleet — source assertions", () => {
   });
 
   it("spawn requires a role argument", () => {
-    expect(src()).toContain('if (!role) return { kind: "usage-error", message: "spawn: missing <role>" };');
+    expect(src()).toContain('if (!role) return { kind: "usage-error", message: `${verb}: missing <role>` };');
   });
 
   it("a usage error exits 1", () => {
@@ -99,7 +99,9 @@ describe("container/studio-fleet — source assertions", () => {
     expect(src()).toContain('new URL("/fleet/spawn", env.workerUrl).toString()');
     expect(src()).toContain('method: "POST",');
     expect(src()).toContain("headers: { [SPAWN_TOKEN_HEADER]: env.token,");
-    expect(src()).toContain("body: JSON.stringify({ role }),");
+    // Issue #59: `extra` is empty for a bare `spawn <role>`, so the body stays
+    // byte-identical to the pre-#59 `{role}` (test/bun/studio-fleet-directs).
+    expect(src()).toContain("body: JSON.stringify({ role, ...extra }),");
   });
 
   it("a non-ok response prints the server's own error body and exits 1 (never swallowed)", () => {
@@ -116,7 +118,7 @@ describe("container/studio-fleet — source assertions", () => {
   });
 
   it("success prints the child's id and state, not the raw response verbatim", () => {
-    expect(src()).toContain('return `spawned ${status.id ?? "?"} (${status.state ?? "?"})`;');
+    expect(src()).toContain('return `${cmd.kind === "resume" ? "resumed" : "spawned"} ${status.id ?? "?"} (${status.state ?? "?"})`;');
   });
 
   it("never logs the spawn token itself under any code path (grep for the literal env var name, not just usage)", () => {
@@ -141,15 +143,17 @@ describe("container/studio-fleet — the board verbs (P4a-2)", () => {
   it("task ls / show <n> / report <n> / state <n> <to> are the four, and <n> must be numeric", () => {
     expect(src()).toContain('if (sub === "ls") return { kind: "task-ls" };');
     expect(src()).toContain('if (sub !== "show" && sub !== "report" && sub !== "state") {');
-    expect(src()).toContain("expected ls, show, report or state");
+    expect(src()).toContain("expected ls, show, report, state, new or assign");
     expect(src()).toContain("missing or non-numeric <n>");
   });
 
-  it("there is still NO create verb — a studio does not open tasks", () => {
-    // Not a convention this script keeps: the Worker serves no such route to
-    // a spawn token (src/board/routes.ts's FLEET_BOARD_ROUTE_RE). Pinned here
-    // so adding one to this CLI cannot pass unnoticed.
-    expect(src()).not.toContain('"task-new"');
+  it("issue #59: task new / assign exist and hold no policy — the Worker gates both on org-chart edges", () => {
+    // The CLI only shapes the ask. Every refusal (non-edge, other repo, self,
+    // junior, unassigned) is the Worker's: test/board.fleet-directs.test.ts.
+    expect(src()).toContain('if (sub === "new") {');
+    expect(src()).toContain('if (sub === "assign") {');
+    expect(src()).toContain("buildTaskRequest(env, `/${cmd.number}/assign`, body)");
+    expect(src()).not.toContain("maySpawn");
   });
 
   // Board issue #41, half two: the verb that closes the loop. A task a lead
