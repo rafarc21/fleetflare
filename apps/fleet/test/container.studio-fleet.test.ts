@@ -225,3 +225,74 @@ describe("container/studio-fleet — the board verbs (P4a-2)", () => {
     expect(src()).toContain('return "(no tasks assigned to this studio)";');
   });
 });
+
+// --- Board issue #105: pre-gate ---------------------------------------------
+//
+// The behavioral coverage for these functions (real fleet.json fixtures,
+// a real subprocess in runPreflight, a real timeout kill, and the full CLI
+// wired end to end against a fake Worker) lives in
+// test/bun/studio-fleet-pregate.test.ts and
+// test/bun/studio-fleet-report-cli.test.ts — this file cannot execute
+// container/studio-fleet at all (vitest-pool-workers runs inside workerd,
+// which cannot spawn a real bun subprocess; see this file's own header).
+// What is pinned here is the CONTRACT: the exact identifiers and wiring a
+// future edit must not silently weaken.
+
+describe("container/studio-fleet — pre-gate (board issue #105)", () => {
+  it("has its own tiny fleet.json preflight parse, duplicated from blueprint.ts's FleetConfig rather than imported", () => {
+    expect(src()).toContain("export function parseFleetPreflight(json: string): string | null {");
+    // Same "own literal, never import the Worker's src/ tree" convention
+    // SPAWN_TOKEN_HEADER/LEAD_TASK_STATES already keep — see this file's
+    // own header.
+    expect(src()).not.toMatch(/from ["']\.\.\/src/);
+  });
+
+  it("resolves the repo root from STUDIO_ID, the SAME derivation studio-bringup.sh's claude-launch step uses — never the calling shell's cwd", () => {
+    expect(src()).toContain("export function resolveRepoRoot(env: Record<string, string | undefined>): string | null {");
+    expect(src()).toContain('const base = env.FLEET_REPO_ROOT_BASE ?? "/workspace";');
+    expect(src()).toContain('`${base}/${studioId.split("--")[0]}`');
+  });
+
+  it("runs the declared command as a real subprocess with a 30-second timeout and a kill on overrun", () => {
+    expect(src()).toContain("const PREFLIGHT_TIMEOUT_MS = 30_000;");
+    expect(src()).toContain("export function runPreflight(cmd: string, cwd: string, timeoutMs: number = PREFLIGHT_TIMEOUT_MS): PreflightResult {");
+    expect(src()).toContain('cmd: ["sh", "-c", cmd],');
+    expect(src()).toContain("killSignal: \"SIGKILL\"");
+    // A timed-out process (Bun reports exitCode null) reads as exit 124 — a
+    // FAILED gate, never a silent pass and never a hang.
+    expect(src()).toContain("proc.exitCode ?? 124");
+  });
+
+  it('the refusal rule is scoped to EXACTLY intent "result" + status "ok" — every other combination still runs and attaches the pre-gate but is never refused', () => {
+    expect(src()).toContain(
+      "export function evaluatePreGate(\n  intent: unknown, status: unknown, preflight: PreflightResult | null,\n): { refuse: boolean; reason?: string } {",
+    );
+    expect(src()).toContain("if (preflight === null || preflight.exit === 0) return { refuse: false };");
+    expect(src()).toContain('if (intent !== "result" || status !== "ok") return { refuse: false };');
+  });
+
+  it("task report: no preflight declared is a COMPLETE no-op — the raw stdin body is posted byte for byte, never parsed", () => {
+    expect(src()).toContain("const preflightCmd = loadPreflightCommand(repoRoot);");
+    expect(src()).toContain("let finalBody = body;");
+    expect(src()).toContain("if (preflightCmd !== null) {");
+  });
+
+  it("task report: a refused pre-gate prints the reason to stderr and exits 1 WITHOUT ever building the POST", () => {
+    expect(src()).toMatch(/if \(gate\.refuse\) \{\s*console\.error\(`studio-fleet: \$\{gate\.reason\}`\);\s*process\.exit\(1\);/);
+    // The refusal check runs strictly before buildTaskRequest is called for
+    // the envelope path — a refused report must never reach the fetch at all.
+    const refuseIdx = src().indexOf("if (gate.refuse) {");
+    const buildIdx = src().indexOf("buildTaskRequest(env, `/${cmd.number}/envelope`, finalBody)");
+    expect(refuseIdx).toBeGreaterThan(-1);
+    expect(buildIdx).toBeGreaterThan(refuseIdx);
+  });
+
+  it("a posted envelope carries the pre-gate result under `pre_gate` when one was declared and run", () => {
+    expect(src()).toContain("envelope.pre_gate = preflight;");
+  });
+
+  it("the help text documents the feature and its no-fleet.json no-op", () => {
+    expect(src()).toContain("Board issue #105 (pre-gate)");
+    expect(src()).toContain('this is a complete no-op');
+  });
+});
