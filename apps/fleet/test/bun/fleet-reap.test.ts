@@ -14,7 +14,7 @@ import {
 import { REAL_WEBSTUDIO_PANE } from "../fixtures/rate-limit-panes";
 import { WORKING_GLYPH_DOT_FOOTER_ESC_PANE } from "../fixtures/activity-panes";
 import type { StudioStatus } from "../../src/studio/types";
-import type { Activity } from "../../src/studio/activity";
+import { type Activity, nextActivity, readActivityFrame } from "../../src/studio/activity";
 import type { BoardTask, TaskState } from "../../src/board/types";
 
 const NOW = new Date("2026-09-29T12:00:00.000Z");
@@ -311,6 +311,19 @@ describe("reap — open task: stall alarm, not reap", () => {
     await runReap(flags(), later.deps);
     expect(later.lines.some((l) => l.startsWith(`STALL ${PILOT}`))).toBe(true);
   });
+
+  // #86: a lead waiting on its own background shell/monitor is not idle.
+  // The mirror is built the way the DO builds it: prev idle 12m, this frame.
+  for (const [name, pane] of [["shells", IDLE_WITH_SHELLS], ["monitors", IDLE_WITH_UNKNOWN_COUNTER], ["background task", IDLE_WITH_BG_TASK]] as const) {
+    test(`idle frame with live ${name} + open task -> no STALL line, no idle alarm`, async () => {
+      const mirrored = nextActivity(activity("idle", 12 * MIN, 30_000), readActivityFrame(pane), null, null, NOW);
+      const studios = [studio(PILOT, mirrored)];
+      const f = fake({ studios, board: [task(7, PILOT)] });
+      await runReap(flags(), f.deps);
+      expect(f.lines.some((l) => l.startsWith("STALL"))).toBe(false);
+      expect(formatIdleAlarm(studios, NOW)).toBeNull();
+    });
+  }
 
   test("the STALL alarm runs in dry-run too", async () => {
     const f = fake({ studios: [studio(PILOT, activity("idle", 12 * MIN))], board: [task(7, PILOT)] });

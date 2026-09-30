@@ -166,8 +166,9 @@ describe("readActivityFrame — Fix 6: queued-message hint and clipboard chrome 
 describe("readActivityFrame — Fix 6: panel glyph '⏺ main' (claude 2.1.282) does not corrupt the parse", () => {
   it("PANEL_GLYPH_2_1_282_PANE (REAL_WEBSTUDIO_PANE with '● main' -> '⏺ main') reads the SAME verdict as the unmutated pane", () => {
     expect(PANEL_GLYPH_2_1_282_PANE).not.toBe(REAL_WEBSTUDIO_PANE);
-    expect(readActivityFrame(REAL_WEBSTUDIO_PANE)).toEqual({ kind: "idle" });
-    expect(readActivityFrame(PANEL_GLYPH_2_1_282_PANE)).toEqual({ kind: "idle" });
+    // #86: its "7 shells" chrome makes both waiting-members (was idle).
+    expect(readActivityFrame(REAL_WEBSTUDIO_PANE)).toEqual({ kind: "waiting-members" });
+    expect(readActivityFrame(PANEL_GLYPH_2_1_282_PANE)).toEqual({ kind: "waiting-members" });
   });
 });
 
@@ -207,6 +208,42 @@ describe("readActivityFrame — waiting-members", () => {
     // a block followed by a non-turn ✻ line (waiting on agents).
     const pane = RELAXED_TAIL_NEGATIVES["a block followed by a non-turn ✻ line (waiting on agents)"];
     expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members" });
+  });
+});
+
+describe("readActivityFrame — #86: a live background shell/monitor/task is waiting, not idle", () => {
+  // REAL_WEBSTUDIO_PANE, member row and typed text removed: turn ended, empty
+  // input box. Its own "7 shells" chrome is the background counter.
+  const base = REAL_WEBSTUDIO_PANE.replace(/\n[^\n]*◯ frontend-developer[^\n]*/, "")
+    .replace("❯\u00a0check on task 2 progress", "❯\u00a0");
+  const clean = base.replace(" · 7 shells still running", "").replace(" · 7 shells", "");
+
+  it("the clean pane (no counter anywhere) still reads idle", () => {
+    expect(readActivityFrame(clean)).toEqual({ kind: "idle" });
+  });
+
+  it("footer '7 shells' + turn-ended '7 shells still running' reads waiting-members", () => {
+    expect(readActivityFrame(base)).toEqual({ kind: "waiting-members" });
+  });
+
+  it("footer '2 monitors' alone reads waiting-members", () => {
+    const pane = clean.replace("⏵⏵ bypass permissions on ·", "⏵⏵ bypass permissions on · 2 monitors ·");
+    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members" });
+  });
+
+  it("footer '1 shell' alone reads waiting-members", () => {
+    const pane = clean.replace("⏵⏵ bypass permissions on ·", "⏵⏵ bypass permissions on · 1 shell ·");
+    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members" });
+  });
+
+  it("turn-ended row '1 background task still running' alone reads waiting-members", () => {
+    const pane = clean.replace("✻ Cooked for 36m 35s", "✻ Cooked for 36m 35s · 1 background task still running");
+    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members" });
+  });
+
+  it("a counter quoted in transcript prose above the box does not count", () => {
+    const pane = clean.replace("✻ Cooked for 36m 35s", "  3 shells still running was the old footer\n\n✻ Cooked for 36m 35s");
+    expect(readActivityFrame(pane)).toEqual({ kind: "idle" });
   });
 });
 

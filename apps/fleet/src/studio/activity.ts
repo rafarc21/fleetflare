@@ -67,6 +67,20 @@ const WORKING_PHRASE = /esc to interrupt/;
  *  still open" — open in the OTHER direction, waiting on someone else). */
 const WAITING_MEMBERS_LINE = /^\s*✻ Waiting for \d+ background agents? to finish\s*$/;
 
+/** Issue #86 — background work the lead left running: a footer segment
+ *  counting shells/monitors/background tasks (`· 7 shells ·`, `· 2 monitors ·`)
+ *  or a turn-ended row saying so (`✻ Cooked for 36m 35s · 7 shells still
+ *  running`). The lead waits on it: the same "waiting on someone else" the
+ *  waiting-members state already means, so an idle alarm never fires on it.
+ *  Matches reap's live-read counter rule (cli/reap.ts chromeRefusal). */
+const BACKGROUND_COUNTER = /^\d+ (?:shells?|monitors?|background (?:tasks?|jobs?)|tasks?)$/i;
+const STILL_RUNNING = / · .*\bstill running\s*$/;
+
+function hasBackgroundWork(footer: string, statusLine: string | null): boolean {
+  if (footer.split("·").some((seg) => BACKGROUND_COUNTER.test(seg.trim()))) return true;
+  return statusLine !== null && STILL_RUNNING.test(statusLine);
+}
+
 function lastStatusLineIndex(lines: string[]): number {
   for (let i = lines.length - 1; i >= 0; i--) {
     if (isCandidateStatusLine(lines[i])) return i;
@@ -163,6 +177,9 @@ export function readActivityFrame(frame: string): FrameVerdict {
   const afterStatus = head.slice(statusIdx + 1);
   const turnEndedOrAbsent = statusIdx < 0 || TURN_ENDED_LINE.test(head[statusIdx]);
   if (turnEndedOrAbsent && hasIdleInputBox(afterStatus)) {
+    if (hasBackgroundWork(lines[footerIdx], statusIdx >= 0 ? head[statusIdx] : null)) {
+      return { kind: "waiting-members" };
+    }
     return { kind: "idle" };
   }
   return { kind: "unknown", reason: "unrecognised frame" };
