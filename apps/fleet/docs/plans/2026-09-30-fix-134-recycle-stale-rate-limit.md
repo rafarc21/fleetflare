@@ -77,3 +77,40 @@ Add to `test/studio.account-launched.test.ts`, alongside the existing
 Run with `vitest run test/studio.account-launched.test.ts` (this repo's
 `test` script is `vitest run`, under `@cloudflare/vitest-pool-workers`) —
 RED before the fix, GREEN after. No full suite, no build, run alone.
+
+## Review round 1 addendum: the entry-time call must not commit
+
+A fresh-context code review caught a regression in the opposite direction:
+`recycle()` calls `launchAccountOrRefuse` TWICE — once at its own entry,
+before `recycleWithSync` has even probed the container (let alone destroyed
+it), and again, fresh, immediately before the post-destroy container
+actually starts (inside the `awaitReady` closure, issue #328). Unconditional
+commits meant the ENTRY call's clear (`claudeAccount`, `rateLimited`) could
+land in storage even when `recycleWithSync` then refuses outright — a failed
+probe, or a confirmed rescue-push failure, without `--discard-unsynced` —
+so `destroy()` never runs and the studio never moves anywhere. That left a
+studio that stayed exactly where it was with a row falsely claiming it was
+no longer rate-limited / no longer on its old account — the mirror image of
+#134's own original bug.
+
+Fix: `launchAccountOrRefuse` grew a 5th, optional `commitOkClears = true`
+parameter. `recycle()`'s entry call passes `false` — it still does its
+existing job (refuse early on an unlaunchable account, with that refusal's
+row write unaffected by the flag) without committing either clear. Every
+other call site (provision, restart, and recycle's own second, post-destroy
+call) keeps the default `true`: none of those has a refuse-after-resolve
+window between the call and the account actually being used, since
+destroy() has either not happened at all (provision/restart start fresh) or
+has already unconditionally happened (recycle's second call).
+
+New tests, same file: a `commitOkClears=false` unit-level describe block
+(resolves the account, writes nothing); a primitive-level composition
+mirroring recycle()'s actual two-call sequence, once with a simulated
+refusal in between (rateLimited survives) and once with a simulated
+successful destroy+relaunch (rateLimited is dropped by the second call); and
+a source-pinning describe block (same convention as the existing "#328"
+blocks — the DO cannot be constructed under vitest-pool-workers) asserting
+the entry call's literal text carries `, false)` and the closure's call does
+not. Also updated the stale comment above the closure (previously claimed
+the entry call's clear was "already performed... if it was going to" — no
+longer true now that it never commits).

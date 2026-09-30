@@ -3268,17 +3268,40 @@ export class LaunchRefusedError extends Error {
  * container. A repo mapped to an account whose secret is not set REFUSES:
  * the row goes `degraded` with the reason (the operator reads it in `fleet
  * ls`), then this throws — never a silent launch on another account, which would
- * starve the other repo. A launchable studio writes nothing.
+ * starve the other repo. A launchable studio writes nothing beyond clearing
+ * what's stale on the row (see `commitOkClears` below).
+ *
+ * `commitOkClears` (issue #134 review round 1): recycle() calls this TWICE —
+ * once at its own entry, BEFORE recycleWithSync has even probed the
+ * container, let alone destroyed it (recycleWithSync can still refuse
+ * outright — a failed probe or a confirmed rescue-push failure without
+ * `--discard-unsynced` — and neither destroy() nor a relaunch ever happens);
+ * and again, fresh, immediately before the post-destroy container actually
+ * starts (the awaitReady closure below, in recycle()). A resolved-`ok`
+ * launch's clears (`claudeAccount`, `rateLimited`) describe what is about to
+ * become true ONCE the studio actually moves onto the newly-resolved
+ * account — at the ENTRY call, that has not happened yet, and might never
+ * happen this recycle at all. Committing them there would leave a studio
+ * that never destroyed/relaunched (recycleWithSync refused) with a row that
+ * falsely claims it is no longer rate-limited / no longer on the old
+ * account, even though nothing moved. Only the SECOND call's clears may
+ * land: it only ever runs once `destroy()` has already unconditionally
+ * happened, so by then the studio truly is about to run on the account this
+ * call resolves to. `commitOkClears` defaults to `true` (every other call
+ * site — provision, restart — is a single call with no such refuse-after-
+ * resolve window); recycle()'s entry call is the one place that passes
+ * `false`.
  */
 export async function launchAccountOrRefuse(
   env: Env, storage: StudioStorage, id: string, recordStudioFn: (status: StudioStatus) => Promise<void>,
+  commitOkClears = true,
 ): Promise<Extract<LaunchAccount, { ok: true }>> {
   const existing = (await storage.get(STATUS_KEY)) ?? null;
   const launch = launchAccount(env, parseStudioId(id)?.repo ?? null, existing?.claudeAccount ?? null);
   if (launch.ok) {
     // #273 r2: flag off, an earlier failover's recorded account is stale — this
     // launch is on the mapped one, so the row stops naming the old one.
-    const clearClaudeAccount = !autoFailoverOn(env) && existing?.claudeAccount != null;
+    const clearClaudeAccount = commitOkClears && !autoFailoverOn(env) && existing?.claudeAccount != null;
     // #134: a `rateLimited` sighting describes whatever account the studio
     // was launched on when it was recorded — once this launch resolves to a
     // DIFFERENT account than `existing.launchedAccount`, that sighting no
@@ -3288,7 +3311,7 @@ export async function launchAccountOrRefuse(
     // read here: the existing 30s/300s live-pane recovery paths will
     // re-observe and re-set `rateLimited` on their own next tick if the new
     // account turns out to also be limited.
-    const clearRateLimited = existing?.rateLimited != null
+    const clearRateLimited = commitOkClears && existing?.rateLimited != null
       && typeof existing?.launchedAccount === "string" && existing.launchedAccount !== launch.name;
     if (clearClaudeAccount || clearRateLimited) {
       const cleared: StudioStatus = {
@@ -6153,7 +6176,19 @@ export class StudioDO extends Sandbox<Env> {
     // write with a stale name the moment onStart's recordLaunchedAccount ran
     // — see the awaitReady closure's own comment for the fresh re-derivation
     // that replaces it.
-    await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn());
+    //
+    // Issue #134 review round 1: `false` — this entry call must not commit
+    // an `ok`-branch clear (`claudeAccount`/`rateLimited`). recycleWithSync
+    // below can still refuse outright (a failed probe, or a confirmed
+    // rescue-push failure, without `--discard-unsynced`) — destroy() is
+    // never called and the studio never moves anywhere. Committing a clear
+    // here, before that refusal is even possible to rule out, would leave a
+    // studio that stayed exactly where it was with a row that falsely
+    // claims it isn't rate-limited / isn't on the old account any more. See
+    // launchAccountOrRefuse's own doc comment for the full reasoning; the
+    // second, post-destroy call below (inside the awaitReady closure) is the
+    // only one that commits either clear.
+    await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);
     const { resolveMemoryRepo, commitFile } = this.memoryDeps();
     // Issue #123: an explicit start — the post-destroy sbAwaitReady runs
     // outside provisionCore's own allowance. Issue #152: ONE ctx for this
@@ -6223,20 +6258,29 @@ export class StudioDO extends Sandbox<Env> {
       // this fix.
       //
       // Calling launchAccountOrRefuse twice in one recycle is safe: on a
-      // launchable account it is a pure re-read (its only write path — an
-      // auto-failover-off recorded `claudeAccount` clear — is already
-      // idempotent, since the entry call above already performed it if it
-      // was going to); on a refusal, this refuses exactly where
-      // provisionUngated/restartUngated already refuse, before the new,
-      // unlaunchable account's container ever starts, and recycleWithSync's
-      // own surrounding try/catch (see its doc comment on that catch)
-      // already treats every awaitReady failure identically — a launch
-      // refusal reaching it here is not a new case to handle. This reasoning
-      // is an invariant of TODAY's launchAccount/failover behavior (the two
-      // calls cannot currently disagree on refuse-vs-succeed) — not a
-      // structural guarantee. A future change to either launchAccount or the
-      // failover write path should re-check this paragraph before assuming
-      // the two calls can never diverge.
+      // launchable account, the entry call above (issue #134 review round 1)
+      // passes `commitOkClears=false` specifically BECAUSE recycleWithSync
+      // can still refuse between the two calls (a failed probe, or a
+      // confirmed rescue-push failure, without `--discard-unsynced`) —
+      // destroy() never runs and the studio never moves, so an `ok`-branch
+      // clear (`claudeAccount`, `rateLimited`) committed at the entry call
+      // would lie about a studio that stayed exactly where it was. THIS
+      // call, here, is the only one that may actually commit either clear —
+      // it only runs once destroy() has already unconditionally happened
+      // (this closure is recycleWithSync's own post-destroy container-start
+      // step), so by the time it resolves the studio genuinely is about to
+      // run on the account it names. On a refusal, this refuses exactly
+      // where provisionUngated/restartUngated already refuse, before the
+      // new, unlaunchable account's container ever starts, and
+      // recycleWithSync's own surrounding try/catch (see its doc comment on
+      // that catch) already treats every awaitReady failure identically — a
+      // launch refusal reaching it here is not a new case to handle. The
+      // "entry and this call cannot currently disagree on refuse-vs-succeed"
+      // reasoning from earlier review rounds is an invariant of TODAY's
+      // launchAccount/failover behavior, not a structural guarantee. A
+      // future change to either launchAccount or the failover write path
+      // should re-check this paragraph before assuming the two calls can
+      // never diverge.
       //
       // Scope, honestly: this (rounds 2+3, together) closes recycle's OWN
       // extra exposure — the pre-destroy phase above, genuinely uncovered by
