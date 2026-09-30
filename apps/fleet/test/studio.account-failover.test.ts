@@ -1539,6 +1539,39 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
     expect(h.notices).toHaveLength(0);
   });
 
+  // -------------------------------------------------------------------
+  // Review round 2 (maestro review of PR #135), finding 5b — mutation gap:
+  // the existing hand-back tests either seed the primary as already free
+  // (fires) or never seed borrowedAccount at all (nothing to fire). Neither
+  // proves hand-back is actually GATED on the primary's freeness, as opposed
+  // to firing unconditionally whenever borrowedAccount happens to be set. A
+  // genuine ping-pong — stays borrowed while STILL limited, returns the
+  // moment it frees up — is that proof.
+  // -------------------------------------------------------------------
+  it("ping-pong: hand-back stays borrowed while the primary is STILL limited, and fires the moment it frees up", async () => {
+    const h = harness({
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
+        borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
+      }),
+      // own primary still fleet-wide limited.
+      accountLimits: { CLAUDE_CODE_OAUTH_TOKEN_2: LIVE_UNTIL },
+    });
+
+    const stillLimited = await run(h);
+    expect(stillLimited).toEqual({ kind: "no-modal", reason: expect.any(String) });
+    expect(h.relaunches).toBe(0);
+    expect((await h.storage.get(STATUS_KEY))?.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+
+    // Own primary frees up.
+    h.accountLimits.delete("CLAUDE_CODE_OAUTH_TOKEN_2");
+    const freedNow = await run(h);
+    expect(freedNow).toEqual({ kind: "returned", from: "CLAUDE_CODE_OAUTH_TOKEN_4", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    expect(h.relaunches).toBe(1);
+    expect((await h.storage.get(STATUS_KEY))?.borrowedAccount).toBeNull();
+  });
+
   it("lowest-burn-first: two free other-repo primaries, the lower-burn one is chosen, not list order", async () => {
     const five: ClaudeAccount[] = [
       ...four,
