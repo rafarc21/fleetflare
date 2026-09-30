@@ -997,7 +997,7 @@ async function cmdSpawn(creds: Credentials, role: string, newInstance: boolean):
  * below); routes.ts's own `req.json().catch(() => ({}))` reads `{}` and an
  * absent body identically, so neither shape means "blueprintRef override".
  */
-async function cmdProvision(creds: Credentials, id: string, freshSession = false): Promise<void> {
+async function cmdProvision(creds: Credentials, id: string, freshSession = false, cancelFreshSession = false): Promise<void> {
   // Dynamic repo selection (P4a): unlike spawn, this command is ADDRESSED by
   // a studio id, and that id already names a repo segment. The detected repo
   // is sent only when the two agree — re-provisioning `websites--pilot`
@@ -1014,7 +1014,15 @@ async function cmdProvision(creds: Credentials, id: string, freshSession = false
   const detectedSegment = detected.slug === null ? null : repoIdSegment(detected.slug.split("/")[1]);
   const matchesId = detectedSegment !== null && detectedSegment === parseStudioId(id)?.repo;
   if (matchesId) reportRepo("fleet provision", detected);
-  const res = await fetch(studioUrl(creds, id, freshSession ? "/provision?fresh-session=true" : "/provision"), {
+  // Issue #115: same query-string convention `?fresh-session=true` already
+  // uses. cli-args.ts's own parsing already refuses both flags at once, so
+  // at most one of these is ever true here.
+  const provisionPath = freshSession
+    ? "/provision?fresh-session=true"
+    : cancelFreshSession
+      ? "/provision?no-fresh-session=true"
+      : "/provision";
+  const res = await fetch(studioUrl(creds, id, provisionPath), {
     method: "POST",
     headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
     body: JSON.stringify(matchesId ? { repo: detected.slug } : {}),
@@ -2500,7 +2508,7 @@ async function main(): Promise<void> {
     case "spawn":
       return cmdSpawn(creds, parsed.role, parsed.newInstance);
     case "provision":
-      return cmdProvision(creds, parsed.id, parsed.freshSession);
+      return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession);
     case "recycle":
       return cmdRecycle(creds, parsed.id, parsed.discardUnsynced, parsed.freshSession);
     case "destroy":

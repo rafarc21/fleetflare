@@ -94,7 +94,7 @@ export { RECYCLE_REFUSED_PREFIX };
 // line rather than three more names on the bulk `./provision` import above —
 // that statement is being rewritten by two other in-flight branches at the
 // same time, and a separate line cannot conflict with either.
-import { bringupLogTailCmd, BRINGUP_LOG_PATH, BRINGUP_LOG_TAIL_MAX_CHARS } from "./provision";
+import { bringupLogTailCmd, BRINGUP_LOG_PATH, BRINGUP_LOG_TAIL_MAX_CHARS, FRESH_SESSION_PENDING_KEY } from "./provision";
 // Issue #330: the house-rules overlay reads the ops repo #346 resolves.
 import { resolveOpsRepo } from "../ops-repo";
 // Task 7: FLEET_JUNIOR/JUNIOR_REPOS -> whether this work repo gets the
@@ -2146,6 +2146,15 @@ async function withBringupLogTail(syncDeps: SessionSyncDeps, reason: string): Pr
  * self-healing regardless of which of `syncSessionTick`'s several call sites
  * (restartWithSync/recycleWithSync/destroyWithSync/this cycle) most recently
  * consumed it, with no second parameter needed to say so.
+ *
+ * Issue #115: also mirrors `StudioStatus.freshSessionPending` from
+ * `FRESH_SESSION_PENDING_KEY`'s (provision.ts) own CURRENT storage presence —
+ * same "reconfirmed every tick, self-healing regardless of which call site
+ * last touched the key" treatment `sessionForceArmedAt` gets just above.
+ * `provisionWithStorage` already stamps this on every provision call; this is
+ * what keeps the row honest BETWEEN provisions too (a --fresh-session
+ * confirmed only later on a PRIOR attempt's own retry, or a `--no-fresh-
+ * session` cancel issued between ticks).
  */
 export async function mirrorBurnToRegistry(
   storage: StudioStorage & SessionSyncStorage,
@@ -2162,6 +2171,8 @@ export async function mirrorBurnToRegistry(
   // is never folded into `sessionGuard` above.
   const burnPersistError = await storage.get(BURN_PERSIST_ERROR_KEY);
   const forceArmed = (await storage.get(SESSION_FORCE_KEY)) === true;
+  // Issue #115: same current-presence mirror as forceArmed just above.
+  const freshSessionPending = (await storage.get(FRESH_SESSION_PENDING_KEY)) === true;
   // PR #46 review: unshipped aside dirs are on the row, like the guard.
   const asideShip = await storage.get(ASIDE_SHIP_KEY);
   const updated: StudioStatus = {
@@ -2171,6 +2182,7 @@ export async function mirrorBurnToRegistry(
     ...(sessionGuard === undefined ? {} : { sessionGuard }),
     ...(burnPersistError === undefined ? {} : { burnPersistError }),
     sessionForceArmedAt: forceArmed ? (status.sessionForceArmedAt ?? null) : null,
+    freshSessionPending,
   };
   await storage.put(STATUS_KEY, updated);
   await recordStudioFn(updated);

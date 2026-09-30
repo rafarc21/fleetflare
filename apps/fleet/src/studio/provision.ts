@@ -3545,14 +3545,34 @@ export async function provisionWithStorage(
   // lock and clears it in its own `finally` below.
   const alreadyLocked = operationLockFresh(await storage.get(OPERATION_KEY), new Date(deps.now()));
   if (!alreadyLocked) await storage.put(OPERATION_KEY, { op: "provision", since: deps.now() });
+  // Issue #115: `cfg.cancelFreshSession` (`fleet provision <id>
+  // --no-fresh-session`) explicitly clears a stuck FRESH_SESSION_PENDING_KEY
+  // — cleared UNCONDITIONALLY (whether or not a pending intent was actually
+  // armed, so cancelling an already-clear marker is a safe no-op) and FIRST,
+  // before runProvision ever runs — same "durability first" ordering the
+  // key's own arm side (just below) already uses. See ProvisionConfig's own
+  // doc comment on this field.
+  if (cfg.cancelFreshSession === true) await storage.put(FRESH_SESSION_PENDING_KEY, false);
   // Issue #100: a PRIOR --fresh-session attempt that never reached
   // `state: "running"` left FRESH_SESSION_PENDING_KEY armed (see its own doc
   // comment) — this bodyless retry must still honor it, never silently
   // resume. Armed BEFORE runProvision is ever called with the flag on, same
   // "write the intent before the risky work" ordering OPERATION_KEY uses.
+  //
+  // Issue #115: a cancel on THIS call wins over any `freshSession` also
+  // present on it — never both honored on the same call. routes.ts refuses
+  // that combination outright (400) before it ever reaches here; this is the
+  // defensive floor for any other caller (direct provisionWithStorage calls,
+  // tests). Reading the key AFTER the clear above means `freshSessionPending`
+  // already reads false in the cancel case, so `requestedFresh` would be
+  // false either way — the explicit `cfg.cancelFreshSession === true` check
+  // below exists only to also strip a `cfg.freshSession: true` the caller
+  // still sent alongside the cancel.
   const freshSessionPending = (await storage.get(FRESH_SESSION_PENDING_KEY)) === true;
-  const requestedFresh = cfg.freshSession === true || freshSessionPending;
-  const provisionCfg: ProvisionConfig = requestedFresh ? { ...cfg, freshSession: true } : cfg;
+  const requestedFresh = cfg.cancelFreshSession === true ? false : (cfg.freshSession === true || freshSessionPending);
+  const provisionCfg: ProvisionConfig = cfg.cancelFreshSession === true
+    ? { ...cfg, freshSession: false }
+    : requestedFresh ? { ...cfg, freshSession: true } : cfg;
   if (requestedFresh) await storage.put(FRESH_SESSION_PENDING_KEY, true);
   let status: StudioStatus;
   let roleEnv: RoleEnv | StudioEnv | null;
@@ -3635,6 +3655,10 @@ export async function provisionWithStorage(
   if (requestedFresh && status.state === "running" && freshSessionConfirmed) {
     await storage.put(FRESH_SESSION_PENDING_KEY, false);
   }
+  // Issue #115: mirrored for fleet ls visibility — read AFTER every write
+  // path above (cancel, arm, confirmed-clear) has run, so the persisted row
+  // is never stale. See StudioStatus.freshSessionPending's own doc comment.
+  status = { ...status, freshSessionPending: (await storage.get(FRESH_SESSION_PENDING_KEY)) === true };
   await storage.put(STATUS_KEY, status);
   // Issue #100 N1: the container is up again, so no destroy is in flight —
   // including one that died before its own `finally` could say so.
