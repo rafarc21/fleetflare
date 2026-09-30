@@ -1413,6 +1413,44 @@ describe("transitionTask — a failed label add never strands zero labels (issue
   });
 });
 
+// Issue #86 item 3: a GitHub 500 on the label REMOVE left the task open;
+// destroy then refused. The remove gets the same one retry the add has.
+describe("transitionTask — a failed label remove is retried once (issue #86)", () => {
+  it("a transient 500 on the remove: retried, the transition lands", async () => {
+    const removeLabel = vi.fn().mockRejectedValueOnce(new GitHubError(500, "GitHub 500")).mockResolvedValueOnce(undefined);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), removeLabel });
+    const res = await transitionTask(api, "o/r", 12, { from: "working", to: "completed" });
+    expect(res.ok).toBe(true);
+    expect(removeLabel).toHaveBeenCalledTimes(2);
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 12, ["completed"]);
+  });
+
+  it("the retry answers 404 (the first remove landed despite its 500): removed, the transition lands", async () => {
+    const removeLabel = vi.fn()
+      .mockRejectedValueOnce(new GitHubError(500, "GitHub 500"))
+      .mockRejectedValueOnce(new GitHubError(404, "Label does not exist"));
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), removeLabel });
+    const res = await transitionTask(api, "o/r", 12, { from: "working", to: "completed" });
+    expect(res.ok).toBe(true);
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 12, ["completed"]);
+  });
+
+  it("the remove fails twice: the failure surfaces, nothing is added", async () => {
+    const removeLabel = vi.fn(async () => { throw new GitHubError(500, "GitHub 500"); });
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), removeLabel });
+    await expect(transitionTask(api, "o/r", 12, { from: "working", to: "completed" })).rejects.toThrow("GitHub 500");
+    expect(removeLabel).toHaveBeenCalledTimes(2);
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("a first-try 404 is not swallowed: the label was never there", async () => {
+    const removeLabel = vi.fn(async () => { throw new GitHubError(404, "Label does not exist"); });
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), removeLabel });
+    await expect(transitionTask(api, "o/r", 12, { from: "working", to: "completed" })).rejects.toThrow("Label does not exist");
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+});
+
 describe("transitionTask — from \"none\" repairs a zero-label task (issue #82)", () => {
   it("zero state labels: writes the target, logs the repair, removes nothing", async () => {
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: null, labels: ["studio:demo--web-studio"] })) });
