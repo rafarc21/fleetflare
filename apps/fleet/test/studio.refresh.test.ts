@@ -6,6 +6,7 @@ import {
   ensureSpawnToken, loadOrMintSpawnToken, SPAWN_TOKEN_KEY, type SpawnTokenStorage,
 } from "../src/studio/do";
 import { hashSpawnToken } from "../src/studio/org";
+import { realDoClassForRole } from "../src/studio/profile";
 import { writeProxyConfigCmd } from "../src/write-proxy/container-config";
 import {
   provisionWithStorage, restartWithStorage, STATUS_KEY, ROLE_ENV_KEY,
@@ -1331,6 +1332,51 @@ describe("ensureSpawnToken", () => {
     expect(stored?.state).toBe("running");
     expect(stored?.tailscaleHost).toBe("s.ts.net");
     expect(stored?.spawnedBy).toBe("websites--cto");
+  });
+
+  // Issue #107 fix-first round 2: the optional 4th `doClass` parameter is
+  // do.ts's real provision()/restartStudio() call sites' seam for
+  // realDoClassForRole's Env-aware answer (see that function's own doc
+  // comment) — freshStatus itself no longer stamps a doClass at all, since it
+  // has no Env and cannot know whether env.STUDIO_BIG is actually reachable.
+  describe("doClass hint (4th param) — the only safe-to-persist source of a fresh row's doClass", () => {
+    const BIG_ID = "acme--release-studio";
+
+    it("a fresh row stamps the passed doClass when STUDIO_BIG is genuinely bound", async () => {
+      const storage = fakeStorage();
+      const doClass = realDoClassForRole(env as unknown as Env, "release-studio");
+      expect(doClass).toBe("STUDIO_BIG"); // sanity: the real test env has STUDIO_BIG bound
+      await ensureSpawnToken(storage, BIG_ID, async () => {}, doClass);
+      expect((await storage.get(STATUS_KEY))?.doClass).toBe("STUDIO_BIG");
+    });
+
+    it("a fresh row stamps STUDIO, never STUDIO_BIG, when env.STUDIO_BIG is undefined -- the batched-rollout window", async () => {
+      const storage = fakeStorage();
+      const envWithoutBig = { ...env, STUDIO_BIG: undefined } as unknown as Env;
+      const doClass = realDoClassForRole(envWithoutBig, "release-studio");
+      expect(doClass).toBe("STUDIO");
+      const recorded: StudioStatus[] = [];
+      await ensureSpawnToken(storage, BIG_ID, async (st) => void recorded.push(st), doClass);
+      expect((await storage.get(STATUS_KEY))?.doClass).toBe("STUDIO");
+      expect(recorded.at(-1)?.doClass).toBe("STUDIO");
+    });
+
+    it("omitting the 4th param (every pre-existing caller) leaves doClass absent -- the safe default", async () => {
+      const storage = fakeStorage();
+      await ensureSpawnToken(storage, BIG_ID, async () => {});
+      expect((await storage.get(STATUS_KEY))?.doClass).toBeUndefined();
+    });
+
+    it("an EXISTING row's doClass is never overwritten by a later doClass hint", async () => {
+      const storage = fakeStorage();
+      await storage.put(STATUS_KEY, status({ id: BIG_ID, doClass: "STUDIO" }));
+      // A later call passes STUDIO_BIG (e.g. the operator has since deployed
+      // the binding) -- the already-recorded row must not move. The existing
+      // row's spawnTokenHash is null, so the write path below genuinely runs
+      // (this isn't the early-return "nothing changed" branch).
+      await ensureSpawnToken(storage, BIG_ID, async () => {}, "STUDIO_BIG");
+      expect((await storage.get(STATUS_KEY))?.doClass).toBe("STUDIO");
+    });
   });
 });
 

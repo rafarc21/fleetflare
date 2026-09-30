@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  isBigProfileRole, doClassForRole, studioNamespace, getStudioStubForRow, BIG_PROFILE_ROLES,
+  isBigProfileRole, doClassForRole, realDoClassForRole, studioNamespace, getStudioStubForRow, BIG_PROFILE_ROLES,
 } from "../src/studio/profile";
 import type { Env } from "../src/env";
 
@@ -33,6 +33,30 @@ describe("doClassForRole", () => {
 
   it("is STUDIO for an ordinary role", () => {
     expect(doClassForRole("pilot")).toBe("STUDIO");
+  });
+});
+
+// Issue #107 fix-first round 2: realDoClassForRole is the ONLY function that
+// should ever decide what doClass value gets WRITTEN to a row — see that
+// function's own doc comment. Unlike doClassForRole, it also asks "is
+// env.STUDIO_BIG genuinely reachable right now," since the container/ change
+// that wires the real binding ships in a separate, batched rollout from this
+// code (the issue's own body) — so there is a real window where this code is
+// live but the binding is not.
+describe("realDoClassForRole", () => {
+  it("is STUDIO_BIG for release-studio when env.STUDIO_BIG is bound", () => {
+    const env = fakeEnv();
+    expect(realDoClassForRole(env, "release-studio")).toBe("STUDIO_BIG");
+  });
+
+  it("is STUDIO for release-studio when env.STUDIO_BIG is undefined -- the batched-rollout window", () => {
+    const env = { STUDIO: fakeNamespace("default"), STUDIO_BIG: undefined } as unknown as Env;
+    expect(realDoClassForRole(env, "release-studio")).toBe("STUDIO");
+  });
+
+  it("is STUDIO for an ordinary role regardless of STUDIO_BIG's presence", () => {
+    const env = fakeEnv();
+    expect(realDoClassForRole(env, "pilot")).toBe("STUDIO");
   });
 });
 

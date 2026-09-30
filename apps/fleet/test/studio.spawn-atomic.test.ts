@@ -4,6 +4,7 @@ import { runSpawn, type SpawnDeps, type SpawnParent } from "../src/studio/spawn"
 import { spawnDeps } from "../src/studio/routes";
 import { listStudios, recordStudio, getStudioRow } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
+import type { Env } from "../src/env";
 
 // ---------------------------------------------------------------------------
 // Issue #296 — `instance: "next"` was read-then-create: two concurrent spawns
@@ -119,5 +120,33 @@ describe("runSpawn — the claim placeholder carries the requested role's doClas
     );
     expect(res.status).toBe(200);
     expect(placeholderDoClassAtProvisionStart).toBe("STUDIO_BIG");
+  });
+
+  // Issue #107 fix-first round 2 — the critical regression: a real deploy
+  // window where this code is live but env.STUDIO_BIG itself is not yet
+  // bound (the container/ change ships in a separate, batched rollout — see
+  // the issue's own body). The claim placeholder must NEVER stamp
+  // "STUDIO_BIG" purely from role in that window — doing so would write a
+  // lie into the row that a later read, once the binding finally exists,
+  // would believe and misroute to a brand-new, empty STUDIO_BIG DO.
+  it('a "release-studio" child\'s CLAIMED placeholder is STUDIO, never STUDIO_BIG, when env.STUDIO_BIG is undefined', async () => {
+    const envWithoutBig = { ...env, STUDIO_BIG: undefined } as unknown as Env;
+    let placeholderDoClassAtProvisionStart: string | undefined;
+    const res = await runSpawn(
+      {
+        ...spawnDeps(envWithoutBig, async () => { throw new Error("no blueprint fetch in this test"); }, async () => ({ ok: true as const, value: "" })),
+        fetchPolicy: async () => ({ org: { edges: { pilot: ["release-studio"] }, gates: {} }, roles: ["pilot", "release-studio"] }),
+        provisionChild: async (childId: string) => {
+          placeholderDoClassAtProvisionStart = (await getStudioRow(env, childId))?.doClass;
+          const row = status({ id: childId, state: "running" });
+          await recordStudio(env, row);
+          return row;
+        },
+        notifyMaestro: async () => {},
+      },
+      PARENT, { role: "release-studio", instance: "next" },
+    );
+    expect(res.status).toBe(200);
+    expect(placeholderDoClassAtProvisionStart).toBe("STUDIO");
   });
 });

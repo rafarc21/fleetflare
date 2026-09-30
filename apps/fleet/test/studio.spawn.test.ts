@@ -18,7 +18,7 @@ import {
   type HealAttempt,
   type OperationInFlight,
 } from "../src/studio/provision";
-import { recordStudio, listStudios } from "../src/studio/registry";
+import { recordStudio, listStudios, getStudioRow } from "../src/studio/registry";
 import { getStudioStub } from "../src/studio/profile";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -1586,5 +1586,33 @@ describe("getStudioStub — issue #107 orphan-risk fix (recorded doClass wins ov
 
     const stub = await getStudioStub(testEnv, id) as unknown as { marker: string; id: string };
     expect(stub.marker).toBe("big");
+  });
+});
+
+// Issue #107 fix-first round 2 — the batched-rollout scenario the whole
+// round exists to close: a row written WHILE env.STUDIO_BIG is genuinely
+// undefined must stay a stable record of what actually happened (STUDIO),
+// even after an operator later deploys the real binding. Re-deriving from
+// role on every read would self-upgrade the row the moment STUDIO_BIG
+// appears and orphan the studio that has been running under STUDIO the
+// whole time.
+describe("claimStudioId -> getStudioStub across a simulated batched rollout (#107 fix-first round 2)", () => {
+  it("claimStudioId stamps an EXPLICIT STUDIO (from role+env), not just an absent field, while STUDIO_BIG is undefined", async () => {
+    const childId = "acme--release-studio";
+    const envDuringRollout = { ...env, STUDIO_BIG: undefined } as unknown as Env;
+    const { claimStudioId } = spawnDeps(envDuringRollout, async () => { throw new Error("unused"); }, async () => ({ ok: true as const, value: "" }));
+
+    const release = await claimStudioId(childId, {
+      id: childId, state: "provisioning", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+    });
+    expect(release).not.toBeNull();
+    expect((await getStudioRow(env, childId))?.doClass).toBe("STUDIO");
+
+    // The operator finally deploys the StudioBigDO binding -- a DIFFERENT
+    // env, STUDIO_BIG now present, reading the SAME row back.
+    const envAfterRollout = { ...env, STUDIO: fakeMarkedNamespace("default"), STUDIO_BIG: fakeMarkedNamespace("big") } as unknown as Env;
+    const stub = await getStudioStub(envAfterRollout, childId) as unknown as { marker: string; id: string };
+    expect(stub.marker).toBe("default"); // still STUDIO -- the row never self-upgrades
   });
 });
