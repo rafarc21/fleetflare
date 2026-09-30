@@ -17,6 +17,7 @@
 import { buildStudioId, nextFreeInstance, parseStudioId } from "./ids";
 import { fetchOrgCached, fetchFleetJsonCached, hashSpawnToken, maySpawn, type Org } from "./org";
 import { FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF, ORG_JSON_PATH } from "./provision";
+import { doClassForRole } from "./container-class";
 import type { ProvisionConfig, StudioStatus } from "./types";
 
 /**
@@ -463,6 +464,14 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
       id: target.full, state: "provisioning", tailscaleHost: null, lastRefresh: null, error: null,
       lastRefreshError: null, burn: null, spawnedBy: parent.id, spawnTokenHash: null,
       repoSlug: parent.repoSlug ?? null,
+      // Issue #107 follow-up: this IS a first-ever write for `target.full`'s
+      // row (see StudioStatus.doClass's own doc comment) — provision.ts's
+      // freshStatus is not the only one. Stamped here, from the same pure
+      // doClassForRole(role) provisionChild will call moments later on the
+      // identical role, so a reader that hits this placeholder before the
+      // DO's own write lands (getStudioRow/getStudioStub, mid-spawn) still
+      // resolves the right namespace instead of falling back to the default.
+      doClass: doClassForRole(target.role),
     });
     if (release !== null || wanted !== "next") break;
     instance = target.instance + 1;

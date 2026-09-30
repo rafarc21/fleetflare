@@ -40,19 +40,29 @@ export interface StudioStatus {
   error: string | null;
   /**
    * Issue #107 fix-first (operator, 2026-09-30): the DO container class
-   * this studio's container was ACTUALLY created under. Recorded exactly
-   * ONCE, by provision.ts's freshStatus, at the moment this id's row is
-   * first ever written — never recomputed from the role name on any later
-   * read. This is load-bearing, not cosmetic: STUDIO and STUDIO_BIG are
-   * separate Durable Object namespaces, so re-deriving "which namespace
-   * does this role belong to today" on every request would silently route
-   * an already-running studio (created before this field existed, or
-   * before its role was added to profile.ts's BIG_PROFILE_ROLES) to a
-   * brand-new, empty DO in the other namespace the moment the role-set
-   * changes — orphaning the real one. Absent (every row written before
-   * this field existed) means "STUDIO", matching exactly what that studio
-   * already is. See profile.ts's studioNamespace/getStudioStub for the
-   * read side, and freshStatus for the one write site.
+   * this studio's container was ACTUALLY created under. Stamped from the
+   * same pure `doClassForRole(role)` at EVERY site that first ever writes
+   * this id's row — never recomputed from the role name on any later read,
+   * and never overwritten by a later write to an existing row. This is
+   * load-bearing, not cosmetic: STUDIO and STUDIO_BIG are separate Durable
+   * Object namespaces, so re-deriving "which namespace does this role
+   * belong to today" on every request would silently route an
+   * already-running studio (created before this field existed, or before
+   * its role was added to profile.ts's BIG_PROFILE_ROLES) to a brand-new,
+   * empty DO in the other namespace the moment the role-set changes —
+   * orphaning the real one. Absent (every row written before this field
+   * existed) means "STUDIO", matching exactly what that studio already is.
+   * See profile.ts's studioNamespace/getStudioStub for the read side.
+   *
+   * Two write sites apply this, both landing on the identical value for a
+   * given role since both call the same doClassForRole: provision.ts's
+   * freshStatus (the direct-provision and restart paths), and spawn.ts's
+   * claimStudioId placeholder (the spawn-flow claim — this one fires
+   * FIRST, moments before the DO's own recordStudio write overwrites the
+   * same row with the identical value; stamped even though it is
+   * self-healing, because an un-stamped placeholder is a real, if narrow,
+   * window for exactly the misrouting this field exists to prevent — see
+   * spawn.ts's runSpawn and issue #107's follow-up review).
    */
   doClass?: StudioDOClass;
   /**
