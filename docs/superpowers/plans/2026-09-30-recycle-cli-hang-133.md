@@ -215,6 +215,100 @@ silently reintroducing the same undocumented gap.
   (2 more than the prior run, matching the 2 new tests).
 - `bun run english-check` — clean.
 
+## Fresh review round 2 (maestro, FIX-FIRST, 2026-09-30) — a real bring-up ordering bug, an ambiguous exit code, and an under-proven poll bound
+
+PR #139 was converted to draft by a maestro review verdict FIX-FIRST.
+Board comment posted 2026-09-30T19:06:16Z. Three findings, all fixed.
+
+Finding 1 (most severe, blocking): `bringupLanded` accepted `state ===
+"running"` + a fresh `observed.session.via === "recycle"` alone as proof
+this recycle landed — round 1's clock-skew writeup framed the residual risk
+as purely cross-machine clock skew, but there was a real SAME-clock ordering
+bug underneath it too. `do.ts`'s `recycleWithSync` runs `provisionCore`'s own
+bring-up FIRST (which stamps `observed.session` with a fresh `via: "recycle"`
+`at`) and only THEN runs its own post-provision readiness check
+(`recycleVerdict`, `EXEC_CLASSES.readiness`, up to 60s). A poll landing
+inside that window read `state: "running"` + a fresh `via: "recycle"`
+session — satisfying the old check — while the readiness check could still
+come back `"bare"`, which flips `state` to `"degraded"` and makes do.ts
+throw (the Worker answers 500). The CLI would report "recycle SUCCEEDED",
+exit 0, for a studio about to be marked degraded. Fixed by also requiring
+`status.readiness != null && new Date(status.readiness.checkedAt) >=
+startedAt`: do.ts writes `readiness` with a fresh `checkedAt` on every one of
+`recycleVerdict`'s three branches, including the degraded one (whose `state`
+flip the existing `state !== "running"` check already rejects once that
+write lands) — so once both conditions hold, the only two ways to get there
+are the genuinely terminal `provisioned`/`inconclusive` branches. Reworded
+`bringupLanded`'s doc comment to lead with this ordering argument rather than
+framing the whole thing as a clock-skew caveat, and re-scoped the two
+genuine clock-skew tests to the now-narrower residual risk (both
+`session.at` AND `readiness.checkedAt` need to independently look fresh, not
+just one). The old "documents the ACCEPTED risk" test (`via: "recycle"`, `at`
+1ms after `startedAt`, no `readiness` on the row at all) was actually
+exercising THIS bug, not the clock-skew one — it now needs a fresh
+`readiness.checkedAt` added to stay a `timeout-provisioned` case, and two new
+tests pin the actual gap directly: a fresh session with no `readiness` at
+all, and a fresh session with a `readiness.checkedAt` from before
+`startedAt` — both must stay `timeout-pending`.
+
+Finding 2 (required): `RecycleReport.exitCode` was `1` for three different
+kinds — `http-error` (a real, definitive refusal/verdict from the Worker)
+and both `timeout-pending`/`timeout-unknown` ("we genuinely don't know") — so
+a caller/script could not tell "the Worker refused this, fix the input and
+retry" apart from "we don't know, check `fleet ls`" by exit code alone.
+Gave the two timeout-shaped kinds their own exit code, `2`, documented on
+`RecycleReport.exitCode`'s own doc comment as a three-value convention (`0`
+confirmed success, `1` a real refusal/verdict, `2` outcome unknown, not a
+refusal). `cmdRecycle` (`cli/fleet.ts`) needed no change — it already just
+forwards `report.exitCode` to `process.exit` verbatim, with no assumption
+about the specific value.
+
+Finding 3 (required): the existing "polls a bounded number of times, never
+forever" test only pinned `RECYCLE_POLL_ATTEMPTS`/`RECYCLE_POLL_INTERVAL_MS`
+as bare constants inside the "the recycle request's own budget" describe
+block — it would stay green even if `pollAfterNoAnswer`'s own loop ignored
+`deps.attempts` entirely (a hardcoded `for (let i = 0; i < 6; i++)`, say).
+Two OTHER existing tests elsewhere in the file already asserted the exact
+call count behaviorally, but the reviewer wanted this made explicit and
+mutation-verified in the budget describe block itself. Added a test there
+that polls with a `/status` that never satisfies `bringupLanded` and asserts
+the exact call count (`toHaveLength(RECYCLE_POLL_ATTEMPTS)`, and again
+literally `.toBe(6)`), not merely a bounded-ish number.
+
+**Bite-proof** (not committed, run live): temporarily changed
+`pollAfterNoAnswer`'s loop bound from `attempt <= deps.attempts` to a
+hardcoded `attempt <= 4`. The new fix-3 test went RED as expected ("expected
+6, got 4"), along with two other pre-existing tests that already asserted
+the same exact-count behavior elsewhere in the file (3 of 15 total). Reverted
+the change (`git diff --stat` showed zero diff afterward) and reconfirmed
+15/15 green.
+
+Also considered, not changed: the reviewer noted the ~17-minute worst case
+(960s client timeout + ~50s poll) and suggested considering a shorter client
+timeout now that polling covers the tail. Left `RECYCLE_CLIENT_TIMEOUT_MS`
+unchanged: its 960_000ms is a real, derived sum of three real exec-class
+budgets (`DESTROY_CLIENT_TIMEOUT_MS` + `EXEC_CLASSES.provision.timeoutMs` +
+`EXEC_CLASSES.readiness.timeoutMs`), not padding — shrinking it without a
+principled smaller number to replace one of those three terms with would
+just be guessing in the other direction, the same "no unfounded magic
+number" discipline round 1's clock-skew writeup already leaned on. If a real
+incident ever shows one of those three exec-class budgets is itself
+oversized, that measurement should size the change, not a guess made here.
+
+### Round 2 re-verification (2026-09-30)
+
+- Scoped vitest (`test/cli.recycle-outcome.test.ts` +
+  `test/cli.destroy-outcome.test.ts`): 15 + 11 = 26 tests, 0 fail (3 new
+  finding-1 tests, 2 new finding-2 assertions on existing tests, 1 new
+  finding-3 test; no regressions).
+- `bun run check` — clean (all 5 tsconfig projects), no output.
+- `bun run test` (full suite, alone) — 152 test files / 5280 tests pass, 0
+  fail (5 more than round 1's 5275, matching the 5 new tests added this
+  round). The same two pre-existing "Containers have not been enabled for
+  this Durable Object class" uncaught-promise lines from round 1's
+  unrelated test fixture appear again; they do not affect the pass count.
+- `bun run english-check` — clean (`english-check: clean`).
+
 ## Deliberately out of scope
 
 - `cmdProvision` (`cli/fleet.ts`) has the identical bare-fetch gap (no
