@@ -33,6 +33,11 @@ import {
   type ObservedStorage, type PaneProbeResult, type Observed,
 } from "./observed";
 import { parseStudioId } from "./ids";
+// Issue #109: TYPE only — see autoContinueAttempt's own doc comment for why
+// this file cannot import a VALUE from wake.ts at its top level (a genuine
+// module-load cycle, MEASURED). `import type` is erased entirely at compile
+// time, so this line carries no runtime import at all.
+import type { GatedWakeDeps } from "./wake";
 
 // ---------------------------------------------------------------------------
 // Detection
@@ -172,8 +177,11 @@ export const PROMPT_LINE = /^\s*❯(?!\s*\d+\.\s)(?:\s.*)?$/;
  *  `aboveAgentPanel`), so widening it here cannot swallow a real `⏺` message
  *  line from the transcript ABOVE the footer, where `⏺` always means. */
 export const AGENT_PANEL_LINE = /^\s*(?:❯\s*)?[●◯⏺]\s+\S/;
-/** How many wrapped rows of queued prompt text the input box may hold. */
-const QUEUED_TEXT_ROWS = 3;
+/** How many wrapped rows of queued prompt text the input box may hold.
+ *  Exported (issue #108 fix-first, PR #118) so activity.ts's
+ *  `extractLastVisibleLine` can skip the SAME box shape as one chrome block,
+ *  rather than re-deriving or hardcoding this bound a second time. */
+export const QUEUED_TEXT_ROWS = 3;
 
 /**
  * Fix pass B: does everything AFTER a limit block say "this turn ended, and
@@ -808,6 +816,98 @@ export function accountSwitchCmd(): string {
   ].join("\n"));
 }
 
+/**
+ * POSIX single-quoting for dismissModalCmd's own grep patterns below — the
+ * same construction wake.ts's own private `shellQuote` makes. Duplicated
+ * rather than imported: see DISMISS_LIMIT_PATTERNS's own doc comment for why
+ * this file cannot import ANYTHING from wake.ts at its top level.
+ */
+function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Matches wake.ts's own LOOSE_TAIL_LINES (issue #136) — the bottom slice of
+ *  the pane a loose, false-positive-biased modal check is run over. */
+const DISMISS_TAIL_LINES = 12;
+
+/**
+ * Issue #109 — the SAME loose, false-positive-biased modal check wake.ts's
+ * own `LOOSE_LIMIT_PATTERNS`/`looseLimitOnScreen` run (see dismissModalCmd's
+ * own doc comment for why this file cannot import it), rebuilt here from
+ * THIS file's own RATE_LIMIT_HEADLINES — the single upstream source both
+ * copies share, so only the fixed POSIX-ERE scaffolding (never the wording
+ * list) is duplicated. Same POSIX ERE, C-locale-safe discipline wake.ts's
+ * own copy is written under.
+ */
+const DISMISS_ROW_LEAD = "^[[:space:]]*(│[[:space:]]*(❯[[:space:]]*)?)?";
+const DISMISS_ROW_TAIL = "[[:space:]]*(│)?[[:space:]]*$";
+const DISMISS_LIMIT_PATTERNS: readonly string[] = [
+  `${DISMISS_ROW_LEAD}Enter to confirm · Esc to cancel${DISMISS_ROW_TAIL}`,
+  `${DISMISS_ROW_LEAD}(Run )?/rate-limit-options`,
+  `${DISMISS_ROW_LEAD}(${RATE_LIMIT_HEADLINES.join("|")})${DISMISS_ROW_TAIL}`,
+];
+
+/** Prefix of the one verdict line dismissModalCmd's shell prints — did it
+ *  actually find the modal still there and send Escape, or was it already
+ *  gone (a no-op)? Parsed by runAccountFailover's own auto-continue step to
+ *  fill in FailoverOutcome's `dismissed` field. */
+export const DISMISS_VERDICT = "__FLEET_DISMISS__";
+
+/**
+ * Issue #109 — the one narrow, sanctioned exception to wake.ts's gate 3
+ * ("not the wake, not an Esc"): a single Esc into the rate-limit modal's own
+ * CANCEL, sent only after re-confirming, in the SAME shell invocation, that
+ * the modal is still on screen.
+ *
+ * WHY A LONE ESC IS SAFE where gate 3 refuses a wake (text + Enter) into the
+ * identical modal shape: Esc is the modal's own CANCEL —
+ * RATE_LIMIT_MODAL_MARKERS'/bottomLimitModal's own footer line reads `Enter
+ * to confirm · Esc to cancel`, and every measured select variant draws that
+ * footer or an equivalent (MODAL_FOOTER_LINE). Esc cancels the dialog
+ * outright; it can never land on a highlighted option ("Upgrade your plan",
+ * "Add funds") the way a stray digit followed by Enter could — there is no
+ * digit, no Enter, and no text in the keystroke at all for the modal to
+ * interpret as a choice.
+ *
+ * ONE shell invocation, no Worker round trip in between — the same reasoning
+ * accountSwitchCmd's own doc comment gives for why races matter here: a
+ * modal that clears between an earlier probe and this exec must not get
+ * answered by the keystroke.
+ *
+ *   1. re-capture the pane and re-confirm a select-style modal is STILL on
+ *      screen, immediately before sending anything. The check reused is the
+ *      SAME loose, false-positive-biased shape wake.ts's own
+ *      `looseLimitOnScreen`/`LOOSE_LIMIT_PATTERNS` runs (see
+ *      DISMISS_LIMIT_PATTERNS's own doc comment for why it is rebuilt here
+ *      rather than imported) — deliberately biased toward false positives,
+ *      which is the right bias here too: this command must never refuse to
+ *      act on a genuine modal, and a false positive costs at most one
+ *      harmless Esc into an idle pane.
+ *   2. if still there: send exactly ONE keystroke, Escape. Nothing else — no
+ *      Enter, no digit, no C-u, ever.
+ *   3. if the modal is no longer there (or the pane could not be read at
+ *      all): do nothing. A no-op, not an error — the race window is real (the
+ *      pane can recover, or a human can already have dismissed it, between
+ *      this tick's earlier paneCaptureCmd probe and this exec) and must fail
+ *      toward doing nothing.
+ *
+ * Prints ONE verdict line (DISMISS_VERDICT …) so the caller can tell which of
+ * (2)/(3) happened, without a second exec.
+ */
+export function dismissModalCmd(): string {
+  const es = DISMISS_LIMIT_PATTERNS.map((p) => `-e ${shellSingleQuote(p)}`).join(" ");
+  return withStudioTmux([
+    `__ffd_c=$(${STUDIO_TMUX} capture-pane -p -t studio:claude 2>/dev/null);`,
+    `__ffd_t=$(printf '%s\\n' "$__ffd_c" | sed '/^[[:space:]]*$/d' | tail -n ${DISMISS_TAIL_LINES});`,
+    `if printf '%s\\n' "$__ffd_t" | grep -E -m 1 ${es} >/dev/null 2>&1; then`,
+    `  ${STUDIO_TMUX} send-keys -t studio:claude Escape;`,
+    `  echo '${DISMISS_VERDICT} escaped';`,
+    `else`,
+    `  echo '${DISMISS_VERDICT} no-modal';`,
+    `fi`,
+  ].join("\n"));
+}
+
 // ---------------------------------------------------------------------------
 // The orchestrator
 // ---------------------------------------------------------------------------
@@ -854,6 +954,18 @@ export interface FailoverDeps {
   /** Issue #271: the account an unswitched studio is on — its repo's mapped
    *  primary. Absent/null: the first account, as before. */
   primary?: string | null;
+  /**
+   * Issue #103 — the fleet's cross-repo boundary: accounts that are some
+   * OTHER repo's own `CLAUDE_ACCOUNT_BY_REPO`-mapped primary (accounts.ts's
+   * `otherRepoPrimaries`), which a wrap for THIS studio must never land on,
+   * regardless of position in the list or fleet-wide limit state. `primary`
+   * above only ever excludes accounts BEFORE this studio's own mapped slot
+   * (walking backward, `scopedAccounts` below); this is the forward half of
+   * the same boundary — an account further along the list that belongs to a
+   * different repo entirely. Absent: no cross-repo boundary is known, same
+   * as every caller written before #103.
+   */
+  reservedAccounts?: Set<string>;
   /** Issue #271: how cards name an account (`<label> (<secret name>)`).
    *  Absent: the secret name. */
   display?: (name: string) => string;
@@ -897,7 +1009,24 @@ export type FailoverOutcome =
   // kind for the same reason `rerender` has one: do.ts logs every outcome but
   // `no-modal`, and a state change nobody can see in a tail is a state change
   // nobody can audit. At most one per degradation — see runAccountFailover.
-  | { kind: "recovered"; clearedAt: string };
+  | { kind: "recovered"; clearedAt: string }
+  // Issue #109 — the auto-continue due-ness/attempt step, evaluated on every
+  // `!next` tick that is genuinely exhausted (`parkedOn === null`) and
+  // select-modal-shaped (`verdict.kind === "modal" && !verdict.inline`);
+  // never on `"parked"`, and never touched on an inline-exhausted row (its
+  // own reset self-clears through the EXISTING #214 recovery). Replaces
+  // `"already-degraded"` ONLY on that path — a caller with no auto-continue
+  // wiring at all, or an inline-exhausted row, keeps returning
+  // `"already-degraded"` unchanged.
+  //
+  // A currently-exhausted, select-modal-shaped row whose due-check said "not
+  // yet" — carries what an operator needs to know WHY nothing happened.
+  | { kind: "auto-continue-waiting"; tried: string[]; dueAt: string | null }
+  // An attempt was made: `dismissed` is whether the re-check found the modal
+  // still there (and so actually sent Esc) vs. already gone (no-op);
+  // `wake` is runGatedWake's outcome, coarsened to never carry a token or a
+  // raw error string, matching every other outcome in this file.
+  | { kind: "auto-continued"; tried: string[]; dismissed: boolean; wake: "ok" | "skipped" | "failed" };
 
 /**
  * What a studio with nowhere left to go records, and what the operator is
@@ -1135,6 +1264,85 @@ export function evaluateDegradedRecovery(
  */
 export const FLAP_GUARD_MINUTES = 5;
 
+/** Issue #109: the short, generic resume nudge an auto-continue attempt's
+ *  `runGatedWake` types — not a claim that work exists, just enough to get a
+ *  turn started once the pane is no longer blocked on the modal. */
+export const AUTO_CONTINUE_PROMPT = "usage limit reset — resuming";
+
+/** Issue #109: the hourly retry cap for an unknown-reset select modal, and
+ *  the anti-hammer cadence after a known reset's first attempt (consumed
+ *  back to null on fire either way — see StudioStatus.autoContinueAt's own
+ *  doc comment). */
+const AUTO_CONTINUE_RETRY_MS = 60 * 60_000;
+
+/**
+ * Issue #109 — is an auto-continue attempt DUE, given the row's own
+ * bookkeeping? Pure, so the state machine is testable with no exec at all.
+ *
+ *   - a KNOWN reset (`autoContinueAt` set): due once `now` has reached it;
+ *   - an UNKNOWN reset (`autoContinueAt` null/absent — the overwhelmingly
+ *     common select-modal case, #4 above): due immediately the first time
+ *     (`autoContinueLastTriedAt` null/absent), then hourly.
+ */
+function autoContinueDue(row: StudioStatus, now: Date): boolean {
+  if (row.autoContinueAt) return now.getTime() >= Date.parse(row.autoContinueAt);
+  if (!row.autoContinueLastTriedAt) return true;
+  return now.getTime() - Date.parse(row.autoContinueLastTriedAt) >= AUTO_CONTINUE_RETRY_MS;
+}
+
+/**
+ * Issue #109 — the due-ness check and, when due, the dismiss+wake attempt,
+ * for a genuinely exhausted (`parkedOn === null`), select-style-modal row.
+ * Called from BOTH the fresh-degrade write and the anti-loop-guard tick
+ * inside runAccountFailover's `!next` branch — see that function's own doc
+ * comment for why this is a bounded exception to "no retry loop", never a
+ * retry of the account list itself.
+ *
+ * Returns the fields to patch onto the row (never `state`/`error` —
+ * recovery to `running` stays the EXISTING #214 `working`-branch's own job)
+ * and the outcome to report. `patch` is null when not due: no write happens
+ * at all, matching the anti-loop guard's own "no write" invariant for the
+ * overwhelming majority of ticks.
+ *
+ * `runGatedWake` (not the raw `runWake`) is imported LAZILY, inside this
+ * function, rather than statically at this file's own top: wake.ts's own
+ * `LOOSE_LIMIT_PATTERNS` is built, AT ITS OWN MODULE TOP LEVEL, from THIS
+ * file's `RATE_LIMIT_HEADLINES` — MEASURED, a static import back into this
+ * file throws `ReferenceError: Cannot access 'RATE_LIMIT_HEADLINES' before
+ * initialization` the moment any entry point reaches this file before
+ * wake.ts (several test files do: they import failover.ts before do.ts's
+ * own chain ever reaches wake.ts). A dynamic `import()` resolves against the
+ * already-settled module registry, at CALL time — well after every module
+ * has finished loading — so it closes no cycle at all. `GatedWakeDeps`
+ * itself is imported as a TYPE only (erased at compile time, no runtime
+ * import), which is why it can sit in this function's own signature.
+ */
+async function autoContinueAttempt(
+  deps: FailoverDeps, studioId: string, row: StudioStatus, tried: string[], sighting: LimitSighting | null,
+): Promise<{ patch: Partial<StudioStatus> | null; outcome: FailoverOutcome }> {
+  const now = deps.now();
+  if (!autoContinueDue(row, now)) {
+    return { patch: null, outcome: { kind: "auto-continue-waiting", tried, dueAt: row.autoContinueAt ?? null } };
+  }
+  const dismissRes = await deps.exec(dismissModalCmd());
+  const dismissed = dismissRes.stdout.includes(`${DISMISS_VERDICT} escaped`);
+  const { runGatedWake } = await import("./wake");
+  const gatedDeps: GatedWakeDeps = {
+    recordedState: async () => row.state,
+    exec: deps.exec,
+    now: deps.now,
+    studioId,
+    switchedBlock: async () => row.failoverBlock ?? null,
+    limitSighting: async () => sighting,
+  };
+  const wakeOutcome = await runGatedWake(gatedDeps, AUTO_CONTINUE_PROMPT);
+  const wake: "ok" | "skipped" | "failed" = wakeOutcome.ok ? "ok" : wakeOutcome.skipped ? "skipped" : "failed";
+  return {
+    patch: { autoContinueAt: null, autoContinueLastTriedAt: now.toISOString() },
+    outcome: { kind: "auto-continued", tried, dismissed, wake },
+  };
+}
+
 /**
  * One failover step, for one studio. Called from do.ts's syncSession cycle.
  *
@@ -1160,6 +1368,15 @@ export const FLAP_GUARD_MINUTES = 5;
  * degradation in each direction, still no retry loop: the clear's own
  * precondition is the state its own write removes. See the block in the
  * `working` branch below for the evidence it requires and why.
+ *
+ * ISSUE #109 adds one more, deliberate and narrow amendment, on top of #214.
+ * It is still true that no ACCOUNT is ever retried, and the three guarantees
+ * above (forward-only account walk, switch-always-recorded, degrade-once)
+ * are untouched — this adds a SEPARATE, explicitly bounded retry of the
+ * DISMISSAL, capped at once per known-reset-due-moment plus once per hour
+ * thereafter, never of the account list itself. See autoContinueAttempt's
+ * own doc comment for the mechanics, and StudioStatus.autoContinueAt's for
+ * the bookkeeping it reads and writes.
  */
 export async function runAccountFailover(
   deps: FailoverDeps,
@@ -1306,7 +1523,12 @@ export async function runAccountFailover(
         ...existing,
         rateLimited: null,
         ...(forget ? { failoverBlock: null, claudeAccountMovedBlock: null } : {}),
-        ...(clearedAt !== null ? { state: "running" as const, error: null, exhaustionClearedAt: clearedAt } : {}),
+        // Issue #109 (#214 recovery): a row that genuinely recovers carries
+        // no stale auto-continue bookkeeping into its next, unrelated
+        // exhaustion.
+        ...(clearedAt !== null
+          ? { state: "running" as const, error: null, exhaustionClearedAt: clearedAt, autoContinueAt: null, autoContinueLastTriedAt: null }
+          : {}),
       };
       await storage.put(STATUS_KEY, cleared);
       await recordStudioFn(cleared);
@@ -1415,7 +1637,7 @@ export async function runAccountFailover(
   const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
   const scopedAccounts = deps.accounts.slice(currentIdx < 0 ? start : Math.min(start, currentIdx));
   const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
-  const candidate = nextClaudeAccount(scopedAccounts, current, limits, deps.now());
+  const candidate = nextClaudeAccount(scopedAccounts, current, limits, deps.now(), deps.reservedAccounts ?? new Set());
   // Issue #271: with auto-failover off, a studio that COULD move is parked
   // instead — marked and carded once, never switched. With nowhere to go the
   // message is today's, so a single-account fleet reads exactly as before.
@@ -1432,19 +1654,63 @@ export async function runAccountFailover(
     const message = parkedOn !== null
       ? parkedMessage(studioId, show(parkedOn))
       : exhaustedMessage(studioId, tried.map(show), earliestReset);
+    // Issue #109: the auto-continue step is gated on the SAME `parkedOn ===
+    // null` split #271's own comment above states — genuinely exhausted,
+    // never the operator's own deliberate "parked" choice — and on this
+    // tick's own already-captured `verdict` being a genuine select-style
+    // modal. An inline-exhausted row self-clears through the EXISTING #214
+    // `working`-branch recovery once its own printed reset passes the clock,
+    // so it needs no Esc at all (see autoContinueAttempt's own doc comment).
+    const autoContinueEligible = parkedOn === null && !verdict.inline;
     // The anti-loop guard. This studio has already been degraded for exactly
-    // this reason, so there is nothing new to record and nobody new to tell.
+    // this reason, so there is nothing new to record and nobody new to tell
+    // — UNLESS an auto-continue attempt is eligible and due, the one
+    // deliberate, bounded exception this file's own doc comment now states.
     if (existing.state === "degraded" && existing.error === message) {
+      if (autoContinueEligible) {
+        const attempt = await autoContinueAttempt(deps, studioId, existing, tried, sighting);
+        const row = attempt.patch ? { ...existing, ...attempt.patch } : existing;
+        if (attempt.patch || limitChanged) {
+          await storage.put(STATUS_KEY, row);
+          await recordStudioFn(row);
+        }
+        return attempt.outcome;
+      }
       if (limitChanged) {
         await storage.put(STATUS_KEY, existing);
         await recordStudioFn(existing);
       }
       return { kind: "already-degraded", tried };
     }
-    const degraded: StudioStatus = { ...existing, state: "degraded", error: message, claudeAccount: existing.claudeAccount ?? null };
+    const degraded: StudioStatus = {
+      ...existing, state: "degraded", error: message, claudeAccount: existing.claudeAccount ?? null,
+      // Issue #109: only on the SAME eligible path the attempt step itself
+      // evaluates (genuinely exhausted, select-style modal) — an
+      // inline-exhausted row gets no bookkeeping at all, since it is never
+      // acted on and self-clears through the EXISTING #214 recovery.
+      // `autoContinueLastTriedAt` is spread from `existing` rather than
+      // reset — a message-text refresh (a fresher `earliestReset`) must not
+      // silently re-arm the hourly cap (see StudioStatus.autoContinueAt's
+      // own doc comment, "message-text refresh" residual).
+      ...(autoContinueEligible ? { autoContinueAt: earliestReset, autoContinueLastTriedAt: existing.autoContinueLastTriedAt ?? null } : {}),
+    };
     await storage.put(STATUS_KEY, degraded);
     await recordStudioFn(degraded);
     await deps.notify(message);
+    // Issue #109: run on THIS tick too (not only later `already-degraded`
+    // ones) — the due-ness check itself decides whether anything fires; the
+    // OUTCOME this call reports stays `"exhausted"`/`"parked"` either way, the
+    // same auditable signal (plus the notify above) this tick has always
+    // given. Only the anti-loop-guard tick's own outcome is replaced, since
+    // that one was previously silent.
+    if (autoContinueEligible) {
+      const attempt = await autoContinueAttempt(deps, studioId, degraded, tried, sighting);
+      if (attempt.patch) {
+        const row = { ...degraded, ...attempt.patch };
+        await storage.put(STATUS_KEY, row);
+        await recordStudioFn(row);
+      }
+    }
     return parkedOn !== null ? { kind: "parked", account: parkedOn } : { kind: "exhausted", tried };
   }
 

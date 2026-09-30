@@ -26,7 +26,7 @@ import {
   closeIssue as closeIssueApi, getDefaultBranch, getPullRequest, commitReachableFromBranch,
   getIssueCloser, type IssueCloser, pullClaimsIssue,
   listMatchingBranches, commitDate, compareFiles, deleteBranch, resolveCanonicalRepoName,
-  repoIsPrivate, fetchRepoFile,
+  repoIsPrivate, fetchRepoFile, listOpenPullFiles,
 } from "../github/api";
 import {
   createIssue, getIssue, listIssues, addLabels, removeLabel,
@@ -90,6 +90,7 @@ export function githubBoardApi(env: Env, leakDeps: Partial<LeakGuardDeps> = {}):
     branchExists: async (repo, branch) => branchExists(await token(repo), repo, branch),
     commitExists: async (repo, sha) => commitExists(await token(repo), repo, sha),
     closeIssue: async (repo, number, reason) => closeIssueApi(await token(repo), repo, number, reason),
+    listOpenPullFiles: async (repo) => listOpenPullFiles(await token(repo), repo),
   }, leakGuard({ ...realLeakDeps(env, token), ...leakDeps }));
 }
 

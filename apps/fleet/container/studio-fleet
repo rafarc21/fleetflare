@@ -55,6 +55,14 @@
  * this script still holds no policy: it only shapes the ask.
  */
 
+// Board issue #105 (pre-gate): the ONLY node: import this file has ever
+// needed — reading fleet.json off the checkout's own disk to find an
+// optional `preflight` command before `task report` posts. Not a relative
+// import (this file's own header's "ZERO relative imports" rule is about
+// never depending on the Worker's src/ tree, not about avoiding Node's
+// runtime builtins).
+import { readFileSync } from "node:fs";
+
 const HELP = `usage: fleet spawn <role>[--<n>] [--instance <n>|next]
        fleet resume <role>[--<n>] [--instance <n>]
        fleet task ls | fleet task show <n> | fleet task report <n>
@@ -101,6 +109,16 @@ const HELP = `usage: fleet spawn <role>[--<n>] [--instance <n>|next]
                         status: ok|partial|failed|blocked
                         The Worker stamps msg_id, task_id, schema_version and
                         sender — you cannot set them, and you do not need to.
+
+                        Board issue #105 (pre-gate): when this repo's own
+                        fleet.json declares a "preflight" shell command, it
+                        runs HERE, before posting, with a 30-second timeout.
+                        A red pre-gate refuses to post a "result"/"ok"
+                        envelope — fix it, or report a different status
+                        (e.g. "blocked"/"failed") instead. Every other
+                        intent/status still runs and attaches the pre-gate
+                        result but is never refused. No fleet.json
+                        "preflight" field -> this is a complete no-op.
 
   fleet task state <n> <to>
                         Move YOUR OWN task to working, input_required or
@@ -417,6 +435,151 @@ export function formatTaskRows(rows: TaskRow[]): string {
   return rows.map((t) => `#${t.number}  [${t.state ?? "DRIFT"}]  ${t.title}\n    ${t.url}`).join("\n");
 }
 
+// --- Board issue #105: pre-gate ---------------------------------------------
+//
+// fleet.json's own optional `preflight` shell command, run by `task report`
+// before it posts a claimed-done envelope. src/studio/blueprint.ts's
+// FleetConfig carries this SAME field (its own doc comment has the full
+// design rationale) — duplicated here, own tiny parse, rather than imported,
+// for the same reason SPAWN_TOKEN_HEADER/LEAD_TASK_STATES already are (see
+// this file's own header).
+
+/**
+ * fleet.json's `preflight` field, or null on ANY absence or malformed shape
+ * — a missing/broken fleet.json must never block `task report` itself, only
+ * the (optional) pre-gate feature it would have enabled. Mirrors
+ * blueprint.ts's parseFleetJson validation (present-but-blank/wrong-type is
+ * treated as "not declared" here rather than thrown — this script has no
+ * usage-error path for a repo's OWN fleet.json content, only for its own
+ * argv).
+ */
+export function parseFleetPreflight(json: string): string | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const preflight = (raw as Record<string, unknown>).preflight;
+  return typeof preflight === "string" && preflight.trim() !== "" ? preflight : null;
+}
+
+/**
+ * Reads fleet.json from `repoRoot` (any directory — a real checkout in
+ * production, an arbitrary fixture in a test) and returns its declared
+ * preflight command, or null when there is none: no fleet.json at that path,
+ * a fleet.json with no `preflight` field, or `repoRoot` itself null (the
+ * STUDIO_ID-absent case resolveRepoRoot already returns null for). IO is
+ * split out from parseFleetPreflight above so the parse rule itself stays
+ * testable with a bare string, no filesystem involved.
+ */
+export function loadPreflightCommand(repoRoot: string | null): string | null {
+  if (repoRoot === null) return null;
+  let text: string;
+  try {
+    text = readFileSync(`${repoRoot}/fleet.json`, "utf8");
+  } catch {
+    return null;
+  }
+  return parseFleetPreflight(text);
+}
+
+/**
+ * Where THIS studio's own checkout lives, from STUDIO_ID alone — the EXACT
+ * derivation container/studio-bringup.sh's own claude-launch step uses for
+ * `repo_dir` (`/workspace/${STUDIO_ID%%--*}`). Reusing it here, rather than
+ * trusting the calling shell's cwd, is what makes this reliable regardless
+ * of where in the checkout a lead happens to `cd` mid-session — STUDIO_ID
+ * never changes for the container's whole lifetime, and do.ts's
+ * studioEnvVars already injects it into every studio's environment
+ * unconditionally (the same env var `fleet task ls`/`show`/`report` never
+ * itself reads, until now). Null only when STUDIO_ID is absent — a
+ * container resolveEnv's own FLEET_WORKER_URL/FLEET_SPAWN_TOKEN check would
+ * already have refused before this is ever called in practice.
+ *
+ * `FLEET_REPO_ROOT_BASE` overrides the `/workspace` base itself — absent in
+ * every real container (do.ts's studioEnvVars never sets it), so production
+ * behavior is byte-for-byte unchanged. It exists purely as a test seam: a
+ * real CI runner does not grant write access to the real `/workspace`, so
+ * test/bun/studio-fleet-report-cli.test.ts, which spawns this file as a real
+ * subprocess and needs a real fleet.json on real disk, points this at a
+ * `mkdtempSync` tmpdir instead.
+ */
+export function resolveRepoRoot(env: Record<string, string | undefined>): string | null {
+  const studioId = env.STUDIO_ID;
+  const base = env.FLEET_REPO_ROOT_BASE ?? "/workspace";
+  return studioId ? `${base}/${studioId.split("--")[0]}` : null;
+}
+
+export interface PreflightResult {
+  cmd: string;
+  exit: number;
+  output: string;
+}
+
+// Issue #105's own framing: "a 30-second pre-gate". A check that runs longer
+// than this is exactly the CHEAP-check promise broken — treated as a FAILED
+// gate (exit 124, the shell convention for "timed out"), never a hang and
+// never a silent pass.
+const PREFLIGHT_TIMEOUT_MS = 30_000;
+// A reasonably-truncated tail, not the whole thing: a chatty check's output
+// still has to fit in a GitHub issue comment alongside everything else the
+// envelope carries (src/board/envelope.ts's own ENVELOPE_MAX_CHARS is far
+// larger than this, but a pre-gate's output is one field among many, not the
+// whole comment).
+const PREFLIGHT_OUTPUT_MAX_CHARS = 4_000;
+
+/**
+ * Runs fleet.json's declared preflight command in `cwd`, real subprocess,
+ * real kill-on-timeout. `timeoutMs` is a deliberate test seam (this file's
+ * own established convention — compare studio-bringup.sh's own
+ * `FLEET_WORKSPACE` seam): production never passes it, so the default IS the
+ * production value. Bun.spawnSync's own `timeout`/`killSignal` do the
+ * killing directly; there is no separate watchdog to get wrong.
+ */
+export function runPreflight(cmd: string, cwd: string, timeoutMs: number = PREFLIGHT_TIMEOUT_MS): PreflightResult {
+  const proc = Bun.spawnSync({
+    cmd: ["sh", "-c", cmd],
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
+  });
+  const combined = `${proc.stdout.toString()}${proc.stderr.toString()}`;
+  const output = combined.length > PREFLIGHT_OUTPUT_MAX_CHARS
+    ? combined.slice(-PREFLIGHT_OUTPUT_MAX_CHARS)
+    : combined;
+  // A process Bun killed for overrunning `timeout` reports exitCode null —
+  // read as 124 (the shell/coreutils convention for "timed out"), a FAILED
+  // gate, never a hang and never a silently-passing 0.
+  return { cmd, exit: proc.exitCode ?? 124, output };
+}
+
+/**
+ * Issue #105: "RED pre-gate = not done". Refuses to post ONLY the specific
+ * claim a red/timed-out pre-gate contradicts — a "result" envelope reporting
+ * "ok". Every other intent/status (blocked, partial, a request, clarify,
+ * escalate, or any non-"ok" status on a "result") still gets the pre-gate
+ * run and attached by the caller — informative, never refused. Not this
+ * function's job to run the gate or decide what "declared" means; it only
+ * turns one already-computed PreflightResult (or null, meaning "not
+ * declared") into a post/refuse verdict.
+ */
+export function evaluatePreGate(
+  intent: unknown, status: unknown, preflight: PreflightResult | null,
+): { refuse: boolean; reason?: string } {
+  if (preflight === null || preflight.exit === 0) return { refuse: false };
+  if (intent !== "result" || status !== "ok") return { refuse: false };
+  return {
+    refuse: true,
+    reason: `pre-gate failed (exit ${preflight.exit}): \`${preflight.cmd}\` — refusing to post a "result"/"ok" ` +
+      "envelope with a RED pre-gate. Fix it, or report a different status (e.g. \"blocked\"/\"failed\") instead. " +
+      `Output:\n${preflight.output}`,
+  };
+}
+
 async function main(): Promise<void> {
   const cmd = parseArgs(process.argv.slice(2));
 
@@ -569,7 +732,40 @@ async function buildRequest(
     console.error("studio-fleet: task report reads the envelope JSON from stdin — see `fleet --help`");
     process.exit(1);
   }
-  const { url, init } = buildTaskRequest(env, `/${cmd.number}/envelope`, body);
+
+  // Board issue #105 (pre-gate). Absent feature (no fleet.json, or no
+  // `preflight` field) is a COMPLETE no-op: `preflightCmd` is null,
+  // `finalBody` stays `body`, byte for byte, unparsed — every repo without
+  // this feature keeps today's exact behavior, including surviving stdin
+  // that is not even valid JSON (the Worker's own parseEnvelope already
+  // handles that case; this script never needed to parse the envelope
+  // before this feature existed, and still does not when it is not
+  // declared).
+  const repoRoot = resolveRepoRoot(process.env as Record<string, string | undefined>);
+  const preflightCmd = loadPreflightCommand(repoRoot);
+  let finalBody = body;
+  if (preflightCmd !== null) {
+    const preflight = runPreflight(preflightCmd, repoRoot ?? ".");
+    let envelope: Record<string, unknown>;
+    try {
+      envelope = JSON.parse(body) as Record<string, unknown>;
+    } catch (err) {
+      console.error(
+        `studio-fleet: task report envelope is not valid JSON (fleet.json declares a preflight, so it must be ` +
+          `parsed to attach the pre-gate result): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+    const gate = evaluatePreGate(envelope.intent, envelope.status, preflight);
+    if (gate.refuse) {
+      console.error(`studio-fleet: ${gate.reason}`);
+      process.exit(1);
+    }
+    envelope.pre_gate = preflight;
+    finalBody = JSON.stringify(envelope);
+  }
+
+  const { url, init } = buildTaskRequest(env, `/${cmd.number}/envelope`, finalBody);
   return {
     what: "task report", url, init,
     render: (json) => {

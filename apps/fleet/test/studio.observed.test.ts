@@ -38,6 +38,10 @@ describe("observed.ts", () => {
       // Issue #249 round 2, item 2: the DEFERRED-brief marker, named for the
       // same reason and with the same optional-means-null reading.
       survivalBriefPending: null,
+      // Issue #108 (#70 ask 4 remainder): the lead's last visible message
+      // line — rides mergeObserved like session/lastShipOkAt, no DO key of
+      // its own.
+      lastMessageLine: null,
     });
   });
 

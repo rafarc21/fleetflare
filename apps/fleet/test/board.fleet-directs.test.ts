@@ -47,6 +47,7 @@ function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
     branchExists: vi.fn(async () => true),
     commitExists: vi.fn(async () => true),
     closeIssue: vi.fn(async () => {}),
+    listOpenPullFiles: vi.fn(async () => []),
     ...overrides,
   };
 }

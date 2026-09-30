@@ -699,6 +699,15 @@ export async function handleStudio(
     // estate row) provisions exactly as this route did before P5c — the
     // key is omitted rather than set to undefined so the RPC payload is
     // byte-identical to the pre-P5c one in that case.
+    // Issue #115: `?fresh-session=true` and `?no-fresh-session=true` are
+    // mutually exclusive — refused outright rather than silently resolved
+    // either way (cancel winning, say), same posture cli-args.ts's own
+    // `--fresh-session`/`--no-fresh-session` parsing already takes.
+    const wantsFresh = url.searchParams.get("fresh-session") === "true";
+    const wantsCancelFresh = url.searchParams.get("no-fresh-session") === "true";
+    if (wantsFresh && wantsCancelFresh) {
+      return new Response("fresh-session and no-fresh-session are mutually exclusive", { status: 400 });
+    }
     const projectCard = await resolveProjectCard(env, id.repo);
     const cfg: ProvisionConfig = {
       // Issue #269: the instance comes off the id this route was ADDRESSED
@@ -712,7 +721,10 @@ export async function handleStudio(
       blueprintRef, repoSlug: repo.slug, briefPrompt,
       ...(projectCard === null ? {} : { projectCard }),
       // Issue #28: one bring-up with a fresh claude session, old one set aside.
-      ...(url.searchParams.get("fresh-session") === "true" ? { freshSession: true } : {}),
+      ...(wantsFresh ? { freshSession: true } : {}),
+      // Issue #115: an explicit clear of a stuck FRESH_SESSION_PENDING_KEY —
+      // see ProvisionConfig.cancelFreshSession's own doc comment.
+      ...(wantsCancelFresh ? { cancelFreshSession: true } : {}),
     };
     try {
       return Response.json(burnView(await stub.provision(cfg)));

@@ -1186,7 +1186,9 @@ describe("mirrorBurnToRegistry", () => {
     expect(recorded[0].burn).toEqual(burn);
     // Issue #228 item 5: sessionForceArmedAt now always rides this same
     // write — null here since SESSION_FORCE_KEY was never armed.
-    expect(await storage.get(STATUS_KEY)).toEqual({ ...status(), burn, sessionForceArmedAt: null });
+    // Issue #115: freshSessionPending rides the same write too — false here
+    // since FRESH_SESSION_PENDING_KEY was never armed.
+    expect(await storage.get(STATUS_KEY)).toEqual({ ...status(), burn, sessionForceArmedAt: null, freshSessionPending: false });
   });
 
   it("no status ever stored yet: skips silently, never calls recordStudio", async () => {

@@ -543,6 +543,34 @@ export async function listOpenPullNumbers(token: string, repo: string): Promise<
 }
 
 /**
+ * Every open PR on a repo, WITH the files each one changed — board issue
+ * #112 / #70 ask 8's own path-claim check (src/board/board.ts's
+ * pathClaimWarnings, the only caller).
+ *
+ * Reuses listOpenPullNumbers above for the PR list (one page, GitHub's own
+ * 100 max, same "a fleet with more open PRs than that is out of scope for
+ * this check" posture that function's own comment already states), then one
+ * files call per PR — also one page each (`per_page=100`), same posture:
+ * a single PR touching more than 100 files is out of scope for a
+ * lightweight warning, not a case worth a second page for.
+ *
+ * Same `ghJson`/`GH_HEADERS` helpers and the same "GitHub's own words on any
+ * non-2xx, token never in the message" convention as every other function in
+ * this module.
+ */
+export async function listOpenPullFiles(token: string, repo: string): Promise<{ number: number; files: string[] }[]> {
+  const numbers = await listOpenPullNumbers(token, repo);
+  return Promise.all(numbers.map(async (number) => {
+    const raw = await ghJson<{ filename: string }[]>(
+      `https://api.github.com/repos/${repo}/pulls/${number}/files?per_page=100`,
+      { method: "GET", headers: GH_HEADERS(token) },
+      `list files for pull ${repo}#${number}`,
+    );
+    return { number, files: raw.map((f) => f.filename) };
+  }));
+}
+
+/**
  * Does this branch exist? Same convention as pullRequestExists above: 404 is
  * `false`, 2xx is `true`, everything else throws with GitHub's own words (the
  * token never appears in them).
