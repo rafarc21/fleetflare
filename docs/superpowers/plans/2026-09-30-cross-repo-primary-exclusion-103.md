@@ -168,3 +168,89 @@ recognize as already on the remote.
 `apps/fleet/src/studio/do.ts` (import + `failoverDeps()` wiring),
 `apps/fleet/test/studio.account-failover.test.ts` (new tests + `harness()`
 option).
+
+## Follow-up fix — `otherRepoPrimaries` excluded by repo KEY, not slot (2026-09-30)
+
+Flagged by the operator as fix-first, blocking merge of PR #117.
+
+### Bug
+
+The original `otherRepoPrimaries` loop excluded an entry from the reserved
+set by comparing the repo KEY to `ownRepo`:
+
+```ts
+for (const [repo, slot] of Object.entries(map)) {
+  if (repo === ownRepo) continue;
+  reserved.add(claudeAccountVarName(slot));
+}
+```
+
+`CLAUDE_ACCOUNT_BY_REPO` mapping two DIFFERENT repo keys to the SAME slot is
+already an invalid config, but the function still has to degrade sanely for
+it. With `{"repo-a":2,"repo-b":2}`, calling `otherRepoPrimaries(env,
+"repo-a")` skips only the `"repo-a"` entry in the loop but still visits
+`"repo-b"` — same slot, so it adds `CLAUDE_CODE_OAUTH_TOKEN_2` anyway. The
+function ends up reserving repo-a's OWN mapped primary against itself, which
+is exactly backward: a repo's own primary must stay eligible for itself no
+matter how many other (invalidly) mapped repo keys share that slot number.
+
+### Fix
+
+Exclude by SLOT NUMBER instead of by repo key — compute the caller's own slot
+once, then reserve every mapped slot except that one, iterating
+`Object.values` instead of `Object.entries`:
+
+```ts
+export function otherRepoPrimaries(env: ClaudeAccountEnv, ownRepo: string | null): Set<string> {
+  const map = parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO);
+  const ownSlot = ownRepo !== null ? map[ownRepo] : undefined;
+  const reserved = new Set<string>();
+  for (const slot of Object.values(map)) {
+    if (slot === ownSlot) continue;
+    reserved.add(claudeAccountVarName(slot));
+  }
+  return reserved;
+}
+```
+
+Every existing behaviour is preserved: `ownRepo: null` gives `ownSlot ===
+undefined`, and no real slot number ever equals `undefined`, so every mapped
+slot is still reserved — identical to before. A repo absent from the map also
+resolves `map[ownRepo]` to `undefined`, so it behaves exactly like the `null`
+case, also unchanged. A normal non-colliding map (`repo-a:2, repo-b:4`)
+produces the same result as the key-based version, since each repo's key and
+slot were already in 1:1 correspondence there. The doc comment above the
+function was updated to state the exclusion is by SLOT, explicitly noting
+that a collision with another repo's key sharing that slot still exempts it.
+
+### TDD
+
+RED — `apps/fleet/test/studio.account-failover.test.ts`, new case in the
+`otherRepoPrimaries (issue #103)` describe block: `CLAUDE_ACCOUNT_BY_REPO:
+'{"repo-a":2,"repo-b":2}'`, asserts `otherRepoPrimaries(env, "repo-a")` is an
+empty set. Confirmed failing against the un-fixed code:
+
+```
+FAIL  test/studio.account-failover.test.ts > otherRepoPrimaries (issue #103)
+  > two repos colliding on the same (already-invalid) slot never reserves
+  that slot against either
+AssertionError: expected Set{ 'CLAUDE_CODE_OAUTH_TOKEN_2' } to deeply equal Set{}
+ Test Files  1 failed (1)
+      Tests  1 failed | 96 skipped (97)
+```
+
+GREEN — applied the slot-based fix above. Same test, plus every other
+`otherRepoPrimaries`/`nextClaudeAccount`/`runAccountFailover` test in the
+file and the whole `studio.account-by-repo.test.ts` file:
+
+```
+ Test Files  2 passed (2)
+      Tests  125 passed (125)
+```
+(125 = the 124 from the original #103 work plus this one new collision case.)
+
+### Files touched (follow-up)
+
+`apps/fleet/src/studio/accounts.ts` (`otherRepoPrimaries` body + doc
+comment), `apps/fleet/test/studio.account-failover.test.ts` (one new test
+case).
