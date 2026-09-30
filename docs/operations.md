@@ -10,9 +10,23 @@ short — nothing here is condensed, only relocated.
 This section is the one worth reading twice. Every entry below was measured, not
 predicted.
 
-**Every deploy replaces every container.** The image build is not reproducible,
-so even a change touching only Worker source produces a new digest and a fresh
-rollout. Plan a deploy as a container replacement, always.
+**A deploy replaces only the containers whose image actually changed.** Since
+#98 (issue #84), the container images build reproducibly: an unchanged
+`container/` — same pinned base images, same `SOURCE_DATE_EPOCH`, same
+`repro-seal`-sealed layers — rebuilds to the exact same digest, cold, every
+time (`scripts/image-repro-check.sh`, `test/bun/reproducible-images.test.ts`).
+`scripts/deploy-containers-changed.ts` (issue #40) builds each container
+image the way wrangler will and compares it against what is already deployed
+(`wrangler containers list`/`info`, read-only): same registry digest, same
+`max_instances`/`instance_type`, same logs setting -> no container is
+replaced, and a Worker-source-only deploy leaves every running studio right
+where it was. Touch `container/` (or a base image pin) and the digest
+changes, and so does every studio built from it — still plan a deploy as a
+container replacement whenever you know you're touching it. The probe still
+needs docker and a logged-in wrangler, still cannot tell about a top-level
+`unsafe` block change or a DO migration deleting/renaming/transferring a
+container class, and either of those still forces the hard gate. See
+[docs/setup.md](setup.md) for the exact comparison.
 
 **A rollout replacement does not run the rescue push.** `recycle` and `destroy`
 rescue uncommitted work to a branch first; a convergence-driven replacement does
@@ -66,42 +80,28 @@ stopped at a prompt alike.
 
 ## CI
 
-GitHub Actions is disabled on this repository (no CI spend). The workflow
-files in `.github/workflows/` stay as the lane definitions. CI runs on the
-operator's Mac instead, and posts two commit statuses on each PR head:
+GitHub Actions runs natively on this repository — two workflows, on every
+pull request and every push to `main`:
 
-| Context | Lanes |
-|---------|-------|
-| `local-ci/fleet-check` | `bun install`, `bun run check`, vitest (Mac); `bun run bun-test` (Linux, docker) |
-| `local-ci/english` | `apps/fleet/scripts/english-check.ts` |
+| Workflow | Trigger | What it runs |
+|---|---|---|
+| [`check`](../.github/workflows/fleet-check.yml) | PR/push touching `apps/fleet/**`, `skills/**`, `fleet/blueprint/**` or `scripts/**` | `bun install`, `bun run check` (types, all tsconfig projects), `bun run test` (vitest-pool-workers), `bun run bun-test` (container-level; the job installs tmux and Chromium first) |
+| [`english`](../.github/workflows/english-check.yml) | every PR/push, no path filter, so no file is exempt | `bun run apps/fleet/scripts/english-check.ts` |
 
-The tested tree is the PR head merged onto `origin/main`, so a PR that
-conflicts with main fails with "conflicts with main". A PR that touches no
-`apps/fleet/`, `skills/` or `fleet/blueprint/` path still gets
-`local-ci/fleet-check`, as success with a "skipped" description.
+A PR whose diff touches none of `check`'s watched paths never triggers that
+workflow at all — no `check` run appears for it on that commit, unlike a path
+match, which always does. `english` has no path filter, so every commit gets
+one. Read a PR's status the normal way:
 
 ```bash
-S=apps/fleet/scripts/localci
-$S/localci.sh <pr-number|sha> [--dry-run]    # one run; --dry-run prints statuses
-$S/localci-daemon.sh once --dry-run          # which open PRs lack a status
-$S/localci-daemon.sh install [--dry-run]     # launchd agent, polls every 120s
-$S/localci-daemon.sh uninstall
-gh api repos/<owner>/<repo>/commits/<sha>/status   # read the result
+gh pr checks <pr-number>
+gh api repos/<owner>/<repo>/commits/<sha>/check-runs
 ```
 
-- Runs are serial. The lanes hold the Mac-wide gate lock
-  (`/tmp/fleetflare-gate.lock`, `lockf`), one heavy job at a time on the
-  machine.
-- Logs, and a `result.json` with counts, failing test names and the tested
-  tree hash, land in `~/Library/Logs/fleetflare-localci/runs/<run>/`.
-- A failure only in a file listed in `scripts/localci/known-flaky.txt` reruns
-  that file alone, once. The status description says when a rerun happened.
-- A status POST that fails is retried once, then fails the run (exit 3).
-- A hung lane is killed at `LOCALCI_LANE_TIMEOUT` (2400s); a lane killed by a
-  signal, and a run killed before it finished (swept at the next start), post
-  `error`, never success or failure.
-- The daemon runs a head with no `local-ci/fleet-check` status, or an `error`
-  one older than 30 min. One daemon per machine; polls no faster than 30s.
-- Install the daemon from a checkout that tracks `main`: launchd runs the
-  scripts from the path you install from.
-- No local-ci status on a head means it has not run yet. It never means green.
+`apps/fleet/scripts/localci/` — a Mac-based daemon that ran the same two
+lanes and posted them as `local-ci/*` commit statuses — predates this native
+Actions setup and is superseded by it: GitHub Actions gates merges now, not
+the daemon. The scripts (`localci.sh`, `localci-daemon.sh`,
+`known-flaky.txt`) still exist for reproducing a lane on a Mac by hand
+(`localci.sh <pr-number|sha> --dry-run` runs it without posting anything),
+but no longer gate a merge or post a commit status.
