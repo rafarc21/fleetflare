@@ -208,6 +208,48 @@ describe("parseCliArgs", () => {
     expect(renderHelp()).toContain("No commits is NOT evidence of death");
   });
 
+  // Board task #131 ask 2: `fleet recycle <id> --account mapped`.
+  it("recycle --account mapped sets forceMappedAccount: true", () => {
+    expect(parseCliArgs(["recycle", "websites--scratch", "--account", "mapped"])).toEqual({
+      cmd: "recycle", id: "websites--scratch", discardUnsynced: false, freshSession: false, forceMappedAccount: true,
+    });
+  });
+
+  it("recycle --account only accepts the literal \"mapped\" — any other value is a usage error naming the flag", () => {
+    const res = parseCliArgs(["recycle", "websites--scratch", "--account", "primary"]);
+    expect(res.cmd).toBe("usage");
+    expect((res as { message: string }).message).toContain('--account only accepts "mapped"');
+    expect(parseCliArgs(["recycle", "websites--scratch", "--account"]).cmd).toBe("usage");
+    expect(parseCliArgs(["recycle", "websites--scratch", "--account", "mapped", "--account", "mapped"]).cmd).toBe("usage");
+  });
+
+  it("recycle --account mapped coexists with --discard-unsynced and --fresh-session, in any order", () => {
+    const combos = [
+      ["--account", "mapped", "--discard-unsynced", "--fresh-session"],
+      ["--discard-unsynced", "--account", "mapped", "--fresh-session"],
+      ["--discard-unsynced", "--fresh-session", "--account", "mapped"],
+    ];
+    for (const flags of combos) {
+      expect(parseCliArgs(["recycle", "websites--scratch", ...flags])).toEqual({
+        cmd: "recycle", id: "websites--scratch", discardUnsynced: true, freshSession: true, forceMappedAccount: true,
+      });
+    }
+  });
+
+  // Regression pin: a plain recycle (no --account) keeps the exact shape it
+  // always had — no forceMappedAccount key at all, same "only present when
+  // true" discipline destroy's own park?: true (#59) already established.
+  it("plain recycle (no --account) has no forceMappedAccount key", () => {
+    const res = parseCliArgs(["recycle", "websites--scratch"]);
+    expect(res).toEqual({ cmd: "recycle", id: "websites--scratch", discardUnsynced: false, freshSession: false });
+    expect(Object.keys(res)).not.toContain("forceMappedAccount");
+  });
+
+  it("recycle's help names --account mapped", () => {
+    expect(VERBS.recycle.args).toContain("--account mapped");
+    expect(VERBS.recycle.summary).toContain('"mapped"');
+  });
+
   // Board task #124: `fleet destroy <id> [--force]`.
   it("destroy requires an id, and force defaults to false", () => {
     expect(parseCliArgs(["destroy", "websites--scratch"])).toEqual({ cmd: "destroy", id: "websites--scratch", force: false, discardUnsynced: false });
