@@ -1,15 +1,54 @@
-FROM oven/bun:1.3-debian
+# Issue #84: reproducible build. Two cold builds of this file (no build
+# cache, any checkout) give the same image id, so wrangler's deploy reports
+# "no changes" for an unchanged container/ even after the deploy host's build
+# cache is gone. scripts/image-repro-check.sh proves it; run it on any change
+# here. The rules, same in all three Dockerfiles:
+#   - SOURCE_DATE_EPOCH fixes the image's created/history times; bump never.
+#   - base image pinned by digest; apt from the dated APT_SNAPSHOT; every
+#     other download pinned by version (and checksum where it is a file).
+#   - every RUN wrapped in repro-seal begin/end (container/repro-seal.sh).
+#   - files reach the image through the `src` stage, whose mtimes are
+#     normalized: COPY keeps the checkout's own mtimes, which differ per clone.
+# Bumping APT_SNAPSHOT (security updates) or a pin IS an image change and a
+# rollout: batch it.
+ARG SOURCE_DATE_EPOCH=1790640000
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+FROM oven/bun:1.3-debian@sha256:9dba1a1b43ce28c9d7931bfc4eb00feb63b0114720a0277a8f939ae4dfc9db6f AS src
+ARG SOURCE_DATE_EPOCH
+COPY repro-seal.sh deploy-server.ts /src/
+# The base has no /etc/hosts; BuildKit then creates and removes a mount stub
+# for it in every RUN, which leaves /etc's build-time mtime in the layer.
+# Laid out as trees copied onto /: a COPY of a single file gives the parent
+# directories it touches a build-time mtime; a copied tree carries its own.
+RUN mkdir -p /src/base/etc /src/base/usr/local/bin /src/app/app \
+    && printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n' > /src/base/etc/hosts \
+    && mv /src/repro-seal.sh /src/base/usr/local/bin/repro-seal \
+    && mv /src/deploy-server.ts /src/app/app/ \
+    && chmod -R u=rwX,go=rX /src && chmod 0755 /src/base/usr/local/bin/repro-seal \
+    && find /src -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
+
+FROM oven/bun:1.3-debian@sha256:9dba1a1b43ce28c9d7931bfc4eb00feb63b0114720a0277a8f939ae4dfc9db6f
+ARG SOURCE_DATE_EPOCH
+ARG APT_SNAPSHOT=20260929T000000Z
+COPY --from=src /src/base/ /
+
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+    && repro-seal end
 
 # No @anthropic-ai/claude-code. Deliberate: this container must never be able
 # to reason, only to execute one command the operator already approved.
-RUN bun install -g wrangler@4
+# Exact version (issue #84: `wrangler@4` floated 4.134 -> 4.143 between two
+# builds of an unchanged file). 4.143.0 = what the image deployed 2026-09-29
+# already runs. Its own dependencies still resolve at build time (no lockfile
+# for a global install): see issue #84's remaining gaps.
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && bun install -g wrangler@4.143.0 \
+    && repro-seal end
 
 WORKDIR /workspace
-COPY deploy-server.ts /app/deploy-server.ts
+COPY --from=src /src/app/ /
 ENV PORT=8080
 EXPOSE 8080
 CMD ["bun", "run", "/app/deploy-server.ts"]

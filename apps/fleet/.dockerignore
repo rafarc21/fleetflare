@@ -7,6 +7,9 @@
 # below is therefore dead weight in the context transfer — node_modules alone
 # is ~605MB, which would otherwise be uploaded to the builder on every build.
 node_modules
+# Issue #84: any nested one too (container/ego-browser after a local
+# `bun install`): it would ride into the image via COPY and differ per checkout.
+**/node_modules
 .wrangler
 .git
 page/dist
