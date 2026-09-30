@@ -55,17 +55,33 @@ beforeEach(() => {
   writeFileSync(join(bin, "wrangler"), `#!/bin/sh\necho "PATH-wrangler $*" >> "${calls}"\n`);
   chmodSync(join(bin, "wrangler"), 0o755);
   // The ops repo: a bare origin and the operator's clone of it.
+  //
+  // Issue #126: /usr/local/bin/git refuses any push that would MOVE a
+  // remote's resolved default branch (#253) -- it can't tell this bare repo
+  // is a throwaway fixture, not the studio's real GitHub remote. Naming the
+  // default branch "main" broke every push after the first (the wrapper
+  // treats an unborn/nonexistent ref as "unknown" and lets it through once,
+  // then refuses every later move once it can resolve "main" as the
+  // default). The fix: the default branch ("unused-default") gets exactly
+  // ONE commit here and is never pushed to again; every push this suite
+  // actually exercises moves a different branch ("trunk"), which is never
+  // the resolved default, so the wrapper never refuses it.
   origin = join(root, "ops.git");
-  Bun.spawnSync(["git", "init", "-q", "--bare", "-b", "main", origin]);
+  Bun.spawnSync(["git", "init", "-q", "--bare", "-b", "unused-default", origin]);
+  const seedDefault = join(root, "seed-default");
+  mkdirSync(seedDefault, { recursive: true });
+  git(root, "init", "-q", "-b", "unused-default", seedDefault);
+  git(seedDefault, "commit", "-q", "--allow-empty", "-m", "unused default branch seed");
+  git(seedDefault, "push", "-q", origin, "unused-default");
   const seed = join(root, "seed");
   mkdirSync(join(seed, "fleet"), { recursive: true });
-  git(root, "init", "-q", "-b", "main", seed);
+  git(root, "init", "-q", "-b", "trunk", seed);
   writeFileSync(join(seed, "fleet", "wrangler.jsonc"), CONFIG);
   git(seed, "add", "-A");
   git(seed, "commit", "-q", "-m", "ops");
-  git(seed, "push", "-q", origin, "main");
+  git(seed, "push", "-q", origin, "trunk");
   ops = join(root, "ops");
-  git(root, "clone", "-q", origin, ops);
+  git(root, "clone", "-q", "--branch", "trunk", origin, ops);
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -104,10 +120,10 @@ function deploy(args: string[], env: Record<string, string> = {}) {
 /** Another clone pushes a newer ops commit: ours is now behind. */
 function pushNewerOps() {
   const other = join(root, "other");
-  git(root, "clone", "-q", origin, other);
+  git(root, "clone", "-q", "--branch", "trunk", origin, other);
   writeFileSync(join(other, "fleet", "wrangler.jsonc"), '{ "name": "fleet-newer" }\n');
   git(other, "commit", "-q", "-am", "newer");
-  git(other, "push", "-q", "origin", "main");
+  git(other, "push", "-q", "origin", "trunk");
 }
 
 // Issue #379: a bare `exec wrangler` ran whatever was first on PATH -- a
@@ -205,7 +221,7 @@ describe("deploy.sh refuses a dirty or stale ops checkout (#365)", () => {
     pushNewerOps();
     const r = deploy([]);
     expect(r.code).not.toBe(0);
-    const upstream = git(origin, "rev-parse", "main");
+    const upstream = git(origin, "rev-parse", "trunk");
     expect(r.err).toContain(before);
     expect(r.err).toContain(upstream);
     expect(r.ran).toBe("");
@@ -309,7 +325,7 @@ describe("round 2 (#368 review): 'committed' means tracked AND equal to HEAD (#3
     writeFileSync(join(ops, ".gitignore"), "fleet/local.jsonc\n");
     git(ops, "add", ".gitignore");
     git(ops, "commit", "-q", "-m", "ignore local");
-    git(ops, "push", "-q", "origin", "main");
+    git(ops, "push", "-q", "origin", "trunk");
     writeFileSync(join(ops, "fleet", "local.jsonc"), CONFIG);
     const r = deploy([], { FLEET_CONFIG: join(ops, "fleet", "local.jsonc") });
     expect(r.code).not.toBe(0);
@@ -417,12 +433,12 @@ describe("#377: only the config's own history decides", () => {
   /** Another clone pushes a completion record — not the config. */
   function pushRecord() {
     const other = join(root, "other-rec");
-    git(root, "clone", "-q", origin, other);
+    git(root, "clone", "-q", "--branch", "trunk", origin, other);
     mkdirSync(join(other, "done"), { recursive: true });
     writeFileSync(join(other, "done", "373.json"), "{}\n");
     git(other, "add", "-A");
     git(other, "commit", "-q", "-m", "completion record #373");
-    git(other, "push", "-q", "origin", "main");
+    git(other, "push", "-q", "origin", "trunk");
   }
 
   test("behind only on a completion record: deploy runs, with a note", () => {
@@ -506,12 +522,12 @@ describe("#380: the config path is matched literally, never as a pathspec glob",
     writeFileSync(join(ops, "fleet", "wx.jsonc"), "{}\n");
     git(ops, "add", "-A");
     git(ops, "commit", "-q", "-m", "star config + sibling");
-    git(ops, "push", "-q", "origin", "main");
+    git(ops, "push", "-q", "origin", "trunk");
     const other = join(root, "other-star");
-    git(root, "clone", "-q", origin, other);
+    git(root, "clone", "-q", "--branch", "trunk", origin, other);
     writeFileSync(join(other, "fleet", "wx.jsonc"), '{ "changed": true }\n');
     git(other, "commit", "-q", "-am", "sibling changes");
-    git(other, "push", "-q", "origin", "main");
+    git(other, "push", "-q", "origin", "trunk");
     const r = deploy([], { FLEET_CONFIG: star });
     expect(r.code, r.err).toBe(0);
   });
@@ -534,7 +550,7 @@ describe("#383: follow-ups from the #381 review", () => {
     writeFileSync(join(ops, "fleet", "w1.jsonc"), "{}\n");
     git(ops, "add", "-A");
     git(ops, "commit", "-q", "-m", "bracket config + sibling");
-    git(ops, "push", "-q", "origin", "main");
+    git(ops, "push", "-q", "origin", "trunk");
     writeFileSync(join(ops, "fleet", "w1.jsonc"), '{ "local": true }\n');
     git(ops, "commit", "-q", "-am", "local sibling change");
     const r = deploy([], { FLEET_CONFIG: cfg });
