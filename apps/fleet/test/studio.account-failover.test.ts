@@ -1436,6 +1436,55 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
     expect(h.notices[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN_2");
   });
 
+  // -------------------------------------------------------------------
+  // Review round 2 (maestro review of PR #135), finding 1 — the hand-back
+  // guard above used to fire on ANY `"working"` verdict, including a
+  // repainting (mid-turn) pane and a fresh OPERATION_KEY held by a
+  // concurrent provision/restart/recycle/failover. Both are "a turn — or an
+  // operation — is in flight right now", and hand-back's own
+  // `accountSwitchCmd` (`respawn-pane -k`) kills whatever is running in the
+  // pane, so firing it in either state loses real work. These two tests pin
+  // the guard: hand-back must skip the tick (not error) and try again next
+  // time.
+  // -------------------------------------------------------------------
+  it("own primary free, but the pane repainted (a turn in flight): hand-back does NOT fire this tick", async () => {
+    const h = harness({
+      accounts: four, pane: captured(MID_TURN_PANE_A, MID_TURN_PANE_B), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
+        borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
+      }),
+      // account 2 (own primary) carries no entry at all — fleet-wide free.
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "no-modal", reason: expect.any(String) });
+    expect(h.relaunches).toBe(0);
+    expect(h.notices).toHaveLength(0);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+    expect(stored?.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+  });
+
+  it("own primary free, pane idle, but OPERATION_KEY holds a FRESH lock: hand-back does NOT fire this tick", async () => {
+    const h = harness({
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
+        borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
+      }),
+    });
+    const freshSince = new Date(NOW.getTime() - 5 * 60 * 1000).toISOString();
+    await h.storage.put(OPERATION_KEY, { op: "provision", since: freshSince });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "no-modal", reason: expect.any(String) });
+    expect(h.relaunches).toBe(0);
+    expect(h.notices).toHaveLength(0);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+    // The outer lock is untouched — hand-back never took, and never cleared, it.
+    expect(await h.storage.get(OPERATION_KEY)).toEqual({ op: "provision", since: freshSince });
+  });
+
   // Code review, 2026-09-30 (this issue's own review pass): handBack's own
   // doc comment above already STATES the missing observedStorage bring-up
   // re-verification as a deliberate, bounded residual — but nothing had ever
