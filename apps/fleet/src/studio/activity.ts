@@ -14,7 +14,7 @@
  */
 import {
   footerAtBottom, aboveAgentPanel, TURN_ENDED_LINE, RULE_LINE, PROMPT_LINE, AGENT_PANEL_LINE,
-  MODAL_FOOTER_LINE, MODAL_BLOCK_START, MEMBERS_TICKING_KEY,
+  MODAL_FOOTER_LINE, MODAL_BLOCK_START, MEMBERS_TICKING_KEY, QUEUED_TEXT_ROWS,
   // Issue #311 — cleared alongside ACTIVITY_KEY/MEMBERS_TICKING_KEY by
   // clearActivityState, below. Defined in failover.ts, not member-alerts.ts
   // — see that constant's own doc comment for why.
@@ -211,10 +211,22 @@ export const LAST_LINE_MAX_CHARS = 200;
  * `head`, MINUS the footer line itself (which `head`, via `aboveAgentPanel`,
  * still includes but this function deliberately never returns as "the
  * lead's message") — then walks backward skipping blank lines, a candidate
- * status line, a turn-ended row, the idle input box's own rule/prompt lines,
- * the waiting-members line, and a select-style modal's own footer/block-start
- * — every one of these is chrome `readActivityFrame` itself already treats
- * as "not the lead's own message". The first surviving line is the answer.
+ * status line, a turn-ended row, the idle input box, the waiting-members
+ * line, and a select-style modal's own footer/block-start — every one of
+ * these is chrome `readActivityFrame` itself already treats as "not the
+ * lead's own message". The first surviving line is the answer.
+ *
+ * Issue #108 fix-first (PR #118, maestro review) — the idle input box is
+ * treated as ONE chrome block (its opening rule through its closing rule,
+ * inclusive), not three independently-matched line patterns: the box's own
+ * 1-3 wrapped continuation rows (`endsInIdleInputBox`'s `QUEUED_TEXT_ROWS`,
+ * failover.ts) match neither RULE_LINE nor PROMPT_LINE, so scanning line by
+ * line alone could surface queued/pasted operator text — a secret-shaped
+ * token split across two rows included, defeating redact.ts's per-line
+ * pattern on each half — as "the lead's last message". The LAST such box
+ * (closest to the footer, the live one) is found first and skipped whole; if
+ * its closing rule cannot be found within QUEUED_TEXT_ROWS, the capture is
+ * treated as malformed and this falls back to the old per-line scan.
  */
 export function extractLastVisibleLine(frame: string): string | null {
   const trimmed = frame.replace(/\s+$/, "");
@@ -222,7 +234,19 @@ export function extractLastVisibleLine(frame: string): string | null {
   const lines = trimmed.split("\n");
   const footerIdx = footerAtBottom(lines);
   const content = footerIdx >= 0 ? lines.slice(0, footerIdx) : lines;
-  for (let i = content.length - 1; i >= 0; i--) {
+
+  // Find the idle input box closest to the footer and, if well-formed, skip
+  // it as one block by starting the per-line scan above its opening rule.
+  let scanEnd = content.length - 1;
+  for (let j = content.length - 2; j >= 0; j--) {
+    if (!RULE_LINE.test(content[j]) || !PROMPT_LINE.test(content[j + 1] ?? "")) continue;
+    for (let k = j + 2; k < content.length && k < j + 2 + QUEUED_TEXT_ROWS; k++) {
+      if (RULE_LINE.test(content[k])) { scanEnd = j - 1; break; }
+    }
+    break;
+  }
+
+  for (let i = scanEnd; i >= 0; i--) {
     const line = content[i];
     if (line.trim() === "") continue;
     if (isCandidateStatusLine(line)) continue;

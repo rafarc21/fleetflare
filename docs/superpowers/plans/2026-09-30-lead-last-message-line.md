@@ -69,6 +69,18 @@ no eager `recordStudioFn` call: this field reaches D1 only via the existing
 running/stopped/limit branching `lsJsonRows` does below it), populated as
 `s.observed?.lastMessageLine ?? null`.
 
+## Fix-first (PR #118, maestro review)
+
+`extractLastVisibleLine`'s backward scan originally treated the idle input
+box as three independent chrome line patterns (`RULE_LINE`, `PROMPT_LINE`,
+`RULE_LINE`), leaving its 1-3 wrapped continuation rows (`QUEUED_TEXT_ROWS`,
+failover.ts) unrecognised as chrome — queued/pasted operator text there,
+secret-shaped tokens split across rows included, could surface as "the
+lead's last message" and reach `fleet ls --json` un-redacted. Fixed by
+detecting the whole box (open rule through close rule) as one block to skip,
+falling back to the old per-line scan only when a closing rule cannot be
+found within `QUEUED_TEXT_ROWS` (a malformed/truncated capture).
+
 ## Out of scope
 
 - No new DO-storage key — `lastMessageLine` rides `mergeObserved` exactly like
