@@ -121,7 +121,17 @@ export type CliCommand =
   // P4 §5's board. Two words rather than one, because `task` is a noun with
   // three operations on it; flags rather than positionals, because a brief is
   // four fields and no positional order survives that.
-  | { cmd: "task-new"; brief: TaskBriefArgs }
+  // Issue #113 ask 9: `--provision` files the task and then provisions its
+  // assigned studio in the same call — the reaper often stops a studio
+  // seconds before its next task lands, and today that leaves a filed task
+  // printing "NO WAKE" until a human runs a second `fleet provision <id>`.
+  // Optional and present ONLY when true (never `false`): several existing
+  // tests assert `toEqual({ cmd: "task-new", brief: {...} })` with no other
+  // top-level keys, and those must keep passing for a plain `task new`.
+  // `freshSession` rides the same way `--fresh-session` does for
+  // `provision`/`recycle` — it only means something as a provision modifier,
+  // which is why parseTask refuses it without `--provision` (see there).
+  | { cmd: "task-new"; brief: TaskBriefArgs; provision?: true; freshSession?: true }
   // Issue #63: `repo` = `--repo`, overriding the cwd's git remote.
   | { cmd: "task-ls"; query: { milestone?: string; state?: string; assignedTo?: string; repo?: string } }
   | { cmd: "task-show"; number: number }
@@ -291,8 +301,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A rescue-push that fails or cannot confirm the work was saved (killed exec, dead shell, deadline) refuses the same way, naming why. A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it.",
   },
   "task-new": {
-    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior]",
-    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given.",
+    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior] [--provision [--fresh-session]]",
+    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given. --provision (issue #113) files the task and then provisions its assigned studio in the same call, so a task filed against a STOPPED studio no longer needs a separate `fleet provision`; needs --studio or --continues to know which studio, and refuses otherwise. " + FRESH_SESSION_HELP,
   },
   "task-ls": {
     args: "ls [--sprint S] [--state submitted|working|input_required|completed|failed|canceled] [--studio ID] [--repo owner/name]",
@@ -565,12 +575,22 @@ function parseTask(argv: string[]): CliCommand {
   // it looks like, and is never eligible to be treated as the bare flag —
   // only a `--junior` that is NOT itself sitting in a value slot is the real
   // boolean flag.
+  // Issue #113 ask 9: `--provision` and `--fresh-session` are two more bare
+  // booleans on `task new`, extracted in this exact same loop as `--junior`
+  // just above — the same value-slot protection this loop already gives
+  // `--junior` (a token immediately after one of TASK_FLAGS.new's
+  // value-taking names is that flag's VALUE, never eligible to be read as a
+  // bare flag) comes for free for these two as well, no new logic needed.
   let junior = false;
+  let provision = false;
+  let freshSession = false;
   const flagArgs: string[] = [];
   if (sub === "new") {
     for (let i = 0; i < rest.length; i++) {
       const token = rest[i];
       if (token === "--junior") { junior = true; continue; }
+      if (token === "--provision") { provision = true; continue; }
+      if (token === "--fresh-session") { freshSession = true; continue; }
       flagArgs.push(token);
       // `token` is a value-taking flag's bare NAME (no `--k=v` form, which
       // carries its value inline and consumes nothing further) — its value
@@ -614,7 +634,19 @@ function parseTask(argv: string[]): CliCommand {
     brief.continues = Number(parsed.continues);
   }
   if (junior) brief.junior = true;
-  return { cmd: "task-new", brief };
+  // Issue #113 ask 9: --fresh-session only means something as a provision
+  // modifier — exactly as it does for `fleet provision`/`fleet recycle` —
+  // so it is refused standalone rather than silently ignored.
+  if (freshSession && !provision) return usage("fleet task new --fresh-session needs --provision");
+  // --provision needs a studio id to provision. An unassigned task (neither
+  // --studio nor --continues) has none — caught here, at parse time, rather
+  // than as a runtime surprise after the issue is already filed.
+  if (provision && brief.assignee === undefined && brief.continues === undefined) {
+    return usage("fleet task new --provision needs --studio or --continues (nothing to provision)");
+  }
+  return provision
+    ? { cmd: "task-new", brief, provision: true as const, ...(freshSession ? { freshSession: true as const } : {}) }
+    : { cmd: "task-new", brief };
 }
 
 /**

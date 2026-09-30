@@ -1173,7 +1173,9 @@ export async function listStudioTasks(creds: Credentials, studioId: string): Pro
   }
 }
 
-async function cmdTaskNew(creds: Credentials, brief: TaskBriefArgs): Promise<void> {
+async function cmdTaskNew(
+  creds: Credentials, brief: TaskBriefArgs, provision = false, freshSession = false,
+): Promise<void> {
   const detected = await detectRepo();
   // Issue #278: an explicit `--repo` (brief.repo) overrides the CWD-detected
   // repo — same override-wins-over-detection precedence `fleet tabs`'s own
@@ -1204,6 +1206,20 @@ async function cmdTaskNew(creds: Credentials, brief: TaskBriefArgs): Promise<voi
   const task = (await res.json()) as AssignedTask;
   console.log(formatTaskTable([task]));
   reportAssignWake(task);
+  // Issue #113 ask 9: --provision boots or heals the assigned studio in the
+  // same call, instead of leaving a filed task's "NO WAKE" (task-format.ts)
+  // to a second, separate `fleet provision <id>` run. cli-args.ts's own
+  // parse-time validation refuses --provision when the brief carries neither
+  // --studio nor --continues, so `task.assignee === null` here should never
+  // happen in practice — the check below is defensive against the Worker's
+  // own assignment resolution (out of this CLI's control) disagreeing.
+  if (provision) {
+    if (task.assignee === null) {
+      console.error("fleet task new --provision: task has no assignee — nothing to provision");
+      process.exit(1);
+    }
+    await cmdProvision(creds, task.assignee, freshSession);
+  }
 }
 
 async function cmdTaskLs(
@@ -2506,7 +2522,7 @@ async function main(): Promise<void> {
     case "destroy":
       return cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced);
     case "task-new":
-      return cmdTaskNew(creds, parsed.brief);
+      return cmdTaskNew(creds, parsed.brief, parsed.provision === true, parsed.freshSession === true);
     case "task-ls":
       return cmdTaskLs(creds, parsed.query);
     case "task-show":
