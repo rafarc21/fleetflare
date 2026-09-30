@@ -33,6 +33,8 @@ import type { Observed } from "./observed";
 import { logWakeOutcome } from "./wake";
 import { threwInsideDurableObject, runtimeFlags, errorMessage, durableObjectUnreachable } from "./rpc-failure";
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
+import { resolveClaudeAccounts, accountLabel } from "./accounts";
+import { readFleetAccountLimits } from "./account-limits-store";
 
 const ROUTE_RE = /^\/studio\/([^/]+)\/(status|provisioned|provision|restart|recycle|destroy|wake|check|rescue|inspect|ws\/terminal|paste|terminal|clear-session-guard)$/;
 
@@ -424,6 +426,29 @@ export async function handleStudio(
     const accept = (req.headers.get("Accept") ?? "").toLowerCase();
     if (accept.includes("text/html")) return renderStudioGrid(env);
     return Response.json(await listStudios(env));
+  }
+
+  /**
+   * Issue #141 review, item 4 — every account this fleet knows about,
+   * fleet-wide, regardless of which studio (if any) is currently parked on
+   * it. `fleet ls` (Task 9's own no-studio-id route, immediately above)
+   * shows only accounts studios are CURRENTLY on; a dead account with no
+   * studio parked on it right now — the real case an org-wide disable
+   * produces, once every studio has already failed off it — is exactly what
+   * that view can never surface. No studio id in this path either, so it is
+   * placed alongside `/studio/reach` and `/studio/` rather than inside
+   * ROUTE_RE's id-scoped dispatch.
+   */
+  if (url.pathname === "/studio/accounts" && req.method === "GET") {
+    const accounts = resolveClaudeAccounts(env);
+    const limits = await readFleetAccountLimits(env.DB, accounts);
+    return Response.json(accounts.map((a) => ({
+      name: a.name,
+      label: accountLabel(env, a.name),
+      dead: limits[a.name]?.dead === true,
+      until: limits[a.name]?.until ?? null,
+      seenAt: limits[a.name]?.seenAt ?? null,
+    })));
   }
 
   const m = ROUTE_RE.exec(url.pathname);

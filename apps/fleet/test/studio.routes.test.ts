@@ -28,6 +28,7 @@ import type { SessionSyncDeps, SessionSyncStorage } from "../src/studio/session-
 import { emptyObserved, type Observed } from "../src/studio/observed";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
+import { writeFleetAccountLimit } from "../src/studio/account-limits-store";
 
 // ROLE_PROMPT_B64 is base64 of UTF-8 and every prompt now carries the house
 // rules, whose em dashes are multi-byte — bare atob() hands back Latin-1.
@@ -2173,6 +2174,46 @@ describe("GET /studio/reach", () => {
     const res = await handleStudio(authorizedReq("/studio/reach"), testEnv, fakeFetchBlueprintFile(), reach);
     expect(res.status).toBe(400);
     expect(calls).toEqual([]);
+  });
+});
+
+// Issue #141 review, item 4 — `fleet ls` shows only accounts studios are
+// CURRENTLY on; a dead account with no studio parked on it right now (every
+// studio already failed off it, the real case an org-wide disable produces)
+// is invisible to that view. This route surfaces every configured account,
+// fleet-wide, whether or not any studio is on it right now.
+describe("GET /studio/accounts", () => {
+  it("401 without an Access header", async () => {
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(new Request("https://x/studio/accounts"), testEnv);
+    expect(res.status).toBe(401);
+  });
+
+  it("no dead accounts: every configured account listed, all dead:false", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(authorizedReq("/studio/accounts"), testEnv);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { name: string; label: string | null; dead: boolean; until: string | null; seenAt: string | null }[];
+    expect(body).toEqual([
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: null, seenAt: null },
+    ]);
+  });
+
+  it("one dead account: that account's row carries dead:true and its seenAt", async () => {
+    authorized();
+    const { testEnv: base } = envWithFakeStudio();
+    const testEnv = { ...base, CLAUDE_CODE_OAUTH_TOKEN_2: "test-oauth-2" } as unknown as Env;
+    const seenAt = "2026-09-30T12:00:00.000Z";
+    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", null, seenAt, true);
+
+    const res = await handleStudio(authorizedReq("/studio/accounts"), testEnv);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { name: string; label: string | null; dead: boolean; until: string | null; seenAt: string | null }[];
+    expect(body).toEqual([
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: null, seenAt: null },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: null, dead: true, until: null, seenAt },
+    ]);
   });
 });
 
