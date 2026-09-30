@@ -39,30 +39,39 @@ export interface StudioStatus {
   lastRefresh: string | null;
   error: string | null;
   /**
-   * Issue #107 fix-first (operator, 2026-09-30): the DO container class
-   * this studio's container was ACTUALLY created under. Stamped from the
-   * same pure `doClassForRole(role)` at EVERY site that first ever writes
-   * this id's row — never recomputed from the role name on any later read,
-   * and never overwritten by a later write to an existing row. This is
-   * load-bearing, not cosmetic: STUDIO and STUDIO_BIG are separate Durable
-   * Object namespaces, so re-deriving "which namespace does this role
-   * belong to today" on every request would silently route an
-   * already-running studio (created before this field existed, or before
-   * its role was added to profile.ts's BIG_PROFILE_ROLES) to a brand-new,
-   * empty DO in the other namespace the moment the role-set changes —
-   * orphaning the real one. Absent (every row written before this field
-   * existed) means "STUDIO", matching exactly what that studio already is.
-   * See profile.ts's studioNamespace/getStudioStub for the read side.
+   * Issue #107 fix-first (operator, 2026-09-30; round 2 same day): the DO
+   * container class this studio's container was ACTUALLY created under.
+   * Never recomputed from the role name on any later read, and never
+   * overwritten by a later write to an existing row. This is load-bearing,
+   * not cosmetic: STUDIO and STUDIO_BIG are separate Durable Object
+   * namespaces, so re-deriving "which namespace does this role belong to
+   * today" on every request would silently route an already-running studio
+   * (created before this field existed, or before its role was added to
+   * profile.ts's BIG_PROFILE_ROLES, or provisioned in the window before
+   * env.STUDIO_BIG's own binding was deployed) to a brand-new, empty DO in
+   * the other namespace the moment the role-set OR the deploy's bindings
+   * change — orphaning the real one. Absent (every row written before this
+   * field existed) means "STUDIO", matching exactly what that studio
+   * already is. See profile.ts's studioNamespace/getStudioStub for the
+   * read side.
    *
-   * Two write sites apply this, both landing on the identical value for a
-   * given role since both call the same doClassForRole: provision.ts's
-   * freshStatus (the direct-provision and restart paths), and spawn.ts's
-   * claimStudioId placeholder (the spawn-flow claim — this one fires
-   * FIRST, moments before the DO's own recordStudio write overwrites the
-   * same row with the identical value; stamped even though it is
-   * self-healing, because an un-stamped placeholder is a real, if narrow,
-   * window for exactly the misrouting this field exists to prevent — see
-   * spawn.ts's runSpawn and issue #107's follow-up review).
+   * Round 2 correction: every WRITE site computes this through
+   * profile.ts's `realDoClassForRole(env, role)`, never the Env-blind
+   * `doClassForRole(role)` — a role-only guess cannot know whether
+   * env.STUDIO_BIG is actually bound in THIS deploy (the container/
+   * change that wires it ships in a separate, batched rollout — see the
+   * issue's own body), and stamping "STUDIO_BIG" purely from role during
+   * that window would write exactly the lie this field exists to prevent.
+   * provision.ts's freshStatus therefore no longer stamps this field at
+   * all (it is deliberately Env-free); do.ts's ensureSpawnToken takes an
+   * explicit `doClass` parameter instead, computed by its two real callers
+   * (provision(), restartStudio()) which do have Env. spawn.ts's claim
+   * placeholder carries no doClass of its own for the same reason (that
+   * file also has no Env) — routes.ts's claimStudioId wrapper computes it,
+   * from the same role provisionChild will resolve moments later, so a
+   * reader that hits the placeholder before the DO's own recordStudio
+   * write lands still resolves the right namespace instead of falling
+   * back to the default.
    */
   doClass?: StudioDOClass;
   /**

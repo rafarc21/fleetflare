@@ -12,7 +12,7 @@
 import type { Env } from "../env";
 import { verifyAccess } from "./auth";
 import { parseStudioId } from "./ids";
-import { getStudioStub, getStudioStubForRow, doClassForRole } from "./profile";
+import { getStudioStub, getStudioStubForRow, realDoClassForRole } from "./profile";
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { TERMINAL_PATH } from "./terminal";
 import { PASTE_MIME_EXT, PASTE_MAX_BYTES } from "./paste";
@@ -220,7 +220,16 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
     // it introduces no new way for a spawn to fail.
     provisionChild: async (childId: string, cfg: ProvisionConfig) => {
       const projectCard = await resolveProjectCard(env, cfg.repo);
-      const stub = getStudioStubForRow(env, { id: childId, doClass: doClassForRole(cfg.role) });
+      // Issue #107 fix-first round 2: realDoClassForRole, not the blind
+      // doClassForRole — this stub resolution is env/role-dependent, and
+      // realDoClassForRole is the only function that should ever make that
+      // call (see its own doc comment). The STUB this resolves to was
+      // already correct in effect (getStudioStubForRow's own
+      // studioNamespace re-checks env.STUDIO_BIG truthiness before honoring
+      // a "STUDIO_BIG" value), but using the blind helper here was the same
+      // footgun pattern that caused the other two write-site bugs this round
+      // fixes — consistency, not a behavior change for this call site alone.
+      const stub = getStudioStubForRow(env, { id: childId, doClass: realDoClassForRole(env, cfg.role) });
       return stub.provision(projectCard === null ? cfg : { ...cfg, projectCard });
     },
     resolveBrief,
@@ -235,7 +244,20 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
       logWakeOutcome(`spawn: maestro wake (${studioId})`, outcome);
     },
     maxStudios: resolveMaxStudios(env.MAX_STUDIOS),
-    claimStudioId: (_childId: string, placeholder: StudioStatus) => claimStudioRow(env, placeholder),
+    // Issue #107 fix-first round 2: this IS a first-ever write for
+    // `childId`'s row (see StudioStatus.doClass's own doc comment) —
+    // provision.ts's freshStatus is not the only site that can be. spawn.ts
+    // no longer stamps doClass itself (it has no Env — see that file's own
+    // header), so this wrapper is where the write-safe value is computed:
+    // realDoClassForRole(env, role), from the SAME role provisionChild
+    // (just above) will resolve moments later, so a reader that hits this
+    // placeholder before the DO's own write lands (getStudioRow/
+    // getStudioStub, mid-spawn) still resolves the right namespace instead
+    // of falling back to the default.
+    claimStudioId: (childId: string, placeholder: StudioStatus) => {
+      const role = parseStudioId(childId)?.role ?? "";
+      return claimStudioRow(env, { ...placeholder, doClass: realDoClassForRole(env, role) });
+    },
     // Issue #59 review round 1 (M1): resume's atomic stopped -> provisioning flip.
     claimStopped: (studioId: string) => claimStoppedRow(env, studioId),
     now: () => new Date(),

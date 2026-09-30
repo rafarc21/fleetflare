@@ -17,7 +17,6 @@
 import { buildStudioId, nextFreeInstance, parseStudioId } from "./ids";
 import { fetchOrgCached, fetchFleetJsonCached, hashSpawnToken, maySpawn, type Org } from "./org";
 import { FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF, ORG_JSON_PATH } from "./provision";
-import { doClassForRole } from "./container-class";
 import type { ProvisionConfig, StudioStatus } from "./types";
 
 /**
@@ -135,10 +134,11 @@ export interface SpawnDeps {
   fetchPolicy: () => Promise<SpawnPolicy>;
   /** The EXISTING provision path (R-P3-2: "no new provisioning machinery"):
    *  routes.ts wires this to `getStudioStubForRow(env, {id: childId,
-   *  doClass: doClassForRole(cfg.role)}).provision(cfg)` — a spawn always
-   *  allocates a FRESH id, so there is no recorded row to defer to yet
-   *  (issue #107: which STUDIO/STUDIO_BIG namespace the child's own role
-   *  resolves to going forward — see profile.ts). */
+   *  doClass: realDoClassForRole(env, cfg.role)}).provision(cfg)` — a spawn
+   *  always allocates a FRESH id, so there is no recorded row to defer to
+   *  yet (issue #107: which STUDIO/STUDIO_BIG namespace the child's own role
+   *  resolves to going forward — see profile.ts; round 2 fixed this to also
+   *  check env.STUDIO_BIG's actual presence, not just role). */
   provisionChild: (childId: string, cfg: ProvisionConfig) => Promise<StudioStatus>;
   /**
    * P4a-2 (brief pickup): the board read that turns `{task: <n>}` into the
@@ -604,18 +604,19 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
   let release: (() => Promise<void>) | null = null;
   let target = child;
   for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt++) {
+    // Issue #107 fix-first round 2: no `doClass` here. This file has no
+    // `Env` (see this file's own header), so it cannot tell whether
+    // env.STUDIO_BIG is actually reachable in THIS deploy — stamping from
+    // role alone risked exactly the lie realDoClassForRole's own doc comment
+    // (profile.ts) now warns against: a batched-rollout window where
+    // "STUDIO_BIG" gets written for a container that was actually created
+    // under STUDIO. routes.ts's claimStudioId wrapper (the real
+    // spawnDeps.claimStudioId this reaches) computes the write-safe value
+    // itself, from this same childId, with Env in hand.
     release = await deps.claimStudioId(target.full, {
       id: target.full, state: "provisioning", tailscaleHost: null, lastRefresh: null, error: null,
       lastRefreshError: null, burn: null, spawnedBy: parent.id, spawnTokenHash: null,
       repoSlug: parent.repoSlug ?? null,
-      // Issue #107 follow-up: this IS a first-ever write for `target.full`'s
-      // row (see StudioStatus.doClass's own doc comment) — provision.ts's
-      // freshStatus is not the only one. Stamped here, from the same pure
-      // doClassForRole(role) provisionChild will call moments later on the
-      // identical role, so a reader that hits this placeholder before the
-      // DO's own write lands (getStudioRow/getStudioStub, mid-spawn) still
-      // resolves the right namespace instead of falling back to the default.
-      doClass: doClassForRole(target.role),
     });
     if (release !== null || wanted !== "next") break;
     instance = target.instance + 1;

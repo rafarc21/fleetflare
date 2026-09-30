@@ -16,17 +16,25 @@ export function isBigProfileRole(role: string): boolean {
 }
 
 /**
- * Issue #107 fix-first: the DO class a role gets the FIRST time it is ever
- * provisioned — see provision.ts's freshStatus, the one place this is
- * actually applied, and StudioStatus.doClass's own doc comment for why this
- * is never used to override an EXISTING row.
- *
- * Deliberately in its own file, imported neither from Env nor from
+ * Which DO class a role qualifies for IN PRINCIPLE — role alone, nothing
+ * else. Deliberately in its own file, imported neither from Env nor from
  * registry.ts: provision.ts (a `cli`-project-reachable module, via
  * failover.ts -> cli/reap.ts) needs this pure role->class function without
  * pulling env.ts's Worker-only ambient types (D1Database,
  * DurableObjectNamespace, ...) into the `cli`/`bun` type-check project —
  * see profile.ts's own header for the Env-aware routing half this feeds.
+ *
+ * Issue #107 fix-first round 2: DO NOT call this to decide what doClass
+ * value gets WRITTEN into a persisted row. It has no way to know whether
+ * env.STUDIO_BIG is actually bound in THIS deploy — the container/ change
+ * that wires it ships in a separate, batched rollout (see the issue's own
+ * body) — so a write made purely from role during that window can stamp
+ * "STUDIO_BIG" on a studio that was actually created under STUDIO, and a
+ * later read (once the binding exists) would believe the lie and orphan the
+ * real container. Every write site uses profile.ts's realDoClassForRole
+ * instead, which takes `env` and answers the write-safe question. This
+ * function stays useful only for the "does this role qualify at all"
+ * question (isBigProfileRole is usually the more direct way to ask that).
  */
 export function doClassForRole(role: string): StudioDOClass {
   return isBigProfileRole(role) ? "STUDIO_BIG" : "STUDIO";

@@ -45,13 +45,6 @@ import { STUDIO_TMUX, withStudioTmux } from "./tmux";
 // imports nothing, so there is no cycle.
 import { buildStudioId, parseStudioId } from "./ids";
 import { repoIdSegment } from "./repo";
-// Issue #107 fix-first: the DO class a role gets the FIRST time it is ever
-// provisioned — see freshStatus below, the one place this is applied.
-// Pulled from container-class.ts, NOT profile.ts: profile.ts imports Env
-// and registry.ts, and provision.ts is reachable from the `cli`/`bun`
-// type-check project (via failover.ts -> cli/reap.ts) where those Worker-
-// only ambient types don't exist — see container-class.ts's own header.
-import { doClassForRole } from "./container-class";
 import { parseFleetJson, parseRoleFile, assertRoleInFleet, roleBringupEnv } from "./blueprint";
 import { parseStudioFile, validateMemberFile, studioBringupEnv, type Studio, type MemberFile } from "./studio-blueprint";
 import { restorePlan, sessionDailyPrefix, dailyKeeperKeys, SESSION_FORCE_KEY, type RestoreAction } from "./session-sync";
@@ -770,12 +763,21 @@ export interface HealAttempt {
  *  Exported since P3 Task 2: do.ts's ensureSpawnToken publishes the spawn
  *  token hash before any provisioning has run, so it may be the first thing
  *  ever to write this studio's status — and it must write the SAME defaults
- *  every other entry point does, not a hand-rolled near-copy. */
+ *  every other entry point does, not a hand-rolled near-copy.
+ *
+ *  Issue #107 fix-first round 2: deliberately does NOT stamp `doClass`.
+ *  This file is Env-free by design (see this file's own header), so it has
+ *  no way to know whether env.STUDIO_BIG is actually reachable in THIS
+ *  deploy — computing it from role alone here would risk exactly the lie
+ *  doClassForRole's own doc comment (container-class.ts) warns against. The
+ *  one caller that can genuinely be first-to-write a row, do.ts's
+ *  ensureSpawnToken, threads its own Env-aware value down as an explicit
+ *  parameter instead (see that function's own doc comment) — this only
+ *  supplies every OTHER field's zero value. */
 export function freshStatus(id: string): StudioStatus {
   return {
     id, state: "provisioning", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
     burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    doClass: doClassForRole(parseStudioId(id)?.role ?? ""),
   };
 }
 

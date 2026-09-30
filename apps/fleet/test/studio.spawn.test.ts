@@ -1551,9 +1551,10 @@ describe("getStudioStub — issue #107 orphan-risk fix (recorded doClass wins ov
     const testEnv = { ...env, STUDIO: fakeMarkedNamespace("default"), STUDIO_BIG: fakeMarkedNamespace("big") } as unknown as Env;
     const id = "acme--release-studio";
     // Hand-built literal, deliberately WITHOUT doClass — the exact shape a
-    // row written before this field ever existed has. (Not built from
-    // freshStatus: freshStatus itself now sets doClass, which is precisely
-    // the behavior this test must not lean on.)
+    // row written before this field ever existed has. (freshStatus itself
+    // never stamps doClass either, round 2 onward — see its own doc
+    // comment — but this literal is built by hand regardless, so this test
+    // does not depend on that detail either way.)
     const preExisting: StudioStatus = {
       id, state: "running", tailscaleHost: "acme-release.example-tailnet.ts.net",
       lastRefresh: "2026-01-01T00:00:00.000Z", error: null, lastRefreshError: null,
