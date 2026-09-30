@@ -58,9 +58,11 @@ LABEL fleet.image.rev="p9-reproducible-images"
 # tmux hosts the long-lived `studio` session; git/curl/ca-certificates are
 # runtime deps of the bring-up script and the tailscale installer below
 # (the guarded clone itself is issued Worker-side via sbExec, but git must
-# exist IN the container for that exec to succeed). tailscale's own installer
-# script adds its apt repo and installs both the `tailscale` CLI and the
-# `tailscaled` daemon. zstd — board #350's install-cache restore/save path
+# exist IN the container for that exec to succeed). tailscale: its pinned
+# .deb, checksum-verified (issue #84; its install.sh installed whatever was
+# newest), which ships both the `tailscale` CLI and the `tailscaled` daemon;
+# iproute2 + libatm1 + libpam-cap = what install.sh pulled in beside it.
+# zstd — board #350's install-cache restore/save path
 # (src/studio/install-cache.ts's installCacheRestoreCmd/installCacheSaveCmd):
 # `curl | zstd -d | tar -x` and the reverse. Bundled into the FIRST apt-get
 # line below (tmux/curl/ca-certificates/gnupg), not git's own PPA-sourced
@@ -103,6 +105,7 @@ LABEL fleet.image.rev="p9-reproducible-images"
 # proven in the sibling container/Dockerfile and scripts/localci/Dockerfile.
 RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
     && apt-get update && apt-get install -y --no-install-recommends tmux curl ca-certificates gnupg zstd \
+    && mkdir -m 0700 /tmp/gnupg \
     && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&exact=on&search=0xF911AB184317630C59970973E363C90F8F1B6217" \
        | GNUPGHOME=/tmp/gnupg gpg --dearmor -o /tmp/repro-apt/git-core-ppa.gpg \
     && FPR="$(GNUPGHOME=/tmp/gnupg gpg --show-keys --with-colons /tmp/repro-apt/git-core-ppa.gpg | awk -F: '/^fpr:/ {print $10; exit}')" \
@@ -126,7 +129,7 @@ RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
     && git config --global --add safe.directory '*' \
     && curl -fsSL -o /tmp/tailscale.deb https://pkgs.tailscale.com/stable/ubuntu/pool/tailscale_1.102.4_amd64.deb \
     && echo "758cd0b2536d35dc1f02b785784dd18d08945ff644fcd92b1b0d597b6fa56f8b  /tmp/tailscale.deb" | sha256sum -c - \
-    && apt-get install -y --no-install-recommends /tmp/tailscale.deb iproute2 \
+    && apt-get install -y --no-install-recommends /tmp/tailscale.deb iproute2 libatm1 libpam-cap \
     && repro-seal end
 
 # gh: copied verbatim from container/Dockerfile (task image) — same install
@@ -347,6 +350,9 @@ RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
 # cache-miss" on every later invocation (plugin stays enabled and usable
 # either way, but the warning is needless noise this image doesn't need to
 # ship with). ~10MB on disk combined (per plugin actually installed below).
+# Their .git is dropped after install (issue #84): clone packs, index and
+# reflogs differ per clone; the pinned sha is already recorded in
+# installed_plugins.json, and a "directory" marketplace never reads .git.
 RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
     && git clone -q https://github.com/obra/superpowers.git \
        /root/.claude/plugins/marketplaces/superpowers-dev \
@@ -354,6 +360,7 @@ RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
        b36e0829c6d0140e93cfef2ca599b1b07d4a7797 \
     && claude plugin marketplace add /root/.claude/plugins/marketplaces/superpowers-dev \
     && claude plugin install superpowers@superpowers-dev \
+    && rm -rf /root/.claude/plugins/marketplaces/superpowers-dev/.git \
     && repro-seal end
 
 # Issue #330 (public-release prep): caveman used to be baked unconditionally
@@ -385,7 +392,8 @@ RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
       && git -C /root/.claude/plugins/marketplaces/caveman checkout -q \
         84cc3c14fa1e10182adaced856e003406ccd250d \
       && claude plugin marketplace add /root/.claude/plugins/marketplaces/caveman \
-      && claude plugin install caveman@caveman; \
+      && claude plugin install caveman@caveman \
+      && rm -rf /root/.claude/plugins/marketplaces/caveman/.git; \
     else \
       echo "ENABLE_CAVEMAN_PLUGIN != true — skipping caveman plugin install (issue #330 default)"; \
     fi \

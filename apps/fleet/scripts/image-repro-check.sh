@@ -131,9 +131,9 @@ for name in "${NAMES[@]}"; do
   ta="fleet-repro-check:$name-a-$$"; tb="fleet-repro-check:$name-b-$$"
   TAGS+=("$ta" "$tb")
   echo "== $name ($df, context $ctx)"
-  build "$df" "$FLEET_DIR/$ctx" "$ta" "$barg" || { echo "  build A failed:"; tail -20 "$TMP/build-$ta.log"; exit 2; }
+  build "$df" "$FLEET_DIR/$ctx" "$ta" "$barg" || { echo "  build A failed:"; grep -vE "^ *[0-9]+ \| " "$TMP/build-$ta.log" | tail -40; exit 2; }
   copy_context "$ctx" "$TMP/ctx-$name"
-  build "$df" "$TMP/ctx-$name" "$tb" "$barg" || { echo "  build B failed:"; tail -20 "$TMP/build-$tb.log"; exit 2; }
+  build "$df" "$TMP/ctx-$name" "$tb" "$barg" || { echo "  build B failed:"; grep -vE "^ *[0-9]+ \| " "$TMP/build-$tb.log" | tail -40; exit 2; }
   ia=$("$DOCKER" image inspect "$ta" --format '{{.Id}}'); ib=$("$DOCKER" image inspect "$tb" --format '{{.Id}}')
   echo "  build A: $ia"
   echo "  build B: $ib"
