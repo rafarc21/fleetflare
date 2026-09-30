@@ -1782,6 +1782,38 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
     expect((await h.storage.get(STATUS_KEY))?.borrowedAccount).toBeNull();
   });
 
+  // -------------------------------------------------------------------
+  // Maestro review of PR #152 (2026-09-30), item 3b — hand-back must never
+  // return a studio onto its OWN primary while that primary is dead
+  // (permanently disabled, issue #141), not merely "still fleet-wide
+  // limited". accountIsFree already checks `dead` first, unconditionally,
+  // before anything else (src/studio/accounts.ts) — this pins that with a
+  // real runAccountFailover tick rather than trusting the doc comment: a
+  // studio borrowed onto another repo's primary, its OWN mapped primary
+  // marked dead, fed a working/idle pane (hand-back only fires on
+  // `kind: "working"`), must stay borrowed.
+  // -------------------------------------------------------------------
+  it("own primary DEAD (not merely limited): hand-back never returns the studio onto it", async () => {
+    const h = harness({
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
+        borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
+      }),
+    });
+    // Own primary marked DEAD fleet-wide (until: null — a dead entry has no
+    // reset at all, see accounts.ts's own AccountLimits shape).
+    h.accountLimits.set("CLAUDE_CODE_OAUTH_TOKEN_2", { until: null, seenAt: NOW.toISOString(), dead: true });
+
+    const out = await run(h);
+    expect(out).toEqual({ kind: "no-modal", reason: expect.any(String) });
+    expect(h.relaunches).toBe(0);
+    expect(h.notices).toHaveLength(0);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+    expect(stored?.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+  });
+
   it("lowest-burn-first: two free other-repo primaries, the lower-burn one is chosen, not list order", async () => {
     const five: ClaudeAccount[] = [
       ...four,
