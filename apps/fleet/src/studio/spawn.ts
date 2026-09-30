@@ -330,6 +330,150 @@ export function readInstanceRequest(body: unknown): number | "next" | null {
   return raw;
 }
 
+/**
+ * Issue #59: may studio `parent` DIRECT studio `targetId` — file a task for
+ * it, hand it one, resume it? The same gate runSpawn applies (maySpawn over
+ * org.json edges, caller role -> target ROLE; every instance inherits its
+ * role's edges), plus the two facts spawn gets for free by building the child
+ * id itself: the target lives in the caller's own repo segment, and is not
+ * the caller. Pure; the caller has already resolved `org` server-side.
+ */
+export function mayDirect(
+  org: Org, parent: SpawnParent, targetId: string,
+): { ok: true } | { ok: false; status: number; message: string } {
+  const target = parseStudioId(targetId);
+  if (!target) return { ok: false, status: 400, message: `${JSON.stringify(targetId)} is not a studio id` };
+  if (target.full === parent.id) {
+    return { ok: false, status: 403, message: "a studio does not direct itself — report your own work with an envelope" };
+  }
+  if (target.repo !== parent.repo || !maySpawn(org, parent.role, target.role)) {
+    return { ok: false, status: 403, message: `${target.full} is outside ${parent.id}'s org-chart edges` };
+  }
+  return { ok: true };
+}
+
+/**
+ * Issue #59: `{role, instance, resume: true}` on /fleet/spawn — start a
+ * STOPPED studio again. The gate is runSpawn's own, in runSpawn's own order
+ * (shape, then org edge BEFORE any existence check, so a caller with no edge
+ * learns nothing about which studios exist). The start is the StudioDO's own
+ * provision(), the same call the operator's POST /studio/:id/provision makes:
+ * rescue discovery, the start gate, bring-up delivery of the latest assigned
+ * brief — nothing here is a second way to start a container.
+ *
+ * Narrower than the operator route on purpose: only a `stopped` row (a live
+ * lead is never re-provisioned from under it), never a new id (that is
+ * spawn), and only a studio bound to the caller's own work repo.
+ */
+/**
+ * Issue #59 review round 1: how long after a studio STOPPED it may be
+ * resumed. Bounds a park <-> resume cycle to one container start per window,
+ * whatever drives it.
+ */
+export const RESUME_COOLDOWN_MS = 10 * 60_000;
+
+/** runResume's ports: spawn's, plus the two only a resume needs. */
+export interface ResumeDeps extends SpawnDeps {
+  /**
+   * Atomically flip the registry row `stopped` -> `provisioning` (routes.ts
+   * wires registry.ts's claimStoppedRow, a conditional D1 UPDATE). Resolves
+   * to the release (flip back, only while still `provisioning`), or null when
+   * the row was no longer `stopped` — another resume won. Without it, the row
+   * reads `stopped` for the whole multi-minute provision, and a retried
+   * resume starts a second bring-up.
+   */
+  claimStopped: (studioId: string) => Promise<(() => Promise<void>) | null>;
+  now: () => Date;
+}
+
+export async function runResume(deps: ResumeDeps, parent: SpawnParent, body: unknown): Promise<Response> {
+  const requested = (body as { role?: unknown } | null)?.role;
+  if (typeof requested !== "string" || requested.length === 0) return new Response("bad role", { status: 400 });
+  const roleProbe = parseStudioId(buildStudioId({ repo: parent.repo, role: requested }));
+  if (!roleProbe || roleProbe.role !== requested) return new Response("bad role", { status: 400 });
+  const wanted = readInstanceRequest(body);
+  if (wanted === null || wanted === "next") {
+    return new Response("resume names one instance — a positive integer, never \"next\"", { status: 400 });
+  }
+  const target = parseStudioId(buildStudioId({ repo: parent.repo, role: requested, instance: wanted }));
+  if (!target) return new Response("bad instance", { status: 400 });
+
+  let policy: SpawnPolicy;
+  try {
+    policy = await deps.fetchPolicy();
+  } catch (err) {
+    console.error(`resume: org.json unavailable for ${parent.id}`, err);
+    return new Response("org unavailable", { status: 503 });
+  }
+  const gate = mayDirect(policy.org, parent, target.full);
+  if (!gate.ok) return new Response(gate.message, { status: gate.status });
+  // Review round 1: the same fleet.json check runSpawn makes — a role the
+  // fleet no longer declares is not started again, edge or not.
+  if (!policy.roles.includes(requested)) {
+    return new Response(`role "${requested}" is not declared in fleet.json roles — not resuming it`, { status: 400 });
+  }
+
+  const rows = await deps.listStudios();
+  const row = rows.find((r) => r.id === target.full);
+  if (!row) return new Response(`no studio ${target.full} — resume never creates one; spawn it`, { status: 404 });
+  if (row.state !== "stopped") {
+    return new Response(`${target.full} is ${row.state}, not stopped — resume only starts a stopped studio`, { status: 409 });
+  }
+  const bound = (row.repoSlug ?? null)?.toLowerCase() ?? null;
+  const mine = (parent.repoSlug ?? null)?.toLowerCase() ?? null;
+  if (bound !== mine) {
+    return new Response(`${target.full} is bound to another work repo than ${parent.id}`, { status: 403 });
+  }
+  // Review round 1, blocker 1: a destroy is the operator's decision to stop
+  // paying for a studio. Only one he PARKED (`fleet destroy --park`) is
+  // resumable; a plain destroy, or a row from before the marker, is not.
+  if (row.parked !== true) {
+    return new Response(
+      `${target.full} was destroyed by the operator, not parked — only the operator can start it again ` +
+      "(ask with an intent: request envelope)",
+      { status: 403 },
+    );
+  }
+  const stoppedAt = row.stoppedAt ? Date.parse(row.stoppedAt) : NaN;
+  const opensAt = stoppedAt + RESUME_COOLDOWN_MS;
+  if (!Number.isFinite(stoppedAt) || deps.now().getTime() < opensAt) {
+    return new Response(
+      `${target.full} is in its resume cooldown — ` +
+      (Number.isFinite(stoppedAt) ? `resumable from ${new Date(opensAt).toISOString()}` : "its stop time is unknown"),
+      { status: 409 },
+    );
+  }
+
+  // Merge with main (#81): the cap counts LIVE studios, so this stopped row
+  // is free and a resume makes it live. Only the operator's own provision
+  // may heal past the cap; a studio's resume may not.
+  const live = liveStudioCount(rows);
+  if (live >= deps.maxStudios) {
+    return new Response(
+      `fleet is at capacity (${live}/${deps.maxStudios} live studios) — cannot resume "${target.full}"`,
+      { status: 409 },
+    );
+  }
+
+  // Review round 1 (M1): one resume at a time — see ResumeDeps.claimStopped.
+  const release = await deps.claimStopped(target.full);
+  if (release === null) return new Response(`${target.full} is already being resumed`, { status: 409 });
+  // No `spawnedBy`: a resume does not re-parent the studio. No `briefPrompt`:
+  // bring-up falls back to the latest task assigned to it on the board.
+  let status: StudioStatus;
+  try {
+    status = await deps.provisionChild(target.full, {
+      repo: target.repo, role: target.role,
+      ...(target.instance === 1 ? {} : { instance: target.instance }),
+      repoSlug: parent.repoSlug,
+    });
+  } catch (err) {
+    await release();
+    throw err;
+  }
+  return Response.json(status);
+}
+
 /** Issue #296: how many numbers a `"next"` spawn tries after losing races. */
 const MAX_CLAIM_ATTEMPTS = 20;
 

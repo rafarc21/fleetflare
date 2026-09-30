@@ -25,8 +25,9 @@ export function repairFailureLine(
 }
 
 /** `fleet destroy`'s route path — the flags ride recycle's own query names. */
-export function destroyPath(force: boolean, discardUnsynced: boolean): string {
-  const query = [force && "force=true", discardUnsynced && "discard-unsynced=true"].filter(Boolean).join("&");
+export function destroyPath(force: boolean, discardUnsynced: boolean, park = false): string {
+  const query = [force && "force=true", discardUnsynced && "discard-unsynced=true", park && "park=true"]
+    .filter(Boolean).join("&");
   return query ? `/destroy?${query}` : "/destroy";
 }
 

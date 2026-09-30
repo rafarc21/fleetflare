@@ -1,10 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
-import { withObserved, recordSnapshotOnSuccess, applyStudioGitSafetyPort, studioGitSafetyCmd } from "../src/studio/do";
+import {
+  withObserved, recordSnapshotOnSuccess, applyStudioGitSafetyPort, studioGitSafetyCmd,
+  runShipTickWithObservation, STALE_SHELL_NUDGE_KEY, STALE_SHELL_NUDGE_EVERY_MS,
+} from "../src/studio/do";
 import { emptyObserved, OBSERVED_KEY, type Observed, type ObservedStorage } from "../src/studio/observed";
 import type { StudioStatus } from "../src/studio/types";
 import type { SyncResult } from "../src/studio/session-sync";
 import { ACTIVITY_KEY, type Activity } from "../src/studio/activity";
 import { MEMBER_ALERTS_KEY, type MemberAlert } from "../src/studio/member-alerts";
+import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
+import { SECTION_PANE, type TranscriptStorage, type ShipDeps } from "../src/studio/transcript";
 
 // Issue #85, maestro correction #1. `withObserved` is the seam every
 // StudioStatus leaving a StudioDO passes through on its way to D1
@@ -176,5 +181,199 @@ describe("applyStudioGitSafetyPort — do.ts's own side of the #253 wiring", () 
 
     expect(res.ok).toBe(false);
     expect(res.ok === false && res.error).toContain("session busy");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #106 — "idle lead + stale background shell: detect and nudge".
+// `applyActivityVerdict`'s own new `onStaleBackgroundShell` edge, exercised
+// via the FULL `runShipTickWithObservation` path — same "proves the wiring,
+// not just the pure decision" split test/studio.observation-tick.test.ts's
+// own "onLeadWorking (issue #86)" describe block already established for
+// `autoWorking`'s identical rate-bound-edge shape. `nextActivity`'s own pure
+// `backgroundShellSince` tracking has its dedicated coverage in
+// test/studio.activity.test.ts; this file only proves do.ts's OWN wiring:
+// the edge fires exactly once per real 15-minute crossing, rate-bound by
+// STALE_SHELL_NUDGE_EVERY_MS, and never for a plain idle tick or a tick that
+// never carried the background-shell flavour at all.
+// ---------------------------------------------------------------------------
+describe("runShipTickWithObservation — onStaleBackgroundShell (issue #106)", () => {
+  const MIN = 60_000;
+  const T0 = new Date("2026-09-30T12:00:00.000Z");
+  const TOK_1 = "11111111-2222-3333-4444-555555555555";
+
+  /** UTF-8 aware base64 — same reasoning as test/studio.observation-tick.
+   *  test.ts's own identical helper: a pane frame carries claude's own
+   *  box-drawing glyphs, which plain `btoa` throws on outright. */
+  function b64Utf8(s: string): string {
+    return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+  }
+
+  function stdoutWithPane(pane: string, incarnation = TOK_1): string {
+    return [
+      "---FLEET-BOOTID---", "", "---FLEET-STAT---", "-1", "---FLEET-INCARNATION---", incarnation,
+      SECTION_PANE, b64Utf8(pane),
+    ].join("\n");
+  }
+
+  // Turn ended, empty input box, footer carries a "7 shells" counter — the
+  // SAME #86/#106 background-shell flavour shape test/studio.activity.
+  // test.ts's own "#86: a live background shell/monitor/task is waiting"
+  // describe block builds from REAL_WEBSTUDIO_PANE.
+  const SHELLS_IDLE_PANE = [
+    "⏺ Done.", "", "─".repeat(68), "❯ ", "─".repeat(68),
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · 7 shells",
+  ].join("\n");
+  // Same pane, counter cleared — plain idle, no background-shell flavour.
+  const CLEAN_IDLE_PANE = [
+    "⏺ Done.", "", "─".repeat(68), "❯ ", "─".repeat(68),
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+  ].join("\n");
+
+  function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
+    return {
+      id: "websites--pilot", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      ...overrides,
+    };
+  }
+
+  /** Same "one Map-backed fake satisfying every narrow port
+   *  runShipTickWithObservation needs at once" shape test/studio.
+   *  observation-tick.test.ts's own `fakeStorage` already establishes,
+   *  rebuilt locally here per this issue's own file boundary. */
+  function fakeStorage(seed?: {
+    status?: StudioStatus;
+    activity?: Activity;
+  }): (TranscriptStorage & ObservedStorage & StudioStorage) & { map: Map<string, unknown> } {
+    const map = new Map<string, unknown>();
+    if (seed?.status) map.set(STATUS_KEY, seed.status);
+    if (seed?.activity) map.set(ACTIVITY_KEY, seed.activity);
+    const storage = {
+      map,
+      get: (async (key: string) => map.get(key)) as unknown as (TranscriptStorage & ObservedStorage & StudioStorage)["get"],
+      put: (async (keyOrEntries: unknown, value?: unknown) => {
+        if (typeof keyOrEntries === "object" && keyOrEntries !== null) {
+          for (const [k, v] of Object.entries(keyOrEntries as Record<string, unknown>)) map.set(k, v);
+          return;
+        }
+        map.set(keyOrEntries as string, value);
+      }) as unknown as (TranscriptStorage & ObservedStorage & StudioStorage)["put"],
+    };
+    return storage;
+  }
+
+  const shipDeps = (pane: string, now: Date): ShipDeps => ({
+    exec: vi.fn(async () => ({ code: 0, stdout: stdoutWithPane(pane), stderr: "" })),
+    r2Put: vi.fn(async () => {}),
+    now: () => now,
+  });
+
+  const run = (
+    pane: string, now: Date, storage: ReturnType<typeof fakeStorage>, onStaleBackgroundShell: () => Promise<void>,
+  ) => runShipTickWithObservation(
+    shipDeps(pane, now), storage, "websites--pilot", undefined, 5000, undefined, undefined, onStaleBackgroundShell,
+  );
+
+  it("does NOT fire on the first tick that reads a background-shell counter (age 0, well under the 15-minute budget)", async () => {
+    const storage = fakeStorage({ status: status() });
+    const cb = vi.fn(async () => {});
+    await run(SHELLS_IDLE_PANE, T0, storage, cb);
+    expect(cb).not.toHaveBeenCalled();
+    expect((storage.map.get(ACTIVITY_KEY) as Activity).backgroundShellSince).toBe(T0.toISOString());
+  });
+
+  it("fires exactly once on the tick that CROSSES 15 minutes — not on an earlier still-fresh tick, not again the next tick", async () => {
+    const storage = fakeStorage({ status: status() });
+    const cb = vi.fn(async () => {});
+    await run(SHELLS_IDLE_PANE, T0, storage, cb); // stamps backgroundShellSince = T0
+
+    const stillFresh = new Date(T0.getTime() + 10 * MIN);
+    await run(SHELLS_IDLE_PANE, stillFresh, storage, cb);
+    expect(cb).not.toHaveBeenCalled(); // 10min < 15min — not yet stale
+
+    const crossing = new Date(T0.getTime() + 16 * MIN);
+    await run(SHELLS_IDLE_PANE, crossing, storage, cb);
+    expect(cb).toHaveBeenCalledTimes(1); // the crossing tick itself
+    expect(storage.map.get(STALE_SHELL_NUDGE_KEY)).toBe(crossing.toISOString());
+
+    const stillStale = new Date(T0.getTime() + 17 * MIN);
+    await run(SHELLS_IDLE_PANE, stillStale, storage, cb);
+    expect(cb).toHaveBeenCalledTimes(1); // still stale next tick too — NOT a new crossing, no second fire
+  });
+
+  it("never fires for a plain idle tick that never carried the background-shell flavour at all", async () => {
+    const storage = fakeStorage({ status: status() });
+    const cb = vi.fn(async () => {});
+    await run(CLEAN_IDLE_PANE, T0, storage, cb);
+    const later = new Date(T0.getTime() + 20 * MIN);
+    await run(CLEAN_IDLE_PANE, later, storage, cb);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("resets the clock (and never fires) once the counter clears before 15 minutes have passed", async () => {
+    const storage = fakeStorage({ status: status() });
+    const cb = vi.fn(async () => {});
+    await run(SHELLS_IDLE_PANE, T0, storage, cb);
+    const cleared = new Date(T0.getTime() + 10 * MIN);
+    await run(CLEAN_IDLE_PANE, cleared, storage, cb);
+    expect((storage.map.get(ACTIVITY_KEY) as Activity).backgroundShellSince).toBeNull();
+    const later = new Date(T0.getTime() + 26 * MIN); // 16 min after it cleared
+    await run(CLEAN_IDLE_PANE, later, storage, cb);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("rate-bound: a nudge already stamped within STALE_SHELL_NUDGE_EVERY_MS suppresses even a real, new crossing", async () => {
+    const storage = fakeStorage({ status: status() });
+    const cb = vi.fn(async () => {});
+    await run(SHELLS_IDLE_PANE, T0, storage, cb); // stamps backgroundShellSince = T0, no nudge key yet
+
+    const crossing = new Date(T0.getTime() + 16 * MIN);
+    // A nudge fired 5 minutes before this tick's own `now` — well inside the
+    // 15-minute rate-limit window (STALE_SHELL_NUDGE_EVERY_MS), so this
+    // otherwise-real crossing must still be refused.
+    storage.map.set(STALE_SHELL_NUDGE_KEY, new Date(crossing.getTime() - 5 * MIN).toISOString());
+    await run(SHELLS_IDLE_PANE, crossing, storage, cb);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("fires a SECOND time on a genuine later crossing, once STALE_SHELL_NUDGE_EVERY_MS has elapsed since the first nudge", async () => {
+    const storage = fakeStorage({ status: status() });
+    const cb = vi.fn(async () => {});
+    await run(SHELLS_IDLE_PANE, T0, storage, cb); // stamps backgroundShellSince = T0
+
+    const firstCrossing = new Date(T0.getTime() + 16 * MIN);
+    await run(SHELLS_IDLE_PANE, firstCrossing, storage, cb);
+    expect(cb).toHaveBeenCalledTimes(1); // first nudge
+
+    // Flavour clears — backgroundShellSince resets to null, no fire.
+    const cleared = new Date(T0.getTime() + 20 * MIN);
+    await run(CLEAN_IDLE_PANE, cleared, storage, cb);
+    expect((storage.map.get(ACTIVITY_KEY) as Activity).backgroundShellSince).toBeNull();
+    expect(cb).toHaveBeenCalledTimes(1);
+
+    // Flavour returns — a fresh backgroundShellSince, age 0, still no fire.
+    const restarted = new Date(T0.getTime() + 40 * MIN);
+    await run(SHELLS_IDLE_PANE, restarted, storage, cb);
+    expect((storage.map.get(ACTIVITY_KEY) as Activity).backgroundShellSince).toBe(restarted.toISOString());
+    expect(cb).toHaveBeenCalledTimes(1);
+
+    // A genuine second crossing: 17 minutes after `restarted` (past the
+    // 15-minute staleness budget again), and 41 minutes after `firstCrossing`
+    // (well past STALE_SHELL_NUDGE_EVERY_MS's own 15-minute rate-limit
+    // window) — nothing suppresses this one.
+    const secondCrossing = new Date(T0.getTime() + 57 * MIN);
+    await run(SHELLS_IDLE_PANE, secondCrossing, storage, cb);
+    expect(cb).toHaveBeenCalledTimes(2);
+    expect(storage.map.get(STALE_SHELL_NUDGE_KEY)).toBe(secondCrossing.toISOString());
+  });
+
+  it("a throwing callback never fails the tick; activity is still stored", async () => {
+    const storage = fakeStorage({ status: status() });
+    await run(SHELLS_IDLE_PANE, T0, storage, async () => {});
+    const crossing = new Date(T0.getTime() + 16 * MIN);
+    await expect(run(SHELLS_IDLE_PANE, crossing, storage, async () => { throw new Error("wake refused"); }))
+      .resolves.toBeDefined();
+    expect((storage.map.get(ACTIVITY_KEY) as Activity).state).toBe("waiting-members");
   });
 });

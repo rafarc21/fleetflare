@@ -410,6 +410,9 @@ export interface LsJsonRow {
   limitResetsAt: string | null;
   /** The ACTIVITY column's own text, unchanged. */
   activity: string;
+  /** The lead's last visible, non-chrome message line — redacted, bounded;
+   *  issue #108 (#70 ask 4 remainder). */
+  lastLine: string | null;
 }
 
 /** The same data the ACTIVITY column renders, as a lead state per studio. */
@@ -417,7 +420,10 @@ export function lsJsonRows(
   studios: StudioStatus[], now: Date, staleAfterSeconds: number = ACTIVITY_MIRROR_STALE_SECONDS,
 ): LsJsonRow[] {
   return studios.map((s) => {
-    const base = { id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds) };
+    const base = {
+      id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds),
+      lastLine: s.observed?.lastMessageLine ?? null,
+    };
     if (s.state !== "running" && s.state !== "degraded") return { ...base, lead: "stopped", leadSince: null, limitResetsAt: null };
     const rl = s.rateLimited;
     if (rl?.select) return { ...base, lead: "modal", leadSince: rl.seenAt, limitResetsAt: rl.until ?? null };
@@ -483,6 +489,16 @@ export function formatState(s: StudioStatus): string {
  * both occur on the very same tick, and used to clobber each other under one
  * shared field). Silent once a later tick's persist succeeds again
  * (`burnPersistError` back to `null`).
+ *
+ * Issue #115: also one line per studio whose `--fresh-session` intent is
+ * currently PENDING (`StudioStatus.freshSessionPending`, mirrored from
+ * provision.ts's own `FRESH_SESSION_PENDING_KEY` by do.ts's
+ * `mirrorBurnToRegistry`, same bridge `sessionForceArmedAt` crosses) — a
+ * prior `--fresh-session` attempt that never reached a CONFIRMED success, and
+ * which keeps forcing every later provision fresh until one finally succeeds
+ * or `fleet provision <id> --no-fresh-session` cancels it. Previously
+ * invisible here entirely, same gap `sessionForceArmedAt` closed for the
+ * force-next-sync override.
  */
 export function formatSessionGuards(studios: StudioStatus[]): string[] {
   const lines: string[] = [];
@@ -507,6 +523,10 @@ export function formatSessionGuards(studios: StudioStatus[]): string[] {
     }
     if (s.burnPersistError) {
       lines.push(`BURN PERSIST ${s.id}: FAILED since ${s.burnPersistError.at} (${s.burnPersistError.reason})`);
+    }
+    // Issue #115: a stuck fresh-session intent, previously invisible here.
+    if (s.freshSessionPending) {
+      lines.push(`FRESH SESSION ${s.id}: fresh-session pending`);
     }
     // PR #46 review (#37): an aside session that is not reaching R2.
     for (const f of s.asideShip?.failed ?? []) {

@@ -46,6 +46,7 @@ function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
     branchExists: vi.fn(async () => true),
     commitExists: vi.fn(async () => true),
     closeIssue: vi.fn(async () => {}),
+    listOpenPullFiles: vi.fn(async () => []),
     ...overrides,
   };
 }
@@ -145,15 +146,18 @@ describe("handleFleetBoard — auth", () => {
     expect((await handleFleetBoard(req("/fleet/tasks/71/state", token), testEnv, fakeApi(), rows)).status).toBe(405);
   });
 
-  it("has no assignment route either — a studio cannot adopt or hand off work (P5 §3)", async () => {
+  it("cannot adopt, and cannot assign outside its org-chart edges (P5 §3, issue #59)", async () => {
     const { token, rows } = await tokenFor(MINE);
     const api = fakeApi();
-    for (const action of ["adopt", "assign"]) {
+    // web-studio has no edges at all: the assign route exists since issue #59,
+    // and refuses it at the org-chart gate before any label is touched.
+    const noEdges = async () => ({ org: { edges: {}, gates: {} }, roles: [] });
+    for (const [action, status] of [["adopt", 404], ["assign", 403]] as const) {
       const res = await handleFleetBoard(
         req(`/fleet/tasks/71/${action}`, token, { method: "POST", body: JSON.stringify({ assignee: THEIRS }) }),
-        testEnv, api, rows,
+        testEnv, api, rows, noEdges,
       );
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(status);
     }
     // The point is not the status code: no label was written by either call.
     expect(api.addLabels).not.toHaveBeenCalled();
@@ -296,15 +300,18 @@ describe("handleFleetBoard — a lead moves its own task", () => {
     expect(api.addLabels).not.toHaveBeenCalled();
   });
 
-  it("has no assignment route either — a studio cannot adopt or hand off work (P5 §3)", async () => {
+  it("cannot adopt, and cannot assign outside its org-chart edges (P5 §3, issue #59)", async () => {
     const { token, rows } = await tokenFor(MINE);
     const api = fakeApi();
-    for (const action of ["adopt", "assign"]) {
+    // web-studio has no edges at all: the assign route exists since issue #59,
+    // and refuses it at the org-chart gate before any label is touched.
+    const noEdges = async () => ({ org: { edges: {}, gates: {} }, roles: [] });
+    for (const [action, status] of [["adopt", 404], ["assign", 403]] as const) {
       const res = await handleFleetBoard(
         req(`/fleet/tasks/71/${action}`, token, { method: "POST", body: JSON.stringify({ assignee: THEIRS }) }),
-        testEnv, api, rows,
+        testEnv, api, rows, noEdges,
       );
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(status);
     }
     // The point is not the status code: no label was written by either call.
     expect(api.addLabels).not.toHaveBeenCalled();

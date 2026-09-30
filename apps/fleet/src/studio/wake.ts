@@ -604,6 +604,10 @@ export async function runGatedWake(deps: GatedWakeDeps, prompt: string, clearDra
     // on screen whatever the clock says, and no unattended path may press a
     // key into it — not the wake, not an Esc.
     if (!limit.inline) {
+      // Issue #109: the ONE sanctioned exception to "not the wake, not an
+      // Esc" is failover.ts's own dismissModalCmd — a single Esc, gated by
+      // its own immediate re-check of the SAME modal shape, never this gate
+      // or the generic wake path.
       return {
         ok: false, skipped: true,
         error: `usage-limit modal open in ${WAKE_TARGET}; no keystroke sent (spend options on screen). ` +

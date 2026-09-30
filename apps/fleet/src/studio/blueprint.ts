@@ -91,6 +91,21 @@ export interface FleetConfig {
   blueprint: { repo: string; ref: string };
   roles: string[];
   instance_type: string;
+  /**
+   * Board issue #105 (pre-gate): an optional shell command a lead's
+   * `fleet task report` runs before posting a "result"/"ok" envelope — a
+   * 30-second-scale cheap check (a repo-invariants test minus its heavy
+   * build legs, plus one lint subset — the issue's own framing) run BEFORE
+   * a studio may claim done, so a RED result there refuses the post rather
+   * than shipping a false "done" the merge gate discovers 10-20 minutes
+   * later. See container/studio-fleet's own runPreflight/evaluatePreGate
+   * for the enforcement — that binary duplicates this exact parse rather
+   * than importing this file (its own header explains why: zero relative
+   * imports). Optional, no default: absent means no repo has declared this
+   * feature, not "run nothing" as a meaningful choice — same shape as
+   * Role.instance_type above (undefined is "no opinion", not a value).
+   */
+  preflight?: string;
 }
 
 const REQUIRED_ROLE_FIELDS = ["name", "skills", "allowedTools", "reports_to", "gates"] as const;
@@ -280,6 +295,15 @@ export function parseFleetJson(s: string): FleetConfig {
     throw new BlueprintError("roles", "missing or not an array of strings");
   }
 
+  // Board issue #105: optional, no default (see FleetConfig's own doc
+  // comment) — but a PRESENT value must be a non-empty string, the same
+  // "no silently-wrong value" contract instance_type's own blank check
+  // (parseRoleFile above) already enforces for exactly this "absent is
+  // fine, present-but-blank is not" shape.
+  if (obj.preflight !== undefined && (typeof obj.preflight !== "string" || obj.preflight.trim() === "")) {
+    throw new BlueprintError("preflight", "must be a non-empty string when present");
+  }
+
   return {
     blueprint: {
       repo: requireString(bp, "repo", "blueprint.repo"),
@@ -287,6 +311,7 @@ export function parseFleetJson(s: string): FleetConfig {
     },
     roles,
     instance_type: requireString(obj, "instance_type", "instance_type"),
+    preflight: typeof obj.preflight === "string" ? obj.preflight : undefined,
   };
 }
 

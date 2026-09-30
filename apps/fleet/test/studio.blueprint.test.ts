@@ -335,6 +335,55 @@ describe("parseFleetJson", () => {
       expect((err as BlueprintError).field).toBe("instance_type");
     }
   });
+
+  // Board issue #105 (pre-gate): an optional shell command a lead's
+  // `fleet task report` runs before posting a "result"/"ok" envelope — see
+  // container/studio-fleet's own runPreflight/evaluatePreGate for the
+  // enforcement (that binary duplicates this same parse rather than
+  // importing this file — see its own header on zero relative imports).
+  // Same "absent -> undefined, present-but-blank throws" shape as
+  // Role.instance_type above: no repo declaring this feature is the
+  // overwhelming common case, and "no opinion" must stay distinguishable
+  // from "explicitly run nothing".
+  describe("optional field: preflight (board issue #105, pre-gate)", () => {
+    it("absent -> undefined, no error", () => {
+      expect(parseFleetJson(VALID_FLEET_JSON).preflight).toBeUndefined();
+    });
+
+    it("present -> parsed as a plain string", () => {
+      const s = JSON.stringify({
+        blueprint: { repo: "o/r", ref: "main" }, roles: ["pilot"], instance_type: "standard-2",
+        preflight: "bun run check:fast",
+      });
+      expect(parseFleetJson(s).preflight).toBe("bun run check:fast");
+    });
+
+    it("present but blank -> BlueprintError naming it, not a silently-empty override", () => {
+      const s = JSON.stringify({
+        blueprint: { repo: "o/r", ref: "main" }, roles: ["pilot"], instance_type: "standard-2", preflight: "",
+      });
+      try {
+        parseFleetJson(s);
+        expect.unreachable();
+      } catch (err) {
+        expect(err).toBeInstanceOf(BlueprintError);
+        expect((err as BlueprintError).field).toBe("preflight");
+      }
+    });
+
+    it("present but not a string -> BlueprintError naming it", () => {
+      const s = JSON.stringify({
+        blueprint: { repo: "o/r", ref: "main" }, roles: ["pilot"], instance_type: "standard-2", preflight: 7,
+      });
+      try {
+        parseFleetJson(s);
+        expect.unreachable();
+      } catch (err) {
+        expect(err).toBeInstanceOf(BlueprintError);
+        expect((err as BlueprintError).field).toBe("preflight");
+      }
+    });
+  });
 });
 
 describe("assertRoleInFleet", () => {

@@ -49,6 +49,36 @@ export async function claimStudioRow(
   };
 }
 
+/**
+ * Issue #59 review round 1 (M1): resume's claim. One conditional UPDATE flips
+ * the row `stopped` -> `provisioning`; D1 serializes writes, so of two racing
+ * resumes exactly one sees `changes === 1`. Resolves to the release (flip
+ * back to `stopped`, only while the row still reads `provisioning` — never
+ * over a row provision itself has since written), or null for the loser.
+ */
+export async function claimStoppedRow(
+  env: Env, id: string, now: number = Date.now(),
+): Promise<(() => Promise<void>) | null> {
+  const key = studioKey(id);
+  const res = await env.DB
+    .prepare(
+      `UPDATE fleet_state SET value = json_set(value, '$.state', 'provisioning'), ts = ?
+       WHERE key = ? AND json_extract(value, '$.state') = 'stopped'`,
+    )
+    .bind(now, key)
+    .run();
+  if (res.meta.changes !== 1) return null;
+  return async () => {
+    await env.DB
+      .prepare(
+        `UPDATE fleet_state SET value = json_set(value, '$.state', 'stopped')
+         WHERE key = ? AND json_extract(value, '$.state') = 'provisioning'`,
+      )
+      .bind(key)
+      .run();
+  };
+}
+
 function studioKey(id: string): string {
   return `${STUDIO_KEY_PREFIX}${id}`;
 }
