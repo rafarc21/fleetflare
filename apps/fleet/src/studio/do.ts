@@ -133,7 +133,7 @@ import {
 import { sendCard } from "../telegram/api";
 import { parseLearnings, parseEnvelopeComment } from "../board/envelope";
 import { assignedBriefResolver, openTaskChecker, githubBoardApi } from "../board/routes";
-import { listTasks, resolveLatestAssignedBrief, autoStartSubmittedTasks } from "../board/board";
+import { listTasks, openTasksNeedingRebrief, autoStartSubmittedTasks } from "../board/board";
 // Issue #249 (PR4b): "live" is the board's own state, not GitHub's open flag —
 // a terminal state leaves the issue open, and a finished task's branch is not
 // work a fresh lead needs re-briefed on. Same filter
@@ -1866,11 +1866,26 @@ export async function switchedBlockIn(storage: StudioStorage): Promise<string | 
 }
 
 /**
- * Board issue #213: the dedup marker `deliverAssignedTaskOnBringup` (below)
- * reads before waking — the number of the task it last DELIVERED to this
- * studio, or null if it has never delivered one. Storing only the last
- * number is enough: `resolveLatestAssignedBrief`'s own "newest wins"
- * resolution means a studio has exactly one current live task at a time.
+ * Board issue #213: originally the dedup marker `deliverAssignedTaskOnBringup`
+ * (below) gated its wake on — the number of the task it last DELIVERED to
+ * this studio, or null if it has never delivered one.
+ *
+ * Issue #137: that gate moved. Recording only the last number, forever, with
+ * no notion of container identity, meant a task delivered once was never
+ * re-delivered again on ANY later bring-up for that same task — even after
+ * the container behind the pane was fully destroyed and rebuilt (an image
+ * rollout) and a fresh lead had zero memory of ever hearing about it.
+ * `deliverAssignedTaskOnBringup`'s own gate now reads
+ * `Observed.taskWakesDeliveredFor` instead (observed.ts), scoped to the
+ * bring-up's `incarnation` token — the same per-incarnation discipline
+ * `survivalBriefDeliveredFor` already uses.
+ *
+ * This marker ITSELF is UNCHANGED and still written on every landed wake
+ * (`recordDeliveredTask`, below): `harvestLearnings`'s own teardown read
+ * (`deliveredTaskIn`, called from `recycleWithSync` and `destroy.ts`) still
+ * wants exactly this — "the single most-recently-delivered task number,
+ * forever, not incarnation-scoped" — as the task whose completion record to
+ * harvest learnings from. The two concerns just no longer share one marker.
  *
  * Its own key, off StudioStorage's overloads — same reason LIMIT_SIGHTING_KEY
  * above keeps its own rather than widening the shared interface for a single
@@ -1961,12 +1976,38 @@ export async function sweepWake(
  * `wakeStudioWith`/`sweepWake` above delegate their own gating to
  * `runGatedWake` rather than reimplementing it.
  *
- * At-most-once per task id: `deliveredTaskIn` is the dedup marker, written
- * ONLY on a landed wake (`outcome.ok`). A refusal — stopped again mid-race, a
- * limit modal on screen, single-flight busy — persists nothing, so the very
- * next provision/restart/recycle naturally retries: no separate retry queue
- * needed, because each of the three choke points calls this again on its own
- * next run.
+ * Issue #137 widened this two ways:
+ *
+ *  1. SCOPE. `boardLookup` used to resolve `resolveLatestAssignedBrief`'s
+ *     single "newest" open task; it now resolves `openTasksNeedingRebrief`'s
+ *     full list of every open `working`/`input_required` task, so a studio
+ *     holding two or more live tasks gets every one re-typed, not just the
+ *     most recent.
+ *  2. DEDUP. At-most-once per task id PER INCARNATION, not forever:
+ *     `deliveredTaskIn`/`recordDeliveredTask` (`DELIVERED_TASK_KEY`, above)
+ *     are still written on every landed wake, UNCHANGED, but they are no
+ *     longer what this function reads to decide whether to wake — that
+ *     marker's own doc comment explains why (it is now only
+ *     `harvestLearnings`'s teardown pointer). The actual gate is
+ *     `taskWakesDeliveredIn`/`recordTaskWakeDelivered` (below), scoped to the
+ *     `incarnation` param: a container replacement (a NEW incarnation token)
+ *     earns every open task exactly one fresh wake again, even one that had
+ *     already been delivered before the replacement — the gap that left leads
+ *     idle after an image rollout until a human hand-retyped every task.
+ *     `incarnation === null` uses the key `""` rather than skipping the
+ *     record outright (unlike `deliverSurvivalBriefOnBringup`'s own null
+ *     handling): this preserves the OLD marker's "forever, no reset" behavior
+ *     for a studio whose incarnation-token write keeps failing, rather than
+ *     regressing it to "never delivers" — real incarnation tokens
+ *     (`crypto.randomUUID()`) are never the empty string, so this never
+ *     collides with a genuine one.
+ *
+ * A refusal on any one task — stopped again mid-race, a limit modal on
+ * screen, single-flight busy — persists nothing FOR THAT TASK, so the very
+ * next provision/restart/recycle naturally retries it: no separate retry
+ * queue needed, because each of the three choke points calls this again on
+ * its own next run. Other tasks in the same `boardLookup` batch are still
+ * attempted in the same call — one refusal does not block the rest.
  *
  * DI shape mirrors `wakeStudioWith`'s own reasoning (this file's header): a
  * `boardLookup` thunk and a `wake` thunk, both injected rather than reaching
@@ -1983,23 +2024,61 @@ export async function sweepWake(
  * AFTER the dedup check (a duplicate wake into a live pane is harmless; a
  * wake into a container destroy just tore down is not) and RIGHT BEFORE
  * `wake`, so it catches a destroy landing anywhere up to that point,
- * including during `boardLookup` itself. Defaults to "never moved" so every
+ * including during `boardLookup` itself. Issue #137: now checked per task,
+ * inside the loop — a destroy observed mid-loop STOPS the whole loop rather
+ * than merely skipping the one task, since the container it would type into
+ * is gone for every remaining task too. Defaults to "never moved" so every
  * existing caller in this test suite that does not pass one keeps this
  * function's pre-fix-round behavior unchanged, the same trailing-optional
  * shape `recycleWithSync`'s own `ctx`/`observedStorage` params use.
  */
 export async function deliverAssignedTaskOnBringup(
   storage: StudioStorage,
-  boardLookup: () => Promise<{ taskNumber: number; title: string } | null>,
-  wake: (prompt: string) => Promise<WakeOutcome>,
+  incarnation: string | null,
+  boardLookup: () => Promise<{ taskNumber: number; title: string }[]>,
+  wake: (prompt: string, taskNumber: number) => Promise<WakeOutcome>,
   moved: () => Promise<boolean> = async () => false,
 ): Promise<void> {
-  const task = await boardLookup();
-  if (task === null) return;
-  if ((await deliveredTaskIn(storage)) === task.taskNumber) return;
-  if (await moved()) return;
-  const outcome = await wake(assignDigest({ number: task.taskNumber, title: task.title }));
-  if (outcome.ok) await recordDeliveredTask(storage, task.taskNumber);
+  const tasks = await boardLookup();
+  if (tasks.length === 0) return;
+  const incarnationKey = incarnation ?? "";
+  const delivered = await taskWakesDeliveredIn(storage, incarnationKey);
+  for (const task of tasks) {
+    if (delivered.has(task.taskNumber)) continue;
+    if (await moved()) return;
+    const outcome = await wake(assignDigest({ number: task.taskNumber, title: task.title }), task.taskNumber);
+    if (outcome.ok) {
+      await recordDeliveredTask(storage, task.taskNumber);
+      await recordTaskWakeDelivered(storage, incarnationKey, task.taskNumber);
+      delivered.add(task.taskNumber);
+    }
+  }
+}
+
+/** Issue #137: reads `Observed.taskWakesDeliveredFor` scoped to
+ *  `incarnationKey` — the set of task numbers already re-delivered a bring-up
+ *  wake for the CURRENT incarnation. A record for a DIFFERENT incarnation
+ *  (or no record at all) reads as empty; that reset is the fix
+ *  `deliverAssignedTaskOnBringup`'s own doc comment describes. Cast the same
+ *  way `deliveredTaskIn`/`recordDeliveredTask` already cast `storage` to
+ *  their own narrow port — `StudioStorage` has no `OBSERVED_KEY` overload,
+ *  and `getObserved`/`mergeObserved` want `ObservedStorage`. */
+async function taskWakesDeliveredIn(storage: StudioStorage, incarnationKey: string): Promise<Set<number>> {
+  const record = (await getObserved(storage as unknown as ObservedStorage)).taskWakesDeliveredFor ?? null;
+  return record !== null && record.incarnation === incarnationKey ? new Set(record.numbers) : new Set();
+}
+
+/** Issue #137: records one more task number delivered for `incarnationKey`,
+ *  read-patch-write. Called ONLY after a wake lands — same "write only on a
+ *  landed wake" discipline `recordDeliveredTask` (above) and
+ *  survival-delivery.ts's own markers already follow. A prior record for a
+ *  DIFFERENT incarnation is superseded outright (it describes a container
+ *  that is gone), not merged into. */
+async function recordTaskWakeDelivered(storage: StudioStorage, incarnationKey: string, taskNumber: number): Promise<void> {
+  const observed = await getObserved(storage as unknown as ObservedStorage);
+  const record = observed.taskWakesDeliveredFor ?? null;
+  const numbers = record !== null && record.incarnation === incarnationKey ? [...record.numbers, taskNumber] : [taskNumber];
+  await mergeObserved(storage as unknown as ObservedStorage, { taskWakesDeliveredFor: { incarnation: incarnationKey, numbers } });
 }
 
 /**
@@ -4904,20 +4983,9 @@ export class StudioDO extends Sandbox<Env> {
     return resolveWorkRepoSlug(cfg, existing, this.env.AGENT_REPO);
   }
 
-  /**
-   * Board issue #213: this DO's real board lookup for
-   * `deliverAssignedTaskOnBringup`'s `boardLookup` thunk — resolves the
-   * studio's currently assigned open task (if any) down to just the two
-   * fields `assignDigest` needs.
-   *
-   * `workRepoSlug` is lowercased before the lookup: `resolveLatestAssignedBrief`
-   * matches against the board's OWN stored slug casing, and
-   * assignedBriefResolver (src/board/routes.ts) already lowercases the exact
-   * same way for the exact same reason — a case mismatch here would silently
-   * fail to match a task that IS assigned.
-   */
   /** Issue #86: the lead started a turn — its submitted tasks go to working.
-   *  Lowercased for the same reason as `assignedTaskOnBoard` below. */
+   *  Lowercased for the same reason as `openTasksNeedingRebrief`'s own
+   *  `workRepoSlug` handling below. */
   private async autoStartSubmitted(): Promise<void> {
     const repo = (await this.workRepoSlug(null)).toLowerCase();
     const res = await autoStartSubmittedTasks(githubBoardApi(this.env), repo, this.selfId());
@@ -4946,15 +5014,27 @@ export class StudioDO extends Sandbox<Env> {
     logWakeOutcome("stale background-shell nudge", outcome);
   }
 
-  private async assignedTaskOnBoard(workRepoSlug: string): Promise<{ taskNumber: number; title: string } | null> {
-    const brief = await resolveLatestAssignedBrief(githubBoardApi(this.env), workRepoSlug.toLowerCase(), this.selfId());
-    return brief === null ? null : { taskNumber: brief.taskNumber, title: brief.title };
+  /**
+   * Board issue #213, widened by issue #137: this DO's real board lookup for
+   * `deliverAssignedTaskOnBringup`'s `boardLookup` thunk — resolves EVERY
+   * open `working`/`input_required` task currently assigned to this studio
+   * (`openTasksNeedingRebrief`, board.ts), not only the single newest one.
+   *
+   * `workRepoSlug` is lowercased before the lookup: `openTasksNeedingRebrief`
+   * (like `resolveLatestAssignedBrief` before it) matches against the board's
+   * OWN stored slug casing, and assignedBriefResolver (src/board/routes.ts)
+   * already lowercases the exact same way for the exact same reason — a case
+   * mismatch here would silently fail to match a task that IS assigned.
+   */
+  private async openTasksNeedingRebriefOnBoard(workRepoSlug: string): Promise<{ taskNumber: number; title: string }[]> {
+    return openTasksNeedingRebrief(githubBoardApi(this.env), workRepoSlug.toLowerCase(), this.selfId());
   }
 
   /**
-   * Board issue #213: wires `deliverAssignedTaskOnBringup` (do.ts's own
-   * standalone extraction, tested with no DO construction in test/studio.
-   * wake-gate.test.ts) to this DO's real board lookup and real wake.
+   * Board issue #213, widened by issue #137: wires `deliverAssignedTaskOnBringup`
+   * (do.ts's own standalone extraction, tested with no DO construction in
+   * test/studio.wake-gate.test.ts) to this DO's real board lookup and real
+   * wake.
    *
    * Called from all three bring-up choke points — `provision()`,
    * `restartUngated()`, and `recycle()`'s wiring into `recycleWithSync` —
@@ -4969,10 +5049,16 @@ export class StudioDO extends Sandbox<Env> {
    * `repoSlug` onto STATUS_KEY and `workRepoSlug` reads storage, not `cfg`
    * alone.
    *
+   * Issue #137: the `incarnation` token is read here, the same way
+   * `deliverSurvivalOnBringup` (below) reads it — `(await
+   * getObserved(this.ctx.storage)).incarnation` — and threaded through as
+   * `deliverAssignedTaskOnBringup`'s new 2nd param, so its per-incarnation
+   * dedup gate has a real container identity to key off.
+   *
    * `ctx` is the SAME OpCtx threaded through from whichever choke point
    * called this (provision's own `allowingStart`-scoped ctx, recycle's own
    * ctx, restartUngated's own ctx) — `() => ctx.moved()` is
-   * `deliverAssignedTaskOnBringup`'s 4th `moved` param, so a destroy landing
+   * `deliverAssignedTaskOnBringup`'s 5th `moved` param, so a destroy landing
    * mid-bring-up vetoes the delivery exactly like issue #174 already vetoes
    * every other bring-up write.
    *
@@ -4983,23 +5069,20 @@ export class StudioDO extends Sandbox<Env> {
    * A REFUSED wake (stopped, limit modal, single-flight busy) is not an
    * error, but it must still leave a trace: the corrected NO-WAKE message
    * (#229) now PROMISES delivery on bring-up, and a silent refusal would
-   * make that promise false with nothing in the logs to show it.
+   * make that promise false with nothing in the logs to show it — issue #137:
+   * the wake closure now receives `taskNumber` as its own 2nd argument
+   * (rather than a captured outer variable), since a single bring-up can now
+   * refuse more than one task and each refusal must name ITS OWN task.
    */
   private async deliverTaskOnBringup(cfg: ProvisionConfig | null, ctx: OpCtx): Promise<void> {
     try {
       const workRepoSlug = await this.workRepoSlug(cfg);
-      // Captured by the boardLookup closure below so the wake closure (which
-      // only receives the already-rendered `prompt`, not the task itself) can
-      // still name the task in a refusal's log line.
-      let taskNumber: number | undefined;
+      const incarnation = (await getObserved(this.ctx.storage)).incarnation;
       await deliverAssignedTaskOnBringup(
         this.ctx.storage,
-        async () => {
-          const task = await this.assignedTaskOnBoard(workRepoSlug);
-          taskNumber = task?.taskNumber;
-          return task;
-        },
-        async (prompt) => {
+        incarnation,
+        () => this.openTasksNeedingRebriefOnBoard(workRepoSlug),
+        async (prompt, taskNumber) => {
           const outcome = await this.wakeStudioOnAssignment(prompt);
           if (!outcome.ok) logWakeOutcome(`studio ${this.selfId()}: bring-up delivery of #${taskNumber}`, outcome);
           return outcome;

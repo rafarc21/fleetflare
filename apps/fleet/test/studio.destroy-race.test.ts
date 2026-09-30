@@ -1128,10 +1128,18 @@ describe("K23 — restart: readiness check never execs once the op's ctx has mov
 //
 // Pinned here, through the REAL StudioDO verbs (provision/restartStudio/
 // recycle), using the SAME makeHarness this suite's other describes already
-// use. `assignedTaskOnBoard` and `wakeStudioOnAssignment` are the two seams
-// `deliverTaskOnBringup` calls through (do.ts) — overridden here exactly like
-// deps()/refreshDeps()/syncDeps() already are inside makeHarness itself,
-// Object.assign onto the fake `this`, no DO construction.
+// use. `openTasksNeedingRebriefOnBoard` and `wakeStudioOnAssignment` are the
+// two seams `deliverTaskOnBringup` calls through (do.ts) — overridden here
+// exactly like deps()/refreshDeps()/syncDeps() already are inside makeHarness
+// itself, Object.assign onto the fake `this`, no DO construction.
+//
+// Issue #137 widened `deliverAssignedTaskOnBringup`'s `boardLookup` from a
+// single task-or-null to an array, so `boardLookup` below now returns
+// `[task]` or `[]` — the wake mock's own shape (called with just a rendered
+// `prompt` string) is UNCHANGED, since `wakeStudioOnAssignment` itself is
+// still called with only `prompt`; the new per-task `taskNumber` argument is
+// consumed one layer up, inside `deliverTaskOnBringup`'s own wrapping
+// closure, purely for its refusal log line.
 // ---------------------------------------------------------------------------
 
 describe("board issue #213 (fix round) — bring-up task delivery honors the #174 destroy-epoch guard", () => {
@@ -1147,15 +1155,16 @@ describe("board issue #213 (fix round) — bring-up task delivery honors the #17
   const inconclusiveRespond = (cmd: string) =>
     (cmd.includes("pane_current_command") ? { code: 0, stdout: PROVISIONED_UNKNOWN, stderr: "" } : undefined);
 
-  /** Wires `assignedTaskOnBoard`/`wakeStudioOnAssignment` test doubles onto an
-   *  already-built harness's `doObj` — the two seams `deliverTaskOnBringup`
-   *  calls through. `onLookup` fires INSIDE the board-lookup call itself, so a
-   *  test can simulate a destroy landing during that exact round trip (the
-   *  same shape studio.wake-gate.test.ts's own `lookup` fake uses for the
-   *  unit-level version of this same guarantee). Assertions run OUTSIDE
-   *  `wake`/`boardLookup` themselves — never inside a callback
-   *  deliverAssignedTaskOnBringup's own total try/catch could swallow — so a
-   *  wrong call shape fails the test for real, not silently. */
+  /** Wires `openTasksNeedingRebriefOnBoard`/`wakeStudioOnAssignment` test
+   *  doubles onto an already-built harness's `doObj` — the two seams
+   *  `deliverTaskOnBringup` calls through. `onLookup` fires INSIDE the
+   *  board-lookup call itself, so a test can simulate a destroy landing
+   *  during that exact round trip (the same shape studio.wake-gate.test.ts's
+   *  own `lookup` fake uses for the unit-level version of this same
+   *  guarantee). Assertions run OUTSIDE `wake`/`boardLookup` themselves —
+   *  never inside a callback `deliverAssignedTaskOnBringup`'s own total
+   *  try/catch could swallow — so a wrong call shape fails the test for
+   *  real, not silently. */
   function withDelivery(h: Harness, opts: {
     task?: { taskNumber: number; title: string } | null;
     onLookup?: () => void;
@@ -1163,7 +1172,8 @@ describe("board issue #213 (fix round) — bring-up task delivery honors the #17
   } = {}) {
     const boardLookup = vi.fn(async () => {
       opts.onLookup?.();
-      return opts.task === undefined ? TASK : opts.task;
+      const task = opts.task === undefined ? TASK : opts.task;
+      return task === null ? [] : [task];
     });
     const readinessAtWake: Array<string | undefined> = [];
     const wake = vi.fn(async (_prompt: string) => {
@@ -1173,7 +1183,7 @@ describe("board issue #213 (fix round) — bring-up task delivery honors the #17
       readinessAtWake.push((h.map.get(STATUS_KEY) as StudioStatus | undefined)?.readiness?.kind);
       return opts.wakeOutcome?.() ?? { ok: true };
     });
-    Object.assign(h.doObj, { assignedTaskOnBoard: boardLookup, wakeStudioOnAssignment: wake });
+    Object.assign(h.doObj, { openTasksNeedingRebriefOnBoard: boardLookup, wakeStudioOnAssignment: wake });
     return { boardLookup, wake, readinessAtWake };
   }
 
