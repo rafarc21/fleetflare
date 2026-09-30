@@ -642,9 +642,15 @@ describe("#241 (4) — the 3-option rate-limit modal is a modal, never inline, a
       }
     });
 
-    it(`${name}: a degraded row stays degraded (already-degraded, untouched)`, async () => {
+    // Issue #109: this row is select-modal-shaped and genuinely exhausted, so
+    // the auto-continue step now fires (an unknown-reset first attempt) on
+    // this very tick — its own kind (`auto-continued`) REPLACES the old
+    // silent `already-degraded` here, exactly as designed. The invariant
+    // this test exists to pin — state/error stay `degraded`/EXHAUSTED,
+    // untouched — is unaffected: that step never writes either field.
+    it(`${name}: a degraded row stays degraded (state/error untouched by auto-continue)`, async () => {
       const s = studio(pane);
-      expect((await s.run()).kind).toBe("already-degraded");
+      expect((await s.run()).kind).toBe("auto-continued");
       expect(s.row().state).toBe("degraded");
       expect(s.row().error).toBe(EXHAUSTED);
     });

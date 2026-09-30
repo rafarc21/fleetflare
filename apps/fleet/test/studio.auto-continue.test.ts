@@ -1,0 +1,286 @@
+import { describe, it, expect, vi } from "vitest";
+import {
+  runAccountFailover, paneCaptureCmd, dismissModalCmd, DISMISS_VERDICT, exhaustedMessage,
+  PANE_CAPTURE_MARKER, type FailoverDeps,
+} from "../src/studio/failover";
+import { PANE_PROBE_CMD, PANE_SCREEN_CMD } from "../src/studio/wake";
+import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
+import type { StudioStatus } from "../src/studio/types";
+import type { ClaudeAccount } from "../src/studio/accounts";
+import { RULE_PROMPT } from "./fixtures/rate-limit-panes";
+
+// ---------------------------------------------------------------------------
+// Issue #109 — the auto-continue due-ness/attempt state machine, run inside
+// runAccountFailover's own `!next` branch. Same storage-level harness shape
+// test/studio.account-failover.test.ts and test/studio.failover-274.test.ts
+// already use — a live StudioDO cannot be constructed under
+// vitest-pool-workers (see src/studio/do.ts's header).
+// ---------------------------------------------------------------------------
+
+const STUDIO_ID = "fleetflare--release-studio";
+const NOW = new Date("2026-09-30T12:00:00.000Z");
+const TOKEN_1 = "sk-ant-oat01-" + "a".repeat(40);
+const TOKEN_2 = "sk-ant-oat01-" + "b".repeat(40);
+const ONE_ACCOUNT: ClaudeAccount[] = [{ name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 }];
+const TWO_ACCOUNTS: ClaudeAccount[] = [...ONE_ACCOUNT, { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 }];
+
+/** A select-style modal ("You've hit your org's monthly spend limit") — never
+ *  inline, and the ONLY shape this feature acts on. Same frame every other
+ *  runAccountFailover fixture in this repo already uses. */
+const MODAL_PANE = [
+  "⏺ Reading the release notes for the batch.",
+  "",
+  "⏺ Read(docs/release.md)",
+  "  ⎿  Read 42 lines",
+  "",
+  "╭────────────────────────────────────────────────────────────────╮",
+  "│ You've hit your org's monthly spend limit                      │",
+  "│                                                                │",
+  "│ Run /rate-limit-options to see what you can do.                │",
+  "│                                                                │",
+  "│ ❯ 1. Upgrade your plan                                         │",
+  "│   2. Not now                                                   │",
+  "╰────────────────────────────────────────────────────────────────╯",
+].join("\n");
+
+/** An inline session-limit block — claude prints it and returns to its input
+ *  box. Excluded from the ACT step (self-clears through the EXISTING #214
+ *  recovery once its own printed reset passes the clock). */
+const INLINE_PANE = [
+  "⏺ Opening the PR for the pilot fix.",
+  "",
+  "  ⎿  You've hit your session limit · resets 1:30pm (UTC)",
+  "     /upgrade to increase your usage limit.",
+  "",
+  ...RULE_PROMPT,
+].join("\n");
+
+/** claude back at its input box: no modal, no limit block anywhere. */
+const RECOVERED_IDLE = ["⏺ Resumed.", "", ...RULE_PROMPT].join("\n");
+
+function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
+  return {
+    id: STUDIO_ID, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+    ...overrides,
+  };
+}
+
+function fakeStorage(initial?: StudioStatus): StudioStorage {
+  const map = new Map<string, unknown>();
+  if (initial) map.set(STATUS_KEY, initial);
+  return {
+    get: (async (key: string) => map.get(key)) as StudioStorage["get"],
+    put: (async (key: string, value: unknown) => { map.set(key, value); }) as StudioStorage["put"],
+  };
+}
+
+const captured = (first: string, second = first) => `${first}\n${PANE_CAPTURE_MARKER}\n${second}\n`;
+
+interface Harness {
+  deps: FailoverDeps;
+  storage: StudioStorage;
+  recorded: StudioStatus[];
+  execs: string[];
+  run(): ReturnType<typeof runAccountFailover>;
+}
+
+function harness(opts: {
+  accounts: ClaudeAccount[];
+  pane: string;
+  initial?: StudioStatus;
+  now?: Date;
+  autoFailover?: boolean;
+}): Harness {
+  const execs: string[] = [];
+  const recorded: StudioStatus[] = [];
+  const storage = fakeStorage(opts.initial ?? status());
+  const deps: FailoverDeps = {
+    accounts: opts.accounts,
+    autoFailover: opts.autoFailover ?? true,
+    now: () => opts.now ?? NOW,
+    exec: vi.fn(async (cmd: string) => {
+      execs.push(cmd);
+      if (cmd === paneCaptureCmd()) return { code: 0, stdout: captured(opts.pane), stderr: "" };
+      // dismissModalCmd()'s own shell — the fake never runs a real shell, so
+      // this stands in for it: report "escaped" (the modal was still there),
+      // the common case for a fresh select-modal capture.
+      if (cmd === dismissModalCmd()) return { code: 0, stdout: `${DISMISS_VERDICT} escaped\n`, stderr: "" };
+      // runGatedWake's own gate 2 (pane_current_command) and gate 3
+      // (screen). Answering both lets a due attempt reach a definite
+      // ok/skipped verdict rather than the generic "no window" refusal.
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude claude\n", stderr: "" };
+      if (cmd === PANE_SCREEN_CMD) return { code: 0, stdout: `${RECOVERED_IDLE}\n`, stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    }),
+    relaunch: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+    notify: vi.fn(async () => {}),
+  };
+  return {
+    deps, storage, recorded, execs,
+    run: () => runAccountFailover(deps, storage, STUDIO_ID, async (s) => { recorded.push(s); }),
+  };
+}
+
+const EXHAUSTED_ONE = exhaustedMessage(STUDIO_ID, ["CLAUDE_CODE_OAUTH_TOKEN"]);
+
+describe("issue #109 — auto-continue due-ness", () => {
+  it("known reset, not yet due: no exec beyond the probe, no write, auto-continue-waiting", async () => {
+    const dueAt = new Date(NOW.getTime() + 60 * 60_000).toISOString();
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: MODAL_PANE,
+      initial: status({
+        state: "degraded", error: EXHAUSTED_ONE, autoContinueAt: dueAt, autoContinueLastTriedAt: null,
+        // Matches what THIS tick's own capture would compute — keeps
+        // limitChanged false, so the pre-existing "a changed limit is still
+        // written" path (unrelated to this feature) does not also fire and
+        // obscure the "no write at all" claim this test is pinning.
+        rateLimited: { until: null, seenAt: NOW.toISOString(), select: true },
+      }),
+    });
+
+    const out = await h.run();
+
+    expect(out).toEqual({ kind: "auto-continue-waiting", tried: ["CLAUDE_CODE_OAUTH_TOKEN"], dueAt });
+    expect(h.recorded).toEqual([]);
+    expect(h.execs).toEqual([paneCaptureCmd()]);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.autoContinueAt).toBe(dueAt);
+    expect(stored?.autoContinueLastTriedAt ?? null).toBeNull();
+  });
+
+  it("known reset, due: dismiss + wake attempted, autoContinueLastTriedAt set, autoContinueAt consumed", async () => {
+    const dueAt = new Date(NOW.getTime() - 1000).toISOString();
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: MODAL_PANE,
+      initial: status({
+        state: "degraded", error: EXHAUSTED_ONE, autoContinueAt: dueAt, autoContinueLastTriedAt: null,
+      }),
+    });
+
+    const out = await h.run();
+
+    expect(out.kind).toBe("auto-continued");
+    if (out.kind === "auto-continued") {
+      expect(out.dismissed).toBe(true);
+      expect(["ok", "skipped", "failed"]).toContain(out.wake);
+    }
+    expect(h.execs).toContain(dismissModalCmd());
+    expect(h.execs).toContain(PANE_PROBE_CMD);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.autoContinueAt ?? null).toBeNull();
+    expect(stored?.autoContinueLastTriedAt).toBe(NOW.toISOString());
+  });
+
+  it("unknown reset, first tick: attempted immediately (autoContinueLastTriedAt was never set)", async () => {
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: MODAL_PANE,
+      initial: status({
+        state: "degraded", error: EXHAUSTED_ONE, autoContinueAt: null, autoContinueLastTriedAt: null,
+      }),
+    });
+
+    const out = await h.run();
+
+    // Same tick, so this row's own !next branch is the anti-loop-guard path
+    // (already degraded for exactly this message) — the very first tick the
+    // due-ness step ever runs against it.
+    expect(out.kind).toBe("auto-continued");
+    expect(h.execs).toContain(dismissModalCmd());
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.autoContinueLastTriedAt).toBe(NOW.toISOString());
+  });
+
+  it("unknown reset, second tick within 1h: no attempt, auto-continue-waiting", async () => {
+    const lastTried = new Date(NOW.getTime() - 30 * 60_000).toISOString();
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: MODAL_PANE,
+      initial: status({
+        state: "degraded", error: EXHAUSTED_ONE, autoContinueAt: null, autoContinueLastTriedAt: lastTried,
+      }),
+    });
+
+    const out = await h.run();
+
+    expect(out).toEqual({ kind: "auto-continue-waiting", tried: ["CLAUDE_CODE_OAUTH_TOKEN"], dueAt: null });
+    expect(h.execs).toEqual([paneCaptureCmd()]);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.autoContinueLastTriedAt).toBe(lastTried);
+  });
+
+  it("unknown reset, after 1h: attempted again", async () => {
+    const lastTried = new Date(NOW.getTime() - 61 * 60_000).toISOString();
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: MODAL_PANE,
+      initial: status({
+        state: "degraded", error: EXHAUSTED_ONE, autoContinueAt: null, autoContinueLastTriedAt: lastTried,
+      }),
+    });
+
+    const out = await h.run();
+
+    expect(out.kind).toBe("auto-continued");
+    expect(h.execs).toContain(dismissModalCmd());
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.autoContinueLastTriedAt).toBe(NOW.toISOString());
+  });
+});
+
+describe("issue #109 — never attempts outside the genuinely-exhausted select-modal path", () => {
+  it("an inline exhausted block (nowhere to fail over) never attempts Esc or wake", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: INLINE_PANE });
+
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    const second = await h.run();
+
+    // Unchanged: still the old, silent already-degraded — this feature never
+    // evaluates an inline-exhausted row at all.
+    expect(second.kind).toBe("already-degraded");
+    expect(h.execs.filter((c) => c === dismissModalCmd())).toEqual([]);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.autoContinueAt).toBeUndefined();
+    expect(stored?.autoContinueLastTriedAt).toBeUndefined();
+  });
+
+  it("'parked' (auto-failover off, a candidate exists) never writes or attempts auto-continue", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: MODAL_PANE, autoFailover: false });
+
+    const out = await h.run();
+
+    expect(out).toEqual({ kind: "parked", account: "CLAUDE_CODE_OAUTH_TOKEN" });
+    expect(h.execs.filter((c) => c === dismissModalCmd())).toEqual([]);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.autoContinueAt).toBeUndefined();
+    expect(stored?.autoContinueLastTriedAt).toBeUndefined();
+
+    // The tick after stays silently parked — this feature's own step never
+    // evaluates the "parked" path, matching parkedMessage's own "no switch
+    // attempted" contract.
+    const second = await h.run();
+    expect(second.kind).toBe("already-degraded");
+    expect(h.execs.filter((c) => c === dismissModalCmd())).toEqual([]);
+  });
+});
+
+describe("issue #109 — the #214 working-branch recovery clears both new fields", () => {
+  it("a genuinely recovered row carries no stale auto-continue bookkeeping forward", async () => {
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: RECOVERED_IDLE,
+      initial: status({
+        state: "degraded", error: EXHAUSTED_ONE,
+        autoContinueAt: new Date(NOW.getTime() + 60 * 60_000).toISOString(),
+        autoContinueLastTriedAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
+      }),
+    });
+
+    const out = await h.run();
+
+    expect(out.kind).toBe("recovered");
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.state).toBe("running");
+    expect(stored?.autoContinueAt ?? null).toBeNull();
+    expect(stored?.autoContinueLastTriedAt ?? null).toBeNull();
+  });
+});

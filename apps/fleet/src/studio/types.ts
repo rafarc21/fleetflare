@@ -336,6 +336,25 @@ export interface StudioStatus {
    */
   exhaustionClearedAt?: string | null;
   /**
+   * Issue #109: the earliest readable fleet-wide reset among the accounts
+   * tried at the moment this studio's exhaustion was first recorded (reuses
+   * earliestAccountReset, already computed for exhaustedMessage at that call
+   * site) — null when no tried account had a readable reset (the common
+   * case: a select-style modal never prints one). Consumed (set back to
+   * null) the first time an auto-continue attempt fires against it, so a
+   * known reset that does not actually clear the exhaustion falls back to
+   * the same hourly cadence as an unknown one, rather than re-firing every
+   * 5-minute tick forever.
+   */
+  autoContinueAt?: string | null;
+  /**
+   * Issue #109: when an auto-continue attempt (Esc + wake) was last made,
+   * regardless of outcome — the hourly retry-cap clock for an unknown
+   * reset, and the anti-hammer clock for a known one that already fired
+   * once.
+   */
+  autoContinueLastTriedAt?: string | null;
+  /**
    * See StudioReadiness's own doc comment above for what this records.
    * `null`/absent both mean "no verdict recorded yet" — a studio whose first
    * syncSession tick has not fired, or one written by a call site that

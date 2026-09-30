@@ -758,8 +758,17 @@ describe("runAccountFailover — (c) with every account exhausted the studio end
     const second = await run(h);
     const third = await run(h);
 
-    expect(second.kind).toBe("already-degraded");
-    expect(third.kind).toBe("already-degraded");
+    // Issue #109: this row is select-modal-shaped and genuinely exhausted, so
+    // the anti-loop guard's own kind is now `auto-continue-waiting`, not the
+    // old silent `already-degraded` — the first tick's own exhaustion write
+    // already recorded a KNOWN reset (ALL_LIMITED's own future `until`, read
+    // back via accountLimits), and `now` never advances across these three
+    // calls, so every due-check still says "not yet". The invariant this
+    // test exists to pin — no re-degrade, no re-notify, no retry — holds
+    // exactly as before: due-ness false means zero writes and zero execs
+    // beyond the probe, same as `already-degraded` always guaranteed.
+    expect(second.kind).toBe("auto-continue-waiting");
+    expect(third.kind).toBe("auto-continue-waiting");
     expect(h.recorded).toHaveLength(writesAfterFirst);
     expect(h.notices).toHaveLength(noticesAfterFirst);
     expect(h.relaunches).toBe(0);
