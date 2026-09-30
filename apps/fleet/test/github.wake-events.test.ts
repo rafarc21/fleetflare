@@ -134,6 +134,29 @@ describe("deltaDigest", () => {
     expect(d).toContain("#131");
   });
 
+  it("wakes maestro for an issue_comment on a backlog task (no studio: label at all)", () => {
+    const d = deltaDigest("issue_comment", {
+      action: "created", repository: repo,
+      issue: { number: 131, title: "fleet task state verb", state: "open", labels: [] },
+      comment: { user: { login: "rafarc21" }, body: "hi" },
+    });
+    expect(d).toContain("#131");
+  });
+
+  // Ambiguous (more than one studio: label) is treated as maestro's own --
+  // label drift is exactly what maestro, not a lane, should see.
+  it("wakes maestro on an issue_comment for an ambiguous (two studio: labels) task -- drift is maestro's business", () => {
+    const d = deltaDigest("issue_comment", {
+      action: "created", repository: repo,
+      issue: {
+        number: 131, title: "fleet task state verb", state: "open",
+        labels: [{ name: "studio:websites--web-studio" }, { name: "studio:websites--other-studio" }],
+      },
+      comment: { user: { login: "rafarc21" }, body: "hi" },
+    });
+    expect(d).toContain("#131");
+  });
+
   it("carries who commented and what they said, trimmed to one line", () => {
     const d = deltaDigest("issue_comment", {
       action: "created", repository: repo,
