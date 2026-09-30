@@ -14,6 +14,11 @@
 // as testable as it was.
 import { buildStudioId } from "../studio/ids";
 import { repoIdSegment } from "../studio/repo";
+// Pure, no Env/binding, zero imports of its own (board/types.ts's own
+// header) — safe to pull into this file, no circular import. Board #111:
+// the ownership filter below needs the assignment-label parse this already
+// does, rather than re-typing the `studio:` prefix parse a second place.
+import { taskAssignees } from "../board/types";
 
 /** The four the App actually delivers. `push` is deliberately absent: it
  *  already owns a path in webhook.ts (the UNAPPROVED WRITE alarm) and a merge
@@ -166,17 +171,44 @@ export function maestroIdFor(repoFullName: string | undefined | null): string | 
 
 interface Issueish { number?: unknown; title?: unknown; state?: unknown; labels?: unknown }
 
-function issueOf(p: Record<string, unknown>): { number: number; title: string; state: string; labels: string } | null {
+function issueOf(
+  p: Record<string, unknown>,
+): { number: number; title: string; state: string; labels: string; labelList: string[] } | null {
   const i = p["issue"] as Issueish | undefined;
   if (!i || typeof i.number !== "number" || typeof i.title !== "string") return null;
-  const labels = Array.isArray(i.labels)
+  const labelList = Array.isArray(i.labels)
     ? i.labels.map((l) => (l as { name?: unknown })?.name).filter((n): n is string => typeof n === "string")
     : [];
   return {
     number: i.number, title: i.title,
     state: typeof i.state === "string" ? i.state : "?",
-    labels: labels.join(","),
+    labels: labelList.join(","),
+    labelList,
   };
+}
+
+/**
+ * Board #111: is this task maestro's OWN business, per the three-way rule
+ * ask #7 (board #70) asked for —
+ *
+ *   - backlog (no `studio:` label at all) → own (maestro triages backlog)
+ *   - single assignee, and it IS this repo's maestro → own
+ *   - single assignee, and it is NOT maestro → NOT own (that lane already
+ *     gets its own targeted wake — board #236's wakeTaskOnComment/
+ *     wakeOnComment)
+ *   - ambiguous (more than one `studio:` label) → own — label drift is
+ *     exactly what maestro, not a lane, should see, never silently dropped
+ *
+ * `maestroId` is `null` when the repo's own id can't be folded at all
+ * (`maestroIdFor`'s own refusal case) — treated as "not own" here since
+ * `deltaDigest` already returns null via `wakeMaestro`'s own null-studioId
+ * check for that repo regardless; this function never needs to special-case
+ * it beyond a plain string compare that then correctly reads false.
+ */
+function isMaestroOwnTask(labels: string[], maestroId: string | null): boolean {
+  const assignees = taskAssignees(labels);
+  if (assignees.length !== 1) return true;
+  return assignees[0] === maestroId;
 }
 
 /**
@@ -200,6 +232,11 @@ export function deltaDigest(event: string, payload: unknown): string | null {
     const issue = issueOf(p);
     if (!issue) return null;
     if (issue.title === WAVE_LOG_TITLE) return null;
+    // Board #111: a task assigned to a DIFFERENT lane already has its own
+    // targeted wake (board #236) — a second, generic maestro wake for the
+    // same delta is pure noise. See isMaestroOwnTask's own doc comment for
+    // the exact three-way rule.
+    if (!isMaestroOwnTask(issue.labelList, maestroIdFor(repo))) return null;
     if (event === "issues") {
       const labels = issue.labels ? ` labels=${issue.labels}` : "";
       return oneLine(`${head} #${issue.number} "${issue.title}" state=${issue.state}${labels}`);
@@ -211,6 +248,11 @@ export function deltaDigest(event: string, payload: unknown): string | null {
   }
 
   if (event === "pull_request") {
+    // Board #111: maestro itself never holds a PR — only the studios/lanes
+    // it supervises do — so every synchronize (fired on every push to a PR
+    // branch) is inherently noise from maestro's own perspective. Checked
+    // first, before any other work in this branch.
+    if (action === "synchronize") return null;
     const pr = p["pull_request"] as
       { number?: unknown; title?: unknown; state?: unknown; merged?: unknown; draft?: unknown } | undefined;
     if (!pr || typeof pr.number !== "number" || typeof pr.title !== "string") return null;
