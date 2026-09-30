@@ -214,6 +214,107 @@ that imports the touched exports was run individually above instead.
   expected 403-shaped refusal (issue #102 carries no `junior` label). Did the
   rest of the read/draft/test work myself.
 
+## Review round 1 fixes (2026-09-30)
+
+A fresh-context review of this feature found 2 real, severe bugs. Both fixed
+TDD RED-first, on the same branch, one commit pair each.
+
+### Finding 1 (HIGH) — a `null`-until sighting blacklisted an account forever
+
+`isFree` (accounts.ts) only cleared an account when its recorded `until` was
+readable and had passed; a select-style modal sighting (`until: null` —
+`failover.ts`'s `limitObservation`, every `!verdict.inline` modal) therefore
+never cleared BY THE CLOCK at all, no matter how stale. `nextClaudeAccount`
+skips a limited account on every future wrap, so this was a true deadlock:
+nothing ever routes a studio back onto that account to re-probe whether the
+underlying limit (a monthly/org spend cap) has actually reset — worse than
+the pre-#102 behaviour for exactly the #53 incident shape (`/rate-limit-
+options`, "Upgrade your plan") that motivated this whole feature.
+
+**Fix**: `AccountLimits`'s value is now `{ until, seenAt }` (was bare
+`string | null`) — `seenAt` threaded through `nextClaudeAccount`,
+`earliestAccountReset`, and do.ts's `readFleetAccountLimits` (the D1-backed
+`AccountLimitState` already stored `seenAt`; only the read projection had been
+dropping it). `isFree` now treats a `null`-until entry as free again once
+`now - seenAt` exceeds `NULL_UNTIL_CEILING_MS` — 24h, matching this file's own
+`DAY_MS`/`firstSighting` day-boundary granularity (accounts.ts imports
+nothing, per its own header, so the constant is repeated rather than
+imported); no more precise documented figure for "how long a select-modal
+limit typically lasts" exists anywhere else in this codebase. Stated as a
+RESIDUAL/FIX at `NULL_UNTIL_CEILING_MS`'s own doc comment in accounts.ts,
+following this file's convention of naming known gaps plainly (the ceiling
+means a genuinely still-limited account can wrongly read free for up to 24h
+after its select-modal sighting — accepted trade-off, stated explicitly, in
+exchange for a self-healing path where there was none).
+
+**TDD**: RED — `nextClaudeAccount` with a `null`-until entry `seenAt` 30 days
+ago still returned `null` (no next account) against the un-fixed `isFree`;
+confirmed failing. GREEN — same case now returns the next account; a
+`null`-until entry `seenAt` 1 minute ago still correctly returns `null`
+(excluded), proving the ceiling doesn't just delete the exclusion.
+
+### Finding 2 (HIGH) — the flap-guard's escape hatch was unreachable for a new limit
+
+The no-flapping guard (`FLAP_GUARD_MINUTES`, failover.ts) fired on ANY inline
+verdict within the cooldown window after a `"modal"`-via switch, with the only
+override being `!verdict.inline` (a genuine select-style modal). A genuinely
+NEW limit on the studio's OWN NEW account that happened to render INLINE
+(session/weekly/monthly-spend blocks — measured, `INLINE_LIMIT_HEADLINES`'s
+own doc comment, the overwhelmingly common shape) was indistinguishable from a
+stale `--continue` redraw of the OLD account's leftover transcript, so it was
+wrongly suppressed for up to 5 minutes — the opposite of the requirement's own
+stated intent ("no flapping... UNLESS its new account itself now shows a live
+limit").
+
+**Fix**: reuses `limitBlockKey`, the redraw guard's own comparison primitive
+(the same one `failoverBlock`/`rerender` already use), rather than inventing a
+new one. A new `StudioStatus.claudeAccountMovedBlock` field records, on every
+completed switch, the block-key this studio already knew about at that
+moment: `key` itself for an `"inline"`-via switch (same value `failoverBlock`
+gets), or the studio's own `LIMIT_SIGHTING_KEY` sighting's block (read at the
+top of `runAccountFailover`, before this tick's own observation) for a
+`"modal"`-via switch — `null` when it knew of none (a select modal's own
+capture can never also carry an inline block; the two are position-exclusive
+in `detectLimitOnScreen`, so there is nothing else to record). The flap-guard
+now suppresses a NEW inline observation only when its block-key MATCHES
+`claudeAccountMovedBlock` (a genuine stale redraw); a DIFFERENTLY-keyed block,
+or one appearing when `claudeAccountMovedBlock` is null (nothing was known at
+switch time), is trusted immediately, cooldown or not. Cleared alongside
+`failoverBlock` on the same "forget" trigger (a static pane with claude's
+footer and no limit on it).
+
+This narrows — but does not fully close — the pre-existing UNMEASURED residual
+this file's own detection doc comment names ("a `--continue` redraw of the
+persisted limit message is unguarded"): an inline message printed but never
+sighted (it never matched the strict idle-ending shape this file requires)
+still leaves `claudeAccountMovedBlock: null`, so its redraw is not suppressed
+either. Traded deliberately: the OLD, unconditional guard suppressed every
+genuinely new inline limit on a freshly-switched account, which measures far
+more often than this narrower residual ever has. Restated at the doc comment
+in failover.ts.
+
+**TDD**: RED — a select-modal-via switch with no known block
+(`claudeAccountMovedBlock` absent) followed, within the cooldown window, by a
+genuinely new, differently-keyed inline limit (`WEEKLY_LIMIT_PANE`, distinct
+from the session-limit fixture the existing tests used) stayed
+`"flap-guarded"` instead of attempting a switch; confirmed failing against the
+un-fixed guard. GREEN — the same case now returns `"switched"`; a matching
+stale redraw (`claudeAccountMovedBlock` equal to the new inline verdict's own
+key) still correctly returns `"flap-guarded"` within the cooldown window, and
+a different `claudeAccountMovedBlock` recorded at switch time still does not
+suppress a differently-keyed new limit.
+
+**Verification**: `npx vitest run test/studio.account-failover.test.ts
+test/studio.failover-real-panes.test.ts test/studio.account-by-repo.test.ts`
+— 229 pass, 0 fail. Also ran every other file importing
+`runAccountFailover`/`FailoverDeps`/`claudeAccountMovedVia` (`studio.account-
+launched.test.ts`, `studio.failover-106.test.ts`, `studio.failover-214.test.ts`,
+`studio.failover-274.test.ts`, `studio.rate-limited.test.ts`,
+`studio.replacement.test.ts`, `studio.start-gate-writeback.test.ts`,
+`studio.wake-race.test.ts`) — 522 pass total across all 11 files, 0 fail.
+`flock /tmp/fleet-gate.lock bun run check` (5-tsconfig repo-wide typecheck) —
+clean. `bun scripts/english-check.ts ../..` — clean.
+
 ## Files touched
 
 `apps/fleet/src/studio/accounts.ts`, `apps/fleet/src/studio/failover.ts`,
