@@ -9,6 +9,7 @@ import { destroyWithSync } from "../src/studio/destroy";
 import type { SessionSyncStorage } from "../src/studio/session-sync";
 import type { StudioState, StudioStatus, ProvisionConfig } from "../src/studio/types";
 import { assignDigest } from "../src/board/assign-wake";
+import { BRINGUP_TOKEN_WRITE_SECTION } from "../src/studio/observed";
 
 // ---------------------------------------------------------------------------
 // Issue #152 — a genuine destroy EPOCH, replacing the prior (insufficient)
@@ -1285,6 +1286,41 @@ describe("board issue #213 (fix round) — bring-up task delivery honors the #17
     await h.doObj.restartStudio();
 
     expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  // PR #143 fix-first review coverage gap: `recordBringupObservation`
+  // (provision.ts ~3329) mints a BRAND NEW `crypto.randomUUID()` on EVERY
+  // bring-up unconditionally, not only when a real container replacement
+  // happened — unlike `deliverSurvivalOnBringup`'s own allowlist-gated
+  // feature, this delivery path shares none of that restriction. The dedup
+  // test right above only proves "one wake total" because this harness's
+  // `provisionedRespond` never answers the bring-up-observation exec with a
+  // successful token write, so `Observed.incarnation` never actually changes
+  // between the two calls — the SAME gap the reviewer's own note calls out
+  // ("the destroy-race harness never changes the token, so add one test that
+  // does"). This test arms that exec for real (matching on
+  // `BRINGUP_TOKEN_WRITE_SECTION`, observed.ts), so `provision()` and the
+  // following `restartStudio()` each mint and persist a genuinely different
+  // incarnation token, and pins that the SAME still-open task earns a SEPARATE
+  // wake on each — the incarnation-scoped dedup (`taskWakesDeliveredFor`)
+  // correctly treats each as a fresh container identity, end-to-end through
+  // the real StudioDO methods (not just at the do.ts-unit level
+  // studio.wake-gate.test.ts already covers).
+  it("provision, then restartStudio, for the SAME task, but a DIFFERENT incarnation each time: TWO wakes — the token change earns a fresh delivery", async () => {
+    const respondWithTokenWrite = (cmd: string) => {
+      if (cmd.includes("pane_current_command")) return { code: 0, stdout: PROVISIONED_OK, stderr: "" };
+      if (cmd.includes(BRINGUP_TOKEN_WRITE_SECTION)) {
+        return { code: 0, stdout: `${BRINGUP_TOKEN_WRITE_SECTION}\nyes\n`, stderr: "" };
+      }
+      return undefined;
+    };
+    const h = makeHarness({ state: "stopped", respond: respondWithTokenWrite });
+    const { wake } = withDelivery(h);
+
+    await h.doObj.provision(cfg());
+    await h.doObj.restartStudio();
+
+    expect(wake).toHaveBeenCalledTimes(2);
   });
 });
 
