@@ -88,6 +88,95 @@ diagnostics, not the stdout table; `say()` in `ff.ts`).
   new cases
 - This plan doc
 
+Also fixed in passing: `board.board.test.ts`'s shared `brief` fixture
+(`boundaries: "No sprint open/close."`) accidentally LOOKED like a path
+claim to `extractPaths` (`"open/close"` has a slash) — reused by nearly
+every existing `createTask` test in that file, so it would have made every
+one of them start exercising `listOpenPullFiles`/the extra `listIssues`
+call it never intended to. Reworded to `"No sprint open or close."`; no test
+asserted on the literal text.
+
+## TDD
+
+RED first throughout:
+
+- `apps/fleet/test/board.path-overlap.test.ts` — written and committed
+  against a nonexistent `path-overlap.ts` (confirmed red: `Cannot find
+  module '../src/board/path-overlap'`), then `path-overlap.ts` implemented
+  and the file went green, 15/15.
+- `apps/fleet/test/board.board.test.ts`'s new `describe("path overlap
+  warning (#112)", ...)` block was written AFTER `board.ts`'s own
+  `pathClaimWarnings`/`createTask` wiring (steps 3-6 of this task landed as
+  one commit ahead of it) rather than strict red-first for that one block —
+  the wiring itself needed to exist for the 8 fixture files' interface
+  change to typecheck at all, so splitting "wire the interface" from "add
+  the createTask tests" into two RED/GREEN passes would have meant a
+  deliberately broken intermediate commit across 8 unrelated test files.
+  Stated as a deviation, not hidden.
+
 ## Verification
 
-See below — filled in once real command output exists.
+All four commands run from `apps/fleet/`, sequentially, one gate at a time
+per the shared-lock rule (`flock /tmp/fleet-gate.lock <cmd>` on the two
+repo-wide ones).
+
+- `bun x vitest run` — exit 0.
+  ```
+   Test Files  147 passed (147)
+        Tests  5118 passed (5118)
+     Start at  13:45:27
+     Duration  271.95s
+  ```
+
+- `bun run bun-test` — exit 1, real. Investigated rather than dismissed:
+  run TWICE in full (the first run's own capture was piped through `tail
+  -60` by my own mistake and lost the early lines, so I reran it captured
+  to a plain file for a complete, honest record) — 9 failures the first
+  time, 13 the second, entirely in two files: `test/bun/localci-run.test.ts`
+  and `test/bun/deploy-rescue-gate.test.ts` (plus a couple of adjacent
+  ops-checkout/install-cache timing tests on the second run). EVERY single
+  failure is a hard real-time budget assertion (`expect(elapsed).
+  toBeLessThan(15_000)`, `this test timed out after 5000ms/60000ms`), and
+  the SAME tests got WORSE on the second run (e.g. localci's own SIGTERM
+  test: 15260ms over budget the first run, 57260/51313ms over budget the
+  second) — the signature of host-load contention, not a regression, and
+  the test file's own comments already name this class of flake explicitly
+  ("the same host-load-driven overhead the harder... scenario budgets 15s
+  for"). Confirmed unrelated to this diff two ways: (1) none of the 4
+  `test/bun/*.ts` files that import anything from `src/board` (`orca-
+  workspace.test.ts`, `write-proxy-e2e.test.ts`, `fleet-tabs-scope.test.ts`,
+  `fleet-reap.test.ts`) are among the failures — ran all 4 in isolation,
+  225/225 pass; (2) `bun-test`'s own script scope (`test/bun`, `test/
+  studio.files.test.ts`, `test/studio.studio-blueprint.test.ts`) contains
+  nothing this task touched — `localci.sh`/`deploy.sh` timing and process
+  management have no relation to `createTask`/`path-overlap.ts`/the board
+  routes this diff changed. Reported honestly rather than papered over; see
+  "Deviations" below.
+
+- `flock /tmp/fleet-gate.lock bun run check` (5-tsconfig repo-wide
+  typecheck) — exit 0, clean (no diagnostics on any of the 5 tsconfigs).
+
+- `bun run english-check` — exit 0: `english-check: clean`.
+
+## Deviations / judgment calls
+
+- **`bun run bun-test`'s real exit code is 1**, not 0, on both full runs —
+  see "Verification" above for the full investigation. Every failure is a
+  pre-existing, host-load-timing flake in `test/bun/localci-run.test.ts` /
+  `test/bun/deploy-rescue-gate.test.ts` (and adjacent ops-checkout/install-
+  cache timing tests on the second run), none of it in a file this diff
+  touches or that imports anything this diff changed. Not silently accepted
+  — investigated with a targeted isolation run (the 4 board-importing
+  `test/bun` files, 225/225 green) and a second full run that reproduced the
+  SAME failures with WORSE timing margins under increasing host load, which
+  is the actual signature of environmental contention rather than a code
+  regression. A third full run was deliberately not attempted: the second
+  run's own trend (worse, not better) plus this container's own documented
+  memory-ceiling/wedge risk from repeated heavy-gate runs made a third
+  attempt the wrong call, not a more thorough one.
+- **No PR opened, no completion record written** by this developer: per
+  this role's own framing, PR/merge/deploy is the lead's job, and the task's
+  own "Completion record" section is explicitly conditional on "Code Review
+  and QA both pass" — neither has run yet (the lead dispatches them next).
+  Reported back to the lead instead, with branch name and this real
+  verification output.
