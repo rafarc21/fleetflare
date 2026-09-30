@@ -745,6 +745,29 @@ describe("runAccountFailover — issue #141: a dead account (org disabled subscr
     expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toMatchObject({ dead: true });
   });
 
+  // Fresh-context review of this PR (2026-09-30): limitObservation's "has
+  // anything changed" check compares `!!prior.dead === dead` alongside
+  // `until`/`select` PRECISELY because a plain non-dead inline sighting
+  // already on the row (this studio's own out-of-credits-style block, seen
+  // an hour ago) has `until: null` and no `select` — the SAME shape a dead
+  // verdict's own `until`/`select` present. Without the `dead` comparison
+  // too, the transition to dead on a LATER tick would read as "nothing
+  // changed" against that prior and `prior` itself would be returned
+  // unwritten, silently swallowing the dead flag. This seeds exactly that
+  // prior observation, then feeds the dead pane through the SAME row.
+  it("a prior non-dead inline sighting (until: null) on the row still gets marked dead once the pane goes dead", async () => {
+    const seenAt = new Date(NOW.getTime() - 60 * 60_000).toISOString();
+    const h = harness({
+      accounts: TWO_ACCOUNTS,
+      pane: captured(ORG_DISABLED_PANE),
+      initial: status({ rateLimited: { until: null, seenAt } }),
+    });
+    const out = await run(h);
+
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toMatchObject({ dead: true });
+  });
+
   it("never auto-expires: a LATER tick, 30 days on, still refuses to wrap back onto the dead account", async () => {
     const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(ORG_DISABLED_PANE) });
     await run(h); // marks CLAUDE_CODE_OAUTH_TOKEN dead, switches to CLAUDE_CODE_OAUTH_TOKEN_2
