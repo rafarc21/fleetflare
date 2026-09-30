@@ -180,6 +180,39 @@ describe("HOUSE_RULES — the memory ceiling is a rule, not an anecdote (issue #
   });
 });
 
+// Issue #85: lead deadlocks were the most common failure in a ~30-studio
+// night run. Four always-on rules, one per measured deadlock.
+describe("HOUSE_RULES — a lead never blocks on nothing (issue #85)", () => {
+  const rules = () => collapseWs(HOUSE_RULES);
+
+  it("names the section", () => {
+    expect(HOUSE_RULES).toContain("## House rules — never block on nothing");
+  });
+
+  it("1: never wait on a notification; re-read the output yourself, act if nothing is alive", () => {
+    expect(rules()).toMatch(/Never end a turn waiting for a notification\./);
+    expect(rules()).toMatch(/read the background task's output file and the screen yourself/);
+    expect(rules()).toMatch(/If nothing is still running, act\./);
+  });
+
+  it("2: before waiting on a job, verify it is alive; dead = rerun or report", () => {
+    expect(rules()).toMatch(/Before you wait on a job, check it is alive\./);
+    expect(rules()).toMatch(/A dead job is rerun or reported, never waited on\./);
+  });
+
+  it("3: never AskUserQuestion in a studio; blocker into the issue, move on", () => {
+    expect(rules()).toMatch(/Never use AskUserQuestion \(or any menu that waits for an answer\) in a studio\./);
+    expect(rules()).toMatch(/Write the blocker into the task's issue and move to the next piece of work\./);
+  });
+
+  it("4: touched tests, then push with LEFTHOOK=0; full suite is CI's; not a way past a refused push", () => {
+    expect(rules()).toMatch(/Run the tests your change touches, then push with `LEFTHOOK=0 git push`\./);
+    expect(rules()).toMatch(/The full suite belongs to CI or the merge gate\./);
+    expect(rules()).toMatch(/skips only the repo's own lefthook hooks; the fleet's own push checks still run/);
+    expect(rules()).toMatch(/Never use it to get past a push that was refused\./);
+  });
+});
+
 describe("HOUSE_RULES — studios never hold Cloudflare deploy credentials", () => {
   // Collapse before matching, same reason as the gate-budget block above: a
   // whole clause can straddle the line-wrap boundary in the source array.
