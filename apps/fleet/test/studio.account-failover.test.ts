@@ -1398,7 +1398,13 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
       // account 2 (own primary) AND account 3 (current) both fleet-wide
       // limited — the strictly stricter condition than the golden #103 test
       // above, where account 2 stays free and the studio wraps back to it.
-      accountLimits: { CLAUDE_CODE_OAUTH_TOKEN_2: LIVE_UNTIL, CLAUDE_CODE_OAUTH_TOKEN_3: LIVE_UNTIL },
+      // Review round 2 (maestro review of PR #135), finding 3: account 1
+      // (positioned BEFORE the primary) is ALSO limited here — otherwise it
+      // is a genuinely unclaimed spare (tier 2), which this fixture's own
+      // "every account... limited" premise requires it not to be.
+      accountLimits: {
+        CLAUDE_CODE_OAUTH_TOKEN: LIVE_UNTIL, CLAUDE_CODE_OAUTH_TOKEN_2: LIVE_UNTIL, CLAUDE_CODE_OAUTH_TOKEN_3: LIVE_UNTIL,
+      },
       reservedAccounts: new Set(["CLAUDE_CODE_OAUTH_TOKEN_4"]),
       otherRepoOf: (name) => (name === "CLAUDE_CODE_OAUTH_TOKEN_4" ? "repo-b" : null),
     });
@@ -1541,7 +1547,11 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
     const h = harness({
       accounts: five, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
       initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }),
-      accountLimits: { CLAUDE_CODE_OAUTH_TOKEN_2: LIVE_UNTIL, CLAUDE_CODE_OAUTH_TOKEN_3: LIVE_UNTIL },
+      // Review round 2 (maestro review of PR #135), finding 3: account 1
+      // (before the primary) is limited too — see the sibling test above.
+      accountLimits: {
+        CLAUDE_CODE_OAUTH_TOKEN: LIVE_UNTIL, CLAUDE_CODE_OAUTH_TOKEN_2: LIVE_UNTIL, CLAUDE_CODE_OAUTH_TOKEN_3: LIVE_UNTIL,
+      },
       reservedAccounts: new Set(["CLAUDE_CODE_OAUTH_TOKEN_4", "CLAUDE_CODE_OAUTH_TOKEN_5"]),
       // list order would try account 4 before account 5; burn order must win.
       accountBurn: { CLAUDE_CODE_OAUTH_TOKEN_4: 500, CLAUDE_CODE_OAUTH_TOKEN_5: 10 },
@@ -1576,6 +1586,58 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
     expect(h.accountBurnReads).toBe(0);
     const last = h.recorded.at(-1)!;
     expect(last.borrowedAccount).toBeNull();
+  });
+
+  // -------------------------------------------------------------------
+  // Review round 2 (maestro review of PR #135), finding 3 — the first pass
+  // (`nextClaudeAccount` over `scopedAccounts`) only ever scans this
+  // studio's OWN chain (primary forward); the borrow pass only ever scans
+  // `reserved` names. An account that is BOTH positioned before this
+  // studio's own primary AND not `reserved` for another repo — a genuinely
+  // unclaimed spare — fell into a blind spot neither pass ever looked at,
+  // so the old code jumped straight to borrowing another repo's primary
+  // while a plain free spare sat unused.
+  // -------------------------------------------------------------------
+  describe("tier 2 — an unclaimed spare before this studio's own primary (review round 2, finding 3)", () => {
+    const RESERVED_OTHER: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_6", token: "sk-ant-oat01-" + "f".repeat(40) };
+    const SPARE: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_7", token: "sk-ant-oat01-" + "g".repeat(40) };
+    const OWN_PRIMARY: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
+    const OWN_CHAIN: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 };
+    // List order: [repo-B's primary (reserved), a free plain spare, this
+    // studio's own primary, the rest of its own chain] — the exact fixture
+    // shape the maestro's own review comment describes.
+    const accountsTier2: ClaudeAccount[] = [RESERVED_OTHER, SPARE, OWN_PRIMARY, OWN_CHAIN];
+
+    it("scans every non-primary account, not just its own chain: the unclaimed spare wins over another repo's reserved primary", async () => {
+      const h = harness({
+        accounts: accountsTier2, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+        initial: status({ claudeAccount: OWN_CHAIN.name }),
+        // own primary AND the rest of the own chain (the current account)
+        // both limited; the spare and the reserved other-repo primary are
+        // left free.
+        accountLimits: { [OWN_PRIMARY.name]: LIVE_UNTIL, [OWN_CHAIN.name]: LIVE_UNTIL },
+        reservedAccounts: new Set([RESERVED_OTHER.name]),
+      });
+      const out = await run(h);
+      expect(out).toEqual({ kind: "switched", from: OWN_CHAIN.name, to: SPARE.name });
+      const last = h.recorded.at(-1)!;
+      // Away from primary — tracked so hand-back can bring it home later
+      // (finding 4), even though this was never a reserved-primary borrow.
+      expect(last.borrowedAccount).toBe(SPARE.name);
+      expect(last.borrowedFromRepo).toBeNull();
+    });
+
+    it("regression pin: when the spare is ALSO limited, it correctly falls through to borrowing the reserved primary", async () => {
+      const h = harness({
+        accounts: accountsTier2, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+        initial: status({ claudeAccount: OWN_CHAIN.name }),
+        accountLimits: { [OWN_PRIMARY.name]: LIVE_UNTIL, [OWN_CHAIN.name]: LIVE_UNTIL, [SPARE.name]: LIVE_UNTIL },
+        reservedAccounts: new Set([RESERVED_OTHER.name]),
+        otherRepoOf: (n) => (n === RESERVED_OTHER.name ? "repo-b" : null),
+      });
+      const out = await run(h);
+      expect(out).toEqual({ kind: "borrowed", from: OWN_CHAIN.name, to: RESERVED_OTHER.name, fromRepo: "repo-b" });
+    });
   });
 });
 
