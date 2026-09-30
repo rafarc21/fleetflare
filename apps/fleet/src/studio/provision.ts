@@ -352,6 +352,9 @@ export interface StudioStorage {
   // Issue #152: the destroy epoch — see DESTROY_EPOCH_KEY's own doc comment
   // for why this is a monotonically increasing counter, never a boolean.
   get(key: typeof DESTROY_EPOCH_KEY): Promise<number | undefined>;
+  // Issue #100: read before every provision — see FRESH_SESSION_PENDING_KEY's
+  // own doc comment for what "undefined" vs "true"/"false" mean here.
+  get(key: typeof FRESH_SESSION_PENDING_KEY): Promise<boolean | undefined>;
   put(key: typeof STATUS_KEY, value: StudioStatus): Promise<void>;
   put(key: typeof ROLE_ENV_KEY, value: RoleEnv | StudioEnv): Promise<void>;
   put(key: typeof KEEP_ALIVE_KEY, value: boolean): Promise<void>;
@@ -361,6 +364,8 @@ export interface StudioStorage {
   put(key: typeof DESTROY_EPOCH_KEY, value: number): Promise<void>;
   // Issue #37: armed by a --fresh-session provision (see provisionWithStorage).
   put(key: typeof SESSION_FORCE_KEY, value: boolean): Promise<void>;
+  // Issue #100: see FRESH_SESSION_PENDING_KEY's own doc comment.
+  put(key: typeof FRESH_SESSION_PENDING_KEY, value: boolean): Promise<void>;
 }
 
 /**
@@ -516,6 +521,41 @@ export const OPERATION_KEY = "operationInFlight";
  *  with its bounded waits) is minutes, and a heal that fires one tick too
  *  late costs one cycle, while a heal that fires too early costs a race. */
 export const OPERATION_STALE_MS = 15 * 60 * 1000;
+
+/**
+ * Issue #100: "a --fresh-session provision was requested and not yet
+ * CONFIRMED applied", set true BEFORE `runProvision` is ever called with
+ * `freshSession: true` (provisionWithStorage), cleared only after a LATER
+ * attempt actually reaches `state: "running"` with the flag effectively on.
+ *
+ * Before this key existed, `cfg.freshSession` lived only as a local variable
+ * for the ONE attempt carrying it (cli-args.ts's own doc comment: "the
+ * Worker never persists it" -- true for a SUCCESSFUL bring-up, where the
+ * container itself is the durable record, but also true, silently, for a
+ * FAILED one). `runProvision`'s own try/catch (see its doc comment) turns
+ * every failure anywhere in the clone/blueprint/bring-up sequence --
+ * including a bring-up exec that throws or exits non-zero -- into a
+ * `"degraded"` status with `freshSessionMoved` left at its initial `false`,
+ * and returns NORMALLY: nothing durable ever recorded that a fresh session
+ * was asked for. The next plain `fleet provision <id>` (no flag) then read
+ * `cfg.freshSession` as absent, took the ordinary `adoptBeforeBringup`
+ * branch, and resumed whatever session state the container actually held --
+ * silently dropping the operator's fresh-session intent. Measured live
+ * 2026-09-30: `--fresh-session` -> 500 mid-bring-up -> plain retry ->
+ * "resumed · snap 152m STALE".
+ *
+ * Same "write the intent before the risky work, clear only on a genuine
+ * later success" shape OPERATION_KEY's own doc comment already establishes
+ * for the identical class of problem (an in-flight claim that must survive a
+ * throw) -- chosen over "refuse the plain retry outright" (the issue's own
+ * other acceptable fix) because this codebase already has the durable-intent
+ * idiom and no precedent for a provision verb that refuses a bodyless retry.
+ * A `boolean`, not a timestamped/stale-able marker like OPERATION_KEY: an
+ * un-consumed fresh-session request never goes stale on its own -- an
+ * operator who asked for fresh a week ago still wants fresh, not a silent
+ * expiry back to resume.
+ */
+export const FRESH_SESSION_PENDING_KEY = "freshSessionPending";
 
 /**
  * Issue #100 F3: "a destroy is in flight", as an ISO timestamp, or null.
@@ -2322,6 +2362,12 @@ export async function runProvision(
   status: StudioStatus; roleEnv: RoleEnv | StudioEnv | null; keepAlive: boolean | null;
   /** Issue #37: a --fresh-session bring-up confirmed it moved a session aside. */
   freshSessionMoved?: boolean;
+  /** Issue #100 review round 1: see freshSessionConfirmed's own doc comment
+   *  above (local variable of the same name) -- true iff the flag was
+   *  actually honored (a marker line printed, no failed entries), which is
+   *  NOT the same thing as freshSessionMoved (false both when unconfirmed
+   *  AND when confirmed-but-nothing-to-move). */
+  freshSessionConfirmed?: boolean;
 }> {
   const id = buildStudioId(cfg);
   // Dynamic repo selection (P4a) — see resolveWorkRepoSlug's own doc comment
@@ -2353,6 +2399,15 @@ export async function runProvision(
   // channel: a discard nobody is told about is the thing this must never be.
   let freshSessionNote: string | null = null;
   let freshSessionMoved = false;
+  // Issue #100 review round 1: distinct from `freshSessionMoved` above, which
+  // is ALSO `false` for the legitimate "flag honored, nothing to move" case
+  // (`moved` is `[]`) -- indistinguishable there from "never confirmed at
+  // all" (`moved === null`, no marker line) or "every move failed" without
+  // this separate flag. `provisionWithStorage` needs exactly this signal to
+  // decide whether FRESH_SESSION_PENDING_KEY may clear: true iff bring-up
+  // printed at least one FLEET_SESSION_FRESH line and none of them failed
+  // (empty array counts as confirmed -- there was nothing to move).
+  let freshSessionConfirmed = false;
 
   try {
     const resolved = await resolveBringupEnv(deps, cfg, fleetRepoSlug, workRepoSlug);
@@ -2459,6 +2514,11 @@ export async function runProvision(
       const moved = parseFreshSession(bringupRes.stdout);
       freshSessionNote = freshSessionNoteFor(moved, id);
       freshSessionMoved = moved !== null && moved.some((m) => !m.startsWith("failed "));
+      // Issue #100 review round 1: see freshSessionConfirmed's own doc
+      // comment above -- `moved !== null` (a marker line printed) and no
+      // entry failed. `[]` (nothing to move) is confirmed; `null` or any
+      // `failed ` entry is not.
+      freshSessionConfirmed = moved !== null && !moved.some((m) => m.startsWith("failed "));
     }
 
     // Board issue #28 — the missing observation. `bringupRes.code === 0`
@@ -2515,6 +2575,14 @@ export async function runProvision(
       sessionAdoption: adoptionRecord(adoption),
     };
   } catch (err) {
+    // Review round 1 (issue #100): server-side diagnostic ONLY, logged
+    // before any redaction — every OTHER nested try/catch in this function
+    // (rescue-branch discovery, install-cache restore, session restore) already
+    // logs its raw error via console.error; this outer catch-all, the one the
+    // historical 500 this issue investigated actually disappeared into, did
+    // not. Does not change what the operator sees: `status.error` below is
+    // still built from the redacted message exactly as before.
+    console.error(`studio ${id}: provision failed`, err instanceof Error ? (err.stack ?? err.message) : String(err));
     // Scrubbed immediately, at the point the raw message is first held —
     // simpler and strictly safer than container/server.ts's "raw in
     // storage, scrub only at the output boundary" split (which exists
@@ -2537,7 +2605,11 @@ export async function runProvision(
   }
 
   await deps.recordStudio(status);
-  return { status, roleEnv, keepAlive, ...(freshSessionMoved ? { freshSessionMoved } : {}) };
+  return {
+    status, roleEnv, keepAlive,
+    ...(freshSessionMoved ? { freshSessionMoved } : {}),
+    ...(freshSessionConfirmed ? { freshSessionConfirmed } : {}),
+  };
 }
 
 /**
@@ -3473,13 +3545,23 @@ export async function provisionWithStorage(
   // lock and clears it in its own `finally` below.
   const alreadyLocked = operationLockFresh(await storage.get(OPERATION_KEY), new Date(deps.now()));
   if (!alreadyLocked) await storage.put(OPERATION_KEY, { op: "provision", since: deps.now() });
+  // Issue #100: a PRIOR --fresh-session attempt that never reached
+  // `state: "running"` left FRESH_SESSION_PENDING_KEY armed (see its own doc
+  // comment) — this bodyless retry must still honor it, never silently
+  // resume. Armed BEFORE runProvision is ever called with the flag on, same
+  // "write the intent before the risky work" ordering OPERATION_KEY uses.
+  const freshSessionPending = (await storage.get(FRESH_SESSION_PENDING_KEY)) === true;
+  const requestedFresh = cfg.freshSession === true || freshSessionPending;
+  const provisionCfg: ProvisionConfig = requestedFresh ? { ...cfg, freshSession: true } : cfg;
+  if (requestedFresh) await storage.put(FRESH_SESSION_PENDING_KEY, true);
   let status: StudioStatus;
   let roleEnv: RoleEnv | StudioEnv | null;
   let keepAlive: boolean | null;
   let freshSessionMoved: boolean | undefined;
+  let freshSessionConfirmed: boolean | undefined;
   try {
-    ({ status, roleEnv, keepAlive, freshSessionMoved } = await runProvision(
-      { ...provisionDeps, recordStudio: guardRecordStudio(deps, ctx) }, cfg, fleetRepoSlug, existing,
+    ({ status, roleEnv, keepAlive, freshSessionMoved, freshSessionConfirmed } = await runProvision(
+      { ...provisionDeps, recordStudio: guardRecordStudio(deps, ctx) }, provisionCfg, fleetRepoSlug, existing,
     ));
     // Review round 3 (issue #85 PR1), MUST-FIX 9 (maestro correction #4):
     // this must run INSIDE the op-lock's own try, before the `finally`
@@ -3532,6 +3614,26 @@ export async function provisionWithStorage(
     await storage.put(SESSION_FORCE_KEY, true);
     // PR #46 review: the row says so, like clear-session-guard does.
     status = { ...status, sessionForceArmedAt: deps.now() };
+  }
+  // Issue #100: retire the pending marker ONLY once a fresh-session attempt
+  // has actually reached `state: "running"` — any other outcome (a clone
+  // failure, a bring-up throw, anything runProvision's own try/catch turned
+  // into "degraded") leaves it armed, so the NEXT provision call — flagged
+  // or not — still forces `freshSession: true` rather than silently
+  // resuming. See FRESH_SESSION_PENDING_KEY's own doc comment.
+  //
+  // Review round 1: `state === "running"` alone is NOT enough — it is set by
+  // runProvision purely on bring-up exit code 0 + verifyBringupLanded, and
+  // says nothing about whether the fresh-session move was ever confirmed.
+  // `freshSessionConfirmed` is the real signal (see its own doc comment on
+  // runProvision's return type): false when bring-up printed no
+  // FLEET_SESSION_FRESH line at all, or every entry it printed was
+  // `failed `. Without this, a bring-up that "succeeds" (exit 0) without
+  // confirming the move would still clear the marker, reproducing the exact
+  // bug this fix exists for via a different path than the throw it was
+  // written against.
+  if (requestedFresh && status.state === "running" && freshSessionConfirmed) {
+    await storage.put(FRESH_SESSION_PENDING_KEY, false);
   }
   await storage.put(STATUS_KEY, status);
   // Issue #100 N1: the container is up again, so no destroy is in flight —
