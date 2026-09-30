@@ -98,6 +98,9 @@ describe("requestRecycle — a recycle request that times out never reports a ve
     expect(text).toContain("still running");
     expect(text).toContain("fleet ls");
     expect(text).not.toMatch(/\bfailed\b/i);
+    // Review round 2, fix 2: a timeout outcome ("we don't know") must exit
+    // with a code distinct from http-error's 1 ("the Worker refused this").
+    expect(report.exitCode).toBe(2);
     // The bound: RECYCLE_POLL_ATTEMPTS reads, no more.
     expect(calls.filter((u) => u.endsWith("/status"))).toHaveLength(RECYCLE_POLL_ATTEMPTS);
   });
@@ -206,6 +209,9 @@ describe("requestRecycle — a recycle request that times out never reports a ve
     expect(text).toContain("did not answer");
     expect(text).toContain("connect ECONNREFUSED");
     expect(text).not.toMatch(/\bfailed\b/i);
+    // Review round 2, fix 2: same distinct "unknown, not a refusal" code as
+    // timeout-pending, not http-error's 1.
+    expect(report.exitCode).toBe(2);
     expect(calls.filter((u) => u.endsWith("/status"))).toHaveLength(RECYCLE_POLL_ATTEMPTS);
   });
 
