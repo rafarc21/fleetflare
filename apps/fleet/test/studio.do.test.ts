@@ -337,6 +337,37 @@ describe("runShipTickWithObservation — onStaleBackgroundShell (issue #106)", (
     expect(cb).not.toHaveBeenCalled();
   });
 
+  it("fires a SECOND time on a genuine later crossing, once STALE_SHELL_NUDGE_EVERY_MS has elapsed since the first nudge", async () => {
+    const storage = fakeStorage({ status: status() });
+    const cb = vi.fn(async () => {});
+    await run(SHELLS_IDLE_PANE, T0, storage, cb); // stamps backgroundShellSince = T0
+
+    const firstCrossing = new Date(T0.getTime() + 16 * MIN);
+    await run(SHELLS_IDLE_PANE, firstCrossing, storage, cb);
+    expect(cb).toHaveBeenCalledTimes(1); // first nudge
+
+    // Flavour clears — backgroundShellSince resets to null, no fire.
+    const cleared = new Date(T0.getTime() + 20 * MIN);
+    await run(CLEAN_IDLE_PANE, cleared, storage, cb);
+    expect((storage.map.get(ACTIVITY_KEY) as Activity).backgroundShellSince).toBeNull();
+    expect(cb).toHaveBeenCalledTimes(1);
+
+    // Flavour returns — a fresh backgroundShellSince, age 0, still no fire.
+    const restarted = new Date(T0.getTime() + 40 * MIN);
+    await run(SHELLS_IDLE_PANE, restarted, storage, cb);
+    expect((storage.map.get(ACTIVITY_KEY) as Activity).backgroundShellSince).toBe(restarted.toISOString());
+    expect(cb).toHaveBeenCalledTimes(1);
+
+    // A genuine second crossing: 17 minutes after `restarted` (past the
+    // 15-minute staleness budget again), and 41 minutes after `firstCrossing`
+    // (well past STALE_SHELL_NUDGE_EVERY_MS's own 15-minute rate-limit
+    // window) — nothing suppresses this one.
+    const secondCrossing = new Date(T0.getTime() + 57 * MIN);
+    await run(SHELLS_IDLE_PANE, secondCrossing, storage, cb);
+    expect(cb).toHaveBeenCalledTimes(2);
+    expect(storage.map.get(STALE_SHELL_NUDGE_KEY)).toBe(secondCrossing.toISOString());
+  });
+
   it("a throwing callback never fails the tick; activity is still stored", async () => {
     const storage = fakeStorage({ status: status() });
     await run(SHELLS_IDLE_PANE, T0, storage, async () => {});
