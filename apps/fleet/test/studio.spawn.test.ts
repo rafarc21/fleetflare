@@ -19,6 +19,7 @@ import {
   type OperationInFlight,
 } from "../src/studio/provision";
 import { recordStudio, listStudios } from "../src/studio/registry";
+import { getStudioStub } from "../src/studio/profile";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
 
@@ -1521,5 +1522,69 @@ describe("spawnDeps().provisionChild — issue #107 role routing is real, not ju
 
     expect(small.provisioned).toEqual([{ repo: "websites", role: "release", spawnedBy: PARENT_ID }]);
     expect(big.provisioned).toEqual([]);
+  });
+});
+
+/** Same distinguishable-fake-namespace shape test/studio.profile.test.ts
+ *  uses for its own pure-function tests — `get` tags which namespace
+ *  served the stub, so a test can tell them apart without a real DO. */
+function fakeMarkedNamespace(marker: "default" | "big") {
+  return {
+    idFromName: (name: string) => name as unknown as DurableObjectId,
+    get: (id: DurableObjectId) => ({ marker, id: id as unknown as string }),
+  } as unknown as Env["STUDIO"];
+}
+
+// Issue #107 orphan-risk fix-first (operator, 2026-09-30): getStudioStub's
+// own async, real-D1-backed row lookup. STUDIO and STUDIO_BIG are two
+// entirely separate DO namespaces — re-deriving which one a role belongs to
+// on every read would silently re-route an ALREADY-RUNNING studio (created
+// before this field existed, or before its role joined BIG_PROFILE_ROLES)
+// to a brand-new, empty DO the moment the role-set changes, orphaning the
+// real one. These tests write real rows into the same D1 `fleet_state`
+// table recordStudio/listStudios use (via the `env` cloudflare:test binding
+// this file already shares), not a fake registry — the DB-backed lookup
+// itself is exactly what needs proving, not just the pure routing rule
+// test/studio.profile.test.ts's studioNamespace tests already cover.
+describe("getStudioStub — issue #107 orphan-risk fix (recorded doClass wins over role)", () => {
+  it("a pre-#107 release-studio row (no doClass recorded) stays on STUDIO, never STUDIO_BIG", async () => {
+    const testEnv = { ...env, STUDIO: fakeMarkedNamespace("default"), STUDIO_BIG: fakeMarkedNamespace("big") } as unknown as Env;
+    const id = "acme--release-studio";
+    // Hand-built literal, deliberately WITHOUT doClass — the exact shape a
+    // row written before this field ever existed has. (Not built from
+    // freshStatus: freshStatus itself now sets doClass, which is precisely
+    // the behavior this test must not lean on.)
+    const preExisting: StudioStatus = {
+      id, state: "running", tailscaleHost: "acme-release.example-tailnet.ts.net",
+      lastRefresh: "2026-01-01T00:00:00.000Z", error: null, lastRefreshError: null,
+      burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+    };
+    await recordStudio(testEnv, preExisting);
+
+    const stub = await getStudioStub(testEnv, id) as unknown as { marker: string; id: string };
+    expect(stub.marker).toBe("default");
+    expect(stub.id).toBe(id);
+  });
+
+  it("a bare, never-recorded release-studio id resolves fresh to STUDIO_BIG", async () => {
+    const testEnv = { ...env, STUDIO: fakeMarkedNamespace("default"), STUDIO_BIG: fakeMarkedNamespace("big") } as unknown as Env;
+    const id = "othercorp--release-studio";
+
+    const stub = await getStudioStub(testEnv, id) as unknown as { marker: string; id: string };
+    expect(stub.marker).toBe("big");
+    expect(stub.id).toBe(id);
+  });
+
+  it("a row explicitly recorded STUDIO_BIG resolves there, even if the role later left BIG_PROFILE_ROLES", async () => {
+    const testEnv = { ...env, STUDIO: fakeMarkedNamespace("default"), STUDIO_BIG: fakeMarkedNamespace("big") } as unknown as Env;
+    const id = "acme--release-studio";
+    const recorded: StudioStatus = {
+      id, state: "running", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
+      burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null, doClass: "STUDIO_BIG",
+    };
+    await recordStudio(testEnv, recorded);
+
+    const stub = await getStudioStub(testEnv, id) as unknown as { marker: string; id: string };
+    expect(stub.marker).toBe("big");
   });
 });
