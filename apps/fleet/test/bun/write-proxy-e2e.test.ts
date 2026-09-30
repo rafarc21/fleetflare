@@ -81,6 +81,8 @@ beforeAll(async () => {
     defaultRepo: "example-org/fleet",
     upstream: (url, init) => httpBackend(url, init),
     check: leakGuard({ isPrivate: async () => false, fetchDenylist: async () => "acmeclient\n9{9}\n" }),
+    defaultBranch: async () => "main",
+    allowDefaultBranch: () => false,
   };
   server = Bun.serve({ port: 0, fetch: (req) => handleGitProxy(req, ports) });
   port = server.port as number;
@@ -93,7 +95,9 @@ beforeAll(async () => {
   writeFileSync(join(work, "big.txt"), Array.from({ length: 400 }, (_, i) => `line ${i} of shared text\n`).join(""));
   await sh(["git", "-C", work, "add", "-A"]);
   await sh(["git", "-C", work, "commit", "-qm", "base"]);
-  const seed = await sh(["git", "-C", work, "push", "origin", "HEAD:refs/heads/main"]);
+  // Seeded straight into the bare repo: the proxy refuses the default branch
+  // (issue #34), which is what the test further down proves.
+  const seed = await sh(["git", "-C", work, "push", bare, "HEAD:refs/heads/main"]);
   expect(seed.err).not.toContain("rejected");
   expect(seed.code).toBe(0);
 });
@@ -163,6 +167,15 @@ describe("write proxy e2e (real git both ends)", () => {
     expect(r.err).not.toContain("rejected");
     expect(r.code).toBe(0);
     expect(await bareRef("refs/heads/feat-d")).not.toBe("");
+  });
+
+  test("a push to the default branch is refused by the proxy (issue #34)", async () => {
+    const before = await bareRef("refs/heads/main");
+    const r = await sh(["git", "-C", work(), "push", "origin", "feat-a:refs/heads/main"]);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain("remote rejected");
+    expect(r.err).toContain("is the default branch");
+    expect(await bareRef("refs/heads/main")).toBe(before);
   });
 
   test("a delete lands", async () => {
