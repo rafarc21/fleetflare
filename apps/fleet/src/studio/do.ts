@@ -3278,8 +3278,24 @@ export async function launchAccountOrRefuse(
   if (launch.ok) {
     // #273 r2: flag off, an earlier failover's recorded account is stale — this
     // launch is on the mapped one, so the row stops naming the old one.
-    if (!autoFailoverOn(env) && existing?.claudeAccount != null) {
-      const cleared: StudioStatus = { ...existing, claudeAccount: null };
+    const clearClaudeAccount = !autoFailoverOn(env) && existing?.claudeAccount != null;
+    // #134: a `rateLimited` sighting describes whatever account the studio
+    // was launched on when it was recorded — once this launch resolves to a
+    // DIFFERENT account than `existing.launchedAccount`, that sighting no
+    // longer describes the account the studio is about to run on, so it
+    // cannot be left standing (fleet ls would keep printing "rate-limited"
+    // for a studio actually healthy on its new account). Deliberately no D1
+    // read here: the existing 30s/300s live-pane recovery paths will
+    // re-observe and re-set `rateLimited` on their own next tick if the new
+    // account turns out to also be limited.
+    const clearRateLimited = existing?.rateLimited != null
+      && typeof existing?.launchedAccount === "string" && existing.launchedAccount !== launch.name;
+    if (clearClaudeAccount || clearRateLimited) {
+      const cleared: StudioStatus = {
+        ...existing,
+        ...(clearClaudeAccount ? { claudeAccount: null } : {}),
+        ...(clearRateLimited ? { rateLimited: null } : {}),
+      };
       await storage.put(STATUS_KEY, cleared);
       await recordStudioFn(cleared);
     }
