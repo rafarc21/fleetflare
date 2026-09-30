@@ -5,7 +5,7 @@ import {
   decideAccountClears, applyAccountClears,
 } from "../src/studio/do";
 import { withAccountDisplay } from "../src/studio/registry";
-import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
+import { STATUS_KEY, NEVER_MOVED_CTX, type StudioStorage, type OpCtx } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { MAIN_ROWS } from "./fixtures/account-rows-main";
@@ -571,14 +571,14 @@ describe("StudioDO.recycle wiring — the entry-time launchAccountOrRefuse call 
   // rather than an inline commit.
   it("the post-destroy call (inside the awaitReady closure) also resolves with commitOkClears=false — it commits via decide/apply, not inline", () => {
     const closureStart = recycleBody.indexOf("async () => {");
-    const closureEnd = recycleBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears);", closureStart)
-      + "await applyAccountClears(this.ctx.storage, this.recordFn(), clears);".length;
+    const closureEnd = recycleBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);", closureStart)
+      + "await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);".length;
     const closureBody = recycleBody.slice(closureStart, closureEnd);
     expect(closureBody).toContain(
       "const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);",
     );
     expect(closureBody).toContain("await decideAccountClears(this.env, this.ctx.storage, launch);");
-    expect(closureBody).toContain("await applyAccountClears(this.ctx.storage, this.recordFn(), clears);");
+    expect(closureBody).toContain("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);");
   });
 });
 
@@ -665,7 +665,8 @@ describe("decideAccountClears/applyAccountClears — decided before the containe
     const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot
     await mutateToLaunchedAccount(storage, launch.name); // sbAwaitReady -> onStart, simulated
     // sbAwaitReady resolved successfully: its success continuation runs.
-    await applyAccountClears(storage, recordFn, clears);
+    // No concurrent destroy landed either (NEVER_MOVED_CTX).
+    await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
 
     const row = (await storage.get(STATUS_KEY))!;
     expect(row.rateLimited ?? null).toBeNull(); // cleared, as #134 requires
@@ -687,6 +688,37 @@ describe("decideAccountClears/applyAccountClears — decided before the containe
     expect(row.launchedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN"); // onStart never got to run either
   });
 
+  // Issue #134 review round 5: sbAwaitReady resolving SUCCESSFULLY is not,
+  // by itself, proof no concurrent destroy landed while it was running — a
+  // `fleet destroy` racing this exact window can finish after this studio's
+  // own operation started, and applyAccountClears's fresh read could
+  // otherwise land AFTER destroy's own final write and clobber it. Same
+  // `ctx.moved()` guard every other post-container-touch write in this file
+  // already uses (do.ts:1505/5963/6195's own `if (await ctx.moved())`
+  // checks) — applied here too.
+  it("outcome 4 — sbAwaitReady succeeds, but a concurrent destroy landed first: apply skips the write entirely (#134 review round 5)", async () => {
+    const { env, storage, recordFn, observation } = seeded();
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
+
+    const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot, decided
+    expect(clears).not.toBeNull();
+    await mutateToLaunchedAccount(storage, launch.name); // sbAwaitReady -> onStart, simulated
+    // A concurrent destroy landed (its own epoch bump) sometime during
+    // sbAwaitReady — same shape test/studio.replacement.test.ts's own
+    // `ctx: OpCtx = { epoch: 0, moved: async () => moved }` fixture uses.
+    const movedCtx: OpCtx = { epoch: 0, moved: async () => true };
+    await applyAccountClears(storage, recordFn, clears, movedCtx);
+
+    const row = (await storage.get(STATUS_KEY))!;
+    // The write never happened at all: rateLimited is exactly whatever it
+    // was the instant before this function ran (here: still the stale
+    // observation) — NOT "correctly cleared" and NOT the pre-touch value
+    // either, simply untouched, so a real destroy's own later write (which
+    // this test does not simulate, since applyAccountClears returning
+    // early is the whole point) is never at risk of being clobbered.
+    expect(row.rateLimited).toEqual(observation);
+  });
+
   it("no stale fields on the row at all: decide returns null, apply is a no-op", async () => {
     const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
     const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }));
@@ -695,7 +727,7 @@ describe("decideAccountClears/applyAccountClears — decided before the containe
     const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
     const clears = await decideAccountClears(env, storage, launch);
     expect(clears).toBeNull();
-    await applyAccountClears(storage, recordFn, clears);
+    await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
     expect(recorded).toHaveLength(0);
   });
 });
@@ -766,7 +798,7 @@ describe("StudioDO.provisionUngated/restartUngated wiring — decide before sbAw
         const block = coldStartBlock(fnBody);
         const decideIdx = block.indexOf("const clears = await decideAccountClears(this.env, this.ctx.storage, launch);");
         const awaitReadyIdx = block.indexOf("await sbAwaitReady(this);");
-        const applyIdx = block.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears);");
+        const applyIdx = block.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);");
         expect(decideIdx).toBeGreaterThan(-1);
         expect(awaitReadyIdx).toBeGreaterThan(-1);
         expect(applyIdx).toBeGreaterThan(-1);
@@ -797,8 +829,8 @@ describe("StudioDO.recycle wiring — decide before sbAwaitReady, apply only aft
   };
   const recycleBody = body("async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {");
   const closureStart = recycleBody.indexOf("async () => {");
-  const closureEnd = recycleBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears);", closureStart)
-    + "await applyAccountClears(this.ctx.storage, this.recordFn(), clears);".length;
+  const closureEnd = recycleBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);", closureStart)
+    + "await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);".length;
   const closureBody = recycleBody.slice(closureStart, closureEnd);
 
   it("the closure's own launchAccountOrRefuse call passes commitOkClears=false", () => {
@@ -810,7 +842,7 @@ describe("StudioDO.recycle wiring — decide before sbAwaitReady, apply only aft
   it("decideAccountClears, sbAwaitReady, applyAccountClears run in that exact order", () => {
     const decideIdx = closureBody.indexOf("const clears = await decideAccountClears(this.env, this.ctx.storage, launch);");
     const awaitReadyIdx = closureBody.indexOf("await sbAwaitReady(this);");
-    const applyIdx = closureBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears);");
+    const applyIdx = closureBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);");
     expect(decideIdx).toBeGreaterThan(-1);
     expect(awaitReadyIdx).toBeGreaterThan(-1);
     expect(applyIdx).toBeGreaterThan(-1);

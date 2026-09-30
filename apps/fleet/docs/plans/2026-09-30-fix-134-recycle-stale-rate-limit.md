@@ -346,3 +346,54 @@ catches the exact round-3-style regression: temporarily reordered
 `apply` (mimicking what an "apply after success, but decide too late"
 mistake would look like) → the ordering assertion failed as expected →
 restored → 59/59 green again.
+
+## Review round 5 addendum: applyAccountClears missed the ctx.moved() guard
+
+A fifth fresh-context review found that `applyAccountClears` never checked
+`ctx.moved()` — the same destroy-epoch guard every OTHER write following a
+container-touching await in these same three functions already uses
+(do.ts:1505/1521's own checks right after `recycleWithSync`'s
+`awaitReady()`, and the provisionUngated/restartUngated tick-arming guards
+a few lines below this fix's own call sites). `sbAwaitReady` resolving
+successfully is not proof no concurrent `fleet destroy` landed while it was
+running — that destroy can finish AFTER `applyAccountClears`'s own fresh
+`storage.get` would otherwise run, and clobber destroy's carefully built
+final row (rescue notes, `unrescued` text, final `state`) with a stale
+intermediate snapshot plus the two now-cleared fields. `ctx` was already in
+scope at all three call sites (the same `ctx` used a few lines later for
+the analogous downstream tick-arming check) but was never threaded into
+`applyAccountClears` itself.
+
+**Fix**: `applyAccountClears` takes a 4th parameter, `ctx: OpCtx`, and
+checks `await ctx.moved()` FIRST — before even reading storage — returning
+immediately (no write at all) if a destroy has landed. All three call
+sites now pass their own already-in-scope `ctx` straight through. Because
+the check lives inside `applyAccountClears` itself rather than being
+duplicated at each of the three call sites, all three automatically share
+the identical guard with no risk of one site's copy drifting from
+another's.
+
+**Final trace, extended**: at each of the 3 sites, `applyAccountClears` now
+runs to completion (commits the clear) in exactly ONE of four outcomes —
+(1) the preceding await (`sbAwaitReady`/`awaitReady()`) throws → never
+reached (round 4's fix); (2) a concurrent destroy landed (`ctx.moved()` is
+true) → returns immediately, no write (round 5's fix); (3) the
+provision/restart container-running guard skipped the whole branch →
+never reached at all (round 2's fix; N/A for recycle's closure, which has
+no such guard); (4) none of the above → commits, exactly once. Confirmed
+by direct inspection: all three call sites (`provisionUngated`,
+`restartUngated`, recycle's post-destroy closure) pass their own `ctx`
+into the identical `applyAccountClears`, so the guard is centralized, not
+duplicated per site.
+
+New test: a 4th primitive-level outcome ("outcome 4") in the existing
+decide/apply describe block — decide computes a real clear, the simulated
+onStart write lands, then `applyAccountClears` is called with a `ctx` whose
+`moved()` resolves `true` (same `{ epoch, moved: async () => ... }` shape
+`test/studio.replacement.test.ts`'s own fixture already uses) — asserting
+the row is left completely untouched (not "correctly cleared", not
+reverted to the pre-touch snapshot — simply never written). Verified this
+test actually exercises the real guard (not a simulated shape): temporarily
+removed the `if (await ctx.moved()) return;` line from `applyAccountClears`
+itself → the new test failed exactly as expected (row was cleared instead
+of surviving) → restored → 60/60 green again.

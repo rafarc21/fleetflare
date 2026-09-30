@@ -3337,12 +3337,29 @@ export async function decideAccountClears(
  * own pre-touch snapshot — is what keeps this from clobbering that write
  * back to the old account name. A `null` `clears` (nothing was ever going to
  * be cleared) is a no-op, same as a missing row.
+ *
+ * Issue #134 review round 5: `ctx.moved()` — checked the same way, and for
+ * the same reason, as every other post-container-touch write in
+ * provisionUngated/restartUngated/recycle's own closure (do.ts's
+ * `if (await ctx.moved())` guards right after this call's own callers'
+ * `sbAwaitReady`/`awaitReady()`, e.g. the comment on recycleWithSync's
+ * "awaitReady() can also resolve SUCCESSFULLY while an EXTERNAL destroy has,
+ * by then, already fully landed"). `sbAwaitReady` resolving successfully is
+ * NOT proof no concurrent destroy landed while it was running — a `fleet
+ * destroy` racing this exact window can finish AFTER this function's own
+ * fresh `storage.get` would otherwise run, and clobber destroy's carefully
+ * built final row (rescue notes, `unrescued` text, final `state`) with a
+ * stale intermediate snapshot plus the two now-cleared fields. Checked
+ * FIRST, before the read: a moved ctx means this function does nothing at
+ * all, the same "no further write" contract every other #152-era guard in
+ * this file already honors.
  */
 export async function applyAccountClears(
   storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
-  clears: Pick<StudioStatus, "claudeAccount" | "rateLimited"> | null,
+  clears: Pick<StudioStatus, "claudeAccount" | "rateLimited"> | null, ctx: OpCtx,
 ): Promise<void> {
   if (clears === null) return;
+  if (await ctx.moved()) return;
   const existing = (await storage.get(STATUS_KEY)) ?? null;
   if (existing === null) return;
   const cleared: StudioStatus = { ...existing, ...clears };
@@ -5944,7 +5961,7 @@ export class StudioDO extends Sandbox<Env> {
       // `existing`) does not clobber onStart's own launchedAccount write.
       const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
       await sbAwaitReady(this);
-      await applyAccountClears(this.ctx.storage, this.recordFn(), clears);
+      await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(cfg)), this.ctx.storage, id, ctx);
     const status = await provisionWithStorage(
@@ -6178,7 +6195,7 @@ export class StudioDO extends Sandbox<Env> {
       // `clears` is simply never persisted).
       const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
       await sbAwaitReady(this);
-      await applyAccountClears(this.ctx.storage, this.recordFn(), clears);
+      await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(null)), this.ctx.storage, id, ctx);
     const restarted = await restartWithSync(
@@ -6462,7 +6479,7 @@ export class StudioDO extends Sandbox<Env> {
         // this closure ran, not falsely cleared.
         const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
         await sbAwaitReady(this);
-        await applyAccountClears(this.ctx.storage, this.recordFn(), clears);
+        await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
       },
       (c) => this.provisionCore(c, "recycle", ctx),
       async (s: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, s)), cfg,
