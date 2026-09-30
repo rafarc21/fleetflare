@@ -2033,6 +2033,67 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
         expect(sh(`git -C ${priv} show ${stash}:s.md`).out).toBe("stash me");
       });
     }
+
+    // Issue #140, observed 2026-09-30: a real, non-empty, disjoint-history
+    // private rescue remote rejected a shallow push with DIFFERENT wording
+    // than this describe block's own fixture ever produces -- "did not
+    // receive expected object <sha>" plus a generic "[remote rejected] ...
+    // (failed)" summary, not "shallow update not allowed" -- so the
+    // fallback above never fired and the push failed outright. Verified
+    // live against git's own source (git/git, builtin/index-pack.c:265):
+    // that exact text is `check_object()`'s own die() message, a STRICT/
+    // fsck connectivity check (receive.fsckObjects) tripping on the shallow
+    // boundary commit's own still-present-in-the-raw-bytes parent pointer --
+    // the SAME "this remote has never seen the history behind this shallow
+    // boundary" fact "shallow update not allowed" already catches, just
+    // surfaced by a receive path that doesn't carry vanilla git's own
+    // `receive-pack.c` grace window for it (confirmed live: every
+    // empty/non-empty/ahead-by-N/merge-boundary/deepened-shallow disjoint
+    // remote this file's OWN real `git push` against real local git could
+    // reach either hit the original message or fully succeeded, never this
+    // one -- a live hosted backend's receive path evidently doesn't always
+    // carry that grace window). Reproduced here with a `realGit` shim (the
+    // same test seam every other private-remote test in this file already
+    // uses) that answers the FIRST push attempt with the real observed
+    // wording, then lets the SECOND (the snapshot fallback's own retry)
+    // through to real git -- so the recovery is proven for real, landing on
+    // `priv`, not just asserted by exit code.
+    test("issue #140: a real disjoint remote's own wording ('did not receive expected object <sha>', not 'shallow update not allowed') still recovers via the parentless snapshot", () => {
+      const tip = sh(`git -C ${checkout} rev-parse HEAD`).out;
+      const attempts = join(dir, "issue-140-attempts");
+      const shimDir = join(dir, "issue-140-shim");
+      mkdirSync(shimDir);
+      const shim = join(shimDir, "real-git-140");
+      writeFileSync(shim,
+        `#!/bin/bash\n` +
+        `n=$(( $(cat '${attempts}' 2>/dev/null || echo 0) + 1 ))\n` +
+        `echo "$n" > '${attempts}'\n` +
+        `if [ "$n" = "1" ]; then\n` +
+        `  echo "remote: error: unpack failed: unpack-objects abnormal exit" >&2\n` +
+        `  echo "remote: fatal: did not receive expected object ${tip}" >&2\n` +
+        `  echo "To ${priv}" >&2\n` +
+        `  echo " ! [remote rejected] HEAD -> refs/heads/fleet/rescue/probe (failed)" >&2\n` +
+        `  echo "error: failed to push some refs to '${priv}'" >&2\n` +
+        `  exit 1\n` +
+        `fi\n` +
+        `exec '${REAL_GIT}' "$@"\n`);
+      chmodSync(shim, 0o755);
+      writeFileSync(join(checkout, "notes.md"), "shallow work behind a disjoint real remote\n");
+
+      const out = pushPriv({ realGit: shim });
+
+      expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 files$`, "m"));
+      const ref = privRefs().find((r) => r.includes("fleet/rescue/"));
+      expect(ref).toBeDefined();
+      expect(privTreeFiles(ref!)).toEqual(["a.md", "b.md", "c.md", "notes.md"]);
+      expect(sh(`git -C ${priv} show ${ref}:notes.md`).out).toBe("shallow work behind a disjoint real remote");
+      // Parentless: the same snapshot shape issue #16 pushes.
+      expect(sh(`git -C ${priv} rev-list --count ${ref}`).out).toBe("1");
+      // Both attempts actually ran -- the plain push (failed, by the shim)
+      // and the snapshot retry (landed, for real).
+      expect(sh(`cat '${attempts}'`).out).toBe("2");
+    });
   });
 
   test("rescueSnapshotCmd: dirty tree, branch walk and stash walk all land on the private remote, NOT origin", () => {
