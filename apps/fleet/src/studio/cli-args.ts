@@ -295,7 +295,7 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given.",
   },
   "task-ls": {
-    args: "ls [--sprint S] [--state submitted|working|input_required|completed|failed|canceled] [--studio ID] [--repo owner/name]",
+    args: `ls [--sprint S] [--state ${TASK_STATES.join("|")}] [--studio ID] [--repo owner/name]`,
     summary: "List board tasks for the repo you are standing in, or --repo. With --studio and no git remote, the studio's own repo is read; a repo that is not that studio's is refused, never guessed (issue #63).",
   },
   "task-show": {
