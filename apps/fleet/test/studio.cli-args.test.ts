@@ -138,7 +138,9 @@ describe("parseCliArgs", () => {
   });
 
   it("provision requires an id", () => {
-    expect(parseCliArgs(["provision", "websites--scratch"])).toEqual({ cmd: "provision", id: "websites--scratch", freshSession: false });
+    expect(parseCliArgs(["provision", "websites--scratch"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false,
+    });
     expect(parseCliArgs(["provision"])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });
 
@@ -159,7 +161,7 @@ describe("parseCliArgs", () => {
   // Issue #28.
   it("--fresh-session: provision and recycle, in any order with --discard-unsynced; repeats and strays are usage errors", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session"])).toEqual({
-      cmd: "provision", id: "websites--scratch", freshSession: true,
+      cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false,
     });
     expect(parseCliArgs(["recycle", "websites--scratch", "--fresh-session"])).toEqual({
       cmd: "recycle", id: "websites--scratch", discardUnsynced: false, freshSession: true,
@@ -172,6 +174,20 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--force"]).cmd).toBe("usage");
     expect(parseCliArgs(["provision", "--fresh-session"])).toEqual({ cmd: "usage", message: CLI_USAGE });
     expect(parseCliArgs(["recycle", "websites--scratch", "--fresh-session", "--fresh-session"]).cmd).toBe("usage");
+  });
+
+  // Issue #115: `--no-fresh-session` cancels a pending fresh-session intent
+  // (FRESH_SESSION_PENDING_KEY) — same bespoke flag shape as `--fresh-session`
+  // above, mutually exclusive with it, each at most once, unknown flag never
+  // silently ignored (recycle's own two-flag parsing's own posture).
+  it("--no-fresh-session: cancels a pending intent; mutually exclusive with --fresh-session; repeats and strays are usage errors", () => {
+    expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: true,
+    });
+    expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session", "--no-fresh-session"]).cmd).toBe("usage");
+    expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--fresh-session"]).cmd).toBe("usage");
+    expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--no-fresh-session"]).cmd).toBe("usage");
+    expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--bogus"]).cmd).toBe("usage");
   });
 
   // Issue #35.

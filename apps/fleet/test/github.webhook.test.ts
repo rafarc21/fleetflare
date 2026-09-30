@@ -513,9 +513,15 @@ describe("github webhook -> comment wakes the task's OWN assignee (board issue #
     // design doc's corrected single-flight section).
     expect(assigneeWakes[0][1]).toContain(COMMENT_URL);
     expect(assigneeWakes[0][1]).toContain("| read: fleet task show 231");
-    // The maestro's own generic supervision wake still fires independently --
-    // this is an ADDITIONAL wake, not a replacement.
-    expect(wakes.some(([id]) => id === "websites--maestro")).toBe(true);
+    // Board #111: `ASSIGNEE` (websites--web-studio) is NOT this repo's own
+    // maestro, so the task is a DIFFERENT lane's business -- the maestro's
+    // own generic supervision wake now correctly stays silent here; only
+    // the targeted assignee wake above fires. (Before #111, the maestro
+    // wake fired unconditionally for every event regardless of who the
+    // task was assigned to -- that was the exact duplicate-wake noise #111
+    // was filed to remove; see board #70 ask 7's own "other lanes'
+    // comments" complaint.)
+    expect(wakes.some(([id]) => id === "websites--maestro")).toBe(false);
   });
 
   it("never wakes on the studio's own envelope comment, even on an input_required task", async () => {
@@ -636,8 +642,11 @@ describe("github webhook -> comment wakes the task's OWN assignee (board issue #
       await drainLast();
       expect(res.status).toBe(200); // GitHub's delivery is still accepted -- the refusal is logged, not surfaced as an error.
       expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
-      // The maestro's own independent wake is unaffected by this refusal.
-      expect(wakes.some(([id]) => id === "websites--maestro")).toBe(true);
+      // Board #111: this task's own assignee (ASSIGNEE, websites--web-studio)
+      // is not this repo's maestro, so the maestro's own generic wake stays
+      // silent regardless of this repo-mismatch refusal -- both paths agree
+      // on zero wakes here, for two independent reasons.
+      expect(wakes.some(([id]) => id === "websites--maestro")).toBe(false);
     });
 
     it("still wakes the task's own assignee when its recorded repo matches the comment's own repo", async () => {
@@ -692,11 +701,14 @@ describe("github webhook -> comment wakes the task's OWN assignee (board issue #
     const res = await post(body, await sign(body), "issue_comment");
     await drainLast();
     expect(res.status).toBe(200);
-    // The maestro wake for this same delivery legitimately calls .get() once
-    // (websites--maestro IS registered) -- what must stay at zero is any
-    // .get() reaching the phantom PHANTOM id itself.
+    // Board #111: PHANTOM is a single, non-maestro assignee, so this task is
+    // a DIFFERENT lane's business -- the maestro's own generic wake now
+    // correctly refuses (deltaDigest returns null) before ever reaching
+    // listStudios/.get() at all, so `getCalls` stays flat. What must still
+    // stay at zero regardless is any .get() reaching the phantom PHANTOM id
+    // itself, through either wake path.
     expect(rpcCalls.some((c) => c.name === PHANTOM)).toBe(false);
-    expect(getCalls).toBe(before + 1);
+    expect(getCalls).toBe(before);
   });
 
   it("mutant pin: the assignee wake goes through wakeStudioOnAssignment, never the plain wakeStudio RPC", async () => {
