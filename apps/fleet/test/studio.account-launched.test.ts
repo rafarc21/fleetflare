@@ -521,10 +521,13 @@ describe("launchAccountOrRefuse(..., commitOkClears=false) — the entry-time re
   });
 
   // Same sequence, but recycleWithSync does NOT refuse this time — destroy()
-  // runs, and the second, post-destroy call (default commitOkClears=true)
-  // resolves fresh and commits the clear, exactly as production's awaitReady
-  // closure does.
-  it("entry call + a successful recycle (destroy ran, second call commits): rateLimited is dropped", async () => {
+  // runs, and the second, post-destroy call resolves fresh and commits the
+  // clear via decide/apply (issue #134 review round 4: the closure's own
+  // launchAccountOrRefuse call also passes commitOkClears=false and commits
+  // only through decideAccountClears -> sbAwaitReady -> applyAccountClears —
+  // see the round 4 describe blocks further down for that mechanism's own
+  // dedicated coverage, including the throw case this test does not exercise).
+  it("entry call + a successful recycle (destroy ran, second call commits via decide/apply): rateLimited is dropped", async () => {
     const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
     const observation = { until: FUTURE, seenAt: SEEN };
     const storage = fakeStorage(status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN", rateLimited: observation }));
@@ -533,8 +536,15 @@ describe("launchAccountOrRefuse(..., commitOkClears=false) — the entry-time re
     await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false); // entry call
 
     // destroy() ran (simulated); the awaitReady closure's own fresh call.
-    const freshLaunch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn);
+    const freshLaunch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
     expect(freshLaunch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+
+    // decide (pre-touch) -> sbAwaitReady's own onStart write (simulated) ->
+    // apply (post-success, no concurrent destroy).
+    const clears = await decideAccountClears(env, storage, freshLaunch);
+    const existingRow = (await storage.get(STATUS_KEY))!;
+    await storage.put(STATUS_KEY, { ...existingRow, launchedAccount: freshLaunch.name });
+    await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
 
     const row = (await storage.get(STATUS_KEY))!;
     expect(row.rateLimited ?? null).toBeNull();
