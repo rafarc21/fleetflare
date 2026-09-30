@@ -320,7 +320,7 @@ export async function transitionTask(
   // rather than two. Both are drift and both are refused by the checks above
   // — but "no state" reads unambiguously as an interrupted write, while two
   // labels reads as two writers, which is the more expensive diagnosis.
-  await api.removeLabel(repo, number, from);
+  await removeStateWithRetry(api, repo, number, from);
   await addStateAfterRemove(api, repo, number, from, to);
 
   // Returned from what was just written rather than re-read: these two calls
@@ -328,6 +328,27 @@ export async function transitionTask(
   // add a window for someone else's write to be reported as ours.
   const labels = [...task.labels.filter((l) => l !== from), to];
   return closeIfTerminal(api, repo, { ...task, state: to, labels });
+}
+
+/**
+ * Issue #86: a GitHub 500 on the remove left the task in its old state and
+ * the destroy that waited on it refused. Retried once, like the add. A 404
+ * on the retry means the first remove landed despite its 500: removed. A
+ * first-try 404 is another writer (the CAS just read the label) and surfaces.
+ */
+async function removeStateWithRetry(api: BoardApi, repo: string, number: number, from: TaskState): Promise<void> {
+  try {
+    await api.removeLabel(repo, number, from);
+    return;
+  } catch (err) {
+    if (err instanceof GitHubError && err.status === 404) throw err;
+  }
+  try {
+    await api.removeLabel(repo, number, from);
+  } catch (err) {
+    if (err instanceof GitHubError && err.status === 404) return;
+    throw err;
+  }
 }
 
 /**
