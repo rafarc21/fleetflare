@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import {
   launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch, clearForceMappedAccount,
+  refuseUnlessMappedAccountLaunchable,
 } from "../src/studio/do";
 import { withAccountDisplay } from "../src/studio/registry";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
@@ -412,8 +413,19 @@ describe("StudioDO.recycle wiring — forced-mapped clear runs BEFORE either lau
 
   it("the clear calls clearForceMappedAccount, not a hand-rolled inline write", () => {
     const clearIdx = recycleBody.indexOf("cfg.forceMappedAccount");
-    const nextLines = recycleBody.slice(clearIdx, clearIdx + 200);
+    // Review round 2 (maestro review of PR #135), Minor finding: widened
+    // from 200 — refuseUnlessMappedAccountLaunchable's own call (and its
+    // one-line comment) now sits between the `if` and this clear.
+    const nextLines = recycleBody.slice(clearIdx, clearIdx + 500);
     expect(nextLines).toContain("clearForceMappedAccount(this.ctx.storage, this.recordFn())");
+  });
+
+  it("refuseUnlessMappedAccountLaunchable is checked before the clear (Minor finding, review round 2)", () => {
+    const clearIdx = recycleBody.indexOf("cfg.forceMappedAccount");
+    const refuseIdx = recycleBody.indexOf("refuseUnlessMappedAccountLaunchable(");
+    const clearCallIdx = recycleBody.indexOf("clearForceMappedAccount(this.ctx.storage, this.recordFn())");
+    expect(refuseIdx).toBeGreaterThan(clearIdx);
+    expect(refuseIdx).toBeLessThan(clearCallIdx);
   });
 });
 
@@ -508,6 +520,55 @@ describe("clearForceMappedAccount / launchAccountOrRefuse — the borrow flags c
     expect(row.claudeAccount).toBeNull();
     expect(row.borrowedAccount).toBeNull();
     expect(row.borrowedFromRepo).toBeNull();
+  });
+});
+
+// Review round 2 (maestro review of PR #135), Minor finding — a missing
+// mapped secret used to refuse AFTER clearForceMappedAccount already wiped
+// the record: no container was ever touched (correct), but the row lost
+// claudeAccount/the moved-audit trail/the borrow flags on what was,
+// underneath, still a no-op refusal.
+describe("refuseUnlessMappedAccountLaunchable — refuses BEFORE the clear when the mapped slot's secret is missing (Minor finding, review round 2)", () => {
+  it("throws, and leaves claudeAccount/the moved-audit trail/the borrow flags completely untouched", async () => {
+    // MAP_2 maps demosite-life -> slot 2, and CLAUDE_CODE_OAUTH_TOKEN_2 is
+    // deliberately NOT set here — the mapped slot's own secret is missing.
+    const missingMapped = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: MAP_2, FLEET_AUTO_FAILOVER: "on" });
+    const before = status({
+      claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      claudeAccountMovedAt: "2026-09-29T00:00:00Z", claudeAccountMovedVia: "inline", claudeAccountMovedBlock: "rate-limit",
+      borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", borrowedFromRepo: "repo-b",
+    });
+    const storage = fakeStorage(before);
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+
+    // recycle()'s own new pre-clear check, called BEFORE clearForceMappedAccount.
+    await expect(
+      refuseUnlessMappedAccountLaunchable(missingMapped, "demosite-life--pilot", storage, recordFn),
+    ).rejects.toThrow(/refusing to launch/);
+
+    const row = (await storage.get(STATUS_KEY))!;
+    // Everything clearForceMappedAccount would have cleared stays exactly as
+    // it was before this call — the whole point of checking first.
+    expect(row.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
+    expect(row.claudeAccountMovedAt).toBe("2026-09-29T00:00:00Z");
+    expect(row.claudeAccountMovedVia).toBe("inline");
+    expect(row.claudeAccountMovedBlock).toBe("rate-limit");
+    expect(row.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
+    expect(row.borrowedFromRepo).toBe("repo-b");
+    // Same refusal shape an ordinary launchAccountOrRefuse refusal writes,
+    // so `fleet ls` shows why — a refusal nobody can see is a refusal
+    // nobody can audit.
+    expect(row.state).toBe("degraded");
+    expect(row.error).toContain("CLAUDE_CODE_OAUTH_TOKEN_2");
+  });
+
+  it("a launchable mapped slot: a no-op, nothing written, nothing thrown", async () => {
+    const mapped = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2, FLEET_AUTO_FAILOVER: "on" });
+    const storage = fakeStorage(status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }));
+    const recorded: StudioStatus[] = [];
+    await refuseUnlessMappedAccountLaunchable(mapped, "demosite-life--pilot", storage, async (s) => { recorded.push(s); });
+    expect(recorded).toHaveLength(0);
+    expect((await storage.get(STATUS_KEY))?.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
   });
 });
 
