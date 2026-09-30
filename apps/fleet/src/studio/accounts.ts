@@ -317,18 +317,22 @@ export function parseAccountMap(raw: string | undefined): Record<string, number>
  * use. Fed to `nextClaudeAccount`'s `reserved` param, which skips a name in
  * it unconditionally — same treatment as a live fleet-wide limit.
  *
- * `ownRepo`'s OWN mapped slot is never in the result: a repo's own primary is
- * exactly where it starts and is free to land back on (the whole point of the
- * #103 fix — wrap back to it rather than steal someone else's). `null`, or a
- * repo the map does not mention, reserves every mapped slot: an unmapped
- * caller has no "own" entry to exempt, so every entry in the map belongs to
- * some OTHER repo from its point of view.
+ * `ownRepo`'s OWN mapped SLOT is never in the result — exclusion is by slot
+ * NUMBER, not by repo key: a repo's own primary is exactly where it starts
+ * and is free to land back on (the whole point of the #103 fix — wrap back
+ * to it rather than steal someone else's), and that stays true even if the
+ * map also (invalidly) assigns some OTHER repo key to that same slot number
+ * — a collision does not make a repo's own primary reservable against
+ * itself. `null`, or a repo the map does not mention, reserves every mapped
+ * slot: an unmapped caller has no "own" slot to exempt, so every entry in
+ * the map belongs to some OTHER repo from its point of view.
  */
 export function otherRepoPrimaries(env: ClaudeAccountEnv, ownRepo: string | null): Set<string> {
   const map = parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO);
+  const ownSlot = ownRepo !== null ? map[ownRepo] : undefined;
   const reserved = new Set<string>();
-  for (const [repo, slot] of Object.entries(map)) {
-    if (repo === ownRepo) continue;
+  for (const slot of Object.values(map)) {
+    if (slot === ownSlot) continue;
     reserved.add(claudeAccountVarName(slot));
   }
   return reserved;
