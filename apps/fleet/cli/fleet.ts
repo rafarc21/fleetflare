@@ -1527,9 +1527,10 @@ async function cmdRescueGc(creds: Credentials, apply: boolean, olderThanDays: nu
  * PR #263 round 2, C6: `state === "degraded"` IS exec'd, same as `"running"`
  * — a degraded studio (a failed refresh, a failed restart, a failover) still
  * runs a container that can hold real, uncommitted work; only the ROLLOUT
- * that eventually replaces it skips rescue entirely (README.md's own "does
- * not run the rescue push" warning), and this command exists precisely to
- * cover that gap. Every studio this filter excludes is printed as `skipped
+ * that eventually replaces it skips rescue entirely (docs/operations.md's
+ * own "does not run the rescue push" warning), and this command exists
+ * precisely to cover that gap. Every studio this filter excludes is printed
+ * as `skipped
  * <id> (<state>)` — visible, never silent — in both the real run and
  * `--dry-run`.
  *
