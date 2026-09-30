@@ -79,7 +79,10 @@ secret-shaped tokens split across rows included, could surface as "the
 lead's last message" and reach `fleet ls --json` un-redacted. Fixed by
 detecting the whole box (open rule through close rule) as one block to skip,
 falling back to the old per-line scan only when a closing rule cannot be
-found within `QUEUED_TEXT_ROWS` (a malformed/truncated capture).
+found within `QUEUED_TEXT_ROWS` (a malformed/truncated capture); a follow-up
+off-by-one fix corrected the closing-rule search's upper bound so a box with
+exactly `QUEUED_TEXT_ROWS` (3) continuation rows is also matched as
+well-formed, matching `endsInIdleInputBox`'s own 0/1/2/3-valid boundary.
 
 ## Out of scope
 

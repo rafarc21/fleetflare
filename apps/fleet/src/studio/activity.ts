@@ -240,7 +240,7 @@ export function extractLastVisibleLine(frame: string): string | null {
   let scanEnd = content.length - 1;
   for (let j = content.length - 2; j >= 0; j--) {
     if (!RULE_LINE.test(content[j]) || !PROMPT_LINE.test(content[j + 1] ?? "")) continue;
-    for (let k = j + 2; k < content.length && k < j + 2 + QUEUED_TEXT_ROWS; k++) {
+    for (let k = j + 2; k < content.length && k <= j + 2 + QUEUED_TEXT_ROWS; k++) {
       if (RULE_LINE.test(content[k])) { scanEnd = j - 1; break; }
     }
     break;
