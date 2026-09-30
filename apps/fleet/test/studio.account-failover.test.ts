@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   resolveClaudeAccounts, nextClaudeAccount, claudeAccountToken, accountsTried, earliestAccountReset,
-  MAX_CLAUDE_ACCOUNTS, claudeAccountVarName, type ClaudeAccount,
+  MAX_CLAUDE_ACCOUNTS, claudeAccountVarName, otherRepoPrimaries, type ClaudeAccount,
 } from "../src/studio/accounts";
 import {
   detectRateLimitModal, paneCaptureCmd, accountSwitchCmd, runAccountFailover, FLEET_TOKEN_ENV,
@@ -243,6 +243,28 @@ describe("nextClaudeAccount", () => {
     expect(nextClaudeAccount(accounts, "CLAUDE_CODE_OAUTH_TOKEN_7")).toBeNull();
   });
 
+  // -------------------------------------------------------------------
+  // Issue #103 — `reserved` unconditionally excludes a candidate, the same
+  // way a live fleet-wide limit does, regardless of `isFree`. This is what
+  // lets failover.ts keep a studio off an account that is ANOTHER repo's own
+  // mapped primary (see otherRepoPrimaries below), even when that account has
+  // never been seen limited at all.
+  // -------------------------------------------------------------------
+  it("issue #103: `reserved` skips a candidate even though it carries no fleet-wide limit at all", () => {
+    const four: ClaudeAccount[] = [
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_4", token: "sk-ant-oat01-" + "d".repeat(40) },
+    ];
+    const now = new Date("2026-09-23T14:00:00.000Z");
+    const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_3"]);
+    // On CLAUDE_CODE_OAUTH_TOKEN_2 (free, no limits at all): forward wrap
+    // would land on account 3 first — but it is RESERVED for another repo's
+    // own mapped primary, so it must be skipped in favour of account 4.
+    expect(nextClaudeAccount(four, "CLAUDE_CODE_OAUTH_TOKEN_2", {}, now, reserved)).toEqual(four[3]);
+  });
+
   it("names every account up to and including the current one as tried", () => {
     expect(accountsTried(accounts, "CLAUDE_CODE_OAUTH_TOKEN_2"))
       .toEqual(["CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_2"]);
@@ -254,6 +276,41 @@ describe("nextClaudeAccount", () => {
     expect(claudeAccountToken(accounts, null)).toBe(TOKEN_1);
     expect(claudeAccountToken(accounts, "CLAUDE_CODE_OAUTH_TOKEN_9")).toBe(TOKEN_1);
     expect(claudeAccountToken([], null)).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #103 — the set of account names that are SOME OTHER repo's own
+// CLAUDE_ACCOUNT_BY_REPO-mapped primary, fed to nextClaudeAccount's `reserved`
+// so a wrap for THIS repo can never land on an account #271's map reserves
+// exclusively for a different one.
+// ---------------------------------------------------------------------------
+describe("otherRepoPrimaries (issue #103)", () => {
+  it("excludes every OTHER repo's mapped account, never the caller's own", () => {
+    const env = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: '{"repo-a":2,"repo-b":4}' });
+    expect(otherRepoPrimaries(env, "repo-a")).toEqual(new Set(["CLAUDE_CODE_OAUTH_TOKEN_4"]));
+  });
+
+  it("with no owning repo (null, or a repo absent from the map), every mapped account is reserved", () => {
+    const env = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: '{"repo-a":2,"repo-b":4}' });
+    expect(otherRepoPrimaries(env, null)).toEqual(new Set(["CLAUDE_CODE_OAUTH_TOKEN_2", "CLAUDE_CODE_OAUTH_TOKEN_4"]));
+    expect(otherRepoPrimaries(env, "repo-c")).toEqual(new Set(["CLAUDE_CODE_OAUTH_TOKEN_2", "CLAUDE_CODE_OAUTH_TOKEN_4"]));
+  });
+
+  it("an empty or absent map reserves nothing", () => {
+    const env = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1 });
+    expect(otherRepoPrimaries(env, "repo-a")).toEqual(new Set());
+    expect(otherRepoPrimaries(envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: "" }), "repo-a")).toEqual(new Set());
+  });
+
+  it("two repos colliding on the same (already-invalid) slot never reserves that slot against either", () => {
+    // CLAUDE_ACCOUNT_BY_REPO mapping two repos to the same slot is already an
+    // invalid config, but the exclusion must still be by SLOT NUMBER, not by
+    // repo key: from repo-a's own point of view slot 2 is ITS primary too,
+    // even though "repo-b" also maps there, so it must never be reserved
+    // against repo-a.
+    const env = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: '{"repo-a":2,"repo-b":2}' });
+    expect(otherRepoPrimaries(env, "repo-a")).toEqual(new Set());
   });
 });
 
@@ -437,6 +494,9 @@ function harness(opts: {
   now?: Date;
   /** Issue #102: seed a fleet-wide limit fixture, `{ name: until }`. */
   accountLimits?: Record<string, string | null>;
+  /** Issue #103: accounts that are some OTHER repo's own mapped primary —
+   *  never a candidate for THIS studio, regardless of fleet-wide limit state. */
+  reservedAccounts?: Set<string>;
 }): Harness {
   const execs: string[] = [];
   const recorded: StudioStatus[] = [];
@@ -456,6 +516,7 @@ function harness(opts: {
       autoFailover: opts.autoFailover ?? true,
       ...(opts.primary !== undefined ? { primary: opts.primary } : {}),
       ...(opts.display ? { display: opts.display } : {}),
+      ...(opts.reservedAccounts ? { reservedAccounts: opts.reservedAccounts } : {}),
       now: () => opts.now ?? NOW,
       accountLimits: {
         read: async () => Object.fromEntries(accountLimits),
@@ -1198,6 +1259,30 @@ describe("runAccountFailover — auto-failover ON with a mapped primary (#271)",
     });
     expect(await run(h)).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_2", to: "CLAUDE_CODE_OAUTH_TOKEN_3" });
     expect(h.notices[0]).toContain("claude_code_oauth_token_3@example.com (CLAUDE_CODE_OAUTH_TOKEN_3)");
+  });
+
+  // -------------------------------------------------------------------
+  // Issue #103 — the exact incident shape: repo A's own mapped primary is
+  // slot 2, repo B's is slot 4. Repo A's studio, currently limited on slot 3,
+  // wraps forward. Slot 4 is fleet-wide FREE, so the OLD code (no cross-repo
+  // exclusion) would land there — stealing the account CLAUDE_ACCOUNT_BY_REPO
+  // reserves exclusively for repo B. `reservedAccounts` must skip it, wrapping
+  // back to repo A's own primary (slot 2) instead.
+  // -------------------------------------------------------------------
+  it("issue #103: a repo-A studio wrapping past a fleet-wide-limited account never lands on repo B's own mapped primary", async () => {
+    const four: ClaudeAccount[] = [
+      ...TWO_ACCOUNTS,
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_4", token: "sk-ant-oat01-" + "d".repeat(40) },
+    ];
+    const h = harness({
+      accounts: four, pane: captured(MODAL_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2",
+      initial: status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }),
+      // account 3 fleet-wide limited (still live); account 4 left unseeded — fleet-wide FREE.
+      accountLimits: { CLAUDE_CODE_OAUTH_TOKEN_3: new Date(NOW.getTime() + 60 * 60_000).toISOString() },
+      reservedAccounts: new Set(["CLAUDE_CODE_OAUTH_TOKEN_4"]),
+    });
+    expect(await run(h)).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_3", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
   });
 });
 

@@ -857,6 +857,18 @@ export interface FailoverDeps {
   /** Issue #271: the account an unswitched studio is on — its repo's mapped
    *  primary. Absent/null: the first account, as before. */
   primary?: string | null;
+  /**
+   * Issue #103 — the fleet's cross-repo boundary: accounts that are some
+   * OTHER repo's own `CLAUDE_ACCOUNT_BY_REPO`-mapped primary (accounts.ts's
+   * `otherRepoPrimaries`), which a wrap for THIS studio must never land on,
+   * regardless of position in the list or fleet-wide limit state. `primary`
+   * above only ever excludes accounts BEFORE this studio's own mapped slot
+   * (walking backward, `scopedAccounts` below); this is the forward half of
+   * the same boundary — an account further along the list that belongs to a
+   * different repo entirely. Absent: no cross-repo boundary is known, same
+   * as every caller written before #103.
+   */
+  reservedAccounts?: Set<string>;
   /** Issue #271: how cards name an account (`<label> (<secret name>)`).
    *  Absent: the secret name. */
   display?: (name: string) => string;
@@ -1418,7 +1430,7 @@ export async function runAccountFailover(
   const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
   const scopedAccounts = deps.accounts.slice(currentIdx < 0 ? start : Math.min(start, currentIdx));
   const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
-  const candidate = nextClaudeAccount(scopedAccounts, current, limits, deps.now());
+  const candidate = nextClaudeAccount(scopedAccounts, current, limits, deps.now(), deps.reservedAccounts ?? new Set());
   // Issue #271: with auto-failover off, a studio that COULD move is parked
   // instead — marked and carded once, never switched. With nowhere to go the
   // message is today's, so a single-account fleet reads exactly as before.

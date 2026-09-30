@@ -9,6 +9,7 @@ import { describe, it, expect } from "vitest";
 import {
   readActivityFrame, nextActivity, clearActivityState, ACTIVITY_KEY, type Activity,
   parseHookHeartbeat, type HookHeartbeat, extractLastVisibleLine, LAST_LINE_MAX_CHARS,
+  backgroundShellAgeMs, BACKGROUND_SHELL_STALE_MS,
 } from "../src/studio/activity";
 import { MEMBERS_TICKING_KEY } from "../src/studio/failover";
 import { MEMBER_ALERTS_KEY, MEMBER_ROWS_KEY } from "../src/studio/member-alerts";
@@ -167,19 +168,20 @@ describe("readActivityFrame — Fix 6: panel glyph '⏺ main' (claude 2.1.282) d
   it("PANEL_GLYPH_2_1_282_PANE (REAL_WEBSTUDIO_PANE with '● main' -> '⏺ main') reads the SAME verdict as the unmutated pane", () => {
     expect(PANEL_GLYPH_2_1_282_PANE).not.toBe(REAL_WEBSTUDIO_PANE);
     // #86: its "7 shells" chrome makes both waiting-members (was idle).
-    expect(readActivityFrame(REAL_WEBSTUDIO_PANE)).toEqual({ kind: "waiting-members" });
-    expect(readActivityFrame(PANEL_GLYPH_2_1_282_PANE)).toEqual({ kind: "waiting-members" });
+    // #106: that chrome is the background-shell flavour, not a live subagent.
+    expect(readActivityFrame(REAL_WEBSTUDIO_PANE)).toEqual({ kind: "waiting-members", via: "background-shell" });
+    expect(readActivityFrame(PANEL_GLYPH_2_1_282_PANE)).toEqual({ kind: "waiting-members", via: "background-shell" });
   });
 });
 
 describe("readActivityFrame — real waiting-members captures (this container's own lead, 2026-09-25)", () => {
-  it("REAL_LEAD_WAITING_MEMBERS_PANE reads waiting-members", () => {
-    expect(readActivityFrame(REAL_LEAD_WAITING_MEMBERS_PANE)).toEqual({ kind: "waiting-members" });
+  it("REAL_LEAD_WAITING_MEMBERS_PANE reads waiting-members (#106: via subagents — a real WAITING_MEMBERS_LINE match)", () => {
+    expect(readActivityFrame(REAL_LEAD_WAITING_MEMBERS_PANE)).toEqual({ kind: "waiting-members", via: "subagents" });
   });
 
-  it("the LATER real capture (panel timer advanced, status line unchanged) also reads waiting-members", () => {
+  it("the LATER real capture (panel timer advanced, status line unchanged) also reads waiting-members (via subagents)", () => {
     expect(REAL_LEAD_WAITING_MEMBERS_PANE_LATER).not.toBe(REAL_LEAD_WAITING_MEMBERS_PANE);
-    expect(readActivityFrame(REAL_LEAD_WAITING_MEMBERS_PANE_LATER)).toEqual({ kind: "waiting-members" });
+    expect(readActivityFrame(REAL_LEAD_WAITING_MEMBERS_PANE_LATER)).toEqual({ kind: "waiting-members", via: "subagents" });
   });
 });
 
@@ -197,17 +199,17 @@ describe("readActivityFrame — round 3: REAL fleetflare--web-studio captures (2
     expect(readActivityFrame(REAL_WEBSTUDIO_C13_WORKING_PANE)).toEqual({ kind: "working" });
   });
 
-  it("REAL_WEBSTUDIO_C30_WAITING_MEMBERS_PANE (same session, no 'esc to interrupt' in the footer) reads waiting-members", () => {
-    expect(readActivityFrame(REAL_WEBSTUDIO_C30_WAITING_MEMBERS_PANE)).toEqual({ kind: "waiting-members" });
+  it("REAL_WEBSTUDIO_C30_WAITING_MEMBERS_PANE (same session, no 'esc to interrupt' in the footer) reads waiting-members (#106: via subagents)", () => {
+    expect(readActivityFrame(REAL_WEBSTUDIO_C30_WAITING_MEMBERS_PANE)).toEqual({ kind: "waiting-members", via: "subagents" });
   });
 });
 
 describe("readActivityFrame — waiting-members", () => {
-  it("'✻ Waiting for 1 background agent to finish' bottom-anchored reads waiting-members", () => {
+  it("'✻ Waiting for 1 background agent to finish' bottom-anchored reads waiting-members (#106: via subagents)", () => {
     // test/studio.failover-real-panes.test.ts's RELAXED_TAIL_NEGATIVES entry:
     // a block followed by a non-turn ✻ line (waiting on agents).
     const pane = RELAXED_TAIL_NEGATIVES["a block followed by a non-turn ✻ line (waiting on agents)"];
-    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members" });
+    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members", via: "subagents" });
   });
 });
 
@@ -222,23 +224,23 @@ describe("readActivityFrame — #86: a live background shell/monitor/task is wai
     expect(readActivityFrame(clean)).toEqual({ kind: "idle" });
   });
 
-  it("footer '7 shells' + turn-ended '7 shells still running' reads waiting-members", () => {
-    expect(readActivityFrame(base)).toEqual({ kind: "waiting-members" });
+  it("footer '7 shells' + turn-ended '7 shells still running' reads waiting-members (#106: via background-shell)", () => {
+    expect(readActivityFrame(base)).toEqual({ kind: "waiting-members", via: "background-shell" });
   });
 
-  it("footer '2 monitors' alone reads waiting-members", () => {
+  it("footer '2 monitors' alone reads waiting-members (via background-shell)", () => {
     const pane = clean.replace("⏵⏵ bypass permissions on ·", "⏵⏵ bypass permissions on · 2 monitors ·");
-    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members" });
+    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members", via: "background-shell" });
   });
 
-  it("footer '1 shell' alone reads waiting-members", () => {
+  it("footer '1 shell' alone reads waiting-members (via background-shell)", () => {
     const pane = clean.replace("⏵⏵ bypass permissions on ·", "⏵⏵ bypass permissions on · 1 shell ·");
-    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members" });
+    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members", via: "background-shell" });
   });
 
-  it("turn-ended row '1 background task still running' alone reads waiting-members", () => {
+  it("turn-ended row '1 background task still running' alone reads waiting-members (via background-shell)", () => {
     const pane = clean.replace("✻ Cooked for 36m 35s", "✻ Cooked for 36m 35s · 1 background task still running");
-    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members" });
+    expect(readActivityFrame(pane)).toEqual({ kind: "waiting-members", via: "background-shell" });
   });
 
   it("a counter quoted in transcript prose above the box does not count", () => {
@@ -531,7 +533,7 @@ describe("nextActivity", () => {
   });
 
   it("a waiting-members frame verdict reaches waiting-members", () => {
-    const result = nextActivity(null, { kind: "waiting-members" }, null, null, T0);
+    const result = nextActivity(null, { kind: "waiting-members", via: "subagents" }, null, null, T0);
     expect(result.state).toBe("waiting-members");
   });
 
@@ -554,7 +556,7 @@ describe("nextActivity", () => {
   });
 
   it("membersTickingAt carries forward when the caller does not pass a fresh one", () => {
-    const first = nextActivity(null, { kind: "waiting-members" }, null, T0.toISOString(), T0);
+    const first = nextActivity(null, { kind: "waiting-members", via: "subagents" }, null, T0.toISOString(), T0);
     const second: Activity = nextActivity(first, { kind: "idle" }, null, null, T2);
     expect(second.membersTickingAt).toBe(T0.toISOString());
   });
@@ -923,7 +925,7 @@ describe("nextActivity — PR3b hook merge", () => {
 
   it("MUTANT PROOF (b): WAITING MEMBERS is never overridden by a fresher, contradicting hook claim", () => {
     const hook: HookHeartbeat = { state: "working", at: FRESHER };
-    const result = nextActivity(null, { kind: "waiting-members" }, null, null, NOW, hook);
+    const result = nextActivity(null, { kind: "waiting-members", via: "subagents" }, null, null, NOW, hook);
     expect(result.state).toBe("waiting-members");
     expect(result.source).toBe("pane");
   });
@@ -1116,5 +1118,175 @@ describe("nextActivity — round 3 LOW fix: millisecond-precision hook timestamp
     expect(result.state).toBe("idle");
     expect(result.source).toBe("pane");
     expect(result.since).not.toBe(REAL_INSTANT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #106 — "idle lead + stale background shell: detect and nudge".
+// `readActivityFrame`'s idle-input-box branch already forces `waiting-members`
+// when the footer/status line still shows a shell/monitor/task counter with
+// the lead's OWN turn idle (issue #86); this tags THAT specific sub-case
+// (`via: "background-shell"`) separately from a genuine live subagent wait
+// (`via: "subagents"`), and `nextActivity` tracks how long an UNBROKEN run of
+// it has held in `Activity.backgroundShellSince` — the age do.ts's
+// `applyActivityVerdict` eventually nudges the lead on once it crosses
+// `BACKGROUND_SHELL_STALE_MS`.
+// ---------------------------------------------------------------------------
+describe("readActivityFrame — #106: waiting-members now tags WHICH sub-case produced it", () => {
+  it("a live subagent wait ('✻ Waiting for N background agents to finish') tags via: subagents", () => {
+    const pane = RELAXED_TAIL_NEGATIVES["a block followed by a non-turn ✻ line (waiting on agents)"];
+    const verdict = readActivityFrame(pane);
+    expect(verdict).toEqual({ kind: "waiting-members", via: "subagents" });
+  });
+
+  it("a footer/status-line background-shell counter with the lead idle tags via: background-shell", () => {
+    // Same #86 fixture shape as the describe block above: REAL_WEBSTUDIO_PANE
+    // with its member row and typed text stripped, turn ended, empty input
+    // box, "7 shells" chrome intact.
+    const base = REAL_WEBSTUDIO_PANE.replace(/\n[^\n]*◯ frontend-developer[^\n]*/, "")
+      .replace("❯ check on task 2 progress", "❯ ");
+    const verdict = readActivityFrame(base);
+    expect(verdict).toEqual({ kind: "waiting-members", via: "background-shell" });
+  });
+});
+
+describe("nextActivity — #106: backgroundShellSince tracks an UNBROKEN background-shell run", () => {
+  const T0 = new Date("2026-09-30T12:00:00.000Z");
+  const T1 = new Date("2026-09-30T12:00:30.000Z");
+  const T2 = new Date("2026-09-30T12:01:00.000Z");
+
+  // Real-shaped fixtures, same construction as the #86 describe block above.
+  const shellPane = REAL_WEBSTUDIO_PANE.replace(/\n[^\n]*◯ frontend-developer[^\n]*/, "")
+    .replace("❯ check on task 2 progress", "❯ ");
+  const cleanIdlePane = shellPane.replace(" · 7 shells still running", "").replace(" · 7 shells", "");
+  const shellVerdict = readActivityFrame(shellPane);
+  const idleVerdict = readActivityFrame(cleanIdlePane);
+  const subagentsVerdict = readActivityFrame(
+    RELAXED_TAIL_NEGATIVES["a block followed by a non-turn ✻ line (waiting on agents)"],
+  );
+  const workingVerdict = readActivityFrame(REAL_WEBSTUDIO_C1_WORKING_PANE);
+
+  it("stamps backgroundShellSince to now on the FIRST tick that reads waiting-members via background-shell", () => {
+    const result = nextActivity(null, shellVerdict, null, null, T0);
+    expect(result.state).toBe("waiting-members");
+    expect(result.backgroundShellSince).toBe(T0.toISOString());
+  });
+
+  it("holds backgroundShellSince unchanged while the SAME flavour continues to hold", () => {
+    const first = nextActivity(null, shellVerdict, null, null, T0);
+    const second = nextActivity(first, shellVerdict, null, null, T1);
+    const third = nextActivity(second, shellVerdict, null, null, T2);
+    expect(second.backgroundShellSince).toBe(T0.toISOString());
+    expect(third.backgroundShellSince).toBe(T0.toISOString());
+  });
+
+  it("resets to null once the lead goes plain idle (the counter cleared)", () => {
+    const withShell = nextActivity(null, shellVerdict, null, null, T0);
+    const afterIdle = nextActivity(withShell, idleVerdict, null, null, T1);
+    expect(afterIdle.state).toBe("idle");
+    expect(afterIdle.backgroundShellSince).toBeNull();
+  });
+
+  it("resets to null on a genuine subagent wait (via: subagents) — a live turn, not a forgotten shell", () => {
+    const withShell = nextActivity(null, shellVerdict, null, null, T0);
+    const afterSubagents = nextActivity(withShell, subagentsVerdict, null, null, T1);
+    expect(afterSubagents.state).toBe("waiting-members");
+    expect(afterSubagents.backgroundShellSince).toBeNull();
+  });
+
+  it("resets to null for a membersTickingFresh-only waiting-members (no background-shell verdict at all this tick)", () => {
+    const withShell = nextActivity(null, shellVerdict, null, null, T0);
+    // idleVerdict + a fresh membersTickingAt forces state waiting-members via
+    // the OTHER leg of the precedence table (nextActivity's own step 2),
+    // never through verdict.kind === "waiting-members" at all.
+    const afterFresh = nextActivity(withShell, idleVerdict, null, T1.toISOString(), T1);
+    expect(afterFresh.state).toBe("waiting-members");
+    expect(afterFresh.backgroundShellSince).toBeNull();
+  });
+
+  it("resets to null on working", () => {
+    const withShell = nextActivity(null, shellVerdict, null, null, T0);
+    const afterWorking = nextActivity(withShell, workingVerdict, null, null, T1);
+    expect(afterWorking.state).toBe("working");
+    expect(afterWorking.backgroundShellSince).toBeNull();
+  });
+
+  it("resets to null on a still-live limit, even though the frame verdict is still background-shell shaped", () => {
+    const withShell = nextActivity(null, shellVerdict, null, null, T0);
+    const limit = { until: "2026-09-30T13:00:00.000Z", seenAt: T1.toISOString() };
+    const afterLimit = nextActivity(withShell, shellVerdict, limit, null, T1);
+    expect(afterLimit.state).toBe("limit");
+    expect(afterLimit.backgroundShellSince).toBeNull();
+  });
+
+  it("resets to null on waiting-question and on unknown", () => {
+    const withShell = nextActivity(null, shellVerdict, null, null, T0);
+    const afterQuestion = nextActivity(withShell, { kind: "waiting-question" }, null, null, T1);
+    expect(afterQuestion.backgroundShellSince).toBeNull();
+    const withShell2 = nextActivity(null, shellVerdict, null, null, T0);
+    const afterUnknown = nextActivity(withShell2, { kind: "unknown", reason: "unrecognised frame" }, null, null, T1);
+    expect(afterUnknown.backgroundShellSince).toBeNull();
+  });
+
+  // Hooks have no `waiting-members` state at all (HookHeartbeat's own union),
+  // so a hook-sourced tick can never be the background-shell flavour either —
+  // pinned directly rather than only inferred from the generic working/idle
+  // cases above, per this issue's own design note.
+  it("resets to null on a hook-sourced working/idle tick", () => {
+    const withShell = nextActivity(null, shellVerdict, null, null, T0);
+    expect(withShell.observedAt).toBe(T0.toISOString());
+    const hook: HookHeartbeat = { state: "working", at: T1.toISOString() };
+    const afterHook = nextActivity(withShell, idleVerdict, null, null, T1, hook);
+    expect(afterHook.source).toBe("hook");
+    expect(afterHook.state).toBe("working");
+    expect(afterHook.backgroundShellSince).toBeNull();
+  });
+
+  it("re-entering the background-shell flavour after a break restarts the clock, never resurrects the old since", () => {
+    const withShell1 = nextActivity(null, shellVerdict, null, null, T0);
+    const afterIdle = nextActivity(withShell1, idleVerdict, null, null, T1);
+    const withShell2 = nextActivity(afterIdle, shellVerdict, null, null, T2);
+    expect(withShell2.backgroundShellSince).toBe(T2.toISOString());
+    expect(withShell2.backgroundShellSince).not.toBe(T0.toISOString());
+  });
+});
+
+describe("backgroundShellAgeMs — #106: pure age read of Activity.backgroundShellSince", () => {
+  const NOW = new Date("2026-09-30T12:15:00.000Z");
+
+  it("null when backgroundShellSince is null", () => {
+    const idleAct: Activity = {
+      state: "idle", since: "2026-09-30T12:00:00.000Z", anchored: true,
+      observedAt: "2026-09-30T12:00:00.000Z", source: "pane", reason: null, membersTickingAt: null,
+      backgroundShellSince: null,
+    };
+    expect(backgroundShellAgeMs(idleAct, NOW)).toBeNull();
+  });
+
+  it("the elapsed ms since backgroundShellSince, for a real waiting-members-via-background-shell record", () => {
+    const act: Activity = {
+      state: "waiting-members", since: "2026-09-30T12:00:00.000Z", anchored: true,
+      observedAt: "2026-09-30T12:14:30.000Z", source: "pane", reason: null, membersTickingAt: null,
+      backgroundShellSince: "2026-09-30T12:00:00.000Z",
+    };
+    expect(backgroundShellAgeMs(act, NOW)).toBe(15 * 60_000);
+  });
+
+  // `backgroundShellSince` is optional on the TYPE (activity.ts's own doc
+  // comment: every pre-existing `Activity` literal elsewhere in this
+  // codebase stays valid without it) — a record missing the field entirely
+  // must read exactly like an explicit null, never throw or misread as 0.
+  it("treats a MISSING backgroundShellSince field (not just an explicit null) the same as null", () => {
+    const act = {
+      state: "idle", since: "2026-09-30T12:00:00.000Z", anchored: true,
+      observedAt: "2026-09-30T12:00:00.000Z", source: "pane", reason: null, membersTickingAt: null,
+    } as Activity;
+    expect(backgroundShellAgeMs(act, NOW)).toBeNull();
+  });
+});
+
+describe("BACKGROUND_SHELL_STALE_MS — #106: the 15-minute nudge budget", () => {
+  it("is 15 minutes, this fleet's own established unpushed/unwaited convention", () => {
+    expect(BACKGROUND_SHELL_STALE_MS).toBe(15 * 60_000);
   });
 });

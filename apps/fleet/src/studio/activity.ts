@@ -22,8 +22,21 @@ import {
 } from "./failover";
 import type { RateLimitObservation } from "./rate-limit";
 
+// Issue #106 — `waiting-members` now carries WHICH sub-case produced it:
+// `"subagents"` is the WAITING_MEMBERS_LINE match, a live subagent turn
+// genuinely still in flight; `"background-shell"` is the idle-input-box
+// branch below, where the lead's OWN turn has ended but the footer/status
+// line still shows a shell/monitor/task counter the lead may have simply
+// forgotten about. Both still collapse to `Activity.state ===
+// "waiting-members"` (nextActivity, below) — this tag is ADDITIONAL
+// information, not a new state — but `nextActivity` uses it to track how
+// long the background-shell flavour specifically has held
+// (`backgroundShellSince`), which is what lets a stale one eventually nudge
+// the lead (do.ts's `applyActivityVerdict`) instead of waiting on it forever.
 export type FrameVerdict =
-  | { kind: "working" | "waiting-members" | "idle" | "waiting-question" }
+  | { kind: "working" | "idle" }
+  | { kind: "waiting-members"; via: "subagents" | "background-shell" }
+  | { kind: "waiting-question" }
   | { kind: "unknown"; reason: string };
 
 /** The LAST `✻ ` line in the head is claude's status line — bottom-anchored,
@@ -171,14 +184,14 @@ export function readActivityFrame(frame: string): FrameVerdict {
       return { kind: "working" };
     }
     if (WAITING_MEMBERS_LINE.test(line) || WAITING_MEMBERS_LINE.test(wrapped)) {
-      return { kind: "waiting-members" };
+      return { kind: "waiting-members", via: "subagents" };
     }
   }
   const afterStatus = head.slice(statusIdx + 1);
   const turnEndedOrAbsent = statusIdx < 0 || TURN_ENDED_LINE.test(head[statusIdx]);
   if (turnEndedOrAbsent && hasIdleInputBox(afterStatus)) {
     if (hasBackgroundWork(lines[footerIdx], statusIdx >= 0 ? head[statusIdx] : null)) {
-      return { kind: "waiting-members" };
+      return { kind: "waiting-members", via: "background-shell" };
     }
     return { kind: "idle" };
   }
@@ -327,6 +340,23 @@ export type Activity = {
   reason: string | null;
   /** Last 300s probe that saw the agent panel move, ISO, or null. */
   membersTickingAt: string | null;
+  /** Issue #106 — first observation of an UNBROKEN run of `waiting-members
+   *  via: "background-shell"` (a footer/status-line shell counter with the
+   *  lead's OWN turn idle, distinct from a genuine live subagent wait), ISO,
+   *  or null when that is not this tick's own flavour. Holds while the SAME
+   *  flavour continues to hold, the same "first-observed-since" shape
+   *  `since` above already uses; reset to null the instant the tick is
+   *  anything else (working, idle, waiting-members via subagents, a
+   *  membersTickingFresh-only carry-forward, waiting-question, limit,
+   *  unknown, or hook-sourced — a hook has no `waiting-members` state at
+   *  all). Optional on the TYPE (not just the runtime value) so every
+   *  pre-existing `Activity` literal elsewhere in this codebase — none of
+   *  which this issue's own file-boundary allows touching — stays valid
+   *  without also being updated; `nextActivity` below always sets it on
+   *  every `Activity` it actually produces. `backgroundShellAgeMs` reads it
+   *  back; `BACKGROUND_SHELL_STALE_MS` is the staleness budget do.ts's
+   *  `applyActivityVerdict` nudges on. */
+  backgroundShellSince?: string | null;
 };
 
 /** How long a `membersTickingAt` observation still forces `waiting-members`
@@ -599,6 +629,25 @@ export function nextActivity(
   // False (a lower bound) until the FIRST observed change; once a change
   // lands it is anchored for good, same-state observations included.
   const anchored = sameState ? prev.anchored : prev !== null;
+  // Issue #106 — true ONLY for step 2's own pane branch (this tick's frame
+  // verdict itself is `waiting-members via: "background-shell"` AND it is
+  // what decided `state` this tick): never the `membersTickingFresh`
+  // carry-forward fallback (that leg's own `verdict.kind` is whatever the
+  // frame actually read, not `waiting-members`), never `via: "subagents"`,
+  // and never hook-sourced (the hook branch can only ever set `state` to
+  // `working`/`idle`/`waiting-question` — see this function's own doc
+  // comment, step 3 — so `state === "waiting-members"` alone already rules
+  // out `source === "hook"` here without needing to check it separately).
+  const backgroundShellFlavor = state === "waiting-members"
+    && verdict.kind === "waiting-members" && verdict.via === "background-shell";
+  // Same "holds while unchanged, first-observed-since otherwise" shape as
+  // `since` above: `prev?.backgroundShellSince` is only ever non-null when
+  // the PREVIOUS tick was already this same flavour (every other branch
+  // resets it to null below), so carrying it forward when present and
+  // stamping `now` when absent is exactly "first-observed-since, holds
+  // while unchanged" by induction — no separate "was it the same flavour
+  // last tick" check needed.
+  const backgroundShellSince = backgroundShellFlavor ? (prev?.backgroundShellSince ?? nowIso) : null;
   return {
     state,
     since,
@@ -607,7 +656,25 @@ export function nextActivity(
     source,
     reason,
     membersTickingAt: membersTickingAt ?? prev?.membersTickingAt ?? null,
+    backgroundShellSince,
   };
+}
+
+/** Issue #106 — 15 minutes: this fleet's own established "never more than 15
+ *  minutes unpushed/unwaited" convention (also the fleet-member push
+ *  discipline documented elsewhere in this repo), reused here as the budget
+ *  for how long a background-shell footer counter may sit unattended before
+ *  `applyActivityVerdict` (do.ts) nudges the lead to re-check it. */
+export const BACKGROUND_SHELL_STALE_MS = 15 * 60_000;
+
+/** Pure age read of `Activity.backgroundShellSince` — null when the CURRENT
+ *  tick's own flavour is not `waiting-members via: "background-shell"`
+ *  (`nextActivity` resets the field to null in every other case), else how
+ *  long, in ms, that unbroken run has held. */
+export function backgroundShellAgeMs(activity: Activity, now: Date): number | null {
+  const since = activity.backgroundShellSince ?? null;
+  if (since === null) return null;
+  return now.getTime() - Date.parse(since);
 }
 
 /**
