@@ -21,38 +21,62 @@ timeout (`setTimeout`-based) lives — never gets serviced. The test HANGS the
 whole process rather than failing fast. A hang is strictly worse than a red
 test for CI/local runs: it wedges instead of reporting.
 
-### The fix
+### The fix: what the issue suggested, versus what actually works here
 
-Both of the issue's suggested fixes close real, independent gaps, so both
-land:
+The issue offered two candidate fixes (yield via `setImmediate`, or cap the
+fake and throw past it) and predicted the throw-alone would not be enough
+(correctly — `readStatus`'s own try/catch swallows it, turning it into just
+another failed poll attempt). Both candidates were tried and verified BY
+RUNNING THE ACTUAL MUTATION (see "Verification" below), not assumed from
+reasoning alone, and the investigation found the real picture is more
+specific than the issue's own write-up assumed:
 
-1. **`noSleep` yields a real macrotask** (`test/cli.recycle-outcome.test.ts`):
-   ```ts
-   const noSleep = async (): Promise<void> => new Promise((r) => setImmediate(r));
-   ```
-   `setImmediate` schedules its callback as a macrotask (after the current
-   I/O/poll phase), so even under a broken/unbounded loop, control genuinely
-   returns to Node's event loop between iterations — letting vitest's real
-   per-test timeout fire and fail the test quickly and cleanly (a vitest
-   timeout error) instead of hanging past the process's own wall-clock
-   bound. This is the fix for the actual hang.
+1. **`noSleep` yielding a real macrotask, alone, does not close the gap
+   either** — not for the reason the issue anticipated. `pollAfterNoAnswer`'s
+   own `if (attempt < deps.attempts) await deps.sleep(...)` guard only calls
+   `sleep` while `attempt` is still below `deps.attempts` (6). Under the
+   `attempt <= deps.attempts` → unconditional-`true` mutant, `attempt` grows
+   past 6 almost immediately, and that guard then gates `sleep` off
+   PERMANENTLY — the loop runs from then on purely on `readStatus`'s own
+   microtask chain, with `sleep` never invoked again regardless of how it
+   yields.
+2. **Even when `sleep` *is* still being called every iteration, vitest's own
+   per-test timeout was verified NOT to reliably rescue a microtask-tight
+   loop in this repo's actual test runtime.** `vitest-pool-workers` executes
+   the test body inside a real `workerd` isolate (a separate process, not
+   plain Node) — confirmed by hand with a synthetic reproduction (a tight
+   `while (true) { await sleepViaSetImmediate(); }` loop, run through
+   `requestRecycle`'s own call shape): neither the `--testTimeout` CLI flag
+   nor an explicit low `it(..., ms)` third argument caused the test to fail
+   inside a 15s+ external wall-clock bound; the process had to be killed
+   externally every time. A synthetic isolated probe (a bare loop with no
+   other call chain) DID respect `testTimeout` correctly, so the difference
+   is specific to the real call shape here, not a blanket "testTimeout never
+   works" claim — but it means this specific hang cannot be assumed
+   self-healing via vitest's own timeout, in this environment.
 
-2. **A capped fake `/status` handler in the one affected test**: the inline
-   fake used by "a status that never lands..." (~line 280) is changed to
-   throw once its own call counter exceeds ~20 (comfortably above the
-   legitimate `RECYCLE_POLL_ATTEMPTS = 6`, comfortably below "never"). Per
-   `readStatus`'s (cli/status-poll.ts) own try/catch, a thrown fetch does
-   NOT propagate out of `pollAfterNoAnswer`'s loop on its own — it is caught
-   and turned into `{ ok: false, why: ... }`, exactly like any other network
-   error, so the loop keeps going around a thrown status call precisely as
-   it would around a live one. The cap on its own therefore does not bound
-   an unbounded loop. Combined with fix 1's yielding `noSleep`, though, it
-   gives the test a second, independent, fast-failing signal: if the loop
-   ever runs past ~20 iterations for any reason, the fake throws a
-   recognizable error (`"fake /status called N times — the poll loop looks
-   unbounded"`) rather than silently cycling forever, which surfaces as a
-   clear assertion/rejection rather than depending solely on vitest's
-   timeout racing the event loop.
+**The fix that was verified to actually work**: bound the fake `/status`
+handler's own reply sequence with a **trap**, not a throw. Up to a cap (20 —
+comfortably above the legitimate `RECYCLE_POLL_ATTEMPTS = 6`, comfortably
+below "never"), replies never satisfy `bringupLanded` (the real scenario
+this test targets). The cap+1'th reply, though, IS a row that satisfies
+`bringupLanded` (fresh `via: "recycle"` session, fresh readiness, no
+operation in flight). A correctly bounded loop never reaches the trap — it
+still stops at exactly 6 calls, still reports `timeout-pending`, completely
+unaffected. A loop that ignores its own bound runs past 6, reaches the trap
+after a small, FIXED number of additional calls — resolved through ordinary
+microtask recursion, no macrotask/timer wait required at all, so it
+resolves in milliseconds regardless of whether `sleep`/`setImmediate` is
+ever invoked — and returns `timeout-provisioned` instead of
+`timeout-pending`: a normal, fast `AssertionError`, not a hang. This is the
+one change that was actually run against the mutation and observed to fail
+in ~30ms rather than hang.
+
+`noSleep` was still changed to yield via `setImmediate` (harmless, and a
+reasonable defensive improvement in its own right for any future mutant
+shape where `sleep` genuinely keeps being called every iteration) — but it
+is explicitly NOT relied upon as the thing that closes this specific gap.
+The trap-row fake is what does.
 
 Neither fix touches production code — both are test-fixture hardening only,
 scoped to `test/cli.recycle-outcome.test.ts`.
@@ -60,17 +84,17 @@ scoped to `test/cli.recycle-outcome.test.ts`.
 ### Verification method (mutation check, not a conventional RED/GREEN unit test)
 
 Temporarily mutate `pollAfterNoAnswer`'s loop bound in
-`cli/recycle-outcome.ts` (e.g. `for (let attempt = 1; attempt <= deps.attempts; attempt++)`
+`cli/recycle-outcome.ts` (`for (let attempt = 1; attempt <= deps.attempts; attempt++)`
 → `for (let attempt = 1; ; attempt++)`, an unconditionally-true loop), then
-run JUST the affected test with a short, explicit per-test timeout:
+run JUST the affected test:
 
 ```
-timeout 15 bunx vitest run apps/fleet/test/cli.recycle-outcome.test.ts -t "EXACTLY RECYCLE_POLL_ATTEMPTS" --testTimeout=3000
+timeout 15 bun run test -- test/cli.recycle-outcome.test.ts -t "EXACTLY RECYCLE_POLL_ATTEMPTS"
 ```
 
-Confirm this now fails FAST and CLEANLY (a real vitest timeout/assertion
-error, well inside the 15s wall-clock bound) rather than hanging past it.
-Then revert the mutation and confirm the full file is green again.
+Confirm this now fails FAST and CLEANLY (a real assertion error, well inside
+the 15s wall-clock bound — observed: ~32ms) rather than hanging past it.
+Then revert the mutation and confirm the full file is green again (17/17).
 
 ## Ask 2 — the real race: operationInFlight must be null before reporting success
 

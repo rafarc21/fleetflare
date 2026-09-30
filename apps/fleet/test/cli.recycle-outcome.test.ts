@@ -72,7 +72,15 @@ function fakeSlowWorker(statusReplies: (() => Promise<Response>)[]): { fetchImpl
   return { fetchImpl, calls };
 }
 
-const noSleep = async (): Promise<void> => {};
+// Board issue #149 (follow-up from #139 review): resolving already-settled,
+// this used to let a broken/unbounded `pollAfterNoAnswer` loop mutant spin
+// tightly enough that the macrotask queue — where vitest's own per-test
+// timeout (`setTimeout`-based) lives — never got serviced, HANGING the test
+// (and the whole process) instead of failing it. `setImmediate` schedules
+// its callback as a real macrotask, so even under a broken/unbounded loop,
+// control genuinely returns to Node's event loop between iterations,
+// letting vitest's real timeout fire and fail fast and cleanly.
+const noSleep = async (): Promise<void> => new Promise((r) => setImmediate(r));
 const opts = (fetchImpl: typeof fetch) => ({ fetchImpl, timeoutMs: 20, sleep: noSleep, now: () => START });
 
 describe("requestRecycle — a recycle request that times out never reports a verdict it does not have", () => {
@@ -327,15 +335,79 @@ describe("the recycle request's own budget", () => {
   // <= it" — an off-by-one or a hardcoded loop bound would show up here even
   // if it happened to equal 6 today.
   it("a status that never lands this recycle's bring-up is polled EXACTLY RECYCLE_POLL_ATTEMPTS times, not merely a bounded-ish number", async () => {
-    const { fetchImpl, calls } = fakeSlowWorker([
-      async () => Response.json(statusRow("running", session({ via: "provision", at: "2026-09-30T12:00:05.000Z" }))),
-    ]);
+    // Board issue #149: a capped-with-a-trap fake, not `fakeSlowWorker`'s
+    // own forever-repeating queue.
+    //
+    // Verified by hand (mutating `pollAfterNoAnswer`'s own `for (let attempt
+    // = 1; attempt <= deps.attempts; attempt++)` to an unconditional `for
+    // (let attempt = 1; ; attempt++)`) that TWO more-obvious-looking fixes
+    // do NOT actually catch this mutant, and why:
+    //
+    // 1. A bare "throw after N calls" in the fake does nothing on its own:
+    //    `readStatus` (cli/status-poll.ts) wraps its own `fetchImpl` call in
+    //    a try/catch and turns a thrown error into `{ ok: false, why }` —
+    //    never rethrows — so a broken loop just keeps treating every call
+    //    past the cap as another failed poll attempt, exactly like a
+    //    network error, and keeps going.
+    // 2. Making `noSleep` itself yield a real macrotask (this file's own
+    //    `noSleep`, above — worth keeping regardless, see its own comment)
+    //    is not sufficient EITHER: `pollAfterNoAnswer`'s own `if (attempt <
+    //    deps.attempts) await deps.sleep(...)` guard means `sleep` stops
+    //    being called at all once `attempt` grows past `deps.attempts`
+    //    under the mutant, so the loop runs on `readStatus`'s own bare
+    //    microtask chain from then on. Confirmed empirically that, in this
+    //    repo's actual test runtime (vitest-pool-workers executes the test
+    //    body inside a real workerd isolate, not plain Node), neither
+    //    vitest's own per-test timeout (the `--testTimeout` CLI flag, nor
+    //    an explicit low `it(..., ms)` third argument) reliably preempts a
+    //    microtask-only loop running inside that isolate: a synthetic
+    //    reproduction of exactly this shape stayed busy past a 15s+
+    //    external wall-clock kill in every configuration tried. A hang here
+    //    is not a something-eventually-times-out risk, it is close to
+    //    unrecoverable without an external kill — this environment cannot
+    //    be relied on to rescue a microtask-starved test on its own.
+    //
+    // The fix that actually catches the mutant FAST, proven by running it:
+    // bound the fake's OWN reply sequence with a trap, not a throw. Up to
+    // CAP (20 — comfortably above the legitimate `RECYCLE_POLL_ATTEMPTS`,
+    // comfortably below "never") replies never satisfy `bringupLanded`,
+    // exactly like the real scenario this test targets. The CAP+1'th reply,
+    // though, is a row that DOES satisfy `bringupLanded` (fresh via=recycle
+    // session, fresh readiness, no operation in flight). The correctly
+    // bounded loop (6 attempts) never reaches the trap and behaves exactly
+    // as it always has (still exactly 6 calls, still `timeout-pending`). A
+    // loop that ignores its own bound runs past 6, reaches the trap after a
+    // small, FIXED number of additional calls — resolved via ordinary
+    // microtask recursion, no macrotask/timer wait required at all, so it
+    // is fast regardless of whether `sleep`/`setImmediate` ever gets
+    // invoked — and returns `timeout-provisioned` instead of
+    // `timeout-pending`: a normal, fast `AssertionError` below, not a hang.
+    const CAP = 20;
+    const calls: string[] = [];
+    let statusCalls = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/recycle")) {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+        });
+      }
+      statusCalls++;
+      if (statusCalls > CAP) {
+        return Response.json(statusRow(
+          "running", session({ at: "2026-09-30T12:00:05.000Z" }),
+          { kind: "provisioned", checkedAt: "2026-09-30T12:00:06.000Z" },
+        ));
+      }
+      return Response.json(statusRow("running", session({ via: "provision", at: "2026-09-30T12:00:05.000Z" })));
+    };
     const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
 
     expect(report.kind).toBe("timeout-pending");
-    const statusCalls = calls.filter((u) => u.endsWith("/status"));
-    expect(statusCalls).toHaveLength(RECYCLE_POLL_ATTEMPTS);
-    expect(statusCalls.length).toBe(6);
+    const statusUrlCalls = calls.filter((u) => u.endsWith("/status"));
+    expect(statusUrlCalls).toHaveLength(RECYCLE_POLL_ATTEMPTS);
+    expect(statusUrlCalls.length).toBe(6);
   });
 });
 
