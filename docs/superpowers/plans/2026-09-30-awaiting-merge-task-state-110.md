@@ -283,3 +283,96 @@ stale doc comment).
 
 No deploy, no PR, no merge — that is the lead's job per process, not this
 pass's.
+
+## Addendum (2026-09-30): three fixes found in PR #132 review
+
+The operator reviewed PR #132 and found three real problems, all fixed on
+this same branch (not a new one).
+
+### 1. Merge with `origin/main` (PR #75)
+
+PR #75 (merged to main as `b219438`, `fleet resume` / `fleet task new` /
+`fleet task assign`) landed on main after this branch was cut, editing the
+same `HELP` usage-string block in `container/studio-fleet` this branch's
+`0dbd001` touched. A real `git merge origin/main` (this branch was already
+pushed with an open PR, so rebase was not an option) produced exactly one
+conflict, in that usage block:
+
+```
+       fleet task ls | fleet task show <n> | fleet task report <n>
+       fleet task state <n> <working|input_required|awaiting_merge|failed>
+       fleet task new [--studio <id>] | fleet task assign <n> <studio-id> [--why <text>]
+       fleet memory ls | fleet memory compact
+```
+
+— this branch's `awaiting_merge` addition to the `task state` line, and
+main's new `task new`/`task assign` line, next to each other, both intact.
+Everything else in the file (the doc-comment header, the `task state` body
+section explaining `awaiting_merge`, the `task new`/`task assign`/`resume`
+body sections) auto-merged cleanly — git's merge algorithm found them
+non-overlapping hunks. `src/board/board.ts`, `src/board/routes.ts`,
+`src/studio/cli-args.ts`, `src/studio/destroy.ts` and their tests all
+auto-merged with no conflicts either; grepped afterward for `awaiting_merge`
+to confirm this branch's content survived the merge, and ran the targeted
+suites before committing. This repo's clone was shallow going into the
+merge (`git merge-base` and `git merge` both failed outright, "refusing to
+merge unrelated histories") — `git fetch --unshallow` first, same as any
+merge against a distant base would need in a shallow checkout.
+
+### 2. `brief.ts`'s `renderBriefPrompt` — the only place a lead learns the verb exists
+
+A self-reported state a lead is never told about is a verb that does not
+exist, same lesson board issue #41 already paid for once (tasks sitting at
+`submitted` because nobody told the lead to move them). The boot-time brief
+sentence still named only `working`/`input_required`/`failed` after this
+branch added a fourth self-settable state. Fixed by naming `awaiting_merge`
+with a "when" clause (after `fleet task report` with a PR, nothing left but
+to wait on the merge) and updating "Those three" to "Those four, and no
+others" — kept in the same terse style as the rest of the function, per
+this file's own header on why boot-time brief text stays minimal.
+
+### 3. `do.ts`'s `survivalTasks` — a genuinely different "is this task still owed" question
+
+This is the one place in this feature where "live" needed the OPPOSITE fix
+direction from `openAssignedTasks`/`liveTasksOf` above, and that is not an
+inconsistency — it is two different consumers asking two different
+questions of the same vocabulary:
+
+- `openAssignedTasks` (destroy gate) and `liveTasksOf` (reap gate) ask "is
+  there still work OWED that a fresh studio, or a studio about to be
+  destroyed/reaped, needs to be protected for". An `awaiting_merge` task
+  answers NO — the lead's part is done, there is nothing left to brief or
+  protect. These needed to move FROM "not terminal" TO "positively live"
+  (`LIVE_TASK_STATES` membership) so `awaiting_merge` stopped being treated
+  as owed work.
+- `survivalTasks` (crash/restart re-brief, issue #249/PR4b) asks a
+  completely different question: "does a previously-claimed work ARTIFACT
+  (a PR, a branch) still need re-verifying after this studio got
+  rescued/re-provisioned". An `awaiting_merge` task answers YES to that —
+  it has exactly such an artifact, the PR the lead already reported. This
+  one needed to move the OTHER way, FROM "positively live"
+  (`LIVE_TASK_STATES` membership, which silently excluded `awaiting_merge`
+  and left its PR un-re-checked after a crash) TO "not terminal"
+  (`!TERMINAL_TASK_STATES.includes`).
+
+Same vocabulary, same `t.open && t.state !== null && <bucket check>` shape,
+opposite bucket for opposite reasons — a reader who only skims one of these
+fixes could easily assume the other is a leftover bug rather than a
+deliberate, independently-reasoned choice. (The pre-existing
+`t.state !== null` drift guard in `survivalTasks` was left as-is by this
+fix: a drifted task was already excluded from survival re-brief before
+issue #110, and stays excluded — that guard is orthogonal to the
+terminal/live bucket question this fix answers.)
+
+Regression test: `survivalTasks` is a private `StudioDO` method and
+`StudioDO` cannot be constructed under vitest-pool-workers (do.ts's own
+header). `test/studio.survival-delivery.test.ts` already pins several of
+`do.ts`'s private-method internals via `env.TEST_STUDIO_DO_SRC` (the DO's
+real source text, injected by `vitest.config.ts` for exactly this reason).
+Extended that: a new `describe` block regexes the real `live = ...filter`
+expression out of that source text and runs it, via `new Function`, as
+actual executable code against fixtures covering the whole state
+vocabulary — genuine behavioral coverage of the shipped expression, not a
+paraphrase of it, without needing a real DO or a real board. RED against
+the pre-fix source (`awaiting_merge` excluded — `expected false to be
+true`), GREEN after the fix.
