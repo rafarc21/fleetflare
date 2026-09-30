@@ -133,7 +133,9 @@ export interface SpawnDeps {
    *  outcome (503, never a silent allow). */
   fetchPolicy: () => Promise<SpawnPolicy>;
   /** The EXISTING provision path (R-P3-2: "no new provisioning machinery"):
-   *  routes.ts wires this to `env.STUDIO.get(idFromName(childId)).provision(cfg)`. */
+   *  routes.ts wires this to `getStudioStub(env, childId).provision(cfg)`
+   *  (issue #107: which STUDIO/STUDIO_BIG namespace that resolves to is the
+   *  child's role's call — see profile.ts). */
   provisionChild: (childId: string, cfg: ProvisionConfig) => Promise<StudioStatus>;
   /**
    * P4a-2 (brief pickup): the board read that turns `{task: <n>}` into the

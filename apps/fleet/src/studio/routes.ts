@@ -1,15 +1,18 @@
 // Carries no import of "@cloudflare/sandbox" or of do.ts's `StudioDO` VALUE
 // (a type-only reference flows through `Env`, below, and is erased at build
-// time) — it needs neither. Dispatch to the DO goes through the plain
-// `env.STUDIO.get(env.STUDIO.idFromName(...))` stub (identical to how
-// src/agents/do.ts and src/telegram/webhook.ts already call AgentDO), not
-// `getSandbox()` — confirmed equivalent for custom RPC methods; see
-// sandbox-api.ts's provenance notes, section (a). Keeping the SDK out of
-// this module also keeps it trivially importable from tests, which is how
-// every /studio/* route is covered.
+// time) — it needs neither. Dispatch to the DO goes through profile.ts's
+// `getStudioStub(env, id)` (issue #107: it, not this file, is now the one
+// place that names `env.STUDIO`/`env.STUDIO_BIG` directly — see that file's
+// header), a thin wrapper around the same `env.STUDIO.get(env.STUDIO.
+// idFromName(...))` stub shape src/agents/do.ts and src/telegram/webhook.ts
+// already use for AgentDO, not `getSandbox()` — confirmed equivalent for
+// custom RPC methods; see sandbox-api.ts's provenance notes, section (a).
+// Keeping the SDK out of this module also keeps it trivially importable
+// from tests, which is how every /studio/* route is covered.
 import type { Env } from "../env";
 import { verifyAccess } from "./auth";
 import { parseStudioId } from "./ids";
+import { getStudioStub } from "./profile";
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { TERMINAL_PATH } from "./terminal";
 import { PASTE_MIME_EXT, PASTE_MAX_BYTES } from "./paste";
@@ -89,8 +92,10 @@ function redactObservedSession(observed: Observed): Observed {
  * renders it. Lives here, not grid.ts, for the same reason page.ts's own
  * render half never dispatches to a DO stub — routes.ts is this feature's
  * one file allowed to import "@cloudflare/sandbox" transitively via `Env`'s
- * type-only `StudioDO` reference and call `env.STUDIO.get(...)` (see this
- * file's own header comment).
+ * type-only `StudioDO` reference and call `getStudioStub(env, ...)` (see
+ * this file's own header comment; issue #107 moved the literal
+ * `env.STUDIO.get(...)` one-liner into profile.ts, but the transitive SDK
+ * import stays confined to this module the same way).
  *
  * Per-studio hot-tail reads are isolated with their own try/catch — the
  * same "one bad row must not fail the whole listing" posture
@@ -105,7 +110,7 @@ async function renderStudioGrid(env: Env): Promise<Response> {
     studios.map(async (s): Promise<GridCard> => {
       let preview = "";
       try {
-        const stub = env.STUDIO.get(env.STUDIO.idFromName(s.id));
+        const stub = getStudioStub(env, s.id);
         preview = scrubPreview(await stub.getTranscriptTail());
       } catch (err) {
         console.error(`grid: transcript tail read failed for ${s.id}`, err);
@@ -215,17 +220,18 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
     // it introduces no new way for a spawn to fail.
     provisionChild: async (childId: string, cfg: ProvisionConfig) => {
       const projectCard = await resolveProjectCard(env, cfg.repo);
-      const stub = env.STUDIO.get(env.STUDIO.idFromName(childId));
+      const stub = getStudioStub(env, childId);
       return stub.provision(projectCard === null ? cfg : { ...cfg, projectCard });
     },
     resolveBrief,
     // Phase 2, task 4: the "studio spawned" re-arm. Same DO-stub shape
-    // provisionChild uses just above, so this file stays the only place that
-    // knows a studio id resolves to a STUDIO stub. runSpawn already guards
-    // the maestro-spawning-itself case and swallows a failure, so nothing is
-    // re-checked here.
+    // provisionChild uses just above — issue #107: which STUDIO/STUDIO_BIG
+    // namespace a given id resolves to now lives in profile.ts, not here,
+    // but this is still the one place in routes.ts that knows a spawned
+    // studio needs waking. runSpawn already guards the maestro-spawning-
+    // itself case and swallows a failure, so nothing is re-checked here.
     notifyMaestro: async (studioId: string, prompt: string) => {
-      const outcome = await env.STUDIO.get(env.STUDIO.idFromName(studioId)).wakeStudio(prompt);
+      const outcome = await getStudioStub(env, studioId).wakeStudio(prompt);
       logWakeOutcome(`spawn: maestro wake (${studioId})`, outcome);
     },
     maxStudios: resolveMaxStudios(env.MAX_STUDIOS),
@@ -397,7 +403,7 @@ export async function handleStudio(
   const id = parseStudioId(rawId);
   if (!id) return new Response("bad studio id", { status: 400 });
 
-  const stub = env.STUDIO.get(env.STUDIO.idFromName(id.full));
+  const stub = getStudioStub(env, id.full);
 
   if (action === "status" && req.method === "GET") {
     return Response.json(burnView(await stub.getStatusDetail()));

@@ -11,6 +11,20 @@ export interface Env {
   AGENT: DurableObjectNamespace<AgentDO>;
   DEPLOY: DurableObjectNamespace<DeployDO>;
   STUDIO: DurableObjectNamespace<StudioDO>;
+  /**
+   * Issue #107 (#70 ask 3): a second StudioDO container class for roles
+   * profile.ts's BIG_PROFILE_ROLES marks "big" (release-studio today, the
+   * QA/gate role) — see that file's own header and blueprint.ts's
+   * Role.instance_type doc comment for the full ruling this completes.
+   * wrangler.jsonc's containers[] entry for StudioBigDO is where the actual
+   * instance_type value lives; this repo's own wrangler.example.jsonc/
+   * wrangler.test.jsonc carry a placeholder (real value is the operator's
+   * own ops-repo deploy config, same split every other instance_type in
+   * this file already has). profile.ts's studioNamespace/getStudioStub are
+   * the ONLY code that should read this binding directly — every other call
+   * site routes through those instead of naming STUDIO/STUDIO_BIG itself.
+   */
+  STUDIO_BIG: DurableObjectNamespace<StudioDO>;
   /** P2 transcript/session archival (src/studio/archive.ts owns the key
    * formats; shipping/sync loops are later tasks). Private — raw terminal
    * bytes, never scrubbed (see archive.ts's header). */

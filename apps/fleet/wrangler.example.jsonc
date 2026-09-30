@@ -144,13 +144,15 @@
     "bindings": [
       { "name": "AGENT", "class_name": "AgentDO" },
       { "name": "DEPLOY", "class_name": "DeployDO" },
-      { "name": "STUDIO", "class_name": "StudioDO" }
+      { "name": "STUDIO", "class_name": "StudioDO" },
+      { "name": "STUDIO_BIG", "class_name": "StudioBigDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["AgentDO"] },
     { "tag": "v2", "new_sqlite_classes": ["DeployDO"] },
-    { "tag": "v3", "new_sqlite_classes": ["StudioDO"] }
+    { "tag": "v3", "new_sqlite_classes": ["StudioDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["StudioBigDO"] }
   ],
   "containers": [
     {
@@ -179,6 +181,23 @@
       "image_vars": { "ENABLE_CAVEMAN_PLUGIN": "false" },
       "instance_type": "standard-1",
       "max_instances": 5,
+      "rollout_step_percentage": 100
+    },
+    {
+      // Issue #107 (#70 ask 3): the release-studio-only bigger class —
+      // profile.ts's BIG_PROFILE_ROLES/getStudioStub route a role in that
+      // set here instead of StudioDO. Same image as StudioDO (no new
+      // Dockerfile). The instance_type below is a placeholder/template
+      // value, same as every other instance_type in this file — your own
+      // ops-repo wrangler.jsonc sets the real size. max_instances is
+      // deliberately smaller than StudioDO's 5: only release-studio-shaped
+      // ids land here today.
+      "class_name": "StudioBigDO",
+      "image": "./container/Dockerfile.studio",
+      "image_build_context": ".",
+      "image_vars": { "ENABLE_CAVEMAN_PLUGIN": "false" },
+      "instance_type": "standard-4",
+      "max_instances": 2,
       "rollout_step_percentage": 100
     }
   ]

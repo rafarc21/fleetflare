@@ -6668,6 +6668,16 @@ export class StudioDO extends Sandbox<Env> {
 }
 
 /**
+ * Issue #107 (#70 ask 3): identical to StudioDO in every way — same class
+ * body, zero behavior difference — except its OWN container class, so
+ * wrangler.jsonc can give it a different instance_type. profile.ts routes a
+ * BIG_PROFILE_ROLES role's studio id here instead of StudioDO. See that
+ * file's header for why a role-keyed static predicate, not this class
+ * itself, is where the actual role logic lives.
+ */
+export class StudioBigDO extends StudioDO {}
+
+/**
  * `ProvisionDeps.applyStudioGitSafety`'s body (issue #253), lifted OUT of
  * `deps()` so that a test can reach it. `deps()` is a private method on a
  * Durable Object, so nothing in the suite could ever call the port it builds —

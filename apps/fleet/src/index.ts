@@ -8,6 +8,7 @@ import { staleTasks, rearmKey, alertedKey, shouldAlert } from "./tasks/watchdog"
 import type { TaskRecord } from "./tasks/loop";
 import { handleStudio, handleFleetSpawn } from "./studio/routes";
 import { listStudios } from "./studio/registry";
+import { getStudioStub } from "./studio/profile";
 import { isWatchMinute, watchStoppedContainers } from "./studio/container-watch";
 import { handleBoard, handleFleetBoard } from "./board/routes";
 import { handleMemory } from "./memory/routes";
@@ -27,8 +28,10 @@ export { DeployDO } from "./deploy/do";
 // to a workerd that has it (see task-5-report.md's Step 0 section for the
 // exact version bisect); `wrangler deploy` needs this line, since a
 // container class declared in wrangler.jsonc without a matching export here
-// fails boot for the entire Worker.
-export { StudioDO } from "./studio/do";
+// fails boot for the entire Worker. Issue #107: StudioBigDO (a same-shape
+// subclass, see do.ts's own comment) needs this same export the moment its
+// wrangler.jsonc containers[] entry lands.
+export { StudioDO, StudioBigDO } from "./studio/do";
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -173,7 +176,7 @@ export default {
     if (isWatchMinute(controller.scheduledTime ?? Date.now())) {
       try {
         await watchStoppedContainers(
-          await listStudios(env), (id) => env.STUDIO.get(env.STUDIO.idFromName(id)).watchContainer(),
+          await listStudios(env), (id) => getStudioStub(env, id).watchContainer(),
         );
       } catch (err) {
         console.error("container watch sweep failed", err);
