@@ -1,4 +1,32 @@
-FROM docker.io/cloudflare/sandbox:0.12.7
+# Issue #84: reproducible build -- the rules are in Dockerfile.deploy's
+# header; scripts/image-repro-check.sh proves them. Bumping APT_SNAPSHOT or a
+# pin IS an image change and a rollout: batch it.
+ARG SOURCE_DATE_EPOCH=1790640000
+
+# Every file this image takes from the checkout, laid out as trees copied onto
+# / with normalized mtimes and modes (COPY keeps the checkout's own mtimes,
+# which differ per clone). This base already has /etc/hosts.
+FROM docker.io/cloudflare/sandbox:0.12.7@sha256:6d741713aef266e8ae0831a5709c6f2d7b77b4952ac79b549f4f4e380af86fbe AS src
+ARG SOURCE_DATE_EPOCH
+COPY container/repro-seal.sh container/studio-bringup.sh container/studio-shell.sh \
+     container/studio-fleet container/studio-adopt.sh container/memguard.ts \
+     container/gh-proxy.ts /src/in/
+COPY container/ego-browser /src/ego/opt/fleet/ego-browser
+RUN mkdir -p /src/base/usr/local/bin /src/app/opt/fleet /src/app/usr/local/bin \
+    && mv /src/in/repro-seal.sh /src/base/usr/local/bin/repro-seal \
+    && mv /src/in/* /src/app/opt/fleet/ \
+    && ln -s /opt/fleet/studio-fleet /src/app/usr/local/bin/fleet \
+    && ln -s /opt/fleet/gh-proxy.ts /src/app/usr/local/bin/fleet-gh-proxy \
+    && chmod -R u=rwX,go=rX /src \
+    && chmod 0755 /src/base/usr/local/bin/repro-seal /src/ego/opt/fleet/ego-browser/cli.ts \
+       /src/app/opt/fleet/studio-bringup.sh /src/app/opt/fleet/studio-shell.sh \
+       /src/app/opt/fleet/studio-fleet /src/app/opt/fleet/studio-adopt.sh /src/app/opt/fleet/gh-proxy.ts \
+    && find /src -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
+
+FROM docker.io/cloudflare/sandbox:0.12.7@sha256:6d741713aef266e8ae0831a5709c6f2d7b77b4952ac79b549f4f4e380af86fbe
+ARG SOURCE_DATE_EPOCH
+ARG APT_SNAPSHOT=20260929T000000Z
+COPY --from=src /src/base/ /
 
 # Security (operator directive 2026-08-19): unlocks
 # --dangerously-skip-permissions for claude running as root in this
@@ -25,7 +53,7 @@ ENV DISABLE_AUTOUPDATER=1
 # but never applied to the app (a push that landed, then a failed apply):
 # "no changes" forever. >= 4.141 applies it (EDIT ... @sha256); package.json
 # pins that, and scripts/deploy.sh runs only the pinned binary.
-LABEL fleet.image.rev="p8-install-cache-git-core-ppa"
+LABEL fleet.image.rev="p9-reproducible-images"
 
 # tmux hosts the long-lived `studio` session; git/curl/ca-certificates are
 # runtime deps of the bring-up script and the tailscale installer below
@@ -73,18 +101,19 @@ LABEL fleet.image.rev="p8-install-cache-git-core-ppa"
 # this RUN step itself runs as, so this must be set globally right after git
 # lands -- same guard, same `--global --add safe.directory '*'` form, already
 # proven in the sibling container/Dockerfile and scripts/localci/Dockerfile.
-RUN apt-get update && apt-get install -y --no-install-recommends tmux curl ca-certificates gnupg zstd \
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && apt-get update && apt-get install -y --no-install-recommends tmux curl ca-certificates gnupg zstd \
     && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&exact=on&search=0xF911AB184317630C59970973E363C90F8F1B6217" \
-       | gpg --dearmor -o /usr/share/keyrings/git-core-ppa-archive-keyring.gpg \
-    && FPR="$(gpg --show-keys --with-colons /usr/share/keyrings/git-core-ppa-archive-keyring.gpg | awk -F: '/^fpr:/ {print $10; exit}')" \
+       | GNUPGHOME=/tmp/gnupg gpg --dearmor -o /tmp/repro-apt/git-core-ppa.gpg \
+    && FPR="$(GNUPGHOME=/tmp/gnupg gpg --show-keys --with-colons /tmp/repro-apt/git-core-ppa.gpg | awk -F: '/^fpr:/ {print $10; exit}')" \
     && [ "$FPR" = "F911AB184317630C59970973E363C90F8F1B6217" ] \
        || { echo "git-core PPA key fingerprint mismatch: got '$FPR', expected F911AB184317630C59970973E363C90F8F1B6217" >&2; exit 1; } \
-    && echo "deb [signed-by=/usr/share/keyrings/git-core-ppa-archive-keyring.gpg] https://ppa.launchpadcontent.net/git-core/ppa/ubuntu jammy main" \
-       > /etc/apt/sources.list.d/git-core-ppa.list \
+    && echo "deb [signed-by=/tmp/repro-apt/git-core-ppa.gpg] https://snapshot.ppa.launchpadcontent.net/git-core/ppa/ubuntu/$APT_SNAPSHOT jammy main" \
+       > /tmp/repro-apt/sources.list.d/git-core-ppa.list \
     && apt-get update && apt-get install -y --no-install-recommends git \
     && dpkg --compare-versions "$(git --version | awk '{print $3}')" ge 2.38 \
        || { echo "installed git $(git --version) is older than the 2.38 floor" >&2; exit 1; } \
-    && rm -rf /tmp/git-merge-tree-smoke && mkdir -p /tmp/git-merge-tree-smoke \
+    && mkdir -p /tmp/git-merge-tree-smoke \
     && cd /tmp/git-merge-tree-smoke && git init -q \
     && git config user.email smoke@fleetflare.local && git config user.name smoke \
     && echo a > f.txt && git add f.txt && git commit -qm base \
@@ -93,10 +122,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends tmux curl ca-ce
     && git checkout -q - \
     && git merge-tree --write-tree "$SMOKE_BASE" "$SMOKE_SHA" >/dev/null \
        || { echo "git merge-tree --write-tree smoke test failed -- scripts/localci/localci.sh:293 needs it to work" >&2; exit 1; } \
-    && cd / && rm -rf /tmp/git-merge-tree-smoke \
+    && cd / \
     && git config --global --add safe.directory '*' \
-    && curl -fsSL https://tailscale.com/install.sh | sh \
-    && rm -rf /var/lib/apt/lists/*
+    && curl -fsSL -o /tmp/tailscale.deb https://pkgs.tailscale.com/stable/ubuntu/pool/tailscale_1.102.4_amd64.deb \
+    && echo "758cd0b2536d35dc1f02b785784dd18d08945ff644fcd92b1b0d597b6fa56f8b  /tmp/tailscale.deb" | sha256sum -c - \
+    && apt-get install -y --no-install-recommends /tmp/tailscale.deb iproute2 \
+    && repro-seal end
 
 # gh: copied verbatim from container/Dockerfile (task image) — same install
 # mechanism, so the two images can never silently drift on how `gh` gets
@@ -117,14 +148,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends tmux curl ca-ce
 # `FROM oven/bun:1.3-debian`, this image's base
 # (docker.io/cloudflare/sandbox:0.12.7) already ships bun — confirmed
 # `which bun` resolves to /usr/local/bin/bun inside the base image itself.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl gnupg \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-       > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
-    && rm -rf /var/lib/apt/lists/*
+    && curl -fsSL -o /tmp/gh.deb https://github.com/cli/cli/releases/download/v2.101.0/gh_2.101.0_linux_amd64.deb \
+    && echo "f876a3b87bf67c94f773d17becca4dc7340b056dab901473a9260ee2a73e237b  /tmp/gh.deb" | sha256sum -c - \
+    && apt-get install -y --no-install-recommends /tmp/gh.deb \
+    && repro-seal end
 
 # Pinned to the exact same version container/Dockerfile installs — see that
 # file's own comment: the auth gate/JSON contract this version's output
@@ -146,9 +176,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Running the postinstall explicitly and symlinking into /usr/local/bin
 # ourselves reproduces exactly what oven/bun's newer bun does automatically,
 # deterministically, independent of bun's per-version default trust list.
-RUN bun install -g @anthropic-ai/claude-code@2.1.224 \
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && bun install -g @anthropic-ai/claude-code@2.1.224 \
     && node /root/.bun/install/global/node_modules/@anthropic-ai/claude-code/install.cjs \
-    && ln -sf /root/.bun/install/global/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/local/bin/claude
+    && ln -sf /root/.bun/install/global/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/local/bin/claude \
+    && repro-seal end
 
 # P4a-1: python3 (studio-bringup.sh's materialization block decodes/writes
 # the member/MCP bundles via `python3 -c`, no other interpreter in this
@@ -157,9 +189,10 @@ RUN bun install -g @anthropic-ai/claude-code@2.1.224 \
 # link is up). tailscale itself is already installed above; nothing further
 # to add for it here. Chromium is deliberately NOT in this apt line — see
 # the next RUN block for why and what actually provides it.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && apt-get update && apt-get install -y --no-install-recommends \
     python3 openssh-server mosh \
-    && rm -rf /var/lib/apt/lists/*
+    && repro-seal end
 
 # P4a-1: chromium for the playwright MCP server studio-bringup.sh's
 # known-server map already wires up (STUDIO_MCP="playwright" ->
@@ -197,9 +230,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # playwright install" error from the MCP server despite this layer having
 # run. No evidence this has actually happened; noting the mechanism so it
 # is diagnosable if it ever does.
-RUN bun x playwright install chromium --with-deps \
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && bun x playwright@1.63.0 install chromium --with-deps \
     && ln -sf /root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome /usr/local/bin/chromium \
-    && rm -rf /var/lib/apt/lists/*
+    && repro-seal end
 
 # ego-browser (issue #30): every brief this fleet sends tells its agent "use
 # the ego-browser skill (ego lite), NOT agent-browser" -- unfollowable until
@@ -230,10 +264,11 @@ RUN bun x playwright install chromium --with-deps \
 # cli.ts already carries `#!/usr/bin/env bun` -- same shebang idiom as
 # studio-fleet below -- so chmod + ln -sf is enough to make a bare
 # `ego-browser nodejs ...` resolve on PATH, no wrapper script needed.
-COPY container/ego-browser /opt/fleet/ego-browser
-RUN cd /opt/fleet/ego-browser && bun install --production \
-    && chmod 0755 cli.ts \
-    && ln -sf /opt/fleet/ego-browser/cli.ts /usr/local/bin/ego-browser
+COPY --from=src /src/ego/ /
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && cd /opt/fleet/ego-browser && bun install --production \
+    && ln -sf /opt/fleet/ego-browser/cli.ts /usr/local/bin/ego-browser \
+    && repro-seal end
 
 # P4a-1: superpowers (always) + caveman (operator opt-in, issue #330 — see
 # ENABLE_CAVEMAN_PLUGIN below) baked at build so a studio boots with whatever
@@ -312,12 +347,14 @@ RUN cd /opt/fleet/ego-browser && bun install --production \
 # cache-miss" on every later invocation (plugin stays enabled and usable
 # either way, but the warning is needless noise this image doesn't need to
 # ship with). ~10MB on disk combined (per plugin actually installed below).
-RUN git clone -q https://github.com/obra/superpowers.git \
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && git clone -q https://github.com/obra/superpowers.git \
        /root/.claude/plugins/marketplaces/superpowers-dev \
     && git -C /root/.claude/plugins/marketplaces/superpowers-dev checkout -q \
        b36e0829c6d0140e93cfef2ca599b1b07d4a7797 \
     && claude plugin marketplace add /root/.claude/plugins/marketplaces/superpowers-dev \
-    && claude plugin install superpowers@superpowers-dev
+    && claude plugin install superpowers@superpowers-dev \
+    && repro-seal end
 
 # Issue #330 (public-release prep): caveman used to be baked unconditionally
 # above, for every deployment of this image regardless of operator — an
@@ -341,7 +378,8 @@ RUN git clone -q https://github.com/obra/superpowers.git \
 # ops repo; wrangler.example.jsonc ships it "false") — no Dockerfile edit, no
 # fork of this RUN step.
 ARG ENABLE_CAVEMAN_PLUGIN=false
-RUN if [ "$ENABLE_CAVEMAN_PLUGIN" = "true" ]; then \
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && if [ "$ENABLE_CAVEMAN_PLUGIN" = "true" ]; then \
       git clone -q https://github.com/JuliusBrussee/caveman.git \
         /root/.claude/plugins/marketplaces/caveman \
       && git -C /root/.claude/plugins/marketplaces/caveman checkout -q \
@@ -350,15 +388,14 @@ RUN if [ "$ENABLE_CAVEMAN_PLUGIN" = "true" ]; then \
       && claude plugin install caveman@caveman; \
     else \
       echo "ENABLE_CAVEMAN_PLUGIN != true — skipping caveman plugin install (issue #330 default)"; \
-    fi
+    fi \
+    && repro-seal end
 
-COPY container/studio-bringup.sh /opt/fleet/studio-bringup.sh
 # The pty's root process (src/studio/sandbox-api.ts's STUDIO_SHELL). Baked
 # into the image rather than written at provision time on purpose: the pty is
 # opened lazily, on the first attach, which can happen against a container
 # that recycled since the last provision — a script written by provision
 # would be gone, and the attach would land on nothing.
-COPY container/studio-shell.sh /opt/fleet/studio-shell.sh
 # Fleet Spawn P3, Task 3 (R-P3-2/R-P3-7): the in-container `fleet spawn`
 # command — baked, not written at provision time, same reasoning as
 # studio-shell.sh just above (it must survive a container recycle that
@@ -367,18 +404,15 @@ COPY container/studio-shell.sh /opt/fleet/studio-shell.sh
 # exact binary name every role's `allowedTools` grants (`Bash(fleet *)`,
 # see studio-fleet's own header for why this is safe to share with the task
 # image's OWN, unrelated /usr/local/bin/fleet).
-COPY container/studio-fleet /opt/fleet/studio-fleet
 # Issue #146: the worktree-session adopt bring-up runs right after the
 # session-restore untar; the Worker's pre-bring-up adopt runs it too when it
 # is executable here.
-COPY container/studio-adopt.sh /opt/fleet/studio-adopt.sh
 # Issue #169: memory guard, started by studio-bringup.sh's memguard step.
 # Plain TS run by the base image's own bun; no dependencies.
-COPY container/memguard.ts /opt/fleet/memguard.ts
 # Issue #7: write-proxy client. In proxy mode the gh wrapper hands gh write
 # verbs (pr create/edit/ready/comment/review, issue create/edit/comment) here;
 # it posts them to the Worker's /fleet/gh. Plain TS run by bun.
-COPY container/gh-proxy.ts /opt/fleet/gh-proxy.ts
-RUN chmod 0755 /opt/fleet/studio-bringup.sh /opt/fleet/studio-shell.sh /opt/fleet/studio-fleet /opt/fleet/studio-adopt.sh /opt/fleet/gh-proxy.ts \
-    && ln -sf /opt/fleet/studio-fleet /usr/local/bin/fleet \
-    && ln -sf /opt/fleet/gh-proxy.ts /usr/local/bin/fleet-gh-proxy
+# All of the above: studio-bringup.sh, studio-shell.sh, studio-fleet (as
+# /usr/local/bin/fleet), studio-adopt.sh, memguard.ts, gh-proxy.ts (as
+# /usr/local/bin/fleet-gh-proxy) -- modes and symlinks set in the src stage.
+COPY --from=src /src/app/ /
