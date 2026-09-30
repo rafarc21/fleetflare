@@ -32,11 +32,15 @@ function session(over: Partial<ObservedSession> = {}): ObservedSession {
   };
 }
 
-function statusRow(state: StudioStatus["state"], observedSession?: ObservedSession | null): StudioStatus {
+function statusRow(
+  state: StudioStatus["state"], observedSession?: ObservedSession | null,
+  readiness?: StudioStatus["readiness"],
+): StudioStatus {
   return {
     id: ID, state, tailscaleHost: null, lastRefresh: null,
     error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
     observed: observedSession === undefined ? undefined : { session: observedSession } as StudioStatus["observed"],
+    readiness,
   };
 }
 
@@ -68,7 +72,10 @@ const opts = (fetchImpl: typeof fetch) => ({ fetchImpl, timeoutMs: 20, sleep: no
 describe("requestRecycle — a recycle request that times out never reports a verdict it does not have", () => {
   it("timed-out request, then status shows THIS recycle's own bring-up landed: recycle SUCCEEDED", async () => {
     const { fetchImpl, calls } = fakeSlowWorker([
-      async () => Response.json(statusRow("running", session({ at: "2026-09-30T12:00:05.000Z" }))),
+      async () => Response.json(statusRow(
+        "running", session({ at: "2026-09-30T12:00:05.000Z" }),
+        { kind: "provisioned", checkedAt: "2026-09-30T12:00:06.000Z" },
+      )),
     ]);
     const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
 
@@ -111,13 +118,17 @@ describe("requestRecycle — a recycle request that times out never reports a ve
   // both directions of that asymmetry are understood, not silently ignored.
   it("a Worker clock running a hair BEHIND the CLI's reports the safe failure mode: an extra timeout-pending, never a crash or a false success", async () => {
     // Same real event as the very first test in this file (a genuine recycle
-    // bring-up, `via: "recycle"`), but the Worker's own clock stamped `at`
-    // one second BEFORE this side's `startedAt` — a lagging server clock,
-    // not a stale row. `bringupLanded`'s strict `>=` reads this as
-    // not-yet-proven: the safe direction (never a crash, never a false
-    // success) — costs one extra poll cycle at worst.
+    // bring-up, `via: "recycle"`, WITH a fresh readiness write already
+    // landed), but the Worker's own clock stamped both `session.at` AND
+    // `readiness.checkedAt` one second BEFORE this side's `startedAt` — a
+    // lagging server clock, not a stale row. `bringupLanded`'s strict `>=`
+    // reads this as not-yet-proven: the safe direction (never a crash, never
+    // a false success) — costs one extra poll cycle at worst.
     const { fetchImpl } = fakeSlowWorker([
-      async () => Response.json(statusRow("running", session({ via: "recycle", at: "2026-09-30T11:59:59.000Z" }))),
+      async () => Response.json(statusRow(
+        "running", session({ via: "recycle", at: "2026-09-30T11:59:59.000Z" }),
+        { kind: "provisioned", checkedAt: "2026-09-30T11:59:59.000Z" },
+      )),
     ]);
     const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
 
@@ -125,21 +136,62 @@ describe("requestRecycle — a recycle request that times out never reports a ve
     expect(report.lines.join("\n")).not.toMatch(/\bfailed\b/i);
   });
 
-  it("documents the ACCEPTED risk: a Worker clock running ahead can make a stale via=recycle row satisfy the timestamp check (false success, not guarded against)", async () => {
+  it("documents the NARROWED residual risk: a Worker clock running ahead on BOTH stamps can still make a stale via=recycle row with its own fresh readiness satisfy the timestamp check (false success, not guarded against)", async () => {
     // This row is from a bring-up that, in real wall-clock terms, finished
     // BEFORE this call's own POST ever fired -- but the Worker's clock, if
-    // running ahead of this CLI's, could stamp `at` with a value that still
-    // reads at/after `startedAt`. bringupLanded has no way to tell this
-    // apart from a genuine, freshly-landed bring-up: it is not fixed, only
-    // named in its own doc comment. This test exists to prove that
-    // limitation is understood and pinned, not silently reintroduced by a
-    // future "improvement" that starts guessing at skew tolerance.
+    // running ahead of this CLI's, could stamp BOTH `session.at` AND
+    // `readiness.checkedAt` with values that still read at/after
+    // `startedAt`. bringupLanded has no way to tell this apart from a
+    // genuine, freshly-landed bring-up: it is not fixed, only named in its
+    // own doc comment. Requiring a fresh `readiness.checkedAt` (fix #133
+    // review round 2) narrows this from "any fresh-looking session stamp" to
+    // "two independent fresh-looking stamps, both from the same clock" — a
+    // much smaller attack surface, but this test exists to prove the
+    // remaining sliver is understood and pinned, not silently reintroduced
+    // by a future "improvement" that starts guessing at skew tolerance.
     const { fetchImpl } = fakeSlowWorker([
-      async () => Response.json(statusRow("running", session({ via: "recycle", at: "2026-09-30T12:00:00.001Z" }))),
+      async () => Response.json(statusRow(
+        "running", session({ via: "recycle", at: "2026-09-30T12:00:00.001Z" }),
+        { kind: "provisioned", checkedAt: "2026-09-30T12:00:00.001Z" },
+      )),
     ]);
     const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
 
     expect(report.kind).toBe("timeout-provisioned");
+  });
+
+  // Fix #133 review round 2, finding 1 (the most severe): the real bug, not
+  // just a clock-skew edge case. `provisionCore`'s own bring-up steps stamp
+  // `observed.session` with `via: "recycle"` and a fresh `at` BEFORE this
+  // recycle's own post-provision readiness check (do.ts's `recycleVerdict`,
+  // up to 60s) ever runs. A poll landing inside that window used to see
+  // `state: "running"` + a fresh `via: "recycle"` session and report
+  // `timeout-provisioned` — SUCCEEDED — for a studio whose readiness check
+  // could still come back "bare" moments later, flipping `state` to
+  // `"degraded"` and 500ing. A row with no `readiness` at all (or one from
+  // BEFORE this call started) proves the readiness write for THIS recycle
+  // has not landed yet, so `bringupLanded` must not accept it.
+  it("status shows a fresh via=recycle session but NO readiness write yet: stays timeout-pending, never a false success", async () => {
+    const { fetchImpl } = fakeSlowWorker([
+      async () => Response.json(statusRow("running", session({ at: "2026-09-30T12:00:05.000Z" }))),
+    ]);
+    const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
+
+    expect(report.kind).toBe("timeout-pending");
+    expect(report.lines.join("\n")).not.toMatch(/\bfailed\b/i);
+  });
+
+  it("status shows a fresh via=recycle session but a STALE readiness write (from before this call started): stays timeout-pending, never a false success", async () => {
+    const { fetchImpl } = fakeSlowWorker([
+      async () => Response.json(statusRow(
+        "running", session({ at: "2026-09-30T12:00:05.000Z" }),
+        { kind: "provisioned", checkedAt: "2026-09-30T11:00:00.000Z" },
+      )),
+    ]);
+    const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
+
+    expect(report.kind).toBe("timeout-pending");
+    expect(report.lines.join("\n")).not.toMatch(/\bfailed\b/i);
   });
 
   it("timed-out request, status unreachable every attempt: timeout-unknown, never \"failed\"", async () => {
@@ -185,7 +237,10 @@ describe("requestRecycle — a recycle request that times out never reports a ve
     const { fetchImpl, calls } = fakeSlowWorker([
       async () => Response.json(statusRow("running", session({ via: "provision", at: "2026-09-30T12:00:05.000Z" }))),
       async () => Response.json(statusRow("provisioning", null)),
-      async () => Response.json(statusRow("running", session({ at: "2026-09-30T12:00:20.000Z" }))),
+      async () => Response.json(statusRow(
+        "running", session({ at: "2026-09-30T12:00:20.000Z" }),
+        { kind: "provisioned", checkedAt: "2026-09-30T12:00:21.000Z" },
+      )),
     ]);
     const report = await requestRecycle({ recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, opts(fetchImpl));
 
