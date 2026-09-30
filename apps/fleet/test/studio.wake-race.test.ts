@@ -221,11 +221,15 @@ describe("the loose patterns' row anchors are load-bearing (#144, mutants N1/N8)
       "❯ WAKE: see /rate-limit-options for what the account can still do"],
     ["a #53 headline quoted inside a row",
       "❯ WAKE: yesterday You've hit your usage limit was on screen; it is gone now"],
+    ["the permission-prompt footer, echoed back by the composer (#144)",
+      "❯ WAKE TASK #144 \"the pane footer read Esc to cancel · Tab to amend · ctrl+e to explain, so nothing was typed\""],
   ];
   /** N1's tail half: the phrase OPENS the row but does not end it. */
   const TRAILING: [string, string][] = [
     ["footer with trailing prose", "  Enter to confirm · Esc to cancel — quoted from the #53 modal"],
     ["a #53 headline with trailing prose", "  You've hit your usage limit was the wording on 09-23"],
+    ["the permission-prompt footer with trailing prose (#144)",
+      "  Esc to cancel · Tab to amend · ctrl+e to explain — quoted from the modal"],
   ];
   /** N8: the SAME rows as ghost suggestions — a cursor at column 0, no border. */
   const GHOST: [string, string][] = [
@@ -233,6 +237,7 @@ describe("the loose patterns' row anchors are load-bearing (#144, mutants N1/N8)
     ["ghost /rate-limit-options", "❯ /rate-limit-options"],
     ["ghost Run /rate-limit-options", "❯ Run /rate-limit-options to see what you can do."],
     ["ghost #53 headline", "❯ You've hit your usage limit"],
+    ["ghost permission-prompt footer (#144)", "❯ Esc to cancel · Tab to amend · ctrl+e to explain"],
   ];
 
   for (const [name, row] of [...MID_ROW, ...TRAILING, ...GHOST]) {
@@ -260,6 +265,7 @@ describe("the loose patterns' row anchors are load-bearing (#144, mutants N1/N8)
       "  Enter to confirm · Esc to cancel",
       "│ Run /rate-limit-options to see what you can do.              │",
       "│ ❯ You've hit your usage limit                                │",
+      "  Esc to cancel · Tab to amend · ctrl+e to explain",
     ]) {
       const { cmds, exec } = container(idleWith(row));
       const outcome = await gated(exec);
