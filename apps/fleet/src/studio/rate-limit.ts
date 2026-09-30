@@ -214,6 +214,53 @@ export function decodeAccountLimitState(raw: string | null): AccountLimitState |
 }
 
 /**
+ * Issue #131 (Stage B) — the fleet_state key holding ONE account's mirrored
+ * 5h-window burn, the read half of `FailoverDeps.accountBurn`. Same shape and
+ * same reasoning as `accountLimitStateKey` just above (see its own doc
+ * comment): one account, one independent row, written by whichever studio is
+ * currently launched on it (do.ts's `mirrorBurnToRegistry`), read by every
+ * studio's own borrow second pass (accounts.ts's `nextBorrowedAccount`) so a
+ * borrow decision sees the WHOLE fleet's burn on a candidate account, not
+ * only what this studio's own row happens to say.
+ */
+const ACCOUNT_BURN_STATE_PREFIX = "account-burn:";
+export function accountBurnStateKey(accountName: string): string {
+  return `${ACCOUNT_BURN_STATE_PREFIX}${accountName}`;
+}
+
+/** The value stored at accountBurnStateKey(name) — JSON, `fleet_state.value`
+ *  is TEXT. Mirrors AccountLimitState's own shape/encode/decode discipline;
+ *  kept as its own type rather than reused, same "must never be read as
+ *  interchangeable" reasoning AccountLimitState's own doc comment gives. */
+export interface AccountBurnState {
+  window5hOutput: number;
+}
+
+export function encodeAccountBurnState(state: AccountBurnState): string {
+  return JSON.stringify(state);
+}
+
+/** `null` for a key never written, or a value that is not this shape — never
+ *  thrown: a corrupt fleet_state row must read as "no burn observed", never
+ *  crash a borrow decision that has nothing to do with writing it. */
+export function decodeAccountBurnState(raw: string | null): AccountBurnState | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed !== "object" || parsed === null
+    || !("window5hOutput" in parsed) || typeof (parsed as { window5hOutput: unknown }).window5hOutput !== "number"
+  ) {
+    return null;
+  }
+  return { window5hOutput: (parsed as AccountBurnState).window5hOutput };
+}
+
+/**
  * The row's words while the limit holds:
  *   - "rate-limited until 13:30Z" — a readable reset still ahead;
  *   - "limit modal open — Esc to dismiss (ff <id>)" — a select modal, which

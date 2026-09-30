@@ -321,6 +321,54 @@ export interface StudioStatus {
    */
   claudeAccountMovedBlock?: string | null;
   /**
+   * Issue #131 (Stage B) — set whenever this studio's own repo has a genuine
+   * `CLAUDE_ACCOUNT_BY_REPO` entry (failover.ts's `FailoverDeps.primaryIsMapped`)
+   * AND the studio is currently away from that mapped primary, for ANY
+   * reason: an ordinary in-chain switch that merely stepped forward from
+   * primary, a tier-2 landing on an unclaimed spare positioned before
+   * primary, or an actual cross-repo borrow of some OTHER repo's own mapped
+   * primary (`nextBorrowedAccount`'s second pass, once every account
+   * reserved for THIS repo is exhausted at once). NOT narrower than that —
+   * review round 2 (maestro review of PR #135, 2026-09-30), finding 4
+   * generalized this from "only a genuine cross-repo borrow" to "away from
+   * primary at all", so hand-back's own `rowNow.borrowedAccount` gate — the
+   * ONLY thing that ever brings a studio back to its primary — never goes
+   * stale partway through a chain of non-primary switches. Round 3 (2nd,
+   * independent review of PR #135, 2026-09-30) did not touch this
+   * generalization — it only added the `primaryIsMapped` gate on top (see
+   * `FailoverDeps.primaryIsMapped`'s own doc comment, failover.ts), so the
+   * write condition never fires at all for a studio whose own repo has no
+   * mapped primary. The account NAME, same "safe to
+   * log/store/card" discipline `claudeAccount` itself already documents —
+   * never a token.
+   *
+   * NEVER set at all for a studio whose own repo has no `CLAUDE_ACCOUNT_BY_REPO`
+   * entry — such a studio never opted into Stage B borrow/hand-back
+   * semantics, and an ordinary rate-limit switch for it (e.g. account 1 to
+   * account 2 with no map configured at all) must never be mistaken for a
+   * borrow.
+   *
+   * Cleared (`null`) the moment a switch lands exactly on the studio's own
+   * mapped primary — whether via this ordinary path or via `handBack`'s own
+   * dedicated one — attempted regardless of success, same treatment a
+   * completed switch's `claudeAccount`/`launchedAccount` fields already get.
+   * `undefined`/absent: never borrowed (including every studio with no
+   * mapped primary at all), or borrowed before this field existed — readers
+   * treat the two identically, same as every other optional account field on
+   * this type.
+   */
+  borrowedAccount?: string | null;
+  /**
+   * Issue #131 (Stage B) — which repo's own primary `borrowedAccount` is,
+   * for logging/audit only (never read to decide anything — the failover
+   * DECISION is keyed on the `reservedAccounts` SET alone, accounts.ts's
+   * `repoForAccount` is a pure display lookup). `null` when the borrowed
+   * account's slot is not (or no longer) in `CLAUDE_ACCOUNT_BY_REPO` at all —
+   * an operator alert then names the account alone, same fallback
+   * `accountDisplay` already gives an unlabelled account.
+   */
+  borrowedFromRepo?: string | null;
+  /**
    * Issue #289: the account this studio's container was actually LAUNCHED
    * on -- written when the container starts (StudioDO.onStart, from the same
    * launchAccount call that filled its CLAUDE_CODE_OAUTH_TOKEN) and by a
@@ -515,6 +563,22 @@ export interface ProvisionConfig {
    * call. Never persisted onto the stored role env, same as `freshSession`.
    */
   cancelFreshSession?: boolean;
+  /**
+   * Board task #131 ask 2: `fleet recycle <id> --account mapped`. With
+   * FLEET_AUTO_FAILOVER=on, `launchAccount` (src/studio/accounts.ts) serves a
+   * studio's RECORDED account verbatim, without even consulting
+   * CLAUDE_ACCOUNT_BY_REPO — a map change never reaches a studio an earlier
+   * failover recorded elsewhere, and until this field existed the only lever
+   * was flipping failover off and recycling. `true` only when the operator
+   * passed `--account mapped` — `do.ts`'s `recycle()` then clears the
+   * recorded account (and its moved-audit trail) as the very first thing it
+   * does, before touching the container, so the studio relaunches on its
+   * plain mapped slot instead. Absent/false: an ordinary recycle, unaffected.
+   * Only ever set from routes.ts's `?account=mapped` query param, same
+   * "resolved by the Worker, never read straight from a request body"
+   * posture as every other override on this type.
+   */
+  forceMappedAccount?: true;
   /**
    * Dynamic repo selection (P4a): the full `owner/repo` of the WORK repo to
    * clone. Absent means "whatever this studio is already bound to, else the

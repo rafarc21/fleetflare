@@ -17,7 +17,9 @@
  * provision.ts's header). do.ts wires the ports and owns the schedule.
  */
 import type { ClaudeAccount, AccountLimits } from "./accounts";
-import { accountsTried, nextClaudeAccount, earliestAccountReset } from "./accounts";
+import {
+  accountsTried, nextClaudeAccount, earliestAccountReset, nextBorrowedAccount, accountIsFree, firstFreeAccount,
+} from "./accounts";
 import { STATUS_KEY, OPERATION_KEY, watchForDestroy, operationLockFresh, type StudioStorage } from "./provision";
 import { redactSecrets } from "./redact";
 import {
@@ -955,6 +957,78 @@ export interface FailoverDeps {
    *  primary. Absent/null: the first account, as before. */
   primary?: string | null;
   /**
+   * Issue #131 (Stage B) review round 3 (2nd review of PR #135, 2026-09-30) —
+   * true ONLY when THIS studio's own repo has a genuine `CLAUDE_ACCOUNT_BY_REPO`
+   * entry (a real #271 mapped primary); false when `primary` above merely
+   * fell back to the first configured account because no such entry exists.
+   *
+   * WHY THIS EXISTS, AND `primary != null` DOES NOT SUFFICE: `primary` is
+   * NEVER null in real deployment. do.ts's `failoverDeps()` always wires it
+   * from `primaryAccount()` -> accounts.ts's `launchAccount`, which — in the
+   * no-map case — falls through to `accounts[0]` rather than returning null.
+   * So `primary != null` is true for every studio with at least one
+   * CLAUDE_CODE_OAUTH_TOKEN* secret set, mapped repo or not; it was only ever
+   * false inside this file's own test harness, where `primary` defaults to
+   * `undefined`. A generalized write condition gated on that (review round 2,
+   * finding 4) wrongly armed Stage B's borrowedAccount/hand-back machinery
+   * for every PLAIN multi-account fleet that never configured
+   * CLAUDE_ACCOUNT_BY_REPO at all — an ordinary rate-limit switch from
+   * account 1 to account 2 got recorded as a "borrow", and hand-back would
+   * later kill+relaunch the pane to yank it back to account 1, uninvited.
+   *
+   * Absent (every caller/test that predates this field): `undefined` reads
+   * falsy in the write condition below, the same safe "never opted into
+   * Stage B" default production now gives an unmapped repo.
+   *
+   * RESIDUAL, stated rather than hidden (round 3 review escalation, resolved
+   * 2026-09-30): this field can itself read `true` while `primary` above
+   * reads `null` — REACHABLE, not merely theoretical. Trigger: a studio
+   * already RUNNING on a recorded, non-primary account (`FLEET_AUTO_FAILOVER`
+   * on, `launchAccount`'s recorded-account fast path, accounts.ts) keeps
+   * running untouched if an operator later deletes the MAPPED slot's own
+   * secret without recycling the studio — do.ts's `primaryAccount()` then
+   * refuses that now-secretless slot on every later tick, while
+   * `primaryIsMapped()` stays true (it checks only that the map KEY exists,
+   * never the secret).
+   *
+   * BOUNDED AND NON-DESTRUCTIVE while this holds: hand-back's own guard
+   * (runAccountFailover, `deps.autoFailover && rowNow.borrowedAccount &&
+   * deps.primary && !verdict.repainted`) has exactly one call site and
+   * requires `deps.primary` truthy as a hard precondition — with `primary`
+   * null it simply never fires: no `accountSwitchCmd`, no pane kill, no
+   * relaunch. A skipped hand-back just leaves the studio on its current
+   * account for one more tick, same as any other skipped tick (the fresh
+   * op-lock / mid-turn guards beside it skip the same way). Ordinary account
+   * switching, driven by genuine exhaustion observed on the pane, keeps
+   * working throughout: its target account (`current`, runAccountFailover)
+   * resolves from `existing.launchedAccount`/`claudeAccount`, never from
+   * `primary`, and it never crosses the #103 cross-repo reserved-primary
+   * boundary (`reserved` is threaded into `nextClaudeAccount`/
+   * `firstFreeAccount` untouched either way). One narrower side effect: the
+   * wrap-search anchor (`start`, computed from `deps.primary` a few lines
+   * into runAccountFailover) collapses to 0 while primary is null, widening
+   * the ordinary first pass to the WHOLE account list instead of
+   * primary-forward-only — it can still only land on an account the
+   * dedicated unclaimed-spare tier (`firstFreeAccount`) already treats as
+   * fair game, never a reserved primary.
+   *
+   * SELF-CORRECTING: `primary` and this field are both recomputed FRESH from
+   * live `this.env` on every tick — do.ts's `failoverDeps()` is never cached
+   * or memoized, called fresh inline at its one call site
+   * (`StudioDO.syncSession()` -> `syncSessionCycle`, every
+   * `SYNC_SESSION_SECONDS`) — so the moment the missing secret is restored,
+   * `primary` resolves again on the very next tick and hand-back's guard
+   * evaluates normally, using whatever `borrowedAccount` is still on the row
+   * from before.
+   *
+   * The precondition itself — deleting a slot's secret while a studio is
+   * actively running on it, without a recycle — is an anomalous operator
+   * action outside this feature's normal operating envelope, not something
+   * ordinary failover/borrow/hand-back operation would ever produce on its
+   * own.
+   */
+  primaryIsMapped?: boolean;
+  /**
    * Issue #103 — the fleet's cross-repo boundary: accounts that are some
    * OTHER repo's own `CLAUDE_ACCOUNT_BY_REPO`-mapped primary (accounts.ts's
    * `otherRepoPrimaries`), which a wrap for THIS studio must never land on,
@@ -984,6 +1058,30 @@ export interface FailoverDeps {
     read(): Promise<AccountLimits>;
     write(name: string, until: string | null, seenAt: string): Promise<void>;
   };
+  /**
+   * Issue #131 (Stage B) — fleet-wide per-account 5h-window burn, mirrored the
+   * same way `accountLimits` is (do.ts's `mirrorBurnToRegistry` writes it,
+   * wherever burn already reaches the registry; a parallel `account-burn:
+   * <name>` fleet_state row, rate-limit.ts's `accountBurnStateKey`). Read only
+   * on the borrow second pass (accounts.ts's `nextBorrowedAccount`), which
+   * only ever runs once the first pass has already found nowhere to go — see
+   * that function's own doc comment for why LOWEST burn, not list order,
+   * orders the candidates there. Absent (every caller/test that predates this
+   * feature): the second pass treats every candidate as 0 burn, i.e. ties on
+   * list order — never a crash, never a skipped candidate.
+   */
+  accountBurn?: {
+    read(): Promise<Record<string, { window5hOutput: number }>>;
+  };
+  /**
+   * Issue #131 (Stage B) — accounts.ts's `repoForAccount`, wired here for the
+   * SAME reason `display` is: a pure naming lookup, never a failover
+   * decision. Used only to name the repo a borrowed account belongs to, in
+   * the loud "borrowed"/"returned" notify messages (`borrowedMessage`,
+   * `returnedMessage`) — absent, or an account the map does not (or no
+   * longer) mention, and the message names the account alone.
+   */
+  otherRepoOf?: (name: string) => string | null;
 }
 
 export type FailoverOutcome =
@@ -1000,6 +1098,16 @@ export type FailoverOutcome =
   // decision nobody can audit.
   | { kind: "flap-guarded"; reason: string }
   | { kind: "switched"; from: string | null; to: string }
+  // Issue #131 (Stage B) — the borrow second pass landed: `to` is some OTHER
+  // repo's own mapped primary (never a routine candidate — see
+  // nextBorrowedAccount's own doc comment for when this is even reachable),
+  // and `fromRepo` names the repo it was borrowed from (null when the map no
+  // longer names one, for display only).
+  | { kind: "borrowed"; from: string | null; to: string; fromRepo: string | null }
+  // Issue #131 (Stage B) — hand-back: a studio that was on `from` (the
+  // borrowed account) moved back to its own mapped primary, `to`, because a
+  // periodic tick observed it free again.
+  | { kind: "returned"; from: string | null; to: string }
   | { kind: "exhausted"; tried: string[] }
   // Issue #271: auto-failover off, another account existed, none was used.
   | { kind: "parked"; account: string }
@@ -1087,6 +1195,39 @@ export function switchedMessage(
   return (
     `claude account switch: ${studioId} matched the rate-limit modal ("${headline}") in tmux studio:claude ` +
     `and moved from ${from ?? "its first account"} to ${to}. claude was relaunched with its own resume.`
+  );
+}
+
+/**
+ * Issue #131 (Stage B) — "log it loudly". What an operator is told when a
+ * studio borrows another repo's own mapped primary: names BOTH repos (its
+ * own, and the one the account is reserved for), so the alert is legible on
+ * its own, without a second lookup at `CLAUDE_ACCOUNT_BY_REPO`, about exactly
+ * the boundary #103/#117 exist to protect — this is the one deliberate,
+ * bounded exception to it.
+ */
+export function borrowedMessage(
+  studioId: string, from: string | null, to: string, ownRepo: string | null, borrowedFromRepo: string | null,
+  headline: string,
+): string {
+  return (
+    `claude account BORROW: ${studioId} (repo ${ownRepo ?? "?"}) matched the rate-limit modal ("${headline}") ` +
+    `in tmux studio:claude and moved from ${from ?? "its first account"} to ${to} — every account reserved for ` +
+    `${ownRepo ?? "this repo"} was limited, so it borrowed ${to}, ${borrowedFromRepo ?? "another repo"}'s own ` +
+    `mapped primary. Hand-back is automatic the moment ${ownRepo ?? "this repo"}'s own primary frees up again. ` +
+    `claude was relaunched with its own resume.`
+  );
+}
+
+/**
+ * Issue #131 (Stage B) — hand-back's own notify. `from` is the borrowed
+ * account the studio is moving OFF of; `to` is always this studio's own
+ * mapped primary.
+ */
+export function returnedMessage(studioId: string, from: string | null, to: string, show: (name: string) => string): string {
+  return (
+    `claude account RETURN: ${studioId} moved back from the borrowed account ${from !== null ? show(from) : "(unknown)"} ` +
+    `to its own mapped primary ${show(to)} — the primary is free again. claude was relaunched with its own resume.`
   );
 }
 
@@ -1274,6 +1415,76 @@ export const AUTO_CONTINUE_PROMPT = "usage limit reset — resuming";
  *  back to null on fire either way — see StudioStatus.autoContinueAt's own
  *  doc comment). */
 const AUTO_CONTINUE_RETRY_MS = 60 * 60_000;
+
+/**
+ * Issue #131 (Stage B) — the hand-back switch: move a studio off a borrowed
+ * account back onto its own mapped primary. Called from runAccountFailover's
+ * `working` branch (see that branch's own doc comment for WHY there, and why
+ * no separate periodic hook is needed) the moment a periodic tick observes
+ * the primary free again.
+ *
+ * Mirrors the shape of the ordinary account switch further down in this file
+ * (exec the switch, relaunch, record, notify) but deliberately does LESS:
+ *   - no redraw-guard bookkeeping (`failoverBlock`/`claudeAccountMovedBlock`
+ *     are cleared, not set) — there is no limit block to key a future guard
+ *     on, since hand-back fires on a CLEAN pane, not a freshly-observed one;
+ *   - no `claudeAccountMovedVia` — that field's only reader is the
+ *     no-flapping guard, which exists to judge whether a fresh INLINE
+ *     observation is a stale `--continue` redraw of a SELECT-modal switch;
+ *     hand-back is neither, so leaving it unset (rather than mislabelling it
+ *     `"modal"`) keeps that guard's own meaning intact for whatever switch
+ *     comes next;
+ *   - no `observedStorage` bring-up re-verification (the incarnation-token
+ *     write + session-verdict machinery near the bottom of
+ *     `runAccountFailover`) — that exists specifically for a FRESH
+ *     limit-triggered switch's own post-switch session-verdict write; a
+ *     hand-back is not one, and STATED as a residual in this feature's own
+ *     plan doc rather than silently left out.
+ */
+async function handBack(
+  deps: FailoverDeps, storage: StudioStorage, studioId: string, existing: StudioStatus,
+  ownPrimary: ClaudeAccount, recordStudioFn: (status: StudioStatus) => Promise<void>,
+): Promise<FailoverOutcome> {
+  const from = existing.borrowedAccount ?? null;
+  const switchRes = await deps.exec(accountSwitchCmd(), tokenEnv(ownPrimary.token));
+  const relaunchRes = switchRes.code === 0
+    ? await deps.relaunch()
+    : { code: switchRes.code, stdout: "", stderr: switchRes.stderr };
+  const failed = switchRes.code !== 0 || relaunchRes.code !== 0;
+  const show = deps.display ?? ((name: string) => name);
+  const error = failed
+    ? redactSecrets(
+        `claude account hand-back to ${ownPrimary.name} did not complete (exit ${relaunchRes.code}): ` +
+        `${relaunchRes.stderr.slice(0, 500)}`,
+      )
+    : null;
+  const returned: StudioStatus = {
+    ...existing,
+    state: failed ? "degraded" : "running",
+    error,
+    claudeAccount: ownPrimary.name,
+    // #289: a completed switch is a launch on the new account.
+    ...(failed ? {} : { launchedAccount: ownPrimary.name }),
+    claudeAccountMovedAt: deps.now().toISOString(),
+    // See this function's own doc comment for why this is cleared, not set.
+    claudeAccountMovedVia: null,
+    failoverBlock: null,
+    claudeAccountMovedBlock: null,
+    // The whole point: no longer borrowed, whether the switch landed or not
+    // — same "attempted regardless of success" treatment `claudeAccount`
+    // itself already gets above.
+    borrowedAccount: null,
+    borrowedFromRepo: null,
+  };
+  await storage.put(STATUS_KEY, returned);
+  // Issue #354: the in-memory start config follows the ROW before any other
+  // await, same ordering the ordinary switch path uses below.
+  if (!failed) await deps.onSwitched?.(ownPrimary.name);
+  await recordStudioFn(returned);
+  const message = returnedMessage(studioId, from, ownPrimary.name, show);
+  await deps.notify(failed ? `${message} RELAUNCH FAILED: ${error}` : message);
+  return { kind: "returned", from, to: ownPrimary.name };
+}
 
 /**
  * Issue #109 — is an auto-continue attempt DUE, given the row's own
@@ -1518,6 +1729,7 @@ export async function runAccountFailover(
     const heal = recovery.shouldHeal
       && !operationLockFresh(await storage.get(OPERATION_KEY), deps.now());
     const clearedAt = heal ? deps.now().toISOString() : null;
+    let rowNow = existing;
     if (existing.rateLimited || forget || clearedAt !== null) {
       const cleared: StudioStatus = {
         ...existing,
@@ -1532,6 +1744,48 @@ export async function runAccountFailover(
       };
       await storage.put(STATUS_KEY, cleared);
       await recordStudioFn(cleared);
+      rowNow = cleared;
+    }
+    // Issue #131 (Stage B) — hand-back. This exact tick already runs on a
+    // FIXED CADENCE (SYNC_SESSION_SECONDS, do.ts's syncSessionCycle)
+    // regardless of whether a limit is currently observed — confirmed by
+    // reading do.ts's own call site before writing this code, not assumed;
+    // see this feature's plan doc for the full finding. `verdict.kind ===
+    // "working"` (this whole branch) is precisely "nothing is currently
+    // broken on this pane", which is the state hand-back must fire in — an
+    // operator cannot wait for a FRESH limit sighting that, by definition,
+    // never comes once the studio is happily running on a borrowed account.
+    // Guarded on `rowNow.borrowedAccount` so the overwhelming majority of
+    // ticks (never borrowed) pay nothing beyond that one field read.
+    //
+    // Review round 2 (maestro review of PR #135), finding 1 — this whole
+    // `"working"` branch fires on ANY working verdict, including a THINKING
+    // lead: `verdict.repainted` is set whenever the two captures differed
+    // (PANE_QUIESCE_SECONDS apart), which is precisely "a turn is in
+    // flight" — the exact signal `forget` just above already refuses to act
+    // on for the identical reason. Hand-back's own `accountSwitchCmd`
+    // (`respawn-pane -k`) kills whatever is running in the pane, so firing
+    // it mid-turn loses in-flight work; skipping it here costs nothing but
+    // one more 300s tick before the studio genuinely comes home. Likewise
+    // gated on a FRESH `OPERATION_KEY` — the same lock the `heal` check
+    // above already reads before its own write, and the same lock the
+    // ordinary switch path further below takes for its own container-exec-
+    // then-DO-patch two-step: a concurrent provision/restart/recycle/
+    // failover already touching this container must not be interrupted by
+    // hand-back's own respawn-pane. Neither guard errors — a skipped tick
+    // just leaves the studio borrowed for one more cycle, and the next tick
+    // tries again.
+    if (deps.autoFailover && rowNow.borrowedAccount && deps.primary && !verdict.repainted) {
+      const ownPrimary = deps.accounts.find((a) => a.name === deps.primary);
+      if (ownPrimary) {
+        const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
+        if (
+          accountIsFree(ownPrimary, limits, deps.now())
+          && !operationLockFresh(await storage.get(OPERATION_KEY), deps.now())
+        ) {
+          return handBack(deps, storage, studioId, rowNow, ownPrimary, recordStudioFn);
+        }
+      }
     }
     if (clearedAt !== null) return { kind: "recovered", clearedAt };
     return { kind: "no-modal", reason: verdict.reason };
@@ -1629,19 +1883,83 @@ export async function runAccountFailover(
   // were never its to try — computed once, reused below for both the
   // wrap-around search range and the "tried" list.
   const start = deps.primary ? Math.max(0, deps.accounts.findIndex((a) => a.name === deps.primary)) : 0;
+  const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
+  // Review round 2 (maestro review of PR #135), finding 4 — the #273 r2
+  // widening just below (a stale recorded `current` from BEFORE the primary
+  // stepping FORWARD into scope) must NOT apply while this studio is in an
+  // ACTIVE borrow: widening it then would expose an account positioned
+  // before the primary to the ordinary first-pass wrap below, which #271
+  // forbids landing on outside the two dedicated tiers further down.
+  // `existing.borrowedAccount` is the discriminator — set ONLY by a genuine
+  // Stage-B switch (finding 3's own unclaimed-spare tier, or a
+  // reserved-primary borrow), never by the #273 r2 stale-legacy case: that
+  // field did not exist before Stage B, and every #273 r2 test leaves it
+  // unset, so this never changes that fixture's own anchor.
+  const borrowedActive = existing.borrowedAccount != null;
   // Issue #102: a stale recorded `current` from BEFORE the primary (#273 r2)
   // must still be able to step FORWARD into scope, so the search range
   // extends back to cover it; a `current` already at or past the primary
   // never wraps BEHIND it — an account before a repo's mapped primary is
-  // never that repo's to use, wrap or no wrap.
-  const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
-  const scopedAccounts = deps.accounts.slice(currentIdx < 0 ? start : Math.min(start, currentIdx));
+  // never that repo's to use, wrap or no wrap. Not while actively borrowed —
+  // see `borrowedActive` above.
+  const anchor = borrowedActive ? start : (currentIdx < 0 ? start : Math.min(start, currentIdx));
+  const scopedAccounts = deps.accounts.slice(anchor);
   const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
-  const candidate = nextClaudeAccount(scopedAccounts, current, limits, deps.now(), deps.reservedAccounts ?? new Set());
+  const reserved = deps.reservedAccounts ?? new Set();
+  // Review round 2, finding 4 — `current` falls OUTSIDE `scopedAccounts`
+  // only in the new borrowed-before-`start` case the anchor above pins:
+  // every other caller still lands inside it by construction. Ordinary
+  // `nextClaudeAccount(scopedAccounts, current, ...)` cannot handle that
+  // case on its own — see `firstFreeAccount`'s own doc comment for why
+  // (there is no position to step FORWARD from, and its own `null`
+  // convention wrongly skips position 0 rather than treating it as a
+  // genuine candidate).
+  const currentOutOfScope = borrowedActive && currentIdx >= 0 && currentIdx < anchor;
+  const candidate = currentOutOfScope
+    ? firstFreeAccount(scopedAccounts, reserved, limits, deps.now())
+    : nextClaudeAccount(scopedAccounts, current, limits, deps.now(), reserved);
+  // Review round 2 (maestro review of PR #135), finding 3 — tier 2, tried
+  // ONLY once the first pass just above found nothing: an "unclaimed spare"
+  // — an account positioned BEFORE this studio's own primary (never visible
+  // to the first pass, which only ever scans `scopedAccounts`) that is ALSO
+  // not `reserved` for another repo (never visible to the third pass below
+  // either, which only ever considers `reserved` names) — a genuine blind
+  // spot the original two passes left between them. List order, never
+  // lowest-burn (see `firstFreeAccount`'s own doc comment) — tried BEFORE
+  // the third pass: a plain free spare nobody has claimed must never lose
+  // to someone else's mapped primary.
+  const outOfScopeSpare = candidate === null && deps.autoFailover
+    ? firstFreeAccount(deps.accounts.slice(0, anchor), reserved, limits, deps.now())
+    : null;
+  // Issue #131 (Stage B) — the borrow third pass, entered ONLY when BOTH
+  // passes above found NOTHING (`candidate === null && outOfScopeSpare ===
+  // null`): this studio's own chain (the reserved-primaries-respecting wrap
+  // #103/#117 protect) AND every unclaimed spare are genuinely exhausted,
+  // not merely skipped as reserved the way an account in `scopedAccounts`
+  // with a live fleet-wide limit is. Borrowing is the fleet's last resort,
+  // never a routine candidate — a reserved account with the lowest burn
+  // must NEVER outrank a free account still in this studio's own chain or a
+  // plain unclaimed spare, which is exactly why this is gated on both
+  // passes returning null rather than computed unconditionally and compared
+  // against them. `deps.accountBurn` is read lazily, here, on this
+  // already-rare path only — the overwhelming majority of ticks (an earlier
+  // pass finds somewhere to go) never pay for it.
+  const borrowed = candidate === null && outOfScopeSpare === null && deps.autoFailover
+    ? nextBorrowedAccount(
+        deps.accounts, reserved, limits,
+        deps.accountBurn ? await deps.accountBurn.read() : {}, deps.now(),
+      )
+    : null;
   // Issue #271: with auto-failover off, a studio that COULD move is parked
   // instead — marked and carded once, never switched. With nowhere to go the
   // message is today's, so a single-account fleet reads exactly as before.
-  const next = deps.autoFailover ? candidate : null;
+  const next = deps.autoFailover ? (candidate ?? outOfScopeSpare ?? borrowed) : null;
+  // Issue #131 (Stage B): true only when `next` came from the THIRD
+  // (reserved-primary) pass — every downstream decision (the outcome kind,
+  // the StudioStatus borrow fields, the notify wording) reads off this ONE
+  // flag, so they can never disagree about which pass actually landed the
+  // switch.
+  const isBorrow = candidate === null && outOfScopeSpare === null && borrowed !== null;
 
   if (!next) {
     const tried = deps.accounts.map((a) => a.name).slice(start);
@@ -1758,6 +2076,37 @@ export async function runAccountFailover(
     claudeAccountMovedBlock: key ?? sighting?.block ?? null,
     // A completed switch is a new account: the old one's limit is not its.
     rateLimited: failed ? existing.rateLimited : null,
+    // Review round 2 (maestro review of PR #135), finding 4 (write-condition
+    // half) — generalized from `isBorrow` (true only for the third,
+    // reserved-primary pass): ANY switch that lands the studio somewhere
+    // other than its own configured primary now keeps `borrowedAccount` set
+    // (updating it when the studio moves from one non-own account to
+    // another), so hand-back's own `rowNow.borrowedAccount` gate — the ONLY
+    // thing that ever brings a studio back to its primary — never goes
+    // stale partway through a chain of non-primary switches (tier 2's own
+    // unclaimed spare included: without this, the first plain own-chain
+    // switch after landing on a tier-2 spare would silently clear the flag,
+    // and hand-back would never fire again). Cleared ONLY by a switch that
+    // lands exactly on `deps.primary` — a genuine return, whether via this
+    // ordinary path or via `handBack`'s own dedicated one.
+    //
+    // Review round 3 (2nd, independent review of PR #135, 2026-09-30) —
+    // FIXED: gated on `deps.primaryIsMapped`, not `deps.primary != null`.
+    // `primary` is never null in real deployment (see that field's own doc
+    // comment above); the old guard therefore armed Stage B's whole
+    // borrowedAccount/hand-back machinery for every PLAIN multi-account
+    // fleet that never configured CLAUDE_ACCOUNT_BY_REPO at all, turning an
+    // ordinary account-1 -> account-2 switch into a recorded "borrow" that
+    // hand-back would later forcibly undo. `primaryIsMapped` is the one
+    // thing that actually distinguishes "this repo opted into #271" from
+    // "primaryAccount() merely fell back to the first configured account" —
+    // see do.ts's `failoverDeps()` for how it is computed.
+    // `borrowedFromRepo` stays keyed on `isBorrow` specifically: an
+    // unclaimed spare (tier 2) or a plain own-chain landing was never
+    // "borrowed FROM" any repo, so it carries no such repo to name.
+    ...(deps.primaryIsMapped && next.name !== deps.primary
+      ? { borrowedAccount: next.name, borrowedFromRepo: isBorrow ? (deps.otherRepoOf?.(next.name) ?? null) : null }
+      : { borrowedAccount: null, borrowedFromRepo: null }),
   };
   await storage.put(STATUS_KEY, switched);
   // Issue #354: the in-memory start config follows the ROW before any other
@@ -1837,10 +2186,17 @@ export async function runAccountFailover(
       if (!alreadyLocked) await storage.put(OPERATION_KEY, null);
     }
   }
-  await deps.notify(
-    failed
-      ? `${switchedMessage(studioId, from === null ? null : show(from), show(next.name), verdict.headline ?? verdict.marker)} RELAUNCH FAILED: ${error}`
-      : switchedMessage(studioId, from === null ? null : show(from), show(next.name), verdict.headline ?? verdict.marker),
-  );
-  return { kind: "switched", from, to: next.name };
+  // Issue #131 (Stage B) — "log it loudly": a borrow names both repos, never
+  // just the plain switchedMessage every other landing gets.
+  const borrowedFromRepo = isBorrow ? (deps.otherRepoOf?.(next.name) ?? null) : null;
+  const message = isBorrow
+    ? borrowedMessage(
+        studioId, from === null ? null : show(from), show(next.name),
+        parseStudioId(existing.id)?.repo ?? null, borrowedFromRepo, verdict.headline ?? verdict.marker,
+      )
+    : switchedMessage(studioId, from === null ? null : show(from), show(next.name), verdict.headline ?? verdict.marker);
+  await deps.notify(failed ? `${message} RELAUNCH FAILED: ${error}` : message);
+  return isBorrow
+    ? { kind: "borrowed", from, to: next.name, fromRepo: borrowedFromRepo }
+    : { kind: "switched", from, to: next.name };
 }

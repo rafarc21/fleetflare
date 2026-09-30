@@ -38,7 +38,7 @@ import {
 // schedule, nothing more.
 import {
   resolveClaudeAccounts, claudeAccountToken, launchAccount, autoFailoverOn, accountDisplay, otherRepoPrimaries,
-  type LaunchAccount,
+  repoForAccount, parseAccountMap, type LaunchAccount,
 } from "./accounts";
 import {
   runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, MEMBERS_TICKING_KEY, type FailoverDeps,
@@ -60,6 +60,7 @@ import {
 import {
   LIMIT_SIGHTING_KEY, type LimitSighting,
   accountLimitStateKey, encodeAccountLimitState, decodeAccountLimitState,
+  accountBurnStateKey, encodeAccountBurnState, decodeAccountBurnState,
 } from "./rate-limit";
 import type { AccountLimits, ClaudeAccount } from "./accounts";
 // Issue #102: the fleet-wide per-account limit record lives in D1
@@ -2246,6 +2247,12 @@ async function withBringupLogTail(syncDeps: SessionSyncDeps, reason: string): Pr
 export async function mirrorBurnToRegistry(
   storage: StudioStorage & SessionSyncStorage,
   recordStudioFn: (status: StudioStatus) => Promise<void>,
+  // Issue #131 (Stage B) — optional, like every other port added to this
+  // file after its first callers: absent (every existing call site) mirrors
+  // burn exactly as before, no account-burn write at all. Present, it is
+  // called with this studio's OWN account name and its 5h-window output,
+  // the same tick this function already mirrors both onto the registry row.
+  accountBurnWrite?: ((name: string, window5hOutput: number) => Promise<void>) | null,
 ): Promise<void> {
   const status = await storage.get(STATUS_KEY);
   const burn = await storage.get(BURN_KEY);
@@ -2273,6 +2280,15 @@ export async function mirrorBurnToRegistry(
   };
   await storage.put(STATUS_KEY, updated);
   await recordStudioFn(updated);
+  // Issue #131 (Stage B): the account this studio is actually running on —
+  // #289's own field, the best available signal for "currently on", same
+  // choice launchFields (below) makes for booting a recycled container.
+  // `null`/absent (never launched under #289, or a refused launch) writes
+  // nothing — there is no account name to key the row on.
+  const account = typeof updated.launchedAccount === "string" ? updated.launchedAccount : null;
+  if (accountBurnWrite && account !== null) {
+    await accountBurnWrite(account, updated.burn?.window5hOutput ?? 0);
+  }
 }
 
 /**
@@ -2857,6 +2873,13 @@ export async function syncSessionCycle(
   // in-memory half is then simply not in effect, though the storage lease
   // below still is.
   installCacheGuard?: { inFlight: boolean } | null,
+  // Issue #131 (Stage B): the account-burn mirror write (do.ts's own
+  // `writeFleetAccountBurn`, D1-backed) — kept OUT of this function's own
+  // body, wired by the caller, same "this file stays D1-free" boundary every
+  // other D1-touching port here already respects (see accountLimits' own
+  // wiring at failoverDeps() below). Absent: mirrorBurnToRegistry runs
+  // exactly as it did before this feature, no account-burn write at all.
+  accountBurnWrite?: ((name: string, window5hOutput: number) => Promise<void>) | null,
 ): Promise<void> {
   try {
     const now = syncDeps.now().toISOString();
@@ -2881,7 +2904,7 @@ export async function syncSessionCycle(
     console.error(`studio ${idFallback}: aside ship record failed`, err);
   }
   try {
-    await mirrorBurnToRegistry(storage, recordStudioFn);
+    await mirrorBurnToRegistry(storage, recordStudioFn, accountBurnWrite);
   } catch (err) {
     console.error(`studio ${idFallback}: burn mirror failed`, err);
   }
@@ -3314,6 +3337,51 @@ async function writeFleetAccountLimit(
 }
 
 /**
+ * Issue #131 (Stage B) — the fleet-wide read half of FailoverDeps.accountBurn,
+ * the exact same shape readFleetAccountLimits above reads for accountLimits:
+ * one fleet_state row per configured account, read in parallel, only on the
+ * (already rare) borrow second pass. A row this studio never wrote (another
+ * studio's own mirror, or none at all) reads back identically to one this
+ * studio wrote itself.
+ */
+async function readFleetAccountBurn(
+  db: D1Database, accounts: ClaudeAccount[],
+): Promise<Record<string, { window5hOutput: number }>> {
+  const burn: Record<string, { window5hOutput: number }> = {};
+  await Promise.all(accounts.map(async (a) => {
+    const state = decodeAccountBurnState(await getFlag(db, accountBurnStateKey(a.name)));
+    if (state) burn[a.name] = { window5hOutput: state.window5hOutput };
+  }));
+  return burn;
+}
+
+/**
+ * Issue #131 (Stage B) — the fleet-wide write half, called from
+ * mirrorBurnToRegistry (below) on the SAME 300s tick every studio already
+ * mirrors its own burn on: one fleet_state row, keyed by account NAME (never
+ * a studio id), so every OTHER studio's own borrow second pass sees it. A
+ * studio with no known account (never launched under #289) writes nothing —
+ * there is no account name to key the row on.
+ *
+ * RESIDUAL, stated per this feature's own plan doc: unlike
+ * `StudioStatus.burn` itself (registry.ts's `expireBurnWindow`, issue #181),
+ * this mirrored figure is never read-time-expired against the 5h window —
+ * `AccountBurnState` carries no `window5hStart` (the plan doc's own shape is
+ * `{ window5hOutput: number }` alone). A stopped studio's last mirrored
+ * figure for its account therefore freezes, same residual #181 fixed for the
+ * per-studio figure but NOT extended here — a borrow decision sizing a
+ * stale-but-nonzero number against a genuinely-idle account is a worse
+ * outcome than picking list order, never a wrong SWITCH (accountIsFree, the
+ * fleet-wide LIMIT map, is still what decides whether a candidate is usable
+ * at all; burn only orders free candidates against each other).
+ */
+async function writeFleetAccountBurn(
+  db: D1Database, name: string, window5hOutput: number, now: number,
+): Promise<void> {
+  await setFlag(db, accountBurnStateKey(name), encodeAccountBurnState({ window5hOutput }), now);
+}
+
+/**
  * Issue #354: the DO's in-memory start config — the token the NEXT container
  * start boots (`envVars`) and the account onStart then records (`envAccount`)
  * — derived from ONE account name, so the two can never disagree. Every site
@@ -3343,6 +3411,100 @@ export class LaunchRefusedError extends Error {
 }
 
 /**
+ * Board task #131 ask 2: `fleet recycle <id> --account mapped`. With
+ * FLEET_AUTO_FAILOVER=on, `launchAccount` serves a RECORDED account verbatim,
+ * without even consulting CLAUDE_ACCOUNT_BY_REPO (see that function's own doc
+ * comment) — a map change never reaches a studio an earlier failover recorded
+ * elsewhere. This clears `claudeAccount` (and the `claudeAccountMovedAt`/
+ * `claudeAccountMovedVia`/`claudeAccountMovedBlock` "we're on a non-default
+ * account" audit trail, since a forced-mapped recycle deliberately puts the
+ * studio back on its plain mapped slot, not a failover-moved one) so the very
+ * next `launchAccount` resolution falls through to the mapped slot.
+ *
+ * Called from `StudioDO.recycle()` itself, as the VERY FIRST thing it does —
+ * before recycle's own first `launchAccountOrRefuse` call — never as a
+ * separate route-level pre-step fired before `stub.recycle()` is even
+ * invoked. A route-level clear would reopen the exact race issue #328 closed:
+ * a concurrently-running `runAccountFailover` could rewrite `claudeAccount`
+ * in the gap between a route-level clear and recycle()'s own first read.
+ * Landing the clear inside recycle()'s own atomic flow means BOTH
+ * `launchAccountOrRefuse` calls recycle() makes (the entry-time refusal check
+ * and the later, freshly re-read in-closure resolve — see that closure's own
+ * #328 round 2/3 comment) see the cleared state.
+ */
+export async function clearForceMappedAccount(
+  storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
+): Promise<void> {
+  const existing = (await storage.get(STATUS_KEY)) ?? null;
+  if (existing == null) return;
+  if (
+    existing.claudeAccount == null && existing.claudeAccountMovedAt == null &&
+    existing.claudeAccountMovedVia == null && existing.claudeAccountMovedBlock == null &&
+    // Review round 2 (maestro review of PR #135), finding 2: these two must
+    // be clear too, not just the three above — see the write below.
+    existing.borrowedAccount == null && existing.borrowedFromRepo == null
+  ) {
+    return;
+  }
+  const cleared: StudioStatus = {
+    ...existing,
+    claudeAccount: null, claudeAccountMovedAt: null, claudeAccountMovedVia: null, claudeAccountMovedBlock: null,
+    // Review round 2 (maestro review of PR #135), finding 2 — left set
+    // before this fix: a stale `borrowedAccount` surviving a forced-mapped
+    // recycle made the NEXT hand-back check (failover.ts, gated on exactly
+    // this field) fire spuriously against a studio that was never actually
+    // borrowing anything any more, killing the fresh lead this recycle just
+    // launched out from under it. Cleared alongside the other three
+    // "we're on a non-default account" fields for the identical reason: a
+    // forced-mapped recycle puts the studio back on its plain mapped slot,
+    // not a failover-moved (or borrowed) one.
+    borrowedAccount: null, borrowedFromRepo: null,
+  };
+  await storage.put(STATUS_KEY, cleared);
+  await recordStudioFn(cleared);
+}
+
+/**
+ * Review round 2 (maestro review of PR #135), Minor finding — `recycle()`'s
+ * own `cfg.forceMappedAccount` clear (`clearForceMappedAccount`, just above)
+ * must not run at all when the MAPPED slot itself cannot launch: before this
+ * fix, a missing mapped secret still wiped `claudeAccount`/the moved-audit
+ * trail (via `clearForceMappedAccount`) before `launchAccountOrRefuse`
+ * discovered the slot was unlaunchable and refused — no container was ever
+ * touched (correct), but the row lost information on what was, underneath,
+ * still a no-op refusal. This is called FIRST, before the clear, so a
+ * refusal leaves the row exactly as it was.
+ *
+ * Deliberately not `launchAccountOrRefuse` itself: that function always
+ * resolves against `existing?.claudeAccount` (the RECORDED account) when
+ * `FLEET_AUTO_FAILOVER` is on, which is exactly the resolution `--account
+ * mapped` exists to bypass. `launchAccount(env, repo, null)` forces the
+ * MAPPED slot's own resolution instead, regardless of the flag or any
+ * recorded account — the exact question this verb is asking.
+ *
+ * On refusal, writes the SAME `degraded`/error shape `launchAccountOrRefuse`
+ * already writes for an ordinary refusal (so `fleet ls` shows why, same as
+ * any other refused launch) and throws the same `LaunchRefusedError` — but
+ * leaves `claudeAccount` and every other field this call does not own
+ * completely untouched, since nothing here was ever cleared to begin with.
+ */
+export async function refuseUnlessMappedAccountLaunchable(
+  env: Env, id: string, storage: StudioStorage, recordStudioFn: (status: StudioStatus) => Promise<void>,
+): Promise<void> {
+  const launch = launchAccount(env, parseStudioId(id)?.repo ?? null, null);
+  if (launch.ok) return;
+  const existing = (await storage.get(STATUS_KEY)) ?? null;
+  const base = existing ?? {
+    id, tailscaleHost: null, lastRefresh: null, lastRefreshError: null, burn: null,
+    spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+  };
+  const refused: StudioStatus = { ...base, id, state: "degraded", error: launch.error, launchedAccount: null };
+  await storage.put(STATUS_KEY, refused);
+  await recordStudioFn(refused);
+  throw new LaunchRefusedError(launch.error);
+}
+
+/**
  * Issue #271: the gate provision, restart and recycle pass before touching a
  * container. A repo mapped to an account whose secret is not set REFUSES:
  * the row goes `degraded` with the reason (the operator reads it in `fleet
@@ -3357,8 +3519,14 @@ export async function launchAccountOrRefuse(
   if (launch.ok) {
     // #273 r2: flag off, an earlier failover's recorded account is stale — this
     // launch is on the mapped one, so the row stops naming the old one.
+    // Review round 2 (maestro review of PR #135), finding 2: `borrowedAccount`/
+    // `borrowedFromRepo` clear alongside it — same stale-hand-back hazard
+    // `clearForceMappedAccount`'s own identical fix addresses (that doc
+    // comment has the full reasoning): a stale borrow flag surviving a
+    // flag-off launch would make the next hand-back check fire against a
+    // studio that is not actually borrowing anything any more.
     if (!autoFailoverOn(env) && existing?.claudeAccount != null) {
-      const cleared: StudioStatus = { ...existing, claudeAccount: null };
+      const cleared: StudioStatus = { ...existing, claudeAccount: null, borrowedAccount: null, borrowedFromRepo: null };
       await storage.put(STATUS_KEY, cleared);
       await recordStudioFn(cleared);
     }
@@ -5639,6 +5807,13 @@ export class StudioDO extends Sandbox<Env> {
       // where an unswitched studio is; cards name labels.
       autoFailover: autoFailoverOn(this.env),
       primary: this.primaryAccount(),
+      // Review round 3 (2nd review of PR #135, 2026-09-30) — see
+      // FailoverDeps.primaryIsMapped's own doc comment (failover.ts) for why
+      // `primary != null` alone can never gate the borrowedAccount write:
+      // `primaryAccount()` above never returns null in the no-map case, it
+      // falls back to the first configured account. THIS is the actual
+      // discriminator — a genuine CLAUDE_ACCOUNT_BY_REPO entry for this repo.
+      primaryIsMapped: this.primaryIsMapped(),
       // Issue #103: this repo's own mapped primary must never be excluded
       // for itself — only accounts CLAUDE_ACCOUNT_BY_REPO reserves for a
       // DIFFERENT repo are.
@@ -5652,6 +5827,16 @@ export class StudioDO extends Sandbox<Env> {
         read: () => readFleetAccountLimits(this.env.DB, resolveClaudeAccounts(this.env)),
         write: (name: string, until: string | null, seenAt: string) => writeFleetAccountLimit(this.env.DB, name, until, seenAt),
       },
+      // Issue #131 (Stage B): fleet-wide per-account 5h burn, same D1-backed
+      // shape/reasoning as accountLimits just above, read only on the borrow
+      // second pass.
+      accountBurn: {
+        read: () => readFleetAccountBurn(this.env.DB, resolveClaudeAccounts(this.env)),
+      },
+      // Issue #131 (Stage B): names the repo a borrowed account is reserved
+      // for, in the loud "borrowed"/"returned" notify messages only — never a
+      // failover decision (that stays keyed on `reservedAccounts` above).
+      otherRepoOf: (name: string) => repoForAccount(this.env, name),
       exec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.sync, env }),
       now: () => new Date(),
       notify: async (message: string) => {
@@ -5680,6 +5865,17 @@ export class StudioDO extends Sandbox<Env> {
   private primaryAccount(): string | null {
     const launch = launchAccount(this.env, parseStudioId(this.selfId())?.repo ?? null, null);
     return launch.ok ? launch.name : null;
+  }
+
+  /** Review round 3 (2nd review of PR #135, 2026-09-30) — true only when THIS
+   *  studio's own repo is a genuine KEY in the parsed `CLAUDE_ACCOUNT_BY_REPO`
+   *  map, never merely because `primaryAccount()` above resolved to SOME
+   *  account (it always does, mapped or not — see that method's own "first
+   *  set account" fallback). See failover.ts's `FailoverDeps.primaryIsMapped`
+   *  for the full reasoning this method exists to satisfy. */
+  private primaryIsMapped(): boolean {
+    const repo = parseStudioId(this.selfId())?.repo ?? null;
+    return repo !== null && parseAccountMap(this.env.CLAUDE_ACCOUNT_BY_REPO)[repo] !== undefined;
   }
 
   /** The account this studio is recorded on (StudioStatus.claudeAccount), for
@@ -6207,6 +6403,20 @@ export class StudioDO extends Sandbox<Env> {
    * two covers does not come back.
    */
   async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {
+    // Board task #131 ask 2: `fleet recycle <id> --account mapped`. This
+    // clear runs FIRST — before either launchAccountOrRefuse call below — so
+    // both see the cleared state and fall through to CLAUDE_ACCOUNT_BY_REPO's
+    // mapped slot rather than a stale recorded (possibly failed-over)
+    // account. See clearForceMappedAccount's own doc comment for why this
+    // lives here, inside recycle()'s own atomic flow, rather than as a
+    // route-level pre-step.
+    if (cfg.forceMappedAccount) {
+      // Review round 2 (maestro review of PR #135), Minor finding: refuse
+      // BEFORE clearing — see refuseUnlessMappedAccountLaunchable's own doc
+      // comment.
+      await refuseUnlessMappedAccountLaunchable(this.env, this.selfId(), this.ctx.storage, this.recordFn());
+      await clearForceMappedAccount(this.ctx.storage, this.recordFn());
+    }
     // Issue #271: refuse BEFORE recycle's destroy — an unlaunchable account
     // must not cost a running studio its container. Issue #328 fix round 2:
     // this resolution is NOT reused below — recycleWithSync's pre-destroy
@@ -6657,6 +6867,10 @@ export class StudioDO extends Sandbox<Env> {
         // Round 3 review, item 3: the SAME guard object every tick this
         // isolate runs — see installCacheSaveGuard's own doc comment above.
         this.installCacheSaveGuard,
+        // Issue #131 (Stage B): mirrors this studio's own 5h-window burn onto
+        // its account's fleet-wide row, so another studio's own borrow
+        // second pass (failoverDeps().accountBurn, above) can read it.
+        (name: string, window5hOutput: number) => writeFleetAccountBurn(this.env.DB, name, window5hOutput, Date.now()),
       ),
       () => this.rearm("syncSession", SYNC_SESSION_SECONDS),
       "syncSession",

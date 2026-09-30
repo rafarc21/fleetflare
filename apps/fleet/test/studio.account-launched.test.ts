@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { env as testEnv } from "cloudflare:test";
-import { launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch } from "../src/studio/do";
+import {
+  launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch, clearForceMappedAccount,
+  refuseUnlessMappedAccountLaunchable,
+} from "../src/studio/do";
 import { withAccountDisplay } from "../src/studio/registry";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
@@ -384,6 +387,188 @@ describe("end-state sanity check (not a regression test): a map change + recycle
     const shown = withAccountDisplay(env, row);
     expect(shown.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(shown.claudeAccountNext).toBeUndefined();
+  });
+});
+
+// Board task #131 ask 2: `fleet recycle <id> --account mapped`. See the
+// header on the #328 wiring block above for why a source pin is the only way
+// to regression-cover recycle()'s actual statement ordering — the DO cannot
+// be constructed under vitest-pool-workers.
+describe("StudioDO.recycle wiring — forced-mapped clear runs BEFORE either launchAccountOrRefuse call (#131 ask 2)", () => {
+  const doSrc: string = (testEnv as unknown as { TEST_STUDIO_DO_SRC: string }).TEST_STUDIO_DO_SRC;
+  const body = (sig: string): string => {
+    const start = doSrc.indexOf(sig);
+    if (start === -1) throw new Error(`not found: ${sig}`);
+    return doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
+  };
+  const recycleBody = body("async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {");
+
+  it("cfg.forceMappedAccount is checked before recycle's first launchAccountOrRefuse call", () => {
+    const clearIdx = recycleBody.indexOf("cfg.forceMappedAccount");
+    const firstLaunchIdx = recycleBody.indexOf("launchAccountOrRefuse(");
+    expect(clearIdx).toBeGreaterThan(-1);
+    expect(firstLaunchIdx).toBeGreaterThan(-1);
+    expect(clearIdx).toBeLessThan(firstLaunchIdx);
+  });
+
+  it("the clear calls clearForceMappedAccount, not a hand-rolled inline write", () => {
+    const clearIdx = recycleBody.indexOf("cfg.forceMappedAccount");
+    // Review round 2 (maestro review of PR #135), Minor finding: widened
+    // from 200 — refuseUnlessMappedAccountLaunchable's own call (and its
+    // one-line comment) now sits between the `if` and this clear.
+    const nextLines = recycleBody.slice(clearIdx, clearIdx + 500);
+    expect(nextLines).toContain("clearForceMappedAccount(this.ctx.storage, this.recordFn())");
+  });
+
+  it("refuseUnlessMappedAccountLaunchable is checked before the clear (Minor finding, review round 2)", () => {
+    const clearIdx = recycleBody.indexOf("cfg.forceMappedAccount");
+    const refuseIdx = recycleBody.indexOf("refuseUnlessMappedAccountLaunchable(");
+    const clearCallIdx = recycleBody.indexOf("clearForceMappedAccount(this.ctx.storage, this.recordFn())");
+    expect(refuseIdx).toBeGreaterThan(clearIdx);
+    expect(refuseIdx).toBeLessThan(clearCallIdx);
+  });
+});
+
+// Same race, at the primitive level — composing the real
+// clearForceMappedAccount + launchAccountOrRefuse the way recycle() itself
+// does, rather than executing do.ts's actual closure (the DO cannot be
+// constructed here — see the #328 block above for the same caveat). Proves
+// the MECHANISM: a studio recorded on a failed-over account, with
+// FLEET_AUTO_FAILOVER=on (the exact case launchAccount's own doc comment
+// says never consults the map), still resolves the mapped slot once
+// clearForceMappedAccount has run — and is completely unaffected when it has
+// not (a plain recycle).
+describe("clearForceMappedAccount — the primitive recycle()'s forced-mapped clear composes (#131 ask 2)", () => {
+  const env = envWith({ ...ALL, FLEET_AUTO_FAILOVER: "on" });
+
+  it("clears claudeAccount and the moved-audit trail, so the VERY NEXT launchAccountOrRefuse call already sees the cleared state and falls through to the mapped slot", async () => {
+    const storage = fakeStorage(status({
+      claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      claudeAccountMovedAt: "2026-09-29T00:00:00Z", claudeAccountMovedVia: "inline", claudeAccountMovedBlock: "rate-limit",
+    }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+
+    // recycle()'s own entry-time act, before its first launchAccountOrRefuse.
+    await clearForceMappedAccount(storage, recordFn);
+    const cleared = (await storage.get(STATUS_KEY))!;
+    expect(cleared.claudeAccount).toBeNull();
+    expect(cleared.claudeAccountMovedAt).toBeNull();
+    expect(cleared.claudeAccountMovedVia).toBeNull();
+    expect(cleared.claudeAccountMovedBlock).toBeNull();
+
+    // recycle()'s own entry-time launchAccountOrRefuse (issue #271's early
+    // refuse) — without the clear above this would resolve
+    // CLAUDE_CODE_OAUTH_TOKEN_3 again, unconditionally (launchAccount's own
+    // doc comment: auto-failover on + a recorded account never consults the
+    // map at all). No repo mapping is set, so the mapped slot is the first
+    // configured account.
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn);
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN");
+  });
+
+  it("a plain recycle never calls this — claudeAccount (and the moved-audit trail) is preserved exactly as before", async () => {
+    const storage = fakeStorage(status({
+      claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      claudeAccountMovedVia: "inline",
+    }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+    // forceMappedAccount not set: recycle()'s own `if (cfg.forceMappedAccount)`
+    // gate (do.ts) means clearForceMappedAccount is never called at all.
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn);
+    expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_3"); // unaffected: still the recorded (failed-over) account
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
+    expect(row.claudeAccountMovedVia).toBe("inline");
+  });
+
+  it("no-op on a row already clear (nothing to write, nothing recorded)", async () => {
+    const storage = fakeStorage(status());
+    const recorded: StudioStatus[] = [];
+    await clearForceMappedAccount(storage, async (s) => { recorded.push(s); });
+    expect(recorded).toHaveLength(0);
+  });
+});
+
+// Review round 2 (maestro review of PR #135), finding 2 — clearForceMappedAccount
+// left borrowedAccount/borrowedFromRepo set, and so did the sibling #273 r2
+// stale-clear in launchAccountOrRefuse. A stale borrow flag surviving either
+// one makes the NEXT hand-back check (failover.ts, gated on exactly that
+// field) fire against a studio that is not actually borrowing anything any
+// more, killing the fresh lead the clear just launched out from under it.
+describe("clearForceMappedAccount / launchAccountOrRefuse — the borrow flags clear too (review round 2 finding 2)", () => {
+  it("clearForceMappedAccount clears borrowedAccount/borrowedFromRepo alongside the moved-audit trail", async () => {
+    const storage = fakeStorage(status({
+      claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
+      borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
+    }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+    await clearForceMappedAccount(storage, recordFn);
+    const cleared = (await storage.get(STATUS_KEY))!;
+    expect(cleared.borrowedAccount).toBeNull();
+    expect(cleared.borrowedFromRepo).toBeNull();
+  });
+
+  it("the #273 r2 flag-off stale-clear in launchAccountOrRefuse also clears borrowedAccount/borrowedFromRepo", async () => {
+    const off = envWith(ALL); // FLEET_AUTO_FAILOVER unset -> off
+    const storage = fakeStorage(status({
+      claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", borrowedFromRepo: "repo-b",
+    }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+    await launchAccountOrRefuse(off, storage, "demosite-life--pilot", recordFn);
+    const row = (await storage.get(STATUS_KEY))!;
+    expect(row.claudeAccount).toBeNull();
+    expect(row.borrowedAccount).toBeNull();
+    expect(row.borrowedFromRepo).toBeNull();
+  });
+});
+
+// Review round 2 (maestro review of PR #135), Minor finding — a missing
+// mapped secret used to refuse AFTER clearForceMappedAccount already wiped
+// the record: no container was ever touched (correct), but the row lost
+// claudeAccount/the moved-audit trail/the borrow flags on what was,
+// underneath, still a no-op refusal.
+describe("refuseUnlessMappedAccountLaunchable — refuses BEFORE the clear when the mapped slot's secret is missing (Minor finding, review round 2)", () => {
+  it("throws, and leaves claudeAccount/the moved-audit trail/the borrow flags completely untouched", async () => {
+    // MAP_2 maps demosite-life -> slot 2, and CLAUDE_CODE_OAUTH_TOKEN_2 is
+    // deliberately NOT set here — the mapped slot's own secret is missing.
+    const missingMapped = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: MAP_2, FLEET_AUTO_FAILOVER: "on" });
+    const before = status({
+      claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3",
+      claudeAccountMovedAt: "2026-09-29T00:00:00Z", claudeAccountMovedVia: "inline", claudeAccountMovedBlock: "rate-limit",
+      borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", borrowedFromRepo: "repo-b",
+    });
+    const storage = fakeStorage(before);
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+
+    // recycle()'s own new pre-clear check, called BEFORE clearForceMappedAccount.
+    await expect(
+      refuseUnlessMappedAccountLaunchable(missingMapped, "demosite-life--pilot", storage, recordFn),
+    ).rejects.toThrow(/refusing to launch/);
+
+    const row = (await storage.get(STATUS_KEY))!;
+    // Everything clearForceMappedAccount would have cleared stays exactly as
+    // it was before this call — the whole point of checking first.
+    expect(row.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
+    expect(row.claudeAccountMovedAt).toBe("2026-09-29T00:00:00Z");
+    expect(row.claudeAccountMovedVia).toBe("inline");
+    expect(row.claudeAccountMovedBlock).toBe("rate-limit");
+    expect(row.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
+    expect(row.borrowedFromRepo).toBe("repo-b");
+    // Same refusal shape an ordinary launchAccountOrRefuse refusal writes,
+    // so `fleet ls` shows why — a refusal nobody can see is a refusal
+    // nobody can audit.
+    expect(row.state).toBe("degraded");
+    expect(row.error).toContain("CLAUDE_CODE_OAUTH_TOKEN_2");
+  });
+
+  it("a launchable mapped slot: a no-op, nothing written, nothing thrown", async () => {
+    const mapped = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2, FLEET_AUTO_FAILOVER: "on" });
+    const storage = fakeStorage(status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }));
+    const recorded: StudioStatus[] = [];
+    await refuseUnlessMappedAccountLaunchable(mapped, "demosite-life--pilot", storage, async (s) => { recorded.push(s); });
+    expect(recorded).toHaveLength(0);
+    expect((await storage.get(STATUS_KEY))?.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
   });
 });
 

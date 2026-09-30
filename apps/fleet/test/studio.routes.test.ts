@@ -2752,6 +2752,24 @@ describe("repair verbs name the failing side (#96)", () => {
     expect(provision.mock.calls.length).toBe(2);
   });
 
+  // Board task #131 ask 2: `fleet recycle <id> --account mapped` rides
+  // `?account=mapped`, same query-string convention as `?fresh-session=true`
+  // above, and reaches the DO as cfg.forceMappedAccount for that ONE call.
+  // Absent, or any other value, leaves the field absent.
+  it("#131: recycle ?account=mapped reaches the DO as cfg.forceMappedAccount; absent (or any other value), no field", async () => {
+    authorized();
+    const { testEnv, fakeNs } = envWithFakeStudio();
+    const stub = fakeNs.get();
+    const recycle = vi.fn(async () => ({ id: STUDIO_ID, state: "running" }) as StudioStatus);
+    const ns = { ...fakeNs, get: () => ({ ...stub, recycle }) };
+    const e = { ...testEnv, STUDIO: ns } as unknown as Env;
+    await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/recycle`, { method: "POST" }), e);
+    await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/recycle?account=mapped`, { method: "POST" }), e);
+    await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/recycle?account=primary`, { method: "POST" }), e);
+    const rcfg = (recycle.mock.calls as unknown[][]).map((c) => (c[0] as ProvisionConfig).forceMappedAccount);
+    expect(rcfg).toEqual([undefined, true, undefined]);
+  });
+
   it("inspect: a DO failure says only what is known — the container may or may not have been reached", async () => {
     authorized();
     const res = await handleStudio(
