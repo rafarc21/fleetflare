@@ -1767,7 +1767,7 @@ export async function healDegradedRowAndWake(d: DegradedHealDeps): Promise<Studi
   const heal = d.recovery.shouldHeal && !d.opLockFresh;
   if (!heal) return null;
   const clearedAt = d.now.toISOString();
-  const cleared: StudioStatus = {
+  let cleared: StudioStatus = {
     ...d.existing,
     rateLimited: null,
     state: "running",
@@ -1779,6 +1779,12 @@ export async function healDegradedRowAndWake(d: DegradedHealDeps): Promise<Studi
     // `operatorParked: null` here (field removed entirely, see
     // StudioStatus.exhaustionKind's own doc comment for the full history).
     exhaustionKind: null,
+    // Maestro round-2 review (PR #170), finding 2 — a fresh heal starts with
+    // no pending retry; see this function's own write just below for when
+    // this gets armed, and StudioStatus.pendingHealWakeAttempts's own doc
+    // comment for the full mechanism.
+    pendingHealWakeAttempts: null,
+    pendingHealWakeLastTriedAt: null,
   };
   await d.storage.put(STATUS_KEY, cleared);
   await d.recordStudioFn(cleared);
@@ -1801,9 +1807,87 @@ export async function healDegradedRowAndWake(d: DegradedHealDeps): Promise<Studi
       switchedBlock: async () => cleared.failoverBlock ?? null,
       limitSighting: async () => d.sighting,
     };
-    await runGatedWake(gatedDeps, AUTO_CONTINUE_PROMPT);
+    const outcome = await runGatedWake(gatedDeps, AUTO_CONTINUE_PROMPT);
+    // Maestro round-2 review (PR #170), finding 2 — the outcome used to be
+    // discarded entirely here: the row above already flipped to `"running"`,
+    // so a refused/skipped/failed wake (a transient pane-probe hiccup,
+    // claude briefly not in the window, anything) lost the opportunity
+    // forever. Arm the bounded retry instead of dropping it — a SECOND
+    // write, same tick, same reasoning #109's own `autoContinueAttempt`
+    // already gives for a separate bookkeeping write after its own gated
+    // wake attempt.
+    if (!outcome.ok) {
+      cleared = { ...cleared, pendingHealWakeAttempts: 1, pendingHealWakeLastTriedAt: clearedAt };
+      await d.storage.put(STATUS_KEY, cleared);
+      await d.recordStudioFn(cleared);
+    }
   }
   return cleared;
+}
+
+/**
+ * Maestro round-2 review (PR #170), finding 2 — the bounded retry itself.
+ * See StudioStatus.pendingHealWakeAttempts's own doc comment for the full
+ * mechanism and why it mirrors `autoContinueAt`/`autoContinueLastTriedAt`'s
+ * own hourly cadence (`AUTO_CONTINUE_RETRY_MS`) rather than a new shape.
+ *
+ * Called from BOTH cadences that ever heal a degraded row — the SAME
+ * dual-path lesson `healDegradedRowAndWake` itself (finding 3) already
+ * states — on every ordinary tick, regardless of whether anything else
+ * happened this tick. A no-op (no write, no exec) when the row carries no
+ * pending retry at all, the overwhelming majority of ticks.
+ */
+export interface PendingHealWakeRetryDeps {
+  storage: StudioStorage;
+  recordStudioFn: (status: StudioStatus) => Promise<void>;
+  existing: StudioStatus;
+  now: Date;
+  studioId: string;
+  exec: WakeExec;
+  sighting: LimitSighting | null;
+  /** See `DegradedHealDeps.safeToWake`'s own doc comment — the identical
+   *  signal, threaded the identical way by both callers. */
+  safeToWake: boolean;
+}
+
+/** Issue #158 review finding 2: the attempt cap past which a pending heal
+ *  wake gives up rather than retrying forever — #109's own hourly-retry
+ *  mechanism is bounded by the row leaving `degraded` state entirely
+ *  (nothing equivalent exists here, the row is already `"running"`), so an
+ *  explicit count is what makes this "bounded," not indefinite. */
+export const PENDING_HEAL_WAKE_MAX_ATTEMPTS = 3;
+
+export async function retryPendingHealWake(d: PendingHealWakeRetryDeps): Promise<void> {
+  if (!d.existing.pendingHealWakeLastTriedAt || d.existing.state !== "running") return;
+  const attempts = d.existing.pendingHealWakeAttempts ?? 0;
+  if (attempts >= PENDING_HEAL_WAKE_MAX_ATTEMPTS) {
+    // Bound hit: give up silently (no notify — the row already heals and
+    // reads correctly; only the extra nudge is foregone) and clear the
+    // bookkeeping so this is never re-evaluated for this stale opportunity.
+    const row = { ...d.existing, pendingHealWakeAttempts: null, pendingHealWakeLastTriedAt: null };
+    await d.storage.put(STATUS_KEY, row);
+    await d.recordStudioFn(row);
+    return;
+  }
+  // Same hourly cadence #109's own `autoContinueDue` (unknown-reset branch)
+  // already models — mirrored, not reinvented.
+  const due = d.now.getTime() - Date.parse(d.existing.pendingHealWakeLastTriedAt) >= AUTO_CONTINUE_RETRY_MS;
+  if (!due || !d.safeToWake) return;
+  const { runGatedWake } = await import("./wake");
+  const gatedDeps: GatedWakeDeps = {
+    recordedState: async () => d.existing.state,
+    exec: d.exec,
+    now: () => d.now,
+    studioId: d.studioId,
+    switchedBlock: async () => d.existing.failoverBlock ?? null,
+    limitSighting: async () => d.sighting,
+  };
+  const outcome = await runGatedWake(gatedDeps, AUTO_CONTINUE_PROMPT);
+  const row = outcome.ok
+    ? { ...d.existing, pendingHealWakeAttempts: null, pendingHealWakeLastTriedAt: null }
+    : { ...d.existing, pendingHealWakeAttempts: attempts + 1, pendingHealWakeLastTriedAt: d.now.toISOString() };
+  await d.storage.put(STATUS_KEY, row);
+  await d.recordStudioFn(row);
 }
 
 /**
@@ -2027,6 +2111,15 @@ export async function runAccountFailover(
       await recordStudioFn(cleared);
       rowNow = cleared;
     }
+    // Maestro round-2 review (PR #170), finding 2 — the bounded retry for a
+    // heal wake that was refused/skipped/failed on an EARLIER tick (never
+    // only the tick heal itself fired on, which is why this runs
+    // unconditionally here rather than inside the `if (healed)` branch
+    // above): a no-op unless `rowNow` actually carries pending bookkeeping.
+    await retryPendingHealWake({
+      storage, recordStudioFn, existing: rowNow, now: deps.now(), studioId, exec: deps.exec, sighting,
+      safeToWake: !verdict.repainted,
+    });
     // Issue #131 (Stage B) — hand-back. This exact tick already runs on a
     // FIXED CADENCE (SYNC_SESSION_SECONDS, do.ts's syncSessionCycle)
     // regardless of whether a limit is currently observed — confirmed by
