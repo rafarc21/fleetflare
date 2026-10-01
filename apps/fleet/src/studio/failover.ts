@@ -1969,17 +1969,34 @@ export async function runAccountFailover(
   // `respawn-pane -k` clears tmux's history: the baseline is always "whatever
   // count exists at the very first post-switch sighting," and only a count
   // that GROWS beyond that baseline counts as fresh.
-  // RED commit (TDD): round-1's time-bounded guard, kept here UNCHANGED for
-  // this commit so the new round-2 tests below land as genuinely failing
-  // (RED) against it. The very next commit replaces this with the round-2
-  // occurrence-count fix (see the primitives/doc comment above) and turns
-  // these same tests GREEN.
   const key = verdict.inline ? limitBlockKey(verdict) : null;
-  const movedRecently = existing.claudeAccountMovedAt != null
-    && !Number.isNaN(Date.parse(existing.claudeAccountMovedAt))
-    && deps.now().getTime() - Date.parse(existing.claudeAccountMovedAt) < FLAP_GUARD_MINUTES * 60_000;
-  if (key !== null && existing.failoverBlock === key && movedRecently) {
-    return { kind: "rerender", block: key };
+  if (key !== null && existing.failoverBlock === key) {
+    if (!verdict.dead) {
+      // Original, pre-round-1 behavior, restored: see the long comment above.
+      return { kind: "rerender", block: key };
+    }
+    // Occurrence-count evidence for the dead-account case only. See
+    // countDeadAccountOccurrences' and failoverBlockOccurrences' own doc
+    // comments for the full reasoning.
+    const scroll = await deps.exec(deadAccountScrollbackCmd());
+    const count = countDeadAccountOccurrences(scroll.stdout);
+    const baseline = existing.failoverBlockOccurrences ?? null;
+    if (baseline === null) {
+      // First sighting since the switch: this IS the baseline, not yet
+      // evidence either way — record it and treat this tick as a rerender,
+      // same as the very first `--continue` redraw always has been.
+      const withBaseline: StudioStatus = { ...existing, failoverBlockOccurrences: count };
+      await storage.put(STATUS_KEY, withBaseline);
+      await recordStudioFn(withBaseline);
+      existing = withBaseline;
+      return { kind: "rerender", block: key };
+    }
+    if (count <= baseline) {
+      return { kind: "rerender", block: key };
+    }
+    // count > baseline: a genuinely NEW occurrence printed since the switch —
+    // fall through to the ordinary inline-evidence handling below, which
+    // marks THIS account dead too and looks for somewhere else to go.
   }
   // Issue #102 — no flapping. Guards ONLY the one path with a genuinely
   // unguarded residual: a switch that matched a SELECT-style modal
