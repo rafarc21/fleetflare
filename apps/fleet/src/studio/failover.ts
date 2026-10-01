@@ -1979,9 +1979,36 @@ export async function runAccountFailover(
     // countDeadAccountOccurrences' and failoverBlockOccurrences' own doc
     // comments for the full reasoning.
     const scroll = await deps.exec(deadAccountScrollbackCmd());
+    // Fresh-context review of PR #152 round 2, finding 1 — `scroll` is an
+    // outbound exec's own result and is NEVER trusted un-validated, same as
+    // `detectRateLimitModal`'s own `parts.length !== 2`/empty-length checks on
+    // ITS capture. A non-zero exit or empty stdout (a container exec timeout,
+    // a tmux hiccup, a pane target momentarily unavailable right after
+    // `respawn-pane -k`) is NEVER evidence of anything, including a baseline:
+    // if this happened to be the FIRST post-switch sighting, trusting it would
+    // record a wrongly-empty baseline of 0 even though the real, already-
+    // present, non-fresh count could be 1 or more — and the very next tick's
+    // successful capture would then misread its own true count as fresh
+    // evidence (count > the wrongly-recorded 0), the exact P7 failure class
+    // reached via exec unreliability instead of elapsed time. Declining to
+    // touch `failoverBlockOccurrences` at all here means a later, successful
+    // capture gets to establish (or compare against) a real baseline instead
+    // of one poisoned by this glitch.
+    if (scroll.code !== 0 || scroll.stdout.trim().length === 0) {
+      return { kind: "rerender", block: key };
+    }
     const count = countDeadAccountOccurrences(scroll.stdout);
     const baseline = existing.failoverBlockOccurrences ?? null;
     if (baseline === null) {
+      // Issue #99 review (same reasoning, reapplied to this exec): the
+      // scrollback capture above is itself an outbound exec with the Durable
+      // Object's input gate open across it, and a destroy can land meanwhile.
+      // Writing `existing` unconditionally here would resurrect/overwrite the
+      // row with stale content over whatever the destroy path already
+      // finalized.
+      if (await destroyLanded()) {
+        return { kind: "skipped", reason: "studio stopped during the dead-account scrollback capture" };
+      }
       // First sighting since the switch: this IS the baseline, not yet
       // evidence either way — record it and treat this tick as a rerender,
       // same as the very first `--continue` redraw always has been.
