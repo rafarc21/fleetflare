@@ -10,7 +10,7 @@ describe("code-reviewer blueprint — Spec + Standards axes (#162)", () => {
   test("still parses as a valid read-only member", () => {
     const m = validateMemberFile("code-reviewer.md", raw);
     expect(m.name).toBe("code-reviewer");
-    expect(m.tools).toBe("Read, Glob, Grep");
+    expect(m.tools).toBe("Read, Glob, Grep, Bash(git diff *), Bash(git log *), Bash(git show *)");
   });
 
   test("declares both axes by name", () => {
