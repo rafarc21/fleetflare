@@ -4,7 +4,7 @@ import {
   PANE_CAPTURE_MARKER, AUTO_CONTINUE_PROMPT, type FailoverDeps,
 } from "../src/studio/failover";
 import { PANE_PROBE_CMD, PANE_SCREEN_CMD, wakeCmd } from "../src/studio/wake";
-import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
+import { STATUS_KEY, OPERATION_KEY, type StudioStorage, type OperationInFlight } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
 import type { ClaudeAccount } from "../src/studio/accounts";
 import { RULE_PROMPT } from "./fixtures/rate-limit-panes";
@@ -316,34 +316,95 @@ describe("issue #158 — inline exhaustion gets a wake once its own reset passes
     expect(stored?.state).toBe("running");
   });
 
-  // Review of #158 (fresh-context, this same PR): `recovery.parked`
-  // (evaluateDegradedRecovery) is true for ANY exhaustedMessagePrefix row —
-  // parkedMessage (#271, FLEET_AUTO_FAILOVER off) starts with the exact same
-  // prefix exhaustedMessage does, by design (its own doc comment: "so #214's
-  // heal clears it the same way once the pane recovers"). An INLINE block
-  // observed while a second account sits free writes via parkedMessage (the
-  // `!next` branch's `candidate` is non-null) with `rateLimited` shaped
-  // EXACTLY like a genuine inline-exhaustion row (no `select`, no `dead` —
-  // both independent of autoFailover). The existing "'parked' ... never
-  // writes or attempts auto-continue" test above only drives MODAL_PANE,
-  // which accidentally masks this gap: `select` is true there, so the old
-  // (wrong) exclusion happened to hold anyway. This test drives INLINE_PANE
-  // instead — the operator's own deliberate #271 choice must stay untouched,
-  // no wake ever, matching this feature's plan Scope/OUT section.
-  it("'parked' via an INLINE block (auto-failover off, a candidate exists) never gets a heal wake either", async () => {
+  // Maestro review round 2 (PR #170, direct against real Claude Code
+  // behavior), finding 3 — the test THIS replaces got the exclusion wrong.
+  // #158's own text is explicit: the inline-reset wake fires "independent of
+  // FLEET_AUTO_FAILOVER" — only a SELECT-MODAL-triggered park must stay
+  // permanently manual (that's #109's ORIGINAL scope, via `rateLimited.select`,
+  // nothing to do with auto-failover). An INLINE-triggered park (a free
+  // second account existed, but `autoFailover` was off so nothing switched)
+  // is, evidence-wise, indistinguishable from a genuine inline exhaustion —
+  // same reset, same self-clearing shape — and #158 explicitly wants THIS
+  // case to heal and wake too, same as any other inline block. `exhaustionKind`
+  // (stamped from `verdict.inline`/`verdict.dead` at write time, independent
+  // of `parkedOn`/auto-failover) is what the heal now reads, replacing the
+  // old `operatorParked` exclusion that wrongly blocked this case.
+  it("'parked' via an INLINE block (auto-failover off, a candidate existed) still gets the heal wake, same as any inline exhaustion", async () => {
     const h = harness({ accounts: TWO_ACCOUNTS, pane: INLINE_PANE, autoFailover: false });
 
     const first = await h.run();
     expect(first).toEqual({ kind: "parked", account: "CLAUDE_CODE_OAUTH_TOKEN" });
 
-    // The pane recovers and its printed reset has passed — exactly the
-    // shape that fires a heal wake for a GENUINE inline exhaustion.
+    // The pane recovers and its printed reset has passed.
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    const second = await h.run();
+
+    expect(second.kind).toBe("recovered");
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toHaveLength(1);
+  });
+
+  // Finding 3's counterpart: a SELECT-MODAL-triggered park must stay
+  // permanently manual — #109's original scope, untouched by this change.
+  // Pins the existing "'parked' (auto-failover off...) never writes or
+  // attempts auto-continue" test's own claim specifically against the heal
+  // wake too (that test, above, only pins the INITIAL tick; this one drives
+  // a second, healing tick the same way the inline case above does).
+  it("'parked' via a SELECT-MODAL block (auto-failover off) never gets a heal wake — stays permanently manual", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: MODAL_PANE, autoFailover: false });
+
+    const first = await h.run();
+    expect(first).toEqual({ kind: "parked", account: "CLAUDE_CODE_OAUTH_TOKEN" });
+
     h.setPane(RECOVERED_IDLE);
     h.setNow(new Date("2026-09-30T14:00:00.000Z"));
     const second = await h.run();
 
     expect(second.kind).toBe("recovered");
     expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]);
+  });
+
+  // Maestro review round 2 (PR #170), finding 4 — `runAccountFailover`'s
+  // `working` branch independently nulls `existing.rateLimited` whenever the
+  // pane shows no current limit, REGARDLESS of whether heal itself fired
+  // this tick (the `else if (existing.rateLimited || forget)` write,
+  // unrelated to the heal gate). Before `exhaustionKind`, the heal wake's own
+  // `existing.rateLimited != null` check read this nulled value on a LATER
+  // tick where heal genuinely succeeds, silently losing the wake.
+  // `exhaustionKind` is never touched by that independent write, so it
+  // survives across ticks the way `rateLimited`'s own live shape never did.
+  it("a tick that nulls rateLimited WITHOUT healing (op lock fresh) does not cost a LATER genuine heal its wake", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: INLINE_PANE });
+
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    // Tick 2: the pane has ALREADY recovered and the reset has passed (the
+    // evidence `evaluateDegradedRecovery` would otherwise heal on), but a
+    // bring-up holds a FRESH operation lock — `healDegradedRowAndWake`'s own
+    // `opLockFresh` gate refuses to heal this tick. The row stays `degraded`,
+    // yet `runAccountFailover`'s OWN independent `rateLimited`-null write
+    // still fires (the pane shows no current limit).
+    const operation: OperationInFlight = { op: "restart", since: "2026-09-30T13:58:00.000Z" };
+    await h.storage.put(OPERATION_KEY, operation);
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    const second = await h.run();
+    expect(second.kind).toBe("no-modal");
+    const midStored = await h.storage.get(STATUS_KEY);
+    expect(midStored?.state).toBe("degraded");
+    expect(midStored?.rateLimited ?? null).toBeNull();
+
+    // Tick 3: the lock has released — heal genuinely fires now. Before the
+    // fix, `rateLimited` was already nulled by tick 2, so the heal wake's own
+    // shape check silently refused to fire even though this IS the genuine
+    // healing tick.
+    await h.storage.put(OPERATION_KEY, null);
+    h.setNow(new Date("2026-09-30T14:16:00.000Z")); // past OPERATION_STALE_MS too, belt and suspenders
+    const third = await h.run();
+
+    expect(third.kind).toBe("recovered");
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toHaveLength(1);
   });
 });
 
