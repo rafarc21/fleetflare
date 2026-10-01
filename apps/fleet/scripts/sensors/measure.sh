@@ -50,7 +50,7 @@ gh run list --repo "$REPO" --workflow="$ENGLISH_CHECK" --limit 100 \
 echo
 echo "## known-flaky entries ($KNOWN_FLAKY)"
 if [ -f "$KNOWN_FLAKY" ]; then
-  count=$(grep -c '^test/' "$KNOWN_FLAKY")
+  count=$(grep -c '^test/' "$KNOWN_FLAKY" || true)
   echo "$count"
 else
   echo "known-flaky.txt not found at $KNOWN_FLAKY"
