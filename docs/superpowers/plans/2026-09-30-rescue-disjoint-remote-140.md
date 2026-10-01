@@ -277,3 +277,106 @@ discipline.
    `Test Files 153 passed (153); Tests 5384 passed (5384); Duration
    161.41s`. Clean, no failures.
 5. `bun run english-check` — exit code 0: `english-check: clean`.
+
+## Fresh review round 1 (maestro, FIX-FIRST, 2026-10-01) — test fixture made faithful, a missing failure-path test added
+
+PR #155 was converted to draft by a maestro review verdict FIX-FIRST,
+test-only — the production fix in `rescue.ts` was confirmed correct as-is,
+no change made to it this round. Board comment posted 2026-10-01 on issue
+#140. Two findings.
+
+Finding 1 (block): the original "issue #140" test (the one quoted in this
+doc's own Verification section above) was a shim, not a reproduction — a
+`realGit` wrapper that counted its own invocations in a file and
+fabricated the real-world error text on attempt 1 only, then `exec`'d real
+git on attempt 2. That pins rescue.ts's OWN code path faithfully (the grep
+really does match, the retry really does run) but proves nothing about
+whether a REAL remote would ever produce that failure+recovery shape
+against this fix's actual mechanism (a parentless commit with no history
+for ANY connectivity check to trip on). Replaced with a fully real
+reproduction: a non-empty bare remote carrying disjoint history (an
+orphan repo's own commit pushed to an unrelated `task/other` branch, the
+same shape the existing "shallow + non-fast-forward" fixture already uses
+for `task/lead`), `receive.shallowUpdate=true` (so vanilla git's own pre-
+transfer "shallow update not allowed" can never fire here — isolating the
+coverage to the grep's NEW alternative only, not re-proving the old one),
+and a real `pre-receive` hook on the remote side that rejects a push
+whose new history still carries a parent pointer to an object this repo
+never received, printing the real `fatal: did not receive expected object
+<sha>` text and exiting 1. No `realGit` override anywhere in either new
+test: real git, both sides, the whole way.
+
+Building that hook correctly took two live corrections, both verified
+against real git in a scratch directory before being trusted in the test
+(this fix's own established convention — "verified live," never assumed):
+
+- **A one-level parent check is not enough.** The maestro's own wording
+  ("walks the new commit's own parent(s)") reads as checking only the ref
+  tip's immediate parent. Verified live that this is insufficient: with a
+  shallow clone carrying 2 real local commits ahead of the shallow
+  boundary (the maestro's own explicit ask — "a shallow clone WITH local
+  commits", not just a dirty file), the ref tip pushed is the newest local
+  commit, whose own immediate parent is the OTHER new local commit — also
+  part of the same push, so present post-unpack. The missing object (the
+  boundary commit's own parent) sits two hops further back. A hook that
+  checks only `$new`'s own direct parents never saw it; the push
+  succeeded outright, silently proving nothing. Fixed by walking the FULL
+  set of commits newly reachable from each ref update's tip (a worklist,
+  not a single level) — the same shape real git's own `index-pack`
+  connectivity check actually walks (the whole pack, not just the tip),
+  which is what this fix is reproducing in the first place.
+- **`git rev-parse <sha>^@` is shallow-aware and lies once the RECEIVING
+  repo itself turns shallow.** First hook draft read parents via
+  `rev-parse "$c"^@`. Verified live: `receive.shallowUpdate=true`'s own
+  mechanism writes a `.git/shallow` entry on the RECEIVING bare repo,
+  recording the boundary commit as a graft point, as a side effect of the
+  very push under test — before the hook even runs. Once that file
+  exists, `rev-parse <boundary-sha>^@` on the receiver returns EMPTY, even
+  though `git cat-file -p <boundary-sha>` still shows the real `parent
+  <sha>` line in the object's raw bytes. A hook built on `rev-parse` never
+  saw the missing parent at all and accepted every push unconditionally.
+  Fixed by reading each commit's parent lines straight off `git cat-file
+  -p ... | sed -n 's/^parent //p'` — the raw bytes, never shallow-aware,
+  exactly what `check_object()` in `index-pack.c` itself inspects.
+
+Both corrections were caught by building the exact fixture by hand in a
+scratch directory first (a throwaway bare remote, the same orphan-branch
+seeding, the hook script, a real `--depth 1` clone with 2 real commits on
+top) and confirming with real git: the first plain push attempt genuinely
+fails with stderr containing `did not receive expected object <sha>`, and
+a parentless snapshot genuinely lands (`rev-list --count` = 1) against
+the identical hook — before either line of the actual test file was
+written as a foregone conclusion.
+
+Finding 2 (should-fix): no test pinned that `rescue_try_push`'s own
+snapshot RETRY push is checked for failure, not assumed to succeed — a
+mutant that dropped the second `[ "$prc" = 0 ] && return 0` check (or
+otherwise ignored the retry's exit code) would stay green under every
+existing test, since none of them ever made the snapshot push itself
+fail. Added a second test: same disjoint-history/`shallowUpdate` remote,
+but the hook now rejects EVERY push unconditionally — first attempt and
+the parentless retry alike — with wording the grep still matches either
+way. Confirmed RED first against a deliberately broken version of this
+exact test (hook mutated to accept everything) to prove the assertion can
+actually fail before trusting it: `expect(out).toMatch(/^RESCUE_FAILED
+checkout push$/m)` failed with `Received: "RESCUE_PUSHED fleet/rescue/...
+1 files\nRESCUE_WT checkout pushed ..."` — then reverted to the real
+always-reject hook and reran GREEN. The new-fixture-1 test ("issue #140")
+was separately RED-checked the same way, with the hook mutated to accept
+everything: the `rev-list --count` assertion failed with `Received: "3"`
+(a normal 3-commit push landed, not the parentless snapshot) — confirming
+that test's own assertions are load-bearing on the real rejection+
+recovery mechanism, not vacuously true against any real git push.
+
+### Round 1 re-verification (2026-10-01)
+
+- Scoped bun test (`apps/fleet`, `bun test test/bun/rescue-push.test.ts`):
+  133 pass, 0 fail, 494 `expect()` calls — 1 more test than before (the old
+  shimmed "issue #140" test replaced by 2 new real-hook-based tests, net
+  +1).
+- `bun run check` (fast, scoped tsc run across this repo's 5 tsconfig
+  projects) — clean, no output, re-run once after the test file's final
+  state.
+- Heavy gates (full `bun-test`/`test`/`english-check`) intentionally not
+  re-run this round — out of scope for a test-only fixture fix, sequenced
+  by the lead afterward per this round's own instructions.
