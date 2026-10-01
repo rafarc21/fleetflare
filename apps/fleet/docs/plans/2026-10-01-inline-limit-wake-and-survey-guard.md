@@ -58,6 +58,53 @@
 >    `evaluateDegradedRecovery`, for the identical reason ("can never fork
 >    into two subtly different implementations").
 
+> **Round-2 review corrections** (maestro, directly against real Claude
+> Code behavior, PR #170, 2026-10-01) — five more findings, all now fixed:
+>
+> 1. **`operatorParked` (round-1's own finding-1 fix, above) was scoped
+>    wrong.** It excluded ANY `"parked"` (#271) row from the heal wake,
+>    regardless of which verdict triggered it — but #158's own text requires
+>    the wake fire "independent of `FLEET_AUTO_FAILOVER`": only a
+>    SELECT-MODAL-triggered park must stay permanently manual (#109's
+>    original scope). Replaced entirely by `StudioStatus.exhaustionKind`
+>    (`"dead" | "inline" | "select"`), stamped directly from the triggering
+>    verdict (`verdict.dead`/`verdict.inline`) rather than from `parkedOn`/
+>    `autoFailover` at all. `operatorParked` removed (no other reader).
+> 2. **The independent `rateLimited`-nulling write could cost a LATER
+>    genuine heal its wake.** `runAccountFailover`'s `working` branch nulls
+>    `existing.rateLimited` whenever the pane shows no limit, regardless of
+>    whether heal itself fired that tick (e.g., a fresh op lock). A later
+>    tick's genuine heal then read the already-nulled value and silently
+>    lost its own wake. `exhaustionKind` is immune: written once at degrade
+>    time, cleared only on a genuine heal, never touched by that independent
+>    write.
+> 3. **The survey detector matched an invented shape, not the real one.**
+>    The real overlay (Claude Code 2.1.286, directly observed) is ONE row
+>    (`1: Bad  2: Fine  3: Good  0: Dismiss`) under a header
+>    (`● How is Claude doing this session? (optional)`) — nothing like the
+>    first round's guessed 4-stacked-bare-rows shape, which ALSO
+>    false-positived on an ordinary lead's own short numbered list. Detector
+>    redesigned to anchor on BOTH the header's own text AND a `N: label`
+>    choice row within a few lines of it — header absent means never flags,
+>    which is what fixed the false positive too. `wakeCmd`'s container-side
+>    `grep -E` scan also gained the header text as a standalone
+>    defense-in-depth pattern (manually verified against real `grep -E`,
+>    default and C locale).
+> 4. **A refused heal wake was discarded forever.** `healDegradedRowAndWake`
+>    ignored its own `runGatedWake` outcome — the row had already flipped to
+>    `"running"` by the same write, so any transient refusal (a pane-probe
+>    hiccup, claude briefly not in the window, anything) lost the
+>    opportunity permanently. Fixed with bounded retry bookkeeping
+>    (`pendingHealWakeAttempts`/`pendingHealWakeLastTriedAt`, mirroring
+>    `autoContinueAt`/`autoContinueLastTriedAt`'s own hourly cadence, capped
+>    at `PENDING_HEAL_WAKE_MAX_ATTEMPTS`), retried from BOTH cadences on
+>    every ordinary tick. See Design §4 (new).
+> 5. Two mutant-coverage gaps closed: a stronger assertion that
+>    `runGatedWake` is never even CALLED when `shouldHeal` is false (not
+>    only that no keystroke landed), and a new fast-path test proving
+>    `safeToWake: paneVerdict?.kind === "idle"` actually gates the wake
+>    (a non-idle `"working"` verdict heals the row but must not wake it).
+
 ## The gap, as measured
 
 Two separate gaps, both reported in #158.
@@ -172,8 +219,10 @@ OUT (explicitly not doing):
 ## Mechanism
 
 Both fixes reuse existing infrastructure — no new scheduler, no new exec
-primitive; ONE new Durable Object field (`StudioStatus.operatorParked`,
-added by the post-review correction, finding 1):
+primitive; new Durable Object fields: `StudioStatus.exhaustionKind`
+(round-2 finding 1, replacing round-1's `operatorParked`) and
+`pendingHealWakeAttempts`/`pendingHealWakeLastTriedAt` (round-2 finding 2,
+Design §4):
 - Gap 1 piggybacks on the EXISTING heal evidence (`evaluateDegradedRecovery`)
   and the EXISTING `runGatedWake` / `AUTO_CONTINUE_PROMPT` machinery #109
   already built for the select-modal case — same dynamic
@@ -193,8 +242,8 @@ added by the post-review correction, finding 1):
 
 ## Design
 
-### 1. Inline-exhaustion wake on heal (`failover.ts`) — CORRECTED, see the
-callout at the top of this doc
+### 1. Inline-exhaustion wake on heal (`failover.ts`) — CORRECTED TWICE, see
+both callouts at the top of this doc
 
 `healDegradedRowAndWake` (the shared function Design §3 introduces) owns
 this: `recovery.shouldHeal && !opLockFresh` is the "this call heals a
@@ -210,16 +259,24 @@ degraded row" signal, and the write it performs includes the wake decision.
   park. Nor does `rateLimited.select`/`.dead` alone: both are set
   independent of `autoFailover`, and a #271 park triggered by an INLINE
   block (a free second account existed) leaves `rateLimited` with neither
-  set, the exact shape a genuine inline exhaustion has. The real signal is
-  `StudioStatus.operatorParked` — a new field, stamped at write time from
-  the `!next` branch's own local `parkedOn` (both of `runAccountFailover`'s
-  write sites there: the fresh-degrade write and the anti-loop-guard
-  re-write), `true` only when `parkedOn !== null` at that moment, cleared
-  back to `null` in the same heal write that resets
-  `autoContinueAt`/`autoContinueLastTriedAt`. The final condition
+  set, the exact shape a genuine inline exhaustion has.
+
+  **Round-2 correction (finding 1 of that round):** the field above,
+  `operatorParked`, turned out to be the WRONG question — it recorded
+  whether auto-failover was off with a candidate, not WHICH verdict
+  triggered the degradation, so it wrongly excluded an INLINE-triggered
+  park too (#158's own text requires that case to heal and wake). Replaced
+  by `StudioStatus.exhaustionKind` (`"dead" | "inline" | "select"`),
+  stamped directly from `verdict.dead`/`verdict.inline` at the SAME two
+  `!next`-branch write sites `operatorParked` used (fresh-degrade write,
+  anti-loop-guard re-write), cleared to `null` on the same heal write that
+  resets `autoContinueAt`/`autoContinueLastTriedAt`. Round-2 finding 2 also
+  found the live `rateLimited.select`/`.dead` read unreliable across ticks
+  (`runAccountFailover`'s own independent `rateLimited`-nulling write could
+  zero it out before a LATER genuine heal ever read it) — `exhaustionKind`
+  is immune, written once at degrade time. The final condition
   (`inlineExhaustionHealed`, `failover.ts`'s `healDegradedRowAndWake`):
-  `recovery.parked && !existing.operatorParked && existing.rateLimited !=
-  null && !existing.rateLimited.select && !existing.rateLimited.dead`.
+  `recovery.parked && existing.exhaustionKind === "inline"`.
 - When that's true AND the caller's own `safeToWake` signal allows it
   (pane genuinely idle, not mid-turn — see Design §3 for what each of the
   two call sites threads in here, and why they differ): dynamically
@@ -347,37 +404,71 @@ mid-turn" signal, so each threads its own:**
   repaint specifically. Verified, not assumed, before choosing it — see
   Residuals below for the one gap this substitution leaves open.
 
+### 4. Bounded retry for a refused heal wake (`failover.ts`, `do.ts`) — NEW,
+round-2 correction, finding 2
+
+`healDegradedRowAndWake` discarded its own `runGatedWake` outcome entirely:
+the row already flipped to `"running"` by the SAME write (heal fires at
+most once, by design — Scope point 2), so a refused/skipped/failed wake (a
+transient pane-probe hiccup, claude briefly not in the window, a survey
+false positive, anything) lost the opportunity forever, reproducing #158's
+own original symptom.
+
+**Fix:** capture the `WakeOutcome`. On anything other than `ok: true`, arm
+`StudioStatus.pendingHealWakeAttempts`/`pendingHealWakeLastTriedAt` —
+mirroring `autoContinueAt`/`autoContinueLastTriedAt`'s own hourly cadence
+(`AUTO_CONTINUE_RETRY_MS`) rather than a new shape, the ONE thing it cannot
+borrow being an explicit attempt cap (`PENDING_HEAL_WAKE_MAX_ATTEMPTS = 3`):
+#109's own mechanism is bounded for free by the row leaving `degraded`
+state entirely, which this retry has no equivalent of (the row is already
+`"running"`). `retryPendingHealWake` (`failover.ts`) is the retry itself —
+called from BOTH cadences, same dual-path lesson as Design §3, on every
+ordinary tick where `state === "running"`: a no-op (no write, no exec)
+unless the row actually carries pending bookkeeping. Clears the bookkeeping
+on a successful retry, and on hitting the attempt cap (gives up silently —
+the row already heals and reads correctly regardless; only the extra nudge
+is foregone). Both call sites also clear the pair on every fresh heal (no
+stale retry carried into whatever comes next) via `healDegradedRowAndWake`'s
+own `cleared` write.
+
 ## Files touched
 
-- `apps/fleet/src/studio/failover.ts` — the heal-site addition (§1); the new
-  `StudioStatus.operatorParked`-aware `inlineExhaustionHealed` condition
-  (post-review finding 1); the new shared `healDegradedRowAndWake` export
-  and its two `!next`-branch write sites now stamping `operatorParked`
-  (post-review finding 1); `runAccountFailover`'s `working` branch now
-  calling the shared function instead of its own inline heal+wake logic
-  (post-review finding 3).
+- `apps/fleet/src/studio/failover.ts` — the heal-site addition (§1); the
+  shared `healDegradedRowAndWake` export and its two `!next`-branch write
+  sites, now stamping `exhaustionKind` (round-2 findings 1+2, replacing
+  `operatorParked`); `runAccountFailover`'s `working` branch calling the
+  shared function instead of its own inline heal+wake logic (round-1
+  finding 3); the new `retryPendingHealWake` export and its call site
+  (round-2 finding 2, Design §4).
 - `apps/fleet/src/studio/do.ts` — `runShipTickWithObservation`'s #274
-  fast-path heal block now calls the same shared `healDegradedRowAndWake`
-  instead of its own inline write (post-review finding 3, NEW file for this
-  plan).
-- `apps/fleet/src/studio/types.ts` — new `StudioStatus.operatorParked` field
-  (post-review finding 1, NEW file for this plan).
-- `apps/fleet/src/studio/wake.ts` — new survey detector + GATE 3 wiring
-  (§2), moved to run before the `limit.kind === "modal"` branch rather than
-  after it (post-review finding 2).
+  fast-path heal block calling the shared `healDegradedRowAndWake` (round-1
+  finding 3); a new sibling branch calling `retryPendingHealWake` for a
+  `"running"` row (round-2 finding 2).
+- `apps/fleet/src/studio/types.ts` — `StudioStatus.exhaustionKind` (round-2
+  findings 1+2, replacing `operatorParked`); `pendingHealWakeAttempts`/
+  `pendingHealWakeLastTriedAt` (round-2 finding 2).
+- `apps/fleet/src/studio/wake.ts` — survey detector + GATE 3 wiring (§2),
+  running before the `limit.kind === "modal"` branch (round-1 finding 2);
+  redesigned against the real survey shape, plus the container-side
+  `SURVEY_HEADER_PATTERN` defense-in-depth entry (round-2 finding 1).
 - `apps/fleet/test/studio.auto-continue.test.ts` — split/extend the inline
-  tests per Scope point 5; a new case pinning the #271-park-via-inline-block
-  exclusion (post-review finding 1).
-- `apps/fleet/test/studio.wake-race.test.ts` — the survey-gate RED tests;
-  a new case combining the #144 switched-block fixture with the survey
-  fixture, proving the gate now wins regardless of order (post-review
-  finding 2).
-- `apps/fleet/test/studio.failover-274.test.ts` — new cases proving the
-  heal wake fires on the FAST (30s) path alone, not only when
-  `runAccountFailover` happens to run first (post-review finding 3, NEW
-  file for this plan).
-- `apps/fleet/test/fixtures/survey-panes.ts` — new UNMEASURED
-  feedback-survey fixture(s).
+  tests per Scope point 5; cases pinning the inline-vs-select-modal park
+  split (round-2 finding 1), the `rateLimited`-nulling race (round-2
+  finding 2), the bounded retry (round-2 finding 4 — this doc's own
+  numbering: see the round-2 callout at the top), the digit-free
+  `AUTO_CONTINUE_PROMPT` pin, and the strengthened no-exec assertion
+  (round-2 finding 5(i)).
+- `apps/fleet/test/studio.wake-race.test.ts` — the survey-gate tests;
+  the real-shape fixture, the false-positive regression case, and the
+  switched-block+survey combo updated to the real shape (round-2 findings
+  1+3 — again, see the round-2 callout for the finding numbers this doc
+  uses vs. the maestro's own numbering).
+- `apps/fleet/test/studio.failover-274.test.ts` — cases proving the heal
+  wake fires on the FAST (30s) path alone (round-1 finding 3); the
+  non-idle-`paneVerdict` coverage gap (round-2 finding 5(ii)).
+- `apps/fleet/test/fixtures/survey-panes.ts` — the real survey shape,
+  replacing the first round's invented one; a false-positive regression
+  fixture (`LEAD_NUMBERED_LIST_PANE`).
 
 ## Test plan
 
@@ -398,21 +489,29 @@ mid-turn" signal, so each threads its own:**
 
 ## Residuals, stated rather than hidden
 
-- The survey-overlay fixture is UNMEASURED — no real capture of Claude
-  Code's feedback-survey overlay exists anywhere in this repo. The detector
-  is deliberately conservative; it may both under-match (a real survey shape
-  that doesn't match the heuristic) and, less likely given the narrowing in
-  §2, over-match something not yet seen. Follow-up: capture a real pane the
-  next time the survey appears (`tmux capture-pane`) and feed it back as a
-  VERBATIM fixture, same discipline `rate-limit-panes.ts` already follows.
-- The inline-exhaustion wake skips firing on a tick where `verdict.repainted`
-  is true at the exact moment of heal (§1) — a narrow, one-tick race; next
-  tick still heals (state is already `"running"` by then, so nothing re-arms
-  it, meaning a wake that loses this race never fires at all, not just
-  delayed). Accepted rather than solved: solving it fully would need new
-  bookkeeping (a field to retry the wake on a later tick even after heal),
-  which is a bigger change than this gap's measured severity (one field of
-  the two gaps reported) justifies right now.
+- The survey-overlay fixture is NOT VERBATIM — no raw, byte-for-byte
+  `tmux capture-pane -p` of Claude Code's feedback-survey overlay exists in
+  this repo yet, even after round-2's redesign against the REAL shape (the
+  repo owner's own direct observation, Claude Code 2.1.286). Follow-up
+  unchanged: capture a real pane the next time the survey appears and feed
+  it back as a VERBATIM fixture, same discipline `rate-limit-panes.ts`
+  already follows.
+- **Round-2 correction (Design §4) partially resolves this entry — read
+  both halves.** The inline-exhaustion wake used to skip firing on a tick
+  where `verdict.repainted`/a non-`"idle"` `paneVerdict` is true at the
+  exact moment of heal, AND to permanently lose a wake that WAS attempted
+  but came back refused — originally stated as one combined, fully-accepted
+  residual. Design §4's bounded retry now covers the SECOND half (a
+  genuinely-attempted, refused wake retries hourly, up to
+  `PENDING_HEAL_WAKE_MAX_ATTEMPTS`). The FIRST half remains a residual,
+  unchanged: `safeToWake` false means `runGatedWake` is never even CALLED
+  that tick, so there is no `WakeOutcome` to arm a retry from — a wake lost
+  to a mid-turn moment on the exact healing tick still never fires at all.
+  Covering that too would mean arming pending-retry bookkeeping on
+  `!safeToWake` as well as on a refused outcome, which is a reasonable
+  future extension but was not in round-2's own finding 2 scope (that
+  finding was specifically about a discarded `WakeOutcome`, not about the
+  `safeToWake` guard itself).
 - `recovery.parked`'s exact interaction with the dead-account (#141) path is
   stated as "verify during TDD" in Design §1 rather than pre-solved — the
   dead-account detector's own message-prefix function needs a direct read
@@ -436,7 +535,12 @@ mid-turn" signal, so each threads its own:**
   once per degradation means a skipped wake here is the SAME one-tick-race
   trade already accepted for the slow path just above, not a new kind of
   loss.
-- The shared `healDegradedRowAndWake` (Design §3) does not retry a skipped
-  wake on a later call either — same "heal is at-most-once per degradation"
-  invariant as Design §1's original residual, now shared by both cadences
-  rather than specific to one.
+- **Superseded by Design §4** — this entry originally said
+  `healDegradedRowAndWake` never retries a skipped wake on a later call.
+  Round-2 finding 2 added `retryPendingHealWake` specifically for that
+  (bounded, both cadences). The attempt cap itself
+  (`PENDING_HEAL_WAKE_MAX_ATTEMPTS = 3`) is a judgment call, same as
+  `AUTO_CONTINUE_RETRY_MS`'s own hourly figure was — not measured against a
+  real incident, chosen to be "a few tries over a few hours" rather than
+  either a single shot or forever. Revisit if a real refusal streak is ever
+  measured past it.
