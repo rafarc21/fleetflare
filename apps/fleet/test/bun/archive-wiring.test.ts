@@ -19,7 +19,7 @@ import { join } from "node:path";
 // vitest-pool-workers, so this is the only practical way to pin the wiring
 // short of a full Worker integration test.
 describe("do.ts StudioDO.shipTranscript() — archive wiring (#367 round 3)", () => {
-  const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");
+  const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8"); // test-lies-check: allow — StudioDO cannot be constructed under vitest-pool-workers (see the comment above), so this file's own documented source pin
 
   const methodStart = src.indexOf("async shipTranscript(): Promise<void> {");
   const methodEnd = src.indexOf("\n  }\n", methodStart);
