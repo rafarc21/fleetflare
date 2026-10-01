@@ -2021,8 +2021,15 @@ export async function runAccountFailover(
     if (count <= baseline) {
       return { kind: "rerender", block: key };
     }
-    // count > baseline: a genuinely NEW occurrence printed since the switch —
-    // fall through to the ordinary inline-evidence handling below, which
+    // count > baseline: a genuinely NEW occurrence printed since the switch.
+    // Same destroy-race reasoning as the baseline write above: this exec also
+    // has the Durable Object's input gate open across it, and whatever runs
+    // next (a switch, or the exhausted/parked write below) must not resurrect
+    // a row a destroy already finalized.
+    if (await destroyLanded()) {
+      return { kind: "skipped", reason: "studio stopped during the dead-account scrollback capture" };
+    }
+    // Fall through to the ordinary inline-evidence handling below, which
     // marks THIS account dead too and looks for somewhere else to go.
   }
   // Issue #102 — no flapping. Guards ONLY the one path with a genuinely
