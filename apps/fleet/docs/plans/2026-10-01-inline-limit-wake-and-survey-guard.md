@@ -88,8 +88,18 @@
 >    choice row within a few lines of it — header absent means never flags,
 >    which is what fixed the false positive too. `wakeCmd`'s container-side
 >    `grep -E` scan also gained the header text as a standalone
->    defense-in-depth pattern (manually verified against real `grep -E`,
->    default and C locale).
+>    defense-in-depth pattern. Round-4 follow-up (maestro): the ORIGINAL
+>    wording here claimed "manually verified against real `grep -E`, default
+>    and C locale" with no committed artifact behind it — this file's own
+>    `▔`-rule history (`wake.ts:51-132`) is exactly the failure mode (passes
+>    JS `new RegExp`, silently fails the real container `grep -E` under the
+>    C locale) that demands a REAL shell test, not a claim. Added
+>    `test/bun/wake-guard.test.ts`'s own `"the real survey header row
+>    refuses under the container's own default locale (C.UTF-8)"` / `"...
+>    under LC_ALL=C too"` cases, mirroring the existing `▔▔▔▔▔▔▔▔` entry's
+>    exact pattern — both run the real emitted `wakeCmd` shell, under a real
+>    `grep -E`, in both locales. Mutation-tested: breaking the pattern text
+>    turned both RED, reverting turned them GREEN.
 > 4. **A refused heal wake was discarded forever.** `healDegradedRowAndWake`
 >    ignored its own `runGatedWake` outcome — the row had already flipped to
 >    `"running"` by the same write, so any transient refusal (a pane-probe

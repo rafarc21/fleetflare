@@ -344,6 +344,42 @@ describe("wakeCmd — the loose scan's row anchors hold under grep -E (#144)", (
       } finally { t.cleanup(); }
     });
   }
+
+  // Issue #158 round-2 review, finding 1 (maestro round-4 follow-up): the
+  // same documented failure mode the ▔-rule entry above (N1/N8) exists to
+  // guard against — a pattern that passes JS `new RegExp` (vitest already
+  // proves `surveyOverlayOnScreen` matches this row) but silently fails the
+  // REAL container `grep -E`, specifically under the C locale, where a bare
+  // multibyte glyph directly before a quantifier binds to its last BYTE, not
+  // the whole character (wake.ts:51-132's own doc comment). The new
+  // container-side `SURVEY_HEADER_PATTERN` wraps its `⏺|●` glyph alternation
+  // in a group before the `?`, the same discipline that fixed `(▔)+` there —
+  // this proves it holds under a REAL shell `grep -E`, not just the JS-side
+  // test suite, in BOTH the container's own default locale (`C.UTF-8`,
+  // confirmed this container's actual ambient locale) and the stricter
+  // `LC_ALL=C` #141 review already found necessary.
+  const SURVEY_HEADER_ROW_TEXT = "● How is Claude doing this session? (optional)";
+
+  test("the real survey header row refuses under the container's own default locale (C.UTF-8): nothing typed", () => {
+    const t = fakeTmux(composer(SURVEY_HEADER_ROW_TEXT));
+    try {
+      const r = run(t, wakeCmd("WAKE"), { LC_ALL: "C.UTF-8" });
+      expect(t.calls().filter((c) => c.startsWith("send-keys"))).toEqual([]);
+      expect(r.stdout).toContain("__FLEET_WAKE__ refused-before modal");
+    } finally { t.cleanup(); }
+  });
+
+  test("the real survey header row refuses under LC_ALL=C too (#141's own C-locale pitfall)", () => {
+    const t = fakeTmux(composer(SURVEY_HEADER_ROW_TEXT));
+    try {
+      // run()'s own default already sets LC_ALL=C (see its own doc comment) —
+      // no override needed, stated explicitly here so the intent reads
+      // clearly next to the default-locale case just above.
+      const r = run(t, wakeCmd("WAKE"));
+      expect(t.calls().filter((c) => c.startsWith("send-keys"))).toEqual([]);
+      expect(r.stdout).toContain("__FLEET_WAKE__ refused-before modal");
+    } finally { t.cleanup(); }
+  });
 });
 
 describe("accountSwitchCmd — #90's C-c re-check stops the chain (#141 review)", () => {
