@@ -41,7 +41,8 @@ import {
   repoForAccount, parseAccountMap, type LaunchAccount,
 } from "./accounts";
 import {
-  runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, MEMBERS_TICKING_KEY, type FailoverDeps,
+  runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, healDegradedRowAndWake, retryPendingHealWake,
+  MEMBERS_TICKING_KEY, type FailoverDeps,
 } from "./failover";
 // Issue #249 (PR4b): #107/#150's survival re-brief, delivered. Own
 // sandbox-free module for the usual reason (see credentials.ts's header) —
@@ -4639,21 +4640,51 @@ export async function runShipTickWithObservation(
   if (result.paneFrame !== undefined) {
     const degradedRowNow = await storage.get(STATUS_KEY);
     const recoveryOpFresh = operationLockFresh(await storage.get(OPERATION_KEY), deps.now());
+    const sightingStorage = storage as unknown as {
+      get(key: typeof LIMIT_SIGHTING_KEY): Promise<LimitSighting | undefined>;
+    };
+    const recoveryStudioId = (degradedRowNow?.id || id);
+    // Shared across both branches below — recordStudioFn's own `withObserved`
+    // wrap, the SAME closure either call site needs.
+    const mirrorRecordStudioFn = recordStudioFn
+      ? async (s: StudioStatus) => { await recordStudioFn(await withObserved(storage, s)); }
+      : async () => {};
+    // `safeToWake`: this path has no two-capture `repainted` signal (its 30s
+    // exec captures the pane once, unlike runAccountFailover's own dedicated
+    // two-capture probe) — `result.paneVerdict?.kind === "idle"` is the
+    // single-capture substitute (activity.ts's `readActivityFrame`, the SAME
+    // frame #221 already parsed from this same capture, just above). See
+    // `healDegradedRowAndWake`'s own doc comment for exactly what this trade
+    // is and the one residual it leaves, also stated in #158's plan doc.
+    const safeToWake = result.paneVerdict?.kind === "idle";
     if (degradedRowNow?.state === "degraded" && !recoveryOpFresh) {
-      const sightingStorage = storage as unknown as {
-        get(key: typeof LIMIT_SIGHTING_KEY): Promise<LimitSighting | undefined>;
-      };
       const sighting = (await sightingStorage.get(LIMIT_SIGHTING_KEY)) ?? null;
-      const recoveryStudioId = degradedRowNow.id || id;
       const recovery = evaluateDegradedRecovery(degradedRowNow, recoveryStudioId, result.paneFrame, deps.now(), sighting);
-      if (recovery.shouldHeal) {
-        const clearedAt = deps.now().toISOString();
-        const cleared: StudioStatus = {
-          ...degradedRowNow, rateLimited: null, state: "running", error: null, exhaustionClearedAt: clearedAt,
-        };
-        await storage.put(STATUS_KEY, cleared);
-        if (recordStudioFn) await recordStudioFn(await withObserved(storage, cleared));
-      }
+      // Issue #158 review finding 3 (fresh-context re-review, same PR): the
+      // SAME shared heal+wake implementation runAccountFailover's own 300s
+      // `working` branch calls — see `healDegradedRowAndWake`'s own doc
+      // comment (failover.ts) for why this 30s path needs it too: it runs
+      // ~10x more often, so without this it almost always healed a row
+      // BEFORE the slower path ever saw it degraded again, making the #158
+      // wake unreachable in the common case.
+      await healDegradedRowAndWake({
+        storage, existing: degradedRowNow, recovery, opLockFresh: recoveryOpFresh, now: deps.now(),
+        studioId: recoveryStudioId, exec: shipDeps.exec, sighting, safeToWake,
+        recordStudioFn: mirrorRecordStudioFn,
+      });
+    } else if (degradedRowNow?.state === "running") {
+      // Maestro round-2 review (PR #170), finding 2 — the bounded retry for
+      // a heal wake refused/skipped/failed on an EARLIER tick (any cadence:
+      // this one or the 300s one), same dual-path lesson finding 3 already
+      // states. A no-op unless the row actually carries pending
+      // bookkeeping — the overwhelming majority of ticks never pay for the
+      // sighting read below.
+      const sighting = (await sightingStorage.get(LIMIT_SIGHTING_KEY)) ?? null;
+      await retryPendingHealWake({
+        storage, existing: degradedRowNow, now: deps.now(), studioId: recoveryStudioId,
+        exec: shipDeps.exec, sighting, safeToWake,
+        recordStudioFn: mirrorRecordStudioFn,
+      });
     }
   }
 

@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   runAccountFailover, paneCaptureCmd, dismissModalCmd, DISMISS_VERDICT, exhaustedMessage,
-  PANE_CAPTURE_MARKER, type FailoverDeps,
+  PANE_CAPTURE_MARKER, AUTO_CONTINUE_PROMPT, type FailoverDeps,
 } from "../src/studio/failover";
-import { PANE_PROBE_CMD, PANE_SCREEN_CMD } from "../src/studio/wake";
-import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
+import { PANE_PROBE_CMD, PANE_SCREEN_CMD, wakeCmd } from "../src/studio/wake";
+import { STATUS_KEY, OPERATION_KEY, type StudioStorage, type OperationInFlight } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
 import type { ClaudeAccount } from "../src/studio/accounts";
 import { RULE_PROMPT } from "./fixtures/rate-limit-panes";
@@ -83,6 +83,14 @@ interface Harness {
   recorded: StudioStatus[];
   execs: string[];
   run(): ReturnType<typeof runAccountFailover>;
+  /** Issue #158: lets a test drive TWO ticks with genuinely different pane
+   *  content (exhaust, then reset-passed-and-idle) through the SAME harness,
+   *  the same `setPane` shape test/studio.account-failover.test.ts's own
+   *  richer harness already uses. */
+  setPane(pane: string): void;
+  /** Issue #158: same reasoning as setPane — a reset-passed test needs the
+   *  SECOND tick's clock to be later than the first's. */
+  setNow(now: Date): void;
 }
 
 function harness(opts: {
@@ -95,13 +103,15 @@ function harness(opts: {
   const execs: string[] = [];
   const recorded: StudioStatus[] = [];
   const storage = fakeStorage(opts.initial ?? status());
+  let pane = opts.pane;
+  let now = opts.now ?? NOW;
   const deps: FailoverDeps = {
     accounts: opts.accounts,
     autoFailover: opts.autoFailover ?? true,
-    now: () => opts.now ?? NOW,
+    now: () => now,
     exec: vi.fn(async (cmd: string) => {
       execs.push(cmd);
-      if (cmd === paneCaptureCmd()) return { code: 0, stdout: captured(opts.pane), stderr: "" };
+      if (cmd === paneCaptureCmd()) return { code: 0, stdout: captured(pane), stderr: "" };
       // dismissModalCmd()'s own shell — the fake never runs a real shell, so
       // this stands in for it: report "escaped" (the modal was still there),
       // the common case for a fresh select-modal capture.
@@ -119,6 +129,8 @@ function harness(opts: {
   return {
     deps, storage, recorded, execs,
     run: () => runAccountFailover(deps, storage, STUDIO_ID, async (s) => { recorded.push(s); }),
+    setPane: (p: string) => { pane = p; },
+    setNow: (n: Date) => { now = n; },
   };
 }
 
@@ -264,6 +276,190 @@ describe("issue #109 — never attempts outside the genuinely-exhausted select-m
   });
 });
 
+describe("issue #158 — inline exhaustion gets a wake once its own reset passes (#214 heal)", () => {
+  it("inline exhausted, reset still live: #214 heal never fires, so no wake attempt either", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: INLINE_PANE });
+
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    // Still showing the SAME inline block (the pane never changed, and the
+    // reset — 1:30pm UTC — is still ahead of NOW, noon UTC): #214's own
+    // evidence rule never heals it, so this feature's new wake never gets a
+    // chance to fire either. The existing "never attempts Esc or wake" test
+    // above pins the silent already-degraded outcome; this pins the
+    // wake-specific half of the same still-live tick.
+    const second = await h.run();
+    expect(second.kind).toBe("already-degraded");
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]);
+    // Maestro round-2 review (PR #170), finding 5(i): stronger than "no
+    // WAKE text landed" — `runGatedWake` must never even be CALLED (no
+    // probe/screen exec at all) when `shouldHeal` is false, even though
+    // this row's own exhaustion shape (`exhaustionKind: "inline"`, once
+    // degraded) would otherwise satisfy the wake condition. Catches a
+    // mutant that drops the `recovery.shouldHeal` gate specifically, which
+    // the WAKE-text-only assertion above cannot: `runGatedWake` itself
+    // would still refuse (the live block is still on screen), so a looser
+    // assertion checking only the final keystroke stays green either way.
+    expect(h.execs.filter((c) => c === PANE_PROBE_CMD || c === PANE_SCREEN_CMD)).toEqual([]);
+  });
+
+  it("inline exhausted, reset passed and the pane is idle: exactly one gated wake with AUTO_CONTINUE_PROMPT", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: INLINE_PANE });
+
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    // The reset (1:30pm UTC) has passed, and the pane has genuinely
+    // recovered — claude's own footer at the bottom, no limit anywhere —
+    // so #214's own heal fires, and this is the healing tick.
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    const second = await h.run();
+
+    expect(second.kind).toBe("recovered");
+    // Never the select-modal path's own Esc — this row was never eligible
+    // for that (verdict.inline was true throughout).
+    expect(h.execs.filter((c) => c === dismissModalCmd())).toEqual([]);
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toHaveLength(1);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.state).toBe("running");
+  });
+
+  // Maestro review round 2 (PR #170, direct against real Claude Code
+  // behavior), finding 3 — the test THIS replaces got the exclusion wrong.
+  // #158's own text is explicit: the inline-reset wake fires "independent of
+  // FLEET_AUTO_FAILOVER" — only a SELECT-MODAL-triggered park must stay
+  // permanently manual (that's #109's ORIGINAL scope, via `rateLimited.select`,
+  // nothing to do with auto-failover). An INLINE-triggered park (a free
+  // second account existed, but `autoFailover` was off so nothing switched)
+  // is, evidence-wise, indistinguishable from a genuine inline exhaustion —
+  // same reset, same self-clearing shape — and #158 explicitly wants THIS
+  // case to heal and wake too, same as any other inline block. `exhaustionKind`
+  // (stamped from `verdict.inline`/`verdict.dead` at write time, independent
+  // of `parkedOn`/auto-failover) is what the heal now reads, replacing the
+  // old `operatorParked` exclusion that wrongly blocked this case.
+  it("'parked' via an INLINE block (auto-failover off, a candidate existed) still gets the heal wake, same as any inline exhaustion", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: INLINE_PANE, autoFailover: false });
+
+    const first = await h.run();
+    expect(first).toEqual({ kind: "parked", account: "CLAUDE_CODE_OAUTH_TOKEN" });
+
+    // The pane recovers and its printed reset has passed.
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    const second = await h.run();
+
+    expect(second.kind).toBe("recovered");
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toHaveLength(1);
+  });
+
+  // Finding 3's counterpart: a SELECT-MODAL-triggered park must stay
+  // permanently manual — #109's original scope, untouched by this change.
+  // Pins the existing "'parked' (auto-failover off...) never writes or
+  // attempts auto-continue" test's own claim specifically against the heal
+  // wake too (that test, above, only pins the INITIAL tick; this one drives
+  // a second, healing tick the same way the inline case above does).
+  it("'parked' via a SELECT-MODAL block (auto-failover off) never gets a heal wake — stays permanently manual", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: MODAL_PANE, autoFailover: false });
+
+    const first = await h.run();
+    expect(first).toEqual({ kind: "parked", account: "CLAUDE_CODE_OAUTH_TOKEN" });
+
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    const second = await h.run();
+
+    expect(second.kind).toBe("recovered");
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]);
+  });
+
+  // Maestro review round 2 (PR #170), finding 4 — `runAccountFailover`'s
+  // `working` branch independently nulls `existing.rateLimited` whenever the
+  // pane shows no current limit, REGARDLESS of whether heal itself fired
+  // this tick (the `else if (existing.rateLimited || forget)` write,
+  // unrelated to the heal gate). Before `exhaustionKind`, the heal wake's own
+  // `existing.rateLimited != null` check read this nulled value on a LATER
+  // tick where heal genuinely succeeds, silently losing the wake.
+  // `exhaustionKind` is never touched by that independent write, so it
+  // survives across ticks the way `rateLimited`'s own live shape never did.
+  it("a tick that nulls rateLimited WITHOUT healing (op lock fresh) does not cost a LATER genuine heal its wake", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: INLINE_PANE });
+
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    // Tick 2: the pane has ALREADY recovered and the reset has passed (the
+    // evidence `evaluateDegradedRecovery` would otherwise heal on), but a
+    // bring-up holds a FRESH operation lock — `healDegradedRowAndWake`'s own
+    // `opLockFresh` gate refuses to heal this tick. The row stays `degraded`,
+    // yet `runAccountFailover`'s OWN independent `rateLimited`-null write
+    // still fires (the pane shows no current limit).
+    const operation: OperationInFlight = { op: "restart", since: "2026-09-30T13:58:00.000Z" };
+    await h.storage.put(OPERATION_KEY, operation);
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    const second = await h.run();
+    expect(second.kind).toBe("no-modal");
+    const midStored = await h.storage.get(STATUS_KEY);
+    expect(midStored?.state).toBe("degraded");
+    expect(midStored?.rateLimited ?? null).toBeNull();
+
+    // Tick 3: the lock has released — heal genuinely fires now. Before the
+    // fix, `rateLimited` was already nulled by tick 2, so the heal wake's own
+    // shape check silently refused to fire even though this IS the genuine
+    // healing tick.
+    await h.storage.put(OPERATION_KEY, null);
+    h.setNow(new Date("2026-09-30T14:16:00.000Z")); // past OPERATION_STALE_MS too, belt and suspenders
+    const third = await h.run();
+
+    expect(third.kind).toBe("recovered");
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toHaveLength(1);
+  });
+
+  // Maestro round-2 review (PR #170), finding 2 — `healDegradedRowAndWake`
+  // used to discard its own `runGatedWake` outcome entirely: the row had
+  // already flipped to `"running"` by the SAME write, so a refused wake (a
+  // transient pane-probe hiccup here — claude briefly not in the window,
+  // unrelated to the heal's own evidence) lost the opportunity forever.
+  it("a refused heal wake (transient pane-probe hiccup) gets a bounded retry on a LATER tick, not lost forever", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: INLINE_PANE });
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    // Simulate the wake's OWN pane-probe refusing THIS tick only — claude
+    // briefly not the pane's current command (a transient hiccup), nothing
+    // to do with #214's own heal evidence, which is unaffected.
+    const originalExec = h.deps.exec;
+    h.deps.exec = vi.fn(async (cmd: string) => {
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude bash\n", stderr: "" };
+      return originalExec(cmd);
+    });
+    const second = await h.run();
+
+    expect(second.kind).toBe("recovered"); // the row still heals regardless
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]); // but nothing typed
+    const mid = await h.storage.get(STATUS_KEY);
+    expect(mid?.state).toBe("running");
+    expect(mid?.pendingHealWakeAttempts).toBe(1);
+    expect(mid?.pendingHealWakeLastTriedAt).toBe("2026-09-30T14:00:00.000Z");
+
+    // Claude is back in the window, and enough time has passed for the
+    // bounded retry's own hourly cadence (AUTO_CONTINUE_RETRY_MS, mirrored
+    // from #109's own select-modal retry) to fire again.
+    h.deps.exec = originalExec;
+    h.setNow(new Date("2026-09-30T15:01:00.000Z"));
+    await h.run();
+
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toHaveLength(1);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.pendingHealWakeAttempts ?? null).toBeNull();
+    expect(stored?.pendingHealWakeLastTriedAt ?? null).toBeNull();
+  });
+});
+
 describe("issue #109 — the #214 working-branch recovery clears both new fields", () => {
   it("a genuinely recovered row carries no stale auto-continue bookkeeping forward", async () => {
     const h = harness({
@@ -282,5 +478,18 @@ describe("issue #109 — the #214 working-branch recovery clears both new fields
     expect(stored?.state).toBe("running");
     expect(stored?.autoContinueAt ?? null).toBeNull();
     expect(stored?.autoContinueLastTriedAt ?? null).toBeNull();
+  });
+});
+
+// Maestro round-2 review (PR #170), finding 1 — the #158 plan's own Scope
+// point 1 claims this prompt is "already digit-free, so Gap 2's concern
+// does not even apply to this specific wake", but no test pinned that claim
+// until now: a future reword could silently reintroduce a digit (a task
+// number, a time) that answers Claude Code's own feedback-survey overlay
+// the SAME way the issue's other two wake callers (assignWakeMessage/
+// commentWakeMessage) can.
+describe("issue #158 — AUTO_CONTINUE_PROMPT stays digit-free", () => {
+  it("carries no digit characters", () => {
+    expect(AUTO_CONTINUE_PROMPT).not.toMatch(/\d/);
   });
 });

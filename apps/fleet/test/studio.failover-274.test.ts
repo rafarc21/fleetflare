@@ -22,8 +22,9 @@ import { describe, it, expect, vi } from "vitest";
 import { runShipTickWithObservation } from "../src/studio/do";
 import {
   runAccountFailover, exhaustedMessage, evaluateDegradedRecovery, paneCaptureCmd, PANE_CAPTURE_MARKER,
-  detectLimitOnScreen, type FailoverDeps,
+  detectLimitOnScreen, AUTO_CONTINUE_PROMPT, type FailoverDeps,
 } from "../src/studio/failover";
+import { wakeCmd, PANE_PROBE_CMD, PANE_SCREEN_CMD } from "../src/studio/wake";
 import { STATUS_KEY, OPERATION_KEY, type OperationInFlight, type StudioStorage } from "../src/studio/provision";
 import { OBSERVED_KEY, emptyObserved, type Observed, type ObservedStorage } from "../src/studio/observed";
 import type { TranscriptStorage } from "../src/studio/transcript";
@@ -364,5 +365,122 @@ describe("#274 (6) — two more still-limited screen shapes never clear on the f
     // guard than the select-modal case above.
     expect(detectLimitOnScreen(QUESTION_MENU_NO_LIMIT_PANE, NOW, null).kind).toBe("working");
     expect(questionMenu.claudeOnScreen).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #158 review finding 3 (fresh-context re-review, same PR) — the #158
+// heal wake must fire on the FAST (30s) ship-tick path too, not only
+// runAccountFailover's own slower 300s `working` branch: because the fast
+// path runs ~10x more often, it almost always heals a recovered row BEFORE
+// the slow path ever sees `state === "degraded"` again, which would make a
+// wake that only lived in runAccountFailover unreachable in the common case.
+// Mirrors this file's own #274 (1) harness (`fakeStorage`/`shipDeps`-shaped
+// exec, `stdoutWithPane`), extended with a cmd-discriminating exec so the
+// wake's OWN PANE_PROBE_CMD/PANE_SCREEN_CMD/wakeCmd execs (issued from
+// INSIDE this same ship tick) get sensible answers rather than the ship
+// tick's own raw stdout.
+// ---------------------------------------------------------------------------
+describe("#158 (7) — the fast (30s) ship-tick path also fires the heal wake, not only the 300s path", () => {
+  it("an inline-exhausted row, reset passed, healed entirely by the FAST path: exactly one gated wake fires", async () => {
+    // Same shape test/studio.auto-continue.test.ts's own "reset passed and
+    // the pane is idle" case gives a row healed by runAccountFailover — a
+    // genuine inline exhaustion (no select, no dead) whose printed reset has
+    // already passed `now` below.
+    const status = degradedStatus({
+      rateLimited: { until: "2026-09-25T09:45:00.000Z", seenAt: "2026-09-25T09:15:00.000Z" },
+      // Maestro round-2 review (PR #170), findings 3+4: the heal wake now
+      // reads this durable field, not `rateLimited`'s own live shape — see
+      // StudioStatus.exhaustionKind's own doc comment.
+      exhaustionKind: "inline",
+    });
+    const storage = fakeStorage({ status });
+    const wake = wakeCmd(AUTO_CONTINUE_PROMPT);
+    const execCalls: string[] = [];
+    const exec = vi.fn(async (cmd: string) => {
+      execCalls.push(cmd);
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude claude\n", stderr: "" };
+      if (cmd === PANE_SCREEN_CMD) return { code: 0, stdout: `${RECOVERED_IDLE}\n`, stderr: "" };
+      if (cmd === wake) return { code: 0, stdout: "__FLEET_WAKE__ sent\n", stderr: "" };
+      // The ship tick's own single exec (shipTickCmd) — anything else.
+      return { code: 0, stdout: stdoutWithPane(RECOVERED_IDLE), stderr: "" };
+    });
+    const deps = { exec, r2Put: vi.fn(async () => {}), now: () => new Date("2026-09-25T10:02:30.000Z") };
+
+    await runShipTickWithObservation(deps, storage, STUDIO_ID, undefined, 5000);
+
+    const row = storage.map.get(STATUS_KEY) as StudioStatus;
+    expect(row.state).toBe("running");
+    // The row still heals even on a build that cannot reach this assertion —
+    // what THIS test pins is the wake, the gap review finding 3 found.
+    expect(execCalls).toContain(wake);
+  });
+
+  it("the SAME row, but runAccountFailover's 300s path never ran this tick at all: the fast path alone is enough", async () => {
+    // Belt-and-suspenders over the test above: no runAccountFailover call
+    // anywhere in this test, proving the wake does not secretly depend on
+    // it having run first (the exact race finding 3 describes — the fast
+    // path healing BEFORE the slow path ever gets a turn).
+    const status = degradedStatus({
+      rateLimited: { until: "2026-09-25T09:00:00.000Z", seenAt: "2026-09-25T08:30:00.000Z" },
+      exhaustionKind: "inline",
+    });
+    const storage = fakeStorage({ status });
+    const wake = wakeCmd(AUTO_CONTINUE_PROMPT);
+    const execCalls: string[] = [];
+    const exec = vi.fn(async (cmd: string) => {
+      execCalls.push(cmd);
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude claude\n", stderr: "" };
+      if (cmd === PANE_SCREEN_CMD) return { code: 0, stdout: `${RECOVERED_IDLE}\n`, stderr: "" };
+      if (cmd === wake) return { code: 0, stdout: "__FLEET_WAKE__ sent\n", stderr: "" };
+      return { code: 0, stdout: stdoutWithPane(RECOVERED_IDLE), stderr: "" };
+    });
+    const deps = { exec, r2Put: vi.fn(async () => {}), now: () => new Date("2026-09-25T09:30:00.000Z") };
+
+    await runShipTickWithObservation(deps, storage, STUDIO_ID, undefined, 5000);
+
+    const row = storage.map.get(STATUS_KEY) as StudioStatus;
+    expect(row.state).toBe("running");
+    expect(execCalls.filter((c) => c === wake)).toHaveLength(1);
+  });
+
+  // Maestro round-2 review (PR #170), finding 5(ii): no test proved
+  // `safeToWake: result.paneVerdict?.kind === "idle"` actually gates
+  // anything on the fast path — both tests above use an idle pane, so a
+  // mutant that always passed `safeToWake: true` here would stay green.
+  // This pane satisfies #214's OWN heal evidence (claude's footer at the
+  // bottom, no limit block anywhere — `evaluateDegradedRecovery` doesn't
+  // look at the spinner line at all) while ALSO carrying a live spinner
+  // status line (`activity.ts`'s own MEASURED shape, "· Improvising… (1s ·
+  // ↓ 3 tokens)") that makes `readActivityFrame` read `paneVerdict.kind` as
+  // `"working"`, not `"idle"` — the row heals, but the wake must not fire.
+  it("heal succeeds on a WORKING (non-idle) paneVerdict, but the wake does not fire", async () => {
+    const RECOVERED_BUT_WORKING = [
+      "⏺ Resumed after the Esc.",
+      "",
+      "· Improvising… (1s · ↓ 3 tokens)",
+      ...RULE_PROMPT,
+    ].join("\n");
+    const status = degradedStatus({
+      rateLimited: { until: "2026-09-25T09:00:00.000Z", seenAt: "2026-09-25T08:30:00.000Z" },
+      exhaustionKind: "inline",
+    });
+    const storage = fakeStorage({ status });
+    const wake = wakeCmd(AUTO_CONTINUE_PROMPT);
+    const execCalls: string[] = [];
+    const exec = vi.fn(async (cmd: string) => {
+      execCalls.push(cmd);
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude claude\n", stderr: "" };
+      if (cmd === PANE_SCREEN_CMD) return { code: 0, stdout: `${RECOVERED_BUT_WORKING}\n`, stderr: "" };
+      if (cmd === wake) return { code: 0, stdout: "__FLEET_WAKE__ sent\n", stderr: "" };
+      return { code: 0, stdout: stdoutWithPane(RECOVERED_BUT_WORKING), stderr: "" };
+    });
+    const deps = { exec, r2Put: vi.fn(async () => {}), now: () => new Date("2026-09-25T09:30:00.000Z") };
+
+    await runShipTickWithObservation(deps, storage, STUDIO_ID, undefined, 5000);
+
+    const row = storage.map.get(STATUS_KEY) as StudioStatus;
+    expect(row.state).toBe("running"); // the row still heals — #214's own evidence is independent of the spinner
+    expect(execCalls.filter((c) => c === wake)).toEqual([]); // but nothing typed — a turn is in flight
   });
 });
