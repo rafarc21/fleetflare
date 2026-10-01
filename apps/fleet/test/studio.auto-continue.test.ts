@@ -315,6 +315,36 @@ describe("issue #158 — inline exhaustion gets a wake once its own reset passes
     const stored = await h.storage.get(STATUS_KEY);
     expect(stored?.state).toBe("running");
   });
+
+  // Review of #158 (fresh-context, this same PR): `recovery.parked`
+  // (evaluateDegradedRecovery) is true for ANY exhaustedMessagePrefix row —
+  // parkedMessage (#271, FLEET_AUTO_FAILOVER off) starts with the exact same
+  // prefix exhaustedMessage does, by design (its own doc comment: "so #214's
+  // heal clears it the same way once the pane recovers"). An INLINE block
+  // observed while a second account sits free writes via parkedMessage (the
+  // `!next` branch's `candidate` is non-null) with `rateLimited` shaped
+  // EXACTLY like a genuine inline-exhaustion row (no `select`, no `dead` —
+  // both independent of autoFailover). The existing "'parked' ... never
+  // writes or attempts auto-continue" test above only drives MODAL_PANE,
+  // which accidentally masks this gap: `select` is true there, so the old
+  // (wrong) exclusion happened to hold anyway. This test drives INLINE_PANE
+  // instead — the operator's own deliberate #271 choice must stay untouched,
+  // no wake ever, matching this feature's plan Scope/OUT section.
+  it("'parked' via an INLINE block (auto-failover off, a candidate exists) never gets a heal wake either", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: INLINE_PANE, autoFailover: false });
+
+    const first = await h.run();
+    expect(first).toEqual({ kind: "parked", account: "CLAUDE_CODE_OAUTH_TOKEN" });
+
+    // The pane recovers and its printed reset has passed — exactly the
+    // shape that fires a heal wake for a GENUINE inline exhaustion.
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    const second = await h.run();
+
+    expect(second.kind).toBe("recovered");
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]);
+  });
 });
 
 describe("issue #109 — the #214 working-branch recovery clears both new fields", () => {
