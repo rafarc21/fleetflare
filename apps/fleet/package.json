@@ -19,6 +19,7 @@
     "build:page": "bun run scripts/build-page.ts",
     "english-check": "bun run scripts/english-check.ts",
     "test-lies-check": "bun run scripts/test-lies-check.ts",
+    "sensors": "bun run scripts/sensors/run.ts",
     "migrate:local": "scripts/deploy.sh d1 migrations apply fleet --local",
     "migrate:remote": "scripts/deploy.sh d1 migrations apply fleet --remote"
   },
