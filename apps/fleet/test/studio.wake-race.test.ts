@@ -16,7 +16,7 @@ import {
   V1_STOP_AND_WAIT_PANE, V2_SESSION_LIMIT_PANE, REAL_PILOT_PANE, REAL_PANE_CAPTURED_AT,
 } from "./fixtures/rate-limit-panes";
 import { REAL_PERMISSION_PROMPT_TAIL_PANE, REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE } from "./fixtures/activity-panes";
-import { SURVEY_OVERLAY_PANE, RECOVERED_IDLE_PANE } from "./fixtures/survey-panes";
+import { SURVEY_OVERLAY_PANE, RECOVERED_IDLE_PANE, LEAD_NUMBERED_LIST_PANE } from "./fixtures/survey-panes";
 
 const NOW = new Date("2026-09-24T12:20:00.000Z");
 const STUDIO_ID = "fleetflare--maestro";
@@ -353,6 +353,17 @@ describe("gate 3 also refuses Claude Code's own feedback-survey overlay (#158)",
     expect(cmds).toHaveLength(3);
   });
 
+  // Maestro round-2 review (PR #170), finding 2 — the exact false positive
+  // the first-round detector tripped on: a lead's own short numbered status
+  // list, with no survey header anywhere near it. The redesigned detector
+  // (header text REQUIRED, never the choice shape alone) must let this land.
+  it("a lead's own short numbered list, no survey header anywhere: the wake still lands (finding 2's false positive, fixed)", async () => {
+    const { cmds, exec } = container(LEAD_NUMBERED_LIST_PANE);
+    const outcome = await gated(exec);
+    expect(outcome.ok).toBe(true);
+    expect(cmds).toHaveLength(3);
+  });
+
   // Review of #158 (fresh-context, this same PR), finding 2: the #144
   // switched-block early return (`if (switched === limitBlockKey(limit))
   // return afterLimitGate(...)`) sits INSIDE the `limit.kind === "modal"`
@@ -364,9 +375,15 @@ describe("gate 3 also refuses Claude Code's own feedback-survey overlay (#158)",
   // in at the exact point #144's own `withQueued` above splices queued rows.
   it("a stale switched-block redraw AND a survey overlay on the same screen: the survey gate wins, nothing typed", async () => {
     const SWITCHED = "You've hit your session limit · 1:30pm (UTC)";
+    // Maestro round-2 review (PR #170), finding 1: the real survey shape
+    // (header + one `N: label` choice row), not the first-round's invented
+    // stacked bare rows.
     const withSurvey = REAL_PILOT_PANE.replace(
       /❯\s+keep going/u,
-      ["❯ keep going", "  1  Great", "  2  Good"].join("\n"),
+      [
+        "❯ keep going", "● How is Claude doing this session? (optional)",
+        "1: Bad    2: Fine   3: Good   0: Dismiss",
+      ].join("\n"),
     );
     const { cmds, exec } = container(withSurvey);
 

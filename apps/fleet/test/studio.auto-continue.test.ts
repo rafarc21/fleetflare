@@ -428,3 +428,16 @@ describe("issue #109 — the #214 working-branch recovery clears both new fields
     expect(stored?.autoContinueLastTriedAt ?? null).toBeNull();
   });
 });
+
+// Maestro round-2 review (PR #170), finding 1 — the #158 plan's own Scope
+// point 1 claims this prompt is "already digit-free, so Gap 2's concern
+// does not even apply to this specific wake", but no test pinned that claim
+// until now: a future reword could silently reintroduce a digit (a task
+// number, a time) that answers Claude Code's own feedback-survey overlay
+// the SAME way the issue's other two wake callers (assignWakeMessage/
+// commentWakeMessage) can.
+describe("issue #158 — AUTO_CONTINUE_PROMPT stays digit-free", () => {
+  it("carries no digit characters", () => {
+    expect(AUTO_CONTINUE_PROMPT).not.toMatch(/\d/);
+  });
+});
