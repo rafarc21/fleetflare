@@ -262,13 +262,17 @@ bringup_step tailscale-up
 tailnet_marker="${FLEET_WORKSPACE:-/workspace}/.fleet/tailnet-down"
 if [ -z "${TS_AUTHKEY:-}" ]; then
   echo "studio-bringup: TS_AUTHKEY not set, skipping tailscale up"
+  rm -f "$tailnet_marker" 2>/dev/null || true
 elif ts_status=$(tailscale status --json 2>/dev/null) && grep -qE '"BackendState":[[:space:]]*"Running"' <(printf '%s' "$ts_status"); then
   echo "studio-bringup: tailscale already up"
   rm -f "$tailnet_marker" 2>/dev/null || true
 elif ts_up_err=$(tailscale up --ssh --authkey="$TS_AUTHKEY" --hostname="${STUDIO_ID:-studio}" 2>&1 >/dev/null); then
   rm -f "$tailnet_marker" 2>/dev/null || true
 else
-  ts_up_first="$(printf '%s\n' "$ts_up_err" | head -n1)"
+  # Parameter expansion, never `printf | head -n1`: head exits after one
+  # line, printf takes SIGPIPE on stderr over 64KB, and pipefail + errexit
+  # would kill bring-up right here (PR #190 review, reproduced rc=141).
+  ts_up_first="${ts_up_err%%$'\n'*}"
   echo "studio-bringup: tailscale-up FAILED (${ts_up_first}), continuing without tailnet" >&2
   case "$ts_up_err" in
     *"quota reached"*) ts_warning="tailnet: quota reached" ;;

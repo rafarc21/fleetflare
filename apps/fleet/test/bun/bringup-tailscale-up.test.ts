@@ -154,7 +154,7 @@ describe("studio-bringup.sh — tailscale-up region (issue #395)", () => {
 // a studio does needs the tailnet (attach is a WSS through the Worker), so
 // the region must log, leave a marker the provisioned check reads, and go on.
 describe("studio-bringup.sh — tailscale-up failure is non-fatal (issue #189)", () => {
-  function runRegion(upBehaviour: string, opts: { seedMarker?: boolean } = {}) {
+  function runRegion(upBehaviour: string, opts: { seedMarker?: boolean; statusRunning?: boolean; noAuthKey?: boolean } = {}) {
     const dir = mkdtempSync(join(tmpdir(), "fleet-tailscale-189-"));
     const bin = join(dir, "bin");
     const ws = join(dir, "ws");
@@ -164,7 +164,9 @@ describe("studio-bringup.sh — tailscale-up failure is non-fatal (issue #189)",
     writeFileSync(
       join(bin, "tailscale"),
       `#!/bin/bash\n` +
-        `if [ "$1" = "status" ]; then echo '{"BackendState": "NeedsLogin"}'; exit 1; fi\n` +
+        (opts.statusRunning
+          ? `if [ "$1" = "status" ]; then echo '{"BackendState": "Running"}'; exit 0; fi\n`
+          : `if [ "$1" = "status" ]; then echo '{"BackendState": "NeedsLogin"}'; exit 1; fi\n`) +
         `if [ "$1" = "up" ]; then ${upBehaviour}; fi\n` +
         `exit 1\n`,
     );
@@ -173,7 +175,10 @@ describe("studio-bringup.sh — tailscale-up failure is non-fatal (issue #189)",
     writeFileSync(scriptPath, `set -euo pipefail\n${REGION}\necho REACHED-NEXT-STEP\n`);
     const r = Bun.spawnSync({
       cmd: ["bash", scriptPath],
-      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, TS_AUTHKEY: "dummy-key", STUDIO_ID: "test-studio", FLEET_WORKSPACE: ws },
+      env: {
+        PATH: `${bin}:${process.env.PATH ?? ""}`, STUDIO_ID: "test-studio", FLEET_WORKSPACE: ws,
+        ...(opts.noAuthKey ? {} : { TS_AUTHKEY: "dummy-key" }),
+      },
       stdout: "pipe",
       stderr: "pipe",
       timeout: 15_000,
@@ -207,6 +212,32 @@ describe("studio-bringup.sh — tailscale-up failure is non-fatal (issue #189)",
   test("a successful tailscale up clears a stale marker from an earlier run", () => {
     const r = runRegion(`exit 0`, { seedMarker: true });
     expect(r.code).toBe(0);
+    expect(r.marker).toBeNull();
+  });
+
+  // PR #190 review, item 1: `printf | head -n1` under pipefail -- head exits
+  // after one line, printf takes SIGPIPE (rc 141), errexit kills bring-up.
+  test("stderr over 64KB: still continues, first line still named", () => {
+    const r = runRegion(
+      `echo "backend error: node quota reached on this tailnet" >&2; head -c 300000 /dev/zero | tr '\\0' 'x' >&2; echo >&2; exit 1`,
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("REACHED-NEXT-STEP");
+    expect(r.stderr).toContain("tailscale-up FAILED (backend error: node quota reached on this tailnet), continuing without tailnet");
+    expect(r.marker).toBe("tailnet: quota reached\n");
+  });
+
+  test("already up clears a stale marker", () => {
+    const r = runRegion(`exit 1`, { seedMarker: true, statusRunning: true });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("tailscale already up");
+    expect(r.marker).toBeNull();
+  });
+
+  test("TS_AUTHKEY unset clears a stale marker", () => {
+    const r = runRegion(`exit 1`, { seedMarker: true, noAuthKey: true });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("TS_AUTHKEY not set");
     expect(r.marker).toBeNull();
   });
 });

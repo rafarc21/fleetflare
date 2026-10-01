@@ -2143,14 +2143,17 @@ async function runProvisionedCheck(
 ): Promise<ProvisionedVerdict> {
   try {
     const res = await syncDeps.exec(provisionedCheckCmd(repo, harness));
-    const out = res.stdout.trim();
+    // Issue #189: the tailnet marker line rides on every answer. Read it,
+    // then judge the verdict on the rest -- a marker alone is no verdict,
+    // and it never belongs in a bare reason (PR #190 review).
+    const warning = tailnetWarningIn(res.stdout);
+    const out = res.stdout.split("\n").filter((l) => tailnetWarningIn(l) === null).join("\n").trim();
     // UNKNOWN first: it is the container saying the CHECK broke, not the
     // studio. Reading it as "bare" would turn a broken check into a recycle
     // trigger — the exact inversion the three-verdict split exists to stop.
     if (out.includes(PROVISIONED_UNKNOWN)) return { kind: "inconclusive", reason: out };
     if (out.includes(PROVISIONED_OK)) {
       // Issue #189: provisioned without a tailnet is still provisioned.
-      const warning = tailnetWarningIn(out);
       return warning ? { kind: "provisioned", warning } : { kind: "provisioned" };
     }
     // Issue #38: a BARE verdict is the one an operator has to act on, and
