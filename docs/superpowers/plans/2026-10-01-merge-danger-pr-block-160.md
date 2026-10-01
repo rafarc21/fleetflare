@@ -64,11 +64,22 @@ two-way. Blast Radius: one line, what breaks and for whom if this is wrong.
 
 `apps/fleet/test/board.envelope.test.ts`:
 - A fixture built from a REAL envelope already posted to the live board
-  (issue #158, before `merge_danger` existed — confirmed via `gh api
-  repos/rafarc21/fleetflare/issues/158/comments`) proves
-  `parseEnvelopeComment` still parses it cleanly, with `payload.merge_danger`
-  undefined. Guards against the optional field retroactively breaking
-  anything already stored on the board.
+  proves `parseEnvelopeComment` still parses it cleanly, with
+  `payload.merge_danger` undefined. Guards against the optional field
+  retroactively breaking anything already stored on the board. Deviation
+  from the original issue #158 pointer: #158's own two envelope comments
+  (checked both, `gh api repos/rafarc21/fleetflare/issues/158/comments`)
+  are MISSING `envelope.msg_id` entirely — `decodeDoc` in `envelope.ts`
+  requires it as a string and returns null for anything without one, so
+  neither #158 comment round-trips through `parseEnvelopeComment` at all,
+  for reasons wholly unrelated to `merge_danger` (likely hand-posted via
+  `gh issue comment` rather than through the Worker's own envelope route,
+  which is the only thing that stamps `msg_id`). Used issue #163's envelope
+  instead (`gh api repos/rafarc21/fleetflare/issues/163/comments`,
+  comment id 5930494303) — same "before `merge_danger` existed" property,
+  but carries a real `msg_id`, so it actually decodes and the "still a
+  valid doc, `merge_danger` undefined" assertion is literal, not
+  reinterpreted.
 - Round-trip test: a valid `merge_danger` survives
   `parseEnvelope`/`renderEnvelopeComment`/`parseEnvelopeComment`.
 - Invalid `door` (outside the closed set) is refused with a message naming
@@ -131,6 +142,8 @@ zero further edits.
   `parseEnvelope`/`renderEnvelopeComment`
 - `apps/fleet/test/board.envelope.test.ts` — backward-compat fixture test +
   new-field unit tests
+- `apps/fleet/test/fixtures/envelope-comment-issue-163.ts` (new) — the real
+  stored-comment fixture
 - `apps/fleet/scripts/merge-danger.ts` — 5 new `ONE_WAY_GLOBS` entries
 - `apps/fleet/test/bun/merge-danger.test.ts` — one test per new glob class
 

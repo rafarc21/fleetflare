@@ -5,6 +5,7 @@ import {
 } from "../src/board/envelope";
 import { commentEnvelope, type BoardApi } from "../src/board/board";
 import { taskStates, type EnvelopeDoc, type BoardTask } from "../src/board/types";
+import { ENVELOPE_COMMENT_ISSUE_163 } from "./fixtures/envelope-comment-issue-163";
 
 const MSG_ID = "0d9f1c2e-0000-4000-8000-000000000001";
 
@@ -261,6 +262,90 @@ describe("parseEnvelopeComment", () => {
     expect(parseEnvelopeComment("looks good to me, ship it")).toBeNull();
     expect(parseEnvelopeComment("```json\n{not json\n```")).toBeNull();
     expect(parseEnvelopeComment("```json\n{\"a\":1}\n```")).toBeNull();
+  });
+
+  // Issue #160: a REAL comment already on the board (fleetflare#163, before
+  // merge_danger existed) must still parse cleanly, with merge_danger
+  // absent — the new optional field cannot retroactively break anything
+  // already stored.
+  it("parses a real pre-#160 stored envelope with merge_danger absent", () => {
+    const doc = parseEnvelopeComment(ENVELOPE_COMMENT_ISSUE_163);
+    expect(doc).not.toBeNull();
+    if (!doc) return;
+    expect(doc.envelope.task_id).toBe(163);
+    expect(doc.envelope.sender).toBe("fleetflare--web-studio--26");
+    expect(doc.payload.merge_danger).toBeUndefined();
+  });
+});
+
+describe("parseEnvelope — merge_danger (§160)", () => {
+  const base = { sender: "websites--web-studio", intent: "result" as const };
+  const sample = { url: "https://x.test/check", steps: ["open it"], expected: "it works" };
+
+  it.each(["one-way", "two-way"] as const)(
+    "accepts a valid merge_danger door %s and round-trips it through render/parse",
+    (door) => {
+      const res = parseEnvelope(
+        { ...base, status: "ok", verification: sample, merge_danger: { door, blast_radius: "nothing — docs only" } },
+        7, MSG_ID,
+      );
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.doc.payload.merge_danger).toEqual({ door, blast_radius: "nothing — docs only" });
+      const rendered = renderEnvelopeComment(res.doc);
+      expect(rendered).toContain("Merge Danger");
+      expect(rendered).toContain(`Door: ${door}`);
+      expect(rendered).toContain("Blast Radius: nothing — docs only");
+      expect(parseEnvelopeComment(rendered)).toEqual(res.doc);
+    },
+  );
+
+  it("renders Merge Danger before Artifacts — operator attention routes to the door first", () => {
+    const res = parseEnvelope(
+      { ...base, status: "ok", verification: sample, artifacts: [{ kind: "pr", pr: "1" }],
+        merge_danger: { door: "one-way", blast_radius: "loses uncommitted work" } },
+      7, MSG_ID,
+    );
+    if (!res.ok) throw new Error(res.message);
+    const rendered = renderEnvelopeComment(res.doc);
+    expect(rendered.indexOf("Merge Danger")).toBeLessThan(rendered.indexOf("Artifacts"));
+  });
+
+  it("refuses a door outside the closed set, naming the field", () => {
+    const res = parseEnvelope(
+      { ...base, status: "ok", verification: sample, merge_danger: { door: "sideways", blast_radius: "x" } },
+      7, MSG_ID,
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain("merge_danger.door");
+    expect(res.message).toContain("one-way");
+    expect(res.message).toContain("two-way");
+  });
+
+  it("refuses a missing or blank blast_radius", () => {
+    expect(parseEnvelope(
+      { ...base, status: "ok", verification: sample, merge_danger: { door: "two-way" } }, 7, MSG_ID,
+    ).ok).toBe(false);
+    expect(parseEnvelope(
+      { ...base, status: "ok", verification: sample, merge_danger: { door: "two-way", blast_radius: "   " } }, 7, MSG_ID,
+    ).ok).toBe(false);
+  });
+
+  it.each(["request", "result", "error", "clarify", "escalate"] as const)(
+    "merge_danger absent is fine on intent %s — it is never required, unlike verification",
+    (intent) => {
+      const payload = intent === "result"
+        ? { sender: "s", intent, status: "ok", verification: sample }
+        : { sender: "s", intent, status: "ok" };
+      expect(parseEnvelope(payload, 7, MSG_ID).ok).toBe(true);
+    },
+  );
+
+  it("renders nothing under Merge Danger when the envelope carries no block", () => {
+    const res = parseEnvelope({ sender: "s", intent: "request", status: "ok" }, 7, MSG_ID);
+    if (!res.ok) throw new Error(res.message);
+    expect(renderEnvelopeComment(res.doc)).not.toContain("Merge Danger");
   });
 });
 
