@@ -264,3 +264,21 @@ export const REAL_PERMISSION_PROMPT_TAIL_PANE = REAL_LEAD_WAITING_MEMBERS_PANE.r
     "Esc to cancel · Tab to amend · ctrl+e to explain",
   ].join("\n"),
 );
+
+/**
+ * Issue #146 — the regression proof that the loose gate refuses a select
+ * modal by its OPENER (the ▔ rule, "Do you want to proceed?"), not by its
+ * footer's exact wording. Same shape as REAL_PERMISSION_PROMPT_TAIL_PANE,
+ * with ONLY its last line (the footer) swapped for a plausible reworded one
+ * that is neither of the two literals LOOSE_LIMIT_PATTERNS / MODAL_FOOTER_LINE
+ * already know (`Enter to confirm · Esc to cancel`, `Esc to cancel · Tab to
+ * amend · ctrl+e to explain`): a future Claude Code version rewording its
+ * footer, standing in for one this repo has never measured. Before #146's fix
+ * this footer is invisible to both gates and the wake types straight into the
+ * open "❯ 1. Yes" prompt; after it, the ▔ rule and the question alone refuse
+ * it regardless of what the footer says.
+ */
+export const REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE = REAL_PERMISSION_PROMPT_TAIL_PANE.replace(
+  "Esc to cancel · Tab to amend · ctrl+e to explain",
+  "Esc dismiss · Enter approve",
+);

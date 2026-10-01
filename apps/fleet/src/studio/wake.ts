@@ -65,6 +65,40 @@ export function flattenPrompt(prompt: string): string {
  *     for the limit/select modal above; failover.ts's strict detector
  *     already knows both shapes as alternatives in MODAL_FOOTER_LINE, this
  *     loose gate did not),
+ *   - the ▔-ruled top of ANY select-style modal (#146 — a Claude Code
+ *     version that rewords its footer yet again reopens exactly the hole
+ *     #144 closed, because both footer entries above are exact literals.
+ *     The fix generalizes on the modal's OPENER instead, which
+ *     failover.ts's own MODAL_BLOCK_START comment already establishes as
+ *     the shape claude draws for every select-style menu — limit modal,
+ *     permission prompt, plan-mode choice — "without forking this regex or
+ *     hardcoding footer text". A bare row of ▔ box-drawing glyphs is
+ *     UI-only chrome: no lead or prose ever prints one, so it cannot
+ *     conflict with a lead's own output),
+ *   - NOT the permission prompt's own question, "Do you want to proceed?",
+ *     standalone: this was tried and REJECTED (code review on #146) — unlike
+ *     every other entry here (an exact TUI footer, a product-specific
+ *     headline, a slash command), that sentence is ordinary English a lead
+ *     could plausibly end a genuinely-idle turn on ("I found three
+ *     approaches for the migration. Do you want to proceed?"), with no test
+ *     proving it safe against ordinary prose. It needs no entry of its own
+ *     anyway: every measured real permission-prompt pane
+ *     (REAL_PERMISSION_PROMPT_TAIL_PANE, REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE,
+ *     test/fixtures/activity-panes.ts) draws the ▔ rule directly above it,
+ *     so the ▔ entry above already refuses the same modal one row earlier —
+ *     covered TRANSITIVELY, never matched on its own wording. A bare
+ *     numbered-option-row pattern ("❯ 1. ...") was ALSO considered and
+ *     rejected: it would match the ghost-composer row this file's own
+ *     "#141 review" describe block pins as NOT a modal
+ *     (test/studio.wake-race.test.ts, `"❯ 1. Upgrade deps"`), and it would
+ *     reopen the false-positive class PR #102's first cut already got
+ *     burned by — a lead's own numbered prose (status update, plan,
+ *     checklist), pinned in test/fixtures/rate-limit-panes.ts's
+ *     `NOT_DETECTED` corpus, fixtures (d)/(e)/(f)/(g), several of which sit
+ *     inside LOOSE_TAIL_LINES. The limit modal's own opener, "What do you
+ *     want to do?", was deliberately left OUT too: NOT_DETECTED fixture (h)
+ *     quotes that exact line in prose, and the ▔ rule already covers the
+ *     same modal shape,
  *   - "(Run )/rate-limit-options" at the start of the row, or
  *   - a #53 headline as the whole row,
  * optionally inside a box border (a cursor only after a border). claude's
@@ -76,7 +110,15 @@ export function flattenPrompt(prompt: string): string {
  * POSIX ERE, C-locale safe, one list for both sides: the container's
  * `grep -E` reads it as is; the Worker swaps `[[:space:]]` for `\s`
  * (looseLimitOnScreen). `(│)?`, never `│?` — in the C locale `?` would bind
- * to the last BYTE of `│`. No `\s`, `\b` or `{n,}`. `ctrl\\+e`, never
+ * to the last BYTE of `│`. `(▔)+`, never bare `▔+`, for the exact same
+ * reason — MEASURED: `LC_ALL=C grep -E '▔+'` against ten repeated ▔
+ * characters does NOT match (the quantifier binds to the last byte of the
+ * multibyte glyph, not the whole character); wrapped in a group, `(▔)+`
+ * matches correctly. This is what let the #146 fix's own `▔`-only entry
+ * pass the JS-side test (`new RegExp` is code-unit aware) while silently
+ * failing the container's real `grep -E` guard — caught only because
+ * dropping the redundant "Do you want to proceed?" literal (also #146, see
+ * above) stopped masking it. No `\s`, `\b` or `{n,}`. `ctrl\\+e`, never
  * `ctrl\+e`: these patterns are JS STRING literals (fed to both `grep -E`
  * and `new RegExp`), not regex literals — `\+` in a JS string is an
  * unrecognized escape and silently collapses to a bare `+` (one-or-more),
@@ -93,6 +135,12 @@ const ROW_TAIL = "[[:space:]]*(│)?[[:space:]]*$";
 export const LOOSE_LIMIT_PATTERNS: readonly string[] = [
   `${ROW_LEAD}Enter to confirm · Esc to cancel${ROW_TAIL}`,
   `${ROW_LEAD}Esc to cancel · Tab to amend · ctrl\\+e to explain${ROW_TAIL}`,
+  // #146: the ▔-ruled top of ANY select-style modal — footer-wording-
+  // independent, structurally safe (UI-only chrome, no lead prints one).
+  // See this array's own doc comment above for why neither the permission
+  // prompt's "Do you want to proceed?" question nor a bare numbered-row
+  // pattern is a separate entry here.
+  `${ROW_LEAD}(▔)+${ROW_TAIL}`,
   `${ROW_LEAD}(Run )?/rate-limit-options`,
   `${ROW_LEAD}(${RATE_LIMIT_HEADLINES.join("|")})${ROW_TAIL}`,
 ];

@@ -9,7 +9,7 @@ import { tokenEnv } from "../../src/studio/credentials";
 import {
   RULE_PROMPT, V1_STOP_AND_WAIT_PANE, ORG_SPEND_LIMIT_PANE,
 } from "../fixtures/rate-limit-panes";
-import { REAL_PERMISSION_PROMPT_TAIL_PANE } from "../fixtures/activity-panes";
+import { REAL_PERMISSION_PROMPT_TAIL_PANE, REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE } from "../fixtures/activity-panes";
 
 // Issue #136. Gate 3 was check-then-act: the Worker read the screen, then a
 // SEPARATE exec typed text, slept 1s and pressed Enter. A modal drawn in
@@ -160,6 +160,10 @@ describe("wakeCmd — the guard runs INSIDE the one exec (#136)", () => {
     // real emitted shell command's `grep -E` must refuse on it too, not just
     // the pure-JS scan (studio.wake-race.test.ts).
     ["permission prompt (not the limit modal's footer)", REAL_PERMISSION_PROMPT_TAIL_PANE],
+    // #146: a footer #144 has never seen — the in-container `grep -E` guard
+    // must refuse on the modal's OPENER (the ▔ rule, "Do you want to
+    // proceed?") alone, independent of the footer's exact wording.
+    ["permission prompt with an unknown/reworded footer (#146)", REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE],
   ];
   for (const [name, pane] of UNSEEN) {
     test(`an unseen modal shape (${name}) on screen: nothing typed at all`, () => {
@@ -289,6 +293,7 @@ describe("wakeCmd — the loose scan's row anchors hold under grep -E (#144)", (
     ["a #53 headline", "WAKE: yesterday You've hit your usage limit was on screen; it is gone now"],
     ["the permission-prompt footer (#144)",
       "WAKE #144 retry — pane said Esc to cancel · Tab to amend · ctrl+e to explain, so nothing was typed"],
+    ["the ▔ rule (#146)", "WAKE #146 retry — pane showed a row of ▔▔▔ characters, so nothing was typed"],
   ];
   for (const [name, prompt] of MID_ROW) {
     test(`an echoing composer and a prompt carrying ${name} mid-row: Enter sent, and the next wake lands`, () => {
@@ -310,6 +315,7 @@ describe("wakeCmd — the loose scan's row anchors hold under grep -E (#144)", (
     "❯ Run /rate-limit-options to see what you can do.",
     "❯ You've hit your usage limit",
     "❯ Esc to cancel · Tab to amend · ctrl+e to explain",
+    "❯ ▔▔▔▔▔▔▔▔",
   ]) {
     test(`a ghost suggestion ${JSON.stringify(ghost)}: the wake lands`, () => {
       const t = fakeTmux(composer(ghost));

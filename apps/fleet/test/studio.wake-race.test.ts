@@ -15,7 +15,7 @@ import type { StudioStatus } from "../src/studio/types";
 import {
   V1_STOP_AND_WAIT_PANE, V2_SESSION_LIMIT_PANE, REAL_PILOT_PANE, REAL_PANE_CAPTURED_AT,
 } from "./fixtures/rate-limit-panes";
-import { REAL_PERMISSION_PROMPT_TAIL_PANE } from "./fixtures/activity-panes";
+import { REAL_PERMISSION_PROMPT_TAIL_PANE, REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE } from "./fixtures/activity-panes";
 
 const NOW = new Date("2026-09-24T12:20:00.000Z");
 const STUDIO_ID = "fleetflare--maestro";
@@ -48,6 +48,10 @@ describe("gate 3 is LOOSE: unseen modal shapes are refused before any keystroke"
     // Yes / 2. No") draws a DIFFERENT footer than the limit modal's own —
     // this is the regression fixture proving the loose gate now catches it.
     ["permission prompt (not the limit modal's footer)", REAL_PERMISSION_PROMPT_TAIL_PANE],
+    // #146: a footer #144 has never seen (a future Claude Code version
+    // rewording its own) must refuse too — the gate now generalizes on the
+    // modal's OPENER (the ▔ rule, "Do you want to proceed?"), not the footer.
+    ["permission prompt with an unknown/reworded footer (#146)", REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE],
   ];
   for (const [name, screen] of UNSEEN) {
     it(`refuses: ${name}`, async () => {
@@ -186,7 +190,10 @@ describe("gate 3 loose check anchors on modal ROWS (#141 review)", () => {
     const outcome = await gated(exec);
     expect(outcome.ok).toBe(false);
     expect(outcome.skipped).toBeUndefined();
-    expect(outcome.error).toContain("Enter to confirm · Esc to cancel");
+    // #146: the ▔ rule opens V1's modal BEFORE its footer, and the loose
+    // check now recognizes that opener too — it is the first matching row
+    // in the tail, so it is what gets named here now, not the footer.
+    expect(outcome.error).toContain("▔");
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     logWakeOutcome("wake", outcome);
     expect(errors).toHaveBeenCalledTimes(1);
@@ -223,6 +230,8 @@ describe("the loose patterns' row anchors are load-bearing (#144, mutants N1/N8)
       "❯ WAKE: yesterday You've hit your usage limit was on screen; it is gone now"],
     ["the permission-prompt footer, echoed back by the composer (#144)",
       "❯ WAKE TASK #144 \"the pane footer read Esc to cancel · Tab to amend · ctrl+e to explain, so nothing was typed\""],
+    ["the ▔ rule, echoed back by the composer (#146)",
+      "❯ WAKE TASK #146 \"the pane showed a row of ▔▔▔ characters, so nothing was typed\""],
   ];
   /** N1's tail half: the phrase OPENS the row but does not end it. */
   const TRAILING: [string, string][] = [
@@ -230,6 +239,7 @@ describe("the loose patterns' row anchors are load-bearing (#144, mutants N1/N8)
     ["a #53 headline with trailing prose", "  You've hit your usage limit was the wording on 09-23"],
     ["the permission-prompt footer with trailing prose (#144)",
       "  Esc to cancel · Tab to amend · ctrl+e to explain — quoted from the modal"],
+    ["the ▔ rule with trailing prose (#146)", "  ▔▔▔ — the modal's top rule"],
   ];
   /** N8: the SAME rows as ghost suggestions — a cursor at column 0, no border. */
   const GHOST: [string, string][] = [
@@ -238,6 +248,7 @@ describe("the loose patterns' row anchors are load-bearing (#144, mutants N1/N8)
     ["ghost Run /rate-limit-options", "❯ Run /rate-limit-options to see what you can do."],
     ["ghost #53 headline", "❯ You've hit your usage limit"],
     ["ghost permission-prompt footer (#144)", "❯ Esc to cancel · Tab to amend · ctrl+e to explain"],
+    ["ghost ▔ rule (#146)", "❯ ▔▔▔▔▔▔▔▔"],
   ];
 
   for (const [name, row] of [...MID_ROW, ...TRAILING, ...GHOST]) {
