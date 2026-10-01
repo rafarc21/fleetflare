@@ -166,9 +166,17 @@ describe("the destroy request's own budget", () => {
     expect(DESTROY_CLIENT_TIMEOUT_MS).toBeGreaterThanOrEqual(120_000 + CONTAINER_PROBE_MS + EXEC_CLASSES.sync.timeoutMs);
   });
 
-  it("polls a bounded number of times, never forever", () => {
-    expect(DESTROY_POLL_ATTEMPTS).toBe(6);
-    expect(DESTROY_POLL_INTERVAL_MS).toBe(10_000);
+  // DESTROY_POLL_ATTEMPTS's own real-behavior coverage is the "status never
+  // reaches stopped" test above, which counts the ACTUAL /status reads
+  // against this constant with no pollAttempts override.
+
+  it("sleeps DESTROY_POLL_INTERVAL_MS between polls, when nothing overrides it", async () => {
+    const { fetchImpl } = fakeSlowWorker([async () => Response.json(statusRow("running"))]);
+    const slept: number[] = [];
+    const sleep = async (ms: number) => { slept.push(ms); };
+    await requestDestroy({ destroy: DESTROY_URL, status: STATUS_URL }, {}, ID, { fetchImpl, timeoutMs: 20, sleep });
+    expect(slept.length).toBeGreaterThan(0);
+    expect(slept.every((ms) => ms === DESTROY_POLL_INTERVAL_MS)).toBe(true);
   });
 });
 
