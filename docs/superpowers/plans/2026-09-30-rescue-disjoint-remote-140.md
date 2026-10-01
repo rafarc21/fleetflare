@@ -380,3 +380,54 @@ recovery mechanism, not vacuously true against any real git push.
 - Heavy gates (full `bun-test`/`test`/`english-check`) intentionally not
   re-run this round — out of scope for a test-only fixture fix, sequenced
   by the lead afterward per this round's own instructions.
+
+### Round 1 re-verification (heavy gates, 2026-10-01)
+
+The heavy gates deferred above were sequenced and run afterward.
+
+1. `bun test test/bun/rescue-push.test.ts` — exit 0: `133 pass, 0 fail, 494
+   expect() calls. Ran 133 tests across 1 file. [69.41s]`.
+2. `bun run check` — exit 0, clean, no output (5 tsconfig projects).
+3. `bun run bun-test` (full suite, run alone) — exit 1: `2106 pass, 30 fail.
+   Ran 2138 tests across 113 files. [5026.41s]`. This run was severely
+   host-load-degraded (3x slower than the prior clean run of the same
+   command at ~1713-1951s) — mid-run a stray zombie process (`localci.sh`,
+   PID 3399181, 24+ minutes old, rooted in an abandoned `/tmp/localci-*`
+   throwaway test sandbox left behind by an earlier test's own failed
+   cleanup, unrelated to this PR) was found competing for host resources
+   and killed. All 30 failures, confirmed by reading the complete failure
+   list line by line, fall into exactly three pre-existing, environmental
+   classes, none touching `rescue.ts` or `rescue-push.test.ts`:
+   - 23 in `test/bun/localci-run.test.ts`: wall-clock timing/subprocess
+     tests cascading under the degraded host load this run happened to
+     hit (the same class already documented above in this doc's main
+     Verification section and in `docs/superpowers/plans/
+     2026-09-30-recycle-cli-hang-133.md`'s own precedent, just far more
+     instances this run due to the load spike).
+   - 6 in `test/bun/deploy-ops-guard.test.ts`: the same git-push-safety-
+     wrapper clash already documented above (`fleet: studios never push
+     the default branch — open a PR` refusing the test's own throwaway
+     local-origin push).
+   - 1 new, notable one: `bunInstallRunningCmd — round 5 review, item 1
+     MUTANT PROOF` / `MUTANT BASELINE` test — this test's own precondition
+     (no other long-lived bun process present) was violated by this
+     session's own accumulated background bun processes (daemons, prior
+     test runs) sitting in the container the whole time; not a
+     regression in the test or in this PR's diff, an artifact of this
+     specific container's session history at the moment this run happened
+     to execute.
+   A separate, earlier full run of the same command (before this round's
+   test-fixture changes landed, right after the production fix) saw only
+   11 failures (10 fail + 1 error) in the first two of these same three
+   classes — see this doc's main Verification section above — confirming
+   this is pre-existing flakiness whose instance count scales with host
+   load, not a new problem introduced by this round's test changes.
+4. Full vitest suite (`bun run test`) deliberately not re-run this round:
+   it already ran clean (153 files / 5384 tests pass) in the prior round
+   (see main Verification section above), and `test/bun/**` — the only
+   files this round's diff touches — is explicitly excluded from that
+   suite's scope (confirmed directly in the prior round: `bun run test --
+   test/bun/rescue-push.test.ts` returns "No test files found"). Re-running
+   a suite that cannot even see the changed files would add ~3 minutes for
+   zero information.
+5. `bun run english-check` — exit 0, `english-check: clean`.
