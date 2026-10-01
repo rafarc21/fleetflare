@@ -44,6 +44,22 @@ describe("buildReport — first run (no previous baseline)", () => {
   });
 });
 
+describe("buildReport — zero run history (brand-new fleet-check.yml, no runs yet)", () => {
+  test("ciTotal: 0, ciFailures: 0 computes without throwing and stays OK (not FIRED)", () => {
+    const report = buildReport(
+      { ciFailures: 0, ciTotal: 0, knownFlaky: 0 },
+      { ciFailures: null, knownFlaky: null },
+    );
+    expect(report.ciFailures.total).toBe(0);
+    expect(report.ciFailures.current).toBe(0);
+    expect(report.ciFailures.baseline).toBe(0);
+    expect(report.ciFailures.dampener).toBe("OK");
+    expect(report.knownFlaky.current).toBe(0);
+    expect(report.knownFlaky.baseline).toBe(0);
+    expect(report.knownFlaky.dampener).toBe("OK");
+  });
+});
+
 describe("buildReport — second run with a previous baseline", () => {
   test("CI sensor FIRED when current rises past baseline+slack, known-flaky independently OK", () => {
     const report = buildReport(
@@ -91,15 +107,39 @@ describe("renderBody / parseState round trip", () => {
     expect(parsed.knownFlaky).toBe(report.knownFlaky.current);
   });
 
-  test("rendered body carries the rate cap line, window, and current/baseline/dampener values", () => {
+  test("includes the rate-cap line", () => {
     const report = buildReport(
       { ciFailures: 4, ciTotal: 50, knownFlaky: 5 },
       { ciFailures: 1, knownFlaky: 2 },
     );
     const body = renderBody(report, "2026-10-01T10:00:00Z");
     expect(body).toContain("Rate cap: TBD, pending operator decision — filing disabled (record-only)");
+  });
+
+  test("includes the run timestamp", () => {
+    const report = buildReport(
+      { ciFailures: 4, ciTotal: 50, knownFlaky: 5 },
+      { ciFailures: 1, knownFlaky: 2 },
+    );
+    const body = renderBody(report, "2026-10-01T10:00:00Z");
     expect(body).toContain("2026-10-01T10:00:00Z");
+  });
+
+  test("includes the CI run window total value", () => {
+    const report = buildReport(
+      { ciFailures: 4, ciTotal: 50, knownFlaky: 5 },
+      { ciFailures: 1, knownFlaky: 2 },
+    );
+    const body = renderBody(report, "2026-10-01T10:00:00Z");
     expect(body).toContain("50");
+  });
+
+  test("includes a FIRED dampener value", () => {
+    const report = buildReport(
+      { ciFailures: 4, ciTotal: 50, knownFlaky: 5 },
+      { ciFailures: 1, knownFlaky: 2 },
+    );
+    const body = renderBody(report, "2026-10-01T10:00:00Z");
     expect(body).toContain("FIRED");
   });
 });
