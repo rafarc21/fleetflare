@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
 import {
   chunkKey, sessionLatestKey, sessionDailyKey, advance, shouldRotate,
-  CHUNK_SEQ_WIDTH, ROTATION_THRESHOLD_BYTES,
+  ROTATION_THRESHOLD_BYTES,
   TRANSCRIPT_PULL_MAX, HOT_TAIL_BYTES, SESSION_SINGLE_READ_MAX,
   SESSION_SPLIT_PART, SESSION_TOTAL_MAX, SESSION_SUBAGENT_RAW_BUDGET,
   SESSION_SUBAGENT_LIVE_WINDOW_SECONDS, SESSION_SUBAGENT_WATERMARK_LOOKBACK_SECONDS,
@@ -18,7 +18,6 @@ describe("chunkKey", () => {
   });
 
   it("zero-pads seq to CHUNK_SEQ_WIDTH digits", () => {
-    expect(CHUNK_SEQ_WIDTH).toBe(6);
     expect(chunkKey("id1", "2026-08-16", 9)).toBe("transcripts/id1/2026-08-16/000009.log");
     expect(chunkKey("id1", "2026-08-16", 10)).toBe("transcripts/id1/2026-08-16/000010.log");
   });
