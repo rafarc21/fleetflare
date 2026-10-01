@@ -406,6 +406,48 @@ describe("issue #158 — inline exhaustion gets a wake once its own reset passes
     expect(third.kind).toBe("recovered");
     expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toHaveLength(1);
   });
+
+  // Maestro round-2 review (PR #170), finding 2 — `healDegradedRowAndWake`
+  // used to discard its own `runGatedWake` outcome entirely: the row had
+  // already flipped to `"running"` by the SAME write, so a refused wake (a
+  // transient pane-probe hiccup here — claude briefly not in the window,
+  // unrelated to the heal's own evidence) lost the opportunity forever.
+  it("a refused heal wake (transient pane-probe hiccup) gets a bounded retry on a LATER tick, not lost forever", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: INLINE_PANE });
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    // Simulate the wake's OWN pane-probe refusing THIS tick only — claude
+    // briefly not the pane's current command (a transient hiccup), nothing
+    // to do with #214's own heal evidence, which is unaffected.
+    const originalExec = h.deps.exec;
+    h.deps.exec = vi.fn(async (cmd: string) => {
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude bash\n", stderr: "" };
+      return originalExec(cmd);
+    });
+    const second = await h.run();
+
+    expect(second.kind).toBe("recovered"); // the row still heals regardless
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]); // but nothing typed
+    const mid = await h.storage.get(STATUS_KEY);
+    expect(mid?.state).toBe("running");
+    expect(mid?.pendingHealWakeAttempts).toBe(1);
+    expect(mid?.pendingHealWakeLastTriedAt).toBe("2026-09-30T14:00:00.000Z");
+
+    // Claude is back in the window, and enough time has passed for the
+    // bounded retry's own hourly cadence (AUTO_CONTINUE_RETRY_MS, mirrored
+    // from #109's own select-modal retry) to fire again.
+    h.deps.exec = originalExec;
+    h.setNow(new Date("2026-09-30T15:01:00.000Z"));
+    await h.run();
+
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toHaveLength(1);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.pendingHealWakeAttempts ?? null).toBeNull();
+    expect(stored?.pendingHealWakeLastTriedAt ?? null).toBeNull();
+  });
 });
 
 describe("issue #109 — the #214 working-branch recovery clears both new fields", () => {

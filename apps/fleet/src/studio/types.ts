@@ -499,6 +499,37 @@ export interface StudioStatus {
    */
   exhaustionKind?: "dead" | "inline" | "select" | null;
   /**
+   * Maestro round-2 review (PR #170), finding 2: `healDegradedRowAndWake`
+   * used to discard its own `runGatedWake` outcome entirely — the row had
+   * already flipped to `"running"` by the SAME write, so a refused/skipped/
+   * failed heal wake (a transient pane-probe hiccup, claude briefly not in
+   * the window, a survey-detector false positive, anything) lost the
+   * opportunity forever. `pendingHealWakeAttempts`/`pendingHealWakeLastTriedAt`
+   * (this field's own pair, below) are the bounded-retry bookkeeping that
+   * fixes it, mirroring `autoContinueAt`/`autoContinueLastTriedAt`'s own
+   * hourly cadence (`AUTO_CONTINUE_RETRY_MS`) rather than reinventing a
+   * different shape — the one new concept neither borrows is a CAP on
+   * attempts (`PENDING_HEAL_WAKE_MAX_ATTEMPTS`, failover.ts): #109's own
+   * mechanism is bounded by the row leaving `degraded` state entirely, which
+   * this retry has no equivalent of (the row is already `"running"`), so an
+   * explicit attempt count is what makes this "bounded," not indefinite.
+   *
+   * `retryPendingHealWake` (failover.ts) reads/writes this pair from BOTH
+   * cadences — `runAccountFailover`'s 300s `working` branch and do.ts's
+   * #274 fast 30s ship-tick path — on every ordinary tick where
+   * `state === "running"`; a no-op (no write, no exec) when absent, the
+   * overwhelming majority of ticks. Cleared to `null` on success, on giving
+   * up past the attempt cap, and on every fresh heal/fresh degrade (a row
+   * must never carry a stale retry opportunity from one degradation into an
+   * unrelated later one).
+   */
+  pendingHealWakeAttempts?: number | null;
+  /** See `pendingHealWakeAttempts`'s own doc comment — the hourly-cadence
+   *  clock half of the same pair, set to the Nth attempt's own timestamp
+   *  regardless of that attempt's outcome, the same "regardless of outcome"
+   *  rule `autoContinueLastTriedAt` already states for its own clock. */
+  pendingHealWakeLastTriedAt?: string | null;
+  /**
    * See StudioReadiness's own doc comment above for what this records.
    * `null`/absent both mean "no verdict recorded yet" — a studio whose first
    * syncSession tick has not fired, or one written by a call site that
