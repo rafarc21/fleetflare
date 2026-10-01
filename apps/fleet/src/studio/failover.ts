@@ -1886,6 +1886,49 @@ export async function runAccountFailover(
       await storage.put(STATUS_KEY, cleared);
       await recordStudioFn(cleared);
       rowNow = cleared;
+      // Issue #158 — the gap #109 itself assumed away: an inline-exhausted
+      // row "self-clears through the EXISTING #214 working-branch recovery
+      // once its own printed reset passes the clock" (autoContinueEligible's
+      // own comment above), but the clear just above only ever flips STATE —
+      // it never types a keystroke, and claude does not resume a turn on its
+      // own just because a block scrolled past staleness. Fire exactly here,
+      // on the SAME tick the clear itself fires, so it shares that write's
+      // own at-most-once precondition (`existing.state === "degraded"`,
+      // consumed by the very write above) for free — no new bookkeeping.
+      //
+      // `inlineExhaustionHealed` narrows to THIS feature's own degradation,
+      // never the select-modal case (already woken via autoContinueAttempt,
+      // the one sanctioned Esc+wake path), never `"parked"` (#271, deliberate
+      // operator choice), and never the dead-account path (#141): `parked`
+      // (evaluateDegradedRecovery) is true for exhaustedMessagePrefix rows —
+      // which covers "parked" and dead-account messages too, both built on
+      // the same prefix — so the split is on `existing.rateLimited` itself,
+      // written by limitObservation at degrade time: `select` is set ONLY
+      // for a genuine select-modal verdict (never inline), and `dead` is set
+      // ONLY for the org-disabled-subscription verdict (#141) — their shared
+      // absence on an already-`parked` row is exactly the inline case.
+      const inlineExhaustionHealed = clearedAt !== null
+        && recovery.parked
+        && existing.rateLimited != null
+        && !existing.rateLimited.select
+        && !existing.rateLimited.dead;
+      // `!verdict.repainted`: a turn is in flight (the hand-back guard below
+      // reads the identical signal for the identical reason) — skip the wake
+      // this tick rather than type into a pane mid-turn. The row still heals
+      // either way; see this feature's own plan doc for why a wake lost to
+      // this one-tick race is accepted rather than retried.
+      if (inlineExhaustionHealed && !verdict.repainted) {
+        const { runGatedWake } = await import("./wake");
+        const gatedDeps: GatedWakeDeps = {
+          recordedState: async () => cleared.state,
+          exec: deps.exec,
+          now: deps.now,
+          studioId,
+          switchedBlock: async () => cleared.failoverBlock ?? null,
+          limitSighting: async () => sighting,
+        };
+        await runGatedWake(gatedDeps, AUTO_CONTINUE_PROMPT);
+      }
     }
     // Issue #131 (Stage B) — hand-back. This exact tick already runs on a
     // FIXED CADENCE (SYNC_SESSION_SECONDS, do.ts's syncSessionCycle)
