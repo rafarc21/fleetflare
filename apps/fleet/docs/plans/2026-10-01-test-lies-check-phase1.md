@@ -73,8 +73,21 @@ disabled, which is worse than no check, so every uncertain case resolves to
 ### 2. Source-reading
 
 Finds `readFileSync(...)` / `readFile(...)` / `Bun.file(...).text()` calls
-(via the same paren-depth-balanced extraction) whose literal first argument
-contains a `src/` path segment. Two shapes are flagged:
+(via the same paren-depth-balanced extraction) whose first argument carries
+a `src/` path segment in a string literal. That first argument is not
+always a bare literal: this repo's own actual idiom (`wake-gate-wiring.
+test.ts`, `archive-wiring.test.ts`, `bringup-log.test.ts`) is
+`readFileSync(join(import.meta.dir, "../../src/...ts"), "utf8")` — the
+literal is wrapped in a `join(...)` call, not passed directly. The first
+top-level argument's own text (up to its first top-level comma, respecting
+nested brackets/parens/strings, so a wrapper call's own internal commas
+don't get mistaken for the outer call's) is checked for a bare literal
+first, then — if it isn't one — scanned for any string literal it contains
+that carries a `src/` segment. Review round 1 (#164) caught the original
+version of this detector requiring the first argument to literally START
+with a quote character, which silently skipped every real `join(...)`-
+wrapped call in this repo and undercounted this detector to 0 — fixed by
+the lookup described above. Two shapes are flagged:
 
 - **Inline**: the read call sits directly inside `expect(...)`, which is
   itself followed (allowing an intervening `.toString()`) by `.toContain(`
@@ -95,6 +108,34 @@ file-scoped, not block-scoped — it does not understand `describe`/`test`
 boundaries. It can false-positive if the same variable name is reused,
 unrelated, later in a large test file. Accepted as a simplification; it
 will not miss a genuine match, only (rarely) over-flag one.
+
+A second, more consequential limitation, found while verifying the
+`join(...)` fix above against the real repo: the captured-variable scan
+only ever matches the EXACT captured name — no dataflow tracking through a
+second (or third) derived variable. This repo's three real
+`join(import.meta.dir, "../../src/...")` reads are all source-pinning tests
+that read a `src/` file, then derive a SUBSTRING of it through one or two
+further steps (`.split()`/`.indexOf()`/`.slice()`/`.match()`) before the
+derived value — never the originally-captured variable itself — is what
+actually reaches `toContain`/`toMatch`/a `.length` comparison (e.g.
+`archive-wiring.test.ts`: `src` → `method` (`src.slice(...)`) → `call`
+(`method.slice(...)`) → `expect(call).toContain(...)`, two hops deep). None
+of the three is flagged by this detector, even after the `join(...)` fix,
+and that is correct behavior for the algorithm as built: tracking an
+arbitrary chain of derived variables is genuine dataflow analysis, not a
+text-pattern scan, and is deliberately out of scope here for the same
+reason every other uncertain case in this file resolves to "skip" — a
+heuristic that starts guessing through derivation chains is far more likely
+to go wrong than one that only ever matches the name it actually saw read
+the file. Accepted as a real, current blind spot, not a bug: these three
+source-pinning tests happen to be a defensible style in their own right
+(each reads real source text and pins a literal structural fact about it,
+e.g. "N regexes declared", "the call site carries this literal arg name" —
+arguably closer to the source-pinning convention this repo already uses
+deliberately elsewhere than to the "test lie" shape this detector targets),
+but the detector cannot currently distinguish that from a less defensible
+case of the same two-hop shape. Left for a future round if the distinction
+turns out to matter in practice.
 
 ### 3. Own-module mocks
 
@@ -145,10 +186,18 @@ against, so those use a throwaway `mkdtempSync` directory, same pattern
 several other `test/bun/*.test.ts` files already use), covering both the
 real repeated shapes this repo has today and the documented false-positive
 guards (unresolved import, local variable instead of an import, a `src/`
-read never string-matched, a bare-specifier mock, the escape comment). A
-final "the repository itself" block runs `scanRepo()` for real and logs its
-counts — report-only, so there is no pass/fail threshold here, only a
-"doesn't throw" assertion.
+read never string-matched, a bare-specifier mock, the escape comment, the
+real `RECYCLE_CLIENT_TIMEOUT_MS`-shaped multi-line-but-NOT-tautological
+assertion, and the real `join(import.meta.dir, "../../src/...")` idiom in
+both its inline and captured-variable forms). A final "the repository
+itself" block runs `scanRepo()` for real and logs its counts — report-only,
+so there is no pass/fail threshold here, only a "doesn't throw" assertion —
+plus one pinned assertion that this check's own test file never appears in
+its own real findings, since the ALLOWLIST entry exempting it is load-
+bearing (its `vi.mock(...)` fixture would otherwise resolve for real into
+this repo's own `src/studio/paste.ts` and trip detector 3), not decorative,
+and Phase 1 never failing CI means a dropped entry would otherwise regress
+silently.
 
 Run alone: `bun test apps/fleet/test/bun/test-lies-check.test.ts` (or `cd
 apps/fleet && bun test test/bun/test-lies-check.test.ts`).

@@ -93,6 +93,39 @@ describe("findTautologies — expect(IMPORTED_CONST).toBe(<its own value>)", () 
     }
   });
 
+  // Mirrors the real test/cli.recycle-outcome.test.ts:320-322 shape — the
+  // motivating case for the paren-depth-balanced, multi-line argument
+  // extraction in the first place: a real `.toBe(...)` argument that spans
+  // several lines and contains its own parens/operators. It is NOT
+  // tautological: the declared RHS (`DESTROY_CLIENT_TIMEOUT_MS + 600_000 +
+  // 60_000` in the real module) textually differs from the asserted RHS
+  // (`DESTROY_CLIENT_TIMEOUT_MS + EXEC_CLASSES.provision.timeoutMs + ...`),
+  // even though both may be numerically equal at runtime — this detector
+  // compares text, not values, so a real cross-check like this must not be
+  // flagged as a restated-constant tautology.
+  test("does NOT flag a real multi-line assertion whose RHS differs textually from the declared one", () => {
+    const fx = new Fixture();
+    try {
+      fx.writeModule(
+        "src/recycle-outcome.ts",
+        "export const DESTROY_CLIENT_TIMEOUT_MS = 120_000;\n" +
+        "export const RECYCLE_CLIENT_TIMEOUT_MS = DESTROY_CLIENT_TIMEOUT_MS + 600_000 + 60_000;\n",
+      );
+      const testText = [
+        'import { RECYCLE_CLIENT_TIMEOUT_MS, DESTROY_CLIENT_TIMEOUT_MS } from "../src/recycle-outcome";',
+        "",
+        "it('covers destroy budget plus provision plus readiness', () => {",
+        "  expect(RECYCLE_CLIENT_TIMEOUT_MS).toBe(",
+        "    DESTROY_CLIENT_TIMEOUT_MS + EXEC_CLASSES.provision.timeoutMs + EXEC_CLASSES.readiness.timeoutMs,",
+        "  );",
+        "});",
+      ].join("\n");
+      expect(findTautologies(testText, fx.testDir)).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   test("does NOT flag when the identifier is a local variable, not an import", () => {
     const fx = new Fixture();
     try {
@@ -197,6 +230,36 @@ describe("findSourceReading — reading src/ as text and string-matching it", ()
     expect(findSourceReading(text)).toEqual([]);
   });
 
+  // This repo's own actual idiom (wake-gate-wiring.test.ts,
+  // archive-wiring.test.ts): the first argument is not a bare string
+  // literal, it's `join(import.meta.dir, "../../src/...")`. The detector
+  // must look inside that wrapper call for the literal, not only accept a
+  // bare literal as the first argument.
+  test('flags the real join(import.meta.dir, "...") idiom, captured-variable case', () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      "doSomethingUnrelated();",
+      'expect(src).toContain("switchedBlock:");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("../../src/studio/do.ts");
+  });
+
+  test('flags the join(import.meta.dir, "...") idiom, inline case too', () => {
+    const text = 'expect(readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8")).toContain("switchedBlock:");';
+    expect(findSourceReading(text)).toHaveLength(1);
+  });
+
+  test('does NOT flag join(import.meta.dir, "...") when the joined literal has no src/ segment', () => {
+    const text = [
+      'const fixture = readFileSync(join(import.meta.dir, "fixtures/sample.txt"), "utf8");',
+      'expect(fixture).toContain("hi");',
+    ].join("\n");
+    expect(findSourceReading(text)).toEqual([]);
+  });
+
   test("a trailing `test-lies-check: allow` exempts that one flagged line only (via scanFile)", () => {
     const fx = new Fixture();
     try {
@@ -290,5 +353,17 @@ describe("the repository itself", () => {
       expect(typeof f.path).toBe("string");
       expect(typeof f.line).toBe("number");
     }
+  }, 30_000);
+
+  // The ALLOWLIST entry for this file is load-bearing, not decorative: its
+  // own `vi.mock("../src/studio/paste");` fixture above (a string literal
+  // standing in for example flagged code) would resolve, for real, from
+  // this file's own real test/bun/ directory straight to the real
+  // apps/fleet/src/studio/paste.ts and trip findOwnModuleMocks — and since
+  // Phase 1 never fails CI, a dropped ALLOWLIST entry would regress this
+  // silently. Pin it directly, rather than only trusting a no-throw check.
+  test("test-lies-check's own test file never appears in its own real findings", async () => {
+    const findings = await scanRepo();
+    expect(findings.some((f) => f.path === "apps/fleet/test/bun/test-lies-check.test.ts")).toBe(false);
   }, 30_000);
 });

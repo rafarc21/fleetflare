@@ -253,6 +253,47 @@ export function findTautologies(
   return hits;
 }
 
+/** The text of `argText`'s first top-level argument — up to the first
+ *  top-level comma, respecting nested parens/brackets/braces/strings (so a
+ *  nested call's own commas, e.g. `join(a, b)` as the first argument,
+ *  don't get mistaken for the outer call's argument separator). */
+function firstArgText(argText: string): string {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < argText.length; i++) {
+    const c = argText[i];
+    if (quote) {
+      if (c === "\\") { i++; continue; }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") { quote = c; continue; }
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === "," && depth === 0) return argText.slice(0, i);
+  }
+  return argText;
+}
+
+/** The effective `src/`-segment path literal fed to a read call's first
+ *  argument, or null if none carries one. Handles both a bare literal
+ *  (`readFileSync("src/foo.ts")`) and this repo's actual real-world idiom —
+ *  `readFileSync(join(import.meta.dir, "../../src/foo.ts"), "utf8")` — by
+ *  falling back to any string literal found inside the first argument's own
+ *  expression text (so a `join(...)`/similar wrapper around the literal is
+ *  still caught) when the first argument is not itself a bare literal. */
+function pathLiteralOf(argText: string): string | null {
+  const first = firstArgText(argText);
+  const bare = first.match(/^\s*["'`]([^"'`]*)["'`]\s*$/);
+  if (bare) return /\bsrc\//.test(bare[1]) ? bare[1] : null;
+  const litRe = /["'`]([^"'`]*)["'`]/g;
+  let m: RegExpExecArray | null;
+  while ((m = litRe.exec(first))) {
+    if (/\bsrc\//.test(m[1])) return m[1];
+  }
+  return null;
+}
+
 /** Detector 2: a `src/` file read as text, then string-matched instead of
  *  exercised. See the file header for the algorithm and its known,
  *  documented limitation (the captured-variable scan is file-scoped). */
@@ -260,9 +301,8 @@ export function findSourceReading(text: string): Hit[] {
   const hits: Hit[] = [];
   const calls = [...findCalls(text, ["readFileSync", "readFile"]), ...findBunFileTextCalls(text)];
   for (const call of calls) {
-    const litMatch = call.argText.match(/^\s*["'`]([^"'`]*)["'`]/);
-    if (!litMatch || !/\bsrc\//.test(litMatch[1])) continue;
-    const pathLiteral = litMatch[1];
+    const pathLiteral = pathLiteralOf(call.argText);
+    if (!pathLiteral) continue;
 
     // Easy, high-confidence case first: the call sits directly inside
     // expect(...), itself followed by .toContain(/.toMatch( — handled
