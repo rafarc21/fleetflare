@@ -563,6 +563,15 @@ interface Harness {
    *  dead-account block appears in the pane's own tmux SCROLLBACK, separately
    *  from what the visible screen currently shows. */
   setScrollback(stdout: string): void;
+  /** Finding 1, fresh-context review of PR #152 round 2 (2026-09-30) — a
+   *  one-shot override of the scrollback exec's own RESULT (code/stdout/
+   *  stderr), consumed by the very next `deadAccountScrollbackCmd()` call and
+   *  then cleared, so a test can simulate a single transient exec failure (a
+   *  container exec timeout, a tmux hiccup, a momentarily-unavailable pane
+   *  target right after `respawn-pane -k`) on one SPECIFIC tick without
+   *  disturbing `setScrollback`'s own steady-state behavior on every other
+   *  tick. */
+  setScrollbackExec(result: { code: number; stdout: string; stderr: string }): void;
   /** Issue #102: the fleet-wide fake `accountLimits` store, exposed so a test
    *  can seed another account as ALREADY limited (fleet-wide, from some other
    *  studio's own sighting) before running this one. Issue #141: `dead` rides
@@ -609,6 +618,7 @@ function harness(opts: {
   const notices: string[] = [];
   let pane = opts.pane;
   let scrollback = "";
+  let scrollbackExecOverride: { code: number; stdout: string; stderr: string } | null = null;
   let relaunches = 0;
   let accountBurnReads = 0;
   const storage = fakeStorage(opts.initial ?? status()) as StudioStorage & ObservedStorage;
@@ -621,6 +631,9 @@ function harness(opts: {
     get accountBurnReads() { return accountBurnReads; },
     setPane: (stdout: string) => { pane = stdout; },
     setScrollback: (stdout: string) => { scrollback = stdout; },
+    setScrollbackExec: (result: { code: number; stdout: string; stderr: string }) => {
+      scrollbackExecOverride = result;
+    },
     deps: {
       accounts: opts.accounts,
       autoFailover: opts.autoFailover ?? true,
@@ -651,7 +664,14 @@ function harness(opts: {
         // scrollback read, distinguished from the ordinary pane capture the
         // same way this fake already distinguishes the bringup token-write
         // exec below: match the exact command string.
-        if (cmd === deadAccountScrollbackCmd()) return { code: 0, stdout: scrollback, stderr: "" };
+        if (cmd === deadAccountScrollbackCmd()) {
+          if (scrollbackExecOverride) {
+            const result = scrollbackExecOverride;
+            scrollbackExecOverride = null;
+            return result;
+          }
+          return { code: 0, stdout: scrollback, stderr: "" };
+        }
         // Issue #85, maestro correction #6: the post-switch combined
         // token-write + pane-probe exec. Default simulates a successful
         // token write with no lead pane found (this fake has no real tmux)
@@ -928,6 +948,63 @@ describe("runAccountFailover — issue #141 review, round 2, probe P7: an idle -
       // second one from a wrongly-triggered switch off the healthy account.
       expect(h.relaunches).toBe(1);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fresh-context review of PR #152's round-2 occurrence-count fix (2026-09-30),
+// finding 1 — the scrollback exec's own result was trusted without checking
+// `code` or `stdout`. A failed/empty capture on the VERY FIRST post-switch
+// sighting (the `baseline === null` branch) used to record a wrongly-empty
+// baseline of 0 (an empty stdout parses to 0 occurrences via
+// `countDeadAccountOccurrences`), even though the real, already-present,
+// NON-fresh count was 1. The next tick's successful capture would then read
+// 1 > 0 as genuinely fresh evidence and wrongly mark a possibly-still-just-
+// redrawing account dead — the exact P7 failure class (a non-fresh
+// observation misread as new evidence), reached via exec unreliability
+// instead of elapsed time. Fix: an invalid capture (non-zero `code`, or empty
+// `stdout`) is NEVER evidence of anything, including a baseline — it must
+// leave `failoverBlockOccurrences` completely untouched and fall back to
+// `rerender`, the same false-negative-biased discipline every other guard in
+// this file already uses (see `detectRateLimitModal`'s own "inconclusive"
+// handling).
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — fresh-context review of PR #152 round 2, finding 1: a failed/empty scrollback capture must never poison the occurrence baseline", () => {
+  it("a failed capture on the first post-switch sighting leaves no baseline; the next, genuinely-first-valid capture establishes it instead of being misread as fresh evidence", async () => {
+    const h = harness({ accounts: THREE_ACCOUNTS, pane: captured(ORG_DISABLED_PANE) });
+
+    // Tick 1: account 1's own screen shows the dead message — switches off it,
+    // as always.
+    const out1 = await run(h);
+    expect(out1).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toMatchObject({ dead: true });
+
+    // Tick 2 (first post-switch sighting): the scrollback capture FAILS — a
+    // transient container exec timeout/tmux hiccup, simulated here as a
+    // non-zero exit with empty stdout. The real, already-present (non-fresh)
+    // count is actually 1, but this capture cannot see it.
+    h.setScrollbackExec({ code: 1, stdout: "", stderr: "boom" });
+    const out2 = await run(h);
+    expect(out2.kind).toBe("rerender");
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN_2")?.dead).not.toBe(true);
+    // The failed capture must not have poisoned a baseline at all.
+    expect((await h.storage.get(STATUS_KEY))?.failoverBlockOccurrences ?? null).toBeNull();
+
+    // Tick 3: the scrollback capture now SUCCEEDS and genuinely returns the
+    // block occurring exactly ONCE — the true, still-stale count. This is now
+    // treated as the first VALID baseline, not as "1 > a wrongly-recorded 0".
+    h.setScrollback(deadBlockOccurring(1));
+    const out3 = await run(h);
+    expect(out3.kind).toBe("rerender");
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN_2")?.dead).not.toBe(true);
+    expect((await h.storage.get(STATUS_KEY))?.failoverBlockOccurrences).toBe(1);
+
+    // Tick 4: the scrollback genuinely grows to TWO occurrences — real, fresh
+    // evidence. Account 2 is now marked dead and the studio moves on.
+    h.setScrollback(deadBlockOccurring(2));
+    const out4 = await run(h);
+    expect(out4).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_2", to: "CLAUDE_CODE_OAUTH_TOKEN_3" });
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN_2")).toMatchObject({ dead: true });
   });
 });
 
