@@ -23,11 +23,25 @@ describe("classify — one glob class per forced one-way-door path", () => {
     expect(result.matched).toEqual(["apps/fleet/container/Dockerfile.studio"]);
   });
 
+  test("apps/fleet/container/** — two levels deep (real path, ego-browser)", () => {
+    const changed = ["apps/fleet/container/ego-browser/api.ts"];
+    const result = classify(changed);
+    expect(result.oneWay).toBe(true);
+    expect(result.matched).toEqual(["apps/fleet/container/ego-browser/api.ts"]);
+  });
+
   test("apps/fleet/migrations/** — D1 schema migrations", () => {
     const changed = ["apps/fleet/migrations/0003_add_column.sql"];
     const result = classify(changed);
     expect(result.oneWay).toBe(true);
     expect(result.matched).toEqual(["apps/fleet/migrations/0003_add_column.sql"]);
+  });
+
+  test("apps/fleet/migrations/** — two levels deep (migrations is flat today; ** must still reach a nested subdir)", () => {
+    const changed = ["apps/fleet/migrations/archive/0001_old.sql"];
+    const result = classify(changed);
+    expect(result.oneWay).toBe(true);
+    expect(result.matched).toEqual(["apps/fleet/migrations/archive/0001_old.sql"]);
   });
 
   test("apps/fleet/src/studio/rescue.ts — rescue-push", () => {
@@ -77,6 +91,13 @@ describe("classify — one glob class per forced one-way-door path", () => {
     const result = classify(changed);
     expect(result.oneWay).toBe(true);
     expect(result.matched).toEqual(["apps/fleet/src/write-proxy/git-route.ts"]);
+  });
+
+  test("apps/fleet/src/write-proxy/** — two levels deep (write-proxy is flat today; ** must still reach a nested subdir)", () => {
+    const changed = ["apps/fleet/src/write-proxy/git/auth.ts"];
+    const result = classify(changed);
+    expect(result.oneWay).toBe(true);
+    expect(result.matched).toEqual(["apps/fleet/src/write-proxy/git/auth.ts"]);
   });
 
   test("apps/fleet/scripts/deploy* — deploy.sh, deploy-target.ts, deploy-containers-changed.ts", () => {
