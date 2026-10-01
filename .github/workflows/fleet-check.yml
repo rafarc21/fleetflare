@@ -44,6 +44,11 @@ jobs:
       - name: Unit tests (vitest-pool-workers)
         run: bun run test
 
+      # #174: tests that cannot catch a bug (tautological, source-reading,
+      # own-module mocks) fail the build. Same check as the local-ci lane.
+      - name: Test-lies check
+        run: bun run test-lies-check
+
       # test/bun/wake-cmd.test.ts runs the waker's emitted `tmux send-keys`
       # against a REAL tmux server. Without tmux those tests fail loudly
       # (they pin tmux's own stderr, so a missing binary can never read as
