@@ -154,6 +154,62 @@ export function looseLimitOnScreen(screen: string): string | null {
   return tail.find((l) => LOOSE_JS.some((re) => re.test(l)))?.trim() ?? null;
 }
 
+/**
+ * Issue #158 — a NEW, SEPARATE loose detector: Claude Code's own feedback-
+ * survey overlay (options 1/2/3/0 above the prompt — field note on #158,
+ * 2026-10-01 02:56Z). A SEPARATE function and pattern from
+ * LOOSE_LIMIT_PATTERNS above, deliberately — that array is scoped to MODAL
+ * ROWS (this file's own doc comment just above it), and a general
+ * numbered-option-row pattern was already tried there once (PR #102's first
+ * cut) and REJECTED again at #146, for matching a lead's own numbered prose
+ * (test/fixtures/rate-limit-panes.ts's NOT_DETECTED corpus, fixtures
+ * (d)/(e)/(f)/(g)) and the ghost-composer row (test/studio.wake-race.test.ts,
+ * `"❯ 1. Upgrade deps"`). Folding this into LOOSE_LIMIT_PATTERNS would repeat
+ * that exact mistake.
+ *
+ * Narrower shape, chosen to avoid it: within the bottom LOOSE_TAIL_LINES
+ * non-blank rows, at least TWO CONSECUTIVE rows that are each a BARE, SHORT
+ * numbered-choice line — just a digit (optionally followed by `.`/`)`/`:`)
+ * and no more than a handful of characters of label, nothing else on the
+ * row. Every rejected shape above carries a full word or sentence after the
+ * number, and the ghost-composer row is only ever ONE such row, never two in
+ * a row — so neither trips this.
+ *
+ * The field note's own "no ▔ rule" (i.e. NOT drawn inside the same
+ * boxed-modal chrome every rate-limit/permission-prompt fixture in this repo
+ * uses) is read as: if a ▔ rule is anywhere in the same tail, this is modal
+ * territory, already owned by LOOSE_LIMIT_PATTERNS's own `(▔)+` entry — defer
+ * to it rather than risk a double-refusal with the wrong reason. MEASURED
+ * collision this guards against: REAL_PERMISSION_PROMPT_TAIL_PANE and
+ * REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE (test/fixtures/activity-panes.ts)
+ * draw a ▔ rule directly above their own bare "❯ 1. Yes" / "2. No" pair,
+ * which would otherwise also match this shape and change WHICH gate refuses
+ * (and how — a skip here, a loud error there) for an already-covered case.
+ *
+ * UNMEASURED (no real capture of this overlay exists in this repo yet —
+ * test/fixtures/survey-panes.ts's own doc comment); the shape is
+ * deliberately conservative rather than guessed wide.
+ */
+const SURVEY_CHOICE_ROW = /^[ \t]*(│[ \t]*)?[0-9][.):]?[ \t]{0,2}\S{0,6}[ \t]*(│)?[ \t]*$/;
+
+/** True when SURVEY_CHOICE_ROW's shape (see its own doc comment) is found
+ *  twice in a row within the bottom LOOSE_TAIL_LINES non-blank rows, and no
+ *  ▔ rule sits anywhere in that same tail. */
+export function surveyOverlayOnScreen(screen: string): boolean {
+  const tail = screen.split("\n").filter((l) => l.trim() !== "").slice(-LOOSE_TAIL_LINES);
+  if (tail.some((l) => l.includes("▔"))) return false;
+  let run = 0;
+  for (const line of tail) {
+    if (SURVEY_CHOICE_ROW.test(line)) {
+      run += 1;
+      if (run >= 2) return true;
+    } else {
+      run = 0;
+    }
+  }
+  return false;
+}
+
 /** Prefix of the one verdict line the in-container guard prints. */
 export const WAKE_VERDICT = "__FLEET_WAKE__";
 
@@ -688,6 +744,22 @@ export async function runGatedWake(deps: GatedWakeDeps, prompt: string, clearDra
     return {
       ok: false, skipped: true,
       error: `${holds} — session-limit block on screen in ${WAKE_TARGET}; no keystroke sent`,
+    };
+  }
+
+  // Issue #158 — Claude Code's own feedback-survey overlay. Checked here,
+  // right after the modal check above and still against the SAME `screen`
+  // capture (no new exec), for every runGatedWake caller: a wake whose text
+  // carries a digit (a task number, a time) can answer a survey the strict
+  // detector above has never heard of. See surveyOverlayOnScreen's own doc
+  // comment for the shape and why it is a SEPARATE check from the modal gate
+  // above and from LOOSE_LIMIT_PATTERNS (afterLimitGate's own loose check,
+  // just below).
+  if (surveyOverlayOnScreen(screen.stdout)) {
+    return {
+      ok: false, skipped: true,
+      error: `feedback survey on screen in ${WAKE_TARGET}; no keystroke sent — ` +
+        `Dismiss by hand: ff ${deps.studioId ?? "<id>"}, press Esc, detach, re-assign.`,
     };
   }
 
