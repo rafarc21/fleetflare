@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   runAccountFailover, paneCaptureCmd, dismissModalCmd, DISMISS_VERDICT, exhaustedMessage,
-  PANE_CAPTURE_MARKER, type FailoverDeps,
+  PANE_CAPTURE_MARKER, AUTO_CONTINUE_PROMPT, type FailoverDeps,
 } from "../src/studio/failover";
-import { PANE_PROBE_CMD, PANE_SCREEN_CMD } from "../src/studio/wake";
+import { PANE_PROBE_CMD, PANE_SCREEN_CMD, wakeCmd } from "../src/studio/wake";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
 import type { ClaudeAccount } from "../src/studio/accounts";
@@ -83,6 +83,14 @@ interface Harness {
   recorded: StudioStatus[];
   execs: string[];
   run(): ReturnType<typeof runAccountFailover>;
+  /** Issue #158: lets a test drive TWO ticks with genuinely different pane
+   *  content (exhaust, then reset-passed-and-idle) through the SAME harness,
+   *  the same `setPane` shape test/studio.account-failover.test.ts's own
+   *  richer harness already uses. */
+  setPane(pane: string): void;
+  /** Issue #158: same reasoning as setPane — a reset-passed test needs the
+   *  SECOND tick's clock to be later than the first's. */
+  setNow(now: Date): void;
 }
 
 function harness(opts: {
@@ -95,13 +103,15 @@ function harness(opts: {
   const execs: string[] = [];
   const recorded: StudioStatus[] = [];
   const storage = fakeStorage(opts.initial ?? status());
+  let pane = opts.pane;
+  let now = opts.now ?? NOW;
   const deps: FailoverDeps = {
     accounts: opts.accounts,
     autoFailover: opts.autoFailover ?? true,
-    now: () => opts.now ?? NOW,
+    now: () => now,
     exec: vi.fn(async (cmd: string) => {
       execs.push(cmd);
-      if (cmd === paneCaptureCmd()) return { code: 0, stdout: captured(opts.pane), stderr: "" };
+      if (cmd === paneCaptureCmd()) return { code: 0, stdout: captured(pane), stderr: "" };
       // dismissModalCmd()'s own shell — the fake never runs a real shell, so
       // this stands in for it: report "escaped" (the modal was still there),
       // the common case for a fresh select-modal capture.
@@ -119,6 +129,8 @@ function harness(opts: {
   return {
     deps, storage, recorded, execs,
     run: () => runAccountFailover(deps, storage, STUDIO_ID, async (s) => { recorded.push(s); }),
+    setPane: (p: string) => { pane = p; },
+    setNow: (n: Date) => { now = n; },
   };
 }
 
@@ -261,6 +273,47 @@ describe("issue #109 — never attempts outside the genuinely-exhausted select-m
     const second = await h.run();
     expect(second.kind).toBe("already-degraded");
     expect(h.execs.filter((c) => c === dismissModalCmd())).toEqual([]);
+  });
+});
+
+describe("issue #158 — inline exhaustion gets a wake once its own reset passes (#214 heal)", () => {
+  it("inline exhausted, reset still live: #214 heal never fires, so no wake attempt either", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: INLINE_PANE });
+
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    // Still showing the SAME inline block (the pane never changed, and the
+    // reset — 1:30pm UTC — is still ahead of NOW, noon UTC): #214's own
+    // evidence rule never heals it, so this feature's new wake never gets a
+    // chance to fire either. The existing "never attempts Esc or wake" test
+    // above pins the silent already-degraded outcome; this pins the
+    // wake-specific half of the same still-live tick.
+    const second = await h.run();
+    expect(second.kind).toBe("already-degraded");
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]);
+  });
+
+  it("inline exhausted, reset passed and the pane is idle: exactly one gated wake with AUTO_CONTINUE_PROMPT", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: INLINE_PANE });
+
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    // The reset (1:30pm UTC) has passed, and the pane has genuinely
+    // recovered — claude's own footer at the bottom, no limit anywhere —
+    // so #214's own heal fires, and this is the healing tick.
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    const second = await h.run();
+
+    expect(second.kind).toBe("recovered");
+    // Never the select-modal path's own Esc — this row was never eligible
+    // for that (verdict.inline was true throughout).
+    expect(h.execs.filter((c) => c === dismissModalCmd())).toEqual([]);
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toHaveLength(1);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.state).toBe("running");
   });
 });
 
