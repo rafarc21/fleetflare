@@ -352,4 +352,33 @@ describe("gate 3 also refuses Claude Code's own feedback-survey overlay (#158)",
     expect(outcome.ok).toBe(true);
     expect(cmds).toHaveLength(3);
   });
+
+  // Review of #158 (fresh-context, this same PR), finding 2: the #144
+  // switched-block early return (`if (switched === limitBlockKey(limit))
+  // return afterLimitGate(...)`) sits INSIDE the `limit.kind === "modal"`
+  // branch, which runs BEFORE this survey check — so a stale switched-block
+  // redraw and a feedback-survey overlay coinciding on the same screen used
+  // to skip the survey gate entirely. Reuses the #144 describe block's own
+  // SWITCHED fixture/pane (REAL_PILOT_PANE already proven to trigger that
+  // early return) with the survey fixture's own bare numbered rows spliced
+  // in at the exact point #144's own `withQueued` above splices queued rows.
+  it("a stale switched-block redraw AND a survey overlay on the same screen: the survey gate wins, nothing typed", async () => {
+    const SWITCHED = "You've hit your session limit · 1:30pm (UTC)";
+    const withSurvey = REAL_PILOT_PANE.replace(
+      /❯\s+keep going/u,
+      ["❯ keep going", "  1  Great", "  2  Good"].join("\n"),
+    );
+    const { cmds, exec } = container(withSurvey);
+
+    const outcome = await runGatedWake({
+      recordedState: async () => "running", exec, studioId: STUDIO_ID,
+      now: () => new Date(REAL_PANE_CAPTURED_AT.pilot),
+      switchedBlock: async () => SWITCHED,
+    }, "WAKE");
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.skipped).toBe(true);
+    expect(cmds).toEqual([PANE_PROBE_CMD, PANE_SCREEN_CMD]);
+    expect(cmds.some((c) => c.includes("WAKE"))).toBe(false);
+  });
 });
