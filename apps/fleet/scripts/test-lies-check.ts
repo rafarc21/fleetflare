@@ -17,10 +17,13 @@
  * `export const A = 1, B = 2;` shape, etc.) is a silent SKIP, never a flag.
  * A noisy check gets disabled, which is worse than no check.
  *
- * Phase 1 is report-only: `scanRepo()` runs, the CLI prints findings and
- * counts, and always exits 0 regardless of what it finds. Phase 2 (wiring
- * this in as a failing gate) is a separate, future piece of work — see
- * docs/plans/2026-10-01-test-lies-check-phase1.md.
+ * Phase 1 (docs/plans/2026-10-01-test-lies-check-phase1.md) was report-only:
+ * `scanRepo()` ran, the CLI printed findings and counts, and always exited 0
+ * regardless of what it found — the point was to get real, honest counts
+ * before committing to a threshold. Phase 2 (#174,
+ * docs/plans/2026-10-01-test-lies-check-phase2.md) cleared that backlog to
+ * 0 and flipped this into a real gate: the CLI now exits 1 on any finding,
+ * 0 on none, and is wired into `local-ci/fleet-check`.
  *
  * Escape hatch for a single line: end it with `test-lies-check: allow`. For
  * a whole deliberate file (this check's own test, whose fixtures are string
