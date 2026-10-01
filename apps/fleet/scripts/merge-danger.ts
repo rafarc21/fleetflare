@@ -80,6 +80,28 @@ export const ONE_WAY_GLOBS: OneWayGlob[] = [
     pattern: "apps/fleet/.dev.vars*",
     why: "secrets shape; no literal secrets/ dir exists in this repo",
   },
+  // Board issue #160: 5 more forced one-way-door paths, on top of #161's
+  // original 12.
+  {
+    pattern: "apps/fleet/src/studio/do.ts",
+    why: "the studio Durable Object — core per-studio state machine",
+  },
+  {
+    pattern: "apps/fleet/src/studio/wake.ts",
+    why: "wakes a studio's Claude Code session; a bug here can stall or double-fire across the fleet",
+  },
+  {
+    pattern: "apps/fleet/src/studio/registry.ts",
+    why: "the studio registry — the fleet's source of truth for what's running",
+  },
+  {
+    pattern: "apps/fleet/src/studio/profile.ts",
+    why: "studio account/profile assignment",
+  },
+  {
+    pattern: "gates/**",
+    why: "the hook scripts gating lead writes, completion, and session recovery (lead-gate.sh, completion-gate.sh, etc.) — this IS the safety mechanism these rules describe",
+  },
 ];
 
 /** True when `pattern` has no glob metacharacters — matched by exact equality. */

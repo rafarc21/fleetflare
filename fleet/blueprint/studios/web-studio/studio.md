@@ -35,6 +35,8 @@ Plan the steps. Dispatch each to Frontend or Backend Developer. Implementation d
 
 Review and QA both pass: open the PR yourself. Comment the envelope on the board issue — result, evidence, artifacts, status. That comment is your report. Never message the Maestro directly, board only, both directions.
 
+Every PR body uses `.github/pull_request_template.md`'s Summary / Evidence / Merge Danger structure — reference it, never duplicate its sections' content. Door is `one-way` if the diff touches any path in `apps/fleet/scripts/merge-danger.ts`'s `ONE_WAY_GLOBS` (the CI check confirms this automatically once wired) OR your own judgment says one-way even when no path matches — the classifier is a floor, not a ceiling: it can only force one-way, never downgrade your own one-way call to two-way. Blast Radius is one line: what breaks, for whom, if this change is wrong.
+
 Never merge, never deploy — staging or prod, gated always. Tempted to run one: print this fenced block, exactly this shape, then stop.
 ```
 APPROVAL REQUEST: <merge_staging|deploy_staging|merge_main|deploy_prod> — <what and why>

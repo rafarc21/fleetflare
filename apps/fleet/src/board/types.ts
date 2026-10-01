@@ -258,6 +258,17 @@ export interface EnvelopeVerification {
   expected: string;
 }
 
+export const MERGE_DANGER_DOORS = ["one-way", "two-way"] as const;
+export type MergeDangerDoor = (typeof MERGE_DANGER_DOORS)[number];
+
+/** Board issue #160: the path classifier's (or the lead's own) verdict on
+ *  whether this PR is reversible, carried into the result envelope so the
+ *  operator's attention routes to one-way doors without reading every PR. */
+export interface MergeDanger {
+  door: MergeDangerDoor;
+  blast_radius: string;
+}
+
 /**
  * §6's envelope, stored verbatim in its own shape (snake_case, nested
  * envelope/payload/notes) — the schema is the migration surface, so it is
@@ -280,6 +291,10 @@ export interface EnvelopeDoc {
     artifacts: EnvelopeArtifact[];
     /** Commands run, checks passed. §6: no unverified claims. */
     evidence: string[];
+    /** Issue #160: optional on EVERY intent, never required — unlike
+     *  `verification` below. Rendered FIRST in the comment so an operator's
+     *  attention routes to one-way doors before reading anything else. */
+    merge_danger?: MergeDanger;
     /** §4: absent unless intent is "result" — see EnvelopeVerification. */
     verification?: EnvelopeVerification;
     /** Structural slot so the schema never forces a guess — fail-to-ask is
