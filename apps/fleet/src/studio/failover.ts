@@ -1714,7 +1714,7 @@ async function autoContinueAttempt(
  * check for their own pre-existing reasons — #85 PR1's op lock here, #86/#87
  * there — so it is threaded in rather than recomputed); building and writing
  * the healed `StudioStatus` (`state`, `rateLimited`, `autoContinueAt`,
- * `autoContinueLastTriedAt`, `operatorParked`, `exhaustionClearedAt` — do.ts's
+ * `autoContinueLastTriedAt`, `exhaustionKind`, `exhaustionClearedAt` — do.ts's
  * OWN pre-#158 heal write cleared only the first three of these six, a
  * pre-existing gap folded into this one shared write rather than left as two
  * subtly different `cleared` shapes); and firing the #158 heal wake when
@@ -1775,22 +1775,22 @@ export async function healDegradedRowAndWake(d: DegradedHealDeps): Promise<Studi
     exhaustionClearedAt: clearedAt,
     autoContinueAt: null,
     autoContinueLastTriedAt: null,
-    operatorParked: null,
+    // Maestro round-2 review (PR #170), findings 3+4 — replaces
+    // `operatorParked: null` here (field removed entirely, see
+    // StudioStatus.exhaustionKind's own doc comment for the full history).
+    exhaustionKind: null,
   };
   await d.storage.put(STATUS_KEY, cleared);
   await d.recordStudioFn(cleared);
-  // See `inlineExhaustionHealed`'s own history in `runAccountFailover`'s
-  // doc comments (issues #109, #158 findings 1 and 3) for why each conjunct
-  // is here: `recovery.parked` alone covers select-modal/dead-account rows
-  // too (shared `exhaustedMessagePrefix`), `!d.existing.operatorParked`
-  // excludes a #271 park even when its trigger was inline, and
-  // `rateLimited.select`/`.dead` exclude the select-modal/dead-account cases
-  // specifically.
-  const inlineExhaustionHealed = d.recovery.parked
-    && !d.existing.operatorParked
-    && d.existing.rateLimited != null
-    && !d.existing.rateLimited.select
-    && !d.existing.rateLimited.dead;
+  // `recovery.parked` alone covers select-modal/dead-account rows too
+  // (shared `exhaustedMessagePrefix`), so the real split is on
+  // `d.existing.exhaustionKind`, stamped once at degrade time from the
+  // TRIGGERING verdict (see StudioStatus.exhaustionKind's own doc comment
+  // for why this replaced both `operatorParked` and a live read of
+  // `rateLimited.select`/`.dead`, maestro round-2 review, PR #170, findings
+  // 3+4): `"inline"` heals and wakes (independent of `autoFailover` — #158's
+  // own text), `"select"`/`"dead"` never do.
+  const inlineExhaustionHealed = d.recovery.parked && d.existing.exhaustionKind === "inline";
   if (inlineExhaustionHealed && d.safeToWake) {
     const { runGatedWake } = await import("./wake");
     const gatedDeps: GatedWakeDeps = {
@@ -2338,6 +2338,14 @@ export async function runAccountFailover(
   if (!next) {
     const tried = deps.accounts.map((a) => a.name).slice(start);
     const parkedOn = candidate ? (from ?? tried.at(-1) ?? "CLAUDE_CODE_OAUTH_TOKEN") : null;
+    // Maestro round-2 review (PR #170), findings 3+4 — the durable
+    // classification stamped on every write in this branch (see
+    // StudioStatus.exhaustionKind's own doc comment for the full history of
+    // why this replaced `operatorParked`/a live `rateLimited` read).
+    // Computed directly from THIS tick's own triggering verdict, never from
+    // `parkedOn`/`autoFailover` — a #271 park and a genuine exhaustion
+    // triggered by the SAME verdict shape must classify identically.
+    const exhaustionKind = verdict.dead ? "dead" as const : verdict.inline ? "inline" as const : "select" as const;
     // Issue #102 requirement 3: every account genuinely exhausted (parkedOn
     // null means nextClaudeAccount found nowhere to go at all) — the
     // earliest fleet-wide reset among them, so `fleet ls`/the degraded
@@ -2369,13 +2377,14 @@ export async function runAccountFailover(
         return attempt.outcome;
       }
       if (limitChanged) {
-        // Issue #158 review finding 1: same message means the same
-        // `parkedOn` this tick computed as last tick's write did, but stamp
-        // it explicitly anyway (rather than rely on `existing` already
-        // carrying it forward) — the same call site #109's own
-        // `autoContinueAt`/`autoContinueLastTriedAt` bookkeeping lives at,
-        // and the row that self-heals a pre-#158 row lacking the field.
-        const row = { ...existing, operatorParked: parkedOn !== null };
+        // Issue #158 review finding 1 / round-2 findings 3+4: same message
+        // means the same `exhaustionKind` this tick computed as last tick's
+        // write did, but stamp it explicitly anyway (rather than rely on
+        // `existing` already carrying it forward) — the same call site
+        // #109's own `autoContinueAt`/`autoContinueLastTriedAt` bookkeeping
+        // lives at, and the row that self-heals a pre-#158 row lacking the
+        // field.
+        const row = { ...existing, exhaustionKind };
         await storage.put(STATUS_KEY, row);
         await recordStudioFn(row);
       }
@@ -2383,14 +2392,14 @@ export async function runAccountFailover(
     }
     const degraded: StudioStatus = {
       ...existing, state: "degraded", error: message, claudeAccount: existing.claudeAccount ?? null,
-      // Issue #158 review finding 1: stamped unconditionally (never gated on
-      // `autoContinueEligible`, which `parkedOn !== null` always makes
-      // false) — the fact #214's own heal (`inlineExhaustionHealed` above)
-      // needs to tell a #271 park apart from genuine exhaustion, since
-      // `parkedMessage`/`exhaustedMessage` share `exhaustedMessagePrefix`
-      // and `rateLimited.select`/`.dead` alone cannot do it either (see
-      // StudioStatus.operatorParked's own doc comment).
-      operatorParked: parkedOn !== null,
+      // Issue #158 review finding 1 / round-2 findings 3+4: stamped
+      // unconditionally (never gated on `autoContinueEligible`, which
+      // `parkedOn !== null` always makes false, and never derived from
+      // `parkedOn`/`autoFailover` at all) — the fact #214's own heal
+      // (`inlineExhaustionHealed` above) needs is WHICH VERDICT triggered
+      // this degradation, not whether auto-failover happened to be off (see
+      // StudioStatus.exhaustionKind's own doc comment for the full history).
+      exhaustionKind,
       // Issue #109: only on the SAME eligible path the attempt step itself
       // evaluates (genuinely exhausted, select-style modal) — an
       // inline-exhausted row gets no bookkeeping at all, since it is never

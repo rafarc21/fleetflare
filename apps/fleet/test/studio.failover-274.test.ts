@@ -389,6 +389,10 @@ describe("#158 (7) — the fast (30s) ship-tick path also fires the heal wake, n
     // already passed `now` below.
     const status = degradedStatus({
       rateLimited: { until: "2026-09-25T09:45:00.000Z", seenAt: "2026-09-25T09:15:00.000Z" },
+      // Maestro round-2 review (PR #170), findings 3+4: the heal wake now
+      // reads this durable field, not `rateLimited`'s own live shape — see
+      // StudioStatus.exhaustionKind's own doc comment.
+      exhaustionKind: "inline",
     });
     const storage = fakeStorage({ status });
     const wake = wakeCmd(AUTO_CONTINUE_PROMPT);
@@ -419,6 +423,7 @@ describe("#158 (7) — the fast (30s) ship-tick path also fires the heal wake, n
     // path healing BEFORE the slow path ever gets a turn).
     const status = degradedStatus({
       rateLimited: { until: "2026-09-25T09:00:00.000Z", seenAt: "2026-09-25T08:30:00.000Z" },
+      exhaustionKind: "inline",
     });
     const storage = fakeStorage({ status });
     const wake = wakeCmd(AUTO_CONTINUE_PROMPT);

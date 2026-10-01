@@ -467,24 +467,37 @@ export interface StudioStatus {
    */
   autoContinueLastTriedAt?: string | null;
   /**
-   * Issue #158 review finding 1: whether THIS degradation was written via
-   * `parkedMessage` (#271, `FLEET_AUTO_FAILOVER` off, a candidate existed)
-   * rather than genuine exhaustion (`exhaustedMessage`) — computed from the
-   * `!next` branch's own LOCAL `parkedOn` (failover.ts), stamped at write
-   * time because `parkedMessage`/`exhaustedMessage` share `exhaustedMessagePrefix`
-   * (#214's heal clears either the same way) and so cannot be told apart from
-   * `error` alone, and `rateLimited.select`/`.dead` do not distinguish them
-   * either — both are independent of `autoFailover`, and an INLINE block
-   * observed on a #271-parked studio sets neither, the exact shape of a
-   * genuine inline exhaustion. `inlineExhaustionHealed` (failover.ts) reads
-   * this to exclude the operator's own deliberate #271 choice from the #158
-   * heal-wake: that row must stay untouched, no wake ever. Cleared to `null`
-   * in the SAME `clearedAt !== null` spread that already resets
-   * `autoContinueAt`/`autoContinueLastTriedAt` on heal. `null`/absent: not
-   * currently a #271 park (every row written before this field existed, and
-   * every genuinely-exhausted row).
+   * Maestro round-2 review (PR #170), findings 3+4 — replaces the original
+   * #158 review's `operatorParked` field entirely (removed; had no other
+   * reader). Durable classification of THIS degradation's own triggering
+   * verdict, stamped at write time (the `!next` branch's own two write
+   * sites, `failover.ts`) directly from `verdict.dead`/`verdict.inline` —
+   * `"dead"` (#141 org-disabled-subscription), `"inline"` (a session-limit
+   * line, whether or not `FLEET_AUTO_FAILOVER` was on and a candidate
+   * existed — #158's own text: the heal wake fires "independent of
+   * FLEET_AUTO_FAILOVER"), or `"select"` (a select-style spend modal, #109's
+   * ORIGINAL scope — stays permanently manual, no heal wake ever).
+   *
+   * WHY NOT `operatorParked` (finding 3): that field recorded WHETHER
+   * `FLEET_AUTO_FAILOVER` was off with a candidate account (`parkedOn !==
+   * null`), not WHICH verdict triggered the degradation — so it wrongly
+   * excluded an INLINE-triggered park from the heal wake too, when #158
+   * explicitly wants that case to fire (only a SELECT-MODAL-triggered park
+   * must stay manual). `exhaustionKind` asks the right question directly.
+   *
+   * WHY NOT `rateLimited.select`/`.dead` alone (finding 4): both are set by
+   * `limitObservation` at OBSERVATION time, and `runAccountFailover`'s own
+   * `working` branch independently nulls `rateLimited` whenever the pane
+   * shows no current limit, REGARDLESS of whether heal itself fired that
+   * tick — so a later tick's genuine heal could read an already-nulled
+   * `rateLimited` and lose its own wake. `exhaustionKind` is written ONLY at
+   * degrade time and cleared ONLY on a genuine heal (the SAME
+   * `clearedAt !== null`/heal write that already resets
+   * `autoContinueAt`/`autoContinueLastTriedAt`), so it survives the
+   * `rateLimited`-nulling write untouched. `null`/absent: not currently
+   * degraded (healed, or never degraded for this feature's own reason).
    */
-  operatorParked?: boolean | null;
+  exhaustionKind?: "dead" | "inline" | "select" | null;
   /**
    * See StudioReadiness's own doc comment above for what this records.
    * `null`/absent both mean "no verdict recorded yet" — a studio whose first
