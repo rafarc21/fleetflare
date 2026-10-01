@@ -6,7 +6,7 @@
 // test/bun/inspect-cmd.test.ts's job) for `runInspect`'s gating logic.
 import { describe, it, expect, vi } from "vitest";
 import {
-  inspectCmd, parseInspectOutput, runInspect, INSPECT_TARGET, INSPECT_DEFAULT_TAIL_LINES,
+  inspectCmd, parseInspectOutput, runInspect, INSPECT_DEFAULT_TAIL_LINES,
   INSPECT_EXEC_MS, CHECKOUT_PRESENT, CHECKOUT_MISSING, TAIL_BEGIN,
 } from "../src/studio/inspect";
 import { INCARNATION_PATH } from "../src/studio/observed";
@@ -33,9 +33,9 @@ describe("inspectCmd — the command path a coordinator's inspect actually runs"
   });
 
   it("addresses the claude window by name, never by index — same target wake.ts and provision.ts read", () => {
-    expect(INSPECT_TARGET).toBe("studio:claude");
     const cmd = inspectCmd("websites");
-    expect(cmd).toContain(`-t ${INSPECT_TARGET}`);
+    // The literal, not the import — ties the test to the real emitted text.
+    expect(cmd).toContain("-t studio:claude");
     expect(cmd).not.toContain("studio:0");
   });
 
