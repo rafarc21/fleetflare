@@ -58,6 +58,12 @@ Written before or alongside implementation.
 - A regression test for every bug fixed. Red first, then green.
 - Edge cases the spec implies: empty, one, many, missing optional field, longest
   realistic string.
+- **Name the seams.** List the public interface each test goes through — the
+  exported function, the HTTP route, the CLI command, the rendered element. A test
+  that goes around a seam instead of through it (rereads a `src/` file as text,
+  mocks the module under test, echoes an imported constant back at itself — this
+  repo's own `test-lies-check` catches exactly these three shapes) needs a stated
+  reason in the plan. No reason, no pass.
 
 ### B. Browser verification, as steps
 
@@ -91,6 +97,11 @@ a finding, not a detail.**
 
 Coverage is a floor, not a target. 50% with untested rendering is worse than 40% with
 it covered. Say what is covered, not only how much.
+
+Coverage percentage can reward a test that cannot fail. The 50% floor counts
+**behavior tests only** — a tautological assertion, a mock of the module under
+test, or a source-text read standing in for the real seam inflates the number
+without proving anything. Strip those before reporting coverage; don't bank them.
 
 ## Record what you learn, while you learn it
 
