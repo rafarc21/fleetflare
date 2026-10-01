@@ -23,22 +23,30 @@ the lead's own Bash blocklist.
 Two files changed:
 
 - `fleet/blueprint/studios/web-studio/members/code-reviewer.md` — the
-  read-only-git sentence #166 added now also says: "Never `--output`/`-o` on
-  any of them — that flag redirects git's own output to a file instead of
-  stdout, which would make a read command write one." Nothing else in the
+  read-only-git sentence #166 added now also says: "Never `--output` on any
+  of them, and never `-o` either in case any alias exists — that flag
+  redirects git's own output to a file instead of stdout, which would make a
+  read command write one." (Updated by the round-1 review fix, `9b449193`:
+  the original wording quoted `--output`/`-o` as if `-o` were a documented
+  alias on these git subcommands; it isn't, so the sentence now hedges with
+  "in case any alias exists" instead of asserting one.) Nothing else in the
   file changes — the frontmatter `tools:` line, the Spec/Standards axes,
   citation rules, recursion guard, and verdict format are untouched from
   #162/#166.
 - `fleet/blueprint/studios/web-studio/studio.md` — the lead's own prompt.
   A new paragraph, `**Review rounds cap at 2.**`, is inserted immediately
   after the refactor-step paragraph #166 added and before the
-  `**Push discipline.**` paragraph. It names the cap explicitly (round 2
-  still has cited blocking findings → stop, no round 3), the overflow
-  mechanism (`fleet task new`, one task listing every remaining finding),
-  that the PR proceeds anyway, and that the filed follow-up belongs in the
-  lead's envelope. No other paragraph in `studio.md` changed — push
-  discipline, the heavy-gate rule, and the completion-record block are
-  byte-identical to before.
+  `**Push discipline.**` paragraph. It dispatches Code Reviewer for round 1;
+  nothing cited means done, move straight to QA. Only if round 1 returns
+  cited blocking findings does the lead route them and dispatch Code
+  Reviewer again for round 2 — round 2's dispatch is conditional on round
+  1's findings, not automatic. If round 2 still returns cited blocking
+  findings, the lead stops: no round 3. It files every remaining cited
+  finding as one board task (`fleet task new`, a single task listing all of
+  them), lets the PR proceed anyway, and notes the filed follow-up in its
+  envelope. No other paragraph in `studio.md` changed — push discipline, the
+  heavy-gate rule, and the completion-record block are byte-identical to
+  before.
 
 ## Why no app-code change
 
