@@ -16,6 +16,7 @@ import {
   V1_STOP_AND_WAIT_PANE, V2_SESSION_LIMIT_PANE, REAL_PILOT_PANE, REAL_PANE_CAPTURED_AT,
 } from "./fixtures/rate-limit-panes";
 import { REAL_PERMISSION_PROMPT_TAIL_PANE, REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE } from "./fixtures/activity-panes";
+import { SURVEY_OVERLAY_PANE, RECOVERED_IDLE_PANE } from "./fixtures/survey-panes";
 
 const NOW = new Date("2026-09-24T12:20:00.000Z");
 const STUDIO_ID = "fleetflare--maestro";
@@ -327,6 +328,27 @@ describe("gate 3 loose check covers the switched-block redraw too (#144)", () =>
   it("the same switched-block redraw with NO modal row still lands the wake", async () => {
     const { cmds, exec } = container(REAL_PILOT_PANE);
     const outcome = await gatedSwitched(exec);
+    expect(outcome.ok).toBe(true);
+    expect(cmds).toHaveLength(3);
+  });
+});
+
+// --- Issue #158: a new, separate gate refuses a wake onto Claude Code's own
+// feedback-survey overlay — zero keystrokes, for every runGatedWake caller.
+
+describe("gate 3 also refuses Claude Code's own feedback-survey overlay (#158)", () => {
+  it("survey overlay on screen: refused, skipped, and NOTHING typed", async () => {
+    const { cmds, exec } = container(SURVEY_OVERLAY_PANE);
+    const outcome = await gated(exec);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.skipped).toBe(true);
+    expect(cmds).toEqual([PANE_PROBE_CMD, PANE_SCREEN_CMD]);
+    expect(cmds.some((c) => c.includes("WAKE"))).toBe(false);
+  });
+
+  it("the SAME idle pane with no survey overlay: the wake still lands (no regression)", async () => {
+    const { cmds, exec } = container(RECOVERED_IDLE_PANE);
+    const outcome = await gated(exec);
     expect(outcome.ok).toBe(true);
     expect(cmds).toHaveLength(3);
   });
