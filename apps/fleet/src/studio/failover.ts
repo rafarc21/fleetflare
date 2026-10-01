@@ -1880,7 +1880,15 @@ export async function runAccountFailover(
         // no stale auto-continue bookkeeping into its next, unrelated
         // exhaustion.
         ...(clearedAt !== null
-          ? { state: "running" as const, error: null, exhaustionClearedAt: clearedAt, autoContinueAt: null, autoContinueLastTriedAt: null }
+          ? {
+              state: "running" as const, error: null, exhaustionClearedAt: clearedAt,
+              autoContinueAt: null, autoContinueLastTriedAt: null,
+              // Issue #158 review finding 1: cleared alongside the other
+              // auto-continue bookkeeping, same trigger — a row healing out
+              // of one degradation must never carry a stale #271-park flag
+              // into whatever unrelated degradation comes next.
+              operatorParked: null,
+            }
           : {}),
       };
       await storage.put(STATUS_KEY, cleared);
@@ -1902,13 +1910,25 @@ export async function runAccountFailover(
       // operator choice), and never the dead-account path (#141): `parked`
       // (evaluateDegradedRecovery) is true for exhaustedMessagePrefix rows —
       // which covers "parked" and dead-account messages too, both built on
-      // the same prefix — so the split is on `existing.rateLimited` itself,
-      // written by limitObservation at degrade time: `select` is set ONLY
-      // for a genuine select-modal verdict (never inline), and `dead` is set
-      // ONLY for the org-disabled-subscription verdict (#141) — their shared
-      // absence on an already-`parked` row is exactly the inline case.
+      // the same prefix — so `existing.rateLimited.select`/`.dead` alone
+      // excludes the select-modal and dead-account cases (set independently
+      // of `autoFailover`, never for an inline verdict).
+      //
+      // Review of #158 (fresh-context, this same PR), finding 1: that is NOT
+      // enough to exclude `"parked"` — `parkedMessage` (#271) shares
+      // `exhaustedMessagePrefix` with `exhaustedMessage` BY DESIGN (its own
+      // doc comment: "so #214's heal clears it the same way"), and a
+      // `!next` tick with `autoFailover` off still writes `parkedMessage`
+      // even when the TRIGGERING verdict was inline (a free second account
+      // made `candidate` non-null) — `rateLimited` then carries no `select`,
+      // no `dead`, the exact shape a genuine inline exhaustion has. Read
+      // `existing.operatorParked` (stamped at write time from the `!next`
+      // branch's own local `parkedOn`, StudioStatus's own doc comment)
+      // instead of trying to infer it from `rateLimited`, which cannot tell
+      // the two apart.
       const inlineExhaustionHealed = clearedAt !== null
         && recovery.parked
+        && !existing.operatorParked
         && existing.rateLimited != null
         && !existing.rateLimited.select
         && !existing.rateLimited.dead;
@@ -2272,13 +2292,28 @@ export async function runAccountFailover(
         return attempt.outcome;
       }
       if (limitChanged) {
-        await storage.put(STATUS_KEY, existing);
-        await recordStudioFn(existing);
+        // Issue #158 review finding 1: same message means the same
+        // `parkedOn` this tick computed as last tick's write did, but stamp
+        // it explicitly anyway (rather than rely on `existing` already
+        // carrying it forward) — the same call site #109's own
+        // `autoContinueAt`/`autoContinueLastTriedAt` bookkeeping lives at,
+        // and the row that self-heals a pre-#158 row lacking the field.
+        const row = { ...existing, operatorParked: parkedOn !== null };
+        await storage.put(STATUS_KEY, row);
+        await recordStudioFn(row);
       }
       return { kind: "already-degraded", tried };
     }
     const degraded: StudioStatus = {
       ...existing, state: "degraded", error: message, claudeAccount: existing.claudeAccount ?? null,
+      // Issue #158 review finding 1: stamped unconditionally (never gated on
+      // `autoContinueEligible`, which `parkedOn !== null` always makes
+      // false) — the fact #214's own heal (`inlineExhaustionHealed` above)
+      // needs to tell a #271 park apart from genuine exhaustion, since
+      // `parkedMessage`/`exhaustedMessage` share `exhaustedMessagePrefix`
+      // and `rateLimited.select`/`.dead` alone cannot do it either (see
+      // StudioStatus.operatorParked's own doc comment).
+      operatorParked: parkedOn !== null,
       // Issue #109: only on the SAME eligible path the attempt step itself
       // evaluates (genuinely exhausted, select-style modal) — an
       // inline-exhausted row gets no bookkeeping at all, since it is never

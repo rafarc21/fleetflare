@@ -467,6 +467,25 @@ export interface StudioStatus {
    */
   autoContinueLastTriedAt?: string | null;
   /**
+   * Issue #158 review finding 1: whether THIS degradation was written via
+   * `parkedMessage` (#271, `FLEET_AUTO_FAILOVER` off, a candidate existed)
+   * rather than genuine exhaustion (`exhaustedMessage`) — computed from the
+   * `!next` branch's own LOCAL `parkedOn` (failover.ts), stamped at write
+   * time because `parkedMessage`/`exhaustedMessage` share `exhaustedMessagePrefix`
+   * (#214's heal clears either the same way) and so cannot be told apart from
+   * `error` alone, and `rateLimited.select`/`.dead` do not distinguish them
+   * either — both are independent of `autoFailover`, and an INLINE block
+   * observed on a #271-parked studio sets neither, the exact shape of a
+   * genuine inline exhaustion. `inlineExhaustionHealed` (failover.ts) reads
+   * this to exclude the operator's own deliberate #271 choice from the #158
+   * heal-wake: that row must stay untouched, no wake ever. Cleared to `null`
+   * in the SAME `clearedAt !== null` spread that already resets
+   * `autoContinueAt`/`autoContinueLastTriedAt` on heal. `null`/absent: not
+   * currently a #271 park (every row written before this field existed, and
+   * every genuinely-exhausted row).
+   */
+  operatorParked?: boolean | null;
+  /**
    * See StudioReadiness's own doc comment above for what this records.
    * `null`/absent both mean "no verdict recorded yet" — a studio whose first
    * syncSession tick has not fired, or one written by a call site that
