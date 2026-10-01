@@ -93,7 +93,7 @@ Print all nine, every time. A field with nothing to say prints `—`. Never drop
 🎯 WAVE      EVENT(<what fired>) | SWEEP #n | FINAL
 🏭 STUDIOS   name · state/ready · age of READY · burn
 📋 BOARD     in flight · newly completed · backlog count
-🔀 PRS       number · CI verdict · mergeability · action taken
+🔀 PRS       number · CI verdict · mergeability · door · action taken
 ✅ DONE      delta since your last wave only — never restate standing state
 🚧 BLOCKED   what is stuck, and exactly what it needs to move
 🧭 NEXT      what you do next, unprompted
