@@ -41,7 +41,8 @@ import {
   repoForAccount, parseAccountMap, type LaunchAccount,
 } from "./accounts";
 import {
-  runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, MEMBERS_TICKING_KEY, type FailoverDeps,
+  runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, healDegradedRowAndWake,
+  MEMBERS_TICKING_KEY, type FailoverDeps,
 } from "./failover";
 // Issue #249 (PR4b): #107/#150's survival re-brief, delivered. Own
 // sandbox-free module for the usual reason (see credentials.ts's header) —
@@ -4646,14 +4647,30 @@ export async function runShipTickWithObservation(
       const sighting = (await sightingStorage.get(LIMIT_SIGHTING_KEY)) ?? null;
       const recoveryStudioId = degradedRowNow.id || id;
       const recovery = evaluateDegradedRecovery(degradedRowNow, recoveryStudioId, result.paneFrame, deps.now(), sighting);
-      if (recovery.shouldHeal) {
-        const clearedAt = deps.now().toISOString();
-        const cleared: StudioStatus = {
-          ...degradedRowNow, rateLimited: null, state: "running", error: null, exhaustionClearedAt: clearedAt,
-        };
-        await storage.put(STATUS_KEY, cleared);
-        if (recordStudioFn) await recordStudioFn(await withObserved(storage, cleared));
-      }
+      // Issue #158 review finding 3 (fresh-context re-review, same PR): the
+      // SAME shared heal+wake implementation runAccountFailover's own 300s
+      // `working` branch calls — see `healDegradedRowAndWake`'s own doc
+      // comment (failover.ts) for why this 30s path needs it too: it runs
+      // ~10x more often, so without this it almost always healed a row
+      // BEFORE the slower path ever saw it degraded again, making the #158
+      // wake unreachable in the common case.
+      //
+      // `safeToWake`: this path has no two-capture `repainted` signal (its
+      // 30s exec captures the pane once, unlike runAccountFailover's own
+      // dedicated two-capture probe) — `result.paneVerdict?.kind === "idle"`
+      // is the single-capture substitute (activity.ts's `readActivityFrame`,
+      // the SAME frame #221 already parsed from this same capture, just
+      // above). See `healDegradedRowAndWake`'s own doc comment for exactly
+      // what this trade is and the one residual it leaves, also stated in
+      // #158's plan doc.
+      await healDegradedRowAndWake({
+        storage, existing: degradedRowNow, recovery, opLockFresh: recoveryOpFresh, now: deps.now(),
+        studioId: recoveryStudioId, exec: shipDeps.exec, sighting,
+        safeToWake: result.paneVerdict?.kind === "idle",
+        recordStudioFn: recordStudioFn
+          ? async (s: StudioStatus) => { await recordStudioFn(await withObserved(storage, s)); }
+          : async () => {},
+      });
     }
   }
 
