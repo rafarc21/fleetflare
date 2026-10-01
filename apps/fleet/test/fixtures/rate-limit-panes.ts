@@ -539,6 +539,21 @@ export const NOT_DETECTED_141: Record<string, string> = {
       "● Your organization has disabled Claude subscription access for Claude Code · Contact support for details",
       "", ...RULE_PROMPT,
     ].join("\n"),
+  // Issue #156 — a DIFFERENT mutant from the 3 above: this line has NO glyph
+  // at all, yet starts exactly where the real message would (the sentence
+  // itself, at column 0) — the gap none of the fixtures above exercise. If
+  // DEAD_ACCOUNT_START_LINE's glyph requirement were ever weakened (made
+  // optional, or dropped in favor of anchoring on the sentence alone), this
+  // is the fixture that would catch it; the 3 above all have OTHER text
+  // before the sentence on the same line, which a loosened-but-still-
+  // "something before the sentence is fine" mutant could still
+  // coincidentally reject.
+  "the bare sentence at the start of its own line, quoted verbatim with no ●/⏺ marker at all":
+    [
+      "⏺ The error, verbatim, for the ticket:",
+      "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access",
+      "", ...BOX_PROMPT,
+    ].join("\n"),
 };
 
 /** Issue #106 item 4: a #53 headline quoted in prose ABOVE a real V2 block. */

@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { detectRateLimitModal, PANE_CAPTURE_MARKER, DEAD_ACCOUNT_HEADLINE } from "../src/studio/failover";
+import {
+  detectRateLimitModal,
+  PANE_CAPTURE_MARKER,
+  DEAD_ACCOUNT_HEADLINE,
+  countDeadAccountOccurrences,
+} from "../src/studio/failover";
 import { ORG_DISABLED_PANE, ORG_DISABLED_PANE_80COL, NOT_DETECTED_141 } from "./fixtures/rate-limit-panes";
 
 // ---------------------------------------------------------------------------
@@ -43,5 +48,22 @@ describe("detectRateLimitModal — issue #141 dead account (org disabled subscri
     const b = ORG_DISABLED_PANE.replace("your admin to enable access", "your admin to enable access.");
     const v = detectRateLimitModal(captured(a, b));
     expect(v.kind).toBe("working");
+  });
+});
+
+describe("countDeadAccountOccurrences — issue #156: a bare sentence with no glyph is never counted", () => {
+  it("counts real glyph-anchored occurrences but ignores a bare line with no glyph in between", () => {
+    const [glyphLine1, glyphLine2] = ORG_DISABLED_PANE.split("\n");
+    const scrollback = [
+      glyphLine1,
+      glyphLine2,
+      "",
+      "⏺ The error, verbatim, for the ticket:",
+      "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access",
+      "",
+      glyphLine1,
+      glyphLine2,
+    ].join("\n");
+    expect(countDeadAccountOccurrences(scrollback)).toBe(2);
   });
 });
