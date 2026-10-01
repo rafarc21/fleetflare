@@ -23,7 +23,7 @@ import { buildStudioId, parseStudioId } from "./ids";
 // ensureSpawnToken below rather than letting that Env-blind call guess.
 import { realDoClassForRole } from "./profile";
 import {
-  provisionWithStorage, getStatusWithStorage, restartWithStorage, freshStatus, provisionedCheckCmd, PROVISIONED_OK,
+  provisionWithStorage, getStatusWithStorage, restartWithStorage, freshStatus, provisionedCheckCmd, PROVISIONED_OK, tailnetWarningIn,
   PROVISIONED_UNKNOWN, harnessExpectation, ROLE_ENV_KEY,
   STATUS_KEY, resolveWorkRepoSlug, NO_ROLE_ENV_ERROR, HEAL_ATTEMPT_KEY, relaunchBringup,
   OPERATION_KEY, OPERATION_STALE_MS, DESTROYING_KEY, DESTROY_IN_FLIGHT, LAST_STOP_KEY,
@@ -1729,7 +1729,7 @@ export const CHECK_ATTEMPTS = 3;
  * `state: running` — because that is exactly what it detects.
  */
 export type ProvisionedVerdict =
-  | { kind: "provisioned" }
+  | { kind: "provisioned"; warning?: string }
   | { kind: "bare"; reason: string }
   | { kind: "inconclusive"; reason: string };
 
@@ -1760,7 +1760,7 @@ export type ProvisionedVerdict =
  */
 export function readinessOf(verdict: ProvisionedVerdict, checkedAt: string): StudioReadiness {
   return verdict.kind === "provisioned"
-    ? { kind: "provisioned", checkedAt }
+    ? (verdict.warning ? { kind: "provisioned", warning: verdict.warning, checkedAt } : { kind: "provisioned", checkedAt })
     : { kind: verdict.kind, reason: redactSecrets(verdict.reason), checkedAt };
 }
 
@@ -2143,12 +2143,19 @@ async function runProvisionedCheck(
 ): Promise<ProvisionedVerdict> {
   try {
     const res = await syncDeps.exec(provisionedCheckCmd(repo, harness));
-    const out = res.stdout.trim();
+    // Issue #189: the tailnet marker line rides on every answer. Read it,
+    // then judge the verdict on the rest -- a marker alone is no verdict,
+    // and it never belongs in a bare reason (PR #190 review).
+    const warning = tailnetWarningIn(res.stdout);
+    const out = res.stdout.split("\n").filter((l) => tailnetWarningIn(l) === null).join("\n").trim();
     // UNKNOWN first: it is the container saying the CHECK broke, not the
     // studio. Reading it as "bare" would turn a broken check into a recycle
     // trigger — the exact inversion the three-verdict split exists to stop.
     if (out.includes(PROVISIONED_UNKNOWN)) return { kind: "inconclusive", reason: out };
-    if (out.includes(PROVISIONED_OK)) return { kind: "provisioned" };
+    if (out.includes(PROVISIONED_OK)) {
+      // Issue #189: provisioned without a tailnet is still provisioned.
+      return warning ? { kind: "provisioned", warning } : { kind: "provisioned" };
+    }
     // Issue #38: a BARE verdict is the one an operator has to act on, and
     // until now it said only WHAT was missing ("no git checkout at
     // /workspace/acme-os"), never WHERE bring-up stopped trying. The

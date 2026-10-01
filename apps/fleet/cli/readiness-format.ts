@@ -60,7 +60,8 @@ export function formatReady(
   const limited = live ? formatRateLimited(row?.rateLimited, now, row?.id) : null;
   if (limited) return limited;
   if (readiness == null) return "?";
-  if (readiness.kind === "provisioned") return "provisioned";
+  // Issue #189: "provisioned (tailnet: quota reached)" -- alive, no tailnet.
+  if (readiness.kind === "provisioned") return readiness.warning ? `provisioned (${readiness.warning})` : "provisioned";
   const reason = readiness.reason.replace(/\s+/g, " ");
   return readiness.kind === "bare" ? `bare: ${reason}` : `? ${reason}`;
 }

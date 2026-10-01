@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { checkAndRecordReadiness, provisionWithFreshVerdict, CHECK_ATTEMPTS } from "../src/studio/do";
 import {
-  STATUS_KEY, PROVISIONED_OK, provisionedCheckCmd, bringupLogTailCmd, type StudioStorage,
+  STATUS_KEY, PROVISIONED_OK, provisionedCheckCmd, bringupLogTailCmd, tailnetWarningIn, type StudioStorage,
 } from "../src/studio/provision";
 import type { SessionSyncDeps } from "../src/studio/session-sync";
 import { STUDIO_TMUX, withStudioTmux } from "../src/studio/tmux";
@@ -105,6 +105,50 @@ describe("checkAndRecordReadiness (do.ts)", () => {
     expect(recorded).toHaveLength(1);
     expect(recorded[0].readiness).toEqual({ kind: "provisioned", checkedAt: NOW_ISO });
     expect((await storage.get(STATUS_KEY))?.readiness).toEqual({ kind: "provisioned", checkedAt: NOW_ISO });
+  });
+
+  // Issue #189: bring-up survives a failed `tailscale up` and leaves a
+  // marker; the check prints it after PROVISIONED_OK. A tailnet-less studio
+  // is still provisioned, and says why it has no tailnet.
+  it("provisioned + tailnet marker line: records the warning on the provisioned verdict", async () => {
+    const storage = fakeStorage({ status: status() });
+    const deps = fakeSyncDeps(async () => ({ code: 0, stdout: `${PROVISIONED_OK}\ntailnet: quota reached\n`, stderr: "" }));
+    const recorded: StudioStatus[] = [];
+
+    await checkAndRecordReadiness(deps, storage, STUDIO_ID, async (s) => {
+      recorded.push(s);
+    });
+
+    expect(recorded[0].readiness).toEqual({ kind: "provisioned", warning: "tailnet: quota reached", checkedAt: NOW_ISO });
+  });
+
+  // PR #190 review, item 2: the marker line rides on every check's stdout.
+  // It must never turn an empty (inconclusive) answer into a bare one, and
+  // never leak into a bare reason.
+  it("marker line alone (check printed nothing else): inconclusive, never bare", async () => {
+    const storage = fakeStorage({ status: status() });
+    const deps = fakeSyncDeps(bareWithNoLog("tailnet: down\n"));
+    const recorded: StudioStatus[] = [];
+
+    await checkAndRecordReadiness(deps, storage, STUDIO_ID, async (s) => {
+      recorded.push(s);
+    });
+
+    expect(recorded[0].readiness?.kind).toBe("inconclusive");
+  });
+
+  it("bare + marker line: bare reason is the container's words without the marker", async () => {
+    const storage = fakeStorage({ status: status() });
+    const deps = fakeSyncDeps(bareWithNoLog("no git checkout at /workspace/websites\ntailnet: quota reached\n"));
+    const recorded: StudioStatus[] = [];
+
+    await checkAndRecordReadiness(deps, storage, STUDIO_ID, async (s) => {
+      recorded.push(s);
+    });
+
+    expect(recorded[0].readiness).toEqual({
+      kind: "bare", reason: "no git checkout at /workspace/websites", checkedAt: NOW_ISO,
+    });
   });
 
   it("bare: records {kind:'bare', reason, checkedAt} — the container's own words, verbatim", async () => {
@@ -355,5 +399,19 @@ describe("provisionedCheckCmd — the on-demand live check leaves no trace", () 
       expect(body).toContain(`$(${STUDIO_TMUX} display-message -p -t studio:claude`);
       expect(body).not.toMatch(/[;&|]\s*(?:__ff_)?tmux /);
     }
+  });
+});
+
+describe("tailnetWarningIn (provision.ts, issue #189)", () => {
+  it("reads the two fixed marker lines", () => {
+    expect(tailnetWarningIn(`${PROVISIONED_OK}\ntailnet: quota reached\n`)).toBe("tailnet: quota reached");
+    expect(tailnetWarningIn(`${PROVISIONED_OK}\ntailnet: down`)).toBe("tailnet: down");
+  });
+
+  it("rejects anything else shaped like it", () => {
+    expect(tailnetWarningIn("tailnet: pwned")).toBeNull();
+    expect(tailnetWarningIn("xtailnet: down")).toBeNull();
+    expect(tailnetWarningIn("tailnet: down and more")).toBeNull();
+    expect(tailnetWarningIn(PROVISIONED_OK)).toBeNull();
   });
 });

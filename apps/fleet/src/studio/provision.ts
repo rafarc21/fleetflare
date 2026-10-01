@@ -1449,8 +1449,22 @@ export function provisionedCheckCmd(repo: string, harness?: string | null): stri
     `p="$(${STUDIO_TMUX} display-message -p -t studio:claude '#{pane_current_command}' 2>/dev/null || true)"; ` +
     `if [ "$p" = claude ]; then break; fi; i=$((i+1)); sleep 1; done; ` +
     `if [ "$p" != claude ]; then echo "claude is not running in tmux studio:claude (pane runs: \${p:-none})"; ` +
-    `else ${harness ? harnessCheckSnippet(harness) : `echo "${PROVISIONED_OK}"`}; fi; fi`
+    `else ${harness ? harnessCheckSnippet(harness) : `echo "${PROVISIONED_OK}"`}; fi; fi; ` +
+    `cat "${TAILNET_DOWN_PATH}" 2>/dev/null || true`
   );
+}
+
+/** Issue #189: written by container/studio-bringup.sh's tailscale-up region
+ *  when `tailscale up` fails (bring-up continues without the tailnet),
+ *  removed when it succeeds. Holds one fixed line, `tailnet: quota reached`
+ *  or `tailnet: down`. `${FLEET_WORKSPACE:-/workspace}` is the same
+ *  expansion bring-up uses, so the two always name one file. */
+export const TAILNET_DOWN_PATH = "${FLEET_WORKSPACE:-/workspace}/.fleet/tailnet-down";
+
+/** The marker line out of the check's stdout, or null. A strict match:
+ *  anything else the container printed is not a tailnet warning. */
+export function tailnetWarningIn(stdout: string): string | null {
+  return stdout.match(/^tailnet: (?:quota reached|down)$/m)?.[0] ?? null;
 }
 
 /**

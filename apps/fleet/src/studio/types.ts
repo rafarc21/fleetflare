@@ -28,7 +28,7 @@ export type StudioDOClass = "STUDIO" | "STUDIO_BIG";
  * broken OR healthy.
  */
 export type StudioReadiness =
-  | { kind: "provisioned"; checkedAt: string }
+  | { kind: "provisioned"; checkedAt: string; warning?: string }
   | { kind: "bare"; reason: string; checkedAt: string }
   | { kind: "inconclusive"; reason: string; checkedAt: string };
 

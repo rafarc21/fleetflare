@@ -25,7 +25,7 @@ Secret names only. No value appears anywhere in this document.
 | `CLAUDE_CODE_OAUTH_TOKEN` (and `_2`, `_3`, ...) | Claude account(s) the studios run on | **Yes**, one account's token, as a plain process environment variable (`apps/fleet/src/studio/do.ts:2672`; alternates stay Worker-side, `apps/fleet/src/env.ts:36-39`) |
 | `GITHUB_TOKEN`, `GITHUB_TOKEN_<OWNER>` | Fine-grained PAT, per repo owner (`apps/fleet/src/env.ts:98-118`) | **Yes**, written to a credential file (see next section) |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_INSTALLATION_ID` (+ per-owner ids) | GitHub App; the Worker mints installation tokens (`apps/fleet/src/github/app.ts:78`) | The private key: no. Minted installation tokens: **yes**, same file as the PAT |
-| `TS_AUTHKEY` | Tailscale auth key, documented as **reusable, non-ephemeral** (`apps/fleet/src/env.ts:143-156`) | **Yes**, plain environment variable (`apps/fleet/src/studio/do.ts:2677`) |
+| `TS_AUTHKEY` | Tailscale auth key, documented as **reusable, ephemeral** (issue #189) (`apps/fleet/src/env.ts:143-156`) | **Yes**, plain environment variable (`apps/fleet/src/studio/do.ts:2677`) |
 | `FLEET_SPAWN_TOKEN` (minted per studio, not a Worker secret) | Studio-to-Worker authentication on `/fleet/*` | **Yes**, plain environment variable (`apps/fleet/src/studio/do.ts:2679`) |
 | `CLOUDFLARE_DEPLOY_TOKEN` | Cloudflare deploys | **No.** Only the deploy container's env (`apps/fleet/src/deploy/do.ts:215-216`, `apps/fleet/src/env.ts:126`) |
 | `GITHUB_WEBHOOK_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `DIRECTUS_TOKEN` | Worker-side verification and integrations (`apps/fleet/src/env.ts`) | No (`DIRECTUS_TOKEN`: explicitly never, `apps/fleet/src/env.ts:208-214`) |
@@ -152,7 +152,7 @@ one such command can send every credential in the table above to an attacker.
 | Egress allowlist | **Absent** |
 | Least-privilege GitHub token per studio (per repo, narrowed permissions) | **Absent** |
 | Claude token kept out of the model's reach | **Absent** |
-| Ephemeral, scoped Tailscale key | **Absent** (key is reusable and non-ephemeral) |
+| Ephemeral, scoped Tailscale key | **Recommended, not enforced** (docs/setup.md asks for an ephemeral key; the fleet cannot check key type) |
 | Branch protection preventing direct merge with the studio token | Not configured by fleetflare; depends on your GitHub settings |
 
 What a leak costs: the GitHub token (write to every repo it covers, until

@@ -257,17 +257,17 @@ export interface Env {
   /** Access application audience tag every /studio/* JWT must carry. */
   ACCESS_AUD: string;
   /**
-   * Reusable, non-ephemeral Tailscale auth key (design spec: user-owned
-   * devices, not tagged resources). Threaded into the studio container's
+   * Reusable Tailscale auth key. Should be EPHEMERAL (issue #189): every
+   * container joins as a new node and destroy never removes it, so a
+   * non-ephemeral key fills the tailnet's device quota. Threaded into the studio container's
    * environment by StudioDO.envVars, where container/studio-bringup.sh reads
    * it for `tailscale up`.
    *
    * Optional: a local `wrangler dev` / integration run has none, and the
    * bring-up script's own `[ -z "${TS_AUTHKEY:-}" ]` guard logs and skips
-   * `tailscale up` in that case rather than failing the whole bring-up. Do
-   * NOT set it to a placeholder to "fill it in" — a bogus key makes
-   * `tailscale up` exit non-zero, and the script's `set -e` turns that into a
-   * failed bring-up and a degraded studio.
+   * `tailscale up` in that case. A failing `tailscale up` (bogus key, full
+   * quota) is non-fatal since issue #189: bring-up continues without the
+   * tailnet and `fleet ls` READY says `provisioned (tailnet: ...)`.
    */
   TS_AUTHKEY?: string;
   /**
