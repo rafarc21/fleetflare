@@ -132,3 +132,20 @@ feature adds nothing parallel to that pipeline. It adds:
   this round. If a narrow-pane miss is ever measured, raising
   `DEAD_ACCOUNT_WRAP_LINES` is the fix, same as it was chosen generously the
   first time.
+
+## 2026-10-01 — issue #156: test-only follow-up, anchor-mutant coverage gap
+
+The existing `NOT_DETECTED_141` fixtures (prose-prefixed sentence, sentence
+quoted inside a `⎿` tool-output line, glyph-anchored but paraphrased ending)
+all leave the sentence's own line preceded by SOME other text, so a mutant
+that merely loosened "nothing before the sentence except the glyph" to
+"nothing before the sentence except possibly a glyph" could still coincide
+with all three passing. Added a fourth `NOT_DETECTED_141` fixture: the exact
+canonical sentence sitting bare at column 0 of its own line, no `⏺`/`●`
+prefix at all — closing that gap for `detectRateLimitModal`. Added a sibling
+test for `countDeadAccountOccurrences` (the scrollback-redraw occurrence
+counter, which reuses `DEAD_ACCOUNT_START_LINE` identically) proving the same
+bare line is never counted as an occurrence. Verified both are genuine
+mutant-killers by temporarily making `DEAD_ACCOUNT_START_LINE`'s glyph
+optional, confirming both new tests go RED, then reverting. Test-only; no
+production code changed.
