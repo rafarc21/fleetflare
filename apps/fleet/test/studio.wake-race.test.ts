@@ -201,9 +201,19 @@ describe("gate 3 loose check anchors on modal ROWS (#141 review)", () => {
   });
 
   it(`a footer ${6} rows above the bottom is still within LOOSE_TAIL_LINES (${LOOSE_TAIL_LINES})`, () => {
-    expect(LOOSE_TAIL_LINES).toBe(12);
     const screen = [V1_STOP_AND_WAIT_PANE, ...Array.from({ length: 6 }, (_, i) => `  status ${i}`)].join("\n");
     expect(looseLimitOnScreen(screen)).not.toBeNull();
+  });
+
+  // LOOSE_TAIL_LINES's real behavior coverage: the HARDCODED literal 12, not
+  // the import — a matching row exactly 12 non-blank rows from the bottom is
+  // still seen; one row further back (13) is not.
+  it("the tail window is exactly the last 12 non-blank rows, no more", () => {
+    const matchRow = "▔▔▔▔▔▔▔▔";
+    const within = [matchRow, ...Array.from({ length: 11 }, (_, i) => `  status ${i}`)].join("\n");
+    expect(looseLimitOnScreen(within)).not.toBeNull();
+    const outside = [matchRow, ...Array.from({ length: 12 }, (_, i) => `  status ${i}`)].join("\n");
+    expect(looseLimitOnScreen(outside)).toBeNull();
   });
 });
 

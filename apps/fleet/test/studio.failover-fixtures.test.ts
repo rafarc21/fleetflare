@@ -79,8 +79,11 @@ describe("detectRateLimitModal — nothing it knows is unpinned", () => {
     }
   });
 
+  // SESSION_LIMIT_HEADLINE's real behavior coverage: the DETECTED fixture
+  // above (V2 demosite-life session limit) hardcodes this exact literal as
+  // its expected `headline`, matched against detectRateLimitModal's REAL
+  // output (line 47's toMatchObject) — not the import.
   it("knows the session-limit headline, but not as a bare substring marker", () => {
-    expect(SESSION_LIMIT_HEADLINE).toBe("You've hit your session limit");
     expect(RATE_LIMIT_MODAL_MARKERS).not.toContain("/upgrade");
   });
 });

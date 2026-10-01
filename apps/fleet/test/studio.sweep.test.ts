@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
-  sweepTick, sweepPrompt, SWEEP_SECONDS, SWEEP_COUNT_KEY, QUIESCENT_STREAK_KEY, SWEEP_STOPPED_KEY,
+  sweepTick, sweepPrompt, SWEEP_COUNT_KEY, QUIESCENT_STREAK_KEY, SWEEP_STOPPED_KEY,
   type SweepDeps, type SweepStorage,
 } from "../src/studio/sweep";
 import type { QuiescenceDeps } from "../src/studio/quiescence";
@@ -33,11 +33,10 @@ function deps(over: Partial<SweepDeps> = {}): SweepDeps & { wakes: string[] } {
   } as SweepDeps & { wakes: string[] };
 }
 
-describe("SWEEP_SECONDS", () => {
-  it("is the spec's 20 minutes", () => {
-    expect(SWEEP_SECONDS).toBe(20 * 60);
-  });
-});
+// SWEEP_SECONDS's real behavior coverage: the source-pinning block below
+// ("StudioDO.sweepMaestro wiring") already asserts do.ts rearms through
+// `this.rearm("sweepMaestro", SWEEP_SECONDS)` — the symbol, not a re-typed
+// literal — which is the real regression this constant needs caught.
 
 describe("sweepTick", () => {
   it("wakes maestro and numbers the sweep", async () => {

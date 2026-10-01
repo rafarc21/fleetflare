@@ -322,18 +322,24 @@ describe("the recycle request's own budget", () => {
     );
   });
 
-  it("polls a bounded number of times, never forever", () => {
-    expect(RECYCLE_POLL_ATTEMPTS).toBe(6);
-    expect(RECYCLE_POLL_INTERVAL_MS).toBe(10_000);
+  it("sleeps RECYCLE_POLL_INTERVAL_MS between polls, when nothing overrides it", async () => {
+    const { fetchImpl } = fakeSlowWorker([async () => Response.json(statusRow("running"))]);
+    const slept: number[] = [];
+    const sleep = async (ms: number) => { slept.push(ms); };
+    await requestRecycle(
+      { recycle: RECYCLE_URL, status: STATUS_URL }, {}, ID, { fetchImpl, timeoutMs: 20, sleep, now: () => START },
+    );
+    expect(slept.length).toBeGreaterThan(0);
+    expect(slept.every((ms) => ms === RECYCLE_POLL_INTERVAL_MS)).toBe(true);
   });
 
-  // Review round 2, fix 3: the two tests above only pin the CONSTANTS, which
-  // stay green even if `pollAfterNoAnswer`'s own loop ignored them (e.g. a
-  // hardcoded `for (let i = 0; i < 6; i++)`). This test proves the bound is
-  // actually load-bearing: a `/status` that NEVER satisfies `bringupLanded`
-  // must be called EXACTLY `RECYCLE_POLL_ATTEMPTS` times, not "some number
-  // <= it" — an off-by-one or a hardcoded loop bound would show up here even
-  // if it happened to equal 6 today.
+  // Review round 2, fix 3: a bare constant-pinning assertion here would stay
+  // green even if `pollAfterNoAnswer`'s own loop ignored RECYCLE_POLL_ATTEMPTS
+  // (e.g. a hardcoded `for (let i = 0; i < 6; i++)`). This test proves the
+  // bound is actually load-bearing: a `/status` that NEVER satisfies
+  // `bringupLanded` must be called EXACTLY `RECYCLE_POLL_ATTEMPTS` times, not
+  // "some number <= it" — an off-by-one or a hardcoded loop bound would show
+  // up here even if it happened to equal 6 today.
   it("a status that never lands this recycle's bring-up is polled EXACTLY RECYCLE_POLL_ATTEMPTS times, not merely a bounded-ish number", async () => {
     // Board issue #149: a capped-with-a-trap fake, not `fakeSlowWorker`'s
     // own forever-repeating queue.

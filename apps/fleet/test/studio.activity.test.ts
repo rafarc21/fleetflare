@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import {
   readActivityFrame, nextActivity, clearActivityState, ACTIVITY_KEY, type Activity,
   parseHookHeartbeat, type HookHeartbeat, extractLastVisibleLine, LAST_LINE_MAX_CHARS,
-  backgroundShellAgeMs, BACKGROUND_SHELL_STALE_MS,
+  backgroundShellAgeMs,
 } from "../src/studio/activity";
 import { MEMBERS_TICKING_KEY } from "../src/studio/failover";
 import { MEMBER_ALERTS_KEY, MEMBER_ROWS_KEY } from "../src/studio/member-alerts";
@@ -1285,8 +1285,11 @@ describe("backgroundShellAgeMs — #106: pure age read of Activity.backgroundShe
   });
 });
 
-describe("BACKGROUND_SHELL_STALE_MS — #106: the 15-minute nudge budget", () => {
-  it("is 15 minutes, this fleet's own established unpushed/unwaited convention", () => {
-    expect(BACKGROUND_SHELL_STALE_MS).toBe(15 * 60_000);
-  });
-});
+// BACKGROUND_SHELL_STALE_MS's real behavior coverage: unlike the other
+// do.ts-coupled constants, its consumer (applyActivityVerdict) is reached
+// through the EXPORTED runShipTickWithObservation, not locked behind the
+// unconstructable StudioDO closure — test/studio.do.test.ts's
+// "runShipTickWithObservation — onStaleBackgroundShell (issue #106)" describe
+// block already exercises the real 15-minute crossing (16min fires, 10min
+// does not), which breaks if this constant's value ever drifts from the code
+// that reads it.

@@ -341,10 +341,12 @@ describe("rollWindow — 5h window start/output tracking", () => {
     expect(afterRoll.window5hOutput).toBe(4); // window bucket itself DID reset
   });
 
-  it("exactly at the BURN_WINDOW_MS boundary: rolls (window5hStart moves to `now`, window5hOutput resets to just this delta)", () => {
-    expect(BURN_WINDOW_MS).toBe(18_000_000); // 5h, pinned by archive.ts (task's own spec authority)
+  // BURN_WINDOW_MS's real behavior coverage: the HARDCODED 5h literal
+  // (18_000_000ms), not the import, so a drift between the constant's own
+  // value and rollWindow's real boundary is caught — not just re-asserted.
+  it("exactly at the 5h (18_000_000ms) boundary: rolls (window5hStart moves to `now`, window5hOutput resets to just this delta)", () => {
     const burn: Burn = { turns: 5, inputTokens: 500, outputTokens: 200, costUsd: 0, window5hStart: T0, window5hOutput: 200 };
-    const boundary = new Date(new Date(T0).getTime() + BURN_WINDOW_MS);
+    const boundary = new Date(new Date(T0).getTime() + 18_000_000);
     const next = rollWindow(burn, { turns: 1, inputTokens: 1, outputTokens: 9, costUsd: 0 }, boundary);
     expect(next.window5hStart).toBe(boundary.toISOString());
     expect(next.window5hOutput).toBe(9); // reset, not 200+9

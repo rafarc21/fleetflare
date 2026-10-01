@@ -213,8 +213,18 @@ describe("POST /studio/:id/paste", () => {
 });
 
 describe("PASTE_MAX_BYTES", () => {
-  it("is the 10_485_760 byte cap from the brief", () => {
-    expect(PASTE_MAX_BYTES).toBe(10_485_760);
+  // The literal 10_485_760, not the import — ties this to the REAL cap
+  // handleStudio enforces, not a comparison of the constant with itself.
+  it("the real cap is exactly 10_485_760 bytes: one byte over rejects, exactly at the cap succeeds", async () => {
+    authorized();
+    const overCap = new Uint8Array(10_485_761);
+    const atCap = new Uint8Array(10_485_760);
+    const { testEnv: overEnv } = envWithFakeStudio();
+    const rejected = await handleStudio(pasteReq(STUDIO_ID, "image/png", overCap), overEnv);
+    expect(rejected.status).toBe(413);
+    const { testEnv: atEnv } = envWithFakeStudio();
+    const accepted = await handleStudio(pasteReq(STUDIO_ID, "image/png", atCap), atEnv);
+    expect(accepted.status).toBe(200);
   });
 });
 

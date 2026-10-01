@@ -15,10 +15,10 @@ import { describe, it, expect, vi } from "vitest";
 import {
   survivalBriefAllowed, paneBusy, midTurnRow,
   prArtifactNumbers, branchArtifacts, isRescueBranchFor, rescueBranchesFor,
-  attributeRescueBranch, rescueBranchPrefix, RESCUE_STAMP_DIGITS,
+  attributeRescueBranch, rescueBranchPrefix,
   resolveSurvivalInput, composeSurvivalDelivery, deliverSurvivalBriefOnBringup,
   retryPendingSurvivalBrief, retryBoundExceeded,
-  SURVIVAL_COMPARE_BASE, SURVIVAL_RETRY_MAX_ATTEMPTS, SURVIVAL_RETRY_WINDOW_MS,
+  SURVIVAL_RETRY_MAX_ATTEMPTS, SURVIVAL_RETRY_WINDOW_MS,
   type ComposedBrief, type SurvivalSources, type SurvivalTaskRef, type SurvivalBringup,
 } from "../src/studio/survival-delivery";
 import { PANE_CAPTURE_MARKER, PANE_QUIESCE_SECONDS } from "../src/studio/failover";
@@ -240,7 +240,6 @@ describe("the 3 anchored branch sources", () => {
     const good = `fleet/rescue/${STUDIO}-20260925120000`;
     expect(isRescueBranchFor(STUDIO, good)).toBe(true);
     expect(rescueBranchPrefix(STUDIO)).toBe(`fleet/rescue/${STUDIO}-`);
-    expect(RESCUE_STAMP_DIGITS).toBe(14);
   });
 
   it("SOURCE 3 — ANOTHER studio's rescue ref that CONTAINS this studio's name is REJECTED", () => {
@@ -398,9 +397,9 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
 
   it("the compare's base is `main`, and it is the base the source is asked for", async () => {
     const compareAhead = vi.fn(async () => ({ aheadBy: 1, lastCommitAt: null }));
-    // SURVIVAL_COMPARE_BASE is what do.ts passes as compareAhead's `base`; the
-    // source port receives only the head branch.
-    expect(SURVIVAL_COMPARE_BASE).toBe("main");
+    // SURVIVAL_COMPARE_BASE is what do.ts passes as compareAhead's `base`
+    // (pinned in the "shared single-flight" describe block below); the
+    // source port here receives only the head branch.
     await resolveSurvivalInput(
       sources({ compareAhead }),
       { ok: true, value: [task({ artifacts: [{ kind: "branch", path: "head-branch" }] })] },
@@ -749,6 +748,17 @@ describe("shared single-flight — #229's lock is reused, never duplicated", () 
     expect(code.filter((l) => /\bthis\.deliverBringupWakes\(/.test(l))).toHaveLength(3);
     // Exactly ONE gated-wake call site for the whole survival feature.
     expect(code.filter((l) => /this\.wakeStudioOnAssignment\(/.test(l)).length).toBeLessThanOrEqual(3);
+  });
+
+  // SURVIVAL_COMPARE_BASE's real consumer is do.ts's compareAhead wiring,
+  // unreachable by import (the DO cannot be constructed here) — pinned by
+  // symbol so a hardcoded `"main"` typed in do.ts instead of the constant,
+  // or a drift between the two, breaks this. StudioDO cannot be constructed
+  // under vitest-pool-workers; source-pinning is this repo's established
+  // compromise, see studio.account-launched.test.ts.
+  it("do.ts's compareAhead wiring passes SURVIVAL_COMPARE_BASE as the base, not a re-typed literal", () => {
+    const src = env.TEST_STUDIO_DO_SRC;
+    expect(src).toContain("compareAhead(await token(), repo, SURVIVAL_COMPARE_BASE, branch)"); // test-lies-check: allow — source-pinning, see comment above
   });
 
   it("maestro review, PR #302 round 2 — ONLY the retry's wake thunk clears a stuck draft first", async () => {
