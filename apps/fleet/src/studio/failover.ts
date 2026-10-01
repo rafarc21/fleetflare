@@ -753,21 +753,25 @@ function bottomLimitModal(lines: string[]): PaneVerdict | null {
  *     one (a later day's "1:30pm") reads stale; and a reset in a zone Intl
  *     rejects, or no reset at all, is never judged stale.
  *   - B: a transcript RE-RENDER. MEASURED 2026-09-24 (#106): `claude --resume`
- *     redraws a persisted limit block with its hint. runAccountFailover skips
- *     an INLINE block whose headline + reset equal the ones recorded at the
- *     last switch, until EITHER a still pane with claude's footer and no
- *     limit retires that record, OR FLAP_GUARD_MINUTES has passed since the
- *     switch (maestro review of PR #152, 2026-09-30, item 1 — a NO-VARIABLE-
- *     TEXT block, the dead-account message, produces the identical key for
- *     every account that shows it, so an unbounded version of this guard
- *     suppressed a genuinely second dead account forever). Select modals are
- *     never guarded: `--continue` does not redraw them. A new account limited
- *     by the very same headline and reset text within that window COLLIDES
- *     and is skipped; the only trace is the `rerender` outcome the tick logs.
- *     A RESET-LESS inline block (out of usage credits, or the dead-account
- *     message) keys on its headline alone, so the next account's own
- *     identically-keyed block reads as that redraw until the record retires
- *     or the window passes.
+ *     redraws a persisted limit block with its hint. The real guard and its
+ *     full history (round 1 TRIED a FLAP_GUARD_MINUTES time bound, FOUND
+ *     UNSAFE by reviewer probe P7, round 2 reverted it) live in the doc
+ *     comment directly above the `rerender`/`key` check further down this
+ *     file — summarized here, not re-derived, so the two descriptions cannot
+ *     drift apart again: an ORDINARY (non-dead) inline block whose headline +
+ *     reset equal the ones recorded at the last switch is skipped
+ *     UNCONDITIONALLY AND FOREVER, no time bound at all — the original,
+ *     pre-round-1, long-proven-safe behavior, restored. A RESET-LESS inline
+ *     block (out of usage credits, or any other hint-less block) keys on its
+ *     headline alone, so a GENUINE new limit printing that identical headline
+ *     also reads as that redraw and is skipped forever; the only trace is the
+ *     `rerender` outcome the tick logs. The ONE carve-out is the dead-account
+ *     message (issue #141): no variable text at all, so it instead uses
+ *     occurrence-counting (`countDeadAccountOccurrences`/
+ *     `deadAccountScrollbackCmd`/`StudioStatus.failoverBlockOccurrences`) — a
+ *     scrollback count that GROWS beyond its recorded baseline is fresh
+ *     evidence, no time element at all. Select modals are never guarded:
+ *     `--continue` does not redraw them.
  *   - B: the first sighting (LIMIT_SIGHTING_KEY) is never cleared, only
  *     replaced by a different block. A genuinely new limit with identical
  *     headline + reset text reads stale for its whole window.
