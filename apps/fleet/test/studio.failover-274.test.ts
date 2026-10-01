@@ -443,4 +443,44 @@ describe("#158 (7) — the fast (30s) ship-tick path also fires the heal wake, n
     expect(row.state).toBe("running");
     expect(execCalls.filter((c) => c === wake)).toHaveLength(1);
   });
+
+  // Maestro round-2 review (PR #170), finding 5(ii): no test proved
+  // `safeToWake: result.paneVerdict?.kind === "idle"` actually gates
+  // anything on the fast path — both tests above use an idle pane, so a
+  // mutant that always passed `safeToWake: true` here would stay green.
+  // This pane satisfies #214's OWN heal evidence (claude's footer at the
+  // bottom, no limit block anywhere — `evaluateDegradedRecovery` doesn't
+  // look at the spinner line at all) while ALSO carrying a live spinner
+  // status line (`activity.ts`'s own MEASURED shape, "· Improvising… (1s ·
+  // ↓ 3 tokens)") that makes `readActivityFrame` read `paneVerdict.kind` as
+  // `"working"`, not `"idle"` — the row heals, but the wake must not fire.
+  it("heal succeeds on a WORKING (non-idle) paneVerdict, but the wake does not fire", async () => {
+    const RECOVERED_BUT_WORKING = [
+      "⏺ Resumed after the Esc.",
+      "",
+      "· Improvising… (1s · ↓ 3 tokens)",
+      ...RULE_PROMPT,
+    ].join("\n");
+    const status = degradedStatus({
+      rateLimited: { until: "2026-09-25T09:00:00.000Z", seenAt: "2026-09-25T08:30:00.000Z" },
+      exhaustionKind: "inline",
+    });
+    const storage = fakeStorage({ status });
+    const wake = wakeCmd(AUTO_CONTINUE_PROMPT);
+    const execCalls: string[] = [];
+    const exec = vi.fn(async (cmd: string) => {
+      execCalls.push(cmd);
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude claude\n", stderr: "" };
+      if (cmd === PANE_SCREEN_CMD) return { code: 0, stdout: `${RECOVERED_BUT_WORKING}\n`, stderr: "" };
+      if (cmd === wake) return { code: 0, stdout: "__FLEET_WAKE__ sent\n", stderr: "" };
+      return { code: 0, stdout: stdoutWithPane(RECOVERED_BUT_WORKING), stderr: "" };
+    });
+    const deps = { exec, r2Put: vi.fn(async () => {}), now: () => new Date("2026-09-25T09:30:00.000Z") };
+
+    await runShipTickWithObservation(deps, storage, STUDIO_ID, undefined, 5000);
+
+    const row = storage.map.get(STATUS_KEY) as StudioStatus;
+    expect(row.state).toBe("running"); // the row still heals — #214's own evidence is independent of the spinner
+    expect(execCalls.filter((c) => c === wake)).toEqual([]); // but nothing typed — a turn is in flight
+  });
 });

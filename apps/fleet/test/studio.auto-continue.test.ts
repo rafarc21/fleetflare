@@ -292,6 +292,16 @@ describe("issue #158 — inline exhaustion gets a wake once its own reset passes
     const second = await h.run();
     expect(second.kind).toBe("already-degraded");
     expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]);
+    // Maestro round-2 review (PR #170), finding 5(i): stronger than "no
+    // WAKE text landed" — `runGatedWake` must never even be CALLED (no
+    // probe/screen exec at all) when `shouldHeal` is false, even though
+    // this row's own exhaustion shape (`exhaustionKind: "inline"`, once
+    // degraded) would otherwise satisfy the wake condition. Catches a
+    // mutant that drops the `recovery.shouldHeal` gate specifically, which
+    // the WAKE-text-only assertion above cannot: `runGatedWake` itself
+    // would still refuse (the live block is still on screen), so a looser
+    // assertion checking only the final keystroke stays green either way.
+    expect(h.execs.filter((c) => c === PANE_PROBE_CMD || c === PANE_SCREEN_CMD)).toEqual([]);
   });
 
   it("inline exhausted, reset passed and the pane is idle: exactly one gated wake with AUTO_CONTINUE_PROMPT", async () => {
