@@ -155,57 +155,80 @@ export function looseLimitOnScreen(screen: string): string | null {
 }
 
 /**
- * Issue #158 — a NEW, SEPARATE loose detector: Claude Code's own feedback-
- * survey overlay (options 1/2/3/0 above the prompt — field note on #158,
- * 2026-10-01 02:56Z). A SEPARATE function and pattern from
- * LOOSE_LIMIT_PATTERNS above, deliberately — that array is scoped to MODAL
- * ROWS (this file's own doc comment just above it), and a general
- * numbered-option-row pattern was already tried there once (PR #102's first
- * cut) and REJECTED again at #146, for matching a lead's own numbered prose
- * (test/fixtures/rate-limit-panes.ts's NOT_DETECTED corpus, fixtures
- * (d)/(e)/(f)/(g)) and the ghost-composer row (test/studio.wake-race.test.ts,
- * `"❯ 1. Upgrade deps"`). Folding this into LOOSE_LIMIT_PATTERNS would repeat
- * that exact mistake.
+ * Issue #158, maestro round-2 review (PR #170) finding 1 — a NEW, SEPARATE
+ * loose detector: Claude Code's own feedback-survey overlay. A SEPARATE
+ * function and pattern from LOOSE_LIMIT_PATTERNS above, deliberately — that
+ * array is scoped to MODAL ROWS (this file's own doc comment just above
+ * it), and a general numbered-option-row pattern was already tried there
+ * once (PR #102's first cut) and REJECTED again at #146, for matching a
+ * lead's own numbered prose and the ghost-composer row
+ * (test/studio.wake-race.test.ts, `"❯ 1. Upgrade deps"`). Folding this into
+ * LOOSE_LIMIT_PATTERNS would repeat that exact mistake.
  *
- * Narrower shape, chosen to avoid it: within the bottom LOOSE_TAIL_LINES
- * non-blank rows, at least TWO CONSECUTIVE rows that are each a BARE, SHORT
- * numbered-choice line — just a digit (optionally followed by `.`/`)`/`:`)
- * and no more than a handful of characters of label, nothing else on the
- * row. Every rejected shape above carries a full word or sentence after the
- * number, and the ghost-composer row is only ever ONE such row, never two in
- * a row — so neither trips this.
+ * REDESIGNED (round-2 review, finding 1) against the REAL shape (Claude
+ * Code 2.1.286, directly observed by the repo owner, not a blind guess): a
+ * header line, `● How is Claude doing this session? (optional)`, followed
+ * within a few rows by ONE choice row carrying multiple `N: label` tokens
+ * on it (`1: Bad    2: Fine   3: Good   0: Dismiss`) — NOT stacked bare rows
+ * the first-round detector guessed at. See test/fixtures/survey-panes.ts's
+ * own doc comment for the full history, including the false positive the
+ * first-round guess tripped on an ordinary lead's own short numbered status
+ * list ("1. Done" / "2. Merged" — finding 2, same review).
  *
- * The field note's own "no ▔ rule" (i.e. NOT drawn inside the same
- * boxed-modal chrome every rate-limit/permission-prompt fixture in this repo
- * uses) is read as: if a ▔ rule is anywhere in the same tail, this is modal
- * territory, already owned by LOOSE_LIMIT_PATTERNS's own `(▔)+` entry — defer
- * to it rather than risk a double-refusal with the wrong reason. MEASURED
- * collision this guards against: REAL_PERMISSION_PROMPT_TAIL_PANE and
- * REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE (test/fixtures/activity-panes.ts)
- * draw a ▔ rule directly above their own bare "❯ 1. Yes" / "2. No" pair,
- * which would otherwise also match this shape and change WHICH gate refuses
- * (and how — a skip here, a loud error there) for an already-covered case.
+ * Anchored on BOTH the header's own text AND the choice-row shape appearing
+ * TOGETHER, never on the choice shape alone: the header is specific product
+ * copy no lead would ever print by coincidence, so requiring it is what
+ * keeps this detector from matching ordinary numbered prose the way the
+ * header-less, stacked-bare-row version used to (finding 2).
  *
- * UNMEASURED (no real capture of this overlay exists in this repo yet —
- * test/fixtures/survey-panes.ts's own doc comment); the shape is
- * deliberately conservative rather than guessed wide.
+ * Not VERBATIM (no raw `tmux capture-pane -p` byte-for-byte exists in this
+ * repo yet) — see test/fixtures/survey-panes.ts's own doc comment for the
+ * provenance note.
  */
-const SURVEY_CHOICE_ROW = /^[ \t]*(│[ \t]*)?[0-9][.):]?[ \t]{0,2}\S{0,6}[ \t]*(│)?[ \t]*$/;
+const SURVEY_HEADER_TEXT = "How is Claude doing this session\\? \\(optional\\)";
+/** Tolerant of a leading bullet (claude draws its own turn-start marker as
+ *  either ⏺ or ●, measured across this repo's own fixtures) or box border,
+ *  same `ROW_LEAD`-style tolerance `LOOSE_LIMIT_PATTERNS` above already
+ *  uses. The glyph alternation sits inside its own group before the `?`,
+ *  the same C-locale-safe discipline this file's own `(▔)+` entry
+ *  documents (a bare multibyte glyph directly before a quantifier binds to
+ *  its last BYTE, not the whole character — wrapping in a group fixes it). */
+const SURVEY_HEADER_ROW_LEAD = "^[[:space:]]*(│[[:space:]]*)?(⏺|●)?[[:space:]]*";
+/** POSIX ERE, C-locale safe — exported so `wakeCmd` can fold it into the
+ *  container-side `grep -E` scan too (defense-in-depth, finding 1): the
+ *  header's own literal text is specific enough to be safe as a STANDALONE
+ *  pattern there, unlike a bare numbered-row shape would be. The two-row
+ *  proximity check below stays JS-side only — a single `grep -E` line
+ *  pattern cannot express "this row, AND within N rows below it, that
+ *  other shape" the way `LOOSE_LIMIT_PATTERNS`'s single-row entries can. */
+export const SURVEY_HEADER_PATTERN = `${SURVEY_HEADER_ROW_LEAD}${SURVEY_HEADER_TEXT}${ROW_TAIL}`;
+const SURVEY_HEADER_ROW = new RegExp(SURVEY_HEADER_PATTERN.replaceAll("[[:space:]]", "\\s"));
 
-/** True when SURVEY_CHOICE_ROW's shape (see its own doc comment) is found
- *  twice in a row within the bottom LOOSE_TAIL_LINES non-blank rows, and no
- *  ▔ rule sits anywhere in that same tail. */
+/** At least two `N: label` tokens on the SAME row — claude draws every
+ *  choice on one line, with varying label widths ("Bad"/"Fine"/"Good"/
+ *  "Dismiss"), so no per-token length cap (the first-round per-row shape
+ *  broke on "Dismiss", 7 characters, past its own 6-character cap). */
+const SURVEY_CHOICE_TOKEN = /[0-9]:\s*\S+/g;
+
+/** How many rows below a matched header line still count as "the same
+ *  overlay" — the real pane draws the choice row immediately below the
+ *  header, one line down; a small window tolerates a blank line or minor
+ *  redraw jitter without growing wide enough to span unrelated content. */
+const SURVEY_HEADER_PROXIMITY = 3;
+
+/** True when `SURVEY_HEADER_ROW` is found in the bottom `LOOSE_TAIL_LINES`
+ *  non-blank rows, AND within `SURVEY_HEADER_PROXIMITY` rows below it a row
+ *  carries `SURVEY_CHOICE_TOKEN` at least twice. Header absent: never
+ *  flags, even if a lead's own prose happens to contain a short numbered
+ *  row shape (finding 2, maestro round-2 review, PR #170). */
 export function surveyOverlayOnScreen(screen: string): boolean {
   const tail = screen.split("\n").filter((l) => l.trim() !== "").slice(-LOOSE_TAIL_LINES);
-  if (tail.some((l) => l.includes("▔"))) return false;
-  let run = 0;
-  for (const line of tail) {
-    if (SURVEY_CHOICE_ROW.test(line)) {
-      run += 1;
-      if (run >= 2) return true;
-    } else {
-      run = 0;
-    }
+  const headerIdx = tail.findIndex((l) => SURVEY_HEADER_ROW.test(l));
+  if (headerIdx < 0) return false;
+  const end = Math.min(tail.length, headerIdx + 1 + SURVEY_HEADER_PROXIMITY);
+  for (let i = headerIdx + 1; i < end; i++) {
+    const matches = tail[i].match(SURVEY_CHOICE_TOKEN);
+    if (matches && matches.length >= 2) return true;
   }
   return false;
 }
@@ -382,7 +405,12 @@ function submitCheck(fragment: string): string {
 export function wakeCmd(prompt: string, clearDraftFirst = false): string {
   const q = shellQuote(flattenPrompt(prompt));
   const clear = clearDraftFirst ? `${STUDIO_TMUX} send-keys -t ${WAKE_TARGET} C-u && ` : "";
-  const es = LOOSE_LIMIT_PATTERNS.map((p) => `-e ${shellQuote(p)}`).join(" ");
+  // Maestro round-2 review (PR #170), finding 1 — the container's own
+  // in-shell scan had zero survey awareness (LOOSE_LIMIT_PATTERNS only).
+  // Defense-in-depth only: the header's own literal text, safe standalone
+  // (see SURVEY_HEADER_PATTERN's own doc comment for why the full two-row
+  // proximity check stays JS-side, in runGatedWake, rather than here).
+  const es = [...LOOSE_LIMIT_PATTERNS, SURVEY_HEADER_PATTERN].map((p) => `-e ${shellQuote(p)}`).join(" ");
   // Fail CLOSED (#141 review): a capture, sed, tail or grep error is
   // UNREADABLE (2), never clean. grep: 0 = a modal row, 1 = none, else error.
   const scan =
