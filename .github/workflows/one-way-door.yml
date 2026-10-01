@@ -1,0 +1,54 @@
+name: One-Way Door
+
+# Issue #161: path-based override of an agent's own reversibility judgment.
+# apps/fleet/scripts/merge-danger.ts classifies the PR's changed files
+# against ONE_WAY_GLOBS. A match labels the PR `one-way-door` and lists the
+# files in the job summary; no match removes the label. Never fails the
+# build: the label is the signal, a human decides the merge.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Classify changed files
+        id: classify
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          result=$(git diff --name-only "$BASE...$HEAD" | bun run apps/fleet/scripts/merge-danger.ts)
+          echo "$result"
+          echo "one_way=$(echo "$result" | jq -r .oneWay)" >> "$GITHUB_OUTPUT"
+          {
+            echo "## One-way door: $(echo "$result" | jq -r .oneWay)"
+            echo "$result" | jq -r '.matched[] | "- `\(.)`"'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Fork PRs get a read-only token; the summary above still reports.
+      - name: Label PR
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "${{ steps.classify.outputs.one_way }}" = "true" ]; then
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label one-way-door
+          else
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label one-way-door || true
+          fi
