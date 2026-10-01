@@ -496,6 +496,57 @@ function deadAccountBlock(lines: string[]): PaneVerdict | null {
 }
 
 /**
+ * Maestro review of PR #152, round 2 — how many times the dead-account block
+ * appears ANYWHERE in `text` (this pane's own tmux scrollback, not just the
+ * bottom-anchored visible screen `deadAccountBlock` itself scans). Reuses the
+ * exact same wrap-tolerant full-sentence reconstruction `deadAccountBlock`
+ * uses (glyph-anchored start line, join+trim up to DEAD_ACCOUNT_WRAP_LINES
+ * rows, exact match against DEAD_ACCOUNT_FULL_TEXT) — the two must never
+ * drift on what counts as "the block." Non-overlapping: once a match is
+ * found ending at row `end`, the scan resumes AT `end`, never re-matching
+ * rows already consumed by it.
+ */
+export function countDeadAccountOccurrences(text: string): number {
+  const lines = text.replace(/\s+$/, "").split("\n");
+  let count = 0;
+  let i = 0;
+  while (i < lines.length) {
+    if (!DEAD_ACCOUNT_START_LINE.test(lines[i])) { i++; continue; }
+    let matched = false;
+    for (let end = i + 1; end <= Math.min(i + DEAD_ACCOUNT_WRAP_LINES, lines.length); end++) {
+      const joined = lines.slice(i, end).map((l) => l.trim()).join(" ").replace(/^[⏺●]\s+/, "");
+      if (joined === DEAD_ACCOUNT_FULL_TEXT) {
+        count++;
+        i = end;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) i++;
+  }
+  return count;
+}
+
+/**
+ * Maestro review of PR #152, round 2 — the scrollback read behind
+ * `countDeadAccountOccurrences`. `-S -20000`: 20000 lines of HISTORY (tmux
+ * 3.2a's `capture-pane -S <start-line>`, negative meaning "N lines back from
+ * the bottom"), not the bare visible screen `paneCaptureCmd()` reads.
+ * 20000 is generous headroom under this studio's own tmux session's
+ * `history-limit 50000` (container/studio-bringup.sh) without asking for the
+ * full history on every call — this only ever runs in the rare branch where a
+ * dead-account verdict's key already matches a recorded `failoverBlock`,
+ * never on every tick, so correctness (enough history to see a genuinely
+ * earlier occurrence) is worth more here than trimming the exec's own output
+ * size. Same INVISIBLE-BY-CONSTRUCTION addressing-by-name discipline as
+ * `paneCaptureCmd()` itself (see that function's own doc comment): selects,
+ * switches or attaches nothing.
+ */
+export function deadAccountScrollbackCmd(): string {
+  return withStudioTmux(`${STUDIO_TMUX} capture-pane -p -S -20000 -t studio:claude 2>/dev/null`);
+}
+
+/**
  * Issue #232: the key + RESETS match for ONE row that already matched
  * INLINE_LIMIT_LINE, built the same way inlineLimitBlock's own `block()`
  * closure builds it — except this is never anchored to a hint or an idle
@@ -1549,6 +1600,9 @@ async function handBack(
     // See this function's own doc comment for why this is cleared, not set.
     claudeAccountMovedVia: null,
     failoverBlock: null,
+    // Maestro review of PR #152, round 2 — reset alongside `failoverBlock`:
+    // a stale baseline from a previous leg must never leak into the next.
+    failoverBlockOccurrences: null,
     claudeAccountMovedBlock: null,
     // The whole point: no longer borrowed, whether the switch landed or not
     // — same "attempted regardless of success" treatment `claudeAccount`
@@ -1814,7 +1868,10 @@ export async function runAccountFailover(
       const cleared: StudioStatus = {
         ...existing,
         rateLimited: null,
-        ...(forget ? { failoverBlock: null, claudeAccountMovedBlock: null } : {}),
+        // Maestro review of PR #152, round 2 — reset alongside `failoverBlock`
+        // on the same trigger: a stale occurrence baseline from the block just
+        // forgotten must never leak into whatever block is seen next.
+        ...(forget ? { failoverBlock: null, failoverBlockOccurrences: null, claudeAccountMovedBlock: null } : {}),
         // Issue #109 (#214 recovery): a row that genuinely recovers carries
         // no stale auto-continue bookkeeping into its next, unrelated
         // exhaustion.
@@ -1878,20 +1935,45 @@ export async function runAccountFailover(
   // message, so `--continue` never redraws it — the same modal on the next
   // account is that account's limit, and must walk on to exhausted.
   //
-  // Maestro review of PR #152 (2026-09-30), item 1 — this check used to have
-  // NO time bound at all, on the assumption that a genuinely new limit always
-  // produces a DIFFERENT key (a different headline or reset). The
-  // dead-account message (issue #141) breaks that assumption: it has NO
-  // variable text at all, so a SECOND account that is ALSO genuinely,
-  // currently dead produces the exact same key as the FIRST account's own
-  // departure evidence — and the guard used to suppress it as a "rerender"
-  // FOREVER, so the second account was never marked dead and the switch never
-  // happened. Bounded the same way the select-modal flap-guard just below
-  // already is: past FLAP_GUARD_MINUTES since the switch, a still-matching
-  // inline block is trusted as fresh evidence for the CURRENT account, not
-  // presumed to be an infinite `--continue` echo of the one just departed. A
-  // genuine `--continue` redraw only ever replays ONCE, right at relaunch;
-  // real, ongoing evidence that persists past this window is real.
+  // Maestro review of PR #152 (2026-09-30), round 1, item 1 — TRIED, FOUND
+  // UNSAFE (reviewer probe P7), see round 2 note below. Round 1 bounded this
+  // check by time (FLAP_GUARD_MINUTES since the switch), on the theory that a
+  // genuine `--continue` redraw only ever replays once, right at relaunch, so
+  // anything persisting past a short window must be real. Probe P7 broke that
+  // theory: after a switch, `--continue` can redraw the OLD account's dead-
+  // account departure evidence on a pane that then simply IDLES — nothing
+  // typed, nothing new — because the account it is NOW on can be perfectly
+  // healthy. That idle redraw sits on screen, completely static, for
+  // arbitrarily long: 11 minutes, an hour, whatever. A time bound alone
+  // cannot tell that apart from genuinely fresh evidence once elapsed time is
+  // the only test, so round 1's fix eventually marked a HEALTHY account
+  // permanently dead — worse than the bug it fixed.
+  //
+  // Round 2's fix: unconditional-forever suppression is RESTORED as the
+  // default (the ORIGINAL, pre-round-1, long-proven-safe behavior — an
+  // ordinary inline limit's key is practically never identical across two
+  // genuinely different limits, per INLINE_LIMIT_HEADLINES's own doc comment,
+  // so an unconditional match here has always meant a stale redraw). The
+  // dead-account message (issue #141) is the ONE case that breaks that
+  // assumption — no variable text at all, so a second account that is ALSO
+  // genuinely, currently dead produces the exact same key as the first
+  // account's own departure evidence — and it alone gets a NARROWER,
+  // NON-TIME-BASED escape hatch: occurrence counting in the pane's own tmux
+  // scrollback (countDeadAccountOccurrences/deadAccountScrollbackCmd above,
+  // StudioStatus.failoverBlockOccurrences). A static `--continue` redraw that
+  // just sits there idling never adds a new occurrence to the scrollback —
+  // the text was already there, unchanged. A genuinely new rejection (the
+  // account really is dead and claude tried something and got rejected again)
+  // prints the block a SECOND time, appended after the first — real,
+  // unambiguous, non-time-based evidence. This works whether or not
+  // `respawn-pane -k` clears tmux's history: the baseline is always "whatever
+  // count exists at the very first post-switch sighting," and only a count
+  // that GROWS beyond that baseline counts as fresh.
+  // RED commit (TDD): round-1's time-bounded guard, kept here UNCHANGED for
+  // this commit so the new round-2 tests below land as genuinely failing
+  // (RED) against it. The very next commit replaces this with the round-2
+  // occurrence-count fix (see the primitives/doc comment above) and turns
+  // these same tests GREEN.
   const key = verdict.inline ? limitBlockKey(verdict) : null;
   const movedRecently = existing.claudeAccountMovedAt != null
     && !Number.isNaN(Date.parse(existing.claudeAccountMovedAt))
@@ -1905,10 +1987,10 @@ export async function runAccountFailover(
   // null` (select modals have no block key), so the `rerender` check above
   // cannot catch a `--continue` redraw of an INLINE message the switched-off
   // account's transcript still holds. An `"inline"`-via switch is already
-  // protected by its own `failoverBlock`/`rerender` pairing, ALSO bounded by
-  // FLAP_GUARD_MINUTES since review round above — and a genuine SELECT-style
-  // modal (`!verdict.inline`) always overrides the guard either way: claude
-  // can never redraw one of those from a resumed transcript.
+  // protected by its own `failoverBlock`/`rerender` pairing above — and a
+  // genuine SELECT-style modal (`!verdict.inline`) always overrides the guard
+  // either way: claude can never redraw one of those from a resumed
+  // transcript.
   //
   // Review round 1 (#102 review, 2026-09-30), finding 2 — the escape hatch
   // was UNREACHABLE for a genuinely new limit: the guard used to fire on ANY
@@ -2163,6 +2245,10 @@ export async function runAccountFailover(
     claudeAccountMovedAt: deps.now().toISOString(),
     claudeAccountMovedVia: verdict.inline ? "inline" : "modal",
     failoverBlock: key,
+    // Maestro review of PR #152, round 2 — reset alongside `failoverBlock`:
+    // this switch starts a NEW leg, so any occurrence baseline recorded for
+    // the PREVIOUS leg's dead-account block must not survive into this one.
+    failoverBlockOccurrences: null,
     // Review round 1 (#102 review, 2026-09-30), finding 2 — the no-flapping
     // guard's own comparison key (types.ts's own doc comment states the full
     // rule): `key` itself for an inline-via switch (the same value

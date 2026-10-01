@@ -526,6 +526,19 @@ export const NOT_DETECTED_141: Record<string, string> = {
         "Claude Code · Use an Anthropic API key instead, or ask your admin to enable access\" verbatim.",
       "", ...RULE_PROMPT,
     ].join("\n"),
+  // Maestro review of PR #152, round 2 — a DIFFERENT mutant from the one
+  // above: this line IS glyph-anchored at exactly the right position (claude's
+  // own message glyph, immediately followed by the sentence's real opening
+  // words), but its ENDING is not the exact measured sentence — a paraphrase,
+  // not the real message. Proves the comparison is `===` exact-text against
+  // DEAD_ACCOUNT_FULL_TEXT, not a loose/fuzzy "starts with the headline" match
+  // — a detector that only checked the headline prefix would wrongly fire
+  // here.
+  "the dead-account headline's exact start, but a different (paraphrased) ending":
+    [
+      "● Your organization has disabled Claude subscription access for Claude Code · Contact support for details",
+      "", ...RULE_PROMPT,
+    ].join("\n"),
 };
 
 /** Issue #106 item 4: a #53 headline quoted in prose ABOVE a real V2 block. */

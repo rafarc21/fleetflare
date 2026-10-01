@@ -121,3 +121,14 @@ feature adds nothing parallel to that pipeline. It adds:
   real "still physically on screen but not bottom-anchored" capture — should
   one surface, the fix is the same generalization `anyLiveLimitLineOnScreen`
   already provides for the other shapes).
+- Round 2 review (maestro review of PR #152, 2026-09-30) — `DEAD_ACCOUNT_WRAP_LINES
+  = 3` may not be enough rows for the full sentence to reconstruct at very
+  narrow pane widths (below roughly 78 columns): the measured real pane
+  (~120 cols) wraps to 2 rows and the hand-wrapped 80-col fixture also fits in
+  2, but a genuinely narrower pane could push the sentence past 3 rows and the
+  detector (both `deadAccountBlock` and its round-2 sibling
+  `countDeadAccountOccurrences`, which reuses the identical wrap-tolerant
+  reconstruction) would then miss it entirely. Known, accepted gap — not fixed
+  this round. If a narrow-pane miss is ever measured, raising
+  `DEAD_ACCOUNT_WRAP_LINES` is the fix, same as it was chosen generously the
+  first time.

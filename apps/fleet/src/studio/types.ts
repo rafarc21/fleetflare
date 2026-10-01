@@ -403,6 +403,24 @@ export interface StudioStatus {
    */
   failoverBlock?: string | null;
   /**
+   * Maestro review of PR #152 (2026-09-30), round 2 — the baseline occurrence
+   * count of the dead-account block (failover.ts's `countDeadAccountOccurrences`)
+   * in this pane's own tmux scrollback, taken at the FIRST post-switch sighting
+   * of a matching `failoverBlock` while `verdict.dead` is true. A time bound
+   * alone (round 1's fix) is not evidence: a stale `--continue` redraw can sit
+   * on an idling pane, completely static, for arbitrarily long, with nothing to
+   * distinguish it from genuinely fresh evidence once time is the only test
+   * (MEASURED, reviewer probe P7: a healthy account's own idle redraw read as
+   * fresh past the window and got marked dead forever). A GROWING occurrence
+   * count is real, non-time-based evidence: a mere idle redraw never adds a new
+   * occurrence, only a genuinely new print does. `null`/absent: no baseline
+   * recorded yet (either never switched via a dead verdict, or this is the
+   * first sighting and the NEXT tick's count becomes the thing to compare).
+   * Reset to `null` at every switch alongside `failoverBlock` itself — a stale
+   * baseline from the PREVIOUS leg must never leak into the new one's count.
+   */
+  failoverBlockOccurrences?: number | null;
+  /**
    * Issue #99: the claude account's usage/session limit, as the failover
    * pane capture (every 300s, failover.ts) last saw it. Written when the pane
    * shows the limit, cleared when it no longer does. `fleet ls` READY reads

@@ -8,7 +8,7 @@ import {
 import {
   detectRateLimitModal, paneCaptureCmd, accountSwitchCmd, runAccountFailover, FLEET_TOKEN_ENV,
   exhaustedMessage, RATE_LIMIT_HEADLINES, RATE_LIMIT_MODAL_MARKERS, FLAP_GUARD_MINUTES,
-  PANE_CAPTURE_MARKER, MODAL_TAIL_LINES, type FailoverDeps,
+  PANE_CAPTURE_MARKER, MODAL_TAIL_LINES, deadAccountScrollbackCmd, type FailoverDeps,
 } from "../src/studio/failover";
 import { STATUS_KEY, OPERATION_KEY, OPERATION_STALE_MS, type StudioStorage } from "../src/studio/provision";
 import { syncSessionCycle, launchFields, recordLaunchedAccount, StudioDO } from "../src/studio/do";
@@ -557,6 +557,12 @@ interface Harness {
   relaunches: number;
   notices: string[];
   setPane(stdout: string): void;
+  /** Maestro review of PR #152, round 2 — controls the fake `exec`'s response
+   *  to `deadAccountScrollbackCmd()`, independently of `setPane`'s own
+   *  response to `paneCaptureCmd()` — a test drives how many times the
+   *  dead-account block appears in the pane's own tmux SCROLLBACK, separately
+   *  from what the visible screen currently shows. */
+  setScrollback(stdout: string): void;
   /** Issue #102: the fleet-wide fake `accountLimits` store, exposed so a test
    *  can seed another account as ALREADY limited (fleet-wide, from some other
    *  studio's own sighting) before running this one. Issue #141: `dead` rides
@@ -602,6 +608,7 @@ function harness(opts: {
   const recorded: StudioStatus[] = [];
   const notices: string[] = [];
   let pane = opts.pane;
+  let scrollback = "";
   let relaunches = 0;
   let accountBurnReads = 0;
   const storage = fakeStorage(opts.initial ?? status()) as StudioStorage & ObservedStorage;
@@ -613,6 +620,7 @@ function harness(opts: {
     get relaunches() { return relaunches; },
     get accountBurnReads() { return accountBurnReads; },
     setPane: (stdout: string) => { pane = stdout; },
+    setScrollback: (stdout: string) => { scrollback = stdout; },
     deps: {
       accounts: opts.accounts,
       autoFailover: opts.autoFailover ?? true,
@@ -639,6 +647,11 @@ function harness(opts: {
       exec: vi.fn(async (cmd: string) => {
         execs.push(cmd);
         if (cmd === paneCaptureCmd()) return { code: 0, stdout: pane, stderr: "" };
+        // Maestro review of PR #152, round 2 — the occurrence-counting
+        // scrollback read, distinguished from the ordinary pane capture the
+        // same way this fake already distinguishes the bringup token-write
+        // exec below: match the exact command string.
+        if (cmd === deadAccountScrollbackCmd()) return { code: 0, stdout: scrollback, stderr: "" };
         // Issue #85, maestro correction #6: the post-switch combined
         // token-write + pane-probe exec. Default simulates a successful
         // token write with no lead pane found (this fake has no real tmux)
@@ -815,33 +828,106 @@ describe("runAccountFailover — issue #141: a dead account (org disabled subscr
 // SECOND, genuinely dead account produces the SAME key as the first
 // account's own departure evidence, and was suppressed as a stale
 // `--continue` rerender FOREVER — never marked dead, never switched off.
+//
+// Round 2 (maestro review of PR #152, 2026-09-30) — round 1's fix here was a
+// TIME bound (FLAP_GUARD_MINUTES since the switch), and the reviewer's probe
+// P7 (see the DEDICATED describe block further below) found it unsafe: a
+// stale `--continue` redraw of the departed account's OWN evidence can sit on
+// an idling, perfectly healthy pane for arbitrarily long, and a time bound
+// alone cannot tell that apart from genuinely fresh evidence. This test is
+// REWRITTEN to prove the same outcome (account 2 eventually gets marked dead
+// and the studio moves on to account 3) via a GROWING OCCURRENCE COUNT in the
+// pane's own tmux scrollback instead of elapsed time — see
+// countDeadAccountOccurrences'/failoverBlockOccurrences' own doc comments
+// (failover.ts/types.ts) for the full mechanism.
 // ---------------------------------------------------------------------------
-describe("runAccountFailover — issue #141 review: a same-keyed dead-account block on the NEXT account, past the flap window, is trusted (not suppressed forever)", () => {
-  it("tick 1 switches account 1 off (dead); tick 2 (same now) is correctly rerender-guarded; tick 3 (past the flap window) marks account 2 dead and switches on", async () => {
+/** One dead-account block, exactly as `countDeadAccountOccurrences` requires
+ *  to count it — the same two-line wrap the `ORG_DISABLED_PANE` fixture
+ *  itself uses, repeated `n` times to simulate `n` occurrences in scrollback. */
+function deadBlockOccurring(n: number): string {
+  const block = [
+    "● Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask",
+    "  your admin to enable access",
+  ].join("\n");
+  return Array.from({ length: n }, () => block).join("\n");
+}
+
+describe("runAccountFailover — issue #141 review, round 2: a same-keyed dead-account block on the NEXT account is trusted once the scrollback occurrence count GROWS (not once time passes)", () => {
+  it("tick 1 switches account 1 off (dead); tick 2 (same now) records the baseline and rerender-guards; tick 3 (still same now) sees a NEW occurrence and marks account 2 dead and switches on", async () => {
     const h = harness({ accounts: THREE_ACCOUNTS, pane: captured(ORG_DISABLED_PANE) });
 
-    // Tick 1: account 1's own screen shows the dead message.
+    // Tick 1: account 1's own screen shows the dead message. The
+    // scrollback-read branch is not reached on this tick (no recorded
+    // failoverBlock yet to match against), so its response does not matter.
     const out1 = await run(h);
     expect(out1).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
     expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toMatchObject({ dead: true });
 
-    // Tick 2, SAME now, SAME harness (existing/failoverBlock/claudeAccountMovedAt
-    // carry over from storage): the SAME pane now represents account 2's own
-    // screen — genuinely ALSO dead — but this tick is still within the flap
-    // window right after the switch, so a --continue redraw ambiguity
-    // genuinely exists this soon. This is CORRECT, expected behavior, not a
-    // bug on its own.
+    // Tick 2, SAME now — proving this mechanism is not time-dependent at all:
+    // the SAME pane now represents account 2's own screen — genuinely ALSO
+    // dead — and this is the FIRST sighting since the switch. The scrollback
+    // shows the block occurring ONCE: this tick records that as the baseline
+    // and rerender-guards, exactly like the very first `--continue` redraw
+    // always has.
+    h.setScrollback(deadBlockOccurring(1));
     const out2 = await run(h);
     expect(out2.kind).toBe("rerender");
+    expect((await h.storage.get(STATUS_KEY))?.failoverBlockOccurrences).toBe(1);
 
-    // Tick 3: advance past FLAP_GUARD_MINUTES since the switch. The SAME
-    // dead-account pane is now trusted as fresh evidence for account 2, not
-    // presumed to be an infinite echo of account 1's own departure — account
-    // 2 gets marked dead fleet-wide and the studio switches to account 3.
-    h.deps.now = () => new Date(NOW.getTime() + (FLAP_GUARD_MINUTES + 1) * 60_000);
+    // Tick 3, STILL the same `now` — no time advance at all: the pane shows
+    // the SAME block, but the scrollback now shows it occurring TWICE,
+    // simulating account 2 genuinely, independently printing its own fresh
+    // rejection — a real second occurrence, not a redraw of the first. This
+    // is real, unambiguous, non-time-based evidence: account 2 gets marked
+    // dead fleet-wide and the studio switches to account 3.
+    h.setScrollback(deadBlockOccurring(2));
     const out3 = await run(h);
     expect(out3).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN_2", to: "CLAUDE_CODE_OAUTH_TOKEN_3" });
     expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN_2")).toMatchObject({ dead: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Maestro review of PR #152, round 2 — reviewer probe P7. Round 1's time-
+// bounded redraw guard (FLAP_GUARD_MINUTES) is UNSAFE: after a switch,
+// claude's `--continue` can redraw the OLD dead account's departure evidence
+// on the NEW account's own pane, and that pane can then simply IDLE — nothing
+// typed, nothing new — because the account it is NOW on is perfectly healthy.
+// That idle redraw can sit on screen, completely static, for arbitrarily
+// long. A time bound alone cannot distinguish that from genuinely fresh
+// evidence once elapsed time is the only test, so round 1's fix eventually
+// marks a HEALTHY account permanently dead. This pins the fix: an occurrence
+// count that never grows (a genuinely idle, never-reprinted redraw) must
+// rerender-guard FOREVER, no matter how much time passes.
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — issue #141 review, round 2, probe P7: an idle --continue redraw of a departed account's dead block never marks the NEW (healthy) account dead, no matter how much time passes", () => {
+  it("stays rerender-guarded across many ticks, well past the old 5-minute bound, when the scrollback occurrence count never grows", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(ORG_DISABLED_PANE) });
+
+    // Tick 1: switches account 1 (dead) -> account 2.
+    const out1 = await run(h);
+    expect(out1).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toMatchObject({ dead: true });
+
+    // Every subsequent tick sees the IDENTICAL pane (a static --continue
+    // redraw of account 1's own departure evidence, now idling on account 2's
+    // healthy pane) and the IDENTICAL scrollback — the block occurring
+    // exactly ONCE, unchanged, no matter how many ticks pass. This is exactly
+    // what a genuinely idle, never-reprinted redraw looks like.
+    h.setScrollback(deadBlockOccurring(1));
+
+    const advances = [10, 10, 10, 120]; // minutes per tick; last one is +2h
+    let elapsedMs = 0;
+    for (const minutes of advances) {
+      elapsedMs += minutes * 60_000;
+      h.deps.now = () => new Date(NOW.getTime() + elapsedMs);
+      const out = await run(h);
+      expect(out.kind).toBe("rerender");
+      expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN_2")?.dead).not.toBe(true);
+      // Only the original switch's own respawn-pane/relaunch — never a
+      // second one from a wrongly-triggered switch off the healthy account.
+      expect(h.relaunches).toBe(1);
+    }
   });
 });
 
