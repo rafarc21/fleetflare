@@ -3,7 +3,7 @@ import { env } from "cloudflare:test";
 import * as authModule from "../src/studio/auth";
 import { handleStudio } from "../src/studio/routes";
 import { TerminalBridge, TERMINAL_PATH, WS_BUFFER_MAX, type AttachPty } from "../src/studio/terminal";
-import { sbAttachPty, STUDIO_SESSION_ID, STUDIO_SHELL, type PtyHandle } from "../src/studio/sandbox-api";
+import { sbAttachPty, STUDIO_SESSION_ID, type PtyHandle } from "../src/studio/sandbox-api";
 import { StudioDO } from "../src/studio/do";
 import type { Env } from "../src/env";
 
@@ -806,10 +806,11 @@ describe("a failed pty attempt must not be cached (issue #48)", () => {
 });
 
 describe("WS_BUFFER_MAX backpressure", () => {
-  it("is one megabyte", () => {
-    expect(WS_BUFFER_MAX).toBe(1_048_576);
-  });
-
+  // WS_BUFFER_MAX's real behavior coverage: the test below offers three
+  // hardcoded 524_288-byte (512KB) chunks — two of which exactly fill the
+  // real 1_048_576-byte cap — and proves the oldest is dropped once that
+  // real cap is crossed. A drift in the constant's own value would change
+  // whether/which chunk gets dropped, breaking this test.
   it("drops the OLDEST queued output for a backpressured socket, never the newest", async () => {
     // A real Worker WebSocket has no bufferedAmount at all, so backpressure
     // can only be staged through a socket that reports one. Faked at exactly
@@ -906,8 +907,8 @@ describe("sbAttachPty adapter", () => {
 
     await sbAttachPty(sb.host, { cols: 80, rows: 24 });
 
-    expect(new URL(sb.seen[0].url).searchParams.get("shell")).toBe(STUDIO_SHELL);
-    expect(STUDIO_SHELL).toBe("/opt/fleet/studio-shell.sh");
+    // The literal, not the import — ties the test to the real query param.
+    expect(new URL(sb.seen[0].url).searchParams.get("shell")).toBe("/opt/fleet/studio-shell.sh");
   });
 
   it("survives a duplicate-session error — the upgrade is the real health check", async () => {

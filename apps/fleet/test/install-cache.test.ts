@@ -36,7 +36,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   parseInstallCacheRepos, isInstallCacheRepo, repoCheckoutDirName,
-  installCacheKey, installCachePrefix, keysToPrune, INSTALL_CACHE_KEEP_GENERATIONS,
+  installCacheKey, installCachePrefix, keysToPrune,
   WORKSPACE_LOCK_MARKERS, LOCKFILE_CANDIDATES, discoverCacheDirsCmd,
   normalizeCacheDir, parseCacheDirs, absoluteCacheDir, dirSlug,
   lockHashCmd, parseLockHash,
@@ -168,9 +168,10 @@ describe("keysToPrune — LRU to the newest N", () => {
     expect(keysToPrune(objects, 1)).toEqual(["old"]);
   });
 
-  it("default keep matches #350's own design constant (2)", () => {
-    expect(INSTALL_CACHE_KEEP_GENERATIONS).toBe(2);
-  });
+  // INSTALL_CACHE_KEEP_GENERATIONS's real behavior coverage: the "(c) keeps
+  // exactly the newest 2 by default" test above already exercises the
+  // DEFAULT (no override passed) against a hardcoded 4-object fixture —
+  // would break if the constant's value ever drifted from 2.
 });
 
 // ---------------------------------------------------------------------------

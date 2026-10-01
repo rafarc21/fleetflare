@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  SPRINT_MS, DEMOTION_MIN_AGE_MS, PROMOTION_CITATIONS,
+  SPRINT_MS, DEMOTION_MIN_AGE_MS,
   countCitations, demotionVerdict, surveyMemory, planCompaction,
   type MemorySource, type CompactionProposal,
 } from "../src/memory/compact";
@@ -21,13 +21,6 @@ function harvested(studio: string, iso: string, i: number, slug: string, descrip
 const OLD = "2026-08-01T10-00-00-000Z";
 const OLD_ISO = "2026-08-01T10:00:00.000Z";
 
-describe("thresholds", () => {
-  it("a sprint is two days; demotion needs two sprints of silence", () => {
-    expect(SPRINT_MS).toBe(2 * 24 * 60 * 60 * 1000);
-    expect(DEMOTION_MIN_AGE_MS).toBe(2 * SPRINT_MS);
-    expect(PROMOTION_CITATIONS).toBe(3);
-  });
-});
 
 describe("countCitations", () => {
   const targets = ["websites--pilot/2026-08-01T10-00-00-000Z-0-a-fact.md", "shared/cf-rollout.md"];
@@ -65,6 +58,22 @@ describe("demotionVerdict — promotion-or-death, measured not judged", () => {
     expect(demotionVerdict(0, SPRINT_MS)).toBe("hold");
   });
   it("an undatable file is never auto-demoted", () => expect(demotionVerdict(0, null)).toBe("hold"));
+
+  // SPRINT_MS/DEMOTION_MIN_AGE_MS's own real behavior coverage: a sprint is
+  // 2 days, demotion needs 2 sprints (4 days) of silence — pinned against
+  // the HARDCODED millisecond literal, not the imported constants, so a
+  // change to either constant's own value (not just demotionVerdict's
+  // wiring to it) is caught right at the boundary.
+  it("the demotion boundary is exactly four days (two 2-day sprints) of silence", () => {
+    const FOUR_DAYS_MS = 4 * 24 * 60 * 60 * 1000;
+    expect(demotionVerdict(0, FOUR_DAYS_MS - 1)).toBe("hold");
+    expect(demotionVerdict(0, FOUR_DAYS_MS)).toBe("demote");
+  });
+
+  it("a file younger than one sprint (2 days) holds", () => {
+    const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+    expect(demotionVerdict(0, TWO_DAYS_MS)).toBe("hold");
+  });
 });
 
 describe("surveyMemory", () => {

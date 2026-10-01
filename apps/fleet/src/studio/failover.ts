@@ -39,7 +39,7 @@ import { parseStudioId } from "./ids";
 // this file cannot import a VALUE from wake.ts at its top level (a genuine
 // module-load cycle, MEASURED). `import type` is erased entirely at compile
 // time, so this line carries no runtime import at all.
-import type { GatedWakeDeps } from "./wake";
+import type { GatedWakeDeps, WakeExec } from "./wake";
 
 // ---------------------------------------------------------------------------
 // Detection
@@ -1693,6 +1693,204 @@ async function autoContinueAttempt(
 }
 
 /**
+ * Issue #158 review finding 3 (fresh-context re-review, same PR) — do.ts's
+ * `runShipTickWithObservation` (issue #274) calls `evaluateDegradedRecovery`
+ * too, on its own much faster 30s ship-tick cadence, independent of this
+ * file's own 300s `runAccountFailover` `working`-branch heal below. Because
+ * the fast path runs ~10x more often, it almost always observes
+ * `recovery.shouldHeal` and flips a row to `"running"` before
+ * `runAccountFailover`'s own slower tick ever sees `state === "degraded"`
+ * again — so a wake that only ever lived inline in `runAccountFailover`
+ * would be unreachable in the common case: the row still heals (as it
+ * always did), but the NEW #158 wake never fires. Extracted here for the
+ * exact reason #274 itself already extracted `evaluateDegradedRecovery` (see
+ * that function's own doc comment, and do.ts:4612's: "the exact same check…
+ * so BOTH the slow 300s… and the fast 30s… path… make EXACTLY the same call
+ * from the same evidence") — so both call sites heal AND wake through ONE
+ * implementation, never two that can quietly drift apart.
+ *
+ * Owns: computing `clearedAt` from `recovery.shouldHeal` ANDed with the
+ * caller's own `opLockFresh` (both callers already compute this freshness
+ * check for their own pre-existing reasons — #85 PR1's op lock here, #86/#87
+ * there — so it is threaded in rather than recomputed); building and writing
+ * the healed `StudioStatus` (`state`, `rateLimited`, `autoContinueAt`,
+ * `autoContinueLastTriedAt`, `exhaustionKind`, `exhaustionClearedAt` — do.ts's
+ * OWN pre-#158 heal write cleared only the first three of these six, a
+ * pre-existing gap folded into this one shared write rather than left as two
+ * subtly different `cleared` shapes); and firing the #158 heal wake when
+ * `inlineExhaustionHealed` holds and the caller's own `safeToWake` signal
+ * allows it.
+ *
+ * Does NOT own the #186 redraw-guard retirement (`forget`,
+ * `runAccountFailover`'s own local var — resets `failoverBlock`/
+ * `failoverBlockOccurrences`/`claudeAccountMovedBlock`): that concern is
+ * specific to the slower, account-switch-aware path and has no 30s-path
+ * equivalent (do.ts's fast tick has never written those fields), so
+ * `runAccountFailover` folds any such reset into the `existing` it passes in
+ * BEFORE calling this function, rather than this function knowing about it.
+ *
+ * Returns the written row when it healed, `null` when it did not (the
+ * caller's own "nothing changed" case — no write, no wake).
+ */
+export interface DegradedHealDeps {
+  storage: StudioStorage;
+  recordStudioFn: (status: StudioStatus) => Promise<void>;
+  existing: StudioStatus;
+  recovery: DegradedRecoveryVerdict;
+  /** Whether a bring-up (#85/#86/#87) currently owns this row — the caller's
+   *  own freshness check on OPERATION_KEY, ANDed onto `recovery.shouldHeal`
+   *  the same way both callers already AND it onto their own heal decision. */
+  opLockFresh: boolean;
+  now: Date;
+  studioId: string;
+  exec: WakeExec;
+  sighting: LimitSighting | null;
+  /**
+   * Safe to type a wake into the pane right now — never while a turn is in
+   * flight. `runAccountFailover`'s own two-capture `!verdict.repainted`
+   * (`detectRateLimitModal`'s own probe, PANE_QUIESCE_SECONDS apart);
+   * do.ts's fast path has no equivalent two-capture signal (its 30s-cadence
+   * exec captures the pane once per tick), so it threads its own
+   * single-capture `paneVerdict?.kind === "idle"` instead (activity.ts's
+   * `readActivityFrame`, the SAME frame #221 already parses the pane from).
+   * NARROWER and more conservative than `!repainted`, never looser: any
+   * non-idle frame (`working`, `waiting-members`, `waiting-question`,
+   * `unknown`) skips the wake, not only a detected mid-turn spinner. See
+   * #158's plan doc Residuals for the one gap this trade leaves open — the
+   * fast path's heal itself had NO such guard at all before #158, so a wake
+   * gated on it is strictly no worse than that path's existing risk profile.
+   */
+  safeToWake: boolean;
+}
+
+export async function healDegradedRowAndWake(d: DegradedHealDeps): Promise<StudioStatus | null> {
+  const heal = d.recovery.shouldHeal && !d.opLockFresh;
+  if (!heal) return null;
+  const clearedAt = d.now.toISOString();
+  let cleared: StudioStatus = {
+    ...d.existing,
+    rateLimited: null,
+    state: "running",
+    error: null,
+    exhaustionClearedAt: clearedAt,
+    autoContinueAt: null,
+    autoContinueLastTriedAt: null,
+    // Maestro round-2 review (PR #170), findings 3+4 — replaces
+    // `operatorParked: null` here (field removed entirely, see
+    // StudioStatus.exhaustionKind's own doc comment for the full history).
+    exhaustionKind: null,
+    // Maestro round-2 review (PR #170), finding 2 — a fresh heal starts with
+    // no pending retry; see this function's own write just below for when
+    // this gets armed, and StudioStatus.pendingHealWakeAttempts's own doc
+    // comment for the full mechanism.
+    pendingHealWakeAttempts: null,
+    pendingHealWakeLastTriedAt: null,
+  };
+  await d.storage.put(STATUS_KEY, cleared);
+  await d.recordStudioFn(cleared);
+  // `recovery.parked` alone covers select-modal/dead-account rows too
+  // (shared `exhaustedMessagePrefix`), so the real split is on
+  // `d.existing.exhaustionKind`, stamped once at degrade time from the
+  // TRIGGERING verdict (see StudioStatus.exhaustionKind's own doc comment
+  // for why this replaced both `operatorParked` and a live read of
+  // `rateLimited.select`/`.dead`, maestro round-2 review, PR #170, findings
+  // 3+4): `"inline"` heals and wakes (independent of `autoFailover` — #158's
+  // own text), `"select"`/`"dead"` never do.
+  const inlineExhaustionHealed = d.recovery.parked && d.existing.exhaustionKind === "inline";
+  if (inlineExhaustionHealed && d.safeToWake) {
+    const { runGatedWake } = await import("./wake");
+    const gatedDeps: GatedWakeDeps = {
+      recordedState: async () => cleared.state,
+      exec: d.exec,
+      now: () => d.now,
+      studioId: d.studioId,
+      switchedBlock: async () => cleared.failoverBlock ?? null,
+      limitSighting: async () => d.sighting,
+    };
+    const outcome = await runGatedWake(gatedDeps, AUTO_CONTINUE_PROMPT);
+    // Maestro round-2 review (PR #170), finding 2 — the outcome used to be
+    // discarded entirely here: the row above already flipped to `"running"`,
+    // so a refused/skipped/failed wake (a transient pane-probe hiccup,
+    // claude briefly not in the window, anything) lost the opportunity
+    // forever. Arm the bounded retry instead of dropping it — a SECOND
+    // write, same tick, same reasoning #109's own `autoContinueAttempt`
+    // already gives for a separate bookkeeping write after its own gated
+    // wake attempt.
+    if (!outcome.ok) {
+      cleared = { ...cleared, pendingHealWakeAttempts: 1, pendingHealWakeLastTriedAt: clearedAt };
+      await d.storage.put(STATUS_KEY, cleared);
+      await d.recordStudioFn(cleared);
+    }
+  }
+  return cleared;
+}
+
+/**
+ * Maestro round-2 review (PR #170), finding 2 — the bounded retry itself.
+ * See StudioStatus.pendingHealWakeAttempts's own doc comment for the full
+ * mechanism and why it mirrors `autoContinueAt`/`autoContinueLastTriedAt`'s
+ * own hourly cadence (`AUTO_CONTINUE_RETRY_MS`) rather than a new shape.
+ *
+ * Called from BOTH cadences that ever heal a degraded row — the SAME
+ * dual-path lesson `healDegradedRowAndWake` itself (finding 3) already
+ * states — on every ordinary tick, regardless of whether anything else
+ * happened this tick. A no-op (no write, no exec) when the row carries no
+ * pending retry at all, the overwhelming majority of ticks.
+ */
+export interface PendingHealWakeRetryDeps {
+  storage: StudioStorage;
+  recordStudioFn: (status: StudioStatus) => Promise<void>;
+  existing: StudioStatus;
+  now: Date;
+  studioId: string;
+  exec: WakeExec;
+  sighting: LimitSighting | null;
+  /** See `DegradedHealDeps.safeToWake`'s own doc comment — the identical
+   *  signal, threaded the identical way by both callers. */
+  safeToWake: boolean;
+}
+
+/** Issue #158 review finding 2: the attempt cap past which a pending heal
+ *  wake gives up rather than retrying forever — #109's own hourly-retry
+ *  mechanism is bounded by the row leaving `degraded` state entirely
+ *  (nothing equivalent exists here, the row is already `"running"`), so an
+ *  explicit count is what makes this "bounded," not indefinite. */
+export const PENDING_HEAL_WAKE_MAX_ATTEMPTS = 3;
+
+export async function retryPendingHealWake(d: PendingHealWakeRetryDeps): Promise<void> {
+  if (!d.existing.pendingHealWakeLastTriedAt || d.existing.state !== "running") return;
+  const attempts = d.existing.pendingHealWakeAttempts ?? 0;
+  if (attempts >= PENDING_HEAL_WAKE_MAX_ATTEMPTS) {
+    // Bound hit: give up silently (no notify — the row already heals and
+    // reads correctly; only the extra nudge is foregone) and clear the
+    // bookkeeping so this is never re-evaluated for this stale opportunity.
+    const row = { ...d.existing, pendingHealWakeAttempts: null, pendingHealWakeLastTriedAt: null };
+    await d.storage.put(STATUS_KEY, row);
+    await d.recordStudioFn(row);
+    return;
+  }
+  // Same hourly cadence #109's own `autoContinueDue` (unknown-reset branch)
+  // already models — mirrored, not reinvented.
+  const due = d.now.getTime() - Date.parse(d.existing.pendingHealWakeLastTriedAt) >= AUTO_CONTINUE_RETRY_MS;
+  if (!due || !d.safeToWake) return;
+  const { runGatedWake } = await import("./wake");
+  const gatedDeps: GatedWakeDeps = {
+    recordedState: async () => d.existing.state,
+    exec: d.exec,
+    now: () => d.now,
+    studioId: d.studioId,
+    switchedBlock: async () => d.existing.failoverBlock ?? null,
+    limitSighting: async () => d.sighting,
+  };
+  const outcome = await runGatedWake(gatedDeps, AUTO_CONTINUE_PROMPT);
+  const row = outcome.ok
+    ? { ...d.existing, pendingHealWakeAttempts: null, pendingHealWakeLastTriedAt: null }
+    : { ...d.existing, pendingHealWakeAttempts: attempts + 1, pendingHealWakeLastTriedAt: d.now.toISOString() };
+  await d.storage.put(STATUS_KEY, row);
+  await d.recordStudioFn(row);
+}
+
+/**
  * One failover step, for one studio. Called from do.ts's syncSession cycle.
  *
  * Does NOTHING unless the pane is showing the modal — the common case is one
@@ -1864,29 +2062,64 @@ export async function runAccountFailover(
     // NO SPAM, which the invariant above was protecting: the clear writes at
     // most ONCE per degradation. Its own precondition is `state === degraded`
     // with that error, and its own write removes both.
-    const heal = recovery.shouldHeal
-      && !operationLockFresh(await storage.get(OPERATION_KEY), deps.now());
-    const clearedAt = heal ? deps.now().toISOString() : null;
+    const opLockFresh = operationLockFresh(await storage.get(OPERATION_KEY), deps.now());
+    // Issue #158 review finding 3: #186's redraw-guard retirement (`forget`)
+    // has no equivalent on do.ts's fast (#274) path — folded into the row
+    // passed to the shared heal function BEFORE calling it (rather than that
+    // function knowing about it), so both callers share the exact same
+    // heal+wake implementation (see `healDegradedRowAndWake`'s own doc
+    // comment, just above this function).
+    //
+    // Maestro review of PR #152, round 2 — reset alongside `failoverBlock`
+    // on the same trigger: a stale occurrence baseline from the block just
+    // forgotten must never leak into whatever block is seen next.
+    const forgetFields = forget
+      ? { failoverBlock: null, failoverBlockOccurrences: null, claudeAccountMovedBlock: null }
+      : {};
     let rowNow = existing;
-    if (existing.rateLimited || forget || clearedAt !== null) {
-      const cleared: StudioStatus = {
-        ...existing,
-        rateLimited: null,
-        // Maestro review of PR #152, round 2 — reset alongside `failoverBlock`
-        // on the same trigger: a stale occurrence baseline from the block just
-        // forgotten must never leak into whatever block is seen next.
-        ...(forget ? { failoverBlock: null, failoverBlockOccurrences: null, claudeAccountMovedBlock: null } : {}),
-        // Issue #109 (#214 recovery): a row that genuinely recovers carries
-        // no stale auto-continue bookkeeping into its next, unrelated
-        // exhaustion.
-        ...(clearedAt !== null
-          ? { state: "running" as const, error: null, exhaustionClearedAt: clearedAt, autoContinueAt: null, autoContinueLastTriedAt: null }
-          : {}),
-      };
+    // Issue #158 — the gap #109 itself assumed away: an inline-exhausted row
+    // "self-clears through the EXISTING #214 working-branch recovery once
+    // its own printed reset passes the clock" (autoContinueEligible's own
+    // comment above), but the clear alone only ever flips STATE — it never
+    // types a keystroke, and claude does not resume a turn on its own just
+    // because a block scrolled past staleness. `healDegradedRowAndWake`
+    // fires the wake on the SAME tick the clear itself fires, sharing that
+    // write's own at-most-once precondition (`existing.state === "degraded"`,
+    // consumed by the write itself) for free — no new bookkeeping.
+    //
+    // `!verdict.repainted`: a turn is in flight (the hand-back guard below
+    // reads the identical signal for the identical reason) — skip the wake
+    // this tick rather than type into a pane mid-turn. The row still heals
+    // either way; see this feature's own plan doc for why a wake lost to
+    // this one-tick race is accepted rather than retried.
+    const healed = await healDegradedRowAndWake({
+      storage, recordStudioFn, existing: { ...existing, ...forgetFields }, recovery,
+      opLockFresh, now: deps.now(), studioId, exec: deps.exec, sighting,
+      safeToWake: !verdict.repainted,
+    });
+    if (healed) {
+      rowNow = healed;
+    } else if (existing.rateLimited || forget) {
+      // #85 PR1's op lock, #214's own write — unchanged from before this
+      // extraction: a studio that is no longer limited (or whose redraw
+      // guard just retired) but did NOT genuinely heal this tick (not
+      // degraded for this reason, or the op lock is fresh) still gets this
+      // simpler write, kept here rather than inside the shared function,
+      // which only ever writes on a genuine heal.
+      const cleared: StudioStatus = { ...existing, rateLimited: null, ...forgetFields };
       await storage.put(STATUS_KEY, cleared);
       await recordStudioFn(cleared);
       rowNow = cleared;
     }
+    // Maestro round-2 review (PR #170), finding 2 — the bounded retry for a
+    // heal wake that was refused/skipped/failed on an EARLIER tick (never
+    // only the tick heal itself fired on, which is why this runs
+    // unconditionally here rather than inside the `if (healed)` branch
+    // above): a no-op unless `rowNow` actually carries pending bookkeeping.
+    await retryPendingHealWake({
+      storage, recordStudioFn, existing: rowNow, now: deps.now(), studioId, exec: deps.exec, sighting,
+      safeToWake: !verdict.repainted,
+    });
     // Issue #131 (Stage B) — hand-back. This exact tick already runs on a
     // FIXED CADENCE (SYNC_SESSION_SECONDS, do.ts's syncSessionCycle)
     // regardless of whether a limit is currently observed — confirmed by
@@ -1928,7 +2161,7 @@ export async function runAccountFailover(
         }
       }
     }
-    if (clearedAt !== null) return { kind: "recovered", clearedAt };
+    if (healed) return { kind: "recovered", clearedAt: healed.exhaustionClearedAt as string };
     return { kind: "no-modal", reason: verdict.reason };
   }
   // Issue #106, MEASURED 2026-09-24: `claude --resume` redraws a persisted
@@ -2198,6 +2431,14 @@ export async function runAccountFailover(
   if (!next) {
     const tried = deps.accounts.map((a) => a.name).slice(start);
     const parkedOn = candidate ? (from ?? tried.at(-1) ?? "CLAUDE_CODE_OAUTH_TOKEN") : null;
+    // Maestro round-2 review (PR #170), findings 3+4 — the durable
+    // classification stamped on every write in this branch (see
+    // StudioStatus.exhaustionKind's own doc comment for the full history of
+    // why this replaced `operatorParked`/a live `rateLimited` read).
+    // Computed directly from THIS tick's own triggering verdict, never from
+    // `parkedOn`/`autoFailover` — a #271 park and a genuine exhaustion
+    // triggered by the SAME verdict shape must classify identically.
+    const exhaustionKind = verdict.dead ? "dead" as const : verdict.inline ? "inline" as const : "select" as const;
     // Issue #102 requirement 3: every account genuinely exhausted (parkedOn
     // null means nextClaudeAccount found nowhere to go at all) — the
     // earliest fleet-wide reset among them, so `fleet ls`/the degraded
@@ -2229,13 +2470,29 @@ export async function runAccountFailover(
         return attempt.outcome;
       }
       if (limitChanged) {
-        await storage.put(STATUS_KEY, existing);
-        await recordStudioFn(existing);
+        // Issue #158 review finding 1 / round-2 findings 3+4: same message
+        // means the same `exhaustionKind` this tick computed as last tick's
+        // write did, but stamp it explicitly anyway (rather than rely on
+        // `existing` already carrying it forward) — the same call site
+        // #109's own `autoContinueAt`/`autoContinueLastTriedAt` bookkeeping
+        // lives at, and the row that self-heals a pre-#158 row lacking the
+        // field.
+        const row = { ...existing, exhaustionKind };
+        await storage.put(STATUS_KEY, row);
+        await recordStudioFn(row);
       }
       return { kind: "already-degraded", tried };
     }
     const degraded: StudioStatus = {
       ...existing, state: "degraded", error: message, claudeAccount: existing.claudeAccount ?? null,
+      // Issue #158 review finding 1 / round-2 findings 3+4: stamped
+      // unconditionally (never gated on `autoContinueEligible`, which
+      // `parkedOn !== null` always makes false, and never derived from
+      // `parkedOn`/`autoFailover` at all) — the fact #214's own heal
+      // (`inlineExhaustionHealed` above) needs is WHICH VERDICT triggered
+      // this degradation, not whether auto-failover happened to be off (see
+      // StudioStatus.exhaustionKind's own doc comment for the full history).
+      exhaustionKind,
       // Issue #109: only on the SAME eligible path the attempt step itself
       // evaluates (genuinely exhausted, select-style modal) — an
       // inline-exhausted row gets no bookkeeping at all, since it is never

@@ -190,6 +190,7 @@ describe("load errors — the case the review reproduced", () => {
       meta: "sha=abc\n",
       "install.exit": "0",
       "check.exit": "0",
+      "test-lies-check.exit": "0",
       "vitest.exit": "0",
       "vitest.json": JSON.stringify({ numPassedTests: 1, numFailedTests: 0, numPendingTests: 0, testResults: [] }),
       "linux.exit": "1",
@@ -209,6 +210,7 @@ describe("computeResult — the two statuses a run posts", () => {
     meta: "sha=abc\npr=12\ntree=t1\nbase=b1\n",
     "install.exit": "0",
     "check.exit": "0",
+    "test-lies-check.exit": "0",
     "vitest.exit": "0",
     "vitest.json": JSON.stringify({ numPassedTests: 3499, numFailedTests: 0, numPendingTests: 0, testResults: [] }),
     "linux.exit": "0",
@@ -264,6 +266,20 @@ describe("computeResult — the two statuses a run posts", () => {
 
   test("tsc red → failure", () => {
     expect(byContext({ ...green, "check.exit": "2" })["local-ci/fleet-check"].state).toBe("failure");
+  });
+
+  // #174: test-lies-check is wired in as a fleet-check lane, the same shape
+  // as check/install — a nonzero exit fails local-ci/fleet-check, never
+  // local-ci/english (it is a test-quality gate, not an English-prose one).
+  test("test-lies-check red → fleet-check failure naming it, english unaffected", () => {
+    const s = byContext({ ...green, "test-lies-check.exit": "1" });
+    expect(s["local-ci/fleet-check"].state).toBe("failure");
+    expect(s["local-ci/fleet-check"].description).toContain("test-lies-check FAILED");
+    expect(s["local-ci/english"].state).toBe("success");
+  });
+
+  test("test-lies-check green is named ok in the description, same as every other lane", () => {
+    expect(byContext(green)["local-ci/fleet-check"].description).toContain("test-lies-check ok");
   });
 
   test("english red → english failure, fleet-check unaffected", () => {

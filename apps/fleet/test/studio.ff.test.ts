@@ -26,10 +26,11 @@ function row(overrides: Partial<StudioStatus> = {}): StudioStatus {
 
 describe("parseFfArgs", () => {
   it("bare `ff` means the maestro", () => {
+    // The literal "maestro", not the DEFAULT_FF_ROLE import — ties this test
+    // to the real resolved role, not a comparison of the constant with itself.
     expect(parseFfArgs([])).toEqual({
-      cmd: "ff", role: DEFAULT_FF_ROLE, task: null, newInstance: false,
+      cmd: "ff", role: "maestro", task: null, newInstance: false,
     });
-    expect(DEFAULT_FF_ROLE).toBe("maestro");
   });
 
   it("`ff <role>` takes the role", () => {

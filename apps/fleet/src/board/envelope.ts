@@ -21,8 +21,9 @@
 // rather than silently re-addressed.
 
 import {
-  ENVELOPE_INTENTS, ENVELOPE_STATUSES,
+  ENVELOPE_INTENTS, ENVELOPE_STATUSES, MERGE_DANGER_DOORS,
   type EnvelopeArtifact, type EnvelopeDoc, type EnvelopeIntent, type EnvelopeStatus, type EnvelopeVerification,
+  type MergeDanger, type MergeDangerDoor,
 } from "./types";
 
 export const ENVELOPE_SCHEMA_VERSION = "1";
@@ -123,6 +124,32 @@ function verification(raw: unknown): { ok: true; value: EnvelopeVerification } |
   return { ok: true, value: { url, steps, expected } };
 }
 
+const MERGE_DANGER_SHAPE = "a well-formed { door: \"one-way\"|\"two-way\", blast_radius }";
+
+/**
+ * Issue #160: the path classifier's (or the lead's own) verdict on whether
+ * this PR is reversible. Shape-checked exactly like `verification` above —
+ * a closed-set `door`, same pattern as `ENVELOPE_INTENTS.includes(...)`
+ * elsewhere in this file, and a non-empty trimmed `blast_radius`.
+ */
+function mergeDanger(raw: unknown): { ok: true; value: MergeDanger } | { ok: false; message: string } {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, message: `merge_danger must be an object — ${MERGE_DANGER_SHAPE}` };
+  }
+  const m = raw as Record<string, unknown>;
+  if (!MERGE_DANGER_DOORS.includes(m.door as MergeDangerDoor)) {
+    return {
+      ok: false,
+      message: `unknown merge_danger.door ${JSON.stringify(m.door)} — one of ${MERGE_DANGER_DOORS.join("|")}`,
+    };
+  }
+  const blastRadius = typeof m.blast_radius === "string" ? m.blast_radius.trim() : "";
+  if (blastRadius === "") {
+    return { ok: false, message: `merge_danger.blast_radius must be a non-empty string — ${MERGE_DANGER_SHAPE}` };
+  }
+  return { ok: true, value: { door: m.door as MergeDangerDoor, blast_radius: blastRadius } };
+}
+
 /**
  * Validates one sender's envelope against §6 and composes the stored
  * document. `taskId` is the issue the comment is going ON (the route's own
@@ -188,6 +215,15 @@ export function parseEnvelope(raw: unknown, taskId: number, msgId: string): Enve
     };
   }
 
+  // Issue #160: ALWAYS optional, on every intent including "result" — unlike
+  // verification above, this never becomes a required field.
+  let mergeDangerValue: MergeDanger | undefined;
+  if (body.merge_danger !== undefined && body.merge_danger !== null) {
+    const md = mergeDanger(body.merge_danger);
+    if (!md.ok) return md;
+    mergeDangerValue = md.value;
+  }
+
   if (body.notes !== undefined && body.notes !== null && typeof body.notes !== "string") {
     return { ok: false, message: "notes must be a string" };
   }
@@ -204,6 +240,7 @@ export function parseEnvelope(raw: unknown, taskId: number, msgId: string): Enve
       status: body.status as EnvelopeStatus,
       artifacts: arts.list,
       evidence: evidence.list,
+      merge_danger: mergeDangerValue,
       verification: verificationValue,
       open_questions: openQuestions.list,
       context_digest: contextDigest.list,
@@ -234,6 +271,14 @@ function listBlock(heading: string, entries: string[]): string[] {
   return ["", `**${heading}**`, "", ...(entries.length === 0 ? ["- (none)"] : entries.map((e) => `- ${e}`))];
 }
 
+/** Issue #160's block, rendered only when present, and placed FIRST in the
+ *  comment (before Artifacts) — the whole point is routing an operator's
+ *  attention to one-way doors before anything else on the page. */
+function mergeDangerBlock(m: MergeDanger | undefined): string[] {
+  if (!m) return [];
+  return ["", "**Merge Danger**", "", `- Door: ${m.door}`, `- Blast Radius: ${m.blast_radius}`];
+}
+
 /** §4's block, rendered only when present — most envelopes are not
  *  graded results and carry nothing here. Release Studio concatenates these
  *  across studios into one checklist, mechanically — so the shape stays
@@ -259,6 +304,7 @@ function verificationBlock(v: EnvelopeVerification | undefined): string[] {
 export function renderEnvelopeComment(doc: EnvelopeDoc): string {
   const { envelope: e, payload: p } = doc;
   const lines: string[] = [`**${e.intent}** from \`${e.sender}\` — status **${p.status}**`];
+  lines.push(...mergeDangerBlock(p.merge_danger));
   if (doc.notes !== "") lines.push("", doc.notes);
   lines.push(
     ...listBlock("Artifacts", p.artifacts.map(artifactLine).map((l) => l.replace(/^- /, ""))),

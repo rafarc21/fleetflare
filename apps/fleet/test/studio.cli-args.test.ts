@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseCliArgs, CLI_USAGE, VERBS, renderHelp } from "../src/studio/cli-args";
+import { RETRO_TASK_TEMPLATE } from "../src/studio/retro-template";
 
 // Fleet Spawn P3, Task 3: the Mac CLI's argv parser — see cli-args.ts's own
 // header for why this pure logic lives outside cli/fleet.ts (which is never
@@ -764,6 +765,67 @@ describe("fleet task new — --repo (issue #278)", () => {
         milestone: "Sprint 1", assignee: "websites--web-studio", repo: "acme/widgets",
       },
     });
+  });
+});
+
+// Issue #165: `fleet task new --template retro` files the weekly retro board
+// task from a fixed brief (apps/fleet/src/studio/retro-template.ts's
+// RETRO_TASK_TEMPLATE) instead of the operator retyping the same four
+// sections every week. `--template` is an ordinary value-taking flag through
+// the ALREADY-existing parseFlags path (TASK_FLAGS.new), not a bare boolean
+// like --junior/--provision — see cli-args.ts's own TASK_FLAGS comment for
+// why an unknown flag is always a usage error rather than silently ignored.
+describe("fleet task new --template retro — issue #165", () => {
+  it("`--template retro` alone produces the full template brief", () => {
+    const cmd = parseCliArgs(["task", "new", "--template", "retro"]);
+    expect(cmd.cmd).toBe("task-new");
+    if (cmd.cmd !== "task-new") return;
+    expect(cmd.brief).toEqual({
+      title: RETRO_TASK_TEMPLATE.title,
+      objective: RETRO_TASK_TEMPLATE.objective,
+      outputFormat: RETRO_TASK_TEMPLATE.outputFormat,
+      boundaries: RETRO_TASK_TEMPLATE.boundaries,
+    });
+  });
+
+  it("`--template retro --title \"custom\"` overrides just the title, rest from template", () => {
+    const cmd = parseCliArgs(["task", "new", "--template", "retro", "--title", "custom retro title"]);
+    expect(cmd.cmd).toBe("task-new");
+    if (cmd.cmd !== "task-new") return;
+    expect(cmd.brief).toEqual({
+      title: "custom retro title",
+      objective: RETRO_TASK_TEMPLATE.objective,
+      outputFormat: RETRO_TASK_TEMPLATE.outputFormat,
+      boundaries: RETRO_TASK_TEMPLATE.boundaries,
+    });
+  });
+
+  it("`--template bogus` is refused with a usage error naming the problem", () => {
+    const cmd = parseCliArgs(["task", "new", "--template", "bogus"]);
+    expect(cmd.cmd).toBe("usage");
+    if (cmd.cmd !== "usage") return;
+    expect(cmd.message).toContain("retro");
+  });
+
+  it("a plain `task new` with no --template is completely unaffected", () => {
+    const required = ["--title", "T", "--objective", "O", "--output", "F", "--boundaries", "B"];
+    expect(parseCliArgs(["task", "new", ...required])).toEqual({
+      cmd: "task-new",
+      brief: { title: "T", objective: "O", outputFormat: "F", boundaries: "B" },
+    });
+  });
+
+  it("other brief flags, --studio, --sprint, --continues, --junior still work alongside --template retro", () => {
+    const cmd = parseCliArgs([
+      "task", "new", "--template", "retro",
+      "--studio", "websites--maestro", "--sprint", "Sprint 1", "--junior",
+    ]);
+    expect(cmd.cmd).toBe("task-new");
+    if (cmd.cmd !== "task-new") return;
+    expect(cmd.brief.assignee).toBe("websites--maestro");
+    expect(cmd.brief.milestone).toBe("Sprint 1");
+    expect(cmd.brief.junior).toBe(true);
+    expect(cmd.brief.objective).toBe(RETRO_TASK_TEMPLATE.objective);
   });
 });
 

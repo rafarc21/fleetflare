@@ -7,8 +7,12 @@ import { AUTO_CLOSE_BUDGET_MS, makeTimeBudget, budgetExceeded } from "../src/tim
 // notice. Pinned to the exact value AND separately checked against the
 // ceiling it exists to stay clear of, so either kind of drift is caught.
 describe("AUTO_CLOSE_BUDGET_MS (BU7)", () => {
-  it("is pinned at exactly the value issue #198 started with", () => {
-    expect(AUTO_CLOSE_BUDGET_MS).toBe(25_000);
+  // The literal 25_000, not the import — exercises makeTimeBudget's REAL
+  // default parameter (no override), so a drift between the constant and
+  // the default it feeds is caught, not just a re-assertion of the import.
+  it("is pinned at exactly the value issue #198 started with, wired through makeTimeBudget's own default", () => {
+    const budget = makeTimeBudget(() => 1_000); // no budgetMs override
+    expect(budget.deadline).toBe(1_000 + 25_000);
   });
 
   it("stays comfortably under the ~30s waitUntil execution ceiling", () => {

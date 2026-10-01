@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  checkQuiescence, nextStreak, shouldStop, QUIESCENT_SWEEPS_REQUIRED,
+  checkQuiescence, nextStreak, shouldStop,
   type QuiescenceDeps,
 } from "../src/studio/quiescence";
 import type { EnvelopeDoc } from "../src/board/types";
@@ -105,7 +105,6 @@ describe("checkQuiescence", () => {
 
 describe("the two-consecutive-sweeps guard", () => {
   it("takes TWO consecutive quiescent sweeps to stop — one flaps", () => {
-    expect(QUIESCENT_SWEEPS_REQUIRED).toBe(2);
     const first = nextStreak(0, { quiescent: true });
     expect(shouldStop(first)).toBe(false);
     expect(shouldStop(nextStreak(first, { quiescent: true }))).toBe(true);

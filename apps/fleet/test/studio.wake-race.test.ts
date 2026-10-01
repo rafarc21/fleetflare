@@ -16,6 +16,7 @@ import {
   V1_STOP_AND_WAIT_PANE, V2_SESSION_LIMIT_PANE, REAL_PILOT_PANE, REAL_PANE_CAPTURED_AT,
 } from "./fixtures/rate-limit-panes";
 import { REAL_PERMISSION_PROMPT_TAIL_PANE, REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE } from "./fixtures/activity-panes";
+import { SURVEY_OVERLAY_PANE, RECOVERED_IDLE_PANE, LEAD_NUMBERED_LIST_PANE } from "./fixtures/survey-panes";
 
 const NOW = new Date("2026-09-24T12:20:00.000Z");
 const STUDIO_ID = "fleetflare--maestro";
@@ -201,9 +202,19 @@ describe("gate 3 loose check anchors on modal ROWS (#141 review)", () => {
   });
 
   it(`a footer ${6} rows above the bottom is still within LOOSE_TAIL_LINES (${LOOSE_TAIL_LINES})`, () => {
-    expect(LOOSE_TAIL_LINES).toBe(12);
     const screen = [V1_STOP_AND_WAIT_PANE, ...Array.from({ length: 6 }, (_, i) => `  status ${i}`)].join("\n");
     expect(looseLimitOnScreen(screen)).not.toBeNull();
+  });
+
+  // LOOSE_TAIL_LINES's real behavior coverage: the HARDCODED literal 12, not
+  // the import — a matching row exactly 12 non-blank rows from the bottom is
+  // still seen; one row further back (13) is not.
+  it("the tail window is exactly the last 12 non-blank rows, no more", () => {
+    const matchRow = "▔▔▔▔▔▔▔▔";
+    const within = [matchRow, ...Array.from({ length: 11 }, (_, i) => `  status ${i}`)].join("\n");
+    expect(looseLimitOnScreen(within)).not.toBeNull();
+    const outside = [matchRow, ...Array.from({ length: 12 }, (_, i) => `  status ${i}`)].join("\n");
+    expect(looseLimitOnScreen(outside)).toBeNull();
   });
 });
 
@@ -329,5 +340,72 @@ describe("gate 3 loose check covers the switched-block redraw too (#144)", () =>
     const outcome = await gatedSwitched(exec);
     expect(outcome.ok).toBe(true);
     expect(cmds).toHaveLength(3);
+  });
+});
+
+// --- Issue #158: a new, separate gate refuses a wake onto Claude Code's own
+// feedback-survey overlay — zero keystrokes, for every runGatedWake caller.
+
+describe("gate 3 also refuses Claude Code's own feedback-survey overlay (#158)", () => {
+  it("survey overlay on screen: refused, skipped, and NOTHING typed", async () => {
+    const { cmds, exec } = container(SURVEY_OVERLAY_PANE);
+    const outcome = await gated(exec);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.skipped).toBe(true);
+    expect(cmds).toEqual([PANE_PROBE_CMD, PANE_SCREEN_CMD]);
+    expect(cmds.some((c) => c.includes("WAKE"))).toBe(false);
+  });
+
+  it("the SAME idle pane with no survey overlay: the wake still lands (no regression)", async () => {
+    const { cmds, exec } = container(RECOVERED_IDLE_PANE);
+    const outcome = await gated(exec);
+    expect(outcome.ok).toBe(true);
+    expect(cmds).toHaveLength(3);
+  });
+
+  // Maestro round-2 review (PR #170), finding 2 — the exact false positive
+  // the first-round detector tripped on: a lead's own short numbered status
+  // list, with no survey header anywhere near it. The redesigned detector
+  // (header text REQUIRED, never the choice shape alone) must let this land.
+  it("a lead's own short numbered list, no survey header anywhere: the wake still lands (finding 2's false positive, fixed)", async () => {
+    const { cmds, exec } = container(LEAD_NUMBERED_LIST_PANE);
+    const outcome = await gated(exec);
+    expect(outcome.ok).toBe(true);
+    expect(cmds).toHaveLength(3);
+  });
+
+  // Review of #158 (fresh-context, this same PR), finding 2: the #144
+  // switched-block early return (`if (switched === limitBlockKey(limit))
+  // return afterLimitGate(...)`) sits INSIDE the `limit.kind === "modal"`
+  // branch, which runs BEFORE this survey check — so a stale switched-block
+  // redraw and a feedback-survey overlay coinciding on the same screen used
+  // to skip the survey gate entirely. Reuses the #144 describe block's own
+  // SWITCHED fixture/pane (REAL_PILOT_PANE already proven to trigger that
+  // early return) with the survey fixture's own bare numbered rows spliced
+  // in at the exact point #144's own `withQueued` above splices queued rows.
+  it("a stale switched-block redraw AND a survey overlay on the same screen: the survey gate wins, nothing typed", async () => {
+    const SWITCHED = "You've hit your session limit · 1:30pm (UTC)";
+    // Maestro round-2 review (PR #170), finding 1: the real survey shape
+    // (header + one `N: label` choice row), not the first-round's invented
+    // stacked bare rows.
+    const withSurvey = REAL_PILOT_PANE.replace(
+      /❯\s+keep going/u,
+      [
+        "❯ keep going", "● How is Claude doing this session? (optional)",
+        "1: Bad    2: Fine   3: Good   0: Dismiss",
+      ].join("\n"),
+    );
+    const { cmds, exec } = container(withSurvey);
+
+    const outcome = await runGatedWake({
+      recordedState: async () => "running", exec, studioId: STUDIO_ID,
+      now: () => new Date(REAL_PANE_CAPTURED_AT.pilot),
+      switchedBlock: async () => SWITCHED,
+    }, "WAKE");
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.skipped).toBe(true);
+    expect(cmds).toEqual([PANE_PROBE_CMD, PANE_SCREEN_CMD]);
+    expect(cmds.some((c) => c.includes("WAKE"))).toBe(false);
   });
 });
