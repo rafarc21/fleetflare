@@ -18,6 +18,7 @@
     "check": "tsc --noEmit && tsc --noEmit -p container && tsc --noEmit -p cli && tsc --noEmit -p test-integration && tsc --noEmit -p test",
     "build:page": "bun run scripts/build-page.ts",
     "english-check": "bun run scripts/english-check.ts",
+    "test-lies-check": "bun run scripts/test-lies-check.ts",
     "migrate:local": "scripts/deploy.sh d1 migrations apply fleet --local",
     "migrate:remote": "scripts/deploy.sh d1 migrations apply fleet --remote"
   },
