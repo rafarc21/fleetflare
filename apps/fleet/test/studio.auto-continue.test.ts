@@ -458,6 +458,64 @@ describe("issue #158 — inline exhaustion gets a wake once its own reset passes
     expect(stored?.pendingHealWakeAttempts ?? null).toBeNull();
     expect(stored?.pendingHealWakeLastTriedAt ?? null).toBeNull();
   });
+
+  // Issue #178 — pins the retry CAP itself (PENDING_HEAL_WAKE_MAX_ATTEMPTS =
+  // 3), not just that a refused wake retries at all. The test just above
+  // (#170's own) stops at attempt #2 (one refusal, one success) and never
+  // reaches the cap or the give-up branch — confirmed by the issue's own
+  // reported mutation: bumping the constant to 1e9 left the whole suite
+  // green. This test forces three straight refusals (attempts climbs
+  // 1 -> 2 -> 3), then REMOVES the refusal entirely on the next tick — if
+  // the cap weren't enforced, that tick's retry would succeed and a
+  // wakeCmd would land. It must not: the bookkeeping is cleared and zero
+  // wakeCmd call appears anywhere in the test.
+  it("a heal wake refused on every retry stops after PENDING_HEAL_WAKE_MAX_ATTEMPTS (3) tries, even once nothing refuses it anymore", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: INLINE_PANE });
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    h.setPane(RECOVERED_IDLE);
+    h.setNow(new Date("2026-09-30T14:00:00.000Z"));
+    const originalExec = h.deps.exec;
+    const refuse = vi.fn(async (cmd: string) => {
+      if (cmd === PANE_PROBE_CMD) return { code: 0, stdout: "studio:claude bash\n", stderr: "" };
+      return originalExec(cmd);
+    });
+    h.deps.exec = refuse;
+
+    // Heal tick: attempt #1 fails.
+    const second = await h.run();
+    expect(second.kind).toBe("recovered");
+    let stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.pendingHealWakeAttempts).toBe(1);
+
+    // Retry, 1h01m later: attempt #2 fails.
+    h.setNow(new Date("2026-09-30T15:01:00.000Z"));
+    await h.run();
+    stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.pendingHealWakeAttempts).toBe(2);
+
+    // Retry, 1h01m later: attempt #3 fails — the cap.
+    h.setNow(new Date("2026-09-30T16:02:00.000Z"));
+    await h.run();
+    stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.pendingHealWakeAttempts).toBe(3);
+
+    // Retry, 1h01m later: nothing is refusing it anymore (exec restored to
+    // the harness's own normal behavior), yet the cap means this tick must
+    // give up silently rather than attempt a 4th wake.
+    h.deps.exec = originalExec;
+    h.setNow(new Date("2026-09-30T17:03:00.000Z"));
+    await h.run();
+
+    stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.pendingHealWakeAttempts ?? null).toBeNull();
+    expect(stored?.pendingHealWakeLastTriedAt ?? null).toBeNull();
+    // Across the ENTIRE test: zero wakeCmd calls. This only holds because
+    // the cap genuinely stopped a 4th attempt — nothing was refusing it on
+    // that last tick.
+    expect(h.execs.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]);
+  });
 });
 
 describe("issue #109 — the #214 working-branch recovery clears both new fields", () => {
