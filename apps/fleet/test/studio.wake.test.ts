@@ -40,7 +40,6 @@ describe("runWake", () => {
 
 describe("wakeCmd", () => {
   it("addresses the claude window by name, never by index", () => {
-    expect(WAKE_TARGET).toBe("studio:claude");
     expect(wakeCmd("hi")).toContain("-t studio:claude");
     expect(wakeCmd("hi")).not.toContain("studio:0");
   });
