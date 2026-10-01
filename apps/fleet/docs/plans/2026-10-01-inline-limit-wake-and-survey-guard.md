@@ -8,6 +8,56 @@
 > this repo is an unrelated burn-cursor-offset migration (`burn.ts`). This
 > plan uses the real numbers throughout.
 
+> **Post-implementation review corrections** (fresh-context re-review,
+> same PR, 2026-10-01) — three findings, all now fixed, all kept here
+> because they correct claims THIS plan originally made, not just the code:
+>
+> 1. **Design §1's own `recovery.parked` claim was wrong.** The text
+>    originally here read "`recovery.parked` (true only for
+>    `exhaustedMessagePrefix` rows — already excludes `"parked"`/#271 ...)".
+>    That is false: `parkedMessage` (#271) starts with the exact same
+>    `exhaustedMessagePrefix` `exhaustedMessage` does, BY DESIGN (so #214's
+>    heal clears either the same way) — `recovery.parked` cannot tell a #271
+>    park from genuine exhaustion at all. A multi-account fleet with
+>    `FLEET_AUTO_FAILOVER=off`, triggered by an INLINE block (a free second
+>    account made the `!next` branch's `candidate` non-null), writes via
+>    `parkedMessage` with `rateLimited` shaped exactly like a genuine inline
+>    exhaustion (no `select`, no `dead`, both independent of `autoFailover`)
+>    — the heal wake fired on the operator's own deliberate park, exactly
+>    what Scope's OUT section forbids. Fixed with a new field,
+>    `StudioStatus.operatorParked`, stamped at write time from the `!next`
+>    branch's own local `parkedOn` (independent of which verdict triggered
+>    it). Design §1 below is corrected to describe this, not the original
+>    (wrong) `recovery.parked`-only condition.
+> 2. **Design §2's wiring point missed one exit path.** `wake.ts`'s own
+>    #144 switched-block early return (`if (switched ===
+>    limitBlockKey(limit)) return afterLimitGate(...)`, inside the
+>    `limit.kind === "modal"` branch) sat BEFORE the survey check this plan
+>    originally placed "right after the existing GATE 3 modal check, before
+>    the final `return afterLimitGate(...)`" — i.e., after the whole modal
+>    branch, including that early return. A stale switched-block redraw and
+>    a feedback-survey overlay coinciding on the same screen therefore
+>    skipped the survey gate. Fixed by moving the survey check to run
+>    FIRST, immediately after `detectLimitOnScreen`, before any branching
+>    on `limit.kind` — see Design §2's corrected wiring note.
+> 3. **A second, faster heal path this plan never looked at.** Design §1's
+>    "Mechanism" section scoped Gap 1's fix to `runAccountFailover`'s own
+>    300s `working`-branch heal — but issue #274 (`do.ts:4612`'s own doc
+>    comment) already added a SECOND, independent heal path reusing the
+>    SAME `evaluateDegradedRecovery` on a 30s ship-tick cadence, specifically
+>    BECAUSE a lead sitting `degraded` for up to 5 minutes under the 300s
+>    path alone was a measured problem (#274's own MEASURED timelines).
+>    Running ~10x more often, that fast path almost always won the race and
+>    flipped a row to `"running"` before `runAccountFailover`'s own slower
+>    tick ever saw it degraded again — which made Gap 1's whole fix
+>    unreachable in the common case: the row still healed (as it always
+>    did), but the NEW wake never fired. See Design §3 (new) for the fix:
+>    the heal-write + wake logic is now a single shared function,
+>    `healDegradedRowAndWake` (`failover.ts`), called from BOTH cadences —
+>    the same extraction pattern #274 itself already established for
+>    `evaluateDegradedRecovery`, for the identical reason ("can never fork
+>    into two subtly different implementations").
+
 ## The gap, as measured
 
 Two separate gaps, both reported in #158.
@@ -49,17 +99,19 @@ codebase.
 ## Scope
 
 IN:
-1. Once an inline-exhausted row's `working`-branch heal fires
-   (`failover.ts:1867-1889`), and ONLY for a row whose degradation was
-   genuinely this feature's own inline exhaustion (never the select-modal
-   case, which already gets its wake from `autoContinueAttempt`; never a
-   `"parked"` (#271, `FLEET_AUTO_FAILOVER` off) row, which `recovery.parked`
-   already excludes by construction — it only reads true for
-   `exhaustedMessagePrefix` rows, never `parkedMessage` ones; never the
-   dead-account path, #141 — see Design §1 for the exact exclusion), attempt
-   ONE gated wake with the SAME `AUTO_CONTINUE_PROMPT` the select-modal path
-   already uses (already digit-free, so Gap 2's concern does not even apply
-   to this specific wake).
+1. Once a degraded row heals (`healDegradedRowAndWake`, called from BOTH
+   `runAccountFailover`'s 300s `working`-branch heal AND do.ts's #274 fast
+   30s ship-tick heal — see Design §3), and ONLY for a row whose degradation
+   was genuinely this feature's own inline exhaustion (never the
+   select-modal case, which already gets its wake from
+   `autoContinueAttempt`; never a `"parked"` (#271, `FLEET_AUTO_FAILOVER`
+   off) row — excluded via the new `StudioStatus.operatorParked` field, NOT
+   `recovery.parked` alone, which does NOT exclude it by construction (see
+   the post-review correction callout at the top of this doc and Design
+   §1); never the dead-account path, #141 — see Design §1 for the exact
+   exclusion), attempt ONE gated wake with the SAME `AUTO_CONTINUE_PROMPT`
+   the select-modal path already uses (already digit-free, so Gap 2's
+   concern does not even apply to this specific wake).
 2. No new bookkeeping field for "already woken once": the heal write's own
    precondition (`existing.state === "degraded"`) is consumed by the SAME
    write that flips it to `"running"`, so this fires at most once per
@@ -119,58 +171,70 @@ OUT (explicitly not doing):
 
 ## Mechanism
 
-Both fixes reuse existing infrastructure — no new scheduler, no new
-Durable Object field, no new exec primitive:
-- Gap 1 piggybacks on the EXISTING `working`-branch heal tick
-  (`runAccountFailover`, called every `SYNC_SESSION_SECONDS` by
-  `do.ts`'s `syncSessionCycle`) and the EXISTING `runGatedWake` /
-  `AUTO_CONTINUE_PROMPT` machinery #109 already built for the select-modal
-  case — same dynamic `import("./wake")` pattern `autoContinueAttempt`
-  already uses, same reason (module-init-order cycle, see
-  `autoContinueAttempt`'s own doc comment).
+Both fixes reuse existing infrastructure — no new scheduler, no new exec
+primitive; ONE new Durable Object field (`StudioStatus.operatorParked`,
+added by the post-review correction, finding 1):
+- Gap 1 piggybacks on the EXISTING heal evidence (`evaluateDegradedRecovery`)
+  and the EXISTING `runGatedWake` / `AUTO_CONTINUE_PROMPT` machinery #109
+  already built for the select-modal case — same dynamic
+  `import("./wake")` pattern `autoContinueAttempt` already uses, same
+  reason (module-init-order cycle, see `autoContinueAttempt`'s own doc
+  comment). Post-review correction, finding 3: the heal+wake logic lives in
+  ONE shared function (`healDegradedRowAndWake`, `failover.ts`), called from
+  BOTH places that ever heal a degraded row — `runAccountFailover`'s own
+  300s `working`-branch heal AND `do.ts`'s #274 fast 30s ship-tick heal
+  (`runShipTickWithObservation`) — never duplicated inline in either one.
+  See Design §3.
 - Gap 2 extends the EXISTING `runGatedWake` gate pipeline with one more
   gate, in the same file, same style as the `▔`-rule gate it sits beside.
+  Post-review correction, finding 2: that gate now runs FIRST, before any
+  branching on `limit.kind`, so it catches every exit out of the modal
+  branch — the #144 switched-block early return included.
 
 ## Design
 
-### 1. Inline-exhaustion wake on heal (`failover.ts`)
+### 1. Inline-exhaustion wake on heal (`failover.ts`) — CORRECTED, see the
+callout at the top of this doc
 
-At the `working`-branch heal site (`failover.ts:1867-1889`), `clearedAt !==
-null` is already the "this tick heals a degraded row" signal. Add, inside
-that same `if (existing.rateLimited || forget || clearedAt !== null)` block,
-guarded on `clearedAt !== null`:
+`healDegradedRowAndWake` (the shared function Design §3 introduces) owns
+this: `recovery.shouldHeal && !opLockFresh` is the "this call heals a
+degraded row" signal, and the write it performs includes the wake decision.
 
 - Determine whether the row being healed was genuinely THIS feature's own
-  inline exhaustion, not a select-modal exhaustion (already woken via
-  `autoContinueAttempt`) and not the dead-account path (#141, which writes
-  its own distinct message prefix — verify against
-  `studio.failover-dead-account.test.ts` and whatever prefix function it
-  uses before finalizing the condition). Candidate signal, already written
-  at degrade time and already carried on `existing` into this tick:
-  `recovery.parked` (true only for `exhaustedMessagePrefix` rows — already
-  excludes `"parked"`/#271 and, confirm during TDD, dead-account rows if
-  they use a different prefix) AND `existing.rateLimited` present with
-  `!existing.rateLimited.select` (`limitObservation`, `failover.ts:1467-1475`,
-  only sets `select: true` for a non-inline/select-modal verdict — so its
-  absence on a row already confirmed `recovery.parked` is the inline case).
-  Write this as a small named local (e.g. `inlineExhaustionHealed`) so the
-  condition reads as a single named fact, not an inline boolean expression.
-- When that's true AND `!verdict.repainted` (pane genuinely idle on this
-  tick's capture, not mid-turn — same signal the hand-back guard just below
-  already reads for the identical reason, "a turn is in flight ... skipping
-  it here costs nothing but one more 300s tick"): dynamically `import("./wake")`,
-  build `GatedWakeDeps` the same way `autoContinueAttempt` does (reuse that
-  function's own construction as a reference, do not diverge), and call
-  `runGatedWake(gatedDeps, AUTO_CONTINUE_PROMPT)`. Do not block the heal
-  write on this call's outcome — the row still flips to `"running"` this
-  tick regardless of whether the wake itself succeeds, skips, or fails
-  (matches #214's own invariant: the row describes the PANE, not the wake).
-- If `verdict.repainted` is true on the healing tick (mid-turn), skip the
-  wake this tick. Document as a residual below — since heal only fires once
-  per degradation, a coincidental repaint on the exact healing tick means
-  this specific wake never retries. Acceptable: already strictly better than
-  today (never wakes at all), and the condition is narrow (one specific
-  tick, one specific coincidence).
+  inline exhaustion — not a select-modal exhaustion (already woken via
+  `autoContinueAttempt`), not the dead-account path (#141), and **not a
+  `"parked"` (#271, `FLEET_AUTO_FAILOVER=off`) row** — the exclusion this
+  section originally got wrong. `recovery.parked` is true for ANY
+  `exhaustedMessagePrefix` row, which `parkedMessage` (#271) shares with
+  `exhaustedMessage` BY DESIGN — it does NOT, by itself, exclude a #271
+  park. Nor does `rateLimited.select`/`.dead` alone: both are set
+  independent of `autoFailover`, and a #271 park triggered by an INLINE
+  block (a free second account existed) leaves `rateLimited` with neither
+  set, the exact shape a genuine inline exhaustion has. The real signal is
+  `StudioStatus.operatorParked` — a new field, stamped at write time from
+  the `!next` branch's own local `parkedOn` (both of `runAccountFailover`'s
+  write sites there: the fresh-degrade write and the anti-loop-guard
+  re-write), `true` only when `parkedOn !== null` at that moment, cleared
+  back to `null` in the same heal write that resets
+  `autoContinueAt`/`autoContinueLastTriedAt`. The final condition
+  (`inlineExhaustionHealed`, `failover.ts`'s `healDegradedRowAndWake`):
+  `recovery.parked && !existing.operatorParked && existing.rateLimited !=
+  null && !existing.rateLimited.select && !existing.rateLimited.dead`.
+- When that's true AND the caller's own `safeToWake` signal allows it
+  (pane genuinely idle, not mid-turn — see Design §3 for what each of the
+  two call sites threads in here, and why they differ): dynamically
+  `import("./wake")`, build `GatedWakeDeps` the same way
+  `autoContinueAttempt` does, and call `runGatedWake(gatedDeps,
+  AUTO_CONTINUE_PROMPT)`. Does not block the heal write on this call's
+  outcome — the row still flips to `"running"` regardless of whether the
+  wake itself succeeds, skips, or fails (matches #214's own invariant: the
+  row describes the PANE, not the wake).
+- If `safeToWake` is false on the healing call (mid-turn), skip the wake
+  that time. Documented as a residual below — since heal only fires once
+  per degradation, a coincidental mid-turn moment on the exact healing call
+  means this specific wake never retries. Acceptable: already strictly
+  better than before (never wakes at all), and the condition is narrow (one
+  specific call, one specific coincidence).
 
 ### 2. Survey-overlay gate (`wake.ts`)
 
@@ -204,25 +268,116 @@ the #146 regression pair), then the detector that makes it refuse without
 also refusing the existing `NOT_DETECTED` corpus and
 `REAL_PERMISSION_PROMPT_*` fixtures.
 
-Wire the new detector into `runGatedWake` right after the existing GATE 3
-modal check (`wake.ts`, after the `if (limit.kind === "modal") { ... }`
-block, before the final `return afterLimitGate(...)`), reusing the SAME
-`screen.stdout` already captured for GATE 3 — no new exec. On a hit, return
-`{ ok: false, skipped: true, error: "feedback survey on screen in
-${WAKE_TARGET}; no keystroke sent — <remedy, same style as the modal
-refusal message>" }`.
+Wire the new detector into `runGatedWake`, reusing the SAME `screen.stdout`
+already captured for GATE 3 — no new exec. On a hit, return `{ ok: false,
+skipped: true, error: "feedback survey on screen in ${WAKE_TARGET}; no
+keystroke sent — <remedy, same style as the modal refusal message>" }`.
+
+**Wiring point — CORRECTED, see the callout at the top of this doc.**
+Originally placed right after the whole `if (limit.kind === "modal") { ...
+}` block, before the final `return afterLimitGate(...)`. That missed one
+exit path: `wake.ts`'s own #144 switched-block early return (`if (switched
+=== limitBlockKey(limit)) return afterLimitGate(...)`) lives INSIDE the
+modal branch and returns before control ever reaches a check placed after
+that whole block — a stale switched-block redraw coinciding with a survey
+overlay would skip the survey gate entirely. Fixed position: immediately
+after `const limit = detectLimitOnScreen(...)`, BEFORE any branching on
+`limit.kind` at all — this way nothing downstream, early return included,
+can run before it does.
+
+### 3. Two heal cadences, one shared heal-and-wake function (`failover.ts`,
+`do.ts`) — NEW, post-review correction, finding 3
+
+Issue #274 (`do.ts:4612`'s own doc comment) already added a SECOND place
+that calls `evaluateDegradedRecovery` and heals a degraded row:
+`runShipTickWithObservation`'s fast-path block, reusing the SAME 30s
+ship-tick pane frame (`ShipResult.paneFrame`) #221 already captures — built
+specifically because a lead sitting `degraded` for up to 5 minutes under
+`runAccountFailover`'s 300s-only cadence was itself a measured problem
+(#274's own MEASURED timelines, `studio.failover-274.test.ts`'s header).
+Running on a 30s cadence — roughly 10x `runAccountFailover`'s own 300s one —
+this fast path almost always observes `recovery.shouldHeal` and flips the
+row to `"running"` before the slower path's own next tick ever sees
+`state === "degraded"` again. Design §1's wake, added only inline in
+`runAccountFailover`'s own `working` branch, would therefore be unreachable
+in the common case: the row still heals (unchanged, as it always did), but
+the new wake never fires — reproducing #158's original symptom even with
+Design §1 and §2 both otherwise correct.
+
+**Fix: extract the heal-write + `inlineExhaustionHealed` + gated-wake logic
+into ONE shared function, `healDegradedRowAndWake` (`failover.ts`), called
+from BOTH places that ever heal a degraded row.** Same extraction pattern
+#274 itself already established for `evaluateDegradedRecovery` — that
+function's own doc comment states the reason directly: "so BOTH the slow
+300s `runAccountFailover` path and the fast 30s ship-tick path ... make
+EXACTLY the same call from the same evidence." `healDegradedRowAndWake`
+owns: computing `clearedAt` from `recovery.shouldHeal` ANDed with the
+caller's own `opLockFresh`; building and writing the healed `StudioStatus`
+(`state`, `rateLimited`, `autoContinueAt`, `autoContinueLastTriedAt`,
+`operatorParked`, `exhaustionClearedAt` — do.ts's own PRE-#158 heal write
+only ever cleared the first three of these six; folded into this one
+shared write rather than left as two subtly different `cleared` shapes);
+performing the write + the registry-mirror call; and firing the gated wake
+when `inlineExhaustionHealed` holds and the caller's own `safeToWake` signal
+allows it.
+
+Does NOT own `runAccountFailover`'s own #186 redraw-guard retirement
+(`forget` — resets `failoverBlock`/`failoverBlockOccurrences`/
+`claudeAccountMovedBlock`): that is specific to the slower, account-switch-
+aware path and has no 30s-path equivalent (the fast tick has never written
+those fields), so `runAccountFailover` folds any such reset into the row it
+passes in BEFORE calling the shared function, rather than the shared
+function knowing about it.
+
+**`safeToWake` — the two cadences do not share an equivalent "pane is not
+mid-turn" signal, so each threads its own:**
+- `runAccountFailover` (300s): `!verdict.repainted` — a genuine two-capture
+  comparison (`detectRateLimitModal`'s own probe, `PANE_QUIESCE_SECONDS`
+  apart). Unchanged from Design §1's original mechanism.
+- `runShipTickWithObservation` (30s, #274): has no two-capture signal at
+  all — its own exec captures the pane ONCE per tick (#274's own "zero
+  added execs" design). Threads `result.paneVerdict?.kind === "idle"`
+  instead: `activity.ts`'s `readActivityFrame`, parsed from the SAME
+  `SECTION_PANE` frame #221 already reads for THIS tick's activity verdict
+  (no new exec here either) — `"idle"` means claude's own idle input box is
+  on screen with no working-spinner status line, which is a NARROWER,
+  strictly more conservative substitute than `!repainted`: any non-idle
+  frame (`working`, `waiting-members`, `waiting-question`, `unknown`) skips
+  the wake, where `!repainted` would only skip on a detected mid-turn
+  repaint specifically. Verified, not assumed, before choosing it — see
+  Residuals below for the one gap this substitution leaves open.
 
 ## Files touched
 
-- `apps/fleet/src/studio/failover.ts` — the heal-site addition (§1).
-- `apps/fleet/src/studio/wake.ts` — new survey detector + GATE 3 wiring (§2).
+- `apps/fleet/src/studio/failover.ts` — the heal-site addition (§1); the new
+  `StudioStatus.operatorParked`-aware `inlineExhaustionHealed` condition
+  (post-review finding 1); the new shared `healDegradedRowAndWake` export
+  and its two `!next`-branch write sites now stamping `operatorParked`
+  (post-review finding 1); `runAccountFailover`'s `working` branch now
+  calling the shared function instead of its own inline heal+wake logic
+  (post-review finding 3).
+- `apps/fleet/src/studio/do.ts` — `runShipTickWithObservation`'s #274
+  fast-path heal block now calls the same shared `healDegradedRowAndWake`
+  instead of its own inline write (post-review finding 3, NEW file for this
+  plan).
+- `apps/fleet/src/studio/types.ts` — new `StudioStatus.operatorParked` field
+  (post-review finding 1, NEW file for this plan).
+- `apps/fleet/src/studio/wake.ts` — new survey detector + GATE 3 wiring
+  (§2), moved to run before the `limit.kind === "modal"` branch rather than
+  after it (post-review finding 2).
 - `apps/fleet/test/studio.auto-continue.test.ts` — split/extend the inline
-  tests per Scope point 5.
-- `apps/fleet/test/fixtures/activity-panes.ts` (or a new
-  `test/fixtures/survey-panes.ts` if that reads cleaner once the fixture
-  exists — developer's call) — new UNMEASURED feedback-survey fixture(s).
-- A new or existing wake-gate test file (`test/studio.wake-gate.test.ts` or
-  similar) — the new survey-gate RED tests.
+  tests per Scope point 5; a new case pinning the #271-park-via-inline-block
+  exclusion (post-review finding 1).
+- `apps/fleet/test/studio.wake-race.test.ts` — the survey-gate RED tests;
+  a new case combining the #144 switched-block fixture with the survey
+  fixture, proving the gate now wins regardless of order (post-review
+  finding 2).
+- `apps/fleet/test/studio.failover-274.test.ts` — new cases proving the
+  heal wake fires on the FAST (30s) path alone, not only when
+  `runAccountFailover` happens to run first (post-review finding 3, NEW
+  file for this plan).
+- `apps/fleet/test/fixtures/survey-panes.ts` — new UNMEASURED
+  feedback-survey fixture(s).
 
 ## Test plan
 
@@ -264,3 +419,24 @@ refusal message>" }`.
   before the exclusion condition is final; get this from
   `studio.failover-dead-account.test.ts` and the dead-account message
   builder, not assumed.
+- **`safeToWake` on the fast (30s) path is a narrower, single-capture
+  substitute for `runAccountFailover`'s two-capture `!verdict.repainted`
+  (Design §3) — not an identical signal.** `result.paneVerdict?.kind ===
+  "idle"` requires claude's own idle input box AND no working-spinner
+  status line on THIS tick's single capture; `!verdict.repainted` requires
+  two captures (`PANE_QUIESCE_SECONDS` apart) to be IDENTICAL. A pane that
+  is genuinely idle but whose single capture happens to land on an
+  `"unknown"`-shaped frame (an unrecognised render, `activity.ts`'s own
+  `readActivityFrame` doc comment: "never guess between thinking and
+  stopped") skips the wake on the fast path where the slower path's own
+  `!repainted` check might not have. Accepted rather than solved: the fast
+  path's own PRE-#158 heal (#274) never had ANY mid-turn guard at all before
+  this feature — a wake gated on `paneVerdict?.kind === "idle"` is strictly
+  no worse than that path's existing risk profile, and heal firing only
+  once per degradation means a skipped wake here is the SAME one-tick-race
+  trade already accepted for the slow path just above, not a new kind of
+  loss.
+- The shared `healDegradedRowAndWake` (Design §3) does not retry a skipped
+  wake on a later call either — same "heal is at-most-once per degradation"
+  invariant as Design §1's original residual, now shared by both cadences
+  rather than specific to one.
