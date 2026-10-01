@@ -108,7 +108,7 @@ GitHub Actions runs natively on this repository — three workflows:
 |---|---|---|
 | [`check`](../.github/workflows/fleet-check.yml) | PR/push touching `apps/fleet/**`, `skills/**`, `fleet/blueprint/**` or `scripts/**` | `bun install`, `bun run check` (types, all tsconfig projects), `bun run test` (vitest-pool-workers), `bun run bun-test` (container-level; the job installs tmux and Chromium first) |
 | [`english`](../.github/workflows/english-check.yml) | every PR/push, no path filter, so no file is exempt | `bun run apps/fleet/scripts/english-check.ts` |
-| [`one-way-door`](../.github/workflows/one-way-door.yml) | every PR, no path filter; no push trigger (there is no PR to label on push to `main`) | `apps/fleet/scripts/merge-danger.ts` against the PR's diff — see below |
+| `one-way-door` — **not yet added**, see below | every PR, no path filter; no push trigger (there is no PR to label on push to `main`) | `apps/fleet/scripts/merge-danger.ts` against the PR's diff — see below |
 
 A PR whose diff touches none of `check`'s watched paths never triggers that
 workflow at all — no `check` run appears for it on that commit, unlike a path
@@ -125,16 +125,35 @@ gh api repos/<owner>/<repo>/commits/<sha>/check-runs
 Issue #161: a deterministic, path-based classifier that overrides an
 agent's own self-graded reversibility judgment on a PR (studio leads
 already self-assess reversible/irreversible before acting — this is a hard
-override on top of that, for CI). It runs on every PR, no path filter (a
-docs-only PR must still come back two-way), via its own workflow
-([`one-way-door`](../.github/workflows/one-way-door.yml)): diffs the PR
-against its base SHA, classifies the changed paths with
-`apps/fleet/scripts/merge-danger.ts`'s `classify()`, applies or removes the
-`one-way-door` PR label accordingly, and lists every matched path in the
-check's own step summary. See `ONE_WAY_GLOBS` in that script for the
-authoritative list of forced one-way-door paths and why each one is on it
-— not duplicated here, to avoid the table drifting out of sync with the
-code. The job itself always succeeds; it classifies, it does not gate.
+override on top of that, for CI).
+
+**`.github/workflows/one-way-door.yml` does not exist in this repo yet.**
+`apps/fleet/scripts/merge-danger.ts` (the classifier itself) and
+`apps/fleet/test/bun/merge-danger.test.ts` (its tests) are already in place
+and green — only the workflow file that wires the classifier into GitHub
+Actions is missing. It could not be pushed from inside a studio container:
+this container's git/gh credential is a GitHub App installation token that
+is scoped to exclude writes under `.github/workflows/**` (a hard platform
+restriction, not a bug to route around), so GitHub rejected the push with
+"refusing to allow a Personal Access Token to create or update workflow
+.github/workflows/one-way-door.yml without workflow scope". The intended
+file content is preserved verbatim in
+[`docs/superpowers/plans/2026-10-01-merge-danger-161.md`](superpowers/plans/2026-10-01-merge-danger-161.md)
+under "Blocked: workflow file", ready for a maintainer with a `workflow`-scoped
+credential to add by hand (GitHub web UI, or a push from their own PAT).
+Until that file is added, no `one-way-door` check runs on any PR and no
+`one-way-door` label is ever applied — do not go looking for a check or a
+label that isn't there yet.
+
+Once added, it is meant to run on every PR, no path filter (a docs-only PR
+must still come back two-way): diffs the PR against its base SHA, classifies
+the changed paths with `apps/fleet/scripts/merge-danger.ts`'s `classify()`,
+applies or removes the `one-way-door` PR label accordingly, and lists every
+matched path in the check's own step summary. See `ONE_WAY_GLOBS` in that
+script for the authoritative list of forced one-way-door paths and why each
+one is on it — not duplicated here, to avoid the table drifting out of sync
+with the code. The job itself is meant to always succeed; it classifies, it
+does not gate.
 
 `apps/fleet/scripts/localci/` — a Mac-based daemon that ran the same two
 lanes and posted them as `local-ci/*` commit statuses — predates this native
