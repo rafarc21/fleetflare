@@ -174,6 +174,35 @@ export function rescuePushPrelude(opts: RescuePushOptions): string {
  * "shallow update not allowed". Then this pushes a PARENTLESS snapshot of
  * `<src>`'s tree to the same ref instead: the content survives, only the
  * history cut is lost. Never `+`/`--force`.
+ *
+ * Issue #140, observed 2026-09-30: "shallow update not allowed" is the
+ * PRE-transfer rejection vanilla local git's own `receive-pack` gives before
+ * it even tries to unpack. Against a REAL, disjoint-history private rescue
+ * remote, the actual failure never got that far -- "did not receive
+ * expected object <sha>" plus a generic "[remote rejected] ... (failed)"
+ * summary instead -- so this fallback never fired (old grep, no match) and
+ * the push just failed, losing the work; only a manual seed of the rescue
+ * remote unblocked it. Verified live against git's own source (git/git,
+ * builtin/index-pack.c:265): that exact text is `check_object()`'s own
+ * `die()` message, fired by a STRICT/fsck connectivity check
+ * (`receive.fsckObjects`) when a shallow boundary commit's own
+ * still-present-in-the-raw-bytes parent pointer is neither in the incoming
+ * pack nor already on the receiver -- the SAME "this remote has never seen
+ * the history behind this shallow boundary" fact "shallow update not
+ * allowed" already catches, just surfaced by a receive path that doesn't
+ * carry vanilla git's own `receive-pack.c` grace window for it (confirmed
+ * live: every empty/non-empty/ahead-by-N/merge-boundary/deepened-shallow
+ * disjoint remote this repo's own real `git push` could reach against real
+ * local git either hit the original message or fully succeeded, never this
+ * one -- a live hosted backend's receive path evidently doesn't always
+ * carry that grace window; see test/bun/rescue-push.test.ts's own issue
+ * #140 test and this fix's plan doc for the full live investigation). The
+ * grep below now matches both; the recovery is identical either way -- a
+ * parentless snapshot has no parent pointer for ANY connectivity check to
+ * trip on. Deliberately NOT broadened to a generic "(failed)"/"rejected":
+ * that would fire the snapshot retry on a genuine, unrelated rejection
+ * (permission denied, branch protection, a repo's own pre-receive hook)
+ * too, masking the real error with a second, equally-doomed push.
  */
 /**
  * Issue #49: `rescue_on_origin <w> <sha>` — true when `<sha>` is already a
@@ -250,7 +279,12 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
     `  [ "$prc" = 0 ] && return 0\n` +
     `  if [ -z "$perr" ]; then perr="push to $ref failed (code $prc) with no output"; ` +
     `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="push to $ref killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
-    `  printf '%s' "$perr" | grep -qi 'shallow update not allowed' || return 1\n` +
+    // Issue #140: broadened past git's own pre-transfer "shallow update not
+    // allowed" to also catch a STRICT/fsck-enabled remote's later-stage
+    // "did not receive expected object" -- same underlying gap, different
+    // wording (see this function's own doc comment above). -E, not two
+    // greps: one pipeline, one exit code, same short-circuit shape as before.
+    `  printf '%s' "$perr" | grep -qiE 'shallow update not allowed|did not receive expected object' || return 1\n` +
     `  snap=$(git -C "$w" ${identity} commit-tree "$src^{tree}" -m "fleet rescue snapshot of $(git -C "$w" rev-parse "$src") (shallow clone)" 2>/dev/null) || return 1\n` +
     `  rescue_budget_ok "$ref" >/dev/null || { perr="snapshot push to $ref not attempted: rescue budget exhausted"; return 1; }\n` +
     `  perr="$(${push("$snap")})"; prc=$?\n` +

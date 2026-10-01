@@ -1923,6 +1923,12 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
   // a shallow push ("shallow update not allowed") -- it lacks the parents
   // behind the shallow boundary. Rescue now pushes a parentless snapshot of
   // the same tree instead: the content survives, the history cut does not.
+  //
+  // Issue #140: a real, non-empty, disjoint-history private remote can
+  // reject the exact same underlying gap with DIFFERENT wording ("did not
+  // receive expected object <sha>", not "shallow update not allowed") --
+  // see this block's own issue #140 test below, and rescueTryPushFn's doc
+  // comment in rescue.ts for the live git-source verification of why.
   describe("issue #16 — a --depth 1 checkout still rescues to an empty private remote", () => {
     beforeEach(() => {
       const origin3 = join(dir, "origin3.git");
@@ -2033,6 +2039,158 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
         expect(sh(`git -C ${priv} show ${stash}:s.md`).out).toBe("stash me");
       });
     }
+
+    // Issue #140, observed 2026-09-30: a real, non-empty, disjoint-history
+    // private rescue remote rejected a shallow push with DIFFERENT wording
+    // than this describe block's own fixture ever produces -- "did not
+    // receive expected object <sha>" plus a generic "[remote rejected] ...
+    // (failed)" summary, not "shallow update not allowed" -- so the
+    // fallback above never fired and the push failed outright. Verified
+    // live against git's own source (git/git, builtin/index-pack.c:265):
+    // that exact text is `check_object()`'s own die() message, a STRICT/
+    // fsck connectivity check (receive.fsckObjects) tripping on the shallow
+    // boundary commit's own still-present-in-the-raw-bytes parent pointer --
+    // the SAME "this remote has never seen the history behind this shallow
+    // boundary" fact "shallow update not allowed" already catches, just
+    // surfaced by a receive path that doesn't carry vanilla git's own
+    // `receive-pack.c` grace window for it (confirmed live: every
+    // empty/non-empty/ahead-by-N/merge-boundary/deepened-shallow disjoint
+    // remote this file's OWN real `git push` against real local git could
+    // reach either hit the original message or fully succeeded, never this
+    // one -- a live hosted backend's receive path evidently doesn't always
+    // carry that grace window).
+    //
+    // Fresh review round 1 (maestro, 2026-10-01): the ORIGINAL version of
+    // this test (now replaced below) reproduced the wording with a
+    // `realGit` shim that counted its own invocations and fabricated the
+    // real-world error text on attempt 1 only -- a faithful assertion on
+    // rescue.ts's OWN behavior, but not a faithful reproduction of what a
+    // real remote actually does. Both tests below instead build a REAL
+    // non-empty bare remote with disjoint history, `receive.shallowUpdate
+    // true` (so vanilla git's own pre-transfer "shallow update not
+    // allowed" can never fire here -- isolating the coverage to the grep's
+    // NEW alternative only), and a REAL `pre-receive` hook that rejects a
+    // push whose new history still carries a parent pointer to an object
+    // this repo never received -- the from-scratch reproduction of a
+    // strict/hosted backend's own connectivity check, not reliant on
+    // vanilla git's own `receive.fsckObjects` (this PR's plan doc already
+    // found that does NOT reproduce the real wording here once
+    // `receive.shallowUpdate` is also set -- the grace window suppresses
+    // it). No `realGit` override anywhere below: real git, both sides, the
+    // whole way.
+    //
+    // The hook walks EVERY commit newly reachable from each ref update's
+    // tip (not just the tip's own immediate parent) and reads each one's
+    // parent line straight off `git cat-file -p`, never `git rev-parse
+    // <sha>^@`: verified live that once this receiving repo itself gains a
+    // `.git/shallow` entry (receive.shallowUpdate's own mechanism, written
+    // as a side effect of the very push under test, before the hook even
+    // runs), `^@` becomes shallow-boundary-aware and silently reports ZERO
+    // parents for the boundary commit even though its object bytes still
+    // carry one -- `cat-file -p` does not lie, it reads the raw bytes. The
+    // one-level-only reading ("the new commit's own parent(s)") is not
+    // enough by itself: verified live that a push carrying real LOCAL
+    // commits layered on top of the shallow boundary (this test's own
+    // fixture, per the review's explicit ask) always has the missing
+    // object two or more hops behind the ref tip, never at the tip's own
+    // immediate parent -- same shape real git's own connectivity check
+    // walks the whole pack, not just the ref.
+    function diskconnectHook(): string {
+      return (
+        `#!/bin/sh\n` +
+        `while read old new ref; do\n` +
+        `  case "$new" in\n` +
+        `    0000000000000000000000000000000000000000) continue ;;\n` +
+        `  esac\n` +
+        `  queue="$new"\n` +
+        `  seen=""\n` +
+        `  while [ -n "$queue" ]; do\n` +
+        `    c=\${queue%% *}\n` +
+        `    case "$queue" in\n` +
+        `      *" "*) queue=\${queue#* } ;;\n` +
+        `      *) queue="" ;;\n` +
+        `    esac\n` +
+        `    case " $seen " in\n` +
+        `      *" $c "*) continue ;;\n` +
+        `    esac\n` +
+        `    seen="$seen $c"\n` +
+        `    for p in $(git cat-file -p "$c" 2>/dev/null | sed -n 's/^parent //p'); do\n` +
+        `      if ! git cat-file -e "$p" 2>/dev/null; then\n` +
+        `        echo "fatal: did not receive expected object $p" >&2\n` +
+        `        exit 1\n` +
+        `      fi\n` +
+        `      queue="$queue $p"\n` +
+        `    done\n` +
+        `  done\n` +
+        `done\n` +
+        `exit 0\n`
+      );
+    }
+
+    // Disjoint history on priv, same shape as the "shallow + non-fast-
+    // forward" fixture above (an orphan repo's own commit pushed to an
+    // unrelated branch) -- priv is non-empty from the start, never just an
+    // empty bare remote.
+    function seedDisjointPriv(): void {
+      const orphan = join(dir, "orphan-140");
+      sh(`git init -q -b task/other ${orphan} && cd ${orphan} && git commit -q --allow-empty -m other && git push -q ${priv} task/other`);
+      sh(`git -C ${priv} config receive.shallowUpdate true`);
+    }
+
+    test("issue #140: a real pre-receive hook rejecting on a missing parent object ('did not receive expected object <sha>') still recovers via the parentless snapshot", () => {
+      seedDisjointPriv();
+      writeFileSync(join(priv, "hooks", "pre-receive"), diskconnectHook());
+      chmodSync(join(priv, "hooks", "pre-receive"), 0o755);
+      // Real local commits ahead of the shallow boundary, not just a dirty
+      // working tree -- the review's own "shallow clone WITH local
+      // commits" wording. The "clean but ahead" test above already proves
+      // this file's own count/kind reporting for a single such commit;
+      // this one is about the push rejection/recovery, not that reporting.
+      writeFileSync(join(checkout, "d.md"), "d\n");
+      sh(`git -C ${checkout} add d.md && git -C ${checkout} commit -q -m d`);
+      writeFileSync(join(checkout, "e.md"), "e\n");
+      sh(`git -C ${checkout} add e.md && git -C ${checkout} commit -q -m e`);
+
+      const out = pushPriv();
+
+      expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 2 commits$`, "m"));
+      const ref = privRefs().find((r) => r.includes("fleet/rescue/"));
+      expect(ref).toBeDefined();
+      // Parentless: the same snapshot shape issue #16 pushes.
+      expect(sh(`git -C ${priv} rev-list --count ${ref}`).out).toBe("1");
+      expect(privTreeFiles(ref!)).toEqual(["a.md", "b.md", "c.md", "d.md", "e.md"]);
+      expect(sh(`git -C ${priv} rev-parse ${ref}^{tree}`).out).toBe(sh(`git -C ${checkout} rev-parse HEAD^{tree}`).out);
+    });
+
+    // Fresh review round 1 finding 2: a mutant that ignores the snapshot
+    // push's own exit code stayed green before this test existed -- nothing
+    // pinned that `rescue_try_push` treats a failed RETRY as a failure too,
+    // not just a failed first attempt. Same disjoint-history/shallowUpdate
+    // setup, but the hook now rejects EVERY push outright (first attempt
+    // and the parentless snapshot retry alike), with wording the grep
+    // above still matches either way.
+    test("issue #140 review finding 2: the parentless snapshot's own push can also fail -- RESCUE_FAILED, never a silent success", () => {
+      seedDisjointPriv();
+      writeFileSync(join(priv, "hooks", "pre-receive"),
+        `#!/bin/sh\n` +
+        `while read old new ref; do\n` +
+        `  case "$new" in\n` +
+        `    0000000000000000000000000000000000000000) continue ;;\n` +
+        `  esac\n` +
+        `  echo "fatal: did not receive expected object 0000000000000000000000000000000000000000; policy says no" >&2\n` +
+        `  exit 1\n` +
+        `done\n` +
+        `exit 0\n`);
+      chmodSync(join(priv, "hooks", "pre-receive"), 0o755);
+      writeFileSync(join(checkout, "notes.md"), "shallow work that cannot land\n");
+
+      const out = pushPriv();
+
+      expect(out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
+      expect(out).not.toContain(RESCUE_PUSHED_PREFIX);
+      expect(privRefs().some((r) => r.includes("fleet/rescue/"))).toBe(false);
+    });
   });
 
   test("rescueSnapshotCmd: dirty tree, branch walk and stash walk all land on the private remote, NOT origin", () => {
