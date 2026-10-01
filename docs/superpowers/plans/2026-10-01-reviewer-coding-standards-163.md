@@ -59,8 +59,8 @@ Actions setup, so `CONTRIBUTING.md` was the stale side — fixed to match
 
 | File | Before | After | Diff |
 |---|---:|---:|---:|
-| `fleet/blueprint/studios/web-studio/members/frontend-developer.md` | 2098 | 2208 | +110 |
-| `fleet/blueprint/studios/web-studio/members/backend-developer.md` | 2219 | 2329 | +110 |
+| `fleet/blueprint/studios/web-studio/members/frontend-developer.md` | 2098 | 2138 | +40 |
+| `fleet/blueprint/studios/web-studio/members/backend-developer.md` | 2219 | 2259 | +40 |
 | `fleet/blueprint/studios/web-studio/members/code-reviewer.md` | 1031 | 1084 | +53 |
 | `fleet/blueprint/CODING_STANDARDS.md` (new) | — | 3826 | +3826 |
 
