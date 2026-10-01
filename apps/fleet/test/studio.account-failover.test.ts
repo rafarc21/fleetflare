@@ -908,6 +908,72 @@ describe("runAccountFailover — issue #141 review, round 2: a same-keyed dead-a
 });
 
 // ---------------------------------------------------------------------------
+// Fresh-context review of PR #152 round 2 (2026-09-30) — the `count >
+// baseline` fall-through (the branch right after the one T1 fixture above
+// exercises) issues no exec of its own, but it DOES fall through into the
+// ordinary inline-evidence handling below, which can reach the `if (!next)`
+// write (the exhausted/parked path) built from `existing` — a snapshot taken
+// BEFORE the scrollback exec that just ran. Same destroy-race reasoning as
+// the `baseline === null` branch's own `destroyLanded()` check just above
+// (and the pre-existing switch-write guard, #123's "studio stopped during
+// the account switch"): a destroy landing during THIS exec must be caught
+// here too, before genuinely-new occurrence evidence is allowed to fall
+// through to a write that could resurrect a row the destroy path already
+// finalized.
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — PR #152 round 3 review: a destroy landing during the dead-account scrollback's own `count > baseline` capture must not resurrect a finalized row", () => {
+  it("tick 3's genuinely-new occurrence count is skipped (not switched, not exhausted) when a destroy completes during that exact scrollback exec", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(ORG_DISABLED_PANE) });
+
+    // Tick 1: switches account 1 (dead) -> account 2.
+    const out1 = await run(h);
+    expect(out1).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+
+    // Tick 2: first post-switch sighting on account 2 establishes the
+    // baseline (count 1).
+    h.setScrollback(deadBlockOccurring(1));
+    const out2 = await run(h);
+    expect(out2.kind).toBe("rerender");
+    const afterTick2 = await h.storage.get(STATUS_KEY);
+    expect(afterTick2?.failoverBlockOccurrences).toBe(1);
+
+    // Tick 3: the scrollback genuinely grows to 2 occurrences — real, fresh
+    // evidence that account 2 is ALSO dead — but a destroy completes DURING
+    // this exact scrollback exec, same simulation shape as #123's own
+    // "destroy lands during the account switch" test
+    // (studio.start-gate-writeback.test.ts's `destroyCompletes`): the row
+    // flips to `stopped` as a side effect of the exec that is in flight.
+    // With only TWO_ACCOUNTS, nextClaudeAccount wraps forward from account 2
+    // back to account 1 — already dead, so excluded — leaving nowhere else to
+    // go (`next === null`), the exact `if (!next)` hazard the finding named.
+    h.setScrollback(deadBlockOccurring(2));
+    const originalExec = h.deps.exec;
+    h.deps.exec = vi.fn(async (cmd: string, env?: Record<string, string>) => {
+      const res = await originalExec(cmd, env);
+      if (cmd === deadAccountScrollbackCmd()) {
+        const existing = await h.storage.get(STATUS_KEY);
+        await h.storage.put(STATUS_KEY, { ...(existing as StudioStatus), state: "stopped" });
+      }
+      return res;
+    });
+
+    const out3 = await run(h);
+
+    expect(out3).toEqual({ kind: "skipped", reason: "studio stopped during the dead-account scrollback capture" });
+    // Account 2 is never marked dead fleet-wide — the exhausted/parked write
+    // this check prevents never ran at all.
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN_2")?.dead).not.toBe(true);
+    // The row is exactly what the destroy itself left (`stopped`) plus
+    // whatever tick 2 already recorded — never overwritten with a fresh
+    // `degraded`/`running` snapshot built from the stale pre-exec `existing`.
+    const finalRow = await h.storage.get(STATUS_KEY);
+    expect(finalRow?.state).toBe("stopped");
+    expect(finalRow?.failoverBlockOccurrences).toBe(afterTick2?.failoverBlockOccurrences);
+    expect(finalRow?.claudeAccount).toBe(afterTick2?.claudeAccount);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Maestro review of PR #152, round 2 — reviewer probe P7. Round 1's time-
 // bounded redraw guard (FLAP_GUARD_MINUTES) is UNSAFE: after a switch,
 // claude's `--continue` can redraw the OLD dead account's departure evidence
