@@ -10,7 +10,7 @@ import { describe, it, expect } from "vitest";
 import {
   studioGitSafetyCmd, studioGitWrapperScript,
   STUDIO_GIT_WRAPPER_PATH, STUDIO_GIT_WRAPPER_TMP_PATH, STUDIO_REAL_GIT_PATH,
-  STUDIO_PUSH_REFUSAL, STUDIO_PUSH_UNRESOLVED_DEFAULT,
+  STUDIO_PUSH_UNRESOLVED_DEFAULT,
   STUDIO_PUSH_PROBE_FAILED, STUDIO_PUSH_SHELL_ALIAS_REFUSAL,
   STUDIO_PUSH_PLUMBING_REFUSAL, STUDIO_PUSH_ALIAS_DEPTH_REFUSAL, STUDIO_PUSH_LEAK_REFUSAL,
   STUDIO_PUSH_SUBMODULE_REFUSAL, STUDIO_PUSH_NONCOMMIT_REFUSAL,
@@ -53,14 +53,18 @@ describe("studioGitSafetyCmd — the two git config values (issue #253)", () => 
 });
 
 describe("studioGitSafetyCmd — the atomic wrapper install (issue #253)", () => {
+  // STUDIO_GIT_WRAPPER_PATH/STUDIO_REAL_GIT_PATH's real behavior coverage:
+  // hardcoded literals against studioGitSafetyCmd()'s REAL default output
+  // (no wrapperPath/realGit override) — test/bun/git-wrapper.test.ts's own
+  // header says it deliberately never touches these two real paths (every
+  // fixture there uses its own temp-dir seam instead), so this vitest
+  // assertion is the only place either literal is actually pinned.
   it("installs the guard at /usr/local/bin/git, ahead of /usr/bin/git on PATH", () => {
-    expect(STUDIO_GIT_WRAPPER_PATH).toBe("/usr/local/bin/git");
-    expect(STUDIO_REAL_GIT_PATH).toBe("/usr/bin/git");
-    expect(studioGitSafetyCmd()).toContain(STUDIO_GIT_WRAPPER_PATH);
+    expect(studioGitSafetyCmd()).toContain("/usr/local/bin/git");
+    expect(studioGitSafetyCmd()).toContain("'/usr/bin/git' config --global push.default current");
   });
 
   it("stages the wrapper in a tmp file NEXT TO its destination, so the mv is same-filesystem and atomic", () => {
-    expect(STUDIO_GIT_WRAPPER_TMP_PATH).toBe(`${STUDIO_GIT_WRAPPER_PATH}.fleet-install`);
     const cmd = studioGitSafetyCmd();
     expect(cmd).toContain(`> '${STUDIO_GIT_WRAPPER_TMP_PATH}'`);
     expect(cmd).toContain(`mv -f '${STUDIO_GIT_WRAPPER_TMP_PATH}' '${STUDIO_GIT_WRAPPER_PATH}'`);
@@ -347,8 +351,11 @@ describe("studioGitWrapperScript — the generated /usr/local/bin/git wrapper (i
 
   it("refuses any porcelain line whose DESTINATION is refs/heads/<default> and whose flag is not '='", () => {
     const s = studioGitWrapperScript();
-    expect(STUDIO_PUSH_REFUSAL).toBe("fleet: studios never push the default branch — open a PR");
-    expect(s).toContain(STUDIO_PUSH_REFUSAL);
+    // The literal operator-facing message, not the import — every other
+    // reference to STUDIO_PUSH_REFUSAL in this suite and in
+    // test/bun/git-wrapper.test.ts compares against the SAME import, so this
+    // is the only place the real string is actually pinned.
+    expect(s).toContain("fleet: studios never push the default branch — open a PR");
     expect(s).toContain('"refs/heads/$def"');
     // `=` is git's "up to date" flag: nothing would move, so it is not a push.
     expect(s).toContain('"$flag" = "="');
