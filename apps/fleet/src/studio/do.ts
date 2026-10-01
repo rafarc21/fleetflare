@@ -59,16 +59,19 @@ import {
 } from "./activity";
 import {
   LIMIT_SIGHTING_KEY, type LimitSighting,
-  accountLimitStateKey, encodeAccountLimitState, decodeAccountLimitState,
   accountBurnStateKey, encodeAccountBurnState, decodeAccountBurnState,
 } from "./rate-limit";
-import type { AccountLimits, ClaudeAccount } from "./accounts";
+import type { ClaudeAccount } from "./accounts";
 // Issue #102: the fleet-wide per-account limit record lives in D1
 // (fleet_state), the same generic key/value table issue #5's junior-
 // authorization flag already uses — reused via state.ts's own getFlag/setFlag
 // rather than a new table, exactly as this file's own header favours no new
 // storage mechanism for something an existing one already covers.
 import { getFlag, setFlag } from "../state";
+// Issue #141 — the D1 read/write half moved to its own module so
+// src/studio/routes.ts can reach it without pulling in do.ts's own
+// "@cloudflare/sandbox" import (see account-limits-store.ts's own header).
+import { readFleetAccountLimits, writeFleetAccountLimit } from "./account-limits-store";
 import {
   shipTranscriptTick, getTranscriptTailWithStorage, type ShipDeps, type TranscriptStorage, type ShipResult,
 } from "./transcript";
@@ -3308,35 +3311,6 @@ export function constructorLaunch(
 }
 
 /**
- * Issue #102 — the fleet-wide read half of FailoverDeps.accountLimits: one
- * fleet_state row per configured account, read in parallel (at most
- * MAX_CLAUDE_ACCOUNTS, and only on a tick that already found a live limit
- * modal — see runAccountFailover's own call site). A row this studio's own
- * write never touched (another studio's sighting, or none at all) reads back
- * exactly the same as one this studio wrote itself; fleet-wide is the point.
- */
-async function readFleetAccountLimits(db: D1Database, accounts: ClaudeAccount[]): Promise<AccountLimits> {
-  const limits: AccountLimits = {};
-  await Promise.all(accounts.map(async (a) => {
-    const state = decodeAccountLimitState(await getFlag(db, accountLimitStateKey(a.name)));
-    // Review round 1 (#102 review, 2026-09-30): `seenAt` rides along too, not
-    // just `until` — accounts.ts's `isFree` needs it for a `null`-until
-    // entry's staleness ceiling (NULL_UNTIL_CEILING_MS).
-    if (state) limits[a.name] = { until: state.until, seenAt: state.seenAt };
-  }));
-  return limits;
-}
-
-/** Issue #102 — the fleet-wide write half: one fleet_state row, keyed by
- *  account NAME (never a studio id), so every studio's own next
- *  `readFleetAccountLimits` sees it. */
-async function writeFleetAccountLimit(
-  db: D1Database, name: string, until: string | null, seenAt: string,
-): Promise<void> {
-  await setFlag(db, accountLimitStateKey(name), encodeAccountLimitState({ until, seenAt }), Date.parse(seenAt));
-}
-
-/**
  * Issue #131 (Stage B) — the fleet-wide read half of FailoverDeps.accountBurn,
  * the exact same shape readFleetAccountLimits above reads for accountLimits:
  * one fleet_state row per configured account, read in parallel, only on the
@@ -5981,7 +5955,8 @@ export class StudioDO extends Sandbox<Env> {
       // header), wired here where `this.env.DB` already lives.
       accountLimits: {
         read: () => readFleetAccountLimits(this.env.DB, resolveClaudeAccounts(this.env)),
-        write: (name: string, until: string | null, seenAt: string) => writeFleetAccountLimit(this.env.DB, name, until, seenAt),
+        write: (name: string, until: string | null, seenAt: string, dead?: true) =>
+          writeFleetAccountLimit(this.env.DB, name, until, seenAt, dead),
       },
       // Issue #131 (Stage B): fleet-wide per-account 5h burn, same D1-backed
       // shape/reasoning as accountLimits just above, read only on the borrow

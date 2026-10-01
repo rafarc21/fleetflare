@@ -376,7 +376,9 @@ export function formatActivity(status: StudioStatus, now: Date, staleAfterSecond
   if (!live) return "—";
   const rl = status.rateLimited;
   let base: string;
-  if (rl?.select) {
+  if (rl?.dead) {
+    base = "DEAD · org disabled subscription access";
+  } else if (rl?.select) {
     base = `LIMIT · modal — Esc (ff ${status.id})`;
   } else if (rl && rl.until !== null && !Number.isNaN(Date.parse(rl.until)) && Date.parse(rl.until) > now.getTime()) {
     base = `LIMIT · resets ${formatResetUtcClock(new Date(Date.parse(rl.until)))}`;
@@ -402,9 +404,10 @@ export interface LsJsonRow {
   id: string;
   state: StudioStatus["state"];
   repo: string | null;
-  /** stopped = not live; modal = limit menu up; limit = usage limit;
-   *  unknown = no verdict or a stale one; else the ACTIVITY verdict. */
-  lead: "stopped" | "modal" | "limit" | "unknown" | "working" | "idle" | "waiting-members" | "waiting-question";
+  /** stopped = not live; dead = org disabled subscription access (issue
+   *  #141, permanent); modal = limit menu up; limit = usage limit; unknown =
+   *  no verdict or a stale one; else the ACTIVITY verdict. */
+  lead: "stopped" | "dead" | "modal" | "limit" | "unknown" | "working" | "idle" | "waiting-members" | "waiting-question";
   /** When the lead entered that state, ISO, or null when not known. */
   leadSince: string | null;
   limitResetsAt: string | null;
@@ -426,6 +429,7 @@ export function lsJsonRows(
     };
     if (s.state !== "running" && s.state !== "degraded") return { ...base, lead: "stopped", leadSince: null, limitResetsAt: null };
     const rl = s.rateLimited;
+    if (rl?.dead) return { ...base, lead: "dead", leadSince: rl.seenAt, limitResetsAt: null };
     if (rl?.select) return { ...base, lead: "modal", leadSince: rl.seenAt, limitResetsAt: rl.until ?? null };
     const until = rl?.until ?? null;
     if (rl && (until === null || (!Number.isNaN(Date.parse(until)) && Date.parse(until) > now.getTime()))) {
@@ -574,6 +578,28 @@ export function formatSurvivalBriefs(studios: StudioStatus[]): string[] {
       : `SURVIVAL ${s.id}: re-brief pending since ${p.since}, ${p.attempts} attempts so far — ${why}`);
   }
   return lines;
+}
+
+/**
+ * Issue #141 review, item 4 — every account the fleet knows is dead, printed
+ * UNCONDITIONALLY (not filtered by which studio is currently on it — a dead
+ * account with no studio parked on it right now is exactly the case a
+ * per-studio view can never surface, and is real: several accounts can go
+ * dead in one org-wide disable while every studio has already moved off of
+ * them). SAME SHAPE AND SAME PLACE as `formatSessionGuards`/
+ * `formatSurvivalBriefs` above: a plain-text trailer under the `fleet ls`
+ * table, fed by `GET /studio/accounts` (src/studio/routes.ts) rather than by
+ * `StudioStatus` — this is fleet-wide account state, not a per-studio field.
+ */
+export function formatDeadAccounts(
+  accounts: { name: string; label: string | null; dead: boolean; seenAt: string | null }[],
+): string[] {
+  const dead = accounts.filter((a) => a.dead);
+  if (dead.length === 0) return [];
+  return dead.map((a) => {
+    const label = a.label ? `${a.label} (${a.name})` : a.name;
+    return `dead account: ${label}${a.seenAt ? ` — seen ${a.seenAt}` : ""} — see docs/operations.md#clearing-a-dead-claude-account to clear it`;
+  });
 }
 
 /**

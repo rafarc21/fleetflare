@@ -480,6 +480,67 @@ export const SESSION_LIMIT_LOGIN_HINT_PANE = inlineBlock([
   "     /login to switch to an API usage-billed account.",
 ]);
 
+/**
+ * Issue #141, review fix pass (2026-09-30) — REAL pane, ~120 cols: studio on a
+ * disabled account. Never resets (not a rate limit at all: a human outside
+ * this fleet has to re-enable the account), and not a select-style modal (no
+ * numbered options, no Enter/Esc footer) — but this is claude's OWN MESSAGE,
+ * drawn with its own message-start glyph (`●`, not `⎿`), and it WRAPS: the
+ * original fixture's fabricated single `⎿` line never happened on a real
+ * pane. Glyph is `●` here — see AGENT_PANEL_LINE's own doc comment: claude
+ * has drawn its message-start glyph as either `⏺` or `●`, by version.
+ */
+export const ORG_DISABLED_PANE = [
+  "● Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask",
+  "  your admin to enable access",
+  "", ...RULE_PROMPT,
+].join("\n");
+
+/** Same message, hand-wrapped at 80 cols — proves the detector matches
+ *  regardless of exact wrap position, not just the one real capture above. */
+export const ORG_DISABLED_PANE_80COL = [
+  "● Your organization has disabled Claude subscription access for Claude Code ·",
+  "  Use an Anthropic API key instead, or ask your admin to enable access",
+  "", ...RULE_PROMPT,
+].join("\n");
+
+/** Issue #141: a lead reporting ON this feature must never look like a lead
+ *  that HIT it — same "idle prose talking about the limit" discipline as the
+ *  main NOT_DETECTED map above, kept as its own small export so the new
+ *  detector's own test file can pull in just this one fixture. */
+export const NOT_DETECTED_141: Record<string, string> = {
+  "prose reporting on issue #141, not the pane": [
+    "⏺ Filed #141: some accounts print \"Your organization has disabled Claude",
+    "  subscription access for Claude Code\" instead of resetting.",
+    "", ...BOX_PROMPT,
+  ].join("\n"),
+  // Review fix pass (2026-09-30): the exact canonical sentence, but QUOTED
+  // inside a `⎿` tool-output line, not printed as claude's OWN message — a
+  // mutant that weakened the glyph anchor from "the glyph is IMMEDIATELY
+  // followed by this sentence" to "this sentence appears somewhere on the
+  // line" would flip this from pass to fail.
+  "issue #141 quoted inside a tool-output/report line, not the pane's own message":
+    [
+      "⏺ Filed #141.",
+      "  ⎿  Filed #141: accounts sometimes print \"Your organization has disabled Claude subscription access for " +
+        "Claude Code · Use an Anthropic API key instead, or ask your admin to enable access\" verbatim.",
+      "", ...RULE_PROMPT,
+    ].join("\n"),
+  // Maestro review of PR #152, round 2 — a DIFFERENT mutant from the one
+  // above: this line IS glyph-anchored at exactly the right position (claude's
+  // own message glyph, immediately followed by the sentence's real opening
+  // words), but its ENDING is not the exact measured sentence — a paraphrase,
+  // not the real message. Proves the comparison is `===` exact-text against
+  // DEAD_ACCOUNT_FULL_TEXT, not a loose/fuzzy "starts with the headline" match
+  // — a detector that only checked the headline prefix would wrongly fire
+  // here.
+  "the dead-account headline's exact start, but a different (paraphrased) ending":
+    [
+      "● Your organization has disabled Claude subscription access for Claude Code · Contact support for details",
+      "", ...RULE_PROMPT,
+    ].join("\n"),
+};
+
 /** Issue #106 item 4: a #53 headline quoted in prose ABOVE a real V2 block. */
 export const ORG_HEADLINE_PROSE_ABOVE_V2_PANE = [
   "⏺ Yesterday's modal said You've hit your org's monthly spend limit, today's",

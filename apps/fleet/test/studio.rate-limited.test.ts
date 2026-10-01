@@ -6,7 +6,9 @@
 // never work; and each wake typed text + Enter into a select modal whose
 // option 2 is a spend path ("Upgrade your plan", "Add funds").
 import { describe, it, expect, vi } from "vitest";
-import { parseResetUtc, formatRateLimited } from "../src/studio/rate-limit";
+import {
+  parseResetUtc, formatRateLimited, encodeAccountLimitState, decodeAccountLimitState,
+} from "../src/studio/rate-limit";
 import { detectRateLimitModal, runAccountFailover, paneCaptureCmd, PANE_CAPTURE_MARKER, type FailoverDeps } from "../src/studio/failover";
 import { runGatedWake, PANE_PROBE_CMD, PANE_SCREEN_CMD, wakeCmd } from "../src/studio/wake";
 import { wakeOnAssign } from "../src/board/assign-wake";
@@ -86,6 +88,15 @@ describe("formatRateLimited / fleet ls READY", () => {
     expect(formatRateLimited(undefined, NOW)).toBeNull();
   });
 
+  it("issue #141: a dead account never reads as null, however far past 'now' — it never resets", () => {
+    const rl = { until: null, seenAt: NOW.toISOString(), dead: true as const };
+    expect(formatRateLimited(rl, NOW, STUDIO_ID)).toBe(`claude account dead — org disabled subscription access (ff ${STUDIO_ID})`);
+    const muchLater = new Date(NOW.getTime() + 365 * 24 * 60 * 60_000);
+    expect(formatRateLimited(rl, muchLater, STUDIO_ID)).toBe(
+      `claude account dead — org disabled subscription access (ff ${STUDIO_ID})`,
+    );
+  });
+
   it("READY overrides 'provisioned' while rate-limited, and falls back once it passes", () => {
     const readiness = { kind: "provisioned" as const, checkedAt: NOW.toISOString() };
     const rl = { until: "2026-09-24T13:30:00.000Z", seenAt: NOW.toISOString() };
@@ -93,6 +104,27 @@ describe("formatRateLimited / fleet ls READY", () => {
     expect(formatReady(readiness, row, NOW)).toBe("rate-limited until 13:30Z");
     expect(formatReady(readiness, row, new Date("2026-09-24T14:00:00.000Z"))).toBe("provisioned");
     expect(formatReady(readiness)).toBe("provisioned");
+  });
+});
+
+describe("encodeAccountLimitState / decodeAccountLimitState — issue #141's dead flag round-trips", () => {
+  it("round-trips dead: true through JSON, same as until/seenAt", () => {
+    const state = { until: null, seenAt: NOW.toISOString(), dead: true as const };
+    expect(decodeAccountLimitState(encodeAccountLimitState(state))).toEqual(state);
+  });
+
+  it("an ordinary (non-dead) state still round-trips with no `dead` key at all", () => {
+    const state = { until: "2026-09-24T13:30:00.000Z", seenAt: NOW.toISOString() };
+    expect(decodeAccountLimitState(encodeAccountLimitState(state))).toEqual(state);
+  });
+
+  it("a present but non-true `dead` is corrupt — reads back null, never thrown", () => {
+    expect(decodeAccountLimitState(JSON.stringify({ until: null, seenAt: NOW.toISOString(), dead: false }))).toBeNull();
+    expect(decodeAccountLimitState(JSON.stringify({ until: null, seenAt: NOW.toISOString(), dead: "yes" }))).toBeNull();
+  });
+
+  it("null for a key never written, unchanged by this feature", () => {
+    expect(decodeAccountLimitState(null)).toBeNull();
   });
 });
 

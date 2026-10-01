@@ -128,6 +128,10 @@ export function claudeAccountToken(accounts: ClaudeAccount[], currentName: strin
 export interface AccountLimitEntry {
   until: string | null;
   seenAt: string;
+  /** Issue #141 — set once an account is confirmed dead (org disabled
+   *  subscription access); never expires, unlike a null `until`'s
+   *  NULL_UNTIL_CEILING_MS grace below. */
+  dead?: true;
 }
 export type AccountLimits = Record<string, AccountLimitEntry>;
 
@@ -231,7 +235,11 @@ export function nextClaudeAccount(
  */
 export function accountIsFree(a: ClaudeAccount, limits: AccountLimits, now: Date): boolean {
   if (!(a.name in limits)) return true;
-  const { until, seenAt } = limits[a.name];
+  const { until, seenAt, dead } = limits[a.name];
+  // Issue #141 — dead wins over everything else, unconditionally, regardless
+  // of `seenAt` age: a dead account never gets NULL_UNTIL_CEILING_MS's
+  // re-probe grace, since nothing about it clears on its own.
+  if (dead) return false;
   if (until !== null) return Date.parse(until) <= now.getTime();
   // Review round 1 (#102 review, 2026-09-30) — see NULL_UNTIL_CEILING_MS's
   // own doc comment: a `null` until must not blacklist an account forever.
