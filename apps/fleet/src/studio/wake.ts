@@ -715,6 +715,32 @@ export async function runGatedWake(deps: GatedWakeDeps, prompt: string, clearDra
   const now = (deps.now ?? (() => new Date()))();
   const sighting = deps.limitSighting ? await deps.limitSighting().catch(() => null) ?? null : null;
   const limit = detectLimitOnScreen(screen.stdout, now, sighting);
+
+  // Issue #158 — Claude Code's own feedback-survey overlay. Checked FIRST,
+  // before the modal branch below, still against the SAME `screen` capture
+  // (no new exec), for every runGatedWake caller: a wake whose text carries
+  // a digit (a task number, a time) can answer a survey the strict detector
+  // above has never heard of.
+  //
+  // Review of #158 (fresh-context, this same PR), finding 2: this used to
+  // sit AFTER the whole `limit.kind === "modal"` branch — which has its own
+  // #144 early return (`switched === limitBlockKey(limit)`, just below) that
+  // exits straight to `afterLimitGate` BEFORE control ever reached this
+  // check. A stale switched-block redraw and a feedback-survey overlay
+  // coinciding on the same screen therefore slipped the wake past the
+  // survey gate entirely. Running this first catches every exit path out of
+  // the modal branch, early return included, since nothing below can run
+  // before it does. See surveyOverlayOnScreen's own doc comment for the
+  // shape and why it is a SEPARATE check from the modal gate below and from
+  // LOOSE_LIMIT_PATTERNS (afterLimitGate's own loose check, further below).
+  if (surveyOverlayOnScreen(screen.stdout)) {
+    return {
+      ok: false, skipped: true,
+      error: `feedback survey on screen in ${WAKE_TARGET}; no keystroke sent — ` +
+        `Dismiss by hand: ff ${deps.studioId ?? "<id>"}, press Esc, detach, re-assign.`,
+    };
+  }
+
   if (limit.kind === "modal") {
     // A select modal (V1, V3, #53) is refused ALWAYS: its spend options stay
     // on screen whatever the clock says, and no unattended path may press a
@@ -744,22 +770,6 @@ export async function runGatedWake(deps: GatedWakeDeps, prompt: string, clearDra
     return {
       ok: false, skipped: true,
       error: `${holds} — session-limit block on screen in ${WAKE_TARGET}; no keystroke sent`,
-    };
-  }
-
-  // Issue #158 — Claude Code's own feedback-survey overlay. Checked here,
-  // right after the modal check above and still against the SAME `screen`
-  // capture (no new exec), for every runGatedWake caller: a wake whose text
-  // carries a digit (a task number, a time) can answer a survey the strict
-  // detector above has never heard of. See surveyOverlayOnScreen's own doc
-  // comment for the shape and why it is a SEPARATE check from the modal gate
-  // above and from LOOSE_LIMIT_PATTERNS (afterLimitGate's own loose check,
-  // just below).
-  if (surveyOverlayOnScreen(screen.stdout)) {
-    return {
-      ok: false, skipped: true,
-      error: `feedback survey on screen in ${WAKE_TARGET}; no keystroke sent — ` +
-        `Dismiss by hand: ff ${deps.studioId ?? "<id>"}, press Esc, detach, re-assign.`,
     };
   }
 
