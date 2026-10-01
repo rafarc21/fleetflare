@@ -20,6 +20,9 @@
 // module: this file only validates argv shape, never calls the Worker.
 import { TASK_STATES, isTaskState, type TaskState } from "../board/types";
 import { LIVENESS_RULE } from "./recycle-cost";
+// Board issue #165: `--template retro`'s fixed brief — see that module's own
+// header for why its title is static rather than datestamped.
+import { RETRO_TASK_TEMPLATE } from "./retro-template";
 
 /** Issue #28: shared by provision's and recycle's help. */
 const FRESH_SESSION_HELP =
@@ -307,8 +310,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A rescue-push that fails or cannot confirm the work was saved (killed exec, dead shell, deadline) refuses the same way, naming why. A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it. --park stops it RESUMABLE: a studio whose org-chart edges reach it may `fleet resume` it from its container (after a cooldown). Without --park, only you can start it again.",
   },
   "task-new": {
-    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior] [--provision [--fresh-session]]",
-    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given. --provision (issue #113) files the task and then provisions its assigned studio in the same call, so a task filed against a STOPPED studio no longer needs a separate `fleet provision`; needs --studio or --continues to know which studio, and refuses otherwise. " + FRESH_SESSION_HELP,
+    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior] [--provision [--fresh-session]] [--template retro]",
+    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required, UNLESS --template retro is given (issue #165): it fills the whole brief with the weekly retro's fixed sections (skills/retro-ritual/SKILL.md), and any of --title/--objective/--output/--boundaries given alongside it still overrides just that one field. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given. --provision (issue #113) files the task and then provisions its assigned studio in the same call, so a task filed against a STOPPED studio no longer needs a separate `fleet provision`; needs --studio or --continues to know which studio, and refuses otherwise. " + FRESH_SESSION_HELP,
   },
   "task-ls": {
     args: `ls [--sprint S] [--state ${TASK_STATES.join("|")}] [--studio ID] [--repo owner/name]`,
@@ -451,7 +454,11 @@ export function renderHelp(): string {
  *  error and never ignored: a silently dropped `--sprint` puts a task on no
  *  sprint board at all, and nothing on screen would say so. */
 const TASK_FLAGS: Record<string, readonly string[]> = {
-  new: ["title", "objective", "output", "boundaries", "sprint", "studio", "repo", "continues"],
+  // Issue #165: `--template` is a value-taking flag (`--template retro`), so
+  // it belongs here, through the ordinary parseFlags path — NOT in the
+  // bare-boolean extraction loop below (--junior/--provision/--fresh-session),
+  // which exists only because those three take no value.
+  new: ["title", "objective", "output", "boundaries", "sprint", "studio", "repo", "continues", "template"],
   ls: ["sprint", "state", "studio", "repo"],
   assign: ["why"],
 };
@@ -620,17 +627,42 @@ function parseTask(argv: string[]): CliCommand {
     return { cmd: "task-ls", query };
   }
 
+  // Issue #165: `--template retro` supplies a DEFAULT for the four required
+  // sections below — an explicit --title/--objective/--output/--boundaries
+  // alongside it still overrides that one field, same as every other brief
+  // flag layers onto a brief. Validated here, against the one value this
+  // vocabulary holds today, so a typo'd template name is a usage error
+  // naming the problem rather than a wasted round trip or a silently
+  // half-filled brief.
+  let template: typeof RETRO_TASK_TEMPLATE | undefined;
+  if (parsed.template !== undefined) {
+    if (parsed.template !== "retro") {
+      return usage(`fleet task new --template only accepts "retro", not ${JSON.stringify(parsed.template)}`);
+    }
+    template = RETRO_TASK_TEMPLATE;
+  }
+
   // Named one at a time so a half-written brief says WHICH section is
   // missing — the same rule src/board/brief.ts enforces server-side, applied
-  // early enough to cost no round trip.
+  // early enough to cost no round trip. A field the template already fills
+  // is exempt ONLY when the flag was not given at all; an explicit flag with
+  // a blank value is still refused, template or not — a caller who typed
+  // `--title ""` meant something and got nothing, which is never silently
+  // papered over by the default.
   for (const [flag, field] of [["title", "title"], ["objective", "objective"], ["output", "outputFormat"], ["boundaries", "boundaries"]] as const) {
-    if (parsed[flag] === undefined || parsed[flag].trim() === "") {
+    if (parsed[flag] === undefined) {
+      if (template !== undefined) continue;
+      return usage(`fleet task new needs --${flag} (${field})`);
+    }
+    if (parsed[flag].trim() === "") {
       return usage(`fleet task new needs --${flag} (${field})`);
     }
   }
   const brief: TaskBriefArgs = {
-    title: parsed.title, objective: parsed.objective,
-    outputFormat: parsed.output, boundaries: parsed.boundaries,
+    title: parsed.title ?? template?.title ?? "",
+    objective: parsed.objective ?? template?.objective ?? "",
+    outputFormat: parsed.output ?? template?.outputFormat ?? "",
+    boundaries: parsed.boundaries ?? template?.boundaries ?? "",
   };
   if (parsed.sprint !== undefined) brief.milestone = parsed.sprint;
   if (parsed.studio !== undefined) brief.assignee = parsed.studio;

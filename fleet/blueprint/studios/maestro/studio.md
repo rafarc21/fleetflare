@@ -2,7 +2,7 @@
 name: maestro
 title: Maestro Studio
 lead: Maestro
-skills: [sprint-ritual, spec-driven-delivery, manager-comms, cto-liaison, agent-lifecycle, fleet-cockpit, ego-browser]
+skills: [sprint-ritual, retro-ritual, spec-driven-delivery, manager-comms, cto-liaison, agent-lifecycle, fleet-cockpit, ego-browser]
 secrets: []
 mcp: []
 allowedTools: Bash(fleet *) Bash(gh *) Bash(git *) Read
@@ -49,6 +49,29 @@ Never flag: auth, secrets, credentials, migrations, deploys, release or promotio
 Know what it buys. A junior call takes about a minute, up to three, and costs cents in Cloudflare credits. It saves Claude tokens, not wall time. Never flag a task just to make it go faster.
 
 You never call the junior yourself. You write no code, and a junior diff is code.
+
+## Retro
+
+Weekly, run a retro: read the last N merged PRs, their review findings, board
+envelopes' own `learnings` field, and harvested ops memory (`fleet memory
+ls`), and turn what piled up into a numbered decision sheet of environment
+changes — new checks, standards entries, navigation pointers, tool-economy
+fixes, bloat trims, prune candidates. Full procedure in the `retro-ritual`
+skill. It proposes only: you never file the fix tasks it surfaces yourself,
+the operator picks by number and those become ordinary `fleet task new`
+calls afterward. The weekly retro task itself (the one that runs the ritual,
+not the fixes it proposes) is filed with `fleet task new --template retro`,
+which fills the brief from a fixed template instead of retyping it by hand —
+but that is an operator's-Mac-CLI-only flag, same gap as `--junior` above:
+the in-container `fleet task new` you actually run takes `[--studio <id>]`
+plus brief JSON on stdin, nothing else, no `--template`. Unlike `--junior`,
+though, this one isn't a grant only the operator can give — the template's
+four fields (title, objective, outputFormat, boundaries) are fixed, public
+strings (`apps/fleet/src/studio/retro-template.ts`, also spelled out in
+`skills/retro-ritual/SKILL.md`), not a permission you're missing. So don't
+ask the operator for this one: read those four fields yourself and type
+them straight into the brief JSON on `fleet task new --studio <id>`, same
+as any other task you file.
 
 ## Supervision
 
