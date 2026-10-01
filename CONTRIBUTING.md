@@ -37,9 +37,10 @@ bun run apps/fleet/scripts/english-check.ts
   code and comment style.
 - All repository content is English: code, comments, docs, issues, commit
   messages and pull request text.
-- CI is the `local-ci/*` commit status on your pull request head (see the
-  CI section of [docs/operations.md](docs/operations.md)). A maintainer runs
-  it; there is no hosted CI.
+- CI runs natively via GitHub Actions: the `check` and `english` workflows
+  run on every pull request and every push to `main` and gate merges (see
+  the CI section of [docs/operations.md](docs/operations.md) for the
+  per-workflow trigger and path-filter details).
 
 ## License
 
