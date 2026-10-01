@@ -97,7 +97,7 @@ describe("renderBody / parseState round trip", () => {
       { ciFailures: 1, knownFlaky: 2 },
     );
     const body = renderBody(report, "2026-10-01T10:00:00Z");
-    expect(body).toContain("3/day (filing disabled — record-only)");
+    expect(body).toContain("Rate cap: TBD, pending operator decision — filing disabled (record-only)");
     expect(body).toContain("2026-10-01T10:00:00Z");
     expect(body).toContain("50");
     expect(body).toContain("FIRED");

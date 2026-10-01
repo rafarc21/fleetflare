@@ -139,7 +139,7 @@ export function renderBody(report: Report, timestamp: string): string {
     "Board issue #187 (#168 phase 2) — record-only. No board task is auto-filed",
     "by this run, and no CI gate is wired to the dampener state below.",
     "",
-    "Rate cap: 3/day (filing disabled — record-only)",
+    "Rate cap: TBD, pending operator decision — filing disabled (record-only)",
     `Last run: ${timestamp}`,
     "",
     "| sensor | window | current | baseline | dampener |",
