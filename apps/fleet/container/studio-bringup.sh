@@ -250,12 +250,31 @@ bringup_step tailscale-up
 # output — every bring-up called `tailscale up` unconditionally, regardless
 # of whether it was already up. `[[:space:]]*` tolerates that space (and any
 # future re-indent) without depending on an exact byte count.
+#
+# Issue #189: a failed `tailscale up` is NOT fatal. Measured 2026-10-01: a
+# full tailnet (`backend error: node quota reached on this tailnet`) exited 1,
+# `set -e` aborted bring-up, and every new studio in every repo came back
+# bare. Nothing a studio does needs the tailnet -- `fleet attach` is a WSS
+# through the Worker -- so log, leave a marker, and continue. The marker is
+# read back by provision.ts's provisionedCheckCmd (TAILNET_DOWN_PATH there)
+# and shown in `fleet ls` READY. Fixed strings only: tailscale's own stderr
+# goes to the (redacted) log, never into the marker.
+tailnet_marker="${FLEET_WORKSPACE:-/workspace}/.fleet/tailnet-down"
 if [ -z "${TS_AUTHKEY:-}" ]; then
   echo "studio-bringup: TS_AUTHKEY not set, skipping tailscale up"
 elif ts_status=$(tailscale status --json 2>/dev/null) && grep -qE '"BackendState":[[:space:]]*"Running"' <(printf '%s' "$ts_status"); then
   echo "studio-bringup: tailscale already up"
+  rm -f "$tailnet_marker" 2>/dev/null || true
+elif ts_up_err=$(tailscale up --ssh --authkey="$TS_AUTHKEY" --hostname="${STUDIO_ID:-studio}" 2>&1 >/dev/null); then
+  rm -f "$tailnet_marker" 2>/dev/null || true
 else
-  tailscale up --ssh --authkey="$TS_AUTHKEY" --hostname="${STUDIO_ID:-studio}"
+  ts_up_first="$(printf '%s\n' "$ts_up_err" | head -n1)"
+  echo "studio-bringup: tailscale-up FAILED (${ts_up_first}), continuing without tailnet" >&2
+  case "$ts_up_err" in
+    *"quota reached"*) ts_warning="tailnet: quota reached" ;;
+    *) ts_warning="tailnet: down" ;;
+  esac
+  { mkdir -p "$(dirname "$tailnet_marker")" && printf '%s\n' "$ts_warning" > "$tailnet_marker"; } 2>/dev/null || true
 fi
 # <<< tailscale-up <<<
 

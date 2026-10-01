@@ -100,6 +100,11 @@ describe("formatReady (cli/readiness-format.ts)", () => {
     expect(rendered).toBe("? check unreachable: timeout");
   });
 
+  it("issue #189: provisioned with a tailnet warning names it beside the verdict, never as bare", () => {
+    expect(formatReady({ kind: "provisioned", warning: "tailnet: quota reached", checkedAt: "2026-08-28T12:00:00.000Z" }))
+      .toBe("provisioned (tailnet: quota reached)");
+  });
+
   it("a multi-line/whitespace-heavy reason collapses to one line, same as the ERROR column's own convention", () => {
     const rendered = formatReady({ kind: "bare", reason: "line one\nline  two\ttabbed", checkedAt: "2026-08-28T12:00:00.000Z" });
     expect(rendered).toBe("bare: line one line two tabbed");

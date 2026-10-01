@@ -365,10 +365,20 @@ committed `vars` entry of the same name collides with a same-named secret at
 deploy time, so the running fleet keeps both as secrets exclusively.
 
 `TS_AUTHKEY` (Tailscale) is optional and enables reaching a studio over your
-tailnet. Use a **reusable, non-ephemeral** auth key. Never set it to a
-placeholder "to fill in later" — a bogus key makes `tailscale up` fail loudly
-and takes the whole studio bring-up down with it (`set -e`); leaving it unset
-is the safe, supported state.
+tailnet. Use a **reusable, ephemeral** auth key. Every studio container
+joins the tailnet as a new node, and destroy/recycle never removes it: with a
+non-ephemeral key, offline nodes pile up until the tailnet's device quota is
+full (issue #189). An ephemeral node is removed automatically once offline.
+Changing key type is an operator step — create the new key in the Tailscale
+admin console, then `scripts/deploy.sh secret put TS_AUTHKEY`. If the quota is
+already full, remove offline machines in the Tailscale admin console.
+
+A failed `tailscale up` (bogus key, full quota, tailnet outage) does NOT stop
+bring-up: the studio comes up without a tailnet, `bringup.log` records
+`tailscale-up FAILED (...)`, and `fleet ls` READY reads
+`provisioned (tailnet: quota reached)` or `provisioned (tailnet: down)`.
+`fleet attach` goes through the Worker and keeps working. Leaving the key
+unset is still the safe, supported state.
 
 **`FLEET_OPS_REPO`** (optional; not to be confused with `FLEET_OPS_DIR` above
 — that one is a local filesystem path `scripts/deploy.sh` reads on your own

@@ -107,6 +107,21 @@ describe("checkAndRecordReadiness (do.ts)", () => {
     expect((await storage.get(STATUS_KEY))?.readiness).toEqual({ kind: "provisioned", checkedAt: NOW_ISO });
   });
 
+  // Issue #189: bring-up survives a failed `tailscale up` and leaves a
+  // marker; the check prints it after PROVISIONED_OK. A tailnet-less studio
+  // is still provisioned, and says why it has no tailnet.
+  it("provisioned + tailnet marker line: records the warning on the provisioned verdict", async () => {
+    const storage = fakeStorage({ status: status() });
+    const deps = fakeSyncDeps(async () => ({ code: 0, stdout: `${PROVISIONED_OK}\ntailnet: quota reached\n`, stderr: "" }));
+    const recorded: StudioStatus[] = [];
+
+    await checkAndRecordReadiness(deps, storage, STUDIO_ID, async (s) => {
+      recorded.push(s);
+    });
+
+    expect(recorded[0].readiness).toEqual({ kind: "provisioned", warning: "tailnet: quota reached", checkedAt: NOW_ISO });
+  });
+
   it("bare: records {kind:'bare', reason, checkedAt} — the container's own words, verbatim", async () => {
     const storage = fakeStorage({ status: status() });
     const deps = fakeSyncDeps(bareWithNoLog("no git checkout at /workspace/websites"));

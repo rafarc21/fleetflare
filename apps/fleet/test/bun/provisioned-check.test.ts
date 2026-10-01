@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runSnippet } from "./exec-snippet";
 import { provisionedCheckCmd } from "../../src/studio/provision";
 
@@ -22,5 +25,32 @@ describe("provisionedCheckCmd, executed", () => {
   test("the harness variant also leaves the parent alive", () => {
     const r = runSnippet({ script: provisionedCheckCmd(ABSENT, "claude"), sourced: true });
     expect(r.parentAlive).toBe(true);
+  });
+
+  // Issue #189: bring-up writes .fleet/tailnet-down when `tailscale up`
+  // fails; the check must carry that line out so `fleet ls` can show it.
+  test("prints the tailnet-down marker after its verdict, parent alive", () => {
+    const ws = mkdtempSync(join(tmpdir(), "fleet-check-tailnet-"));
+    try {
+      mkdirSync(join(ws, ".fleet"));
+      writeFileSync(join(ws, ".fleet", "tailnet-down"), "tailnet: quota reached\n");
+      const r = runSnippet({ script: provisionedCheckCmd(ABSENT), sourced: true, env: { FLEET_WORKSPACE: ws } });
+      expect(r.stdout).toContain(`no git checkout at /workspace/${ABSENT}`);
+      expect(r.stdout).toContain("tailnet: quota reached");
+      expect(r.parentAlive).toBe(true);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test("no marker: prints nothing extra", () => {
+    const ws = mkdtempSync(join(tmpdir(), "fleet-check-tailnet-"));
+    try {
+      const r = runSnippet({ script: provisionedCheckCmd(ABSENT), sourced: true, env: { FLEET_WORKSPACE: ws } });
+      expect(r.stdout).not.toContain("tailnet:");
+      expect(r.parentAlive).toBe(true);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
   });
 });
