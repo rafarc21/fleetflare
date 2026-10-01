@@ -102,13 +102,13 @@ failover again on the very next tick that reads the fleet-wide limit map.
 
 ## CI
 
-GitHub Actions runs natively on this repository — two workflows, on every
-pull request and every push to `main`:
+GitHub Actions runs natively on this repository — three workflows:
 
 | Workflow | Trigger | What it runs |
 |---|---|---|
 | [`check`](../.github/workflows/fleet-check.yml) | PR/push touching `apps/fleet/**`, `skills/**`, `fleet/blueprint/**` or `scripts/**` | `bun install`, `bun run check` (types, all tsconfig projects), `bun run test` (vitest-pool-workers), `bun run bun-test` (container-level; the job installs tmux and Chromium first) |
 | [`english`](../.github/workflows/english-check.yml) | every PR/push, no path filter, so no file is exempt | `bun run apps/fleet/scripts/english-check.ts` |
+| [`one-way-door`](../.github/workflows/one-way-door.yml) | every PR, no path filter; no push trigger (there is no PR to label on push to `main`) | `apps/fleet/scripts/merge-danger.ts` against the PR's diff — see below |
 
 A PR whose diff touches none of `check`'s watched paths never triggers that
 workflow at all — no `check` run appears for it on that commit, unlike a path
@@ -119,6 +119,22 @@ one. Read a PR's status the normal way:
 gh pr checks <pr-number>
 gh api repos/<owner>/<repo>/commits/<sha>/check-runs
 ```
+
+### One-way-door classification
+
+Issue #161: a deterministic, path-based classifier that overrides an
+agent's own self-graded reversibility judgment on a PR (studio leads
+already self-assess reversible/irreversible before acting — this is a hard
+override on top of that, for CI). It runs on every PR, no path filter (a
+docs-only PR must still come back two-way), via its own workflow
+([`one-way-door`](../.github/workflows/one-way-door.yml)): diffs the PR
+against its base SHA, classifies the changed paths with
+`apps/fleet/scripts/merge-danger.ts`'s `classify()`, applies or removes the
+`one-way-door` PR label accordingly, and lists every matched path in the
+check's own step summary. See `ONE_WAY_GLOBS` in that script for the
+authoritative list of forced one-way-door paths and why each one is on it
+— not duplicated here, to avoid the table drifting out of sync with the
+code. The job itself always succeeds; it classifies, it does not gate.
 
 `apps/fleet/scripts/localci/` — a Mac-based daemon that ran the same two
 lanes and posted them as `local-ci/*` commit statuses — predates this native
