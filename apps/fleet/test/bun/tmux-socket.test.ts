@@ -38,11 +38,12 @@ const WORKER_TMUX_CMDS: [string, string][] = [
   ["provisionedCheckCmd", provisionedCheckCmd("websites")],
 ];
 
+// STUDIO_TMUX_SOCKET's own literal value ("fleet-studio") has real behavior
+// coverage already: test/bun/studio-tmux-socket.test.ts runs the REAL
+// container/studio-bringup.sh and studio-shell.sh against a real tmux and
+// hardcodes that same literal, proving the Worker and image sides agree —
+// not just re-asserting the constant against itself.
 describe("the builder's contract", () => {
-  test("the private socket name is one exported constant", () => {
-    expect(STUDIO_TMUX_SOCKET).toBe("fleet-studio");
-  });
-
   test.each(WORKER_TMUX_CMDS)("%s is wrapped by withStudioTmux and calls tmux only through it", (_name, cmd) => {
     expect(cmd.startsWith(withStudioTmux(""))).toBe(true);
     expect(cmd.slice(withStudioTmux("").length)).toContain(`${STUDIO_TMUX} `);
