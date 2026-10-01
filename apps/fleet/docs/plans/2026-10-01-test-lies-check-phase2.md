@@ -136,10 +136,20 @@ fleet-check sequence, skipped when no fleet path changed, and a nonzero
 exit from it fails the run) — neither touches docker, tmux, or `gh` for
 real.
 
-The dormant `.github/workflows/fleet-check.yml` got the equivalent `Test-lies
-check` step (`bun run test-lies-check`), next to its existing `Type check`
-step, purely so a human reading that file sees the real gate reflected
-there too — Actions itself stays disabled and this step runs nowhere.
+The dormant `.github/workflows/fleet-check.yml` was deliberately left
+untouched, not updated: pushing an edit to anything under
+`.github/workflows/` was rejected by GitHub itself ("refusing to allow a
+Personal Access Token to create or update workflow
+`.github/workflows/fleet-check.yml` without `workflow` scope") — this
+container's token lacks the `workflow` OAuth scope, which is a real
+permission boundary, not something to work around from here. The edit was
+drafted and verified locally, then reverted rather than left as an
+unpushable commit. Adding the equivalent `Test-lies check` step (`bun run
+test-lies-check`, next to the existing `Type check` step) is a follow-up
+for whoever has `workflow` scope — either a token with that scope, or
+applied by hand through the GitHub UI. Actions itself stays disabled
+either way; this is purely so a human reading that file sees the real
+gate reflected there too, once someone can push it.
 
 ## What changed, in one line
 
