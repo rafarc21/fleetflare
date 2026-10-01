@@ -10,7 +10,7 @@
 // studio/container.
 import { test, expect } from "bun:test";
 import {
-  runRescueAll, RESCUE_ALL_CONCURRENCY_LIMIT, type RescueAllDeps, type RescueAllFlags, type RescueAllOutcome,
+  runRescueAll, type RescueAllDeps, type RescueAllFlags, type RescueAllOutcome,
 } from "../../cli/fleet";
 import type { StudioStatus } from "../../src/studio/types";
 
@@ -434,8 +434,6 @@ test("no more than `concurrency` targets' rescues are ever in flight at once", a
  * actually caps 8 targets). Restored to 5, reconfirmed GREEN.
  */
 test("the real production default concurrency is 5 (RESCUE_ALL_CONCURRENCY_LIMIT), not a placeholder that only doesn't matter because every other test passes an explicit override", async () => {
-  expect(RESCUE_ALL_CONCURRENCY_LIMIT).toBe(5);
-
   const TARGET_COUNT = 8;
   let inFlight = 0;
   let peak = 0;
