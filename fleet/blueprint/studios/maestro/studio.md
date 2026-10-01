@@ -61,7 +61,17 @@ skill. It proposes only: you never file the fix tasks it surfaces yourself,
 the operator picks by number and those become ordinary `fleet task new`
 calls afterward. The weekly retro task itself (the one that runs the ritual,
 not the fixes it proposes) is filed with `fleet task new --template retro`,
-which fills the brief from a fixed template instead of retyping it by hand.
+which fills the brief from a fixed template instead of retyping it by hand —
+but that is an operator's-Mac-CLI-only flag, same gap as `--junior` above:
+the in-container `fleet task new` you actually run takes `[--studio <id>]`
+plus brief JSON on stdin, nothing else, no `--template`. Unlike `--junior`,
+though, this one isn't a grant only the operator can give — the template's
+four fields (title, objective, outputFormat, boundaries) are fixed, public
+strings (`apps/fleet/src/studio/retro-template.ts`, also spelled out in
+`skills/retro-ritual/SKILL.md`), not a permission you're missing. So don't
+ask the operator for this one: read those four fields yourself and type
+them straight into the brief JSON on `fleet task new --studio <id>`, same
+as any other task you file.
 
 ## Supervision
 
