@@ -513,10 +513,12 @@ if (import.meta.main) {
   }
   const fileCount = listTestFiles(REPO_ROOT).filter((p) => !(p in ALLOWLIST)).length;
   console.log(
-    `\ntest-lies-check (report-only): ${counts.tautological} tautological, ` +
+    `\ntest-lies-check: ${counts.tautological} tautological, ` +
     `${counts["source-reading"]} source-reading, ${counts["own-module-mock"]} own-module-mock ` +
     `across ${fileCount} test files`,
   );
-  // Phase 1 (#164): report-only — never fails CI. Phase 2 wires this in as a failing gate.
-  process.exit(0);
+  // Phase 2 (#174): report-only period is over — this is now a real failing gate.
+  // Phase 1 (#164) left this at process.exit(0) regardless of findings while the
+  // backlog of real findings was cleared; now that the count is 0, any new finding fails CI.
+  process.exit(findings.length > 0 ? 1 : 0);
 }
