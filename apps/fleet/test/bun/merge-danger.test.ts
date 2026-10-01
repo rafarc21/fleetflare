@@ -125,6 +125,50 @@ describe("classify — one glob class per forced one-way-door path", () => {
     expect(result.oneWay).toBe(true);
     expect(result.matched).toEqual(["apps/fleet/.dev.vars.example"]);
   });
+
+  // Board issue #160: 5 more forced one-way-door paths added on top of
+  // #161's original 12.
+  test("apps/fleet/src/studio/do.ts — the studio Durable Object", () => {
+    const changed = ["apps/fleet/src/studio/do.ts"];
+    const result = classify(changed);
+    expect(result.oneWay).toBe(true);
+    expect(result.matched).toEqual(["apps/fleet/src/studio/do.ts"]);
+  });
+
+  test("apps/fleet/src/studio/wake.ts — wakes a studio's Claude Code session", () => {
+    const changed = ["apps/fleet/src/studio/wake.ts"];
+    const result = classify(changed);
+    expect(result.oneWay).toBe(true);
+    expect(result.matched).toEqual(["apps/fleet/src/studio/wake.ts"]);
+  });
+
+  test("apps/fleet/src/studio/registry.ts — the studio registry", () => {
+    const changed = ["apps/fleet/src/studio/registry.ts"];
+    const result = classify(changed);
+    expect(result.oneWay).toBe(true);
+    expect(result.matched).toEqual(["apps/fleet/src/studio/registry.ts"]);
+  });
+
+  test("apps/fleet/src/studio/profile.ts — studio account/profile assignment", () => {
+    const changed = ["apps/fleet/src/studio/profile.ts"];
+    const result = classify(changed);
+    expect(result.oneWay).toBe(true);
+    expect(result.matched).toEqual(["apps/fleet/src/studio/profile.ts"]);
+  });
+
+  test("gates/** — the hook scripts gating lead writes, completion, session recovery", () => {
+    const changed = ["gates/lead-gate.sh"];
+    const result = classify(changed);
+    expect(result.oneWay).toBe(true);
+    expect(result.matched).toEqual(["gates/lead-gate.sh"]);
+  });
+
+  test("gates/** — two levels deep (gates is flat today; ** must still reach a nested subdir)", () => {
+    const changed = ["gates/sub/completion-gate.sh"];
+    const result = classify(changed);
+    expect(result.oneWay).toBe(true);
+    expect(result.matched).toEqual(["gates/sub/completion-gate.sh"]);
+  });
 });
 
 describe("classify — two-way-door cases", () => {
