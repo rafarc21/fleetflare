@@ -273,6 +273,45 @@ describe("findSourceReading — reading src/ as text and string-matching it", ()
       fx.cleanup();
     }
   });
+
+  // Board issue #174 part 2 — follow simple derivation chains, not just the
+  // directly captured variable. Mirrors the real archive-wiring.test.ts
+  // shape: src -> method (one hop: .indexOf/.slice) -> call (a second hop,
+  // chained off the FIRST derived variable, not off src directly).
+  test("flags a two-hop derivation chain: read -> derive once -> derive again -> assert", () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      'const methodStart = src.indexOf("shipTranscript");',
+      'const method = src.slice(methodStart, methodStart + 200);',
+      'const callStart = method.indexOf("runShipTickWithObservation(");',
+      'const call = method.slice(callStart, callStart + 80);',
+      'expect(call).toContain("doneRecords:");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("../../src/studio/do.ts");
+  });
+
+  test("does NOT flag a derivation chain that never reaches an assertion", () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      'const methodStart = src.indexOf("shipTranscript");',
+      'const method = src.slice(methodStart, methodStart + 200);',
+      'expect(methodStart).toBeGreaterThan(-1);',
+    ].join("\n");
+    expect(findSourceReading(text)).toEqual([]);
+  });
+
+  test("does NOT flag .split()/.slice() on a variable that was never tainted by a src/ read", () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      'const unrelated = "hello world, not derived from src at all";',
+      'const piece = unrelated.split(",")[0].slice(0, 5);',
+      'expect(piece).toContain("hello");',
+    ].join("\n");
+    expect(findSourceReading(text)).toEqual([]);
+  });
 });
 
 describe("findOwnModuleMocks — mocking this repo's own src/ defeats the test", () => {
@@ -341,9 +380,11 @@ describe("the repository itself", () => {
     }
   });
 
-  // Phase 1 is report-only (#164): no pass/fail threshold here, only proof
-  // the real scan runs clean against the real repo and counts are sane.
-  test("scans every real test file in the repo without throwing, and reports counts", async () => {
+  // Phase 2 (#174): the backlog is cleared and this IS a pass/fail
+  // threshold now — local-ci/fleet-check's test-lies-check lane depends on
+  // findings.length being 0 against the real repo, so this test pins that
+  // directly, not just that the scan runs without throwing.
+  test("scans every real test file in the repo without throwing, and finds nothing", async () => {
     const findings = await scanRepo();
     const byKind: Record<string, number> = {};
     for (const f of findings) byKind[f.kind] = (byKind[f.kind] ?? 0) + 1;
@@ -353,6 +394,7 @@ describe("the repository itself", () => {
       expect(typeof f.path).toBe("string");
       expect(typeof f.line).toBe("number");
     }
+    expect(findings.length).toBe(0);
   }, 30_000);
 
   // The ALLOWLIST entry for this file is load-bearing, not decorative: its
@@ -366,4 +408,59 @@ describe("the repository itself", () => {
     const findings = await scanRepo();
     expect(findings.some((f) => f.path === "apps/fleet/test/bun/test-lies-check.test.ts")).toBe(false);
   }, 30_000);
+});
+
+// Phase 2 (#174): the CLI's actual exit-code contract — what
+// local-ci/fleet-check's test-lies-check lane depends on — pinned directly
+// as a repeatable test, not just proven once by hand during the Phase 2 flip.
+describe("the CLI exit code (#174) — Phase 2's real failing-gate contract", () => {
+  const SCRIPT = join(import.meta.dir, "../../scripts/test-lies-check.ts");
+
+  test("the real repo today: no findings, exit 0", () => {
+    const p = Bun.spawnSync([process.execPath, SCRIPT]);
+    expect(p.stdout.toString()).toContain("0 tautological, 0 source-reading, 0 own-module-mock");
+    expect(p.exitCode).toBe(0);
+  }, 30_000);
+
+  // A synthetic repo, not a mutation of a real tracked file: a throwaway
+  // directory shaped like apps/fleet/scripts|test|src/ so a real COPY of the
+  // script (REPO_ROOT is computed from import.meta.dir at run time, three
+  // levels up from scripts/) resolves its own REPO_ROOT to the throwaway
+  // root, scans it for real, and actually exits through the CLI block.
+  test("a synthetic repo with one injected tautological finding: exit 1, the finding listed", () => {
+    const root = mkdtempSync(join(tmpdir(), "test-lies-check-cli-"));
+    try {
+      const scriptsDir = join(root, "apps/fleet/scripts");
+      const testDir = join(root, "apps/fleet/test");
+      const srcDir = join(root, "apps/fleet/src");
+      mkdirSync(scriptsDir, { recursive: true });
+      mkdirSync(testDir, { recursive: true });
+      mkdirSync(srcDir, { recursive: true });
+      const copy = join(scriptsDir, "test-lies-check.ts");
+      writeFileSync(copy, readFileSync(SCRIPT, "utf8"));
+      writeFileSync(join(srcDir, "bad.ts"), "export const BAD_CONST = 42;\n");
+      writeFileSync(
+        join(testDir, "bad.test.ts"),
+        [
+          'import { BAD_CONST } from "../src/bad";',
+          "",
+          "test('x', () => {",
+          "  expect(BAD_CONST).toBe(42);",
+          "});",
+          "",
+        ].join("\n"),
+      );
+      // git ls-files (listTestFiles) needs these tracked in the index — no
+      // commit required, `git add` alone is enough.
+      Bun.spawnSync(["git", "init", "-q"], { cwd: root });
+      Bun.spawnSync(["git", "add", "-A"], { cwd: root });
+      const p = Bun.spawnSync([process.execPath, copy]);
+      const out = p.stdout.toString();
+      expect(out).toContain("[tautological] BAD_CONST mirrors");
+      expect(out).toContain("1 tautological, 0 source-reading, 0 own-module-mock");
+      expect(p.exitCode).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

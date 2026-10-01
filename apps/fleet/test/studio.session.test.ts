@@ -25,7 +25,7 @@ import {
 } from "../src/studio/do";
 import {
   sessionLatestKey, sessionDailyKey, SESSION_SINGLE_READ_MAX, SESSION_SPLIT_PART,
-  SESSION_TOTAL_MAX, SESSION_DAILY_KEEPERS, SESSION_SUBAGENT_RAW_BUDGET,
+  SESSION_TOTAL_MAX, SESSION_SUBAGENT_RAW_BUDGET,
   SESSION_SUBAGENT_LIVE_WINDOW_SECONDS, SESSION_SUBAGENT_WATERMARK_LOOKBACK_SECONDS,
 } from "../src/studio/archive";
 import { getObserved, OBSERVED_KEY, type ObservedStorage } from "../src/studio/observed";
@@ -377,8 +377,8 @@ describe("tarAndStatCmd / singleReadCmd / splitCmd / partReadCmd — exact shell
     expect(SESSION_SUBAGENT_LIVE_WINDOW_SECONDS).toBeGreaterThanOrEqual(600);
     // ... and the 24h lookback caps how far back a watermark can hold the
     // tree, so a long outage sheds old files instead of blowing the budget.
-    expect(cmd).toContain(`-v d=${SESSION_SUBAGENT_WATERMARK_LOOKBACK_SECONDS} `);
-    expect(SESSION_SUBAGENT_WATERMARK_LOOKBACK_SECONDS).toBe(86_400);
+    // The literal, not the import — ties this to the real emitted command.
+    expect(cmd).toContain("-v d=86400 ");
     // `NR > 1` — the newest subagent transcript is never excluded, so a single
     // transcript larger than the whole budget still ships.
     expect(cmd).toContain("NR > 1 && t > b");
@@ -814,7 +814,6 @@ describe("syncSessionTick — daily-once marker", () => {
 
 describe("syncSessionTick — prune keeps newest SESSION_DAILY_KEEPERS", () => {
   it("deletes the oldest excess daily keys, keeping the newest 7", async () => {
-    expect(SESSION_DAILY_KEEPERS).toBe(7);
     const dates = [
       "2026-08-08", "2026-08-09", "2026-08-10", "2026-08-11",
       "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-15", "2026-08-16",

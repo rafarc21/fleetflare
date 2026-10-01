@@ -17,10 +17,13 @@
  * `export const A = 1, B = 2;` shape, etc.) is a silent SKIP, never a flag.
  * A noisy check gets disabled, which is worse than no check.
  *
- * Phase 1 is report-only: `scanRepo()` runs, the CLI prints findings and
- * counts, and always exits 0 regardless of what it finds. Phase 2 (wiring
- * this in as a failing gate) is a separate, future piece of work — see
- * docs/plans/2026-10-01-test-lies-check-phase1.md.
+ * Phase 1 (docs/plans/2026-10-01-test-lies-check-phase1.md) was report-only:
+ * `scanRepo()` ran, the CLI printed findings and counts, and always exited 0
+ * regardless of what it found — the point was to get real, honest counts
+ * before committing to a threshold. Phase 2 (#174,
+ * docs/plans/2026-10-01-test-lies-check-phase2.md) cleared that backlog to
+ * 0 and flipped this into a real gate: the CLI now exits 1 on any finding,
+ * 0 on none, and is wired into `local-ci/fleet-check`.
  *
  * Escape hatch for a single line: end it with `test-lies-check: allow`. For
  * a whole deliberate file (this check's own test, whose fixtures are string
@@ -294,9 +297,80 @@ function pathLiteralOf(argText: string): string | null {
   return null;
 }
 
+/** Derivation methods the captured-variable case follows past the directly
+ *  captured variable, repo-idiom-driven: the exact four the board issue
+ *  names (`.split`/`.indexOf`/`.slice`/`.match`), plus `.substring`/
+ *  `.replace` (the same shape, reasonable string-derivation siblings) and
+ *  `.map` — needed for the real `src.split(...).slice(...).map(...)` idiom
+ *  (test/bun/wake-gate-wiring.test.ts), which slices each piece again
+ *  inside the callback. Deliberately NOT broader than this: a method here
+ *  only ever matters when chained directly off an already-tainted variable,
+ *  so widening this list only risks following an unrelated derivation, not
+ *  missing one of the detector's own false positives. */
+const DERIVE_METHODS = ["split", "indexOf", "slice", "match", "substring", "replace", "map"];
+
+/** Bounds the fixed-point propagation below. Five hops comfortably covers
+ *  every real chain found in the repo (the deepest is two hops: raw text ->
+ *  one `.indexOf`/`.slice`-derived body -> a second body sliced out of the
+ *  first) with headroom to spare, while still keeping a single scan O(n). */
+const MAX_DERIVE_HOPS = 5;
+
+/** Starting from `seedVar` (the variable directly assigned the read call's
+ *  result), follows simple derivation forward through the rest of the file
+ *  (text at and after `fromIndex`, i.e. after the read call itself) to a
+ *  fixed point: a `const`/`let`/`var X = ...;` statement taints `X` when its
+ *  right-hand side is a call chained directly off an already-tainted
+ *  variable through one of DERIVE_METHODS (e.g. `body.slice(...)` once
+ *  `body` is tainted); a `for (const X of Y)` taints `X` when `Y` is tainted
+ *  (the wake-gate-wiring idiom: `.map()`'s per-item pieces, iterated).
+ *
+ *  Same conservative, file-scoped (not block-scoped) limitation as the
+ *  original single-variable scan: this is plain text-pattern matching, not
+ *  real parsing, so a same-named variable in an unrelated scope could in
+ *  principle be mistaken for a derived one. Accepted for the same reason the
+ *  original single-hop scan accepted it — narrow and real-case-driven over
+ *  broad and noisy. */
+function deriveTaintedVars(text: string, seedVar: string, fromIndex: number): Set<string> {
+  const tainted = new Set<string>([seedVar]);
+  const declRe = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+);/g;
+  const forOfRe = /\bfor\s*\(\s*(?:const|let)\s+([A-Za-z_$][\w$]*)\s+of\s+([A-Za-z_$][\w$]*)\s*\)/g;
+  const chainRe = new RegExp(`^\\s*([A-Za-z_$][\\w$]*)\\s*\\.\\s*(?:${DERIVE_METHODS.join("|")})\\s*\\(`);
+  for (let hop = 0; hop < MAX_DERIVE_HOPS; hop++) {
+    let addedAny = false;
+
+    declRe.lastIndex = fromIndex;
+    let m: RegExpExecArray | null;
+    while ((m = declRe.exec(text))) {
+      const [, varName, rhs] = m;
+      if (tainted.has(varName)) continue;
+      const chain = rhs.match(chainRe);
+      if (chain && tainted.has(chain[1])) {
+        tainted.add(varName);
+        addedAny = true;
+      }
+    }
+
+    forOfRe.lastIndex = fromIndex;
+    while ((m = forOfRe.exec(text))) {
+      const [, loopVar, iterVar] = m;
+      if (tainted.has(loopVar)) continue;
+      if (tainted.has(iterVar)) {
+        tainted.add(loopVar);
+        addedAny = true;
+      }
+    }
+
+    if (!addedAny) break;
+  }
+  return tainted;
+}
+
 /** Detector 2: a `src/` file read as text, then string-matched instead of
- *  exercised. See the file header for the algorithm and its known,
- *  documented limitation (the captured-variable scan is file-scoped). */
+ *  exercised — including through a simple derivation chain (board issue
+ *  #174 part 2): capture -> `.split`/`.indexOf`/`.slice`/`.match`/
+ *  `.substring`/`.replace`/`.map`, repeated up to a fixed point, -> assert.
+ *  See the file header for the overall algorithm and its known, documented
+ *  limitations (the whole-chain scan is file-scoped, not block-scoped). */
 export function findSourceReading(text: string): Hit[] {
   const hits: Hit[] = [];
   const calls = [...findCalls(text, ["readFileSync", "readFile"]), ...findBunFileTextCalls(text)];
@@ -317,18 +391,30 @@ export function findSourceReading(text: string): Hit[] {
 
     // Captured-variable case: const/let/plain assignment, then a forward
     // (file-scoped, not block-scoped — documented limitation) scan for a
-    // substring-style assertion against that variable.
+    // substring-style assertion against that variable, or any variable
+    // simply derived from it (deriveTaintedVars above).
     const beforeWindow = text.slice(Math.max(0, call.start - 80), call.start);
     const assignMatch = beforeWindow.match(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?$/)
       ?? beforeWindow.match(/\b([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?$/);
     if (!assignMatch) continue;
     const varName = assignMatch[1];
-    const esc = escapeRegex(varName);
     const rest = text.slice(call.end + 1);
-    const direct = new RegExp(`\\b${esc}\\s*\\.(?:toContain|toMatch|includes)\\(`);
-    const viaExpect = new RegExp(`expect\\(\\s*${esc}\\s*\\)[\\s\\S]{0,80}?\\.(?:toContain|toMatch)\\(`);
-    if (direct.test(rest) || viaExpect.test(rest)) {
-      hits.push({ line: call.line, kind: "source-reading", detail: `${pathLiteral} read as text, then string-matched via ${varName}` });
+    const tainted = deriveTaintedVars(text, varName, call.end + 1);
+    for (const candidate of tainted) {
+      const esc = escapeRegex(candidate);
+      const direct = new RegExp(`\\b${esc}\\s*\\.(?:toContain|toMatch|includes)\\(`);
+      // `[^;]` (not `[\s\S]`), so the lookahead can't cross a statement
+      // boundary into a DIFFERENT expect(...) call's own .toContain/.toMatch
+      // — real when the tainted set has multiple candidates in play, e.g.
+      // `expect(methodStart).toBeGreaterThan(-1); expect(method).toContain(
+      // ...)` back to back (test/bun/archive-wiring.test.ts): without this,
+      // the unrelated `method` match would misattribute to `methodStart`.
+      const viaExpect = new RegExp(`expect\\(\\s*${esc}\\s*\\)[^;]{0,80}?\\.(?:toContain|toMatch)\\(`);
+      if (direct.test(rest) || viaExpect.test(rest)) {
+        const via = candidate === varName ? candidate : `${candidate} (derived from ${varName})`;
+        hits.push({ line: call.line, kind: "source-reading", detail: `${pathLiteral} read as text, then string-matched via ${via}` });
+        break;
+      }
     }
   }
   return hits;
@@ -430,10 +516,12 @@ if (import.meta.main) {
   }
   const fileCount = listTestFiles(REPO_ROOT).filter((p) => !(p in ALLOWLIST)).length;
   console.log(
-    `\ntest-lies-check (report-only): ${counts.tautological} tautological, ` +
+    `\ntest-lies-check: ${counts.tautological} tautological, ` +
     `${counts["source-reading"]} source-reading, ${counts["own-module-mock"]} own-module-mock ` +
     `across ${fileCount} test files`,
   );
-  // Phase 1 (#164): report-only — never fails CI. Phase 2 wires this in as a failing gate.
-  process.exit(0);
+  // Phase 2 (#174): report-only period is over — this is now a real failing gate.
+  // Phase 1 (#164) left this at process.exit(0) regardless of findings while the
+  // backlog of real findings was cleared; now that the count is 0, any new finding fails CI.
+  process.exit(findings.length > 0 ? 1 : 0);
 }

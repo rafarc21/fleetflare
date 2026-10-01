@@ -7,7 +7,7 @@ import { join } from "node:path";
 // re-parses seen text (#127) or refuses a wake the switch already explained.
 // A source pin: StudioDO cannot be constructed under vitest-pool-workers.
 describe("do.ts runGatedWake call sites", () => {
-  const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");
+  const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8"); // test-lies-check: allow — StudioDO cannot be constructed under vitest-pool-workers (see the comment above), so this file's own documented source pin
   const calls = src.split("runGatedWake(").slice(1).map((rest) => rest.slice(0, rest.indexOf("prompt")));
 
   test("there are exactly 3", () => {

@@ -37,8 +37,11 @@ describe("resolveRescueTarget", () => {
       return "ghs_fake";
     }, PUBLIC);
     expect(minted).toEqual(["acme/rescue-vault"]);
-    expect(t).toEqual({ remoteUrl: "https://github.com/acme/rescue-vault.git", env: { [RESCUE_TOKEN_ENV]: "ghs_fake" } });
-    expect(RESCUE_TOKEN_ENV).toBe("FLEET_RESCUE_TOKEN");
+    // The literal env var name, not RESCUE_TOKEN_ENV's own computed key —
+    // rescue.ts's shell credential helper (test/bun/rescue-push.test.ts's
+    // "FLEET_RESCUE_TOKEN set/unset" coverage) reads this exact name from
+    // the exec env, so a drift here is the real regression.
+    expect(t).toEqual({ remoteUrl: "https://github.com/acme/rescue-vault.git", env: { FLEET_RESCUE_TOKEN: "ghs_fake" } });
   });
 
   test("unset: origin (empty target), and says loudly the origin rescue is leak-gated", async () => {

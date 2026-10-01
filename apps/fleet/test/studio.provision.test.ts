@@ -26,6 +26,7 @@ import { ghBlockCmd, leakGateInstallCmd } from "../src/studio/gh-wrapper";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { memoryCloneCmd, MEMORY_TOKEN_ENV } from "../src/memory/store";
+import { MEMORY_INDEX_PATH } from "../src/memory/index-file";
 import {
   LEAK_DENYLIST_PATH, LEAK_GATE_OFF, LEAK_GATE_ON, OPS_DENYLIST_PATH, denylistFileContent,
 } from "../src/leak-gate";
@@ -500,6 +501,25 @@ describe("runProvision — work repo vs fleet repo (dynamic repo selection)", ()
     expect(clone).toBeDefined();
     expect(clone!.env).toEqual({ [MEMORY_TOKEN_ENV]: "fake-installation-token" });
     expect(calls.some((c) => c.cmd.includes("fake-installation-token"))).toBe(false);
+  });
+
+  // #341: the memory INDEX (distinct from the file clone above) is read from
+  // the store's own default branch — MEMORY_REF's real consumer. Hardcodes
+  // the literal "HEAD" (not the MEMORY_REF import) so a drift in either the
+  // constant or resolveMemoryIndex's own wiring to it is caught.
+  it("memory store set: the index is fetched at the store's default branch (HEAD)", async () => {
+    const refs: string[] = [];
+    const base = blueprintFetch([]);
+    const fetchBlueprintFile: ProvisionDeps["fetchBlueprintFile"] = vi.fn(async (repo, path, ref) => {
+      if (path === MEMORY_INDEX_PATH) {
+        refs.push(ref);
+        throw notFound(path, ref);
+      }
+      return base(repo, path, ref);
+    });
+    const deps: ProvisionDeps = { ...fakeDeps([], fetchBlueprintFile), memoryRepo: "o/fleet-memory" };
+    await provisionWithStorage(deps, fakeStorage(), { repo: "websites", role: "scratch" }, REPO_SLUG);
+    expect(refs).toEqual(["HEAD"]);
   });
 
   it("memory store unset: no memory clone at all", async () => {

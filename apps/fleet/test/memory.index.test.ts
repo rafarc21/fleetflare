@@ -1,14 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
-  MEMORY_DIR, MEMORY_INDEX_PATH, MEMORY_ARCHIVE_DIR,
+  MEMORY_INDEX_PATH, MEMORY_ARCHIVE_DIR,
   parseMemoryIndex, renderMemoryIndex, renderIndexLine,
   archivePathFor, harvestDateOf, indexEntryFromFile,
   type IndexEntry,
 } from "../src/memory/index-file";
 
 describe("memory paths", () => {
+  // MEMORY_DIR's real behavior coverage: archivePathFor below already pins
+  // the real "fleet/memory/" literal against a real consumer. These two
+  // assertions exercise the TEMPLATE concatenation (`${MEMORY_DIR}/INDEX.md`,
+  // `${MEMORY_DIR}/archive`), not a re-declaration of MEMORY_DIR itself.
   it("index and archive live under fleet/memory/", () => {
-    expect(MEMORY_DIR).toBe("fleet/memory");
     expect(MEMORY_INDEX_PATH).toBe("fleet/memory/INDEX.md");
     expect(MEMORY_ARCHIVE_DIR).toBe("fleet/memory/archive");
   });

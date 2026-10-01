@@ -665,8 +665,9 @@ describe("provision + credential (do.ts's real provision() shape)", () => {
     expect(calls[6]).toBe("test -d /workspace/websites/.git");
 
     // The recurring refresh got scheduled, with the brief's exact interval.
+    // REFRESH_SECONDS's real do.ts wiring is pinned in the "StudioDO wiring
+    // (source-pinned)" describe block below (armTicks/refreshToken rearm).
     expect(scheduler.active).toEqual([{ delaySeconds: 3000, name: "refreshToken" }]);
-    expect(REFRESH_SECONDS).toBe(3000);
 
     // The credential-writing command (token-bearing) is never persisted:
     // not in DO storage, not in the D1-backed registry row.
@@ -1240,6 +1241,18 @@ describe("StudioDO wiring (source-pinned — the class cannot be constructed her
 
   it("checkNow() runs the same recorded readiness check the syncSession tick runs", () => {
     expect(checkNowBody()).toContain("checkAndRecordReadiness(");
+  });
+
+  // REFRESH_SECONDS's real consumer is do.ts, unreachable by import (the DO
+  // cannot be constructed here) — pins the symbol itself at both rearm
+  // sites (armTicks' initial arm, refreshToken()'s own reschedule), so a
+  // future edit that hardcodes a different interval at either site, or
+  // drops the constant from one of them, breaks this. StudioDO cannot be
+  // constructed under vitest-pool-workers; source-pinning is this repo's
+  // established compromise, see studio.account-launched.test.ts.
+  it("rearms refreshToken with REFRESH_SECONDS at both call sites (armTicks, refreshToken's own reschedule)", () => {
+    const sites = src.split("\n").filter((l) => l.includes('this.rearm("refreshToken", REFRESH_SECONDS)'));
+    expect(sites.length).toBe(2); // test-lies-check: allow — source-pinning, see comment above
   });
 });
 

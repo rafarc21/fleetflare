@@ -70,6 +70,7 @@ beforeEach(() => {
     "bun",
     `case "$*" in
        install|"run check") exit 0 ;;
+       "run test-lies-check") exit \${STUB_TEST_LIES_FAILS:-0} ;;
        "run test"*) for a in "$@"; do case "$a" in --outputFile=*) f="\${a#--outputFile=}";; esac; done
                     echo '{"numPassedTests":5,"numFailedTests":0,"numPendingTests":0,"testResults":[]}' > "$f"; exit 0 ;;
        *english-check.ts) exit 0 ;;
@@ -270,6 +271,35 @@ describe("localci.sh", () => {
     const r = run("7");
     expect(r.code).toBe(1);
     expect(posts()[2]).toBe("local-ci/fleet-check=failure");
+  });
+
+  // #174: test-lies-check is a fleet-check lane (install/check/vitest's own
+  // scope), never the separate english() lane above it.
+  test("test-lies-check runs as part of the fleet-check sequence, never inside the english lane", () => {
+    openPr(7, "apps/fleet/b.txt", "x");
+    const r = run("7");
+    expect(r.code).toBe(0);
+    const log = readFileSync(calls, "utf8");
+    expect(log).toContain("bun run test-lies-check");
+    // Its invocation comes after english's own call, i.e. inside the fleet
+    // scope (cd "$F") that english-check.ts never runs in.
+    expect(log.indexOf("bun run apps/fleet/scripts/english-check.ts")).toBeLessThan(
+      log.indexOf("bun run test-lies-check"),
+    );
+  });
+
+  test("no fleet path touched: test-lies-check is skipped along with the rest of fleet-check", () => {
+    openPr(7, "docs/e.md", "x");
+    expect(run("7").code).toBe(0);
+    expect(readFileSync(calls, "utf8")).not.toContain("bun run test-lies-check");
+  });
+
+  test("red test-lies-check lane → fleet-check failure, exit 1, same as any other lane going red", () => {
+    openPr(7, "apps/fleet/b.txt", "x");
+    const r = run("7", [], { STUB_TEST_LIES_FAILS: "1" });
+    expect(r.code).toBe(1);
+    expect(posts()[2]).toBe("local-ci/fleet-check=failure");
+    expect(readFileSync(calls, "utf8")).toContain("test-lies-check FAILED");
   });
 
   test("red only in a known-flaky file: that file reruns alone once, and a green rerun is success", () => {

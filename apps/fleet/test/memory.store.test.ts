@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { env } from "cloudflare:test";
-import { resolveMemoryRepo, MEMORY_REF, MEMORY_CLONE_DIR, MEMORY_TOKEN_ENV, memoryCloneCmd } from "../src/memory/store";
+import { resolveMemoryRepo, MEMORY_CLONE_DIR, MEMORY_TOKEN_ENV, memoryCloneCmd } from "../src/memory/store";
 import { githubMemoryDeps } from "../src/memory/routes";
 import type { Env } from "../src/env";
 
@@ -34,18 +34,25 @@ describe("resolveMemoryRepo", () => {
     }
   });
 
-  it("the store is read at its default branch", () => {
-    expect(MEMORY_REF).toBe("HEAD");
-  });
+  // MEMORY_REF's real behavior coverage: provision.ts's resolveMemoryIndex is
+  // its only real consumer — test/studio.provision.test.ts's "the index is
+  // fetched at the store's default branch (HEAD)" test hardcodes this exact
+  // literal against the real fetchBlueprintFile call.
 });
 
 describe("memoryCloneCmd", () => {
   const cmd = memoryCloneCmd("rafarc21/fleet-memory");
 
   it("clones the store into MEMORY_CLONE_DIR, swapped in whole", () => {
-    expect(MEMORY_CLONE_DIR).toBe("/opt/memory");
     expect(cmd).toContain("https://github.com/rafarc21/fleet-memory.git");
     expect(cmd).toContain(MEMORY_CLONE_DIR);
+  });
+
+  // MEMORY_CLONE_DIR's real behavior coverage: the HARDCODED literal, not
+  // the import, so a drift between the constant and memoryCloneCmd's own
+  // default `dir` is caught — not just a re-assertion of the constant.
+  it("with no dir override, the default clone target is the literal /opt/memory", () => {
+    expect(memoryCloneCmd("rafarc21/fleet-memory")).toContain("d='/opt/memory'");
   });
 
   it("the token rides the exec env by NAME, never the command text", () => {

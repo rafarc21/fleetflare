@@ -4,8 +4,9 @@
 #   localci.sh <pr-number|sha> [--dry-run] [--native]
 #
 # Tested tree = PR head merged onto origin/main (git merge-tree), checked out
-# as a detached worktree. Mac lanes: bun install, bun run check, vitest,
-# english-check. Linux lane: bun run bun-test in docker (tmux + chromium).
+# as a detached worktree. Mac lanes: bun install, bun run check,
+# test-lies-check (#174), vitest, english-check. Linux lane: bun run bun-test
+# in docker (tmux + chromium).
 # Posts two commit statuses on the PR head: local-ci/fleet-check and
 # local-ci/english — pending first, then success/failure/error. --dry-run
 # prints the statuses instead of posting them.
@@ -125,6 +126,10 @@ if [ "${1:-}" = "--lanes" ]; then
   cd "$F" || exit 2
   lane install bun install
   lane check bun run check
+  # #174: a real failing gate now the tautological/source-reading/own-module-
+  # mock backlog is 0 — a test-quality check, so it feeds fleet-check, not
+  # the separate english() lane above.
+  lane test-lies-check bun run test-lies-check
   lane vitest bun run test --reporter=default --reporter=json "--outputFile=$RUN/vitest.json"
   linux() { # linux <name> <command>: in docker, or on this host when IMAGE=native
     if [ "$IMAGE" = native ]; then

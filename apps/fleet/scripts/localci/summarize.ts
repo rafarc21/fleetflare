@@ -193,7 +193,7 @@ export interface Result {
   pr?: string;
   base?: string;
   tree?: string;
-  lanes: { install?: boolean; check?: boolean; vitest?: Lane; bun?: Lane };
+  lanes: { install?: boolean; check?: boolean; testLiesCheck?: boolean; vitest?: Lane; bun?: Lane };
   statuses: Status[];
 }
 
@@ -238,7 +238,7 @@ function verdict(files: Record<string, string>): Result {
     };
   }
 
-  const fleetError = laneError(files, ["install", "check", "vitest", "vitest-rerun", "linux", "linux-rerun"]);
+  const fleetError = laneError(files, ["install", "check", "test-lies-check", "vitest", "vitest-rerun", "linux", "linux-rerun"]);
   if (fleetError) {
     return { ...base, lanes: {}, statuses: [{ context: FLEET, state: "error", description: clip(fleetError) }, english] };
   }
@@ -254,11 +254,13 @@ function verdict(files: Record<string, string>): Result {
   }
   const install = exitOk(files["install.exit"]);
   const check = exitOk(files["check.exit"]);
+  const testLiesCheck = exitOk(files["test-lies-check.exit"]);
 
   const parts: string[] = [];
   const count = (label: string, l: Lane) => `${label} ${l.pass}/${l.pass + l.fail}`;
   if (!install) parts.push("bun install FAILED");
   parts.push(check ? "tsc ok" : "tsc FAILED");
+  parts.push(testLiesCheck ? "test-lies-check ok" : "test-lies-check FAILED");
   parts.push(count("vitest", vitest), count("bun", bun));
   for (const [label, l] of [["vitest", vitest], ["bun", bun]] as const) {
     if (l.rerun?.ok) parts.push(`flaky rerun ok: ${l.rerun.files.map(short).join(",")}`);
@@ -268,9 +270,9 @@ function verdict(files: Record<string, string>): Result {
       if (l.rerun) parts.push("flaky rerun failed");
     }
   }
-  const ok = install && check && vitest.ok && bun.ok;
+  const ok = install && check && testLiesCheck && vitest.ok && bun.ok;
   const fleet: Status = { context: FLEET, state: ok ? "success" : "failure", description: clip(parts.join(" · ")) };
-  return { ...base, lanes: { install, check, vitest, bun }, statuses: [fleet, english] };
+  return { ...base, lanes: { install, check, testLiesCheck, vitest, bun }, statuses: [fleet, english] };
 }
 
 function readDir(dir: string): Record<string, string> {
