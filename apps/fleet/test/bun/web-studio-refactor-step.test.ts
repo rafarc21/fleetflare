@@ -18,3 +18,13 @@ test("refactor step still respects push discipline and the one-heavy-gate-at-a-t
   expect(STUDIO.toLowerCase()).toContain("push discipline");
   expect(STUDIO.toLowerCase()).toMatch(/one.heavy.gate/);
 });
+
+test("review rounds cap at 2; round-2 overflow is filed as a board task, not looped forever (#167)", () => {
+  expect(STUDIO).toMatch(/cap.*2|2 rounds|round 2/i);
+  expect(STUDIO).toContain("fleet task new");
+  expect(STUDIO).toMatch(/no round 3/i);
+});
+
+test("overflow findings still let the PR proceed, not block forever", () => {
+  expect(STUDIO).toMatch(/proceed/i);
+});

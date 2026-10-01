@@ -57,3 +57,10 @@ describe("code-reviewer blueprint — read-only git (#166)", () => {
     expect(raw).toMatch(/git show/);
   });
 });
+
+describe("code-reviewer blueprint — deny --output/-o on git reads (#167)", () => {
+  test("prompt explicitly forbids --output/-o on git diff/log/show", () => {
+    expect(raw).toMatch(/--output/);
+    expect(raw).toMatch(/-o\b/);
+  });
+});
