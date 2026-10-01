@@ -273,6 +273,45 @@ describe("findSourceReading — reading src/ as text and string-matching it", ()
       fx.cleanup();
     }
   });
+
+  // Board issue #174 part 2 — follow simple derivation chains, not just the
+  // directly captured variable. Mirrors the real archive-wiring.test.ts
+  // shape: src -> method (one hop: .indexOf/.slice) -> call (a second hop,
+  // chained off the FIRST derived variable, not off src directly).
+  test("flags a two-hop derivation chain: read -> derive once -> derive again -> assert", () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      'const methodStart = src.indexOf("shipTranscript");',
+      'const method = src.slice(methodStart, methodStart + 200);',
+      'const callStart = method.indexOf("runShipTickWithObservation(");',
+      'const call = method.slice(callStart, callStart + 80);',
+      'expect(call).toContain("doneRecords:");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("../../src/studio/do.ts");
+  });
+
+  test("does NOT flag a derivation chain that never reaches an assertion", () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      'const methodStart = src.indexOf("shipTranscript");',
+      'const method = src.slice(methodStart, methodStart + 200);',
+      'expect(methodStart).toBeGreaterThan(-1);',
+    ].join("\n");
+    expect(findSourceReading(text)).toEqual([]);
+  });
+
+  test("does NOT flag .split()/.slice() on a variable that was never tainted by a src/ read", () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      'const unrelated = "hello world, not derived from src at all";',
+      'const piece = unrelated.split(",")[0].slice(0, 5);',
+      'expect(piece).toContain("hello");',
+    ].join("\n");
+    expect(findSourceReading(text)).toEqual([]);
+  });
 });
 
 describe("findOwnModuleMocks — mocking this repo's own src/ defeats the test", () => {
