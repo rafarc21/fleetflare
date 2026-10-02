@@ -30,11 +30,13 @@
 # human operator's own ad-hoc outer wrap), self-wrapping here deadlocks
 # against our own ancestor, which is itself waiting on us. Before
 # self-wrapping, `ancestor_holds_lock` walks this process's own ancestor
-# chain (portable `ps -o ppid=`/`ps -o command=`, same idiom localci.sh's
-# sweep_procs Linux branch already uses) for a `lockf ... "$LOCK"` command
-# line; if found, the gate is already held further up OUR OWN process
-# tree, so skip the self-wrap entirely (behave as if the caller had set
-# IMAGE_REPRO_LOCKED=1). A fixed timeout can't make this call: a stranger
+# chain (portable `ps -ww -o ppid=`/`ps -ww -o command=` -- `-ww` for
+# unlimited width, same fix localci.sh's macOS `sweep_procs` branch already
+# needed for BSD ps's command field truncating to terminal width without it)
+# for a `lockf ... "$LOCK"` command line; if found, the gate is already
+# held further up OUR OWN process tree, so skip the self-wrap entirely
+# (behave as if the caller had set IMAGE_REPRO_LOCKED=1). A fixed timeout
+# can't make this call: a stranger
 # process (not our ancestor) can legitimately hold the lock for a long
 # time, and "still locked after N seconds" looks the same whether it's a
 # deadlock on our own ancestor or someone else's long legitimate job.
@@ -50,9 +52,9 @@ LOCK=/tmp/fleetflare-gate.lock
 ancestor_holds_lock() {
   local pid=$$ ppid cmd depth=0
   while [ "$pid" != "1" ] && [ "$depth" -lt 50 ]; do
-    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    ppid=$(ps -ww -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -z "$ppid" ] && return 1
-    cmd=$(ps -o command= -p "$ppid" 2>/dev/null)
+    cmd=$(ps -ww -o command= -p "$ppid" 2>/dev/null)
     case "$cmd" in *lockf*"$LOCK"*) return 0 ;; esac
     pid=$ppid
     depth=$((depth + 1))

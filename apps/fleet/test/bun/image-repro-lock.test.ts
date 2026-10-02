@@ -11,45 +11,32 @@ import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test
  * nested, without setting `IMAGE_REPRO_LOCKED` itself, deadlocks against its
  * own ancestor (itself waiting on the nested call). The fix walks this
  * process's own ancestor chain for a `lockf ... "$LOCK"` command line before
- * self-wrapping; this test exercises that `ancestor_holds_lock` logic
- * directly via the `--ancestor-holds-lock-check` test-only hook (same
- * precedent as localci.sh's `--sweep-procs-only`, added for #159), not the
- * real `lockf` binary -- this container has no `lockf` installed (only
- * `flock`), so the top-level self-wrap `if` never runs here at all; the
- * hook is defined unconditionally, outside that gate, so it's exercisable
- * regardless of whether `lockf` exists.
+ * self-wrapping, skipping the self-wrap entirely when found.
  *
- * The fake ancestor below is built with bash's `exec -a NAME CMD ARGS`,
- * which REPLACES the current process image (same pid, no fork) with argv[0]
- * renamed to NAME. Confirmed empirically on this container's `ps`
- * (procps-ng 3.3.17) that `ps -o command=` on such a process reports the
- * renamed argv[0] followed by the program's real remaining args --
- * `bash -c 'exec -a "lockf -k /tmp/fleetflare-gate.lock" sleep 30'` shows up
- * as `lockf -k /tmp/fleetflare-gate.lock 30`.
+ * Tests 1-2 call the pure ancestor-walk (`ancestor_holds_lock`) directly via
+ * the `--ancestor-holds-lock-check` test-only hook (same precedent as
+ * localci.sh's `--sweep-procs-only`, added for #159) -- that hook exits
+ * before the real self-wrap `if` block, so it can't exercise its branching.
+ * Tests 3-4 close that gap: they invoke the script with NO test flag, so it
+ * runs the real self-wrap `if` for real, with a `lockf` PATH shim standing
+ * in for the real binary (logging to a file instead of actually locking) --
+ * asserting the shim is/isn't invoked is what actually proves the self-wrap
+ * does/doesn't re-exec depending on whether an ancestor holds the lock.
+ * Both pass a bogus image name (`probe-noop`) so the script exits fast
+ * right after the self-wrap decision (`spec()` rejects it, exit 2), never
+ * reaching docker.
  *
- * The renamed process must then run the real check script as a genuinely
- * SEPARATE child (not itself) for there to be an "ancestor" at all. Bare
- * `bash -c 'cmd'` is not enough: when `cmd` is the sole/trailing simple
- * command bash is about to run with nothing left to do afterward, bash
- * optimizes by exec'ing it directly in place (no fork) -- verified
- * empirically (a debug ancestor-dump showed the "child" script's own `$$`
- * was the SAME pid as the renamed parent, with the rename itself
- * overwritten by the inner exec's own fresh argv[0]). Backgrounding the
- * real command and `wait`-ing for it (`cmd & wait $!`) forces bash to keep
- * the renamed parent alive as a distinct, live process while the real
- * command runs as an actual forked child -- verified empirically this
- * gives the child a real parent whose own command line looks exactly like
- * a real `lockf -k "$LOCK"` invocation.
- *
- * Also verified: the literal lock path must never appear directly in a
- * command string passed straight to this harness's own shell tool, only
- * inside scripts/args passed BY PATH -- the harness's own wrapper process
- * is always a real ancestor of anything spawned this way, and embedding
- * the literal text in a directly-typed command (rather than a file) makes
- * that unrelated wrapper spuriously "match" too, independent of any real
- * nested lockf process. Not a concern for the construction below, since
- * the lock path only ever appears inside bash -c argument strings handed
- * to `Bun.spawnSync`, never typed into an interactive shell.
+ * The fake ancestor is built with bash's `exec -a NAME CMD ARGS`, which
+ * REPLACES the current process image (same pid, no fork) with argv[0]
+ * renamed to NAME; confirmed empirically that `ps -o command=` on this
+ * container's ps reports the renamed argv[0] followed by the program's real
+ * remaining args. The renamed process must then run the real script as a
+ * genuinely separate CHILD (not itself) for there to be an ancestor at all:
+ * a bare trailing `bash -c 'cmd'` isn't enough, since bash exec-replaces
+ * itself into a sole/trailing simple command instead of forking, erasing
+ * the rename (verified empirically). Backgrounding it and `wait`-ing
+ * (`cmd & wait $!`) forces bash to keep the renamed parent alive as a
+ * distinct process while the real command runs as an actual forked child.
  */
 const SCRIPT = resolve(import.meta.dir, "../../scripts/image-repro-check.sh");
 const LOCK = "/tmp/fleetflare-gate.lock";
@@ -77,39 +64,47 @@ test('--ancestor-holds-lock-check reports \'yes\'/exit 0 when an ancestor\'s com
 });
 
 let binDir: string;
-let markerDir: string;
 
 beforeEach(() => {
   binDir = mkdtempSync(join(tmpdir(), "image-repro-lock-bin-"));
-  markerDir = mkdtempSync(join(tmpdir(), "image-repro-lock-marker-"));
 });
 
 afterEach(() => {
   rmSync(binDir, { recursive: true, force: true });
-  rmSync(markerDir, { recursive: true, force: true });
 });
 
-test("the full self-wrap branch skips re-exec through a lockf shim when an ancestor already holds the lock", () => {
-  // Confirms the FULL self-wrap `if` block's control flow: with a `lockf`
-  // shim on PATH (so `command -v lockf` succeeds) AND a fake lockf ancestor
-  // in the chain, the script must run directly -- never re-exec itself
-  // through the shim -- because ancestor_holds_lock short-circuits it
-  // before `command -v lockf` is even consulted for real work.
-  const shimLog = join(binDir, "shim-log");
-  const shim = join(binDir, "lockf");
-  writeFileSync(
-    shim,
-    `#!/bin/bash\necho "SHIM-INVOKED" >> "${shimLog}"\nshift; shift\nexec "$@"\n`,
-  );
+/** A `lockf` PATH shim: logs that it ran, then execs straight through to
+ * its own real args (dropping `-k "$LOCK"`) -- stands in for the real
+ * binary's locking without needing real POSIX lock semantics. Returns the
+ * log file path; its existence after a run is the test's signal for
+ * whether the self-wrap actually re-exec'd through `lockf`. */
+function installLockfShim(dir: string): string {
+  const shimLog = join(dir, "shim-log");
+  const shim = join(dir, "lockf");
+  writeFileSync(shim, `#!/bin/bash\necho "SHIM-INVOKED" >> "${shimLog}"\nshift; shift\nexec "$@"\n`);
   chmodSync(shim, 0o755);
+  return shimLog;
+}
 
+test("the real self-wrap re-execs through lockf when no ancestor holds the lock", () => {
+  // No test flag: runs the script for real through its own self-wrap `if`.
+  // `probe-noop` isn't agent|deploy|studio, so `spec()` rejects it (exit 2)
+  // right after the self-wrap decision, before anything touches docker.
+  const shimLog = installLockfShim(binDir);
+  const r = Bun.spawnSync(["bash", SCRIPT, "probe-noop"], {
+    env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+  });
+  expect(r.exitCode).toBe(2);
+  expect(existsSync(shimLog)).toBe(true);
+});
+
+test("the real self-wrap skips re-exec through lockf when an ancestor already holds the lock", () => {
+  const shimLog = installLockfShim(binDir);
   const r = Bun.spawnSync([
     "bash",
     "-c",
-    `exec -a "lockf -k ${LOCK}" bash -c 'PATH="${binDir}:$PATH" bash "$0" --ancestor-holds-lock-check & wait $!' "${SCRIPT}"`,
+    `exec -a "lockf -k ${LOCK}" bash -c 'PATH="${binDir}:$PATH" bash "$0" probe-noop & wait $!' "${SCRIPT}"`,
   ]);
-
-  expect(r.stdout.toString().trim()).toBe("yes");
-  expect(r.exitCode).toBe(0);
+  expect(r.exitCode).toBe(2);
   expect(existsSync(shimLog)).toBe(false);
 });
