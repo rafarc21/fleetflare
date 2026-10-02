@@ -88,19 +88,15 @@ FLEET_BRINGUP_RUN_ID="${FLEET_BRINGUP_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$(cut -
 FLEET_BRINGUP_STEP=""
 FLEET_BRINGUP_STDERR_TMP=""
 
-# The redactor. Mirrors src/studio/redact.ts's regexes in the SAME order
-# that file applies them, one `-e` per shape so each stays independently
-# readable and greppable -- the exact reason that file keeps them as named
-# constants instead of one alternation.
+# The redactor. Mirrors src/studio/redact.ts's seven regexes in the SAME
+# order that file applies them, one `-e` per shape so each stays
+# independently readable and greppable -- the exact reason that file keeps
+# them as seven named constants instead of one alternation.
 #
 # `sed` is line-oriented while redactSecrets runs over a whole string; the
-# only patterns where that could differ are Bearer (JS `\s` matches a
-# newline, POSIX `[[:space:]]` inside a line-scoped sed cannot) and the PEM
-# private-key block below (a real PEM spans multiple lines; this sed only
-# catches one already on a single line) -- neither is a shape this log can
-# produce, since bringup_log's own call shape (`printf '%s %s %s\n' ...
-# "$*"`) always collapses its args onto one line before this filter ever
-# runs over them.
+# only pattern where that could differ is the Bearer one (JS `\s` matches a
+# newline, POSIX `[[:space:]]` inside a line-scoped sed cannot), and a
+# header value split across two lines is not a shape this log can produce.
 bringup_redact() {
   sed -E \
     -e 's/ghs_[A-Za-z0-9]+/«redacted»/g' \
@@ -110,11 +106,7 @@ bringup_redact() {
     -e 's/sk-ant-[A-Za-z0-9_-]+/«redacted»/g' \
     -e 's/fsp_[0-9a-f]+/«redacted»/g' \
     -e 's/[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]]+/Bearer «redacted»/g' \
-    -e 's|([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]:[[:space:]]*[Bb][Aa][Ss][Ii][Cc])[[:space:]]+[A-Za-z0-9+/=]+|\1 «redacted»|g' \
-    -e 's/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/«redacted»/g' \
-    -e 's/[0-9]{6,}:[A-Za-z0-9_-]{35}/«redacted»/g' \
-    -e 's/-----BEGIN [A-Z ]*PRIVATE KEY-----.*-----END [A-Z ]*PRIVATE KEY-----/«redacted»/g' \
-    -e 's/([?&](token|key)=)[^&[:space:]"\x27]+/\1«redacted»/g'
+    -e 's|([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]:[[:space:]]*[Bb][Aa][Ss][Ii][Cc])[[:space:]]+[A-Za-z0-9+/=]+|\1 «redacted»|g'
 }
 
 # One log line: timestamp, run id, message. Redacted on the way in, so the

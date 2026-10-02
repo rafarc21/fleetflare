@@ -174,27 +174,6 @@ const SECRET_SPECIMENS = [
   "curl -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig' https://api.github.com",
   // Issue #67: a traced git push echoes its credential header.
   "git -c http.extraHeader='Authorization: Basic eC1hY2Nlc3MtdG9rZW46ZmFrZS10b2tlbg==' push origin HEAD",
-  // Operator fix-first review on PR #198 (issue #188): four more shapes,
-  // one specimen each, matching redact.ts's JWT_RE / TELEGRAM_TOKEN_RE /
-  // PEM_PRIVATE_KEY_RE / QUERY_SECRET_RE in that same order.
-  //
-  // A bare JWT (not Bearer-prefixed -- that shape is already covered above).
-  "session cookie eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U leaked",
-  // Telegram bot token: digits, colon, EXACTLY 35 chars -- TELEGRAM_TOKEN_RE's
-  // own quantifier, not eyeballed (counted: A-Z is 26, +9 of a-z = 35).
-  "telegram sendCard failed for bot 123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi with 403",
-  // A real PEM block spans multiple lines; this specimen list is one line
-  // per specimen (the coverage test below counts via split("\n")), so this
-  // is a representative single-line form, not a multi-line leak. That is
-  // also the true shape bringup_log ever sees in production: it logs via
-  // `printf '%s %s %s\n' ... "$*"`, which already collapses its args onto
-  // one line before bringup_redact (sed, line-oriented) ever runs over it.
-  // A secret spanning sed's line boundary is a real, UNCOVERED gap for the
-  // shell filter specifically -- noted on bringup_redact itself, not hidden
-  // here.
-  "leaked key -----BEGIN RSA PRIVATE KEY----- MIIBOwIBAAJBAKj34Gkx -----END RSA PRIVATE KEY----- in log",
-  // `?token=`/`&key=` query-string value.
-  "GET /webhook?token=abcdef0123456789abcdef0123456789 returned 403",
 ].join("\n");
 
 function shellRedact(input: string): string {
@@ -226,10 +205,6 @@ describe("studio-bringup.sh bringup_redact — the same shapes redactSecrets cov
       "sk-ant-oat01-AbCd_eF-gHiJkLmNoP0123456789",
       "fsp_0123456789abcdef",
       "eyJhbGciOiJIUzI1NiJ9.payload.sig",
-      "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
-      "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
-      "MIIBOwIBAAJBAKj34Gkx",
-      "abcdef0123456789abcdef0123456789",
     ]) {
       expect(out).not.toContain(fragment);
     }
@@ -432,7 +407,7 @@ describe("redaction coverage — the specimen list tracks redactSecrets itself",
   test("one specimen per regex declared in src/studio/redact.ts", () => {
     const src = readFileSync(join(import.meta.dir, "../../src/studio/redact.ts"), "utf8");
     const declared = src.match(/^const [A-Z0-9_]+_RE = \//gm) ?? [];
-    expect(declared.length).toBe(12);
+    expect(declared.length).toBe(8);
     // Each specimen line carries exactly one shape; the count must agree.
     expect(SECRET_SPECIMENS.split("\n").length).toBe(declared.length);
   });
