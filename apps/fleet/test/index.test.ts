@@ -280,13 +280,19 @@ describe("worker exception capture (#188)", () => {
 
   it("fetch: an uncaught exception lands a row in worker_exceptions AND is still rethrown unchanged", async () => {
     vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
-    vi.spyOn(registryModule, "listStudios").mockRejectedValue(new Error("listStudios boom"));
+    // Operator fix-first review, PR #198: a `const` so `.rejects.toBe` can
+    // assert on OBJECT IDENTITY, not just a matching message — a weaker
+    // `.rejects.toThrow("listStudios boom")` would also pass if the wrapper
+    // threw a brand NEW Error with the same string instead of rethrowing
+    // this exact instance.
+    const original = new Error("listStudios boom");
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(original);
 
     const req = new Request("https://x/studio/", {
       headers: { "Cf-Access-Jwt-Assertion": "t", Accept: "application/json" },
     });
     const ctx = fakeCtx();
-    await expect(worker.fetch(req, env as unknown as Env, ctx)).rejects.toThrow("listStudios boom");
+    await expect(worker.fetch(req, env as unknown as Env, ctx)).rejects.toBe(original);
 
     const rows = await exceptionRows();
     expect(rows).toHaveLength(1);
@@ -304,12 +310,14 @@ describe("worker exception capture (#188)", () => {
     // getFlag's own call site (the rearm-attempt counter read) is the one
     // line in scheduled() with no local try/catch around it — see
     // src/index.ts's handleScheduled.
-    vi.spyOn(stateModule, "getFlag").mockRejectedValue(new Error("getFlag boom - scheduled exception test"));
+    // Same object-identity reasoning as the fetch test above (operator
+    // fix-first review, PR #198).
+    const original = new Error("getFlag boom - scheduled exception test");
+    vi.spyOn(stateModule, "getFlag").mockRejectedValue(original);
     const fakeEnv = { ...env, AGENT: fakeAgentReturning(staleTask()) };
 
     const ctx = fakeCtx();
-    await expect(worker.scheduled({} as any, fakeEnv, ctx))
-      .rejects.toThrow("getFlag boom - scheduled exception test");
+    await expect(worker.scheduled({} as any, fakeEnv, ctx)).rejects.toBe(original);
 
     const rows = await exceptionRows();
     expect(rows).toHaveLength(1);
@@ -322,12 +330,16 @@ describe("worker exception capture (#188)", () => {
   it("redacts a secret shape out of the stored message before it ever reaches D1", async () => {
     vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
     const secret = "sk-ant-oat01-super-secret-token-value";
-    vi.spyOn(registryModule, "listStudios").mockRejectedValue(new Error(`upstream call failed, leaked ${secret}`));
+    // Same object-identity reasoning as above (operator fix-first review,
+    // PR #198) — the caller must see the EXACT original Error, unredacted;
+    // only the D1 row gets the redacted copy.
+    const original = new Error(`upstream call failed, leaked ${secret}`);
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(original);
 
     const req = new Request("https://x/studio/", {
       headers: { "Cf-Access-Jwt-Assertion": "t", Accept: "application/json" },
     });
-    await expect(worker.fetch(req, env as unknown as Env, fakeCtx())).rejects.toThrow(secret);
+    await expect(worker.fetch(req, env as unknown as Env, fakeCtx())).rejects.toBe(original);
 
     const rows = await exceptionRows();
     expect(rows).toHaveLength(1);
@@ -337,7 +349,10 @@ describe("worker exception capture (#188)", () => {
 
   it("an insert failure in recordWorkerException never masks the original error", async () => {
     vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
-    vi.spyOn(registryModule, "listStudios").mockRejectedValue(new Error("original boom, not a D1 error"));
+    // Same object-identity reasoning as above (operator fix-first review,
+    // PR #198).
+    const original = new Error("original boom, not a D1 error");
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(original);
 
     // A stub DB that answers every statement through the REAL binding except
     // the one INSERT recordWorkerException issues, which fails instead — the
@@ -358,7 +373,7 @@ describe("worker exception capture (#188)", () => {
     });
     const ctx = fakeCtx();
     await expect(worker.fetch(req, { ...env, DB: failingDb } as unknown as Env, ctx))
-      .rejects.toThrow("original boom, not a D1 error");
+      .rejects.toBe(original);
 
     // The insert genuinely failed — no row landed — proving this isn't a
     // trivially-true assertion.
