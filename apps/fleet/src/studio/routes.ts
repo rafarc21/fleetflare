@@ -35,6 +35,7 @@ import { threwInsideDurableObject, runtimeFlags, errorMessage, durableObjectUnre
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
 import { resolveClaudeAccounts, accountLabel } from "./accounts";
 import { readFleetAccountLimits } from "./account-limits-store";
+import { countWorkerExceptions } from "../exceptions";
 
 const ROUTE_RE = /^\/studio\/([^/]+)\/(status|provisioned|provision|restart|recycle|destroy|wake|check|rescue|inspect|ws\/terminal|paste|terminal|clear-session-guard)$/;
 
@@ -449,6 +450,17 @@ export async function handleStudio(
       until: limits[a.name]?.until ?? null,
       seenAt: limits[a.name]?.seenAt ?? null,
     })));
+  }
+
+  /**
+   * #168 sensor 4 (issue #188) — the read-only count behind that sensor.
+   * No studio id in this path either, so it sits alongside `/studio/accounts`
+   * rather than inside ROUTE_RE's id-scoped dispatch. Reuses the SAME
+   * Access-gated `/studio/` auth lane (verifyAccess already ran above,
+   * unconditionally) — deliberately no new auth surface, no new credential.
+   */
+  if (url.pathname === "/studio/worker-exceptions/count" && req.method === "GET") {
+    return Response.json({ count: await countWorkerExceptions(env.DB) });
   }
 
   const m = ROUTE_RE.exec(url.pathname);
