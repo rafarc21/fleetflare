@@ -1,6 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as authModule from "../src/studio/auth";
+import * as registryModule from "../src/studio/registry";
+import * as stateModule from "../src/state";
 import worker from "../src/index";
 import { getFlag } from "../src/state";
 import { recordStudio } from "../src/studio/registry";
@@ -37,6 +39,7 @@ function fakeAgentReturning(task: TaskRecord | null): Env["AGENT"] {
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
+  await env.DB.prepare("DELETE FROM worker_exceptions").run();
   alerts = [];
   realFetch = globalThis.fetch;
   globalThis.fetch = (async (_input: unknown, init: any) => {
@@ -239,5 +242,99 @@ describe("scheduled() order (PR #109 review)", () => {
       { scheduledTime: Date.UTC(2026, 8, 24, 12, 40) } as any, { ...env, AGENT: agent, STUDIO: studio }, {} as any,
     );
     expect(order).toEqual(["rearm", "watch"]);
+  });
+});
+
+// #168 sensor 4 (issue #188), option (b): fetch/scheduled each wrap their
+// ENTIRE body in one outer try/catch — anything that escapes lands a row in
+// worker_exceptions (src/exceptions.ts's recordWorkerException) before the
+// SAME error is rethrown unchanged.
+describe("worker exception capture (#188)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  async function exceptionRows() {
+    const res = await env.DB.prepare(
+      "SELECT ts, route, name, message, stack_head FROM worker_exceptions ORDER BY ts ASC",
+    ).all<{ ts: number; route: string; name: string; message: string; stack_head: string | null }>();
+    return res.results ?? [];
+  }
+
+  it("fetch: an uncaught exception lands a row in worker_exceptions AND is still rethrown unchanged", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(new Error("listStudios boom"));
+
+    const req = new Request("https://x/studio/", {
+      headers: { "Cf-Access-Jwt-Assertion": "t", Accept: "application/json" },
+    });
+    await expect(worker.fetch(req, env as unknown as Env, {} as any)).rejects.toThrow("listStudios boom");
+
+    const rows = await exceptionRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].route).toBe("/studio/");
+    expect(rows[0].name).toBe("Error");
+    expect(rows[0].message).toBe("listStudios boom");
+  });
+
+  it("scheduled: an uncaught exception (outside every local try/catch) lands a row AND is still rethrown unchanged", async () => {
+    // getFlag's own call site (the rearm-attempt counter read) is the one
+    // line in scheduled() with no local try/catch around it — see
+    // src/index.ts's handleScheduled.
+    vi.spyOn(stateModule, "getFlag").mockRejectedValue(new Error("getFlag boom - scheduled exception test"));
+    const fakeEnv = { ...env, AGENT: fakeAgentReturning(staleTask()) };
+
+    await expect(worker.scheduled({} as any, fakeEnv, {} as any))
+      .rejects.toThrow("getFlag boom - scheduled exception test");
+
+    const rows = await exceptionRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].route).toBe("scheduled");
+    expect(rows[0].name).toBe("Error");
+    expect(rows[0].message).toBe("getFlag boom - scheduled exception test");
+  });
+
+  it("redacts a secret shape out of the stored message before it ever reaches D1", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    const secret = "sk-ant-oat01-super-secret-token-value";
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(new Error(`upstream call failed, leaked ${secret}`));
+
+    const req = new Request("https://x/studio/", {
+      headers: { "Cf-Access-Jwt-Assertion": "t", Accept: "application/json" },
+    });
+    await expect(worker.fetch(req, env as unknown as Env, {} as any)).rejects.toThrow(secret);
+
+    const rows = await exceptionRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].message).not.toContain(secret);
+    expect(rows[0].message).toContain("«redacted»");
+  });
+
+  it("an insert failure in recordWorkerException never masks the original error", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(new Error("original boom, not a D1 error"));
+
+    // A stub DB that answers every statement through the REAL binding except
+    // the one INSERT recordWorkerException issues, which fails instead — the
+    // same "plain object implementing only the method under test" shape
+    // fakeAgentReturning/fakeStudio above already use for env.AGENT/STUDIO.
+    const realDb = env.DB;
+    const failingDb = {
+      prepare(sql: string) {
+        if (sql.includes("INSERT INTO worker_exceptions")) {
+          throw new Error("simulated D1 outage — insert into worker_exceptions failed");
+        }
+        return realDb.prepare(sql);
+      },
+    } as unknown as Env["DB"];
+
+    const req = new Request("https://x/studio/", {
+      headers: { "Cf-Access-Jwt-Assertion": "t", Accept: "application/json" },
+    });
+    await expect(worker.fetch(req, { ...env, DB: failingDb } as unknown as Env, {} as any))
+      .rejects.toThrow("original boom, not a D1 error");
+
+    // The insert genuinely failed — no row landed — proving this isn't a
+    // trivially-true assertion.
+    const rows = await exceptionRows();
+    expect(rows).toHaveLength(0);
   });
 });
