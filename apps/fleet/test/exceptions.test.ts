@@ -293,6 +293,25 @@ describe("recordWorkerException — local secret scrub (operator stop-change, PR
     expect(rows[0].message).toBe("GET /webhook?access_token=«redacted»&x=1");
     expect(rows[0].stack_head).not.toContain("super-secret-value");
   });
+
+  // Operator found bug (PR #198, issue #188): the old JWT_RE
+  // (`/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g`) has no anchor on
+  // where a match attempt may START — inside a long run of `eyJ`-prefixed
+  // noise with no `.` ever following, the engine retries the SAME
+  // `[A-Za-z0-9_-]+\.` failure at every single character position, which is
+  // quadratic in the run's length. A `(?<![A-Za-z0-9_-])` negative lookbehind
+  // restricts match attempts to real token boundaries, closing it off —
+  // `recordWorkerException` (which runs this regex on every caught
+  // exception's message) must stay fast even on adversarial input instead of
+  // opening a ReDoS surface on the Worker's own exception-handling path.
+  it("stays fast (no ReDoS) on a long run of eyJ-prefixed noise with no JWT structure", async () => {
+    const noise = "eyJ".repeat(66_666);
+    const err = new Error(noise);
+    const started = performance.now();
+    await recordWorkerException(env.DB, "/x", err, 15_000, fakeCtx());
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeLessThan(200);
+  });
 });
 
 describe("countWorkerExceptions", () => {

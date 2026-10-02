@@ -61,7 +61,17 @@ function stackHead(stack: string): string {
  *  - `?token=`/`&key=` query-string values, case-insensitive,
  *    capture-preserving (keeps the param name, redacts only the value).
  */
-const JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
+// Operator found bug (PR #198, issue #188): without the `(?<![A-Za-z0-9_-])`
+// negative lookbehind, this regex has no anchor on where a match attempt may
+// START — a long run of `eyJ`-prefixed noise with no `.` ever following
+// forces the engine to retry the same failing `[A-Za-z0-9_-]+\.` match at
+// EVERY character position in the run, which is quadratic in the run's
+// length (measured: "eyJ".repeat(66666) took ~10s). The lookbehind forces a
+// match attempt to only start at a real token boundary (not preceded by a
+// word/`-`/`_` char), closing off the retry blowup — zero effect on where a
+// match ends or on any real JWT, since every real specimen already sits
+// after prose/whitespace/punctuation, never mid-word.
+const JWT_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
 const TELEGRAM_TOKEN_RE = /\b\d{6,}:[A-Za-z0-9_-]{35}\b/g;
 // Operator fix 2nd review (PR #198, issue #188): the `(?:-----END...|$)`
 // alternation matters — without it, an UNTERMINATED PEM block (no END
