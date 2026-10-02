@@ -218,7 +218,17 @@ export async function recordWorkerException(
     console.error("recordWorkerException insert failed", insertErr);
     return;
   }
-  ctx.waitUntil(pruneWorkerExceptions(db));
+  // Fresh-context review on PR #198 (issue #188), blocking: `ctx.waitUntil`
+  // itself must never be allowed to throw out of this function — same class
+  // of bug as `describeError`'s throwing getters above. Unreachable with a
+  // real ExecutionContext today, but the function's own "NEVER throws"
+  // contract has to hold unconditionally, not just for the shapes currently
+  // passed at the two real call sites.
+  try {
+    ctx.waitUntil(pruneWorkerExceptions(db));
+  } catch (waitUntilErr) {
+    console.error("recordWorkerException ctx.waitUntil failed", waitUntilErr);
+  }
 }
 
 /**

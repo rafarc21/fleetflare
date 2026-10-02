@@ -67,18 +67,34 @@ describe("recordWorkerException", () => {
     await expect(recordWorkerException(failingDb, "/x", new Error("original"), 4000, fakeCtx())).resolves.toBeUndefined();
   });
 
-  it("caps message/stack_head at MAX_FIELD_CHARS, AFTER redaction has already run (operator review, PR #198)", async () => {
-    const secret = "sk-ant-oat01-huge-secret-value";
-    const huge = `${secret} ` + "x".repeat(5000);
+  it("caps message/stack_head at MAX_FIELD_CHARS, AFTER redaction has already run (fresh-context review, PR #198)", async () => {
+    // The secret must actually STRADDLE the 2000-char cut point, or this
+    // test can pass even against a truncate-then-redact bug (the secret
+    // would sit entirely inside the kept prefix either way). A Telegram bot
+    // token (`\d{6,}:[A-Za-z0-9_-]{35}`, src/studio/redact.ts) is chosen
+    // specifically because its match requires an EXACT 35-char tail — a
+    // naive truncate-first implementation that cuts the tail short leaves a
+    // partial, UNMATCHED (and so unredacted) fragment behind, whereas
+    // redact-first replaces the whole token with "«redacted»" before the cut
+    // ever happens.
+    const filler = "f".repeat(1980);
+    const telegramId = "123456789"; // 9 digits, satisfies \d{6,}
+    const bodyPrefix = "A".repeat(10); // the slice that survives a truncate-first bug
+    const telegramBody = bodyPrefix + "B".repeat(10) + "C".repeat(15); // exactly 35 chars
+    expect(telegramBody).toHaveLength(35);
+    const secret = `${telegramId}:${telegramBody}`;
+    const huge = filler + secret; // secret occupies chars [1980, 2025) — straddles 2000
     const err = new Error(huge);
     err.stack = `Error: ${huge}`;
     await recordWorkerException(env.DB, "/x", err, 9000, fakeCtx());
     const rows = await allRows();
-    // Redacted first: the secret must never survive, even straddling the
-    // 2000-char cut point (it's well inside the first 2000 chars here).
+    // Redact-first (correct): the WHOLE token is gone, including the prefix
+    // chunk a truncate-first bug would have left raw in the output.
     expect(rows[0].message).not.toContain(secret);
+    expect(rows[0].message).not.toContain(bodyPrefix);
     expect(rows[0].message.length).toBeLessThanOrEqual(2000);
     expect(rows[0].stack_head).not.toBeNull();
+    expect(rows[0].stack_head as string).not.toContain(bodyPrefix);
     expect((rows[0].stack_head as string).length).toBeLessThanOrEqual(2000);
   });
 
@@ -154,6 +170,20 @@ describe("recordWorkerException — hot-path safety (operator review, PR #198)",
 
     await recordWorkerException(env.DB, "/x", new Error("after window"), 61_000, fakeCtx());
     expect(await allRows()).toHaveLength(21);
+  });
+
+  it("1b: a ctx.waitUntil that throws synchronously never masks recordWorkerException's own resolution (fresh-context review, PR #198)", async () => {
+    // A `ctx`-shaped object whose `waitUntil` itself throws — the same class
+    // of bug `describeError`'s throwing getters already covers above:
+    // nothing upstream of this call may be allowed to override the function's
+    // own "best-effort, NEVER throws" contract.
+    const throwingCtx = {
+      waitUntil: () => { throw new Error("waitUntil is broken"); },
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext;
+    await expect(
+      recordWorkerException(env.DB, "/x", new Error("boom"), 8500, throwingCtx),
+    ).resolves.toBeUndefined();
   });
 
   it("1c: logs the drop once via console.error, not once per dropped record", async () => {
