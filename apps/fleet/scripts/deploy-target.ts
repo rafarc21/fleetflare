@@ -37,6 +37,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { unstable_readConfig } from "wrangler";
+import { findDotenvVar } from "./deploy-env-guard";
 
 const say = (m: string) => console.error(`deploy-target: ${m}`);
 function undeterminable(why: string): never {
@@ -99,16 +100,15 @@ if (deleteAt >= 0) {
 // into process.env BEFORE reading the config: .env, .env.local, and with an
 // env also .env.<env>, .env.<env>.local. A CLOUDFLARE_* or WRANGLER_* var
 // there (CLOUDFLARE_ENV, WRANGLER_CI_OVERRIDE_NAME, CLOUDFLARE_ACCOUNT_ID,
-// ...) can retarget the deploy behind this check's back: refused.
+// ...) can retarget the deploy behind this check's back: refused. Issue
+// #204: the same scan, shared with scripts/deploy-env-guard.ts, which
+// deploy.sh also runs directly for every non-read-only command this check
+// does not cover (e.g. d1, secret, kv, r2).
 const appDir = join(import.meta.dir, "..");
 const envForFiles = envs[0] ?? process.env.CLOUDFLARE_ENV;
-const dotenvFiles = [".env", ".env.local", ...(envForFiles ? [`.env.${envForFiles}`, `.env.${envForFiles}.local`] : [])];
-for (const f of dotenvFiles) {
-  let body: string;
-  try { body = readFileSync(join(appDir, f), "utf8"); } catch { continue; }
-  const hit = body.split(/\r?\n/).map((l) => /^\s*(?:export\s+)?([\w.-]+)\s*[=:]/.exec(l)?.[1])
-    .find((k) => k !== undefined && /^(CLOUDFLARE_|WRANGLER_)/i.test(k));
-  if (hit) undeterminable(`${join(appDir, f)} sets ${hit}; wrangler loads it and it can change the deploy target. Move it to the shell environment or remove it`);
+const dotenvHit = findDotenvVar(appDir, envForFiles);
+if (dotenvHit) {
+  undeterminable(`${dotenvHit.file} sets ${dotenvHit.key}; wrangler loads it and it can change the deploy target. Move it to the shell environment or remove it`);
 }
 if (envs.length > 1) undeterminable(`--env given ${envs.length} times (${envs.join(", ")})`);
 if (names.length > 1) undeterminable(`Worker name given ${names.length} times (${names.join(", ")})`);

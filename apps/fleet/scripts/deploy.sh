@@ -304,6 +304,40 @@ done
 unset GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS GIT_NOGLOB_PATHSPECS
 
 if ! is_read_only ${ARGS[@]+"${ARGS[@]}"}; then
+  # Issue #204: wrangler auto-loads .env files from ITS OWN cwd (we `cd` into
+  # $FLEET_DIR below) into process.env BEFORE reading the config or
+  # authenticating. A stray CLOUDFLARE_*/WRANGLER_* var left there (e.g. from
+  # local `wrangler dev` against a sandbox account) can silently retarget ANY
+  # non-read-only command -- d1, secret, kv, r2, ... not just the
+  # container-replacing subset scripts/deploy-target.ts already guards below
+  # -- to the wrong, unauthorized account. Reported as: a real D1 migration
+  # sent to the wrong account, Cloudflare API error [code: 7403] "account not
+  # authorized", while the identical bare `wrangler` command (a different
+  # cwd, so no .env ever loaded) worked. Checked here, at the very top of
+  # this block, so neither --allow-dirty-ops (the ops git checkout, a
+  # different concern) nor --allow-unrescued (the rescue gate) can skip it.
+  #
+  # Best-effort -e/--env scan: a miss only means an env-specific dotenv file
+  # (.env.<env>, .env.<env>.local) is not also checked -- the universal
+  # .env/.env.local check, the one this issue's own repro hits, always runs
+  # regardless.
+  ENV_GUESS=""
+  GUESS_ARGS=(${ARGS[@]+"${ARGS[@]}"})
+  for ((gi = 0; gi < ${#GUESS_ARGS[@]}; gi++)); do
+    case "${GUESS_ARGS[$gi]}" in
+      -e|--env) ENV_GUESS="${GUESS_ARGS[$((gi + 1))]:-}" ;;
+      --env=*) ENV_GUESS="${GUESS_ARGS[$gi]#--env=}" ;;
+    esac
+  done
+  if command -v bun >/dev/null 2>&1; then
+    bun "$SCRIPT_DIR/deploy-env-guard.ts" "$FLEET_DIR" "$ENV_GUESS" || {
+      echo "deploy.sh: refusing — a local .env file may retarget this deploy to the wrong account; see above." >&2
+      exit 1
+    }
+  else
+    echo "deploy.sh: WARNING — bun not found on PATH -- cannot check for a stray CLOUDFLARE_*/WRANGLER_* var in a local .env file; continuing." >&2
+  fi
+
   CONFIG_DIR="$(dirname "$CONFIG_REAL")"
   if OPS_TOP="$(git -C "$CONFIG_DIR" rev-parse --show-toplevel 2>/dev/null)"; then
     if [[ "$ALLOW_DIRTY_OPS" == 1 ]]; then
