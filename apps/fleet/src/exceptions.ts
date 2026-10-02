@@ -227,6 +227,20 @@ export async function recordWorkerException(
  * `recordWorkerException`, this one CAN throw/propagate normally: nothing
  * downstream depends on it being silent, since it's a plain read with no
  * response-shape contract to protect.
+ *
+ * Caveat (operator fix-first review, PR #198, issue #188): a count of 0
+ * does NOT mean the Worker is healthy. This whole table only catches what
+ * is thrown synchronously-awaited inside `fetch`'s/`scheduled`'s own body
+ * (src/index.ts's outer try/catch). It misses: (a) failures inside a
+ * `ctx.waitUntil`-deferred background task — this feature's own prune call
+ * included; if `pruneWorkerExceptions` itself fails inside its
+ * `ctx.waitUntil`, nothing records that, since there is no outer try/catch
+ * left to catch it once it's handed off; (b) Durable Object internals
+ * (AgentDO/DeployDO/StudioDO methods run in their own object context and
+ * never touch this wrapper at all); (c) WebSocket message handlers, if any
+ * exist; (d) a route that catches its own error internally and returns a
+ * 500 `Response` on purpose instead of throwing — nothing escapes to be
+ * caught, so nothing gets recorded.
  */
 export async function countWorkerExceptions(db: D1Database): Promise<number> {
   const row = await db.prepare(`SELECT COUNT(*) AS n FROM worker_exceptions`).first<{ n: number }>();

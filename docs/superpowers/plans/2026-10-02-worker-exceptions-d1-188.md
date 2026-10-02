@@ -136,3 +136,65 @@ test/exceptions.test.ts test/studio.routes.test.ts` — not the full `bun run
 test`/`bun run check` sweep (heavy-gate budget; this task's scope doesn't
 need the full suite, and a second concurrent full gate from another fleet
 member risks the memory ceiling).
+
+## Operator fix-first review, PR #198 (2026-10-02)
+
+The operator reviewed the PR directly (soft block, migration stays as-is)
+and asked for five fixes before merge. All five landed on top of the plan
+above, same migration, same table:
+
+1. **Hot-path safety in `recordWorkerException`.** Three changes so a
+   slow/degraded D1 can't turn every failing request into a second
+   load-bearing call against the SAME struggling D1: a per-isolate rate cap
+   (~20 records/minute, rolling window, checked before any `prepare`/`run`
+   is attempted — `rateCapped`/`__resetExceptionRateCapForTests` in
+   exceptions.ts); a ~2s timeout on the insert itself (`Promise.race` +
+   `setTimeout`, same idiom as src/studio/sandbox-api.ts's `sbExec`); and
+   the prune call moved from an inline `await` to `ctx.waitUntil`, so it
+   still runs every time but strictly after the caller's own response has
+   already resolved. `recordWorkerException` gained a required `ctx:
+   ExecutionContext` parameter; both src/index.ts call sites thread their
+   already-in-scope `ctx` through.
+2. **New secret shapes in `redactSecrets`** (src/studio/redact.ts, a
+   Worker-wide util — these help every caller, not just this feature): a
+   JWT (`eyJ...`), a Telegram bot token (this Worker's own real
+   `telegram.token` → `sendCard` path), a multiline PEM private-key block,
+   and `token=`/`key=` query-string values. Also, in exceptions.ts: a
+   `MAX_FIELD_CHARS` (2000) char cap on both `message` and `stack_head`,
+   applied AFTER redaction (same ordering this module already followed for
+   `stack_head`'s line-count truncation) — `message` had no cap before this.
+3. **Stronger test assertions.** The four exception-capture tests in
+   test/index.test.ts now assert `.rejects.toBe(originalErrorInstance)`
+   instead of `.rejects.toThrow(message)` — proving the EXACT same object
+   propagates, not merely one with a matching string. Added a new test
+   covering an async `.run()` rejection (not just a synchronous `.prepare()`
+   throw) through the same try/catch.
+4. **Prune query shape.** `pruneWorkerExceptions` now deletes by a
+   boundary-timestamp comparison (`ts < (SELECT ts ... OFFSET keep - 1)`)
+   instead of `NOT IN` over a potentially-large id set. Fewer than `keep`
+   rows: the subquery returns no row, so `ts < NULL` is never true — nothing
+   gets deleted, which is correct.
+
+### Caveats
+
+`countWorkerExceptions` (and the `/studio/worker-exceptions/count` route it
+backs) answering 0 does **not** mean the Worker is healthy — this entire
+feature only catches what is thrown synchronously-awaited inside `fetch`'s/
+`scheduled`'s own body, via the one outer try/catch src/index.ts wraps
+around each. It has no visibility into:
+
+- Failures inside a `ctx.waitUntil`-deferred background task — this
+  feature's own `pruneWorkerExceptions` call included; if prune itself
+  fails inside its `waitUntil`, nothing records that, since there is no
+  outer try/catch left once the promise has been handed off.
+- Durable Object internals (AgentDO/DeployDO/StudioDO methods run in their
+  own object context, never touching this wrapper).
+- WebSocket message handlers, if any exist.
+- A route that catches its own error internally and deliberately returns a
+  500 `Response` rather than throwing — nothing escapes to be caught, so
+  nothing gets recorded.
+
+This is a known, accepted gap for this sensor's current scope, not a defect
+to fix here — see `countWorkerExceptions`'s own doc comment (exceptions.ts)
+and the `/studio/worker-exceptions/count` route's doc comment
+(src/studio/routes.ts) for the same note kept next to the code.

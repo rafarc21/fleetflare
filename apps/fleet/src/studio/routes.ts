@@ -458,6 +458,13 @@ export async function handleStudio(
    * rather than inside ROUTE_RE's id-scoped dispatch. Reuses the SAME
    * Access-gated `/studio/` auth lane (verifyAccess already ran above,
    * unconditionally) — deliberately no new auth surface, no new credential.
+   *
+   * Caveat (operator fix-first review, PR #198): a count of 0 here does NOT
+   * mean the Worker is healthy — see `countWorkerExceptions`'s own doc
+   * comment (src/exceptions.ts) for the full list of what this sensor
+   * cannot see (deferred `ctx.waitUntil` failures, Durable Object
+   * internals, WebSocket handlers, a route that swallows its own error and
+   * returns a 500 on purpose).
    */
   if (url.pathname === "/studio/worker-exceptions/count" && req.method === "GET") {
     return Response.json({ count: await countWorkerExceptions(env.DB) });
