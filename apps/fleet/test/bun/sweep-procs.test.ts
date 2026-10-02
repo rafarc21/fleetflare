@@ -108,3 +108,43 @@ test("sweep_procs kills cmdline/cwd/env matches, spares an unrelated process", a
     }
   }
 });
+
+// #159 review (fresh-context code review, empirically reproduced): the cwd
+// match must be boundary-anchored on the worktree path itself, not a bare
+// substring test. localci.sh's own RID ends in a raw, unpadded `$$`, so two
+// runs close together can produce e.g. `wt-...-1` and `wt-...-12` — the
+// first a literal character-prefix of the second — and both can exist on
+// disk before the gate lock serializes the lanes. A sibling worktree whose
+// name merely EXTENDS the target's, with no `/` in between, must never match.
+test("sweep_procs: a sibling worktree whose path is a literal character-prefix extension is never matched by cwd", async () => {
+  const wt1 = join(root, "wt-1");
+  const wt12 = join(root, "wt-12");
+  mkdirSync(wt1, { recursive: true });
+  mkdirSync(wt12, { recursive: true });
+  const rid = `rid-${Date.now()}`;
+
+  // Lives in the sibling worktree wt-12, which is NOT what the sweep targets
+  // (wt-1) — must survive. wt-12's path literally starts with wt-1's path.
+  const sibling = Bun.spawn(["sleep", "100"], { cwd: wt12, stdout: "ignore", stderr: "ignore" });
+  // A genuine cwd match (exactly wt-1) — must still die, proving the fix
+  // didn't just make cwd matching stop working altogether.
+  const exact = Bun.spawn(["sleep", "100"], { cwd: wt1, stdout: "ignore", stderr: "ignore" });
+
+  try {
+    await Bun.sleep(200);
+
+    const r = Bun.spawnSync(["bash", SCRIPT, "--sweep-procs-only", wt1, rid], { env: process.env });
+    expect(r.exitCode).toBe(0);
+
+    const deadline = Date.now() + 5_000;
+    while (running(exact.pid) && Date.now() < deadline) Bun.sleepSync(100);
+    expect(running(exact.pid)).toBe(false);
+    expect(running(sibling.pid)).toBe(true);
+  } finally {
+    for (const p of [sibling, exact]) {
+      try {
+        process.kill(p.pid, "SIGKILL");
+      } catch {}
+    }
+  }
+});

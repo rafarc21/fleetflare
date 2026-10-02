@@ -40,11 +40,14 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # /proc, for EVERY process on the host (not just this run's), twice per
 # interrupted run — O(3 × host-wide process count), measured to take over a
 # minute on a process-dense host (#382 flagged this as a follow-up). Fixed to
-# fork exactly twice for the WHOLE sweep: cwd membership is one batched
-# `ls -la /proc/*/cwd | grep` across every pid up front (`cwd_hits`), checked
-# per pid with a bash pattern match (no fork); cmdline/environ are read with
-# bash's own NUL-delimited `read` builtin straight from each process's own
-# file (no fork at all). Net: O(1) forks for the entire /proc walk.
+# fork a small, constant number of times for the WHOLE sweep, not once per
+# host process: cwd membership is one batched, boundary-anchored
+# `ls -la /proc/*/cwd | grep -E` across every pid up front (`cwd_hits`;
+# anchored on $wp itself so a sibling worktree whose path merely EXTENDS it,
+# e.g. wt-1 vs wt-12, is never matched — #159 review), checked per pid with a
+# bash pattern match (no fork); cmdline/environ are read with bash's own
+# NUL-delimited `read` builtin straight from each process's own file (no
+# fork at all). Net: O(1) forks for the entire /proc walk.
 sweep_procs() {
   local w=$1 rid=$2 d pid matched arg kv cmd cwd line victims=""
   shift 2
@@ -54,8 +57,17 @@ sweep_procs() {
   wp=$(cd "$w" 2>/dev/null && pwd -P) || wp=$w
   local spare=" $$ $* "
   if [ -d /proc/self ]; then
-    local cwd_hits
-    cwd_hits=$(ls -la /proc/[0-9]*/cwd 2>/dev/null | grep -F -- "$wp")
+    # #159 review: a bare `grep -F -- "$wp"` matches ANY line that merely
+    # CONTAINS $wp, including a sibling worktree whose path extends $wp with
+    # no separator (RID ends in a raw, unpadded $$: wt-...-1 is a literal
+    # prefix of wt-...-12 while both exist on disk, pre-lock). Anchor the
+    # same way the old `[[ "$cwd" == "$wp" || "$cwd" == "$wp/"* ]]` did: $wp
+    # itself, followed by either end of line (exact cwd) or `/` (a child of
+    # it). $wp is escaped for ERE (one-time, not per-process) since it can
+    # contain regex metacharacters.
+    local wp_re cwd_hits
+    wp_re=$(printf '%s' "$wp" | sed 's/[.^$*+?()[\]{}|\\]/\\&/g')
+    cwd_hits=$(ls -la /proc/[0-9]*/cwd 2>/dev/null | grep -E -- "${wp_re}(/|\$)")
     for d in /proc/[0-9]*; do
       pid=${d#/proc/}
       case "$spare" in *" $pid "*) continue ;; esac

@@ -27,14 +27,32 @@ process-dense host, not just soft budget overruns.
 Replaced the Linux branch's O(host-process-count) forking with O(1) forking
 for the **whole** sweep:
 
-- **cwd**: one batched `ls -la /proc/[0-9]*/cwd 2>/dev/null | grep -F -- "$wp"`
-  up front, captured once into `cwd_hits`. Per-pid membership is then a bash
-  pattern match on the in-memory string (`case "$cwd_hits" in
-  *"/proc/$pid/cwd"*)`), no fork. Verified the anchor reasoning holds: the
-  match pattern requires `/proc/` immediately before the pid digits and `/cwd`
-  immediately after, so a shorter pid's pattern (e.g. `/proc/12/cwd`) can
-  never match inside a longer pid's line (e.g. `/proc/123/cwd`) -- the
-  character right after `12` there is `3`, not `/`.
+- **cwd**: one batched `ls -la /proc/[0-9]*/cwd` up front, captured once into
+  `cwd_hits`. Per-pid membership is then a bash pattern match on the
+  in-memory string (`case "$cwd_hits" in *"/proc/$pid/cwd"*)`), no fork.
+  Verified the anchor reasoning holds: the match pattern requires `/proc/`
+  immediately before the pid digits and `/cwd` immediately after, so a
+  shorter pid's pattern (e.g. `/proc/12/cwd`) can never match inside a
+  longer pid's line (e.g. `/proc/123/cwd`) -- the character right after `12`
+  there is `3`, not `/`.
+
+  **Review fix (post-initial-implementation):** the first version filtered
+  `cwd_hits` with a bare `grep -F -- "$wp"`, matching ANY line merely
+  *containing* `$wp` as a substring -- including a sibling worktree whose
+  path extends `$wp` with no separator in between. `localci.sh`'s own
+  `RID="$(date +%Y%m%d-%H%M%S)-$$"` ends in a raw, unpadded pid, so two runs
+  close together can produce `wt-...-1` and `wt-...-12` on disk at the same
+  time (before the gate lock serializes the lanes) -- `wt-...-1` is a literal
+  character-prefix of `wt-...-12`. A fresh-context code review reproduced
+  this live: sweeping for `wt-1` also killed `wt-12`'s process, where the
+  pre-#159 code correctly spared it. Fixed by anchoring `$wp` the same way
+  the old `[[ "$cwd" == "$wp" || "$cwd" == "$wp/"* ]]` did -- `$wp` itself,
+  followed by either end of line (exact cwd) or `/` (a child of it):
+  `grep -E -- "${wp_re}(/|$)"`, where `wp_re` is `$wp` escaped for ERE
+  metacharacters (`sed 's/[.^$*+?()[\]{}|\\]/\\&/g'`, computed once per
+  sweep call via one `sed` fork -- still O(1) for the whole sweep, not
+  O(host-wide process count); verified the fix's timing claim below still
+  holds with this one extra one-time fork in place).
 - **cmdline**: bash's own NUL-delimited `read` builtin reads
   `$d/cmdline` directly, one argv element at a time, no fork at all:
   `while IFS= read -r -d '' arg; do case "$arg" in *"$w/"*|*"$wp/"*) ... ;;
@@ -143,17 +161,38 @@ as a refactoring safety net") without spending minutes of container time per
 broken-arm trial against code already known to be too slow to use under any
 test budget.
 
+Added a second correctness test for the review finding specifically: "a
+sibling worktree whose path is a literal character-prefix extension is never
+matched by cwd" -- creates `wt-1` and `wt-12` as siblings, puts a decoy
+process in each, sweeps for `wt-1`, and asserts `wt-12`'s process survives
+while `wt-1`'s own exact-cwd process still dies (proving the fix didn't just
+disable cwd matching altogether). RED-checked by reverting *only* the
+`cwd_hits` line to the original bare `grep -F -- "$wp"` (reusing a saved
+backup of the review-fixed file for the revert) and re-running: the new
+sibling test failed exactly as the reviewer described (`wt-12` killed when
+targeting `wt-1`), while the first (pre-existing) correctness test still
+passed (it doesn't exercise prefix siblings). Restored the fix immediately
+after confirming (`diff` against the backup showed the restore was exact).
+
 ## Verification run (this container, same dense `/proc`)
 
-- `bun test test/bun/sweep-procs.test.ts`: 1 pass, 0 fail, ~2.5s (new
-  correctness test, final GREEN).
-- `bun test test/bun/localci-run.test.ts` (whole file, 34 tests), run 3 times
-  back to back: 34 pass / 0 fail each time, ~62s / ~65s / ~66s total (no
-  per-test timeout failures).
+- `bun test test/bun/sweep-procs.test.ts`: 2 pass, 0 fail, ~5.2-5.6s (both
+  correctness tests, final GREEN, review fix in place).
+- Re-measured the fix's timing claim after the review fix (`/proc` density
+  ~12900 at the time): `real 0m1.447s / 0m1.303s / 0m1.267s` across 3 runs of
+  `localci.sh --sweep-procs-only` -- the one extra one-time `sed` fork for
+  escaping `$wp` adds no measurable regression versus the ~1.2-1.3s measured
+  before the review fix, both still ~55-60x faster than the ~72s pre-#159
+  baseline.
+- `bun test test/bun/localci-run.test.ts` (whole file, 34 tests), run 2 more
+  times after the review fix: 34 pass / 0 fail each time, ~66s / ~70s total
+  (no per-test timeout failures; consistent with the pre-review-fix runs).
 - `bun test test/bun/localci-run.test.ts -t "a hung lane is killed at its
   timeout|start sweeps a killed run|SIGTERM mid-lane|SIGTERM with a lane that
-  ignores TERM"` (the 4 tests #159 named), run 3 times back to back: 4 pass /
-  0 fail each time, ~22s total each run.
+  ignores TERM"` (the 4 tests #159 named), run 3 times back to back (before
+  the review fix, same code path for these tests either way since none of
+  them exercise sibling-prefix worktrees): 4 pass / 0 fail each time, ~22s
+  total each run.
 
 ## Files touched
 
