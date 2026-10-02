@@ -49,6 +49,18 @@ describe("recordWorkerException", () => {
     } as unknown as D1Database;
     await expect(recordWorkerException(failingDb, "/x", new Error("original"), 4000)).resolves.toBeUndefined();
   });
+
+  it("never throws when the caught error's own .message/.stack getters throw", async () => {
+    class WeirdError extends Error {
+      get message(): string {
+        throw new Error("getter boom");
+      }
+      get stack(): string {
+        throw new Error("getter boom");
+      }
+    }
+    await expect(recordWorkerException(env.DB, "/x", new WeirdError(), 5000)).resolves.toBeUndefined();
+  });
 });
 
 describe("countWorkerExceptions", () => {
