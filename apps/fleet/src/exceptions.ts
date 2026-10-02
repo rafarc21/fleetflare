@@ -29,6 +29,52 @@ function stackHead(stack: string): string {
 }
 
 /**
+ * Operator stop-change (PR #198, issue #188): these 4 shapes were FIRST
+ * added to the SHARED Worker-wide `redactSecrets` (src/studio/redact.ts) —
+ * reverted from there because extending that shared util forced a matching
+ * edit to its shell mirror, `container/studio-bringup.sh`'s
+ * `bringup_redact`, and touching ANYTHING under `container/` makes this
+ * (supposed to be Worker-only) feature an IMAGE change — a container
+ * rebuild + rollout, replacing every running studio. Unacceptable blast
+ * radius for a feature that only needed Worker-side D1 writes. Kept here
+ * instead, module-LOCAL to exceptions.ts (NOT exported, NOT the shared
+ * `redactSecrets` — do not confuse the two): `describeError` below applies
+ * this AFTER `redactSecrets` already ran, so `worker_exceptions` rows still
+ * get the same coverage, just without ever touching the container image.
+ *
+ * Patterns (unchanged shapes from the reverted shared-util version):
+ *  - JWT: three dot-separated base64url segments starting `eyJ` (base64 of
+ *    `{"`, i.e. every JSON-header JWT starts with it) — matched by shape,
+ *    not decoded.
+ *  - Telegram bot token: `\d{6,}:[A-Za-z0-9_-]{35}`, Telegram's own
+ *    documented shape. Real leak surface specifically for THIS feature:
+ *    `telegram.token` (src/agents/registry.ts) reaches `sendCard`
+ *    (src/telegram/api.ts), called from `scheduled`'s watchdog path
+ *    (src/index.ts) — exactly the path this module's `recordWorkerException`
+ *    wraps.
+ *  - PEM private key block, multiline, non-greedy (`[\s\S]*?` since `.`
+ *    never matches newlines and a PEM body always spans several lines; non-
+ *    greedy so one leaked block doesn't swallow unrelated text up to a
+ *    LATER unrelated footer). Fully coverable here — unlike the shell
+ *    mirror that forced the revert, src/ TS has no line-oriented-sed
+ *    constraint.
+ *  - `?token=`/`&key=` query-string values, case-insensitive,
+ *    capture-preserving (keeps the param name, redacts only the value).
+ */
+const JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
+const TELEGRAM_TOKEN_RE = /\d{6,}:[A-Za-z0-9_-]{35}/g;
+const PEM_PRIVATE_KEY_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
+const QUERY_SECRET_RE = /([?&](?:token|key)=)[^&\s"']+/gi;
+
+function scrubExceptionLocalSecrets(s: string): string {
+  return s
+    .replace(JWT_RE, "«redacted»")
+    .replace(TELEGRAM_TOKEN_RE, "«redacted»")
+    .replace(PEM_PRIVATE_KEY_RE, "«redacted»")
+    .replace(QUERY_SECRET_RE, "$1«redacted»");
+}
+
+/**
  * Operator fix-first review on PR #198 (issue #188): a hard char cap on
  * BOTH `message` and `stack_head`, applied AFTER redaction (same ordering
  * rule as this module's own `describeError` doc comment already
@@ -52,17 +98,22 @@ function capField(s: string): string {
  * order src/studio/activity.ts's `truncateLine`/`extractLastVisibleLine` doc
  * comments establish and src/studio/grid.ts's `scrubPreview` already
  * implements: redact the full value first, slice second, so a secret
- * straddling the truncation boundary never survives half-caught. `capField`
- * (see its own doc comment) runs last, on each already-redacted,
- * already-line-sliced value.
+ * straddling the truncation boundary never survives half-caught. Exact
+ * order per value: shared `redactSecrets` first, then this module's OWN
+ * `scrubExceptionLocalSecrets` (see its doc comment for why these 4 extra
+ * shapes live here and not in the shared util), THEN (for `stack` only)
+ * `stackHead`'s line-slice, THEN `capField`'s char-cap last, on each
+ * already-redacted, already-line-sliced value.
  */
 function describeError(err: unknown): { name: string; message: string; stackHead: string | null } {
   if (err instanceof Error) {
-    const message = capField(redactSecrets(err.message));
-    const stackHead_ = err.stack ? capField(stackHead(redactSecrets(err.stack))) : null;
+    const message = capField(scrubExceptionLocalSecrets(redactSecrets(err.message)));
+    const stackHead_ = err.stack
+      ? capField(stackHead(scrubExceptionLocalSecrets(redactSecrets(err.stack))))
+      : null;
     return { name: err.name, message, stackHead: stackHead_ };
   }
-  return { name: NON_ERROR_NAME, message: capField(redactSecrets(String(err))), stackHead: null };
+  return { name: NON_ERROR_NAME, message: capField(scrubExceptionLocalSecrets(redactSecrets(String(err)))), stackHead: null };
 }
 
 /**

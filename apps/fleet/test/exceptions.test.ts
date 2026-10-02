@@ -196,6 +196,57 @@ describe("recordWorkerException — hot-path safety (operator review, PR #198)",
   });
 });
 
+// Operator stop-change (PR #198, issue #188): these 4 shapes were first
+// added to the SHARED src/studio/redact.ts (and its shell mirror,
+// container/studio-bringup.sh's bringup_redact) — reverted from there
+// because extending that shared util's shell mirror makes this a
+// container-image change, which this Worker-only feature must not be.
+// Moved local to exceptions.ts's own scrubExceptionLocalSecrets instead
+// (see that function's doc comment); these tests prove the SAME coverage
+// still reaches worker_exceptions rows end-to-end via
+// recordWorkerException, same specimens as the reverted
+// test/studio.redact.test.ts (git show 42aaae5) adapted to this module.
+describe("recordWorkerException — local secret scrub (operator stop-change, PR #198)", () => {
+  it("redacts a three-segment eyJ... JWT out of message and stack_head", async () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+    const err = new Error(`token was ${jwt} in the header`);
+    err.stack = `Error: token was ${jwt} in the header`;
+    await recordWorkerException(env.DB, "/x", err, 11_000, fakeCtx());
+    const rows = await allRows();
+    expect(rows[0].message).toBe("token was «redacted» in the header");
+    expect(rows[0].stack_head).not.toContain(jwt);
+  });
+
+  it("redacts a Telegram bot token (digits:35-char-token) out of message and stack_head", async () => {
+    const token = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw5";
+    const err = new Error(`sendCard failed for ${token}`);
+    err.stack = `Error: sendCard failed for ${token}`;
+    await recordWorkerException(env.DB, "/x", err, 12_000, fakeCtx());
+    const rows = await allRows();
+    expect(rows[0].message).toBe("sendCard failed for «redacted»");
+    expect(rows[0].stack_head).not.toContain(token);
+  });
+
+  it("redacts a full multiline PEM private key block out of message and stack_head", async () => {
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK...\nmore base64 lines\n-----END RSA PRIVATE KEY-----";
+    const err = new Error(`leaked key:\n${pem}\nend of output`);
+    err.stack = `Error: leaked key:\n${pem}\nend of output`;
+    await recordWorkerException(env.DB, "/x", err, 13_000, fakeCtx());
+    const rows = await allRows();
+    expect(rows[0].message).toBe("leaked key:\n«redacted»\nend of output");
+    expect(rows[0].stack_head).not.toContain("MIIBOgIBAAJBAK");
+  });
+
+  it("redacts token=/key= query-string values, keeping the param name, out of message and stack_head", async () => {
+    const err = new Error("GET /webhook?token=abc123&x=1");
+    err.stack = "Error: curl 'https://x/y&KEY=super-secret-value'";
+    await recordWorkerException(env.DB, "/x", err, 14_000, fakeCtx());
+    const rows = await allRows();
+    expect(rows[0].message).toBe("GET /webhook?token=«redacted»&x=1");
+    expect(rows[0].stack_head).not.toContain("super-secret-value");
+  });
+});
+
 describe("countWorkerExceptions", () => {
   it("counts zero against an empty table", async () => {
     expect(await countWorkerExceptions(env.DB)).toBe(0);
