@@ -386,7 +386,11 @@ describe("worker exception capture (#188)", () => {
 
   it("an insert that returns a REJECTED promise (async failure, not a sync throw) never masks the original error", async () => {
     vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
-    vi.spyOn(registryModule, "listStudios").mockRejectedValue(new Error("original boom, async insert rejection"));
+    // Fresh-context review, PR #198: same object-identity reasoning as the
+    // sibling tests above (ab29295) — a `const` so `.rejects.toBe` can
+    // assert on the EXACT instance, not just a matching message.
+    const original = new Error("original boom, async insert rejection");
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(original);
 
     // Unlike the sync-throw stub above, `.prepare()` here succeeds and
     // returns a real-shaped statement — only the eventual `.run()` promise
@@ -407,7 +411,7 @@ describe("worker exception capture (#188)", () => {
     });
     const ctx = fakeCtx();
     await expect(worker.fetch(req, { ...env, DB: failingDb } as unknown as Env, ctx))
-      .rejects.toThrow("original boom, async insert rejection");
+      .rejects.toBe(original);
 
     const rows = await exceptionRows();
     expect(rows).toHaveLength(0);
@@ -416,7 +420,10 @@ describe("worker exception capture (#188)", () => {
 
   it("1b: a hanging prune never blocks fetch's own resolution (operator review, PR #198)", async () => {
     vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
-    vi.spyOn(registryModule, "listStudios").mockRejectedValue(new Error("original boom, prune hangs"));
+    // Fresh-context review, PR #198: same object-identity reasoning as the
+    // sibling tests above (ab29295).
+    const original = new Error("original boom, prune hangs");
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(original);
 
     const realDb = env.DB;
     const hangingPruneDb = {
@@ -435,7 +442,7 @@ describe("worker exception capture (#188)", () => {
     // If prune were still awaited inline (the pre-fix behavior), this would
     // hang forever and fail this test's own timeout instead of resolving.
     await expect(worker.fetch(req, { ...env, DB: hangingPruneDb } as unknown as Env, ctx))
-      .rejects.toThrow("original boom, prune hangs");
+      .rejects.toBe(original);
     expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
   });
 });
