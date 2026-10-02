@@ -29,20 +29,40 @@ function stackHead(stack: string): string {
 }
 
 /**
+ * Operator fix-first review on PR #198 (issue #188): a hard char cap on
+ * BOTH `message` and `stack_head`, applied AFTER redaction (same ordering
+ * rule as this module's own `describeError` doc comment already
+ * establishes — redact the full value first, slice second, so a secret
+ * straddling the cut point never survives half-caught). `message` had no
+ * cap at all before this; `stack_head`'s existing `STACK_HEAD_MAX_LINES`
+ * line-count truncation stays as the first pass (it's still the right
+ * signal-preserving cut for an ordinary stack) — this is a backstop for the
+ * case a single huge line (or a huge non-Error `String(err)` message) slips
+ * through that unbounded.
+ */
+const MAX_FIELD_CHARS = 2000;
+
+function capField(s: string): string {
+  return s.length > MAX_FIELD_CHARS ? s.slice(0, MAX_FIELD_CHARS) : s;
+}
+
+/**
  * Extracts `name`/`message`/`stack` from whatever was thrown. Redaction
  * runs here, on the FULL message/stack, BEFORE any truncation — the same
  * order src/studio/activity.ts's `truncateLine`/`extractLastVisibleLine` doc
  * comments establish and src/studio/grid.ts's `scrubPreview` already
  * implements: redact the full value first, slice second, so a secret
- * straddling the truncation boundary never survives half-caught.
+ * straddling the truncation boundary never survives half-caught. `capField`
+ * (see its own doc comment) runs last, on each already-redacted,
+ * already-line-sliced value.
  */
 function describeError(err: unknown): { name: string; message: string; stackHead: string | null } {
   if (err instanceof Error) {
-    const message = redactSecrets(err.message);
-    const stackHead_ = err.stack ? stackHead(redactSecrets(err.stack)) : null;
+    const message = capField(redactSecrets(err.message));
+    const stackHead_ = err.stack ? capField(stackHead(redactSecrets(err.stack))) : null;
     return { name: err.name, message, stackHead: stackHead_ };
   }
-  return { name: NON_ERROR_NAME, message: redactSecrets(String(err)), stackHead: null };
+  return { name: NON_ERROR_NAME, message: capField(redactSecrets(String(err))), stackHead: null };
 }
 
 /**

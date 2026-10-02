@@ -59,6 +59,31 @@ const BEARER_RE = /Bearer\s+\S+/gi;
 // (prose saying "basic" is left alone); the header keeps its own case.
 // container/studio-bringup.sh's bringup_redact carries the same rule.
 const BASIC_AUTH_RE = /(authorization:\s*basic)\s+[A-Za-z0-9+/=]+/gi;
+// Operator fix-first review on PR #198 (issue #188): four more secret
+// shapes found during that review's read of this Worker-wide util, same
+// "help every caller, not just the one feature that prompted the read"
+// reasoning as every pattern already above.
+//
+// A JWT's three base64url segments — matched by shape, not by decoding it,
+// the same "mask by shape" rule this whole file already follows. `eyJ` is
+// the base64 of `{"`, i.e. every JSON-header JWT starts with it.
+const JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
+// Telegram's own documented bot-token shape (bot id, colon, 35-char
+// secret). This Worker has a real Telegram integration — `telegram.token`
+// (src/agents/registry.ts) reaches `sendCard` (src/telegram/api.ts), called
+// from `scheduled`'s watchdog path (src/index.ts) — so a failed send's
+// error text is a real, not hypothetical, leak surface for this exact
+// feature's `scheduled` exception capture.
+const TELEGRAM_TOKEN_RE = /\d{6,}:[A-Za-z0-9_-]{35}/g;
+// A full PEM private-key block, multiline — `[\s\S]*?` (not `.*?`) because
+// `.` does not match newlines and a PEM body always spans several lines;
+// non-greedy so one leaked block doesn't swallow unrelated text up to a
+// LATER unrelated PRIVATE KEY footer elsewhere in the same string.
+const PEM_PRIVATE_KEY_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
+// `?token=`/`&key=` query-string values — same capture-group-preserving
+// replace style as BASIC_AUTH_RE just above: keep the param name (and the
+// `?`/`&` it followed), redact only the value.
+const QUERY_SECRET_RE = /([?&](?:token|key)=)[^&\s"']+/gi;
 
 export function redactSecrets(s: string): string {
   return s
@@ -69,5 +94,9 @@ export function redactSecrets(s: string): string {
     .replace(ANTHROPIC_KEY_RE, "«redacted»")
     .replace(FLEET_SPAWN_TOKEN_RE, "«redacted»")
     .replace(BEARER_RE, "Bearer «redacted»")
-    .replace(BASIC_AUTH_RE, "$1 «redacted»");
+    .replace(BASIC_AUTH_RE, "$1 «redacted»")
+    .replace(JWT_RE, "«redacted»")
+    .replace(TELEGRAM_TOKEN_RE, "«redacted»")
+    .replace(PEM_PRIVATE_KEY_RE, "«redacted»")
+    .replace(QUERY_SECRET_RE, "$1«redacted»");
 }
