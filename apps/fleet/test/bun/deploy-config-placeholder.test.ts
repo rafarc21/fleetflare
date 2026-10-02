@@ -45,6 +45,9 @@ function writeInstalledWrangler(app: string, stub: string, version = "4.141.0") 
   // Issue #36: and scripts/deploy-target.ts before that. Same passing stub.
   mkdirSync(join(app, "scripts"), { recursive: true });
   writeFileSync(join(app, "scripts", "deploy-target.ts"), "process.exit(0);\n");
+  // Issue #204: and scripts/deploy-env-guard.ts before that. Same passing
+  // stub: this suite is about the placeholder check only.
+  writeFileSync(join(app, "scripts", "deploy-env-guard.ts"), "process.exit(0);\n");
 }
 
 function run(configBody: string): { code: number; stdout: string; stderr: string } {

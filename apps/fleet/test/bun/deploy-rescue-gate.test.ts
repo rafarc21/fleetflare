@@ -33,6 +33,7 @@ import { join, resolve } from "node:path";
 const DEPLOY_SH = resolve(import.meta.dir, "../../scripts/deploy.sh");
 const DEPLOY_TARGET_TS = resolve(import.meta.dir, "../../scripts/deploy-target.ts");
 const CONTAINERS_CHANGED_TS = resolve(import.meta.dir, "../../scripts/deploy-containers-changed.ts");
+const DEPLOY_ENV_GUARD_TS = resolve(import.meta.dir, "../../scripts/deploy-env-guard.ts");
 const REAL_WRANGLER = resolve(import.meta.dir, "../../node_modules/wrangler");
 
 let root: string;
@@ -78,6 +79,7 @@ beforeEach(() => {
   copyFileSync(DEPLOY_SH, join(fleet, "scripts", "deploy.sh"));
   if (existsSync(DEPLOY_TARGET_TS)) copyFileSync(DEPLOY_TARGET_TS, join(fleet, "scripts", "deploy-target.ts"));
   if (existsSync(CONTAINERS_CHANGED_TS)) copyFileSync(CONTAINERS_CHANGED_TS, join(fleet, "scripts", "deploy-containers-changed.ts"));
+  if (existsSync(DEPLOY_ENV_GUARD_TS)) copyFileSync(DEPLOY_ENV_GUARD_TS, join(fleet, "scripts", "deploy-env-guard.ts"));
   calls = join(root, "calls");
   stubs = join(root, "stubs");
   mkdirSync(stubs);
@@ -249,6 +251,58 @@ describe("deploy.sh runs rescue-all before a container-replacing command (#20)",
 });
 
 /**
+ * Issue #204: wrangler auto-loads `.env`/`.env.local` from ITS OWN cwd
+ * (deploy.sh cds into the app dir before exec-ing it) into process.env
+ * BEFORE it reads the config or authenticates. A stray CLOUDFLARE_* or
+ * WRANGLER_* var left in the app dir's `.env` (e.g. from local `wrangler
+ * dev` against a sandbox account) silently overrides whatever the operator
+ * exported on the command line, retargeting the deploy to a different,
+ * unauthorized account. This hit real, reported in #204: `d1 migrations
+ * apply --remote` failed with Cloudflare API error [code: 7403] "account not
+ * authorized", while the identical bare `wrangler` call (never loading that
+ * .env, different cwd) worked.
+ *
+ * deploy-target.ts's own #36/#48 target check already guards against this
+ * same hazard, but it only runs for the container-replacing subset of
+ * commands (replaces_containers) -- never for d1, secret, kv, r2, ... This
+ * suite proves the NEW guard, scripts/deploy-env-guard.ts, closes that gap
+ * for every non-read-only command.
+ */
+describe("deploy.sh refuses when a stray CLOUDFLARE_*/WRANGLER_* .env var could retarget the deploy (#204)", () => {
+  test("d1 migrations apply --remote with a stray CLOUDFLARE_ACCOUNT_ID in .env: refused, wrangler never runs", () => {
+    writeFileSync(join(fleet, ".env"), "CLOUDFLARE_ACCOUNT_ID=acct-wrong\n");
+    const r = deploy(["d1", "migrations", "apply", "fleet", "--remote"], 0);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain(join(fleet, ".env"));
+    expect(r.err).toContain("CLOUDFLARE_ACCOUNT_ID");
+    expect(r.wrangler).toEqual([]);
+  });
+
+  test("d1 migrations apply --remote with only an unrelated .env var: not refused, wrangler runs", () => {
+    writeFileSync(join(fleet, ".env"), "SOME_OTHER_VAR=x\n");
+    const r = deploy(["d1", "migrations", "apply", "fleet", "--remote"], 0);
+    expect(r.code, r.err).toBe(0);
+    expect(r.wrangler).toEqual(["wrangler d1 migrations apply fleet --remote -c wrangler.local.jsonc"]);
+  });
+
+  test("d1 migrations apply --local with the same stray CLOUDFLARE_ACCOUNT_ID: not refused (read-only/local is out of scope)", () => {
+    writeFileSync(join(fleet, ".env"), "CLOUDFLARE_ACCOUNT_ID=acct-wrong\n");
+    const r = deploy(["d1", "migrations", "apply", "fleet", "--local"], 0);
+    expect(r.code, r.err).toBe(0);
+    expect(r.wrangler).toEqual(["wrangler d1 migrations apply fleet --local -c wrangler.local.jsonc"]);
+  });
+
+  test("secret put with the same stray .env var: also refused (the fix is not d1-specific)", () => {
+    writeFileSync(join(fleet, ".env"), "CLOUDFLARE_ACCOUNT_ID=acct-wrong\n");
+    const r = deploy(["secret", "put", "X"], 0);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain(join(fleet, ".env"));
+    expect(r.err).toContain("CLOUDFLARE_ACCOUNT_ID");
+    expect(r.wrangler).toEqual([]);
+  });
+});
+
+/**
  * Issue #36 (a): rescue-all rescues the fleet ~/.fleet/credentials names;
  * wrangler replaces the Worker the config (+ --env/CLOUDFLARE_ENV, --name)
  * names. Mismatch = the gate rescues the wrong fleet and says SAFE while the
@@ -399,6 +453,13 @@ describe("deploy.sh refuses when wrangler's target Worker is not the credentials
     });
   }
 
+  // Issue #204: this exact hazard is now caught EARLIER, by deploy.sh's own
+  // unconditional scripts/deploy-env-guard.ts call (before deploy-target.ts
+  // even runs), as a hard, non-overridable refusal — not the #36
+  // target-mismatch soft gate (--allow-unrescued-eligible) these tests used
+  // to exercise. Still refused, still no wrangler/rescue-all run, still
+  // names the file; the message no longer offers --allow-unrescued, because
+  // there is nothing to override here.
   for (const [file, body, args] of [
     [".env", "CLOUDFLARE_ENV=prod\n", ["deploy"]],
     [".env", "export CLOUDFLARE_ENV=prod\n", ["deploy"]],
@@ -415,7 +476,11 @@ describe("deploy.sh refuses when wrangler's target Worker is not the credentials
       expect(deploy([...args], 0).code).toBe(0);
       rmSync(calls, { force: true });
       writeFileSync(join(fleet, file), body);
-      expectRefused(deploy([...args], 0), file);
+      const r = deploy([...args], 0);
+      expect(r.code).not.toBe(0);
+      expect(r.wrangler).toEqual([]);
+      expect(r.fleet).toEqual([]);
+      expect(r.err).toContain(file);
     });
   }
 

@@ -50,6 +50,10 @@ beforeEach(() => {
   writeFileSync(join(fleet, "cli", "fleet.ts"), "process.exit(0);\n");
   // Issue #36: and scripts/deploy-target.ts before that. Same passing stub.
   writeFileSync(join(fleet, "scripts", "deploy-target.ts"), "process.exit(0);\n");
+  // Issue #204: and scripts/deploy-env-guard.ts before that. Same passing
+  // stub: this suite is about the ops-checkout dirty guard, not the dotenv
+  // guard.
+  writeFileSync(join(fleet, "scripts", "deploy-env-guard.ts"), "process.exit(0);\n");
   const bin = join(root, "bin");
   mkdirSync(bin);
   writeFileSync(join(bin, "wrangler"), `#!/bin/sh\necho "PATH-wrangler $*" >> "${calls}"\n`);
