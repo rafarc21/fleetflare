@@ -23,6 +23,24 @@
 # Mac-wide gate lock (/tmp/fleetflare-gate.lock) when lockf exists. Never
 # prunes the host's build cache; removes only the images it tagged.
 #
+# Issue #124: `lockf`'s advisory lock is per-PROCESS, not inherited across
+# fork+exec. If a caller already holds this exact lock and invokes this
+# script nested (without setting IMAGE_REPRO_LOCKED itself -- e.g.
+# localci.sh's own `lockf -k "$LOCK"` fallback on a Mac with no flock, or a
+# human operator's own ad-hoc outer wrap), self-wrapping here deadlocks
+# against our own ancestor, which is itself waiting on us. Before
+# self-wrapping, `ancestor_holds_lock` walks this process's own ancestor
+# chain (portable `ps -ww -o ppid=`/`ps -ww -o command=` -- `-ww` for
+# unlimited width, same fix localci.sh's macOS `sweep_procs` branch already
+# needed for BSD ps's command field truncating to terminal width without it)
+# for a `lockf ... "$LOCK"` command line; if found, the gate is already
+# held further up OUR OWN process tree, so skip the self-wrap entirely
+# (behave as if the caller had set IMAGE_REPRO_LOCKED=1). A fixed timeout
+# can't make this call: a stranger
+# process (not our ancestor) can legitimately hold the lock for a long
+# time, and "still locked after N seconds" looks the same whether it's a
+# deadlock on our own ancestor or someone else's long legitimate job.
+#
 # Exit: 0 reproducible · 1 not reproducible · 2 build/infra error.
 # Bash 3.2 (macOS /bin/bash).
 set -uo pipefail
@@ -30,8 +48,35 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 FLEET_DIR=$(dirname "$HERE")
 LOCK=/tmp/fleetflare-gate.lock
+
+ancestor_holds_lock() {
+  local pid=$$ ppid cmd depth=0
+  while [ "$pid" != "1" ] && [ "$depth" -lt 50 ]; do
+    ppid=$(ps -ww -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -z "$ppid" ] && return 1
+    cmd=$(ps -ww -o command= -p "$ppid" 2>/dev/null)
+    case "$cmd" in *lockf*"$LOCK"*) return 0 ;; esac
+    pid=$ppid
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# Test-only hook (#124): lets test/bun/image-repro-lock.test.ts call
+# ancestor_holds_lock directly, against the real /proc-backed `ps` on
+# whatever host runs the test, without needing the real `lockf` binary
+# installed (this studio container has only `flock`, not `lockf`, so the
+# self-wrap `if` below never runs here at all). Never invoked by a real run.
+if [[ "${1:-}" == "--ancestor-holds-lock-check" ]]; then
+  if ancestor_holds_lock; then echo yes; exit 0; else echo no; exit 1; fi
+fi
+
 if [[ -z "${IMAGE_REPRO_LOCKED:-}" ]] && command -v lockf >/dev/null 2>&1; then
-  IMAGE_REPRO_LOCKED=1 exec lockf -k "$LOCK" "$0" "$@"
+  if ancestor_holds_lock; then
+    IMAGE_REPRO_LOCKED=1
+  else
+    IMAGE_REPRO_LOCKED=1 exec lockf -k "$LOCK" "$0" "$@"
+  fi
 fi
 
 DOCKER=${WRANGLER_DOCKER_BIN:-docker}
