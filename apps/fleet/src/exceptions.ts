@@ -80,7 +80,21 @@ export async function pruneWorkerExceptions(db: D1Database, keep: number = 1000)
 export async function recordWorkerException(
   db: D1Database, route: string, err: unknown, now: number,
 ): Promise<void> {
-  const { name, message, stackHead: head } = describeError(err);
+  // `describeError` itself must never be allowed to throw out of this
+  // function: a crafted Error subclass with a throwing `.message`/`.stack`
+  // getter (not just a D1 outage) would otherwise replace the ORIGINAL
+  // error the outer fetch/scheduled try/catch is rethrowing. Falling back
+  // to a fixed placeholder row still records SOMETHING rather than
+  // silently dropping the exception entirely.
+  let name: string, message: string, head: string | null;
+  try {
+    ({ name, message, stackHead: head } = describeError(err));
+  } catch (describeErr) {
+    console.error("recordWorkerException describeError failed", describeErr);
+    name = "<describeError failed>";
+    message = "<describeError failed>";
+    head = null;
+  }
   try {
     await db
       .prepare(
