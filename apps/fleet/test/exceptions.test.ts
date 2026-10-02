@@ -67,6 +67,21 @@ describe("recordWorkerException", () => {
     await expect(recordWorkerException(failingDb, "/x", new Error("original"), 4000, fakeCtx())).resolves.toBeUndefined();
   });
 
+  it("caps message/stack_head at MAX_FIELD_CHARS, AFTER redaction has already run (operator review, PR #198)", async () => {
+    const secret = "sk-ant-oat01-huge-secret-value";
+    const huge = `${secret} ` + "x".repeat(5000);
+    const err = new Error(huge);
+    err.stack = `Error: ${huge}`;
+    await recordWorkerException(env.DB, "/x", err, 9000, fakeCtx());
+    const rows = await allRows();
+    // Redacted first: the secret must never survive, even straddling the
+    // 2000-char cut point (it's well inside the first 2000 chars here).
+    expect(rows[0].message).not.toContain(secret);
+    expect(rows[0].message.length).toBeLessThanOrEqual(2000);
+    expect(rows[0].stack_head).not.toBeNull();
+    expect((rows[0].stack_head as string).length).toBeLessThanOrEqual(2000);
+  });
+
   it("never throws when the caught error's own .message/.stack getters throw", async () => {
     class WeirdError extends Error {
       get message(): string {
