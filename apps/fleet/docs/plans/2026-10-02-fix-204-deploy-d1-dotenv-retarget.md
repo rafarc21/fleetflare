@@ -113,3 +113,18 @@ Real `migrate:local`/`migrate:remote`/`deploy`, and `test:integration`/
 `test:acceptance`, need live wrangler/GitHub App credentials this
 container does not and must not have — not exercised here. Verification is
 entirely through the existing hermetic test harness.
+
+Issue #204's report also mentioned a second symptom alongside the CF 7403
+retarget this fix addresses: "wrapper exit code was swallowed by caller
+pipe — operator script continued past failed migration." This fix does not
+touch that second symptom, deliberately: `scripts/deploy.sh` itself runs
+with `set -euo pipefail` and its last line is an `exec` of wrangler
+directly (never piped through anything of this script's own), so its own
+exit code propagates to whatever invokes it intact — there is nothing in
+this file that could swallow it. The reported swallowing is consistent with
+the OPERATOR's own private orchestration script piping `deploy.sh`'s
+output into something else without `set -o pipefail` on ITS side (a pipe's
+exit status is its last command's by default, not any earlier stage's) —
+that script is outside this repo, not something this fix can see or
+change. Noted here so a future reader, or the issue itself when closed,
+is not left wondering if half the bug was overlooked.

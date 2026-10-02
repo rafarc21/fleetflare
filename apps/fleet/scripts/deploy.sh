@@ -46,6 +46,24 @@
 #     are excluded so wrangler.example.jsonc's own explanatory comments about
 #     that placeholder syntax (which themselves contain the substring
 #     `<YOUR_`) do not cause a fully-filled config to be refused, or
+#   - (issue #204) the command is not a known read-only one (checked first,
+#     before every other non-read-only check below, including #365's
+#     --allow-dirty-ops and #20/#36's --allow-unrescued) and $FLEET_DIR's own
+#     `.env`/`.env.local` (and, when an env is named by -e/--env/--env= or
+#     $CLOUDFLARE_ENV, also `.env.<env>`/`.env.<env>.local`) set a
+#     `CLOUDFLARE_*`/`WRANGLER_*` var (see scripts/deploy-env-guard.ts).
+#     Wrangler auto-loads these files from its OWN cwd (this script `cd`s
+#     into $FLEET_DIR before `exec`-ing it) into its environment BEFORE
+#     reading the config or authenticating, so a stray var left there (e.g.
+#     from local `wrangler dev` against a sandbox account) can silently
+#     retarget the command to the wrong, unauthorized account — reported as a
+#     real D1 migration sent to the wrong account, Cloudflare API error
+#     [code: 7403] "account not authorized", while the identical bare
+#     `wrangler` command (a different cwd, so no `.env` ever loaded) worked.
+#     A hit is a hard refusal: no override, not --allow-dirty-ops, not
+#     --allow-unrescued — this applies to EVERY non-read-only command,
+#     including `secret put`/`secret delete`/`secret bulk`, which the #36
+#     bullet below says are not gated BY THE RESCUE-ALL GATE specifically.
 #   - (issue #365) the command is not a known read-only one (see
 #     is_read_only: everything else is treated as changing remote state) and
 #     the config sits in a git checkout (the ops repo) that is not safe to
@@ -88,8 +106,10 @@
 #     must also sit on the DEPLOYING account's workers.dev subdomain -- a
 #     read-only lookup that needs network and a logged-in wrangler
 #     (CLOUDFLARE_ACCOUNT_ID when the login sees several accounts).
-#   `secret put`/`secret delete`/`secret bulk` are NOT gated (issue #36,
-#   measured 2026-09-29 on a throwaway Worker: plain @cloudflare/containers
+#   `secret put`/`secret delete`/`secret bulk` are NOT gated BY THE
+#   RESCUE-ALL GATE above (issue #36 — the #204 dotenv guard above still
+#   applies to them; this bullet is about rescue-all specifically), measured
+#   2026-09-29 on a throwaway Worker: plain @cloudflare/containers
 #   Container DO, instance lite, one container, n=1): each deploys a new
 #   Worker version and restarts the Durable Object; the container kept the
 #   same boot id throughout. StudioDO extends Sandbox -- not measured
@@ -317,18 +337,21 @@ if ! is_read_only ${ARGS[@]+"${ARGS[@]}"}; then
   # this block, so neither --allow-dirty-ops (the ops git checkout, a
   # different concern) nor --allow-unrescued (the rescue gate) can skip it.
   #
-  # Best-effort -e/--env scan: a miss only means an env-specific dotenv file
-  # (.env.<env>, .env.<env>.local) is not also checked -- the universal
-  # .env/.env.local check, the one this issue's own repro hits, always runs
-  # regardless.
+  # Best-effort -e/--env scan, falling back to $CLOUDFLARE_ENV when argv names
+  # no env (wrangler itself falls back the same way): a miss only means an
+  # env-specific dotenv file (.env.<env>, .env.<env>.local) is not also
+  # checked -- the universal .env/.env.local check, the one this issue's own
+  # repro hits, always runs regardless.
   ENV_GUESS=""
-  GUESS_ARGS=(${ARGS[@]+"${ARGS[@]}"})
-  for ((gi = 0; gi < ${#GUESS_ARGS[@]}; gi++)); do
-    case "${GUESS_ARGS[$gi]}" in
-      -e|--env) ENV_GUESS="${GUESS_ARGS[$((gi + 1))]:-}" ;;
-      --env=*) ENV_GUESS="${GUESS_ARGS[$gi]#--env=}" ;;
+  skip=0
+  for a in ${ARGS[@]+"${ARGS[@]}"}; do
+    if [[ "$skip" == 1 ]]; then ENV_GUESS="$a"; skip=0; continue; fi
+    case "$a" in
+      -e|--env) skip=1 ;;
+      --env=*) ENV_GUESS="${a#--env=}" ;;
     esac
   done
+  [[ -n "$ENV_GUESS" ]] || ENV_GUESS="${CLOUDFLARE_ENV:-}"
   if command -v bun >/dev/null 2>&1; then
     bun "$SCRIPT_DIR/deploy-env-guard.ts" "$FLEET_DIR" "$ENV_GUESS" || {
       echo "deploy.sh: refusing — a local .env file may retarget this deploy to the wrong account; see above." >&2

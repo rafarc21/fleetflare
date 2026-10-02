@@ -484,6 +484,33 @@ describe("deploy.sh refuses when wrangler's target Worker is not the credentials
     });
   }
 
+  // The property above (refused) is also satisfied by the OLD, pre-#204
+  // behavior: a target mismatch from deploy-target.ts's own dotenv scan,
+  // overridable with --allow-unrescued. These two cases are the ones that
+  // actually distinguish the new hard, non-overridable #204 guard from that
+  // old soft gate: a stray dotenv var must still refuse a container-replacing
+  // command EVEN WITH --allow-unrescued (and --allow-dirty-ops, which sits
+  // outside this check entirely) present.
+  test("--allow-unrescued does NOT override the #204 guard: still refused, wrangler and rescue-all never run", () => {
+    writeFileSync(join(fleet, ".env"), "CLOUDFLARE_ACCOUNT_ID=acct-wrong\n");
+    const r = deploy(["deploy", "--allow-unrescued"], 0);
+    expect(r.code).not.toBe(0);
+    expect(r.wrangler).toEqual([]);
+    expect(r.fleet).toEqual([]);
+    expect(r.err).toContain(join(fleet, ".env"));
+    expect(r.err).toContain("CLOUDFLARE_ACCOUNT_ID");
+  });
+
+  test("--allow-dirty-ops does NOT override the #204 guard either: still refused before the ops-checkout logic it controls", () => {
+    writeFileSync(join(fleet, ".env"), "CLOUDFLARE_ACCOUNT_ID=acct-wrong\n");
+    const r = deploy(["deploy", "--allow-dirty-ops"], 0);
+    expect(r.code).not.toBe(0);
+    expect(r.wrangler).toEqual([]);
+    expect(r.fleet).toEqual([]);
+    expect(r.err).toContain(join(fleet, ".env"));
+    expect(r.err).toContain("CLOUDFLARE_ACCOUNT_ID");
+  });
+
   test(".env in the app dir with only unrelated vars -> passes", () => {
     writeFileSync(join(fleet, ".env"), "FOO=1\nMY_CLOUDFLARE_THING=2\n");
     expect(deploy(["deploy"], 0).code).toBe(0);
