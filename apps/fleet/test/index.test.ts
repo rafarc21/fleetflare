@@ -1,10 +1,13 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as authModule from "../src/studio/auth";
+import * as registryModule from "../src/studio/registry";
+import * as stateModule from "../src/state";
 import worker from "../src/index";
 import { getFlag } from "../src/state";
 import { recordStudio } from "../src/studio/registry";
 import { alertedKey, rearmKey, clearRearm } from "../src/tasks/watchdog";
+import { __resetExceptionRateCapForTests } from "../src/exceptions";
 import type { TaskRecord } from "../src/tasks/loop";
 import type { Env } from "../src/env";
 
@@ -35,8 +38,32 @@ function fakeAgentReturning(task: TaskRecord | null): Env["AGENT"] {
   } as unknown as Env["AGENT"];
 }
 
+/**
+ * Operator fix-first review on PR #198 (issue #188): a fake ExecutionContext
+ * whose `waitUntil` is a spy, not a no-op — `recordWorkerException` now
+ * hands its own prune off to `ctx.waitUntil` rather than awaiting it inline,
+ * so any test on the exception-capture path needs a real (if fire-and-
+ * forget) `waitUntil` to assert against, not the bare `{} as any` the
+ * happy-path tests above use (those never reach `recordWorkerException` at
+ * all, so `{} as any` stays fine for them). Same queue-don't-await shape as
+ * test/github.webhook.test.ts's own `fakeCtx()`.
+ */
+function fakeCtx() {
+  const tasks: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: vi.fn((p: Promise<unknown>) => { tasks.push(p); p.catch(() => {}); }),
+    passThroughOnException: () => {},
+  };
+  return ctx as unknown as ExecutionContext & { waitUntil: ReturnType<typeof vi.fn> };
+}
+
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
+  await env.DB.prepare("DELETE FROM worker_exceptions").run();
+  // #188 fix 2nd review (PR #198): the module-level rate cap
+  // (src/exceptions.ts) persists across tests in this file otherwise — a
+  // long enough run could trip the ~20/min cap across unrelated tests.
+  __resetExceptionRateCapForTests();
   alerts = [];
   realFetch = globalThis.fetch;
   globalThis.fetch = (async (_input: unknown, init: any) => {
@@ -239,5 +266,188 @@ describe("scheduled() order (PR #109 review)", () => {
       { scheduledTime: Date.UTC(2026, 8, 24, 12, 40) } as any, { ...env, AGENT: agent, STUDIO: studio }, {} as any,
     );
     expect(order).toEqual(["rearm", "watch"]);
+  });
+});
+
+// #168 sensor 4 (issue #188), option (b): fetch/scheduled each wrap their
+// ENTIRE body in one outer try/catch — anything that escapes lands a row in
+// worker_exceptions (src/exceptions.ts's recordWorkerException) before the
+// SAME error is rethrown unchanged.
+describe("worker exception capture (#188)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  async function exceptionRows() {
+    const res = await env.DB.prepare(
+      "SELECT ts, route, name, message, stack_head FROM worker_exceptions ORDER BY ts ASC",
+    ).all<{ ts: number; route: string; name: string; message: string; stack_head: string | null }>();
+    return res.results ?? [];
+  }
+
+  it("fetch: an uncaught exception lands a row in worker_exceptions AND is still rethrown unchanged", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    // Operator fix-first review, PR #198: a `const` so `.rejects.toBe` can
+    // assert on OBJECT IDENTITY, not just a matching message — a weaker
+    // `.rejects.toThrow("listStudios boom")` would also pass if the wrapper
+    // threw a brand NEW Error with the same string instead of rethrowing
+    // this exact instance.
+    const original = new Error("listStudios boom");
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(original);
+
+    const req = new Request("https://x/studio/", {
+      headers: { "Cf-Access-Jwt-Assertion": "t", Accept: "application/json" },
+    });
+    const ctx = fakeCtx();
+    await expect(worker.fetch(req, env as unknown as Env, ctx)).rejects.toBe(original);
+
+    const rows = await exceptionRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].route).toBe("/studio/");
+    expect(rows[0].name).toBe("Error");
+    expect(rows[0].message).toBe("listStudios boom");
+    // Operator fix-first review on PR #198: the insert's own prune is
+    // handed to ctx.waitUntil, not awaited inline — proven directly below
+    // ("a hanging prune never blocks fetch's own resolution"); this just
+    // confirms the hand-off itself happened on the ordinary success path.
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+  });
+
+  it("scheduled: an uncaught exception (outside every local try/catch) lands a row AND is still rethrown unchanged", async () => {
+    // getFlag's own call site (the rearm-attempt counter read) is the one
+    // line in scheduled() with no local try/catch around it — see
+    // src/index.ts's handleScheduled.
+    // Same object-identity reasoning as the fetch test above (operator
+    // fix-first review, PR #198).
+    const original = new Error("getFlag boom - scheduled exception test");
+    vi.spyOn(stateModule, "getFlag").mockRejectedValue(original);
+    const fakeEnv = { ...env, AGENT: fakeAgentReturning(staleTask()) };
+
+    const ctx = fakeCtx();
+    await expect(worker.scheduled({} as any, fakeEnv, ctx)).rejects.toBe(original);
+
+    const rows = await exceptionRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].route).toBe("scheduled");
+    expect(rows[0].name).toBe("Error");
+    expect(rows[0].message).toBe("getFlag boom - scheduled exception test");
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+  });
+
+  it("redacts a secret shape out of the stored message before it ever reaches D1", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    const secret = "sk-ant-oat01-super-secret-token-value";
+    // Same object-identity reasoning as above (operator fix-first review,
+    // PR #198) — the caller must see the EXACT original Error, unredacted;
+    // only the D1 row gets the redacted copy.
+    const original = new Error(`upstream call failed, leaked ${secret}`);
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(original);
+
+    const req = new Request("https://x/studio/", {
+      headers: { "Cf-Access-Jwt-Assertion": "t", Accept: "application/json" },
+    });
+    await expect(worker.fetch(req, env as unknown as Env, fakeCtx())).rejects.toBe(original);
+
+    const rows = await exceptionRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].message).not.toContain(secret);
+    expect(rows[0].message).toContain("«redacted»");
+  });
+
+  it("an insert failure in recordWorkerException never masks the original error", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    // Same object-identity reasoning as above (operator fix-first review,
+    // PR #198).
+    const original = new Error("original boom, not a D1 error");
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(original);
+
+    // A stub DB that answers every statement through the REAL binding except
+    // the one INSERT recordWorkerException issues, which fails instead — the
+    // same "plain object implementing only the method under test" shape
+    // fakeAgentReturning/fakeStudio above already use for env.AGENT/STUDIO.
+    const realDb = env.DB;
+    const failingDb = {
+      prepare(sql: string) {
+        if (sql.includes("INSERT INTO worker_exceptions")) {
+          throw new Error("simulated D1 outage — insert into worker_exceptions failed");
+        }
+        return realDb.prepare(sql);
+      },
+    } as unknown as Env["DB"];
+
+    const req = new Request("https://x/studio/", {
+      headers: { "Cf-Access-Jwt-Assertion": "t", Accept: "application/json" },
+    });
+    const ctx = fakeCtx();
+    await expect(worker.fetch(req, { ...env, DB: failingDb } as unknown as Env, ctx))
+      .rejects.toBe(original);
+
+    // The insert genuinely failed — no row landed — proving this isn't a
+    // trivially-true assertion.
+    const rows = await exceptionRows();
+    expect(rows).toHaveLength(0);
+    // The insert never succeeded, so there is nothing to prune — waitUntil
+    // must not have been called at all.
+    expect(ctx.waitUntil).not.toHaveBeenCalled();
+  });
+
+  it("an insert that returns a REJECTED promise (async failure, not a sync throw) never masks the original error", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    // Fresh-context review, PR #198: same object-identity reasoning as the
+    // sibling tests above (ab29295) — a `const` so `.rejects.toBe` can
+    // assert on the EXACT instance, not just a matching message.
+    const original = new Error("original boom, async insert rejection");
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(original);
+
+    // Unlike the sync-throw stub above, `.prepare()` here succeeds and
+    // returns a real-shaped statement — only the eventual `.run()` promise
+    // rejects. A materially different JS path through the same try/catch
+    // (await-rejection vs. a throw already raised before any await).
+    const realDb = env.DB;
+    const failingDb = {
+      prepare(sql: string) {
+        if (sql.includes("INSERT INTO worker_exceptions")) {
+          return { bind: () => ({ run: () => Promise.reject(new Error("simulated async D1 insert rejection")) }) };
+        }
+        return realDb.prepare(sql);
+      },
+    } as unknown as Env["DB"];
+
+    const req = new Request("https://x/studio/", {
+      headers: { "Cf-Access-Jwt-Assertion": "t", Accept: "application/json" },
+    });
+    const ctx = fakeCtx();
+    await expect(worker.fetch(req, { ...env, DB: failingDb } as unknown as Env, ctx))
+      .rejects.toBe(original);
+
+    const rows = await exceptionRows();
+    expect(rows).toHaveLength(0);
+    expect(ctx.waitUntil).not.toHaveBeenCalled();
+  });
+
+  it("1b: a hanging prune never blocks fetch's own resolution (operator review, PR #198)", async () => {
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+    // Fresh-context review, PR #198: same object-identity reasoning as the
+    // sibling tests above (ab29295).
+    const original = new Error("original boom, prune hangs");
+    vi.spyOn(registryModule, "listStudios").mockRejectedValue(original);
+
+    const realDb = env.DB;
+    const hangingPruneDb = {
+      prepare(sql: string) {
+        if (sql.includes("DELETE FROM worker_exceptions")) {
+          return { bind: () => ({ run: () => new Promise(() => {}) }) }; // never resolves
+        }
+        return realDb.prepare(sql);
+      },
+    } as unknown as Env["DB"];
+
+    const req = new Request("https://x/studio/", {
+      headers: { "Cf-Access-Jwt-Assertion": "t", Accept: "application/json" },
+    });
+    const ctx = fakeCtx();
+    // If prune were still awaited inline (the pre-fix behavior), this would
+    // hang forever and fail this test's own timeout instead of resolving.
+    await expect(worker.fetch(req, { ...env, DB: hangingPruneDb } as unknown as Env, ctx))
+      .rejects.toBe(original);
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
   });
 });

@@ -406,6 +406,7 @@ afterEach(() => {
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
+  await env.DB.prepare("DELETE FROM worker_exceptions").run();
 });
 
 describe("handleStudio", () => {
@@ -2214,6 +2215,36 @@ describe("GET /studio/accounts", () => {
       { name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: null, seenAt: null },
       { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: null, dead: true, until: null, seenAt },
     ]);
+  });
+});
+
+// #168 sensor 4 (issue #188) — the read-only count that sensor reads.
+describe("GET /studio/worker-exceptions/count", () => {
+  it("401 without an Access header", async () => {
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(new Request("https://x/studio/worker-exceptions/count"), testEnv);
+    expect(res.status).toBe(401);
+  });
+
+  it("answers 0 with an empty table", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(authorizedReq("/studio/worker-exceptions/count"), testEnv);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ count: 0 });
+  });
+
+  it("answers the real row count", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    for (let i = 0; i < 3; i++) {
+      await testEnv.DB.prepare(
+        "INSERT INTO worker_exceptions (id, ts, route, name, message, stack_head) VALUES (?, ?, ?, ?, ?, ?)",
+      ).bind(`exc-${i}`, Date.now() + i, "/x", "Error", "boom", null).run();
+    }
+    const res = await handleStudio(authorizedReq("/studio/worker-exceptions/count"), testEnv);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ count: 3 });
   });
 });
 
