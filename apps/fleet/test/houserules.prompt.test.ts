@@ -181,7 +181,7 @@ describe("HOUSE_RULES — the memory ceiling is a rule, not an anecdote (issue #
 });
 
 // Issue #85: lead deadlocks were the most common failure in a ~30-studio
-// night run. Four always-on rules, one per measured deadlock.
+// night run. Five always-on rules, one per measured deadlock.
 describe("HOUSE_RULES — a lead never blocks on nothing (issue #85)", () => {
   const rules = () => collapseWs(HOUSE_RULES);
 
