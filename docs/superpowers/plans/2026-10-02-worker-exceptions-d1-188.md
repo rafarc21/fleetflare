@@ -163,6 +163,11 @@ above, same migration, same table:
    `MAX_FIELD_CHARS` (2000) char cap on both `message` and `stack_head`,
    applied AFTER redaction (same ordering this module already followed for
    `stack_head`'s line-count truncation) — `message` had no cap before this.
+   **Superseded below (operator stop-change, see "Operator stop-change:
+   secret patterns moved off the shared util" section) — the shared-`redactSecrets`
+   part of this fix was reverted; the patterns now live module-local in
+   exceptions.ts. The `MAX_FIELD_CHARS` cap described here is unaffected
+   and still stands as written.**
 3. **Stronger test assertions.** The four exception-capture tests in
    test/index.test.ts now assert `.rejects.toBe(originalErrorInstance)`
    instead of `.rejects.toThrow(message)` — proving the EXACT same object
@@ -198,3 +203,61 @@ This is a known, accepted gap for this sensor's current scope, not a defect
 to fix here — see `countWorkerExceptions`'s own doc comment (exceptions.ts)
 and the `/studio/worker-exceptions/count` route's doc comment
 (src/studio/routes.ts) for the same note kept next to the code.
+
+## Operator stop-change: secret patterns moved off the shared util (2026-10-02)
+
+Item 2 of the "Operator fix-first review" section above, as originally
+landed, extended the SHARED Worker-wide `redactSecrets`
+(`src/studio/redact.ts`) with the 4 new patterns. That util has a shell
+mirror, `apps/fleet/container/studio-bringup.sh`'s `bringup_redact`, which
+has to stay byte-for-byte in sync with it — so the fix also edited
+`studio-bringup.sh`, plus `test/studio.redact.test.ts` and
+`test/bun/bringup-log.test.ts` to cover both sides.
+
+**Operator stop-change:** touching anything under `container/` makes this
+a container IMAGE change — a rebuild and rollout, replacing every running
+studio — for what was supposed to be a Worker-only feature (new D1 table,
+new D1 writes, no new credential). Unacceptable blast radius. Ruling:
+revert the shared-util path entirely; keep the 4 patterns, but move them
+local to this feature.
+
+**The revert (commit `075a7f7`):** `src/studio/redact.ts`,
+`container/studio-bringup.sh`, `test/studio.redact.test.ts`, and
+`test/bun/bringup-log.test.ts` were hard-reset to byte-identical with
+`origin/main` — undoing exactly the 4 commits (`42aaae5`, `7217040`,
+`5b0382c`, `2741ff5`) that had touched them for this fix.
+
+**The replacement (commit `7e02d4c`):** the same 4 shapes (JWT, Telegram
+bot token, multiline PEM private-key block, `token=`/`key=` query-string
+values) landed instead as a new module-private function,
+`scrubExceptionLocalSecrets`, in `src/exceptions.ts` — not exported, not
+the shared `redactSecrets`. `describeError` calls it on `message` and
+`stack` AFTER `redactSecrets` already ran and BEFORE `stackHead`/
+`capField` (same redact-before-truncate ordering the rest of this module
+follows). Coverage on `worker_exceptions` rows is identical to the
+reverted version; zero lines under `container/` change. 4 new tests moved
+into `test/exceptions.test.ts` (specimens carried over from the reverted
+`test/studio.redact.test.ts`, see `git show 42aaae5`).
+
+**Regex-precision follow-up (commits `8729901`, `815eca1`):** a second
+operator review hardened the 4 patterns themselves:
+
+- `TELEGRAM_TOKEN_RE` gained `\b` word-boundary anchors on both ends, so it
+  no longer partial-matches inside a longer digit run.
+- `PEM_PRIVATE_KEY_RE`'s END-marker alternation gained an end-of-string
+  fallback (`(?:-----END [A-Z ]*PRIVATE KEY-----|$)`) — without it, an
+  unterminated PEM block (no END marker ever found) forced the non-greedy
+  `[\s\S]*?` to backtrack across the rest of the string hunting for a
+  terminator that doesn't exist, the classic non-greedy-with-no-anchor
+  ReDoS/quadratic-blowup shape. Anchoring to end-of-string gives the engine
+  a guaranteed match point instead.
+- `QUERY_SECRET_RE` expanded its alternation to also cover `access_token=`
+  and `api_key=`, not just `token=`/`key=`.
+- Test-isolation nit (`test/index.test.ts`): the module-level exception
+  rate cap (~20/minute) was never reset between tests, risking cross-test
+  pollution on a long run — the top-level `beforeEach` now calls
+  `__resetExceptionRateCapForTests`.
+
+No container/image change in any of this follow-up either — all 3 commits
+stayed inside `src/exceptions.ts` and its own test file (plus the one
+`index.test.ts` nit above).
