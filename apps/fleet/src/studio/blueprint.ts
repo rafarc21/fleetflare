@@ -557,7 +557,15 @@ export const HOUSE_RULES = [
   "the tests your change touches; leave the full set to CI or the merge gate.",
   "",
   // Issue #85: lead deadlocks, the most common failure of a ~30-studio night
-  // run (2026-09-29/30). One rule per measured deadlock.
+  // run (2026-09-29/30). Five always-on rules, one per measured deadlock —
+  // issue #193 (2026-10-01 21:35Z, web-studio/#187) added the fifth: a lead
+  // dispatched a member via the Agent tool's default (run_in_background:
+  // true), then ended its own turn to wait for the completion notification.
+  // Each idle stop that followed was correctly refused by the completion
+  // gate (gates/completion-gate.sh — no .fleet/done/<task>.json existed yet,
+  // because the work genuinely wasn't done), but each refusal still burned
+  // down MAX_REFUSALS; once it stood down, the allowed stop ended the turn
+  // and killed the still-running member mid-task, unsaved.
   "## House rules — never block on nothing",
   "",
   "Never end a turn waiting for a notification. A scheduled wake can fail",
@@ -575,6 +583,17 @@ export const HOUSE_RULES = [
   "The full suite belongs to CI or the merge gate. `LEFTHOOK=0` skips only",
   "the repo's own lefthook hooks; the fleet's own push checks still run.",
   "Never use it to get past a push that was refused.",
+  "",
+  "Dispatching a member with the Agent tool defaults to running it in the",
+  "background. Ending your own turn to wait for that completion",
+  "notification is still an idle stop against the completion gate's",
+  "refusal cap, and enough of them makes the gate stand down, ending the",
+  "turn and killing the member mid-task with its work unsaved. Dispatch",
+  "any member whose result you need before continuing — almost every",
+  "implementation or verification step — in the foreground",
+  "(`run_in_background: false`), so the call itself blocks and the turn",
+  "never idles waiting on it. Background dispatch is for when you have",
+  "other real, independent work to do meanwhile, never the default.",
   "",
   // Board issue #235, measured 2026-09-25 by the BETA maestro: a studio
   // container carries neither CLOUDFLARE_API_TOKEN (what wrangler reads) nor
