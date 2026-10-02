@@ -1,0 +1,39 @@
+name: Sensors
+
+# Issue #187 (#168 phase 2): record-only sensors. Hourly, rewrite the pinned
+# "fleet: sensor burn log" issue with main-only fleet-check failures (last 50
+# runs), known-flaky count and dampener state. Files no tasks, gates nothing.
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+concurrency:
+  group: sensors
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: apps/fleet
+
+jobs:
+  sensors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Run sensors
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SENSOR_REPO: ${{ github.repository }}
+        run: bun run sensors
