@@ -7,6 +7,7 @@ import worker from "../src/index";
 import { getFlag } from "../src/state";
 import { recordStudio } from "../src/studio/registry";
 import { alertedKey, rearmKey, clearRearm } from "../src/tasks/watchdog";
+import { __resetExceptionRateCapForTests } from "../src/exceptions";
 import type { TaskRecord } from "../src/tasks/loop";
 import type { Env } from "../src/env";
 
@@ -59,6 +60,10 @@ function fakeCtx() {
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
   await env.DB.prepare("DELETE FROM worker_exceptions").run();
+  // #188 fix 2nd review (PR #198): the module-level rate cap
+  // (src/exceptions.ts) persists across tests in this file otherwise — a
+  // long enough run could trip the ~20/min cap across unrelated tests.
+  __resetExceptionRateCapForTests();
   alerts = [];
   realFetch = globalThis.fetch;
   globalThis.fetch = (async (_input: unknown, init: any) => {
