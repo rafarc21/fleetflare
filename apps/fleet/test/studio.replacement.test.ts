@@ -383,6 +383,72 @@ describe("runRestart — the retry heals at most once, and never hides that it w
 });
 
 // ---------------------------------------------------------------------------
+// Issue #191 — the tailnet warning (#189/#190) goes missing specifically on
+// the SELF-HEAL path. Root cause: `restartUngated`'s own
+// `!this.ctx.container?.running` gate (do.ts) reads true after a rollout
+// silently replaced the container, so `sbAwaitReady` — the ONE call that
+// pushes fresh envVars (including TS_AUTHKEY) onto the container — never
+// runs. `runRestart`'s own `roleEnv` (persisted at provision time) never
+// carried TS_AUTHKEY either way (it only ever arrived via the container's
+// inherited process env), so bring-up's tailscale-up region reads an EMPTY
+// `$TS_AUTHKEY` and takes the "not set, skip" branch — which CLEARS the
+// marker instead of setting a warning, and HOST/READY both read as if no
+// tailnet had ever been configured.
+// ---------------------------------------------------------------------------
+describe("runRestart — TS_AUTHKEY reaches bring-up on its own per-exec env (issue #191)", () => {
+  it("merges deps.tsAuthKey into BRINGUP_CMD's own exec env, never relying on the persisted roleEnv alone", async () => {
+    const seenEnvs: Record<string, Record<string, string> | undefined> = {};
+    const sbExec = vi.fn(async (cmd: string, env?: Record<string, string>) => {
+      seenEnvs[cmd] = env;
+      if (cmd.includes(BRINGUP_TOKEN_WRITE_SECTION)) return { code: 0, stdout: defaultObservationStdout(), stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const deps: ProvisionDeps = {
+      sbExec,
+      recordStudio: async () => {},
+      now: () => NOW,
+      fetchBlueprintFile: vi.fn(async () => {
+        throw new Error("restart must not refetch the blueprint");
+      }),
+      tsAuthKey: "fake-ts-auth-key-for-test",
+    };
+    const storage = fakeStorage({ status: status({ repoSlug: `acme-org/${REPO}` }), roleEnv: STUDIO_ENV });
+
+    await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare");
+
+    expect(seenEnvs[BRINGUP_CMD]?.TS_AUTHKEY).toBe("fake-ts-auth-key-for-test");
+    // The persisted roleEnv itself never carries the secret, proving the
+    // value above rode the fresh per-exec override, not storage.
+    expect(STUDIO_ENV).not.toHaveProperty("TS_AUTHKEY");
+    // Every other persisted field still reaches bring-up unchanged.
+    expect(seenEnvs[BRINGUP_CMD]?.STUDIO_NAME).toBe(STUDIO_ENV.STUDIO_NAME);
+  });
+
+  it("a restart with no tsAuthKey wired (every pre-#191 caller) behaves exactly as before: no TS_AUTHKEY key added at all", async () => {
+    const seenEnvs: Record<string, Record<string, string> | undefined> = {};
+    const sbExec = vi.fn(async (cmd: string, env?: Record<string, string>) => {
+      seenEnvs[cmd] = env;
+      if (cmd.includes(BRINGUP_TOKEN_WRITE_SECTION)) return { code: 0, stdout: defaultObservationStdout(), stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const deps: ProvisionDeps = {
+      sbExec,
+      recordStudio: async () => {},
+      now: () => NOW,
+      fetchBlueprintFile: vi.fn(async () => {
+        throw new Error("restart must not refetch the blueprint");
+      }),
+    };
+    const storage = fakeStorage({ status: status({ repoSlug: `acme-org/${REPO}` }), roleEnv: STUDIO_ENV });
+
+    await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare");
+
+    expect(seenEnvs[BRINGUP_CMD]).toEqual(STUDIO_ENV);
+    expect(seenEnvs[BRINGUP_CMD]).not.toHaveProperty("TS_AUTHKEY");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PART 1 (Worker half) — the log's tail reaches a failed readiness verdict
 // ---------------------------------------------------------------------------
 

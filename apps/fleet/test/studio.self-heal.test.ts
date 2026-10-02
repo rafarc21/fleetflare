@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   decideHeal, healBareContainer, syncSessionCycle, BARE_SELF_HEALED,
-  healDiedInRollout, ROLLOUT_EXIT_MARKER,
+  healDiedInRollout, ROLLOUT_EXIT_MARKER, checkAndRecordReadiness,
 } from "../src/studio/do";
 import {
   STATUS_KEY, ROLE_ENV_KEY, HEAL_ATTEMPT_KEY, OPERATION_KEY, OPERATION_STALE_MS,
+  PROVISIONED_OK,
   type StudioStorage, type RoleEnv, type StudioEnv, type HealAttempt,
   type OperationInFlight,
 } from "../src/studio/provision";
@@ -488,5 +489,84 @@ describe("a cleared operation lock (stored null) does not disable the heal", () 
     await syncSessionCycle(deps, s as never, STUDIO_ID, async () => {}, null, heal);
 
     expect(heal).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #191 — the tailnet warning (#189/#190) goes missing specifically on
+// the SELF-HEAL path, even though the exact same marker-reading machinery
+// (runProvisionedCheck / checkAndRecordReadiness) is already covered, green,
+// for the plain provision/restart path (test/studio.readiness.test.ts).
+//
+// Every `heal` callback above is hand-written: it pokes STATUS_KEY directly
+// and never calls the real readiness machinery at all. That is the gap this
+// suite closes — `heal` here replicates what restartUngated's real sequence
+// does: runRestart carries the EXISTING (stale) readiness forward onto
+// STATUS_KEY first, and only THEN does restartWithFreshVerdict's
+// checkAndRecordReadiness overwrite it with a verdict measured against the
+// container AFTER the restart.
+// ---------------------------------------------------------------------------
+describe("the real heal path — issue #191, tailnet warning after heal", () => {
+  function realSyncDeps(responses: string[]): SessionSyncDeps & { execCalls: string[] } {
+    const execCalls: string[] = [];
+    let call = 0;
+    return {
+      exec: async (cmd: string) => {
+        execCalls.push(cmd);
+        const stdout = responses[Math.min(call, responses.length - 1)];
+        call++;
+        return { code: 0, stdout, stderr: "" };
+      },
+      r2Put: async () => {},
+      r2List: async () => [],
+      r2Delete: async () => {},
+      now: () => NOW,
+      notify: async () => {},
+      burnAlertThresholdTokens: 0,
+      execCalls,
+    };
+  }
+
+  it("records the tailnet marker on the row after a REAL heal-restart, not a hand-mocked one", async () => {
+    const s = fakeStorage({ status: status() });
+    const recorded: StudioStatus[] = [];
+    const recordStudioFn = async (st: StudioStatus) => { recorded.push(st); };
+
+    // First exec answer: the tick's OWN pre-heal check — bare, no claude pane.
+    // Second exec answer: the post-heal-restart check — provisioned, with the
+    // tailnet marker line riding its stdout, same shape studio-bringup.sh
+    // actually writes it in (test/studio.readiness.test.ts:115).
+    const deps = realSyncDeps([
+      "claude is not running (no claude pane found)",
+      `${PROVISIONED_OK}\ntailnet: quota reached\n`,
+    ]);
+
+    // Step 1: the tick's pre-heal readiness check, for real.
+    const checked = await checkAndRecordReadiness(deps, s as never, STUDIO_ID, recordStudioFn);
+    expect(checked?.readiness?.kind).toBe("bare");
+
+    // Step 2: the heal fires. Replicates restartUngated's real two-phase
+    // write: runRestart carries the stale (bare) readiness forward onto
+    // STATUS_KEY first (restartWithStorage, provision.ts), and only THEN
+    // does restartWithFreshVerdict's checkAndRecordReadiness overwrite it
+    // with a verdict measured after the restart actually ran.
+    const heal = async () => {
+      const stale = await s.get(STATUS_KEY);
+      await s.put(STATUS_KEY, { ...stale, error: null, state: "running" } as StudioStatus);
+      await checkAndRecordReadiness(deps, s as never, STUDIO_ID, recordStudioFn);
+    };
+
+    await healBareContainer(
+      s as never, STUDIO_ID, checked as StudioStatus, (checked as StudioStatus).readiness as StudioReadiness,
+      () => NOW, heal, recordStudioFn,
+    );
+
+    const finalRow = s.map.get(STATUS_KEY) as StudioStatus;
+    expect(finalRow.readiness).toEqual({
+      kind: "provisioned", warning: "tailnet: quota reached", checkedAt: NOW.toISOString(),
+    });
+    expect(recorded.at(-1)?.readiness).toEqual({
+      kind: "provisioned", warning: "tailnet: quota reached", checkedAt: NOW.toISOString(),
+    });
   });
 });

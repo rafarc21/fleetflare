@@ -89,6 +89,42 @@ export interface ProvisionDeps extends InstallCacheRestoreDeps {
   recordStudio: (status: StudioStatus) => Promise<void>;
   now: () => string;
   /**
+   * Issue #191 — `env.TS_AUTHKEY` (the Worker secret), read fresh at the
+   * exact moment `bringUpAndVerify` execs BRINGUP_CMD, merged into THAT ONE
+   * call's own per-exec env rather than left to arrive only via the
+   * container's inherited process environment (do.ts's `this.envVars`,
+   * documented there as "start config" — applied by the SDK only when
+   * `this.container.start(...)` actually runs, which `startContainerIfNotRunning`
+   * skips outright whenever `this.container.running` already reads true).
+   *
+   * A `runRestart` invoked by `restartUngated` (do.ts) after an image
+   * rollout silently replaced the container under this DO is exactly the
+   * case issue #38's own doc comments already name ("restart is routinely
+   * the FIRST THING TO TOUCH a brand new, empty filesystem"): the DO's own
+   * `!this.ctx.container?.running` gate reads true (the binding never
+   * stopped being "running" from the Worker's point of view) and skips
+   * `sbAwaitReady` entirely, so nothing in that call ever re-pushes fresh
+   * envVars onto the replacement instance. `tailscale up` inside
+   * studio-bringup.sh's tailscale-up region then reads an EMPTY
+   * `$TS_AUTHKEY` from its own inherited environment and takes the
+   * "TS_AUTHKEY not set, skip" branch — which CLEARS the tailnet-down
+   * marker rather than setting a warning — so a heal that genuinely had no
+   * tailnet key available reports exactly like one that never needed a
+   * tailnet at all: `fleet ls` READY reads plain `provisioned`, HOST reads
+   * `-`, and the operator never learns why.
+   *
+   * studio-bringup.sh never needs this value past its own tailscale-up
+   * region (run before tmux even exists, let alone a pane that would
+   * inherit the container's persistent env), so a PER-EXEC override is
+   * exactly as correct as the container-level one and does not depend on
+   * the SDK's own start-vs-already-running bookkeeping at all. Optional,
+   * same "absence = behave exactly as before this field existed" contract
+   * every other port on this interface already follows — every existing
+   * test fixture omits it, and `bringUpAndVerify` only merges it in when
+   * it is a non-empty string.
+   */
+  tsAuthKey?: string;
+  /**
    * Task 7: also reused, unmodified, to LIST a directory (a studio's
    * `members/`) — verified live against api.github.com: the Contents API
    * returns the same JSON array for a directory path regardless of the raw
