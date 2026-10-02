@@ -211,6 +211,25 @@ describe("HOUSE_RULES — a lead never blocks on nothing (issue #85)", () => {
     expect(rules()).toMatch(/skips only the repo's own lefthook hooks; the fleet's own push checks still run/);
     expect(rules()).toMatch(/Never use it to get past a push that was refused\./);
   });
+
+  // Issue #193: a fifth measured deadlock in the same family. Dispatching a
+  // member in the background, then ending the turn to wait for its
+  // completion notification, is itself an idle wait — the completion gate's
+  // refusal cap (gates/completion-gate.sh, MAX_REFUSALS) burns down on every
+  // such idle stop, and once it stands down the allowed stop ends the turn
+  // and kills the still-running member mid-task.
+  it("5: dispatch a member in the foreground when you need its result before continuing; backgrounding is for real independent work, not the default", () => {
+    expect(rules()).toMatch(/Dispatching a member with the Agent tool defaults to running it in the background\./);
+    expect(rules()).toMatch(
+      /Ending your own turn to wait for that completion notification is still an idle stop against the completion gate's refusal cap, and enough of them makes the gate stand down, ending the turn and killing the member mid-task with its work unsaved\./,
+    );
+    expect(rules()).toMatch(
+      /Dispatch any member whose result you need before continuing — almost every implementation or verification step — in the foreground \(`run_in_background: false`\), so the call itself blocks and the turn never idles waiting on it\./,
+    );
+    expect(rules()).toMatch(
+      /Background dispatch is for when you have other real, independent work to do meanwhile, never the default\./,
+    );
+  });
 });
 
 describe("HOUSE_RULES — studios never hold Cloudflare deploy credentials", () => {
