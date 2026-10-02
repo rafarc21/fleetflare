@@ -77,7 +77,11 @@ describe("recordWorkerException", () => {
     // partial, UNMATCHED (and so unredacted) fragment behind, whereas
     // redact-first replaces the whole token with "«redacted»" before the cut
     // ever happens.
-    const filler = "f".repeat(1980);
+    // Fix 2nd review (PR #198, issue #188): TELEGRAM_TOKEN_RE now has \b
+    // word-boundary anchors — filler must end on a NON-word char so the
+    // digit run that follows still starts a match (same length, 1980, so
+    // the straddle-2000 math below is untouched).
+    const filler = "f".repeat(1979) + " ";
     const telegramId = "123456789"; // 9 digits, satisfies \d{6,}
     const bodyPrefix = "A".repeat(10); // the slice that survives a truncate-first bug
     const telegramBody = bodyPrefix + "B".repeat(10) + "C".repeat(15); // exactly 35 chars
@@ -243,6 +247,50 @@ describe("recordWorkerException — local secret scrub (operator stop-change, PR
     await recordWorkerException(env.DB, "/x", err, 14_000, fakeCtx());
     const rows = await allRows();
     expect(rows[0].message).toBe("GET /webhook?token=«redacted»&x=1");
+    expect(rows[0].stack_head).not.toContain("super-secret-value");
+  });
+
+  // Operator fix 2nd review (PR #198, issue #188): \b word-boundary anchors
+  // added to TELEGRAM_TOKEN_RE — this is a no-op on an ordinary specimen
+  // (token flanked by non-word chars, same as the existing test above), only
+  // trailing punctuation added here to prove the new `\b` still matches when
+  // the token's last char butts straight up against a non-word char.
+  it("still redacts a Telegram bot token with the \\b-bounded pattern — no-op on a normal specimen", async () => {
+    const token = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw5";
+    const err = new Error(`Bot token leaked: ${token}.`);
+    err.stack = `Error: Bot token leaked: ${token}.`;
+    await recordWorkerException(env.DB, "/x", err, 14_500, fakeCtx());
+    const rows = await allRows();
+    expect(rows[0].message).toBe("Bot token leaked: «redacted».");
+    expect(rows[0].stack_head).not.toContain(token);
+  });
+
+  // Operator fix 2nd review (PR #198, issue #188): PEM_PRIVATE_KEY_RE's
+  // non-greedy `[\s\S]*?` with NO terminator anywhere in the string is the
+  // classic ReDoS/quadratic-blowup shape — the `(?:-----END...|$)`
+  // alternation anchors the fallback match to end-of-string so the engine
+  // always has a guaranteed stopping point. This proves the fix actually
+  // redacts the unterminated block (to EOS), not just that it doesn't hang.
+  it("redacts an UNTERMINATED PEM block (no END marker anywhere) to end-of-string", async () => {
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK...\nmore base64 lines, never closed";
+    const err = new Error(`leaked key:\n${pem}`);
+    err.stack = `Error: leaked key:\n${pem}`;
+    await recordWorkerException(env.DB, "/x", err, 14_600, fakeCtx());
+    const rows = await allRows();
+    expect(rows[0].message).toBe("leaked key:\n«redacted»");
+    expect(rows[0].stack_head).not.toContain("MIIBOgIBAAJBAK");
+  });
+
+  // Operator fix 2nd review (PR #198, issue #188): QUERY_SECRET_RE's
+  // alternation gained access_token/api_key — the old pattern only covered
+  // token/key, so these two param names leaked through unredacted before
+  // this fix.
+  it("redacts access_token=/api_key= query-string values too, keeping the param name", async () => {
+    const err = new Error("GET /webhook?access_token=abc123&x=1");
+    err.stack = "Error: curl 'https://x/y&api_key=super-secret-value'";
+    await recordWorkerException(env.DB, "/x", err, 14_700, fakeCtx());
+    const rows = await allRows();
+    expect(rows[0].message).toBe("GET /webhook?access_token=«redacted»&x=1");
     expect(rows[0].stack_head).not.toContain("super-secret-value");
   });
 });

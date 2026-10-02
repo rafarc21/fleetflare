@@ -62,9 +62,16 @@ function stackHead(stack: string): string {
  *    capture-preserving (keeps the param name, redacts only the value).
  */
 const JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
-const TELEGRAM_TOKEN_RE = /\d{6,}:[A-Za-z0-9_-]{35}/g;
-const PEM_PRIVATE_KEY_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
-const QUERY_SECRET_RE = /([?&](?:token|key)=)[^&\s"']+/gi;
+const TELEGRAM_TOKEN_RE = /\b\d{6,}:[A-Za-z0-9_-]{35}\b/g;
+// Operator fix 2nd review (PR #198, issue #188): the `(?:-----END...|$)`
+// alternation matters — without it, an UNTERMINATED PEM block (no END
+// marker ever found) forces the non-greedy `[\s\S]*?` to backtrack across
+// the entire rest of the string looking for a terminator that doesn't
+// exist — the classic non-greedy-with-no-anchor ReDoS/quadratic-blowup
+// shape. Anchoring the fallback to end-of-string gives the engine a
+// guaranteed match point and avoids that.
+const PEM_PRIVATE_KEY_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g;
+const QUERY_SECRET_RE = /([?&](?:token|key|access_token|api_key)=)[^&\s]+/gi;
 
 function scrubExceptionLocalSecrets(s: string): string {
   return s
