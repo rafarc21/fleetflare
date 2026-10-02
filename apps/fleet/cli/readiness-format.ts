@@ -385,6 +385,15 @@ export function formatActivity(status: StudioStatus, now: Date, staleAfterSecond
     base = `LIMIT · resets ${formatResetUtcClock(new Date(Date.parse(rl.until)))}`;
   } else if (rl && rl.until === null) {
     base = "LIMIT";
+  } else if (status.observed?.replacedAt != null) {
+    // Issue #192 — a rollout can replace a running studio's container
+    // without a clean onStop first, so the DO's `activity` key can still
+    // hold a word left over from BEFORE the replacement (clearActivityState,
+    // activity.ts, only fires on a graceful stop or a completed bring-up).
+    // `readyOverride` (this same file) already renders "replaced <age> ago
+    // — not brought up" for this exact state; the column must not
+    // contradict it with a stale WORKING/WAITING-MEMBERS verdict.
+    base = "—";
   } else {
     base = formatActivityVerdict(status.observed?.activity ?? null, now, staleAfterSeconds);
   }
@@ -436,6 +445,10 @@ export function lsJsonRows(
     if (rl && (until === null || (!Number.isNaN(Date.parse(until)) && Date.parse(until) > now.getTime()))) {
       return { ...base, lead: "limit", leadSince: rl.seenAt, limitResetsAt: until };
     }
+    // Issue #192 — same gate as formatActivity above: a replaced-but-not-
+    // yet-confirmed studio reports no lead at all, never a leftover
+    // pre-replacement verdict.
+    if (s.observed?.replacedAt != null) return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
     const a = s.observed?.activity ?? null;
     if (!a || ageSeconds(a.observedAt, now) > staleAfterSeconds || a.state === "unknown") {
       return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
@@ -637,7 +650,10 @@ export function formatObservedLines(observed: Observed | undefined, now: Date = 
     `replaced:     ${observed.replacedAt ? `yes, since ${observed.replacedAt}` : "no"}`,
     `unreachable:  ${formatUnreachableLine(observed, now)}`,
     `session:      ${formatSessionLine(observed.session)}`,
-    `activity:     ${formatActivityVerdict(observed.activity, now, ACTIVITY_DO_STALE_SECONDS)}`,
+    // Issue #192 — same gate as formatActivity above: a replaced-but-not-
+    // yet-confirmed studio must not pair "replaced: yes" with a leftover
+    // pre-replacement activity word.
+    `activity:     ${observed.replacedAt != null ? "—" : formatActivityVerdict(observed.activity, now, ACTIVITY_DO_STALE_SECONDS)}`,
     // Issue #311 — one "member alert:" line per CURRENT alert, using the
     // DO-direct budget's own `now` (inspect reads the DO directly, no
     // staleness gate of its own here — same posture `activity:` above

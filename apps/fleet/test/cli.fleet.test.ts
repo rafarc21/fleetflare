@@ -668,11 +668,14 @@ describe("formatObservedLines (cli/readiness-format.ts) — issue #85 review BLO
         restore: "restored" as const, snapshotAgeS: 30, turnsBefore: 12, reason: null,
       },
     };
+    // Issue #192: replacedAt set gates the activity: line to "—", never "?"
+    // or a stale word — matches readyOverride's own "replaced ... — not
+    // brought up" render for this exact state.
     expect(formatObservedLines(observed)).toEqual([
       "replaced:     yes, since 2026-09-24T11:54:00.000Z",
       "unreachable:  no",
       "session:      resumed (via restart)",
-      "activity:     ?",
+      "activity:     —",
     ]);
   });
 
@@ -741,11 +744,12 @@ describe("formatObservedLines (cli/readiness-format.ts) — issue #85 review BLO
       execFailures: 3,
       lastShipOkAt: "2026-09-24T11:49:00.000Z", // 11m before NOW — well past board issue #183's 90s
     };
+    // Issue #192: replacedAt set gates the activity: line to "—" here too.
     expect(formatObservedLines(observed, NOW)).toEqual([
       "replaced:     yes, since 2026-09-24T11:54:00.000Z",
       "unreachable:  yes, since 2026-09-24T11:50:00.000Z",
       "session:      ? (no verdict recorded yet)",
-      "activity:     ?",
+      "activity:     —",
     ]);
   });
 
