@@ -35,8 +35,21 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # worktree, or it carries LOCALCI_RUN=<run-id> (set on the lanes' env).
 # Matching uses bash builtins only: a helper's own command line never names
 # the worktree, so the sweep never matches itself.
+#
+# Issue #159: the Linux branch used to fork `tr`×2 + `readlink` per entry in
+# /proc, for EVERY process on the host (not just this run's), twice per
+# interrupted run — O(3 × host-wide process count), measured to take over a
+# minute on a process-dense host (#382 flagged this as a follow-up). Fixed to
+# fork a small, constant number of times for the WHOLE sweep, not once per
+# host process: cwd membership is one batched, boundary-anchored
+# `ls -la /proc/*/cwd | grep -E` across every pid up front (`cwd_hits`;
+# anchored on $wp itself so a sibling worktree whose path merely EXTENDS it,
+# e.g. wt-1 vs wt-12, is never matched — #159 review), checked per pid with a
+# bash pattern match (no fork); cmdline/environ are read with bash's own
+# NUL-delimited `read` builtin straight from each process's own file (no
+# fork at all). Net: O(1) forks for the entire /proc walk.
 sweep_procs() {
-  local w=$1 rid=$2 d pid cmd cwd env line victims=""
+  local w=$1 rid=$2 d pid matched arg kv cmd cwd line victims=""
   shift 2
   # The worktree's physical path too: macOS /var is a symlink, lsof and
   # /proc/*/cwd report /private/var/…
@@ -44,16 +57,34 @@ sweep_procs() {
   wp=$(cd "$w" 2>/dev/null && pwd -P) || wp=$w
   local spare=" $$ $* "
   if [ -d /proc/self ]; then
+    # #159 review: a bare `grep -F -- "$wp"` matches ANY line that merely
+    # CONTAINS $wp, including a sibling worktree whose path extends $wp with
+    # no separator (RID ends in a raw, unpadded $$: wt-...-1 is a literal
+    # prefix of wt-...-12 while both exist on disk, pre-lock). Anchor the
+    # same way the old `[[ "$cwd" == "$wp" || "$cwd" == "$wp/"* ]]` did: $wp
+    # itself, followed by either end of line (exact cwd) or `/` (a child of
+    # it). $wp is escaped for ERE (one-time, not per-process) since it can
+    # contain regex metacharacters.
+    local wp_re cwd_hits
+    wp_re=$(printf '%s' "$wp" | sed 's/[.^$*+?()[\]{}|\\]/\\&/g')
+    cwd_hits=$(ls -la /proc/[0-9]*/cwd 2>/dev/null | grep -E -- "${wp_re}(/|\$)")
     for d in /proc/[0-9]*; do
       pid=${d#/proc/}
       case "$spare" in *" $pid "*) continue ;; esac
-      cmd=$(tr '\0' ' ' <"$d/cmdline" 2>/dev/null) || continue
-      cwd=$(readlink "$d/cwd" 2>/dev/null)
-      env=$(tr '\0' '\n' <"$d/environ" 2>/dev/null)
-      if [[ "$cmd" == *"$w/"* || "$cmd" == *"$wp/"* || "$cwd" == "$wp" || "$cwd" == "$wp/"* ||
-        $'\n'"$env"$'\n' == *$'\n'"LOCALCI_RUN=$rid"$'\n'* ]]; then
-        victims="$victims $pid"
+      [ -r "$d/cmdline" ] || continue
+      matched=0
+      while IFS= read -r -d '' arg; do
+        case "$arg" in *"$w/"*|*"$wp/"*) matched=1; break ;; esac
+      done 2>/dev/null <"$d/cmdline"
+      if [ "$matched" = 0 ]; then
+        case "$cwd_hits" in *"/proc/$pid/cwd"*) matched=1 ;; esac
       fi
+      if [ "$matched" = 0 ]; then
+        while IFS= read -r -d '' kv; do
+          [ "$kv" = "LOCALCI_RUN=$rid" ] && { matched=1; break; }
+        done 2>/dev/null <"$d/environ"
+      fi
+      [ "$matched" = 1 ] && victims="$victims $pid"
     done
   else
     # macOS: no /proc, and `ps -E` shows no other process's environment
@@ -78,6 +109,16 @@ sweep_procs() {
   kill -KILL $victims 2>/dev/null
   return 0
 }
+
+# Test-only hook (#159): lets test/bun/sweep-procs.test.ts call sweep_procs
+# directly, against the real /proc on whatever host runs the test, without
+# running the rest of this script (which would otherwise require a PR/sha
+# target and touch GitHub/git/docker for real). Never invoked by a real run.
+if [ "${1:-}" = "--sweep-procs-only" ]; then
+  shift
+  sweep_procs "$@"
+  exit 0
+fi
 
 # --- lanes: re-invoked by the main flow under the gate lock -----------------
 if [ "${1:-}" = "--lanes" ]; then
