@@ -668,11 +668,14 @@ describe("formatObservedLines (cli/readiness-format.ts) — issue #85 review BLO
         restore: "restored" as const, snapshotAgeS: 30, turnsBefore: 12, reason: null,
       },
     };
+    // Issue #192: replacedAt set gates the activity: line to "—", never "?"
+    // or a stale word — matches readyOverride's own "replaced ... — not
+    // brought up" render for this exact state.
     expect(formatObservedLines(observed)).toEqual([
       "replaced:     yes, since 2026-09-24T11:54:00.000Z",
       "unreachable:  no",
       "session:      resumed (via restart)",
-      "activity:     ?",
+      "activity:     —",
     ]);
   });
 
@@ -741,11 +744,36 @@ describe("formatObservedLines (cli/readiness-format.ts) — issue #85 review BLO
       execFailures: 3,
       lastShipOkAt: "2026-09-24T11:49:00.000Z", // 11m before NOW — well past board issue #183's 90s
     };
+    // Issue #192: replacedAt set gates the activity: line to "—" here too.
     expect(formatObservedLines(observed, NOW)).toEqual([
       "replaced:     yes, since 2026-09-24T11:54:00.000Z",
       "unreachable:  yes, since 2026-09-24T11:50:00.000Z",
       "session:      ? (no verdict recorded yet)",
-      "activity:     ?",
+      "activity:     —",
+    ]);
+  });
+
+  // Issue #192 — a replaced-but-not-yet-confirmed-back studio must not show
+  // the `activity:` line's stale leftover word side by side with
+  // `replaced: yes` above it. Unlike case 4's bare `emptyObserved()`
+  // activity (null, already renders "?"), this one seeds a FRESH-looking
+  // stale `Activity` record to prove the gate fires on `replacedAt`
+  // itself, not merely on staleness.
+  it("issue #192: replacedAt set gates the activity: line to — regardless of a fresh-looking stored activity record", () => {
+    const NOW = new Date("2026-09-25T12:02:00.000Z");
+    const observed = {
+      ...emptyObserved(),
+      replacedAt: "2026-09-25T12:00:00.000Z",
+      activity: {
+        state: "waiting-members" as const, since: "2026-09-25T11:56:00.000Z", anchored: true,
+        observedAt: "2026-09-25T12:01:30.000Z", source: "pane" as const, reason: null, membersTickingAt: null,
+      },
+    };
+    expect(formatObservedLines(observed, NOW)).toEqual([
+      "replaced:     yes, since 2026-09-25T12:00:00.000Z",
+      "unreachable:  no",
+      "session:      ? (no verdict recorded yet)",
+      "activity:     —",
     ]);
   });
 
@@ -1155,6 +1183,25 @@ describe("formatActivity (cli/readiness-format.ts)", () => {
     expect(formatActivity(s, NOW)).toBe("—");
   });
 
+  // Issue #192 — a rollout can replace a running studio's container without
+  // going through a clean onStop first, so the DO's stale `activity` key
+  // from BEFORE the replacement survives (clearActivityState, activity.ts,
+  // only fires on a graceful stop or a completed bring-up). `readyOverride`
+  // (this same file) already renders "replaced <age> ago — not brought up"
+  // off `observed.replacedAt` for exactly this state; the ACTIVITY column
+  // must not contradict it with a leftover WORKING/WAITING-MEMBERS word.
+  it("— for a running studio whose container was just replaced, even with a stale-looking activity record left over", () => {
+    const s = status({
+      state: "running",
+      observed: {
+        ...emptyObserved(),
+        replacedAt: "2026-09-25T12:00:00.000Z",
+        activity: activity({ state: "waiting-members", since: "2026-09-25T11:56:00.000Z" }),
+      },
+    });
+    expect(formatActivity(s, NOW)).toBe("—");
+  });
+
   // Issue #311 — a fresh member alert appends a " · <note>" suffix onto the
   // column, the ACTIVITY-column half of "surfaces as an ACTIVITY state ...
   // and a row note" (the OTHER half is formatObservedLines's own
@@ -1263,6 +1310,24 @@ describe("lsJsonRows (issue #70)", () => {
     const r = row({ state: "stopped", observed: { ...emptyObserved(), activity: act({ state: "working" }) } });
     expect(r.lead).toBe("stopped");
     expect(r.leadSince).toBeNull();
+  });
+
+  // Issue #192 — a running studio whose container was just replaced
+  // (replacedAt set, not yet confirmed back up) must report `lead:
+  // "unknown"`, never a leftover verdict from before the replacement, even
+  // when the stored activity record still looks fresh under the staleness
+  // budget.
+  it("issue #192: a replaced-but-not-yet-confirmed studio is unknown, never a leftover verdict", () => {
+    const r = row({
+      observed: {
+        ...emptyObserved(),
+        replacedAt: "2026-09-25T12:00:00.000Z",
+        activity: act({ state: "waiting-members", since: "2026-09-25T11:56:00.000Z" }),
+      },
+    });
+    expect(r.lead).toBe("unknown");
+    expect(r.leadSince).toBeNull();
+    expect(r.limitResetsAt).toBeNull();
   });
 });
 
