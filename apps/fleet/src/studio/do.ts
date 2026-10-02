@@ -5144,6 +5144,12 @@ export class StudioDO extends Sandbox<Env> {
       sbExec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env }),
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
       now: () => new Date().toISOString(),
+      // Issue #191: fresh off the Worker secret on EVERY call to this method
+      // (provision() AND restartUngated() both call deps() fresh — never
+      // cached across them) -- see ProvisionDeps.tsAuthKey's own doc comment
+      // for why bringUpAndVerify needs this handed in per-exec rather than
+      // left to arrive only via the container's inherited process env.
+      tsAuthKey: this.env.TS_AUTHKEY ?? "",
       fetchBlueprintFile: async (repo: string, path: string, ref: string) =>
         fetchRepoFile(await mint(repo), repo, path, ref),
       // Issue #341: the memory store and a token that reads it (usually

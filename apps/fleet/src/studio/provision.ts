@@ -2966,12 +2966,20 @@ export async function runRestart(
 /** One bring-up exec plus the on-disk verification that it actually landed —
  *  the unit `runRestart` retries. Bring-up's own non-zero exit and a failed
  *  verification both surface as a throw, so the retry decision above does not
- *  have to tell them apart: either way, this container is not yet a studio. */
+ *  have to tell them apart: either way, this container is not yet a studio.
+ *
+ *  Issue #191: `deps.tsAuthKey`, when wired, rides THIS ONE exec's own
+ *  per-call env — see that field's own doc comment (ProvisionDeps, above)
+ *  for why a restart/heal cannot trust the container's inherited env alone
+ *  to carry it. Merged on top of `roleEnv` (never replacing it): the two
+ *  ports have never overlapped (`roleEnv` has no TS_AUTHKEY key of its own)
+ *  and this keeps every OTHER persisted var reaching bring-up unchanged. */
 async function bringUpAndVerify(
   deps: ProvisionDeps, roleEnv: RoleEnv | StudioEnv, repo: string | null, isStudio: boolean,
   onAdoption: (a: SessionAdoption) => void = () => {},
 ): Promise<void> {
-  const bringupRes = await deps.sbExec(BRINGUP_CMD, roleEnv);
+  const bringupEnv = deps.tsAuthKey ? { ...roleEnv, TS_AUTHKEY: deps.tsAuthKey } : roleEnv;
+  const bringupRes = await deps.sbExec(BRINGUP_CMD, bringupEnv);
   // Issue #146: reported BEFORE the exit check and the verify, so an attempt
   // that adopted and then failed (non-zero exit, or verification) still
   // counts — the retry's own adopt sees the copy and says "root" (#185 review).
