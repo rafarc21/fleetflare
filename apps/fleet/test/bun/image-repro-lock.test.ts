@@ -25,17 +25,31 @@ import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test
  * (procps-ng 3.3.17) that `ps -o command=` on such a process reports the
  * renamed argv[0] followed by the program's real remaining args --
  * `bash -c 'exec -a "lockf -k /tmp/fleetflare-gate.lock" sleep 30'` shows up
- * as `lockf -k /tmp/fleetflare-gate.lock 30`. Since `exec -a` replaces
- * in-place rather than forking, that renamed process can then plainly run
- * (fork a child for) the real check script, giving the check hook a real
- * parent whose own command line looks exactly like a real
- * `lockf -k "$LOCK"` invocation -- with no extra intermediate shell layer
- * whose own literal source text could spuriously contain the lock path and
- * cause a false match (verified: embedding the literal fake-ancestor
- * command text directly in an interactive shell -c string run in the SAME
- * outer shell invocation as a later unrelated check DOES cause a false
- * "yes" -- avoided here by never embedding the lock path as literal quoted
- * text anywhere except inside the one `exec -a` argument itself).
+ * as `lockf -k /tmp/fleetflare-gate.lock 30`.
+ *
+ * The renamed process must then run the real check script as a genuinely
+ * SEPARATE child (not itself) for there to be an "ancestor" at all. Bare
+ * `bash -c 'cmd'` is not enough: when `cmd` is the sole/trailing simple
+ * command bash is about to run with nothing left to do afterward, bash
+ * optimizes by exec'ing it directly in place (no fork) -- verified
+ * empirically (a debug ancestor-dump showed the "child" script's own `$$`
+ * was the SAME pid as the renamed parent, with the rename itself
+ * overwritten by the inner exec's own fresh argv[0]). Backgrounding the
+ * real command and `wait`-ing for it (`cmd & wait $!`) forces bash to keep
+ * the renamed parent alive as a distinct, live process while the real
+ * command runs as an actual forked child -- verified empirically this
+ * gives the child a real parent whose own command line looks exactly like
+ * a real `lockf -k "$LOCK"` invocation.
+ *
+ * Also verified: the literal lock path must never appear directly in a
+ * command string passed straight to this harness's own shell tool, only
+ * inside scripts/args passed BY PATH -- the harness's own wrapper process
+ * is always a real ancestor of anything spawned this way, and embedding
+ * the literal text in a directly-typed command (rather than a file) makes
+ * that unrelated wrapper spuriously "match" too, independent of any real
+ * nested lockf process. Not a concern for the construction below, since
+ * the lock path only ever appears inside bash -c argument strings handed
+ * to `Bun.spawnSync`, never typed into an interactive shell.
  */
 const SCRIPT = resolve(import.meta.dir, "../../scripts/image-repro-check.sh");
 const LOCK = "/tmp/fleetflare-gate.lock";
@@ -49,13 +63,14 @@ test("--ancestor-holds-lock-check reports 'no'/exit 1 with no lockf ancestor", (
 
 test('--ancestor-holds-lock-check reports \'yes\'/exit 0 when an ancestor\'s command line is a lockf "$LOCK" invocation', () => {
   // `exec -a` renames the process now running `bash -c '<inner>'`; the
-  // inner script runs the real check script as a plain (forked) child, so
-  // the child's parent is exactly the renamed process. No `exec` on the
-  // inner command, so the outer process's own exit code is the child's.
+  // inner script backgrounds the real check script and `wait`s for it, so
+  // bash forks a genuine child instead of exec-replacing itself into it --
+  // the child's real parent is exactly the renamed process. `wait $!`
+  // propagates the child's exit status as this bash -c's own.
   const r = Bun.spawnSync([
     "bash",
     "-c",
-    `exec -a "lockf -k ${LOCK}" bash -c 'bash "$0" --ancestor-holds-lock-check' "${SCRIPT}"`,
+    `exec -a "lockf -k ${LOCK}" bash -c 'bash "$0" --ancestor-holds-lock-check & wait $!' "${SCRIPT}"`,
   ]);
   expect(r.stdout.toString().trim()).toBe("yes");
   expect(r.exitCode).toBe(0);
@@ -91,7 +106,7 @@ test("the full self-wrap branch skips re-exec through a lockf shim when an ances
   const r = Bun.spawnSync([
     "bash",
     "-c",
-    `exec -a "lockf -k ${LOCK}" bash -c 'PATH="${binDir}:$PATH" bash "$0" --ancestor-holds-lock-check' "${SCRIPT}"`,
+    `exec -a "lockf -k ${LOCK}" bash -c 'PATH="${binDir}:$PATH" bash "$0" --ancestor-holds-lock-check & wait $!' "${SCRIPT}"`,
   ]);
 
   expect(r.stdout.toString().trim()).toBe("yes");
