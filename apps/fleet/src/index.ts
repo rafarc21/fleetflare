@@ -42,11 +42,13 @@ export default {
     // every route handler. On catch: record it to D1 (never throws — see
     // exceptions.ts's own doc comment for the never-throws contract), then
     // rethrow the SAME error unchanged — this wrapper adds a side effect,
-    // never a change in what the caller sees.
+    // never a change in what the caller sees. `ctx` is threaded through so
+    // recordWorkerException can hand its own prune off to `ctx.waitUntil`
+    // (operator fix-first review, PR #198) instead of awaiting it inline.
     try {
       return await handleFetch(req, env, ctx, url);
     } catch (err) {
-      await recordWorkerException(env.DB, url.pathname, err, Date.now());
+      await recordWorkerException(env.DB, url.pathname, err, Date.now(), ctx);
       throw err;
     }
   },
@@ -70,13 +72,15 @@ export default {
    * catching anything that escapes past `handleScheduled`'s own several
    * LOCAL try/catch blocks (those are untouched; this only catches what
    * already gets past them). `route` is the literal "scheduled" — no URL
-   * exists in a cron invocation.
+   * exists in a cron invocation. Same `ctx` threading into
+   * `recordWorkerException` as `fetch` above, for the same `ctx.waitUntil`
+   * reason (operator fix-first review, PR #198).
    */
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     try {
       await handleScheduled(controller, env, ctx);
     } catch (err) {
-      await recordWorkerException(env.DB, "scheduled", err, Date.now());
+      await recordWorkerException(env.DB, "scheduled", err, Date.now(), ctx);
       throw err;
     }
   },

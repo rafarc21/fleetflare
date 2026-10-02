@@ -46,6 +46,63 @@ function describeError(err: unknown): { name: string; message: string; stackHead
 }
 
 /**
+ * Operator fix-first review on PR #198 (issue #188): the insert this module
+ * issues against D1 must never be allowed to hang past a fixed budget — a
+ * slow/degraded D1 blocking the Worker's own response past this point would
+ * turn the symptom (D1 trouble) into the cause (every failing request also
+ * stalling on D1). Same `Promise.race` + `setTimeout` idiom as
+ * src/studio/sandbox-api.ts's `sbExec`/src/studio/do.ts's exec deadlines —
+ * `clearTimeout` in `finally` either way, so a fast insert never leaves a
+ * dangling timer.
+ */
+const INSERT_TIMEOUT_MS = 2000;
+
+/**
+ * Operator fix-first review on PR #198 (issue #188): a per-isolate cap so a
+ * single Worker isolate cannot hammer a struggling D1 with unbounded insert
+ * attempts under sustained failure — isolates are long-lived processes, so a
+ * plain module-level counter is the standard cheap Workers rate-limit
+ * pattern (no KV/D1 round trip needed to rate-limit calls INTO D1 itself).
+ * Rolling window, not fixed-bucket: `now` is the same epoch-millis clock
+ * already threaded into `recordWorkerException` (never `Date.now()` read
+ * internally), so this stays deterministic under test.
+ */
+const RATE_CAP_PER_WINDOW = 20;
+const RATE_WINDOW_MS = 60_000;
+let rateWindowStart = 0;
+let rateWindowCount = 0;
+
+/**
+ * Returns true if this call should be DROPPED — no `prepare`/`run` even
+ * attempted. Logs the drop exactly once per window (on the FIRST call that
+ * crosses the cap), not once per dropped record after that: under sustained
+ * failure this function is itself on the hot path, so repeated logging here
+ * would just be a second unbounded-cost loop replacing the first one this
+ * whole cap exists to kill.
+ */
+function rateCapped(now: number): boolean {
+  if (now - rateWindowStart >= RATE_WINDOW_MS) {
+    rateWindowStart = now;
+    rateWindowCount = 0;
+  }
+  rateWindowCount++;
+  if (rateWindowCount <= RATE_CAP_PER_WINDOW) return false;
+  if (rateWindowCount === RATE_CAP_PER_WINDOW + 1) {
+    console.error(`recordWorkerException rate cap hit (${RATE_CAP_PER_WINDOW}/${RATE_WINDOW_MS}ms) — dropping further records this window`);
+  }
+  return true;
+}
+
+/** Test-only — same reset pattern src/studio/org.ts's
+ *  `__resetOrgCacheForTests` already establishes for process-global state:
+ *  deterministic counter resets without depending on real elapsed time or
+ *  test execution order. */
+export function __resetExceptionRateCapForTests(): void {
+  rateWindowStart = 0;
+  rateWindowCount = 0;
+}
+
+/**
  * Caps `worker_exceptions` at `keep` rows, oldest-first by `ts`. No
  * existing "cap at N rows" precedent elsewhere in this repo (every other
  * table's delete is a timestamp-cutoff, not a row-count cap), so this is
@@ -76,10 +133,23 @@ export async function pruneWorkerExceptions(db: D1Database, keep: number = 1000)
  * become the symptom. Called from the outer try/catch src/index.ts's
  * `fetch`/`scheduled` wrap their entire body in, right before each
  * rethrows the SAME error it caught.
+ *
+ * Operator fix-first review on PR #198 (issue #188), hot-path safety: three
+ * changes on top of the above so a slow/degraded D1 cannot turn every
+ * failing request into a second load-bearing call against the SAME
+ * struggling D1 — (1) the per-isolate rate cap (`rateCapped`) above, checked
+ * FIRST, before any `prepare`/`run` is even attempted; (2) the insert itself
+ * is raced against `INSERT_TIMEOUT_MS`, so a hanging D1 can never hold the
+ * caller's response past that; (3) the prune that used to run inline, right
+ * here, now goes through `ctx.waitUntil` instead — it still runs every
+ * time an insert succeeds, but strictly AFTER this function (and therefore
+ * the caller's own response) has already resolved, never blocking it.
  */
 export async function recordWorkerException(
-  db: D1Database, route: string, err: unknown, now: number,
+  db: D1Database, route: string, err: unknown, now: number, ctx: ExecutionContext,
 ): Promise<void> {
+  if (rateCapped(now)) return;
+
   // `describeError` itself must never be allowed to throw out of this
   // function: a crafted Error subclass with a throwing `.message`/`.stack`
   // getter (not just a D1 outage) would otherwise replace the ORIGINAL
@@ -96,18 +166,32 @@ export async function recordWorkerException(
     head = null;
   }
   try {
-    await db
-      .prepare(
-        `INSERT INTO worker_exceptions (id, ts, route, name, message, stack_head)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(crypto.randomUUID(), now, route, name, message, head)
-      .run();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`recordWorkerException insert timed out after ${INSERT_TIMEOUT_MS}ms`)),
+        INSERT_TIMEOUT_MS,
+      );
+    });
+    try {
+      await Promise.race([
+        db
+          .prepare(
+            `INSERT INTO worker_exceptions (id, ts, route, name, message, stack_head)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(crypto.randomUUID(), now, route, name, message, head)
+          .run(),
+        deadline,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   } catch (insertErr) {
     console.error("recordWorkerException insert failed", insertErr);
     return;
   }
-  await pruneWorkerExceptions(db);
+  ctx.waitUntil(pruneWorkerExceptions(db));
 }
 
 /**
