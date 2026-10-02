@@ -129,16 +129,23 @@ export function __resetExceptionRateCapForTests(): void {
  * new. NEVER throws — a prune failure must not surface any differently
  * than the insert failure it's always called right after (see
  * `recordWorkerException`'s own doc comment for why).
+ *
+ * Operator fix-first review on PR #198 (issue #188), nit: a boundary-
+ * timestamp comparison instead of `NOT IN` over a potentially-large id set
+ * — the subquery finds the `ts` of the `keep`-th newest row (`OFFSET
+ * keep - 1`), then deletes everything strictly older than it. Fewer than
+ * `keep` rows: the subquery returns no row, so `ts < NULL` is never true in
+ * SQL — nothing gets deleted, which is correct (nothing to prune yet).
  */
 export async function pruneWorkerExceptions(db: D1Database, keep: number = 1000): Promise<void> {
   try {
     await db
       .prepare(
-        `DELETE FROM worker_exceptions WHERE id NOT IN (
-           SELECT id FROM worker_exceptions ORDER BY ts DESC LIMIT ?
+        `DELETE FROM worker_exceptions WHERE ts < (
+           SELECT ts FROM worker_exceptions ORDER BY ts DESC LIMIT 1 OFFSET ?
          )`,
       )
-      .bind(keep)
+      .bind(keep - 1)
       .run();
   } catch (err) {
     console.error("pruneWorkerExceptions failed", err);
