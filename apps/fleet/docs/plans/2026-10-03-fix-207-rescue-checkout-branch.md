@@ -160,6 +160,49 @@ beside the text that is now stale:
   remote test is deleted for the same unreachable-precondition reason as N3
   above.
 
+Beyond the scenarios named above, running the full file surfaced three more
+fixtures with the identical root problem, not individually anticipated going
+in:
+
+- `"#371 review Finding 1"`'s `setUpNonFastForwardRetryFixture` (the
+  "remaining budget covers the DOUBLED (retry-pair) threshold" test) and
+  `"#359 round 2 review, item 3"`'s own `rescue_push()`-retry-timeout test
+  both built a real `task/lead` branch collision to force the first push
+  attempt's rejection, the same way N3 did. Rather than delete these two
+  (they prove a real, still-reachable code path — the NFF-retry's own
+  `timeout -k` wrapping, and the budget guard's handling of a genuinely
+  slow retry), both are rewritten to force the same rejection
+  deterministically: `date -u +%Y%m%d%H%M%S` is PATH-shimmed to a fixed
+  value, and that exact first-attempt ref name is squatted on origin by an
+  unrelated commit ahead of the real run. This is the same technique the
+  pre-existing `rescueSnapshotCmd`/private-remote collision test already
+  used (`"its generated ref already taken on the private remote"`), just
+  applied to `rescuePushCmd` and to origin instead of the private remote.
+  Confirmed this mattered, not cosmetic: with the real-branch fixture left
+  in place, the item-3 retry test kept passing but started proving the
+  WRONG thing — the first attempt (now always a fresh, uncollided ref)
+  tripped the slow hook itself and got killed by the timeout, never
+  reaching the retry branch the test's own name and comment claim to
+  isolate.
+- `"issue #16"`'s `"rescuePushCmd, shallow + non-fast-forward: a push the
+  budget cannot cover is never started"` test: same real-branch-collision
+  problem, same fix — a `date`-shimmed deterministic collision squatted on
+  the private remote this time, combined with the pre-existing slow
+  `timeout` shim already in that test.
+
+`"#49"` describe block: its own leading doc comment claimed "a repo's own
+pre-push hook runs (#359: real branches keep hooks)" — corrected in place.
+Its one broken test ("a GENUINE unpushed commit on that branch still fails
+under the hook") is rewritten: the commit now lands cleanly on a generated
+ref (a client-side hook can no longer observe a real-branch push at all),
+rather than deleted, since the underlying fixture (an upstream-less branch
+with a genuinely-ahead commit) is still a real, useful scenario once
+re-pointed at the new expected outcome.
+
+`"#58"` describe block: one test (`"pushurl differs from the fetch url"`)
+asserted the push landed under `task/pr`'s own name at the pushurl
+destination — updated to assert a generated ref lands there instead.
+
 `apps/fleet/test/studio.session.test.ts`, `describe("rescuePushCmd — the
 shell shape...")`:
 
