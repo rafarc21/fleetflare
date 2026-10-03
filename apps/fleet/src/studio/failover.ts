@@ -41,6 +41,13 @@ import { parseStudioId } from "./ids";
 // module-load cycle, MEASURED). `import type` is erased entirely at compile
 // time, so this line carries no runtime import at all.
 import type { GatedWakeDeps, WakeExec } from "./wake";
+// Review round 1 (#210), finding 1 — TYPE only, same reason GatedWakeDeps
+// above is: destroy.ts itself imports real VALUES from do.ts (rescuePush,
+// harvestLearnings, …), so a runtime import here would pull in do.ts's own
+// "@cloudflare/sandbox" chain, exactly what this file's own header says it
+// never does. `import type` is erased at compile time, so this carries none
+// of that.
+import type { DestroyOutcome } from "./destroy";
 
 // ---------------------------------------------------------------------------
 // Detection
@@ -1214,16 +1221,42 @@ export interface FailoverDeps {
    * Issue #210 — ask 3: rescue-then-stop a studio that has sat genuinely
    * parked (`StudioStatus.parkedAt`, no free account at all) past
    * `PARKED_AUTO_STOP_HOURS`. Wired in do.ts's `failoverDeps()` to
-   * `StudioDO.destroyStudio(false, false, true)` — the exact "operator ran
-   * `fleet destroy --park`" verb, rescue-then-destroy included — followed by
-   * disarming this studio's own ticks, mirroring the ordering the
-   * operator-triggered destroy path already uses (do.ts). Optional, same
-   * "absent means no-op" convention every other capability-shaped dep in
-   * this interface already uses: a caller/test that predates this feature
-   * (or genuinely never wants auto-stop wired) runs the cycle exactly as it
-   * ran before, and this file's own check simply never has anything to call.
+   * `StudioDO.destroyStudio(true, false, true)` — `force: true` because this
+   * trigger is UNATTENDED: an operator retrying a refused `fleet destroy`
+   * with `--force` is a deliberate human call, but nobody is there to retry
+   * this one, and the realistic case — a studio stuck parked mid-task — by
+   * construction almost always carries an open assigned board task, which
+   * `runDestroy`'s own fail-CLOSED gate (destroy.ts) refuses UNLESS forced.
+   * `force` skips ONLY that gate (and, as an existing, unrelated side effect
+   * of `destroyStudio`'s own `discardUnsynced: discardUnsynced || force`
+   * wiring, also turns a probe/rescue-push-confirmed-failure REFUSAL into
+   * "proceed anyway" — the same thing an operator's own `--force` already
+   * does today, not something new this call introduces). It never skips the
+   * rescue-push/session-sync/learning-harvest ATTEMPT itself — those run
+   * whenever the container answers the probe, `force` or not; see
+   * `destroyWithSync`'s own doc comment (destroy.ts) and
+   * test/studio.destroy.test.ts's "--force overrides the refusal" case,
+   * which already pins that a forced destroy still runs the full
+   * sync/rescue-push/harvest sequence before the container is torn down —
+   * this wiring reuses that exact function rather than a second copy.
+   * `discardUnsynced` itself stays `false`: that is a SEPARATE, human
+   * `--discard-unsynced` choice this unattended trigger must never make on
+   * an operator's behalf.
+   *
+   * Returns the REAL `DestroyOutcome` — never swallowed into `void` — so a
+   * refusal (or a throw) is never misreported as a completed stop; see this
+   * file's own `runAccountFailover` call site for how it turns that into a
+   * `"park-refused"` outcome instead of lying `"auto-stopped"`. `destroyStudio`
+   * itself already disarms this studio's own ticks, ONLY once `this.destroy()`
+   * has resolved — same ordering routes.ts's call site relies on, never
+   * duplicated here. Optional, same "absent means no-op" convention every
+   * other capability-shaped dep in this interface already uses: a
+   * caller/test that predates this feature (or genuinely never wants
+   * auto-stop wired) runs the cycle exactly as it ran before, and this
+   * file's own check simply never has anything to call — reported as a
+   * (vacuous) `"auto-stopped"`, since there is nothing to refuse.
    */
-  stopParkedStudio?(): Promise<void>;
+  stopParkedStudio?(): Promise<DestroyOutcome>;
 }
 
 export type FailoverOutcome =
@@ -1286,10 +1319,22 @@ export type FailoverOutcome =
   | { kind: "free-account-wake"; wake: "ok" | "skipped" | "failed" }
   // Issue #210, ask 3 — nothing was free (ask 2 above found nothing, on
   // EITHER check) and this row has sat parked past PARKED_AUTO_STOP_HOURS:
-  // `deps.stopParkedStudio` was invoked (a no-op if that capability is not
-  // wired — see FailoverDeps.stopParkedStudio's own doc comment).
+  // `deps.stopParkedStudio` was invoked (a no-op, vacuously reported here too
+  // — see FailoverDeps.stopParkedStudio's own doc comment — if that
+  // capability is not wired) AND actually stopped it (`DestroyOutcome.ok`).
   // `parkedAt` names when the clock this decision read from started.
-  | { kind: "auto-stopped"; parkedAt: string };
+  | { kind: "auto-stopped"; parkedAt: string }
+  // Review round 1 (#210), finding 1 — `deps.stopParkedStudio` was invoked
+  // but did NOT actually stop the studio: either a tagged refusal
+  // (`DestroyOutcome.ok === false` — the realistic case, an open assigned
+  // board task destroy.ts's own fail-CLOSED gate refuses) or a genuine throw
+  // (an unexpected destroy failure, caught here so one studio's bad tick
+  // never takes the whole failover sweep down with it). `reason` names why,
+  // same text an operator would see from a manual `fleet destroy` refusal.
+  // The container is STILL UP and STILL BILLING — never report
+  // `"auto-stopped"` for this case, which is exactly the bug this kind
+  // exists to stop lying about.
+  | { kind: "park-refused"; parkedAt: string; reason: string };
 
 /**
  * What a studio with nowhere left to go records, and what the operator is
@@ -1751,13 +1796,31 @@ async function autoContinueAttempt(
  *       current account was free the whole time.
  *
  *   (b) does the SAME 3-tier selection the ordinary switch path runs
- *       (`nextClaudeAccount` over `scopedAccounts`, then `firstFreeAccount`
- *       over the unclaimed-spare range, then `nextBorrowedAccount` over
- *       `reserved`) find ANY free account at all? Computed UNCONDITIONALLY
- *       here — never gated on `deps.autoFailover` the way the ordinary
+ *       (`nextClaudeAccount` over `scopedAccounts` — or, while
+ *       `currentOutOfScope`, `firstFreeAccount` over it instead, EXACTLY the
+ *       branch `runAccountFailover`'s own `candidate` takes, see its doc
+ *       comment there for why `nextClaudeAccount` cannot handle that case on
+ *       its own — then `firstFreeAccount` over the unclaimed-spare range,
+ *       then `nextBorrowedAccount` over `reserved`) find ANY free account at
+ *       all? Computed UNCONDITIONALLY here — never gated on
+ *       `deps.autoFailover` the way the ordinary
  *       `candidate`/`outOfScopeSpare`/`borrowed` above are — so a studio
  *       parked with auto-failover off still gets the complete answer, not
  *       merely its own first tier.
+ *
+ * Review round 1 (#210), finding 2 — tier (b)'s first pass used to call
+ * `nextClaudeAccount(scopedAccounts, current, ...)` UNCONDITIONALLY, never
+ * branching on `currentOutOfScope` the way the real `candidate` computation
+ * already does. An active borrow with `current` recorded BEFORE the search
+ * anchor has no position in `scopedAccounts` to step forward from —
+ * `nextClaudeAccount` returns null immediately (current not found), wrongly
+ * reading as "nothing free" even when every position in `scopedAccounts`,
+ * including the first, is a genuine candidate. Only ever observable with
+ * auto-failover OFF: with it on, the real `candidate` (correctly
+ * `currentOutOfScope`-aware) finds the same account on the SAME tick and
+ * switches away before this function is ever reached — see this file's own
+ * test suite (review round 1, finding 2) for the full repro and why that
+ * masking makes an auto-failover-ON repro impossible.
  *
  * Short-circuits left to right, so the (rare, borrow-tier) `accountBurn.read`
  * is only ever paid for once every cheaper tier has already said no — the
@@ -1766,7 +1829,7 @@ async function autoContinueAttempt(
  */
 async function anyAccountFreeToResume(
   deps: FailoverDeps, current: string | null, currentAccount: ClaudeAccount | null,
-  scopedAccounts: ClaudeAccount[], anchor: number,
+  scopedAccounts: ClaudeAccount[], anchor: number, currentOutOfScope: boolean,
   reserved: Set<string>, limits: AccountLimits, now: Date,
 ): Promise<boolean> {
   // `currentAccount` is resolved by the CALLER from the same `currentIdx`
@@ -1777,7 +1840,13 @@ async function anyAccountFreeToResume(
   // would wrongly read as "no current account at all" for the overwhelming
   // common case of a studio that has never switched (`current` null).
   if (currentAccount && accountIsFree(currentAccount, limits, now)) return true;
-  if (nextClaudeAccount(scopedAccounts, current, limits, now, reserved) !== null) return true;
+  // Review round 1 (#210), finding 2 — mirrors `runAccountFailover`'s own
+  // `candidate` branch exactly, rather than always calling
+  // `nextClaudeAccount` (see this function's own doc comment above).
+  const tier1 = currentOutOfScope
+    ? firstFreeAccount(scopedAccounts, reserved, limits, now)
+    : nextClaudeAccount(scopedAccounts, current, limits, now, reserved);
+  if (tier1 !== null) return true;
   if (firstFreeAccount(deps.accounts.slice(0, anchor), reserved, limits, now) !== null) return true;
   const burn = deps.accountBurn ? await deps.accountBurn.read() : {};
   return nextBorrowedAccount(deps.accounts, reserved, limits, burn, now) !== null;
@@ -2653,7 +2722,7 @@ export async function runAccountFailover(
       if (existing.parkedAt && existing.exhaustionKind && existing.exhaustionKind !== "dead" && deps.accountLimits) {
         const currentAccount = currentIdx >= 0 ? deps.accounts[currentIdx] : null;
         const free = await anyAccountFreeToResume(
-          deps, current, currentAccount, scopedAccounts, anchor, reserved, limits, deps.now(),
+          deps, current, currentAccount, scopedAccounts, anchor, currentOutOfScope, reserved, limits, deps.now(),
         );
         if (free) {
           freeAccountWake = await freeAccountWakeAttempt(deps, studioId, existing, sighting);
@@ -2663,7 +2732,29 @@ export async function runAccountFailover(
           // keep idle-billing a container nothing will ever wake unattended.
           const parkedMs = Date.parse(existing.parkedAt);
           if (!Number.isNaN(parkedMs) && deps.now().getTime() - parkedMs >= PARKED_AUTO_STOP_HOURS * 60 * 60_000) {
-            await deps.stopParkedStudio?.();
+            // Review round 1 (#210), finding 1 — the OLD code reported
+            // `"auto-stopped"` unconditionally the instant this capability
+            // was invoked, regardless of what it actually did. A refusal
+            // (destroy.ts's own fail-CLOSED open-task gate — the realistic
+            // case for a studio stuck parked mid-task) or a genuine throw
+            // (an unexpected destroy failure) must read differently from a
+            // completed stop: the container is still up, still billing, and
+            // nothing here should claim otherwise. Absent entirely (an
+            // older caller/test that predates this capability) stays the
+            // existing no-op convention: vacuously "auto-stopped", since
+            // there is nothing to refuse.
+            if (deps.stopParkedStudio) {
+              let outcome: DestroyOutcome;
+              try {
+                outcome = await deps.stopParkedStudio();
+              } catch (err) {
+                return {
+                  kind: "park-refused", parkedAt: existing.parkedAt,
+                  reason: redactSecrets(err instanceof Error ? err.message : String(err)),
+                };
+              }
+              if (!outcome.ok) return { kind: "park-refused", parkedAt: existing.parkedAt, reason: outcome.reason };
+            }
             return { kind: "auto-stopped", parkedAt: existing.parkedAt };
           }
         }

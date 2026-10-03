@@ -6174,7 +6174,26 @@ export class StudioDO extends Sandbox<Env> {
       // definition) already disarms this studio's ticks itself, ONLY once
       // `this.destroy()` has resolved — same ordering routes.ts's call site
       // relies on, never duplicated here.
-      stopParkedStudio: async () => { await this.destroyStudio(false, false, true); },
+      //
+      // Review round 1 (#210), finding 1 — `force: true` (1st arg), unlike
+      // routes.ts's own `destroy` route, which only ever forces when the
+      // OPERATOR passed `--force`: this trigger is UNATTENDED, and the
+      // realistic case this feature exists for — a studio stuck parked
+      // mid-task — by construction almost always carries an open assigned
+      // board task, which `runDestroy`'s own fail-CLOSED gate (destroy.ts)
+      // refuses unless forced, with nobody there to retry. `force` skips
+      // ONLY that gate; the rescue-push/session-sync/learning-harvest
+      // sequence inside `destroyWithSync` still runs in full first whenever
+      // the container answers its probe — see `FailoverDeps.stopParkedStudio`'s
+      // own doc comment (failover.ts) for the full reasoning, including the
+      // one pre-existing side effect this flag also carries (same as any
+      // operator's own `--force`, nothing new here). `discardUnsynced`
+      // (2nd arg) stays `false` — that is a separate, human
+      // `--discard-unsynced` choice this automated call must never make.
+      // `park: true` (3rd arg) is unchanged. Returns `destroyStudio`'s real
+      // `DestroyOutcome` (never swallowed into `void`) so a refusal is never
+      // misreported as a completed stop.
+      stopParkedStudio: () => this.destroyStudio(true, false, true),
     };
   }
 
