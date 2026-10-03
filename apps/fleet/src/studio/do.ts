@@ -37,8 +37,8 @@ import {
 // credentials.ts's header) — this file wires their ports and owns the
 // schedule, nothing more.
 import {
-  resolveClaudeAccounts, claudeAccountToken, launchAccount, autoFailoverOn, accountDisplay, otherRepoPrimaries,
-  repoForAccount, parseAccountMap, type LaunchAccount,
+  resolveClaudeAccounts, claudeAccountToken, launchAccount, launchAccountOrReroute, autoFailoverOn, accountDisplay,
+  otherRepoPrimaries, repoForAccount, parseAccountMap, type LaunchAccount,
 } from "./accounts";
 import {
   runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, healDegradedRowAndWake, retryPendingHealWake,
@@ -3650,7 +3650,18 @@ export async function launchAccountOrRefuse(
   commitOkClears = true,
 ): Promise<Extract<LaunchAccount, { ok: true }>> {
   const existing = (await storage.get(STATUS_KEY)) ?? null;
-  const launch = launchAccount(env, parseStudioId(id)?.repo ?? null, existing?.claudeAccount ?? null);
+  const repo = parseStudioId(id)?.repo ?? null;
+  // Issue #209 — launchAccount resolves a slot unconditionally; it never
+  // consults the fleet-wide AccountLimits map, so a repo mapped to (or a
+  // studio recorded on) an account D1 already records as limited would
+  // still launch straight onto it. The D1 round trip is paid only when
+  // auto-failover is on: with it off nothing ever reroutes a studio away
+  // from its mapped primary (launchAccount's own doc comment), so there is
+  // nothing this read could change — see launchAccountOrReroute's own doc
+  // comment (accounts.ts) for the full reroute/refuse rule.
+  const limits = autoFailoverOn(env) ? await readFleetAccountLimits(env.DB, resolveClaudeAccounts(env)) : {};
+  const reserved = otherRepoPrimaries(env, repo);
+  const launch = launchAccountOrReroute(env, repo, existing?.claudeAccount ?? null, limits, reserved);
   if (launch.ok) {
     // #273 r2: flag off, an earlier failover's recorded account is stale — this
     // launch is on the mapped one, so the row stops naming the old one.

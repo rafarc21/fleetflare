@@ -501,6 +501,56 @@ export function launchAccount(env: ClaudeAccountEnv, repo: string | null, record
   return { ok: true, name: mapped.name, token: mapped.token };
 }
 
+/**
+ * Issue #209 — `launchAccount` (above) resolves the mapped slot, or a
+ * RECORDED failed-over account, UNCONDITIONALLY: it never consults the
+ * fleet-wide `AccountLimits` map (issue #102's `accountIsFree`) at all. A
+ * repo mapped to a slot the fleet already recorded as limited — or a
+ * studio recorded on one — still launched straight onto it, into the
+ * weekly-limit modal, every time provision/restart/recycle ran.
+ *
+ * Wraps `launchAccount` with exactly that one extra check, pure (no I/O —
+ * `limits`/`reserved` are both parameters, same style `nextClaudeAccount`
+ * already uses): if the account it resolved to is free, `launchAccount`'s
+ * own answer stands COMPLETELY unchanged — this never touches that
+ * function's own behaviour (see its own tests, including the
+ * "(#53, unchanged)" one). If it is limited, reroutes to the next free
+ * account in forward-wrap order (`nextClaudeAccount`, #102/#103's own rule),
+ * respecting the SAME `reserved` set (another repo's own mapped primary,
+ * `otherRepoPrimaries`) every other failover path already does. If every
+ * account is limited too (`nextClaudeAccount` itself returns null), REFUSES
+ * — same `{ ok: false, error }` shape `launchAccount`'s own refusal already
+ * uses — naming the earliest reset (`earliestAccountReset`) an operator
+ * reading the degraded row can expect a studio back by.
+ *
+ * Gated on `autoFailoverOn(env)`, same as every other reroute/switch
+ * mechanism in this file: with failover off nothing ever moves a studio
+ * away from its mapped primary (see `launchAccount`'s own doc comment,
+ * and `autoFailoverOn`'s) — a restart is the documented way an operator's
+ * own map edit reaches it, and this function must not quietly override
+ * that. The caller (do.ts's `launchAccountOrRefuse`) is the one that reads
+ * D1 for `limits`, and only when `autoFailoverOn(env)` is already true —
+ * this function's own check is a second, redundant guard, not the only one,
+ * so a caller that forgets the outer gate still cannot make this reroute.
+ */
+export function launchAccountOrReroute(
+  env: ClaudeAccountEnv, repo: string | null, recorded: string | null | undefined,
+  limits: AccountLimits, reserved: Set<string>, now: Date = new Date(),
+): LaunchAccount {
+  const launch = launchAccount(env, repo, recorded);
+  if (!launch.ok || !autoFailoverOn(env)) return launch;
+  const accounts = resolveClaudeAccounts(env);
+  const resolved = accounts.find((a) => a.name === launch.name);
+  if (resolved === undefined || accountIsFree(resolved, limits, now)) return launch;
+  const next = nextClaudeAccount(accounts, launch.name, limits, now, reserved);
+  if (next !== null) return { ok: true, name: next.name, token: next.token };
+  const resetAt = earliestAccountReset(accounts, limits, now);
+  return {
+    ok: false,
+    error: `claude account: every account limited; earliest reset ${resetAt ?? "unknown"}`,
+  };
+}
+
 /** The slot a secret name holds, or null for a name outside the list. */
 function slotOf(name: string): number | null {
   for (let position = 1; position <= MAX_CLAUDE_ACCOUNTS; position++) {
