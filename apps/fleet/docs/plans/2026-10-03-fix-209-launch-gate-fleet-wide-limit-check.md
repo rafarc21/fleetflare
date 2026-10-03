@@ -363,12 +363,17 @@ both confirmed by reading the code directly (not inferred).
 caller of `borrowFields` (the write that sets `borrowedAccount`/
 `borrowedFromRepo` so the existing hand-back mechanism, failover.ts, can
 later bring a rerouted/borrowing studio home once its own primary frees
-up) — but all FOUR real production call sites (`provisionUngated`,
-`restartUngated`, recycle's entry call, recycle's post-destroy closure)
-pass `commitOkClears: false` and commit only through
-`decideAccountClears`/`applyAccountClears`, which called `accountClears`
-without ever touching the borrow fields at all. Net effect: in real
-production, a studio that reroutes onto a spare or borrows another repo's
+up) — but the three real production call sites that actually commit a
+resolved clear (`provisionUngated`, `restartUngated`, recycle's
+post-destroy closure) all pass `commitOkClears: false` and commit only
+through `decideAccountClears`/`applyAccountClears`, which called
+`accountClears` without ever touching the borrow fields at all. (Recycle's
+entry call also passes `commitOkClears: false`, but by design never calls
+`decideAccountClears` at all — per `do.ts`'s own comment and
+`test/studio.account-launched.test.ts`, it exists only to refuse early and
+never commits a resolution, so it is excluded from this list, not an
+oversight.) Net effect: in real production, a studio that reroutes onto a
+spare or borrows another repo's
 reserved primary never got `borrowedAccount` written, and the hand-back
 mechanism — gated on exactly that field — never fired. The existing borrow
 test (`test/studio.account-by-repo.test.ts`) only ever exercised the
