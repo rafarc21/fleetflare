@@ -349,3 +349,102 @@ Ran `test/studio.account-by-repo.test.ts`, `test/studio.account-launched.test.ts
 `test/studio.account-failover.test.ts` together (249 tests, all green) after
 every change, then the full `bun run test` and repo-wide `bun run check`
 (gate-locked, one at a time) before reporting done.
+
+## Fix-first review round 3 (2026-10-03) — borrow-field write dead in
+## production, and a stale pre-primary anchor false-refusing a free primary
+
+A third fresh-context review of PR #211 found two more blocking findings,
+both confirmed by reading the code directly (not inferred).
+
+### Finding 1 — `borrowFields`'s row write was DEAD CODE in production;
+### hand-back never fired
+
+`launchAccountOrRefuse`'s own inline `commitOkClears` branch was the ONLY
+caller of `borrowFields` (the write that sets `borrowedAccount`/
+`borrowedFromRepo` so the existing hand-back mechanism, failover.ts, can
+later bring a rerouted/borrowing studio home once its own primary frees
+up) — but all FOUR real production call sites (`provisionUngated`,
+`restartUngated`, recycle's entry call, recycle's post-destroy closure)
+pass `commitOkClears: false` and commit only through
+`decideAccountClears`/`applyAccountClears`, which called `accountClears`
+without ever touching the borrow fields at all. Net effect: in real
+production, a studio that reroutes onto a spare or borrows another repo's
+reserved primary never got `borrowedAccount` written, and the hand-back
+mechanism — gated on exactly that field — never fired. The existing borrow
+test (`test/studio.account-by-repo.test.ts`) only ever exercised the
+DEFAULT `commitOkClears: true` path, which no real caller uses, so it never
+caught this.
+
+Fix: `accountClears` now takes `repo`/`reserved` and folds `borrowFields`'s
+own computation (plus the pre-existing "genuine reroute" gate that keeps
+the plain #289 carry-forward case silent) directly into its own return —
+the ONE computation both the inline `commitOkClears: true` branch and
+`decideAccountClears` (every real production caller's own path) now share.
+`decideAccountClears` gained the same two parameters, threaded through from
+each of its three call sites in do.ts, derived the identical way
+`launchAccountOrRefuse` itself already does: `parseStudioId(id)?.repo ??
+null` and `otherRepoPrimaries(env, repo)`.
+
+New test (`test/studio.account-by-repo.test.ts`): the same tiers-1+2-miss,
+tier-3-borrow fixture as the existing (now explicitly-labelled "default
+path") test, but driven through the REAL `commitOkClears: false` →
+`decideAccountClears` → (simulated success continuation) → `applyAccountClears`
+sequence every real caller actually uses — asserting `borrowedAccount`/
+`borrowedFromRepo` land correctly. RED against the pre-fix code (`clears`
+resolved null, so nothing was ever written); GREEN after.
+
+### Finding 2 — `launchAccountOrReroute`'s anchor never widened backward for
+### a stale non-borrowing recorded account (#273 r2 case), false-refusing a
+### free primary
+
+`accounts.ts`'s `launchAccountOrReroute` computed `anchor` as ALWAYS just
+the mapped primary's own index — unlike `failover.ts`'s own
+`runAccountFailover` derivation, which widens `anchor` backward to the
+recorded `current`'s own position whenever the studio is NOT actively
+borrowing and `current` sits before the primary (the "#273 r2" shape: a
+repo whose `CLAUDE_ACCOUNT_BY_REPO` map assigns it a primary while a studio
+is still recorded on an earlier account from before that map existed).
+Without the widening, `scopedAccounts` (sliced from the unwidened anchor)
+never even contained the recorded account, so `nextClaudeAccount`'s own
+`idx < 0` branch returned null immediately — tier 1 never even tried the
+primary itself (which sits INSIDE the correctly-widened scope), tier 2 only
+covers strictly-before-anchor, and tier 3 has nothing to borrow when no
+other repo's primary is reserved. Concrete repro: three accounts, a repo
+mapped to slot 2, a studio recorded on slot 1 (not borrowing), slot 1
+fleet-wide limited, slot 2 (the repo's own primary) completely free —
+refused "every account limited" instead of rerouting to slot 2.
+
+Fix: factored the anchor/`currentOutOfScope` derivation into a new shared
+pure helper, `accounts.ts`'s `deriveSearchAnchor(accounts, start, current,
+borrowedActive)`, implementing failover.ts's own exact formula (`anchor =
+borrowedActive ? start : (currentIdx < 0 ? start : Math.min(start,
+currentIdx))`, `currentOutOfScope = borrowedActive && currentIdx >= 0 &&
+currentIdx < anchor`). `failover.ts`'s own inline computation now calls it
+(semantics unchanged — a pure lift, not a behaviour change there);
+`launchAccountOrReroute` calls it too, instead of its own simplified (and
+wrong) copy, so the two formulas cannot drift a third time.
+
+New test (`test/studio.account-by-repo.test.ts`): the exact repro scenario
+above — a stale recorded account before a later-mapped primary, not
+borrowing, primary free — asserts the launch gate reroutes to the primary
+rather than refusing. RED against the pre-fix code (refused "every account
+limited" even with the primary free); GREEN after.
+
+### Finding 3 (test improvement) — the genuine-exhaustion refusal test now
+### also checks the row
+
+The existing "every configured account fleet-wide limited" test
+(`test/studio.account-by-repo.test.ts`) only ever asserted the REJECTED
+promise's message. Strengthened to also assert the row itself went
+`state: "degraded"` with `error` naming the earliest reset — what `fleet
+ls` actually reads, not just what the call throws.
+
+### Verification
+
+Each finding's test confirmed RED against the pre-fix code, then GREEN
+after its own fix, committed separately and pushed immediately. Ran
+`test/studio.account-by-repo.test.ts`, `test/studio.account-launched.test.ts`,
+`test/studio.account-failover.test.ts` together (all green) after every
+change, repo-wide `tsc --noEmit` clean, then the full `bun run test` and
+`bun run check` (gate-locked, one at a time, never concurrently) before
+reporting done.
