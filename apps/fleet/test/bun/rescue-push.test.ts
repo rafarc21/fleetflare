@@ -1109,6 +1109,40 @@ describe("HOLD round (PR #312 real-git review) — rescueSnapshotCmd on a live f
   });
 });
 
+/**
+ * Board issue #207, measured live 2026-10-03T02:17Z: `fleet destroy --park`
+ * ran rescue-push on a studio with an uncommitted dev-only edit, checked out
+ * on the HEAD branch of an open, already-gated PR. `rescue_target()`'s own
+ * branch-vs-default split (the "Fix round 2" design documented at length
+ * above rescuePushCmd) deliberately returned that checked-out branch's OWN
+ * name as the push target, because it was not the repo's resolved default —
+ * and rescue committed the dev-only edit as a bot commit and pushed it
+ * straight onto that gated PR's own head. A 45s push timeout happened to turn
+ * the actual push into a harmless 409 that night, but nothing in the design
+ * prevented it from landing. `rescueSnapshotCmd`'s own `snapshot_target()` was
+ * already fixed for the identical reason under issue #312 (see the HOLD-round
+ * block right above this one) — a live studio's real branch must never be a
+ * push target. `rescue_target()` gets the same fix here: in checkout mode it
+ * now ALWAYS generates a fresh `fleet/rescue/...` ref, exactly like
+ * `snapshot_target()`, never the checked-out branch's own name — closing this
+ * for every caller of rescuePushCmd (destroy.ts's plain destroy and --park,
+ * and do.ts's other call site), since they all go through this one function.
+ */
+describe("#207 — rescue never commits/pushes directly onto the checked-out branch", () => {
+  test("dirty tree on a non-default checked-out branch (an open PR's head): origin's branch ref is unchanged; the edit lands on a generated fleet/rescue/... ref instead", () => {
+    sh(`git -C ${checkout} checkout -q -b task/pr-branch`);
+    sh(`git -C ${checkout} push -q origin task/pr-branch`);
+    writeFileSync(join(checkout, "dev-only.local"), "must never be committed to a PR branch\n");
+    const before = sh(`git -C ${origin} rev-parse refs/heads/task/pr-branch`).out;
+
+    const out = rescue();
+
+    expect(out).not.toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} task/pr-branch `, "m"));
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 files$`, "m"));
+    expect(sh(`git -C ${origin} rev-parse refs/heads/task/pr-branch`).out).toBe(before);
+  });
+});
+
 // Issue #313 (PR #263's own round-5 review): three findings duplicated
 // across BOTH command builders (rescuePushCmd's own N1/branch-walk and
 // rescue_one, and rescueSnapshotCmd's near-identical copies of the same
