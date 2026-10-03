@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { env } from "cloudflare:test";
 import { Sandbox } from "@cloudflare/sandbox";
 import type { Env } from "../src/env";
-import { StudioDO, SPAWN_TOKEN_KEY, LaunchRefusedError } from "../src/studio/do";
+import { StudioDO, SPAWN_TOKEN_KEY, LaunchRefusedError, LAUNCH_REFUSED_PREFIX } from "../src/studio/do";
 import { STATUS_KEY, type OpCtx } from "../src/studio/provision";
 import { hashSpawnToken } from "../src/studio/org";
 import type { StudioState, StudioStatus } from "../src/studio/types";
@@ -83,7 +83,15 @@ function rowError(map: Map<string, unknown>): string | null {
 describe("#271 launch gate — mapped account with no secret refuses, through the real DO paths", () => {
   it("provision: refused, row says why, no container started", async () => {
     const s = await studio("provisioning");
-    await expect(s.doObj.provision({ repo: "fleetflare", role: "web-studio" })).rejects.toBeInstanceOf(LaunchRefusedError);
+    const err: unknown = await s.doObj.provision({ repo: "fleetflare", role: "web-studio" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LaunchRefusedError);
+    // Issue #217 review: pinned directly at the source, independent of the
+    // route layer — routes.ts's launchOrStartRefusalResponse recognises this
+    // refusal ACROSS the RPC boundary purely by this message prefix (a class
+    // never survives Workers RPC, only `.message` does), so the prefix must
+    // genuinely be on the message the real DO method throws, not just
+    // asserted by a test fixture that types it in independently.
+    expect((err as Error).message.startsWith(LAUNCH_REFUSED_PREFIX)).toBe(true);
     expect(rowError(s.map)).toContain("mapped to CLAUDE_CODE_OAUTH_TOKEN_2");
     expect((s.map.get(STATUS_KEY) as StudioStatus).state).toBe("degraded");
     expect(s.started()).toBe(false);
@@ -91,7 +99,9 @@ describe("#271 launch gate — mapped account with no secret refuses, through th
 
   it("restart: refused, row says why, no container started", async () => {
     const s = await studio("running");
-    await expect(s.doObj.restartStudio()).rejects.toBeInstanceOf(LaunchRefusedError);
+    const err: unknown = await s.doObj.restartStudio().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LaunchRefusedError);
+    expect((err as Error).message.startsWith(LAUNCH_REFUSED_PREFIX)).toBe(true);
     expect(rowError(s.map)).toContain("mapped to CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(s.started()).toBe(false);
   });
@@ -99,7 +109,9 @@ describe("#271 launch gate — mapped account with no secret refuses, through th
   it("recycle: refused BEFORE its destroy — the running container is not killed", async () => {
     const s = await studio("running");
     const destroy = vi.spyOn(s.doObj, "destroy").mockResolvedValue(undefined);
-    await expect(s.doObj.recycle({ repo: "fleetflare", role: "web-studio" })).rejects.toBeInstanceOf(LaunchRefusedError);
+    const err: unknown = await s.doObj.recycle({ repo: "fleetflare", role: "web-studio" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LaunchRefusedError);
+    expect((err as Error).message.startsWith(LAUNCH_REFUSED_PREFIX)).toBe(true);
     expect(destroy).not.toHaveBeenCalled();
     expect(rowError(s.map)).toContain("mapped to CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(s.started()).toBe(false);

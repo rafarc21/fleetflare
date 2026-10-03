@@ -15,6 +15,7 @@ import {
   checkProvisionedGated, wakeStudioWith,
   provisionWithFreshVerdict, SPAWN_TOKEN_KEY, RECYCLE_REFUSED_PREFIX,
   statusDetailWithStorage, clearSessionGuard, RESCUE_CLEAN,
+  LaunchRefusedError, StartRefusedError,
   type SpawnTokenStorage, type ProvisionedVerdict,
 } from "../src/studio/do";
 import { runDestroy, type DestroyOutcome } from "../src/studio/destroy";
@@ -387,6 +388,14 @@ function envWithFakeStudio(
     testEnv: { ...env, AGENT_REPO: "acme-org/websites", STUDIO: fakeNs } as unknown as Env,
     fakeNs,
   };
+}
+
+/** Worker->DO stub's named method throws `err` instead of answering. */
+function envWithThrowingVerb(method: string, err: Error) {
+  const { testEnv, fakeNs } = envWithFakeStudio();
+  const stub = fakeNs.get();
+  const failingNs = { ...fakeNs, get: () => ({ ...stub, [method]: async () => { throw err; } }) };
+  return { ...testEnv, STUDIO: failingNs } as unknown as Env;
 }
 
 function authorizedReq(path: string, init: RequestInit = {}) {
@@ -2635,12 +2644,6 @@ describe("repair verbs name the failing side (#96)", () => {
       durableObjectReset: true, retryable: true,
     });
   }
-  function envWithThrowingVerb(method: string, err: Error) {
-    const { testEnv, fakeNs } = envWithFakeStudio();
-    const stub = fakeNs.get();
-    const failingNs = { ...fakeNs, get: () => ({ ...stub, [method]: async () => { throw err; } }) };
-    return { ...testEnv, STUDIO: failingNs } as unknown as Env;
-  }
   const VERBS: { action: string; method: string; init: RequestInit }[] = [
     { action: "provision", method: "provision", init: { method: "POST", body: "{}" } },
     { action: "restart", method: "restartStudio", init: { method: "POST" } },
@@ -2851,5 +2854,102 @@ describe("repair verbs name the failing side (#96)", () => {
     expect(body.error).toContain("Worker->DO call failed; the container may or may not have been reached");
     expect(body.error).not.toContain("before the container was read");
     expect(body.error).toContain("retryable=false");
+  });
+});
+
+/**
+ * Issue #217: a repo mapped to an unlaunchable account (an unset secret, or
+ * every account fleet-wide limited — #209/#211) makes do.ts's
+ * `launchAccountOrRefuse`/`refuseUnlessMappedAccountLaunchable` throw
+ * `LaunchRefusedError` from INSIDE the StudioDO. Before this fix, provision's
+ * and restart's catch blocks (routes.ts) checked only
+ * `threwInsideDurableObject` and bare-rethrew anything else — a thrown error
+ * with NOTHING above it to catch, which Cloudflare renders as an opaque
+ * "Worker threw exception" 1101 page, the exact symptom reported. recycle's
+ * own catch had a narrower version of the same gap: it checked
+ * `RECYCLE_REFUSED_PREFIX` first, but a `LaunchRefusedError`'s message never
+ * carries that prefix, so it fell through to the generic 500 path instead —
+ * wrong status, though at least a real Response, never a bare throw.
+ *
+ * `StartRefusedError` (issue #123's start gate) gets the identical fix for
+ * provision/restart — `studio.destroy-race.test.ts`'s own T6 coverage proves
+ * it reaches `provision()` uncaught the same way (a destroy racing the op's
+ * own first container-start attempt). It does NOT need the same fix for
+ * recycle: recycleWithSync's own try/catch (do.ts) already intercepts it
+ * there and re-throws it already renamed into the SAME "recycle failed before
+ * reprovisioning could start: ..." bucket `routes.test.ts`'s own "an error the
+ * DO's own code threw (remote) keeps the 500" test (above) already covers —
+ * never reaching routes.ts carrying `START_REFUSED_PREFIX` at all, so no new
+ * recycle case exists to add for it.
+ *
+ * Simulates the RPC crossing exactly like every other test in this file:
+ * `Object.assign(<err>, { remote: true })` — tagging `remote: true` is the
+ * repo's own stand-in for "this error already crossed the Worker<->DO RPC
+ * boundary" (Workers RPC sets that flag itself; nothing else survives the
+ * boundary intact). `<err>` carries a message computed from the REAL `LaunchRefusedError`/
+ * `StartRefusedError` (do.ts), constructed the same way the DO's own code
+ * constructs it, never a hand-typed `LAUNCH_REFUSED_PREFIX + "..."` string —
+ * a mutation test (maestro review round, issue #217) found that hand-typed
+ * version passed green even with the prefix-prepending lines deleted from
+ * BOTH constructors, because the fixture already carried the prefix
+ * independently of whatever the constructor did. Using the real constructor
+ * to compute the message means these tests can only pass if
+ * `new LaunchRefusedError(reason).message` genuinely starts with
+ * `LAUNCH_REFUSED_PREFIX` (ditto `StartRefusedError`/`START_REFUSED_PREFIX`)
+ * — the one property `launchOrStartRefusalResponse` actually depends on,
+ * pinned at its real source instead of asserted by construction. The object
+ * that actually crosses the simulated RPC boundary, though, is a plain
+ * `Error` wrapping that message — never the `LaunchRefusedError`/
+ * `StartRefusedError` instance itself — because real Workers RPC strips
+ * subclass identity when an error crosses the Worker<->DO boundary; only
+ * `.message` (and explicitly-tagged properties like `remote: true`) survive
+ * (a follow-up mutation test, issue #225, found that keeping the subclass
+ * identity in the fixture let a `constructor === Error` guard mutant survive
+ * undetected in `launchOrStartRefusalResponse`, since no fixture ever
+ * produced a plain `Error` the way real crossed errors always do).
+ */
+describe("LaunchRefusedError/StartRefusedError surface as 409, not an uncaught 500 (#217)", () => {
+  const EARLIEST_RESET_REASON = "claude account: every account limited; earliest reset 2026-10-03T12:00:00.000Z";
+
+  for (const { action, method, init } of [
+    { action: "provision", method: "provision", init: { method: "POST", body: "{}" } },
+    { action: "restart", method: "restartStudio", init: { method: "POST" } },
+  ] as const) {
+    it(`${action}: a LaunchRefusedError (every account fleet-wide limited) is a 409 naming the earliest reset, never an uncaught throw`, async () => {
+      authorized();
+      const refusal = Object.assign(new Error(new LaunchRefusedError(EARLIEST_RESET_REASON).message), { remote: true });
+      const res = await handleStudio(
+        authorizedReq(`/studio/${STUDIO_ID}/${action}`, init), envWithThrowingVerb(method, refusal),
+      );
+      expect(res.status).toBe(409);
+      const body = await res.json() as { error: string };
+      expect(body.error).toBe(EARLIEST_RESET_REASON);
+      expect(body.error).toContain("earliest reset");
+    });
+
+    it(`${action}: a StartRefusedError (a destroy raced the op's own first start) is also a 409, never an uncaught throw`, async () => {
+      authorized();
+      const refusal = Object.assign(
+        new Error(new StartRefusedError(`studio ${STUDIO_ID} is stopped — \`ff ${STUDIO_ID}\` to start it`).message),
+        { remote: true },
+      );
+      const res = await handleStudio(
+        authorizedReq(`/studio/${STUDIO_ID}/${action}`, init), envWithThrowingVerb(method, refusal),
+      );
+      expect(res.status).toBe(409);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain("is stopped");
+    });
+  }
+
+  it("recycle: a LaunchRefusedError (recycle()'s own entry-time refusal, before recycleWithSync ever runs) is a 409 naming the reason", async () => {
+    authorized();
+    const refusal = Object.assign(new Error(new LaunchRefusedError(EARLIEST_RESET_REASON).message), { remote: true });
+    const res = await handleStudio(
+      authorizedReq(`/studio/${STUDIO_ID}/recycle`, { method: "POST" }), envWithThrowingVerb("recycle", refusal),
+    );
+    expect(res.status).toBe(409);
+    const body = await res.json() as { error: string };
+    expect(body.error).toBe(EARLIEST_RESET_REASON);
   });
 });

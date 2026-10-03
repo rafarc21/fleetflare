@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Sandbox } from "@cloudflare/sandbox";
-import { StudioDO, SPAWN_TOKEN_KEY, DELIVERED_TASK_KEY, type RefreshDeps } from "../src/studio/do";
+import { StudioDO, SPAWN_TOKEN_KEY, DELIVERED_TASK_KEY, START_REFUSED_PREFIX, type RefreshDeps } from "../src/studio/do";
 import {
   STATUS_KEY, DESTROYING_KEY, DESTROY_EPOCH_KEY, ROLE_ENV_KEY, freshStatus, PROVISIONED_OK, PROVISIONED_UNKNOWN, OPERATION_STALE_MS,
   type ProvisionDeps, type StudioStorage,
@@ -549,7 +549,16 @@ describe("T6 — destroy lands before the op's own first container-start attempt
     // shape #123's own start gate already produces for a plain stopped
     // studio with no op in flight at all) BEFORE the spied SDK method is
     // ever reached.
-    await expect(h.doObj.provision(cfg())).rejects.toThrow(/stopped/);
+    //
+    // Issue #217 review: pinned at the source, same reason
+    // studio.account-gate-do.test.ts now pins LaunchRefusedError's own
+    // message prefix directly rather than only via `instanceof`/substring —
+    // routes.ts's launchOrStartRefusalResponse recognises this refusal ONLY
+    // by this exact prefix once it has crossed the Worker<->DO RPC boundary
+    // (a class never survives Workers RPC), so this is the one real DO call
+    // site proving `START_REFUSED_PREFIX` is genuinely on the message
+    // `provision()` throws here, not merely documented as such.
+    await expect(h.doObj.provision(cfg())).rejects.toThrow(new RegExp(`^${START_REFUSED_PREFIX}.*stopped`));
     expect((h.map.get(STATUS_KEY) as StudioStatus).state).toBe("stopped");
     expect(startCount(h)).toBe(0);
   });

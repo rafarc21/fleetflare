@@ -21,6 +21,23 @@ export function repairFailureLine(
     return `${label}: ${status} ${title} ` +
       "(a Cloudflare error page: the Worker threw — this page does not say which side failed)";
   }
+  // Issue #217: provision/restart/recycle's 409 refusal (routes.ts's
+  // `launchOrStartRefusalResponse`) answers `{"error": "<reason>"}`. Without
+  // this, the operator read the raw JSON blob, braces and quoting included,
+  // instead of the reason itself. A JSON body is never also an HTML document,
+  // so this never races the <title> check above either way.
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    // Issue #217 review round 2: same cap as the plain-text fallback below —
+    // `parsed.error` can carry redacted container stderr (routes.ts's
+    // launchOrStartRefusalResponse passes a refusal reason through
+    // uninspected), and an uncapped reason here was the one path this
+    // function's own MAX_CHARS bound did not actually reach.
+    if (typeof parsed.error === "string") return `${label}: ${status} ${parsed.error.slice(0, MAX_CHARS)}`;
+  } catch {
+    // Not JSON — every other repair verb's body (plain text, or the
+    // RECYCLE_REFUSED_PREFIX price in full) falls through to the slice below.
+  }
   return `${label}: ${status} ${text.trim().slice(0, MAX_CHARS)}`;
 }
 

@@ -63,6 +63,18 @@ import {
   accountBurnStateKey, encodeAccountBurnState, decodeAccountBurnState,
 } from "./rate-limit";
 import type { ClaudeAccount } from "./accounts";
+// Issue #217: the launch-refusal prefix lives in accounts.ts, not here, for
+// the identical reason RECYCLE_REFUSED_PREFIX lives in recycle-cost.ts (see
+// that constant's own doc comment, and LAUNCH_REFUSED_PREFIX's) — so
+// routes.ts can import it without pulling in this file's own
+// "@cloudflare/sandbox" value import.
+import { LAUNCH_REFUSED_PREFIX } from "./accounts";
+export { LAUNCH_REFUSED_PREFIX };
+// Issue #217: same reasoning, this file's own "@cloudflare/sandbox" import —
+// routes.ts already imports rpc-failure.ts for threwInsideDurableObject/
+// errorMessage; START_REFUSED_PREFIX just grows that existing import.
+import { START_REFUSED_PREFIX } from "./rpc-failure";
+export { START_REFUSED_PREFIX };
 // Issue #102: the fleet-wide per-account limit record lives in D1
 // (fleet_state), the same generic key/value table issue #5's junior-
 // authorization flag already uses — reused via state.ts's own getFlag/setFlag
@@ -1841,11 +1853,20 @@ export async function startRefusal(
   return `studio ${id} is stopped — \`ff ${id}\` to start it`;
 }
 
-/** Issue #123: what the start overrides throw — typed like the 409 body. */
+/** Issue #123: what the start overrides throw — typed like the 409 body.
+ *
+ *  Issue #217 investigation: `studio.destroy-race.test.ts`'s own T6 coverage
+ *  (`doObj.provision(cfg())` rejecting with this class directly, uncaught)
+ *  confirms this CAN reach `provision()`/`restartStudio()` uncaught — the
+ *  identical leak #217 found for `LaunchRefusedError` — when a destroy races
+ *  the op's own first container-start attempt. Message prefixed with
+ *  `START_REFUSED_PREFIX` for the same RPC-survival reason
+ *  `LaunchRefusedError` is: `.code` does not survive the Worker->DO boundary
+ *  either, only `.message` does. */
 export class StartRefusedError extends Error {
   readonly code = START_REFUSED_CODE;
   constructor(message: string) {
-    super(message);
+    super(START_REFUSED_PREFIX + message);
     this.name = "StartRefusedError";
   }
 }
@@ -3420,10 +3441,19 @@ export function launchFields(
 }
 
 /** Issue #271: what provision/restart/recycle throw for an unlaunchable
- *  account — after the row already says why. */
+ *  account — after the row already says why.
+ *
+ *  Issue #217: the message is prefixed with `LAUNCH_REFUSED_PREFIX` — this
+ *  class does not survive the Worker->DO RPC boundary (Workers RPC keeps an
+ *  error's message, not its subclass), and routes.ts's provision/restart/
+ *  recycle catches need a way to recognise a refusal by message alone once it
+ *  has crossed that boundary, same as `RECYCLE_REFUSED_PREFIX` already does
+ *  for recycle's own refusal. `StudioStatus.error` (what `fleet ls` shows) is
+ *  unaffected: every caller writes the row from `launch.error` directly, not
+ *  from this exception's `.message`. */
 export class LaunchRefusedError extends Error {
   constructor(message: string) {
-    super(message);
+    super(LAUNCH_REFUSED_PREFIX + message);
     this.name = "LaunchRefusedError";
   }
 }

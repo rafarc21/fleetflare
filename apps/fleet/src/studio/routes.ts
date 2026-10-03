@@ -31,7 +31,9 @@ import { resolveProjectCard } from "../directus/card";
 import { redactSecrets } from "./redact";
 import type { Observed } from "./observed";
 import { logWakeOutcome } from "./wake";
-import { threwInsideDurableObject, runtimeFlags, errorMessage, durableObjectUnreachable } from "./rpc-failure";
+import {
+  threwInsideDurableObject, runtimeFlags, errorMessage, durableObjectUnreachable, launchOrStartRefusalResponse,
+} from "./rpc-failure";
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
 import { resolveClaudeAccounts, accountLabel } from "./accounts";
 import { readFleetAccountLimits } from "./account-limits-store";
@@ -801,6 +803,8 @@ export async function handleStudio(
     try {
       return Response.json(burnView(await stub.provision(cfg)));
     } catch (err) {
+      const refusal = launchOrStartRefusalResponse(err);
+      if (refusal) return refusal;
       if (threwInsideDurableObject(err)) throw err;
       return durableObjectUnreachable("provision", err);
     }
@@ -840,6 +844,8 @@ export async function handleStudio(
     try {
       return Response.json(burnView(await stub.restartStudio()));
     } catch (err) {
+      const refusal = launchOrStartRefusalResponse(err);
+      if (refusal) return refusal;
       if (threwInsideDurableObject(err)) throw err;
       return durableObjectUnreachable("restart", err);
     }
@@ -896,6 +902,16 @@ export async function handleStudio(
       if (message.startsWith(RECYCLE_REFUSED_PREFIX)) {
         console.error(`studio ${id.full} recycle refused`, message);
         return new Response(message, { status: 409 });
+      }
+      // Issue #217: `recycle()`'s own entry-time `launchAccountOrRefuse` call
+      // (do.ts) throws LaunchRefusedError BEFORE recycleWithSync ever runs —
+      // never wrapped in RECYCLE_REFUSED_PREFIX, so without this check it fell
+      // through to the generic 500 path below for what is actually a known,
+      // named refusal. See launchOrStartRefusalResponse's own doc comment.
+      const refusal = launchOrStartRefusalResponse(err);
+      if (refusal) {
+        console.error(`studio ${id.full} recycle refused`, message);
+        return refusal;
       }
       console.error(`studio ${id.full} recycle failed`, err);
       if (!threwInsideDurableObject(err)) return durableObjectUnreachable("recycle", err);
