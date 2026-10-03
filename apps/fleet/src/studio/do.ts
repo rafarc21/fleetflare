@@ -6033,25 +6033,31 @@ export class StudioDO extends Sandbox<Env> {
       // `this.destroy()` has resolved — same ordering routes.ts's call site
       // relies on, never duplicated here.
       //
-      // Review round 1 (#210), finding 1 — `force: true` (1st arg), unlike
-      // routes.ts's own `destroy` route, which only ever forces when the
-      // OPERATOR passed `--force`: this trigger is UNATTENDED, and the
-      // realistic case this feature exists for — a studio stuck parked
-      // mid-task — by construction almost always carries an open assigned
-      // board task, which `runDestroy`'s own fail-CLOSED gate (destroy.ts)
-      // refuses unless forced, with nobody there to retry. `force` skips
-      // ONLY that gate; the rescue-push/session-sync/learning-harvest
-      // sequence inside `destroyWithSync` still runs in full first whenever
-      // the container answers its probe — see `FailoverDeps.stopParkedStudio`'s
-      // own doc comment (failover.ts) for the full reasoning, including the
-      // one pre-existing side effect this flag also carries (same as any
-      // operator's own `--force`, nothing new here). `discardUnsynced`
-      // (2nd arg) stays `false` — that is a separate, human
-      // `--discard-unsynced` choice this automated call must never make.
-      // `park: true` (3rd arg) is unchanged. Returns `destroyStudio`'s real
-      // `DestroyOutcome` (never swallowed into `void`) so a refusal is never
-      // misreported as a completed stop.
-      stopParkedStudio: () => this.destroyStudio(true, false, true),
+      // Review round 2 (#210), finding 1 (FIXED — this was a data-loss risk:
+      // round 1's `force: true` here ALSO widened `guard.discardUnsynced`
+      // via `destroyStudio`'s own pre-existing `discardUnsynced || force`
+      // coupling, so an unattended stop could destroy WITHOUT a successful
+      // rescue, silently, the moment the probe or a CONFIRMED rescue-push
+      // failed — exactly the scenario a "rescue first" feature must never
+      // allow, since nobody is there to catch the refusal and retry).
+      // `force: false` (1st arg) now — `discardUnsynced: false` (2nd arg,
+      // unchanged) therefore stays what the caller passed, never OR'd with
+      // anything, so the probe-failure and confirmed-rescue-push-failure
+      // refusals (destroy.ts's `destroyWithSync`) stay FULLY ARMED on this
+      // unattended path, same as they would for a human who never passed
+      // `--force`. `park: true` (3rd arg) is unchanged. `skipOpenTaskGate:
+      // true` (4th arg, NEW) is what actually does the job round 1's
+      // `force: true` was reaching for: it skips ONLY `runDestroy`'s own
+      // open-task-gate check (`destroyStudio`'s own doc comment explains the
+      // exact wiring) — the realistic case this feature exists for, a
+      // studio stuck parked mid-task, by construction almost always carries
+      // an open assigned board task, and nobody is there to cancel/reassign
+      // it or retry with `--force`. The rescue-push/session-sync/learning-
+      // harvest sequence inside `destroyWithSync` still runs in full first
+      // whenever the container answers its probe, exactly as before. Returns
+      // `destroyStudio`'s real `DestroyOutcome` (never swallowed into
+      // `void`) so a refusal is never misreported as a completed stop.
+      stopParkedStudio: () => this.destroyStudio(false, false, true, true),
     };
   }
 
@@ -6915,8 +6921,23 @@ export class StudioDO extends Sandbox<Env> {
    * only, and the destroy path this reaches has no board call in it at all
    * (see this file's own header for why destroy.ts is where the board task's
    * label/state stay untouched by construction, not by a special case here).
+   *
+   * Review round 2 (#210), finding 1 — `skipOpenTaskGate` (4th arg,
+   * default `false`: every existing caller — routes.ts's `destroy` route,
+   * the CLI, every pre-#210 test — keeps its exact current behavior
+   * unchanged). Widens ONLY `runDestroy`'s own `force` param (the
+   * open-task-gate escape hatch, `force || skipOpenTaskGate` below) —
+   * UNLIKE `force` itself, it is never folded into `discardUnsynced` (which
+   * stays exactly `discardUnsynced || force`, never `|| skipOpenTaskGate`).
+   * `do.ts`'s `failoverDeps().stopParkedStudio` is the one caller that
+   * passes it: an unattended auto-stop must skip the open-task gate (nobody
+   * is there to cancel/reassign a board task), but must NEVER also turn a
+   * genuine probe/rescue-push-confirmed failure into "destroy anyway" the
+   * way a human's own `--force` deliberately does — see that call site's
+   * own doc comment (failover.ts's `FailoverDeps.stopParkedStudio`) for the
+   * full reasoning this fixes.
    */
-  async destroyStudio(force: boolean, discardUnsynced = false, park = false): Promise<DestroyOutcome> {
+  async destroyStudio(force: boolean, discardUnsynced = false, park = false, skipOpenTaskGate = false): Promise<DestroyOutcome> {
     const workRepoSlug = await this.workRepoSlug(null);
     const repo = parseStudioId(this.selfId())?.repo ?? this.selfId();
     const { resolveMemoryRepo, commitFile } = this.memoryDeps();
@@ -6931,7 +6952,11 @@ export class StudioDO extends Sandbox<Env> {
     this.destroyInFlightCount += 1;
     try {
       return await runDestroy(
-        openTaskChecker(this.env), this.selfId(), workRepoSlug, force,
+        // Review round 2 (#210), finding 1 — `force || skipOpenTaskGate`:
+        // the ONLY thing `skipOpenTaskGate` widens. `discardUnsynced` just
+        // below stays `discardUnsynced || force`, deliberately never `||
+        // skipOpenTaskGate` — see this method's own doc comment for why.
+        openTaskChecker(this.env), this.selfId(), workRepoSlug, force || skipOpenTaskGate,
         this.syncDeps("rescue"), this.ctx.storage, this.selfId(),
         // A stopped studio stays stopped: every loop left armed would exec
         // into the destroyed container on its next tick, and an exec STARTS

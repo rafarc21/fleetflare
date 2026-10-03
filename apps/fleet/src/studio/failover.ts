@@ -1213,27 +1213,33 @@ export interface FailoverDeps {
    * Issue #210 — ask 3: rescue-then-stop a studio that has sat genuinely
    * parked (`StudioStatus.parkedAt`, no free account at all) past
    * `PARKED_AUTO_STOP_HOURS`. Wired in do.ts's `failoverDeps()` to
-   * `StudioDO.destroyStudio(true, false, true)` — `force: true` because this
-   * trigger is UNATTENDED: an operator retrying a refused `fleet destroy`
-   * with `--force` is a deliberate human call, but nobody is there to retry
-   * this one, and the realistic case — a studio stuck parked mid-task — by
-   * construction almost always carries an open assigned board task, which
-   * `runDestroy`'s own fail-CLOSED gate (destroy.ts) refuses UNLESS forced.
-   * `force` skips ONLY that gate (and, as an existing, unrelated side effect
-   * of `destroyStudio`'s own `discardUnsynced: discardUnsynced || force`
-   * wiring, also turns a probe/rescue-push-confirmed-failure REFUSAL into
-   * "proceed anyway" — the same thing an operator's own `--force` already
-   * does today, not something new this call introduces). It never skips the
-   * rescue-push/session-sync/learning-harvest ATTEMPT itself — those run
-   * whenever the container answers the probe, `force` or not; see
-   * `destroyWithSync`'s own doc comment (destroy.ts) and
-   * test/studio.destroy.test.ts's "--force overrides the refusal" case,
-   * which already pins that a forced destroy still runs the full
-   * sync/rescue-push/harvest sequence before the container is torn down —
-   * this wiring reuses that exact function rather than a second copy.
-   * `discardUnsynced` itself stays `false`: that is a SEPARATE, human
-   * `--discard-unsynced` choice this unattended trigger must never make on
-   * an operator's behalf.
+   * `StudioDO.destroyStudio(false, false, true, true)`.
+   *
+   * Review round 2 (#210), finding 1 (BLOCKER, FIXED) — round 1 wired
+   * `force: true` here, reasoning that it skips ONLY the open-task gate.
+   * That was wrong: `destroyStudio`'s own `discardUnsynced: discardUnsynced
+   * || force` wiring ALSO turns a probe-failure or a CONFIRMED rescue-push-
+   * failure refusal into "proceed anyway" the moment `force` is `true` —
+   * correct, deliberate behavior for a HUMAN's own `fleet destroy --force`
+   * (an explicit "I know what I'm doing, blow past every refusal"), but
+   * exactly backwards for this UNATTENDED trigger: nobody is there to catch
+   * a rescue failure and retry, so this path must never destroy without a
+   * successful rescue. Fixed by decoupling the two: `force: false` (1st
+   * arg) now, so `discardUnsynced` stays exactly what the 2nd arg says
+   * (`false`) and the probe/rescue-push-confirmed-failure refusals
+   * (destroy.ts's `destroyWithSync`) stay FULLY ARMED. `skipOpenTaskGate:
+   * true` (4th arg, NEW) does the job `force: true` was actually needed
+   * for: it widens ONLY `runDestroy`'s own `force` param (the open-task-
+   * gate escape hatch) — see `destroyStudio`'s own doc comment (do.ts) for
+   * the exact `force || skipOpenTaskGate` wiring, and
+   * test/studio.destroy.test.ts's "review round 2 (#210), finding 1" block
+   * for the pure-function-level proof that an open task alone no longer
+   * blocks this path while a probe/rescue-push failure still refuses it.
+   * It never skips the rescue-push/session-sync/learning-harvest ATTEMPT
+   * itself — those run whenever the container answers the probe, same as
+   * every other destroy. `discardUnsynced` itself stays `false`: that is a
+   * SEPARATE, human `--discard-unsynced` choice this unattended trigger
+   * must never make on an operator's behalf.
    *
    * Returns the REAL `DestroyOutcome` — never swallowed into `void` — so a
    * refusal (or a throw) is never misreported as a completed stop; see this
