@@ -776,15 +776,21 @@ procSuite("bunInstallRunningCmd — round 5 review, item 1 MUTANT PROOF: a long-
   // Fixed by removing the race entirely: the child below never resolves on
   // its own (`await new Promise(() => {})`) and lives for exactly as long as
   // this test's own `finally { child.kill("SIGKILL") }` lets it — i.e. it is
-  // now GUARANTEED to still be alive no matter how slow the scan runs, so
-  // the test's pass/fail no longer depends on guessing the scan's duration,
-  // only on it completing within a generous ABSOLUTE ceiling (120s for
-  // `runSnippet`'s own timeout, 130s for this test's own bun:test per-test
-  // timeout) rather than a tuned margin over an unpredictable load. This
-  // affects ONLY the historical reconstruction of the abandoned round-4
-  // command; the sibling "MUTANT PROOF" test right after it (proving the
-  // ACTUAL shipped, current command never scans `/proc` at all) already used
-  // a short-lived child and is unaffected.
+  // now GUARANTEED to still be alive no matter how slow the scan runs. That
+  // removes the "which side timed out" ambiguity entirely: the child can
+  // NEVER be the thing that expires mid-scan, so a failure can only mean the
+  // scan itself didn't finish. What's left is sizing that one remaining
+  // ceiling against real CPU-contended `/proc`-scan time under FULL-SUITE
+  // concurrency (120 test files each forking their own subprocesses), not
+  // against a single-process baseline (~20s) or a single prior failure
+  // observed at ~40s — both of those are moving targets, not the thing we
+  // actually need to bound. `runSnippet`'s own timeout and this test's own
+  // bun:test per-test timeout are both set to a generous ABSOLUTE ceiling
+  // (180s / 185s) against that contended-scan time. This affects ONLY the
+  // historical reconstruction of the abandoned round-4 command; the sibling
+  // "MUTANT PROOF" test right after it (proving the ACTUAL shipped, current
+  // command never scans `/proc` at all) already used a short-lived child and
+  // is unaffected.
   test("MUTANT BASELINE — the round-4 shipped command genuinely OVER-BLOCKS: a settled install with an UNRELATED long-lived bun process sitting in the directory (a dev server / MCP server stand-in) still reads as RUNNING", () => {
     const dir = seedSettledInstall();
     // An UNRELATED long-lived bun process sitting in this same directory —
@@ -795,12 +801,12 @@ procSuite("bunInstallRunningCmd — round 5 review, item 1 MUTANT PROOF: a long-
     // matter how slow a loaded container's `/proc` walk gets.
     const child = spawn("bun", ["-e", "await new Promise(() => {})"], { cwd: dir, stdio: "ignore" });
     try {
-      const r = runSnippet({ script: preFixBunInstallRunningCmdRound4(dir), shell: "bash", sourced: true, timeout: 120_000 });
+      const r = runSnippet({ script: preFixBunInstallRunningCmdRound4(dir), shell: "bash", sourced: true, timeout: 180_000 });
       expect(parseBunInstallRunning(r.stdout)).toBe(true); // the bug: over-blocks on ANY matching process
     } finally {
       child.kill("SIGKILL");
     }
-  }, 130_000);
+  }, 185_000);
 
   test("MUTANT PROOF — the FIXED, shipped command correctly saves through the SAME long-lived, unrelated process once the completion marker is present and fresh", () => {
     const dir = seedSettledInstall();
