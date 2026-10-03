@@ -156,3 +156,117 @@ bun-native lane (`bun run bun-test` — `accounts.ts` stays importable from
 it, per its own header), and `bun run english-check`, run one at a time
 under the shared gate lock. See the PR/completion record for the actual
 command output.
+
+## Fix-first review round (2026-10-03) — tiers 2/3 were missing, and a D1
+## hiccup could strand a studio
+
+A fresh-context review of PR #211 (before merge) found two real gaps in the
+fix above, both now closed on the same branch/PR.
+
+### Finding A+B — the reroute only ever ran tier 1 of failover's own cascade
+
+`launchAccountOrReroute`'s *original* version (described above) called
+`nextClaudeAccount` over the **full, unscoped** account list and refused the
+moment that returned null. `runAccountFailover` (`failover.ts`), the
+reactive failover path for an already-running studio, runs a genuine
+**three**-tier cascade when picking a replacement: (1) this repo's own
+scoped chain, forward wrap; (2) an unclaimed spare positioned before this
+repo's own primary; (3) borrowing another repo's own reserved primary
+(lowest 5h burn). The launch gate's own copy implemented only tier 1 — a
+repo whose own scoped chain was fully limited refused the WHOLE launch
+(`every account limited`) even when an unclaimed spare, or another repo's
+reserved-but-currently-free primary, genuinely existed. That message is
+literally false in that case: an account exists and is free, just reserved
+or out of this repo's own scope.
+
+Fix:
+
+- **`accounts.ts`**: new exported `selectFreeAccount(accounts, anchor,
+  current, currentOutOfScope, reserved, limits, now)` — tiers 1+2 of the
+  cascade, factored out of failover.ts's own inline `candidate`/
+  `outOfScopeSpare` locals, so there is exactly one implementation of "where
+  does this repo's own chain send it, falling back to an unclaimed spare".
+- **`failover.ts`**: `runAccountFailover`'s own `outOfScopeSpare` now
+  delegates to `selectFreeAccount` instead of its own inline
+  `firstFreeAccount` call. `candidate` (tier 1 alone) stays its own direct,
+  separate call — it is still needed standalone for the auto-failover-OFF
+  "parked" messaging and the `isBorrow` computation, which must never be
+  influenced by a tier-2 spare that an auto-failover-off tick never acts on.
+  `anchor`/`scopedAccounts`/`currentOutOfScope`/`start`/tier 3
+  (`nextBorrowedAccount`) are untouched — this is a one-way-door file (see
+  its own doc comments, #102/#103/#109/#131/#158/#170/#214) and the only
+  change is that one delegation.
+- **`accounts.ts`**: `launchAccountOrReroute` rewritten to run all three
+  tiers: `selectFreeAccount` first (tiers 1+2, scoped to this repo's own
+  mapped-primary anchor), then — only on a miss — `nextBorrowedAccount`
+  (already its own shared export) fed fleet-wide burn via a new `readBurn`
+  callback parameter, read lazily only on this now-rare path, exactly like
+  `FailoverDeps.accountBurn.read()` already is. The function is now
+  `async` for that one reason; it stays pure (no I/O of its own — `readBurn`
+  is the caller's own injected callback). Refuses only once ALL THREE tiers
+  miss.
+- **Residual, stated rather than assumed**: the launch gate always treats
+  the resolved account as in-scope (`currentOutOfScope: false`). The one
+  case that is not is a studio restarting while actively borrowing an
+  account positioned before its own primary, whose borrowed account has
+  ALSO since gone limited — a narrow edge needing `existing.borrowedAccount`
+  threaded through, which this function is not handed. Every other studio
+  is unaffected; tiers 1/2/3 themselves are not weakened by this.
+- **`do.ts`**: `readFleetAccountBurn` (previously module-private) exported,
+  mirroring `readFleetAccountLimits`'s own export, so `launchAccountOrRefuse`
+  can wire it in as `launchAccountOrReroute`'s `readBurn` callback.
+- **`do.ts`**: a genuine reroute (this call's own `launch.name` differs from
+  what plain `launchAccount` — no limit-awareness at all — would have
+  resolved for the same `recorded`) now also writes `borrowedAccount`/
+  `borrowedFromRepo` onto the row, mirroring `failover.ts`'s own write
+  condition on a completed switch exactly (new `borrowFields` helper,
+  alongside `accountClears`). Gated on genuine rerouting specifically — the
+  plain #289 "recorded account carries forward, still free" case stays
+  silent, since that switch already set the field back when it actually
+  happened; re-deriving it here would otherwise spuriously write on every
+  ordinary relaunch. Without this write, a studio launched via reroute/
+  borrow would never carry the field the EXISTING hand-back mechanism reads
+  to bring it home once its own primary frees up.
+
+### Finding C — a D1 hiccup must fail open, never strand a studio
+
+`launchAccountOrRefuse`'s `readFleetAccountLimits` call (and the new burn
+read) could throw on a transient D1 error. That throw propagated
+**uncaught** through `launchAccountOrRefuse`, which recycle's own flow calls
+AFTER `destroy()` has already landed — stranding the studio destroyed with
+nothing relaunched, a worse failure than before #209 ever read D1 at this
+point. Both reads are now wrapped in try/catch, falling back to `{}` (no
+limit/burn known — the exact behaviour this gate had before #209 shipped)
+and logging `console.warn` with the error, never throwing.
+
+### Tests added (`test/studio.account-by-repo.test.ts`)
+
+`describe("launchAccountOrReroute — issue #209...")`, all now `async`:
+
+- tier 3 — own chain exhausted, no unclaimed spare, another repo's reserved
+  primary free → borrows it (replaces the old test that incorrectly
+  expected a refusal in this exact shape).
+- genuine exhaustion — own chain AND the reserved borrow candidate all
+  limited → refuses, naming the earliest reset (the only case that still
+  refuses).
+- tier 2 — own chain limited, an unclaimed spare before the primary free →
+  reroutes there.
+- a `dead: true` entry is never picked by any tier.
+- a `null`-until entry older than `NULL_UNTIL_CEILING_MS` (24h) counts as
+  free again, picked over a genuinely limited one.
+
+New `describe("launchAccountOrRefuse — borrow tier 3 and D1 failure
+handling, real D1 (#209 review)")`:
+
+- borrow via the real D1 wiring: launch succeeds on another repo's reserved
+  primary, and the row's `borrowedAccount`/`borrowedFromRepo` land
+  correctly.
+- `env.DB.prepare` throws → the limits read is caught, the launch still
+  succeeds with `limits = {}` (fail open), and `console.warn` fires — never
+  an uncaught throw out of `launchAccountOrRefuse`.
+
+Ran `test/studio.account-by-repo.test.ts`, `test/studio.account-launched.test.ts`,
+`test/studio.account-failover.test.ts` together (243 tests, all green) after
+every change; no regression in the existing tier-2/tier-3/hand-back coverage
+`studio.account-failover.test.ts` already had for `runAccountFailover`
+itself.
