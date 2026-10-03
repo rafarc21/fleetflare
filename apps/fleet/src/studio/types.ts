@@ -467,6 +467,19 @@ export interface StudioStatus {
    */
   autoContinueLastTriedAt?: string | null;
   /**
+   * Review round 2 (#210), finding 3, part 2 — the anti-hammer clock for
+   * the ask-2 free-account wake (`freeAccountWakeAttempt`, failover.ts):
+   * when a wake fired because `accountIsFree(currentAccount, ...)` read
+   * true, regardless of outcome. Mirrors `autoContinueLastTriedAt`'s own
+   * shape and hourly cadence (`AUTO_CONTINUE_RETRY_MS`) exactly — a wake
+   * that fires but does not actually resolve anything (the row is still
+   * degraded next tick, same as any transient pane-probe hiccup) must not
+   * refire on every single 300s tick forever just because the current
+   * account still reads free. `null`/absent: no wake has fired yet for
+   * this degradation.
+   */
+  freeAccountWakeLastTriedAt?: string | null;
+  /**
    * Maestro round-2 review (PR #170), findings 3+4 — replaces the original
    * #158 review's `operatorParked` field entirely (removed; had no other
    * reader). Durable classification of THIS degradation's own triggering

@@ -1779,58 +1779,39 @@ async function autoContinueAttempt(
 }
 
 /**
- * Issue #210, ask 2 — "is anything free" for a row that is STILL degraded
- * for this feature's own reason. Deliberately asks TWO questions neither
- * existing recovery mechanism ever asks:
+ * Issue #210, ask 2 — "is THIS ROW'S OWN current account free again right
+ * now" for a row that is STILL degraded for this feature's own reason.
+ * `nextClaudeAccount`'s own wrap (the ordinary switch search further up in
+ * `runAccountFailover`) starts at `current`'s NEXT position and never
+ * re-checks `current` itself — by design, it exists to find somewhere ELSE
+ * to go, not to notice the studio's own current slot freed up again. A
+ * same-account usage-credit top-up (board issue #210's own repro: "headroom
+ * returned on one account slot") falls exactly into that gap: every tick
+ * since the park, the ordinary search has kept finding nowhere to go, even
+ * though the studio's own current account was free the whole time.
  *
- *   (a) is the account THIS ROW IS CURRENTLY ON free again right now?
- *       `nextClaudeAccount`'s own wrap (the ordinary switch search further
- *       up in `runAccountFailover`) starts at `current`'s NEXT position and
- *       never re-checks `current` itself — by design, it exists to find
- *       somewhere ELSE to go, not to notice the studio's own current slot
- *       freed up again. A same-account usage-credit top-up (board issue
- *       #210's own repro: "headroom returned on one account slot") falls
- *       exactly into that gap: every tick since the park, the ordinary
- *       search has kept finding nowhere to go, even though the studio's own
- *       current account was free the whole time.
- *
- *   (b) does the SAME 3-tier selection the ordinary switch path runs
- *       (`nextClaudeAccount` over `scopedAccounts` — or, while
- *       `currentOutOfScope`, `firstFreeAccount` over it instead, EXACTLY the
- *       branch `runAccountFailover`'s own `candidate` takes, see its doc
- *       comment there for why `nextClaudeAccount` cannot handle that case on
- *       its own — then `firstFreeAccount` over the unclaimed-spare range,
- *       then `nextBorrowedAccount` over `reserved`) find ANY free account at
- *       all? Computed UNCONDITIONALLY here — never gated on
- *       `deps.autoFailover` the way the ordinary
- *       `candidate`/`outOfScopeSpare`/`borrowed` above are — so a studio
- *       parked with auto-failover off still gets the complete answer, not
- *       merely its own first tier.
- *
- * Review round 1 (#210), finding 2 — tier (b)'s first pass used to call
- * `nextClaudeAccount(scopedAccounts, current, ...)` UNCONDITIONALLY, never
- * branching on `currentOutOfScope` the way the real `candidate` computation
- * already does. An active borrow with `current` recorded BEFORE the search
- * anchor has no position in `scopedAccounts` to step forward from —
- * `nextClaudeAccount` returns null immediately (current not found), wrongly
- * reading as "nothing free" even when every position in `scopedAccounts`,
- * including the first, is a genuine candidate. Only ever observable with
- * auto-failover OFF: with it on, the real `candidate` (correctly
- * `currentOutOfScope`-aware) finds the same account on the SAME tick and
- * switches away before this function is ever reached — see this file's own
- * test suite (review round 1, finding 2) for the full repro and why that
- * masking makes an auto-failover-ON repro impossible.
- *
- * Short-circuits left to right, so the (rare, borrow-tier) `accountBurn.read`
- * is only ever paid for once every cheaper tier has already said no — the
- * same "second pass never even consulted" discipline `nextBorrowedAccount`'s
- * own call site further up already keeps.
+ * Review round 2 (#210), finding 3 (BLOCKER, FIXED) — this used to ALSO ask
+ * "does the ordinary 3-tier switch selection (scoped chain, unclaimed
+ * spare, borrow) find ANYTHING free", and fire the wake whenever EITHER
+ * question said yes. That was the literal #210 bug shape, reintroduced: a
+ * blind wake is just "dismiss + continue on the account the pane is
+ * CURRENTLY sitting on" — it can only ever help if the CURRENT account
+ * itself is the one that freed. A free spare/borrow tier while the current
+ * account stays limited means firing this wake accomplishes nothing (claude
+ * hits the same limit again), yet a wake WAS attempted, so the row never
+ * reads as genuinely stuck — repeatable every tick forever (Esc+prompt
+ * spam), while ALSO masking the auto-stop check behind "something's free,
+ * don't stop" even though nothing useful is actually happening. A free
+ * spare/borrow tier, with auto-failover ON, is already the EXISTING 3-tier
+ * `candidate`/`outOfScopeSpare`/`borrowed` computation's own job (it runs
+ * EARLIER in the SAME `runAccountFailover` tick, before ever reaching the
+ * already-degraded branch this function is called from, and would already
+ * switch away before this is reached); with auto-failover OFF, nothing
+ * moves by design (#271), and this mechanism has no business trying to "fix"
+ * that case with a blind retry either. Narrowed to the one question that is
+ * actually this mechanism's own job.
  */
-async function anyAccountFreeToResume(
-  deps: FailoverDeps, current: string | null, currentAccount: ClaudeAccount | null,
-  scopedAccounts: ClaudeAccount[], anchor: number, currentOutOfScope: boolean,
-  reserved: Set<string>, limits: AccountLimits, now: Date,
-): Promise<boolean> {
+function currentAccountFreeToResume(currentAccount: ClaudeAccount | null, limits: AccountLimits, now: Date): boolean {
   // `currentAccount` is resolved by the CALLER from the same `currentIdx`
   // every other reader of "where is this studio right now" already uses
   // (accounts.ts's own `currentIndex`: a null/absent recorded account means
@@ -1838,22 +1819,14 @@ async function anyAccountFreeToResume(
   // own doc comment) rather than re-derived here by a name lookup, which
   // would wrongly read as "no current account at all" for the overwhelming
   // common case of a studio that has never switched (`current` null).
-  if (currentAccount && accountIsFree(currentAccount, limits, now)) return true;
-  // Review round 1 (#210), finding 2 — mirrors `runAccountFailover`'s own
-  // `candidate` branch exactly, rather than always calling
-  // `nextClaudeAccount` (see this function's own doc comment above).
-  const tier1 = currentOutOfScope
-    ? firstFreeAccount(scopedAccounts, reserved, limits, now)
-    : nextClaudeAccount(scopedAccounts, current, limits, now, reserved);
-  if (tier1 !== null) return true;
-  if (firstFreeAccount(deps.accounts.slice(0, anchor), reserved, limits, now) !== null) return true;
-  const burn = deps.accountBurn ? await deps.accountBurn.read() : {};
-  return nextBorrowedAccount(deps.accounts, reserved, limits, burn, now) !== null;
+  return currentAccount !== null && accountIsFree(currentAccount, limits, now);
 }
 
 /**
  * Issue #210, ask 2 — the wake itself, fired the moment
- * `anyAccountFreeToResume` says yes. Mirrors `autoContinueAttempt`'s own
+ * `currentAccountFreeToResume` says yes AND the caller's own anti-hammer
+ * check (`freeAccountWakeLastTriedAt`, below) says this is not a repeat
+ * within `AUTO_CONTINUE_RETRY_MS`. Mirrors `autoContinueAttempt`'s own
  * dismiss-then-`runGatedWake` shape (reusing the SAME `AUTO_CONTINUE_PROMPT`
  * copy, never new text) but is independent of it in every other way:
  *
@@ -1863,14 +1836,21 @@ async function anyAccountFreeToResume(
  *     widening of #109's own select-modal-only scope;
  *   - skips the dismiss step for `"inline"` — there is no modal to Esc, the
  *     same reason `autoContinueEligible`'s own definition states for why an
- *     inline-exhausted row "needs no Esc at all";
- *   - carries NO due-ness/anti-hammer clock of its own. It is gated on a
- *     REAL state change (an account becoming free, re-checked fresh every
- *     tick by the caller), not a blind timer — `runGatedWake`'s own gates
- *     (stopped/no-claude/modal/survey) are what make firing it on every
- *     tick a free account stays free safe, the same guard
- *     `autoContinueAttempt`/`healDegradedRowAndWake` already lean on rather
- *     than reinventing.
+ *     inline-exhausted row "needs no Esc at all".
+ *
+ * Review round 2 (#210), finding 3, part 2 — this function itself still
+ * carries no due-ness clock (it always fires when called): the caller
+ * computes `dueForWake` BEFORE calling this, and stamps
+ * `freeAccountWakeLastTriedAt` itself on whichever write lands that tick,
+ * the same "caller owns the bookkeeping write" shape `autoContinueAttempt`
+ * uses for its own `patch`. Round 1's original reasoning for no bound at
+ * all ("gated on a REAL state change, re-checked fresh every tick") still
+ * holds for the COMMON case (a free account that then gets used and heals),
+ * but round 2's finding 3 measured the realistic failure mode that
+ * reasoning missed: a wake that fires but does not actually resolve
+ * anything (a transient pane-probe hiccup, claude briefly not in the
+ * window, anything) while the account stays free would otherwise refire on
+ * every single 300s tick forever.
  *
  * Returns the outcome directly (never a patch) — like `autoContinueAttempt`,
  * it never touches `state`/`error`/`parkedAt`: recovery to `running` (and
@@ -2718,44 +2698,67 @@ export async function runAccountFailover(
       // dep -> no behavior change" convention every other optional
       // capability in this file already keeps.
       let freeAccountWake: FailoverOutcome | null = null;
+      // Review round 2 (#210), finding 3, part 2 — the anti-hammer stamp for
+      // a fired wake (StudioStatus.freeAccountWakeLastTriedAt's own doc
+      // comment), merged into whichever write below actually lands this
+      // tick (never a write of its own: the overwhelming majority of ticks
+      // write nothing at all, same invariant every other optional
+      // bookkeeping field in this block already keeps).
+      let freeAccountWakeLastTriedAt: string | null = null;
       if (existing.parkedAt && existing.exhaustionKind && existing.exhaustionKind !== "dead" && deps.accountLimits) {
-        const currentAccount = currentIdx >= 0 ? deps.accounts[currentIdx] : null;
-        const free = await anyAccountFreeToResume(
-          deps, current, currentAccount, scopedAccounts, anchor, currentOutOfScope, reserved, limits, deps.now(),
-        );
-        if (free) {
-          freeAccountWake = await freeAccountWakeAttempt(deps, studioId, existing, sighting);
-        } else {
-          // Issue #210, ask 3 — nothing free on EITHER check above, and this
-          // row has sat parked long enough: rescue-then-stop rather than
-          // keep idle-billing a container nothing will ever wake unattended.
-          const parkedMs = Date.parse(existing.parkedAt);
-          if (!Number.isNaN(parkedMs) && deps.now().getTime() - parkedMs >= PARKED_AUTO_STOP_HOURS * 60 * 60_000) {
-            // Review round 1 (#210), finding 1 — the OLD code reported
-            // `"auto-stopped"` unconditionally the instant this capability
-            // was invoked, regardless of what it actually did. A refusal
-            // (destroy.ts's own fail-CLOSED open-task gate — the realistic
-            // case for a studio stuck parked mid-task) or a genuine throw
-            // (an unexpected destroy failure) must read differently from a
-            // completed stop: the container is still up, still billing, and
-            // nothing here should claim otherwise. Absent entirely (an
-            // older caller/test that predates this capability) stays the
-            // existing no-op convention: vacuously "auto-stopped", since
-            // there is nothing to refuse.
-            if (deps.stopParkedStudio) {
-              let outcome: DestroyOutcome;
-              try {
-                outcome = await deps.stopParkedStudio();
-              } catch (err) {
-                return {
-                  kind: "park-refused", parkedAt: existing.parkedAt,
-                  reason: redactSecrets(err instanceof Error ? err.message : String(err)),
-                };
-              }
-              if (!outcome.ok) return { kind: "park-refused", parkedAt: existing.parkedAt, reason: outcome.reason };
+        const now = deps.now();
+        // Review round 2 (#210), finding 3, part 3 (BLOCKER, FIXED) — this
+        // used to be an `else` of "is anything free", so a free spare/borrow
+        // tier (never this row's own current account — see
+        // `currentAccountFreeToResume`'s own doc comment) read as "something
+        // is free, don't stop" even though nothing useful was actually
+        // happening, masking a genuinely stuck row forever. Checked FIRST
+        // now, unconditionally of the free-account check below: "wakes have
+        // not healed it in 6h" (still degraded with the SAME exhaustion,
+        // `existing.parkedAt` old enough, not dead) is on its own sufficient
+        // — simpler, and immune to finding-3's own kind of bug by
+        // construction, since it never has to correctly re-derive "is
+        // anything free" at all.
+        const parkedMs = Date.parse(existing.parkedAt);
+        const stopDue = !Number.isNaN(parkedMs) && now.getTime() - parkedMs >= PARKED_AUTO_STOP_HOURS * 60 * 60_000;
+        if (stopDue) {
+          // Issue #210, ask 3 — rescue-then-stop rather than keep
+          // idle-billing a container nothing will ever wake unattended.
+          // Review round 1 (#210), finding 1 — the OLD code reported
+          // `"auto-stopped"` unconditionally the instant this capability
+          // was invoked, regardless of what it actually did. A refusal
+          // (destroy.ts's own fail-CLOSED open-task gate — the realistic
+          // case for a studio stuck parked mid-task) or a genuine throw
+          // (an unexpected destroy failure) must read differently from a
+          // completed stop: the container is still up, still billing, and
+          // nothing here should claim otherwise. Absent entirely (an
+          // older caller/test that predates this capability) stays the
+          // existing no-op convention: vacuously "auto-stopped", since
+          // there is nothing to refuse.
+          if (deps.stopParkedStudio) {
+            let outcome: DestroyOutcome;
+            try {
+              outcome = await deps.stopParkedStudio();
+            } catch (err) {
+              return {
+                kind: "park-refused", parkedAt: existing.parkedAt,
+                reason: redactSecrets(err instanceof Error ? err.message : String(err)),
+              };
             }
-            return { kind: "auto-stopped", parkedAt: existing.parkedAt };
+            if (!outcome.ok) return { kind: "park-refused", parkedAt: existing.parkedAt, reason: outcome.reason };
           }
+          return { kind: "auto-stopped", parkedAt: existing.parkedAt };
+        }
+        // Not yet due to stop: does THIS ROW'S OWN current account read
+        // free again, and is a wake attempt not already bounded by the
+        // anti-hammer cadence below (finding 3, part 2)?
+        const dueForWake = !existing.freeAccountWakeLastTriedAt
+          || now.getTime() - Date.parse(existing.freeAccountWakeLastTriedAt) >= AUTO_CONTINUE_RETRY_MS;
+        const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
+        const currentAccount = currentIdx >= 0 ? deps.accounts[currentIdx] : null;
+        if (dueForWake && currentAccountFreeToResume(currentAccount, limits, now)) {
+          freeAccountWake = await freeAccountWakeAttempt(deps, studioId, existing, sighting);
+          freeAccountWakeLastTriedAt = now.toISOString();
         }
       }
       // Issue #210: a wake already fired above this tick — never also run
@@ -2763,14 +2766,16 @@ export async function runAccountFailover(
       // wake, not two racing into the same pane).
       if (!freeAccountWake && autoContinueEligible) {
         const attempt = await autoContinueAttempt(deps, studioId, existing, tried, sighting);
-        const row = attempt.patch ? { ...existing, ...attempt.patch } : existing;
-        if (attempt.patch || limitChanged) {
+        const row = attempt.patch || freeAccountWakeLastTriedAt !== null
+          ? { ...existing, ...attempt.patch, ...(freeAccountWakeLastTriedAt !== null ? { freeAccountWakeLastTriedAt } : {}) }
+          : existing;
+        if (attempt.patch || limitChanged || freeAccountWakeLastTriedAt !== null) {
           await storage.put(STATUS_KEY, row);
           await recordStudioFn(row);
         }
         return attempt.outcome;
       }
-      if (limitChanged) {
+      if (limitChanged || freeAccountWakeLastTriedAt !== null) {
         // Issue #158 review finding 1 / round-2 findings 3+4: same message
         // means the same `exhaustionKind` this tick computed as last tick's
         // write did, but stamp it explicitly anyway (rather than rely on
@@ -2778,7 +2783,10 @@ export async function runAccountFailover(
         // #109's own `autoContinueAt`/`autoContinueLastTriedAt` bookkeeping
         // lives at, and the row that self-heals a pre-#158 row lacking the
         // field.
-        const row = { ...existing, exhaustionKind };
+        const row = {
+          ...existing, ...(limitChanged ? { exhaustionKind } : {}),
+          ...(freeAccountWakeLastTriedAt !== null ? { freeAccountWakeLastTriedAt } : {}),
+        };
         await storage.put(STATUS_KEY, row);
         await recordStudioFn(row);
       }

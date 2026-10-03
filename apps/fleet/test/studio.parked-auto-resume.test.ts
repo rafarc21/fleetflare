@@ -272,15 +272,30 @@ describe("issue #210, ask 1 — parkedAt clears on a heal", () => {
 });
 
 describe("issue #210, ask 2 — a periodic tick wakes the row the moment ANY account reads free, with no blind timer of its own", () => {
+  // Review round 2 (#210), finding 3 — the original form of this test (and
+  // its select-modal sibling just below) jumped the clock 25h to cross the
+  // 24h null-until grace, which (after finding 3's own fix) ALSO crosses
+  // PARKED_AUTO_STOP_HOURS (6h) — and the auto-stop now fires FIRST,
+  // unconditionally of what the free-account check reads, so the row would
+  // be stopped before this wake is ever reached. Backdating the account's
+  // own fleet-wide sighting (rather than the clock) keeps `parkedAt`'s own
+  // elapsed time safely under 6h while still genuinely crossing the
+  // null-until grace — the same real-world shape as "some OTHER studio
+  // already recorded this account limited hours before THIS studio parked".
   it("an inline-exhausted row with an unreadable reset: once its OWN account's null-until grace passes, fires a gated wake with AUTO_CONTINUE_PROMPT, with no dismiss-modal attempt (nothing to Esc)", async () => {
     const h = harness({ accounts: ONE_ACCOUNT, pane: NO_RESET_INLINE_PANE });
     const first = await h.run();
     expect(first.kind).toBe("exhausted");
 
-    // 25h later: the SAME pane, never retyped (the realistic #210 shape) —
-    // but this account's own null-until fleet-wide entry has now crossed
-    // NULL_UNTIL_CEILING_MS (24h), so accountIsFree reads it free again.
-    h.setNow(new Date(NOW.getTime() + 25 * HOUR_MS));
+    // Backdate the account's own null-until sighting by 23h — its grace
+    // (24h) is now already almost spent, well ahead of `parkedAt`'s own
+    // clock (which stays at NOW).
+    h.accountLimits.set(ONE_ACCOUNT[0].name, { until: null, seenAt: new Date(NOW.getTime() - 23 * HOUR_MS).toISOString() });
+    // 2h later: the SAME pane, never retyped (the realistic #210 shape) —
+    // the backdated sighting has now crossed NULL_UNTIL_CEILING_MS (24h),
+    // so accountIsFree reads it free again, while `parkedAt` itself is
+    // only 2h old — well under PARKED_AUTO_STOP_HOURS.
+    h.setNow(new Date(NOW.getTime() + 2 * HOUR_MS));
     const second = await h.run();
 
     expect(second).toEqual({ kind: "free-account-wake", wake: "ok" });
@@ -303,11 +318,14 @@ describe("issue #210, ask 2 — a periodic tick wakes the row the moment ANY acc
     expect(first.kind).toBe("exhausted");
     expect(h.execs.filter((c) => c === dismissModalCmd())).toHaveLength(1);
 
+    // Backdate the account's own null-until sighting (see the inline test
+    // just above for why the CLOCK, not the sighting, must stay under 6h).
+    h.accountLimits.set(ONE_ACCOUNT[0].name, { until: null, seenAt: new Date(NOW.getTime() - 23 * HOUR_MS).toISOString() });
     const beforeTick2 = h.execs.length;
-    // 25h later: #109's own hourly retry (AUTO_CONTINUE_RETRY_MS) is ALSO
+    // 2h later: #109's own hourly retry (AUTO_CONTINUE_RETRY_MS) is ALSO
     // independently due by now — proving this is a genuine composition
     // guard, not just "the other mechanism never got a chance".
-    h.setNow(new Date(NOW.getTime() + 25 * HOUR_MS));
+    h.setNow(new Date(NOW.getTime() + 2 * HOUR_MS));
     const second = await h.run();
 
     expect(second).toEqual({ kind: "free-account-wake", wake: "ok" });
@@ -620,11 +638,14 @@ describe("review round 2 (#210), finding 3 — the free-account wake must fire O
     expect(h.stopParkedStudio).not.toHaveBeenCalled();
   });
 
+  // Review round 2 (#210), finding 3 — backdates the account's own
+  // null-until sighting (never the clock) so the grace crosses WELL under
+  // PARKED_AUTO_STOP_HOURS (6h) — see the inline test above's own doc
+  // comment for why a 25h clock jump is no longer usable here.
   it("the studio's own CURRENT account is the one that frees: the wake fires, even while the OTHER account stays limited for a very long time", async () => {
     const CUR: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 };
     const SECOND: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
-    // Far enough out that it is STILL limited after the 25h jump below —
-    // unlike CUR's own null-until sighting, which clears at the 24h grace.
+    // Far enough out that it stays limited throughout this test.
     const VERY_FAR_UNTIL = new Date(NOW.getTime() + 100 * HOUR_MS).toISOString();
     const h = harness({
       accounts: [CUR, SECOND], pane: MODAL_PANE, autoFailover: false,
@@ -634,12 +655,16 @@ describe("review round 2 (#210), finding 3 — the free-account wake must fire O
     const first = await h.run();
     expect(first.kind).toBe("exhausted");
 
-    // 25h later: CUR's own null-until sighting (stamped by tick 1's own
-    // observation) has crossed the 24h grace and reads free again; SECOND
-    // stays limited throughout, so `candidate` still finds nowhere to go
-    // and `parkedOn` stays null — the SAME exhausted message, landing in
-    // the anti-loop guard, the free-account-wake branch under test.
-    h.setNow(new Date(NOW.getTime() + 25 * HOUR_MS));
+    // Backdate CUR's own null-until sighting by 23h, so its 24h grace is
+    // already almost spent while `parkedAt` itself stays at NOW.
+    h.accountLimits.set(CUR.name, { until: null, seenAt: new Date(NOW.getTime() - 23 * HOUR_MS).toISOString() });
+    // 2h later: CUR's own backdated sighting has crossed the 24h grace and
+    // reads free again; SECOND stays limited throughout, so `candidate`
+    // still finds nowhere to go and `parkedOn` stays null — the SAME
+    // exhausted message, landing in the anti-loop guard, the
+    // free-account-wake branch under test. `parkedAt` itself is only 2h
+    // old — well under PARKED_AUTO_STOP_HOURS.
+    h.setNow(new Date(NOW.getTime() + 2 * HOUR_MS));
     const second = await h.run();
 
     expect(second).toEqual({ kind: "free-account-wake", wake: "ok" });
@@ -656,7 +681,8 @@ describe("review round 2 (#210), finding 3 — the free-account wake must fire O
     const first = await h.run();
     expect(first.kind).toBe("exhausted");
 
-    h.setNow(new Date(NOW.getTime() + 25 * HOUR_MS));
+    h.accountLimits.set(ONE_ACCOUNT[0].name, { until: null, seenAt: new Date(NOW.getTime() - 23 * HOUR_MS).toISOString() });
+    h.setNow(new Date(NOW.getTime() + 2 * HOUR_MS));
     const second = await h.run();
     expect(second).toEqual({ kind: "free-account-wake", wake: "ok" });
 
@@ -665,7 +691,7 @@ describe("review round 2 (#210), finding 3 — the free-account wake must fire O
     // STILL reads free (its own null-until grace has long since passed),
     // yet the wake must not fire again — the retry window has not elapsed.
     const beforeTick3 = h.execs.length;
-    h.setNow(new Date(NOW.getTime() + 25 * HOUR_MS + 60_000));
+    h.setNow(new Date(NOW.getTime() + 2 * HOUR_MS + 60_000));
     const third = await h.run();
 
     expect(third.kind).not.toBe("free-account-wake");
