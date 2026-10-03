@@ -10,6 +10,7 @@ import {
 } from "../src/studio/observed";
 import type { StudioStatus } from "../src/studio/types";
 import type { ClaudeAccount } from "../src/studio/accounts";
+import type { DestroyOutcome } from "../src/studio/destroy";
 import { RULE_PROMPT } from "./fixtures/rate-limit-panes";
 
 // ---------------------------------------------------------------------------
@@ -111,6 +112,12 @@ interface Harness {
   stopParkedStudio: ReturnType<typeof vi.fn>;
 }
 
+/** Review round 1, finding 1: the real `destroyStudio` return shape, never a
+ *  bare void — a refusal (or a throw) must be distinguishable from an actual
+ *  stop. Default stand-in for every test that does not care about the
+ *  distinction: a plain completed stop. */
+const STOP_SUCCEEDED: DestroyOutcome = { ok: true, status: status({ state: "stopped" }) };
+
 function harness(opts: {
   accounts: ClaudeAccount[];
   pane: string;
@@ -121,6 +128,15 @@ function harness(opts: {
   /** Default true: a test that covers #210's own "absent, no-op" contract
    *  (test 10) passes false to leave it unwired entirely. */
   wireStopParkedStudio?: boolean;
+  /** Review round 1, finding 1: override the canned success result above —
+   *  a refusal or a throw, to prove the outcome reports the real result. */
+  stopParkedStudioImpl?: () => Promise<DestroyOutcome>;
+  /** Review round 1, finding 2: a mapped primary + reserved set, the same
+   *  shape test/studio.account-failover.test.ts's own borrow fixtures use —
+   *  needed to build an active-borrow, current-before-anchor scenario. */
+  primary?: string;
+  primaryIsMapped?: boolean;
+  reservedAccounts?: Set<string>;
 }): Harness {
   const execs: string[] = [];
   const recorded: StudioStatus[] = [];
@@ -130,10 +146,13 @@ function harness(opts: {
   const accountLimits = new Map<string, { until: string | null; seenAt: string; dead?: true }>(
     Object.entries(opts.accountLimits ?? {}).map(([name, until]) => [name, { until, seenAt: NOW.toISOString() }]),
   );
-  const stopParkedStudio = vi.fn(async () => {});
+  const stopParkedStudio = vi.fn(opts.stopParkedStudioImpl ?? (async () => STOP_SUCCEEDED));
   const deps: FailoverDeps = {
     accounts: opts.accounts,
     autoFailover: opts.autoFailover ?? true,
+    ...(opts.primary !== undefined ? { primary: opts.primary } : {}),
+    primaryIsMapped: opts.primaryIsMapped ?? false,
+    ...(opts.reservedAccounts ? { reservedAccounts: opts.reservedAccounts } : {}),
     now: () => now,
     accountLimits: {
       read: async () => Object.fromEntries(accountLimits),
@@ -406,6 +425,129 @@ describe("issue #210, ask 3 — a studio parked past PARKED_AUTO_STOP_HOURS with
 
     h.setNow(new Date(NOW.getTime() + (PARKED_AUTO_STOP_HOURS * HOUR_MS) + 60_000));
     await expect(h.run()).resolves.toMatchObject({ kind: "auto-stopped" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fresh-context review round 1, finding 1 — `deps.stopParkedStudio` used to
+// be typed `Promise<void>`, so a REFUSAL (the realistic case: a studio sat
+// parked mid-task almost always has an open assigned board task, and
+// destroy.ts's own `runDestroy` fails CLOSED on that — see its own doc
+// comment) was indistinguishable from an actual stop. `runAccountFailover`
+// reported `"auto-stopped"` unconditionally regardless of what actually
+// happened, so an operator reading the outcome could never tell the
+// container was still up and still billing. `stopParkedStudio` now returns
+// the real `DestroyOutcome`, and this file's own call site reports a
+// DIFFERENT kind — `"park-refused"` — whenever it was not a genuine stop.
+// ---------------------------------------------------------------------------
+describe("review round 1, finding 1 — stopParkedStudio's real outcome, never a silent \"auto-stopped\" lie", () => {
+  it("a refusal (e.g. an open assigned board task) reports park-refused, never auto-stopped", async () => {
+    const REFUSAL: DestroyOutcome = {
+      ok: false, refused: true,
+      reason: "studio fleetflare--release-studio has an open assigned board task; pass --force to destroy anyway",
+    };
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: NO_RESET_INLINE_PANE, stopParkedStudioImpl: async () => REFUSAL,
+    });
+    await h.run();
+    const parkedAt = (await h.storage.get(STATUS_KEY))?.parkedAt as string;
+
+    h.setNow(new Date(NOW.getTime() + (PARKED_AUTO_STOP_HOURS * HOUR_MS) + 60_000));
+    const out = await h.run();
+
+    expect(h.stopParkedStudio).toHaveBeenCalledTimes(1);
+    expect(out).toEqual({ kind: "park-refused", parkedAt, reason: REFUSAL.reason });
+  });
+
+  it("stopParkedStudio throwing (an unexpected RPC/destroy failure, not a tagged refusal) ALSO reports park-refused, never auto-stopped — fail safe, not fail open", async () => {
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: NO_RESET_INLINE_PANE,
+      stopParkedStudioImpl: async () => { throw new Error("destroy failed: container kill failed: no such container"); },
+    });
+    await h.run();
+    const parkedAt = (await h.storage.get(STATUS_KEY))?.parkedAt as string;
+
+    h.setNow(new Date(NOW.getTime() + (PARKED_AUTO_STOP_HOURS * HOUR_MS) + 60_000));
+    const out = await h.run();
+
+    expect(out).toEqual({
+      kind: "park-refused", parkedAt,
+      reason: "destroy failed: container kill failed: no such container",
+    });
+  });
+
+  it("a genuine stop (ok: true) reports auto-stopped exactly as before", async () => {
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: NO_RESET_INLINE_PANE,
+      stopParkedStudioImpl: async () => ({ ok: true, status: status({ state: "stopped" }) }),
+    });
+    await h.run();
+    const parkedAt = (await h.storage.get(STATUS_KEY))?.parkedAt as string;
+
+    h.setNow(new Date(NOW.getTime() + (PARKED_AUTO_STOP_HOURS * HOUR_MS) + 60_000));
+    const out = await h.run();
+
+    expect(out).toEqual({ kind: "auto-stopped", parkedAt });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fresh-context review round 1, finding 2 — `anyAccountFreeToResume`'s tier-1
+// check always called `nextClaudeAccount(scopedAccounts, current, ...)`, but
+// the REAL selection (`runAccountFailover`'s own `candidate`) branches on
+// `currentOutOfScope` first: an ACTIVE borrow whose recorded account sits
+// BEFORE the search anchor has no position to step forward from, so
+// `nextClaudeAccount` returns null immediately (current not found) even when
+// an account WITHIN the scoped chain has genuinely freed. Reusing the exact
+// `currentOutOfScope`-active-borrow fixture shape
+// test/studio.account-failover.test.ts's own "scope stays anchored while
+// actively borrowed" block already established.
+//
+// This can only ever matter with auto-failover OFF: with it on, the SAME
+// correctly-branching `candidate` computation (used for the ordinary switch)
+// would already find the same free account on the very same tick and switch
+// away before this code path is ever reached — see this suite's own PR
+// branch for the round-1 writeup of why an autoFailover-ON repro never
+// reaches `anyAccountFreeToResume`'s tier 1 at all.
+// ---------------------------------------------------------------------------
+describe("review round 1, finding 2 — anyAccountFreeToResume must branch on currentOutOfScope like the real selection", () => {
+  it("auto-failover off, active borrow, current recorded before the anchor: once an account WITHIN the scoped chain frees, the free-account-wake check finds it", async () => {
+    const CUR: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 };
+    const PRIMARY: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
+    const OTHER: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 };
+    const FAR_UNTIL = new Date(NOW.getTime() + 5 * HOUR_MS).toISOString();
+    const SOON_UNTIL = new Date(NOW.getTime() + HOUR_MS).toISOString();
+    const h = harness({
+      accounts: [CUR, PRIMARY, OTHER], pane: MODAL_PANE, autoFailover: false,
+      primary: PRIMARY.name, primaryIsMapped: true,
+      initial: status({
+        claudeAccount: CUR.name, launchedAccount: CUR.name, borrowedAccount: CUR.name, borrowedFromRepo: null,
+      }),
+      // CUR and PRIMARY stay limited for hours; OTHER (inside scopedAccounts,
+      // i.e. accounts.slice(anchor) = [PRIMARY, OTHER]) is limited only an
+      // hour out.
+      accountLimits: { [CUR.name]: FAR_UNTIL, [PRIMARY.name]: FAR_UNTIL, [OTHER.name]: SOON_UNTIL },
+    });
+    // Tick 1: nothing free anywhere -> genuine exhaustion, parkedAt stamped.
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    // Tick 2, just past SOON_UNTIL: OTHER is now free, so the REAL `candidate`
+    // (correctly currentOutOfScope-aware) finds it -> parkedOn flips non-null
+    // -> this tick's own message is the DIFFERENT "#271 parked" shape, so the
+    // anti-loop guard does not match yet and this is a one-time re-card, not
+    // the branch under test.
+    h.setNow(new Date(NOW.getTime() + HOUR_MS + 60_000));
+    const second = await h.run();
+    expect(second.kind).toBe("parked");
+
+    // Tick 3, same conditions held: the SAME "#271 parked" message now
+    // matches tick 2's own stored error, so the anti-loop guard DOES match
+    // and this tick lands in the free-account-wake branch under test.
+    h.setNow(new Date(NOW.getTime() + HOUR_MS + 2 * 60_000));
+    const third = await h.run();
+
+    expect(third).toEqual({ kind: "free-account-wake", wake: "ok" });
   });
 });
 

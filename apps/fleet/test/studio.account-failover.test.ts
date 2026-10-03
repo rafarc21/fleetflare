@@ -14,6 +14,7 @@ import { STATUS_KEY, OPERATION_KEY, OPERATION_STALE_MS, type StudioStorage } fro
 import { syncSessionCycle, launchFields, recordLaunchedAccount, StudioDO } from "../src/studio/do";
 import type { SessionSyncDeps } from "../src/studio/session-sync";
 import type { StudioStatus } from "../src/studio/types";
+import type { DestroyOutcome } from "../src/studio/destroy";
 import type { Env } from "../src/env";
 import {
   getObserved, mergeObserved, type ObservedStorage, INCARNATION_PATH,
@@ -2307,5 +2308,40 @@ describe("runAccountFailover — the in-memory start config follows a completed 
     await deps.onSwitched!("CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(fakeThis.envVars.CLAUDE_CODE_OAUTH_TOKEN).toBe(TOKEN_2);
     expect(fakeThis.envAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+  });
+
+  // Fresh-context review round 1, finding 1 — the realistic auto-stop case
+  // (a studio stuck parked mid-task) almost always has an open assigned
+  // board task, which destroy.ts's own `runDestroy` refuses UNLESS `force`
+  // is passed. `stopParkedStudio` is an unattended, automated trigger — no
+  // operator is there to retry with `--force` — so it must pass force=true
+  // itself (never the operator's own discardUnsynced/park choices), and it
+  // must hand back the REAL `DestroyOutcome`, not swallow it into `void`.
+  it("StudioDO's own stopParkedStudio passes force=true (never discardUnsynced) and hands back destroyStudio's real outcome", async () => {
+    const REFUSAL: DestroyOutcome = {
+      ok: false, refused: true,
+      reason: "studio fleetflare--release-studio has an open assigned board task; pass --force to destroy anyway",
+    };
+    const destroyStudio = vi.fn(async (_force: boolean, _discardUnsynced: boolean, _park: boolean) => REFUSAL);
+    const fakeThis = {
+      env: ENV,
+      ctx: { storage: { get: async () => undefined, put: async () => {} } },
+      selfId: () => STUDIO_ID,
+      primaryAccount: () => "CLAUDE_CODE_OAUTH_TOKEN",
+      primaryIsMapped: () => false,
+      envVars: launchFields(ENV, STUDIO_ID, SPAWN, "CLAUDE_CODE_OAUTH_TOKEN").envVars,
+      envAccount: "CLAUDE_CODE_OAUTH_TOKEN" as string | undefined,
+      destroyStudio,
+    };
+    const deps = (StudioDO.prototype as unknown as { failoverDeps(this: unknown): FailoverDeps }).failoverDeps.call(fakeThis);
+    const outcome = await deps.stopParkedStudio!();
+
+    // force=true (1st arg) — the ONLY thing this automated trigger ever
+    // overrides; discardUnsynced (2nd arg) stays false — a failed probe or
+    // an unconfirmed rescue-push must still refuse exactly like it does
+    // today, this call never pays for a human's `--discard-unsynced`
+    // choice. park=true (3rd arg) — the exact "fleet destroy --park" verb.
+    expect(destroyStudio).toHaveBeenCalledWith(true, false, true);
+    expect(outcome).toEqual(REFUSAL);
   });
 });
