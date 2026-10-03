@@ -2853,9 +2853,25 @@ export async function runAccountFailover(
       // a message-text refresh of THIS SAME write later in the same
       // episode); any other previous state (running — a resume landed)
       // restarts the clock from `now`, exactly as a first-ever park would.
+      //
+      // Review round 2 (#210), FINAL round, finding A (BLOCKER, FIXED) — the
+      // `else` branch here used to spread `{}` (nothing), so `...existing`'s
+      // OWN `parkedAt` — possibly stamped hours ago by an EARLIER genuine
+      // (`parkedOn === null`) park — rode forward untouched onto THIS tick's
+      // `parkedOn !== null` (#271, operator chose not to move) row. That is
+      // exactly the shape that can happen when the same studio was once
+      // genuinely exhausted (fleet-wide), then later degrades again but this
+      // time a candidate exists and auto-failover is off: `existing.state`
+      // is still `"degraded"` from the earlier genuine park, but THIS
+      // classification is the separate #271 case, which must never carry a
+      // `parkedAt` at all (see StudioStatus.parkedAt's own doc comment). The
+      // stale value would otherwise satisfy the ask-3 auto-stop gate's own
+      // `existing.parkedAt && existing.exhaustionKind && ...` check on a
+      // LATER tick and destroy a studio the operator deliberately parked.
+      // Fixed: the `parkedOn !== null` branch now explicitly clears it.
       ...(parkedOn === null
         ? { parkedAt: existing.state === "degraded" ? (existing.parkedAt ?? deps.now().toISOString()) : deps.now().toISOString() }
-        : {}),
+        : { parkedAt: null }),
       // Issue #109: only on the SAME eligible path the attempt step itself
       // evaluates (genuinely exhausted, select-style modal) — an
       // inline-exhausted row gets no bookkeeping at all, since it is never
