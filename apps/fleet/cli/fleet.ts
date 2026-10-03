@@ -178,6 +178,13 @@ export function memoryUrl(creds: Credentials, path: string): string {
   return new URL(`/studio/memory${path}`, creds.workerUrl).toString();
 }
 
+/** Issue #218's usage stats route (src/junior/usage.ts's
+ *  handleJuniorUsageStats). Under `/studio/` for the same Access reason the
+ *  board and memory passes are — see boardUrl just above. */
+export function juniorUrl(creds: Credentials, path: string): string {
+  return new URL(`/studio/junior${path}`, creds.workerUrl).toString();
+}
+
 /** https://... -> wss://..., http://... -> ws://... (the latter is what a
  *  local `wrangler dev` loopback needs during manual verification). */
 export function wsUrl(creds: Credentials, id: string): string {

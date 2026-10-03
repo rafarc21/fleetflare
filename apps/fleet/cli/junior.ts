@@ -12,7 +12,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Credentials } from "./fleet";
+import { accessHeaders, juniorUrl, type Credentials } from "./fleet";
 import { juniorUsageLogPath } from "../../../skills/junior/src/usage";
 
 export interface JuniorPaths { skillLink: string; config: string; skillSrc: string }
@@ -79,7 +79,13 @@ export function juniorStatus(p: JuniorPaths, env: Record<string, string | undefi
 }
 
 export function cmdJunior(parsed: { action: "enable" | "disable" | "status"; account?: string }): number {
-  const p = juniorPaths(process.env.HOME ?? "", join(import.meta.dir, "../../.."));
+  // Finding 3 (fresh-context review): `|| homedir()`, same convention as
+  // readLocalUsage below and skills/junior/src/usage.ts's own HOME lookup —
+  // `?? ""` left a HOME-unset environment resolving to the empty string
+  // (every path under it then rooted at "/"), a latent bug this file no
+  // longer needs to carry now that a second, correct convention exists
+  // right below it.
+  const p = juniorPaths(process.env.HOME || homedir(), join(import.meta.dir, "../../.."));
   const out = parsed.action === "enable" ? juniorEnable(p, parsed.account)
     : parsed.action === "disable" ? juniorDisable(p) : juniorStatus(p, process.env);
   for (const l of out.lines) (out.ok ? console.log : console.error)(l);
@@ -174,10 +180,8 @@ export async function cmdJuniorStats(creds: Credentials, since?: string): Promis
 
   let remoteRows: JuniorStatsRow[] = [];
   try {
-    const url = new URL("/studio/junior/usage", creds.workerUrl);
-    url.searchParams.set("since", String(sinceMs));
-    const res = await fetch(url.toString(), {
-      headers: { "CF-Access-Client-Id": creds.accessClientId, "CF-Access-Client-Secret": creds.accessClientSecret },
+    const res = await fetch(juniorUrl(creds, `/usage?since=${encodeURIComponent(String(sinceMs))}`), {
+      headers: accessHeaders(creds),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const body = (await res.json()) as RemoteUsageAggregate;
