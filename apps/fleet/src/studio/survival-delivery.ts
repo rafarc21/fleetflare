@@ -265,10 +265,20 @@ export function rescueBranchNestedPrefix(studioId: string): string {
 export const RESCUE_STAMP_DIGITS = 14;
 
 /**
- * SOURCE 3 — this fleet's own rescue-ref naming convention, matched ANCHORED
- * AT BOTH ENDS and nothing else: the ref must START with
- * `fleet/rescue/<studio>-` and END with exactly RESCUE_STAMP_DIGITS digits,
- * with nothing left over.
+ * SOURCE 3 — this fleet's own rescue-ref naming convention. Matches all 4 ref
+ * shapes `rescue.ts` actually pushes, every one ANCHORED AT BOTH ENDS and
+ * nothing else:
+ *
+ * - flat: `fleet/rescue/<studio>-<14digits>` (rescue_one's own direct push).
+ * - nested, N1/N2: `fleet/rescue/<studio>/<14digits>/checkout/<name>` (the
+ *   main checkout's own unpushed-local-branch/stash walk).
+ * - nested, member worktree: `fleet/rescue/<studio>/wt/<id>-<14digits>`,
+ *   optionally with `-nff-` before the stamp (that shape's own non-fast-
+ *   forward retry).
+ *
+ * See this function's own body below for the nested shapes' match logic and
+ * reasoning (#216) — the flat shape's own reasoning follows here since it's
+ * the simplest case to ground the anchoring discipline in:
  *
  * NEVER a bare substring or a `*<studio>*` wildcard — the spec forbids it by
  * name, and the reason is concrete. `fleet/rescue/other--web-studio-
@@ -279,9 +289,12 @@ export const RESCUE_STAMP_DIGITS = 14;
  * this fleet ever pushed.
  *
  * Deliberately NOT a regex built from `studioId`: a studio id is data, and a
- * regex assembled from data needs escaping to be safe. `startsWith` plus a
- * digits-only length check is total, needs no escaping, and is anchored at
- * both ends by construction.
+ * regex assembled from data needs escaping to be safe. The flat shape above
+ * uses `startsWith` plus a digits-only length check, needing no escaping,
+ * anchored at both ends by construction; the nested shapes below use a
+ * `RegExp` only on the REMAINDER after that same unescaped `startsWith` has
+ * already anchored the studio id itself, so a studio id is still never
+ * interpolated into pattern syntax.
  */
 export function isRescueBranchFor(studioId: string, branch: string): boolean {
   const prefix = rescueBranchPrefix(studioId);
