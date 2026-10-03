@@ -656,31 +656,40 @@ describe("launchAccountOrRefuse — borrow tier 3 and D1 failure handling, real 
   });
 });
 
+// Issue #213: `withAccountDisplay` now takes the same `limits`/`reserved`/
+// `now` the real launch gate consults. `{}`/empty-set/`new Date()` are the
+// "nothing is fleet-wide limited" no-op inputs -- every test below is
+// unchanged from before the reroute-awareness fix, so each one passes those
+// through literally rather than deriving them, the same way a caller with
+// failover off (listStudios' own skip) would.
+const NO_LIMITS: AccountLimits = {};
+const NO_RESERVED = new Set<string>();
+
 describe("withAccountDisplay — what fleet ls reads", () => {
   // #292 r2: a row with no launch record never claims an account -- `?`, and
   // the mapped one only as the NEXT launch's.
-  it("a mapped studio with no launch record: `?`, the mapped secret as the next launch", () => {
+  it("a mapped studio with no launch record: `?`, the mapped secret as the next launch", async () => {
     const env = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2, CLAUDE_ACCOUNT_BY_REPO: '{"demosite-life":2}' });
-    const shown = withAccountDisplay(env, status());
+    const shown = await withAccountDisplay(env, status(), NO_LIMITS, NO_RESERVED, new Date());
     expect(shown.claudeAccount).toBe("?");
     expect(shown.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
   });
 
-  it("the label rides along with a launched account", () => {
+  it("the label rides along with a launched account", async () => {
     const env = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_1_LABEL: "first@example.com" });
-    expect(withAccountDisplay(env, status({ id: "fleetflare--lead", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN" })).claudeAccountLabel)
-      .toBe("first@example.com");
+    const shown = await withAccountDisplay(env, status({ id: "fleetflare--lead", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN" }), NO_LIMITS, NO_RESERVED, new Date());
+    expect(shown.claudeAccountLabel).toBe("first@example.com");
   });
 
-  it("no map, no launch record: `?` with the first account as the next launch", () => {
-    const shown = withAccountDisplay(envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1 }), status({ id: "fleetflare--lead" }));
+  it("no map, no launch record: `?` with the first account as the next launch", async () => {
+    const shown = await withAccountDisplay(envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1 }), status({ id: "fleetflare--lead" }), NO_LIMITS, NO_RESERVED, new Date());
     expect(shown.claudeAccount).toBe("?");
     expect(shown.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN");
   });
 
-  it("never carries a token", () => {
+  it("never carries a token", async () => {
     const env = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2, CLAUDE_ACCOUNT_BY_REPO: '{"demosite-life":2}' });
-    expect(JSON.stringify(withAccountDisplay(env, status()))).not.toContain("sk-ant-");
+    expect(JSON.stringify(await withAccountDisplay(env, status(), NO_LIMITS, NO_RESERVED, new Date()))).not.toContain("sk-ant-");
   });
 });
 
@@ -692,16 +701,16 @@ describe("stale recorded account with auto-failover off (#273 r2)", () => {
     CLAUDE_ACCOUNT_BY_REPO: '{"demosite-life":2}',
   };
 
-  it("fleet ls never shows the stale recorded account: `?`, the mapped one as the next launch", () => {
-    const shown = withAccountDisplay(envWith(vars), status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }));
+  it("fleet ls never shows the stale recorded account: `?`, the mapped one as the next launch", async () => {
+    const shown = await withAccountDisplay(envWith(vars), status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }), NO_LIMITS, NO_RESERVED, new Date());
     expect(shown.claudeAccount).toBe("?");
     expect(shown.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
   });
 
-  it("with the flag on, the recorded account is what the NEXT launch uses", () => {
+  it("with the flag on, the recorded account is what the NEXT launch uses", async () => {
     const env = envWith({ ...vars, FLEET_AUTO_FAILOVER: "on" });
-    expect(withAccountDisplay(env, status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" })).claudeAccountNext)
-      .toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
+    const shown = await withAccountDisplay(env, status({ claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }), NO_LIMITS, NO_RESERVED, new Date());
+    expect(shown.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
   });
 
   it("the next launch clears the stale recorded account from the row", async () => {
