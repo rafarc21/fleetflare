@@ -389,6 +389,14 @@ function envWithFakeStudio(
   };
 }
 
+/** Worker->DO stub's named method throws `err` instead of answering. */
+function envWithThrowingVerb(method: string, err: Error) {
+  const { testEnv, fakeNs } = envWithFakeStudio();
+  const stub = fakeNs.get();
+  const failingNs = { ...fakeNs, get: () => ({ ...stub, [method]: async () => { throw err; } }) };
+  return { ...testEnv, STUDIO: failingNs } as unknown as Env;
+}
+
 function authorizedReq(path: string, init: RequestInit = {}) {
   return new Request(`https://x${path}`, {
     ...init,
@@ -2635,12 +2643,6 @@ describe("repair verbs name the failing side (#96)", () => {
       durableObjectReset: true, retryable: true,
     });
   }
-  function envWithThrowingVerb(method: string, err: Error) {
-    const { testEnv, fakeNs } = envWithFakeStudio();
-    const stub = fakeNs.get();
-    const failingNs = { ...fakeNs, get: () => ({ ...stub, [method]: async () => { throw err; } }) };
-    return { ...testEnv, STUDIO: failingNs } as unknown as Env;
-  }
   const VERBS: { action: string; method: string; init: RequestInit }[] = [
     { action: "provision", method: "provision", init: { method: "POST", body: "{}" } },
     { action: "restart", method: "restartStudio", init: { method: "POST" } },
@@ -2886,16 +2888,6 @@ describe("repair verbs name the failing side (#96)", () => {
  */
 describe("LaunchRefusedError/StartRefusedError surface as 409, not an uncaught 500 (#217)", () => {
   const EARLIEST_RESET_REASON = "claude account: every account limited; earliest reset 2026-10-03T12:00:00.000Z";
-
-  // Same helper shape as "repair verbs name the failing side (#96)"'s own
-  // (local to that describe block, not reusable from here): the Worker->DO
-  // stub's named method throws `err` instead of answering.
-  function envWithThrowingVerb(method: string, err: Error) {
-    const { testEnv, fakeNs } = envWithFakeStudio();
-    const stub = fakeNs.get();
-    const failingNs = { ...fakeNs, get: () => ({ ...stub, [method]: async () => { throw err; } }) };
-    return { ...testEnv, STUDIO: failingNs } as unknown as Env;
-  }
 
   for (const { action, method, init } of [
     { action: "provision", method: "provision", init: { method: "POST", body: "{}" } },
