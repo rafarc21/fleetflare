@@ -546,3 +546,95 @@ same six files: 407/407 passed. Full gates, run one at a time under
 `flock /tmp/fleet-gate.lock`: `bun run test` (full vitest suite) — 157 test
 files, 5586 tests, all passed; `bun run check` (`tsc --noEmit` across all
 five configured projects) — clean, no errors.
+
+## Review round 2, FINAL round (fresh-context human review, 2026-10-03) — fix-first, no round 3
+
+Two mandatory BLOCKER findings, explicitly the last fix-first round before
+merge. Several optional extras the review also named (`recordParkRefusal`
+re-reading `STATUS_KEY` before write; resetting
+`parkRefusalReason`/`parkRefusedAt`/`freeAccountWakeLastTriedAt` on
+heal/switch/fresh-degrade; stamping `autoContinueLastTriedAt` on a
+free-account wake; stale PR-body/test-title/plan text) were deliberately
+SKIPPED per this round's own scope — left for the lead to decide on as a
+possible follow-up, not attempted here. TDD throughout: a RED commit per
+finding, pushed, then the fix, pushed.
+
+**Finding A (BLOCKER) — a stale `parkedAt` from an EARLIER genuine park rode
+forward onto a LATER `parkedOn !== null` (#271 operator-park) degrade.**
+Round 2's own finding-2 fix (above) only ever restarted the `parkedAt` clock
+for a GENUINE same-episode repeat exhaustion (`parkedOn === null`,
+`existing.state === "degraded"`); its `else` branch — the separate
+`parkedOn !== null` ("#271, operator chose not to move, auto-failover off,
+a candidate exists") case — spread `{}` (nothing), so `...existing`'s own
+`parkedAt`, possibly stamped hours ago by an EARLIER genuine park, rode
+forward untouched the instant the SAME studio later degraded again for the
+SEPARATE #271 reason (`existing.state` still `"degraded"` from the earlier
+genuine park, but the current tick's own classification is `parkedOn !==
+null`). That stale value then satisfied the ask-3 auto-stop gate's own
+`existing.parkedAt && existing.exhaustionKind && ...` check on a LATER tick
+and would destroy a studio the operator deliberately parked, not one that is
+fleet-wide exhausted — the exact invariant `StudioStatus.parkedAt`'s own doc
+comment (fixed the round before this one) states.
+
+Fix: `failover.ts`'s degrade-write ternary now has an explicit `else`:
+`...(parkedOn === null ? { parkedAt: ... } : { parkedAt: null })`. The
+surrounding comment block was extended to document this else-branch clear
+alongside the existing-genuine-repeat case it already explained. Test
+(`test/studio.parked-auto-resume.test.ts`): a genuine fleet-wide exhaustion
+stamps `parkedAt`; the fleet then gains a second (free) account and the
+operator flips `FLEET_AUTO_FAILOVER` off (`parkedOn !== null`, a candidate
+now exists) — the resulting row's `parkedAt` is asserted `null`, and the
+ask-3 auto-stop gate is asserted to never fire on that row even 6h+ later
+(`stopParkedStudio` not called). RED against the pre-fix code (the stale
+`parkedAt` survived and the auto-stop gate fired at +6h+1m, 7h+1m measured
+from the STALE first `parkedAt`).
+
+**Finding B (BLOCKER) — an auto-stop mid-tick, then two LATER steps in the
+same tick rebooted the just-destroyed container.** `syncSessionCycle`
+(do.ts)'s failover step can call `deps.stopParkedStudio`, which destroys the
+container THIS SAME TICK — the row reads `"stopped"` the instant that step
+returns. Two LATER steps in the same function body ran UNCONDITIONALLY
+regardless of what the failover step just did: `retrySurvivalBrief` and the
+detached `installCacheDeps` save, both of which eventually `sbExec` into the
+container — on an already-destroyed-this-tick row, that BOOTS the container
+back up, billing under a row that now reads `"stopped"`. `isStoppedIn`
+(do.ts, already used by `runScheduledTick`/`refreshToken` for exactly this
+reason) only ever guarded the START of a tick, never a destroy that happens
+MID-tick — this exact gap.
+
+Fix: right after the failover step's own try/catch, a single
+`const stoppedAfterFailover = await isStoppedIn(storage);` read, then both
+`if (retrySurvivalBrief) {` and `if (installCacheDeps) {` widened to also
+require `!stoppedAfterFailover`. `checkAndRecordReadiness` and `heal` are
+deliberately left ungated — the former already self-guards on
+`state === "stopped"` (do.ts's own pre-existing early return), and the
+review's own scope named exactly these two steps, nothing broader. Test
+(`test/studio.session.test.ts`): a row already parked past
+`PARKED_AUTO_STOP_HOURS` with nowhere to go hits the failover step's ask-3
+auto-stop gate directly (the "already-degraded, same message" fast path, no
+prior tick needed); `stopParkedStudio` is wired to write `state: "stopped"`
+onto the SAME storage the way the real `destroyStudio` does, simulating the
+real mid-tick destroy. Asserts neither `retrySurvivalBrief` nor the
+install-cache save's own `sbExec` ran afterward (RED against the pre-fix
+code: `stopParkedStudio` was called exactly once, the row genuinely read
+`"stopped"`, yet `retrySurvivalBrief` still fired). A second control test
+(a `"running"` row, no failover wired) confirms both steps still run exactly
+as before when nothing auto-stopped. Fixing finding B also required
+updating one pre-existing source-text pin
+(`test/studio.survival-delivery.test.ts`'s own exact-literal match on the
+`if (retrySurvivalBrief) {` line) to the new `if (retrySurvivalBrief &&
+!stoppedAfterFailover) {` text — a legitimate pin update, not a new finding.
+
+**Verification.** Targeted: `test/studio.parked-auto-resume.test.ts` +
+`test/studio.account-failover.test.ts` + `test/studio.session.test.ts` +
+`test/studio.stopped-stays-stopped.test.ts` + `test/studio.survival-delivery.test.ts`
+all green. Full gates, run one at a time under `flock
+/tmp/fleet-gate.lock`: `bun run test` (full vitest suite) — 157 test files,
+5588 tests, all passed (run twice: once mid-round after finding B's initial
+GREEN surfaced the stale source-text pin above as a genuine failure, once
+more at the final commit after fixing it); `bun run check` (`tsc --noEmit`
+across all five configured projects) — clean, no errors (likewise run twice,
+the first catching a real `DestroyOutcome`'s `ok: true` literal-type error
+in the finding-B test fixture, fixed with an explicit `as const`);
+`bun run test-lies-check` — `0 tautological, 0 source-reading, 0
+own-module-mock across 279 test files`.
