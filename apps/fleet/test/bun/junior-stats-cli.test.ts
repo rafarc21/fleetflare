@@ -107,6 +107,31 @@ describe("fleet junior stats", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+  test("skips malformed lines (missing ts, non-numeric input_tokens) but still aggregates the well-formed one", async () => {
+    const home = tmpHome();
+    const server = Bun.serve({
+      port: 0,
+      async fetch() {
+        return Response.json({ rows: [], totals: { calls: 0, inputTokens: 0, outputTokens: 0 } });
+      },
+    });
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+    const dir = join(home, ".local", "share", "fleet");
+    mkdirSync(dir, { recursive: true });
+    const lines = [
+      JSON.stringify({ ts: NOW, id: "laptop-d", mode: "edit", model: "glm", input_tokens: 7, output_tokens: 3, calls: 1, ok: true }),
+      JSON.stringify({ id: "laptop-d", mode: "edit", model: "glm", input_tokens: 999, output_tokens: 999, calls: 1, ok: true }), // ts missing
+      JSON.stringify({ ts: NOW, id: "laptop-d", mode: "edit", model: "glm", input_tokens: "not a number", output_tokens: 999, calls: 1, ok: true }),
+    ];
+    writeFileSync(join(dir, "junior-usage.jsonl"), `${lines.join("\n")}\n`);
+    const r = await run(["junior", "stats"], home);
+    server.stop(true);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/laptop-d\s+1\s+7\s+3/);
+    expect(r.out).not.toContain("999");
+    rmSync(home, { recursive: true, force: true });
+  });
+
   test("--since filters out local rows older than the cutoff", async () => {
     const home = tmpHome();
     const server = Bun.serve({
