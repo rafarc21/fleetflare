@@ -761,50 +761,46 @@ procSuite("bunInstallRunningCmd — round 5 review, item 1 MUTANT PROOF: a long-
     return dir;
   }
 
-  // My own finding: both tests below spawn a real 8s child process and run
-  // it through a real bash snippet (its own internal timeout already 10s) —
-  // measured wall-clock ~8.6s on this sandbox, which is UNDER bun:test's own
-  // default PER-TEST timeout of 5s, so bun:test itself was killing these as
-  // "timed out after 5000ms" before the real assertion ever ran — a flake
-  // whose rate tracks machine load, not a real correctness gap in either the
-  // mutant or the fix. Fixed with an explicit per-test timeout comfortably
-  // above the measured wall-clock time, the same way `runSnippet`'s own
-  // internal timeout is already sized generously above its own expected
-  // duration.
+  // My own finding: both tests below spawn a real child process and run
+  // it through a real bash snippet. Originally the child had a FIXED
+  // lifetime (first 8s, then bumped to 35s) racing against the MUTANT
+  // BASELINE's own `/proc` scan below — a race against an unpredictable,
+  // load-dependent scan duration is the wrong shape: under this container's
+  // own accumulating zombie count (PID 1 here is `sandbox`, not a reaping
+  // init, so `/proc` only grows over a long session), a plain shell
+  // `for p in /proc/[0-9]*; do cat "$p/cmdline"; done` loop was measured at
+  // ~20s in one run and then took LONGER than a 35s child/40s timeout margin
+  // in a later, more-loaded run of the very same container — bumping the
+  // numbers again would just be guessing at a moving target.
   //
-  // Separate, known limitation observed live in a long-running studio
-  // container specifically (not a portable code bug): the MUTANT BASELINE
-  // test right below reconstructs round 4's own already-abandoned `/proc`
-  // scan, which can be intermittently slow to find the freshly-spawned child
-  // in a container that has accumulated a very large number of processes
-  // over a long session (many defunct/zombie entries under `/proc`) — the
-  // scan is a plain shell `for p in /proc/[0-9]*` loop with no bound on how
-  // many entries it walks. Measured directly in one such container: a bare
-  // `for p in /proc/[0-9]*; do cat "$p/cmdline"; done` loop over ~13,000+
-  // zombie-laden `/proc` entries took ~20s wall-clock. Rather than race that
-  // scan against an 8s child (which is exactly what used to flake), the
-  // child below is given 35s of lifetime — comfortably above the measured
-  // ~20s scan time with real headroom as the container's zombie count keeps
-  // growing (monotonic; PID 1 here is `sandbox`, not a reaping init) — and
-  // `runSnippet`'s own timeout and this test's own bun:test per-test timeout
-  // are both bumped to stay above that in turn. This affects ONLY the
-  // historical reconstruction of the abandoned round-4 command; the sibling
-  // "MUTANT PROOF" test right after it (proving the ACTUAL shipped, current
-  // command never scans `/proc` at all) is unaffected and passes reliably
-  // regardless of process count.
+  // Fixed by removing the race entirely: the child below never resolves on
+  // its own (`await new Promise(() => {})`) and lives for exactly as long as
+  // this test's own `finally { child.kill("SIGKILL") }` lets it — i.e. it is
+  // now GUARANTEED to still be alive no matter how slow the scan runs, so
+  // the test's pass/fail no longer depends on guessing the scan's duration,
+  // only on it completing within a generous ABSOLUTE ceiling (120s for
+  // `runSnippet`'s own timeout, 130s for this test's own bun:test per-test
+  // timeout) rather than a tuned margin over an unpredictable load. This
+  // affects ONLY the historical reconstruction of the abandoned round-4
+  // command; the sibling "MUTANT PROOF" test right after it (proving the
+  // ACTUAL shipped, current command never scans `/proc` at all) already used
+  // a short-lived child and is unaffected.
   test("MUTANT BASELINE — the round-4 shipped command genuinely OVER-BLOCKS: a settled install with an UNRELATED long-lived bun process sitting in the directory (a dev server / MCP server stand-in) still reads as RUNNING", () => {
     const dir = seedSettledInstall();
     // An UNRELATED long-lived bun process sitting in this same directory —
     // the maestro's own named repro shape (a dev server, an MCP server
     // started via `bun x` from the repo root), never an install of any kind.
-    const child = spawn("bun", ["-e", "await new Promise((r) => setTimeout(r, 35000))"], { cwd: dir, stdio: "ignore" });
+    // Never resolves on its own — lifetime is controlled entirely by this
+    // test's own `finally` block below, so it cannot expire mid-scan no
+    // matter how slow a loaded container's `/proc` walk gets.
+    const child = spawn("bun", ["-e", "await new Promise(() => {})"], { cwd: dir, stdio: "ignore" });
     try {
-      const r = runSnippet({ script: preFixBunInstallRunningCmdRound4(dir), shell: "bash", sourced: true, timeout: 40_000 });
+      const r = runSnippet({ script: preFixBunInstallRunningCmdRound4(dir), shell: "bash", sourced: true, timeout: 120_000 });
       expect(parseBunInstallRunning(r.stdout)).toBe(true); // the bug: over-blocks on ANY matching process
     } finally {
       child.kill("SIGKILL");
     }
-  }, 45_000);
+  }, 130_000);
 
   test("MUTANT PROOF — the FIXED, shipped command correctly saves through the SAME long-lived, unrelated process once the completion marker is present and fresh", () => {
     const dir = seedSettledInstall();
