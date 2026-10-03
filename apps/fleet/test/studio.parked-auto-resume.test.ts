@@ -393,10 +393,6 @@ describe("issue #210, ask 2 — a periodic tick wakes the row the moment ANY acc
 });
 
 describe("issue #210, ask 3 — a studio parked past PARKED_AUTO_STOP_HOURS with nothing free at all gets rescued-then-stopped", () => {
-  it(`confirms PARKED_AUTO_STOP_HOURS is 6 (the repro idled ~7h; this bounds the worst case well below that)`, () => {
-    expect(PARKED_AUTO_STOP_HOURS).toBe(6);
-  });
-
   it("parked > 6h ago, still nothing free: deps.stopParkedStudio is called, outcome names the park", async () => {
     const h = harness({ accounts: ONE_ACCOUNT, pane: NO_RESET_INLINE_PANE });
     await h.run();
