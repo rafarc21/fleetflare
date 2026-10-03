@@ -2232,8 +2232,20 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
 
     // PR #31 review HIGH: the branch walk and stash walk pushed raw, so a
     // shallow checkout with an ahead side branch or any stash failed forever.
+    //
+    // Board issue #216 fix 1: both `feat` and the stash land here via
+    // `rescue_try_push`'s shallow-clone fallback (the empty `priv` lacks the
+    // shallow boundary commit's own history, the same "shallow update not
+    // allowed" rejection issue #16 documents above) -- each lands as a
+    // PARENTLESS snapshot commit, confirmed below by `rev-list --count` being
+    // `1` despite `feat` itself sitting 2 commits deep locally. That snapshot
+    // commit's `Rescued-From:` trailer must name the real branch/stash
+    // (`feat` / `stash-0`), never the generated `fleet/rescue/.../checkout/...`
+    // ref it was pushed to -- `rescue_try_push`'s own 5th positional arg,
+    // which the branch walk's and stash walk's direct call sites previously
+    // omitted, defaulting it to that generated ref instead.
     for (const [label, run] of [["rescuePushCmd", () => pushPriv()], ["rescueSnapshotCmd", () => snapPriv()]] as const) {
-      test(`${label}, shallow checkout with an ahead side branch and a stash: both land on the private remote with the right trees`, () => {
+      test(`${label}, shallow checkout with an ahead side branch and a stash: both land on the private remote with the right trees and a Rescued-From trailer naming the real branch/stash`, () => {
         sh(`cd ${checkout} && git checkout -q -b feat && echo f > f.md && git add f.md && git commit -q -m feat && git checkout -q main`);
         writeFileSync(join(checkout, "s.md"), "stash me\n");
         sh(`git -C ${checkout} add s.md && git -C ${checkout} stash -q`);
@@ -2251,6 +2263,12 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
         expect(sh(`git -C ${priv} rev-parse ${feat}^{tree}`).out).toBe(featTree);
         expect(sh(`git -C ${priv} rev-parse ${stash}^{tree}`).out).toBe(stashTree);
         expect(sh(`git -C ${priv} show ${stash}:s.md`).out).toBe("stash me");
+        // Parentless: confirms this really is rescue_try_push's fallback
+        // snapshot path, not a plain successful history push.
+        expect(sh(`git -C ${priv} rev-list --count ${feat}`).out).toBe("1");
+        expect(sh(`git -C ${priv} rev-list --count ${stash}`).out).toBe("1");
+        expect(sh(`git -C ${priv} log -1 --format=%B ${feat}`).out).toContain("Rescued-From: feat");
+        expect(sh(`git -C ${priv} log -1 --format=%B ${stash}`).out).toContain("Rescued-From: stash-0");
       });
     }
 

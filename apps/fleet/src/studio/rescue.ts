@@ -263,11 +263,14 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
     `timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push $nv "$__rdest" "${src}:refs/heads/$ref" 2>&1 1>/dev/null`;
   return (
     `rescue_try_push() {\n` +
-    // Issue #216 fix 4: `rbranch`, 5th and optional, defaults to `$ref` (the
-    // destination ref this push is targeting) when the caller omits it —
-    // the branch walk's and stash walk's own direct call sites (never
-    // touched by this fix) still call this with only 4 args, and keep
-    // getting their existing, already-correct behavior unchanged.
+    // Issue #216 fix 4: `rbranch`, 5th and optional, is the real identifier
+    // (branch/stash name) this push is rescuing -- used only as the fallback
+    // snapshot's `Rescued-From:` trailer below. The `${5:-$4}` default exists
+    // purely so an UNANTICIPATED future call site that omits it entirely
+    // falls back to *something* readable rather than an empty trailer --
+    // every call site this file actually ships (rescue_push()'s own two, plus
+    // the branch walk's and stash walk's four direct calls below) passes its
+    // own real identifier explicitly; none relies on this default.
     `  local w="$1" nv="$2" src="$3" ref="$4" rbranch="\${5:-$4}" snap prc\n` +
     // PR #65 review: an early budget return must not leave the PREVIOUS
     // push's stderr in perr for the caller to report as this one's.
@@ -1274,7 +1277,11 @@ export function rescuePushCmd(
     // branch push, unlike rescue_push()'s own conditional check above.
     // Issue #359 round 3: same per-push timeout bound as rescue_push()'s own
     // pushes above — see this file's own header comment.
-    `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" </dev/null; then\n` +
+    // Issue #216 fix 1: 5th arg `"$b"` is the real branch name, for the
+    // shallow-clone fallback's `Rescued-From:` trailer should it fire here --
+    // without it the trailer would default to `$btarget`, the generated
+    // throwaway ref itself, naming nothing useful.
+    `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" "$b" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:$b push"; fail=$((fail+1))\n` +
     // Issue #58: the reason reaches the 409, same as rescue_push's.
     `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
@@ -1330,7 +1337,12 @@ export function rescuePushCmd(
     // unconditionally — never a real branch push.
     // Issue #359 round 3: same per-push timeout bound as every other push in
     // this file — see this file's own header comment.
-    `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" </dev/null; then\n` +
+    // Issue #216 fix 1: 5th arg `"stash-$sn"` is the real stash identifier
+    // (same spelling as `$starget`'s own suffix and the RESCUE_FAILED line
+    // above), for the shallow-clone fallback's `Rescued-From:` trailer should
+    // it fire here -- without it the trailer would default to `$starget`,
+    // the generated throwaway ref itself, naming nothing useful.
+    `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" "stash-$sn" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:stash-$sn push"; fail=$((fail+1))\n` +
     // Issue #58: the reason reaches the 409, same as rescue_push's.
     `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
@@ -1742,7 +1754,11 @@ export function rescueSnapshotCmd(
     // branch push, unlike rescue_push()'s own conditional check above.
     // Issue #359 round 3: same per-push timeout bound as rescue_push()'s own
     // pushes above — see this file's own header comment.
-    `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" </dev/null; then\n` +
+    // Issue #216 fix 1: 5th arg `"$b"` is the real branch name, for the
+    // shallow-clone fallback's `Rescued-From:` trailer should it fire here --
+    // without it the trailer would default to `$btarget`, the generated
+    // throwaway ref itself, naming nothing useful.
+    `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" "$b" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:$b push"; fail=$((fail+1))\n` +
     // Issue #58: the reason reaches the 409, same as rescue_push's.
     `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
@@ -1781,7 +1797,12 @@ export function rescueSnapshotCmd(
     // unconditionally — never a real branch push.
     // Issue #359 round 3: same per-push timeout bound as every other push in
     // this file — see this file's own header comment.
-    `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" </dev/null; then\n` +
+    // Issue #216 fix 1: 5th arg `"stash-$sn"` is the real stash identifier
+    // (same spelling as `$starget`'s own suffix and the RESCUE_FAILED line
+    // above), for the shallow-clone fallback's `Rescued-From:` trailer should
+    // it fire here -- without it the trailer would default to `$starget`,
+    // the generated throwaway ref itself, naming nothing useful.
+    `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" "stash-$sn" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:stash-$sn push"; fail=$((fail+1))\n` +
     // Issue #58: the reason reaches the 409, same as rescue_push's.
     `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
