@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import * as authModule from "../src/studio/auth";
-import { insertJuniorUsage, aggregateJuniorUsage, handleJuniorUsageStats } from "../src/junior/usage";
+import { insertJuniorUsage, aggregateJuniorUsage, handleJuniorUsageStats, pruneOldJuniorUsage } from "../src/junior/usage";
 import { handleFleetJunior } from "../src/junior/route";
 import { recordJuniorAuthorization } from "../src/junior/authz";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
@@ -77,6 +77,40 @@ describe("insertJuniorUsage + aggregateJuniorUsage", () => {
     const agg = await aggregateJuniorUsage(env.DB, 1000);
     expect(agg.rows).toEqual([{ studioId: ME, calls: 1, inputTokens: 1, outputTokens: 1 }]);
     expect(agg.totals).toEqual({ calls: 1, inputTokens: 1, outputTokens: 1 });
+  });
+});
+
+// Issue #221 item 3: retention — mirrors ratelimit.ts's pruneStaleCounters
+// (timestamp-cutoff delete, run opportunistically), not exceptions.ts's
+// row-count-cap style.
+describe("pruneOldJuniorUsage", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  it("deletes rows older than the retention window, keeps fresh rows", async () => {
+    const now = 1_000_000_000_000; // arbitrary fixed epoch ms
+    await insertJuniorUsage(env.DB, {
+      id: "old", ts: now - 91 * DAY_MS, studioId: ME, mode: "edit", model: "m", inputTokens: 1, outputTokens: 1, ok: true,
+    });
+    await insertJuniorUsage(env.DB, {
+      id: "fresh", ts: now - 1 * DAY_MS, studioId: ME, mode: "edit", model: "m", inputTokens: 2, outputTokens: 2, ok: true,
+    });
+
+    await pruneOldJuniorUsage(env.DB, now);
+
+    const logged = await env.DB.prepare("SELECT id FROM junior_usage_log").all();
+    expect(logged.results).toEqual([{ id: "fresh" }]);
+  });
+
+  it("never throws, even against a D1 that rejects", async () => {
+    const failing = new Proxy(env.DB, {
+      get(target, prop, receiver) {
+        if (prop === "prepare") {
+          return () => ({ bind: () => ({ run: async () => { throw new Error("simulated D1 failure"); } }) });
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as unknown as D1Database;
+    await expect(pruneOldJuniorUsage(failing, Date.now())).resolves.toBeUndefined();
   });
 });
 
