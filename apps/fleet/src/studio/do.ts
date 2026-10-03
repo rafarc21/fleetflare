@@ -49,7 +49,7 @@ import {
 // `deliverSurvivalOnBringup` below wires its ports and nothing more.
 import {
   deliverSurvivalBriefOnBringup, retryPendingSurvivalBrief, composeSurvivalDelivery, paneBusy,
-  rescueBranchPrefix, SURVIVAL_COMPARE_BASE,
+  fetchRescueBranchesForStudio, SURVIVAL_COMPARE_BASE,
   type BusyVerdict, type ComposedBrief, type SurvivalDeliveryOutcome,
   type SurvivalSources, type SurvivalTaskRef,
 } from "./survival-delivery";
@@ -5607,12 +5607,16 @@ export class StudioDO extends Sandbox<Env> {
           return null;
         }
       },
-      // A PREFIX query against GitHub's matching-refs endpoint, then
-      // re-filtered through `isRescueBranchFor`'s anchored both-ends match
-      // (rescueBranchesFor, survival-delivery.ts) — the server-side prefix is
-      // a narrowing, never the match itself.
+      // PREFIX queries against GitHub's matching-refs endpoint, one per
+      // `rescueBranchPrefixes` shape (#216 item 2 — a SINGLE flat-prefix
+      // query used to miss every nested shape: member worktree, not-
+      // checked-out-branch/stash, and WIP sync), then re-filtered through
+      // `isRescueBranchFor`'s anchored both-ends match (rescueBranchesFor,
+      // survival-delivery.ts) — the server-side prefix is a narrowing, never
+      // the match itself.
       rescueBranches: async () =>
-        (await listMatchingBranches(await token(), repo, rescueBranchPrefix(this.selfId()))).map((b) => b.name),
+        fetchRescueBranchesForStudio(this.selfId(), async (prefix) =>
+          (await listMatchingBranches(await token(), repo, prefix)).map((b) => b.name)),
       compareAhead: async (branch) => compareAhead(await token(), repo, SURVIVAL_COMPARE_BASE, branch),
       openPullNumbers: async () => listOpenPullNumbers(await token(), repo),
     };

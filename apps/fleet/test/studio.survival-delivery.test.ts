@@ -15,7 +15,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   survivalBriefAllowed, paneBusy, midTurnRow,
   prArtifactNumbers, branchArtifacts, isRescueBranchFor, rescueBranchesFor,
-  attributeRescueBranch, rescueBranchPrefix,
+  attributeRescueBranch, rescueBranchPrefix, rescueBranchNestedPrefix, rescueBranchPrefixes,
+  fetchRescueBranchesForStudio,
   resolveSurvivalInput, composeSurvivalDelivery, deliverSurvivalBriefOnBringup,
   retryPendingSurvivalBrief, retryBoundExceeded,
   SURVIVAL_RETRY_MAX_ATTEMPTS, SURVIVAL_RETRY_WINDOW_MS,
@@ -280,6 +281,80 @@ describe("the 3 anchored branch sources", () => {
     expect(attributeRescueBranch(1, two)).toBeNull();
     expect(attributeRescueBranch(2, one)).toBeNull();
     expect(attributeRescueBranch(0, one)).toBeNull();
+  });
+
+  /**
+   * #216 item 2 — `isRescueBranchFor` used to accept ONLY the flat main-
+   * checkout shape (`fleet/rescue/<studio>-<14 digits>`), missing every other
+   * real rescue-ref shape `rescue.ts` / `provision.ts`'s `discoverRescueRefsCmd`
+   * actually produce: the member-worktree shape (and its nff-retry variant),
+   * the not-checked-out-branch/stash shape, and the WIP-sync shape (#208, not
+   * yet on main but about to be). Each case below is checked true for THIS
+   * studio, false for a cross-studio ref of the same shape, and false for a
+   * coincidentally-prefixed non-rescue branch — the same anchoring discipline
+   * the flat-shape tests above already pin.
+   */
+  it("#216 item 2 — the member-worktree shape, and its nff-retry variant", () => {
+    const wt = `fleet/rescue/${STUDIO}/wt/abc123-20260925120000`;
+    const wtNff = `fleet/rescue/${STUDIO}/wt/abc123-nff-20260925120000`;
+    expect(isRescueBranchFor(STUDIO, wt)).toBe(true);
+    expect(isRescueBranchFor(STUDIO, wtNff)).toBe(true);
+    // Cross-studio: a DIFFERENT studio's nested wt ref must not match.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/other-studio/wt/abc123-20260925120000`)).toBe(false);
+    // A coincidentally-prefixed non-rescue branch under the nested tree.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wt/not-a-timestamp`)).toBe(false);
+    expect(rescueBranchesFor(STUDIO, [wt, wtNff]).slice().sort()).toEqual([wt, wtNff].sort());
+  });
+
+  it("#216 item 2 — the not-checked-out-branch/stash shape", () => {
+    const checkout = `fleet/rescue/${STUDIO}/20260925120000/checkout/some-local-branch`;
+    expect(isRescueBranchFor(STUDIO, checkout)).toBe(true);
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/other-studio/20260925120000/checkout/x`)).toBe(false);
+    // Not 14 digits -- not a real stamp.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/2026092512/checkout/x`)).toBe(false);
+  });
+
+  it("#216 item 2 — the WIP-sync shape (#208): exact, no digits, no trailing path", () => {
+    const wip = `fleet/rescue/${STUDIO}/wip`;
+    expect(isRescueBranchFor(STUDIO, wip)).toBe(true);
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/other-studio/wip`)).toBe(false);
+    // Anything past `/wip` is not the WIP-sync ref itself.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip/extra`)).toBe(false);
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wipster`)).toBe(false);
+  });
+
+  it("#216 item 2 — rescueBranchesFor picks up all 4 shapes for the right studio only", () => {
+    const flat = `fleet/rescue/${STUDIO}-20260925120000`;
+    const wt = `fleet/rescue/${STUDIO}/wt/abc-20260925120000`;
+    const checkout = `fleet/rescue/${STUDIO}/20260925120000/checkout/x`;
+    const wip = `fleet/rescue/${STUDIO}/wip`;
+    const other = `fleet/rescue/other-studio/wip`;
+    const matched = rescueBranchesFor(STUDIO, [flat, wt, checkout, wip, other]);
+    expect(matched.slice().sort()).toEqual([flat, wt, checkout, wip].sort());
+  });
+
+  /**
+   * #216 item 2 — `do.ts`'s `rescueBranches` port used to query ONLY the
+   * flat prefix, so every nested shape (wt/, checkout/, wip) was invisible to
+   * the server-side listing no matter what `isRescueBranchFor` itself
+   * accepted. `fetchRescueBranchesForStudio` is the pure core do.ts's port is
+   * now a one-line forward of — this pins that BOTH prefixes get queried,
+   * and that the results are unioned.
+   */
+  it("#216 item 2 — fetchRescueBranchesForStudio queries BOTH prefixes and unions the results", async () => {
+    expect(rescueBranchPrefixes(STUDIO)).toEqual([rescueBranchPrefix(STUDIO), rescueBranchNestedPrefix(STUDIO)]);
+    const flat = `fleet/rescue/${STUDIO}-20260925120000`;
+    const wt = `fleet/rescue/${STUDIO}/wt/abc-20260925120000`;
+    const listByPrefix = vi.fn(async (prefix: string) => {
+      if (prefix === rescueBranchPrefix(STUDIO)) return [flat];
+      if (prefix === rescueBranchNestedPrefix(STUDIO)) return [wt];
+      return [];
+    });
+    const result = await fetchRescueBranchesForStudio(STUDIO, listByPrefix);
+    expect(listByPrefix).toHaveBeenCalledWith(rescueBranchPrefix(STUDIO));
+    expect(listByPrefix).toHaveBeenCalledWith(rescueBranchNestedPrefix(STUDIO));
+    expect(listByPrefix).toHaveBeenCalledTimes(2);
+    expect(result.slice().sort()).toEqual([flat, wt].sort());
   });
 });
 
