@@ -310,3 +310,153 @@ own "Review round 1 correction" addendum) rather than left overclaiming.
 Judged a one-line `fleet ls` surfacing of these fields as its own,
 not-yet-scoped follow-up (a new table column/JSON field plus its own tests)
 rather than folding it into this already-multi-part fix.
+
+## Review round 2 (fresh-context human review, 2026-10-03) — fix-first
+
+Three BLOCKER findings, one Major finding, plus a rebase item deferred on a
+dependency that has not merged. TDD throughout: a RED commit per finding,
+pushed, then the fix, pushed.
+
+**Finding 1 (BLOCKER, data-loss risk) — `force=true` also disabled the
+rescue-failure refusal, so an unattended stop could destroy WITHOUT a
+successful rescue.** Round 1's own fix (above) wired `stopParkedStudio:
+() => this.destroyStudio(true, false, true)`, reasoning `force: true`
+skipped ONLY the open-task gate. That reasoning missed `destroyStudio`'s own
+`discardUnsynced: discardUnsynced || force` wiring (one level up from
+`runDestroy`'s own `force` param, which really does control ONLY the
+open-task gate): `force: true` here ALSO turned a failed container probe or
+a CONFIRMED rescue-push failure refusal (`destroy.ts`'s `destroyWithSync`,
+~L204 and ~L276) into "proceed anyway" — correct, deliberate behavior for a
+HUMAN's own `fleet destroy --force`, backwards for this UNATTENDED trigger,
+which must never destroy without a successful rescue when nobody is there to
+catch the refusal.
+
+Fix: `destroyStudio` gained a 4th parameter, `skipOpenTaskGate = false`
+(every existing caller unaffected by the default). It widens ONLY the value
+passed as `runDestroy`'s own `force` param (`force || skipOpenTaskGate`);
+`guard.discardUnsynced` stays exactly `discardUnsynced || force`, never
+touching `skipOpenTaskGate`. `stopParkedStudio` now calls
+`this.destroyStudio(false, false, true, true)` — `force: false` (so
+`discardUnsynced` stays `false`, and the probe/rescue-push-confirmed-failure
+refusals stay fully armed), `skipOpenTaskGate: true` (so an open assigned
+board task alone no longer blocks the attempt). Pinned at the pure-function
+level in `test/studio.destroy.test.ts` (an open task is skipped while a
+probe/rescue-push failure still refuses, with `force: true` standing in for
+`force || skipOpenTaskGate` and an explicit `guard.discardUnsynced: false`
+standing in for the two original arguments both being `false`) and at the
+source-text level in `test/studio.observation.test.ts` (the exact
+`force || skipOpenTaskGate` / `discardUnsynced: discardUnsynced || force`
+lines, and the exact `stopParkedStudio` wiring).
+
+**Finding 2 (BLOCKER) — a stale `parkedAt` survived a stop -> resume cycle,
+causing an immediate re-stop (~5 min later).** Three spread sites carried
+`parkedAt` forward unchanged across a stop/resume cycle: `destroy.ts`'s
+stopped-row write, and `provision.ts`'s fresh-provision/restart status
+builds (`runProvision`, `runRestart`), all spread `...(existing ??
+freshStatus(id))` with no explicit `parkedAt` override. Worse,
+`failover.ts`'s own degrade-write read `existing.parkedAt ?? now`
+UNCONDITIONALLY, so a row that had genuinely passed through
+`"stopped"`/`"provisioning"`/`"running"` since the old `parkedAt` was
+stamped — a NEW episode by construction — still carried the OLD, hours-stale
+clock forward the instant the SAME exhaustion reappeared, instantly
+satisfying the 6h auto-stop threshold on the very next tick.
+
+Fix (belt and suspenders, per the review's own instruction): (1) the
+LOAD-BEARING half, `failover.ts`'s degrade-write, now preserves the old
+`parkedAt` ONLY when `existing.state === "degraded"` (a genuine same-episode
+repeat); any other prior state restarts the clock from `now`. (2) the
+DEFENSE-IN-DEPTH half, `destroy.ts`'s stopped-row write and both of
+`provision.ts`'s status builds, now explicitly set `parkedAt: null`. Tests:
+`test/studio.parked-auto-resume.test.ts` pins the exact repro (parked,
+auto-stopped — simulated via a direct `state: "running"` write with the
+stale `parkedAt` left in place — then the same exhaustion reappears: the
+clock restarts, and the auto-stop does not immediately refire);
+`test/studio.destroy.test.ts` and `test/studio.provision.test.ts` each pin
+their own explicit clear.
+
+**Finding 3 (BLOCKER) — the free-account wake could fire forever on a still-
+limited current account, accomplishing nothing, while also masking the
+auto-stop.** `anyAccountFreeToResume` fired the wake whenever EITHER the
+current account was free OR the ordinary 3-tier switch selection
+(`candidate`/`outOfScopeSpare`/`borrowed`) found anything free anywhere. A
+wake is just "dismiss + continue on the account the pane is CURRENTLY
+sitting on" — it can only ever help if the CURRENT account itself is the one
+that freed. A free spare/borrow tier while the current account stayed
+limited meant firing the wake accomplished nothing (claude hits the same
+limit again) while ALSO reading as "something's free, don't stop" on the
+OLD auto-stop condition — the row could never be recognized as genuinely
+stuck. The literal #210 bug shape, reintroduced by this feature's own first
+draft.
+
+Fix, three parts: (1) `anyAccountFreeToResume` is replaced by
+`currentAccountFreeToResume`, which asks ONLY `accountIsFree(currentAccount,
+...)` — the ordinary 3-tier selection already owns "is anything else free"
+(it runs earlier in the same tick, with auto-failover on; with it off,
+nothing moves by design, #271, and this mechanism must respect that
+boundary too). (2) a new anti-hammer field, `StudioStatus.
+freeAccountWakeLastTriedAt`, mirrors `autoContinueLastTriedAt`'s own hourly
+cadence (`AUTO_CONTINUE_RETRY_MS`) so a wake that fires but does not resolve
+anything does not refire every single 300s tick. (3) the auto-stop's own
+triggering condition is simplified to elapsed-time (`>=
+PARKED_AUTO_STOP_HOURS` since `parkedAt`) + still-degraded + not-dead,
+checked BEFORE the free-account check and independent of what it reads that
+tick — "wakes have not healed it in 6h" is on its own sufficient, and immune
+to this finding's own kind of bug by construction (it never has to
+correctly re-derive "is anything free" at all).
+
+The existing round-1 finding-2 test (the only test that exercised the
+removed OR-branch) is corrected to its actually-correct expectation (no
+wake fires when only a different, non-current tier frees). The two original
+ask-2 demo tests, and the new tests this finding adds, needed their own
+25h-clock-jump fixtures reworked: once the auto-stop is unconditional past
+6h, any scenario that waits a full day for the 24h null-until grace to lift
+is ALSO, by then, long past the 6h stop threshold — so those tests now
+either backdate the account's own fleet-wide sighting (crossing the grace
+while `parkedAt` itself stays under 6h) or assert `"auto-stopped"` directly.
+
+**Finding 5 Part A (Major) — a refused auto-stop needed its own backoff and
+a single notify.** `park-refused` returned without ever writing the refusal
+onto the row or telling the operator, and would have retried
+`deps.stopParkedStudio` (a real board-API call, in production) every single
+300s tick forever. Fix: two new fields, `StudioStatus.parkRefusalReason`/
+`parkRefusedAt`, written onto the row BEFORE the outcome returns.
+`parkRefusedAt` is also the bounded retry cadence (same
+`AUTO_CONTINUE_RETRY_MS` shape) — a standing refusal is not retried (or
+renotified) more often than once an hour. The operator is notified via
+`deps.notify` only when the reason actually CHANGED from the last one
+recorded (the same "unchanged message, no new notify" rule the ordinary
+exhaustion message's own anti-loop guard already uses,
+`existing.error === message`) — a changed reason (the board task situation
+shifted) notifies again.
+
+**Finding 5 Part B (doc only) — does this auto-stop interact with an
+operator actively attached to the studio's tmux session?** Checked
+`src/studio/inspect.ts` directly (the one file in this codebase that
+documents the `tmux list-clients`/attach mechanics in depth, issue #47) and
+grepped the whole repo for `list-clients`: it appears EXACTLY ONCE, in
+`inspect.ts`'s own doc comment, as an EMPIRICAL VERIFICATION NOTE that
+`capture-pane -p` itself never creates an attached client — not as a live
+check anything calls. There is no "is an operator currently attached"
+primitive anywhere in this codebase today, and this auto-stop path (nor any
+other path) never checks for one. Stated here explicitly, per the review's
+own instruction, rather than silently: an operator who has `fleet attach`ed
+to a parked studio's tmux session gets no special treatment from
+`PARKED_AUTO_STOP_HOURS` — if the row is still degraded with the same
+exhaustion 6 hours after `parkedAt`, the auto-stop fires regardless of
+whether anyone is watching. No new attach-detection machinery was built for
+this: the review's own instruction was not to invent one unless a trivial,
+already-available, zero-new-risk check existed, and none does
+(`list-clients` is a real tmux round trip this file's whole design
+(`sbExec`-only, never `sbAttachPty`) goes out of its way to avoid paying for
+on every read-only check it already runs; adding it here would be new
+scope, not a trivial reuse).
+
+**Finding 4 (the #209/#211-dependent rebase) — DEFERRED, not attempted.**
+The review's own 5th finding asks that this file's 3-tier `candidate`/
+`outOfScopeSpare`/`borrowed` selection (`runAccountFailover`) be rebased onto
+PR #211's shared `selectFreeAccount`/`nextBorrowedAccount` helpers (itself
+building on PR #209). PR #211 has not merged to `main` as of this round —
+rebasing onto helpers that do not exist yet on `main` is not attempted here.
+A one-line `TODO (#210 review, finding 4)` comment marks the exact call site
+(`failover.ts`, immediately above the `candidate` computation) referencing
+this issue and PR #211, so the rebase is easy to find once that PR lands.
