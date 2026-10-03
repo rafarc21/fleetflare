@@ -271,6 +271,12 @@ describe("#251 — rescue-push walks every git worktree, not just the main check
  * symbolic meaning for that name. Detached HEAD must be treated exactly
  * like "checked out branch is the default": always the generated
  * `fleet/rescue/...` ref, never a branch literally named HEAD.
+ *
+ * Issue #207 (2026-10-03): rescue_target() no longer inspects HEAD/the
+ * checked-out branch at all in checkout mode, so this collision is
+ * impossible for a simpler reason now — see rescue_target()'s own doc
+ * comment in rescue.ts. The fixtures below still pass unchanged: detached
+ * HEAD was already routed to a generated ref, and still is.
  */
 function anyRefNamedHead(): boolean {
   return sh(`git -C ${origin} for-each-ref --format='%(refname)'`)
@@ -377,14 +383,26 @@ describe("#263 C1 — a failed rescue never reads as RESCUE_CLEAN/RESCUE_MARKERS
     expect(refs.some((r) => !r.includes("agent-a1b2"))).toBe(false);
   });
 
-  test("a stale index.lock in the member worktree: RESCUE_FAILED names that worktree, nothing pushed for it", () => {
+  // BLOCKER fix (fresh-context review on #207, 2026-10-03): this used to
+  // assert a stale REAL index.lock blocked the rescue — true back when
+  // rescue_one's dirty-tree branch ran `git add -A`/`git commit` against the
+  // real index, which a stale lock on that same real file genuinely
+  // contends with. The dirty-tree branch now stages into a throwaway,
+  // out-of-band `GIT_INDEX_FILE` (the same non-mutating technique
+  // rescueSnapshotCmd's own copy already used) that never touches
+  // `.git/worktrees/agent-a1b2/index.lock` or the real index it guards —
+  // a leftover lock from a crashed `git add`/`git commit` the agent itself
+  // was mid-running no longer loses that worktree's rescue the way it used
+  // to.
+  test("a stale index.lock in the member worktree no longer blocks the rescue (the dirty-tree snapshot never touches the real index)", () => {
     writeFileSync(join(scheckout, ".git/worktrees/agent-a1b2/index.lock"), "");
     writeFileSync(join(scheckout, ".claude/worktrees/agent-a1b2", "wip.md"), "member work\n");
 
     const out = srescue();
 
-    expect(out).toMatch(new RegExp(`${RESCUE_FAILED_PREFIX} agent-a1b2`));
-    expect(rescueRefs().some((r) => r.includes("agent-a1b2"))).toBe(false);
+    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-\\d{14} 1 files$`, "m"));
+    expect(rescueRefs().some((r) => r.includes("agent-a1b2"))).toBe(true);
   });
 
   test("a failing pre-commit hook via core.hooksPath does not block the rescue: commits use --no-verify", () => {
@@ -437,6 +455,12 @@ describe("#263 C2 — the lead's own unpushed commits are never masked by the ma
     expect(sh(`git -C ${origin} rev-parse ${mainRef}`).out).toBe(leadSha);
   });
 
+  // Issue #207: this used to assert the lead's commit landed on
+  // `task/feature`'s own name (origin's branch ref moving as a side effect
+  // of this rescue). rescue_target() in checkout mode now always generates,
+  // so the lead's commit lands under its own fleet/rescue/<studio>-<ts> ref
+  // instead, and `task/feature` (never pushed anywhere in this fixture)
+  // stays absent from origin.
   test("dirty member AND lead on a new upstream-less branch with 1 commit: both HEADs land on origin in the same run", () => {
     sh(`git -C ${checkout} checkout -q -b task/feature && git -C ${checkout} commit -q --allow-empty -m "lead work"`);
     const leadSha = sh(`git -C ${checkout} rev-parse HEAD`).out;
@@ -444,12 +468,22 @@ describe("#263 C2 — the lead's own unpushed commits are never masked by the ma
 
     const out = rescue();
 
-    expect(out).toMatch(/RESCUE_PUSHED task\/feature 1/);
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 commits$`, "m"));
     expect(out).toMatch(new RegExp(`${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-\\d{14} 1`));
-    expect(sh(`git -C ${origin} rev-parse refs/heads/task/feature`).out).toBe(leadSha);
+    expect(sh(`git -C ${origin} rev-parse --verify refs/heads/task/feature`).code).not.toBe(0);
+    const mainRef = rescueRefs().find((r) => !r.includes("agent-a1b2"));
+    expect(mainRef).toBeDefined();
+    expect(sh(`git -C ${origin} rev-parse ${mainRef}`).out).toBe(leadSha);
+    // BLOCKER fix (fresh-context review on #207, 2026-10-03): the member
+    // worktree's dirty tree is now snapshotted non-mutatingly (same
+    // technique rescueSnapshotCmd already used) — its own real HEAD never
+    // moves, so the pushed ref is a FLOATING commit whose PARENT is that
+    // unchanged real HEAD, not the real HEAD itself.
     const memberSha = sh(`git -C ${join(checkout, ".claude/worktrees/agent-a1b2")} rev-parse HEAD`).out;
     const memberRef = rescueRefs().find((r) => r.includes("agent-a1b2"));
-    expect(sh(`git -C ${origin} rev-parse ${memberRef}`).out).toBe(memberSha);
+    expect(sh(`git -C ${origin} rev-parse ${memberRef}^`).out).toBe(memberSha);
+    const memberFiles = sh(`git -C ${origin} ls-tree -r --name-only ${memberRef}`).out.split("\n");
+    expect(memberFiles).toContain("wip.md");
   });
 });
 
@@ -462,16 +496,26 @@ describe("#263 C2 — the lead's own unpushed commits are never masked by the ma
  * second run sees the work as already saved.
  */
 describe("#263 C3 — idempotent on a --depth 1 clone: a second run pushes nothing new", () => {
-  test("run1 pushes one ref; run2 (1.1s later) pushes nothing and the ref list is unchanged", async () => {
+  // BLOCKER fix (fresh-context review on #207, 2026-10-03): this used to
+  // write a DIRTY file and rely on rescuePushCmd's own now-removed real
+  // `git commit` to make the member worktree clean again before run2 — the
+  // dirty-tree branch is non-mutating now (same technique rescueSnapshotCmd
+  // always used) and, by design, re-finds the SAME dirty diff and pushes a
+  // fresh ref every run (see rescueSnapshotCmd's own doc comment in
+  // rescue.ts for why that's the correct tradeoff). A real, already-COMMITTED
+  // unpushed commit — the "clean, but has unpushed commits" branch, entirely
+  // unaffected by that fix — is what C3's own local-bookkeeping fix
+  // (`update-ref refs/remotes/origin/<target> HEAD`) still applies to.
+  test("run1 pushes a real unpushed commit; run2 (1.1s later) pushes nothing and the ref list is unchanged", async () => {
     const sroot = join(dir, "workspace-shallow-c3");
     const scheckout = join(sroot, REPO);
     mkdirSync(sroot, { recursive: true });
     sh(`git clone -q --depth 1 file://${origin} ${scheckout}`);
     sh(`git -C ${scheckout} worktree add -q .claude/worktrees/agent-a1b2 -b agent-a1b2`);
-    writeFileSync(join(scheckout, ".claude/worktrees/agent-a1b2", "wip.md"), "member work\n");
+    sh(`git -C ${join(scheckout, ".claude/worktrees/agent-a1b2")} commit -q --allow-empty -m "member work"`);
 
     const out1 = sh(rescuePushCmd(REPO, STUDIO, sroot)).out;
-    expect(out1).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-\\d{14} 1 files$`, "m"));
+    expect(out1).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-\\d{14} 1 commits$`, "m"));
     const refsAfter1 = rescueRefs();
     expect(refsAfter1.length).toBe(1);
 
@@ -520,7 +564,12 @@ describe("#263 C4 — colliding worktree-directory basenames never overwrite eac
   test("rescuePushCmd never force-pushes a member ref (no `+HEAD:` anywhere)", () => {
     const cmd = rescuePushCmd(REPO, STUDIO, root);
     expect(cmd).not.toMatch(/push origin "\+HEAD/);
-    expect(cmd).not.toContain(" -f ");
+    // BLOCKER fix (fresh-context review on #207, 2026-10-03): not a bare
+    // `not.toContain(" -f ")` -- rescue_one's dirty-tree branch now also
+    // contains `[ -f "$realidx" ]` (a shell file-existence test, unrelated
+    // to git's own `-f`/`--force` flag), same non-mutating technique
+    // rescueSnapshotCmd's own identical test (below) already scopes past.
+    expect(cmd).not.toMatch(/git[^\n]*push[^\n]*(-f\b|--force)/);
     expect(cmd).not.toContain("--force");
   });
 });
@@ -751,77 +800,25 @@ describe("#263 round 6 — a benign stderr warning during N1's rev-list must nev
   });
 });
 
-/**
- * PR #263 round 3, N3: a push rejected non-fast-forward (the checked-out
- * branch moved on origin since this worktree last knew about it — a lead's
- * own PR branch, pushed to from somewhere else entirely) used to fall
- * straight into RESCUE_FAILED, destroying the container's only copy of that
- * work right after. Verified live against real git (a second clone pushes
- * ahead of the lead's own checkout, exactly reproducing the "fetch first"
- * rejection this file's own header already documents for the shallow-clone
- * case): the SAME commit is retried, once, to a freshly generated
- * `fleet/rescue/...` ref that has no existing tip on origin to reject
- * against — landing clean. Only if THAT retry also fails does this become a
- * genuine RESCUE_FAILED.
- */
-describe("#263 N3 — a non-fast-forward push rejection retries to a generated fallback ref", () => {
-  test("the checked-out branch moved on origin: retried to a generated ref, never RESCUE_FAILED", () => {
-    sh(`cd ${checkout} && git checkout -q -b task/lead && git push -q origin task/lead`);
-    const otherClone = join(dir, "other-clone");
-    sh(`git clone -q ${origin} ${otherClone}`);
-    sh(`cd ${otherClone} && git checkout -q task/lead && git commit -q --allow-empty -m "someone else moved this branch" && git push -q origin task/lead`);
-    writeFileSync(join(checkout, "notes.md"), "lead work that must not be lost\n");
-
-    const out = rescue();
-
-    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
-    // HOLD-round fix: the fallback ref used to sit flat between two dashes
-    // (`fleet/rescue/<studio>-<id>-<ts>-nff`) — the exact same shape #266's
-    // own fix already moved the member-worktree ref OFF of, for the exact
-    // same reason (discoverRescueRefsCmd's flat pattern anchors to EXACTLY
-    // 14 digits right after `<studio>-`; the extra `<id>-nff-` characters
-    // never matched it, so an nff-retried rescue sat on origin invisible to
-    // the very auto-fetch this whole feature exists to provide). Moved under
-    // the same `wt/` segment (`fleet/rescue/<studio>/wt/<id>-nff-<ts>`) so it
-    // matches discoverRescueRefsCmd's existing `wt/` pattern alternative
-    // unchanged — no new pattern needed, `-nff` just replaces the timestamp
-    // as the trailing literal before the real 14-digit timestamp.
-    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/checkout-nff-\\d{14} 1 files$`, "m"));
-    const refs = rescueRefs();
-    const fallbackRef = refs.find((r) => r.includes("-nff-"));
-    expect(fallbackRef).toBeDefined();
-    const leadSha = sh(`git -C ${checkout} rev-parse HEAD`).out;
-    expect(sh(`git -C ${origin} rev-parse ${fallbackRef}`).out).toBe(leadSha);
-    // The branch's own ref on origin is untouched — never force-pushed over.
-    expect(sh(`git -C ${otherClone} rev-parse HEAD`).out).toBe(sh(`git -C ${origin} rev-parse refs/heads/task/lead`).out);
-  });
-
-  test("the -nff fallback ref is auto-discoverable by discoverRescueRefsCmd, same as the ordinary wt/ shape", () => {
-    sh(`cd ${checkout} && git checkout -q -b task/lead2 && git push -q origin task/lead2`);
-    const otherClone = join(dir, "other-clone-nff-discover");
-    sh(`git clone -q ${origin} ${otherClone}`);
-    sh(`cd ${otherClone} && git checkout -q task/lead2 && git commit -q --allow-empty -m "someone else moved this branch" && git push -q origin task/lead2`);
-    writeFileSync(join(checkout, "notes.md"), "lead work that must not be lost\n");
-
-    const out = rescue();
-    const fallbackRef = rescueRefs().find((r) => r.includes("-nff-"));
-    expect(fallbackRef).toBeDefined();
-    const branchName = fallbackRef!.replace(/^refs\/heads\//, "");
-
-    // Simulate the NEXT provision, from a fresh clone that knows nothing
-    // about this rescue yet.
-    const freshClone = join(dir, "fresh-clone-nff");
-    sh(`git clone -q ${origin} ${freshClone}`);
-    // PR #312 round 3: the list file's path is injectable -- the default
-    // /workspace/.fleet does not exist (or is unwritable) off a studio, and
-    // the old command's `|| true` hid that, so this test failed on a Mac
-    // for a reason nothing printed.
-    sh(discoverRescueRefsCmd(freshClone, STUDIO, join(dir, ".fleet", "remote-branches.txt")), dir);
-
-    expect(sh(`git -C ${freshClone} rev-parse --verify ${branchName}`).code).toBe(0);
-    expect(out).toContain(branchName);
-  });
-
+// PR #263 round 3, N3 ("a non-fast-forward push rejection retries to a
+// generated fallback ref") used to live here: a lead's own checked-out PR
+// branch, moved on origin by a second clone, made rescue_push()'s FIRST push
+// attempt (back then, the checked-out branch's own name) get rejected
+// non-fast-forward, retried onto a generated fallback ref.
+//
+// Issue #207 (2026-10-03): retired. rescue_target() in checkout mode now
+// always generates a fresh ref as the FIRST attempt (see its own doc
+// comment in rescue.ts), which nothing on origin can ever collide with — so
+// this fixture's precondition (a real checked-out branch as the push
+// target) can no longer occur. This is the exact same already-accepted gap
+// rescueSnapshotCmd's own HOLD-round doc comment on `rescue_push()` already
+// documents for its own NFF-retry call site: "there is no
+// real-branch-collision fixture that reaches rescueSnapshotCmd's own retry
+// call site at all" (see rescue.ts's rescueSnapshotCmd section).
+// discoverRescueRefsCmd's own auto-discovery of the `-nff-` ref shape is
+// still covered by the shallow-clone NFF fixture under "issue #1" below,
+// which still reaches the retry today.
+describe("discoverRescueRefsCmd — a write failure is reported, never blocks provisioning", () => {
   test("discovery that cannot write its list file says so on stderr, and still never fails provisioning", () => {
     const freshClone = join(dir, "fresh-clone-unwritable");
     sh(`git clone -q ${origin} ${freshClone}`);
@@ -1027,13 +1024,21 @@ describe("#266 — rescueSnapshotCmd saves a dirty tree WITHOUT touching the liv
  * branch called the SAME rescue_target() checkout-mode resolution
  * rescuePushCmd uses to pick a push destination. In checkout mode, when the
  * checked-out branch is NOT the repo's resolved default (the ordinary case
- * once a studio's own agent branches), rescue_target() returns that branch's
- * OWN name as the target — correct for rescuePushCmd (which WANTS to push
- * straight to the current branch, an existing/real commit, at teardown) but
- * wrong for rescueSnapshotCmd's dirty-tree branch, which builds a synthetic
- * snapshot commit foreign to the studio's own history and must NEVER land it
- * on a ref the live studio itself still owns, regardless of what
- * branch-vs-default the checked-out branch happens to resolve to.
+ * once a studio's own agent branches), rescue_target() returned that
+ * branch's OWN name as the target — correct, AT THE TIME, for rescuePushCmd
+ * (which wanted to push straight to the current branch, an existing/real
+ * commit, at teardown) but wrong for rescueSnapshotCmd's dirty-tree branch,
+ * which builds a synthetic snapshot commit foreign to the studio's own
+ * history and must NEVER land it on a ref the live studio itself still owns,
+ * regardless of what branch-vs-default the checked-out branch happens to
+ * resolve to.
+ *
+ * Issue #207 (2026-10-03, see the describe block of that name further below)
+ * later found "correct for rescuePushCmd" itself wrong too — a checked-out
+ * branch can be an already-gated PR's own head, not just "the current
+ * branch" — and made rescue_target() match snapshot_target()'s own always-
+ * generate shape. The two functions this comment contrasts are, as of
+ * #207, the same shape in checkout mode.
  *
  * Measured: a studio on `task/feature` (not the default branch) ran a
  * snapshot rescue against a dirty tree; the old code printed `RESCUE_PUSHED
@@ -1106,6 +1111,90 @@ describe("HOLD round (PR #312 real-git review) — rescueSnapshotCmd on a live f
     const rescued = rescueRefs().find((r) => r.startsWith(`refs/heads/fleet/rescue/${STUDIO}-`));
     expect(rescued).toBeDefined();
     expect(sh(`git -C ${origin} rev-parse ${rescued}`).out).toBe(head);
+  });
+});
+
+/**
+ * Board issue #207, measured live 2026-10-03T02:17Z: `fleet destroy --park`
+ * ran rescue-push on a studio with an uncommitted dev-only edit, checked out
+ * on the HEAD branch of an open, already-gated PR. `rescue_target()`'s own
+ * branch-vs-default split (the "Fix round 2" design documented at length
+ * above rescuePushCmd) deliberately returned that checked-out branch's OWN
+ * name as the push target, because it was not the repo's resolved default —
+ * and rescue committed the dev-only edit as a bot commit and pushed it
+ * straight onto that gated PR's own head. A 45s push timeout happened to turn
+ * the actual push into a harmless 409 that night, but nothing in the design
+ * prevented it from landing. `rescueSnapshotCmd`'s own `snapshot_target()` was
+ * already fixed for the identical reason under issue #312 (see the HOLD-round
+ * block right above this one) — a live studio's real branch must never be a
+ * push target. `rescue_target()` gets the same fix here: in checkout mode it
+ * now ALWAYS generates a fresh `fleet/rescue/...` ref, exactly like
+ * `snapshot_target()`, never the checked-out branch's own name — closing this
+ * for every caller of rescuePushCmd (destroy.ts's plain destroy and --park,
+ * and do.ts's other call site), since they all go through this one function.
+ */
+describe("#207 — rescue never commits/pushes directly onto the checked-out branch", () => {
+  test("dirty tree on a non-default checked-out branch (an open PR's head): origin's branch ref is unchanged; the edit lands on a generated fleet/rescue/... ref instead", () => {
+    sh(`git -C ${checkout} checkout -q -b task/pr-branch`);
+    sh(`git -C ${checkout} push -q origin task/pr-branch`);
+    writeFileSync(join(checkout, "dev-only.local"), "must never be committed to a PR branch\n");
+    const before = sh(`git -C ${origin} rev-parse refs/heads/task/pr-branch`).out;
+
+    const out = rescue();
+
+    expect(out).not.toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} task/pr-branch `, "m"));
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 files$`, "m"));
+    expect(sh(`git -C ${origin} rev-parse refs/heads/task/pr-branch`).out).toBe(before);
+  });
+});
+
+/**
+ * BLOCKER, fresh-context review on #207 (2026-10-03): #207 made the PUSH
+ * always target a generated `fleet/rescue/...` ref, but rescuePushCmd's own
+ * `rescue_one()` still staged and committed the dirty tree onto the REAL
+ * checkout's REAL index/HEAD BEFORE that push was even attempted. If the
+ * subsequent push then failed for any reason — here, an origin `pre-receive`
+ * hook rejecting it outright, same `originRejects` technique the #58
+ * describe block below already uses to force a real push failure — the
+ * caller (`do.ts`'s `rescuePush`) throws on the `RESCUE_FAILED` line, and
+ * `destroy`/`recycle` refuse the kill on that throw (unless
+ * `--discard-unsynced`) — so the container survives with a bot commit now
+ * sitting on the real branch's real local HEAD, tree clean. The lead's own
+ * next ordinary `git push` on that branch would ship that bot commit,
+ * including whatever forbidden content it carried, straight onto the real
+ * branch.
+ *
+ * This is the test that proves the fix: the real checkout's own
+ * `git status --porcelain` and `git rev-parse HEAD` must be byte-identical
+ * before the rescue attempt and after it returns RESCUE_FAILED. Before the
+ * fix, HEAD moves (a new commit lands) and the tree goes clean; after it,
+ * neither changes — the dirty-tree snapshot is built out-of-band (a detached
+ * `GIT_INDEX_FILE` + `commit-tree`, the same non-mutating technique
+ * rescueSnapshotCmd's own `rescue_one()` already used), and only ITS sha is
+ * pushed/retried, never the real index or HEAD.
+ */
+describe("BLOCKER (fresh-context review on #207) — rescue_one() never mutates the real checkout before a push attempt", () => {
+  function originRejects(msg: string): void {
+    mkdirSync(join(origin, "hooks"), { recursive: true });
+    writeFileSync(join(origin, "hooks", "pre-receive"), `#!/bin/sh\necho "${msg}" >&2\nexit 1\n`);
+    chmodSync(join(origin, "hooks", "pre-receive"), 0o755);
+  }
+
+  test("dirty tree on a checked-out branch, push rejected by origin: real checkout status/HEAD are byte-identical before and after RESCUE_FAILED", () => {
+    sh(`git -C ${checkout} checkout -q -b task/pr-branch`);
+    sh(`git -C ${checkout} push -q origin task/pr-branch`);
+    writeFileSync(join(checkout, "dev-only.local"), "must never land as a real commit on this branch\n");
+    originRejects("policy says no");
+
+    const statusBefore = sh(`git -C ${checkout} status --porcelain`).out;
+    const headBefore = sh(`git -C ${checkout} rev-parse HEAD`).out;
+
+    const r = sh(rescuePushCmd(REPO, STUDIO, root));
+
+    expect(r.out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
+    expect(r.err).toContain("policy says no");
+    expect(sh(`git -C ${checkout} status --porcelain`).out).toBe(statusBefore);
+    expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(headBefore);
   });
 });
 
@@ -1234,26 +1323,24 @@ for (const [label, cmdFn] of RESCUE_CMDS) {
  * control over — stalls exactly at the push step, matching the measured
  * failure precisely.
  *
- * Fix: `--no-verify` on the push itself, but ONLY when the push target is
- * a generated `fleet/rescue/...` ref — never when it is a real branch name
- * (the main checkout's own current branch, pushed straight there when that
- * branch is not the repo's resolved default; see rescue_target()'s own doc
- * comment above). A real branch push must still go through #259's guard and
- * any repo's own pre-push hook, exactly as before — only the throwaway
- * rescue refs this whole file invents get to skip a hook that has nothing
- * to review.
+ * Fix, AT THE TIME: `--no-verify` on the push itself, but ONLY when the push
+ * target was a generated `fleet/rescue/...` ref — never when it was a real
+ * branch name (the main checkout's own current branch, pushed straight
+ * there when that branch was not the repo's resolved default; see
+ * rescue_target()'s own doc comment above). A real branch push still had to
+ * go through #259's guard and any repo's own pre-push hook — only the
+ * throwaway rescue refs this whole file invents got to skip a hook that has
+ * nothing to review.
  *
- * Every OTHER push in both commands (worktree member refs, the branch walk's
- * `checkout/<branch>` refs, the stash walk's `checkout/stash-N` refs, and
- * rescueSnapshotCmd's own snapshot_target() in every mode) is ALREADY,
- * unconditionally, a generated `fleet/rescue/...` ref — verified by reading
- * every push call site in rescue.ts, not assumed — so the shared test below
- * (parametrized across both command builders, same RESCUE_CMDS list used
- * throughout this file) covers the one push shape common to both. The
- * rescuePushCmd-only test after it covers the ONE call site — the main
- * checkout's own branch-vs-default resolution — capable of naming a real
- * branch as its push target, which is exactly the case `--no-verify` must
- * never reach.
+ * Issue #207 (2026-10-03): rescue_target() in checkout mode can no longer
+ * name a real branch as a push target at all (see its own doc comment in
+ * rescue.ts), so EVERY push in both commands is now unconditionally a
+ * generated `fleet/rescue/...` ref, and `--no-verify` applies
+ * unconditionally too. The shared test below (parametrized across both
+ * command builders) is the only test left in this describe block — the
+ * rescuePushCmd-only test that used to follow it, covering the one call site
+ * that could still name a real branch, was deleted; see the comment that
+ * replaces it, right after this block's single test.
  */
 describe("#359 — a failing pre-push hook never blocks a rescue push to a generated fleet/rescue/... ref", () => {
   function installFailingPrePushHook(): void {
@@ -1275,53 +1362,21 @@ describe("#359 — a failing pre-push hook never blocks a rescue push to a gener
     });
   }
 
-  // The mutant this guards against: applying `--no-verify` unconditionally to
-  // EVERY push (not only generated refs) would make this test go red for the
-  // wrong reason — a real branch push must still be blockable by a repo's own
-  // pre-push hook. Only rescuePushCmd's rescue_target() can ever name a real
-  // branch as a push target (the checked-out branch, when it is not the
-  // repo's resolved default) — rescueSnapshotCmd's snapshot_target() never
-  // does, in either mode (see this function's own HOLD-round doc comment).
-  test("rescuePushCmd: dirty tree on a REAL (non-default) feature branch still honors a failing pre-push hook — RESCUE_FAILED, never silently bypassed", () => {
-    sh(`git -C ${checkout} checkout -q -b task/feature`);
-    sh(`git -C ${checkout} push -q origin task/feature`);
-    installFailingPrePushHook();
-    writeFileSync(join(checkout, "notes.md"), "real work\n");
-
-    const out = sh(rescuePushCmd(REPO, STUDIO, root)).out;
-
-    expect(out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
-    expect(out).not.toContain(RESCUE_PUSHED_PREFIX);
-  });
-
-  /**
-   * Fresh review of PR #359 round 1, Finding 1: `rescue_push()` decided
-   * whether to apply `--no-verify` by pattern-matching the RESULTING string
-   * (`case "$target" in fleet/rescue/*) ...`), never by tracking which of
-   * `rescue_target()`'s own two branches actually produced it. Git branch
-   * names may legally contain slashes, so a real, currently-checked-out
-   * branch that happens to be named `fleet/rescue/<anything>` (nothing to do
-   * with this tool's own generated refs — just a human/agent branch that
-   * collides with the naming scheme by coincidence) makes `rescue_target()`
-   * return that branch's OWN name unchanged (the "else" arm: not the
-   * default), the `case` pattern matches it anyway, and `--no-verify`
-   * silently bypasses the target repo's own pre-push hook for a genuine
-   * branch push — exactly the failure mode this whole file exists to
-   * prevent. The fix threads rescue_target()'s own provenance (which branch
-   * of ITS logic ran) through to rescue_push() directly, rather than
-   * reconstructing the answer later from the string's shape.
-   */
-  test("rescuePushCmd: a REAL (non-default) branch that happens to be NAMED fleet/rescue/collision still honors a failing pre-push hook — RESCUE_FAILED, never silently bypassed by string-shape coincidence", () => {
-    sh(`git -C ${checkout} checkout -q -b fleet/rescue/collision`);
-    sh(`git -C ${checkout} push -q origin fleet/rescue/collision`);
-    installFailingPrePushHook();
-    writeFileSync(join(checkout, "notes.md"), "real work on a coincidentally-named branch\n");
-
-    const out = sh(rescuePushCmd(REPO, STUDIO, root)).out;
-
-    expect(out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
-    expect(out).not.toContain(RESCUE_PUSHED_PREFIX);
-  });
+  // Issue #207 (2026-10-03): two tests used to live here —
+  // "rescuePushCmd: dirty tree on a REAL (non-default) feature branch still
+  // honors a failing pre-push hook" and "...a REAL (non-default) branch that
+  // happens to be NAMED fleet/rescue/collision...", guarding against a
+  // mutant that applied `--no-verify` unconditionally to every push. Their
+  // whole premise — that rescuePushCmd's rescue_target() can still name a
+  // real, checked-out branch as a push target — no longer holds:
+  // rescue_target() in checkout mode now always generates, exactly like
+  // rescueSnapshotCmd's own snapshot_target() already did (see
+  // rescue_target()'s own doc comment in rescue.ts). The parametrized test
+  // just above already proves `--no-verify` applies to the generated-ref
+  // case for both command builders; there is no remaining real-branch-push
+  // case left for either builder to guard with a client-side pre-push hook.
+  // See `rescue_push()`'s own doc comment in rescue.ts for why unconditional
+  // `--no-verify` is safe now.
 });
 
 /**
@@ -1445,23 +1500,37 @@ describe("#359 round 2 review, item 3 — the branch-walk and non-fast-forward-r
   }
 
   test("rescuePushCmd: rescue_push()'s own non-fast-forward RETRY push is killed and reported as RESCUE_FAILED, never waits out the hook's own 3s sleep", () => {
-    // Same fixture as "#263 N3": the checked-out branch moved on origin
-    // since this checkout last knew about it, so the FIRST push attempt is
-    // rejected non-fast-forward (instantly — the hook never runs for a
-    // rejected push, since `post-receive` only fires once a push actually
-    // updates refs) and rescue_push() retries to a freshly generated
-    // `-nff-` fallback ref, which DOES land — and DOES trigger the slow
-    // hook. Isolates the RETRY's own `timeout -k` wrapping specifically,
-    // never the first attempt's.
-    sh(`cd ${checkout} && git checkout -q -b task/lead && git push -q origin task/lead`);
-    const otherClone = join(dir, "other-clone-item3-retry");
-    sh(`git clone -q ${origin} ${otherClone}`);
-    sh(`cd ${otherClone} && git checkout -q task/lead && git commit -q --allow-empty -m "someone else moved this branch" && git push -q origin task/lead`);
+    // Issue #207: this used to reuse "#263 N3"'s real `task/lead`-collision
+    // fixture. That precondition is retired (rescue_target() in checkout
+    // mode always generates now; see N3's own retirement comment above) —
+    // reusing it here would have made the FIRST attempt (now always a fresh
+    // generated ref) land cleanly and trip the slow hook itself, isolating
+    // the wrong call site's `timeout -k` wrapping. Same deterministic
+    // generated-ref collision as "#371 review Finding 1" above instead:
+    // `date -u +%Y%m%d%H%M%S` is PATH-shimmed to a fixed value, and that
+    // EXACT first-attempt ref name is squatted on origin (fast, before the
+    // slow hook is installed) so the FIRST push attempt is rejected
+    // non-fast-forward (instantly — the hook never runs for a rejected push,
+    // since `post-receive` only fires once a push actually updates refs) and
+    // rescue_push() retries to a freshly generated `-nff-` fallback ref,
+    // which DOES land — and DOES trigger the slow hook. Isolates the RETRY's
+    // own `timeout -k` wrapping specifically, never the first attempt's.
+    const fixedTs = "20261003120000";
+    const shimDir = mkdtempSync(join(tmpdir(), "fleet-item3-retry-date-shim-"));
+    writeFileSync(
+      join(shimDir, "date"),
+      `#!/bin/sh\nif [ "$1" = "-u" ] && [ "$2" = "+%Y%m%d%H%M%S" ]; then echo ${fixedTs}; exit 0; fi\n` +
+        `for d in /bin/date /usr/bin/date; do [ -x "$d" ] && exec "$d" "$@"; done\n`,
+    );
+    chmodSync(join(shimDir, "date"), 0o755);
+    const squat = join(dir, "squat-clone-item3-retry");
+    sh(`git clone -q ${origin} ${squat} 2>/dev/null && git -C ${squat} commit -q --allow-empty -m squat && ` +
+      `git -C ${squat} push -q origin HEAD:refs/heads/fleet/rescue/${STUDIO}-${fixedTs}`);
     installSlowPostReceiveHook(3);
     writeFileSync(join(checkout, "notes.md"), "lead work racing a slow retry push\n");
 
     const start = Date.now();
-    const out = sh(rescuePushCmd(REPO, STUDIO, root, 1)).out;
+    const out = sh(rescuePushCmd(REPO, STUDIO, root, 1), dir, { PATH: `${shimDir}:${BASE_PATH}` }).out;
     const elapsedMs = Date.now() - start;
 
     expect(out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
@@ -1611,11 +1680,21 @@ describe("#371 (#362 follow-up) — budget guard: rescue never starts a push it 
  * — up to `2 * (pushTimeoutSeconds + KILL_GRACE_SECONDS)` combined, not the
  * single-push figure the pre-fix threshold budgeted for.
  *
- * Same real-non-fast-forward fixture as "#263 N3" above (a checked-out,
- * non-default branch — `task/lead` — pushed-to from a second clone so this
- * checkout's own first attempt is genuinely rejected `(fetch first)`, forcing
+ * Issue #207 (2026-10-03): this used to reuse "#263 N3"'s real-non-fast-
+ * forward fixture (a checked-out, non-default branch — `task/lead` —
+ * pushed-to from a second clone). That fixture is retired (see N3's own
+ * retirement comment above) now that `rescue_target()` never returns a real
+ * branch name. The retry branch is still real and still needs proving
+ * against its actual worst case, so this fixture now forces the SAME
+ * non-fast-forward rejection a different way: `date -u +%Y%m%d%H%M%S` is
+ * PATH-shimmed to a fixed, known value (same mechanism as test case (b)
+ * below, and as the `rescueSnapshotCmd`/private-remote collision fixture
+ * under "issue #1"), and that EXACT generated ref name is pre-squatted on
+ * origin by an unrelated commit before the real rescue run — so this
+ * checkout's own first attempt (now always a freshly generated ref) is
+ * genuinely rejected `(fetch first)` against that squatted name, forcing
  * `rescue_push()` into its retry branch against a freshly generated `-nff-`
- * fallback ref), PLUS a slow `post-receive` hook on the retry's own
+ * fallback ref, PLUS a slow `post-receive` hook on the retry's own
  * destination so the retry itself takes real, measurable wall-clock time
  * (the rejected first attempt is instant — a rejected push never reaches the
  * remote's `post-receive` hook at all, verified by every pre-existing N3/#359
@@ -1654,21 +1733,39 @@ describe("#371 (#362 follow-up) — budget guard: rescue never starts a push it 
  *       never runs at all (no RESCUE_PUSHED, no push-hook side effect).
  */
 describe("#371 review Finding 1 — the budget guard doubles its threshold at rescue_push()'s own retry-capable call sites", () => {
-  function setUpNonFastForwardRetryFixture(hookSleepSeconds: number): void {
-    sh(`cd ${checkout} && git checkout -q -b task/lead && git push -q origin task/lead`);
-    const otherClone = join(dir, "other-clone-371-budget");
-    sh(`git clone -q ${origin} ${otherClone}`);
-    sh(`cd ${otherClone} && git checkout -q task/lead && git commit -q --allow-empty -m "someone else moved this branch" && git push -q origin task/lead`);
+  // Issue #207: deterministic non-fast-forward fixture, replacing the real
+  // `task/lead`-collision fixture this used to build (see this describe
+  // block's own doc comment above). `fixedTs` is PATH-shimmed in for every
+  // `date -u +%Y%m%d%H%M%S` call rescue.ts's own shell makes, so the FIRST
+  // generated ref name is known ahead of time and can be squatted on origin
+  // before the real rescue run.
+  const FIXED_TS = "20261003100000";
+  function dateShimDir(): string {
+    const shimDir = mkdtempSync(join(tmpdir(), "fleet-371-date-shim-"));
+    writeFileSync(
+      join(shimDir, "date"),
+      `#!/bin/sh\nif [ "$1" = "-u" ] && [ "$2" = "+%Y%m%d%H%M%S" ]; then echo ${FIXED_TS}; exit 0; fi\n` +
+        `for d in /bin/date /usr/bin/date; do [ -x "$d" ] && exec "$d" "$@"; done\n`,
+    );
+    chmodSync(join(shimDir, "date"), 0o755);
+    return shimDir;
+  }
+  function setUpNonFastForwardRetryFixture(hookSleepSeconds: number): string {
+    const shimDir = dateShimDir();
+    const squat = join(dir, "squat-clone-371");
+    sh(`git clone -q ${origin} ${squat} 2>/dev/null && git -C ${squat} commit -q --allow-empty -m squat && ` +
+      `git -C ${squat} push -q origin HEAD:refs/heads/fleet/rescue/${STUDIO}-${FIXED_TS}`);
     // The rejected FIRST attempt never reaches this hook (a rejected push
     // updates no ref, so post-receive never fires) -- only the retry's own
     // push to the generated -nff- fallback ref does, so this sleep measures
     // the RETRY's own timeout budget specifically, never the first attempt's.
     installSlowPostReceiveHook(hookSleepSeconds);
     writeFileSync(join(checkout, "notes.md"), "lead work racing a slow retry push, budget-guard review\n");
+    return shimDir;
   }
 
   test(`rescuePushCmd: remaining budget covers the DOUBLED (retry-pair) threshold — the checkpoint is let through and the slow-but-successful retry lands as RESCUE_PUSHED`, () => {
-    setUpNonFastForwardRetryFixture(1);
+    const shimDir = setUpNonFastForwardRetryFixture(1);
     const pushTimeoutSeconds = 2;
     const doubledThreshold = 2 * (pushTimeoutSeconds + KILL_GRACE_SECONDS);
     // ~3s slack clear of the exact doubled-threshold boundary — see this
@@ -1679,11 +1776,12 @@ describe("#371 review Finding 1 — the budget guard doubles its threshold at re
     // `marginSeconds` above, kept independent of production's own
     // RESCUE_BUDGET_MARGIN_SECONDS default (rescue.ts) so this test's exact
     // threshold math stays legible.
-    const out = sh(rescuePushCmd(REPO, STUDIO, root, pushTimeoutSeconds, doubledThreshold + marginSeconds, 0)).out;
+    const out = sh(rescuePushCmd(REPO, STUDIO, root, pushTimeoutSeconds, doubledThreshold + marginSeconds, 0),
+      dir, { PATH: `${shimDir}:${BASE_PATH}` }).out;
 
     expect(out).not.toContain("budget");
     expect(out).not.toContain(`${RESCUE_FAILED_PREFIX} checkout`);
-    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/checkout-nff-\\d{14} 1 files$`, "m"));
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/checkout-nff-${FIXED_TS} 1 files$`, "m"));
   });
 
   test(`rescuePushCmd: remaining budget covers only a SINGLE push (between the single and doubled thresholds) — the checkpoint is skipped as RESCUE_FAILED checkout budget <n> not attempted, never allowed to attempt the retry`, () => {
@@ -1860,30 +1958,61 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
     expect(rescueRefs()).toEqual([]);
   });
 
-  test("rescuePushCmd, real feature branch: pushed under its own name to the private remote; origin never gets the branch", () => {
+  // Issue #207 (2026-10-03): rescue_target() in checkout mode no longer
+  // returns a real, checked-out branch's own name — it always generates,
+  // exactly like rescueSnapshotCmd's own snapshot_target() already did. The
+  // lead's work on `task/lead` now lands under a generated
+  // fleet/rescue/<studio>-<ts> ref instead, and `task/lead` itself is never
+  // pushed anywhere by this rescue.
+  test("rescuePushCmd, real feature branch: lands on a generated ref on the private remote; `task/lead` itself is never pushed anywhere", () => {
     sh(`git -C ${checkout} checkout -q -b task/lead`);
     writeFileSync(join(checkout, "notes.md"), "lead work\n");
 
     const out = pushPriv();
 
-    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} task/lead 1 files$`, "m"));
-    expect(privRefs()).toContain("refs/heads/task/lead");
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 files$`, "m"));
+    expect(privRefs().some((r) => r.includes("fleet/rescue/"))).toBe(true);
+    expect(privRefs()).not.toContain("refs/heads/task/lead");
     expect(sh(`git -C ${origin} for-each-ref --format='%(refname)' refs/heads/task/lead`).out).toBe("");
   });
 
-  test("rescuePushCmd, non-fast-forward on the private remote: the -nff fallback ALSO lands on the private remote", () => {
-    sh(`git -C ${checkout} checkout -q -b task/lead`);
-    const other = join(dir, "other-clone");
-    sh(`git clone -q ${origin} ${other} 2>/dev/null && git -C ${other} checkout -q -b task/lead && git -C ${other} commit -q --allow-empty -m moved && git -C ${other} push -q ${priv} task/lead`);
-    writeFileSync(join(checkout, "notes.md"), "lead work that must not be lost\n");
+  // Issue #207: the test that used to live here ("rescuePushCmd,
+  // non-fast-forward on the private remote: the -nff fallback ALSO lands on
+  // the private remote") had its precondition retired — a real, checked-out
+  // `task/lead` branch colliding with an unrelated `task/lead` history
+  // already pushed to the private remote by a second clone — the same
+  // unreachable-precondition problem "#263 N3" (above) had, for the
+  // identical reason: the first push attempt is now always a freshly
+  // generated ref, which nothing already on the private remote can collide
+  // with by real-branch name. Same deterministic generated-ref collision
+  // technique as "#371 review Finding 1" (above) and the `rescueSnapshotCmd`
+  // equivalent further down this same describe block ("its generated ref
+  // already taken on the private remote: the -nff fallback ALSO lands
+  // there"): `date -u +%Y%m%d%H%M%S` is PATH-shimmed to a fixed value, and
+  // that EXACT generated ref name is squatted on the PRIVATE remote by an
+  // unrelated commit first, so `rescuePushCmd`'s own first attempt is
+  // rejected non-fast-forward and its `-nff` retry fires, landing on the
+  // private remote — never origin.
+  test("rescuePushCmd, its generated ref already taken on the private remote: the -nff fallback ALSO lands there", () => {
+    const shimDir = join(dir, "date-shim-push-priv-nff");
+    mkdirSync(shimDir);
+    writeFileSync(
+      join(shimDir, "date"),
+      "#!/bin/sh\nif [ \"$1\" = \"-u\" ] && [ \"$2\" = \"+%Y%m%d%H%M%S\" ]; then echo 20261003130000; exit 0; fi\n" +
+        "for d in /bin/date /usr/bin/date; do [ -x \"$d\" ] && exec \"$d\" \"$@\"; done\n",
+    );
+    chmodSync(join(shimDir, "date"), 0o755);
+    const other = join(dir, "other-clone-push-priv-nff");
+    sh(`git clone -q ${origin} ${other} 2>/dev/null && git -C ${other} commit -q --allow-empty -m squat && ` +
+      `git -C ${other} push -q ${priv} HEAD:refs/heads/fleet/rescue/${STUDIO}-20261003130000`);
+    writeFileSync(join(checkout, "notes.md"), "private work racing a collision\n");
 
-    const out = pushPriv();
+    const out = sh(rescuePushCmd(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined,
+      { remoteUrl: priv, realGit: REAL_GIT }), dir, { PATH: `${shimDir}:${BASE_PATH}` }).out;
 
     expect(out).not.toContain(RESCUE_FAILED_PREFIX);
-    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/checkout-nff-\\d{14} 1 files$`, "m"));
-    const fallback = privRefs().find((r) => r.includes("-nff-"));
-    expect(fallback).toBeDefined();
-    expect(sh(`git -C ${priv} rev-parse ${fallback}`).out).toBe(sh(`git -C ${checkout} rev-parse HEAD`).out);
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/checkout-nff-20261003130000 1 files$`, "m"));
+    expect(privRefs()).toContain(`refs/heads/fleet/rescue/${STUDIO}/wt/checkout-nff-20261003130000`);
     expect(rescueRefs()).toEqual([]);
   });
 
@@ -1910,8 +2039,19 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
     expect(rescueRefs()).toEqual([]);
   });
 
-  test("rescuePushCmd, private remote: a second run pushes nothing new (local bookkeeping still marks the ref pushed)", () => {
-    writeFileSync(join(checkout, "notes.md"), "once\n");
+  // BLOCKER fix (fresh-context review on #207, 2026-10-03): this used to
+  // write a DIRTY file (never committed by the fixture itself) and relied
+  // on rescuePushCmd's own now-removed real `git commit` to make the tree
+  // clean again, so the local bookkeeping (`update-ref refs/remotes/...`)
+  // could make the SECOND run see it as already saved. The dirty-tree
+  // branch is non-mutating now (same technique rescueSnapshotCmd always
+  // used) and, by design, re-finds the SAME dirty diff and pushes a fresh
+  // ref every run (see rescueSnapshotCmd's own doc comment in rescue.ts for
+  // why that's the correct tradeoff) — so this test now exercises the
+  // "clean, but has a real unpushed commit" branch instead, the one case
+  // the local-bookkeeping fix genuinely still applies to.
+  test("rescuePushCmd, private remote: a second run pushes nothing new for an already-pushed COMMIT (local bookkeeping still marks the ref pushed)", () => {
+    sh(`git -C ${checkout} commit -q --allow-empty -m "real work"`);
     expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
     const refs = privRefs();
 
@@ -1956,7 +2096,15 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
       expect(ref).toBeDefined();
       expect(privTreeFiles(ref!)).toEqual(["a.md", "b.md", "c.md", "notes.md"]);
       expect(sh(`git -C ${priv} show ${ref}:notes.md`).out).toBe("shallow work");
-      expect(sh(`git -C ${priv} rev-parse ${ref}^{tree}`).out).toBe(sh(`git -C ${checkout} rev-parse HEAD^{tree}`).out);
+      // BLOCKER fix (fresh-context review on #207, 2026-10-03): this used to
+      // also assert the pushed ref's tree equals the real checkout's OWN
+      // `HEAD^{tree}` -- true back when the dirty-tree branch committed onto
+      // the real HEAD. The real checkout's HEAD never advances now (the
+      // snapshot is built out-of-band), so `HEAD^{tree}` stays the ORIGINAL
+      // shallow clone's tree, no longer the snapshot's -- the file-list and
+      // content checks above already prove the pushed tree is the whole
+      // tree (a/b/c.md) plus the dirty file (notes.md), which is the
+      // property this line existed to confirm.
     });
 
     test("rescuePushCmd, clean-but-ahead shallow checkout: RESCUE_PUSHED, and the private ref holds HEAD's exact tree", () => {
@@ -1990,18 +2138,40 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
     // caller's budget check reserved (first try + -nff retry). Each extra push
     // is budget-checked too, so none starts past the server deadline -- the
     // worktree is a confirmed RESCUE_FAILED instead of an exec killed mid-run.
+    // Issue #207: the first push attempt is now always a freshly generated
+    // ref (rescue_target() never returns a real branch's own name), so the
+    // old fixture here -- a real, checked-out `task/lead` colliding with an
+    // unrelated `task/lead` history already on the private remote -- can no
+    // longer force a rejection. Same deterministic-collision technique as
+    // the "#371 review Finding 1" fixture above and the
+    // `rescueSnapshotCmd`/private-remote collision test further down this
+    // same describe block ("its generated ref already taken on the private
+    // remote"): `date -u +%Y%m%d%H%M%S` is PATH-shimmed to a fixed value, and
+    // that EXACT generated ref name is squatted on the private remote by an
+    // unrelated commit first -- so both the regular push AND its own
+    // shallow-clone snapshot fallback (rescue_try_push's inner retry, same
+    // target name) are rejected non-fast-forward for the same reason the old
+    // fixture's name collision was, forcing the OUTER `-nff-` retry path.
     test("rescuePushCmd, shallow + non-fast-forward: a push the budget cannot cover is never started", () => {
       const realTimeout = Bun.which("timeout", { PATH: BASE_PATH });
       expect(realTimeout).not.toBeNull();
+      const fixedTs = "20261003110000";
       const slowDir = join(dir, "slow-timeout");
       mkdirSync(slowDir);
       writeFileSync(join(slowDir, "timeout"), `#!/bin/sh\nsleep 5\nexec '${realTimeout}' "$@"\n`);
       chmodSync(join(slowDir, "timeout"), 0o755);
-      // An unrelated history on the private remote's task/lead: the first push
-      // is rejected, and so is its snapshot, forcing the -nff path.
+      writeFileSync(
+        join(slowDir, "date"),
+        `#!/bin/sh\nif [ "$1" = "-u" ] && [ "$2" = "+%Y%m%d%H%M%S" ]; then echo ${fixedTs}; exit 0; fi\n` +
+          `for d in /bin/date /usr/bin/date; do [ -x "$d" ] && exec "$d" "$@"; done\n`,
+      );
+      chmodSync(join(slowDir, "date"), 0o755);
+      // Squat the exact generated ref name on the private remote with an
+      // unrelated commit: the first push, and its own shallow-snapshot
+      // fallback, both get rejected non-fast-forward against it.
       const orphan = join(dir, "orphan");
-      sh(`git init -q -b task/lead ${orphan} && cd ${orphan} && git commit -q --allow-empty -m other && git push -q ${priv} task/lead`);
-      sh(`git -C ${checkout} checkout -q -b task/lead`);
+      sh(`git init -q -b orphan-main ${orphan} && cd ${orphan} && git commit -q --allow-empty -m other && ` +
+        `git push -q ${priv} HEAD:refs/heads/fleet/rescue/${STUDIO}-${fixedTs}`);
       writeFileSync(join(checkout, "notes.md"), "work\n");
       const pushTimeoutSeconds = 3;
       const single = pushTimeoutSeconds + KILL_GRACE_SECONDS;
@@ -2632,10 +2802,20 @@ describe("#39 — one RESCUE_WT line per worktree", () => {
  * HEAD already equals its branch on origin. Provision clones `--depth 1`
  * (implies `--single-branch`), so a branch the lead pushed itself gets no
  * `refs/remotes/origin/<branch>`, and `rev-list --not --remotes` counts its
- * already-pushed commits as ahead. Rescue then pushes to that REAL branch,
- * where the repo's own pre-push hook runs (#359: real branches keep hooks);
- * a hook resolving `@{u}` on an upstream-less branch dies with
- * `fatal: no upstream configured for branch` — and no stderr reached the 409.
+ * already-pushed commits as ahead. At the time this was written, rescue then
+ * pushed to that REAL branch, where the repo's own pre-push hook ran (#359:
+ * real branches kept hooks); a hook resolving `@{u}` on an upstream-less
+ * branch died with `fatal: no upstream configured for branch` — and no
+ * stderr reached the 409.
+ *
+ * Issue #207 (2026-10-03): the "real branch keeps hooks" half of that
+ * history is superseded — rescue_target() in checkout mode now always
+ * generates, so a genuinely-ahead branch's commits land on a generated
+ * `fleet/rescue/...` ref (`--no-verify` unconditionally), never on the real
+ * branch a client-side pre-push hook could still observe. The main scenario
+ * this block tests (`RESCUE_CLEAN`, no push at all because `rescue_on_origin`
+ * already recognizes the branch as saved) is unaffected either way — nothing
+ * is pushed, so no target resolution ever runs.
  */
 describe("#49 — a clean checkout whose HEAD is already on origin is nothing to rescue", () => {
   function upstreamHook(): void {
@@ -2658,6 +2838,12 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
       pushedPrBranch();
       upstreamHook();
       const before = sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out;
+      // Minor #1 (fresh-context review on #207, 2026-10-03): the ref-name
+      // listing alone proves no ref was added/removed, but NOT that
+      // `task/pr`'s own commit stayed the same -- a bug that force-pushed a
+      // DIFFERENT commit onto the exact same ref name would still pass that
+      // check. The sha is captured too, and compared too, below.
+      const beforeSha = sh(`git -C ${origin} rev-parse refs/heads/task/pr`).out;
 
       const r = sh(cmdFn(REPO, STUDIO, root));
 
@@ -2666,18 +2852,31 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
       expect(bare(r.out)).toBe(RESCUE_CLEAN);
       expect(r.out).toMatch(/^RESCUE_WT checkout nothing$/m);
       expect(sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out).toBe(before);
+      expect(sh(`git -C ${origin} rev-parse refs/heads/task/pr`).out).toBe(beforeSha);
     });
   }
 
-  test("a GENUINE unpushed commit on that branch still fails under the hook — and the push stderr is surfaced", () => {
+  // Issue #207 (2026-10-03): this used to assert a GENUINE unpushed commit
+  // on `task/pr` still failed under a client-side pre-push hook resolving
+  // `@{u}` — proof that a real-branch push kept the repo's own hooks.
+  // rescue_target() in checkout mode now always generates, so this exact
+  // commit instead lands cleanly on a generated `fleet/rescue/...` ref
+  // (`--no-verify` unconditionally); there is no real-branch push target
+  // left for a client-side hook to observe. Covered by the `#359`
+  // parametrized "bypassing a failing pre-push hook" test instead.
+  test("a GENUINE unpushed commit on an upstream-less branch: lands on a generated ref, not the real branch — a client-side hook never sees it", () => {
     pushedPrBranch();
     sh(`cd ${checkout} && git commit -q --allow-empty -m "really unpushed"`);
     upstreamHook();
+    const head = sh(`git -C ${checkout} rev-parse HEAD`).out;
 
     const r = sh(rescuePushCmd(REPO, STUDIO, root));
 
-    expect(r.out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
-    expect(r.err).toContain("no upstream configured");
+    expect(r.out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 2 commits$`, "m"));
+    const ref = rescueRefs().find((x) => !x.includes("agent-a1b2"));
+    expect(ref).toBeDefined();
+    expect(sh(`git -C ${origin} rev-parse ${ref}`).out).toBe(head);
+    expect(sh(`git -C ${origin} for-each-ref --format='%(refname)' refs/heads/task/pr`).out).toBe("refs/heads/task/pr");
   });
 });
 
@@ -2783,6 +2982,11 @@ describe("#58 — on-origin check: budgeted, fail-safe, push URL aware; every pu
     });
   }
 
+  // Issue #207: this used to assert the push landed on `task/pr`'s own name
+  // at the pushurl destination (rescue_target()'s old real-branch path).
+  // rescue_target() in checkout mode now always generates, so the push
+  // lands under a generated `fleet/rescue/<studio>-<ts>` ref there instead —
+  // `task/pr`'s own name is never a push target either way.
   test("rescuePushCmd: pushurl differs from the fetch url → the listing cannot vouch for the push destination → push runs", () => {
     prBranchOnOrigin();
     const elsewhere = join(dir, "push-dest.git");
@@ -2790,7 +2994,7 @@ describe("#58 — on-origin check: budgeted, fail-safe, push URL aware; every pu
     sh(`git -C ${checkout} config remote.origin.pushurl ${elsewhere}`);
     const r = sh(rescuePushCmd(REPO, STUDIO, root));
     expect(bare(r.out)).not.toBe(RESCUE_CLEAN);
-    expect(sh(`git -C ${elsewhere} for-each-ref --format='%(refname)'`).out).toContain("refs/heads/task/pr");
+    expect(sh(`git -C ${elsewhere} for-each-ref --format='%(refname)'`).out).toContain(`refs/heads/fleet/rescue/${STUDIO}-`);
   });
 });
 

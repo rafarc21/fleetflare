@@ -1786,6 +1786,7 @@ describe("recordBringupObservation — the keeper's own r2Head failing never fal
       studioId: KEEPER_STUDIO_ID,
       tasks: { ok: true, value: [] },
       openPrs: { ok: true, value: [] },
+      unclaimedRescueBranches: [],
       session: observed.session ?? null,
       now: NOW,
     });

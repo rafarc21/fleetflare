@@ -13,6 +13,7 @@ function baseInput(overrides: Partial<SurvivalInput> = {}): SurvivalInput {
     studioId: "demosite-life--release-studio",
     tasks: { ok: true, value: [] },
     openPrs: { ok: true, value: [] },
+    unclaimedRescueBranches: [],
     session: null,
     now: NOW,
     ...overrides,

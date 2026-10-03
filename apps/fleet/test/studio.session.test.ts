@@ -2387,7 +2387,7 @@ describe("provisionedCheckCmd — the shell shape recycle measures success with"
 // ---------------------------------------------------------------------------
 
 describe("rescuePushCmd — the shell shape rescue-push commits and pushes with", () => {
-  it("checks the repo's own checkout path, the dirty-tree status, and resolves a push target from the checked-out branch", () => {
+  it("checks the repo's own checkout path, the dirty-tree status, and resolves a generated push target", () => {
     const cmd = rescuePushCmd("websites", STUDIO_ID);
 
     expect(cmd).toContain("/workspace/websites/.git");
@@ -2395,16 +2395,14 @@ describe("rescuePushCmd — the shell shape rescue-push commits and pushes with"
     expect(cmd).toContain('rescue_wt "/workspace/websites" "checkout" "checkout"');
     expect(cmd).toContain("rescue_one() {");
     expect(cmd).toContain('git -C "$w" status --porcelain');
-    expect(cmd).toContain("git -C \"$w\" rev-parse --abbrev-ref HEAD");
     expect(cmd).toContain('git -C "$w" add -A');
-    // Issue #359: `$nv` carries --no-verify only when `$target` is a
-    // generated fleet/rescue/... ref — see rescue_push()'s own doc comment
-    // in rescue.ts.
+    // Issue #207: every push now uses --no-verify unconditionally — see
+    // rescue_push()'s own doc comment in rescue.ts.
     // Issue #1 piece 5 + blocker 2: configurable destination; origin (the
     // default) pushes via plain `git` on PATH = the leak-gate wrapper.
     // Issue #16: the push itself lives in rescue_try_push (shallow fallback).
     expect(cmd).toContain('"${__rgit[@]}" -C "$w" push $nv "$__rdest" "$src:refs/heads/$ref"');
-    expect(cmd).toContain('rescue_try_push "$w" "$nv" HEAD "$target"');
+    expect(cmd).toContain('rescue_try_push "$w" --no-verify "$ref" "$target"');
     expect(cmd).toContain("__rgit=(git); __rdest=origin");
     expect(cmd).not.toContain("/usr/bin/git");
     expect(cmd).toContain(`echo "${RESCUE_NO_CHECKOUT}"`);
@@ -2412,47 +2410,26 @@ describe("rescuePushCmd — the shell shape rescue-push commits and pushes with"
     expect(cmd).toContain(RESCUE_PUSHED_PREFIX);
   });
 
-  // Fix round 2 (2026-08-27, T5 Finding 1, HIGH): the guard that keeps
-  // rescue-push off the repo's default branch. See do.ts's own doc comment
-  // on rescuePushCmd for the live-measured failure this closes — an
-  // unreviewed push straight to `main`, or (once `main` has moved past a
-  // studio's shallow clone) a non-fast-forward rejection that silently
-  // saves nothing.
-  it('resolves the repo\'s ACTUAL default branch rather than hardcoding "main" — a repo whose default branch has any other name is handled the same way', () => {
+  // Issue #207 (2026-10-03): a test used to live here ("resolves the repo's
+  // ACTUAL default branch rather than hardcoding main") pinning the
+  // branch-vs-default resolution `rescue_target()` used to do in checkout
+  // mode (Fix round 2, 2026-08-27, T5 Finding 1, HIGH). There is no
+  // default-branch resolution left in `rescuePushCmd` at all — checkout mode
+  // always generates now, exactly like `rescueSnapshotCmd`'s own
+  // `snapshot_target()` (#312) — so there is nothing left to pin here.
+  it("diverts to a generated fleet/rescue/<studio>-<UTC stamp> ref unconditionally in checkout mode (fail safe, not fail open — no branch/default inspection left to get wrong)", () => {
     const cmd = rescuePushCmd("websites", STUDIO_ID);
-    expect(cmd).toContain('git -C "$w" symbolic-ref --quiet refs/remotes/origin/HEAD');
-    // Regression guard: the fixed string "main" must appear NOWHERE in the
-    // emitted command — every prior instance of a literal default-branch
-    // name was the bug.
-    expect(cmd).not.toContain('"main"');
-    expect(cmd).not.toContain("refs/heads/main");
+    expect(cmd).toContain(`target="fleet/rescue/${STUDIO_ID}-$(date -u +%Y%m%d%H%M%S)"`);
+    expect(cmd).not.toContain("target_generated");
+    expect(cmd).not.toContain('"$default"');
+    expect(cmd).not.toContain('"$branch"');
   });
 
-  it("diverts to a generated fleet/rescue/<studio>-<UTC stamp> ref when the checked-out branch matches the resolved default, OR the default could not be resolved at all (fail safe, not fail open — one `if`, both arms share it)", () => {
-    const cmd = rescuePushCmd("websites", STUDIO_ID);
-    expect(cmd).toContain('if [ -z "$default" ] || [ "$branch" = "HEAD" ] || [ "refs/remotes/origin/$branch" = "$default" ]');
-    expect(cmd).toContain(`target="fleet/rescue/${STUDIO_ID}-$(date -u +%Y%m%d%H%M%S)"; target_generated=1`);
-  });
-
-  // #251 review finding: `git rev-parse --abbrev-ref HEAD` returns the
-  // literal string "HEAD" in detached-HEAD state — never a real branch
-  // name, so it must never reach the `target="$branch"` push path (that
-  // would push to a real ref literally named `refs/heads/HEAD`, colliding
-  // with git's own special symbolic meaning for that name).
-  //
-  // PR #263 round 2: the dirty-tree case and the clean-but-unpushed case
-  // both now call the SAME `rescue_target` shell function, so the guard
-  // itself appears exactly once in the emitted script — proven by both call
-  // sites (dirty commit, and clean-but-ahead) reaching it, not by counting
-  // duplicated inline copies of the check.
-  it("treats a detached HEAD (the literal string \"HEAD\") the same as the default branch — never a push target literally named HEAD", () => {
-    const cmd = rescuePushCmd("websites", STUDIO_ID);
-    const guardOccurrences = cmd.split('[ "$branch" = "HEAD" ]').length - 1;
-    expect(guardOccurrences).toBe(1);
-    const targetCallOccurrences = cmd.split('rescue_target "$w" "$mode" "$id"').length - 1;
-    expect(targetCallOccurrences).toBe(2);
-    expect(cmd).not.toContain('target="HEAD"');
-  });
+  // Issue #207: a test used to live here ("treats a detached HEAD... the
+  // same as the default branch") proving `branch = "HEAD"` (detached state)
+  // never reached the real-branch push path (#251 review finding). Branch/
+  // HEAD is never inspected by `rescue_target()` at all any more — there is
+  // no special case left to prove, detached or not.
 
   it("commits under a fixed fleet identity by default — Dockerfile.studio configures no git user.name/user.email of its own", () => {
     // Issue #335: the real identity is env-configured now (do.ts's

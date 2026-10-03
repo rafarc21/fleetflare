@@ -568,10 +568,13 @@ export type RescuePushKind = "files" | "commits";
  *  (`skipped` names which — "no checkout" or "clean", neither an error).
  *  `pushed: true` means `branch`/`files` describe a real commit that
  *  reached origin before the kill that follows it. `branch` is wherever the
- *  push ACTUALLY landed — the studio's own checked-out branch, or a
- *  generated `fleet/rescue/<studio>-<stamp>` ref when that branch was (or
- *  could not be proven not to be) the repo's default; see rescuePushCmd's
- *  own doc comment. Never `null` when `pushed` is true. */
+ *  push ACTUALLY landed — unconditionally a generated
+ *  `fleet/rescue/<studio>-<stamp>` ref since issue #207 (2026-10-03), never
+ *  the studio's own checked-out branch; see rescuePushCmd's own doc comment.
+ *  The real checkout's own index/HEAD are never mutated either (same issue's
+ *  own fresh-context-review fix) — a dirty tree is snapshotted out-of-band
+ *  before the push, so a failed push leaves the real checkout untouched.
+ *  Never `null` when `pushed` is true. */
 export interface RescueResult {
   pushed: boolean;
   branch: string | null;

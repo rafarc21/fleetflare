@@ -63,6 +63,24 @@ export interface SurvivalInput {
   studioId: string;
   tasks: Checked<SurvivalTaskBranch[]>;
   openPrs: Checked<SurvivalOpenPr[]>;
+  /**
+   * MAJOR fix (fresh-context review on #207, 2026-10-03): SOURCE 3's own
+   * rescue refs (survival-delivery.ts's `rescueBranchesFor`) that
+   * `attributeRescueBranch` could NOT safely assign to any unresolved task
+   * -- either genuinely ambiguous (more than one unresolved task, more than
+   * one candidate ref, or both) or simply left over once attribution ran.
+   * `attributeRescueBranch`'s own doc comment explains why a wrong guess is
+   * worse than silence, and that silence is exactly the bug this field
+   * fixes: before this field existed, every one of these refs vanished —
+   * the lead never learned a rescue ref existed for its own studio at all.
+   * Rendered as its own line per ref (see `composeSurvivalBrief` below) so
+   * a lead can go find it by name even though this composer could not
+   * safely guess which task, if any, it belongs to. Always `[]` when
+   * nothing is left unclaimed (including the common case: every task
+   * already had a branch, or exactly one task matched exactly one ref and
+   * was attributed).
+   */
+  unclaimedRescueBranches: string[];
   /** PR1's (#85) own bring-up verdict record, passed through as-is -- null
    *  before any bring-up has completed under that feature. Replaces the
    *  bare `lastSnapshotAgeS: number | null` this field used to be: PR1's
@@ -189,6 +207,15 @@ function taskLine(b: SurvivalTaskBranch, now: string): string {
 
 function prLine(pr: SurvivalOpenPr): string {
   return `- Open PR #${pr.number}: ${quoted(pr.title)} (${sanitizeBranch(pr.branch)})`;
+}
+
+/** MAJOR fix (fresh-context review on #207): one line per rescue ref nothing
+ *  could be safely attributed to. `sanitizeBranch`, same as every other ref
+ *  this composer renders (`taskLine`/`prLine`) -- a ref name is still
+ *  free-ish text (this fleet's own convention happens to constrain it, but
+ *  nothing here should assume that holds for every ref ever pushed). */
+function unclaimedRescueLine(ref: string): string {
+  return `- Unclaimed rescue ref: ${sanitizeBranch(ref)} (not attributed to any task)`;
 }
 
 /** Review fix (#107 re-review): the restore outcome's own word, shown
@@ -319,6 +346,7 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
   const genuinelyEmpty =
     input.tasks.ok && input.tasks.value.length === 0 &&
     input.openPrs.ok && input.openPrs.value.length === 0 &&
+    input.unclaimedRescueBranches.length === 0 &&
     input.session === null;
   if (genuinelyEmpty) return "";
 
@@ -346,6 +374,16 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
     const sorted = input.openPrs.value.slice().sort((a, b) => a.number - b.number);
     for (const pr of sorted.slice(0, MAX_LINES_PER_SECTION)) {
       lines.push(prLine(pr));
+    }
+    if (sorted.length > MAX_LINES_PER_SECTION) {
+      lines.push(`- +${sorted.length - MAX_LINES_PER_SECTION} more`);
+    }
+  }
+
+  if (input.unclaimedRescueBranches.length > 0) {
+    const sorted = input.unclaimedRescueBranches.slice().sort();
+    for (const ref of sorted.slice(0, MAX_LINES_PER_SECTION)) {
+      lines.push(unclaimedRescueLine(ref));
     }
     if (sorted.length > MAX_LINES_PER_SECTION) {
       lines.push(`- +${sorted.length - MAX_LINES_PER_SECTION} more`);

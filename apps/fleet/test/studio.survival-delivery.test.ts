@@ -337,6 +337,60 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       null, NOW,
     );
     expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: ref })] });
+    expect(input.unclaimedRescueBranches).toEqual([]);
+  });
+
+  /**
+   * MAJOR fix (fresh-context review on #207, 2026-10-03): two rescue refs for
+   * one unresolved task used to be AMBIGUOUS-AND-SILENTLY-DROPPED —
+   * `attributeRescueBranch` correctly refuses to guess (its own doc comment:
+   * a wrong guess is worse than silence), but nothing downstream of that
+   * refusal ever surfaced the refs it refused to assign. The lead never
+   * learned either ref existed. `unclaimedRescueBranches` now carries every
+   * ref that attribution did not claim, and the composed brief renders each
+   * one as its own line.
+   */
+  it("source 3, ambiguous (2 refs, 1 unresolved task): neither is attributed, but BOTH are surfaced as unclaimed — never silently dropped", async () => {
+    const refA = `fleet/rescue/${STUDIO}-20260925120000`;
+    const refB = `fleet/rescue/${STUDIO}-20260925130000`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [refA, refB] }),
+      { ok: true, value: [task()] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: null })] });
+    expect(input.unclaimedRescueBranches.slice().sort()).toEqual([refA, refB].sort());
+
+    const brief = await composeSurvivalDelivery(
+      sources({ rescueBranches: async () => [refA, refB] }),
+      { ok: true, value: [task()] },
+      session(), NOW,
+    );
+    expect(brief).toContain(`Unclaimed rescue ref: ${refA}`);
+    expect(brief).toContain(`Unclaimed rescue ref: ${refB}`);
+  });
+
+  it("source 3, ambiguous (1 ref, 2 unresolved tasks): the ref is not attributed to either, but it IS surfaced as unclaimed", async () => {
+    const ref = `fleet/rescue/${STUDIO}-20260925120000`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [ref] }),
+      {
+        ok: true,
+        value: [
+          task({ taskNumber: 1 }),
+          task({ taskNumber: 2 }),
+        ],
+      },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true,
+      value: [
+        expect.objectContaining({ taskNumber: 1, branch: null }),
+        expect.objectContaining({ taskNumber: 2, branch: null }),
+      ],
+    });
+    expect(input.unclaimedRescueBranches).toEqual([ref]);
   });
 
   it("ahead_by 0 renders EMPTY — a CHECKED zero, never dropped and never fabricated", async () => {
