@@ -474,8 +474,9 @@ describe("review round 2 (#210), finding 2 — a stale parkedAt must not survive
     // resume always does), but parkedAt is untouched — exactly the shape
     // destroy.ts's/provision.ts's own pre-fix carry-forward produced.
     const resumedAt = new Date(NOW.getTime() + 7 * HOUR_MS);
+    const beforeResume = (await h.storage.get(STATUS_KEY))!;
     await h.storage.put(STATUS_KEY, {
-      ...(await h.storage.get(STATUS_KEY)), state: "running", error: null, parkedAt: firstParkedAt,
+      ...beforeResume, state: "running", error: null, parkedAt: firstParkedAt,
     });
     h.setNow(resumedAt);
 
