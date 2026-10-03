@@ -38,7 +38,7 @@
 // destroyWithSync itself is here: a live StudioDO cannot be constructed
 // under vitest-pool-workers, so any branch worth covering has to be a plain
 // function taking its dependencies as arguments.
-import type { StudioStatus } from "./types";
+import type { StudioStatus, DestroyOutcome } from "./types";
 import { STATUS_KEY, DESTROYING_KEY, freshStatus, bumpDestroyEpoch, type StudioStorage } from "./provision";
 import {
   syncSessionTick, shipAsideSessions, asideNotShippedNote, type SessionSyncDeps, type SessionSyncStorage,
@@ -370,6 +370,13 @@ async function destroyAndRecord(
   const status: StudioStatus = {
     ...(existing ?? freshStatus(idFallback)), state: "stopped", error: unrescued, containerRunningSince: null,
     parked: park, stoppedAt,
+    // Review round 2 (#210), finding 2 — defense in depth: a STOPPED row
+    // must never claim to still be "parked since <stale time>". The
+    // load-bearing half of this fix lives in failover.ts's own
+    // degrade-write (StudioStatus.parkedAt's own doc comment); this is the
+    // belt (a stop always clears it outright, whether or not a later resume
+    // ever re-exhausts), never relied on alone.
+    parkedAt: null,
   };
   await storage.put(STATUS_KEY, status);
   // Issue #152: the SECOND bump, right after the stopped row lands and still
@@ -386,18 +393,20 @@ async function destroyAndRecord(
   return status;
 }
 
-/** `runDestroy`'s own tagged result — a REFUSAL (an open assigned board task
- *  exists, and `--force` was not passed) must read differently at every
- *  layer above this from an actual operational failure: the route layer
- *  turns this into 409, never 500 (see routes.ts's own destroy branch), and
- *  neither the board task nor its labels are ever touched on this path — see
- *  this file's header. A bare throw here would make that distinction
- *  invisible to a caller without inspecting Error subclasses across what is,
- *  in production, a Durable Object RPC boundary; a plain tagged return
- *  avoids that entirely. */
-export type DestroyOutcome =
-  | { ok: true; status: StudioStatus }
-  | { ok: false; refused: true; reason: string };
+// Review round 1 (#210), finding 1 — `DestroyOutcome` itself now lives in
+// ./types.ts, not here: failover.ts needs this shape too (`stopParkedStudio`
+// returns it), but failover.ts's own header states it imports NOTHING from
+// do.ts — and `cli/reap.ts` already pulls failover.ts into cli/'s own
+// reduced-types ("bun" only, no "@cloudflare/workers-types") compile graph.
+// A type-only import is erased at RUNTIME, but `tsc` still TYPE-CHECKS it —
+// so re-exporting this straight out of destroy.ts (which imports real
+// VALUES from do.ts) would have pulled do.ts's own DO classes into that
+// reduced-types graph the moment failover.ts imported it, exactly the
+// `error TS2339: Property 'ctx'/'env' does not exist on type 'StudioDO'`
+// breakage MEASURED the first time this was tried (`bun run check`'s own
+// `-p cli` pass). `./types.ts` carries no do.ts-reaching import at all (see
+// its own header), so re-exporting FROM there is safe for every caller.
+export type { DestroyOutcome };
 
 /** `runDestroy`'s own dependency for the refusal gate — `openTaskChecker`
  *  (board/routes.ts), NOT task #118's `resolveAssignedBrief`. That resolver

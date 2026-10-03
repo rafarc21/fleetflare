@@ -499,6 +499,28 @@ export interface StudioStatus {
    */
   exhaustionKind?: "dead" | "inline" | "select" | null;
   /**
+   * Issue #210 — WHEN this studio genuinely parked with no free account at
+   * all (`parkedOn === null` — see runAccountFailover's own doc comment at
+   * the `!next` branch for that split), so a periodic tick can tell how long
+   * it has been idle-billing and decide whether to auto-stop
+   * (`PARKED_AUTO_STOP_HOURS`, failover.ts). Deliberately does NOT cover the
+   * separate `parkedOn !== null` case (`FLEET_AUTO_FAILOVER` off with a
+   * candidate account) — that is a deliberate operator choice, not the
+   * "every account is fleet-wide limited" shape #210 is about.
+   *
+   * Stamped ONCE, on the fresh-degrade write, from
+   * `existing.parkedAt ?? now` — a repeat already-degraded tick never resets
+   * it, so the clock always reads from the FIRST tick this park was
+   * observed, never the most recent one. `exhaustionKind` already carries
+   * the reason (its own field, right above); this is only the "since when".
+   *
+   * Cleared to `null` at the same sites `exhaustionKind` is cleared at: a
+   * pane-visual heal (`healDegradedRowAndWake`) and an ordinary account
+   * switch landing (`runAccountFailover`'s own `switched` write) — either one
+   * means the studio is no longer parked, same as a heal.
+   */
+  parkedAt?: string | null;
+  /**
    * Maestro round-2 review (PR #170), finding 2: `healDegradedRowAndWake`
    * used to discard its own `runGatedWake` outcome entirely — the row had
    * already flipped to `"running"` by the SAME write, so a refused/skipped/
@@ -728,3 +750,27 @@ export interface ProvisionConfig {
    */
   projectCard?: string;
 }
+
+/**
+ * `runDestroy`'s own tagged result (destroy.ts) — a REFUSAL (an open
+ * assigned board task exists, and `--force` was not passed) must read
+ * differently at every layer above this from an actual operational failure:
+ * the route layer turns this into 409, never 500 (see routes.ts's own
+ * destroy branch), and neither the board task nor its labels are ever
+ * touched on this path — see destroy.ts's own header. A bare throw here
+ * would make that distinction invisible to a caller without inspecting
+ * Error subclasses across what is, in production, a Durable Object RPC
+ * boundary; a plain tagged return avoids that entirely.
+ *
+ * Lives HERE, not in destroy.ts (which re-exports it for every existing
+ * importer), for the identical reason every other type in this file does:
+ * this module carries no do.ts-reaching import, type-only or otherwise, so
+ * ANY file — including one compiled under a reduced-types config that lacks
+ * "@cloudflare/workers-types" (cli/'s own tsconfig.json; see
+ * `FailoverDeps.stopParkedStudio`'s own doc comment, failover.ts, for the
+ * exact breakage this avoided) — can import this shape without pulling
+ * do.ts's own Durable Object classes into that graph.
+ */
+export type DestroyOutcome =
+  | { ok: true; status: StudioStatus }
+  | { ok: false; refused: true; reason: string };
