@@ -321,6 +321,48 @@ export function firstFreeAccount(
 }
 
 /**
+ * #211 review round 3, finding 2 — the search anchor/`currentOutOfScope`
+ * derivation failover.ts's own `runAccountFailover` has always computed
+ * inline (around its own `start`/`currentIdx`/`borrowedActive` locals),
+ * factored out so `launchAccountOrReroute` below shares the IDENTICAL
+ * formula instead of carrying its own, simplified (and wrong) copy. The
+ * launch gate's own copy hardcoded `anchor = start` unconditionally — it
+ * never widened backward for a studio recorded on an account from BEFORE
+ * the repo was ever mapped to a LATER primary (the "#273 r2" shape) while
+ * NOT actively borrowing, so `scopedAccounts` never even contained the
+ * recorded account and tier 1 (`nextClaudeAccount`'s own `idx < 0` branch)
+ * returned null immediately — a false "every account limited" refusal even
+ * when the mapped primary itself was completely free.
+ *
+ *   - `anchor`: this repo's own mapped primary position (`start`), UNLESS
+ *     the studio is NOT actively borrowing anything (`borrowedActive`
+ *     false) AND its recorded `current` sits BEFORE `start` — in that case
+ *     the anchor widens backward to `current`'s own position, so the
+ *     ordinary forward wrap can still reach everything from there through
+ *     the primary and beyond. A `current` not found in `accounts` at all
+ *     (`currentIdx < 0` — secret deleted/renamed, or no recorded account)
+ *     never widens; the primary is the only sane anchor then.
+ *   - `currentOutOfScope`: true only while ACTIVELY borrowing an account
+ *     positioned before the (unwidened) anchor — the one case `anchor`
+ *     deliberately stays PINNED at `start` rather than widening, so the
+ *     borrowed-before-primary account is excluded from `scopedAccounts` and
+ *     needs the caller's own separate out-of-scope fallback instead.
+ *
+ * `current: null` reads as position 0 (failover.ts's own convention — a
+ * never-switched studio has no recorded account and is on the first slot by
+ * construction), never as "not found" — only a NAMED `current` that is
+ * genuinely absent from `accounts` reads as not found.
+ */
+export function deriveSearchAnchor(
+  accounts: ClaudeAccount[], start: number, current: string | null, borrowedActive: boolean,
+): { anchor: number; currentOutOfScope: boolean } {
+  const currentIdx = current == null ? 0 : accounts.findIndex((a) => a.name === current);
+  const anchor = borrowedActive ? start : (currentIdx < 0 ? start : Math.min(start, currentIdx));
+  const currentOutOfScope = borrowedActive && currentIdx >= 0 && currentIdx < anchor;
+  return { anchor, currentOutOfScope };
+}
+
+/**
  * Fresh-context review of PR #211 (#209 follow-up) — tiers 1+2 of the
  * three-tier cascade failover.ts's own `runAccountFailover` already runs
  * (its own doc comment, around the `candidate`/`outOfScopeSpare` locals,
@@ -603,26 +645,21 @@ export function launchAccount(env: ClaudeAccountEnv, repo: string | null, record
  * function's own pre-existing behaviour and tests) an operator reading the
  * degraded row can expect a studio back by.
  *
- * `anchor`: this repo's own mapped primary position (`launchAccount(env,
+ * `start`: this repo's own mapped primary position (`launchAccount(env,
  * repo, null)`'s own resolution, the identical "mapped slot, or the first
  * set account" rule `primaryAccount()` (do.ts) already uses), or 0 when that
- * cannot itself launch.
- *
- * `currentOutOfScope` (fresh-context review of PR #211, finding 1 — the
- * ORIGINAL version of this function hardcoded this `false` unconditionally,
- * which disabled tier 1 ENTIRELY for a studio restarting while actively
- * borrowing an account positioned BEFORE its own primary: `scopedAccounts`
- * never contains that account, so `nextClaudeAccount`'s own `idx < 0` branch
- * returned null immediately, and `accounts.slice(0, anchor)` — tier 2 — never
- * covers the in-scope chain either, so a genuinely free in-scope account was
- * skipped entirely in favour of an unnecessary tier-3 borrow, or an outright
- * refusal): derived the identical way failover.ts's own `runAccountFailover`
- * already does — `borrowedAccount != null` (this studio IS actively
- * borrowing something, caller-supplied, the same `existing.borrowedAccount`
- * failover.ts's own `borrowedActive` reads) AND the resolved account's own
- * position is BEFORE `anchor`. Every other studio (never borrowed, or
- * borrowed onto something at/after its own primary) computes `false` here,
- * same as the function's pre-existing behaviour and tests.
+ * cannot itself launch. `anchor`/`currentOutOfScope` (#211 review round 3,
+ * finding 2 — the ORIGINAL version of this function hardcoded `anchor =
+ * start` unconditionally, never widening backward for a studio recorded on
+ * an account from BEFORE the repo was ever mapped to a LATER primary, which
+ * false-refused "every account limited" even when the primary itself was
+ * free) are now `deriveSearchAnchor`'s own shared formula — see that
+ * function's own doc comment for the full anchor-widening/
+ * currentOutOfScope-pinning rule, identical to failover.ts's own
+ * `runAccountFailover` derivation. `borrowedAccount != null` (this studio IS
+ * actively borrowing something, caller-supplied, the same
+ * `existing.borrowedAccount` failover.ts's own `borrowedActive` reads) is
+ * the `borrowedActive` input.
  *
  * Gated on `autoFailoverOn(env)`, same as every other reroute/switch
  * mechanism in this file: with failover off nothing ever moves a studio
@@ -647,9 +684,8 @@ export async function launchAccountOrReroute(
   const resolved = accounts.find((a) => a.name === launch.name);
   if (resolved === undefined || accountIsFree(resolved, limits, now)) return launch;
   const primary = launchAccount(env, repo, null);
-  const anchor = primary.ok ? Math.max(0, accounts.findIndex((a) => a.name === primary.name)) : 0;
-  const currentIdx = accounts.findIndex((a) => a.name === launch.name);
-  const currentOutOfScope = borrowedAccount != null && currentIdx >= 0 && currentIdx < anchor;
+  const start = primary.ok ? Math.max(0, accounts.findIndex((a) => a.name === primary.name)) : 0;
+  const { anchor, currentOutOfScope } = deriveSearchAnchor(accounts, start, launch.name, borrowedAccount != null);
   const free = selectFreeAccount(accounts, anchor, launch.name, currentOutOfScope, reserved, limits, now);
   if (free !== null) return { ok: true, name: free.name, token: free.token };
   const borrowed = nextBorrowedAccount(accounts, reserved, limits, await readBurn(), now);

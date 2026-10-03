@@ -19,7 +19,7 @@
 import type { ClaudeAccount, AccountLimits } from "./accounts";
 import {
   accountsTried, nextClaudeAccount, earliestAccountReset, nextBorrowedAccount, accountIsFree, firstFreeAccount,
-  selectFreeAccount,
+  selectFreeAccount, deriveSearchAnchor,
 } from "./accounts";
 import { STATUS_KEY, OPERATION_KEY, watchForDestroy, operationLockFresh, type StudioStorage } from "./provision";
 import { redactSecrets } from "./redact";
@@ -2351,26 +2351,26 @@ export async function runAccountFailover(
   // were never its to try — computed once, reused below for both the
   // wrap-around search range and the "tried" list.
   const start = deps.primary ? Math.max(0, deps.accounts.findIndex((a) => a.name === deps.primary)) : 0;
-  const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
   // Review round 2 (maestro review of PR #135), finding 4 — the #273 r2
-  // widening just below (a stale recorded `current` from BEFORE the primary
-  // stepping FORWARD into scope) must NOT apply while this studio is in an
-  // ACTIVE borrow: widening it then would expose an account positioned
-  // before the primary to the ordinary first-pass wrap below, which #271
-  // forbids landing on outside the two dedicated tiers further down.
-  // `existing.borrowedAccount` is the discriminator — set ONLY by a genuine
-  // Stage-B switch (finding 3's own unclaimed-spare tier, or a
-  // reserved-primary borrow), never by the #273 r2 stale-legacy case: that
-  // field did not exist before Stage B, and every #273 r2 test leaves it
-  // unset, so this never changes that fixture's own anchor.
+  // widening `deriveSearchAnchor` applies below (a stale recorded `current`
+  // from BEFORE the primary stepping FORWARD into scope) must NOT apply
+  // while this studio is in an ACTIVE borrow: widening it then would expose
+  // an account positioned before the primary to the ordinary first-pass
+  // wrap below, which #271 forbids landing on outside the two dedicated
+  // tiers further down. `existing.borrowedAccount` is the discriminator —
+  // set ONLY by a genuine Stage-B switch (finding 3's own unclaimed-spare
+  // tier, or a reserved-primary borrow), never by the #273 r2 stale-legacy
+  // case: that field did not exist before Stage B, and every #273 r2 test
+  // leaves it unset, so this never changes that fixture's own anchor.
   const borrowedActive = existing.borrowedAccount != null;
-  // Issue #102: a stale recorded `current` from BEFORE the primary (#273 r2)
-  // must still be able to step FORWARD into scope, so the search range
-  // extends back to cover it; a `current` already at or past the primary
-  // never wraps BEHIND it — an account before a repo's mapped primary is
-  // never that repo's to use, wrap or no wrap. Not while actively borrowed —
-  // see `borrowedActive` above.
-  const anchor = borrowedActive ? start : (currentIdx < 0 ? start : Math.min(start, currentIdx));
+  // #211 review round 3, finding 2 — this anchor/currentOutOfScope formula
+  // (issue #102's stale-`current`-from-before-the-primary widening, pinned
+  // off while actively borrowing per the comment above) now lives in
+  // accounts.ts's own `deriveSearchAnchor`, shared with
+  // `launchAccountOrReroute` (accounts.ts), so the two can no longer drift a
+  // third time the way the launch gate's own simplified copy already had.
+  // See that function's own doc comment for the full rule.
+  const { anchor, currentOutOfScope } = deriveSearchAnchor(deps.accounts, start, current, borrowedActive);
   const scopedAccounts = deps.accounts.slice(anchor);
   const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
   const reserved = deps.reservedAccounts ?? new Set();
@@ -2382,7 +2382,6 @@ export async function runAccountFailover(
   // (there is no position to step FORWARD from, and its own `null`
   // convention wrongly skips position 0 rather than treating it as a
   // genuine candidate).
-  const currentOutOfScope = borrowedActive && currentIdx >= 0 && currentIdx < anchor;
   const candidate = currentOutOfScope
     ? firstFreeAccount(scopedAccounts, reserved, limits, deps.now())
     : nextClaudeAccount(scopedAccounts, current, limits, deps.now(), reserved);
