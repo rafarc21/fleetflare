@@ -388,6 +388,10 @@ export async function resolveSurvivalInput(
       studioId: sources.studioId,
       tasks,
       openPrs: { ok: false, reason: tasks.reason },
+      // MAJOR fix (fresh-context review on #207): a failed task lookup
+      // means attribution never ran at all (it needs the task list to know
+      // how many unresolved tasks there are) -- `[]`, never a guess.
+      unclaimedRescueBranches: [],
       session,
       now,
     };
@@ -417,11 +421,25 @@ export async function resolveSurvivalInput(
 
   // SOURCE 3 — the rescue-ref convention, anchored, attributed only in the
   // unambiguous single-candidate case (see attributeRescueBranch).
+  //
+  // MAJOR fix (fresh-context review on #207, 2026-10-03): the ambiguous-or-
+  // leftover case used to just fall through here, silently -- `refs` was
+  // computed, `attributeRescueBranch` returned null, and nothing further
+  // ever looked at `refs` again. The lead never learned a rescue ref
+  // existed for its own studio at all. `unclaimedRescueBranches` now
+  // carries every ref this attribution attempt did NOT assign to a task,
+  // so `composeSurvivalBrief` can render it as its own line instead of
+  // dropping it.
   const unresolved = resolved.filter((r) => r.branch === null);
+  let unclaimedRescueBranches: string[] = [];
   if (unresolved.length > 0) {
     const refs = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
     const attributed = attributeRescueBranch(unresolved.length, refs);
-    if (attributed !== null) unresolved[0]!.branch = attributed;
+    if (attributed !== null) {
+      unresolved[0]!.branch = attributed;
+    } else {
+      unclaimedRescueBranches = refs;
+    }
   }
 
   const taskBranches: SurvivalTaskBranch[] = [];
@@ -461,7 +479,10 @@ export async function resolveSurvivalInput(
     openPrs = { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 
-  return { studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, session, now };
+  return {
+    studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, unclaimedRescueBranches,
+    session, now,
+  };
 }
 
 /** `resolveSurvivalInput` + PR4a's composer, in one call — the `compose`
