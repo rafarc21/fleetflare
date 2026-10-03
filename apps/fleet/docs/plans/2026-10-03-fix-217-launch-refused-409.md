@@ -202,3 +202,106 @@ by running the full affected test set after the fix — see below.
 - `flock /tmp/fleet-gate.lock bun run test` (full suite) and
   `flock /tmp/fleet-gate.lock bun run check` (build + typecheck), run one at a
   time, never in parallel — see the PR/report for their exact output.
+
+## Review round 2 (2026-10-03) — a mutation test found the seam untested, plus two more leaking routes
+
+A maestro mutation test on the round-1 fix found a real gap: deleting BOTH
+`LAUNCH_REFUSED_PREFIX`/`START_REFUSED_PREFIX`'s prefix-prepending lines from
+`do.ts`'s two constructors left the entire 5558-test suite green. The
+`studio.routes.test.ts` #217 suite built its RPC-crossing fixture as a
+hand-typed `new Error(LAUNCH_REFUSED_PREFIX + reason)` — never the real
+`LaunchRefusedError`/`StartRefusedError` constructors — so the fixture carried
+the prefix independently of whatever the constructor actually did. The test
+exercised `launchOrStartRefusalResponse` as a unit, never the real DO→route
+seam the fix exists to protect.
+
+### Finding 1 (blocker) — test the real DO→route seam, not just the response mapper
+
+Fixed by constructing the REAL `LaunchRefusedError`/`StartRefusedError`
+(do.ts) in `studio.routes.test.ts`'s #217 suite and tagging `remote: true` on
+the instance, instead of hand-typing an already-prefixed string. Also
+strengthened two DO-level tests the review named directly:
+
+- `studio.account-gate-do.test.ts`'s provision/restart/recycle refusal tests
+  now additionally assert `.message.startsWith(LAUNCH_REFUSED_PREFIX)`, not
+  just `instanceof LaunchRefusedError`.
+- `studio.destroy-race.test.ts`'s T6 "first start refused outright" test now
+  pins `START_REFUSED_PREFIX` on the real rejection (`new RegExp('^' +
+  START_REFUSED_PREFIX + '.*stopped')`), not just `/stopped/`.
+
+**Mutation check, done by hand**: reverted both constructors'
+`super(PREFIX + message)` to `super(message)` (do.ts) and re-ran exactly
+`test/studio.routes.test.ts test/studio.account-gate-do.test.ts
+test/studio.destroy-race.test.ts` — 9 of 208 tests went RED (the 6 strengthened
+#217 route cases, the 3 strengthened account-gate-do cases, and T6). Restored
+the two `super()` lines — all 208 GREEN again. This is the kill the round-1
+suite was missing.
+
+No production code changed for this finding — `do.ts` is untouched; only the
+three test files above.
+
+### Finding 2 (blocker) — /fleet/spawn, /studio/spawn, and resume leaked the same raw throw
+
+`src/studio/spawn.ts`'s `runSpawn` and `runResume` both call
+`deps.provisionChild(...)`, which `routes.ts`'s `spawnDeps` wires to the SAME
+`stub.provision(cfg)` RPC call `provision`/`restart` were already fixed for —
+reached instead via `/fleet/spawn` and `/studio/spawn`. Both catch blocks ran
+their own cleanup (`releaseClaim()`/`release()`) and then bare-rethrew
+everything, including a `LaunchRefusedError`/`StartRefusedError` that had
+already crossed the RPC boundary — the identical #217 bug, a different front
+door.
+
+Fixed by moving `launchOrStartRefusalResponse` out of `routes.ts` (where it
+was private) into `rpc-failure.ts` — importing `LAUNCH_REFUSED_PREFIX` from
+`./accounts` (a zero-import leaf module; confirmed no cycle) alongside the
+`START_REFUSED_PREFIX` constant `rpc-failure.ts` already held — so both
+`routes.ts` and `spawn.ts` import the ONE shared implementation.
+`routes.ts`'s three existing call sites (provision/restart/recycle) now
+import it from `./rpc-failure` instead of using a local copy; `spawn.ts`
+gains one new import (still no `Env`, no `@cloudflare/sandbox`, no
+DurableObjectNamespace — `rpc-failure.ts` carries none of those either).
+`runSpawn`'s and `runResume`'s catch blocks now run their existing cleanup
+FIRST, exactly as before, then check `launchOrStartRefusalResponse(err)`
+before the bare rethrow — an ordinary error (a genuine container failure)
+still propagates uncaught, pinned by the pre-existing "a provision that
+throws releases the claim"/"...releases the id it claimed" tests, which are
+untouched and still pass.
+
+New tests (same real-RPC-crossing convention as finding 1 — a genuinely
+throwing `provisionChild`/DO stub, never a hand-crafted prefixed string):
+
+- `test/studio.spawn-atomic.test.ts`: two new `runSpawn` cases
+  (`LaunchRefusedError`/`StartRefusedError` from `provisionChild` → 409, and
+  the claimed id is confirmed released via a real `listStudios` read).
+- `test/studio.fleet-resume.test.ts`: two new `runResume`/
+  `POST /fleet/spawn {resume: true}` cases (same two errors → 409, and the
+  row is confirmed back to `stopped` — the claim's release — via a real D1
+  read), alongside the pre-existing "a provision that throws releases the
+  claim" test for an ordinary error, unchanged.
+
+RED confirmed by stashing just `src/studio/spawn.ts`'s catch-block changes
+and re-running both files: all 4 new cases failed with the refusal
+propagating as an uncaught throw instead of a 409. Restored — all green.
+
+### Finding 3 (minor) — repair-failure.ts's JSON-derived reason had no length cap
+
+`cli/repair-failure.ts`'s JSON-aware branch (added for #217's 409 body)
+returned `parsed.error` uncapped; the plain-text branch right below it
+already caps with `.slice(0, MAX_CHARS)`. Applied the identical cap to the
+JSON branch. New test in `test/cli.repair-failure.test.ts`: a 5000-char
+`.error` is truncated to `MAX_CHARS` (2000), same as the plain-text path.
+RED (uncapped `parsed.error`) → GREEN (capped) confirmed by running the file
+before/after the one-line fix.
+
+### Verification (round 2)
+
+- Targeted: `npx vitest run test/studio.routes.test.ts
+  test/studio.account-gate-do.test.ts test/studio.destroy-race.test.ts
+  test/studio.spawn-atomic.test.ts test/studio.fleet-resume.test.ts
+  test/studio.spawn.test.ts test/studio.resume-guards.test.ts
+  test/cli.repair-failure.test.ts` — all green (see PR/report for the exact
+  counts).
+- `bun run test-lies-check`, `bun run english-check` — both clean.
+- `flock /tmp/fleet-gate.lock bun run test` (full suite) and
+  `flock /tmp/fleet-gate.lock bun run check` (build + typecheck), run one at a
+  time, never in parallel — see the PR/report for their exact output.
