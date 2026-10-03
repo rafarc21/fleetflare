@@ -383,14 +383,26 @@ describe("#263 C1 — a failed rescue never reads as RESCUE_CLEAN/RESCUE_MARKERS
     expect(refs.some((r) => !r.includes("agent-a1b2"))).toBe(false);
   });
 
-  test("a stale index.lock in the member worktree: RESCUE_FAILED names that worktree, nothing pushed for it", () => {
+  // BLOCKER fix (fresh-context review on #207, 2026-10-03): this used to
+  // assert a stale REAL index.lock blocked the rescue — true back when
+  // rescue_one's dirty-tree branch ran `git add -A`/`git commit` against the
+  // real index, which a stale lock on that same real file genuinely
+  // contends with. The dirty-tree branch now stages into a throwaway,
+  // out-of-band `GIT_INDEX_FILE` (the same non-mutating technique
+  // rescueSnapshotCmd's own copy already used) that never touches
+  // `.git/worktrees/agent-a1b2/index.lock` or the real index it guards —
+  // a leftover lock from a crashed `git add`/`git commit` the agent itself
+  // was mid-running no longer loses that worktree's rescue the way it used
+  // to.
+  test("a stale index.lock in the member worktree no longer blocks the rescue (the dirty-tree snapshot never touches the real index)", () => {
     writeFileSync(join(scheckout, ".git/worktrees/agent-a1b2/index.lock"), "");
     writeFileSync(join(scheckout, ".claude/worktrees/agent-a1b2", "wip.md"), "member work\n");
 
     const out = srescue();
 
-    expect(out).toMatch(new RegExp(`${RESCUE_FAILED_PREFIX} agent-a1b2`));
-    expect(rescueRefs().some((r) => r.includes("agent-a1b2"))).toBe(false);
+    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-\\d{14} 1 files$`, "m"));
+    expect(rescueRefs().some((r) => r.includes("agent-a1b2"))).toBe(true);
   });
 
   test("a failing pre-commit hook via core.hooksPath does not block the rescue: commits use --no-verify", () => {
@@ -462,9 +474,16 @@ describe("#263 C2 — the lead's own unpushed commits are never masked by the ma
     const mainRef = rescueRefs().find((r) => !r.includes("agent-a1b2"));
     expect(mainRef).toBeDefined();
     expect(sh(`git -C ${origin} rev-parse ${mainRef}`).out).toBe(leadSha);
+    // BLOCKER fix (fresh-context review on #207, 2026-10-03): the member
+    // worktree's dirty tree is now snapshotted non-mutatingly (same
+    // technique rescueSnapshotCmd already used) — its own real HEAD never
+    // moves, so the pushed ref is a FLOATING commit whose PARENT is that
+    // unchanged real HEAD, not the real HEAD itself.
     const memberSha = sh(`git -C ${join(checkout, ".claude/worktrees/agent-a1b2")} rev-parse HEAD`).out;
     const memberRef = rescueRefs().find((r) => r.includes("agent-a1b2"));
-    expect(sh(`git -C ${origin} rev-parse ${memberRef}`).out).toBe(memberSha);
+    expect(sh(`git -C ${origin} rev-parse ${memberRef}^`).out).toBe(memberSha);
+    const memberFiles = sh(`git -C ${origin} ls-tree -r --name-only ${memberRef}`).out.split("\n");
+    expect(memberFiles).toContain("wip.md");
   });
 });
 
@@ -477,16 +496,26 @@ describe("#263 C2 — the lead's own unpushed commits are never masked by the ma
  * second run sees the work as already saved.
  */
 describe("#263 C3 — idempotent on a --depth 1 clone: a second run pushes nothing new", () => {
-  test("run1 pushes one ref; run2 (1.1s later) pushes nothing and the ref list is unchanged", async () => {
+  // BLOCKER fix (fresh-context review on #207, 2026-10-03): this used to
+  // write a DIRTY file and rely on rescuePushCmd's own now-removed real
+  // `git commit` to make the member worktree clean again before run2 — the
+  // dirty-tree branch is non-mutating now (same technique rescueSnapshotCmd
+  // always used) and, by design, re-finds the SAME dirty diff and pushes a
+  // fresh ref every run (see rescueSnapshotCmd's own doc comment in
+  // rescue.ts for why that's the correct tradeoff). A real, already-COMMITTED
+  // unpushed commit — the "clean, but has unpushed commits" branch, entirely
+  // unaffected by that fix — is what C3's own local-bookkeeping fix
+  // (`update-ref refs/remotes/origin/<target> HEAD`) still applies to.
+  test("run1 pushes a real unpushed commit; run2 (1.1s later) pushes nothing and the ref list is unchanged", async () => {
     const sroot = join(dir, "workspace-shallow-c3");
     const scheckout = join(sroot, REPO);
     mkdirSync(sroot, { recursive: true });
     sh(`git clone -q --depth 1 file://${origin} ${scheckout}`);
     sh(`git -C ${scheckout} worktree add -q .claude/worktrees/agent-a1b2 -b agent-a1b2`);
-    writeFileSync(join(scheckout, ".claude/worktrees/agent-a1b2", "wip.md"), "member work\n");
+    sh(`git -C ${join(scheckout, ".claude/worktrees/agent-a1b2")} commit -q --allow-empty -m "member work"`);
 
     const out1 = sh(rescuePushCmd(REPO, STUDIO, sroot)).out;
-    expect(out1).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-\\d{14} 1 files$`, "m"));
+    expect(out1).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-\\d{14} 1 commits$`, "m"));
     const refsAfter1 = rescueRefs();
     expect(refsAfter1.length).toBe(1);
 
@@ -535,7 +564,12 @@ describe("#263 C4 — colliding worktree-directory basenames never overwrite eac
   test("rescuePushCmd never force-pushes a member ref (no `+HEAD:` anywhere)", () => {
     const cmd = rescuePushCmd(REPO, STUDIO, root);
     expect(cmd).not.toMatch(/push origin "\+HEAD/);
-    expect(cmd).not.toContain(" -f ");
+    // BLOCKER fix (fresh-context review on #207, 2026-10-03): not a bare
+    // `not.toContain(" -f ")` -- rescue_one's dirty-tree branch now also
+    // contains `[ -f "$realidx" ]` (a shell file-existence test, unrelated
+    // to git's own `-f`/`--force` flag), same non-mutating technique
+    // rescueSnapshotCmd's own identical test (below) already scopes past.
+    expect(cmd).not.toMatch(/git[^\n]*push[^\n]*(-f\b|--force)/);
     expect(cmd).not.toContain("--force");
   });
 });
@@ -1111,6 +1145,56 @@ describe("#207 — rescue never commits/pushes directly onto the checked-out bra
     expect(out).not.toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} task/pr-branch `, "m"));
     expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 files$`, "m"));
     expect(sh(`git -C ${origin} rev-parse refs/heads/task/pr-branch`).out).toBe(before);
+  });
+});
+
+/**
+ * BLOCKER, fresh-context review on #207 (2026-10-03): #207 made the PUSH
+ * always target a generated `fleet/rescue/...` ref, but rescuePushCmd's own
+ * `rescue_one()` still staged and committed the dirty tree onto the REAL
+ * checkout's REAL index/HEAD BEFORE that push was even attempted. If the
+ * subsequent push then failed for any reason — here, an origin `pre-receive`
+ * hook rejecting it outright, same `originRejects` technique the #58
+ * describe block below already uses to force a real push failure — the
+ * caller (`do.ts`'s `rescuePush`) throws on the `RESCUE_FAILED` line, and
+ * `destroy`/`recycle` refuse the kill on that throw (unless
+ * `--discard-unsynced`) — so the container survives with a bot commit now
+ * sitting on the real branch's real local HEAD, tree clean. The lead's own
+ * next ordinary `git push` on that branch would ship that bot commit,
+ * including whatever forbidden content it carried, straight onto the real
+ * branch.
+ *
+ * This is the test that proves the fix: the real checkout's own
+ * `git status --porcelain` and `git rev-parse HEAD` must be byte-identical
+ * before the rescue attempt and after it returns RESCUE_FAILED. Before the
+ * fix, HEAD moves (a new commit lands) and the tree goes clean; after it,
+ * neither changes — the dirty-tree snapshot is built out-of-band (a detached
+ * `GIT_INDEX_FILE` + `commit-tree`, the same non-mutating technique
+ * rescueSnapshotCmd's own `rescue_one()` already used), and only ITS sha is
+ * pushed/retried, never the real index or HEAD.
+ */
+describe("BLOCKER (fresh-context review on #207) — rescue_one() never mutates the real checkout before a push attempt", () => {
+  function originRejects(msg: string): void {
+    mkdirSync(join(origin, "hooks"), { recursive: true });
+    writeFileSync(join(origin, "hooks", "pre-receive"), `#!/bin/sh\necho "${msg}" >&2\nexit 1\n`);
+    chmodSync(join(origin, "hooks", "pre-receive"), 0o755);
+  }
+
+  test("dirty tree on a checked-out branch, push rejected by origin: real checkout status/HEAD are byte-identical before and after RESCUE_FAILED", () => {
+    sh(`git -C ${checkout} checkout -q -b task/pr-branch`);
+    sh(`git -C ${checkout} push -q origin task/pr-branch`);
+    writeFileSync(join(checkout, "dev-only.local"), "must never land as a real commit on this branch\n");
+    originRejects("policy says no");
+
+    const statusBefore = sh(`git -C ${checkout} status --porcelain`).out;
+    const headBefore = sh(`git -C ${checkout} rev-parse HEAD`).out;
+
+    const r = sh(rescuePushCmd(REPO, STUDIO, root));
+
+    expect(r.out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
+    expect(r.err).toContain("policy says no");
+    expect(sh(`git -C ${checkout} status --porcelain`).out).toBe(statusBefore);
+    expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(headBefore);
   });
 });
 
@@ -1955,8 +2039,19 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
     expect(rescueRefs()).toEqual([]);
   });
 
-  test("rescuePushCmd, private remote: a second run pushes nothing new (local bookkeeping still marks the ref pushed)", () => {
-    writeFileSync(join(checkout, "notes.md"), "once\n");
+  // BLOCKER fix (fresh-context review on #207, 2026-10-03): this used to
+  // write a DIRTY file (never committed by the fixture itself) and relied
+  // on rescuePushCmd's own now-removed real `git commit` to make the tree
+  // clean again, so the local bookkeeping (`update-ref refs/remotes/...`)
+  // could make the SECOND run see it as already saved. The dirty-tree
+  // branch is non-mutating now (same technique rescueSnapshotCmd always
+  // used) and, by design, re-finds the SAME dirty diff and pushes a fresh
+  // ref every run (see rescueSnapshotCmd's own doc comment in rescue.ts for
+  // why that's the correct tradeoff) — so this test now exercises the
+  // "clean, but has a real unpushed commit" branch instead, the one case
+  // the local-bookkeeping fix genuinely still applies to.
+  test("rescuePushCmd, private remote: a second run pushes nothing new for an already-pushed COMMIT (local bookkeeping still marks the ref pushed)", () => {
+    sh(`git -C ${checkout} commit -q --allow-empty -m "real work"`);
     expect(pushPriv()).toContain(RESCUE_PUSHED_PREFIX);
     const refs = privRefs();
 
@@ -2001,7 +2096,15 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
       expect(ref).toBeDefined();
       expect(privTreeFiles(ref!)).toEqual(["a.md", "b.md", "c.md", "notes.md"]);
       expect(sh(`git -C ${priv} show ${ref}:notes.md`).out).toBe("shallow work");
-      expect(sh(`git -C ${priv} rev-parse ${ref}^{tree}`).out).toBe(sh(`git -C ${checkout} rev-parse HEAD^{tree}`).out);
+      // BLOCKER fix (fresh-context review on #207, 2026-10-03): this used to
+      // also assert the pushed ref's tree equals the real checkout's OWN
+      // `HEAD^{tree}` -- true back when the dirty-tree branch committed onto
+      // the real HEAD. The real checkout's HEAD never advances now (the
+      // snapshot is built out-of-band), so `HEAD^{tree}` stays the ORIGINAL
+      // shallow clone's tree, no longer the snapshot's -- the file-list and
+      // content checks above already prove the pushed tree is the whole
+      // tree (a/b/c.md) plus the dirty file (notes.md), which is the
+      // property this line existed to confirm.
     });
 
     test("rescuePushCmd, clean-but-ahead shallow checkout: RESCUE_PUSHED, and the private ref holds HEAD's exact tree", () => {

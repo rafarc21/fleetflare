@@ -872,7 +872,7 @@ export function rescuePushCmd(
     // that reaches rescueSnapshotCmd's own retry call site at all").
     rescueTryPushFn(identity, pushTimeoutSeconds) + rescueWtFn() + rescueOnOriginFn(pushTimeoutSeconds) +
     `rescue_push() {\n` +
-    `  local w="$1" id="$2" target="$3" perr prc ftarget\n` +
+    `  local w="$1" id="$2" target="$3" ref="\${4:-HEAD}" perr prc ftarget\n` +
     // Issue #359, measured live 2026-09-26: a slow or hanging pre-push hook
     // in the TARGET repo (lefthook, this codebase has no control over its
     // config) stalled rescue-all's push step on 4/5 busy studios — exactly
@@ -896,7 +896,15 @@ export function rescuePushCmd(
     // a rejected one; no other line here needs to change.
     // Issue #16: rescue_try_push (rescueTryPushFn) adds the shallow-clone
     // snapshot fallback to both this attempt and the nff retry below.
-    `  rescue_try_push "$w" --no-verify HEAD "$target"; prc=$?\n` +
+    //
+    // BLOCKER fix (2026-10-03, fresh-context review on #207): `ref` is a NEW
+    // 4th, optional parameter (default `HEAD`, same `${4:-HEAD}` shape
+    // rescueSnapshotCmd's own copy already uses) — the dirty-tree branch of
+    // rescue_one() below now passes a synthetic snapshot sha here instead of
+    // ever advancing the real `HEAD`; the clean-but-ahead branch still omits
+    // it and gets `HEAD` unchanged, since those commits are the studio's own
+    // real ones and pushing `HEAD` there was already correct.
+    `  rescue_try_push "$w" --no-verify "$ref" "$target"; prc=$?\n` +
     `  if [ "$prc" = "0" ]; then printf '%s' "$target"; return 0; fi\n` +
     `  if printf '%s' "$perr" | grep -qiE 'non-fast-forward|fetch first'; then\n` +
     // HOLD-round fix: this used to sit flat between two dashes
@@ -916,7 +924,7 @@ export function rescuePushCmd(
     // always qualifies for --no-verify unconditionally — no case check
     // needed here the way the first attempt above needs one.
     // Issue #359 round 3: same per-push timeout bound as the first attempt.
-    `    if rescue_try_push "$w" --no-verify HEAD "$ftarget"; then printf '%s' "$ftarget"; return 0; fi\n` +
+    `    if rescue_try_push "$w" --no-verify "$ref" "$ftarget"; then printf '%s' "$ftarget"; return 0; fi\n` +
     `  fi\n` +
     // Issue #49: the reason reaches the caller (and the destroy/recycle
     // 409) instead of dying in this function's own \`perr\`.
@@ -930,7 +938,7 @@ export function rescuePushCmd(
     // (#259's own push guard still sees the push, unmodified); pushes never
     // do, and never `+`/`--force`.
     `rescue_one() {\n` +
-    `  local w="$1" id="$2" mode="$3" wall wstatus wn wahead whead target rc\n` +
+    `  local w="$1" id="$2" mode="$3" wall wstatus wn wahead whead target rc idxfile realidx tree sha rbranch\n` +
     `  wall="$(git -C "$w" status --porcelain 2>&1)"; rc=$?\n` +
     `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id status"; fail=$((fail+1)); return; fi\n` +
     `  wstatus="$(git -C "$w" status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
@@ -938,8 +946,45 @@ export function rescuePushCmd(
     `  if [ -n "$wstatus" ]; then\n` +
     `    wn=$(printf '%s\\n' "$wstatus" | wc -l | tr -d ' ')\n` +
     `    rescue_target "$mode" "$id"\n` +
-    `    if ! git -C "$w" add -A ${scope}; then echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
-    `    if ! git -C "$w" ${identity} commit -q --no-verify -m "fleet: rescue-push before teardown"; then echo "${RESCUE_FAILED_PREFIX} $id commit"; fail=$((fail+1)); return; fi\n` +
+    // BLOCKER fix (2026-10-03, fresh-context review on #207): this used to
+    // `git add -A` + `git commit` against the REAL index/HEAD of whatever is
+    // checked out, before the push below was even attempted — if the push
+    // then failed for ANY reason (budget, network, shallow-clone fallback
+    // also failing) the caller's RESCUE_FAILED leaves the kill refused (see
+    // do.ts's rescuePush/destroy/recycle), but the bot commit stayed sitting
+    // on the real branch's real local HEAD, tree now clean — the lead's own
+    // next ordinary `git push` on that branch would ship it straight onto
+    // the real branch. Since rescue_target() (above) already always
+    // generates a fresh throwaway ref in every mode, there is no remaining
+    // reason for this step to touch the real checkout at all. Builds the
+    // snapshot the exact same non-mutating way rescueSnapshotCmd's own
+    // rescue_one() already does for its own dirty-tree branch: a detached,
+    // out-of-band `GIT_INDEX_FILE` (seeded from a READ of the real index,
+    // never a write to it — see that function's own doc comment for why the
+    // seed step matters) feeds `write-tree` + `commit-tree -p HEAD`, so the
+    // real `.git/index` and `HEAD` are never touched, in or out of this
+    // function's own failure paths below.
+    `    idxfile=$(mktemp 2>/dev/null) || { echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; }\n` +
+    `    realidx=$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
+    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; fi\n` +
+    `    if ! GIT_INDEX_FILE="$idxfile" git -C "$w" add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
+    `    tree=$(GIT_INDEX_FILE="$idxfile" git -C "$w" write-tree 2>/dev/null); rc=$?\n` +
+    `    rm -f "$idxfile"\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
+    // MAJOR fix (survival brief review): every rescue commit this file
+    // produces now names the real branch it came from, as a git trailer
+    // (blank line + `Rescued-From: <value>`, via a second `-m` — both
+    // `git commit` and `git commit-tree` treat multiple `-m` flags as
+    // separate paragraphs, which IS the trailer convention, with no literal
+    // newline to quote through the shell). `rev-parse --abbrev-ref HEAD`
+    // already returns the literal string `HEAD` in detached HEAD — the same
+    // fallback this file's own history (see the Fix-round-2/#251-review
+    // comments above) already established as the sane literal for that
+    // case — so the `:-HEAD` only covers the (believed-impossible) case
+    // where the command itself produced no output at all.
+    `    rbranch=$(git -C "$w" rev-parse --abbrev-ref HEAD 2>/dev/null); rbranch="\${rbranch:-HEAD}"\n` +
+    `    sha=$(git -C "$w" ${identity} commit-tree "$tree" -p HEAD -m "fleet: rescue-push before teardown" -m "Rescued-From: $rbranch" 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$sha" ]; then echo "${RESCUE_FAILED_PREFIX} $id commit"; fail=$((fail+1)); return; fi\n` +
     // Issue #371: checked once, before this logical push attempt (rescue_push's
     // own first try + its immediate nff retry) — never inside rescue_push()
     // itself, whose entire stdout is captured by this call's own `$(...)`
@@ -954,11 +999,15 @@ export function rescuePushCmd(
     // produce one, but the retry mechanism itself, and this budget, still
     // exist for the shallow-clone case.)
     `    if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
-    `    if ! target=$(rescue_push "$w" "$id" "$target"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
+    // BLOCKER fix: push the synthetic snapshot `$sha` (never `HEAD`, which
+    // the real checkout's own HEAD still is, untouched) — same convention
+    // rescueSnapshotCmd's own identical call site already uses.
+    `    if ! target=$(rescue_push "$w" "$id" "$target" "$sha"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
     // C3: a --depth 1 clone gets no local remote-tracking ref for a
     // freshly generated target on its own — without this, the NEXT run
     // re-counts this exact commit as unpushed forever.
-    `    git -C "$w" update-ref "refs/remotes/origin/$target" HEAD 2>/dev/null || true\n` +
+    // BLOCKER fix: tracks `$sha`, not `HEAD` — `HEAD` was never advanced.
+    `    git -C "$w" update-ref "refs/remotes/origin/$target" "$sha" 2>/dev/null || true\n` +
     // Issue #266: $wn is a FILE count (status --porcelain line count, above).
     `    echo "${RESCUE_PUSHED_PREFIX} $target $wn ${RESCUE_PUSHED_KIND_FILES}"; any=1\n` +
     `  else\n` +
@@ -1260,67 +1309,93 @@ export function rescuePushCmd(
  * Issue #266 (follow-up on #251/#263): `fleet rescue-all` (do.ts's
  * `rescueNow`) runs against studios that are still ALIVE and actively worked
  * on — the whole point of the command, a pre-image-deploy safety net — not
- * only against a container that is about to die anyway. `rescuePushCmd`
- * above is correct for THAT case (teardown): `git add -A` against the real
- * index, `git commit --no-verify` moving the real HEAD/branch, because the
- * container is doomed regardless and mutating its own checkout one last time
- * is harmless. Run against a LIVE studio, the exact same steps are NOT
- * harmless: they commit and push whatever is CURRENTLY uncommitted —
- * possibly a lead or member's own mid-edit, half-finished diff — onto the
- * studio's real, live branch, and leave that commit sitting in the real
- * working tree's history/index, changing HEAD/the index out from under a
- * still-running agent that may be relying on either.
+ * only against a container that is about to die anyway. The paragraph that
+ * used to open this comment argued `rescuePushCmd` above was fine mutating
+ * the real index/HEAD at teardown ("the container is doomed regardless") in
+ * a way that would NOT have been fine here, against a live studio — that
+ * argument is superseded below; read on.
+ *
+ * BLOCKER fix (fresh-context review on #207, 2026-10-03): that argument for
+ * `rescuePushCmd` turned out to be wrong even at teardown. `rescue_target()`
+ * (above) now always generates a fresh, throwaway ref — never the real
+ * checked-out branch — so a successful push was never the risk; an UNSUCCESSFUL
+ * one was. If the push failed for any reason (budget exhausted, network, the
+ * shallow-clone fallback also failing) AFTER the real index/HEAD had already
+ * been mutated, the caller (`do.ts`'s `rescuePush`) throws on the resulting
+ * `RESCUE_FAILED`, and `destroy`/`recycle` refuse the kill on that throw
+ * (unless `--discard-unsynced`) — so the container, and the bot commit now
+ * sitting on the real branch's real local HEAD with a clean tree, both
+ * survived. The lead's own next ordinary `git push` on that branch would
+ * ship that commit straight onto the real branch. "The container is doomed
+ * regardless" was never actually guaranteed the moment a failed rescue could
+ * block its own teardown. `rescuePushCmd`'s own dirty-tree branch now uses
+ * the exact same non-mutating technique described below that
+ * `rescueSnapshotCmd` always has — there is no longer any call site in this
+ * file, in either command, that mutates the real checkout's index or HEAD.
  *
  * This command produces the identical `RESCUE_NO_CHECKOUT`/`RESCUE_CLEAN`/
  * `RESCUE_MARKERS_ONLY`/`RESCUE_PUSHED`/`RESCUE_FAILED` output shape as
- * `rescuePushCmd` (do.ts's `rescuePush` parser is reused unchanged), and
- * shares every part of the walk that was ALREADY non-mutating: `rescue_target`
- * (identical, including the #266 `wt/` fix above), the "clean, but has
+ * `rescuePushCmd` (do.ts's `rescuePush` parser is reused unchanged), and now
+ * shares every part of the walk, including the dirty-tree branch (see the
+ * BLOCKER fix note above): `rescue_target`/`snapshot_target` (identical
+ * shape, including the #266 `wt/` fix above, modulo the calling convention —
+ * `rescue_target` sets `target` as a side effect via plain-statement-call;
+ * `snapshot_target` `printf`s it for a `$(...)` capture), the "clean, but has
  * unpushed commits" branch (N1/N2/the per-worktree ahead-check all just push
  * an EXISTING commit by ref — no local state to protect there in the first
- * place), the worktree walk, the branch walk, the stash walk. The ONLY
- * difference is how a DIRTY tree gets turned into something pushable:
+ * place), the worktree walk, the branch walk, the stash walk. How a DIRTY
+ * tree gets turned into something pushable, in BOTH commands now:
  *
- *   - `rescuePushCmd`: `git add -A` (real index) -> `git commit --no-verify`
- *     (real HEAD moves) -> push HEAD.
- *   - `rescueSnapshotCmd`: `GIT_INDEX_FILE=<tmp>` scopes `git add -A` to a
- *     throwaway index file, NEVER the real `.git/index` (or, for a member
- *     worktree, its own per-worktree index under `.git/worktrees/<id>/
- *     index` — `git rev-parse --absolute-git-dir` (an ABSOLUTE path,
- *     correctly per-worktree; `--git-path` was tried first and rejected —
- *     it returns a path relative to `$w`, not to this script's OWN cwd, and
- *     silently resolved against the wrong directory the moment anything
- *     other than `$w` itself happened to be the shell's cwd) resolves
- *     whichever is correct) -> the throwaway index is first SEEDED with a
- *     byte-for-byte copy of the real one (`cp`, a read of the real file,
- *     never a write to it) so `add -A`'s own "also stage removals already in
- *     the index" behaviour sees the SAME starting point the real index would
- *     have given it — skipping the seed would silently drop any deleted-file
- *     staging from the snapshot, a correctness gap the issue's own outline
- *     didn't call out but real `git add -A` semantics require closing.
- *     `git write-tree` against that scoped index produces a tree object;
- *     `git commit-tree <tree> -p HEAD -m ...` produces a commit object whose
- *     parent is the CURRENT real HEAD, but which no ref anywhere points at —
- *     HEAD/the checked-out branch never move. That floating commit's SHA is
- *     pushed directly (`git push origin <sha>:refs/heads/<target>`, never
- *     `HEAD:...`). The temp index file is removed immediately after (success
- *     or failure) on every path — nothing is left behind across repeated
- *     `rescue-all` runs against a studio that stays up for a long time.
+ *   `GIT_INDEX_FILE=<tmp>` scopes `git add -A` to a throwaway index file,
+ *     NEVER the real `.git/index` (or, for a member worktree, its own
+ *     per-worktree index under `.git/worktrees/<id>/index` — `git rev-parse
+ *     --absolute-git-dir` (an ABSOLUTE path, correctly per-worktree;
+ *     `--git-path` was tried first and rejected — it returns a path relative
+ *     to `$w`, not to this script's OWN cwd, and silently resolved against
+ *     the wrong directory the moment anything other than `$w` itself happened
+ *     to be the shell's cwd) resolves whichever is correct) -> the throwaway
+ *     index is first SEEDED with a byte-for-byte copy of the real one (`cp`,
+ *     a read of the real file, never a write to it) so `add -A`'s own "also
+ *     stage removals already in the index" behaviour sees the SAME starting
+ *     point the real index would have given it — skipping the seed would
+ *     silently drop any deleted-file staging from the snapshot, a correctness
+ *     gap the issue's own outline didn't call out but real `git add -A`
+ *     semantics require closing. `git write-tree` against that scoped index
+ *     produces a tree object; `git commit-tree <tree> -p HEAD -m ...`
+ *     produces a commit object whose parent is the CURRENT real HEAD, but
+ *     which no ref anywhere points at — HEAD/the checked-out branch never
+ *     move. That floating commit's SHA is pushed directly (`git push origin
+ *     <sha>:refs/heads/<target>`, never `HEAD:...`). The temp index file is
+ *     removed immediately after (success or failure) on every path — nothing
+ *     is left behind across repeated runs against a studio that stays up for
+ *     a long time (`rescue-all`'s own repeated live case this issue exists
+ *     for, and an ordinary teardown retried after a transient failure,
+ *     exactly the BLOCKER fix's own scenario above).
+ *
+ * The one remaining, deliberate difference between the two commands is the
+ * commit message's own subject line (`"fleet: rescue-push before teardown"`
+ * vs. `"fleet: rescue snapshot (live, real HEAD/index untouched)"` — each
+ * names its own real calling context) — both now also carry an identical
+ * `Rescued-From: <branch>` trailer (see the dirty-tree branch's own comment
+ * below) naming the real branch the snapshot came from.
  *
  * Net effect, proved by test/bun/rescue-push.test.ts's own real-git
- * "snapshot never mutates live state" suite: `git status --porcelain` and
- * `git rev-parse HEAD`, read from the real working tree/index/HEAD, are
- * byte-identical before and after this command runs against a genuinely
- * dirty tree. Re-running `rescueSnapshotCmd` against an UNCHANGED dirty tree
- * therefore always finds the SAME dirty diff again (nothing local ever
- * advances to make it look "already saved") and pushes a FRESH snapshot ref
- * each time — a deliberate tradeoff: some duplicate snapshot refs on origin
- * across repeated `rescue-all` calls against a studio that stays dirty, in
- * exchange for the real guarantee this command exists for (the live studio's
- * own state is never touched). The "clean, but has unpushed commits" branch
- * keeps its own `update-ref refs/remotes/origin/<target> HEAD` exactly as
- * before — those commits are real, persistent, local state that legitimately
- * shouldn't be re-pushed every run.
+ * "snapshot never mutates live state" suite (and, after the BLOCKER fix
+ * above, `rescuePushCmd`'s own equivalent coverage too): `git status
+ * --porcelain` and `git rev-parse HEAD`, read from the real working
+ * tree/index/HEAD, are byte-identical before and after either command runs
+ * against a genuinely dirty tree. Re-running either command against an
+ * UNCHANGED dirty tree therefore always finds the SAME dirty diff again
+ * (nothing local ever advances to make it look "already saved") and pushes a
+ * FRESH snapshot ref each time — a deliberate tradeoff: some duplicate
+ * snapshot/rescue refs on origin across repeated runs against a studio (or a
+ * teardown retried after a transient push failure) that stays dirty, in
+ * exchange for the real guarantee this design exists for (the live checkout's
+ * own state is never touched, regardless of whether the push that follows
+ * succeeds). The "clean, but has unpushed commits" branch keeps its own
+ * `update-ref refs/remotes/origin/<target> HEAD` exactly as before — those
+ * commits are real, persistent, local state that legitimately shouldn't be
+ * re-pushed every run.
  *
  * `root`/`pushTimeoutSeconds`/`serverDeadlineSeconds`/`budgetMarginSeconds`
  * are test seams, same convention as `rescuePushCmd`'s own — see
@@ -1427,7 +1502,7 @@ export function rescueSnapshotCmd(
     // `add -A` + `commit` against the real one — see this function's own
     // doc comment above for the full reasoning.
     `rescue_one() {\n` +
-    `  local w="$1" id="$2" mode="$3" wall wstatus wn wahead whead target rc idxfile realidx tree sha\n` +
+    `  local w="$1" id="$2" mode="$3" wall wstatus wn wahead whead target rc idxfile realidx tree sha rbranch\n` +
     `  wall="$(git -C "$w" status --porcelain 2>&1)"; rc=$?\n` +
     `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id status"; fail=$((fail+1)); return; fi\n` +
     `  wstatus="$(git -C "$w" status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
@@ -1465,7 +1540,13 @@ export function rescueSnapshotCmd(
     `    tree=$(GIT_INDEX_FILE="$idxfile" git -C "$w" write-tree 2>/dev/null); rc=$?\n` +
     `    rm -f "$idxfile"\n` +
     `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
-    `    sha=$(git -C "$w" ${identity} commit-tree "$tree" -p HEAD -m "fleet: rescue snapshot (live, real HEAD/index untouched)" 2>/dev/null); rc=$?\n` +
+    // MAJOR fix (survival brief review): same `Rescued-From: <branch>`
+    // trailer rescuePushCmd's own rescue_one() now adds to its real commit —
+    // see that function's own comment for why `rev-parse --abbrev-ref HEAD`
+    // is the right capture (and already returns the literal `HEAD` when
+    // detached, matching this file's own established fallback precedent).
+    `    rbranch=$(git -C "$w" rev-parse --abbrev-ref HEAD 2>/dev/null); rbranch="\${rbranch:-HEAD}"\n` +
+    `    sha=$(git -C "$w" ${identity} commit-tree "$tree" -p HEAD -m "fleet: rescue snapshot (live, real HEAD/index untouched)" -m "Rescued-From: $rbranch" 2>/dev/null); rc=$?\n` +
     `    if [ "$rc" != "0" ] || [ -z "$sha" ]; then echo "${RESCUE_FAILED_PREFIX} $id commit"; fail=$((fail+1)); return; fi\n` +
     // Issue #371: same single check ahead of the attempt+nff-retry pair as
     // rescuePushCmd's own identical guard — never inside rescue_push() itself
