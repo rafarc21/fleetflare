@@ -29,12 +29,12 @@ const ALL = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN
 const MAP_2 = '{"demosite-life":2}';
 
 // Issue #209: launchAccountOrRefuse now reads env.DB (when auto-failover is
-// on) to consult the fleet-wide AccountLimits map -- merging in the real
+// on) to consult the fleet-wide AccountLimits map -- merging in ONLY the real
 // (migrated, empty-by-default) cloudflare:test D1 keeps every EXISTING test
 // below behaving exactly as before (an empty fleet_state table reads back as
 // "no limits recorded", i.e. every account free).
 function envWith(vars: Record<string, string>): Env {
-  return { ...testEnv, ...vars } as unknown as Env;
+  return { ...vars, DB: testEnv.DB } as unknown as Env;
 }
 
 function status(overrides: Partial<StudioStatus> = {}): StudioStatus {

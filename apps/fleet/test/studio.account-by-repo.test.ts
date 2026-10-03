@@ -27,12 +27,12 @@ const TOKEN_3 = "sk-ant-oat01-" + "c".repeat(40);
 const TOKEN_4 = "sk-ant-oat01-" + "d".repeat(40);
 
 // Issue #209: launchAccountOrRefuse now reads env.DB (when auto-failover is
-// on) to consult the fleet-wide AccountLimits map -- merging in the real
+// on) to consult the fleet-wide AccountLimits map -- merging in ONLY the real
 // (migrated, empty-by-default) cloudflare:test D1 keeps every EXISTING test
 // below behaving exactly as before (an empty fleet_state table reads back as
 // "no limits recorded", i.e. every account free).
 function envWith(vars: Record<string, string>): Env {
-  return { ...testEnv, ...vars } as unknown as Env;
+  return { ...vars, DB: testEnv.DB } as unknown as Env;
 }
 
 function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
