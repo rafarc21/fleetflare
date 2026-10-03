@@ -13,6 +13,7 @@ import { isWatchMinute, watchStoppedContainers } from "./studio/container-watch"
 import { handleBoard, handleFleetBoard } from "./board/routes";
 import { handleMemory } from "./memory/routes";
 import { handleFleetJunior } from "./junior/route";
+import { handleJuniorUsageStats } from "./junior/usage";
 import { handleFleetGh } from "./write-proxy/gh-route";
 import { handleFleetGit } from "./write-proxy/git-worker";
 import { recordWorkerException } from "./exceptions";
@@ -101,6 +102,11 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, url: U
   // a studio route: a studio id always contains `--` (src/studio/ids.ts), so
   // the literal `memory` is not one.
   if (url.pathname.startsWith("/studio/memory")) return handleMemory(req, env);
+  // Issue #218: the fleet junior stats read, Access-gated like every other
+  // /studio/* route. Mounted before the `/studio/` catch-all for the same
+  // reason `/studio/board/` and `/studio/memory` are above — a studio id
+  // always contains `--` (studio/ids.ts), so the literal `junior` is not one.
+  if (url.pathname === "/studio/junior/usage") return handleJuniorUsageStats(req, env);
   if (url.pathname.startsWith("/studio/")) return handleStudio(req, env);
   if (url.pathname.startsWith("/fleet/memory")) return handleMemory(req, env);
   // P4a-2: the studio's own read of its own board, spawn-token

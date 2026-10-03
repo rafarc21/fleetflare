@@ -43,9 +43,10 @@ describe("insertJuniorUsage + aggregateJuniorUsage", () => {
     await insertJuniorUsage(env.DB, { id: "u3", ts: 300, studioId: OTHER, mode: "edit", model: "m", inputTokens: 1, outputTokens: 2, ok: true });
 
     const agg = await aggregateJuniorUsage(env.DB, 0);
+    // ORDER BY studio_id, so lexically "release-studio" < "web-studio".
     expect(agg.rows).toEqual([
-      { studioId: ME, calls: 2, inputTokens: 15, outputTokens: 27 },
       { studioId: OTHER, calls: 1, inputTokens: 1, outputTokens: 2 },
+      { studioId: ME, calls: 2, inputTokens: 15, outputTokens: 27 },
     ]);
     expect(agg.totals).toEqual({ calls: 3, inputTokens: 16, outputTokens: 29 });
   });
