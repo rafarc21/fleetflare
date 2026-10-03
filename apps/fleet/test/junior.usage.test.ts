@@ -167,7 +167,9 @@ describe("handleFleetJunior — usage recording (#218)", () => {
       usage: { prompt_tokens: 3, completion_tokens: 4 },
     });
     const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
-    await r.text(); // drain so the detached IIFE's insert has run
+    await r.text();
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain(); // drain so the detached IIFE's insert has run
 
     const logged = await env.DB.prepare("SELECT * FROM junior_usage_log").all();
     expect(logged.results).toHaveLength(1);
@@ -184,6 +186,8 @@ describe("handleFleetJunior — usage recording (#218)", () => {
     const { token, rows, e } = await setup(new Error("boom"));
     const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
     await r.text();
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain();
 
     const logged = await env.DB.prepare("SELECT * FROM junior_usage_log").all();
     expect(logged.results).toHaveLength(1);
@@ -197,6 +201,8 @@ describe("handleFleetJunior — usage recording (#218)", () => {
     const { token, rows, e } = await setup({ response: "r" });
     const r = await handleFleetJunior(req(token, good, { "X-Junior-Mode": "text" }), e, ctx, board(), rows);
     await r.text();
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain();
 
     const logged = await env.DB.prepare("SELECT mode FROM junior_usage_log").all();
     expect((logged.results[0] as Record<string, unknown>).mode).toBe("text");
@@ -206,6 +212,8 @@ describe("handleFleetJunior — usage recording (#218)", () => {
     const { token, rows, e } = await setup({ response: "r" });
     const r = await handleFleetJunior(req(token, good, { "X-Junior-Mode": "bogus" }), e, ctx, board(), rows);
     await r.text();
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain();
 
     const logged = await env.DB.prepare("SELECT mode FROM junior_usage_log").all();
     expect((logged.results[0] as Record<string, unknown>).mode).toBe("edit");
@@ -229,6 +237,13 @@ describe("handleFleetJunior — usage recording (#218)", () => {
     expect(JSON.parse((await r.text()).trim())).toEqual({
       content: "ok", finish: "stop", usage: { in: 3, out: 4, neurons: null },
     });
+    // Proves the insert call site actually ran (and its promise was handed to
+    // ctx.waitUntil) before the "0 rows" assertion below — otherwise "0 rows"
+    // could pass for the WRONG reason (the insert call site never running at
+    // all) just as easily as for the right one (the insert genuinely
+    // rejecting).
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain();
 
     // The insert genuinely failed — no row landed — proving this is a real
     // rejection surfacing through the full insertJuniorUsage call, not a
