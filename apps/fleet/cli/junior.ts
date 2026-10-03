@@ -7,13 +7,13 @@
 // calls the Worker's `GET /studio/junior/usage` (Access-JWT authenticated,
 // apps/fleet/src/junior/usage.ts's handleJuniorUsageStats) and merges that
 // with this machine's own local usage log (skills/junior/src/usage.ts's
-// recordUsageLocal writes it; same jsonl path, read here directly rather
-// than duplicating the path literal).
+// recordUsageLocal writes it; same jsonl path literal duplicated below
+// rather than importing across the apps/fleet -> skills/* package boundary,
+// which is treated as a filesystem/runtime asset only everywhere else).
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { accessHeaders, juniorUrl, type Credentials } from "./fleet";
-import { juniorUsageLogPath } from "../../../skills/junior/src/usage";
 
 export interface JuniorPaths { skillLink: string; config: string; skillSrc: string }
 type Out = { ok: boolean; lines: string[] };
@@ -126,7 +126,10 @@ export function parseSinceArg(since: string | undefined): number | { error: stri
  *  `ts >= sinceMs`, and aggregates per `id` (normally just one: this
  *  machine's own hostname — recordUsageLocal's only writer). */
 function readLocalUsage(sinceMs: number): JuniorStatsRow[] {
-  const path = juniorUsageLogPath(process.env.HOME || homedir());
+  // Mirrors skills/junior/src/usage.ts's juniorUsageLogPath literal exactly
+  // — duplicated rather than imported, see the file-header comment above.
+  const home = process.env.HOME || homedir();
+  const path = join(home, ".local", "share", "fleet", "junior-usage.jsonl");
   if (!existsSync(path)) return [];
   const byId = new Map<string, JuniorStatsRow>();
   for (const line of readFileSync(path, "utf8").split("\n")) {
