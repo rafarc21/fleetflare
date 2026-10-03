@@ -492,7 +492,9 @@ export const RESCUE_BUDGET_MARGIN_SECONDS = 5;
  * confirmed (live, against a real `--depth 1` clone) to survive shallow —
  * and comparing it against the checked-out branch, rather than trusting
  * that branch unconditionally. NOT hardcoded to `"main"`: a repo whose
- * default branch has any other name is handled identically. Two outcomes:
+ * default branch has any other name is handled identically. Two outcomes
+ * (as originally shipped — issue #207 below superseded the first of them,
+ * see that note):
  *   - checked-out branch != resolved default (the ordinary case once a
  *     studio's own agent branches) -> push there, unchanged from before
  *   - checked-out branch == resolved default, OR the default could not be
@@ -511,6 +513,19 @@ export const RESCUE_BUDGET_MARGIN_SECONDS = 5;
  * straight to `main` came back `[rejected] ... (fetch first)`; pushed to a
  * generated `fleet/rescue/...` ref instead, it landed `[new branch]`, exit
  * 0. Full transcript in this fix's own report.
+ *
+ * Issue #207 (2026-10-03): superseded — the first outcome above ("checked-out
+ * branch != resolved default -> push there") is no longer what
+ * `rescue_target()` does. Measured live: a studio's checked-out branch was
+ * the head of an already-gated, already-reviewed PR, and rescue committed an
+ * uncommitted dev-only edit straight onto it as a bot commit, pushed to that
+ * branch. The round-2 design above assumed a studio's own non-default branch
+ * was always safe to write to directly; it is not, whenever that branch is
+ * also someone else's reviewed PR head. `rescue_target()` now ALWAYS
+ * generates a fresh `fleet/rescue/<studio>-<ts>` ref in checkout mode,
+ * exactly like `rescueSnapshotCmd`'s own `snapshot_target()` already does for
+ * the identical reason (#312, below) — see `rescue_target()`'s own doc
+ * comment for the current behavior.
  *
  * `RescueResult.branch` (below) reports whichever of the two the push
  * ACTUALLY landed on, never the one that was merely checked out — an
@@ -587,8 +602,9 @@ export const RESCUE_FAILED_PREFIX = "RESCUE_FAILED";
  *     as clean, exactly like the main checkout's existing markers-only case
  *     always has.
  * The main checkout keeps its own pre-existing behaviour unchanged (dirty ->
- * commit + branch-vs-default target resolution; see the file-level history
- * above) and additionally gets the same "clean but unpushed" check the
+ * commit + target resolution; see the file-level history above — issue #207
+ * later changed WHAT that resolution produces, never whether it runs) and
+ * additionally gets the same "clean but unpushed" check the
  * worktree loop uses, closing the same loss for it too. `any`/`markers`
  * track whether anything was pushed and whether markers-only was ever the
  * reason nothing was, across EVERY worktree — so a clean main checkout
@@ -613,6 +629,13 @@ export const RESCUE_FAILED_PREFIX = "RESCUE_FAILED";
  * generated `fleet/rescue/<studio>-<worktree>-<timestamp>` ref regardless
  * of what's checked out, so it needs no equivalent check.
  *
+ * Issue #207 (2026-10-03): superseded — `rescue_target()` no longer inspects
+ * `HEAD`/the checked-out branch at all in checkout mode (see its own doc
+ * comment), so there is no branch-vs-default comparison left for a literal
+ * "HEAD" string to fall through. The "ref literally named HEAD" collision
+ * this paragraph fixed is still impossible today, just for a simpler
+ * reason: every checkout-mode target is now unconditionally generated.
+ *
  * PR #263 round 2 (board issue #251, HOLD review): six more holes measured
  * against real git, closed together because they all live in this same
  * shell script:
@@ -627,8 +650,15 @@ export const RESCUE_FAILED_PREFIX = "RESCUE_FAILED";
  *       the tail's CLEAN/MARKERS_ONLY fallback only fires when `fail`
  *       (below) is still 0. Commits use `--no-verify` (a rescue commit is
  *       not a normal commit a human is reviewing, and a broken pre-commit
- *       hook must never be the reason work is lost); pushes deliberately
- *       do NOT — issue #259's own push guard has to see them.
+ *       hook must never be the reason work is lost); at the time this was
+ *       written, pushes deliberately did NOT also skip hooks — issue #259's
+ *       own push guard had to see them, because rescue_target() could still
+ *       return a real, checked-out branch's own name back then. Issue #207
+ *       (2026-10-03) superseded that: rescue_target() in checkout mode now
+ *       always generates a fresh ref, never a real branch name, so every
+ *       push below (like every push rescueSnapshotCmd's own rescue_push()
+ *       already made) now uses `--no-verify` unconditionally too — see
+ *       rescue_push()'s own doc comment for why that's safe today.
  *   C2. The markers-only arm and the "clean but has unpushed commits" arm
  *       used to be mutually exclusive branches of one if/elif/else, so a
  *       worktree whose ONLY untracked change was a marker (`.claude/
@@ -773,84 +803,92 @@ export function rescuePushCmd(
     `any=0; markers=0; fail=0\n` +
     // C4: the target ref for a worktree is named from git's OWN unique
     // admin directory name (never the worktree's directory basename, which
-    // two independently-created worktrees can share) for a member, or the
-    // branch-vs-default resolution (unchanged from the file-level history
-    // above, including the "HEAD" detached-checkout fix) for the main
-    // checkout.
-    // Fresh review of PR #359 round 1, Finding 1: this used to ONLY `printf`
-    // the target, leaving `rescue_push()` (below) to decide `--no-verify`
-    // safety by pattern-matching the resulting STRING (`fleet/rescue/*`) —
-    // which cannot tell "this ref was GENERATED by the branch below" from "a
-    // real, currently-checked-out branch that happens to be named
-    // fleet/rescue/<anything>" (git branch names may legally contain
-    // slashes; nothing stops a human/agent branch from colliding with this
-    // tool's own naming scheme by coincidence). Provenance is now threaded
-    // through explicitly: `target_generated` (1 = a freshly generated,
-    // throwaway ref; 0 = the checked-out branch's own real name), set as a
-    // side effect on every path through this function's own branch point —
-    // the one place that actually KNOWS which case it is in — rather than
-    // reconstructed later from the string's shape. Called as a plain
-    // statement (never `$(...)`, which would run this in a subshell and lose
-    // the side effect) so `target`/`target_generated` land directly in the
-    // caller's own already-`local` variables of the same name (bash's
-    // dynamic function-local scoping — verified live).
+    // two independently-created worktrees can share) for a member, or an
+    // unconditionally generated ref for the main checkout.
+    //
+    // Issue #207 (2026-10-03): superseded the branch-vs-default split this
+    // function used to apply in checkout mode (see the "Fix round 2" comment
+    // above rescuePushCmd for its own full history) — that split pushed to
+    // the checked-out branch's OWN name whenever that branch wasn't the
+    // repo's resolved default, on the theory that a studio's own task branch
+    // is always safe to write to directly. A real incident proved that
+    // theory wrong: a checked-out branch can be the head of an already-gated,
+    // already-reviewed PR, and rescue must never write to it, ever. Now
+    // ALWAYS generates in checkout mode, exactly like rescueSnapshotCmd's own
+    // snapshot_target() already does for the identical reason (#312, see the
+    // HOLD-round block below) — this function and that one are now the same
+    // shape in checkout mode, modulo the calling convention (this one sets
+    // `target` as a side effect via plain-statement-call; that one
+    // `printf`s it for a `$(...)` capture).
+    //
+    // Fresh review of PR #359 round 1, Finding 1 (now moot, kept for
+    // history): this used to need `target_generated` (1 = generated, 0 = the
+    // checked-out branch's own real name) threaded out as a side effect, so
+    // `rescue_push()` could decide `--no-verify` safety from provenance
+    // rather than by pattern-matching the resulting string. Since this
+    // function can no longer produce a real branch name, `target_generated`
+    // would always be 1 — removed, along with `rescue_push()`'s own
+    // conditional on it; see that function's own comment below.
     `rescue_target() {\n` +
-    `  local w="$1" mode="$2" id="$3" branch default\n` +
+    `  local mode="$2" id="$3"\n` +
     `  if [ "$mode" = "checkout" ]; then\n` +
-    `    branch=$(git -C "$w" rev-parse --abbrev-ref HEAD)\n` +
-    `    default=$(git -C "$w" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)\n` +
-    `    if [ -z "$default" ] || [ "$branch" = "HEAD" ] || [ "refs/remotes/origin/$branch" = "$default" ]; then\n` +
-    `      target="fleet/rescue/${studio}-$(date -u +%Y%m%d%H%M%S)"; target_generated=1\n` +
-    `    else\n` +
-    `      target="$branch"; target_generated=0\n` +
-    `    fi\n` +
+    `    target="fleet/rescue/${studio}-$(date -u +%Y%m%d%H%M%S)"\n` +
     `  else\n` +
     // Issue #266: `$id` gets its own path segment (`wt/`) rather than sitting
     // flat between two dashes — see this function's own C4 comment above for
     // why the old flat shape was ambiguous to discoverRescueRefsCmd's regex.
-    `    target="fleet/rescue/${studio}/wt/$id-$(date -u +%Y%m%d%H%M%S)"; target_generated=1\n` +
+    `    target="fleet/rescue/${studio}/wt/$id-$(date -u +%Y%m%d%H%M%S)"\n` +
     `  fi\n` +
     `}\n` +
     // PR #263 round 3 (#251 review), N3: a push rejected non-fast-forward —
-    // the checked-out branch moved on origin since this worktree last knew
-    // about it (a lead's own PR branch, pushed to from somewhere else while
-    // this container was still up), or the exact shallow-clone "(fetch
-    // first)" rejection this file's own header already documents — used to
-    // fall straight into RESCUE_FAILED, and the caller (do.ts's rescuePush)
-    // throws on that, which does NOT stop the kill that follows (rescuePush's
-    // own doc comment: a failed rescue must never block teardown) — so the
-    // work was gone. Verified live against real git (a second clone pushes
-    // ahead of this one, reproducing the identical rejection): the SAME
-    // content is retried, once, to a freshly generated `fleet/rescue/...`
-    // ref that has no existing tip on origin to reject AGAINST — the exact
-    // mechanism the branch-vs-default case above already relies on. Prints
-    // whichever ref the push ACTUALLY landed on (stdout) so the caller's
-    // `update-ref`/RESCUE_PUSHED always name the right one; returns non-zero
-    // only when BOTH attempts failed — that, and only that, is a genuine
-    // RESCUE_FAILED. Never a `+`/`--force` retry: the fallback ref is BRAND
-    // NEW, so a plain push is never rejected on it for the same reason.
+    // the shallow-clone "(fetch first)" rejection this file's own header
+    // already documents — used to fall straight into RESCUE_FAILED, and the
+    // caller (do.ts's rescuePush) throws on that, which does NOT stop the
+    // kill that follows (rescuePush's own doc comment: a failed rescue must
+    // never block teardown) — so the work was gone. The SAME content is
+    // retried, once, to a freshly generated `fleet/rescue/...` ref that has
+    // no existing tip on origin to reject AGAINST. Prints whichever ref the
+    // push ACTUALLY landed on (stdout) so the caller's `update-ref`/
+    // RESCUE_PUSHED always name the right one; returns non-zero only when
+    // BOTH attempts failed — that, and only that, is a genuine RESCUE_FAILED.
+    // Never a `+`/`--force` retry: the fallback ref is BRAND NEW, so a plain
+    // push is never rejected on it for the same reason.
+    //
+    // Issue #207 (2026-10-03): this comment used to open with "the
+    // checked-out branch moved on origin since this worktree last knew about
+    // it (a lead's own PR branch, pushed to from somewhere else while this
+    // container was still up)" as the first-push-rejected scenario, with a
+    // live-verified test fixture reproducing it (a second clone pushing
+    // ahead of the checked-out branch). That scenario required the FIRST
+    // push attempt to target a real, checked-out branch — the exact
+    // behavior this issue's fix removed. `rescue_target()` in checkout mode
+    // now always generates a fresh ref as the first attempt, which nothing
+    // on origin can ever collide with, so that fixture's precondition can no
+    // longer occur; the test was deleted. Only the shallow-clone "(fetch
+    // first)" rejection (this file's own header comment) can still reach
+    // this retry today — the same already-accepted gap
+    // rescueSnapshotCmd's own HOLD-round comment already documents for its
+    // own NFF-retry call site ("there is no real-branch-collision fixture
+    // that reaches rescueSnapshotCmd's own retry call site at all").
     rescueTryPushFn(identity, pushTimeoutSeconds) + rescueWtFn() + rescueOnOriginFn(pushTimeoutSeconds) +
     `rescue_push() {\n` +
-    `  local w="$1" id="$2" target="$3" generated="$4" perr prc ftarget nv\n` +
+    `  local w="$1" id="$2" target="$3" perr prc ftarget\n` +
     // Issue #359, measured live 2026-09-26: a slow or hanging pre-push hook
     // in the TARGET repo (lefthook, this codebase has no control over its
     // config) stalled rescue-all's push step on 4/5 busy studios — exactly
-    // "finalize-902 (push)"-shaped failures. `--no-verify` here, but ONLY
-    // when `$generated` (rescue_target()'s own provenance flag — see that
-    // function's doc comment above) says `$target` was ACTUALLY produced by
-    // rescue_target()'s generated-ref branch, never by pattern-matching the
-    // resulting string: this function's only OTHER possible target is the
-    // checked-out branch's own real name (from rescue_target()'s
-    // branch-vs-default resolution, when that branch is not the repo's
-    // default), and a real branch push must still go through #259's own push
-    // guard and any repo's own pre-push hook, exactly as the C1 comment above
-    // already establishes for why pushes deliberately do NOT skip hooks in
-    // general — REGARDLESS of whether that real branch's own name happens to
-    // look like a generated ref (a branch literally named
-    // `fleet/rescue/<anything>` is real git-legal, and a string-shape check
-    // alone cannot tell it apart from this tool's own throwaway refs). Never
-    // `+`/`--force` regardless — unrelated to this flag.
-    `  nv=""; if [ "$generated" = "1" ]; then nv="--no-verify"; fi\n` +
+    // "finalize-902 (push)"-shaped failures. `--no-verify` unconditionally
+    // here, same as rescueSnapshotCmd's own `rescue_push()`.
+    //
+    // Issue #207 (2026-10-03): superseded a `$generated`-conditional
+    // `--no-verify` that used to live here — rescue_target() could still
+    // return a real, checked-out branch's own name in that older design, and
+    // a real branch push had to keep going through a repo's own pre-push
+    // hook (the C1 comment's own "pushes deliberately do NOT [skip hooks]"
+    // point, written for that now-removed case). Since rescue_target() can
+    // no longer produce a real branch name, this function's only possible
+    // target is always a freshly generated, throwaway ref, so `--no-verify`
+    // applies unconditionally — no provenance flag needed. Never
+    // `+`/`--force` regardless.
     // Issue #359 round 3: `timeout -k <grace> <secs>` bounds a single push
     // that stalls (a slow/hanging pre-push hook) to its OWN small budget —
     // see this file's own header comment above for why. A killed push's exit
@@ -858,7 +896,7 @@ export function rescuePushCmd(
     // a rejected one; no other line here needs to change.
     // Issue #16: rescue_try_push (rescueTryPushFn) adds the shallow-clone
     // snapshot fallback to both this attempt and the nff retry below.
-    `  rescue_try_push "$w" "$nv" HEAD "$target"; prc=$?\n` +
+    `  rescue_try_push "$w" --no-verify HEAD "$target"; prc=$?\n` +
     `  if [ "$prc" = "0" ]; then printf '%s' "$target"; return 0; fi\n` +
     `  if printf '%s' "$perr" | grep -qiE 'non-fast-forward|fetch first'; then\n` +
     // HOLD-round fix: this used to sit flat between two dashes
@@ -892,7 +930,7 @@ export function rescuePushCmd(
     // (#259's own push guard still sees the push, unmodified); pushes never
     // do, and never `+`/`--force`.
     `rescue_one() {\n` +
-    `  local w="$1" id="$2" mode="$3" wall wstatus wn wahead whead target target_generated rc\n` +
+    `  local w="$1" id="$2" mode="$3" wall wstatus wn wahead whead target rc\n` +
     `  wall="$(git -C "$w" status --porcelain 2>&1)"; rc=$?\n` +
     `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id status"; fail=$((fail+1)); return; fi\n` +
     `  wstatus="$(git -C "$w" status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
@@ -906,14 +944,17 @@ export function rescuePushCmd(
     // own first try + its immediate nff retry) — never inside rescue_push()
     // itself, whose entire stdout is captured by this call's own `$(...)`
     // substitution and would otherwise never reach the script's real stdout.
-    // #371 review Finding 1: `mult=2` — `$target` here can be a REAL,
-    // non-generated branch name (rescue_target()'s branch-vs-default
-    // resolution, above), which CAN be rejected non-fast-forward, so
-    // rescue_push() below can run its own first-attempt-plus-retry pair, each
-    // an independently `timeout`-bounded push. Budgeted for that worst case,
-    // not a single push's.
+    // #371 review Finding 1: `mult=2` — rescue_push() below can still run its
+    // own first-attempt-plus-retry pair (the shallow-clone "(fetch first)"
+    // rejection this file's own header documents can hit even a freshly
+    // generated target), each an independently `timeout`-bounded push.
+    // Budgeted for that worst case, not a single push's. (Issue #207: this
+    // used to also cover a REAL, non-generated branch name being rejected
+    // non-fast-forward by a concurrent push — rescue_target() can no longer
+    // produce one, but the retry mechanism itself, and this budget, still
+    // exist for the shallow-clone case.)
     `    if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
-    `    if ! target=$(rescue_push "$w" "$id" "$target" "$target_generated"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
+    `    if ! target=$(rescue_push "$w" "$id" "$target"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
     // C3: a --depth 1 clone gets no local remote-tracking ref for a
     // freshly generated target on its own — without this, the NEXT run
     // re-counts this exact commit as unpushed forever.
@@ -945,10 +986,9 @@ export function rescuePushCmd(
     // the dirty-tree branch above.
     // #371 review Finding 1: `mult=2`, same reasoning as the dirty-tree
     // branch's own identical call above — `$target` here is the SAME
-    // rescue_target() result (a real branch name is possible), so the same
-    // retry-pair worst case applies.
+    // rescue_target() result, so the same retry-pair worst case applies.
     `      if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
-    `      if ! target=$(rescue_push "$w" "$id" "$target" "$target_generated"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
+    `      if ! target=$(rescue_push "$w" "$id" "$target"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
     `      git -C "$w" update-ref "refs/remotes/origin/$target" HEAD 2>/dev/null || true\n` +
     // Issue #266: $wahead is a COMMIT count (rev-list --count, above) —
     // never "file(s)".
