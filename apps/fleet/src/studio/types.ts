@@ -499,6 +499,28 @@ export interface StudioStatus {
    */
   exhaustionKind?: "dead" | "inline" | "select" | null;
   /**
+   * Issue #210 — WHEN this studio genuinely parked with no free account at
+   * all (`parkedOn === null` — see runAccountFailover's own doc comment at
+   * the `!next` branch for that split), so a periodic tick can tell how long
+   * it has been idle-billing and decide whether to auto-stop
+   * (`PARKED_AUTO_STOP_HOURS`, failover.ts). Deliberately does NOT cover the
+   * separate `parkedOn !== null` case (`FLEET_AUTO_FAILOVER` off with a
+   * candidate account) — that is a deliberate operator choice, not the
+   * "every account is fleet-wide limited" shape #210 is about.
+   *
+   * Stamped ONCE, on the fresh-degrade write, from
+   * `existing.parkedAt ?? now` — a repeat already-degraded tick never resets
+   * it, so the clock always reads from the FIRST tick this park was
+   * observed, never the most recent one. `exhaustionKind` already carries
+   * the reason (its own field, right above); this is only the "since when".
+   *
+   * Cleared to `null` at the same sites `exhaustionKind` is cleared at: a
+   * pane-visual heal (`healDegradedRowAndWake`) and an ordinary account
+   * switch landing (`runAccountFailover`'s own `switched` write) — either one
+   * means the studio is no longer parked, same as a heal.
+   */
+  parkedAt?: string | null;
+  /**
    * Maestro round-2 review (PR #170), finding 2: `healDegradedRowAndWake`
    * used to discard its own `runGatedWake` outcome entirely — the row had
    * already flipped to `"running"` by the SAME write, so a refused/skipped/
