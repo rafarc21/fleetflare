@@ -2154,9 +2154,13 @@ export async function runAccountFailover(
       const ownPrimary = deps.accounts.find((a) => a.name === deps.primary);
       if (ownPrimary) {
         const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
+        // Reviewer nit (#211 review round 4): one `now` for both checks below
+        // — an `await storage.get` sits between them, a real gap a second
+        // `deps.now()` call could drift across, if only by a tick.
+        const now = deps.now();
         if (
-          accountIsFree(ownPrimary, limits, deps.now())
-          && !operationLockFresh(await storage.get(OPERATION_KEY), deps.now())
+          accountIsFree(ownPrimary, limits, now)
+          && !operationLockFresh(await storage.get(OPERATION_KEY), now)
         ) {
           return handBack(deps, storage, studioId, rowNow, ownPrimary, recordStudioFn);
         }

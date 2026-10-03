@@ -3466,7 +3466,20 @@ function accountClears(
   // `borrowedAccount` itself, back when it actually happened.
   const plain = launchAccount(env, repo, existing?.claudeAccount ?? null);
   const rerouted = !plain.ok || plain.name !== launch.name;
-  const borrow = rerouted ? borrowFields(env, repo, reserved, existing, launch) : null;
+  // #211 review round 4: a row already carrying a STALE `borrowedAccount`
+  // from an earlier launch's reroute must still get re-checked even when
+  // THIS launch didn't reroute at all — i.e. it landed squarely on the
+  // repo's own primary, because both `plain` (limit-unaware) and `launch`
+  // (limit-aware) agree on it. `rerouted` alone misses that case and leaves
+  // the stale field standing, which later fires a bogus hand-back switch
+  // (failover.ts, gated on exactly this field) against a studio that's
+  // already home. `borrowFields` itself resolves to a clear
+  // (`{ borrowedAccount: null, borrowedFromRepo: null }`) whenever `launch`
+  // lands on the primary, so running it here is always safe — it never
+  // SETS the fields merely because this branch was widened.
+  const primary = launchAccount(env, repo, null);
+  const landedOnPrimary = primary.ok && launch.name === primary.name;
+  const borrow = (rerouted || landedOnPrimary) ? borrowFields(env, repo, reserved, existing, launch) : null;
   if (!clearClaudeAccount && !clearRateLimited && borrow === null) return null;
   return {
     ...(clearClaudeAccount ? { claudeAccount: null, borrowedAccount: null, borrowedFromRepo: null } : {}),

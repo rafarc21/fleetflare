@@ -579,9 +579,14 @@ describe("launchAccountOrRefuse — borrow tier 3 and D1 failure handling, real 
   // lead's own pane -- against a studio that was never away to begin with.
   it("a later launch that lands squarely on the primary clears a STALE borrowedAccount/borrowedFromRepo from an earlier borrow", async () => {
     const env = envWith(twoRepos);
-    // No limits recorded this time -- the mapped primary (account 2) is free
-    // again, unlike the fixture above. The row still carries the borrow an
-    // EARLIER launch (while account 2 was limited) left behind.
+    // The mapped primary (account 2) is free again here, unlike the fixture
+    // above -- explicitly overwritten with an already-expired `until` so this
+    // test does not depend on whether the earlier test in this describe
+    // block (which limits accounts 1 and 2 for an hour) ran first against
+    // the same real D1. The row still carries the borrow an EARLIER launch
+    // (while account 2 was limited) left behind.
+    await writeFleetAccountLimit(env.DB, "CLAUDE_CODE_OAUTH_TOKEN", future(-1), seenAt());
+    await writeFleetAccountLimit(env.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", future(-1), seenAt());
     const storage = fakeStorage(status({ borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", borrowedFromRepo: "otherrepo" }));
     const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
     const launch = await launchAccountOrRefuse(env, storage, "demosite-life--lead", recordFn, false);
