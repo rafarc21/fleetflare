@@ -135,6 +135,13 @@ function readLocalUsage(sinceMs: number): JuniorStatsRow[] {
     // deno-lint-ignore no-explicit-any
     let row: any;
     try { row = JSON.parse(trimmed); } catch { continue; }
+    // Review round 1 (#221): `JSON.parse` succeeds on any valid JSON value,
+    // not just objects — a bare `null`, number, string, or array line (all
+    // realistic shapes for a truncated/partial write or manual edit) parses
+    // fine and then crashes the next check with an uncaught TypeError
+    // reading `.ts` off a non-object. Must be skipped like any other
+    // malformed line, never allowed to take down the whole command.
+    if (typeof row !== "object" || row === null) continue;
     // Issue #221 item 4: a corrupted line (partial write, manual edit) must
     // be SKIPPED, not silently NaN-contaminate every downstream aggregate —
     // a broken `ts` previously made `row.ts < sinceMs` always false, so the
