@@ -819,3 +819,57 @@ describe("exhaustedMessage sanity (shared fixture reuse, no behavior change)", (
     expect(exhaustedMessage(STUDIO_ID, ["CLAUDE_CODE_OAUTH_TOKEN"])).toContain("CLAUDE_CODE_OAUTH_TOKEN");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review round 2 (#210), FINAL round, finding A (BLOCKER) — a stale
+// `parkedAt` from an EARLIER genuine (`parkedOn === null`) park must not ride
+// forward onto a LATER `parkedOn !== null` (#271, operator chose not to
+// move) degrade. The round-2 finding-2 fix above only ever restarted the
+// clock for a genuine repeat exhaustion (`existing.state === "degraded"`);
+// it never addressed the SEPARATE case where `existing` is already
+// "degraded" from a genuine park, and the fleet/flag then changes so THIS
+// tick's own classification is `parkedOn !== null` instead — the `degraded`
+// object literal's own `...existing` spread at the top still carries the old
+// `parkedAt` forward untouched, since the `parkedOn === null` ternary's
+// `else` branch used to spread nothing (`{}`), never clearing it. That stale
+// value then satisfies the ask-3 auto-stop gate's own
+// `existing.parkedAt && existing.exhaustionKind && ...` check on a LATER
+// tick and destroys a studio the operator deliberately parked, not one that
+// is fleet-wide exhausted — exactly the invariant StudioStatus.parkedAt's
+// own doc comment states.
+// ---------------------------------------------------------------------------
+describe("review round 2 (#210), FINAL round, finding A — a stale parkedAt from a genuine park must not ride forward onto a later #271 operator-park degrade", () => {
+  it("genuine exhaustion stamps parkedAt; a LATER #271 operator-park degrade (a candidate now exists, auto-failover off) clears it to null, and the ask-3 auto-stop gate never fires on that row even 6h+ later", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: MODAL_PANE });
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+    const stored1 = await h.storage.get(STATUS_KEY);
+    expect(stored1?.parkedAt).toBe(NOW.toISOString());
+
+    // The fleet gains a second (free) account and the operator flips
+    // auto-failover off — #271's own "operator chose not to move" case, NOT
+    // a new fleet-wide exhaustion: a candidate exists, so `parkedOn !==
+    // null` this tick, even though `existing.state` is still "degraded" from
+    // the earlier genuine park.
+    h.deps.accounts = TWO_ACCOUNTS;
+    h.deps.autoFailover = false;
+    const laterNow = new Date(NOW.getTime() + HOUR_MS);
+    h.setNow(laterNow);
+    const second = await h.run();
+
+    expect(second).toEqual({ kind: "parked", account: "CLAUDE_CODE_OAUTH_TOKEN" });
+    const stored2 = await h.storage.get(STATUS_KEY);
+    // The load-bearing assertion: the earlier genuine park's parkedAt must
+    // NOT survive onto this operator-park row.
+    expect(stored2?.parkedAt ?? null).toBeNull();
+
+    // And critically: the ask-3 auto-stop gate (gated on `existing.parkedAt`
+    // being truthy) must never fire on this operator-parked row, even well
+    // past PARKED_AUTO_STOP_HOURS measured from the STALE first parkedAt.
+    h.setNow(new Date(laterNow.getTime() + (PARKED_AUTO_STOP_HOURS * HOUR_MS) + 60_000));
+    const third = await h.run();
+    expect(third.kind).not.toBe("auto-stopped");
+    expect(third.kind).not.toBe("park-refused");
+    expect(h.stopParkedStudio).not.toHaveBeenCalled();
+  });
+});
