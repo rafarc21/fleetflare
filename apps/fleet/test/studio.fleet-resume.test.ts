@@ -8,6 +8,7 @@ import {
   hashSpawnToken, mintSpawnToken, __resetOrgCacheForTests, __resetFleetJsonCacheForTests,
 } from "../src/studio/org";
 import { recordStudio } from "../src/studio/registry";
+import { LaunchRefusedError, StartRefusedError } from "../src/studio/do";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
 
@@ -261,6 +262,61 @@ describe("POST /fleet/spawn {resume: true} — one resume at a time", () => {
     const testEnv = { ...env, STUDIO: ns, AGENT_REPO: REPO_SLUG } as unknown as Env;
     await expect(handleFleetSpawn(post({ role: "web-studio", instance: 5, resume: true }, token), testEnv, fetchFile))
       .rejects.toThrow("container refused");
+    const row = await env.DB.prepare("SELECT value FROM fleet_state WHERE key LIKE '%websites--web-studio--5'")
+      .first<{ value: string }>();
+    expect(JSON.parse(row!.value).state).toBe("stopped");
+  });
+
+  // Issue #217 review round 2: the DO stub's `provision` above is the SAME
+  // `stub.provision(cfg)` RPC call routes.ts's own POST /studio/:id/provision
+  // already catches LaunchRefusedError/StartRefusedError for — reached here
+  // via /fleet/spawn's `{resume: true}` body instead. The test just above
+  // still pins the bare-rethrow behaviour for an ORDINARY error (a genuine
+  // container failure must keep surfacing uncaught, not get silently turned
+  // into a 409/500). A LaunchRefusedError/StartRefusedError is a known, NAMED
+  // refusal, never a transport failure, and must become the same 409
+  // `{error}` body instead of an uncaught throw — while the claim's own
+  // cleanup (the stopped -> provisioning flip reverting) still runs exactly
+  // as it does for the ordinary-error case above. Real class, `remote: true`
+  // tag — same RPC-crossing convention as studio.routes.test.ts's own #217
+  // suite, never a hand-typed already-prefixed string.
+  it("a LaunchRefusedError is a 409, not an uncaught throw — and the claim is released (studio resumable again)", async () => {
+    const token = await register("websites--maestro");
+    await recordStudio(env, status());
+    const ns = {
+      idFromName: (name: string) => name as unknown as DurableObjectId,
+      get: () => ({
+        provision: async () => {
+          throw Object.assign(new LaunchRefusedError("every account fleet-wide limited"), { remote: true });
+        },
+      }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
+    };
+    const testEnv = { ...env, STUDIO: ns, AGENT_REPO: REPO_SLUG } as unknown as Env;
+    const res = await handleFleetSpawn(post({ role: "web-studio", instance: 5, resume: true }, token), testEnv, fetchFile);
+    expect(res.status).toBe(409);
+    const body = await res.json() as { error: string };
+    expect(body.error).toBe("every account fleet-wide limited");
+    const row = await env.DB.prepare("SELECT value FROM fleet_state WHERE key LIKE '%websites--web-studio--5'")
+      .first<{ value: string }>();
+    expect(JSON.parse(row!.value).state).toBe("stopped");
+  });
+
+  it("a StartRefusedError is also a 409, not an uncaught throw — and the claim is released", async () => {
+    const token = await register("websites--maestro");
+    await recordStudio(env, status());
+    const ns = {
+      idFromName: (name: string) => name as unknown as DurableObjectId,
+      get: () => ({
+        provision: async () => {
+          throw Object.assign(new StartRefusedError("studio websites--web-studio--5 is stopped"), { remote: true });
+        },
+      }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
+    };
+    const testEnv = { ...env, STUDIO: ns, AGENT_REPO: REPO_SLUG } as unknown as Env;
+    const res = await handleFleetSpawn(post({ role: "web-studio", instance: 5, resume: true }, token), testEnv, fetchFile);
+    expect(res.status).toBe(409);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("is stopped");
     const row = await env.DB.prepare("SELECT value FROM fleet_state WHERE key LIKE '%websites--web-studio--5'")
       .first<{ value: string }>();
     expect(JSON.parse(row!.value).state).toBe("stopped");

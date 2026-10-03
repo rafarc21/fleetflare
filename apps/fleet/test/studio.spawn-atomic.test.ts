@@ -3,6 +3,7 @@ import { env } from "cloudflare:test";
 import { runSpawn, type SpawnDeps, type SpawnParent } from "../src/studio/spawn";
 import { spawnDeps } from "../src/studio/routes";
 import { listStudios, recordStudio, getStudioRow } from "../src/studio/registry";
+import { LaunchRefusedError, StartRefusedError } from "../src/studio/do";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 
@@ -86,6 +87,50 @@ describe('runSpawn — instance allocation is atomic (#296)', () => {
       realDeps({ provisionChild: async () => { throw new Error("container would not start"); } }),
       PARENT, { role: "release", instance: "next" },
     )).rejects.toThrow("container would not start");
+    expect((await listStudios(env)).map((r) => r.id)).toEqual(["websites--release"]);
+  });
+
+  // Issue #217 review round 2: provisionChild (realDeps above) is the SAME
+  // `stub.provision(cfg)` RPC call routes.ts's own POST /studio/:id/provision
+  // already catches this refusal for — reached here via /fleet/spawn instead.
+  // Before this fix, runSpawn's catch bare-rethrew every provisionChild
+  // failure alike (the test just above still pins that behaviour for an
+  // ORDINARY error — a genuine container failure must still propagate so the
+  // caller sees it, not a silent 500/409 substitute). A LaunchRefusedError/
+  // StartRefusedError is a known, NAMED refusal, not a transport failure, and
+  // must become the same 409 `{error}` body routes.ts's provision/restart
+  // already answer with — a real throw crossing the RPC boundary
+  // (`Object.assign(<real class instance>, { remote: true })`, same
+  // convention as studio.routes.test.ts's own #217 suite), never a
+  // hand-typed already-prefixed string.
+  it("a LaunchRefusedError from provisionChild is a 409 (not an uncaught throw), and the claimed id is released", async () => {
+    const res = await runSpawn(
+      realDeps({
+        provisionChild: async () => {
+          throw Object.assign(new LaunchRefusedError("every account fleet-wide limited"), { remote: true });
+        },
+      }),
+      PARENT, { role: "release", instance: "next" },
+    );
+    expect(res.status).toBe(409);
+    const body = await res.json() as { error: string };
+    expect(body.error).toBe("every account fleet-wide limited");
+    // Cleanup still ran: the claimed id is free again, not stuck.
+    expect((await listStudios(env)).map((r) => r.id)).toEqual(["websites--release"]);
+  });
+
+  it("a StartRefusedError from provisionChild is also a 409, and the claimed id is released", async () => {
+    const res = await runSpawn(
+      realDeps({
+        provisionChild: async () => {
+          throw Object.assign(new StartRefusedError("studio websites--release--2 is stopped"), { remote: true });
+        },
+      }),
+      PARENT, { role: "release", instance: "next" },
+    );
+    expect(res.status).toBe(409);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("is stopped");
     expect((await listStudios(env)).map((r) => r.id)).toEqual(["websites--release"]);
   });
 });
