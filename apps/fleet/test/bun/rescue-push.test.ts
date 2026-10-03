@@ -204,6 +204,50 @@ describe("#217 — rescue-push never saves a tool marker as work", () => {
 });
 
 /**
+ * Board issue #216 fix 3 (PR #212's own round-2 review): `rescue_one`'s
+ * dirty-tree branch runs `git add -A` + `write-tree` into a detached index
+ * the moment `git status --porcelain` shows anything, then unconditionally
+ * commits and pushes that tree as a "rescue" -- even when the tree it just
+ * built is byte-identical to `HEAD^{tree}`. Staging a change and then
+ * reverting the working tree's own bytes back to HEAD's (without re-staging)
+ * leaves `status --porcelain` dirty (the INDEX still differs from HEAD) while
+ * `add -A` against a throwaway index -- seeded from the real index, then
+ * overwritten by the CURRENT working tree content -- produces a tree
+ * identical to HEAD's. Before the fix, this pushed a no-op commit and
+ * reported `RESCUE_PUSHED ... success` for a push that carried no real
+ * change. Mirrored for both command builders, same as every other fixture
+ * parametrized across both of this file's `rescue_one` copies.
+ */
+describe("#216 fix 3 — a dirty tree whose final content equals HEAD's own is nothing to rescue, not a hollow push", () => {
+  for (const [label, cmdFn] of [
+    ["rescuePushCmd", rescuePushCmd],
+    ["rescueSnapshotCmd", rescueSnapshotCmd],
+  ] as const) {
+    test(`${label}: stage a change, then revert its bytes back to HEAD's own — RESCUE_CLEAN, nothing pushed, no new ref`, () => {
+      sh(`cd ${checkout} && printf 'original\\n' > tracked.md && git add tracked.md && ` +
+        `git commit -q -m "add tracked.md" && git push -q origin main`);
+      const headBefore = sh(`git -C ${checkout} rev-parse HEAD`).out;
+      sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 && rm -rf .claude`);
+      writeFileSync(join(checkout, "tracked.md"), "modified\n");
+      sh(`git -C ${checkout} add tracked.md`);
+      writeFileSync(join(checkout, "tracked.md"), "original\n");
+      // Still dirty per porcelain (the INDEX still differs from HEAD) --
+      // this is the precondition that routes into rescue_one's dirty branch.
+      expect(sh(`git -C ${checkout} status --porcelain`).out).not.toBe("");
+      const refsBefore = sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out;
+
+      const out = sh(cmdFn(REPO, STUDIO, root)).out;
+
+      expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(out).not.toContain(RESCUE_PUSHED_PREFIX);
+      expect(bare(out)).toBe(RESCUE_CLEAN);
+      expect(sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out).toBe(refsBefore);
+      expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(headBefore);
+    });
+  }
+});
+
+/**
  * Issue #251, measured live the same day as #217: a member subagent's own
  * worktree (`.claude/worktrees/<name>`) is a REAL git worktree, not a plain
  * directory — it can hold real, uncommitted or un-pushed work of its own,
