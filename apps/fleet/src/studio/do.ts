@@ -545,9 +545,9 @@ export async function restartWithSync(
 }
 
 import {
-  rescuePushCmd, rescueSnapshotCmd, RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX,
-  RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport, rescueMintPermissions,
-  type RescueWorktree, type RescueTarget,
+  rescuePushCmd, rescueSnapshotCmd, wipSyncCmd, RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY,
+  RESCUE_PUSHED_PREFIX, RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport,
+  rescueMintPermissions, type RescueWorktree, type RescueTarget,
 } from "./rescue";
 // Moved to src/studio/rescue.ts (pure, so a bun test runs it against real
 // git — issue #217); re-exported so every existing import keeps working.
@@ -696,6 +696,44 @@ export async function rescueSnapshot(deps: SessionSyncDeps, repo: string, studio
 }
 
 /**
+ * Board issue #208: the periodic WIP safety net — see `wipSyncCmd`'s own
+ * doc comment (rescue.ts) for the full design. Wired into the EXISTING
+ * SYNC_SESSION_SECONDS tick (`syncSessionCycle`, below), not a new schedule.
+ *
+ * Same shape as `rescuePush`/`rescueSnapshot` above (same `rescueTarget`
+ * resolution, same `parseRescueExecResult` parse, same throw-on-anything-
+ * not-provably-fine contract) — intentionally: this function itself does
+ * not decide whether a failure is safe to ignore, only its caller does.
+ * UNLIKE `rescuePush`'s own doc comment (which explicitly throws because a
+ * TEARDOWN caller must decide whether to refuse the kill), the caller here
+ * (`syncSessionCycle`) catches unconditionally and only logs: nothing is
+ * being torn down, and a WIP sync that fails this cycle just means the next
+ * tick tries again.
+ */
+export async function wipSync(deps: SessionSyncDeps, repo: string, studio: string): Promise<RescueResult> {
+  const t = (await deps.rescueTarget?.()) ?? {};
+  const cmd = wipSyncCmd(repo, studio, undefined, undefined, deps.botName, deps.botEmail, { remoteUrl: t.remoteUrl });
+  const res = await (t.env ? deps.exec(cmd, t.env) : deps.exec(cmd));
+  return parseRescueExecResult(res, "wip-sync");
+}
+
+/**
+ * Board issue #208: stamps `Observed.wipSyncedAt` ONLY on an actual
+ * RESCUE_PUSHED outcome — same "only on real success" shape
+ * `recordSnapshotOnSuccess` above already follows for `lastSnapshotAt`.
+ * RESCUE_CLEAN/RESCUE_MARKERS_ONLY/RESCUE_NO_CHECKOUT leave the field
+ * exactly as it was: a stale stamp is still valid evidence of the last REAL
+ * sync, and there is nothing to overwrite it WITH on a quiet tick.
+ */
+export async function recordWipSyncOnSuccess(
+  observedStorage: ObservedStorage | null | undefined, result: RescueResult, now: string,
+): Promise<void> {
+  if (observedStorage && result.pushed) {
+    await mergeObserved(observedStorage, { wipSyncedAt: now });
+  }
+}
+
+/**
  * Throws on anything it cannot read as one of the three outcomes above (a
  * push rejected, no remote reachable, the exec itself throwing) —
  * deliberately the SAME contract syncSessionTick (session-sync.ts) already
@@ -725,7 +763,10 @@ export async function rescueSnapshot(deps: SessionSyncDeps, repo: string, studio
  */
 async function parseRescueExecResult(
   res: { code: number; stdout: string; stderr: string },
-  label: "rescue-push" | "rescue-snapshot",
+  // Issue #208: "wip-sync" is a THIRD label — wipSync (above) passes it so a
+  // caller's log line can tell which exec failed, same reason the other two
+  // exist.
+  label: "rescue-push" | "rescue-snapshot" | "wip-sync",
 ): Promise<RescueResult> {
   if (isDeadlineExit(res.code)) {
     throw new Error(
@@ -2950,6 +2991,34 @@ export async function syncSessionCycle(
     checked = await checkAndRecordReadiness(syncDeps, storage, idFallback, recordStudioFn);
   } catch (err) {
     console.error(`studio ${idFallback}: readiness check failed`, err);
+  }
+  // Board issue #208: the periodic WIP safety net. Gated on THIS cycle's own
+  // readiness verdict (`checked`, just above) reading "provisioned" —
+  // exactly the container-up-and-reachable confirmation the heal step just
+  // below already gates its own exec on (`if (heal && checked)`) — so a
+  // stopped or unreachable studio never gets a wipSync exec, same discipline
+  // every other step in this cycle already follows. `checked` null (the
+  // check itself threw, or the studio has nothing provisioned yet) or
+  // `readiness.kind` anything other than "provisioned" (bare/inconclusive)
+  // skips this step entirely for the cycle — there is always a next tick.
+  //
+  // Best-effort, same as every step around it: a thrown error (or a
+  // RESCUE_FAILED from `wipSync`'s own `parseRescueExecResult` throw) is
+  // logged loudly and never blocks any other step in this cycle — contrast
+  // `rescuePush`/`rescueSnapshot`'s own doc comments, which explicitly throw
+  // because a TEARDOWN caller must decide whether to refuse the kill.
+  // Nothing here is being torn down; a missed sync this cycle just means the
+  // next one tries again.
+  if (checked?.readiness?.kind === "provisioned") {
+    const parsed = parseStudioId(idFallback);
+    if (parsed) {
+      try {
+        const result = await wipSync(syncDeps, parsed.repo, idFallback);
+        await recordWipSyncOnSuccess(observedStorage, result, syncDeps.now().toISOString());
+      } catch (err) {
+        console.error(`studio ${idFallback}: WIP sync failed`, err);
+      }
+    }
   }
   // Issue #71, LAST and in its own try/catch like the four steps above: the
   // verdict the tick just took is the only place in the system that knows a
