@@ -370,6 +370,13 @@ async function destroyAndRecord(
   const status: StudioStatus = {
     ...(existing ?? freshStatus(idFallback)), state: "stopped", error: unrescued, containerRunningSince: null,
     parked: park, stoppedAt,
+    // Review round 2 (#210), finding 2 — defense in depth: a STOPPED row
+    // must never claim to still be "parked since <stale time>". The
+    // load-bearing half of this fix lives in failover.ts's own
+    // degrade-write (StudioStatus.parkedAt's own doc comment); this is the
+    // belt (a stop always clears it outright, whether or not a later resume
+    // ever re-exhausts), never relied on alone.
+    parkedAt: null,
   };
   await storage.put(STATUS_KEY, status);
   // Issue #152: the SECOND bump, right after the stopped row lands and still

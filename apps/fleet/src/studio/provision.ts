@@ -2413,6 +2413,11 @@ export async function runProvision(
     // true across a re-provision that moved it.
     repoSlug: workRepoSlug,
     containerRunningSince: null,
+    // Review round 2 (#210), finding 2 — defense in depth: a freshly
+    // (re)provisioned row must never claim to still be "parked since <stale
+    // time>" (StudioStatus.parkedAt's own doc comment). The load-bearing
+    // half of this fix lives in failover.ts's own degrade-write.
+    parkedAt: null,
   };
   // Task 7: widened RoleEnv -> RoleEnv | StudioEnv — resolveBringupEnv now
   // returns either shape; this just carries whichever one through to the
@@ -2683,7 +2688,13 @@ export async function runRestart(
   deps: ProvisionDeps, existing: StudioStatus | null, idFallback: string, roleEnv: RoleEnv | StudioEnv | null,
   keepAlive: boolean, fleetRepoSlug: string,
 ): Promise<StudioStatus> {
-  let status: StudioStatus = { ...(existing ?? freshStatus(idFallback)), state: "provisioning" };
+  let status: StudioStatus = {
+    ...(existing ?? freshStatus(idFallback)), state: "provisioning",
+    // Review round 2 (#210), finding 2 — same defense-in-depth clear
+    // `runProvision`'s own identical status build applies, see that one's
+    // own doc comment.
+    parkedAt: null,
+  };
   if (roleEnv === null) {
     status = { ...status, state: "degraded", error: NO_ROLE_ENV_ERROR, sessionAdoption: null };
     await deps.recordStudio(status);
