@@ -95,6 +95,30 @@ const req = (token: string, body: unknown, headers: Record<string, string> = {})
     body: JSON.stringify(body),
   });
 
+// Issue #218 Boundaries: "recording failure must never delay/break the
+// /fleet/junior response". A Proxy wrapping the REAL D1 binding — every
+// query but the usage-log insert passes straight through to it (so
+// rate-limit/authorization reads/writes made earlier in the same request
+// still work against real data), but a `prepare` call whose SQL targets
+// `junior_usage_log` returns a statement whose `.run()` always rejects,
+// simulating a D1 insert failure at exactly the one call site this
+// Boundary is about.
+function dbWithFailingUsageInsert(real: D1Database): D1Database {
+  return new Proxy(real, {
+    get(target, prop, receiver) {
+      if (prop === "prepare") {
+        return (query: string) => {
+          if (query.includes("junior_usage_log")) {
+            return { bind: () => ({ run: async () => { throw new Error("simulated D1 insert failure"); } }) };
+          }
+          return target.prepare(query);
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as unknown as D1Database;
+}
+
 describe("handleFleetJunior — usage recording (#218)", () => {
   it("records ok=1 with real token counts after a successful ai.run() call", async () => {
     const { token, rows, e } = await setup({
@@ -144,6 +168,32 @@ describe("handleFleetJunior — usage recording (#218)", () => {
 
     const logged = await env.DB.prepare("SELECT mode FROM junior_usage_log").all();
     expect((logged.results[0] as Record<string, unknown>).mode).toBe("edit");
+  });
+
+  // Code review round 1, Spec-axis gap: the fire-and-forget `.catch(() =>
+  // {})` in route.ts SUGGESTS a failed usage insert can never delay or break
+  // the response — this test actually forces that failure (see
+  // dbWithFailingUsageInsert's own doc comment) and proves the studio still
+  // gets its normal 200 body, not just that a successful insert leaves the
+  // response alone.
+  it("#218 Boundaries: a D1 insert failure for the usage row never delays or breaks the 200 response", async () => {
+    const { token, rows, e } = await setup({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 3, completion_tokens: 4 },
+    });
+    const failing = { ...e, DB: dbWithFailingUsageInsert(e.DB) } as unknown as Env;
+
+    const r = await handleFleetJunior(req(token, good), failing, board(), rows);
+    expect(r.status).toBe(200);
+    expect(JSON.parse((await r.text()).trim())).toEqual({
+      content: "ok", finish: "stop", usage: { in: 3, out: 4, neurons: null },
+    });
+
+    // The insert genuinely failed — no row landed — proving this is a real
+    // rejection surfacing through the full insertJuniorUsage call, not a
+    // no-op double of the already-covered success path.
+    const logged = await env.DB.prepare("SELECT * FROM junior_usage_log").all();
+    expect(logged.results).toHaveLength(0);
   });
 });
 
