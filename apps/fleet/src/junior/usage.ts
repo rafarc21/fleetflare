@@ -37,6 +37,26 @@ export async function insertJuniorUsage(db: D1Database, row: JuniorUsageRow): Pr
     .run();
 }
 
+// Issue #221 item 3: retention. Mirrors ratelimit.ts's pruneStaleCounters —
+// a timestamp-cutoff delete, run opportunistically on every write (route.ts's
+// call site chains this after insertJuniorUsage, inside the same
+// ctx.waitUntil) — rather than exceptions.ts's pruneWorkerExceptions
+// row-count-cap style, which is a documented exception to this codebase's
+// usual "every other table's delete is a timestamp cutoff" convention.
+const RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** Never throws — same contract as pruneWorkerExceptions (exceptions.ts): a
+ *  retention-prune failure must never affect the /fleet/junior response it
+ *  rides along with (it only ever runs inside that route's own
+ *  ctx.waitUntil, after the response has already been written). */
+export async function pruneOldJuniorUsage(db: D1Database, now: number): Promise<void> {
+  try {
+    await db.prepare(`DELETE FROM junior_usage_log WHERE ts < ?`).bind(now - RETENTION_MS).run();
+  } catch (err) {
+    console.error("pruneOldJuniorUsage failed", err);
+  }
+}
+
 export interface JuniorUsageAggregateRow {
   studioId: string;
   calls: number;

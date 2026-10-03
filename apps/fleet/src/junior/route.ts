@@ -13,7 +13,7 @@ import { findLiveAssignedTask, type BoardApi } from "../board/board";
 import { isJuniorAuthorized, revokeJuniorAuthorization } from "./authz";
 import { checkAndConsumeJuniorRateLimit } from "./ratelimit";
 import { githubBoardApi, resolveStudioBoardRepo } from "../board/routes";
-import { insertJuniorUsage } from "./usage";
+import { insertJuniorUsage, pruneOldJuniorUsage } from "./usage";
 
 // Issue #218: the only two modes the CLI's client.ts ever sends (see that
 // module's own `X-Junior-Mode` header — proxy transport only, per the design
@@ -257,10 +257,20 @@ export async function handleFleetJunior(
     // below closes, silently dropping the row mid-insert. The insert's own
     // `.catch(() => {})` still means a logging failure can never affect (or
     // delay) the result already written to the studio.
-    ctx.waitUntil(insertJuniorUsage(env.DB, {
-      id: crypto.randomUUID(), ts: Date.now(), studioId: studio.id, mode, model: body.model,
-      inputTokens, outputTokens, ok,
-    }).catch(() => {}));
+    // Issue #221 item 3: the retention prune is chained INSIDE this same
+    // ctx.waitUntil (await insert, then await prune) rather than a second,
+    // separate ctx.waitUntil call — tests assert exactly one ctx.waitUntil
+    // call per request (finding 1 above), and this table's likely row count
+    // doesn't justify a scheduled job of its own (same reasoning as
+    // ratelimit.ts's pruneStaleCounters: cheap enough to just always run).
+    const usageTs = Date.now();
+    ctx.waitUntil((async () => {
+      await insertJuniorUsage(env.DB, {
+        id: crypto.randomUUID(), ts: usageTs, studioId: studio.id, mode, model: body.model,
+        inputTokens, outputTokens, ok,
+      }).catch(() => {});
+      await pruneOldJuniorUsage(env.DB, usageTs);
+    })());
     // A client that aborted mid-call leaves this writer closed/errored by
     // the time the AI call resolves — writing to it then would otherwise be
     // an unhandled rejection inside this detached IIFE. Swallow it: the
