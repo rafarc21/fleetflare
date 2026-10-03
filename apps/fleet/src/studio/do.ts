@@ -38,7 +38,7 @@ import {
 // schedule, nothing more.
 import {
   resolveClaudeAccounts, claudeAccountToken, launchAccount, launchAccountOrReroute, autoFailoverOn, accountDisplay,
-  otherRepoPrimaries, repoForAccount, parseAccountMap, type LaunchAccount,
+  otherRepoPrimaries, repoForAccount, primaryIsMapped, type LaunchAccount,
 } from "./accounts";
 import {
   runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, healDegradedRowAndWake, retryPendingHealWake,
@@ -3474,9 +3474,8 @@ function borrowFields(
   launch: Extract<LaunchAccount, { ok: true }>,
 ): Pick<StudioStatus, "borrowedAccount" | "borrowedFromRepo"> | null {
   const primary = launchAccount(env, repo, null);
-  const primaryIsMapped = repo !== null && parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO)[repo] !== undefined;
   const next: Pick<StudioStatus, "borrowedAccount" | "borrowedFromRepo"> =
-    primaryIsMapped && primary.ok && launch.name !== primary.name
+    primaryIsMapped(env, repo) && primary.ok && launch.name !== primary.name
       ? { borrowedAccount: launch.name, borrowedFromRepo: reserved.has(launch.name) ? repoForAccount(env, launch.name) : null }
       : { borrowedAccount: null, borrowedFromRepo: null };
   const changed = (existing?.borrowedAccount ?? null) !== next.borrowedAccount
@@ -6142,10 +6141,12 @@ export class StudioDO extends Sandbox<Env> {
    *  map, never merely because `primaryAccount()` above resolved to SOME
    *  account (it always does, mapped or not — see that method's own "first
    *  set account" fallback). See failover.ts's `FailoverDeps.primaryIsMapped`
-   *  for the full reasoning this method exists to satisfy. */
+   *  for the full reasoning this method exists to satisfy. Fresh-context
+   *  review of PR #211, finding 3 — a one-line wrapper around accounts.ts's
+   *  shared `primaryIsMapped`, which `borrowFields` (above) now also calls,
+   *  so the formula has exactly one implementation. */
   private primaryIsMapped(): boolean {
-    const repo = parseStudioId(this.selfId())?.repo ?? null;
-    return repo !== null && parseAccountMap(this.env.CLAUDE_ACCOUNT_BY_REPO)[repo] !== undefined;
+    return primaryIsMapped(this.env, parseStudioId(this.selfId())?.repo ?? null);
   }
 
   /** The account this studio is recorded on (StudioStatus.claudeAccount), for

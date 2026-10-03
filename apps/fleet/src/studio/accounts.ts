@@ -448,6 +448,23 @@ export function parseAccountMap(raw: string | undefined): Record<string, number>
 }
 
 /**
+ * Review round 3 (2nd review of PR #135, 2026-09-30) — true only when `repo`
+ * is a genuine KEY in the parsed `CLAUDE_ACCOUNT_BY_REPO` map, never merely
+ * because `launchAccount`/`primaryAccount` resolved to SOME account (they
+ * always do, mapped or not — see `launchAccount`'s own "first set account"
+ * fallback). See failover.ts's `FailoverDeps.primaryIsMapped` for the full
+ * reasoning this exists to satisfy.
+ *
+ * Fresh-context review of PR #211, finding 3 — extracted so do.ts's
+ * `borrowFields` and `StudioDO.primaryIsMapped()` share the ONE
+ * implementation rather than each carrying its own hand-copy of this same
+ * formula.
+ */
+export function primaryIsMapped(env: ClaudeAccountEnv, repo: string | null): boolean {
+  return repo !== null && parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO)[repo] !== undefined;
+}
+
+/**
  * Issue #103 — the cross-repo boundary a wrap-around search must never
  * cross: every account `CLAUDE_ACCOUNT_BY_REPO` maps to some OTHER repo,
  * named as its secret. #271's own scoping (failover.ts's `scopedAccounts`)

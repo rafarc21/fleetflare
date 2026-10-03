@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import {
   parseAccountMap, launchAccount, accountDisplay, autoFailoverOn, resolveClaudeAccounts,
-  launchAccountOrReroute, type AccountLimits,
+  launchAccountOrReroute, primaryIsMapped, type AccountLimits,
 } from "../src/studio/accounts";
 import { studioEnvVars, launchAccountOrRefuse, LaunchRefusedError } from "../src/studio/do";
 import { writeFleetAccountLimit } from "../src/studio/account-limits-store";
@@ -102,6 +102,29 @@ describe("parseAccountMap — keys that can never match a studio (#273 r2)", () 
     } finally {
       warns.mockRestore();
     }
+  });
+});
+
+// Fresh-context review of PR #211, finding 3 -- extracted so do.ts's
+// borrowFields and StudioDO.primaryIsMapped() share this ONE implementation
+// rather than each carrying its own hand-copy.
+describe("primaryIsMapped", () => {
+  const mapped = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: '{"demosite-life":2}' });
+
+  it("true only when the repo is a genuine key in the map", () => {
+    expect(primaryIsMapped(mapped, "demosite-life")).toBe(true);
+  });
+
+  it("false for a repo not in the map, even though launchAccount still resolves it (first set account)", () => {
+    expect(primaryIsMapped(mapped, "fleetflare")).toBe(false);
+  });
+
+  it("false for a null repo", () => {
+    expect(primaryIsMapped(mapped, null)).toBe(false);
+  });
+
+  it("false with no map at all", () => {
+    expect(primaryIsMapped(envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1 }), "demosite-life")).toBe(false);
   });
 });
 
