@@ -17,6 +17,7 @@
 import { buildStudioId, nextFreeInstance, parseStudioId } from "./ids";
 import { fetchOrgCached, fetchFleetJsonCached, hashSpawnToken, maySpawn, type Org } from "./org";
 import { FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF, ORG_JSON_PATH } from "./provision";
+import { launchOrStartRefusalResponse } from "./rpc-failure";
 import type { ProvisionConfig, StudioStatus } from "./types";
 
 /**
@@ -468,7 +469,19 @@ export async function runResume(deps: ResumeDeps, parent: SpawnParent, body: unk
       repoSlug: parent.repoSlug,
     });
   } catch (err) {
+    // Cleanup runs regardless of what provisionChild threw — the claim must
+    // never outlive the call that would have used it, refusal or not.
     await release();
+    // Issue #217 review round 2: provisionChild is wired (routes.ts's
+    // spawnDeps) to the SAME `stub.provision(cfg)` RPC call routes.ts's own
+    // provision/restart routes already catch this refusal for — reached here
+    // via /fleet/spawn's {resume: true} body instead of POST
+    // /studio/:id/provision, same underlying DO method, same two named
+    // refusals (LaunchRefusedError/StartRefusedError), same bare-rethrow bug
+    // otherwise. See launchOrStartRefusalResponse's own doc comment
+    // (rpc-failure.ts).
+    const refusal = launchOrStartRefusalResponse(err);
+    if (refusal) return refusal;
     throw err;
   }
   return Response.json(status);
@@ -672,8 +685,16 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
     });
   } catch (err) {
     // A provision that threw may have left nothing but the placeholder: free
-    // the id (the release never touches a row provision itself wrote).
+    // the id (the release never touches a row provision itself wrote) —
+    // regardless of what kind of error this was.
     await releaseClaim();
+    // Issue #217 review round 2: same leak, same fix, as runResume's own
+    // catch just above and routes.ts's provision/restart/recycle — this
+    // `provisionChild` is wired to the identical `stub.provision(cfg)` RPC
+    // call, reached via /fleet/spawn or /studio/spawn instead of POST
+    // /studio/:id/provision.
+    const refusal = launchOrStartRefusalResponse(err);
+    if (refusal) return refusal;
     throw err;
   }
   // AFTER the child is up, and never before: a wake that announced a studio
