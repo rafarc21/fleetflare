@@ -166,7 +166,15 @@ describe("launchAccount", () => {
 // wide, as limited still launched straight onto it. launchAccountOrReroute
 // wraps launchAccount with exactly that one extra check, pure (no I/O) --
 // launchAccountOrRefuse (do.ts) is the only caller that reads D1 for
-// `limits`.
+// `limits`/burn.
+//
+// Fresh-context review round of PR #211 (finding A+B) — the ORIGINAL version
+// of this function copied only TIER 1 of failover.ts's own three-tier
+// account picker (runAccountFailover): it never tried tier 2 (an unclaimed
+// spare before this repo's own primary) or tier 3 (borrowing another repo's
+// own reserved primary) before refusing. Every `it` below is now async: the
+// function itself is, now that tier 3 reads fleet-wide burn (lazily, only on
+// that already-rare path) via its own `readBurn` callback parameter.
 // ---------------------------------------------------------------------------
 describe("launchAccountOrReroute — issue #209: the fleet-wide limit check launchAccountOrRefuse is missing", () => {
   const three = {
@@ -178,62 +186,117 @@ describe("launchAccountOrReroute — issue #209: the fleet-wide limit check laun
   const RESET_SOON = "2026-10-03T18:00:00.000Z"; // after NOW
   const RESET_LATER = "2026-10-04T06:00:00.000Z"; // later still
 
-  it("mapped slot fleet-wide limited, another slot free: reroutes to the free one, never the limited mapped slot", () => {
+  it("mapped slot fleet-wide limited, another slot free: reroutes to the free one, never the limited mapped slot", async () => {
     const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
     const limits: AccountLimits = { CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT } };
-    expect(launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW))
-      .toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
+    await expect(launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
   });
 
-  it("mapped slot limited, every OTHER account also limited or reserved: refuses, naming the earliest reset", () => {
+  // Fresh-context review (finding A+B) — this scenario used to be the
+  // ("every OTHER account also limited or reserved: refuses") test, but a
+  // RESERVED-and-free account is now exactly what tier 3 exists to borrow
+  // rather than refuse against — see the next `it` below for the genuine
+  // exhaustion case (the reserved account ALSO limited).
+  it("tier 3 — own chain exhausted and no unclaimed spare, but another repo's reserved primary is free: borrows it rather than refusing", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_LATER, seenAt: SEEN_AT }, // the only spare before the primary -- also limited
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+    };
+    const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_3"]); // some OTHER repo's own mapped primary, free
+    await expect(launchAccountOrReroute(env, "demosite-life", null, limits, reserved, NOW))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
+  });
+
+  it("mapped slot limited, every other account limited too -- INCLUDING the reserved borrow candidate: refuses, naming the earliest reset (the only case that still refuses)", async () => {
     const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
     const limits: AccountLimits = {
       CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_LATER, seenAt: SEEN_AT },
       CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: SEEN_AT }, // reserved AND limited -- the borrow tier misses too
     };
     const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_3"]); // some OTHER repo's own mapped primary
-    const result = launchAccountOrReroute(env, "demosite-life", null, limits, reserved, NOW);
+    const result = await launchAccountOrReroute(env, "demosite-life", null, limits, reserved, NOW);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toContain(`every account limited; earliest reset ${RESET_SOON}`);
   });
 
-  it("mapped slot limited, every other account limited too, none has a readable reset: refuses, says 'unknown' rather than printing 'null'", () => {
+  it("tier 2 — every account in this repo's own scoped chain is also limited, but an unclaimed spare BEFORE the primary is free: reroutes there, never refuses", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: SEEN_AT },
+    };
+    // CLAUDE_CODE_OAUTH_TOKEN (slot 1) sits BEFORE the mapped primary (slot
+    // 2) and is claimed by nobody -- an unclaimed spare, never reserved.
+    await expect(launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 });
+  });
+
+  it("an account recorded dead is never picked by any tier, same as a live limit", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      // dead, with a NULL until -- never free again, no NULL_UNTIL_CEILING_MS
+      // re-probe grace the way a plain null-until sighting gets.
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: null, seenAt: SEEN_AT, dead: true },
+    };
+    // Tier 1's only other own-chain member (account 3) is dead, so this
+    // falls through to tier 2's own unclaimed spare (account 1) -- proof
+    // `dead` is excluded from every tier, not just the first.
+    await expect(launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 });
+  });
+
+  it("a null-until entry older than the 24h staleness ceiling counts as free again, picked over a genuinely limited one", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const staleSeenAt = new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString(); // >24h before NOW
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT }, // the mapped slot, genuinely limited with a readable reset
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: null, seenAt: staleSeenAt }, // a stale null-until sighting -- free again
+    };
+    await expect(launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
+  });
+
+  it("mapped slot limited, every other account limited too, none has a readable reset: refuses, says 'unknown' rather than printing 'null'", async () => {
     const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
     const limits: AccountLimits = {
       CLAUDE_CODE_OAUTH_TOKEN: { until: null, seenAt: SEEN_AT },
       CLAUDE_CODE_OAUTH_TOKEN_2: { until: null, seenAt: SEEN_AT },
       CLAUDE_CODE_OAUTH_TOKEN_3: { until: null, seenAt: SEEN_AT },
     };
-    const result = launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW);
+    const result = await launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toContain("every account limited; earliest reset unknown");
     expect(result.error).not.toContain("earliest reset null");
   });
 
-  it("mapped slot free: unchanged -- launches on it, no reroute (guards against a regression)", () => {
+  it("mapped slot free: unchanged -- launches on it, no reroute (guards against a regression)", async () => {
     const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
-    expect(launchAccountOrReroute(env, "demosite-life", null, {}, new Set(), NOW))
-      .toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 });
+    await expect(launchAccountOrReroute(env, "demosite-life", null, {}, new Set(), NOW))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 });
   });
 
-  it("auto-failover OFF: a fleet-wide limited mapped slot still launches on it -- today's documented off-semantics, no reroute", () => {
+  it("auto-failover OFF: a fleet-wide limited mapped slot still launches on it -- today's documented off-semantics, no reroute", async () => {
     const env = envWith(three); // FLEET_AUTO_FAILOVER unset -> off
     const limits: AccountLimits = { CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT } };
-    expect(launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW))
-      .toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 });
+    await expect(launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 });
   });
 
-  it("the reroute never lands on another repo's reserved primary, even when AccountLimits shows it free", () => {
+  it("the reroute never lands on another repo's reserved primary, even when AccountLimits shows it free", async () => {
     const four = { ...three, CLAUDE_CODE_OAUTH_TOKEN_4: TOKEN_4 };
     const env = envWith({ ...four, FLEET_AUTO_FAILOVER: "on" });
     const limits: AccountLimits = { CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT } };
     // CLAUDE_CODE_OAUTH_TOKEN_3 is reserved (some OTHER repo's own mapped
     // primary) but carries no limits entry at all -- it reads as free.
     const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_3"]);
-    expect(launchAccountOrReroute(env, "demosite-life", null, limits, reserved, NOW))
-      .toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_4", token: TOKEN_4 });
+    await expect(launchAccountOrReroute(env, "demosite-life", null, limits, reserved, NOW))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_4", token: TOKEN_4 });
   });
 });
 
@@ -340,6 +403,59 @@ describe("launchAccountOrRefuse — fleet-wide limit reroute, real D1 (#209)", (
     const storage = fakeStorage(status());
     await expect(launchAccountOrRefuse(env, storage, "demosite-life--lead", async () => {}))
       .rejects.toThrow(`every account limited; earliest reset ${earliest}`);
+  });
+});
+
+// Fresh-context review round of PR #211 (#209 follow-up, finding A+B) --
+// the launch gate's own tier 3 (borrowing another repo's own reserved
+// primary), exercised end-to-end through the REAL D1 wiring
+// launchAccountOrRefuse uses, and finding C -- a transient D1 read failure
+// must fail OPEN (never strand a studio that recycle's own flow already
+// destroyed before this call runs).
+describe("launchAccountOrRefuse — borrow tier 3 and D1 failure handling, real D1 (#209 review)", () => {
+  const future = (ms: number) => new Date(Date.now() + ms).toISOString();
+  const seenAt = () => new Date().toISOString();
+  // Two repos mapped: demosite-life on slot 2 (its own primary), "otherrepo"
+  // on slot 3 -- otherRepoPrimaries(env, "demosite-life") therefore reserves
+  // CLAUDE_CODE_OAUTH_TOKEN_3 for "otherrepo" alone.
+  const twoRepos = {
+    CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2, CLAUDE_CODE_OAUTH_TOKEN_3: TOKEN_3,
+    CLAUDE_ACCOUNT_BY_REPO: '{"demosite-life":2,"otherrepo":3}', FLEET_AUTO_FAILOVER: "on",
+  };
+
+  it("own chain and spares exhausted, another repo's reserved primary free: borrows it, and the row records borrowedAccount/borrowedFromRepo", async () => {
+    const env = envWith(twoRepos);
+    // The only spare before the primary (account 1) and the mapped primary
+    // itself (account 2) are both fleet-wide limited; the reserved primary
+    // (account 3, "otherrepo"'s own) carries no limit entry -- free.
+    await writeFleetAccountLimit(env.DB, "CLAUDE_CODE_OAUTH_TOKEN", future(60 * 60 * 1000), seenAt());
+    await writeFleetAccountLimit(env.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", future(60 * 60 * 1000), seenAt());
+    const storage = fakeStorage(status());
+    const recorded: StudioStatus[] = [];
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--lead", async (s) => { recorded.push(s); });
+    expect(launch).toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
+    const row = await storage.get(STATUS_KEY);
+    expect(row?.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
+    expect(row?.borrowedFromRepo).toBe("otherrepo");
+    expect(recorded).toHaveLength(1);
+  });
+
+  it("env.DB.prepare throws: the fleet-wide limits read is caught, the launch still succeeds using limits = {} (fail open), and the hiccup is warned -- never an uncaught throw", async () => {
+    const env = {
+      CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2,
+      CLAUDE_ACCOUNT_BY_REPO: '{"demosite-life":2}', FLEET_AUTO_FAILOVER: "on",
+      DB: { prepare: () => { throw new Error("D1 unavailable"); } },
+    } as unknown as Env;
+    const warns = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const storage = fakeStorage(status());
+      const launch = await launchAccountOrRefuse(env, storage, "demosite-life--lead", async () => {});
+      expect(launch).toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 });
+      expect(warns).toHaveBeenCalled();
+      expect(warns.mock.calls.some((c) => c.join(" ").includes("readFleetAccountLimits"))).toBe(true);
+    } finally {
+      warns.mockRestore();
+    }
   });
 });
 
