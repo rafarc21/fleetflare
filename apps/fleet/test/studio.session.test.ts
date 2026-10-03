@@ -32,6 +32,11 @@ import { getObserved, OBSERVED_KEY, type ObservedStorage } from "../src/studio/o
 import { INSTALL_CACHE_SAVE_LEASE_KEY, type InstallCacheSaveStorage } from "../src/studio/install-cache";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Burn } from "../src/studio/burn";
+import {
+  paneCaptureCmd, PANE_CAPTURE_MARKER, exhaustedMessage, PARKED_AUTO_STOP_HOURS, type FailoverDeps,
+} from "../src/studio/failover";
+import type { ClaudeAccount } from "../src/studio/accounts";
+import { ORG_SPEND_LIMIT_PANE } from "./fixtures/rate-limit-panes";
 
 // A live StudioDO cannot be constructed under vitest-pool-workers (see
 // src/studio/do.ts's own header) — this file targets the exported pure
@@ -1271,6 +1276,137 @@ describe("syncSessionCycle — install-cache save in-flight guard (board #350 ro
     // A genuine save actually ran — proven by the hash marker being
     // persisted, not merely that no exception was thrown.
     await hashPersisted;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review round 2 (#210), FINAL round, finding B (BLOCKER) — the failover
+// step (board issue #53/#210) can call `deps.stopParkedStudio`, which
+// destroys the container THIS SAME TICK (the row reads "stopped" the moment
+// that step returns). But two LATER steps in this same function —
+// `retrySurvivalBrief` and the detached `installCacheDeps` save — used to run
+// UNCONDITIONALLY regardless of what the failover step just did, and both
+// eventually exec into the container, which BOOTS it back up: billing starts
+// again under a row that now reads "stopped". `isStoppedIn` (this file)
+// already guards the START of a tick (`runScheduledTick`) for exactly this
+// reason; it did not yet guard a destroy that happens MID-tick, which is
+// this gap. Fixed: both steps now also require the studio to still be
+// running right after the failover step returns.
+// ---------------------------------------------------------------------------
+
+describe("syncSessionCycle — an auto-stop mid-tick must gate retrySurvivalBrief and the install-cache save (#210 review round 2 final, finding B)", () => {
+  const FAILOVER_NOW = new Date("2026-10-03T19:00:00.000Z");
+  const ACCOUNT_NAME = "CLAUDE_CODE_OAUTH_TOKEN";
+  const TOKEN = "sk-ant-oat01-" + "a".repeat(40);
+  /** Two identical observations of the pane, as `paneCaptureCmd()`'s stdout
+   *  carries them — same shape test/studio.account-failover.test.ts's own
+   *  `captured` helper uses. */
+  const captured = (pane: string) => `${pane}\n${PANE_CAPTURE_MARKER}\n${pane}\n`;
+
+  /** A row already parked well past PARKED_AUTO_STOP_HOURS, with nowhere to
+   *  go (a single configured account): this tick's own failover step hits
+   *  the ask-3 auto-stop gate directly (the "already-degraded, same message"
+   *  fast path) and calls `stopParkedStudio` — no prior tick needed. */
+  function parkedPastAutoStop(): StudioStatus {
+    const parkedAt = new Date(FAILOVER_NOW.getTime() - (PARKED_AUTO_STOP_HOURS * 60 * 60_000 + 60_000)).toISOString();
+    return cycleStatus({
+      state: "degraded",
+      error: exhaustedMessage(STUDIO_ID, [ACCOUNT_NAME], null),
+      parkedAt,
+      exhaustionKind: "select",
+      // Set so the install-cache save WOULD have a real repo to act on if it
+      // wrongly ran — otherwise an `sbExecCalls === 0` assertion would pass
+      // vacuously (no repo configured, never any call either way).
+      repoSlug: "example-org/websites",
+    });
+  }
+
+  /** `stopParkedStudio` wired the way the real `destroyStudio` behaves: it
+   *  writes `state: "stopped"` onto THIS SAME storage before returning —
+   *  the real "destroyed mid-tick" shape this finding is about. */
+  function failoverDepsThatAutoStops(storage: StudioStorage): FailoverDeps {
+    return {
+      accounts: [{ name: ACCOUNT_NAME, token: TOKEN }] satisfies ClaudeAccount[],
+      autoFailover: true,
+      primaryIsMapped: false,
+      now: () => FAILOVER_NOW,
+      accountLimits: { read: async () => ({}), write: async () => {} },
+      exec: vi.fn(async (cmd: string) => {
+        if (cmd === paneCaptureCmd()) return { code: 0, stdout: captured(ORG_SPEND_LIMIT_PANE), stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      }),
+      relaunch: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+      notify: vi.fn(async () => {}),
+      stopParkedStudio: vi.fn(async () => {
+        const current = (await storage.get(STATUS_KEY)) as StudioStatus;
+        const stopped = { ...current, state: "stopped" as const };
+        await storage.put(STATUS_KEY, stopped);
+        return { ok: true, status: stopped };
+      }),
+    };
+  }
+
+  it("the failover step auto-stops this tick; neither retrySurvivalBrief nor the install-cache save runs afterward", async () => {
+    const storage = fakeCycleStorage({ status: parkedPastAutoStop() });
+    const failoverDeps = failoverDepsThatAutoStops(storage);
+    const syncDeps = fakeSyncDeps({});
+    const retrySurvivalBrief = vi.fn(async () => {});
+    let sbExecCalls = 0;
+    const installCacheDeps: import("../src/studio/install-cache").InstallCacheSaveDeps = {
+      sbExec: async () => { sbExecCalls += 1; return { code: 0, stdout: "no", stderr: "" }; },
+      presignPut: async () => "https://signed.example/put",
+      r2Head: async () => false,
+      r2List: async () => [],
+      r2Delete: async () => {},
+      installCacheRepos: "example-org/websites",
+      now: () => FAILOVER_NOW,
+    };
+
+    await syncSessionCycle(
+      syncDeps, storage, STUDIO_ID, async () => {},
+      failoverDeps, null, null, retrySurvivalBrief, installCacheDeps,
+    );
+    // Let the detached install-cache IIFE's own microtasks (if it wrongly
+    // started) run before asserting on it.
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+
+    // The load-bearing proof the fix actually happened: the row really did
+    // auto-stop THIS tick (never a vacuous test).
+    expect(failoverDeps.stopParkedStudio).toHaveBeenCalledTimes(1);
+    expect((await storage.get(STATUS_KEY))?.state).toBe("stopped");
+
+    // The two gated steps must never have fired on the now-stopped row.
+    expect(retrySurvivalBrief).not.toHaveBeenCalled();
+    expect(sbExecCalls).toBe(0);
+  });
+
+  it("a studio that does NOT auto-stop this tick still runs both steps as before", async () => {
+    const storage = fakeCycleStorage({ status: cycleStatus({ state: "running", repoSlug: "example-org/websites" }) });
+    const syncDeps = fakeSyncDeps({});
+    const retrySurvivalBrief = vi.fn(async () => {});
+    let sbExecCalls = 0;
+    const installCacheDeps: import("../src/studio/install-cache").InstallCacheSaveDeps = {
+      sbExec: async (cmd: string) => {
+        sbExecCalls += 1;
+        if (cmd.includes("find .")) return { code: 0, stdout: ".\n", stderr: "" };
+        return { code: 0, stdout: "no", stderr: "" };
+      },
+      presignPut: async () => "https://signed.example/put",
+      r2Head: async () => false,
+      r2List: async () => [],
+      r2Delete: async () => {},
+      installCacheRepos: "example-org/websites",
+      now: () => FAILOVER_NOW,
+    };
+
+    await syncSessionCycle(
+      syncDeps, storage, STUDIO_ID, async () => {},
+      null, null, null, retrySurvivalBrief, installCacheDeps,
+    );
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+
+    expect(retrySurvivalBrief).toHaveBeenCalledTimes(1);
+    expect(sbExecCalls).toBeGreaterThan(0);
   });
 });
 
