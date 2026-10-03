@@ -430,15 +430,27 @@ export async function resolveSurvivalInput(
   // carries every ref this attribution attempt did NOT assign to a task,
   // so `composeSurvivalBrief` can render it as its own line instead of
   // dropping it.
+  //
+  // MAJOR fix (#216, fresh-context review on #212 round 2): the fetch itself
+  // used to be gated behind `if (unresolved.length > 0)` -- a task whose
+  // branch WAS resolved (source 1 or 2) could still coexist with a genuine
+  // rescue ref from a DIFFERENT, unrelated incarnation/crash of this same
+  // studio, and that ref was simply never fetched: not unattributed, not
+  // surfaced, never even looked at. A studio with zero live tasks never
+  // fetched at all, same gap. `sources.rescueBranches()` is now called
+  // unconditionally; `attributeRescueBranch` is still only consulted (and
+  // can still only succeed) in the single-candidate case below, so a wrong
+  // guess remains impossible -- the only thing that changed is that a
+  // non-empty `refs` with zero or >1 unresolved tasks now actually reaches
+  // `unclaimedRescueBranches` instead of being replaced by a hardcoded `[]`.
   const unresolved = resolved.filter((r) => r.branch === null);
-  let unclaimedRescueBranches: string[] = [];
+  const refs = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
+  let unclaimedRescueBranches: string[] = refs;
   if (unresolved.length > 0) {
-    const refs = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
     const attributed = attributeRescueBranch(unresolved.length, refs);
     if (attributed !== null) {
       unresolved[0]!.branch = attributed;
-    } else {
-      unclaimedRescueBranches = refs;
+      unclaimedRescueBranches = refs.filter((r) => r !== attributed);
     }
   }
 

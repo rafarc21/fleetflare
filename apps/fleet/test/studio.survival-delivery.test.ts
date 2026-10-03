@@ -393,6 +393,41 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
     expect(input.unclaimedRescueBranches).toEqual([ref]);
   });
 
+  /**
+   * MAJOR fix (#216, fresh-context review on #212 round 2): `rescueBranches()`
+   * used to be called only `if (unresolved.length > 0)` — a task whose branch
+   * resolved via its own PR (zero unresolved tasks) could still coexist with a
+   * genuine rescue ref from a DIFFERENT, unrelated incarnation/crash of the
+   * same studio, and that ref was never fetched, never shown, the lead never
+   * told. Fixed by always fetching; `unclaimedRescueBranches` is now "every
+   * ref this attribution attempt did not assign" even when there were zero
+   * unresolved tasks to attribute to in the first place.
+   */
+  it("a rescue ref is surfaced even when EVERY task already resolved a branch (0 unresolved tasks)", async () => {
+    const ref = `fleet/rescue/${STUDIO}-20260925120000`;
+    const pull = async () => ({ headRef: "pr4b-survival-brief-delivery", title: "PR4b" });
+    const input = await resolveSurvivalInput(
+      sources({ pull, rescueBranches: async () => [ref] }),
+      { ok: true, value: [task({ artifacts: [{ kind: "pr", pr: "150" }] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true, value: [expect.objectContaining({ branch: "pr4b-survival-brief-delivery" })],
+    });
+    expect(input.unclaimedRescueBranches).toEqual([ref]);
+  });
+
+  it("a rescue ref is surfaced even on a studio with ZERO live tasks", async () => {
+    const ref = `fleet/rescue/${STUDIO}-20260925120000`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [ref] }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({ ok: true, value: [] });
+    expect(input.unclaimedRescueBranches).toEqual([ref]);
+  });
+
   it("ahead_by 0 renders EMPTY — a CHECKED zero, never dropped and never fabricated", async () => {
     const brief = await composeSurvivalDelivery(
       sources({ compareAhead: async () => ({ aheadBy: 0, lastCommitAt: null }) }),
