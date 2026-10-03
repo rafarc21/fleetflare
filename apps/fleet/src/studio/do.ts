@@ -3033,14 +3033,14 @@ export async function syncSessionCycle(
     console.error(`studio ${idFallback}: readiness check failed`, err);
   }
   // Board issue #208: the periodic WIP safety net. Gated on THIS cycle's own
-  // readiness verdict (`checked`, just above) reading "provisioned" —
-  // exactly the container-up-and-reachable confirmation the heal step just
-  // below already gates its own exec on (`if (heal && checked)`) — so a
-  // stopped or unreachable studio never gets a wipSync exec, same discipline
-  // every other step in this cycle already follows. `checked` null (the
-  // check itself threw, or the studio has nothing provisioned yet) or
-  // `readiness.kind` anything other than "provisioned" (bare/inconclusive)
-  // skips this step entirely for the cycle — there is always a next tick.
+  // readiness verdict (`checked`, just above) reading "provisioned" — a
+  // narrower gate than heal's own (`if (heal && checked)`, which also fires
+  // on "bare" precisely so it CAN heal it) — wip-sync additionally requires
+  // "provisioned" because, unlike heal, it execs commands into the container
+  // rather than restarting it. `checked` null (the check itself threw, or
+  // the studio has nothing provisioned yet) or `readiness.kind` anything
+  // other than "provisioned" (bare/inconclusive) skips this step entirely
+  // for the cycle — there is always a next tick.
   //
   // Best-effort, same as every step around it: a thrown error (or a
   // RESCUE_FAILED from `wipSync`'s own `parseRescueExecResult` throw) is
