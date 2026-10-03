@@ -750,3 +750,27 @@ export interface ProvisionConfig {
    */
   projectCard?: string;
 }
+
+/**
+ * `runDestroy`'s own tagged result (destroy.ts) — a REFUSAL (an open
+ * assigned board task exists, and `--force` was not passed) must read
+ * differently at every layer above this from an actual operational failure:
+ * the route layer turns this into 409, never 500 (see routes.ts's own
+ * destroy branch), and neither the board task nor its labels are ever
+ * touched on this path — see destroy.ts's own header. A bare throw here
+ * would make that distinction invisible to a caller without inspecting
+ * Error subclasses across what is, in production, a Durable Object RPC
+ * boundary; a plain tagged return avoids that entirely.
+ *
+ * Lives HERE, not in destroy.ts (which re-exports it for every existing
+ * importer), for the identical reason every other type in this file does:
+ * this module carries no do.ts-reaching import, type-only or otherwise, so
+ * ANY file — including one compiled under a reduced-types config that lacks
+ * "@cloudflare/workers-types" (cli/'s own tsconfig.json; see
+ * `FailoverDeps.stopParkedStudio`'s own doc comment, failover.ts, for the
+ * exact breakage this avoided) — can import this shape without pulling
+ * do.ts's own Durable Object classes into that graph.
+ */
+export type DestroyOutcome =
+  | { ok: true; status: StudioStatus }
+  | { ok: false; refused: true; reason: string };
