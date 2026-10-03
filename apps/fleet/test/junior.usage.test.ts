@@ -294,24 +294,24 @@ describe("handleJuniorUsageStats", () => {
 
   it("401/403 when Access auth fails — same pattern as every other /studio/* route", async () => {
     const failure = new Response("forbidden", { status: 403 });
-    const verifyAccessFn = vi.fn(async () => failure);
-    const r = await handleJuniorUsageStats(new Request("https://w/studio/junior/usage"), env as unknown as Env, verifyAccessFn);
+    const spy = vi.spyOn(authModule, "verifyAccess").mockResolvedValue(failure);
+    const r = await handleJuniorUsageStats(new Request("https://w/studio/junior/usage"), env as unknown as Env);
     expect(r.status).toBe(403);
-    expect(verifyAccessFn).toHaveBeenCalled();
+    expect(spy).toHaveBeenCalled();
   });
 
   it("200 with {rows, totals} when authenticated, and ?since= filters correctly", async () => {
     await insertJuniorUsage(env.DB, { id: "u1", ts: 100, studioId: ME, mode: "edit", model: "m", inputTokens: 10, outputTokens: 20, ok: true });
     await insertJuniorUsage(env.DB, { id: "u2", ts: 5000, studioId: ME, mode: "edit", model: "m", inputTokens: 1, outputTokens: 1, ok: true });
-    const verifyAccessFn = vi.fn(async () => null);
+    vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
 
-    const all = await handleJuniorUsageStats(new Request("https://w/studio/junior/usage"), env as unknown as Env, verifyAccessFn);
+    const all = await handleJuniorUsageStats(new Request("https://w/studio/junior/usage"), env as unknown as Env);
     expect(all.status).toBe(200);
     const allBody = await all.json<{ rows: unknown[]; totals: { calls: number } }>();
     expect(allBody.totals.calls).toBe(2);
 
     const since = await handleJuniorUsageStats(
-      new Request("https://w/studio/junior/usage?since=1000"), env as unknown as Env, verifyAccessFn,
+      new Request("https://w/studio/junior/usage?since=1000"), env as unknown as Env,
     );
     const sinceBody = await since.json<{ rows: unknown[]; totals: { calls: number } }>();
     expect(sinceBody.totals.calls).toBe(1);

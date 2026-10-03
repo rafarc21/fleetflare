@@ -99,6 +99,44 @@ describe("main() local usage recording", () => {
     }
   });
 
+  test("direct transport: a 401 (post-call AuthError) still writes a local usage-log line with ok:false", async () => {
+    const home = mkdtempSync(join(tmpdir(), "junior-main-home-"));
+    const unauthorizedServer = Bun.serve({
+      port: 0,
+      async fetch() {
+        return new Response("nope", { status: 401 });
+      },
+    });
+    try {
+      const env = {
+        HOME: home,
+        PATH: process.env.PATH,
+        CLOUDFLARE_API_TOKEN: "t",
+        CLOUDFLARE_ACCOUNT_ID: "a",
+        JUNIOR_API_BASE: `http://127.0.0.1:${unauthorizedServer.port}`,
+      };
+      const code = await main(["--task", "say hi", "--mode", "text"], env, repo());
+      expect(code).toBe(6); // EXIT.AUTH
+      const lines = readFileSync(usageLogPath(home), "utf8").trim().split("\n");
+      expect(lines.length).toBe(1);
+      const row = JSON.parse(lines[0]);
+      expect(row).toMatchObject({ mode: "text", ok: false });
+    } finally {
+      unauthorizedServer.stop(true);
+    }
+  });
+
+  test("direct transport: a pre-call AuthError (no account id, no config) writes NO local usage-log line", async () => {
+    const home = mkdtempSync(join(tmpdir(), "junior-main-home-"));
+    const env = {
+      HOME: home,
+      PATH: process.env.PATH,
+    };
+    const code = await main(["--task", "say hi", "--mode", "text"], env, repo());
+    expect(code).toBe(6); // EXIT.AUTH
+    expect(existsSync(usageLogPath(home))).toBe(false);
+  });
+
   test("proxy transport: a successful call does NOT write a local usage-log line (recorded server-side already)", async () => {
     const home = mkdtempSync(join(tmpdir(), "junior-main-home-"));
     const env = {

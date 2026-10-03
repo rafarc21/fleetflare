@@ -171,7 +171,12 @@ export async function main(argv: string[], env: Record<string, string | undefine
       recordLocalUsage(env, isLocal, args.mode, model, { in: usageIn, out: usageOut }, calls, false);
       return EXIT.TIMEOUT;
     }
-    if (e instanceof AuthError) { console.error(`junior: ${e.message}`); return EXIT.AUTH; }
+    if (e instanceof AuthError) {
+      console.error(`junior: ${e.message}`);
+      console.error(telemetry(model, start, last, calls, "auth-error"));
+      recordLocalUsage(env, isLocal, args.mode, model, { in: usageIn, out: usageOut }, calls, false);
+      return EXIT.AUTH;
+    }
     if (e instanceof ApiError) {
       console.error(`junior: ${e.message}`);
       console.error(telemetry(model, start, last, calls, "api-error"));
