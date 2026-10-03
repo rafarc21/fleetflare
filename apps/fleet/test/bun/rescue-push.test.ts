@@ -2918,6 +2918,12 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
     sh(`cd ${checkout} && git commit -q --allow-empty -m "really unpushed"`);
     upstreamHook();
     const head = sh(`git -C ${checkout} rev-parse HEAD`).out;
+    // Board issue #216 fix 6: the ref-presence check below proves
+    // `refs/heads/task/pr` was not DELETED, but not that its own tip stayed
+    // put -- a regression that force-moved or rewrote that branch on origin
+    // would still pass without this. Same before/after-sha idiom as this
+    // describe block's own neighboring "#49" test above.
+    const branchBefore = sh(`git -C ${origin} rev-parse refs/heads/task/pr`).out;
 
     const r = sh(rescuePushCmd(REPO, STUDIO, root));
 
@@ -2926,6 +2932,7 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
     expect(ref).toBeDefined();
     expect(sh(`git -C ${origin} rev-parse ${ref}`).out).toBe(head);
     expect(sh(`git -C ${origin} for-each-ref --format='%(refname)' refs/heads/task/pr`).out).toBe("refs/heads/task/pr");
+    expect(sh(`git -C ${origin} rev-parse refs/heads/task/pr`).out).toBe(branchBefore);
   });
 });
 
