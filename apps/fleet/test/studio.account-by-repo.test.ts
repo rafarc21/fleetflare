@@ -4,10 +4,12 @@ import {
   parseAccountMap, launchAccount, accountDisplay, autoFailoverOn, resolveClaudeAccounts,
   launchAccountOrReroute, primaryIsMapped, type AccountLimits,
 } from "../src/studio/accounts";
-import { studioEnvVars, launchAccountOrRefuse, LaunchRefusedError } from "../src/studio/do";
+import {
+  studioEnvVars, launchAccountOrRefuse, LaunchRefusedError, decideAccountClears, applyAccountClears,
+} from "../src/studio/do";
 import { writeFleetAccountLimit } from "../src/studio/account-limits-store";
 import { withAccountDisplay } from "../src/studio/registry";
-import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
+import { STATUS_KEY, NEVER_MOVED_CTX, type StudioStorage } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 
@@ -355,6 +357,33 @@ describe("launchAccountOrReroute — issue #209: the fleet-wide limit check laun
       "CLAUDE_CODE_OAUTH_TOKEN",
     )).resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
   });
+
+  // #211 review round 3, finding 2 -- `anchor` used to be ALWAYS just the
+  // mapped primary's own index, never widened backward the way failover.ts's
+  // own `runAccountFailover` derivation already does (`anchor = borrowedActive
+  // ? start : (currentIdx < 0 ? start : Math.min(start, currentIdx))`). A
+  // studio recorded on an account from BEFORE the repo was ever mapped to a
+  // later primary (the "#273 r2" shape), while NOT actively borrowing, hits
+  // this directly: `scopedAccounts` (sliced from the unwidened anchor) never
+  // even contains the recorded account, so `nextClaudeAccount`'s own
+  // `idx < 0` branch returns null immediately -- tier 1 never even tries the
+  // primary itself, which sits INSIDE the correctly-widened scope. Tier 2
+  // only covers strictly-before-anchor, and tier 3 has nothing reserved to
+  // borrow in this fixture -- so, before the fix, this refuses with "every
+  // account limited" even though the mapped primary (account 2) is
+  // completely free.
+  it("stale recorded account from BEFORE a later-mapped primary, not borrowing, primary free: reroutes to the primary rather than refusing", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      // The stale recorded account (slot 1) is now fleet-wide limited.
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+    };
+    // Recorded on slot 1 -- BEFORE the mapped primary (slot 2) -- from
+    // before CLAUDE_ACCOUNT_BY_REPO ever existed. NOT actively borrowing (no
+    // 7th `borrowedAccount` argument).
+    await expect(launchAccountOrReroute(env, "demosite-life", "CLAUDE_CODE_OAUTH_TOKEN", limits, new Set(), NOW))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 });
+  });
 });
 
 describe("accountDisplay — CLAUDE_ACCOUNT_<n>_LABEL", () => {
@@ -495,6 +524,39 @@ describe("launchAccountOrRefuse — borrow tier 3 and D1 failure handling, real 
     expect(row?.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
     expect(row?.borrowedFromRepo).toBe("otherrepo");
     expect(recorded).toHaveLength(1);
+  });
+
+  // #211 review round 3, finding 1 -- the test directly above only ever
+  // exercises launchAccountOrRefuse's DEFAULT `commitOkClears=true` branch,
+  // which no real production caller uses: provisionUngated, restartUngated,
+  // and recycle's post-destroy closure (the only decide/apply caller that
+  // actually commits) all pass `commitOkClears=false` and go through
+  // `decideAccountClears`/`applyAccountClears` instead. Before this fix,
+  // `accountClears` (what those two functions call) never computed
+  // borrowedAccount/borrowedFromRepo at all -- that computation lived only
+  // in launchAccountOrRefuse's own inline `commitOkClears` branch, dead code
+  // for every real caller. Without it, a studio that reroutes onto a spare
+  // or borrows another repo's reserved primary never gets `borrowedAccount`
+  // written, so the hand-back mechanism (failover.ts, gated on exactly that
+  // field) never fires and the studio squats on the borrowed account
+  // forever, even once its own primary frees up.
+  it("the REAL commitOkClears=false path (decide/apply) also records borrowedAccount/borrowedFromRepo -- not just the unused commitOkClears=true default", async () => {
+    const env = envWith(twoRepos);
+    await writeFleetAccountLimit(env.DB, "CLAUDE_CODE_OAUTH_TOKEN", future(60 * 60 * 1000), seenAt());
+    await writeFleetAccountLimit(env.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", future(60 * 60 * 1000), seenAt());
+    const storage = fakeStorage(status());
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+    // commitOkClears=false -- the ONLY mode every real production caller uses.
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--lead", recordFn, false);
+    expect(launch).toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
+    // The caller's own success continuation: decide from the pre-touch
+    // snapshot, then apply once the (simulated) container start succeeds --
+    // the exact shape provisionUngated/restartUngated/recycle's closure use.
+    const clears = await decideAccountClears(env, storage, launch);
+    await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
+    const row = await storage.get(STATUS_KEY);
+    expect(row?.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
+    expect(row?.borrowedFromRepo).toBe("otherrepo");
   });
 
   // Fresh-context review of PR #211, finding 2 -- the try/catch around
