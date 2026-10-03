@@ -2793,6 +2793,33 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
   });
 });
 
+/**
+ * #216 item 5: `realidx=$(... )/index; if [ -f "$realidx" ]; then cp ... ;
+ * fi` left the `mktemp`-created `$idxfile` as an EXISTING, EMPTY (0-byte)
+ * file whenever the real index didn't exist yet (a repo with zero commits,
+ * or a checkout whose `.git/index` was never materialized). `git add -A`
+ * under `GIT_INDEX_FILE` then fails on that 0-byte file -- git only builds a
+ * fresh, valid empty index when the path does NOT exist at all. Repro:
+ * delete the real index of an otherwise-normal checkout (simulating "no
+ * index ever materialized" without also losing HEAD, which a genuinely
+ * zero-commit repo would -- `commit-tree -p HEAD` needs a real HEAD to
+ * parent onto, so that variant hits a DIFFERENT failure unrelated to this
+ * fix) and leave a dirty/untracked file.
+ */
+describe("#216 item 5 — a missing real index must not leave a 0-byte placeholder git add then chokes on", () => {
+  for (const [label, cmdFn] of RESCUE_CMDS) {
+    test(`${label}: no .git/index on disk, dirty untracked file → rescue succeeds, not RESCUE_FAILED ... add`, () => {
+      rmSync(join(checkout, ".git", "index"), { force: true });
+      writeFileSync(join(checkout, "notes.md"), "real work, no index on disk\n");
+
+      const out = sh(cmdFn(REPO, STUDIO, root)).out;
+
+      expect(out).not.toContain(`${RESCUE_FAILED_PREFIX} checkout add`);
+      expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}(-|/wt/checkout-)\\d{14} 1 files$`, "m"));
+    });
+  }
+});
+
 // Issue #39: the operator needs one line per worktree after every rescue —
 // pushed (which ref), nothing to push, or failed (which step). Both builders.
 describe("#39 — one RESCUE_WT line per worktree", () => {

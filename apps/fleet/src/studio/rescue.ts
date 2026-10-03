@@ -981,7 +981,14 @@ export function rescuePushCmd(
     // function's own failure paths below.
     `    idxfile=$(mktemp 2>/dev/null) || { echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; }\n` +
     `    realidx=$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
-    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; fi\n` +
+    // #216 item 5: a brand-new/missing real index (zero commits, or a
+    // checkout whose `.git/index` never got materialized) left `$idxfile`
+    // (from `mktemp`, above) sitting on disk as an EXISTING, 0-byte file --
+    // `git add -A` under `GIT_INDEX_FILE` then fails on it ("index file
+    // smaller than expected"): git only builds a fresh, valid empty index
+    // when the path does NOT exist at all. `rm -f` the placeholder so the
+    // path reads as "doesn't exist yet" to the `add -A` below.
+    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; else rm -f "$idxfile"; fi\n` +
     `    if ! GIT_INDEX_FILE="$idxfile" git -C "$w" add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
     `    tree=$(GIT_INDEX_FILE="$idxfile" git -C "$w" write-tree 2>/dev/null); rc=$?\n` +
     `    rm -f "$idxfile"\n` +
@@ -1550,7 +1557,11 @@ export function rescueSnapshotCmd(
     // ITS OWN admin dir, not the main checkout's -- so `/index` appended to
     // it is always the right file regardless of this script's own cwd.
     `    realidx=$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
-    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; fi\n` +
+    // #216 item 5: same fix as rescuePushCmd's own identical copy above --
+    // `rm -f` the mktemp placeholder when there is no real index to copy, so
+    // `git add -A` sees "no file at all" (a fresh, valid empty index) rather
+    // than an existing 0-byte file it refuses to open.
+    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; else rm -f "$idxfile"; fi\n` +
     `    if ! GIT_INDEX_FILE="$idxfile" git -C "$w" add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
     `    tree=$(GIT_INDEX_FILE="$idxfile" git -C "$w" write-tree 2>/dev/null); rc=$?\n` +
     `    rm -f "$idxfile"\n` +
