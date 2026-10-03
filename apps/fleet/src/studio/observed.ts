@@ -362,6 +362,17 @@ export interface SurvivalBriefPending {
    *  (cli/readiness-format.ts's `formatSurvivalBriefs`); the record is kept
    *  rather than deleted precisely so that line has something to read. */
   gaveUpAt?: string | null;
+  /**
+   * Board issue #208, part 2 — `Observed.wipSyncedAt` AS IT STOOD at the
+   * moment this bring-up happened, frozen here the same way `session` above
+   * is: a retry can run several sync ticks after the heal, and by then a
+   * fresh `wipSync` tick may already have overwritten `wipSyncedAt` with a
+   * NEW timestamp describing time AFTER the heal, not the gap this field
+   * exists to describe (the age of the last REAL push relative to the
+   * replacement). OPTIONAL/absent reads as "no WIP sync had ever landed at
+   * heal time" — the composer (survival-brief.ts) renders nothing for this
+   * studio's WIP safety net in that case. */
+  wipSyncedAt?: string | null;
 }
 
 /** The DO-storage slice this feature touches — same narrow-port style

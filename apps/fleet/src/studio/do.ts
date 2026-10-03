@@ -5848,9 +5848,13 @@ export class StudioDO extends Sandbox<Env> {
           via: session.via,
           replacementDetected: session.replacementDetected === true,
           session,
+          // Board issue #208, part 2: frozen here, at bring-up, for the same
+          // reason `session` is — see SurvivalBringup.wipSyncedAt's own doc
+          // comment (survival-delivery.ts).
+          wipSyncedAt: snapshot.wipSyncedAt ?? null,
         }),
         () => this.survivalBusy(),
-        this.survivalCompose(workRepoSlug, session),
+        this.survivalCompose(workRepoSlug, session, snapshot.wipSyncedAt ?? null),
         (prompt) => this.wakeStudioOnAssignment(prompt),
         () => ctx.moved(),
       );
@@ -5904,7 +5908,10 @@ export class StudioDO extends Sandbox<Env> {
       this.logSurvivalOutcome("deferred", await retryPendingSurvivalBrief(
         this.ctx.storage,
         () => this.survivalBusy(),
-        (pending) => this.survivalCompose(workRepoSlug, pending.session)(),
+        // Board issue #208, part 2: the pending record's OWN frozen
+        // `wipSyncedAt` (SurvivalBriefPending.wipSyncedAt), never a fresh
+        // read — same reason `pending.session` itself is never re-read.
+        (pending) => this.survivalCompose(workRepoSlug, pending.session, pending.wipSyncedAt ?? null)(),
         (prompt) => this.wakeStudioOnAssignment(prompt, true),
       ));
     } catch (err) {
@@ -5948,7 +5955,11 @@ export class StudioDO extends Sandbox<Env> {
    * instruction — a brief naming the surviving branches is worth delivering
    * without it.
    */
-  private survivalCompose(workRepoSlug: string, session: ObservedSession): () => Promise<ComposedBrief> {
+  // Board issue #208, part 2: `wipSyncedAt` is the caller's own frozen
+  // capture (bring-up's `snapshot.wipSyncedAt`, or the retry's
+  // `pending.wipSyncedAt`) — see composeSurvivalDelivery's own doc comment
+  // for why it only ever renders on a `via: "heal"` session.
+  private survivalCompose(workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null): () => Promise<ComposedBrief> {
     return async () => {
       let tasks: SurvivalTaskRef[];
       try {
@@ -5958,6 +5969,7 @@ export class StudioDO extends Sandbox<Env> {
       }
       return composeSurvivalDelivery(
         this.survivalSources(workRepoSlug), { ok: true, value: tasks }, session, new Date().toISOString(),
+        wipSyncedAt,
       );
     };
   }
