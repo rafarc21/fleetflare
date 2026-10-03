@@ -321,6 +321,92 @@ export function firstFreeAccount(
 }
 
 /**
+ * #211 review round 3, finding 2 — the search anchor/`currentOutOfScope`
+ * derivation failover.ts's own `runAccountFailover` has always computed
+ * inline (around its own `start`/`currentIdx`/`borrowedActive` locals),
+ * factored out so `launchAccountOrReroute` below shares the IDENTICAL
+ * formula instead of carrying its own, simplified (and wrong) copy. The
+ * launch gate's own copy hardcoded `anchor = start` unconditionally — it
+ * never widened backward for a studio recorded on an account from BEFORE
+ * the repo was ever mapped to a LATER primary (the "#273 r2" shape) while
+ * NOT actively borrowing, so `scopedAccounts` never even contained the
+ * recorded account and tier 1 (`nextClaudeAccount`'s own `idx < 0` branch)
+ * returned null immediately — a false "every account limited" refusal even
+ * when the mapped primary itself was completely free.
+ *
+ *   - `anchor`: this repo's own mapped primary position (`start`), UNLESS
+ *     the studio is NOT actively borrowing anything (`borrowedActive`
+ *     false) AND its recorded `current` sits BEFORE `start` — in that case
+ *     the anchor widens backward to `current`'s own position, so the
+ *     ordinary forward wrap can still reach everything from there through
+ *     the primary and beyond. A `current` not found in `accounts` at all
+ *     (`currentIdx < 0` — secret deleted/renamed, or no recorded account)
+ *     never widens; the primary is the only sane anchor then.
+ *   - `currentOutOfScope`: true only while ACTIVELY borrowing an account
+ *     positioned before the (unwidened) anchor — the one case `anchor`
+ *     deliberately stays PINNED at `start` rather than widening, so the
+ *     borrowed-before-primary account is excluded from `scopedAccounts` and
+ *     needs the caller's own separate out-of-scope fallback instead.
+ *
+ * `current: null` reads as position 0 (failover.ts's own convention — a
+ * never-switched studio has no recorded account and is on the first slot by
+ * construction), never as "not found" — only a NAMED `current` that is
+ * genuinely absent from `accounts` reads as not found.
+ */
+export function deriveSearchAnchor(
+  accounts: ClaudeAccount[], start: number, current: string | null, borrowedActive: boolean,
+): { anchor: number; currentOutOfScope: boolean } {
+  const currentIdx = current == null ? 0 : accounts.findIndex((a) => a.name === current);
+  const anchor = borrowedActive ? start : (currentIdx < 0 ? start : Math.min(start, currentIdx));
+  const currentOutOfScope = borrowedActive && currentIdx >= 0 && currentIdx < anchor;
+  return { anchor, currentOutOfScope };
+}
+
+/**
+ * Fresh-context review of PR #211 (#209 follow-up) — tiers 1+2 of the
+ * three-tier cascade failover.ts's own `runAccountFailover` already runs
+ * (its own doc comment, around the `candidate`/`outOfScopeSpare` locals,
+ * states the rule in full), factored out so every OTHER caller that needs
+ * "where would this studio's own chain send it, falling back to an
+ * unclaimed spare before its primary" shares the ONE implementation —
+ * `launchAccountOrReroute` below used to carry its own, weaker, tier-1-only
+ * copy that silently dropped tier 2 (and tier 3) entirely.
+ *
+ * Tier 1: `scopedAccounts = accounts.slice(anchor)` — this studio's own
+ * chain, from its mapped primary onward (`anchor`'s own meaning, both
+ * callers' own `start`/their own anchor-of-the-mapped-primary). `current`
+ * steps FORWARD via `nextClaudeAccount` when it is itself a member of
+ * `scopedAccounts` (`currentOutOfScope: false`); otherwise there is no
+ * position to step forward FROM (failover.ts's own active-borrow-before-
+ * anchor case), and `firstFreeAccount` over `scopedAccounts` treats every
+ * position — including the first — as a genuine candidate instead.
+ *
+ * Tier 2, tried ONLY when tier 1 found nothing: `firstFreeAccount` over
+ * `accounts.slice(0, anchor)` — an "unclaimed spare" positioned BEFORE this
+ * studio's own primary that is ALSO not `reserved` for another repo, in
+ * LIST ORDER (never lowest-burn — see `firstFreeAccount`'s own doc comment
+ * for why).
+ *
+ * Returns null when BOTH tiers miss — the caller's own cue to fall through
+ * to tier 3 (`nextBorrowedAccount`, already its own shared export, never
+ * folded in here: a borrow is a different KIND of pick, lowest-5h-burn
+ * rather than list order, and is read from fleet-wide burn lazily, on this
+ * rare path only, by callers that have I/O to pay for it — this module
+ * stays pure, see its own header).
+ */
+export function selectFreeAccount(
+  accounts: ClaudeAccount[], anchor: number, current: string | null, currentOutOfScope: boolean,
+  reserved: Set<string>, limits: AccountLimits, now: Date,
+): ClaudeAccount | null {
+  const scopedAccounts = accounts.slice(anchor);
+  const tier1 = currentOutOfScope
+    ? firstFreeAccount(scopedAccounts, reserved, limits, now)
+    : nextClaudeAccount(scopedAccounts, current, limits, now, reserved);
+  if (tier1 !== null) return tier1;
+  return firstFreeAccount(accounts.slice(0, anchor), reserved, limits, now);
+}
+
+/**
  * Issue #102 requirement 3 — "all exhausted: … show earliest reset in fleet
  * ls". The earliest `until` among `accounts` that `limits` records as
  * currently limited as of `now`, or null when none of them have a readable
@@ -401,6 +487,23 @@ export function parseAccountMap(raw: string | undefined): Record<string, number>
     }
   }
   return map;
+}
+
+/**
+ * Review round 3 (2nd review of PR #135, 2026-09-30) — true only when `repo`
+ * is a genuine KEY in the parsed `CLAUDE_ACCOUNT_BY_REPO` map, never merely
+ * because `launchAccount`/`primaryAccount` resolved to SOME account (they
+ * always do, mapped or not — see `launchAccount`'s own "first set account"
+ * fallback). See failover.ts's `FailoverDeps.primaryIsMapped` for the full
+ * reasoning this exists to satisfy.
+ *
+ * Fresh-context review of PR #211, finding 3 — extracted so do.ts's
+ * `borrowFields` and `StudioDO.primaryIsMapped()` share the ONE
+ * implementation rather than each carrying its own hand-copy of this same
+ * formula.
+ */
+export function primaryIsMapped(env: ClaudeAccountEnv, repo: string | null): boolean {
+  return repo !== null && parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO)[repo] !== undefined;
 }
 
 /**
@@ -499,6 +602,99 @@ export function launchAccount(env: ClaudeAccountEnv, repo: string | null, record
     };
   }
   return { ok: true, name: mapped.name, token: mapped.token };
+}
+
+/**
+ * Issue #209 — `launchAccount` (above) resolves the mapped slot, or a
+ * RECORDED failed-over account, UNCONDITIONALLY: it never consults the
+ * fleet-wide `AccountLimits` map (issue #102's `accountIsFree`) at all. A
+ * repo mapped to a slot the fleet already recorded as limited — or a
+ * studio recorded on one — still launched straight onto it, into the
+ * weekly-limit modal, every time provision/restart/recycle ran.
+ *
+ * Wraps `launchAccount` with exactly that one extra check: if the account it
+ * resolved to is free, `launchAccount`'s own answer stands COMPLETELY
+ * unchanged — this never touches that function's own behaviour (see its own
+ * tests, including the "(#53, unchanged)" one). If it is limited, this runs
+ * the SAME three-tier cascade `runAccountFailover` (failover.ts) already
+ * runs for an ALREADY-RUNNING studio, so the two never disagree about where
+ * a studio may land:
+ *
+ *   - tiers 1+2 via the shared `selectFreeAccount` above (this repo's own
+ *     scoped chain, forward from the resolved account, then an unclaimed
+ *     spare before this repo's own mapped primary) — fresh-context review
+ *     of PR #211 found the ORIGINAL version of this function carried its
+ *     own weaker, tier-1-only copy of that cascade (a plain `nextClaudeAccount`
+ *     over the FULL, unscoped account list) that silently dropped tier 2
+ *     (and tier 3, below) entirely: a repo whose own chain was fully limited
+ *     refused the whole launch with "every account limited" even when
+ *     another repo's own reserved primary — or a plain unclaimed spare — was
+ *     genuinely free right now;
+ *   - tier 3, tried only once tiers 1+2 both miss: `nextBorrowedAccount`
+ *     (already its own shared export, no wrapper needed), fed fleet-wide 5h
+ *     burn via `readBurn` — read LAZILY, only on this already-rare path,
+ *     exactly as failover.ts's own `deps.accountBurn.read()` is. Async for
+ *     exactly that one reason; every other branch above resolves
+ *     synchronously and this function stays pure either way (no I/O of its
+ *     own — `readBurn` is the caller's own callback, same shape
+ *     `FailoverDeps.accountBurn.read` already is).
+ *
+ * REFUSES — same `{ ok: false, error }` shape `launchAccount`'s own refusal
+ * already uses — only once ALL THREE tiers miss, naming the earliest reset
+ * (`earliestAccountReset`, over the full account list, matching this
+ * function's own pre-existing behaviour and tests) an operator reading the
+ * degraded row can expect a studio back by.
+ *
+ * `start`: this repo's own mapped primary position (`launchAccount(env,
+ * repo, null)`'s own resolution, the identical "mapped slot, or the first
+ * set account" rule `primaryAccount()` (do.ts) already uses), or 0 when that
+ * cannot itself launch. `anchor`/`currentOutOfScope` (#211 review round 3,
+ * finding 2 — the ORIGINAL version of this function hardcoded `anchor =
+ * start` unconditionally, never widening backward for a studio recorded on
+ * an account from BEFORE the repo was ever mapped to a LATER primary, which
+ * false-refused "every account limited" even when the primary itself was
+ * free) are now `deriveSearchAnchor`'s own shared formula — see that
+ * function's own doc comment for the full anchor-widening/
+ * currentOutOfScope-pinning rule, identical to failover.ts's own
+ * `runAccountFailover` derivation. `borrowedAccount != null` (this studio IS
+ * actively borrowing something, caller-supplied, the same
+ * `existing.borrowedAccount` failover.ts's own `borrowedActive` reads) is
+ * the `borrowedActive` input.
+ *
+ * Gated on `autoFailoverOn(env)`, same as every other reroute/switch
+ * mechanism in this file: with failover off nothing ever moves a studio
+ * away from its mapped primary (see `launchAccount`'s own doc comment,
+ * and `autoFailoverOn`'s) — a restart is the documented way an operator's
+ * own map edit reaches it, and this function must not quietly override
+ * that. The caller (do.ts's `launchAccountOrRefuse`) is the one that reads
+ * D1 for `limits`/burn, and only when `autoFailoverOn(env)` is already true
+ * — this function's own check is a second, redundant guard, not the only
+ * one, so a caller that forgets the outer gate still cannot make this
+ * reroute.
+ */
+export async function launchAccountOrReroute(
+  env: ClaudeAccountEnv, repo: string | null, recorded: string | null | undefined,
+  limits: AccountLimits, reserved: Set<string>, now: Date = new Date(),
+  borrowedAccount: string | null | undefined = null,
+  readBurn: () => Promise<Record<string, { window5hOutput: number }>> = async () => ({}),
+): Promise<LaunchAccount> {
+  const launch = launchAccount(env, repo, recorded);
+  if (!launch.ok || !autoFailoverOn(env)) return launch;
+  const accounts = resolveClaudeAccounts(env);
+  const resolved = accounts.find((a) => a.name === launch.name);
+  if (resolved === undefined || accountIsFree(resolved, limits, now)) return launch;
+  const primary = launchAccount(env, repo, null);
+  const start = primary.ok ? Math.max(0, accounts.findIndex((a) => a.name === primary.name)) : 0;
+  const { anchor, currentOutOfScope } = deriveSearchAnchor(accounts, start, launch.name, borrowedAccount != null);
+  const free = selectFreeAccount(accounts, anchor, launch.name, currentOutOfScope, reserved, limits, now);
+  if (free !== null) return { ok: true, name: free.name, token: free.token };
+  const borrowed = nextBorrowedAccount(accounts, reserved, limits, await readBurn(), now);
+  if (borrowed !== null) return { ok: true, name: borrowed.name, token: borrowed.token };
+  const resetAt = earliestAccountReset(accounts, limits, now);
+  return {
+    ok: false,
+    error: `claude account: every account limited; earliest reset ${resetAt ?? "unknown"}`,
+  };
 }
 
 /** The slot a secret name holds, or null for a name outside the list. */

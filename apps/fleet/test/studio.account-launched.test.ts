@@ -4,6 +4,7 @@ import {
   launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch,
   decideAccountClears, applyAccountClears, clearForceMappedAccount, refuseUnlessMappedAccountLaunchable,
 } from "../src/studio/do";
+import { otherRepoPrimaries } from "../src/studio/accounts";
 import { withAccountDisplay } from "../src/studio/registry";
 import { STATUS_KEY, NEVER_MOVED_CTX, type StudioStorage, type OpCtx } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
@@ -27,9 +28,21 @@ const TOKEN_2 = "sk-ant-oat01-" + "b".repeat(40);
 const TOKEN_3 = "sk-ant-oat01-" + "c".repeat(40);
 const ALL = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2, CLAUDE_CODE_OAUTH_TOKEN_3: TOKEN_3 };
 const MAP_2 = '{"demosite-life":2}';
+// #211 review round 3, finding 1 -- decideAccountClears now needs repo/
+// reserved to compute the borrow fields, the same way accountClears'
+// inline commitOkClears branch always has. Every test below launches a
+// "demosite-life--pilot" studio under MAP_2 (a single-repo map, so no
+// account is any OTHER repo's reserved primary) -- fixed constants.
+const REPO = "demosite-life";
+const RESERVED = otherRepoPrimaries({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: MAP_2 }, REPO);
 
+// Issue #209: launchAccountOrRefuse now reads env.DB (when auto-failover is
+// on) to consult the fleet-wide AccountLimits map -- merging in ONLY the real
+// (migrated, empty-by-default) cloudflare:test D1 keeps every EXISTING test
+// below behaving exactly as before (an empty fleet_state table reads back as
+// "no limits recorded", i.e. every account free).
 function envWith(vars: Record<string, string>): Env {
-  return vars as unknown as Env;
+  return { ...vars, DB: testEnv.DB } as unknown as Env;
 }
 
 function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
@@ -541,7 +554,7 @@ describe("launchAccountOrRefuse(..., commitOkClears=false) — the entry-time re
 
     // decide (pre-touch) -> sbAwaitReady's own onStart write (simulated) ->
     // apply (post-success, no concurrent destroy).
-    const clears = await decideAccountClears(env, storage, freshLaunch);
+    const clears = await decideAccountClears(env, storage, freshLaunch, REPO, RESERVED);
     const existingRow = (await storage.get(STATUS_KEY))!;
     await storage.put(STATUS_KEY, { ...existingRow, launchedAccount: freshLaunch.name });
     await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
@@ -599,7 +612,7 @@ describe("StudioDO.recycle wiring — the entry-time launchAccountOrRefuse call 
     expect(closureBody).toContain(
       "const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);",
     );
-    expect(closureBody).toContain("await decideAccountClears(this.env, this.ctx.storage, launch);");
+    expect(closureBody).toContain("await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);");
     expect(closureBody).toContain("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);");
   });
 });
@@ -684,7 +697,7 @@ describe("decideAccountClears/applyAccountClears — decided before the containe
     const { env, storage, recordFn, observation: _observation } = seeded();
     const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
 
-    const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot
+    const clears = await decideAccountClears(env, storage, launch, REPO, RESERVED); // pre-touch snapshot
     await mutateToLaunchedAccount(storage, launch.name); // sbAwaitReady -> onStart, simulated
     // sbAwaitReady resolved successfully: its success continuation runs.
     // No concurrent destroy landed either (NEVER_MOVED_CTX).
@@ -699,7 +712,7 @@ describe("decideAccountClears/applyAccountClears — decided before the containe
     const { env, storage, recordFn, observation } = seeded();
     const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
 
-    const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot, decided
+    const clears = await decideAccountClears(env, storage, launch, REPO, RESERVED); // pre-touch snapshot, decided
     expect(clears).not.toBeNull(); // there WAS something to clear
     // sbAwaitReady throws here (a genuine cold-start failure) — production
     // code never reaches the `applyAccountClears` line below it; this test
@@ -722,7 +735,7 @@ describe("decideAccountClears/applyAccountClears — decided before the containe
     const { env, storage, recordFn, observation } = seeded();
     const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
 
-    const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot, decided
+    const clears = await decideAccountClears(env, storage, launch, REPO, RESERVED); // pre-touch snapshot, decided
     expect(clears).not.toBeNull();
     await mutateToLaunchedAccount(storage, launch.name); // sbAwaitReady -> onStart, simulated
     // A concurrent destroy landed (its own epoch bump) sometime during
@@ -747,7 +760,7 @@ describe("decideAccountClears/applyAccountClears — decided before the containe
     const recorded: StudioStatus[] = [];
     const recordFn = async (s: StudioStatus) => { recorded.push(s); await storage.put(STATUS_KEY, s); };
     const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
-    const clears = await decideAccountClears(env, storage, launch);
+    const clears = await decideAccountClears(env, storage, launch, REPO, RESERVED);
     expect(clears).toBeNull();
     await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
     expect(recorded).toHaveLength(0);
@@ -782,7 +795,7 @@ describe("decideAccountClears/applyAccountClears — decided before the containe
     const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
     expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
 
-    const clears = await decideAccountClears(env, storage, launch); // pre-touch snapshot
+    const clears = await decideAccountClears(env, storage, launch, REPO, RESERVED); // pre-touch snapshot
     await mutateToLaunchedAccount(storage, launch.name); // sbAwaitReady -> onStart, simulated
     await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
 
@@ -815,7 +828,7 @@ describe("recycle's post-destroy closure — decide/apply around a throwing star
     await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
     // destroy() ran (simulated) — the closure's own fresh call.
     const launch = await launchAccountOrRefuse(env, storage, "demosite-life--pilot", recordFn, false);
-    const clears = await decideAccountClears(env, storage, launch);
+    const clears = await decideAccountClears(env, storage, launch, REPO, RESERVED);
     expect(clears).not.toBeNull();
     // sbAwaitReady throws here — recycleWithSync's own catch reads the row
     // next; applyAccountClears is never reached.
@@ -858,7 +871,7 @@ describe("StudioDO.provisionUngated/restartUngated wiring — decide before sbAw
 
       it("decideAccountClears, sbAwaitReady, applyAccountClears run in that exact order, inside the cold-start guard", () => {
         const block = coldStartBlock(fnBody);
-        const decideIdx = block.indexOf("const clears = await decideAccountClears(this.env, this.ctx.storage, launch);");
+        const decideIdx = block.indexOf("const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);");
         const awaitReadyIdx = block.indexOf("await sbAwaitReady(this);");
         const applyIdx = block.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);");
         expect(decideIdx).toBeGreaterThan(-1);
@@ -902,7 +915,7 @@ describe("StudioDO.recycle wiring — decide before sbAwaitReady, apply only aft
   });
 
   it("decideAccountClears, sbAwaitReady, applyAccountClears run in that exact order", () => {
-    const decideIdx = closureBody.indexOf("const clears = await decideAccountClears(this.env, this.ctx.storage, launch);");
+    const decideIdx = closureBody.indexOf("const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);");
     const awaitReadyIdx = closureBody.indexOf("await sbAwaitReady(this);");
     const applyIdx = closureBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);");
     expect(decideIdx).toBeGreaterThan(-1);
