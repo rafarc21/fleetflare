@@ -566,6 +566,33 @@ describe("launchAccountOrRefuse — borrow tier 3 and D1 failure handling, real 
     expect(row?.borrowedFromRepo).toBe("otherrepo");
   });
 
+  // #211 review round 4 -- a row already carrying a STALE `borrowedAccount`
+  // from an EARLIER launch's reroute/borrow must get cleared once a LATER
+  // launch lands back on the repo's own primary, even though that later
+  // launch never rerouted at all: `plain` (limit-unaware) and `launch`
+  // (limit-aware) both resolve straight to the primary here, so the old
+  // `rerouted` gate (`plain.name !== launch.name`) reads false and
+  // `borrowFields` never ran, leaving `borrowedAccount`/`borrowedFromRepo`
+  // standing even though the studio is actually back home. That stale pair
+  // later fires a bogus hand-back switch (failover.ts, gated on exactly
+  // `borrowedAccount != null`) -- including a `respawn-pane -k` kill of the
+  // lead's own pane -- against a studio that was never away to begin with.
+  it("a later launch that lands squarely on the primary clears a STALE borrowedAccount/borrowedFromRepo from an earlier borrow", async () => {
+    const env = envWith(twoRepos);
+    // No limits recorded this time -- the mapped primary (account 2) is free
+    // again, unlike the fixture above. The row still carries the borrow an
+    // EARLIER launch (while account 2 was limited) left behind.
+    const storage = fakeStorage(status({ borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3", borrowedFromRepo: "otherrepo" }));
+    const recordFn = async (s: StudioStatus) => { await storage.put(STATUS_KEY, s); };
+    const launch = await launchAccountOrRefuse(env, storage, "demosite-life--lead", recordFn, false);
+    expect(launch).toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 });
+    const clears = await decideAccountClears(env, storage, launch, "demosite-life", otherRepoPrimaries(env, "demosite-life"));
+    await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
+    const row = await storage.get(STATUS_KEY);
+    expect(row?.borrowedAccount).toBeNull();
+    expect(row?.borrowedFromRepo).toBeNull();
+  });
+
   // Fresh-context review of PR #211, finding 2 -- the try/catch around
   // readFleetAccountBurn (do.ts) had ZERO test coverage: the existing
   // "env.DB.prepare throws" test just below only ever breaks the LIMITS
