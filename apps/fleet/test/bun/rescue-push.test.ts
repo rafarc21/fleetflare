@@ -2375,6 +2375,11 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
       expect(sh(`git -C ${priv} rev-list --count ${ref}`).out).toBe("1");
       expect(privTreeFiles(ref!)).toEqual(["a.md", "b.md", "c.md", "d.md", "e.md"]);
       expect(sh(`git -C ${priv} rev-parse ${ref}^{tree}`).out).toBe(sh(`git -C ${checkout} rev-parse HEAD^{tree}`).out);
+      // Board issue #216 fix 4: the shallow-clone fallback snapshot (built
+      // by rescue_try_push's own parentless `commit-tree`) must carry the
+      // same `Rescued-From: <branch>` trailer every other rescue commit in
+      // this file already does — the checkout's real branch here is `main`.
+      expect(sh(`git -C ${priv} log -1 --format=%B ${ref}`).out).toContain("Rescued-From: main");
     });
 
     // Fresh review round 1 finding 2: a mutant that ignores the snapshot
