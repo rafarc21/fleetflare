@@ -2780,11 +2780,26 @@ export async function runAccountFailover(
       // (`parkedOn === null`), never the separate `parkedOn !== null`
       // "operator chose not to move" case (#271, `FLEET_AUTO_FAILOVER` off
       // with a candidate account) — see StudioStatus.parkedAt's own doc
-      // comment. `existing.parkedAt ?? now` so a message-text-refresh
-      // re-degrade (this same anti-loop guard's `limitChanged` write just
-      // above, or a pre-#210 row healing into a fresh one later) never
-      // resets the clock ask-3's own auto-stop check reads from.
-      ...(parkedOn === null ? { parkedAt: existing.parkedAt ?? deps.now().toISOString() } : {}),
+      // comment.
+      //
+      // Review round 2 (#210), finding 2 (BLOCKER, FIXED) — this used to
+      // read `existing.parkedAt ?? now` UNCONDITIONALLY, so a stale
+      // `parkedAt` (hours old, from an EARLIER park) rode forward onto a
+      // BRAND NEW degradation the instant a resumed studio hit the same
+      // exhaustion again: `existing` had already passed through
+      // `"stopped"`/`"provisioning"`/`"running"` since the old `parkedAt`
+      // was stamped — a genuinely NEW episode — yet the clock never
+      // restarted, so the next ask-3 tick read it as already 6h+ old and
+      // re-stopped a studio that had just resumed and never got a real
+      // chance. Fixed: the old value is preserved ONLY for a GENUINE
+      // same-episode repeat (`existing.state === "degraded"` — this same
+      // anti-loop guard's own `limitChanged` message-text-refresh write, or
+      // a message-text refresh of THIS SAME write later in the same
+      // episode); any other previous state (running — a resume landed)
+      // restarts the clock from `now`, exactly as a first-ever park would.
+      ...(parkedOn === null
+        ? { parkedAt: existing.state === "degraded" ? (existing.parkedAt ?? deps.now().toISOString()) : deps.now().toISOString() }
+        : {}),
       // Issue #109: only on the SAME eligible path the attempt step itself
       // evaluates (genuinely exhausted, select-style modal) — an
       // inline-exhausted row gets no bookkeeping at all, since it is never

@@ -472,9 +472,14 @@ describe("review round 2 (#210), finding 2 — a stale parkedAt must not survive
 
     // And critically: the auto-stop must not fire on the very next tick —
     // the (now-correct) clock reads "only just started", not "6h+ old".
+    // (#109's own immediate auto-continue attempt already fired as a side
+    // effect of tick 2's own fresh-degrade write, so this tick's own outcome
+    // is its hourly-cap "not yet due" — the load-bearing assertion here is
+    // that `stopParkedStudio` was never even invoked.)
     h.setNow(new Date(resumedAt.getTime() + 60_000));
     const third = await h.run();
-    expect(third.kind).toBe("already-degraded");
+    expect(third.kind).not.toBe("auto-stopped");
+    expect(third.kind).not.toBe("park-refused");
     expect(h.stopParkedStudio).not.toHaveBeenCalled();
   });
 });
