@@ -13,6 +13,19 @@ import { findLiveAssignedTask, type BoardApi } from "../board/board";
 import { isJuniorAuthorized, revokeJuniorAuthorization } from "./authz";
 import { checkAndConsumeJuniorRateLimit } from "./ratelimit";
 import { githubBoardApi, resolveStudioBoardRepo } from "../board/routes";
+import { insertJuniorUsage } from "./usage";
+
+// Issue #218: the only two modes the CLI's client.ts ever sends (see that
+// module's own `X-Junior-Mode` header — proxy transport only, per the design
+// doc). An absent or unrecognized header defaults to "edit" rather than
+// rejecting the call outright — usage counting must never be a reason a
+// junior call that is otherwise fine gets refused.
+const JUNIOR_MODES = ["edit", "text"] as const;
+type JuniorMode = (typeof JUNIOR_MODES)[number];
+function readJuniorMode(req: Request): JuniorMode {
+  const raw = req.headers.get("X-Junior-Mode");
+  return (JUNIOR_MODES as readonly string[]).includes(raw ?? "") ? (raw as JuniorMode) : "edit";
+}
 
 export const JUNIOR_BODY_CAP = 2 * 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
@@ -120,7 +133,7 @@ async function readCappedBody(req: Request, cap: number): Promise<string | null>
 }
 
 export async function handleFleetJunior(
-  req: Request, env: Env,
+  req: Request, env: Env, ctx: ExecutionContext,
   api: BoardApi = githubBoardApi(env),
   rows: () => Promise<StudioStatus[]> = () => listStudios(env),
   heartbeatMs = HEARTBEAT_MS,
@@ -205,6 +218,7 @@ export async function handleFleetJunior(
   // authorized studio could simply skip it and call this route directly.
   const maxTokens = Math.min(Number(body.max_tokens) > 0 ? Number(body.max_tokens) : 64_000, 128_000);
 
+  const mode = readJuniorMode(req);
   const ai = env.AI;
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const w = writable.getWriter();
@@ -218,14 +232,35 @@ export async function handleFleetJunior(
   const beat = setInterval(() => { w.write(enc.encode(" ")).catch(() => clearInterval(beat)); }, heartbeatMs);
   void (async () => {
     let out: string;
+    let ok: boolean;
+    let inputTokens = 0;
+    let outputTokens = 0;
     try {
-      out = JSON.stringify(normalizeAiResult(await ai.run(body.model, { messages: body.messages, max_tokens: maxTokens })));
+      const normalized = normalizeAiResult(await ai.run(body.model, { messages: body.messages, max_tokens: maxTokens }));
+      inputTokens = normalized.usage.in;
+      outputTokens = normalized.usage.out;
+      ok = true;
+      out = JSON.stringify(normalized);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      ok = false;
       out = JSON.stringify({ error: { code: aiErrorCode(message), message } });
     } finally {
       clearInterval(beat);
     }
+    // Issue #218 finding 1 (fresh-context review): handed to `ctx.waitUntil`
+    // — the house pattern for a side effect that must survive the response
+    // closing (github/webhook.ts's `ctx.waitUntil(autoCloseOnPromote(...))`,
+    // exceptions.ts's `ctx.waitUntil(pruneWorkerExceptions(db))`). A bare
+    // `void`-prefixed fire-and-forget here would let the Workers runtime
+    // tear down this execution context the instant the response stream
+    // below closes, silently dropping the row mid-insert. The insert's own
+    // `.catch(() => {})` still means a logging failure can never affect (or
+    // delay) the result already written to the studio.
+    ctx.waitUntil(insertJuniorUsage(env.DB, {
+      id: crypto.randomUUID(), ts: Date.now(), studioId: studio.id, mode, model: body.model,
+      inputTokens, outputTokens, ok,
+    }).catch(() => {}));
     // A client that aborted mid-call leaves this writer closed/errored by
     // the time the AI call resolves — writing to it then would otherwise be
     // an unhandled rejection inside this detached IIFE. Swallow it: the

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { applyBlocks, parseBlocks, toUnifiedDiff } from "./blocks";
 import { ApiError, AuthError, callWithPolicy, DEEPSEEK, GLM, type ChatMessage, type ChatResult } from "./client";
 import { defaultAuthDeps, resolveTransport } from "./auth";
+import { recordUsageLocal } from "./usage";
 
 export const EXIT = { OK: 0, USAGE: 2, API: 3, INVALID: 4, TIMEOUT: 5, AUTH: 6 } as const;
 export const DEFAULT_MAX_TOKENS = 64_000;
@@ -59,6 +60,19 @@ function telemetry(model: string, startMs: number, r: ChatResult | null, calls: 
   return `junior: model=${model.split("/").pop()} secs=${secs} in=${k(r?.usage.in ?? 0)} out=${k(r?.usage.out ?? 0)} ${cost} calls=${calls} status=${status}`;
 }
 
+// Issue #218: proxy-transport calls are recorded server-side already (the
+// fleet Worker's handleFleetJunior inserts a row); recording them again here
+// too would double count. `isLocal` is only ever true once resolveTransport
+// has actually resolved a non-proxy transport, so the early AuthError branch
+// (no model call ever made) correctly records nothing.
+function recordLocalUsage(
+  env: Record<string, string | undefined>, isLocal: boolean, mode: "edit" | "text", model: string,
+  r: ChatResult | null, ok: boolean,
+): void {
+  if (!isLocal) return;
+  recordUsageLocal(env, { ts: Date.now(), mode, model, inputTokens: r?.usage.in ?? 0, outputTokens: r?.usage.out ?? 0, ok });
+}
+
 export async function main(argv: string[], env: Record<string, string | undefined>, cwd: string): Promise<number> {
   const args = parseArgs(argv);
   if (typeof args === "string") { console.error(`${args}\n${USAGE}`); return EXIT.USAGE; }
@@ -85,15 +99,21 @@ export async function main(argv: string[], env: Record<string, string | undefine
   let calls = 0;
   let model = models[0];
   let last: ChatResult | null = null;
+  // Set once resolveTransport actually resolves a transport; stays false for
+  // the early AuthError branch below (no model call ever made, so no usage
+  // record is owed either way) and for a proxy transport (recorded server-side).
+  let isLocal = false;
 
   try {
     const transport = resolveTransport(env, defaultAuthDeps(env));
-    const first = await callWithPolicy({ transport, models, messages, maxTokens: DEFAULT_MAX_TOKENS, signal });
+    isLocal = transport.kind !== "proxy";
+    const first = await callWithPolicy({ transport, models, messages, maxTokens: DEFAULT_MAX_TOKENS, mode: args.mode, signal });
     calls += first.calls; model = first.model; last = first.result;
 
     if (args.mode === "text") {
       console.log(last.content.trim());
       console.error(telemetry(model, start, last, calls, "ok"));
+      recordLocalUsage(env, isLocal, args.mode, model, last, true);
       return EXIT.OK;
     }
 
@@ -106,19 +126,21 @@ export async function main(argv: string[], env: Record<string, string | undefine
         { role: "user", content: `Your edit blocks failed: ${applied.error}\nReply with the corrected complete set of edit blocks only.` },
       ];
       const orderedModels = [model, ...models.filter((m) => m !== model)];
-      const second = await callWithPolicy({ transport, models: orderedModels, messages: repairMsgs, maxTokens: DEFAULT_MAX_TOKENS, signal });
+      const second = await callWithPolicy({ transport, models: orderedModels, messages: repairMsgs, maxTokens: DEFAULT_MAX_TOKENS, mode: args.mode, signal });
       calls += second.calls; model = second.model; last = second.result;
       applied = applyBlocks(files, parseBlocks(last.content), exists);
     }
     if (!applied.ok) {
       console.error(`junior: invalid edit: ${applied.error}\n--- raw output ---\n${last.content}`);
       console.error(telemetry(model, start, last, calls, "invalid"));
+      recordLocalUsage(env, isLocal, args.mode, model, last, false);
       return EXIT.INVALID;
     }
     const diff = toUnifiedDiff(files, applied.after);
     if (diff === "") {
       console.error("junior: invalid edit: blocks produced no change");
       console.error(telemetry(model, start, last, calls, "invalid"));
+      recordLocalUsage(env, isLocal, args.mode, model, last, false);
       return EXIT.INVALID;
     }
     const dir = join(cwd, ".junior");
@@ -127,18 +149,21 @@ export async function main(argv: string[], env: Record<string, string | undefine
     writeFileSync(join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}.patch`), diff);
     process.stdout.write(diff);
     console.error(telemetry(model, start, last, calls, "ok"));
+    recordLocalUsage(env, isLocal, args.mode, model, last, true);
     return EXIT.OK;
   } catch (e) {
     const name = (e as Error)?.name;
     if (name === "TimeoutError" || name === "AbortError") {
       console.error(`junior: timed out after ${args.timeoutS}s`);
       console.error(telemetry(model, start, last, calls, "timeout"));
+      recordLocalUsage(env, isLocal, args.mode, model, last, false);
       return EXIT.TIMEOUT;
     }
     if (e instanceof AuthError) { console.error(`junior: ${e.message}`); return EXIT.AUTH; }
     if (e instanceof ApiError) {
       console.error(`junior: ${e.message}`);
       console.error(telemetry(model, start, last, calls, "api-error"));
+      recordLocalUsage(env, isLocal, args.mode, model, last, false);
       return EXIT.API;
     }
     // Catch-all for any otherwise-unclassified Error reaching this point:
@@ -155,6 +180,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
     if (e instanceof Error) {
       console.error(`junior: ${e.message}`);
       console.error(telemetry(model, start, last, calls, "api-error"));
+      recordLocalUsage(env, isLocal, args.mode, model, last, false);
       return EXIT.API;
     }
     throw e;

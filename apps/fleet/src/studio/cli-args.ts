@@ -210,7 +210,12 @@ export type CliCommand =
   // Task 8: purely local opt-in — `fleet junior enable [--account <id>] |
   // disable | status`. Never reaches the Worker or any studio; cli/junior.ts
   // (a symlink + one config file under $HOME) does the actual work.
-  | { cmd: "junior"; action: "enable" | "disable" | "status"; account?: string }
+  // Issue #218: `stats` is NOT purely local — it calls the Worker's
+  // `/studio/junior/usage` route, so it needs an Access JWT (unlike the
+  // other three actions) and `since` carries the raw `--since <dur|date>`
+  // string; parsing it to an epoch-ms cutoff happens in cmdJuniorStats, not
+  // here (this file only validates argv shape — see this file's own header).
+  | { cmd: "junior"; action: "enable" | "disable" | "status" | "stats"; account?: string; since?: string }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -362,8 +367,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Deterministic backfill: every open task whose latest envelope names a PR now on the default branch. Bare (or --dry-run) only REPORTS would-close/skipped(why); --apply actually closes the GitHub issue and moves the board to completed, the SAME idempotent action a push webhook uses. The only coverage for a repo on the token auth path, where no webhook is ever sent. --terminal instead closes every OPEN issue whose board state is already completed (as completed) or canceled/failed (as not planned); labels are left as they are.",
   },
   junior: {
-    args: "enable [--account <id>] | disable | status",
-    summary: "Opt this Mac into the junior skill (Workers AI delegation, skills/junior/SKILL.md). enable symlinks ~/.claude/skills/junior to this checkout and stores the Cloudflare account id in ~/.config/fleet/junior.json; disable removes only that symlink; status prints whether it is on, the account, and which auth path a call would take. Local only — never touches the Worker or any studio.",
+    args: "enable [--account <id>] | disable | status | stats [--since <dur|date>]",
+    summary: "Opt this Mac into the junior skill (Workers AI delegation, skills/junior/SKILL.md). enable symlinks ~/.claude/skills/junior to this checkout and stores the Cloudflare account id in ~/.config/fleet/junior.json; disable removes only that symlink; status prints whether it is on, the account, and which auth path a call would take. enable/disable/status are local only — never touch the Worker or any studio. stats is DIFFERENT: it calls the Worker's /studio/junior/usage route (needs ~/.fleet/credentials, like every other board/studio verb) and merges it with this machine's own local usage log (~/.local/share/fleet/junior-usage.jsonl, laptop/direct-transport calls that never reach the Worker), printing one row per studio/id plus a TOTAL. --since <dur|date> (e.g. 24h, 7d, or an ISO date) narrows both halves; omitted means all time.",
   },
 };
 
@@ -928,13 +933,19 @@ export function parseCliArgs(argv: string[]): CliCommand {
       if (arg === undefined || arg === "ls") return { cmd: "memory-ls" };
       if (arg === "compact") return { cmd: "memory-compact" };
       return usage(`unknown memory command ${JSON.stringify(arg)}`);
-    // Task 8: `fleet junior enable [--account <id>] | disable | status`.
+    // Task 8 / issue #218: `fleet junior enable [--account <id>] | disable |
+    // status | stats [--since <dur|date>]`.
     case "junior": {
       const action = argv[1];
-      if (action !== "enable" && action !== "disable" && action !== "status") {
-        return { cmd: "usage", message: "usage: fleet junior enable [--account <id>] | disable | status" };
+      if (action !== "enable" && action !== "disable" && action !== "status" && action !== "stats") {
+        return { cmd: "usage", message: "usage: fleet junior enable [--account <id>] | disable | status | stats [--since <dur|date>]" };
       }
       const rest = argv.slice(2);
+      if (action === "stats") {
+        if (rest.length === 0) return { cmd: "junior", action };
+        if (rest.length === 2 && rest[0] === "--since" && rest[1] !== "") return { cmd: "junior", action, since: rest[1] };
+        return { cmd: "usage", message: "usage: fleet junior stats [--since <dur|date>]" };
+      }
       if (action !== "enable" || rest.length === 0) {
         return rest.length === 0 ? { cmd: "junior", action } : { cmd: "usage", message: `fleet junior ${action}: takes no arguments` };
       }

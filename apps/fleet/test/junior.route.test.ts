@@ -25,6 +25,22 @@ function row(id: string, hash: string, repoSlug: string | null = REPO): StudioSt
   return { id, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
     lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: hash, repoSlug };
 }
+// Issue #218 finding 1: `handleFleetJunior` now hands its usage-log insert
+// off to `ctx.waitUntil` (house pattern — see github/webhook.ts's
+// `autoCloseOnPromote` and exceptions.ts's `pruneWorkerExceptions`) instead
+// of a bare fire-and-forget `void`. Same queue-don't-await fake `ctx` shape
+// already established by test/github.webhook.test.ts and
+// test/exceptions.test.ts's own `fakeCtx()`.
+function fakeCtx() {
+  const tasks: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: vi.fn((p: Promise<unknown>) => { tasks.push(p); p.catch(() => {}); }),
+    passThroughOnException: () => {},
+    drain: () => Promise.all(tasks),
+  };
+  return ctx as unknown as ExecutionContext & { waitUntil: ReturnType<typeof vi.fn>; drain: () => Promise<unknown[]> };
+}
+let ctx: ReturnType<typeof fakeCtx>;
 // `authorize` seeds the B1 D1 record for task #7 (the default `boardTask()`)
 // assigned to `ME` — the Worker-side record that is now the actual /fleet/
 // junior gate (src/junior/authz.ts), never the `junior` GitHub label. Every
@@ -57,6 +73,7 @@ const good = { model: "@cf/zai-org/glm-5.3", messages: [{ role: "user", content:
 // authorizing a test that expects a 403.
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
+  ctx = fakeCtx();
 });
 
 describe("juniorEnabled", () => {
@@ -75,40 +92,40 @@ describe("juniorEnabled", () => {
 describe("handleFleetJunior", () => {
   it("404 when flag off", async () => {
     const { token, rows, e } = await setup({ FLEET_JUNIOR: undefined });
-    expect((await handleFleetJunior(req(token, good), e, board(), rows)).status).toBe(404);
+    expect((await handleFleetJunior(req(token, good), e, ctx, board(), rows)).status).toBe(404);
   });
   it("404 when repo not listed", async () => {
     const { token, rows, e } = await setup({ JUNIOR_REPOS: "acme-org/other" });
-    expect((await handleFleetJunior(req(token, good), e, board(), rows)).status).toBe(404);
+    expect((await handleFleetJunior(req(token, good), e, ctx, board(), rows)).status).toBe(404);
   });
   it("404 when AI binding missing", async () => {
     const { token, rows, e } = await setup({ AI: undefined });
-    expect((await handleFleetJunior(req(token, good), e, board(), rows)).status).toBe(404);
+    expect((await handleFleetJunior(req(token, good), e, ctx, board(), rows)).status).toBe(404);
   });
   it("405 on GET", async () => {
     const { token, rows, e } = await setup();
-    expect((await handleFleetJunior(req(token, null, "/fleet/junior", "GET"), e, board(), rows)).status).toBe(405);
+    expect((await handleFleetJunior(req(token, null, "/fleet/junior", "GET"), e, ctx, board(), rows)).status).toBe(405);
   });
   it("401 on missing or unknown token", async () => {
     const { rows, e } = await setup();
-    expect((await handleFleetJunior(req(null, good), e, board(), rows)).status).toBe(401);
-    expect((await handleFleetJunior(req(mintSpawnToken(), good), e, board(), rows)).status).toBe(401);
+    expect((await handleFleetJunior(req(null, good), e, ctx, board(), rows)).status).toBe(401);
+    expect((await handleFleetJunior(req(mintSpawnToken(), good), e, ctx, board(), rows)).status).toBe(401);
   });
   it("400 on model outside allowlist", async () => {
     const { token, rows, e, run } = await setup();
-    const r = await handleFleetJunior(req(token, { ...good, model: "@cf/openai/gpt-oss-120b" }), e, board(), rows);
+    const r = await handleFleetJunior(req(token, { ...good, model: "@cf/openai/gpt-oss-120b" }), e, ctx, board(), rows);
     expect(r.status).toBe(400);
     expect(run).not.toHaveBeenCalled();
   });
   it("400 on bad JSON or missing messages", async () => {
     const { token, rows, e } = await setup();
-    expect((await handleFleetJunior(req(token, "{nope"), e, board(), rows)).status).toBe(400);
-    expect((await handleFleetJunior(req(token, { model: good.model }), e, board(), rows)).status).toBe(400);
+    expect((await handleFleetJunior(req(token, "{nope"), e, ctx, board(), rows)).status).toBe(400);
+    expect((await handleFleetJunior(req(token, { model: good.model }), e, ctx, board(), rows)).status).toBe(400);
   });
   it("413 over 2 MB", async () => {
     const { token, rows, e } = await setup();
     const big = { ...good, messages: [{ role: "user", content: "x".repeat(2 * 1024 * 1024) }] };
-    expect((await handleFleetJunior(req(token, big), e, board(), rows)).status).toBe(413);
+    expect((await handleFleetJunior(req(token, big), e, ctx, board(), rows)).status).toBe(413);
   });
   // PR #9 review, F3: the old check read the WHOLE body into one JS string
   // (`req.text()`) before ever comparing its length to the cap — exactly the
@@ -126,7 +143,7 @@ describe("handleFleetJunior", () => {
       headers: { "content-length": String(JUNIOR_BODY_CAP + 1) },
       body: JSON.stringify(good),
     });
-    const r = await handleFleetJunior(request, e, api, rows);
+    const r = await handleFleetJunior(request, e, ctx, api, rows);
     expect(r.status).toBe(413);
     expect(rows).not.toHaveBeenCalled();
     expect(api.listIssues).not.toHaveBeenCalled();
@@ -153,7 +170,7 @@ describe("handleFleetJunior", () => {
       body: stream,
       duplex: "half",
     } as RequestInit);
-    const r = await handleFleetJunior(request, e, board(), rows);
+    const r = await handleFleetJunior(request, e, ctx, board(), rows);
     expect(r.status).toBe(413);
     // Stopped pulling once the running total crossed the cap (after 3 MiB —
     // the 3rd chunk), never drained all 5.
@@ -162,7 +179,7 @@ describe("handleFleetJunior", () => {
   });
   it("200 streams normalized JSON and forwards the request to env.AI.run", async () => {
     const { token, rows, e, run } = await setup();
-    const r = await handleFleetJunior(req(token, good), e, board(), rows);
+    const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
     expect(r.status).toBe(200);
     expect(JSON.parse((await r.text()).trim())).toEqual({ content: "ok", finish: "stop", usage: { in: 1, out: 2, neurons: null } });
     expect(run).toHaveBeenCalledWith(good.model, { messages: good.messages, max_tokens: 100 });
@@ -170,13 +187,13 @@ describe("handleFleetJunior", () => {
   it("AI error becomes an error body with a classified code", async () => {
     const { token, rows, e } = await setup();
     (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => { throw new Error("AiError: AiError: Request timeout (abc)"); });
-    const r = await handleFleetJunior(req(token, good), e, board(), rows);
+    const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
     expect(JSON.parse((await r.text()).trim())).toEqual({ error: { code: 3046, message: "AiError: AiError: Request timeout (abc)" } });
   });
   it("heartbeat spaces precede the JSON on slow calls", async () => {
     const { token, rows, e } = await setup();
     (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(() => new Promise((res) => setTimeout(() => res({ response: "late" }), 50)));
-    const r = await handleFleetJunior(req(token, good), e, board(), rows, 10);
+    const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows, 10);
     const text = await r.text();
     expect(text.startsWith(" ")).toBe(true);
     expect(JSON.parse(text.trim()).content).toBe("late");
@@ -189,7 +206,7 @@ describe("handleFleetJunior", () => {
     // the fix must clear it the moment a heartbeat write itself fails.
     (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(() => new Promise((res) => setTimeout(() => res({ response: "late" }), 200)));
     const clearSpy = vi.spyOn(globalThis, "clearInterval");
-    const r = await handleFleetJunior(req(token, good), e, board(), rows, 10);
+    const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows, 10);
     const reader = r.body!.getReader();
     await reader.read(); // consume a heartbeat byte so the stream is flowing
     await reader.cancel(); // simulate the client going away mid-call
@@ -199,7 +216,7 @@ describe("handleFleetJunior", () => {
   });
   it("max_tokens is clamped to 128000 server-side before reaching env.AI.run", async () => {
     const { token, rows, e, run } = await setup();
-    const r = await handleFleetJunior(req(token, { ...good, max_tokens: 999999999 }), e, board(), rows);
+    const r = await handleFleetJunior(req(token, { ...good, max_tokens: 999999999 }), e, ctx, board(), rows);
     expect(r.status).toBe(200);
     expect(run).toHaveBeenCalledWith(good.model, { messages: good.messages, max_tokens: 128_000 });
   });
@@ -211,7 +228,7 @@ describe("handleFleetJunior — maestro authorization", () => {
   // record for this task", not "no junior label".
   it("403 when the live task has no D1 authorization record", async () => {
     const { token, rows, e, run } = await setup({}, undefined, false);
-    const r = await handleFleetJunior(req(token, good), e, board([boardTask({ labels: ["working", studioLabel(ME)] })]), rows);
+    const r = await handleFleetJunior(req(token, good), e, ctx, board([boardTask({ labels: ["working", studioLabel(ME)] })]), rows);
     expect(r.status).toBe(403);
     expect(await r.text()).toBe("junior not authorized for your current task");
     expect(run).not.toHaveBeenCalled();
@@ -219,14 +236,14 @@ describe("handleFleetJunior — maestro authorization", () => {
   it("403 when the junior task is completed", async () => {
     const { token, rows, e } = await setup();
     const done = boardTask({ state: "completed", open: false, labels: ["completed", studioLabel(ME), "junior"] });
-    expect((await handleFleetJunior(req(token, good), e, board([done]), rows)).status).toBe(403);
+    expect((await handleFleetJunior(req(token, good), e, ctx, board([done]), rows)).status).toBe(403);
   });
   // Issue #10: GitHub sets state_reason "reopened" on reopen, and only a later
   // close clears it. A closed-then-reopened task (whoever reopened it) is not
   // the task the maestro authorized: 403, and its record is revoked for good.
   it("#10: a reopened task does not regain junior access, and its record is revoked", async () => {
     const { token, rows, e, run } = await setup();
-    const r = await handleFleetJunior(req(token, good), e, board([boardTask({ reopened: true })]), rows);
+    const r = await handleFleetJunior(req(token, good), e, ctx, board([boardTask({ reopened: true })]), rows);
     expect(r.status).toBe(403);
     expect(run).not.toHaveBeenCalled();
     expect(await isJuniorAuthorized(e.DB, REPO, 7, ME)).toBe(false);
@@ -234,17 +251,17 @@ describe("handleFleetJunior — maestro authorization", () => {
   it("403 when the junior task belongs to another studio", async () => {
     const { token, rows, e } = await setup();
     const theirs = boardTask({ assignee: "websites--release-studio", labels: ["working", studioLabel("websites--release-studio"), "junior"] });
-    expect((await handleFleetJunior(req(token, good), e, board([theirs]), rows)).status).toBe(403);
+    expect((await handleFleetJunior(req(token, good), e, ctx, board([theirs]), rows)).status).toBe(403);
   });
   it("503 when the board read fails — fail closed", async () => {
     const { token, rows, e, run } = await setup();
-    expect((await handleFleetJunior(req(token, good), e, board(new Error("github 500")), rows)).status).toBe(503);
+    expect((await handleFleetJunior(req(token, good), e, ctx, board(new Error("github 500")), rows)).status).toBe(503);
     expect(run).not.toHaveBeenCalled();
   });
   it("board is read for the studio's own id on its bound repo", async () => {
     const { token, rows, e } = await setup();
     const api = board();
-    await (await handleFleetJunior(req(token, good), e, api, rows)).text();
+    await (await handleFleetJunior(req(token, good), e, ctx, api, rows)).text();
     expect(vi.mocked(api.listIssues).mock.calls[0][0]).toBe(REPO);
   });
 
@@ -263,7 +280,7 @@ describe("handleFleetJunior — maestro authorization", () => {
   // implementation and GREEN only against the real D1-backed one.
   it("B1: a JUNIOR_LABEL present on the board with no Worker-side D1 record does NOT authorize", async () => {
     const { token, rows, e, run } = await setup({}, undefined, false);
-    const r = await handleFleetJunior(req(token, good), e, board(), rows);
+    const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
     expect(r.status).toBe(403);
     expect(await r.text()).toBe("junior not authorized for your current task");
     expect(run).not.toHaveBeenCalled();
@@ -273,16 +290,16 @@ describe("handleFleetJunior — maestro authorization", () => {
 describe("handleFleetJunior — rate limit and daily cap (F1)", () => {
   it("a request within both limits still succeeds normally", async () => {
     const { token, rows, e, run } = await setup();
-    const r = await handleFleetJunior(req(token, good), e, board(), rows);
+    const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
     expect(r.status).toBe(200);
     expect(run).toHaveBeenCalled();
   });
   it("429s once the per-minute rate is exceeded, naming the limit", async () => {
     const { token, rows, e, run } = await setup({ JUNIOR_RATE_PER_MINUTE: "1" });
     const api = board();
-    const first = await handleFleetJunior(req(token, good), e, api, rows);
+    const first = await handleFleetJunior(req(token, good), e, ctx, api, rows);
     expect(first.status).toBe(200);
-    const second = await handleFleetJunior(req(token, good), e, api, rows);
+    const second = await handleFleetJunior(req(token, good), e, ctx, api, rows);
     expect(second.status).toBe(429);
     expect(await second.text()).toMatch(/minute/i);
     expect(run).toHaveBeenCalledTimes(1);
@@ -290,9 +307,9 @@ describe("handleFleetJunior — rate limit and daily cap (F1)", () => {
   it("429s once the daily cap is exceeded, naming the limit, even with room left in the per-minute rate", async () => {
     const { token, rows, e, run } = await setup({ JUNIOR_DAILY_CAP: "1" });
     const api = board();
-    const first = await handleFleetJunior(req(token, good), e, api, rows);
+    const first = await handleFleetJunior(req(token, good), e, ctx, api, rows);
     expect(first.status).toBe(200);
-    const second = await handleFleetJunior(req(token, good), e, api, rows);
+    const second = await handleFleetJunior(req(token, good), e, ctx, api, rows);
     expect(second.status).toBe(429);
     expect(await second.text()).toMatch(/daily/i);
     expect(run).toHaveBeenCalledTimes(1);
@@ -301,11 +318,11 @@ describe("handleFleetJunior — rate limit and daily cap (F1)", () => {
     const { token, rows, e, run } = await setup({ JUNIOR_RATE_PER_MINUTE: "1" }, undefined, false);
     // Unauthorized (no D1 record) — should 403, not consume the one
     // per-minute slot, and leave it free for a subsequently authorized call.
-    const unauthorized = await handleFleetJunior(req(token, good), e, board(), rows);
+    const unauthorized = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
     expect(unauthorized.status).toBe(403);
     const { recordJuniorAuthorization } = await import("../src/junior/authz");
     await recordJuniorAuthorization(e.DB, REPO, 7, ME, Date.now());
-    const authorized = await handleFleetJunior(req(token, good), e, board(), rows);
+    const authorized = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
     expect(authorized.status).toBe(200);
     expect(run).toHaveBeenCalledTimes(1);
   });
@@ -330,7 +347,7 @@ describe("handleFleetJunior — maestro exclusion (F2)", () => {
     // must not save it — the maestro exclusion runs first and is absolute.
     await recordJuniorAuthorization(e.DB, REPO, maestroTask.number, MAESTRO, Date.now());
 
-    const r = await handleFleetJunior(req(token, good), e, api, rows);
+    const r = await handleFleetJunior(req(token, good), e, ctx, api, rows);
 
     expect(r.status).toBe(403);
     expect(run).not.toHaveBeenCalled();
@@ -355,7 +372,7 @@ describe("handleFleetJunior — maestro exclusion (F2)", () => {
     const api = board([maestroTask]);
     await recordJuniorAuthorization(e.DB, REPO, maestroTask.number, MAESTRO_2, Date.now());
 
-    const r = await handleFleetJunior(req(token, good), e, api, rows);
+    const r = await handleFleetJunior(req(token, good), e, ctx, api, rows);
 
     expect(r.status).toBe(403);
     expect(run).not.toHaveBeenCalled();
