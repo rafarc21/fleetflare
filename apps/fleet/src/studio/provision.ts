@@ -821,11 +821,11 @@ export function guardedCloneCmd(workRepoSlug: string, targetDir: string): string
  * automates that manual recovery for the one case it CAN automate.
  *
  * do.ts's `rescuePushCmd` (read-only context for this function — not
- * edited here) pushes a dying studio's dirty tree to one of two targets:
- * the branch checked out at teardown (an arbitrary name), or, when that
- * branch equals the repo's resolved default (or the default couldn't be
- * resolved at all — fail safe), a freshly generated
- * `fleet/rescue/<studio>-<UTC YYYYMMDDHHMMSS>` ref. The
+ * edited here) pushes a dying studio's dirty tree to a freshly generated
+ * `fleet/rescue/<studio>-<UTC YYYYMMDDHHMMSS>` ref — unconditionally, in
+ * checkout mode, never the branch checked out at teardown (issue #207,
+ * 2026-10-03: a studio's checked-out branch can be the head of an already-
+ * gated, already-reviewed PR, and rescue must never write to it). The
  * `fleet/rescue/<studio>-` PREFIX is deterministic per studio; only the
  * timestamp suffix varies.
  *

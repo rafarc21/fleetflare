@@ -2838,6 +2838,12 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
       pushedPrBranch();
       upstreamHook();
       const before = sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out;
+      // Minor #1 (fresh-context review on #207, 2026-10-03): the ref-name
+      // listing alone proves no ref was added/removed, but NOT that
+      // `task/pr`'s own commit stayed the same -- a bug that force-pushed a
+      // DIFFERENT commit onto the exact same ref name would still pass that
+      // check. The sha is captured too, and compared too, below.
+      const beforeSha = sh(`git -C ${origin} rev-parse refs/heads/task/pr`).out;
 
       const r = sh(cmdFn(REPO, STUDIO, root));
 
@@ -2846,6 +2852,7 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
       expect(bare(r.out)).toBe(RESCUE_CLEAN);
       expect(r.out).toMatch(/^RESCUE_WT checkout nothing$/m);
       expect(sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out).toBe(before);
+      expect(sh(`git -C ${origin} rev-parse refs/heads/task/pr`).out).toBe(beforeSha);
     });
   }
 
