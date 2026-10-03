@@ -251,6 +251,16 @@ export function rescueBranchPrefix(studioId: string): string {
   return `fleet/rescue/${studioId}-`;
 }
 
+/** The SECOND of this studio's two rescue-ref prefixes: the nested tree
+ *  `fleet/rescue/<studio>/wt/...` (member worktree, and its own `-nff-`
+ *  retry) and `fleet/rescue/<studio>/<14digits>/checkout/...` (N1/N2) both
+ *  live under. Byte-identical to `discoverRescueRefsCmd`'s (provision.ts) own
+ *  `nestedPrefix` — see `isRescueBranchFor`'s own doc comment for why this
+ *  file must not diverge from that pattern. */
+export function rescueBranchNestedPrefix(studioId: string): string {
+  return `fleet/rescue/${studioId}/`;
+}
+
 /** `$(date -u +%Y%m%d%H%M%S)` — exactly 14 digits, no more, no fewer. */
 export const RESCUE_STAMP_DIGITS = 14;
 
@@ -275,9 +285,38 @@ export const RESCUE_STAMP_DIGITS = 14;
  */
 export function isRescueBranchFor(studioId: string, branch: string): boolean {
   const prefix = rescueBranchPrefix(studioId);
-  if (!branch.startsWith(prefix)) return false;
-  const stamp = branch.slice(prefix.length);
-  return stamp.length === RESCUE_STAMP_DIGITS && /^[0-9]+$/.test(stamp);
+  if (branch.startsWith(prefix)) {
+    const stamp = branch.slice(prefix.length);
+    return stamp.length === RESCUE_STAMP_DIGITS && /^[0-9]+$/.test(stamp);
+  }
+  // MAJOR fix (#216, fresh-context review on #212 round 2): the flat prefix
+  // above is only ONE of the 4 ref shapes this fleet's own rescue.ts
+  // actually pushes. `fleet/rescue/<studio>/` is the SOURCE OF TRUTH for the
+  // other three -- byte-identical to `discoverRescueRefsCmd`'s (provision.ts)
+  // own `nestedPrefix`/`wtPrefix`/pattern, which already anchors and
+  // auto-fetches all of them on the next provision; this match must not
+  // diverge from that pattern. Both separators (a literal `-` for the flat
+  // shape above, a literal `/` here) are the ones a studio id could ever be a
+  // prefix of a DIFFERENT, longer studio id in front of -- studio ids never
+  // contain `/`, so neither needs escaping (same reasoning as the flat
+  // prefix's own comment, and provision.ts's own).
+  const nested = rescueBranchNestedPrefix(studioId);
+  if (!branch.startsWith(nested)) return false;
+  const rest = branch.slice(nested.length);
+  // N1/N2: a local branch or stash entry the main checkout's own walk pushed,
+  // never checked out anywhere -- `<14digits>/checkout/<name>`.
+  // `\S+` (never bare `.+`) for the trailing name: a git ref name cannot
+  // contain whitespace, same discipline as discoverRescueRefsCmd's own
+  // `[^[:space:]]+`.
+  if (new RegExp(`^[0-9]{${RESCUE_STAMP_DIGITS}}\\/checkout\\/\\S+$`).test(rest)) return true;
+  // Member worktree, and its own non-fast-forward retry (`-nff-` sits BEFORE
+  // the timestamp, not after it) -- `wt/<id>-<14digits>` or
+  // `wt/<id>-nff-<14digits>`. `\S+` covers both: it already allows the `-nff`
+  // characters before the final `-<14digits>`.
+  if (rest.startsWith("wt/")) {
+    return new RegExp(`^\\S+-[0-9]{${RESCUE_STAMP_DIGITS}}$`).test(rest.slice(3));
+  }
+  return false;
 }
 
 /** Every ref in `branches` that is genuinely one of THIS studio's rescue
@@ -285,6 +324,39 @@ export function isRescueBranchFor(studioId: string, branch: string): boolean {
  *  a chronological one). */
 export function rescueBranchesFor(studioId: string, branches: string[]): string[] {
   return branches.filter((b) => isRescueBranchFor(studioId, b)).sort().reverse();
+}
+
+/**
+ * MAJOR fix (#216, fresh-context review on #212 round 2): `SurvivalSources
+ * .rescueBranches` used to query GitHub's matching-refs endpoint with only
+ * `rescueBranchPrefix(studioId)` (the flat shape) — the nested shapes
+ * `isRescueBranchFor` now also matches never had a server-side prefix query
+ * to be found by in the first place, so they were invisible even before
+ * `rescueBranchesFor`'s own filter got a chance to run.
+ *
+ * A pure, DO-free, port-level helper rather than inline in do.ts's own
+ * `survivalSources`: `StudioDO` cannot be constructed under
+ * vitest-pool-workers (do.ts's own header), so this is the only shape this
+ * file's own two-call, merge-and-dedupe contract can be pinned by a direct
+ * test — do.ts's wiring stays a thin, source-pinned forward (`listByPrefix`
+ * = `listMatchingBranches` + the minted token, see `survivalSources`).
+ *
+ * `listByPrefix` is called EXACTLY TWICE, one prefix per call — GitHub's
+ * matching-refs endpoint (`listMatchingBranches`, github/api.ts) takes a
+ * single prefix — merged in flat-then-nested order and deduped by name. The
+ * caller (`resolveSurvivalInput`, via `rescueBranchesFor`) still re-filters
+ * every name through `isRescueBranchFor`'s own anchored match: this
+ * function's job is only "ask both prefixes", never "decide what's real".
+ */
+export async function fetchRescueBranchCandidates(
+  listByPrefix: (prefix: string) => Promise<string[]>,
+  studioId: string,
+): Promise<string[]> {
+  const flat = await listByPrefix(rescueBranchPrefix(studioId));
+  const nested = await listByPrefix(rescueBranchNestedPrefix(studioId));
+  const out: string[] = [];
+  for (const b of [...flat, ...nested]) if (!out.includes(b)) out.push(b);
+  return out;
 }
 
 /**
