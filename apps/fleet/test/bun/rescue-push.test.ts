@@ -4,8 +4,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
-  rescuePushCmd, rescueSnapshotCmd, RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX, RESCUE_FAILED_PREFIX,
-  RESCUE_NO_CHECKOUT, RESCUE_PUSH_TIMEOUT_SECONDS, RESCUE_SERVER_DEADLINE_SECONDS, RESCUE_BUDGET_MARGIN_SECONDS,
+  rescuePushCmd, rescueSnapshotCmd, wipSyncCmd, wipSyncRef, RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX,
+  RESCUE_FAILED_PREFIX, RESCUE_NO_CHECKOUT, RESCUE_PUSH_TIMEOUT_SECONDS, RESCUE_SERVER_DEADLINE_SECONDS,
+  RESCUE_BUDGET_MARGIN_SECONDS,
 } from "../../src/studio/rescue";
 import { discoverRescueRefsCmd } from "../../src/studio/provision";
 import { KILL_GRACE_SECONDS } from "../../src/studio/exec-deadline";
@@ -1019,6 +1020,112 @@ describe("#266 — rescueSnapshotCmd saves a dirty tree WITHOUT touching the liv
     expect(out2).toContain(RESCUE_PUSHED_PREFIX);
     expect(sh(`git -C ${checkout} status --porcelain`).out).toBe(statusBefore);
     expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(headBefore);
+  });
+});
+
+/**
+ * Board issue #208: `wipSyncCmd` is a periodic (every SYNC_SESSION_SECONDS,
+ * wired through do.ts's `syncSessionCycle`) safety net for a studio whose
+ * container is replaced by the PLATFORM (Cloudflare-side eviction/restart,
+ * not a fleet operation) — the platform gives no pre-replacement hook, so
+ * `rescuePushCmd`/`rescueSnapshotCmd` (both teardown-time only) never get a
+ * chance to run. Shares `rescueSnapshotCmd`'s non-mutating snapshot
+ * technique (the studio is ALIVE when this runs) but, unlike every other
+ * push target in this file, writes to a FIXED, repeatedly-OVERWRITTEN ref
+ * (`fleet/rescue/<studio>/wip`, `wipSyncRef`) via the one deliberate
+ * force-push exception documented on `wipSyncCmd` itself (rescue.ts).
+ */
+describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed ref, force-pushed, main checkout only", () => {
+  function wip(): string {
+    return sh(wipSyncCmd(REPO, STUDIO, root)).out;
+  }
+  const WIP_REF = `refs/heads/${wipSyncRef(STUDIO)}`;
+
+  test("a dirty main checkout: force-pushes a snapshot to the fixed wip ref; real status/HEAD and origin's real branch are untouched", () => {
+    writeFileSync(join(checkout, "notes.md"), "wip work\n");
+    const statusBefore = sh(`git -C ${checkout} status --porcelain`).out;
+    const headBefore = sh(`git -C ${checkout} rev-parse HEAD`).out;
+    const mainBefore = sh(`git -C ${origin} rev-parse main`).out;
+
+    const out = wip();
+
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO)} 1 files$`, "m"));
+    expect(rescueRefs()).toEqual([WIP_REF]);
+    const files = sh(`git -C ${origin} ls-tree -r --name-only ${WIP_REF}`).out.split("\n");
+    expect(files).toContain("notes.md");
+    expect(sh(`git -C ${checkout} status --porcelain`).out).toBe(statusBefore);
+    expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(headBefore);
+    expect(sh(`git -C ${origin} rev-parse main`).out).toBe(mainBefore);
+  });
+
+  test("a clean tree with unpushed commits: force-pushes the existing HEAD commit to the fixed wip ref, by ref -- never touches local state", () => {
+    sh(`git -C ${checkout} commit -q --allow-empty -m "lead commit 1" && git -C ${checkout} commit -q --allow-empty -m "lead commit 2"`);
+    const leadSha = sh(`git -C ${checkout} rev-parse HEAD`).out;
+
+    const out = wip();
+
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO)} 2 commits$`, "m"));
+    expect(sh(`git -C ${origin} rev-parse ${WIP_REF}`).out).toBe(leadSha);
+    expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(leadSha);
+  });
+
+  test("clean, nothing unpushed: RESCUE_CLEAN, no push attempted at all", () => {
+    sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 && rm -rf .claude`);
+    expect(wip()).toBe(RESCUE_CLEAN);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("markers-only tree: RESCUE_MARKERS_ONLY, no push attempted", () => {
+    expect(wip()).toBe(RESCUE_MARKERS_ONLY);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("no checkout: RESCUE_NO_CHECKOUT", () => {
+    expect(sh(wipSyncCmd(REPO, "nope", join(dir, "no-such-workspace"))).out).toBe(RESCUE_NO_CHECKOUT);
+  });
+
+  test("running it twice with different dirty content both times OVERWRITES the same fixed ref -- proves the push is a real force-push, not a silent fallback to a freshly generated ref", () => {
+    writeFileSync(join(checkout, "a.md"), "first wip\n");
+    const out1 = wip();
+    expect(out1).toContain(RESCUE_PUSHED_PREFIX);
+    const sha1 = sh(`git -C ${origin} rev-parse ${WIP_REF}`).out;
+    expect(rescueRefs()).toEqual([WIP_REF]);
+
+    writeFileSync(join(checkout, "a.md"), "second wip, unrelated to the first\n");
+    const out2 = wip();
+    expect(out2).toContain(RESCUE_PUSHED_PREFIX);
+    const sha2 = sh(`git -C ${origin} rev-parse ${WIP_REF}`).out;
+
+    // Still exactly ONE ref under fleet/rescue/ -- never a second, timestamped
+    // one: proves the target is fixed, not generated.
+    expect(rescueRefs()).toEqual([WIP_REF]);
+    expect(sha2).not.toBe(sha1);
+    // Neither snapshot commit is an ancestor of the other (same parent HEAD,
+    // different content) -- a non-force push to an EXISTING tip here would
+    // have been rejected non-fast-forward; this only succeeds because the
+    // push IS forced.
+    expect(sh(`git -C ${origin} merge-base --is-ancestor ${sha1} ${sha2}`).code).not.toBe(0);
+    const files = sh(`git -C ${origin} ls-tree -r --name-only ${WIP_REF}`).out.split("\n");
+    expect(files).toContain("a.md");
+  });
+
+  test("never walks a member worktree -- scope is the main checkout only (deliberate v1 limitation)", () => {
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work\n");
+
+    const out = wip();
+
+    // The main checkout itself is clean beyond the member worktree's own
+    // gitlink directory (a marker, #217) -- so this reads MARKERS_ONLY, never
+    // a push, and the member worktree's own dirty file is never rescued.
+    expect(out).toBe(RESCUE_MARKERS_ONLY);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("the generated command carries exactly one `--force` push -- the one deliberate exception to this file's own 'never force' rule, and nowhere else", () => {
+    const cmd = wipSyncCmd(REPO, STUDIO, root);
+    const forceCount = (cmd.match(/--force/g) ?? []).length;
+    expect(forceCount).toBe(1);
+    expect(cmd).toContain(`refs/heads/${wipSyncRef(STUDIO)}`);
   });
 });
 
