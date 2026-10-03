@@ -1851,3 +1851,176 @@ export function rescueSnapshotCmd(
     `fi`
   );
 }
+
+/**
+ * Board issue #208: the ONE ref `wipSyncCmd` (below) ever pushes to —
+ * `fleet/rescue/<studio>/wip`. FIXED, never timestamped/generated, unlike
+ * every other target this file builds (`rescue_target`/`snapshot_target`,
+ * both always fresh per call): this is a single rolling WIP snapshot per
+ * studio, overwritten every sync, not a trail of one-off refs. Exported so a
+ * caller (do.ts, tests) names it without re-deriving the string.
+ */
+export function wipSyncRef(studio: string): string {
+  return `fleet/rescue/${studio}/wip`;
+}
+
+/**
+ * Board issue #208: a PERIODIC safety net for a studio whose container is
+ * replaced by the PLATFORM itself (Cloudflare-side host move/eviction/
+ * restart) rather than by any fleet operation. `rescuePushCmd`/
+ * `rescueSnapshotCmd` above only ever run at teardown (destroy/park/
+ * recycle, or this file's own pre-restart/pre-recycle sync) — the platform
+ * gives no pre-replacement hook, so neither gets a chance to run before a
+ * replacement lands, and whatever was dirty or committed-but-unpushed at
+ * that moment is simply gone. `wipSyncCmd` is wired into the EXISTING
+ * SYNC_SESSION_SECONDS (300s) tick (do.ts's `syncSessionCycle`) instead of a
+ * new schedule, so it runs every few minutes for the lifetime of the studio
+ * and bounds the loss window to roughly one tick interval, rather than
+ * closing it to zero (only a real teardown rescue can do that).
+ *
+ * NON-MUTATING, same technique `rescueSnapshotCmd` already proved live (see
+ * that function's own doc comment for the full "why a separate command"
+ * reasoning): a dirty tree is snapshotted via a THROWAWAY `GIT_INDEX_FILE`
+ * (seeded from a byte copy of the real index, so a deleted-but-uncommitted
+ * file is captured too) and `commit-tree`, never `git add -A`/`git commit`
+ * against the real index/HEAD. This studio is ALIVE and may be mid-edit the
+ * moment this runs — unlike `rescuePushCmd`, which only ever runs when the
+ * container is already doomed, so mutating its real index/HEAD one last time
+ * is harmless.
+ *
+ * TARGET IS FIXED, NOT GENERATED: `wipSyncRef(studio)` — see that function's
+ * own doc comment. Every OTHER push target in this file
+ * (`rescue_target`/`snapshot_target`) always generates a fresh, timestamped,
+ * never-before-seen ref per call, specifically so a plain (non-force) push
+ * can never be rejected non-fast-forward against it. This function instead
+ * reuses the SAME ref every single call, on purpose — a periodic tick that
+ * ran for a studio's entire multi-day lifetime, generating a fresh ref every
+ * 5 minutes the way the teardown rescues do, would leave thousands of stale
+ * refs on origin. One rolling snapshot per studio is the whole point.
+ *
+ * FORCE-PUSH, AND ONLY HERE — THE ONE DELIBERATE EXCEPTION IN THIS FILE.
+ * Read literally: this file's own comments repeat "Never a `+`/`--force`
+ * push anywhere in this file" more than once, for good reason — every other
+ * push target here is either a REAL branch (a studio's own checked-out
+ * branch, or a local branch/stash the walk discovers: force-pushing one of
+ * those could silently discard a commit someone else pushed in the
+ * meantime) or a FRESHLY GENERATED, never-before-seen ref (force is simply
+ * pointless there — a brand-new ref has no existing tip to be rejected
+ * against, so a plain push always lands clean). `wipSyncCmd`'s own target
+ * (`wipSyncRef`) is neither of those: it is this ONE function's own
+ * exclusive, dedicated scratch ref. Nothing else in this codebase ever
+ * writes to it, reads it as a real branch, or treats it as anything other
+ * than "the last periodic WIP snapshot" — so overwriting it every tick can
+ * never discard anyone else's work, only this same function's own PRIOR
+ * snapshot, which is exactly the point (a rolling safety net, not a growing
+ * archive). That is what makes force safe HERE SPECIFICALLY, and nowhere
+ * else in this file.
+ *
+ * `rescueTryPushFn`/`rescueOnOriginFn` (both used by `rescuePushCmd`/
+ * `rescueSnapshotCmd` above) are deliberately NOT reused here: both are
+ * built around the generate-and-maybe-retry shape (a push rejected
+ * non-fast-forward retries ONCE, to a FRESH ref) and both explicitly forbid
+ * `--force`/`+`. There is nothing to retry against here — force already
+ * wins, unconditionally — so this function writes its own small, dedicated
+ * push step (`wip_sync_push` below) instead of bending either of those to a
+ * shape they were not built for.
+ *
+ * NO BUDGET LEDGER (`rescue_budget_ok`, the elaborate multi-push worst-case
+ * tracking both command builders above carry): that machinery exists
+ * because THOSE functions can run a first push attempt plus an independent
+ * non-fast-forward retry, several times over, across a whole worktree/
+ * branch/stash walk. This function runs exactly ONE push, to ONE target, no
+ * retry (force already wins — there is nothing to retry against), no
+ * worktree/branch/stash walk — a single `timeout`-bounded push is enough.
+ *
+ * SCOPE: THE MAIN CHECKOUT ONLY, never a member subagent's own worktree. A
+ * deliberate v1 limitation (see this feature's own plan doc,
+ * docs/plans/2026-10-03-feat-208-wip-sync.md), not an oversight: this runs
+ * on a 5-minute cadence as a bounding safety net, not a one-shot teardown
+ * rescue, and the board issue's own Ask talks about "a running studio's
+ * container" and "worktree dirty" in the singular.
+ *
+ * Covers the same two shapes `rescue_one`/`snapshot_target` above already
+ * distinguish, reusing the identical detection: a dirty tree (scoped status
+ * non-empty — snapshotted and pushed by its synthetic SHA) and a clean tree
+ * that still holds commits no remote-tracking ref already has (`git
+ * rev-list --count HEAD --not --remotes` — pushed by `HEAD` itself, an
+ * EXISTING commit, no snapshot needed). Nothing to sync at all (clean AND
+ * zero ahead) emits `RESCUE_CLEAN`; a tree whose only change is a tool
+ * marker (#217) emits `RESCUE_MARKERS_ONLY` — neither attempts a push. Same
+ * exported constants (`RESCUE_CLEAN`/`RESCUE_MARKERS_ONLY`/
+ * `RESCUE_NO_CHECKOUT`/`RESCUE_PUSHED_PREFIX`/`RESCUE_FAILED_PREFIX`), same
+ * `RESCUE_PUSHED <target> <count> <files|commits>` line shape
+ * (`parseRescueExecResult`, do.ts, parses this generically already — no new
+ * parser needed), so every downstream consumer composes unchanged.
+ *
+ * `root`/`pushTimeoutSeconds` are the same test seams `rescuePushCmd`'s own
+ * doc comment explains (production always uses the defaults);
+ * `botName`/`botEmail`/`opts` are the same trailing shape too (issue #335,
+ * issue #1 piece 5) — this composes with `RescuePushOptions`/
+ * `rescuePushPrelude` exactly like the other two command builders.
+ */
+export function wipSyncCmd(
+  repo: string, studio: string, root = "/workspace", pushTimeoutSeconds = RESCUE_PUSH_TIMEOUT_SECONDS,
+  botName = "fleetflare[bot]", botEmail = "fleetflare[bot]@users.noreply.github.com",
+  opts: RescuePushOptions = {},
+): string {
+  const dir = `${root}/${repo}`;
+  const scope = `-- . ${RESCUE_MARKER_PATHSPECS}`;
+  const identity = `-c user.name="${botName}" -c user.email="${botEmail}"`;
+  const target = wipSyncRef(studio);
+  return (
+    rescuePushPrelude(opts) +
+    // `$1`: the thing to push (a bare `HEAD`, or a synthetic snapshot SHA) —
+    // `--force --no-verify`, unconditionally: see this function's own doc
+    // comment above for why force is safe HERE, and nowhere else in this
+    // file. `--no-verify` for the same reason every OTHER generated-ref push
+    // in this file skips hooks: `$target` is never a real branch a repo's own
+    // pre-push hook needs to see.
+    `wip_sync_push() {\n` +
+    `  timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --force --no-verify "$__rdest" "$1:refs/heads/${target}" 2>&1 1>/dev/null\n` +
+    `}\n` +
+    `wip_sync_one() {\n` +
+    `  local wall wstatus wn wahead whead idxfile realidx tree sha perr prc rc\n` +
+    `  wall="$(git -C ${dir} status --porcelain 2>&1)"; rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync status"; return; fi\n` +
+    `  wstatus="$(git -C ${dir} status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync status"; return; fi\n` +
+    `  if [ -n "$wstatus" ]; then\n` +
+    `    wn=$(printf '%s\\n' "$wstatus" | wc -l | tr -d ' ')\n` +
+    // Same throwaway-index technique as rescueSnapshotCmd's own rescue_one
+    // (see that function's doc comment for why the real index is seeded
+    // in, never written to) — never the real `.git/index`.
+    `    idxfile=$(mktemp 2>/dev/null) || { echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; }\n` +
+    `    realidx=$(git -C ${dir} rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
+    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; fi\n` +
+    `    if ! GIT_INDEX_FILE="$idxfile" git -C ${dir} add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; fi\n` +
+    `    tree=$(GIT_INDEX_FILE="$idxfile" git -C ${dir} write-tree 2>/dev/null); rc=$?\n` +
+    `    rm -f "$idxfile"\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; fi\n` +
+    `    sha=$(git -C ${dir} ${identity} commit-tree "$tree" -p HEAD -m "fleet: periodic WIP sync (live, real HEAD/index untouched)" 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$sha" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync commit"; return; fi\n` +
+    `    perr="$(wip_sync_push "$sha")"; prc=$?\n` +
+    `    if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync push"; printf '%s\\n' "$perr" | tail -n 5 >&2; return; fi\n` +
+    `    echo "${RESCUE_PUSHED_PREFIX} ${target} $wn ${RESCUE_PUSHED_KIND_FILES}"\n` +
+    `  else\n` +
+    // Issue #313-style ambiguity guard, same as rescue_one's own copy above:
+    // `HEAD` resolved to its own SHA first, never passed bare.
+    `    whead=$(git -C ${dir} rev-parse HEAD 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync rev-parse"; return; fi\n` +
+    `    wahead=$(git -C ${dir} rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync rev-list"; return; fi\n` +
+    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ]; then\n` +
+    `      perr="$(wip_sync_push HEAD)"; prc=$?\n` +
+    `      if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync push"; printf '%s\\n' "$perr" | tail -n 5 >&2; return; fi\n` +
+    `      echo "${RESCUE_PUSHED_PREFIX} ${target} $wahead ${RESCUE_PUSHED_KIND_COMMITS}"\n` +
+    `    elif [ -n "$wall" ]; then\n` +
+    `      echo "${RESCUE_MARKERS_ONLY}"\n` +
+    `    else\n` +
+    `      echo "${RESCUE_CLEAN}"\n` +
+    `    fi\n` +
+    `  fi\n` +
+    `}\n` +
+    `if [ ! -d ${dir}/.git ]; then echo "${RESCUE_NO_CHECKOUT}"; else wip_sync_one; fi`
+  );
+}
