@@ -474,6 +474,45 @@ describe("launchAccountOrRefuse — borrow tier 3 and D1 failure handling, real 
     expect(recorded).toHaveLength(1);
   });
 
+  // Fresh-context review of PR #211, finding 2 -- the try/catch around
+  // readFleetAccountBurn (do.ts) had ZERO test coverage: the existing
+  // "env.DB.prepare throws" test just below only ever breaks the LIMITS
+  // read, in a scenario where tier 1 already resolves, so the burn callback
+  // is never even invoked there. This poisons ONLY the burn-prefixed D1 key
+  // (`account-burn:...`), leaving the limits read hitting the real D1, in
+  // the exact same tiers-1+2-miss fixture as the test above -- the one
+  // scenario that actually reaches the lazy tier-3 burn read.
+  it("readFleetAccountBurn throws when tiers 1+2 miss: tier 3 still succeeds, burn treated as empty (fail open), and the hiccup is warned", async () => {
+    const env = envWith(twoRepos);
+    await writeFleetAccountLimit(env.DB, "CLAUDE_CODE_OAUTH_TOKEN", future(60 * 60 * 1000), seenAt());
+    await writeFleetAccountLimit(env.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", future(60 * 60 * 1000), seenAt());
+    const realPrepare = env.DB.prepare.bind(env.DB);
+    const poisonedDb = {
+      prepare(sql: string) {
+        const stmt = realPrepare(sql);
+        return {
+          bind(...args: unknown[]) {
+            if (typeof args[0] === "string" && args[0].startsWith("account-burn:")) {
+              return { first: async () => { throw new Error("D1 burn read unavailable"); } };
+            }
+            return stmt.bind(...args);
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const poisoned = { ...env, DB: poisonedDb } as unknown as Env;
+    const warns = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const storage = fakeStorage(status());
+      const launch = await launchAccountOrRefuse(poisoned, storage, "demosite-life--lead", async () => {});
+      expect(launch).toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
+      expect(warns).toHaveBeenCalled();
+      expect(warns.mock.calls.some((c) => c.join(" ").includes("readFleetAccountBurn"))).toBe(true);
+    } finally {
+      warns.mockRestore();
+    }
+  });
+
   it("env.DB.prepare throws: the fleet-wide limits read is caught, the launch still succeeds using limits = {} (fail open), and the hiccup is warned -- never an uncaught throw", async () => {
     const env = {
       CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2,
