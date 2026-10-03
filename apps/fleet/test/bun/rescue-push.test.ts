@@ -2107,6 +2107,25 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
       // property this line existed to confirm.
     });
 
+    // #216 item 4: the dirty-tree branch's OWN commit (rescue_one, built
+    // before the push is even attempted) always carries a `Rescued-From:
+    // <branch>` trailer. The shallow-clone fallback inside rescue_try_push
+    // used to build a BRAND NEW parentless commit from that same commit's
+    // tree with a fresh, trailer-less message -- dropping the trailer the
+    // moment a push actually needed this fallback, which is exactly the
+    // shallow-clone case this whole describe block exists to exercise.
+    test("rescuePushCmd, dirty shallow checkout: the shallow-clone fallback's parentless snapshot still carries the Rescued-From trailer", () => {
+      writeFileSync(join(checkout, "notes.md"), "shallow work\n");
+      const branch = sh(`git -C ${checkout} rev-parse --abbrev-ref HEAD`).out;
+
+      const out = pushPriv();
+
+      expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+      const ref = privRefs().find((r) => r.includes("fleet/rescue/"));
+      expect(ref).toBeDefined();
+      expect(sh(`git -C ${priv} log -1 --format=%B ${ref}`).out).toContain(`Rescued-From: ${branch}`);
+    });
+
     test("rescuePushCmd, clean-but-ahead shallow checkout: RESCUE_PUSHED, and the private ref holds HEAD's exact tree", () => {
       writeFileSync(join(checkout, "d.md"), "d\n");
       sh(`git -C ${checkout} add d.md && git -C ${checkout} commit -q -m d`);
@@ -2866,6 +2885,11 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
   // parametrized "bypassing a failing pre-push hook" test instead.
   test("a GENUINE unpushed commit on an upstream-less branch: lands on a generated ref, not the real branch — a client-side hook never sees it", () => {
     pushedPrBranch();
+    // #216 item 6: captured BEFORE the extra commit below, so the assertion
+    // proves `task/pr`'s own origin sha is UNCHANGED by the rescue — not
+    // merely that the ref name still exists (which a bug that moved the ref
+    // to a DIFFERENT sha would still pass).
+    const prShaBefore = sh(`git -C ${origin} rev-parse refs/heads/task/pr`).out;
     sh(`cd ${checkout} && git commit -q --allow-empty -m "really unpushed"`);
     upstreamHook();
     const head = sh(`git -C ${checkout} rev-parse HEAD`).out;
@@ -2877,6 +2901,7 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
     expect(ref).toBeDefined();
     expect(sh(`git -C ${origin} rev-parse ${ref}`).out).toBe(head);
     expect(sh(`git -C ${origin} for-each-ref --format='%(refname)' refs/heads/task/pr`).out).toBe("refs/heads/task/pr");
+    expect(sh(`git -C ${origin} rev-parse refs/heads/task/pr`).out).toBe(prShaBefore);
   });
 });
 

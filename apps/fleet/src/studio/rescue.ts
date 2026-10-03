@@ -263,7 +263,7 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
     `timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push $nv "$__rdest" "${src}:refs/heads/$ref" 2>&1 1>/dev/null`;
   return (
     `rescue_try_push() {\n` +
-    `  local w="$1" nv="$2" src="$3" ref="$4" snap prc\n` +
+    `  local w="$1" nv="$2" src="$3" ref="$4" snap prc rtrailer\n` +
     // PR #65 review: an early budget return must not leave the PREVIOUS
     // push's stderr in perr for the caller to report as this one's.
     `  perr=""\n` +
@@ -285,7 +285,22 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
     // wording (see this function's own doc comment above). -E, not two
     // greps: one pipeline, one exit code, same short-circuit shape as before.
     `  printf '%s' "$perr" | grep -qiE 'shallow update not allowed|did not receive expected object' || return 1\n` +
-    `  snap=$(git -C "$w" ${identity} commit-tree "$src^{tree}" -m "fleet rescue snapshot of $(git -C "$w" rev-parse "$src") (shallow clone)" 2>/dev/null) || return 1\n` +
+    // #216 item 4: this used to build a BRAND NEW parentless commit from
+    // `$src`'s own tree with a fresh message, dropping whatever
+    // `Rescued-From: <branch>` trailer `$src`'s own commit message carried
+    // (rescue_one's dirty-tree/clean-but-ahead commits both add one). Read
+    // it back off `$src` first and, ONLY when non-empty, carry it forward as
+    // a second `-m` on the new commit -- same trailer-via-second-`-m`
+    // convention rescue_one's own commits already use. Not every `$src` this
+    // function ever sees carries one (the branch-walk/stash-walk call sites
+    // push EXISTING commits that never got this trailer), so an empty read
+    // adds nothing rather than an empty trailer line.
+    `  rtrailer=$(git -C "$w" log -1 --format='%(trailers:key=Rescued-From,valueonly)' "$src" 2>/dev/null)\n` +
+    `  if [ -n "$rtrailer" ]; then\n` +
+    `    snap=$(git -C "$w" ${identity} commit-tree "$src^{tree}" -m "fleet rescue snapshot of $(git -C "$w" rev-parse "$src") (shallow clone)" -m "Rescued-From: $rtrailer" 2>/dev/null) || return 1\n` +
+    `  else\n` +
+    `    snap=$(git -C "$w" ${identity} commit-tree "$src^{tree}" -m "fleet rescue snapshot of $(git -C "$w" rev-parse "$src") (shallow clone)" 2>/dev/null) || return 1\n` +
+    `  fi\n` +
     `  rescue_budget_ok "$ref" >/dev/null || { perr="snapshot push to $ref not attempted: rescue budget exhausted"; return 1; }\n` +
     `  perr="$(${push("$snap")})"; prc=$?\n` +
     `  [ "$prc" = 0 ] && return 0\n` +
