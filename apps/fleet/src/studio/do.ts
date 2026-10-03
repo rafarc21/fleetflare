@@ -3421,9 +3421,24 @@ export class LaunchRefusedError extends Error {
  * gated on exactly this field) fire against a studio that is not actually
  * borrowing anything any more — see `clearForceMappedAccount`'s own doc
  * comment (below) for the identical reasoning on its own, separate clear.
+ *
+ * #211 review round 3, finding 1 — `borrowFields` (below) used to be called
+ * ONLY from `launchAccountOrRefuse`'s own inline `commitOkClears: true`
+ * branch, which no real production caller passes: `provisionUngated`,
+ * `restartUngated`, and recycle's post-destroy closure (the only
+ * `decideAccountClears`/`applyAccountClears` caller that actually commits)
+ * all pass `commitOkClears: false`, so that write was DEAD CODE in
+ * production — a studio that rerouted onto a spare or borrowed another
+ * repo's reserved primary never got `borrowedAccount` written at all, and
+ * the hand-back mechanism above never fired. `repo`/`reserved` are now
+ * accepted here too (threaded through from every caller, the same way
+ * `launchAccountOrRefuse` itself already derives them) so this is the ONE
+ * computation both the inline branch and `decideAccountClears` share —
+ * never two independently-drifting copies.
  */
 function accountClears(
-  env: Env, existing: StudioStatus | null, launch: Extract<LaunchAccount, { ok: true }>,
+  env: Env, repo: string | null, reserved: Set<string>, existing: StudioStatus | null,
+  launch: Extract<LaunchAccount, { ok: true }>,
 ): Pick<StudioStatus, "claudeAccount" | "rateLimited" | "borrowedAccount" | "borrowedFromRepo"> | null {
   // #273 r2: flag off, an earlier failover's recorded account is stale — this
   // launch is on the mapped one, so the row stops naming the old one.
@@ -3439,10 +3454,24 @@ function accountClears(
   // account turns out to also be limited.
   const clearRateLimited = existing?.rateLimited != null
     && typeof existing?.launchedAccount === "string" && existing.launchedAccount !== launch.name;
-  if (!clearClaudeAccount && !clearRateLimited) return null;
+  // Fresh-context review of PR #211 (finding A+B, point 5) — see
+  // `borrowFields`' own doc comment for the full reasoning. Gated on a
+  // GENUINE reroute THIS call made (`launch.name` differs from what
+  // `launchAccount` alone — no fleet-wide-limit awareness at all — would
+  // have resolved for the SAME `existing?.claudeAccount`): the plain #289
+  // carry-forward case (a studio already recorded on a non-primary account
+  // from an EARLIER failover switch, still free, so nothing reroutes here)
+  // must stay silent, exactly as it always has (see the "#273 r2 ...
+  // recorded account stays on the row" test) — that switch already set
+  // `borrowedAccount` itself, back when it actually happened.
+  const plain = launchAccount(env, repo, existing?.claudeAccount ?? null);
+  const rerouted = !plain.ok || plain.name !== launch.name;
+  const borrow = rerouted ? borrowFields(env, repo, reserved, existing, launch) : null;
+  if (!clearClaudeAccount && !clearRateLimited && borrow === null) return null;
   return {
     ...(clearClaudeAccount ? { claudeAccount: null, borrowedAccount: null, borrowedFromRepo: null } : {}),
     ...(clearRateLimited ? { rateLimited: null } : {}),
+    ...(borrow ?? {}),
   };
 }
 
@@ -3468,6 +3497,11 @@ function accountClears(
  * Returns null when nothing would actually CHANGE on the row — never forces
  * a write merely because this gate ran; every ordinary, already-on-its-
  * primary launch takes this path too, every single time.
+ *
+ * #211 review round 3, finding 1 — called from `accountClears` (above) now,
+ * never directly: this is the ONE borrow-field computation, shared by both
+ * the inline `commitOkClears: true` branch and `decideAccountClears` (every
+ * real production caller's own path).
  */
 function borrowFields(
   env: Env, repo: string | null, reserved: Set<string>, existing: StudioStatus | null,
@@ -3504,9 +3538,10 @@ function borrowFields(
  */
 export async function decideAccountClears(
   env: Env, storage: StudioStorage, launch: Extract<LaunchAccount, { ok: true }>,
+  repo: string | null, reserved: Set<string>,
 ): Promise<Pick<StudioStatus, "claudeAccount" | "rateLimited" | "borrowedAccount" | "borrowedFromRepo"> | null> {
   const existing = (await storage.get(STATUS_KEY)) ?? null;
-  return accountClears(env, existing, launch);
+  return accountClears(env, repo, reserved, existing, launch);
 }
 
 /**
@@ -3747,23 +3782,14 @@ export async function launchAccountOrRefuse(
     // surviving a flag-off launch would make the next hand-back check fire
     // against a studio that is not actually borrowing anything any more.
     if (commitOkClears) {
-      const clears = accountClears(env, existing, launch);
-      // Fresh-context review of PR #211 (finding A+B, point 5) — see
-      // `borrowFields`' own doc comment for the full reasoning. Gated on a
-      // GENUINE reroute THIS call made (`launch.name` differs from what
-      // `launchAccount` alone — no fleet-wide-limit awareness at all — would
-      // have resolved for the SAME `recorded`): the plain #289 carry-forward
-      // case (a studio already recorded on a non-primary account from an
-      // EARLIER failover switch, still free, so nothing reroutes here) must
-      // stay silent, exactly as it always has (see the "#273 r2 ... recorded
-      // account stays on the row" test) — that switch already set
-      // `borrowedAccount` itself, back when it actually happened.
-      const plain = launchAccount(env, repo, existing?.claudeAccount ?? null);
-      const rerouted = !plain.ok || plain.name !== launch.name;
-      const borrow = rerouted ? borrowFields(env, repo, reserved, existing, launch) : null;
-      const patch = clears !== null || borrow !== null ? { ...clears, ...borrow } : null;
-      if (patch !== null && existing !== null) {
-        const cleared: StudioStatus = { ...existing, ...patch };
+      // #211 review round 3, finding 1 — `accountClears` now computes the
+      // borrow fields itself (folding in what used to be a separate
+      // `borrowFields` call gated on a local `rerouted` check here); this is
+      // the ONE computation `decideAccountClears` (every real production
+      // caller's own path) shares too.
+      const clears = accountClears(env, repo, reserved, existing, launch);
+      if (clears !== null && existing !== null) {
+        const cleared: StudioStatus = { ...existing, ...clears };
         await storage.put(STATUS_KEY, cleared);
         await recordStudioFn(cleared);
       }
@@ -6382,7 +6408,15 @@ export class StudioDO extends Sandbox<Env> {
       // quoting the literal statement in this comment on purpose — it would
       // otherwise satisfy the round-4 wiring test's own ordering check via
       // this comment instead of the real code below.)
-      const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
+      //
+      // #211 review round 3, finding 1 — `repo`/`reserved`, derived the
+      // identical way `launchAccountOrRefuse` itself already does, so
+      // `decideAccountClears` (and the `accountClears` it calls) can compute
+      // the borrow fields too — this is the ONLY path every real production
+      // caller actually commits a clear through.
+      const repo = parseStudioId(id)?.repo ?? null;
+      const reserved = otherRepoPrimaries(this.env, repo);
+      const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);
       if (!this.ctx.container?.running) await sbAwaitReady(this);
       await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
     }
@@ -6621,7 +6655,12 @@ export class StudioDO extends Sandbox<Env> {
       // comment above its own call — the inner guard on the next line is
       // provably redundant here but restores the exact standalone statement
       // studio.exec-deadlines.test.ts pins.
-      const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
+      //
+      // #211 review round 3, finding 1 — see provisionUngated's identical
+      // comment above its own call.
+      const repo = parseStudioId(id)?.repo ?? null;
+      const reserved = otherRepoPrimaries(this.env, repo);
+      const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);
       if (!this.ctx.container?.running) await sbAwaitReady(this);
       await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
     }
@@ -6919,7 +6958,12 @@ export class StudioDO extends Sandbox<Env> {
         // from sbAwaitReady (recycleWithSync's own try/catch, above) now
         // finds `rateLimited`/`claudeAccount` exactly as they were before
         // this closure ran, not falsely cleared.
-        const clears = await decideAccountClears(this.env, this.ctx.storage, launch);
+        //
+        // #211 review round 3, finding 1 — see provisionUngated's identical
+        // comment above its own call.
+        const repo = parseStudioId(this.selfId())?.repo ?? null;
+        const reserved = otherRepoPrimaries(this.env, repo);
+        const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);
         await sbAwaitReady(this);
         await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
       },

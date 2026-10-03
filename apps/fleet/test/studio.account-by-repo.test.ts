@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import {
   parseAccountMap, launchAccount, accountDisplay, autoFailoverOn, resolveClaudeAccounts,
-  launchAccountOrReroute, primaryIsMapped, type AccountLimits,
+  launchAccountOrReroute, primaryIsMapped, otherRepoPrimaries, type AccountLimits,
 } from "../src/studio/accounts";
 import {
   studioEnvVars, launchAccountOrRefuse, LaunchRefusedError, decideAccountClears, applyAccountClears,
@@ -478,6 +478,10 @@ describe("launchAccountOrRefuse — fleet-wide limit reroute, real D1 (#209)", (
     expect(launch.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
   });
 
+  // #211 review round 3, finding 3 -- strengthened to assert the ROW itself,
+  // not just the thrown error: a genuine exhaustion must degrade the row
+  // and name the earliest reset there too (what `fleet ls` actually reads),
+  // not merely reject the promise.
   it("auto-failover on, every configured account fleet-wide limited: refuses, naming the earliest reset", async () => {
     const env = envWith({
       CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2,
@@ -489,6 +493,9 @@ describe("launchAccountOrRefuse — fleet-wide limit reroute, real D1 (#209)", (
     const storage = fakeStorage(status());
     await expect(launchAccountOrRefuse(env, storage, "demosite-life--lead", async () => {}))
       .rejects.toThrow(`every account limited; earliest reset ${earliest}`);
+    const row = await storage.get(STATUS_KEY);
+    expect(row?.state).toBe("degraded");
+    expect(row?.error).toContain(`every account limited; earliest reset ${earliest}`);
   });
 });
 
@@ -552,7 +559,7 @@ describe("launchAccountOrRefuse — borrow tier 3 and D1 failure handling, real 
     // The caller's own success continuation: decide from the pre-touch
     // snapshot, then apply once the (simulated) container start succeeds --
     // the exact shape provisionUngated/restartUngated/recycle's closure use.
-    const clears = await decideAccountClears(env, storage, launch);
+    const clears = await decideAccountClears(env, storage, launch, "demosite-life", otherRepoPrimaries(env, "demosite-life"));
     await applyAccountClears(storage, recordFn, clears, NEVER_MOVED_CTX);
     const row = await storage.get(STATUS_KEY);
     expect(row?.borrowedAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
