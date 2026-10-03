@@ -6026,6 +6026,13 @@ export class StudioDO extends Sandbox<Env> {
         // Issue #116: adopt a worktree-keyed session first, then BRINGUP_CMD.
         return relaunchBringup((cmd, env) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env }), roleEnv, this.selfId());
       },
+      // Issue #210, ask 3 — the exact "operator ran `fleet destroy --park`"
+      // verb (routes.ts's own `destroy` route, `park=true`), rescue-first
+      // included: `destroyStudio`'s own `runDestroy` callback (just below its
+      // definition) already disarms this studio's ticks itself, ONLY once
+      // `this.destroy()` has resolved — same ordering routes.ts's call site
+      // relies on, never duplicated here.
+      stopParkedStudio: async () => { await this.destroyStudio(false, false, true); },
     };
   }
 
