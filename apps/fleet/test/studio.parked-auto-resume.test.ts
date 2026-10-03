@@ -722,6 +722,101 @@ describe("review round 2 (#210), finding 3 — the free-account wake must fire O
   });
 });
 
+// ---------------------------------------------------------------------------
+// Review round 2 (#210), finding 5 Part A (Major) — a refused auto-stop
+// needs its own backoff + a single notify: the row must carry the refusal
+// reason BEFORE this function returns it, the operator must be told exactly
+// ONCE for an ongoing, unchanged refusal (never every single 300s tick), and
+// a bounded retry cadence (mirrors AUTO_CONTINUE_RETRY_MS) must stop this
+// from hammering `deps.stopParkedStudio` itself every tick forever.
+// ---------------------------------------------------------------------------
+describe("review round 2 (#210), finding 5 Part A — a refused auto-stop backs off and notifies exactly once", () => {
+  const REFUSAL_REASON = "studio fleetflare--release-studio has an open assigned board task; pass --force to destroy anyway";
+  // `deps.notify` already fires once on tick 1's own fresh-degrade write
+  // (unrelated to this feature) — every assertion below counts calls made
+  // AFTER that point, never the running total.
+  const notifyCalls = (h: Harness) => (h.deps.notify as ReturnType<typeof vi.fn>).mock.calls.length;
+
+  it("writes the refusal reason onto the row before returning, and notifies the operator exactly once for an unchanged, ongoing refusal", async () => {
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: NO_RESET_INLINE_PANE,
+      stopParkedStudioImpl: async () => ({ ok: false, refused: true, reason: REFUSAL_REASON }),
+    });
+    await h.run();
+    const beforeFirstRefusal = notifyCalls(h);
+
+    h.setNow(new Date(NOW.getTime() + PARKED_AUTO_STOP_HOURS * HOUR_MS + 60_000));
+    const first = await h.run();
+
+    expect(first).toEqual({ kind: "park-refused", parkedAt: NOW.toISOString(), reason: REFUSAL_REASON });
+    expect(h.stopParkedStudio).toHaveBeenCalledTimes(1);
+    expect(notifyCalls(h)).toBe(beforeFirstRefusal + 1);
+    const lastNotifyArg = (h.deps.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(lastNotifyArg).toContain(REFUSAL_REASON);
+    const stored = await h.storage.get(STATUS_KEY);
+    expect(stored?.parkRefusalReason).toBe(REFUSAL_REASON);
+    expect(stored?.parkRefusedAt).toBe(new Date(NOW.getTime() + PARKED_AUTO_STOP_HOURS * HOUR_MS + 60_000).toISOString());
+
+    // A minute later, same ongoing refusal: neither the destroy attempt nor
+    // the notify repeats — bounded backoff, not a blind every-tick retry.
+    const beforeSecondTick = notifyCalls(h);
+    h.setNow(new Date(NOW.getTime() + PARKED_AUTO_STOP_HOURS * HOUR_MS + 2 * 60_000));
+    const second = await h.run();
+
+    expect(second).toEqual({ kind: "park-refused", parkedAt: NOW.toISOString(), reason: REFUSAL_REASON });
+    expect(h.stopParkedStudio).toHaveBeenCalledTimes(1);
+    expect(notifyCalls(h)).toBe(beforeSecondTick);
+  });
+
+  it("retries the stop attempt once the backoff cadence has elapsed", async () => {
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: NO_RESET_INLINE_PANE,
+      stopParkedStudioImpl: async () => ({ ok: false, refused: true, reason: REFUSAL_REASON }),
+    });
+    await h.run();
+
+    h.setNow(new Date(NOW.getTime() + PARKED_AUTO_STOP_HOURS * HOUR_MS + 60_000));
+    await h.run();
+    expect(h.stopParkedStudio).toHaveBeenCalledTimes(1);
+    const beforeRetryTick = notifyCalls(h);
+
+    // Past the retry cadence (AUTO_CONTINUE_RETRY_MS, 1h) since the first
+    // refusal attempt: the stop is retried.
+    h.setNow(new Date(NOW.getTime() + PARKED_AUTO_STOP_HOURS * HOUR_MS + HOUR_MS + 2 * 60_000));
+    const third = await h.run();
+
+    expect(third).toEqual({
+      kind: "park-refused", parkedAt: NOW.toISOString(), reason: REFUSAL_REASON,
+    });
+    expect(h.stopParkedStudio).toHaveBeenCalledTimes(2);
+    // Same, unchanged reason: no additional notify this tick.
+    expect(notifyCalls(h)).toBe(beforeRetryTick);
+  });
+
+  it("a CHANGED refusal reason (the board task situation shifted) notifies again", async () => {
+    let call = 0;
+    const SECOND_REASON = "studio fleetflare--release-studio: could not confirm no open assigned board task (board API error: 503); pass --force to destroy anyway";
+    const h = harness({
+      accounts: ONE_ACCOUNT, pane: NO_RESET_INLINE_PANE,
+      stopParkedStudioImpl: async () => {
+        call += 1;
+        return { ok: false, refused: true, reason: call === 1 ? REFUSAL_REASON : SECOND_REASON };
+      },
+    });
+    await h.run();
+
+    h.setNow(new Date(NOW.getTime() + PARKED_AUTO_STOP_HOURS * HOUR_MS + 60_000));
+    await h.run();
+    const beforeSecondRefusal = notifyCalls(h);
+
+    h.setNow(new Date(NOW.getTime() + PARKED_AUTO_STOP_HOURS * HOUR_MS + HOUR_MS + 2 * 60_000));
+    const second = await h.run();
+
+    expect(second).toEqual({ kind: "park-refused", parkedAt: NOW.toISOString(), reason: SECOND_REASON });
+    expect(notifyCalls(h)).toBe(beforeSecondRefusal + 1);
+  });
+});
+
 describe("exhaustedMessage sanity (shared fixture reuse, no behavior change)", () => {
   it("names the one account tried", () => {
     expect(exhaustedMessage(STUDIO_ID, ["CLAUDE_CODE_OAUTH_TOKEN"])).toContain("CLAUDE_CODE_OAUTH_TOKEN");
