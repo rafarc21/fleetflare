@@ -31,9 +31,9 @@ import { resolveProjectCard } from "../directus/card";
 import { redactSecrets } from "./redact";
 import type { Observed } from "./observed";
 import { logWakeOutcome } from "./wake";
-import { threwInsideDurableObject, runtimeFlags, errorMessage, durableObjectUnreachable } from "./rpc-failure";
+import { threwInsideDurableObject, runtimeFlags, errorMessage, durableObjectUnreachable, START_REFUSED_PREFIX } from "./rpc-failure";
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
-import { resolveClaudeAccounts, accountLabel } from "./accounts";
+import { resolveClaudeAccounts, accountLabel, LAUNCH_REFUSED_PREFIX } from "./accounts";
 import { readFleetAccountLimits } from "./account-limits-store";
 import { countWorkerExceptions } from "../exceptions";
 
@@ -63,6 +63,31 @@ const ROUTE_RE = /^\/studio\/([^/]+)\/(status|provisioned|provision|restart|recy
  * still rolls the window exactly as before.
  */
 const burnView = <T extends StudioStatus>(s: T): T => ({ ...s, burn: expireBurnWindow(s.burn ?? null, new Date()) });
+
+/**
+ * Issue #217: `do.ts`'s `LaunchRefusedError` (a repo mapped to an unlaunchable
+ * account) and `StartRefusedError` (issue #123's start gate, confirmed by
+ * `studio.destroy-race.test.ts`'s own T6 coverage to also reach
+ * `provision()`/`restartStudio()` uncaught) are both known, named refusals —
+ * not a Worker<->DO transport failure. Before #217, `provision`/`restart`'s
+ * catch blocks only ever checked `threwInsideDurableObject` and bare-
+ * rethrew anything else, which Cloudflare renders as an opaque "Worker threw
+ * exception" 1101 page — the exact field-reported symptom. Recognised here by
+ * MESSAGE PREFIX, the one thing that survives the RPC boundary (Workers RPC
+ * keeps an error's message, never its subclass — see each prefix's own doc
+ * comment), same convention `RECYCLE_REFUSED_PREFIX` already established for
+ * recycle's own refusal. `null` when `err` is neither — the caller's existing
+ * `threwInsideDurableObject`/`durableObjectUnreachable` fallback is untouched.
+ */
+function launchOrStartRefusalResponse(err: unknown): Response | null {
+  const message = errorMessage(err);
+  for (const prefix of [LAUNCH_REFUSED_PREFIX, START_REFUSED_PREFIX]) {
+    if (message.startsWith(prefix)) {
+      return Response.json({ error: message.slice(prefix.length) }, { status: 409 });
+    }
+  }
+  return null;
+}
 
 // Task 4 review carry-over, closed by Task 11: blueprintRef used to be cast
 // straight from the request body, unvalidated, and defaulted to a literal
@@ -801,6 +826,8 @@ export async function handleStudio(
     try {
       return Response.json(burnView(await stub.provision(cfg)));
     } catch (err) {
+      const refusal = launchOrStartRefusalResponse(err);
+      if (refusal) return refusal;
       if (threwInsideDurableObject(err)) throw err;
       return durableObjectUnreachable("provision", err);
     }
@@ -840,6 +867,8 @@ export async function handleStudio(
     try {
       return Response.json(burnView(await stub.restartStudio()));
     } catch (err) {
+      const refusal = launchOrStartRefusalResponse(err);
+      if (refusal) return refusal;
       if (threwInsideDurableObject(err)) throw err;
       return durableObjectUnreachable("restart", err);
     }
@@ -896,6 +925,16 @@ export async function handleStudio(
       if (message.startsWith(RECYCLE_REFUSED_PREFIX)) {
         console.error(`studio ${id.full} recycle refused`, message);
         return new Response(message, { status: 409 });
+      }
+      // Issue #217: `recycle()`'s own entry-time `launchAccountOrRefuse` call
+      // (do.ts) throws LaunchRefusedError BEFORE recycleWithSync ever runs —
+      // never wrapped in RECYCLE_REFUSED_PREFIX, so without this check it fell
+      // through to the generic 500 path below for what is actually a known,
+      // named refusal. See launchOrStartRefusalResponse's own doc comment.
+      const refusal = launchOrStartRefusalResponse(err);
+      if (refusal) {
+        console.error(`studio ${id.full} recycle refused`, message);
+        return refusal;
       }
       console.error(`studio ${id.full} recycle failed`, err);
       if (!threwInsideDurableObject(err)) return durableObjectUnreachable("recycle", err);

@@ -19,6 +19,17 @@
  */
 import { redactSecrets } from "./redact";
 
+/** Issue #217 investigation: do.ts's `StartAndWaitForPorts`/`start` overrides
+ *  throw `StartRefusedError` (do.ts, issue #123's start gate) from INSIDE the
+ *  StudioDO, and `studio.destroy-race.test.ts`'s own T6 coverage confirms it
+ *  can reach `provision()`/`restartStudio()` uncaught (a destroy racing the
+ *  op's own first container-start attempt) — the identical leak #217 found
+ *  for `LaunchRefusedError`. Same fix, same reason it lives here rather than
+ *  do.ts (which pulls in "@cloudflare/sandbox"): a prefix is the only thing
+ *  that survives the Worker->DO RPC boundary (see this file's own header),
+ *  so routes.ts can recognise the refusal by its message alone. */
+export const START_REFUSED_PREFIX = "start refused: ";
+
 export function threwInsideDurableObject(err: unknown): boolean {
   return (err as { remote?: unknown } | null)?.remote === true;
 }

@@ -565,6 +565,20 @@ export function autoFailoverOn(env: ClaudeAccountEnv): boolean {
 
 export type LaunchAccount = { ok: true; name: string; token: string } | { ok: false; error: string };
 
+/** Issue #217: every `LaunchAccount` refusal (`{ ok: false, error }`) above
+ *  feeds do.ts's `LaunchRefusedError`, thrown from INSIDE the StudioDO —
+ *  Workers RPC keeps an error's message across that boundary but not its
+ *  class (confirmed: every RPC-crossing throw this codebase simulates in a
+ *  test does `Object.assign(new Error(message), { remote: true })`, a plain
+ *  `Error`, never the real subclass). A prefix is therefore the only thing
+ *  routes.ts can reliably recognise a launch refusal by once it has crossed
+ *  that boundary — same convention `RECYCLE_REFUSED_PREFIX` (recycle-cost.ts)
+ *  already established for recycle's own refusal. Lives here (not do.ts,
+ *  which pulls in "@cloudflare/sandbox" — see this file's own header) so
+ *  routes.ts can import it directly, the same reason account-limits-store.ts
+ *  exists as its own module. */
+export const LAUNCH_REFUSED_PREFIX = "launch refused: ";
+
 /**
  * Issue #271: the account a studio of `repo` launches on.
  *
