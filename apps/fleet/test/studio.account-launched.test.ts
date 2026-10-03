@@ -4,7 +4,7 @@ import {
   launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch,
   decideAccountClears, applyAccountClears, clearForceMappedAccount, refuseUnlessMappedAccountLaunchable,
 } from "../src/studio/do";
-import { otherRepoPrimaries } from "../src/studio/accounts";
+import { otherRepoPrimaries, type AccountLimits } from "../src/studio/accounts";
 import { withAccountDisplay } from "../src/studio/registry";
 import { STATUS_KEY, NEVER_MOVED_CTX, type StudioStorage, type OpCtx } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
@@ -35,6 +35,11 @@ const MAP_2 = '{"demosite-life":2}';
 // account is any OTHER repo's reserved primary) -- fixed constants.
 const REPO = "demosite-life";
 const RESERVED = otherRepoPrimaries({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: MAP_2 }, REPO);
+// Issue #213: withAccountDisplay now takes the same limits/reserved/now the
+// real launch gate consults. `{}` is the "nothing is fleet-wide limited"
+// no-op input -- every withAccountDisplay test below is unchanged from
+// before the reroute-awareness fix, so it passes this through literally.
+const NO_LIMITS: AccountLimits = {};
 
 // Issue #209: launchAccountOrRefuse now reads env.DB (when auto-failover is
 // on) to consult the fleet-wide AccountLimits map -- merging in ONLY the real
@@ -97,7 +102,8 @@ describe("recordLaunchedAccount(undefined) — an unknown launch clears the reco
     await recordLaunchedAccount(storage, "demosite-life--pilot", undefined, async () => {});
     const row = (await storage.get(STATUS_KEY))!;
     expect("launchedAccount" in row).toBe(false);
-    expect(withAccountDisplay(envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 }), row).claudeAccount).toBe("?");
+    const shown = await withAccountDisplay(envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 }), row, NO_LIMITS, RESERVED, new Date());
+    expect(shown.claudeAccount).toBe("?");
   });
 });
 
@@ -401,7 +407,7 @@ describe("end-state sanity check (not a regression test): a map change + recycle
     // What the FIXED awaitReady closure feeds onStart via this.envAccount.
     await recordLaunchedAccount(storage, "demosite-life--pilot", launch.name, async (s) => { recorded.push(s); });
     const row = (await storage.get(STATUS_KEY))!;
-    const shown = withAccountDisplay(env, row);
+    const shown = await withAccountDisplay(env, row, NO_LIMITS, RESERVED, new Date());
     expect(shown.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(shown.claudeAccountNext).toBeUndefined();
   });
@@ -1111,26 +1117,27 @@ describe("refuseUnlessMappedAccountLaunchable — refuses BEFORE the clear when 
 describe("withAccountDisplay — the column shows the LAUNCHED account (#289)", () => {
   const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
 
-  it("launched on account 1 before the map: shows account 1, with the next launch's account as a note", () => {
-    const shown = withAccountDisplay(env, status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN" }));
+  it("launched on account 1 before the map: shows account 1, with the next launch's account as a note", async () => {
+    const shown = await withAccountDisplay(env, status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN" }), NO_LIMITS, RESERVED, new Date());
     expect(shown.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN");
     expect(shown.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
   });
 
-  it("launched on the mapped account: no note", () => {
-    const shown = withAccountDisplay(env, status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }));
+  it("launched on the mapped account: no note", async () => {
+    const shown = await withAccountDisplay(env, status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_2" }), NO_LIMITS, RESERVED, new Date());
     expect(shown.claudeAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(shown.claudeAccountNext).toBeUndefined();
   });
 
-  it("the label follows the launched account, not the mapped one", () => {
+  it("the label follows the launched account, not the mapped one", async () => {
     const labelled = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2, CLAUDE_ACCOUNT_1_LABEL: "first@example.com" });
-    expect(withAccountDisplay(labelled, status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN" })).claudeAccountLabel)
-      .toBe("first@example.com");
+    const shown = await withAccountDisplay(labelled, status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN" }), NO_LIMITS, RESERVED, new Date());
+    expect(shown.claudeAccountLabel).toBe("first@example.com");
   });
 
-  it("never carries a token", () => {
-    expect(JSON.stringify(withAccountDisplay(env, status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN" })))).not.toContain("sk-ant-");
+  it("never carries a token", async () => {
+    const shown = await withAccountDisplay(env, status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN" }), NO_LIMITS, RESERVED, new Date());
+    expect(JSON.stringify(shown)).not.toContain("sk-ant-");
   });
 });
 
@@ -1144,7 +1151,7 @@ describe("a refused launch leaves no stale account name (#285)", () => {
     expect(row.state).toBe("degraded");
     expect(row.claudeAccount ?? null).toBeNull();
     expect(row.launchedAccount).toBeNull();
-    const shown = withAccountDisplay(missing, row);
+    const shown = await withAccountDisplay(missing, row, NO_LIMITS, RESERVED, new Date());
     expect(JSON.stringify(shown)).not.toContain("CLAUDE_CODE_OAUTH_TOKEN_3");
     expect(shown.launchedAccount).toBeNull(); // fleet ls prints "-"; the ERROR column names slot 2
   });
@@ -1163,28 +1170,28 @@ describe("rows stored by origin/main (no launchedAccount) still load and render"
   // #292 r2: main rendered these as CLAUDE_CODE_OAUTH_TOKEN_2 -- the #289 lie
   // itself, for every studio still running after a Worker-only deploy. With no
   // launch record the account is unknown, and the column says so.
-  it("a row main stored (no launch record) renders `?`, the mapped account as the NEXT launch", () => {
-    const shown = withAccountDisplay(env, MAIN_ROWS.launched);
+  it("a row main stored (no launch record) renders `?`, the mapped account as the NEXT launch", async () => {
+    const shown = await withAccountDisplay(env, MAIN_ROWS.launched, NO_LIMITS, RESERVED, new Date());
     expect(shown.claudeAccount).toBe("?");
     expect(shown.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(shown.claudeAccountLabel).toBeUndefined();
   });
 
-  it("a stale failover record with the flag off: `?` too, never TOKEN_3 and never a claimed TOKEN_2", () => {
-    const shown = withAccountDisplay(env, MAIN_ROWS.staleFailoverRecord);
+  it("a stale failover record with the flag off: `?` too, never TOKEN_3 and never a claimed TOKEN_2", async () => {
+    const shown = await withAccountDisplay(env, MAIN_ROWS.staleFailoverRecord, NO_LIMITS, RESERVED, new Date());
     expect(shown.claudeAccount).toBe("?");
     expect(shown.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
   });
 
-  it("unmapped, no launch record: `?` with the first account next", () => {
-    const shown = withAccountDisplay(envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1 }), { ...MAIN_ROWS.launched, id: "fleetflare--pilot" });
+  it("unmapped, no launch record: `?` with the first account next", async () => {
+    const shown = await withAccountDisplay(envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1 }), { ...MAIN_ROWS.launched, id: "fleetflare--pilot" }, NO_LIMITS, new Set<string>(), new Date());
     expect(shown.claudeAccount).toBe("?");
     expect(shown.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN");
   });
 
-  it("a refused row main stored with a stale name no longer shows that name (#285)", () => {
+  it("a refused row main stored with a stale name no longer shows that name (#285)", async () => {
     const missing = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_3: TOKEN_3, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
-    const shown = withAccountDisplay(missing, MAIN_ROWS.refused);
+    const shown = await withAccountDisplay(missing, MAIN_ROWS.refused, NO_LIMITS, RESERVED, new Date());
     expect(JSON.stringify({ ...shown, error: null })).not.toContain("CLAUDE_CODE_OAUTH_TOKEN_3");
     expect(shown.launchedAccount).toBeNull();
   });

@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { listStudios, recordStudio, getStudioRow, getStudioRowLookup } from "../src/studio/registry";
+import { writeFleetAccountLimit } from "../src/studio/account-limits-store";
 import type { StudioStatus } from "../src/studio/types";
+import type { Env } from "../src/env";
 import { emptyObserved } from "../src/studio/observed";
 
 // readiness: null (not omitted) — recordStudio (registry.ts's own
@@ -282,5 +284,109 @@ describe("studio registry", () => {
     errors.mockRestore();
     expect(all.map((s) => s.id).sort()).toEqual(["acmeclient--lead", "acmeclient--old"]);
     expect(all.find((s) => s.id === "acmeclient--lead")?.observed?.restarts).toBeUndefined();
+  });
+
+  // Issue #213 — fleet ls' "next launch" column used to be stamped by the
+  // plain, limit-UNAWARE `launchAccount` (withAccountDisplay's old call),
+  // which never consulted the fleet-wide AccountLimits map the real launch
+  // gate (do.ts's launchAccountOrRefuse, via accounts.ts's own
+  // launchAccountOrReroute) already does. A fleet-wide rate-limited mapped
+  // account showed as "next" even though a REAL launch would reroute around
+  // it via the same three-tier cascade — display-only staleness, but a
+  // column that could disagree with where a launch actually lands. Fixture
+  // reused from studio.account-by-repo.test.ts's own launchAccountOrReroute
+  // suite ("mapped slot fleet-wide limited, another slot free: reroutes to
+  // the free one"), exercised here at the listStudios/fleet-ls integration
+  // level instead of calling the gate directly, to prove the DISPLAY agrees.
+  describe("listStudios' claudeAccountNext reroutes around a fleet-wide limited account (#213)", () => {
+    const TOKEN_1 = "sk-ant-oat01-" + "a".repeat(40);
+    const TOKEN_2 = "sk-ant-oat01-" + "b".repeat(40);
+    const TOKEN_3 = "sk-ant-oat01-" + "c".repeat(40);
+    const MAP = '{"demosite-life":2}';
+    const RESET_SOON = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const SEEN_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+    function envWith(vars: Record<string, string>): Env {
+      return { ...env, ...vars } as unknown as Env;
+    }
+
+    it("mapped account fleet-wide limited, auto-failover on: shows the rerouted account, never the limited mapped one", async () => {
+      const limitedEnv = envWith({
+        CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2, CLAUDE_CODE_OAUTH_TOKEN_3: TOKEN_3,
+        CLAUDE_ACCOUNT_BY_REPO: MAP, FLEET_AUTO_FAILOVER: "on",
+      });
+      await recordStudio(limitedEnv, status({ id: "demosite-life--lead" }));
+      await writeFleetAccountLimit(limitedEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", RESET_SOON, SEEN_AT);
+
+      const rows = await listStudios(limitedEnv);
+      const row = rows.find((r) => r.id === "demosite-life--lead");
+      // The plain, limit-unaware launchAccount would answer the mapped slot
+      // (CLAUDE_CODE_OAUTH_TOKEN_2) unconditionally; the real gate reroutes
+      // to the next free account in this repo's own scoped chain (slot 3).
+      expect(row?.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_3");
+    });
+
+    it("auto-failover off: a fleet-wide limited mapped account still shows unchanged — no reroute, same as before #213", async () => {
+      const env2 = envWith({
+        CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2, CLAUDE_CODE_OAUTH_TOKEN_3: TOKEN_3,
+        CLAUDE_ACCOUNT_BY_REPO: MAP,
+        // FLEET_AUTO_FAILOVER left unset -> off.
+      });
+      await recordStudio(env2, status({ id: "demosite-life--lead2" }));
+      await writeFleetAccountLimit(env2.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", RESET_SOON, SEEN_AT);
+
+      const rows = await listStudios(env2);
+      const row = rows.find((r) => r.id === "demosite-life--lead2");
+      expect(row?.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_2"); // mapped slot, unchanged despite the limit
+    });
+
+    // Fresh-context review of #213, finding 2 — listStudios' own fail-open
+    // try/catch around readFleetAccountLimits (mirroring do.ts's established
+    // "env.DB.prepare throws" pattern, which DOES have a direct test — see
+    // studio.account-by-repo.test.ts's "env.DB.prepare throws: the
+    // fleet-wide limits read is caught..." test) had no equivalent test of
+    // its own here, only a comment asserting the behavior. Poisons only the
+    // `account-limit:` prefixed key (same scoped-poisoning shape as that
+    // file's "readFleetAccountBurn throws" test, which poisons only
+    // `account-burn:`), leaving the row's own SELECT untouched, so the
+    // listing itself must still succeed with limits treated as `{}`.
+    it("D1 read failure in readFleetAccountLimits: listing still succeeds, next-launch falls back as if nothing were limited (fail open)", async () => {
+      const workingEnv = envWith({
+        CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2,
+        CLAUDE_ACCOUNT_BY_REPO: MAP, FLEET_AUTO_FAILOVER: "on",
+      });
+      await recordStudio(workingEnv, status({ id: "demosite-life--failopen" }));
+
+      const realPrepare = env.DB.prepare.bind(env.DB);
+      const poisonedDb = {
+        prepare(sql: string) {
+          const stmt = realPrepare(sql);
+          return {
+            bind(...args: unknown[]) {
+              if (typeof args[0] === "string" && args[0].startsWith("account-limit:")) {
+                return { first: async () => { throw new Error("D1 account-limit read unavailable"); } };
+              }
+              return stmt.bind(...args);
+            },
+          };
+        },
+      } as unknown as D1Database;
+      const poisoned = { ...workingEnv, DB: poisonedDb } as unknown as Env;
+
+      const warns = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const rows = await listStudios(poisoned);
+        const row = rows.find((r) => r.id === "demosite-life--failopen");
+        expect(row).toBeDefined();
+        // Fail-open: limits treated as {} -- next launch is the plain mapped
+        // account, same as if nothing were fleet-wide limited (equivalent to
+        // the account display falling back to the mapped/recorded account).
+        expect(row?.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+        expect(warns).toHaveBeenCalled();
+        expect(warns.mock.calls.some((c) => c.join(" ").includes("readFleetAccountLimits"))).toBe(true);
+      } finally {
+        warns.mockRestore();
+      }
+    });
   });
 });
