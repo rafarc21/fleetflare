@@ -14,6 +14,7 @@ import { STATUS_KEY, OPERATION_KEY, OPERATION_STALE_MS, type StudioStorage } fro
 import { syncSessionCycle, launchFields, recordLaunchedAccount, StudioDO } from "../src/studio/do";
 import type { SessionSyncDeps } from "../src/studio/session-sync";
 import type { StudioStatus } from "../src/studio/types";
+import type { DestroyOutcome } from "../src/studio/destroy";
 import type { Env } from "../src/env";
 import {
   getObserved, mergeObserved, type ObservedStorage, INCARNATION_PATH,
@@ -2307,5 +2308,45 @@ describe("runAccountFailover — the in-memory start config follows a completed 
     await deps.onSwitched!("CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(fakeThis.envVars.CLAUDE_CODE_OAUTH_TOKEN).toBe(TOKEN_2);
     expect(fakeThis.envAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+  });
+
+  // Review round 2 (#210), finding 1 (BLOCKER, FIXED) — round 1's own test
+  // here pinned `force: true`, reasoning it was the ONLY thing this
+  // automated trigger overrides. That was wrong: `destroyStudio`'s own
+  // `discardUnsynced: discardUnsynced || force` wiring ALSO turns a
+  // probe-failure or a CONFIRMED rescue-push-failure refusal into "proceed
+  // anyway" the moment `force` is `true` — exactly backwards for this
+  // UNATTENDED trigger, which must never destroy without a successful
+  // rescue. Fixed: `force: false` (so `discardUnsynced` stays exactly
+  // `false`) and `skipOpenTaskGate: true` (the NEW 4th arg) does the job
+  // `force: true` was actually reaching for — skip ONLY the open-task gate.
+  it("StudioDO's own stopParkedStudio passes force=false, skipOpenTaskGate=true (never discardUnsynced) and hands back destroyStudio's real outcome", async () => {
+    const REFUSAL: DestroyOutcome = {
+      ok: false, refused: true,
+      reason: "studio fleetflare--release-studio has an open assigned board task; pass --force to destroy anyway",
+    };
+    const destroyStudio = vi.fn(async (_force: boolean, _discardUnsynced: boolean, _park: boolean, _skipOpenTaskGate: boolean) => REFUSAL);
+    const fakeThis = {
+      env: ENV,
+      ctx: { storage: { get: async () => undefined, put: async () => {} } },
+      selfId: () => STUDIO_ID,
+      primaryAccount: () => "CLAUDE_CODE_OAUTH_TOKEN",
+      primaryIsMapped: () => false,
+      envVars: launchFields(ENV, STUDIO_ID, SPAWN, "CLAUDE_CODE_OAUTH_TOKEN").envVars,
+      envAccount: "CLAUDE_CODE_OAUTH_TOKEN" as string | undefined,
+      destroyStudio,
+    };
+    const deps = (StudioDO.prototype as unknown as { failoverDeps(this: unknown): FailoverDeps }).failoverDeps.call(fakeThis);
+    const outcome = await deps.stopParkedStudio!();
+
+    // force=false, discardUnsynced=false (2nd arg) — a failed probe or an
+    // unconfirmed rescue-push must still refuse exactly like it does today,
+    // this call never pays for a human's `--discard-unsynced` choice.
+    // park=true (3rd arg) — the exact "fleet destroy --park" verb.
+    // skipOpenTaskGate=true (4th arg, NEW) — the ONLY thing this automated
+    // trigger overrides: an open assigned board task alone must not block
+    // it, with nobody there to retry `--force` by hand.
+    expect(destroyStudio).toHaveBeenCalledWith(false, false, true, true);
+    expect(outcome).toEqual(REFUSAL);
   });
 });

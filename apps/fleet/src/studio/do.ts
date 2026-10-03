@@ -2948,6 +2948,22 @@ export async function syncSessionCycle(
       console.error(`studio ${idFallback}: claude account failover failed`, err);
     }
   }
+  // Review round 2 (#210), FINAL round, finding B (BLOCKER, FIXED) — the
+  // failover step above can call `deps.stopParkedStudio`, which destroys the
+  // container THIS SAME TICK (the row reads "stopped" the instant that step
+  // returns). `retrySurvivalBrief` and the detached `installCacheDeps` save
+  // below both eventually exec into the container, which BOOTS a stopped one
+  // back up, billing under a row that now reads "stopped" — `isStoppedIn`
+  // (below) already guards the START of a tick (`runScheduledTick`) for
+  // exactly this reason, but that guard runs BEFORE this function is even
+  // called, so it cannot see a destroy that happens mid-tick, right here.
+  // Checked ONCE, read again below by both gated steps, rather than
+  // re-reading storage twice: cheaper, and the two steps can never disagree
+  // about what this exact point in the tick saw. Deliberately does NOT gate
+  // `checkAndRecordReadiness` (it already self-guards on `state ===
+  // "stopped"`, do.ts's own early return) or `heal` (out of this finding's
+  // scope).
+  const stoppedAfterFailover = await isStoppedIn(storage);
   let checked: StudioStatus | null = null;
   try {
     checked = await checkAndRecordReadiness(syncDeps, storage, idFallback, recordStudioFn);
@@ -2998,7 +3014,13 @@ export async function syncSessionCycle(
   //
   // Optional, exactly like `failoverDeps` and `heal`: a caller that wires none
   // runs the cycle precisely as it ran before this feature.
-  if (retrySurvivalBrief) {
+  //
+  // Review round 2 (#210), FINAL round, finding B (BLOCKER, FIXED): also
+  // skipped when the failover step above just auto-stopped this row THIS
+  // tick (see `stoppedAfterFailover`'s own doc comment above) — this retry
+  // execs into the container, which would otherwise boot a destroyed one
+  // back up.
+  if (retrySurvivalBrief && !stoppedAfterFailover) {
     try {
       await retrySurvivalBrief();
     } catch (err) {
@@ -3030,7 +3052,13 @@ export async function syncSessionCycle(
   // exactly one call, still fired last, still unawaited — the tick's own
   // deadline race above never has to know or care how many directories one
   // repo happens to cache.
-  if (installCacheDeps) {
+  //
+  // Review round 2 (#210), FINAL round, finding B (BLOCKER, FIXED): also
+  // skipped when the failover step above just auto-stopped this row THIS
+  // tick (see `stoppedAfterFailover`'s own doc comment above) — this save
+  // execs into the container too, same "would boot a destroyed one back up"
+  // gap `retrySurvivalBrief` just above was fixed for.
+  if (installCacheDeps && !stoppedAfterFailover) {
     void (async () => {
       // Round 3 review, item 3 — in-flight guard, checked BEFORE
       // runInstallCacheSaveTick is even called, two layers:
@@ -6168,6 +6196,38 @@ export class StudioDO extends Sandbox<Env> {
         // Issue #116: adopt a worktree-keyed session first, then BRINGUP_CMD.
         return relaunchBringup((cmd, env) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env }), roleEnv, this.selfId());
       },
+      // Issue #210, ask 3 — the exact "operator ran `fleet destroy --park`"
+      // verb (routes.ts's own `destroy` route, `park=true`), rescue-first
+      // included: `destroyStudio`'s own `runDestroy` callback (just below its
+      // definition) already disarms this studio's ticks itself, ONLY once
+      // `this.destroy()` has resolved — same ordering routes.ts's call site
+      // relies on, never duplicated here.
+      //
+      // Review round 2 (#210), finding 1 (FIXED — this was a data-loss risk:
+      // round 1's `force: true` here ALSO widened `guard.discardUnsynced`
+      // via `destroyStudio`'s own pre-existing `discardUnsynced || force`
+      // coupling, so an unattended stop could destroy WITHOUT a successful
+      // rescue, silently, the moment the probe or a CONFIRMED rescue-push
+      // failed — exactly the scenario a "rescue first" feature must never
+      // allow, since nobody is there to catch the refusal and retry).
+      // `force: false` (1st arg) now — `discardUnsynced: false` (2nd arg,
+      // unchanged) therefore stays what the caller passed, never OR'd with
+      // anything, so the probe-failure and confirmed-rescue-push-failure
+      // refusals (destroy.ts's `destroyWithSync`) stay FULLY ARMED on this
+      // unattended path, same as they would for a human who never passed
+      // `--force`. `park: true` (3rd arg) is unchanged. `skipOpenTaskGate:
+      // true` (4th arg, NEW) is what actually does the job round 1's
+      // `force: true` was reaching for: it skips ONLY `runDestroy`'s own
+      // open-task-gate check (`destroyStudio`'s own doc comment explains the
+      // exact wiring) — the realistic case this feature exists for, a
+      // studio stuck parked mid-task, by construction almost always carries
+      // an open assigned board task, and nobody is there to cancel/reassign
+      // it or retry with `--force`. The rescue-push/session-sync/learning-
+      // harvest sequence inside `destroyWithSync` still runs in full first
+      // whenever the container answers its probe, exactly as before. Returns
+      // `destroyStudio`'s real `DestroyOutcome` (never swallowed into
+      // `void`) so a refusal is never misreported as a completed stop.
+      stopParkedStudio: () => this.destroyStudio(false, false, true, true),
     };
   }
 
@@ -7051,8 +7111,23 @@ export class StudioDO extends Sandbox<Env> {
    * only, and the destroy path this reaches has no board call in it at all
    * (see this file's own header for why destroy.ts is where the board task's
    * label/state stay untouched by construction, not by a special case here).
+   *
+   * Review round 2 (#210), finding 1 — `skipOpenTaskGate` (4th arg,
+   * default `false`: every existing caller — routes.ts's `destroy` route,
+   * the CLI, every pre-#210 test — keeps its exact current behavior
+   * unchanged). Widens ONLY `runDestroy`'s own `force` param (the
+   * open-task-gate escape hatch, `force || skipOpenTaskGate` below) —
+   * UNLIKE `force` itself, it is never folded into `discardUnsynced` (which
+   * stays exactly `discardUnsynced || force`, never `|| skipOpenTaskGate`).
+   * `do.ts`'s `failoverDeps().stopParkedStudio` is the one caller that
+   * passes it: an unattended auto-stop must skip the open-task gate (nobody
+   * is there to cancel/reassign a board task), but must NEVER also turn a
+   * genuine probe/rescue-push-confirmed failure into "destroy anyway" the
+   * way a human's own `--force` deliberately does — see that call site's
+   * own doc comment (failover.ts's `FailoverDeps.stopParkedStudio`) for the
+   * full reasoning this fixes.
    */
-  async destroyStudio(force: boolean, discardUnsynced = false, park = false): Promise<DestroyOutcome> {
+  async destroyStudio(force: boolean, discardUnsynced = false, park = false, skipOpenTaskGate = false): Promise<DestroyOutcome> {
     const workRepoSlug = await this.workRepoSlug(null);
     const repo = parseStudioId(this.selfId())?.repo ?? this.selfId();
     const { resolveMemoryRepo, commitFile } = this.memoryDeps();
@@ -7067,7 +7142,11 @@ export class StudioDO extends Sandbox<Env> {
     this.destroyInFlightCount += 1;
     try {
       return await runDestroy(
-        openTaskChecker(this.env), this.selfId(), workRepoSlug, force,
+        // Review round 2 (#210), finding 1 — `force || skipOpenTaskGate`:
+        // the ONLY thing `skipOpenTaskGate` widens. `discardUnsynced` just
+        // below stays `discardUnsynced || force`, deliberately never `||
+        // skipOpenTaskGate` — see this method's own doc comment for why.
+        openTaskChecker(this.env), this.selfId(), workRepoSlug, force || skipOpenTaskGate,
         this.syncDeps("rescue"), this.ctx.storage, this.selfId(),
         // A stopped studio stays stopped: every loop left armed would exec
         // into the destroyed container on its next tick, and an exec STARTS

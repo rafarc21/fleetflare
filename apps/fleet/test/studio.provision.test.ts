@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import {
   provisionWithStorage, restartWithStorage, resolveBringupEnv, resolveWorkRepoSlug, ROLE_ENV_KEY, BRINGUP_CMD,
-  discoverRescueRefsCmd, DESTROYING_KEY, OPS_HOUSE_RULES_PATH,
+  discoverRescueRefsCmd, DESTROYING_KEY, OPS_HOUSE_RULES_PATH, STATUS_KEY,
   type ProvisionDeps, type StudioStorage, type RoleEnv, type StudioEnv,
   type HealAttempt,
   type OperationInFlight,
@@ -1425,6 +1425,68 @@ describe("provision/restart clear a leftover destroy marker (#100 N1)", () => {
     expect(status.state).toBe("running");
     expect((await storage.get(DESTROYING_KEY)) ?? null).toBeNull();
     expect(await gatedStateIn(storage, () => new Date())).toBe("running");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review round 2 (#210), finding 2 (BLOCKER) — a stale `parkedAt` surviving
+// a stop -> resume cycle caused an immediate re-stop ~5 minutes later
+// (failover.ts's own 300s tick, PARKED_AUTO_STOP_HOURS already satisfied by
+// the stale clock). `runProvision`/`runRestart` both spread `...(existing ??
+// freshStatus(id))` into their own fresh status build, carrying a
+// potentially hours-old `parkedAt` (and `exhaustionKind`) forward onto the
+// freshly-provisioned/restarted row untouched. This is the "defense in
+// depth" half of the fix (per the review's own belt-and-suspenders
+// instruction) — a stopped/freshly-provisioned/restarted row should never
+// claim to still be "parked since <stale time>"; the LOAD-BEARING half
+// lives in failover.ts's own degrade-write (see
+// test/studio.parked-auto-resume.test.ts's own "finding 2" describe block
+// for that repro).
+// ---------------------------------------------------------------------------
+describe("provision/restart clear a stale parkedAt from a previous park (#210 review round 2, finding 2)", () => {
+  function roleFetch(): ProvisionDeps["fetchBlueprintFile"] {
+    return vi.fn(async (_repo: string, path: string, ref: string) => {
+      if (path === "fleet.json") return FAKE_FLEET_JSON;
+      if (path === "fleet/blueprint/roles/scratch.md") return FAKE_ROLE_MD;
+      if (path === "fleet/blueprint/org.json") return FAKE_ORG_JSON;
+      throw notFound(path, ref);
+    });
+  }
+  function deps(): ProvisionDeps {
+    return {
+      sbExec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+      recordStudio: (status: StudioStatus) => recordStudio(env as unknown as Env, status),
+      now: () => new Date().toISOString(),
+      fetchBlueprintFile: roleFetch(),
+    };
+  }
+  const STALE_PARKED_AT = new Date(Date.now() - 7 * 60 * 60_000).toISOString();
+
+  it("provisionWithStorage: a stale parkedAt left on the row this container replaces is cleared on the fresh provision", async () => {
+    const storage = fakeStorage();
+    await storage.put(STATUS_KEY, {
+      id: "websites--scratch", state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      parkedAt: STALE_PARKED_AT, exhaustionKind: "select",
+    } as StudioStatus);
+
+    const status = await provisionWithStorage(deps(), storage, { repo: "websites", role: "scratch" }, REPO_SLUG);
+
+    expect(status.state).toBe("running");
+    expect(status.parkedAt ?? null).toBeNull();
+    expect((await storage.get(STATUS_KEY) as StudioStatus | undefined)?.parkedAt ?? null).toBeNull();
+  });
+
+  it("restartWithStorage: a stale parkedAt is cleared on the fresh restart", async () => {
+    const storage = fakeStorage();
+    await provisionWithStorage(deps(), storage, { repo: "websites", role: "scratch" }, REPO_SLUG);
+    const prior = (await storage.get(STATUS_KEY)) as StudioStatus;
+    await storage.put(STATUS_KEY, { ...prior, state: "stopped", parkedAt: STALE_PARKED_AT, exhaustionKind: "select" });
+
+    const status = await restartWithStorage(deps(), storage, "websites--scratch", "rafarc21/fleetflare");
+
+    expect(status.state).toBe("running");
+    expect(status.parkedAt ?? null).toBeNull();
   });
 });
 

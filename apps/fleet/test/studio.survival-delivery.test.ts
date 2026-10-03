@@ -1242,7 +1242,12 @@ describe("the retry rides the REGULAR per-studio tick, not the maestro-only swee
   it("syncSessionCycle takes the retry as its own isolated step, and syncSession wires it", () => {
     const src = env.TEST_STUDIO_DO_SRC;
     expect(src).toContain("retrySurvivalBrief?: (() => Promise<unknown>) | null,");
-    expect(src).toContain("if (retrySurvivalBrief) {\n    try {\n      await retrySurvivalBrief();");
+    // Review round 2 (#210), FINAL round, finding B — also gated on
+    // `!stoppedAfterFailover` (a same-tick auto-stop from the failover step
+    // above): still the retry's own isolated `if`, still one `try` around
+    // one `await retrySurvivalBrief()` call, just no longer firing onto a
+    // row the SAME tick just destroyed.
+    expect(src).toContain("if (retrySurvivalBrief && !stoppedAfterFailover) {\n    try {\n      await retrySurvivalBrief();");
     expect(src).toContain("() => this.retrySurvivalBrief(),");
     // The maestro-only sweep is NOT the schedule: `armSweep` runs behind
     // `if (this.isMaestro())`, and every studio is owed a re-brief.

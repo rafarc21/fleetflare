@@ -467,6 +467,19 @@ export interface StudioStatus {
    */
   autoContinueLastTriedAt?: string | null;
   /**
+   * Review round 2 (#210), finding 3, part 2 — the anti-hammer clock for
+   * the ask-2 free-account wake (`freeAccountWakeAttempt`, failover.ts):
+   * when a wake fired because `accountIsFree(currentAccount, ...)` read
+   * true, regardless of outcome. Mirrors `autoContinueLastTriedAt`'s own
+   * shape and hourly cadence (`AUTO_CONTINUE_RETRY_MS`) exactly — a wake
+   * that fires but does not actually resolve anything (the row is still
+   * degraded next tick, same as any transient pane-probe hiccup) must not
+   * refire on every single 300s tick forever just because the current
+   * account still reads free. `null`/absent: no wake has fired yet for
+   * this degradation.
+   */
+  freeAccountWakeLastTriedAt?: string | null;
+  /**
    * Maestro round-2 review (PR #170), findings 3+4 — replaces the original
    * #158 review's `operatorParked` field entirely (removed; had no other
    * reader). Durable classification of THIS degradation's own triggering
@@ -498,6 +511,59 @@ export interface StudioStatus {
    * degraded (healed, or never degraded for this feature's own reason).
    */
   exhaustionKind?: "dead" | "inline" | "select" | null;
+  /**
+   * Issue #210 — WHEN this studio genuinely parked with no free account at
+   * all (`parkedOn === null` — see runAccountFailover's own doc comment at
+   * the `!next` branch for that split), so a periodic tick can tell how long
+   * it has been idle-billing and decide whether to auto-stop
+   * (`PARKED_AUTO_STOP_HOURS`, failover.ts). Deliberately does NOT cover the
+   * separate `parkedOn !== null` case (`FLEET_AUTO_FAILOVER` off with a
+   * candidate account) — that is a deliberate operator choice, not the
+   * "every account is fleet-wide limited" shape #210 is about.
+   *
+   * Stamped from `existing.parkedAt ?? now` ONLY when `existing.state ===
+   * "degraded"` — a genuine same-episode repeat (the same anti-loop guard's
+   * own message-text refresh, or a later refresh of this same write) — so
+   * the clock keeps reading from the FIRST tick this episode was observed.
+   * Any OTHER prior state (e.g. the studio had resumed to `"running"` since
+   * an earlier park) restarts the clock from `now`, exactly as a first-ever
+   * park would: a stale `parkedAt` surviving a stop/resume cycle must never
+   * read as already-old and trigger an immediate re-stop. `exhaustionKind`
+   * already carries the reason (its own field, right above); this is only
+   * the "since when".
+   *
+   * Cleared to `null` at the same sites `exhaustionKind` is cleared at: a
+   * pane-visual heal (`healDegradedRowAndWake`) and an ordinary account
+   * switch landing (`runAccountFailover`'s own `switched` write) — either one
+   * means the studio is no longer parked, same as a heal.
+   */
+  parkedAt?: string | null;
+  /**
+   * Review round 2 (#210), finding 5 Part A — the LATEST reason
+   * `deps.stopParkedStudio` refused (or threw), redacted the same way every
+   * other message surfaced through this file is. Written BEFORE
+   * `runAccountFailover`'s own `"park-refused"` outcome returns, so an
+   * operator reading `fleet ls`/`fleet inspect` (not only the one-time
+   * notify, below) can always see why an auto-stop has not landed.
+   * Compared against the NEXT refusal's own reason to decide whether to
+   * notify again (same unchanged-message-means-no-new-notify rule
+   * `exhaustedMessage`'s own anti-loop guard already uses, `existing.error
+   * === message`) — an unchanged refusal notifies once, a CHANGED one
+   * (the board task situation shifted) notifies again. `null`/absent: no
+   * refusal has ever been recorded for this park.
+   */
+  parkRefusalReason?: string | null;
+  /**
+   * Review round 2 (#210), finding 5 Part A — the bounded retry cadence for
+   * a refused auto-stop, mirroring `autoContinueLastTriedAt`'s own hourly
+   * shape (`AUTO_CONTINUE_RETRY_MS`): when `deps.stopParkedStudio` was last
+   * ATTEMPTED (refused or not), regardless of outcome. Without this, a
+   * standing refusal (an open board task nobody has cancelled) would retry
+   * the destroy attempt itself — and renotify, were it not also compared
+   * against `parkRefusalReason` — on every single 300s tick forever.
+   * `null`/absent: no attempt has been made yet for this park.
+   */
+  parkRefusedAt?: string | null;
   /**
    * Maestro round-2 review (PR #170), finding 2: `healDegradedRowAndWake`
    * used to discard its own `runGatedWake` outcome entirely — the row had
@@ -728,3 +794,27 @@ export interface ProvisionConfig {
    */
   projectCard?: string;
 }
+
+/**
+ * `runDestroy`'s own tagged result (destroy.ts) — a REFUSAL (an open
+ * assigned board task exists, and `--force` was not passed) must read
+ * differently at every layer above this from an actual operational failure:
+ * the route layer turns this into 409, never 500 (see routes.ts's own
+ * destroy branch), and neither the board task nor its labels are ever
+ * touched on this path — see destroy.ts's own header. A bare throw here
+ * would make that distinction invisible to a caller without inspecting
+ * Error subclasses across what is, in production, a Durable Object RPC
+ * boundary; a plain tagged return avoids that entirely.
+ *
+ * Lives HERE, not in destroy.ts (which re-exports it for every existing
+ * importer), for the identical reason every other type in this file does:
+ * this module carries no do.ts-reaching import, type-only or otherwise, so
+ * ANY file — including one compiled under a reduced-types config that lacks
+ * "@cloudflare/workers-types" (cli/'s own tsconfig.json; see
+ * `FailoverDeps.stopParkedStudio`'s own doc comment, failover.ts, for the
+ * exact breakage this avoided) — can import this shape without pulling
+ * do.ts's own Durable Object classes into that graph.
+ */
+export type DestroyOutcome =
+  | { ok: true; status: StudioStatus }
+  | { ok: false; refused: true; reason: string };
