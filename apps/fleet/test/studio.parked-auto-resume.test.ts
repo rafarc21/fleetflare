@@ -548,26 +548,27 @@ describe("review round 1, finding 1 — stopParkedStudio's real outcome, never a
 });
 
 // ---------------------------------------------------------------------------
-// Fresh-context review round 1, finding 2 — `anyAccountFreeToResume`'s tier-1
-// check always called `nextClaudeAccount(scopedAccounts, current, ...)`, but
-// the REAL selection (`runAccountFailover`'s own `candidate`) branches on
-// `currentOutOfScope` first: an ACTIVE borrow whose recorded account sits
-// BEFORE the search anchor has no position to step forward from, so
-// `nextClaudeAccount` returns null immediately (current not found) even when
-// an account WITHIN the scoped chain has genuinely freed. Reusing the exact
-// `currentOutOfScope`-active-borrow fixture shape
-// test/studio.account-failover.test.ts's own "scope stays anchored while
-// actively borrowed" block already established.
+// Review round 2 (#210), finding 3 SUPERSEDES this test's own original
+// expectation. Round 1, finding 2 fixed `anyAccountFreeToResume`'s tier-1
+// check to branch on `currentOutOfScope` like the real `candidate`
+// selection, and asserted that fix by having a DIFFERENT, non-current tier
+// (OTHER, a plain scoped-chain account) free up while the studio's own
+// CURRENT account (CUR, actively borrowed) stayed limited — and treated the
+// resulting wake as correct.
 //
-// This can only ever matter with auto-failover OFF: with it on, the SAME
-// correctly-branching `candidate` computation (used for the ordinary switch)
-// would already find the same free account on the very same tick and switch
-// away before this code path is ever reached — see this suite's own PR
-// branch for the round-1 writeup of why an autoFailover-ON repro never
-// reaches `anyAccountFreeToResume`'s tier 1 at all.
+// It was not: round 2's finding 3 is the literal #210 bug shape,
+// reintroduced by this feature's own first draft. A blind wake is just
+// "dismiss + continue on the account the pane is CURRENTLY sitting on" — it
+// can only ever help if the CURRENT account itself is the one that freed. A
+// free OTHER tier, with auto-failover OFF (this fixture's own setup), moves
+// nothing by design (#271) — firing a wake at a pane still sitting on a
+// limited CUR account accomplishes nothing, Esc+prompt-spam forever. The fix
+// (below, and in failover.ts) narrows the wake trigger to ONLY
+// `accountIsFree(currentAccount, ...)` — this fixture's own CUR never frees,
+// so this tick must NOT wake at all.
 // ---------------------------------------------------------------------------
-describe("review round 1, finding 2 — anyAccountFreeToResume must branch on currentOutOfScope like the real selection", () => {
-  it("auto-failover off, active borrow, current recorded before the anchor: once an account WITHIN the scoped chain frees, the free-account-wake check finds it", async () => {
+describe("review round 2 (#210), finding 3 — the free-account wake must fire ONLY when the studio's own CURRENT account frees, never a different tier", () => {
+  it("auto-failover off, active borrow, current account (CUR) stays limited for hours while a DIFFERENT scoped account (OTHER) frees up: no wake fires", async () => {
     const CUR: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 };
     const PRIMARY: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
     const OTHER: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 };
@@ -579,10 +580,16 @@ describe("review round 1, finding 2 — anyAccountFreeToResume must branch on cu
       initial: status({
         claudeAccount: CUR.name, launchedAccount: CUR.name, borrowedAccount: CUR.name, borrowedFromRepo: null,
       }),
-      // CUR and PRIMARY stay limited for hours; OTHER (inside scopedAccounts,
-      // i.e. accounts.slice(anchor) = [PRIMARY, OTHER]) is limited only an
-      // hour out.
-      accountLimits: { [CUR.name]: FAR_UNTIL, [PRIMARY.name]: FAR_UNTIL, [OTHER.name]: SOON_UNTIL },
+      // PRIMARY stays limited for hours; OTHER (inside scopedAccounts, i.e.
+      // accounts.slice(anchor) = [PRIMARY, OTHER]) is limited only an hour
+      // out. CUR — the studio's own current account — is left UNSET here on
+      // purpose: tick 1's own observation stamps it (a null-until "unknown
+      // reset" sighting, MODAL_PANE prints none), and that sighting is what
+      // actually keeps CUR limited for the rest of this test (its 24h
+      // null-until grace, accounts.ts's NULL_UNTIL_CEILING_MS) — never a
+      // `--discard-unsynced`-shaped literal date this test would have to
+      // keep in sync with the observation logic by hand.
+      accountLimits: { [PRIMARY.name]: FAR_UNTIL, [OTHER.name]: SOON_UNTIL },
     });
     // Tick 1: nothing free anywhere -> genuine exhaustion, parkedAt stamped.
     const first = await h.run();
@@ -599,11 +606,93 @@ describe("review round 1, finding 2 — anyAccountFreeToResume must branch on cu
 
     // Tick 3, same conditions held: the SAME "#271 parked" message now
     // matches tick 2's own stored error, so the anti-loop guard DOES match
-    // and this tick lands in the free-account-wake branch under test.
+    // and this tick reaches the free-account-wake check under test — but
+    // CUR (the studio's own current account) is STILL limited (its own
+    // null-until sighting is well under the 24h grace), so the wake must
+    // not fire: OTHER freeing is irrelevant to this row's own wake decision.
     h.setNow(new Date(NOW.getTime() + HOUR_MS + 2 * 60_000));
+    const beforeTick3 = h.execs.length;
     const third = await h.run();
 
-    expect(third).toEqual({ kind: "free-account-wake", wake: "ok" });
+    expect(third.kind).toBe("already-degraded");
+    const execsThisTick = h.execs.slice(beforeTick3);
+    expect(execsThisTick.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]);
+    expect(h.stopParkedStudio).not.toHaveBeenCalled();
+  });
+
+  it("the studio's own CURRENT account is the one that frees: the wake fires, even while the OTHER account stays limited for a very long time", async () => {
+    const CUR: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 };
+    const SECOND: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
+    // Far enough out that it is STILL limited after the 25h jump below —
+    // unlike CUR's own null-until sighting, which clears at the 24h grace.
+    const VERY_FAR_UNTIL = new Date(NOW.getTime() + 100 * HOUR_MS).toISOString();
+    const h = harness({
+      accounts: [CUR, SECOND], pane: MODAL_PANE, autoFailover: false,
+      initial: status({ claudeAccount: CUR.name, launchedAccount: CUR.name }),
+      accountLimits: { [SECOND.name]: VERY_FAR_UNTIL },
+    });
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    // 25h later: CUR's own null-until sighting (stamped by tick 1's own
+    // observation) has crossed the 24h grace and reads free again; SECOND
+    // stays limited throughout, so `candidate` still finds nowhere to go
+    // and `parkedOn` stays null — the SAME exhausted message, landing in
+    // the anti-loop guard, the free-account-wake branch under test.
+    h.setNow(new Date(NOW.getTime() + 25 * HOUR_MS));
+    const second = await h.run();
+
+    expect(second).toEqual({ kind: "free-account-wake", wake: "ok" });
+  });
+
+  // Finding 3, part 2 — the anti-hammer bound: a wake that fires but does
+  // not actually resolve anything (the row is still degraded next tick,
+  // same reason as any transient pane-probe hiccup) must not refire on
+  // every single 300s tick forever just because the current account still
+  // reads free. Mirrors #109's own `autoContinueAt`/`autoContinueLastTriedAt`
+  // hourly cadence (`AUTO_CONTINUE_RETRY_MS`), rather than a blind timer.
+  it("a wake that fired but did not resolve anything does not refire on the very next tick, even though the current account still reads free", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: NO_RESET_INLINE_PANE });
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+
+    h.setNow(new Date(NOW.getTime() + 25 * HOUR_MS));
+    const second = await h.run();
+    expect(second).toEqual({ kind: "free-account-wake", wake: "ok" });
+
+    // The wake did not heal the row (the pane is byte-identical, never
+    // retyped — the realistic #210 shape); 1 minute later, the account
+    // STILL reads free (its own null-until grace has long since passed),
+    // yet the wake must not fire again — the retry window has not elapsed.
+    const beforeTick3 = h.execs.length;
+    h.setNow(new Date(NOW.getTime() + 25 * HOUR_MS + 60_000));
+    const third = await h.run();
+
+    expect(third.kind).not.toBe("free-account-wake");
+    const execsThisTick = h.execs.slice(beforeTick3);
+    expect(execsThisTick.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toEqual([]);
+  });
+
+  // Finding 3, part 3 — the auto-stop's own triggering condition no longer
+  // depends on correctly re-deriving "is anything free" at all: elapsed
+  // time past PARKED_AUTO_STOP_HOURS, still degraded, not dead, is on its
+  // own sufficient. Proven here by the EXACT scenario the old "nothing free
+  // anywhere" condition would have refused to stop: the current account
+  // itself reads free (its own 24h null-until grace has passed) on the
+  // very same tick that crosses the 6h parked threshold — yet the stop
+  // still fires, because elapsed time alone decides it now.
+  it("the auto-stop fires purely on elapsed time past 6h, even on a tick where the free-account check would itself read the current account as free", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: NO_RESET_INLINE_PANE });
+    await h.run();
+
+    // 25h later: past PARKED_AUTO_STOP_HOURS (6h) AND past the 24h
+    // null-until grace (so accountIsFree(currentAccount, ...) would itself
+    // read true this same tick) — the auto-stop must fire anyway.
+    h.setNow(new Date(NOW.getTime() + 25 * HOUR_MS));
+    const out = await h.run();
+
+    expect(out.kind).toBe("auto-stopped");
+    expect(h.stopParkedStudio).toHaveBeenCalledTimes(1);
   });
 });
 
