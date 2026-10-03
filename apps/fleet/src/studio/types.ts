@@ -534,6 +534,32 @@ export interface StudioStatus {
    */
   parkedAt?: string | null;
   /**
+   * Review round 2 (#210), finding 5 Part A — the LATEST reason
+   * `deps.stopParkedStudio` refused (or threw), redacted the same way every
+   * other message surfaced through this file is. Written BEFORE
+   * `runAccountFailover`'s own `"park-refused"` outcome returns, so an
+   * operator reading `fleet ls`/`fleet inspect` (not only the one-time
+   * notify, below) can always see why an auto-stop has not landed.
+   * Compared against the NEXT refusal's own reason to decide whether to
+   * notify again (same unchanged-message-means-no-new-notify rule
+   * `exhaustedMessage`'s own anti-loop guard already uses, `existing.error
+   * === message`) — an unchanged refusal notifies once, a CHANGED one
+   * (the board task situation shifted) notifies again. `null`/absent: no
+   * refusal has ever been recorded for this park.
+   */
+  parkRefusalReason?: string | null;
+  /**
+   * Review round 2 (#210), finding 5 Part A — the bounded retry cadence for
+   * a refused auto-stop, mirroring `autoContinueLastTriedAt`'s own hourly
+   * shape (`AUTO_CONTINUE_RETRY_MS`): when `deps.stopParkedStudio` was last
+   * ATTEMPTED (refused or not), regardless of outcome. Without this, a
+   * standing refusal (an open board task nobody has cancelled) would retry
+   * the destroy attempt itself — and renotify, were it not also compared
+   * against `parkRefusalReason` — on every single 300s tick forever.
+   * `null`/absent: no attempt has been made yet for this park.
+   */
+  parkRefusedAt?: string | null;
+  /**
    * Maestro round-2 review (PR #170), finding 2: `healDegradedRowAndWake`
    * used to discard its own `runGatedWake` outcome entirely — the row had
    * already flipped to `"running"` by the SAME write, so a refused/skipped/
