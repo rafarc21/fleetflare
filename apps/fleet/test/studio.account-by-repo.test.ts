@@ -298,6 +298,40 @@ describe("launchAccountOrReroute — issue #209: the fleet-wide limit check laun
     await expect(launchAccountOrReroute(env, "demosite-life", null, limits, reserved, NOW))
       .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_4", token: TOKEN_4 });
   });
+
+  // Fresh-context review of PR #211, finding 1 -- `currentOutOfScope` used to
+  // be hardcoded `false` here, no matter what the caller actually knows about
+  // an active borrow. A studio recorded on (and actively borrowing) an
+  // account positioned BEFORE its own mapped primary has no position to step
+  // FORWARD from inside `scopedAccounts` (`nextClaudeAccount`'s own `idx < 0`
+  // branch returns null immediately -- see accounts.ts:212-213), so tier 1
+  // must switch to `firstFreeAccount` over the WHOLE scoped chain instead,
+  // exactly as failover.ts's own `currentOutOfScope` derivation
+  // (`borrowedActive && currentIdx >= 0 && currentIdx < anchor`) already
+  // does. With the hardcoded `false`, tier 1 is a guaranteed no-op for this
+  // case, tier 2 (`accounts.slice(0, anchor)`) never covers the in-scope
+  // chain either, and the gate wrongly falls through to tier 3 -- borrowing
+  // another repo's reserved primary even though a free account is sitting
+  // right there in this repo's own scoped chain.
+  it("out-of-scope while actively borrowing, own chain also limited but a LATER in-scope account is free: tier 1 picks it, never an unnecessary tier-3 borrow", async () => {
+    const four = { ...three, CLAUDE_CODE_OAUTH_TOKEN_4: TOKEN_4 };
+    const env = envWith({ ...four, FLEET_AUTO_FAILOVER: "on" });
+    // CLAUDE_CODE_OAUTH_TOKEN (slot 1) sits BEFORE the mapped primary (slot
+    // 2) -- the studio is recorded on it AND actively borrowing it
+    // (existing.borrowedAccount), but it has since gone limited too.
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+    };
+    // CLAUDE_CODE_OAUTH_TOKEN_4 is some OTHER repo's reserved primary, free --
+    // exactly what the old hardcoded-false bug wrongly borrowed instead of
+    // trying account 3 (this repo's own scoped chain, free) first.
+    const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_4"]);
+    await expect(launchAccountOrReroute(
+      env, "demosite-life", "CLAUDE_CODE_OAUTH_TOKEN", limits, reserved, NOW,
+      "CLAUDE_CODE_OAUTH_TOKEN",
+    )).resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
+  });
 });
 
 describe("accountDisplay — CLAUDE_ACCOUNT_<n>_LABEL", () => {
