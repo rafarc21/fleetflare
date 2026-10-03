@@ -429,6 +429,57 @@ describe("issue #210, ask 3 — a studio parked past PARKED_AUTO_STOP_HOURS with
 });
 
 // ---------------------------------------------------------------------------
+// Review round 2 (#210), finding 2 (BLOCKER) — a stale `parkedAt` surviving
+// a stop -> resume cycle caused an immediate re-stop (~5 min later). This
+// pins the LOAD-BEARING half of the fix, at failover.ts's own degrade-write:
+// `existing.parkedAt ?? now` used to carry the stale value forward
+// regardless of what `existing.state` was, so a row that genuinely passed
+// through "running" since the old `parkedAt` was stamped (a resume) still
+// re-read as "parked since <hours-old time>" the instant the SAME
+// exhaustion re-appeared. The fix only ever preserves the old value for a
+// GENUINE same-episode repeat (`existing.state === "degraded"`); any other
+// previous state (a resume landed) restarts the clock from `now`.
+// test/studio.provision.test.ts and test/studio.destroy.test.ts pin the
+// complementary "defense in depth" half — provision/restart/destroy must
+// never carry a stale `parkedAt` onto a fresh row in the first place.
+// ---------------------------------------------------------------------------
+describe("review round 2 (#210), finding 2 — a stale parkedAt must not survive a stop/resume cycle", () => {
+  it("resumed (state running again), parkedAt left stale by an earlier park: the next exhaustion stamps a FRESH parkedAt, and the auto-stop does not immediately refire", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: MODAL_PANE });
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+    const firstParkedAt = (await h.storage.get(STATUS_KEY))?.parkedAt as string;
+    expect(firstParkedAt).toBe(NOW.toISOString());
+
+    // Simulate a stop -> resume cycle that (the bug) left the stale
+    // parkedAt on the row: state flips back to "running" (what a genuine
+    // resume always does), but parkedAt is untouched — exactly the shape
+    // destroy.ts's/provision.ts's own pre-fix carry-forward produced.
+    const resumedAt = new Date(NOW.getTime() + 7 * HOUR_MS);
+    await h.storage.put(STATUS_KEY, {
+      ...(await h.storage.get(STATUS_KEY)), state: "running", error: null, parkedAt: firstParkedAt,
+    });
+    h.setNow(resumedAt);
+
+    // The SAME exhaustion verdict re-appears immediately after the resume
+    // (the realistic #210 shape: still nothing free) — a fresh degrade,
+    // since `existing.state` was just "running", not "degraded".
+    const second = await h.run();
+    expect(second.kind).toBe("exhausted");
+    const stored = await h.storage.get(STATUS_KEY);
+    // The NEW episode's own clock, never the 7h-stale one.
+    expect(stored?.parkedAt).toBe(resumedAt.toISOString());
+
+    // And critically: the auto-stop must not fire on the very next tick —
+    // the (now-correct) clock reads "only just started", not "6h+ old".
+    h.setNow(new Date(resumedAt.getTime() + 60_000));
+    const third = await h.run();
+    expect(third.kind).toBe("already-degraded");
+    expect(h.stopParkedStudio).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fresh-context review round 1, finding 1 — `deps.stopParkedStudio` used to
 // be typed `Promise<void>`, so a REFUSAL (the realistic case: a studio sat
 // parked mid-task almost always has an open assigned board task, and
