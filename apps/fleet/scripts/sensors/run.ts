@@ -7,6 +7,15 @@
  * credential: CI failures (`fleet-check.yml`, `main`-only, last 50 runs)
  * and known-flaky count (`apps/fleet/scripts/localci/known-flaky.txt`).
  *
+ * Board issue #208 (ask 3) added a THIRD sensor: platform container
+ * replacements, fleet-wide, per day. The per-studio counter this rolls up
+ * already exists (`src/studio/restarts.ts`'s `RestartLog`/`restartsInWindow`,
+ * already surfaced per-studio as `fleet ls`'s RST column) — this sensor does
+ * not reimplement replacement DETECTION, only sums that existing count
+ * across every studio `GET /studio/` returns, the SAME endpoint and
+ * credential seam `cmdLs` (cli/fleet.ts) already uses (`loadCredentials`/
+ * `accessHeaders`, reused here rather than re-implemented).
+ *
  *   bun run scripts/sensors/run.ts [--dry-run]
  *
  * Still record-only, same as `scripts/sensors/measure.sh` (the earlier
@@ -38,6 +47,9 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadCredentials, accessHeaders } from "../../cli/fleet";
+import { restartsInWindow } from "../../src/studio/restarts";
+import type { StudioStatus } from "../../src/studio/types";
 
 const PINNED_ISSUE_TITLE = "fleet: sensor burn log";
 const FLEET_CHECK_WORKFLOW = "fleet-check.yml";
@@ -56,11 +68,15 @@ export interface RawSensorInputs {
   ciFailures: number;
   ciTotal: number;
   knownFlaky: number;
+  /** Board issue #208 (ask 3) — summed `restartsInWindow` across every
+   *  studio `GET /studio/` returns, fleet-wide, for the last 24h. */
+  platformReplacements: number;
 }
 
 export interface PreviousBaselines {
   ciFailures: number | null;
   knownFlaky: number | null;
+  platformReplacements: number | null;
 }
 
 export interface SensorResult {
@@ -72,6 +88,7 @@ export interface SensorResult {
 export interface Report {
   ciFailures: SensorResult & { total: number };
   knownFlaky: SensorResult;
+  platformReplacements: SensorResult;
 }
 
 /**
@@ -84,6 +101,7 @@ export interface Report {
 export function buildReport(raw: RawSensorInputs, previous: PreviousBaselines, slack = 1): Report {
   const ciBaseline = previous.ciFailures ?? raw.ciFailures;
   const flakyBaseline = previous.knownFlaky ?? raw.knownFlaky;
+  const platformBaseline = previous.platformReplacements ?? raw.platformReplacements;
   return {
     ciFailures: {
       current: raw.ciFailures,
@@ -95,6 +113,11 @@ export function buildReport(raw: RawSensorInputs, previous: PreviousBaselines, s
       current: raw.knownFlaky,
       baseline: flakyBaseline,
       dampener: dampenerState(raw.knownFlaky, flakyBaseline, slack),
+    },
+    platformReplacements: {
+      current: raw.platformReplacements,
+      baseline: platformBaseline,
+      dampener: dampenerState(raw.platformReplacements, platformBaseline, slack),
     },
   };
 }
@@ -108,7 +131,7 @@ export function buildReport(raw: RawSensorInputs, previous: PreviousBaselines, s
  * previous state must still proceed as a first run, not crash).
  */
 export function parseState(body: string | null | undefined): PreviousBaselines {
-  const none: PreviousBaselines = { ciFailures: null, knownFlaky: null };
+  const none: PreviousBaselines = { ciFailures: null, knownFlaky: null, platformReplacements: null };
   if (!body) return none;
   const m = body.match(STATE_COMMENT_RE);
   if (!m) return none;
@@ -116,7 +139,8 @@ export function parseState(body: string | null | undefined): PreviousBaselines {
     const parsed = JSON.parse(m[1]) as Record<string, unknown>;
     const ciFailures = typeof parsed?.ciFailures === "number" ? parsed.ciFailures : null;
     const knownFlaky = typeof parsed?.knownFlaky === "number" ? parsed.knownFlaky : null;
-    return { ciFailures, knownFlaky };
+    const platformReplacements = typeof parsed?.platformReplacements === "number" ? parsed.platformReplacements : null;
+    return { ciFailures, knownFlaky, platformReplacements };
   } catch {
     return none;
   }
@@ -132,6 +156,7 @@ export function renderBody(report: Report, timestamp: string): string {
   const state = JSON.stringify({
     ciFailures: report.ciFailures.current,
     knownFlaky: report.knownFlaky.current,
+    platformReplacements: report.platformReplacements.current,
   });
   return [
     "# fleet sensor burn log",
@@ -146,6 +171,10 @@ export function renderBody(report: Report, timestamp: string): string {
     "| --- | --- | --- | --- | --- |",
     `| CI failures (${FLEET_CHECK_WORKFLOW}, main) | last ${report.ciFailures.total} runs | ${report.ciFailures.current} | ${report.ciFailures.baseline} | ${report.ciFailures.dampener} |`,
     `| known-flaky entries | current list | ${report.knownFlaky.current} | ${report.knownFlaky.baseline} | ${report.knownFlaky.dampener} |`,
+    // Board issue #208 (ask 3): platform container replacements, fleet-wide,
+    // per day — the same RST count `fleet ls` already shows per-studio
+    // (restarts.ts's `restartsInWindow`), summed across the whole fleet.
+    `| platform replacements (fleet-wide, 24h) | last 24h | ${report.platformReplacements.current} | ${report.platformReplacements.baseline} | ${report.platformReplacements.dampener} |`,
     "",
     "<!-- fleet-sensor-state",
     state,
@@ -185,6 +214,36 @@ async function readKnownFlakyCount(): Promise<number> {
   return text.split("\n").filter((line) => /^test\//.test(line)).length;
 }
 
+/**
+ * Board issue #208 (ask 3) — fleet-wide platform container replacements in
+ * the last 24h: the SAME `GET /studio/` endpoint and credential seam
+ * `cmdLs` (cli/fleet.ts) already uses, reusing its `loadCredentials`/
+ * `accessHeaders` rather than re-implementing either. Sums the EXISTING
+ * per-studio count (`restartsInWindow`, restarts.ts) across every studio the
+ * Worker returns — this does not re-detect a replacement, only rolls up a
+ * counter that already exists and is already surfaced per-studio
+ * (`fleet ls`'s RST column).
+ *
+ * No bespoke soft-fail wrapper: `readCiFailures`/`readKnownFlakyCount` above
+ * carry none either (a `gh` failure or an unreadable known-flaky.txt
+ * propagates uncaught, same as `main`'s own `Promise.all` has always let it)
+ * — this sensor's own failure (no credentials file, an unreachable Worker)
+ * is left to propagate exactly the same way, rather than inventing a new,
+ * sensor-specific isolation this script has never had for the other two.
+ */
+async function readPlatformReplacements(): Promise<number> {
+  const creds = await loadCredentials();
+  const res = await fetch(new URL("/studio/", creds.workerUrl), {
+    headers: { ...accessHeaders(creds), Accept: "application/json" },
+  });
+  if (!res.ok) {
+    throw new Error(`GET /studio/ failed: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  }
+  const studios = (await res.json()) as StudioStatus[];
+  const now = new Date();
+  return studios.reduce((sum, s) => sum + restartsInWindow(s.observed?.restarts, now), 0);
+}
+
 interface PinnedIssue {
   number: number;
   body: string;
@@ -222,14 +281,15 @@ async function main(): Promise<void> {
   const repo = process.env.SENSOR_REPO ?? "rafarc21/fleetflare";
   const dryRun = process.argv.includes("--dry-run");
 
-  const [{ failures: ciFailures, total: ciTotal }, knownFlaky, existing] = await Promise.all([
+  const [{ failures: ciFailures, total: ciTotal }, knownFlaky, platformReplacements, existing] = await Promise.all([
     readCiFailures(repo),
     readKnownFlakyCount(),
+    readPlatformReplacements(),
     findPinnedIssue(repo),
   ]);
 
   const previous = parseState(existing?.body);
-  const report = buildReport({ ciFailures, ciTotal, knownFlaky }, previous);
+  const report = buildReport({ ciFailures, ciTotal, knownFlaky, platformReplacements }, previous);
   const body = renderBody(report, new Date().toISOString());
 
   if (dryRun) {

@@ -8,6 +8,12 @@ import { buildReport, dampenerState, parseState, renderBody } from "../../script
  * The `import.meta.main` I/O shell (gh read/write, file read) is
  * deliberately untested here — see the design doc and plan doc for why
  * this PR stops at the pure-function boundary.
+ *
+ * Board issue #208 (ask 3) added a THIRD sensor, "platform replacements" —
+ * threaded through `buildReport`/`PreviousBaselines`/`SensorResult`/
+ * `renderBody`/`parseState` exactly like `knownFlaky` already was, so every
+ * `buildReport`/`parseState` fixture below now carries a
+ * `platformReplacements` value alongside the original two.
  */
 describe("dampenerState", () => {
   test("at baseline+slack exactly — OK", () => {
@@ -31,8 +37,8 @@ describe("dampenerState", () => {
 describe("buildReport — first run (no previous baseline)", () => {
   test("dampener stays OK even when current is high; baseline becomes current", () => {
     const report = buildReport(
-      { ciFailures: 9, ciTotal: 50, knownFlaky: 7 },
-      { ciFailures: null, knownFlaky: null },
+      { ciFailures: 9, ciTotal: 50, knownFlaky: 7, platformReplacements: 3 },
+      { ciFailures: null, knownFlaky: null, platformReplacements: null },
     );
     expect(report.ciFailures.baseline).toBe(9);
     expect(report.ciFailures.current).toBe(9);
@@ -41,14 +47,17 @@ describe("buildReport — first run (no previous baseline)", () => {
     expect(report.knownFlaky.baseline).toBe(7);
     expect(report.knownFlaky.current).toBe(7);
     expect(report.knownFlaky.dampener).toBe("OK");
+    expect(report.platformReplacements.baseline).toBe(3);
+    expect(report.platformReplacements.current).toBe(3);
+    expect(report.platformReplacements.dampener).toBe("OK");
   });
 });
 
 describe("buildReport — zero run history (brand-new fleet-check.yml, no runs yet)", () => {
   test("ciTotal: 0, ciFailures: 0 computes without throwing and stays OK (not FIRED)", () => {
     const report = buildReport(
-      { ciFailures: 0, ciTotal: 0, knownFlaky: 0 },
-      { ciFailures: null, knownFlaky: null },
+      { ciFailures: 0, ciTotal: 0, knownFlaky: 0, platformReplacements: 0 },
+      { ciFailures: null, knownFlaky: null, platformReplacements: null },
     );
     expect(report.ciFailures.total).toBe(0);
     expect(report.ciFailures.current).toBe(0);
@@ -57,14 +66,17 @@ describe("buildReport — zero run history (brand-new fleet-check.yml, no runs y
     expect(report.knownFlaky.current).toBe(0);
     expect(report.knownFlaky.baseline).toBe(0);
     expect(report.knownFlaky.dampener).toBe("OK");
+    expect(report.platformReplacements.current).toBe(0);
+    expect(report.platformReplacements.baseline).toBe(0);
+    expect(report.platformReplacements.dampener).toBe("OK");
   });
 });
 
 describe("buildReport — second run with a previous baseline", () => {
-  test("CI sensor FIRED when current rises past baseline+slack, known-flaky independently OK", () => {
+  test("CI sensor FIRED when current rises past baseline+slack, known-flaky and platform replacements independently OK", () => {
     const report = buildReport(
-      { ciFailures: 4, ciTotal: 50, knownFlaky: 2 },
-      { ciFailures: 1, knownFlaky: 2 },
+      { ciFailures: 4, ciTotal: 50, knownFlaky: 2, platformReplacements: 2 },
+      { ciFailures: 1, knownFlaky: 2, platformReplacements: 2 },
     );
     expect(report.ciFailures.baseline).toBe(1);
     expect(report.ciFailures.current).toBe(4);
@@ -72,45 +84,63 @@ describe("buildReport — second run with a previous baseline", () => {
     expect(report.knownFlaky.baseline).toBe(2);
     expect(report.knownFlaky.current).toBe(2);
     expect(report.knownFlaky.dampener).toBe("OK");
+    expect(report.platformReplacements.baseline).toBe(2);
+    expect(report.platformReplacements.current).toBe(2);
+    expect(report.platformReplacements.dampener).toBe("OK");
   });
 
-  test("known-flaky FIRED when current rises past baseline+slack, CI sensor independently OK", () => {
+  test("known-flaky FIRED when current rises past baseline+slack, CI sensor and platform replacements independently OK", () => {
     const report = buildReport(
-      { ciFailures: 1, ciTotal: 50, knownFlaky: 5 },
-      { ciFailures: 1, knownFlaky: 2 },
+      { ciFailures: 1, ciTotal: 50, knownFlaky: 5, platformReplacements: 2 },
+      { ciFailures: 1, knownFlaky: 2, platformReplacements: 2 },
     );
     expect(report.ciFailures.dampener).toBe("OK");
     expect(report.knownFlaky.baseline).toBe(2);
     expect(report.knownFlaky.current).toBe(5);
     expect(report.knownFlaky.dampener).toBe("FIRED");
+    expect(report.platformReplacements.dampener).toBe("OK");
   });
 
-  test("both sensors OK when neither rises past baseline+slack", () => {
+  test("platform replacements FIRED when current rises past baseline+slack, the other two independently OK", () => {
     const report = buildReport(
-      { ciFailures: 2, ciTotal: 50, knownFlaky: 2 },
-      { ciFailures: 1, knownFlaky: 2 },
+      { ciFailures: 1, ciTotal: 50, knownFlaky: 2, platformReplacements: 6 },
+      { ciFailures: 1, knownFlaky: 2, platformReplacements: 2 },
     );
     expect(report.ciFailures.dampener).toBe("OK");
     expect(report.knownFlaky.dampener).toBe("OK");
+    expect(report.platformReplacements.baseline).toBe(2);
+    expect(report.platformReplacements.current).toBe(6);
+    expect(report.platformReplacements.dampener).toBe("FIRED");
+  });
+
+  test("all three sensors OK when none rises past baseline+slack", () => {
+    const report = buildReport(
+      { ciFailures: 2, ciTotal: 50, knownFlaky: 2, platformReplacements: 2 },
+      { ciFailures: 1, knownFlaky: 2, platformReplacements: 1 },
+    );
+    expect(report.ciFailures.dampener).toBe("OK");
+    expect(report.knownFlaky.dampener).toBe("OK");
+    expect(report.platformReplacements.dampener).toBe("OK");
   });
 });
 
 describe("renderBody / parseState round trip", () => {
   test("parsing a rendered body returns the same numbers as this run's current (next run's baseline)", () => {
     const report = buildReport(
-      { ciFailures: 4, ciTotal: 50, knownFlaky: 5 },
-      { ciFailures: 1, knownFlaky: 2 },
+      { ciFailures: 4, ciTotal: 50, knownFlaky: 5, platformReplacements: 3 },
+      { ciFailures: 1, knownFlaky: 2, platformReplacements: 1 },
     );
     const body = renderBody(report, "2026-10-01T10:00:00Z");
     const parsed = parseState(body);
     expect(parsed.ciFailures).toBe(report.ciFailures.current);
     expect(parsed.knownFlaky).toBe(report.knownFlaky.current);
+    expect(parsed.platformReplacements).toBe(report.platformReplacements.current);
   });
 
   test("includes the rate-cap line", () => {
     const report = buildReport(
-      { ciFailures: 4, ciTotal: 50, knownFlaky: 5 },
-      { ciFailures: 1, knownFlaky: 2 },
+      { ciFailures: 4, ciTotal: 50, knownFlaky: 5, platformReplacements: 3 },
+      { ciFailures: 1, knownFlaky: 2, platformReplacements: 1 },
     );
     const body = renderBody(report, "2026-10-01T10:00:00Z");
     expect(body).toContain("Rate cap: TBD, pending operator decision — filing disabled (record-only)");
@@ -118,8 +148,8 @@ describe("renderBody / parseState round trip", () => {
 
   test("includes the run timestamp", () => {
     const report = buildReport(
-      { ciFailures: 4, ciTotal: 50, knownFlaky: 5 },
-      { ciFailures: 1, knownFlaky: 2 },
+      { ciFailures: 4, ciTotal: 50, knownFlaky: 5, platformReplacements: 3 },
+      { ciFailures: 1, knownFlaky: 2, platformReplacements: 1 },
     );
     const body = renderBody(report, "2026-10-01T10:00:00Z");
     expect(body).toContain("2026-10-01T10:00:00Z");
@@ -127,8 +157,8 @@ describe("renderBody / parseState round trip", () => {
 
   test("includes the CI run window total value", () => {
     const report = buildReport(
-      { ciFailures: 4, ciTotal: 50, knownFlaky: 5 },
-      { ciFailures: 1, knownFlaky: 2 },
+      { ciFailures: 4, ciTotal: 50, knownFlaky: 5, platformReplacements: 3 },
+      { ciFailures: 1, knownFlaky: 2, platformReplacements: 1 },
     );
     const body = renderBody(report, "2026-10-01T10:00:00Z");
     expect(body).toContain("50");
@@ -136,11 +166,24 @@ describe("renderBody / parseState round trip", () => {
 
   test("includes a FIRED dampener value", () => {
     const report = buildReport(
-      { ciFailures: 4, ciTotal: 50, knownFlaky: 5 },
-      { ciFailures: 1, knownFlaky: 2 },
+      { ciFailures: 4, ciTotal: 50, knownFlaky: 5, platformReplacements: 3 },
+      { ciFailures: 1, knownFlaky: 2, platformReplacements: 1 },
     );
     const body = renderBody(report, "2026-10-01T10:00:00Z");
     expect(body).toContain("FIRED");
+  });
+
+  test("includes a platform-replacements row naming the sensor and its current/baseline/dampener", () => {
+    const report = buildReport(
+      { ciFailures: 1, ciTotal: 50, knownFlaky: 1, platformReplacements: 6 },
+      { ciFailures: 1, knownFlaky: 1, platformReplacements: 2 },
+    );
+    const body = renderBody(report, "2026-10-01T10:00:00Z");
+    expect(body).toContain("platform replacements");
+    const row = body.split("\n").find((l) => l.includes("platform replacements"));
+    expect(row).toContain("| 6 |");
+    expect(row).toContain("| 2 |");
+    expect(row).toContain("FIRED");
   });
 });
 
@@ -149,20 +192,26 @@ describe("parseState — tolerates missing/malformed state", () => {
     expect(parseState("just a plain issue body, no state block")).toEqual({
       ciFailures: null,
       knownFlaky: null,
+      platformReplacements: null,
     });
   });
 
   test("absent body (null) returns nulls, never throws", () => {
-    expect(parseState(null)).toEqual({ ciFailures: null, knownFlaky: null });
+    expect(parseState(null)).toEqual({ ciFailures: null, knownFlaky: null, platformReplacements: null });
   });
 
   test("malformed JSON inside the block returns nulls, never throws", () => {
     const body = "body text\n<!-- fleet-sensor-state\n{not valid json\n-->\nmore text";
-    expect(parseState(body)).toEqual({ ciFailures: null, knownFlaky: null });
+    expect(parseState(body)).toEqual({ ciFailures: null, knownFlaky: null, platformReplacements: null });
   });
 
   test("well-formed block with missing fields returns nulls for the missing ones", () => {
     const body = "<!-- fleet-sensor-state\n{\"ciFailures\": 3}\n-->";
-    expect(parseState(body)).toEqual({ ciFailures: 3, knownFlaky: null });
+    expect(parseState(body)).toEqual({ ciFailures: 3, knownFlaky: null, platformReplacements: null });
+  });
+
+  test("well-formed block with only platformReplacements returns nulls for the other two", () => {
+    const body = "<!-- fleet-sensor-state\n{\"platformReplacements\": 4}\n-->";
+    expect(parseState(body)).toEqual({ ciFailures: null, knownFlaky: null, platformReplacements: 4 });
   });
 });
