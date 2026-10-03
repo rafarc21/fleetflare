@@ -460,3 +460,89 @@ rebasing onto helpers that do not exist yet on `main` is not attempted here.
 A one-line `TODO (#210 review, finding 4)` comment marks the exact call site
 (`failover.ts`, immediately above the `candidate` computation) referencing
 this issue and PR #211, so the rebase is easy to find once that PR lands.
+
+## 2026-10-03, finding 4 resolved — rebase onto #211's merged `deriveSearchAnchor`/`selectFreeAccount`
+
+PR #211 (`fix(failover): launch gate consults fleet-wide AccountLimits before
+launching (#209) (#211)`, commit `b061940`) merged to `main`, followed by
+#212 (commit `9cf78e5`). This branch was 17 commits ahead of / 2 commits
+behind `main`; `git rebase origin/main` replayed all 17 cleanly except one
+genuine conflict, resolved as described below. The whole rebase stayed
+linear (no merge commit) so `git log` still reads as one straight RED/GREEN
+history.
+
+**What #211 changed in `failover.ts`.** The old inline
+`const currentIdx = current == null ? 0 : deps.accounts.findIndex(...)` /
+`const anchor = borrowedActive ? start : (currentIdx < 0 ? start :
+Math.min(start, currentIdx))` / `const currentOutOfScope = borrowedActive &&
+currentIdx >= 0 && currentIdx < anchor` block — the exact formula this
+file's own review round 2 finding 4 (PR #135) first wrote inline — was
+extracted into `accounts.ts`'s `deriveSearchAnchor(accounts, start, current,
+borrowedActive)`, shared with `launchAccountOrReroute`'s own gate so the two
+can never drift a third time. The old inline `outOfScopeSpare = candidate
+=== null && deps.autoFailover ? firstFreeAccount(deps.accounts.slice(0,
+anchor), reserved, limits, deps.now()) : null` became `selectFreeAccount
+(deps.accounts, anchor, current, currentOutOfScope, reserved, limits,
+deps.now())`, also from `accounts.ts`. Both are pure re-derivations of the
+SAME formula this file already carried — #211 did not change the algorithm,
+only who owns the one copy of it.
+
+**The conflict.** `git rebase` found exactly one hunk conflicting in
+`failover.ts`: this branch's own `18f9dbc` (review round 2, finding 3) GREEN
+commit carried a hunk reinstating the local `currentOutOfScope` computation
+and the `TODO (#210 review, finding 4)` comment immediately above
+`candidate`, in the SAME spot `main`'s rebase-so-far had already replaced
+with the `deriveSearchAnchor` destructure. Resolution: take `main`'s side —
+deleted the reinstated `currentOutOfScope` line and the TODO comment
+entirely, keeping the single `const { anchor, currentOutOfScope } =
+deriveSearchAnchor(...)` call already in place a few lines above. This
+single deletion both finishes finding 4's own rebase AND removes the TODO
+it asked to resolve — the inline 3-tier selection in `runAccountFailover`
+had nothing else of its own left to migrate; it already called
+`firstFreeAccount`/`nextClaudeAccount`/`nextBorrowedAccount` the same way
+both before and after, and the one piece #211 centralized
+(`anchor`/`currentOutOfScope`/`outOfScopeSpare`'s own tier-2 lookup) now
+reads identically to `main`.
+
+**The `currentIdx` fallout.** `deriveSearchAnchor` returns `anchor`/
+`currentOutOfScope` only — it does not return the `currentIdx` local that
+used to compute them, and that local no longer exists anywhere in the
+rebased `runAccountFailover`. This branch's own #210 free-account-wake block
+(review round 2, finding 3's own `18f9dbc` commit) read `const
+currentAccount = currentIdx >= 0 ? deps.accounts[currentIdx] : null;`
+further down the same function, relying on that now-gone outer-scope
+variable. Rebuilt it locally, at the point of use, with the exact same
+formula `deriveSearchAnchor` itself computes internally (`accounts.ts`:
+`current == null ? 0 : accounts.findIndex((a) => a.name === current)`):
+
+```ts
+const currentIdx = current == null ? 0 : deps.accounts.findIndex((a) => a.name === current);
+const currentAccount = currentIdx >= 0 ? deps.accounts[currentIdx] : null;
+```
+
+This keeps the existing convention every other reader of "where is this
+studio right now" in this file already follows (`current === null` reads as
+position 0 "by construction"; a NAMED `current` absent from `deps.accounts`
+— secret deleted/renamed — reads as not-found, `null`, never position 0) —
+`currentAccountFreeToResume`'s own doc comment states this convention
+explicitly, and this re-derivation satisfies it unchanged.
+
+**No second drifting copy found.** Checked both `currentAccountFreeToResume`
+and `freeAccountWakeAttempt` (the two other #210-only functions near this
+area) for an inline copy of the 3-tier selection the TODO was about:
+neither carries one. `currentAccountFreeToResume` only calls
+`accountIsFree(currentAccount, limits, now)` on the single account the
+caller resolves; `freeAccountWakeAttempt` performs the wake itself (dismiss
++ `runGatedWake`) and never re-derives a candidate account at all. Nothing
+else needed rewiring.
+
+**Verification.** Targeted suite (`test/studio.account-failover.test.ts`,
+`test/studio.parked-auto-resume.test.ts`, `test/studio.account-by-repo.test.ts`,
+`test/studio.account-launched.test.ts`, `test/studio.destroy.test.ts`,
+`test/studio.provision.test.ts`) — three of these import `cloudflare:test`
+(added by #211's own `envWith` change) and cannot run under plain `bun
+test`, which has no workers pool; run instead under `vitest run` on the
+same six files: 407/407 passed. Full gates, run one at a time under
+`flock /tmp/fleet-gate.lock`: `bun run test` (full vitest suite) — 157 test
+files, 5586 tests, all passed; `bun run check` (`tsc --noEmit` across all
+five configured projects) — clean, no errors.
