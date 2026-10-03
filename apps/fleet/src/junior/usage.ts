@@ -104,10 +104,8 @@ export async function aggregateJuniorUsage(db: D1Database, sinceTs: number): Pro
  * epoch>` defaults to 0 (all time); the CLI layer (a later step on this
  * issue) owns duration/date parsing and always hands this a plain epoch ms.
  */
-export async function handleJuniorUsageStats(
-  req: Request, env: Env, verifyAccessFn: typeof verifyAccess = verifyAccess,
-): Promise<Response> {
-  const authFailure = await verifyAccessFn(req, env);
+export async function handleJuniorUsageStats(req: Request, env: Env): Promise<Response> {
+  const authFailure = await verifyAccess(req, env);
   if (authFailure) return authFailure;
   if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
 
