@@ -52,6 +52,17 @@ describe("repairFailureLine — a repair verb's failure, printed whole", () => {
     expect(line).not.toContain("}");
   });
 
+  // Issue #217 review round 2: the JSON branch above returned `parsed.error`
+  // uncapped -- the plain-text branch right below it already caps with
+  // `.slice(0, MAX_CHARS)`, so a pathological `.error` string (a redacted
+  // container stderr blob, say) had no bound at all on this one path.
+  it("caps a long JSON .error the same way the plain-text branch caps everything else", () => {
+    const longReason = "x".repeat(5000);
+    const line = repairFailureLine("provision", 409, JSON.stringify({ error: longReason }));
+    expect(line.length).toBeLessThan(2100);
+    expect(line).toBe(`fleet provision: 409 ${longReason.slice(0, 2000)}`);
+  });
+
   it("a JSON body without a string .error falls through to the raw-text branch", () => {
     const line = repairFailureLine("check", 500, JSON.stringify({ ok: false }));
     expect(line).toBe(`fleet check: 500 ${JSON.stringify({ ok: false })}`);
