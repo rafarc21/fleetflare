@@ -453,3 +453,77 @@ after its own fix, committed separately and pushed immediately. Ran
 change, repo-wide `tsc --noEmit` clean, then the full `bun run test` and
 `bun run check` (gate-locked, one at a time, never concurrently) before
 reporting done.
+
+## Fix-first review round 4 (2026-10-03) — a stale borrow survives a launch
+## that lands squarely back on the primary
+
+A human-reviewer-specified fix (PR #211 approved pending this one change).
+
+### The bug
+
+`accountClears`'s `borrow` computation only ran `borrowFields` when
+`rerouted` (`plain.name !== launch.name`) was true. A studio that
+PREVIOUSLY rerouted/borrowed (its row already carries
+`borrowedAccount`/`borrowedFromRepo` from an earlier launch) and whose
+LATER launch resolves back onto the repo's own primary — because the
+primary is free again, so both `plain` (limit-unaware) and `launch`
+(limit-aware) independently agree on it — never reroutes on THIS call, so
+`rerouted` reads false and `borrowFields` never runs. The stale
+`borrowedAccount`/`borrowedFromRepo` from the prior launch survive on the
+row even though the studio is actually back on its own primary. The
+existing hand-back mechanism (failover.ts, gated on exactly
+`borrowedAccount != null`) later fires a bogus "bring it home" switch
+— including a `respawn-pane -k` kill of the lead's own pane — against a
+studio that never left, plus a false "returned" operator notification.
+
+### Fix
+
+`accountClears` (`do.ts`) now also runs `borrowFields` whenever THIS
+launch landed on the repo's own primary, not only when it rerouted away
+from one:
+
+```ts
+const primary = launchAccount(env, repo, null);
+const landedOnPrimary = primary.ok && launch.name === primary.name;
+const borrow = (rerouted || landedOnPrimary) ? borrowFields(env, repo, reserved, existing, launch) : null;
+```
+
+Safe by construction: `borrowFields`'s own internal check
+(`primary.ok && launch.name !== primary.name`) already resolves to a
+CLEAR (`{ borrowedAccount: null, borrowedFromRepo: null }`) whenever
+`launch` lands on the primary, so widening the gate never makes
+`borrowFields` SET the fields merely because this branch now runs more
+often — it only ever reaches the clear branch in the new case.
+
+### Test
+
+New test in `test/studio.account-by-repo.test.ts`: a row seeded with a
+stale `borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3"` /
+`borrowedFromRepo: "otherrepo"` from an earlier borrow, the repo's own
+mapped primary (account 2) explicitly freed (an already-expired `until`
+written for accounts 1 and 2, so the test does not depend on execution
+order against the same describe block's earlier test sharing the real D1),
+driven through the REAL `launchAccountOrRefuse(..., false)` →
+`decideAccountClears` → `applyAccountClears` commit path (the same shape
+round 3's finding-1 test already uses) — asserts the resulting row has
+BOTH `borrowedAccount: null` AND `borrowedFromRepo: null`. RED against the
+pre-fix code (`borrowedAccount` stayed `"CLAUDE_CODE_OAUTH_TOKEN_3"`);
+GREEN after.
+
+### Optional nit also fixed
+
+`failover.ts`'s hand-back guard (`runAccountFailover`) called `deps.now()`
+twice in the same `if` condition, with an `await storage.get(OPERATION_KEY)`
+sitting between the two calls — a genuine window for a tiny clock-skew
+inconsistency within one tick. Hoisted to a single local `now`, reused by
+both `accountIsFree` and `operationLockFresh`.
+
+### Verification
+
+RED commit pushed, then GREEN commit pushed. Ran
+`test/studio.account-by-repo.test.ts`, `test/studio.account-launched.test.ts`,
+`test/studio.account-failover.test.ts` together (252 tests, all green)
+before and after the fix, then — alone, gate-locked, never concurrently —
+the full `bun run test` (156 files, 5550 tests, all green) and repo-wide
+`bun run check` (`tsc --noEmit` across the root, container, cli,
+test-integration, and test configs, clean) before reporting done.
