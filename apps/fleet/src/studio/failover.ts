@@ -2724,9 +2724,10 @@ export async function runAccountFailover(
         if (stopDue) {
           // Review round 2 (#210), finding 5 Part A — writes the refusal
           // reason onto the row and stamps the bounded retry cadence
-          // BEFORE returning the outcome, so an operator reading `fleet
-          // ls`/`fleet inspect` can always see why an auto-stop has not
-          // landed, and notifies exactly ONCE for a standing, unchanged
+          // BEFORE returning the outcome, so a direct status/D1 read (and a
+          // future `fleet ls`/`fleet inspect` column, not yet wired up) can
+          // show why an auto-stop has not landed, and notifies exactly ONCE
+          // for a standing, unchanged
           // refusal — the SAME "unchanged message, no new notify" rule
           // the ordinary exhaustion message already uses just above
           // (`existing.state === "degraded" && existing.error === message`),

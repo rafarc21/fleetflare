@@ -521,11 +521,16 @@ export interface StudioStatus {
    * candidate account) — that is a deliberate operator choice, not the
    * "every account is fleet-wide limited" shape #210 is about.
    *
-   * Stamped ONCE, on the fresh-degrade write, from
-   * `existing.parkedAt ?? now` — a repeat already-degraded tick never resets
-   * it, so the clock always reads from the FIRST tick this park was
-   * observed, never the most recent one. `exhaustionKind` already carries
-   * the reason (its own field, right above); this is only the "since when".
+   * Stamped from `existing.parkedAt ?? now` ONLY when `existing.state ===
+   * "degraded"` — a genuine same-episode repeat (the same anti-loop guard's
+   * own message-text refresh, or a later refresh of this same write) — so
+   * the clock keeps reading from the FIRST tick this episode was observed.
+   * Any OTHER prior state (e.g. the studio had resumed to `"running"` since
+   * an earlier park) restarts the clock from `now`, exactly as a first-ever
+   * park would: a stale `parkedAt` surviving a stop/resume cycle must never
+   * read as already-old and trigger an immediate re-stop. `exhaustionKind`
+   * already carries the reason (its own field, right above); this is only
+   * the "since when".
    *
    * Cleared to `null` at the same sites `exhaustionKind` is cleared at: a
    * pane-visual heal (`healDegradedRowAndWake`) and an ordinary account
