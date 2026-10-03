@@ -2948,6 +2948,22 @@ export async function syncSessionCycle(
       console.error(`studio ${idFallback}: claude account failover failed`, err);
     }
   }
+  // Review round 2 (#210), FINAL round, finding B (BLOCKER, FIXED) — the
+  // failover step above can call `deps.stopParkedStudio`, which destroys the
+  // container THIS SAME TICK (the row reads "stopped" the instant that step
+  // returns). `retrySurvivalBrief` and the detached `installCacheDeps` save
+  // below both eventually exec into the container, which BOOTS a stopped one
+  // back up, billing under a row that now reads "stopped" — `isStoppedIn`
+  // (below) already guards the START of a tick (`runScheduledTick`) for
+  // exactly this reason, but that guard runs BEFORE this function is even
+  // called, so it cannot see a destroy that happens mid-tick, right here.
+  // Checked ONCE, read again below by both gated steps, rather than
+  // re-reading storage twice: cheaper, and the two steps can never disagree
+  // about what this exact point in the tick saw. Deliberately does NOT gate
+  // `checkAndRecordReadiness` (it already self-guards on `state ===
+  // "stopped"`, do.ts's own early return) or `heal` (out of this finding's
+  // scope).
+  const stoppedAfterFailover = await isStoppedIn(storage);
   let checked: StudioStatus | null = null;
   try {
     checked = await checkAndRecordReadiness(syncDeps, storage, idFallback, recordStudioFn);
@@ -2998,7 +3014,13 @@ export async function syncSessionCycle(
   //
   // Optional, exactly like `failoverDeps` and `heal`: a caller that wires none
   // runs the cycle precisely as it ran before this feature.
-  if (retrySurvivalBrief) {
+  //
+  // Review round 2 (#210), FINAL round, finding B (BLOCKER, FIXED): also
+  // skipped when the failover step above just auto-stopped this row THIS
+  // tick (see `stoppedAfterFailover`'s own doc comment above) — this retry
+  // execs into the container, which would otherwise boot a destroyed one
+  // back up.
+  if (retrySurvivalBrief && !stoppedAfterFailover) {
     try {
       await retrySurvivalBrief();
     } catch (err) {
@@ -3030,7 +3052,13 @@ export async function syncSessionCycle(
   // exactly one call, still fired last, still unawaited — the tick's own
   // deadline race above never has to know or care how many directories one
   // repo happens to cache.
-  if (installCacheDeps) {
+  //
+  // Review round 2 (#210), FINAL round, finding B (BLOCKER, FIXED): also
+  // skipped when the failover step above just auto-stopped this row THIS
+  // tick (see `stoppedAfterFailover`'s own doc comment above) — this save
+  // execs into the container too, same "would boot a destroyed one back up"
+  // gap `retrySurvivalBrief` just above was fixed for.
+  if (installCacheDeps && !stoppedAfterFailover) {
     void (async () => {
       // Round 3 review, item 3 — in-flight guard, checked BEFORE
       // runInstallCacheSaveTick is even called, two layers:
