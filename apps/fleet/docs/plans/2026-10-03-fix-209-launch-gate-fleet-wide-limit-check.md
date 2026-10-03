@@ -270,3 +270,82 @@ Ran `test/studio.account-by-repo.test.ts`, `test/studio.account-launched.test.ts
 every change; no regression in the existing tier-2/tier-3/hand-back coverage
 `studio.account-failover.test.ts` already had for `runAccountFailover`
 itself.
+
+## Fix-first review round 2 (2026-10-03) — a regression in the review-round-1
+## fix, a zero-coverage fail-open path, and a duplicated formula
+
+A second fresh-context review of PR #211 found two blocking Spec findings in
+the review-round-1 work above, plus one Standards nit. All three closed on
+the same branch/PR.
+
+### Finding 1 — `currentOutOfScope` hardcoded `false` disabled tier 1 for an
+### out-of-scope, actively-borrowed `current`
+
+Review round 1's own "Residual" note (above) stated this gap but left it
+unfixed: `launchAccountOrReroute` always called `selectFreeAccount(accounts,
+anchor, launch.name, false, ...)`. For a studio recorded on, and actively
+borrowing, an account positioned BEFORE its own mapped primary (whose
+borrowed account has ALSO since gone limited), that hardcoded `false` made
+tier 1 a **guaranteed no-op**: `scopedAccounts` never contains the
+out-of-scope `current`, so `nextClaudeAccount`'s own `idx < 0` branch
+(accounts.ts) returns null immediately — not merely "misses", but never even
+scans the repo's own in-scope chain for a free account. Tier 2
+(`accounts.slice(0, anchor)`) never covers that chain either (it is the
+slice BEFORE the anchor), so a genuinely free in-scope account was skipped
+entirely in favour of an unnecessary tier-3 borrow, or an outright refusal.
+The ORIGINAL pre-round-1 code (`nextClaudeAccount` over the full, unscoped
+list) did not have this specific bug — this was a regression review round 1
+introduced while fixing Finding A+B above.
+
+Fix: `launchAccountOrReroute` gained a new `borrowedAccount: string | null |
+undefined` parameter (threaded from the caller's own
+`existing.borrowedAccount`) and now derives `currentOutOfScope` the same way
+`failover.ts`'s own `runAccountFailover` already does —
+`borrowedAccount != null && currentIdx >= 0 && currentIdx < anchor`. The
+function's doc comment's "Residual" claim ("tiers 1/2/3 themselves are not
+weakened by it") was also corrected: tier 1 WAS a guaranteed no-op in this
+exact case, not merely a narrow residual. `do.ts`'s `launchAccountOrRefuse`
+(the one caller) now passes `existing?.borrowedAccount ?? null`.
+
+New regression test (`test/studio.account-by-repo.test.ts`): a studio
+recorded on, and actively borrowing, an account before its own mapped
+primary, where that account AND the primary are both now limited but a
+later account in the repo's own scoped chain is free — proves tier 1 picks
+the in-scope free account rather than an unnecessary tier-3 borrow of
+another repo's reserved primary.
+
+### Finding 2 — the burn-read fail-open path had zero test coverage
+
+`do.ts`'s try/catch around `readFleetAccountBurn` (added in review round 1,
+Finding C) was never actually exercised by a test: the existing
+"`env.DB.prepare` throws" test only ever breaks the LIMITS read, in a
+scenario where tier 1 already resolves — the burn callback is never
+invoked there.
+
+New test: the same tiers-1+2-miss fixture as the existing tier-3/borrow
+test, with a D1 stub that poisons ONLY the `account-burn:`-prefixed key
+(leaving the limits read hitting the real D1), asserting the launch still
+succeeds (burn treated as empty) and `console.warn` fires naming
+`readFleetAccountBurn`. Mutation-verified by temporarily removing the
+try/catch: the new test fails with an uncaught "D1 burn read unavailable"
+without it, and passes with it restored — confirming it is a genuine
+regression pin, not a tautology.
+
+### Finding 3 — duplicated `primaryIsMapped` formula (Standards)
+
+`do.ts`'s `borrowFields` carried a hand-copy of
+`StudioDO.primaryIsMapped()`'s own formula
+(`repo !== null && parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO)[repo] !==
+undefined`). Extracted into `accounts.ts` as an exported
+`primaryIsMapped(env, repo)` (alongside `parseAccountMap`, which it already
+wraps); `StudioDO.primaryIsMapped()` is now a one-line wrapper calling it
+with `this.env`/`parseStudioId(this.selfId())?.repo ?? null`. Pure
+extraction, identical behaviour — added direct unit coverage for the new
+export.
+
+### Verification
+
+Ran `test/studio.account-by-repo.test.ts`, `test/studio.account-launched.test.ts`,
+`test/studio.account-failover.test.ts` together (249 tests, all green) after
+every change, then the full `bun run test` and repo-wide `bun run check`
+(gate-locked, one at a time) before reporting done.
