@@ -527,6 +527,94 @@ describe("runDestroy", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Review round 2 (#210), finding 1 (BLOCKER, data-loss risk) — the
+// unattended auto-stop trigger (do.ts's `stopParkedStudio`) used to pass
+// `force: true` straight into `destroyStudio`, which ALSO widens
+// `guard.discardUnsynced` (that method's own, pre-existing `discardUnsynced
+// || force` wiring) — so an unattended stop could destroy WITHOUT a
+// successful rescue the instant a probe or a CONFIRMED rescue-push failed,
+// silently, with nobody there to catch the refusal and retry. The fix
+// decouples the two: `destroyStudio`'s own new `skipOpenTaskGate` argument
+// widens ONLY `runDestroy`'s own `force` param (the open-task-gate escape
+// hatch) — `guard.discardUnsynced` stays exactly what the caller's own
+// `discardUnsynced` argument says, never OR'd with it. This pins the
+// composition `destroyStudio(false, false, true, true)` (the exact call
+// `do.ts`'s `stopParkedStudio` now makes) produces at the
+// `runDestroy`/`destroyWithSync` level: `force: true` here stands in for
+// `force || skipOpenTaskGate`, `guard.discardUnsynced: false` for
+// `discardUnsynced || force` with both original arguments false — see
+// test/studio.observation.test.ts's own "destroyStudio... skipOpenTaskGate"
+// case for the complementary proof that do.ts's real method computes
+// exactly these values.
+// ---------------------------------------------------------------------------
+describe("review round 2 (#210), finding 1 — runDestroy's own force param (open-task gate) must never leak into guard.discardUnsynced", () => {
+  it("an open assigned board task alone no longer blocks: force:true skips the check entirely, even with guard.discardUnsynced false", async () => {
+    const syncDeps = fakeSyncDeps();
+    const destroy = vi.fn(async () => {});
+    const recordStudioFn = vi.fn(async () => {});
+    const storage = fakeCombinedStorage();
+    const checkOpenTask = vi.fn(async () => ({ ok: true as const, hasOpenTask: true, tasks: [90] }));
+    const guard: DestroyGuard = { containerRunning: () => true, discardUnsynced: false };
+
+    const result = await runDestroy(
+      checkOpenTask, STUDIO_ID, "acme-org/websites", true,
+      syncDeps, storage, STUDIO_ID, destroy, recordStudioFn, REPO, noopResolveMemoryRepo, noopCommit, guard,
+    );
+
+    expect(checkOpenTask).not.toHaveBeenCalled();
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.status.state).toBe("stopped");
+  });
+
+  it("a failed container probe still REFUSES even with force:true — force never bypasses it while guard.discardUnsynced is false", async () => {
+    const base = fakeSyncDeps();
+    const syncDeps: SessionSyncDeps & { execCalls: string[] } = {
+      ...base,
+      exec: async (cmd: string) => (cmd === "printf ok" ? { code: 1, stdout: "", stderr: "" } : base.exec(cmd)),
+    };
+    const destroy = vi.fn(async () => {});
+    const recordStudioFn = vi.fn(async () => {});
+    const storage = fakeCombinedStorage();
+    const checkOpenTask = vi.fn(async () => ({ ok: true as const, hasOpenTask: true }));
+    const guard: DestroyGuard = { containerRunning: () => true, discardUnsynced: false };
+
+    const result = await runDestroy(
+      checkOpenTask, STUDIO_ID, "acme-org/websites", true,
+      syncDeps, storage, STUDIO_ID, destroy, recordStudioFn, REPO, noopResolveMemoryRepo, noopCommit, guard,
+    );
+
+    expect(checkOpenTask).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason.startsWith(DESTROY_REFUSED_PREFIX)).toBe(true);
+    expect(destroy).not.toHaveBeenCalled();
+  });
+
+  it("a CONFIRMED rescue-push failure still REFUSES even with force:true — force never bypasses it while guard.discardUnsynced is false", async () => {
+    const syncDeps = fakeSyncDeps({ rescue: { code: 0, stdout: `${RESCUE_FAILED_PREFIX} agent-a1 push` } });
+    const destroy = vi.fn(async () => {});
+    const recordStudioFn = vi.fn(async () => {});
+    const storage = fakeCombinedStorage();
+    const checkOpenTask = vi.fn(async () => ({ ok: true as const, hasOpenTask: true }));
+    const guard: DestroyGuard = { containerRunning: () => true, discardUnsynced: false };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await runDestroy(
+        checkOpenTask, STUDIO_ID, "acme-org/websites", true,
+        syncDeps, storage, STUDIO_ID, destroy, recordStudioFn, REPO, noopResolveMemoryRepo, noopCommit, guard,
+      );
+
+      expect(checkOpenTask).not.toHaveBeenCalled();
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason.startsWith(DESTROY_REFUSED_PREFIX)).toBe(true);
+      expect(destroy).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
 // PR #46 review: an aside dir that could not ship before destroy is named on
 // the stopped row, like an unrescued worktree.
 describe("destroy — unshipped aside named on the row (PR #46 review)", () => {

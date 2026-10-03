@@ -392,6 +392,29 @@ describe("StudioDO wiring (source-pinned — the class cannot be constructed her
     expect(b).toContain("lastSyncedAt: () => this.lastSyncedAt()");
   });
 
+  // Review round 2 (#210), finding 1 (BLOCKER, data-loss risk) — the old
+  // `stopParkedStudio` wiring passed `force: true`, which ALSO widened
+  // `guard.discardUnsynced` via this exact `discardUnsynced || force` line,
+  // so an unattended auto-stop could destroy WITHOUT a successful rescue.
+  // `skipOpenTaskGate` must widen ONLY the `runDestroy` force param (the
+  // open-task-gate escape hatch) on the line just above it, and
+  // `discardUnsynced` must stay EXACTLY `discardUnsynced || force` —
+  // never `|| skipOpenTaskGate` too.
+  it("review round 2 (#210), finding 1: skipOpenTaskGate widens ONLY runDestroy's own force param, never guard.discardUnsynced", () => {
+    const b = body("  async destroyStudio(");
+    expect(b).toContain("workRepoSlug, force || skipOpenTaskGate,");
+    expect(b).toContain("discardUnsynced: discardUnsynced || force,");
+  });
+
+  // Review round 2 (#210), finding 1 — the fixed wiring: `force: false` (so
+  // `discardUnsynced` stays exactly `false`, never widened) and
+  // `skipOpenTaskGate: true` (so an open assigned board task alone does not
+  // block this unattended trigger).
+  it("failoverDeps wires stopParkedStudio to skip ONLY the open-task gate, never discardUnsynced", () => {
+    const b = body("  private failoverDeps(");
+    expect(b).toContain("stopParkedStudio: () => this.destroyStudio(false, false, true, true)");
+  });
+
   it("getStatusDetail forwards to statusDetailWithStorage", () => {
     expect(body("  async getStatusDetail(")).toContain("statusDetailWithStorage(this.ctx.storage");
   });
