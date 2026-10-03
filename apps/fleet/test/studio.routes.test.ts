@@ -2886,18 +2886,27 @@ describe("repair verbs name the failing side (#96)", () => {
  * `Object.assign(<err>, { remote: true })` — tagging `remote: true` is the
  * repo's own stand-in for "this error already crossed the Worker<->DO RPC
  * boundary" (Workers RPC sets that flag itself; nothing else survives the
- * boundary intact). `<err>` is now the REAL `LaunchRefusedError`/
+ * boundary intact). `<err>` carries a message computed from the REAL `LaunchRefusedError`/
  * `StartRefusedError` (do.ts), constructed the same way the DO's own code
  * constructs it, never a hand-typed `LAUNCH_REFUSED_PREFIX + "..."` string —
  * a mutation test (maestro review round, issue #217) found that hand-typed
  * version passed green even with the prefix-prepending lines deleted from
  * BOTH constructors, because the fixture already carried the prefix
  * independently of whatever the constructor did. Using the real constructor
- * means these tests can only pass if `new LaunchRefusedError(reason).message`
- * genuinely starts with `LAUNCH_REFUSED_PREFIX` (ditto `StartRefusedError`/
- * `START_REFUSED_PREFIX`) — the one property `launchOrStartRefusalResponse`
- * actually depends on, pinned at its real source instead of asserted by
- * construction.
+ * to compute the message means these tests can only pass if
+ * `new LaunchRefusedError(reason).message` genuinely starts with
+ * `LAUNCH_REFUSED_PREFIX` (ditto `StartRefusedError`/`START_REFUSED_PREFIX`)
+ * — the one property `launchOrStartRefusalResponse` actually depends on,
+ * pinned at its real source instead of asserted by construction. The object
+ * that actually crosses the simulated RPC boundary, though, is a plain
+ * `Error` wrapping that message — never the `LaunchRefusedError`/
+ * `StartRefusedError` instance itself — because real Workers RPC strips
+ * subclass identity when an error crosses the Worker<->DO boundary; only
+ * `.message` (and explicitly-tagged properties like `remote: true`) survive
+ * (a follow-up mutation test, issue #225, found that keeping the subclass
+ * identity in the fixture let a `constructor === Error` guard mutant survive
+ * undetected in `launchOrStartRefusalResponse`, since no fixture ever
+ * produced a plain `Error` the way real crossed errors always do).
  */
 describe("LaunchRefusedError/StartRefusedError surface as 409, not an uncaught 500 (#217)", () => {
   const EARLIEST_RESET_REASON = "claude account: every account limited; earliest reset 2026-10-03T12:00:00.000Z";
@@ -2908,7 +2917,7 @@ describe("LaunchRefusedError/StartRefusedError surface as 409, not an uncaught 5
   ] as const) {
     it(`${action}: a LaunchRefusedError (every account fleet-wide limited) is a 409 naming the earliest reset, never an uncaught throw`, async () => {
       authorized();
-      const refusal = Object.assign(new LaunchRefusedError(EARLIEST_RESET_REASON), { remote: true });
+      const refusal = Object.assign(new Error(new LaunchRefusedError(EARLIEST_RESET_REASON).message), { remote: true });
       const res = await handleStudio(
         authorizedReq(`/studio/${STUDIO_ID}/${action}`, init), envWithThrowingVerb(method, refusal),
       );
@@ -2921,7 +2930,7 @@ describe("LaunchRefusedError/StartRefusedError surface as 409, not an uncaught 5
     it(`${action}: a StartRefusedError (a destroy raced the op's own first start) is also a 409, never an uncaught throw`, async () => {
       authorized();
       const refusal = Object.assign(
-        new StartRefusedError(`studio ${STUDIO_ID} is stopped — \`ff ${STUDIO_ID}\` to start it`),
+        new Error(new StartRefusedError(`studio ${STUDIO_ID} is stopped — \`ff ${STUDIO_ID}\` to start it`).message),
         { remote: true },
       );
       const res = await handleStudio(
@@ -2935,7 +2944,7 @@ describe("LaunchRefusedError/StartRefusedError surface as 409, not an uncaught 5
 
   it("recycle: a LaunchRefusedError (recycle()'s own entry-time refusal, before recycleWithSync ever runs) is a 409 naming the reason", async () => {
     authorized();
-    const refusal = Object.assign(new LaunchRefusedError(EARLIEST_RESET_REASON), { remote: true });
+    const refusal = Object.assign(new Error(new LaunchRefusedError(EARLIEST_RESET_REASON).message), { remote: true });
     const res = await handleStudio(
       authorizedReq(`/studio/${STUDIO_ID}/recycle`, { method: "POST" }), envWithThrowingVerb("recycle", refusal),
     );

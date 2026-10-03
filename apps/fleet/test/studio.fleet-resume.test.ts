@@ -287,7 +287,7 @@ describe("POST /fleet/spawn {resume: true} — one resume at a time", () => {
       idFromName: (name: string) => name as unknown as DurableObjectId,
       get: () => ({
         provision: async () => {
-          throw Object.assign(new LaunchRefusedError("every account fleet-wide limited"), { remote: true });
+          throw Object.assign(new Error(new LaunchRefusedError("every account fleet-wide limited").message), { remote: true });
         },
       }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
     };
@@ -308,7 +308,7 @@ describe("POST /fleet/spawn {resume: true} — one resume at a time", () => {
       idFromName: (name: string) => name as unknown as DurableObjectId,
       get: () => ({
         provision: async () => {
-          throw Object.assign(new StartRefusedError("studio websites--web-studio--5 is stopped"), { remote: true });
+          throw Object.assign(new Error(new StartRefusedError("studio websites--web-studio--5 is stopped").message), { remote: true });
         },
       }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
     };

@@ -107,7 +107,7 @@ describe('runSpawn — instance allocation is atomic (#296)', () => {
     const res = await runSpawn(
       realDeps({
         provisionChild: async () => {
-          throw Object.assign(new LaunchRefusedError("every account fleet-wide limited"), { remote: true });
+          throw Object.assign(new Error(new LaunchRefusedError("every account fleet-wide limited").message), { remote: true });
         },
       }),
       PARENT, { role: "release", instance: "next" },
@@ -123,7 +123,7 @@ describe('runSpawn — instance allocation is atomic (#296)', () => {
     const res = await runSpawn(
       realDeps({
         provisionChild: async () => {
-          throw Object.assign(new StartRefusedError("studio websites--release--2 is stopped"), { remote: true });
+          throw Object.assign(new Error(new StartRefusedError("studio websites--release--2 is stopped").message), { remote: true });
         },
       }),
       PARENT, { role: "release", instance: "next" },
