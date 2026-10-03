@@ -8,7 +8,11 @@ import type { Observed } from "./observed";
 // constant's own home rather than through burn.ts, so this file shares no
 // import edge with burn.ts's cursor code.
 import { BURN_WINDOW_MS } from "./archive";
-import { launchAccount, accountLabel, autoFailoverOn } from "./accounts";
+import {
+  launchAccountOrReroute, accountLabel, autoFailoverOn, otherRepoPrimaries, resolveClaudeAccounts,
+  type AccountLimits,
+} from "./accounts";
+import { readFleetAccountLimits } from "./account-limits-store";
 import { parseStudioId } from "./ids";
 
 // src/agents/registry.ts (the pattern this follows) is a hardcoded static
@@ -270,12 +274,32 @@ export async function recordStudio(env: Env, status: StudioStatus): Promise<void
  * repo's mapped primary (CLAUDE_ACCOUNT_BY_REPO); the label is
  * CLAUDE_ACCOUNT_<n>_LABEL. Names and labels only, never a token. No map and
  * no label: the row comes back unchanged.
+ *
+ * Issue #213: `claudeAccountNext` used to be stamped by the plain,
+ * limit-UNAWARE `launchAccount` — a fleet-wide rate-limited mapped/recorded
+ * account showed as "next" even though the real launch gate
+ * (`launchAccountOrRefuse`, do.ts) would reroute around it via
+ * `launchAccountOrReroute`'s three-tier cascade. Calling the SAME
+ * reroute-aware function here means this column can never disagree with
+ * where a real launch would actually land. `limits`/`reserved`/`now` are the
+ * caller's (listStudios below): `limits` is one shared D1 read for the whole
+ * `fleet ls` call, not one per row; `reserved` depends on the row's own repo
+ * so it is still computed per row. `readBurn` is deliberately left at its
+ * default (`async () => ({})`) — tier-3 borrow-account selection falls back
+ * to list order instead of lowest-5h-burn for this display-only column, to
+ * avoid importing `readFleetAccountBurn` (do.ts), which would drag in
+ * `@cloudflare/sandbox` and break this file's sandbox-free import boundary
+ * (the same boundary issue #217 fixed for routes.ts).
  */
-export function withAccountDisplay(env: Env, row: StudioStatus): StudioStatus {
+export async function withAccountDisplay(
+  env: Env, row: StudioStatus, limits: AccountLimits, reserved: Set<string>, now: Date,
+): Promise<StudioStatus> {
   // #273 r2: with auto-failover off, a claudeAccount an EARLIER failover
   // recorded is not what launches (launchAccount ignores it).
   const recorded = autoFailoverOn(env) ? row.claudeAccount ?? null : null;
-  const next = launchAccount(env, parseStudioId(row.id)?.repo ?? null, recorded);
+  const next = await launchAccountOrReroute(
+    env, parseStudioId(row.id)?.repo ?? null, recorded, limits, reserved, now, row.borrowedAccount,
+  );
 
   // #289: the account the container was LAUNCHED on, with the next launch's
   // account as a note when a map (or failover) change has not reached it.
@@ -357,6 +381,23 @@ export async function listStudios(env: Env, now: Date = new Date()): Promise<Stu
     .prepare(`SELECT value FROM fleet_state WHERE key LIKE ? ORDER BY key ASC`)
     .bind(`${STUDIO_KEY_PREFIX}%`)
     .all<{ value: string }>();
+  // Issue #213: one shared D1 read for the WHOLE listing, not one per row --
+  // `launchAccountOrReroute`'s own early return (`if (!launch.ok ||
+  // !autoFailoverOn(env)) return launch;`) means `limits` is never even
+  // looked at when failover is off, so the read is skipped entirely then
+  // (fail-OPEN to "nothing is limited", `{}`, the same no-signal convention
+  // do.ts's own launchAccountOrRefuse uses at its own `limits` read -- see
+  // that function's `let limits = {}; try { ... } catch { ... }` for the
+  // exact pattern mirrored here, including warn-and-continue on a transient
+  // D1 failure rather than failing the whole listing over it).
+  let limits: AccountLimits = {};
+  if (autoFailoverOn(env)) {
+    try {
+      limits = await readFleetAccountLimits(env.DB, resolveClaudeAccounts(env));
+    } catch (err) {
+      console.warn("listStudios: readFleetAccountLimits failed, showing next-launch as if nothing were fleet-wide limited (fail open)", err);
+    }
+  }
   const rows: StudioStatus[] = [];
   for (const r of res.results ?? []) {
     // Review round 2, Spec 5: one malformed row (hand-edited D1 data, a
@@ -364,7 +405,8 @@ export async function listStudios(env: Env, now: Date = new Date()): Promise<Stu
     // must not fail the whole listing for every other studio.
     try {
       const row = JSON.parse(r.value) as StudioStatus;
-      rows.push(withAccountDisplay(env, { ...row, burn: expireBurnWindow(row.burn, now) }));
+      const reserved = otherRepoPrimaries(env, parseStudioId(row.id)?.repo ?? null);
+      rows.push(await withAccountDisplay(env, { ...row, burn: expireBurnWindow(row.burn, now) }, limits, reserved, now));
     } catch (err) {
       console.error("listStudios: skipping a malformed fleet_state row", err);
     }
