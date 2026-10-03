@@ -1043,6 +1043,22 @@ export function rescuePushCmd(
     // shared rescue_check_ahead() above -- `wall` deliberately omitted (see
     // that function's own doc comment): this file was real, not a tool
     // marker, so it must never be read as "markers-only" on its own.
+    //
+    // Board issue #216 review (minor, accepted tradeoff): `wall` was captured
+    // ONCE, at this function's own top, before this branch knew the dirty
+    // tree would turn out to revert to HEAD -- it can ALSO hold an unrelated,
+    // genuinely marker-only file dirty in the SAME worktree at the same time.
+    // Omitting it wholesale (rather than passing it through) loses that
+    // signal too: such a worktree now reports RESCUE_CLEAN here instead of
+    // RESCUE_MARKERS_ONLY. No work is lost either way (nothing is pushed in
+    // either outcome) -- only the reported status is less precise than
+    // before this fix existed. Filtering `wall` down to exclude just the
+    // reverted path(s) instead of dropping it wholesale was considered and
+    // rejected: `wall` (unscoped `status --porcelain`, captured before
+    // `${scope}` was known) and `wstatus`/`$tree` (both scoped, captured
+    // after) do not share a format simple enough to diff line-for-line
+    // without risking reintroducing the exact bug this fix closed. Do not
+    // "fix" this back to passing `wall` through unfiltered.
     `    if [ "$tree" = "$(git -C "$w" rev-parse "HEAD^{tree}" 2>/dev/null)" ]; then rescue_check_ahead "$w" "$id" "$mode"; return; fi\n` +
     // MAJOR fix (survival brief review): every rescue commit this file
     // produces now names the real branch it came from, as a git trailer
@@ -1656,6 +1672,22 @@ export function rescueSnapshotCmd(
     // shared rescue_check_ahead() above -- `wall` deliberately omitted (see
     // that function's own doc comment): this file was real, not a tool
     // marker, so it must never be read as "markers-only" on its own.
+    //
+    // Board issue #216 review (minor, accepted tradeoff): `wall` was captured
+    // ONCE, at this function's own top, before this branch knew the dirty
+    // tree would turn out to revert to HEAD -- it can ALSO hold an unrelated,
+    // genuinely marker-only file dirty in the SAME worktree at the same time.
+    // Omitting it wholesale (rather than passing it through) loses that
+    // signal too: such a worktree now reports RESCUE_CLEAN here instead of
+    // RESCUE_MARKERS_ONLY. No work is lost either way (nothing is pushed in
+    // either outcome) -- only the reported status is less precise than
+    // before this fix existed. Filtering `wall` down to exclude just the
+    // reverted path(s) instead of dropping it wholesale was considered and
+    // rejected: `wall` (unscoped `status --porcelain`, captured before
+    // `${scope}` was known) and `wstatus`/`$tree` (both scoped, captured
+    // after) do not share a format simple enough to diff line-for-line
+    // without risking reintroducing the exact bug this fix closed. Do not
+    // "fix" this back to passing `wall` through unfiltered.
     `    if [ "$tree" = "$(git -C "$w" rev-parse "HEAD^{tree}" 2>/dev/null)" ]; then rescue_check_ahead "$w" "$id" "$mode"; return; fi\n` +
     // MAJOR fix (survival brief review): same `Rescued-From: <branch>`
     // trailer rescuePushCmd's own rescue_one() now adds to its real commit —
