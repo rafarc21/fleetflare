@@ -3728,6 +3728,7 @@ export async function launchAccountOrRefuse(
   // this gate into refusing a launch a borrow could otherwise have served.
   const launch = await launchAccountOrReroute(
     env, repo, existing?.claudeAccount ?? null, limits, reserved, new Date(),
+    existing?.borrowedAccount ?? null,
     async () => {
       try {
         return await readFleetAccountBurn(env.DB, resolveClaudeAccounts(env));

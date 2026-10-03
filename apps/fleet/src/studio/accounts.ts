@@ -589,14 +589,23 @@ export function launchAccount(env: ClaudeAccountEnv, repo: string | null, record
  * `anchor`: this repo's own mapped primary position (`launchAccount(env,
  * repo, null)`'s own resolution, the identical "mapped slot, or the first
  * set account" rule `primaryAccount()` (do.ts) already uses), or 0 when that
- * cannot itself launch. RESIDUAL, stated rather than silently assumed: this
- * function always treats the resolved account as IN scope
- * (`currentOutOfScope: false`) — the one case that is not is a studio
- * restarting while actively borrowing an account positioned BEFORE its own
- * primary, whose borrowed account has ALSO since gone limited, a narrow edge
- * this function is not handed `existing.borrowedAccount` to detect. Every
- * other studio (never borrowed, or borrowed onto something at/after its own
- * primary) is unaffected, and tiers 1/2/3 themselves are not weakened by it.
+ * cannot itself launch.
+ *
+ * `currentOutOfScope` (fresh-context review of PR #211, finding 1 — the
+ * ORIGINAL version of this function hardcoded this `false` unconditionally,
+ * which disabled tier 1 ENTIRELY for a studio restarting while actively
+ * borrowing an account positioned BEFORE its own primary: `scopedAccounts`
+ * never contains that account, so `nextClaudeAccount`'s own `idx < 0` branch
+ * returned null immediately, and `accounts.slice(0, anchor)` — tier 2 — never
+ * covers the in-scope chain either, so a genuinely free in-scope account was
+ * skipped entirely in favour of an unnecessary tier-3 borrow, or an outright
+ * refusal): derived the identical way failover.ts's own `runAccountFailover`
+ * already does — `borrowedAccount != null` (this studio IS actively
+ * borrowing something, caller-supplied, the same `existing.borrowedAccount`
+ * failover.ts's own `borrowedActive` reads) AND the resolved account's own
+ * position is BEFORE `anchor`. Every other studio (never borrowed, or
+ * borrowed onto something at/after its own primary) computes `false` here,
+ * same as the function's pre-existing behaviour and tests.
  *
  * Gated on `autoFailoverOn(env)`, same as every other reroute/switch
  * mechanism in this file: with failover off nothing ever moves a studio
@@ -612,6 +621,7 @@ export function launchAccount(env: ClaudeAccountEnv, repo: string | null, record
 export async function launchAccountOrReroute(
   env: ClaudeAccountEnv, repo: string | null, recorded: string | null | undefined,
   limits: AccountLimits, reserved: Set<string>, now: Date = new Date(),
+  borrowedAccount: string | null | undefined = null,
   readBurn: () => Promise<Record<string, { window5hOutput: number }>> = async () => ({}),
 ): Promise<LaunchAccount> {
   const launch = launchAccount(env, repo, recorded);
@@ -621,7 +631,9 @@ export async function launchAccountOrReroute(
   if (resolved === undefined || accountIsFree(resolved, limits, now)) return launch;
   const primary = launchAccount(env, repo, null);
   const anchor = primary.ok ? Math.max(0, accounts.findIndex((a) => a.name === primary.name)) : 0;
-  const free = selectFreeAccount(accounts, anchor, launch.name, false, reserved, limits, now);
+  const currentIdx = accounts.findIndex((a) => a.name === launch.name);
+  const currentOutOfScope = borrowedAccount != null && currentIdx >= 0 && currentIdx < anchor;
+  const free = selectFreeAccount(accounts, anchor, launch.name, currentOutOfScope, reserved, limits, now);
   if (free !== null) return { ok: true, name: free.name, token: free.token };
   const borrowed = nextBorrowedAccount(accounts, reserved, limits, await readBurn(), now);
   if (borrowed !== null) return { ok: true, name: borrowed.name, token: borrowed.token };
