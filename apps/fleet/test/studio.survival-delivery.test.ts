@@ -341,6 +341,35 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
   });
 
   /**
+   * MAJOR fix (#216 item 1, round-2 follow-up on #212): `sources.rescueBranches()`
+   * used to be called ONLY inside the `unresolved.length > 0` branch, so a
+   * studio where every task already resolves a branch via source 1 or 2 — or
+   * a studio with zero tasks at all — never fetched rescue refs, even when a
+   * genuine `fleet/rescue/<studio>-<ts>` ref sat on origin (e.g. from a
+   * periodic WIP sync, or a rescue that landed after the task's PR was
+   * already resolved). The lead was never told it existed. The fetch must run
+   * unconditionally; attribution still only makes sense with something
+   * unresolved to attribute to, but `unclaimedRescueBranches` must be "every
+   * fetched ref minus whichever one got attributed" regardless.
+   */
+  it("#216 item 1 — rescue refs are fetched even when EVERY task already has a resolved branch", async () => {
+    const ref = `fleet/rescue/${STUDIO}-20260925120000`;
+    const rescueBranches = vi.fn(async () => [ref]);
+    const pull = vi.fn(async () => ({ headRef: "already-resolved-branch", title: "PR" }));
+    const input = await resolveSurvivalInput(
+      sources({ pull, rescueBranches }),
+      { ok: true, value: [task({ artifacts: [{ kind: "pr", pr: "150" }] })] },
+      null, NOW,
+    );
+    // The bug: this used to never be called because `unresolved.length` was 0.
+    expect(rescueBranches).toHaveBeenCalled();
+    expect(input.tasks).toEqual({
+      ok: true, value: [expect.objectContaining({ branch: "already-resolved-branch" })],
+    });
+    expect(input.unclaimedRescueBranches).toEqual([ref]);
+  });
+
+  /**
    * MAJOR fix (fresh-context review on #207, 2026-10-03): two rescue refs for
    * one unresolved task used to be AMBIGUOUS-AND-SILENTLY-DROPPED —
    * `attributeRescueBranch` correctly refuses to guess (its own doc comment:

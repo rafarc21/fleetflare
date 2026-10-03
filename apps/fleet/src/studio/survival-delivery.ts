@@ -430,15 +430,23 @@ export async function resolveSurvivalInput(
   // carries every ref this attribution attempt did NOT assign to a task,
   // so `composeSurvivalBrief` can render it as its own line instead of
   // dropping it.
+  //
+  // MAJOR fix (#216 item 1, 2026-10-03): `sources.rescueBranches()` must be
+  // fetched UNCONDITIONALLY. It used to live inside the `unresolved.length >
+  // 0` guard, so a studio where EVERY task already resolved a branch via
+  // source 1/2 -- or a studio with zero tasks at all -- never fetched rescue
+  // refs, and a genuine rescue ref sitting on origin (e.g. a periodic WIP
+  // sync, or a rescue that landed after the task's PR was already resolved)
+  // was never shown. Attribution still only makes sense with something
+  // unresolved to attribute to, so that part alone stays gated.
+  const refs = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
   const unresolved = resolved.filter((r) => r.branch === null);
-  let unclaimedRescueBranches: string[] = [];
+  let unclaimedRescueBranches: string[] = refs;
   if (unresolved.length > 0) {
-    const refs = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
     const attributed = attributeRescueBranch(unresolved.length, refs);
     if (attributed !== null) {
       unresolved[0]!.branch = attributed;
-    } else {
-      unclaimedRescueBranches = refs;
+      unclaimedRescueBranches = refs.filter((r) => r !== attributed);
     }
   }
 
