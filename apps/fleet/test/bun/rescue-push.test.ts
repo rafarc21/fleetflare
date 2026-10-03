@@ -1892,21 +1892,45 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
     expect(sh(`git -C ${origin} for-each-ref --format='%(refname)' refs/heads/task/lead`).out).toBe("");
   });
 
-  // Issue #207: a test used to live here ("rescuePushCmd, non-fast-forward
-  // on the private remote: the -nff fallback ALSO lands on the private
-  // remote") whose precondition was a real, checked-out `task/lead` branch
-  // colliding with an unrelated `task/lead` history already pushed to the
-  // private remote by a second clone — the same unreachable-precondition
-  // problem "#263 N3" (above) had, for the identical reason: the first push
-  // attempt is now always a freshly generated ref, which nothing already on
-  // the private remote can collide with by real-branch name. The identical
-  // mechanism is still proven reachable for `rescueSnapshotCmd` further down
-  // this same describe block ("its generated ref already taken on the
-  // private remote: the -nff fallback ALSO lands there") via a deterministic
-  // generated-ref collision (`date`-shimmed), and for `rescuePushCmd` itself
-  // under this same block's nested "issue #16" shallow-checkout fixture —
-  // this is the same already-accepted gap rescueSnapshotCmd's own HOLD-round
-  // comment documents for its own NFF-retry call site.
+  // Issue #207: the test that used to live here ("rescuePushCmd,
+  // non-fast-forward on the private remote: the -nff fallback ALSO lands on
+  // the private remote") had its precondition retired — a real, checked-out
+  // `task/lead` branch colliding with an unrelated `task/lead` history
+  // already pushed to the private remote by a second clone — the same
+  // unreachable-precondition problem "#263 N3" (above) had, for the
+  // identical reason: the first push attempt is now always a freshly
+  // generated ref, which nothing already on the private remote can collide
+  // with by real-branch name. Same deterministic generated-ref collision
+  // technique as "#371 review Finding 1" (above) and the `rescueSnapshotCmd`
+  // equivalent further down this same describe block ("its generated ref
+  // already taken on the private remote: the -nff fallback ALSO lands
+  // there"): `date -u +%Y%m%d%H%M%S` is PATH-shimmed to a fixed value, and
+  // that EXACT generated ref name is squatted on the PRIVATE remote by an
+  // unrelated commit first, so `rescuePushCmd`'s own first attempt is
+  // rejected non-fast-forward and its `-nff` retry fires, landing on the
+  // private remote — never origin.
+  test("rescuePushCmd, its generated ref already taken on the private remote: the -nff fallback ALSO lands there", () => {
+    const shimDir = join(dir, "date-shim-push-priv-nff");
+    mkdirSync(shimDir);
+    writeFileSync(
+      join(shimDir, "date"),
+      "#!/bin/sh\nif [ \"$1\" = \"-u\" ] && [ \"$2\" = \"+%Y%m%d%H%M%S\" ]; then echo 20261003130000; exit 0; fi\n" +
+        "for d in /bin/date /usr/bin/date; do [ -x \"$d\" ] && exec \"$d\" \"$@\"; done\n",
+    );
+    chmodSync(join(shimDir, "date"), 0o755);
+    const other = join(dir, "other-clone-push-priv-nff");
+    sh(`git clone -q ${origin} ${other} 2>/dev/null && git -C ${other} commit -q --allow-empty -m squat && ` +
+      `git -C ${other} push -q ${priv} HEAD:refs/heads/fleet/rescue/${STUDIO}-20261003130000`);
+    writeFileSync(join(checkout, "notes.md"), "private work racing a collision\n");
+
+    const out = sh(rescuePushCmd(REPO, STUDIO, root, undefined, undefined, undefined, undefined, undefined,
+      { remoteUrl: priv, realGit: REAL_GIT }), dir, { PATH: `${shimDir}:${BASE_PATH}` }).out;
+
+    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/checkout-nff-20261003130000 1 files$`, "m"));
+    expect(privRefs()).toContain(`refs/heads/fleet/rescue/${STUDIO}/wt/checkout-nff-20261003130000`);
+    expect(rescueRefs()).toEqual([]);
+  });
 
   test("rescuePushCmd, branch walk: a not-checked-out branch's commits land on the private remote, NOT origin", () => {
     sh(`cd ${checkout} && git checkout -q -b feat && git commit -q --allow-empty -m "feat work" && git checkout -q main`);

@@ -830,7 +830,7 @@ export function rescuePushCmd(
     // would always be 1 — removed, along with `rescue_push()`'s own
     // conditional on it; see that function's own comment below.
     `rescue_target() {\n` +
-    `  local mode="$2" id="$3"\n` +
+    `  local mode="$1" id="$2"\n` +
     `  if [ "$mode" = "checkout" ]; then\n` +
     `    target="fleet/rescue/${studio}-$(date -u +%Y%m%d%H%M%S)"\n` +
     `  else\n` +
@@ -937,7 +937,7 @@ export function rescuePushCmd(
     `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id status"; fail=$((fail+1)); return; fi\n` +
     `  if [ -n "$wstatus" ]; then\n` +
     `    wn=$(printf '%s\\n' "$wstatus" | wc -l | tr -d ' ')\n` +
-    `    rescue_target "$w" "$mode" "$id"\n` +
+    `    rescue_target "$mode" "$id"\n` +
     `    if ! git -C "$w" add -A ${scope}; then echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
     `    if ! git -C "$w" ${identity} commit -q --no-verify -m "fleet: rescue-push before teardown"; then echo "${RESCUE_FAILED_PREFIX} $id commit"; fail=$((fail+1)); return; fi\n` +
     // Issue #371: checked once, before this logical push attempt (rescue_push's
@@ -981,7 +981,7 @@ export function rescuePushCmd(
     `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
     // Issue #49: already an origin tip = already saved, nothing to push.
     `    if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
-    `      rescue_target "$w" "$mode" "$id"\n` +
+    `      rescue_target "$mode" "$id"\n` +
     // Issue #371: same single check ahead of the attempt+nff-retry pair as
     // the dirty-tree branch above.
     // #371 review Finding 1: `mult=2`, same reasoning as the dirty-tree
