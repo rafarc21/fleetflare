@@ -27,7 +27,7 @@ import {
   RESETS, isResetStale, parseResetUtc, LIMIT_SIGHTING_KEY, type LimitSighting, type RateLimitObservation,
 } from "./rate-limit";
 import { FLEET_TOKEN_ENV, tokenEnv } from "./credentials";
-import type { StudioStatus } from "./types";
+import type { StudioStatus, DestroyOutcome } from "./types";
 import { STUDIO_TMUX, withStudioTmux } from "./tmux";
 
 export { FLEET_TOKEN_ENV };
@@ -41,13 +41,6 @@ import { parseStudioId } from "./ids";
 // module-load cycle, MEASURED). `import type` is erased entirely at compile
 // time, so this line carries no runtime import at all.
 import type { GatedWakeDeps, WakeExec } from "./wake";
-// Review round 1 (#210), finding 1 — TYPE only, same reason GatedWakeDeps
-// above is: destroy.ts itself imports real VALUES from do.ts (rescuePush,
-// harvestLearnings, …), so a runtime import here would pull in do.ts's own
-// "@cloudflare/sandbox" chain, exactly what this file's own header says it
-// never does. `import type` is erased at compile time, so this carries none
-// of that.
-import type { DestroyOutcome } from "./destroy";
 
 // ---------------------------------------------------------------------------
 // Detection
