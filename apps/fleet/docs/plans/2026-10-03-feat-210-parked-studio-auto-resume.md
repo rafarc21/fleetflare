@@ -167,6 +167,17 @@ leftover `exhaustionKind`/`parkedAt` an operator's own deliberate park
 invented; verified by reading `destroy.ts` before concluding this, per the
 task's own instruction.
 
+Review round 1 correction: the paragraph above, as first written, implied an
+operator could read this distinction off `fleet ls`. Checked against
+`cli/readiness-format.ts` directly (both the table formatter and
+`LsJsonRow`/the `--json` output it builds): neither renders `parkedAt` or
+`exhaustionKind` anywhere today — a stopped row's `fleet ls` line looks
+identical whether it got there via auto-stop or a manual `--park`. The data
+is genuinely recorded and queryable (a direct D1/row read, or a future `fleet
+ls` addition), just not surfaced in any CLI view yet; that is a separate,
+not-yet-scoped follow-up, not something this feature already gives an
+operator for free.
+
 ## Test list (`test/studio.parked-auto-resume.test.ts`)
 
 1. Fresh genuine exhaustion (every account limited, `parkedOn === null`) ->
@@ -217,3 +228,85 @@ task's own instruction.
   branch). Rare (requires a live operator action mid-incident) and
   self-correcting the moment any later tick heals the row normally; not
   fixed here to keep this change narrowly scoped to the three asks.
+
+## Review round 1 (fresh-context review, 2026-10-03)
+
+Two blocking findings, one doc nit. TDD throughout: a RED commit for both
+code findings, pushed, then the fix, pushed.
+
+**Finding 1 (severe) — auto-stop could silently no-op and lie about
+success.** `do.ts`'s `stopParkedStudio` passed `force=false` into
+`destroyStudio`. `destroy.ts`'s own `runDestroy` refuses (fail-closed) a
+non-forced destroy whenever the studio has an open assigned board task, or
+whenever that check itself cannot confirm — and a studio genuinely stuck
+parked mid-task almost always has exactly that (that is why it is still
+running). So the realistic case: `destroyStudio` silently refused, no rescue
+ran, the container stayed up billing — yet `FailoverDeps.stopParkedStudio`
+was typed `Promise<void>`, so `runAccountFailover`'s own call site reported
+`"auto-stopped"` unconditionally regardless of what actually happened.
+
+Fix: `do.ts` now wires `stopParkedStudio: () => this.destroyStudio(true,
+false, true)` — `force: true` because this specific trigger is unattended
+(nobody is there to retry with `--force` the way an operator would).
+Confirmed by reading `destroy.ts` first that `force` skips ONLY the
+open-task refusal gate; `destroyWithSync`'s own rescue-push/session-sync/
+learning-harvest sequence is never gated on it and still runs in full
+whenever the container answers its probe (pinned by
+`test/studio.destroy.test.ts`'s own pre-existing "--force overrides the
+refusal... the full destroy sequence proceeds" case — reused, not
+reinvented). One pre-existing side effect worth naming rather than hiding:
+`destroyStudio`'s own `discardUnsynced: discardUnsynced || force` wiring
+means `force` ALSO turns a probe-failure/rescue-push-confirmed-failure
+refusal into "proceed anyway" — exactly what an operator's own `--force`
+already does today, not a new behavior this wiring introduces.
+`discardUnsynced` itself stays `false`, a separate human choice this
+automated call never makes.
+
+`FailoverDeps.stopParkedStudio` now returns the real `DestroyOutcome`
+instead of `void`. `runAccountFailover`'s call site reports a NEW outcome
+kind, `"park-refused"` (carrying the refusal `reason`, or a caught throw's
+message), whenever the stop did not actually happen, instead of claiming
+`"auto-stopped"`. Tests (`test/studio.parked-auto-resume.test.ts`): a
+refusal reports `park-refused`; a throw ALSO reports `park-refused`
+(fail-safe, never fail-open); a genuine success still reports
+`auto-stopped` exactly as before. A wiring-level test
+(`test/studio.account-failover.test.ts`, alongside the existing
+`failoverDeps()` tests that call the real `StudioDO.prototype.failoverDeps`
+on a fake `this`) pins that `destroyStudio` is called with
+`(true, false, true)` and that the real outcome rides back unchanged.
+
+**Finding 2 (moderate) — the free-account check didn't match the real
+selection for an active-borrow, out-of-scope `current`.** `anyAccountFreeToResume`'s
+tier-1 check always called `nextClaudeAccount(scopedAccounts, current, ...)`,
+but the REAL selection (`runAccountFailover`'s own `candidate`) branches on
+`currentOutOfScope` first: `firstFreeAccount(scopedAccounts, ...)` instead,
+whenever an active borrow's `current` sits before the search anchor (no
+position to step forward from — `nextClaudeAccount` returns null
+immediately, current not found). Fixed by threading the SAME
+`currentOutOfScope` boolean the real selection already computes into
+`anyAccountFreeToResume`, and branching identically.
+
+Only ever observable with auto-failover OFF: with it on, the real
+`candidate` computation (already correctly `currentOutOfScope`-aware) finds
+the same free account on the exact same tick and switches away before
+`anyAccountFreeToResume` is ever reached — proven by first writing the
+literal repro the review asked for (active borrow, auto-failover ON, an
+account within the scoped chain frees) and observing it already produces
+`"switched"`, never reaching the buggy branch at all. The reachable repro
+needs auto-failover off, a genuine exhaustion first (so `parkedAt` stamps),
+then the free account creating a `"parked"` (#271-shaped) message on one
+tick and the SAME message again on the next (so the anti-loop guard's
+`existing.error === message` matches and the `anyAccountFreeToResume`
+branch is actually entered) — see the new
+"review round 1, finding 2" describe block in
+`test/studio.parked-auto-resume.test.ts` for the full three-tick fixture.
+
+**Doc nit.** This file's own "Distinguishing an auto-stop..." paragraph
+(above) originally implied an operator could read the auto-stop/manual-park
+distinction off `fleet ls`. Checked `cli/readiness-format.ts` directly:
+neither the table formatter nor `LsJsonRow`/`--json` renders `parkedAt` or
+`exhaustionKind` anywhere today. Corrected in place (see that paragraph's
+own "Review round 1 correction" addendum) rather than left overclaiming.
+Judged a one-line `fleet ls` surfacing of these fields as its own,
+not-yet-scoped follow-up (a new table column/JSON field plus its own tests)
+rather than folding it into this already-multi-part fix.
