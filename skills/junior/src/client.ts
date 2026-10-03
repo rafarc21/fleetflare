@@ -43,11 +43,14 @@ function parseLoose(text: string): Json | undefined {
 }
 
 export async function callOnce(
-  t: Transport, req: ChatRequest, fetchImpl: typeof fetch, signal?: AbortSignal,
+  t: Transport, req: ChatRequest, fetchImpl: typeof fetch, signal?: AbortSignal, mode: "edit" | "text" = "edit",
 ): Promise<ChatResult> {
   const url = t.kind === "proxy" ? `${t.url}/fleet/junior` : `${t.base}/accounts/${t.accountId}/ai/v1/chat/completions`;
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (t.kind === "proxy") headers["X-Fleet-Spawn-Token"] = t.spawnToken;
+  // Issue #218: the mode header only ever reaches the fleet Worker proxy.
+  // Direct transport posts straight to Cloudflare's real chat-completions
+  // API, which must receive exactly what it receives today — no extra header.
+  if (t.kind === "proxy") { headers["X-Fleet-Spawn-Token"] = t.spawnToken; headers["X-Junior-Mode"] = mode; }
   else headers.authorization = `Bearer ${await t.token()}`;
   const res = await fetchImpl(url, { method: "POST", headers, body: JSON.stringify(req), signal });
   const text = await res.text();
@@ -106,6 +109,9 @@ export interface PolicyOpts {
   models: string[];
   messages: ChatMessage[];
   maxTokens: number;
+  /** Issue #218: forwarded to callOnce's X-Junior-Mode header (proxy
+   *  transport only). Defaults to "edit", same as callOnce's own default. */
+  mode?: "edit" | "text";
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   signal?: AbortSignal;
@@ -125,7 +131,7 @@ export async function callWithPolicy(o: PolicyOpts): Promise<{ result: ChatResul
       calls++;
       let r: ChatResult;
       try {
-        r = await callOnce(o.transport, { model, messages: o.messages, max_tokens: budget }, fetchImpl, o.signal);
+        r = await callOnce(o.transport, { model, messages: o.messages, max_tokens: budget }, fetchImpl, o.signal, o.mode);
       } catch (e) {
         if (!(e instanceof ApiError)) throw e;
         last = `${model}: ${e.message}`;
