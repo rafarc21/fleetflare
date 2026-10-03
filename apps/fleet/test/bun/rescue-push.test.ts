@@ -271,6 +271,12 @@ describe("#251 — rescue-push walks every git worktree, not just the main check
  * symbolic meaning for that name. Detached HEAD must be treated exactly
  * like "checked out branch is the default": always the generated
  * `fleet/rescue/...` ref, never a branch literally named HEAD.
+ *
+ * Issue #207 (2026-10-03): rescue_target() no longer inspects HEAD/the
+ * checked-out branch at all in checkout mode, so this collision is
+ * impossible for a simpler reason now — see rescue_target()'s own doc
+ * comment in rescue.ts. The fixtures below still pass unchanged: detached
+ * HEAD was already routed to a generated ref, and still is.
  */
 function anyRefNamedHead(): boolean {
   return sh(`git -C ${origin} for-each-ref --format='%(refname)'`)
@@ -984,13 +990,21 @@ describe("#266 — rescueSnapshotCmd saves a dirty tree WITHOUT touching the liv
  * branch called the SAME rescue_target() checkout-mode resolution
  * rescuePushCmd uses to pick a push destination. In checkout mode, when the
  * checked-out branch is NOT the repo's resolved default (the ordinary case
- * once a studio's own agent branches), rescue_target() returns that branch's
- * OWN name as the target — correct for rescuePushCmd (which WANTS to push
- * straight to the current branch, an existing/real commit, at teardown) but
- * wrong for rescueSnapshotCmd's dirty-tree branch, which builds a synthetic
- * snapshot commit foreign to the studio's own history and must NEVER land it
- * on a ref the live studio itself still owns, regardless of what
- * branch-vs-default the checked-out branch happens to resolve to.
+ * once a studio's own agent branches), rescue_target() returned that
+ * branch's OWN name as the target — correct, AT THE TIME, for rescuePushCmd
+ * (which wanted to push straight to the current branch, an existing/real
+ * commit, at teardown) but wrong for rescueSnapshotCmd's dirty-tree branch,
+ * which builds a synthetic snapshot commit foreign to the studio's own
+ * history and must NEVER land it on a ref the live studio itself still owns,
+ * regardless of what branch-vs-default the checked-out branch happens to
+ * resolve to.
+ *
+ * Issue #207 (2026-10-03, see the describe block of that name further below)
+ * later found "correct for rescuePushCmd" itself wrong too — a checked-out
+ * branch can be an already-gated PR's own head, not just "the current
+ * branch" — and made rescue_target() match snapshot_target()'s own always-
+ * generate shape. The two functions this comment contrasts are, as of
+ * #207, the same shape in checkout mode.
  *
  * Measured: a studio on `task/feature` (not the default branch) ran a
  * snapshot rescue against a dirty tree; the old code printed `RESCUE_PUSHED
@@ -1225,26 +1239,24 @@ for (const [label, cmdFn] of RESCUE_CMDS) {
  * control over — stalls exactly at the push step, matching the measured
  * failure precisely.
  *
- * Fix: `--no-verify` on the push itself, but ONLY when the push target is
- * a generated `fleet/rescue/...` ref — never when it is a real branch name
- * (the main checkout's own current branch, pushed straight there when that
- * branch is not the repo's resolved default; see rescue_target()'s own doc
- * comment above). A real branch push must still go through #259's guard and
- * any repo's own pre-push hook, exactly as before — only the throwaway
- * rescue refs this whole file invents get to skip a hook that has nothing
- * to review.
+ * Fix, AT THE TIME: `--no-verify` on the push itself, but ONLY when the push
+ * target was a generated `fleet/rescue/...` ref — never when it was a real
+ * branch name (the main checkout's own current branch, pushed straight
+ * there when that branch was not the repo's resolved default; see
+ * rescue_target()'s own doc comment above). A real branch push still had to
+ * go through #259's guard and any repo's own pre-push hook — only the
+ * throwaway rescue refs this whole file invents got to skip a hook that has
+ * nothing to review.
  *
- * Every OTHER push in both commands (worktree member refs, the branch walk's
- * `checkout/<branch>` refs, the stash walk's `checkout/stash-N` refs, and
- * rescueSnapshotCmd's own snapshot_target() in every mode) is ALREADY,
- * unconditionally, a generated `fleet/rescue/...` ref — verified by reading
- * every push call site in rescue.ts, not assumed — so the shared test below
- * (parametrized across both command builders, same RESCUE_CMDS list used
- * throughout this file) covers the one push shape common to both. The
- * rescuePushCmd-only test after it covers the ONE call site — the main
- * checkout's own branch-vs-default resolution — capable of naming a real
- * branch as its push target, which is exactly the case `--no-verify` must
- * never reach.
+ * Issue #207 (2026-10-03): rescue_target() in checkout mode can no longer
+ * name a real branch as a push target at all (see its own doc comment in
+ * rescue.ts), so EVERY push in both commands is now unconditionally a
+ * generated `fleet/rescue/...` ref, and `--no-verify` applies
+ * unconditionally too. The shared test below (parametrized across both
+ * command builders) is the only test left in this describe block — the
+ * rescuePushCmd-only test that used to follow it, covering the one call site
+ * that could still name a real branch, was deleted; see the comment that
+ * replaces it, right after this block's single test.
  */
 describe("#359 — a failing pre-push hook never blocks a rescue push to a generated fleet/rescue/... ref", () => {
   function installFailingPrePushHook(): void {
@@ -1404,23 +1416,37 @@ describe("#359 round 2 review, item 3 — the branch-walk and non-fast-forward-r
   }
 
   test("rescuePushCmd: rescue_push()'s own non-fast-forward RETRY push is killed and reported as RESCUE_FAILED, never waits out the hook's own 3s sleep", () => {
-    // Same fixture as "#263 N3": the checked-out branch moved on origin
-    // since this checkout last knew about it, so the FIRST push attempt is
-    // rejected non-fast-forward (instantly — the hook never runs for a
-    // rejected push, since `post-receive` only fires once a push actually
-    // updates refs) and rescue_push() retries to a freshly generated
-    // `-nff-` fallback ref, which DOES land — and DOES trigger the slow
-    // hook. Isolates the RETRY's own `timeout -k` wrapping specifically,
-    // never the first attempt's.
-    sh(`cd ${checkout} && git checkout -q -b task/lead && git push -q origin task/lead`);
-    const otherClone = join(dir, "other-clone-item3-retry");
-    sh(`git clone -q ${origin} ${otherClone}`);
-    sh(`cd ${otherClone} && git checkout -q task/lead && git commit -q --allow-empty -m "someone else moved this branch" && git push -q origin task/lead`);
+    // Issue #207: this used to reuse "#263 N3"'s real `task/lead`-collision
+    // fixture. That precondition is retired (rescue_target() in checkout
+    // mode always generates now; see N3's own retirement comment above) —
+    // reusing it here would have made the FIRST attempt (now always a fresh
+    // generated ref) land cleanly and trip the slow hook itself, isolating
+    // the wrong call site's `timeout -k` wrapping. Same deterministic
+    // generated-ref collision as "#371 review Finding 1" above instead:
+    // `date -u +%Y%m%d%H%M%S` is PATH-shimmed to a fixed value, and that
+    // EXACT first-attempt ref name is squatted on origin (fast, before the
+    // slow hook is installed) so the FIRST push attempt is rejected
+    // non-fast-forward (instantly — the hook never runs for a rejected push,
+    // since `post-receive` only fires once a push actually updates refs) and
+    // rescue_push() retries to a freshly generated `-nff-` fallback ref,
+    // which DOES land — and DOES trigger the slow hook. Isolates the RETRY's
+    // own `timeout -k` wrapping specifically, never the first attempt's.
+    const fixedTs = "20261003120000";
+    const shimDir = mkdtempSync(join(tmpdir(), "fleet-item3-retry-date-shim-"));
+    writeFileSync(
+      join(shimDir, "date"),
+      `#!/bin/sh\nif [ "$1" = "-u" ] && [ "$2" = "+%Y%m%d%H%M%S" ]; then echo ${fixedTs}; exit 0; fi\n` +
+        `for d in /bin/date /usr/bin/date; do [ -x "$d" ] && exec "$d" "$@"; done\n`,
+    );
+    chmodSync(join(shimDir, "date"), 0o755);
+    const squat = join(dir, "squat-clone-item3-retry");
+    sh(`git clone -q ${origin} ${squat} 2>/dev/null && git -C ${squat} commit -q --allow-empty -m squat && ` +
+      `git -C ${squat} push -q origin HEAD:refs/heads/fleet/rescue/${STUDIO}-${fixedTs}`);
     installSlowPostReceiveHook(3);
     writeFileSync(join(checkout, "notes.md"), "lead work racing a slow retry push\n");
 
     const start = Date.now();
-    const out = sh(rescuePushCmd(REPO, STUDIO, root, 1)).out;
+    const out = sh(rescuePushCmd(REPO, STUDIO, root, 1), dir, { PATH: `${shimDir}:${BASE_PATH}` }).out;
     const elapsedMs = Date.now() - start;
 
     expect(out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} checkout push$`, "m"));
