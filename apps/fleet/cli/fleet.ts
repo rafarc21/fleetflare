@@ -29,7 +29,7 @@ import { parseCliArgs, renderHelp } from "../src/studio/cli-args";
 import { parseStudioId } from "../src/studio/ids";
 import { parseGitRemote, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
 import { runOnboardPreflight } from "../src/studio/onboard";
-import { cmdJunior } from "./junior";
+import { cmdJunior, cmdJuniorStats } from "./junior";
 import { sweepAllPages, type SweepPage } from "./junior-sweep";
 import { reapTerminalAll, type TerminalPage } from "./reap-terminal";
 import { runTaskStateTransition, type TaskStateFetchResult } from "../src/studio/task-state";
@@ -2537,11 +2537,21 @@ async function main(): Promise<void> {
     return cmdPrintAttachHandle(parsed.id);
   }
 
-  // Junior: purely local (a symlink + one config file), so like onboard it
-  // must work on a machine with no ~/.fleet/credentials at all.
+  // Junior enable/disable/status: purely local (a symlink + one config
+  // file), so like onboard they must work on a machine with no
+  // ~/.fleet/credentials at all. `stats` (issue #218) is NOT purely local —
+  // it calls the Worker's /studio/junior/usage route, so it needs the Access
+  // JWT `loadCredentials()` below produces, same as every other board verb.
   if (parsed.cmd === "junior") {
-    process.exitCode = cmdJunior(parsed);
-    return;
+    if (parsed.action !== "stats") {
+      // Rebuilt as a literal (not `parsed` itself) because TS does not
+      // narrow the type of a whole object from a nested property's
+      // inequality check — only `parsed.action` as its own expression.
+      process.exitCode = cmdJunior({ action: parsed.action, account: parsed.account });
+      return;
+    }
+    // action === "stats": falls through to loadCredentials() below, unlike
+    // enable/disable/status just above.
   }
 
   const creds = await loadCredentials();
@@ -2594,6 +2604,10 @@ async function main(): Promise<void> {
       return cmdMemoryLs(creds);
     case "memory-compact":
       return cmdMemoryCompact(creds);
+    case "junior":
+      // Only "stats" reaches here — enable/disable/status already returned
+      // above, before loadCredentials(), per #218's early-dispatch guard.
+      return cmdJuniorStats(creds, parsed.since);
   }
 }
 
