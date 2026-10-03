@@ -3325,8 +3325,13 @@ export function constructorLaunch(
  * (already rare) borrow second pass. A row this studio never wrote (another
  * studio's own mirror, or none at all) reads back identically to one this
  * studio wrote itself.
+ *
+ * Exported (fresh-context review of PR #211, #209 follow-up) — now ALSO the
+ * tier-3 burn read `launchAccountOrRefuse`'s own `launchAccountOrReroute`
+ * call (accounts.ts) feeds lazily, same shape `readFleetAccountLimits`'s own
+ * export already is.
  */
-async function readFleetAccountBurn(
+export async function readFleetAccountBurn(
   db: D1Database, accounts: ClaudeAccount[],
 ): Promise<Record<string, { window5hOutput: number }>> {
   const burn: Record<string, { window5hOutput: number }> = {};
@@ -3439,6 +3444,44 @@ function accountClears(
     ...(clearClaudeAccount ? { claudeAccount: null, borrowedAccount: null, borrowedFromRepo: null } : {}),
     ...(clearRateLimited ? { rateLimited: null } : {}),
   };
+}
+
+/**
+ * Fresh-context review of PR #211 (#209 follow-up, finding A+B point 5) —
+ * the row-side half of a launch landing on a non-primary account, via
+ * `launchAccountOrRefuse`'s own three-tier `launchAccountOrReroute` (#209
+ * follow-up): mirrors failover.ts's own write condition for
+ * `borrowedAccount`/`borrowedFromRepo` on a completed switch EXACTLY (see
+ * that file's own doc comment, around its `switched` object literal, for
+ * the full reasoning this restates for the launch gate) — ANY resolution
+ * landing somewhere other than this repo's own mapped primary keeps
+ * `borrowedAccount` set (own-chain reroute, unclaimed spare, or a genuine
+ * reserved-primary borrow alike), with `borrowedFromRepo` naming a repo only
+ * for the genuine borrow (`reserved.has(launch.name)` — tier 1/2 never
+ * resolve to a `reserved` name; tier 3, `nextBorrowedAccount`, never resolves
+ * to anything else, so this one check tells the two apart without the
+ * caller threading an extra `isBorrow` flag through). Without this write, a
+ * studio launched via reroute/borrow would never carry the field the
+ * EXISTING hand-back mechanism (gated on exactly it) reads to bring it home
+ * once its own primary frees up.
+ *
+ * Returns null when nothing would actually CHANGE on the row — never forces
+ * a write merely because this gate ran; every ordinary, already-on-its-
+ * primary launch takes this path too, every single time.
+ */
+function borrowFields(
+  env: Env, repo: string | null, reserved: Set<string>, existing: StudioStatus | null,
+  launch: Extract<LaunchAccount, { ok: true }>,
+): Pick<StudioStatus, "borrowedAccount" | "borrowedFromRepo"> | null {
+  const primary = launchAccount(env, repo, null);
+  const primaryIsMapped = repo !== null && parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO)[repo] !== undefined;
+  const next: Pick<StudioStatus, "borrowedAccount" | "borrowedFromRepo"> =
+    primaryIsMapped && primary.ok && launch.name !== primary.name
+      ? { borrowedAccount: launch.name, borrowedFromRepo: reserved.has(launch.name) ? repoForAccount(env, launch.name) : null }
+      : { borrowedAccount: null, borrowedFromRepo: null };
+  const changed = (existing?.borrowedAccount ?? null) !== next.borrowedAccount
+    || (existing?.borrowedFromRepo ?? null) !== next.borrowedFromRepo;
+  return changed ? next : null;
 }
 
 /**
@@ -3659,9 +3702,41 @@ export async function launchAccountOrRefuse(
   // from its mapped primary (launchAccount's own doc comment), so there is
   // nothing this read could change — see launchAccountOrReroute's own doc
   // comment (accounts.ts) for the full reroute/refuse rule.
-  const limits = autoFailoverOn(env) ? await readFleetAccountLimits(env.DB, resolveClaudeAccounts(env)) : {};
+  //
+  // Fresh-context review of PR #211 (finding C) — a transient D1 read
+  // failure here used to throw UNCAUGHT straight out of this function,
+  // which recycle's own flow calls AFTER destroy has already landed: the
+  // studio ended up destroyed with nothing relaunched, a worse failure than
+  // before #209 ever read D1 at this point at all. Failing OPEN to "no
+  // limit known" (the exact same behaviour this gate had before #209 ever
+  // shipped) rather than throwing is the fix; logged so the hiccup still
+  // shows up in a tail.
+  let limits: Awaited<ReturnType<typeof readFleetAccountLimits>> = {};
+  if (autoFailoverOn(env)) {
+    try {
+      limits = await readFleetAccountLimits(env.DB, resolveClaudeAccounts(env));
+    } catch (err) {
+      console.warn(`studio ${id}: readFleetAccountLimits failed, launching as if nothing were fleet-wide limited (fail open)`, err);
+    }
+  }
   const reserved = otherRepoPrimaries(env, repo);
-  const launch = launchAccountOrReroute(env, repo, existing?.claudeAccount ?? null, limits, reserved);
+  // Issue #131 (Stage B) follow-up (#209 review, finding A+B) — the borrow
+  // third pass' own fleet-wide burn, read lazily: `readFleetAccountBurn`
+  // (above) is only ever invoked by `launchAccountOrReroute` once its own
+  // tiers 1+2 have already missed. Fails open the same way `limits` above
+  // does: a burn-read hiccup on this already-rare path must never throw
+  // this gate into refusing a launch a borrow could otherwise have served.
+  const launch = await launchAccountOrReroute(
+    env, repo, existing?.claudeAccount ?? null, limits, reserved, new Date(),
+    async () => {
+      try {
+        return await readFleetAccountBurn(env.DB, resolveClaudeAccounts(env));
+      } catch (err) {
+        console.warn(`studio ${id}: readFleetAccountBurn failed, borrowing as if no burn were known (fail open)`, err);
+        return {};
+      }
+    },
+  );
   if (launch.ok) {
     // #273 r2: flag off, an earlier failover's recorded account is stale — this
     // launch is on the mapped one, so the row stops naming the old one.
@@ -3673,8 +3748,22 @@ export async function launchAccountOrRefuse(
     // against a studio that is not actually borrowing anything any more.
     if (commitOkClears) {
       const clears = accountClears(env, existing, launch);
-      if (clears !== null && existing !== null) {
-        const cleared: StudioStatus = { ...existing, ...clears };
+      // Fresh-context review of PR #211 (finding A+B, point 5) — see
+      // `borrowFields`' own doc comment for the full reasoning. Gated on a
+      // GENUINE reroute THIS call made (`launch.name` differs from what
+      // `launchAccount` alone — no fleet-wide-limit awareness at all — would
+      // have resolved for the SAME `recorded`): the plain #289 carry-forward
+      // case (a studio already recorded on a non-primary account from an
+      // EARLIER failover switch, still free, so nothing reroutes here) must
+      // stay silent, exactly as it always has (see the "#273 r2 ... recorded
+      // account stays on the row" test) — that switch already set
+      // `borrowedAccount` itself, back when it actually happened.
+      const plain = launchAccount(env, repo, existing?.claudeAccount ?? null);
+      const rerouted = !plain.ok || plain.name !== launch.name;
+      const borrow = rerouted ? borrowFields(env, repo, reserved, existing, launch) : null;
+      const patch = clears !== null || borrow !== null ? { ...clears, ...borrow } : null;
+      if (patch !== null && existing !== null) {
+        const cleared: StudioStatus = { ...existing, ...patch };
         await storage.put(STATUS_KEY, cleared);
         await recordStudioFn(cleared);
       }

@@ -19,6 +19,7 @@
 import type { ClaudeAccount, AccountLimits } from "./accounts";
 import {
   accountsTried, nextClaudeAccount, earliestAccountReset, nextBorrowedAccount, accountIsFree, firstFreeAccount,
+  selectFreeAccount,
 } from "./accounts";
 import { STATUS_KEY, OPERATION_KEY, watchForDestroy, operationLockFresh, type StudioStorage } from "./provision";
 import { redactSecrets } from "./redact";
@@ -2395,8 +2396,23 @@ export async function runAccountFailover(
   // lowest-burn (see `firstFreeAccount`'s own doc comment) — tried BEFORE
   // the third pass: a plain free spare nobody has claimed must never lose
   // to someone else's mapped primary.
+  // Fresh-context review of PR #211 (#209 follow-up) — this tier-2 lookup
+  // is now `selectFreeAccount`'s own (accounts.ts), shared with
+  // `launchAccountOrReroute`'s own three-tier cascade, rather than two
+  // independently drifting copies of the identical "unclaimed spare before
+  // the anchor" scan. `candidate` is already known null on every call that
+  // reaches here, so `selectFreeAccount`'s own tier-1 re-check inside is a
+  // deterministic, pure, zero-cost re-derivation of that same null — the
+  // ONLY tier it can then still find anything on is tier 2, exactly what
+  // the inline `firstFreeAccount` call this replaced always computed.
+  // `candidate` itself stays its own separate, direct tier-1-only call
+  // above: `next`'s own `candidate ?? outOfScopeSpare ?? borrowed` chain,
+  // `parkedOn`'s own auto-failover-OFF messaging, and `isBorrow` all still
+  // need tier 1 ALONE, never tier 1+2 combined (auto-failover off must
+  // never let a tier-2 spare it never acts on change what a studio is
+  // reported as parked on — see `parkedOn`'s own first use below).
   const outOfScopeSpare = candidate === null && deps.autoFailover
-    ? firstFreeAccount(deps.accounts.slice(0, anchor), reserved, limits, deps.now())
+    ? selectFreeAccount(deps.accounts, anchor, current, currentOutOfScope, reserved, limits, deps.now())
     : null;
   // Issue #131 (Stage B) — the borrow third pass, entered ONLY when BOTH
   // passes above found NOTHING (`candidate === null && outOfScopeSpare ===
