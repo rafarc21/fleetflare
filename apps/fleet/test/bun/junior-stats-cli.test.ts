@@ -122,6 +122,13 @@ describe("fleet junior stats", () => {
       JSON.stringify({ ts: NOW, id: "laptop-d", mode: "edit", model: "glm", input_tokens: 7, output_tokens: 3, calls: 1, ok: true }),
       JSON.stringify({ id: "laptop-d", mode: "edit", model: "glm", input_tokens: 999, output_tokens: 999, calls: 1, ok: true }), // ts missing
       JSON.stringify({ ts: NOW, id: "laptop-d", mode: "edit", model: "glm", input_tokens: "not a number", output_tokens: 999, calls: 1, ok: true }),
+      // Review round 1: `JSON.parse("null")` succeeds (valid JSON) and
+      // returns `null` — the try/catch around JSON.parse does NOT catch
+      // this. A bare JSON scalar line (null, a number, a string, an array —
+      // all realistic shapes for a truncated/partial write or manual edit)
+      // must be skipped like any other malformed line, never crash the
+      // whole command with an uncaught TypeError reading `.ts` off `null`.
+      "null",
     ];
     writeFileSync(join(dir, "junior-usage.jsonl"), `${lines.join("\n")}\n`);
     const r = await run(["junior", "stats"], home);
