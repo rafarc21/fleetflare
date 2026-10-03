@@ -1341,7 +1341,7 @@ describe("syncSessionCycle — an auto-stop mid-tick must gate retrySurvivalBrie
         const current = (await storage.get(STATUS_KEY)) as StudioStatus;
         const stopped = { ...current, state: "stopped" as const };
         await storage.put(STATUS_KEY, stopped);
-        return { ok: true, status: stopped };
+        return { ok: true as const, status: stopped };
       }),
     };
   }
