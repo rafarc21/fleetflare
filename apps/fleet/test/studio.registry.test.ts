@@ -339,5 +339,54 @@ describe("studio registry", () => {
       const row = rows.find((r) => r.id === "demosite-life--lead2");
       expect(row?.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_2"); // mapped slot, unchanged despite the limit
     });
+
+    // Fresh-context review of #213, finding 2 — listStudios' own fail-open
+    // try/catch around readFleetAccountLimits (mirroring do.ts's established
+    // "env.DB.prepare throws" pattern, which DOES have a direct test — see
+    // studio.account-by-repo.test.ts's "env.DB.prepare throws: the
+    // fleet-wide limits read is caught..." test) had no equivalent test of
+    // its own here, only a comment asserting the behavior. Poisons only the
+    // `account-limit:` prefixed key (same scoped-poisoning shape as that
+    // file's "readFleetAccountBurn throws" test, which poisons only
+    // `account-burn:`), leaving the row's own SELECT untouched, so the
+    // listing itself must still succeed with limits treated as `{}`.
+    it("D1 read failure in readFleetAccountLimits: listing still succeeds, next-launch falls back as if nothing were limited (fail open)", async () => {
+      const workingEnv = envWith({
+        CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2,
+        CLAUDE_ACCOUNT_BY_REPO: MAP, FLEET_AUTO_FAILOVER: "on",
+      });
+      await recordStudio(workingEnv, status({ id: "demosite-life--failopen" }));
+
+      const realPrepare = env.DB.prepare.bind(env.DB);
+      const poisonedDb = {
+        prepare(sql: string) {
+          const stmt = realPrepare(sql);
+          return {
+            bind(...args: unknown[]) {
+              if (typeof args[0] === "string" && args[0].startsWith("account-limit:")) {
+                return { first: async () => { throw new Error("D1 account-limit read unavailable"); } };
+              }
+              return stmt.bind(...args);
+            },
+          };
+        },
+      } as unknown as D1Database;
+      const poisoned = { ...workingEnv, DB: poisonedDb } as unknown as Env;
+
+      const warns = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const rows = await listStudios(poisoned);
+        const row = rows.find((r) => r.id === "demosite-life--failopen");
+        expect(row).toBeDefined();
+        // Fail-open: limits treated as {} -- next launch is the plain mapped
+        // account, same as if nothing were fleet-wide limited (equivalent to
+        // the account display falling back to the mapped/recorded account).
+        expect(row?.claudeAccountNext).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
+        expect(warns).toHaveBeenCalled();
+        expect(warns.mock.calls.some((c) => c.join(" ").includes("readFleetAccountLimits"))).toBe(true);
+      } finally {
+        warns.mockRestore();
+      }
+    });
   });
 });

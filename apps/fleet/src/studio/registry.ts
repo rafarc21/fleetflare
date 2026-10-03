@@ -280,8 +280,11 @@ export async function recordStudio(env: Env, status: StudioStatus): Promise<void
  * account showed as "next" even though the real launch gate
  * (`launchAccountOrRefuse`, do.ts) would reroute around it via
  * `launchAccountOrReroute`'s three-tier cascade. Calling the SAME
- * reroute-aware function here means this column can never disagree with
- * where a real launch would actually land. `limits`/`reserved`/`now` are the
+ * reroute-aware function here means this column never disagrees in the
+ * common case (tiers 1 and 2 -- this studio's own chain, or an unclaimed
+ * spare); tier-3 borrow selection can still diverge from the real gate's
+ * lowest-burn pick when 2+ reserved accounts are simultaneously free -- see
+ * the readBurn note below. `limits`/`reserved`/`now` are the
  * caller's (listStudios below): `limits` is one shared D1 read for the whole
  * `fleet ls` call, not one per row; `reserved` depends on the row's own repo
  * so it is still computed per row. `readBurn` is deliberately left at its

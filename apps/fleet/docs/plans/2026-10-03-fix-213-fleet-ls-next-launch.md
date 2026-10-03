@@ -137,8 +137,11 @@ Every existing direct call site of `withAccountDisplay`
 — found by grep) was updated to the new async 5-argument signature, passing
 the "nothing is fleet-wide limited" no-op inputs (`{}` limits, an empty or
 the test's already-computed `reserved` set, `new Date()`), since none of
-those tests were exercising rerouting at that call site — all 144
-pre-existing tests across the touched files kept passing unchanged.
+those tests were exercising rerouting at that call site — all 143
+pre-existing tests across the touched files kept passing unchanged, plus the
+2 new `#213` tests above (145 total). A later review pass (finding 2) added
+one more test closing a fail-open coverage gap in `listStudios`'s
+`readFleetAccountLimits` try/catch, bringing the running total to 146.
 
 ## Scope
 
