@@ -272,6 +272,34 @@ export interface Observed {
    */
   restarts?: RestartLog;
   /**
+   * Board issue #208: when do.ts's `wipSync` last actually pushed a periodic
+   * WIP safety-net snapshot (rescue.ts's `wipSyncCmd`, to the fixed
+   * `fleet/rescue/<studio>/wip` ref) — the bounding evidence for "how stale
+   * is the newest copy of this studio's work that survived a platform
+   * container replacement with no pre-replacement hook to rescue-push from".
+   *
+   * OPTIONAL, same absence convention `restarts` above already uses (see
+   * that field's own doc comment): ABSENT while unknown — no WIP sync has
+   * EVER actually pushed yet, or this row predates the feature — never a
+   * fabricated `null`. Rides `mergeObserved` the same way `lastSnapshotAt`
+   * does (own value, no separate DO-storage key needed — unlike `restarts`,
+   * there is no independent state machine here to keep in its own key), so
+   * it flows through `getObserved`/`getObservedWithActivity`/`withObserved`
+   * (do.ts) automatically, with no code change needed in either of those two
+   * functions: `getObserved`'s own `{ ...emptyObserved(), ...stored }` already
+   * passes any stored field through unchanged, and this field is
+   * deliberately left OUT of `emptyObserved()` below so an old row (or one
+   * that has never had a WIP sync succeed) reads as truly absent, not `null`.
+   *
+   * Stamped ONLY on an actual successful push (do.ts's `wipSync` returning
+   * `pushed: true`) — never on RESCUE_CLEAN/RESCUE_MARKERS_ONLY/
+   * RESCUE_NO_CHECKOUT/a failure, each of which leaves whatever was stamped
+   * before exactly as it was: a stale timestamp here is still valid evidence
+   * of the last REAL sync, and clearing it on a quiet or failed tick would
+   * throw away that evidence for no reason.
+   */
+  wipSyncedAt?: string | null;
+  /**
    * Board issue #108 (#70 ask 4 remainder) — the lead's last visible,
    * non-chrome message line: redacted (`redactSecrets`, at the ship-tick
    * write boundary), bounded (activity.ts's `LAST_LINE_MAX_CHARS`), so a
@@ -334,6 +362,17 @@ export interface SurvivalBriefPending {
    *  (cli/readiness-format.ts's `formatSurvivalBriefs`); the record is kept
    *  rather than deleted precisely so that line has something to read. */
   gaveUpAt?: string | null;
+  /**
+   * Board issue #208, part 2 — `Observed.wipSyncedAt` AS IT STOOD at the
+   * moment this bring-up happened, frozen here the same way `session` above
+   * is: a retry can run several sync ticks after the heal, and by then a
+   * fresh `wipSync` tick may already have overwritten `wipSyncedAt` with a
+   * NEW timestamp describing time AFTER the heal, not the gap this field
+   * exists to describe (the age of the last REAL push relative to the
+   * replacement). OPTIONAL/absent reads as "no WIP sync had ever landed at
+   * heal time" — the composer (survival-brief.ts) renders nothing for this
+   * studio's WIP safety net in that case. */
+  wipSyncedAt?: string | null;
 }
 
 /** The DO-storage slice this feature touches — same narrow-port style
