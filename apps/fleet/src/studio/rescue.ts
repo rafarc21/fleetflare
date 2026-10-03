@@ -931,6 +931,40 @@ export function rescuePushCmd(
     `  printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
     `  return 1\n` +
     `}\n` +
+    // Issue #216 fix 3 (PR #212's own round-2 review): shared by rescue_one's
+    // two "nothing new to commit, is HEAD itself ahead of origin?" call
+    // sites below -- the genuinely-clean-tree branch, and (new) the
+    // dirty-tree branch's own tree-identity shortcut, once its `add -A`
+    // happens to reproduce HEAD's own tree byte-for-byte. Extracted so both
+    // never drift into two copies of the same ahead-of-origin/markers
+    // bookkeeping. `wall`, 4th and optional, defaults to empty: the
+    // tree-identity shortcut omits it deliberately (see its own call site's
+    // comment below) since a dirty-but-tree-equal file is not evidence of a
+    // genuine tool-marker-only state.
+    `rescue_check_ahead() {\n` +
+    `  local w="$1" id="$2" mode="$3" wall="\${4:-}" whead wahead target rc\n` +
+    // Issue #313 (PR #263 round 5 review, Finding 3): same ambiguous-bare-
+    // HEAD guard as this file's own rescue_one dirty-tree branch -- resolve
+    // to a SHA first, never pass a bare `HEAD` straight to `rev-list`.
+    `  whead=$(git -C "$w" rev-parse HEAD 2>/dev/null); rc=$?\n` +
+    `  if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-parse"; fail=$((fail+1)); return; fi\n` +
+    `  wahead=$(git -C "$w" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
+    // Issue #49: already an origin tip = already saved, nothing to push.
+    `  if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
+    `    rescue_target "$mode" "$id"\n` +
+    // Issue #371 review Finding 1: `mult=2`, same retry-pair worst case as
+    // every other rescue_push() call site in this file.
+    `    if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
+    `    if ! target=$(rescue_push "$w" "$id" "$target"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
+    `    git -C "$w" update-ref "refs/remotes/origin/$target" HEAD 2>/dev/null || true\n` +
+    // Issue #266: $wahead is a COMMIT count (rev-list --count, above) --
+    // never "file(s)".
+    `    echo "${RESCUE_PUSHED_PREFIX} $target $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; any=1\n` +
+    `  elif [ -n "$wall" ]; then\n` +
+    `    markers=1\n` +
+    `  fi\n` +
+    `}\n` +
     // C1: every step is checked; the first that fails prints
     // RESCUE_FAILED and returns (a function `return`, never a top-level
     // `exit` — the HARD RULE this whole file already follows) so ONE
@@ -971,6 +1005,20 @@ export function rescuePushCmd(
     `    tree=$(GIT_INDEX_FILE="$idxfile" git -C "$w" write-tree 2>/dev/null); rc=$?\n` +
     `    rm -f "$idxfile"\n` +
     `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
+    // Issue #216 fix 3 (PR #212's own round-2 review): a dirty tree whose
+    // final content is byte-identical to HEAD's own tree is not a real
+    // change -- stage something, then revert the working tree's own bytes
+    // back to HEAD's (without re-staging), and `status --porcelain` stays
+    // dirty (the INDEX still differs from HEAD) even though `add -A` above
+    // -- which captures the CURRENT working tree, not the stale index --
+    // just handed back HEAD's own tree right back. Committing and pushing
+    // that would be a hollow "rescue" reporting success for a push with
+    // nothing new in it. Falls through to the exact same ahead-of-origin/
+    // markers bookkeeping the clean-tree branch below already does, via the
+    // shared rescue_check_ahead() above -- `wall` deliberately omitted (see
+    // that function's own doc comment): this file was real, not a tool
+    // marker, so it must never be read as "markers-only" on its own.
+    `    if [ "$tree" = "$(git -C "$w" rev-parse "HEAD^{tree}" 2>/dev/null)" ]; then rescue_check_ahead "$w" "$id" "$mode"; return; fi\n` +
     // MAJOR fix (survival brief review): every rescue commit this file
     // produces now names the real branch it came from, as a git trailer
     // (blank line + `Rescued-From: <value>`, via a second `-m` — both
@@ -1014,37 +1062,12 @@ export function rescuePushCmd(
     // C2: this branch now ALWAYS runs when the scoped status is empty,
     // regardless of whether $wall was non-empty (a marker-only tree) —
     // never gated behind an if/elif that would skip it. `markers=1` is set
-    // only in the one case below where nothing else happened either.
-    // Issue #313 (PR #263 round 5 review, Finding 3): a bare `HEAD` argument
-    // is ambiguous the moment the worktree's own top level ALSO contains a
-    // real file literally named `HEAD` (nothing to do with `.git/HEAD`) --
-    // git cannot tell revision from pathspec and refuses to guess, and the
-    // old `|| echo 0` fallback could not tell that failure apart from
-    // "genuinely zero commits ahead", silently skipping a real push.
-    // Resolving `HEAD` to its own SHA via `rev-parse` first is never
-    // ambiguous the same way (verified live against the identical tree), and
-    // any OTHER genuine rev-list failure is now reported, never swallowed.
-    `    whead=$(git -C "$w" rev-parse HEAD 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-parse"; fail=$((fail+1)); return; fi\n` +
-    `    wahead=$(git -C "$w" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
-    // Issue #49: already an origin tip = already saved, nothing to push.
-    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
-    `      rescue_target "$mode" "$id"\n` +
-    // Issue #371: same single check ahead of the attempt+nff-retry pair as
-    // the dirty-tree branch above.
-    // #371 review Finding 1: `mult=2`, same reasoning as the dirty-tree
-    // branch's own identical call above — `$target` here is the SAME
-    // rescue_target() result, so the same retry-pair worst case applies.
-    `      if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
-    `      if ! target=$(rescue_push "$w" "$id" "$target"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
-    `      git -C "$w" update-ref "refs/remotes/origin/$target" HEAD 2>/dev/null || true\n` +
-    // Issue #266: $wahead is a COMMIT count (rev-list --count, above) —
-    // never "file(s)".
-    `      echo "${RESCUE_PUSHED_PREFIX} $target $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; any=1\n` +
-    `    elif [ -n "$wall" ]; then\n` +
-    `      markers=1\n` +
-    `    fi\n` +
+    // only in the one case where nothing else happened either.
+    // Issue #216 fix 3: delegates to rescue_check_ahead() (above), shared
+    // with the dirty-tree branch's own now-equivalent-to-clean shortcut —
+    // see that function's own doc comment for the full reasoning (#313
+    // Finding 3's ambiguous-bare-HEAD guard included, unchanged).
+    `    rescue_check_ahead "$w" "$id" "$mode" "$wall"\n` +
     `  fi\n` +
     `}\n` +
     // PR #263 round 3, N4: `rescue_one` runs inside the `while ... <<<
@@ -1497,6 +1520,40 @@ export function rescueSnapshotCmd(
     `  printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
     `  return 1\n` +
     `}\n` +
+    // Issue #216 fix 3 (PR #212's own round-2 review): shared by rescue_one's
+    // two "nothing new to commit, is HEAD itself ahead of origin?" call
+    // sites below -- the genuinely-clean-tree branch, and (new) the
+    // dirty-tree branch's own tree-identity shortcut, once its `add -A`
+    // happens to reproduce HEAD's own tree byte-for-byte. Extracted so both
+    // never drift into two copies of the same ahead-of-origin/markers
+    // bookkeeping. `wall`, 4th and optional, defaults to empty: the
+    // tree-identity shortcut omits it deliberately (see its own call site's
+    // comment below) since a dirty-but-tree-equal file is not evidence of a
+    // genuine tool-marker-only state.
+    `rescue_check_ahead() {\n` +
+    `  local w="$1" id="$2" mode="$3" wall="\${4:-}" whead wahead target rc\n` +
+    // Issue #313 (PR #263 round 5 review, Finding 3): same ambiguous-bare-
+    // HEAD guard as this file's own rescue_one dirty-tree branch -- resolve
+    // to a SHA first, never pass a bare `HEAD` straight to `rev-list`.
+    `  whead=$(git -C "$w" rev-parse HEAD 2>/dev/null); rc=$?\n` +
+    `  if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-parse"; fail=$((fail+1)); return; fi\n` +
+    `  wahead=$(git -C "$w" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
+    // Issue #49: already an origin tip = already saved, nothing to push.
+    `  if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
+    // PR #312 round 3 (MED): snapshot_target() here too, never the
+    // checked-out branch's own name.
+    `    target=$(snapshot_target "$mode" "$id")\n` +
+    // Issue #371 review Finding 1: `mult=2`, same retry-pair worst case as
+    // every other rescue_push() call site in this file.
+    `    if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
+    `    if ! target=$(rescue_push "$w" "$id" "$target" "HEAD"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
+    `    git -C "$w" update-ref "refs/remotes/origin/$target" HEAD 2>/dev/null || true\n` +
+    `    echo "${RESCUE_PUSHED_PREFIX} $target $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; any=1\n` +
+    `  elif [ -n "$wall" ]; then\n` +
+    `    markers=1\n` +
+    `  fi\n` +
+    `}\n` +
     // The one part that differs from rescuePushCmd's own rescue_one: a dirty
     // tree is snapshotted via a detached, out-of-band index instead of
     // `add -A` + `commit` against the real one — see this function's own
@@ -1540,6 +1597,20 @@ export function rescueSnapshotCmd(
     `    tree=$(GIT_INDEX_FILE="$idxfile" git -C "$w" write-tree 2>/dev/null); rc=$?\n` +
     `    rm -f "$idxfile"\n` +
     `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
+    // Issue #216 fix 3 (PR #212's own round-2 review): a dirty tree whose
+    // final content is byte-identical to HEAD's own tree is not a real
+    // change -- stage something, then revert the working tree's own bytes
+    // back to HEAD's (without re-staging), and `status --porcelain` stays
+    // dirty (the INDEX still differs from HEAD) even though `add -A` above
+    // -- which captures the CURRENT working tree, not the stale index --
+    // just handed back HEAD's own tree right back. Committing and pushing
+    // that would be a hollow "rescue" reporting success for a push with
+    // nothing new in it. Falls through to the exact same ahead-of-origin/
+    // markers bookkeeping the clean-tree branch below already does, via the
+    // shared rescue_check_ahead() above -- `wall` deliberately omitted (see
+    // that function's own doc comment): this file was real, not a tool
+    // marker, so it must never be read as "markers-only" on its own.
+    `    if [ "$tree" = "$(git -C "$w" rev-parse "HEAD^{tree}" 2>/dev/null)" ]; then rescue_check_ahead "$w" "$id" "$mode"; return; fi\n` +
     // MAJOR fix (survival brief review): same `Rescued-From: <branch>`
     // trailer rescuePushCmd's own rescue_one() now adds to its real commit —
     // see that function's own comment for why `rev-parse --abbrev-ref HEAD`
@@ -1565,37 +1636,11 @@ export function rescueSnapshotCmd(
     // Unchanged from rescuePushCmd: pushing an EXISTING commit by ref
     // (`HEAD`) never touches local state, so there is nothing to protect
     // here beyond what rescuePushCmd already does.
-    // Issue #313 (PR #263 round 5 review, Finding 3): a bare `HEAD` argument
-    // is ambiguous the moment the worktree's own top level ALSO contains a
-    // real file literally named `HEAD` (nothing to do with `.git/HEAD`) --
-    // git cannot tell revision from pathspec and refuses to guess, and the
-    // old `|| echo 0` fallback could not tell that failure apart from
-    // "genuinely zero commits ahead", silently skipping a real push.
-    // Resolving `HEAD` to its own SHA via `rev-parse` first is never
-    // ambiguous the same way (verified live against the identical tree), and
-    // any OTHER genuine rev-list failure is now reported, never swallowed.
-    `    whead=$(git -C "$w" rev-parse HEAD 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-parse"; fail=$((fail+1)); return; fi\n` +
-    `    wahead=$(git -C "$w" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
-    // Issue #49: already an origin tip = already saved, nothing to push.
-    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
-    // PR #312 round 3 (MED): snapshot_target() here too, never the
-    // checked-out branch's own name. A live studio still owns that branch:
-    // pushing its unpushed commits there (and moving the local tracking ref
-    // below) is the same harm the dirty branch above was fixed for.
-    `      target=$(snapshot_target "$mode" "$id")\n` +
-    // Issue #371: same single check ahead of the attempt+nff-retry pair as
-    // this function's own dirty-tree branch above.
-    // #371 review Finding 1: `mult=2`, same reasoning as this function's own
-    // dirty-tree call site above.
-    `      if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
-    `      if ! target=$(rescue_push "$w" "$id" "$target" "HEAD"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
-    `      git -C "$w" update-ref "refs/remotes/origin/$target" HEAD 2>/dev/null || true\n` +
-    `      echo "${RESCUE_PUSHED_PREFIX} $target $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; any=1\n` +
-    `    elif [ -n "$wall" ]; then\n` +
-    `      markers=1\n` +
-    `    fi\n` +
+    // Issue #216 fix 3: delegates to rescue_check_ahead() (above), shared
+    // with the dirty-tree branch's own now-equivalent-to-clean shortcut —
+    // see that function's own doc comment for the full reasoning (#313
+    // Finding 3's ambiguous-bare-HEAD guard included, unchanged).
+    `    rescue_check_ahead "$w" "$id" "$mode" "$wall"\n` +
     `  fi\n` +
     `}\n` +
     // N4 stdin-isolation posture, unchanged from rescuePushCmd.
