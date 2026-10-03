@@ -133,7 +133,7 @@ async function readCappedBody(req: Request, cap: number): Promise<string | null>
 }
 
 export async function handleFleetJunior(
-  req: Request, env: Env,
+  req: Request, env: Env, ctx: ExecutionContext,
   api: BoardApi = githubBoardApi(env),
   rows: () => Promise<StudioStatus[]> = () => listStudios(env),
   heartbeatMs = HEARTBEAT_MS,
@@ -248,13 +248,19 @@ export async function handleFleetJunior(
     } finally {
       clearInterval(beat);
     }
-    // Issue #218: fire-and-forget, own catch — a usage-logging failure must
-    // never affect (or delay) the result already written to the studio
-    // below. Never awaited before the write/close.
-    void insertJuniorUsage(env.DB, {
+    // Issue #218 finding 1 (fresh-context review): handed to `ctx.waitUntil`
+    // — the house pattern for a side effect that must survive the response
+    // closing (github/webhook.ts's `ctx.waitUntil(autoCloseOnPromote(...))`,
+    // exceptions.ts's `ctx.waitUntil(pruneWorkerExceptions(db))`). A bare
+    // `void`-prefixed fire-and-forget here would let the Workers runtime
+    // tear down this execution context the instant the response stream
+    // below closes, silently dropping the row mid-insert. The insert's own
+    // `.catch(() => {})` still means a logging failure can never affect (or
+    // delay) the result already written to the studio.
+    ctx.waitUntil(insertJuniorUsage(env.DB, {
       id: crypto.randomUUID(), ts: Date.now(), studioId: studio.id, mode, model: body.model,
       inputTokens, outputTokens, ok,
-    }).catch(() => {});
+    }).catch(() => {}));
     // A client that aborted mid-call leaves this writer closed/errored by
     // the time the AI call resolves — writing to it then would otherwise be
     // an unhandled rejection inside this detached IIFE. Swallow it: the

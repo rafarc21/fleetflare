@@ -119,7 +119,7 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, url: U
   // /fleet/tasks, before the /fleet/ catch-all. 404s itself unless
   // FLEET_JUNIOR is on for the calling studio's repo; 403 unless the
   // studio's live task carries the maestro's `junior` label.
-  if (url.pathname === "/fleet/junior") return handleFleetJunior(req, env);
+  if (url.pathname === "/fleet/junior") return handleFleetJunior(req, env, ctx);
   // Issue #7: the write proxy -- a public-repo studio's only push and gh
   // write path.
   // Spawn-token authenticated, before the /fleet/ catch-all.

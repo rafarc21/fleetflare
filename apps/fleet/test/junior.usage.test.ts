@@ -20,9 +20,28 @@ import { studioLabel, type BoardTask } from "../src/board/types";
 const REPO = "acme-org/websites";
 const ME = "websites--web-studio";
 
+// Issue #218 finding 1: the usage-log insert is handed to `ctx.waitUntil`
+// now (house pattern — github/webhook.ts's `autoCloseOnPromote`,
+// exceptions.ts's `pruneWorkerExceptions`), never a bare fire-and-forget
+// `void`, so the Workers runtime cannot tear the execution context down
+// mid-insert once the response stream closes. Same queue-don't-await fake
+// `ctx` shape test/github.webhook.test.ts's and test/exceptions.test.ts's
+// own `fakeCtx()` already establish.
+function fakeCtx() {
+  const tasks: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: vi.fn((p: Promise<unknown>) => { tasks.push(p); p.catch(() => {}); }),
+    passThroughOnException: () => {},
+    drain: () => Promise.all(tasks),
+  };
+  return ctx as unknown as ExecutionContext & { waitUntil: ReturnType<typeof vi.fn>; drain: () => Promise<unknown[]> };
+}
+let ctx: ReturnType<typeof fakeCtx>;
+
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
   await env.DB.prepare("DELETE FROM junior_usage_log").run();
+  ctx = fakeCtx();
 });
 
 describe("insertJuniorUsage + aggregateJuniorUsage", () => {
@@ -120,12 +139,34 @@ function dbWithFailingUsageInsert(real: D1Database): D1Database {
 }
 
 describe("handleFleetJunior — usage recording (#218)", () => {
+  // Finding 1 (fresh-context review): the insert must be handed to
+  // `ctx.waitUntil`, not a bare `void`-prefixed fire-and-forget — the
+  // Workers runtime is free to tear down the execution context the instant
+  // the response stream closes, and only `ctx.waitUntil` keeps a promise
+  // alive past that point. Proven two ways: `ctx.waitUntil` was actually
+  // invoked with a promise, and awaiting everything it queued (`drain()`,
+  // not `r.text()`) is what makes the row observable — never the response
+  // body itself.
+  it("#218 finding 1: the usage-log insert is handed to ctx.waitUntil, not fire-and-forget", async () => {
+    const { token, rows, e } = await setup({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 3, completion_tokens: 4 },
+    });
+    const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
+    await r.text();
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain();
+
+    const logged = await env.DB.prepare("SELECT * FROM junior_usage_log").all();
+    expect(logged.results).toHaveLength(1);
+  });
+
   it("records ok=1 with real token counts after a successful ai.run() call", async () => {
     const { token, rows, e } = await setup({
       choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
       usage: { prompt_tokens: 3, completion_tokens: 4 },
     });
-    const r = await handleFleetJunior(req(token, good), e, board(), rows);
+    const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
     await r.text(); // drain so the detached IIFE's insert has run
 
     const logged = await env.DB.prepare("SELECT * FROM junior_usage_log").all();
@@ -141,7 +182,7 @@ describe("handleFleetJunior — usage recording (#218)", () => {
 
   it("records ok=0 with zero tokens after a failed ai.run() call", async () => {
     const { token, rows, e } = await setup(new Error("boom"));
-    const r = await handleFleetJunior(req(token, good), e, board(), rows);
+    const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
     await r.text();
 
     const logged = await env.DB.prepare("SELECT * FROM junior_usage_log").all();
@@ -154,7 +195,7 @@ describe("handleFleetJunior — usage recording (#218)", () => {
 
   it("records the X-Junior-Mode header value in the row's mode column", async () => {
     const { token, rows, e } = await setup({ response: "r" });
-    const r = await handleFleetJunior(req(token, good, { "X-Junior-Mode": "text" }), e, board(), rows);
+    const r = await handleFleetJunior(req(token, good, { "X-Junior-Mode": "text" }), e, ctx, board(), rows);
     await r.text();
 
     const logged = await env.DB.prepare("SELECT mode FROM junior_usage_log").all();
@@ -163,7 +204,7 @@ describe("handleFleetJunior — usage recording (#218)", () => {
 
   it("an invalid X-Junior-Mode header value falls back to the edit default", async () => {
     const { token, rows, e } = await setup({ response: "r" });
-    const r = await handleFleetJunior(req(token, good, { "X-Junior-Mode": "bogus" }), e, board(), rows);
+    const r = await handleFleetJunior(req(token, good, { "X-Junior-Mode": "bogus" }), e, ctx, board(), rows);
     await r.text();
 
     const logged = await env.DB.prepare("SELECT mode FROM junior_usage_log").all();
@@ -183,7 +224,7 @@ describe("handleFleetJunior — usage recording (#218)", () => {
     });
     const failing = { ...e, DB: dbWithFailingUsageInsert(e.DB) } as unknown as Env;
 
-    const r = await handleFleetJunior(req(token, good), failing, board(), rows);
+    const r = await handleFleetJunior(req(token, good), failing, ctx, board(), rows);
     expect(r.status).toBe(200);
     expect(JSON.parse((await r.text()).trim())).toEqual({
       content: "ok", finish: "stop", usage: { in: 3, out: 4, neurons: null },
