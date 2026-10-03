@@ -2310,19 +2310,22 @@ describe("runAccountFailover — the in-memory start config follows a completed 
     expect(fakeThis.envAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
   });
 
-  // Fresh-context review round 1, finding 1 — the realistic auto-stop case
-  // (a studio stuck parked mid-task) almost always has an open assigned
-  // board task, which destroy.ts's own `runDestroy` refuses UNLESS `force`
-  // is passed. `stopParkedStudio` is an unattended, automated trigger — no
-  // operator is there to retry with `--force` — so it must pass force=true
-  // itself (never the operator's own discardUnsynced/park choices), and it
-  // must hand back the REAL `DestroyOutcome`, not swallow it into `void`.
-  it("StudioDO's own stopParkedStudio passes force=true (never discardUnsynced) and hands back destroyStudio's real outcome", async () => {
+  // Review round 2 (#210), finding 1 (BLOCKER, FIXED) — round 1's own test
+  // here pinned `force: true`, reasoning it was the ONLY thing this
+  // automated trigger overrides. That was wrong: `destroyStudio`'s own
+  // `discardUnsynced: discardUnsynced || force` wiring ALSO turns a
+  // probe-failure or a CONFIRMED rescue-push-failure refusal into "proceed
+  // anyway" the moment `force` is `true` — exactly backwards for this
+  // UNATTENDED trigger, which must never destroy without a successful
+  // rescue. Fixed: `force: false` (so `discardUnsynced` stays exactly
+  // `false`) and `skipOpenTaskGate: true` (the NEW 4th arg) does the job
+  // `force: true` was actually reaching for — skip ONLY the open-task gate.
+  it("StudioDO's own stopParkedStudio passes force=false, skipOpenTaskGate=true (never discardUnsynced) and hands back destroyStudio's real outcome", async () => {
     const REFUSAL: DestroyOutcome = {
       ok: false, refused: true,
       reason: "studio fleetflare--release-studio has an open assigned board task; pass --force to destroy anyway",
     };
-    const destroyStudio = vi.fn(async (_force: boolean, _discardUnsynced: boolean, _park: boolean) => REFUSAL);
+    const destroyStudio = vi.fn(async (_force: boolean, _discardUnsynced: boolean, _park: boolean, _skipOpenTaskGate: boolean) => REFUSAL);
     const fakeThis = {
       env: ENV,
       ctx: { storage: { get: async () => undefined, put: async () => {} } },
@@ -2336,12 +2339,14 @@ describe("runAccountFailover — the in-memory start config follows a completed 
     const deps = (StudioDO.prototype as unknown as { failoverDeps(this: unknown): FailoverDeps }).failoverDeps.call(fakeThis);
     const outcome = await deps.stopParkedStudio!();
 
-    // force=true (1st arg) — the ONLY thing this automated trigger ever
-    // overrides; discardUnsynced (2nd arg) stays false — a failed probe or
-    // an unconfirmed rescue-push must still refuse exactly like it does
-    // today, this call never pays for a human's `--discard-unsynced`
-    // choice. park=true (3rd arg) — the exact "fleet destroy --park" verb.
-    expect(destroyStudio).toHaveBeenCalledWith(true, false, true);
+    // force=false, discardUnsynced=false (2nd arg) — a failed probe or an
+    // unconfirmed rescue-push must still refuse exactly like it does today,
+    // this call never pays for a human's `--discard-unsynced` choice.
+    // park=true (3rd arg) — the exact "fleet destroy --park" verb.
+    // skipOpenTaskGate=true (4th arg, NEW) — the ONLY thing this automated
+    // trigger overrides: an open assigned board task alone must not block
+    // it, with nobody there to retry `--force` by hand.
+    expect(destroyStudio).toHaveBeenCalledWith(false, false, true, true);
     expect(outcome).toEqual(REFUSAL);
   });
 });
