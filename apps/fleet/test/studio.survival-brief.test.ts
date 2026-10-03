@@ -885,3 +885,75 @@ describe("(#249 round-2 finding 1) the resumed-conversation sentence", () => {
     expect(composeSurvivalBrief(baseInput())).toBe("");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Board issue #208, part 2 -- the WIP safety-net line. A BARE container heal
+// (do.ts's `BARE_SELF_HEALED` path, `session.via === "heal"`) restarted from a
+// blank disk; this is the one sentence telling a resumed lead that a periodic
+// snapshot ref exists and how old it was at heal time.
+// ---------------------------------------------------------------------------
+
+describe("(#208 part 2) the WIP safety-net line", () => {
+  const WIP_NOW = "2026-10-03T12:00:00.000Z";
+
+  it("via 'heal' + wipSyncedAt set -> names the ref and the age", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession({ via: "heal" }),
+      wipSyncedAt: "2026-10-03T11:56:00.000Z",
+      now: WIP_NOW,
+    }));
+    expect(out).toContain(
+      "- WIP safety net: fleet/rescue/demosite-life--release-studio/wip, last synced 4m ago — check it for anything lost since then.",
+    );
+  });
+
+  it("is the LAST line when the session is not 'resumed' (no RESUMED_TRUST_ORIGIN_LINE after it)", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession({ via: "heal", verdict: "fresh", restore: "skip:no-snapshot" }),
+      wipSyncedAt: "2026-10-03T11:56:00.000Z",
+      now: WIP_NOW,
+    }));
+    expect(out.split("\n").at(-1)).toContain("WIP safety net");
+  });
+
+  it("comes AFTER RESUMED_TRUST_ORIGIN_LINE when both apply", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession({ via: "heal", verdict: "resumed" }),
+      wipSyncedAt: "2026-10-03T11:56:00.000Z",
+      now: WIP_NOW,
+    }));
+    const lines = out.split("\n");
+    expect(lines.at(-2)).toBe(RESUMED_TRUST_ORIGIN_LINE);
+    expect(lines.at(-1)).toContain("WIP safety net");
+  });
+
+  it("any OTHER via -- never rendered, even with wipSyncedAt set", () => {
+    for (const via of ["recycle", "restart", "provision", "failover", "adopted"] as const) {
+      const out = composeSurvivalBrief(baseInput({
+        session: baseSession({ via }),
+        wipSyncedAt: "2026-10-03T11:56:00.000Z",
+        now: WIP_NOW,
+      }));
+      expect(out).not.toContain("WIP safety net");
+    }
+  });
+
+  it("via 'heal' but wipSyncedAt absent/null -- no WIP sync had ever landed, nothing to say", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession({ via: "heal" }),
+      wipSyncedAt: null,
+      now: WIP_NOW,
+    }));
+    expect(out).not.toContain("WIP safety net");
+  });
+
+  it("no session at all -- never rendered regardless of wipSyncedAt", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: null,
+      wipSyncedAt: "2026-10-03T11:56:00.000Z",
+      now: WIP_NOW,
+      tasks: { ok: true, value: [{ taskNumber: 1, taskTitle: "t", branch: "b", commitsAheadOfMain: 1, lastCommitAt: null }] },
+    }));
+    expect(out).not.toContain("WIP safety net");
+  });
+});

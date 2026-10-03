@@ -40,6 +40,7 @@ import type { RepoReach } from "../src/github/reach";
 import { fleetTotals, formatFleetTotalsLine } from "./fleet-totals";
 import { formatBurn, BURN_LEGEND } from "./burn-format";
 import { formatRestartCell, formatRestartChurn, RESTART_LEGEND } from "./restart-format";
+import { formatWipCell, formatWipInspectLines, WIP_LEGEND } from "./wip-format";
 import { requestInspect, renderInspect, formatSessionForceArmedLine, type InspectBody } from "./inspect-request";
 import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
@@ -218,7 +219,7 @@ export function formatStudioCount(studios: StudioStatus[]): string {
 
 /** The lines `fleet ls` prints above its table: the denominator FIRST. */
 export function formatLsHead(studios: StudioStatus[]): string[] {
-  return [formatStudioCount(studios), BURN_LEGEND, RESTART_LEGEND];
+  return [formatStudioCount(studios), BURN_LEGEND, RESTART_LEGEND, WIP_LEGEND];
 }
 
 /** Issue #205: a 3,382-char ERROR padded every line of the table to ~3,600
@@ -305,7 +306,7 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
   // of truth, and a malformed id keeps rendering rather than crashing the
   // table.
   const headers = [
-    "ID", "REPO", "STATE", "RST", "READY", "SESSION", "ACTIVITY", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
+    "ID", "REPO", "STATE", "RST", "WIP", "READY", "SESSION", "ACTIVITY", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
   ];
   const rows = studios.map((s) => [
     s.id,
@@ -317,6 +318,11 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
     // RST column (issue #56): containers replaced in the last 24h / lifetime
     // -- churn a coordinator can see without opening a container.
     formatRestartCell(s, now),
+    // WIP column (board issue #208, part 2): age since the last periodic
+    // WIP safety-net sync (fleet/rescue/<studio>/wip) -- bounds how much a
+    // platform-side container replacement (no pre-replacement rescue hook)
+    // could have cost, without opening a container.
+    formatWipCell(s, now),
     // Issue #85: `readyOverride` reads the DO's own Observed evidence
     // (replaced/unreachable/unverified) FIRST — that evidence contradicts or
     // supersedes the last container-side check `formatReady` renders, and
@@ -480,6 +486,10 @@ async function cmdInspect(creds: Credentials, id: string): Promise<void> {
   // renders the honest-floor line for that case instead of crashing on
   // `body.observed.replacedAt`.
   for (const line of formatObservedLines(body.observed)) console.log(line);
+  // Board issue #208, part 2: same "before the ok-check" treatment as
+  // formatObservedLines just above -- the WIP safety-net sync age is DO-
+  // stored evidence too, so a container-side failure still shows it.
+  for (const line of formatWipInspectLines(id, body.observed, new Date())) console.log(line);
   // Issue #228 HOLD fix, item 4: same "before the ok-check" treatment as
   // formatObservedLines just above — the Worker sends sessionForceArmedAt on
   // BOTH branches (routes.ts), so an ok:false inspect (a stopped studio, a

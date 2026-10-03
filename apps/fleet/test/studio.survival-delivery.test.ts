@@ -710,6 +710,43 @@ describe("deliverSurvivalBriefOnBringup — the delivery", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Board issue #208, part 2 — `wipSyncedAt` threads from the bring-up's own
+// trigger thunk into the pending record it would defer into, frozen the
+// SAME way `session`/`via`/`replacementDetected` already are.
+// ---------------------------------------------------------------------------
+
+describe("deliverSurvivalBriefOnBringup — wipSyncedAt threading (#208 part 2)", () => {
+  it("a bring-up that never names wipSyncedAt at all defers a pending record with NO wipSyncedAt key — byte-identical to before this feature", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      bringup: bringup(), // no `wipSyncedAt` override at all
+    });
+    expect(await h.run()).toMatchObject({ kind: "deferred" });
+    const pending = h.observed.stored()?.survivalBriefPending;
+    expect(pending).not.toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(pending, "wipSyncedAt")).toBe(false);
+  });
+
+  it("a bring-up's own wipSyncedAt (set or null) survives into the deferred pending record", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      bringup: bringup({ wipSyncedAt: "2026-10-03T11:56:00.000Z" }),
+    });
+    expect(await h.run()).toMatchObject({ kind: "deferred" });
+    expect(h.observed.stored()?.survivalBriefPending?.wipSyncedAt).toBe("2026-10-03T11:56:00.000Z");
+  });
+
+  it("explicit null (no WIP sync had ever landed) is carried too, not dropped", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      bringup: bringup({ wipSyncedAt: null }),
+    });
+    expect(await h.run()).toMatchObject({ kind: "deferred" });
+    expect(h.observed.stored()?.survivalBriefPending?.wipSyncedAt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Shared single-flight: one wake path, one lock, source-pinned
 // ---------------------------------------------------------------------------
 
@@ -1201,7 +1238,9 @@ describe("the retry rides the REGULAR per-studio tick, not the maestro-only swee
     const src = env.TEST_STUDIO_DO_SRC;
     // One probe helper, one compose helper, each called from BOTH paths.
     expect(src).toContain("private async survivalBusy(): Promise<BusyVerdict>");
-    expect(src).toContain("private survivalCompose(workRepoSlug: string, session: ObservedSession)");
+    expect(src).toContain(
+      "private survivalCompose(workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null)",
+    );
     const code = codeOnly(src);
     expect(code.filter((l) => /this\.survivalBusy\(\)/.test(l))).toHaveLength(2);
     expect(code.filter((l) => /this\.survivalCompose\(/.test(l))).toHaveLength(2);

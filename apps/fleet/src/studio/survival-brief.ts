@@ -77,6 +77,17 @@ export interface SurvivalInput {
    *  (Principle 1, same as PR1's Observed record). `session.snapshotAgeS`
    *  is the one exception -- see its own field doc comment above. */
   now: string;
+  /**
+   * Board issue #208, part 2 -- `Observed.wipSyncedAt` as it stood AT THE
+   * MOMENT OF THIS BRING-UP (frozen the same way `session` above is -- see
+   * `SurvivalBriefPending.wipSyncedAt`'s own doc comment, observed.ts). Only
+   * ever rendered when `session.via === "heal"` (the `BARE_SELF_HEALED` path,
+   * do.ts) -- see `composeSurvivalBrief`'s own WIP-safety-net section below
+   * for why that gate lives here and not at a caller. OPTIONAL/null means
+   * either this is not a heal bring-up, or no WIP sync had ever landed before
+   * it -- either way, nothing to say.
+   */
+  wipSyncedAt?: string | null;
 }
 
 /** Lines per section before the rest collapses to a single "+N more". Keeps
@@ -315,6 +326,45 @@ function sessionLine(session: ObservedSession | null): string {
 export const RESUMED_TRUST_ORIGIN_LINE =
   "- Your conversation resumed; files were replaced — trust origin, not memory.";
 
+/**
+ * Board issue #208, part 2 -- BYTE-IDENTICAL to rescue.ts's `wipSyncRef`, the
+ * one ref `wipSyncCmd` ever force-pushes to. Duplicated rather than imported,
+ * same convention survival-delivery.ts's own `rescueBranchPrefix` already
+ * follows for the identical reason (that function's own doc comment): this
+ * file is the pure composer and has no business pulling in rescue.ts's own
+ * exec/push machinery for one string.
+ */
+function wipSyncRefEcho(studioId: string): string {
+  return `fleet/rescue/${studioId}/wip`;
+}
+
+/**
+ * Board issue #208, part 2 -- the sentence a healed lead needs that no other
+ * line in this brief carries: a BARE container (`BARE_SELF_HEALED`, do.ts)
+ * was restarted from a BLANK disk, so whatever was dirty or
+ * committed-but-unpushed since the LAST periodic WIP sync (rescue.ts's
+ * `wipSyncCmd`, every ~5 minutes while the studio was alive) is not on this
+ * filesystem and not in this brief's task-branch section either -- that
+ * section only ever reads origin, and a WIP snapshot's whole point is a push
+ * no task branch resolution will find. Naming the ref and its age is the
+ * ONLY way this brief can point a resumed lead at it.
+ *
+ * GATED ON `session.via === "heal"`, deliberately -- the ONE bring-up kind
+ * this line is for. A plain `restart`/`provision`/`recycle` already gets its
+ * own accurate "what survived" from the task-branch/open-PR sections above;
+ * stamping a WIP-ref line onto those too would describe a container that was
+ * never silently replaced out from under a running lead, which is the one
+ * thing `wipSyncedAt` exists to bound. `wipSyncedAt` absent/null (no WIP sync
+ * had ever landed before this heal) renders nothing, same "no fabricated
+ * evidence" rule every other section of this composer already follows.
+ */
+function wipSyncLine(input: SurvivalInput): string | null {
+  if (input.session?.via !== "heal" || input.wipSyncedAt == null) return null;
+  const age = ageFrom(input.wipSyncedAt, input.now);
+  const ageText = age === null ? "unknown age" : `${formatSurvivalAge(age)} ago`;
+  return `- WIP safety net: ${wipSyncRefEcho(input.studioId)}, last synced ${ageText} — check it for anything lost since then.`;
+}
+
 export function composeSurvivalBrief(input: SurvivalInput): string {
   const genuinelyEmpty =
     input.tasks.ok && input.tasks.value.length === 0 &&
@@ -354,6 +404,8 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
 
   lines.push(sessionLine(input.session));
   if (input.session?.verdict === "resumed") lines.push(RESUMED_TRUST_ORIGIN_LINE);
+  const wipLine = wipSyncLine(input);
+  if (wipLine !== null) lines.push(wipLine);
 
   return lines.join("\n");
 }
