@@ -37,6 +37,30 @@ describe("repairFailureLine — a repair verb's failure, printed whole", () => {
   it("still bounds a pathological body", () => {
     expect(repairFailureLine("destroy", 500, "y".repeat(100_000)).length).toBeLessThan(2100);
   });
+
+  // Issue #217: provision/restart/recycle's new 409 refusal (routes.ts's
+  // launchOrStartRefusalResponse) answers `{"error": "<reason>"}` — without
+  // this branch the operator read the raw JSON blob, braces and quoting
+  // included, instead of the reason itself.
+  it("a JSON {error} body (the new #217 409 refusal shape) prints the reason, not the raw JSON", () => {
+    const body = JSON.stringify({ error: "claude account: every account limited; earliest reset 2026-10-03T12:00:00.000Z" });
+    const line = repairFailureLine("provision", 409, body);
+    expect(line).toBe(
+      "fleet provision: 409 claude account: every account limited; earliest reset 2026-10-03T12:00:00.000Z",
+    );
+    expect(line).not.toContain("{");
+    expect(line).not.toContain("}");
+  });
+
+  it("a JSON body without a string .error falls through to the raw-text branch", () => {
+    const line = repairFailureLine("check", 500, JSON.stringify({ ok: false }));
+    expect(line).toBe(`fleet check: 500 ${JSON.stringify({ ok: false })}`);
+  });
+
+  it("non-JSON text (every other verb's body today) is unaffected by the new branch", () => {
+    const line = repairFailureLine("recycle", 409, "recycle refused: the container did not answer an 8s probe.");
+    expect(line).toBe("fleet recycle: 409 recycle refused: the container did not answer an 8s probe.");
+  });
 });
 
 describe("discardNote — what --discard-unsynced just paid", () => {
