@@ -386,6 +386,32 @@ describe("destroyWithSync", () => {
     await destroyWithSync(syncDeps, storage, STUDIO_ID, destroy, recordStudioFn, REPO, noopResolveMemoryRepo, noopCommit);
     expect(await storage.get(DESTROY_EPOCH_KEY)).toBe(4);
   });
+
+  // Review round 2 (#210), finding 2 (BLOCKER) — a stale `parkedAt` carried
+  // onto the STOPPED row (this write used to spread `...(existing ??
+  // freshStatus(idFallback))` unchanged) survives a later resume and makes
+  // the very next exhaustion read as already 6h+ old, auto-stopping a studio
+  // that was just resumed and never got a real chance. Defense in depth
+  // (per the review's own belt-and-suspenders instruction) — a stopped row
+  // must never claim to still be "parked since <stale time>".
+  it("#210 review round 2, finding 2: the stopped row clears a stale parkedAt it inherited from the row BEFORE this destroy", async () => {
+    const syncDeps = fakeSyncDeps();
+    const destroy = vi.fn(async () => {});
+    const recordStudioFn = vi.fn(async () => {});
+    const storage = fakeCombinedStorage({
+      status: {
+        id: STUDIO_ID, state: "degraded", tailscaleHost: null, lastRefresh: null, error: null,
+        lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+        parkedAt: "2026-09-01T00:00:00.000Z", exhaustionKind: "select",
+      },
+    });
+
+    const result = await destroyWithSync(syncDeps, storage, STUDIO_ID, destroy, recordStudioFn, REPO, noopResolveMemoryRepo, noopCommit);
+
+    expect(result.state).toBe("stopped");
+    expect(result.parkedAt ?? null).toBeNull();
+    expect((await storage.get(STATUS_KEY))?.parkedAt ?? null).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
