@@ -107,6 +107,38 @@ describe("fleet junior stats", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+  test("skips malformed lines (missing ts, non-numeric input_tokens) but still aggregates the well-formed one", async () => {
+    const home = tmpHome();
+    const server = Bun.serve({
+      port: 0,
+      async fetch() {
+        return Response.json({ rows: [], totals: { calls: 0, inputTokens: 0, outputTokens: 0 } });
+      },
+    });
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+    const dir = join(home, ".local", "share", "fleet");
+    mkdirSync(dir, { recursive: true });
+    const lines = [
+      JSON.stringify({ ts: NOW, id: "laptop-d", mode: "edit", model: "glm", input_tokens: 7, output_tokens: 3, calls: 1, ok: true }),
+      JSON.stringify({ id: "laptop-d", mode: "edit", model: "glm", input_tokens: 999, output_tokens: 999, calls: 1, ok: true }), // ts missing
+      JSON.stringify({ ts: NOW, id: "laptop-d", mode: "edit", model: "glm", input_tokens: "not a number", output_tokens: 999, calls: 1, ok: true }),
+      // Review round 1: `JSON.parse("null")` succeeds (valid JSON) and
+      // returns `null` — the try/catch around JSON.parse does NOT catch
+      // this. A bare JSON scalar line (null, a number, a string, an array —
+      // all realistic shapes for a truncated/partial write or manual edit)
+      // must be skipped like any other malformed line, never crash the
+      // whole command with an uncaught TypeError reading `.ts` off `null`.
+      "null",
+    ];
+    writeFileSync(join(dir, "junior-usage.jsonl"), `${lines.join("\n")}\n`);
+    const r = await run(["junior", "stats"], home);
+    server.stop(true);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/laptop-d\s+1\s+7\s+3/);
+    expect(r.out).not.toContain("999");
+    rmSync(home, { recursive: true, force: true });
+  });
+
   test("--since filters out local rows older than the cutoff", async () => {
     const home = tmpHome();
     const server = Bun.serve({

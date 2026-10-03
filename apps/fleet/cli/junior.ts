@@ -132,11 +132,32 @@ function readLocalUsage(sinceMs: number): JuniorStatsRow[] {
   for (const line of readFileSync(path, "utf8").split("\n")) {
     const trimmed = line.trim();
     if (trimmed === "") continue;
-    let row: { ts: number; id: string; input_tokens: number; output_tokens: number };
+    // deno-lint-ignore no-explicit-any
+    let row: any;
     try { row = JSON.parse(trimmed); } catch { continue; }
+    // Review round 1 (#221): `JSON.parse` succeeds on any valid JSON value,
+    // not just objects — a bare `null`, number, string, or array line (all
+    // realistic shapes for a truncated/partial write or manual edit) parses
+    // fine and then crashes the next check with an uncaught TypeError
+    // reading `.ts` off a non-object. Must be skipped like any other
+    // malformed line, never allowed to take down the whole command.
+    if (typeof row !== "object" || row === null) continue;
+    // Issue #221 item 4: a corrupted line (partial write, manual edit) must
+    // be SKIPPED, not silently NaN-contaminate every downstream aggregate —
+    // a broken `ts` previously made `row.ts < sinceMs` always false, so the
+    // row was KEPT (not excluded) and then poisoned every sum it touched.
+    if (!Number.isFinite(row.ts) || !Number.isFinite(row.input_tokens) || !Number.isFinite(row.output_tokens)
+      || typeof row.id !== "string" || row.id === "") continue;
+    // Issue #221 item 1: `calls` is new — a line written before this fix
+    // lacks it entirely, and that absence means exactly 1 (the old
+    // one-row-one-call assumption). A PRESENT but non-finite `calls` is a
+    // different thing: a genuinely malformed line, skip it whole rather than
+    // silently defaulting a garbage value.
+    if ("calls" in row && !Number.isFinite(row.calls)) continue;
+    const calls = Number.isFinite(row.calls) ? row.calls : 1;
     if (row.ts < sinceMs) continue;
     const agg = byId.get(row.id) ?? { id: row.id, calls: 0, inputTokens: 0, outputTokens: 0 };
-    agg.calls += 1;
+    agg.calls += calls;
     agg.inputTokens += row.input_tokens;
     agg.outputTokens += row.output_tokens;
     byId.set(row.id, agg);

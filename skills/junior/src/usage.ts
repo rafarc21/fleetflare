@@ -26,6 +26,11 @@ export interface LocalUsageRow {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** Issue #221 finding 1: real HTTP calls this invocation made (first call,
+   *  plus the repair call if one ran, plus any retries callWithPolicy itself
+   *  made) — NOT a per-row-is-one-call assumption. Lets `fleet junior stats`
+   *  sum real call counts consistently with the server-side half. */
+  calls: number;
   ok: boolean;
 }
 
@@ -46,6 +51,7 @@ export function recordUsageLocal(env: Record<string, string | undefined>, row: L
       model: row.model,
       input_tokens: row.inputTokens,
       output_tokens: row.outputTokens,
+      calls: row.calls,
       ok: row.ok,
     });
     appendFileSync(path, `${line}\n`);

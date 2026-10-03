@@ -65,12 +65,18 @@ function telemetry(model: string, startMs: number, r: ChatResult | null, calls: 
 // too would double count. `isLocal` is only ever true once resolveTransport
 // has actually resolved a non-proxy transport, so the early AuthError branch
 // (no model call ever made) correctly records nothing.
+//
+// Issue #221 finding 1: `usage` and `calls` are RUNNING TOTALS accumulated
+// across every callWithPolicy resolution (the first call, and the repair
+// call if one ran) by the caller below — never derived from `last:
+// ChatResult`, which only ever reflects the MOST RECENT call and would
+// silently drop the first call's tokens on a repair round-trip.
 function recordLocalUsage(
   env: Record<string, string | undefined>, isLocal: boolean, mode: "edit" | "text", model: string,
-  r: ChatResult | null, ok: boolean,
+  usage: { in: number; out: number }, calls: number, ok: boolean,
 ): void {
   if (!isLocal) return;
-  recordUsageLocal(env, { ts: Date.now(), mode, model, inputTokens: r?.usage.in ?? 0, outputTokens: r?.usage.out ?? 0, ok });
+  recordUsageLocal(env, { ts: Date.now(), mode, model, inputTokens: usage.in, outputTokens: usage.out, calls, ok });
 }
 
 export async function main(argv: string[], env: Record<string, string | undefined>, cwd: string): Promise<number> {
@@ -99,6 +105,10 @@ export async function main(argv: string[], env: Record<string, string | undefine
   let calls = 0;
   let model = models[0];
   let last: ChatResult | null = null;
+  // Issue #221 finding 1: running totals across every callWithPolicy
+  // resolution, independent of `last` (see recordLocalUsage's own comment).
+  let usageIn = 0;
+  let usageOut = 0;
   // Set once resolveTransport actually resolves a transport; stays false for
   // the early AuthError branch below (no model call ever made, so no usage
   // record is owed either way) and for a proxy transport (recorded server-side).
@@ -109,11 +119,12 @@ export async function main(argv: string[], env: Record<string, string | undefine
     isLocal = transport.kind !== "proxy";
     const first = await callWithPolicy({ transport, models, messages, maxTokens: DEFAULT_MAX_TOKENS, mode: args.mode, signal });
     calls += first.calls; model = first.model; last = first.result;
+    usageIn += last.usage.in; usageOut += last.usage.out;
 
     if (args.mode === "text") {
       console.log(last.content.trim());
       console.error(telemetry(model, start, last, calls, "ok"));
-      recordLocalUsage(env, isLocal, args.mode, model, last, true);
+      recordLocalUsage(env, isLocal, args.mode, model, { in: usageIn, out: usageOut }, calls, true);
       return EXIT.OK;
     }
 
@@ -128,19 +139,20 @@ export async function main(argv: string[], env: Record<string, string | undefine
       const orderedModels = [model, ...models.filter((m) => m !== model)];
       const second = await callWithPolicy({ transport, models: orderedModels, messages: repairMsgs, maxTokens: DEFAULT_MAX_TOKENS, mode: args.mode, signal });
       calls += second.calls; model = second.model; last = second.result;
+      usageIn += last.usage.in; usageOut += last.usage.out;
       applied = applyBlocks(files, parseBlocks(last.content), exists);
     }
     if (!applied.ok) {
       console.error(`junior: invalid edit: ${applied.error}\n--- raw output ---\n${last.content}`);
       console.error(telemetry(model, start, last, calls, "invalid"));
-      recordLocalUsage(env, isLocal, args.mode, model, last, false);
+      recordLocalUsage(env, isLocal, args.mode, model, { in: usageIn, out: usageOut }, calls, false);
       return EXIT.INVALID;
     }
     const diff = toUnifiedDiff(files, applied.after);
     if (diff === "") {
       console.error("junior: invalid edit: blocks produced no change");
       console.error(telemetry(model, start, last, calls, "invalid"));
-      recordLocalUsage(env, isLocal, args.mode, model, last, false);
+      recordLocalUsage(env, isLocal, args.mode, model, { in: usageIn, out: usageOut }, calls, false);
       return EXIT.INVALID;
     }
     const dir = join(cwd, ".junior");
@@ -149,21 +161,21 @@ export async function main(argv: string[], env: Record<string, string | undefine
     writeFileSync(join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}.patch`), diff);
     process.stdout.write(diff);
     console.error(telemetry(model, start, last, calls, "ok"));
-    recordLocalUsage(env, isLocal, args.mode, model, last, true);
+    recordLocalUsage(env, isLocal, args.mode, model, { in: usageIn, out: usageOut }, calls, true);
     return EXIT.OK;
   } catch (e) {
     const name = (e as Error)?.name;
     if (name === "TimeoutError" || name === "AbortError") {
       console.error(`junior: timed out after ${args.timeoutS}s`);
       console.error(telemetry(model, start, last, calls, "timeout"));
-      recordLocalUsage(env, isLocal, args.mode, model, last, false);
+      recordLocalUsage(env, isLocal, args.mode, model, { in: usageIn, out: usageOut }, calls, false);
       return EXIT.TIMEOUT;
     }
     if (e instanceof AuthError) { console.error(`junior: ${e.message}`); return EXIT.AUTH; }
     if (e instanceof ApiError) {
       console.error(`junior: ${e.message}`);
       console.error(telemetry(model, start, last, calls, "api-error"));
-      recordLocalUsage(env, isLocal, args.mode, model, last, false);
+      recordLocalUsage(env, isLocal, args.mode, model, { in: usageIn, out: usageOut }, calls, false);
       return EXIT.API;
     }
     // Catch-all for any otherwise-unclassified Error reaching this point:
@@ -180,7 +192,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
     if (e instanceof Error) {
       console.error(`junior: ${e.message}`);
       console.error(telemetry(model, start, last, calls, "api-error"));
-      recordLocalUsage(env, isLocal, args.mode, model, last, false);
+      recordLocalUsage(env, isLocal, args.mode, model, { in: usageIn, out: usageOut }, calls, false);
       return EXIT.API;
     }
     throw e;

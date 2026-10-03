@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import * as authModule from "../src/studio/auth";
-import { insertJuniorUsage, aggregateJuniorUsage, handleJuniorUsageStats } from "../src/junior/usage";
+import { insertJuniorUsage, aggregateJuniorUsage, handleJuniorUsageStats, pruneOldJuniorUsage } from "../src/junior/usage";
 import { handleFleetJunior } from "../src/junior/route";
 import { recordJuniorAuthorization } from "../src/junior/authz";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
@@ -77,6 +77,40 @@ describe("insertJuniorUsage + aggregateJuniorUsage", () => {
     const agg = await aggregateJuniorUsage(env.DB, 1000);
     expect(agg.rows).toEqual([{ studioId: ME, calls: 1, inputTokens: 1, outputTokens: 1 }]);
     expect(agg.totals).toEqual({ calls: 1, inputTokens: 1, outputTokens: 1 });
+  });
+});
+
+// Issue #221 item 3: retention — mirrors ratelimit.ts's pruneStaleCounters
+// (timestamp-cutoff delete, run opportunistically), not exceptions.ts's
+// row-count-cap style.
+describe("pruneOldJuniorUsage", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  it("deletes rows older than the retention window, keeps fresh rows", async () => {
+    const now = 1_000_000_000_000; // arbitrary fixed epoch ms
+    await insertJuniorUsage(env.DB, {
+      id: "old", ts: now - 91 * DAY_MS, studioId: ME, mode: "edit", model: "m", inputTokens: 1, outputTokens: 1, ok: true,
+    });
+    await insertJuniorUsage(env.DB, {
+      id: "fresh", ts: now - 1 * DAY_MS, studioId: ME, mode: "edit", model: "m", inputTokens: 2, outputTokens: 2, ok: true,
+    });
+
+    await pruneOldJuniorUsage(env.DB, now);
+
+    const logged = await env.DB.prepare("SELECT id FROM junior_usage_log").all();
+    expect(logged.results).toEqual([{ id: "fresh" }]);
+  });
+
+  it("never throws, even against a D1 that rejects", async () => {
+    const failing = new Proxy(env.DB, {
+      get(target, prop, receiver) {
+        if (prop === "prepare") {
+          return () => ({ bind: () => ({ run: async () => { throw new Error("simulated D1 failure"); } }) });
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as unknown as D1Database;
+    await expect(pruneOldJuniorUsage(failing, Date.now())).resolves.toBeUndefined();
   });
 });
 
@@ -167,7 +201,9 @@ describe("handleFleetJunior — usage recording (#218)", () => {
       usage: { prompt_tokens: 3, completion_tokens: 4 },
     });
     const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
-    await r.text(); // drain so the detached IIFE's insert has run
+    await r.text();
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain(); // drain so the detached IIFE's insert has run
 
     const logged = await env.DB.prepare("SELECT * FROM junior_usage_log").all();
     expect(logged.results).toHaveLength(1);
@@ -184,6 +220,8 @@ describe("handleFleetJunior — usage recording (#218)", () => {
     const { token, rows, e } = await setup(new Error("boom"));
     const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
     await r.text();
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain();
 
     const logged = await env.DB.prepare("SELECT * FROM junior_usage_log").all();
     expect(logged.results).toHaveLength(1);
@@ -197,6 +235,8 @@ describe("handleFleetJunior — usage recording (#218)", () => {
     const { token, rows, e } = await setup({ response: "r" });
     const r = await handleFleetJunior(req(token, good, { "X-Junior-Mode": "text" }), e, ctx, board(), rows);
     await r.text();
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain();
 
     const logged = await env.DB.prepare("SELECT mode FROM junior_usage_log").all();
     expect((logged.results[0] as Record<string, unknown>).mode).toBe("text");
@@ -206,6 +246,8 @@ describe("handleFleetJunior — usage recording (#218)", () => {
     const { token, rows, e } = await setup({ response: "r" });
     const r = await handleFleetJunior(req(token, good, { "X-Junior-Mode": "bogus" }), e, ctx, board(), rows);
     await r.text();
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain();
 
     const logged = await env.DB.prepare("SELECT mode FROM junior_usage_log").all();
     expect((logged.results[0] as Record<string, unknown>).mode).toBe("edit");
@@ -229,6 +271,13 @@ describe("handleFleetJunior — usage recording (#218)", () => {
     expect(JSON.parse((await r.text()).trim())).toEqual({
       content: "ok", finish: "stop", usage: { in: 3, out: 4, neurons: null },
     });
+    // Proves the insert call site actually ran (and its promise was handed to
+    // ctx.waitUntil) before the "0 rows" assertion below — otherwise "0 rows"
+    // could pass for the WRONG reason (the insert call site never running at
+    // all) just as easily as for the right one (the insert genuinely
+    // rejecting).
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    await ctx.drain();
 
     // The insert genuinely failed — no row landed — proving this is a real
     // rejection surfacing through the full insertJuniorUsage call, not a
