@@ -2722,6 +2722,37 @@ export async function runAccountFailover(
         const parkedMs = Date.parse(existing.parkedAt);
         const stopDue = !Number.isNaN(parkedMs) && now.getTime() - parkedMs >= PARKED_AUTO_STOP_HOURS * 60 * 60_000;
         if (stopDue) {
+          // Review round 2 (#210), finding 5 Part A — writes the refusal
+          // reason onto the row and stamps the bounded retry cadence
+          // BEFORE returning the outcome, so an operator reading `fleet
+          // ls`/`fleet inspect` can always see why an auto-stop has not
+          // landed, and notifies exactly ONCE for a standing, unchanged
+          // refusal — the SAME "unchanged message, no new notify" rule
+          // the ordinary exhaustion message already uses just above
+          // (`existing.state === "degraded" && existing.error === message`),
+          // never every single 300s tick for the same ongoing refusal. A
+          // CHANGED reason (the board task situation shifted) notifies
+          // again.
+          const recordParkRefusal = async (reason: string): Promise<FailoverOutcome> => {
+            const row: StudioStatus = { ...existing, parkRefusalReason: reason, parkRefusedAt: now.toISOString() };
+            await storage.put(STATUS_KEY, row);
+            await recordStudioFn(row);
+            if (existing.parkRefusalReason !== reason) {
+              await deps.notify(`studio ${studioId}: auto-stop refused: ${reason}`);
+            }
+            return { kind: "park-refused", parkedAt: existing.parkedAt as string, reason };
+          };
+          // Review round 2 (#210), finding 5 Part A — the SAME bounded
+          // retry cadence (`AUTO_CONTINUE_RETRY_MS`) `autoContinueLastTriedAt`
+          // already uses: a STANDING refusal (an open board task nobody
+          // has cancelled) must not retry `deps.stopParkedStudio` itself —
+          // a real board-API call, in production — on every single 300s
+          // tick forever.
+          const retryDue = !existing.parkRefusedAt
+            || now.getTime() - Date.parse(existing.parkRefusedAt) >= AUTO_CONTINUE_RETRY_MS;
+          if (!retryDue) {
+            return { kind: "park-refused", parkedAt: existing.parkedAt, reason: existing.parkRefusalReason ?? "" };
+          }
           // Issue #210, ask 3 — rescue-then-stop rather than keep
           // idle-billing a container nothing will ever wake unattended.
           // Review round 1 (#210), finding 1 — the OLD code reported
@@ -2740,12 +2771,9 @@ export async function runAccountFailover(
             try {
               outcome = await deps.stopParkedStudio();
             } catch (err) {
-              return {
-                kind: "park-refused", parkedAt: existing.parkedAt,
-                reason: redactSecrets(err instanceof Error ? err.message : String(err)),
-              };
+              return recordParkRefusal(redactSecrets(err instanceof Error ? err.message : String(err)));
             }
-            if (!outcome.ok) return { kind: "park-refused", parkedAt: existing.parkedAt, reason: outcome.reason };
+            if (!outcome.ok) return recordParkRefusal(outcome.reason);
           }
           return { kind: "auto-stopped", parkedAt: existing.parkedAt };
         }
