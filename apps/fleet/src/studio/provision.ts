@@ -2462,6 +2462,12 @@ export async function runProvision(
    *  NOT the same thing as freshSessionMoved (false both when unconfirmed
    *  AND when confirmed-but-nothing-to-move). */
   freshSessionConfirmed?: boolean;
+  /** Issue #231 — the real on-disk path(s) a confirmed move actually went
+   *  to (`parseFreshSession`'s successfully-moved entries only, `failed `
+   *  ones excluded): the durable half of `freshSessionNote`'s human-readable
+   *  string, for `provisionWithStorage` to persist onto `Observed.
+   *  lastSessionAside`. Absent/empty when nothing was ever moved. */
+  freshSessionAsidePaths?: string[];
 }> {
   const id = buildStudioId(cfg);
   // Dynamic repo selection (P4a) — see resolveWorkRepoSlug's own doc comment
@@ -2498,6 +2504,9 @@ export async function runProvision(
   // channel: a discard nobody is told about is the thing this must never be.
   let freshSessionNote: string | null = null;
   let freshSessionMoved = false;
+  // Issue #231 — the real paths behind `freshSessionMoved`, for
+  // `provisionWithStorage` to persist onto `Observed.lastSessionAside`.
+  let freshSessionAsidePaths: string[] = [];
   // Issue #100 review round 1: distinct from `freshSessionMoved` above, which
   // is ALSO `false` for the legitimate "flag honored, nothing to move" case
   // (`moved` is `[]`) -- indistinguishable there from "never confirmed at
@@ -2613,6 +2622,10 @@ export async function runProvision(
       const moved = parseFreshSession(bringupRes.stdout);
       freshSessionNote = freshSessionNoteFor(moved, id);
       freshSessionMoved = moved !== null && moved.some((m) => !m.startsWith("failed "));
+      // Issue #231 — the successfully-moved paths only, `failed ` entries
+      // excluded: these are real, on-disk destinations, never a path a move
+      // actually failed to reach.
+      freshSessionAsidePaths = moved === null ? [] : moved.filter((m) => !m.startsWith("failed "));
       // Issue #100 review round 1: see freshSessionConfirmed's own doc
       // comment above -- `moved !== null` (a marker line printed) and no
       // entry failed. `[]` (nothing to move) is confirmed; `null` or any
@@ -2708,6 +2721,7 @@ export async function runProvision(
     status, roleEnv, keepAlive,
     ...(freshSessionMoved ? { freshSessionMoved } : {}),
     ...(freshSessionConfirmed ? { freshSessionConfirmed } : {}),
+    ...(freshSessionAsidePaths.length > 0 ? { freshSessionAsidePaths } : {}),
   };
 }
 
@@ -3412,6 +3426,13 @@ export async function recordBringupObservation(
   // restartWithStorage's own `ctx` parameter) — see this function's own doc
   // comment above for why the callers' pre-call check alone is insufficient.
   ctx: OpCtx,
+  // Issue #231 — WHICH trigger caused `requestedFresh: true` for THIS
+  // bring-up (provisionWithStorage's own local variable of the same name),
+  // or null when this bring-up did not go fresh at all (every
+  // restartWithStorage call, which never computes one). Stamped onto the
+  // session record below — see ObservedSession.freshSessionSource's own
+  // doc comment (observed.ts).
+  freshSessionSource: "flag" | "pending-key" | null = null,
 ): Promise<void> {
   if (!observedStorage) return;
   const token = crypto.randomUUID();
@@ -3517,6 +3538,12 @@ export async function recordBringupObservation(
   // replacement just took away.
   const replacementDetected = observedBefore.replacedAt !== null;
   const replacementFlag = replacementDetected ? { replacementDetected: true } : {};
+  // Issue #231 — same external-spread pattern as `replacementFlag`/
+  // `keeperSource` just below: applied to BOTH branches that build a verdict
+  // describing THIS bring-up, never to the "untouched, keep the prior
+  // verdict" branch above (that branch describes an EARLIER bring-up, which
+  // this call's own `freshSessionSource` says nothing about).
+  const freshSessionFlag = freshSessionSource !== null ? { freshSessionSource } : {};
   // Review round 6, MUST-FIX 9: MUST-FIX 3 above only covers the case where a
   // PRIOR verdict exists to fall back on. An untouched lead with NO prior
   // verdict at all (a studio's very first bring-up ever, or a pre-#85 studio
@@ -3534,12 +3561,14 @@ export async function recordBringupObservation(
           reason: "lead predates bring-up",
           ...(snapshotAgeIsUpperBound ? { snapshotAgeIsUpperBound: true } : {}),
           ...replacementFlag,
+          ...freshSessionFlag,
           ...(keeperSource ? { snapshotSource: keeperSource } : {}),
         }
       : {
           ...computeSessionVerdict(probe, expectedCwd, restoreOutcome, turnsBefore, snapshotAgeS, now, via),
           ...(snapshotAgeIsUpperBound ? { snapshotAgeIsUpperBound: true } : {}),
           ...replacementFlag,
+          ...freshSessionFlag,
           ...(keeperSource ? { snapshotSource: keeperSource } : {}),
         };
 
@@ -3718,13 +3747,22 @@ export async function provisionWithStorage(
     ? { ...cfg, freshSession: false }
     : requestedFresh ? { ...cfg, freshSession: true } : cfg;
   if (requestedFresh) await storage.put(FRESH_SESSION_PENDING_KEY, true);
+  // Issue #231 — WHICH of the two triggers caused `requestedFresh` on THIS
+  // call, for the bring-up log (ObservedSession.freshSessionSource below).
+  // `cfg.freshSession === true` (the explicit ask) takes priority over a
+  // merely-stored pending key when BOTH happen to be true on the same call
+  // — the explicit ask is the more specific, more recent fact.
+  const freshSessionSource: "flag" | "pending-key" | undefined = cfg.cancelFreshSession === true
+    ? undefined
+    : cfg.freshSession === true ? "flag" : freshSessionPending ? "pending-key" : undefined;
   let status: StudioStatus;
   let roleEnv: RoleEnv | StudioEnv | null;
   let keepAlive: boolean | null;
   let freshSessionMoved: boolean | undefined;
   let freshSessionConfirmed: boolean | undefined;
+  let freshSessionAsidePaths: string[] | undefined;
   try {
-    ({ status, roleEnv, keepAlive, freshSessionMoved, freshSessionConfirmed } = await runProvision(
+    ({ status, roleEnv, keepAlive, freshSessionMoved, freshSessionConfirmed, freshSessionAsidePaths } = await runProvision(
       { ...provisionDeps, recordStudio: guardRecordStudio(deps, ctx) }, provisionCfg, fleetRepoSlug, existing,
     ));
     // Review round 3 (issue #85 PR1), MUST-FIX 9 (maestro correction #4):
@@ -3741,7 +3779,10 @@ export async function provisionWithStorage(
     // the exec succeeds it is observing a container this op no longer owns.
     if (status.state === "running" && !(await ctx.moved())) {
       try {
-        await recordBringupObservation(deps, observedStorage, status, existing, restoreOutcome, via, lastSnapshotAtBefore, bringupStartedAt, restoreObservedAt, restoreSource, lastStopAt, ctx);
+        await recordBringupObservation(
+          deps, observedStorage, status, existing, restoreOutcome, via, lastSnapshotAtBefore, bringupStartedAt,
+          restoreObservedAt, restoreSource, lastStopAt, ctx, freshSessionSource ?? null,
+        );
       } catch (err) {
         console.error(`studio ${status.id}: recordBringupObservation failed, continuing`, err instanceof Error ? err.message : String(err));
       }
