@@ -306,10 +306,31 @@ export const RESCUE_STAMP_DIGITS = 14;
  * interpolated into pattern syntax.
  */
 export function isRescueBranchFor(studioId: string, branch: string): boolean {
+  return rescueRefStamp(studioId, branch) !== null;
+}
+
+/**
+ * Board issue #228, item 3 — the SAME anchored match `isRescueBranchFor`
+ * above wraps, refactored to EXPOSE the matched 14-digit stamp instead of a
+ * bare boolean, so the age cap below (`SURVIVAL_RESCUE_REF_MAX_AGE_DAYS`) can
+ * REUSE this per-shape anchoring logic rather than re-deriving a second copy
+ * of it that could drift. `isRescueBranchFor` becomes a one-line wrapper
+ * (`rescueRefStamp(...) !== null`) so every existing caller keeps its own
+ * boolean contract unchanged.
+ *
+ * Every anchoring guarantee the original function's own doc comment
+ * described is preserved byte-for-byte here -- this is a one-way-door rescue
+ * file, and the per-shape regexes below are copied, not rewritten, from that
+ * original body (see git history / #216's own doc comment for the full
+ * reasoning behind each one): never a bare substring, never an unescaped
+ * studio-id-built regex, both separators (`-` flat, `/` nested) safe because
+ * studio ids never contain `/`.
+ */
+export function rescueRefStamp(studioId: string, branch: string): string | null {
   const prefix = rescueBranchPrefix(studioId);
   if (branch.startsWith(prefix)) {
     const stamp = branch.slice(prefix.length);
-    return stamp.length === RESCUE_STAMP_DIGITS && /^[0-9]+$/.test(stamp);
+    return stamp.length === RESCUE_STAMP_DIGITS && /^[0-9]+$/.test(stamp) ? stamp : null;
   }
   // MAJOR fix (#216, fresh-context review on #212 round 2): the flat prefix
   // above is only ONE of the 4 ref shapes this fleet's own rescue.ts
@@ -323,30 +344,78 @@ export function isRescueBranchFor(studioId: string, branch: string): boolean {
   // contain `/`, so neither needs escaping (same reasoning as the flat
   // prefix's own comment, and provision.ts's own).
   const nested = rescueBranchNestedPrefix(studioId);
-  if (!branch.startsWith(nested)) return false;
+  if (!branch.startsWith(nested)) return null;
   const rest = branch.slice(nested.length);
   // N1/N2: a local branch or stash entry the main checkout's own walk pushed,
   // never checked out anywhere -- `<14digits>/checkout/<name>`.
   // `\S+` (never bare `.+`) for the trailing name: a git ref name cannot
   // contain whitespace, same discipline as discoverRescueRefsCmd's own
   // `[^[:space:]]+`.
-  if (new RegExp(`^[0-9]{${RESCUE_STAMP_DIGITS}}\\/checkout\\/\\S+$`).test(rest)) return true;
+  const checkoutMatch = rest.match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})\\/checkout\\/\\S+$`));
+  if (checkoutMatch) return checkoutMatch[1]!;
   // Member worktree, and its own non-fast-forward retry (`-nff-` sits BEFORE
   // the timestamp, not after it) -- `wt/<id>-<14digits>` or
   // `wt/<id>-nff-<14digits>`. `\S+` covers both: it already allows the `-nff`
   // characters before the final `-<14digits>`.
   if (rest.startsWith("wt/")) {
-    return new RegExp(`^\\S+-[0-9]{${RESCUE_STAMP_DIGITS}}$`).test(rest.slice(3));
+    const wtMatch = rest.slice(3).match(new RegExp(`^\\S+-([0-9]{${RESCUE_STAMP_DIGITS}})$`));
+    return wtMatch ? wtMatch[1]! : null;
   }
   // Fix round (#208 PR #215 review item 1): wip-sync's own per-boot ref —
   // `wip/<14digits>`, exactly like `wt/<id>-<14digits>` above but with no
   // `<id>` segment at all (wip-sync has no worktree identity to disambiguate;
   // it is always the main checkout, one ref per container boot).
   if (rest.startsWith("wip/")) {
-    return new RegExp(`^[0-9]{${RESCUE_STAMP_DIGITS}}$`).test(rest.slice(4));
+    const wipMatch = rest.slice(4).match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})$`));
+    return wipMatch ? wipMatch[1]! : null;
   }
-  return false;
+  return null;
 }
+
+/**
+ * Board issue #228, item 3 — the inverse of `rescue.ts`'s own
+ * `formatRescueStamp`: parses a 14-digit `YYYYMMDDHHMMSS` UTC stamp (same
+ * zero-padded field order) back into a `Date`. Lives HERE, not rescue.ts,
+ * for the same import-direction reason `formatRescueStamp`'s own doc comment
+ * gives for why IT lives there and not here: this file (survival-delivery.ts)
+ * already owns `RESCUE_STAMP_DIGITS` and the whole read side
+ * (`isRescueBranchFor`/`rescueRefStamp`), and importing FROM rescue.ts here
+ * would close the same import cycle that comment describes.
+ *
+ * Returns `null` for anything that is not exactly `RESCUE_STAMP_DIGITS`
+ * digits, or that does not round-trip to a real UTC calendar date/time
+ * (`Date.UTC` silently NORMALIZES an out-of-range field like month 13 rather
+ * than rejecting it -- round-tripping through the UTC getters catches that
+ * instead of accepting a stamp that was never a real moment).
+ */
+export function parseRescueStamp(stamp: string): Date | null {
+  if (stamp.length !== RESCUE_STAMP_DIGITS || !/^[0-9]+$/.test(stamp)) return null;
+  const year = Number(stamp.slice(0, 4));
+  const month = Number(stamp.slice(4, 6));
+  const day = Number(stamp.slice(6, 8));
+  const hour = Number(stamp.slice(8, 10));
+  const minute = Number(stamp.slice(10, 12));
+  const second = Number(stamp.slice(12, 14));
+  const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (
+    date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day ||
+    date.getUTCHours() !== hour || date.getUTCMinutes() !== minute || date.getUTCSeconds() !== second
+  ) {
+    return null;
+  }
+  return date;
+}
+
+/**
+ * Board issue #228, item 3 — a rescue ref older than this is dropped from
+ * both the attribution candidate pool and `unclaimedRescueBranches`: a
+ * container replaced or crashed over 2 weeks ago is very unlikely to still
+ * be relevant to today's lead. Deliberately kept a bit longer than teardown
+ * rescue's own urgency window (minutes, not days) -- unlike a kept ref or a
+ * retry budget, this costs NOTHING but a brief-rendering line, so there is
+ * no pressure to cut it close.
+ */
+export const SURVIVAL_RESCUE_REF_MAX_AGE_DAYS = 14;
 
 /** Every ref in `branches` that is genuinely one of THIS studio's rescue
  *  refs, newest stamp first (the stamps are fixed-width, so a lexical sort IS
@@ -569,7 +638,25 @@ export async function resolveSurvivalInput(
   const unresolved = resolved.filter((r) => r.branch === null);
   let unclaimedRescueBranches: Checked<string[]>;
   try {
-    const refs = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
+    const fetched = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
+    // Board issue #228, item 3 — too stale to list is also too stale to
+    // attribute: a ref whose own embedded stamp is older than
+    // `SURVIVAL_RESCUE_REF_MAX_AGE_DAYS` (measured against `now`, NEVER the
+    // real clock) never reaches attribution or `unclaimedRescueBranches`
+    // below. A ref whose stamp cannot even be parsed (unreachable in
+    // practice -- `rescueBranchesFor` already filtered to `isRescueBranchFor`
+    // matches, which `rescueRefStamp` agrees with by construction) is kept
+    // rather than dropped: never discard a real ref over an age this
+    // function failed to compute.
+    const maxAgeMs = SURVIVAL_RESCUE_REF_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+    const nowMs = Date.parse(now);
+    const refs = fetched.filter((b) => {
+      const stamp = rescueRefStamp(sources.studioId, b);
+      if (stamp === null) return true;
+      const at = parseRescueStamp(stamp);
+      if (at === null || Number.isNaN(nowMs)) return true;
+      return nowMs - at.getTime() <= maxAgeMs;
+    });
     let unclaimed = refs;
     if (unresolved.length > 0) {
       const attributed = attributeRescueBranch(unresolved.length, refs);
