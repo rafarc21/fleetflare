@@ -204,6 +204,50 @@ describe("#217 — rescue-push never saves a tool marker as work", () => {
 });
 
 /**
+ * Board issue #216 fix 3 (PR #212's own round-2 review): `rescue_one`'s
+ * dirty-tree branch runs `git add -A` + `write-tree` into a detached index
+ * the moment `git status --porcelain` shows anything, then unconditionally
+ * commits and pushes that tree as a "rescue" -- even when the tree it just
+ * built is byte-identical to `HEAD^{tree}`. Staging a change and then
+ * reverting the working tree's own bytes back to HEAD's (without re-staging)
+ * leaves `status --porcelain` dirty (the INDEX still differs from HEAD) while
+ * `add -A` against a throwaway index -- seeded from the real index, then
+ * overwritten by the CURRENT working tree content -- produces a tree
+ * identical to HEAD's. Before the fix, this pushed a no-op commit and
+ * reported `RESCUE_PUSHED ... success` for a push that carried no real
+ * change. Mirrored for both command builders, same as every other fixture
+ * parametrized across both of this file's `rescue_one` copies.
+ */
+describe("#216 fix 3 — a dirty tree whose final content equals HEAD's own is nothing to rescue, not a hollow push", () => {
+  for (const [label, cmdFn] of [
+    ["rescuePushCmd", rescuePushCmd],
+    ["rescueSnapshotCmd", rescueSnapshotCmd],
+  ] as const) {
+    test(`${label}: stage a change, then revert its bytes back to HEAD's own — RESCUE_CLEAN, nothing pushed, no new ref`, () => {
+      sh(`cd ${checkout} && printf 'original\\n' > tracked.md && git add tracked.md && ` +
+        `git commit -q -m "add tracked.md" && git push -q origin main`);
+      const headBefore = sh(`git -C ${checkout} rev-parse HEAD`).out;
+      sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 && rm -rf .claude`);
+      writeFileSync(join(checkout, "tracked.md"), "modified\n");
+      sh(`git -C ${checkout} add tracked.md`);
+      writeFileSync(join(checkout, "tracked.md"), "original\n");
+      // Still dirty per porcelain (the INDEX still differs from HEAD) --
+      // this is the precondition that routes into rescue_one's dirty branch.
+      expect(sh(`git -C ${checkout} status --porcelain`).out).not.toBe("");
+      const refsBefore = sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out;
+
+      const out = sh(cmdFn(REPO, STUDIO, root)).out;
+
+      expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(out).not.toContain(RESCUE_PUSHED_PREFIX);
+      expect(bare(out)).toBe(RESCUE_CLEAN);
+      expect(sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out).toBe(refsBefore);
+      expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(headBefore);
+    });
+  }
+});
+
+/**
  * Issue #251, measured live the same day as #217: a member subagent's own
  * worktree (`.claude/worktrees/<name>`) is a REAL git worktree, not a plain
  * directory — it can hold real, uncommitted or un-pushed work of its own,
@@ -2188,8 +2232,20 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
 
     // PR #31 review HIGH: the branch walk and stash walk pushed raw, so a
     // shallow checkout with an ahead side branch or any stash failed forever.
+    //
+    // Board issue #216 fix 1: both `feat` and the stash land here via
+    // `rescue_try_push`'s shallow-clone fallback (the empty `priv` lacks the
+    // shallow boundary commit's own history, the same "shallow update not
+    // allowed" rejection issue #16 documents above) -- each lands as a
+    // PARENTLESS snapshot commit, confirmed below by `rev-list --count` being
+    // `1` despite `feat` itself sitting 2 commits deep locally. That snapshot
+    // commit's `Rescued-From:` trailer must name the real branch/stash
+    // (`feat` / `stash-0`), never the generated `fleet/rescue/.../checkout/...`
+    // ref it was pushed to -- `rescue_try_push`'s own 5th positional arg,
+    // which the branch walk's and stash walk's direct call sites previously
+    // omitted, defaulting it to that generated ref instead.
     for (const [label, run] of [["rescuePushCmd", () => pushPriv()], ["rescueSnapshotCmd", () => snapPriv()]] as const) {
-      test(`${label}, shallow checkout with an ahead side branch and a stash: both land on the private remote with the right trees`, () => {
+      test(`${label}, shallow checkout with an ahead side branch and a stash: both land on the private remote with the right trees and a Rescued-From trailer naming the real branch/stash`, () => {
         sh(`cd ${checkout} && git checkout -q -b feat && echo f > f.md && git add f.md && git commit -q -m feat && git checkout -q main`);
         writeFileSync(join(checkout, "s.md"), "stash me\n");
         sh(`git -C ${checkout} add s.md && git -C ${checkout} stash -q`);
@@ -2207,6 +2263,12 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
         expect(sh(`git -C ${priv} rev-parse ${feat}^{tree}`).out).toBe(featTree);
         expect(sh(`git -C ${priv} rev-parse ${stash}^{tree}`).out).toBe(stashTree);
         expect(sh(`git -C ${priv} show ${stash}:s.md`).out).toBe("stash me");
+        // Parentless: confirms this really is rescue_try_push's fallback
+        // snapshot path, not a plain successful history push.
+        expect(sh(`git -C ${priv} rev-list --count ${feat}`).out).toBe("1");
+        expect(sh(`git -C ${priv} rev-list --count ${stash}`).out).toBe("1");
+        expect(sh(`git -C ${priv} log -1 --format=%B ${feat}`).out).toContain("Rescued-From: feat");
+        expect(sh(`git -C ${priv} log -1 --format=%B ${stash}`).out).toContain("Rescued-From: stash-0");
       });
     }
 
@@ -2331,6 +2393,11 @@ describe("issue #1 — rescue pushes go to a configurable private remote, never 
       expect(sh(`git -C ${priv} rev-list --count ${ref}`).out).toBe("1");
       expect(privTreeFiles(ref!)).toEqual(["a.md", "b.md", "c.md", "d.md", "e.md"]);
       expect(sh(`git -C ${priv} rev-parse ${ref}^{tree}`).out).toBe(sh(`git -C ${checkout} rev-parse HEAD^{tree}`).out);
+      // Board issue #216 fix 4: the shallow-clone fallback snapshot (built
+      // by rescue_try_push's own parentless `commit-tree`) must carry the
+      // same `Rescued-From: <branch>` trailer every other rescue commit in
+      // this file already does — the checkout's real branch here is `main`.
+      expect(sh(`git -C ${priv} log -1 --format=%B ${ref}`).out).toContain("Rescued-From: main");
     });
 
     // Fresh review round 1 finding 2: a mutant that ignores the snapshot
@@ -2869,6 +2936,12 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
     sh(`cd ${checkout} && git commit -q --allow-empty -m "really unpushed"`);
     upstreamHook();
     const head = sh(`git -C ${checkout} rev-parse HEAD`).out;
+    // Board issue #216 fix 6: the ref-presence check below proves
+    // `refs/heads/task/pr` was not DELETED, but not that its own tip stayed
+    // put -- a regression that force-moved or rewrote that branch on origin
+    // would still pass without this. Same before/after-sha idiom as this
+    // describe block's own neighboring "#49" test above.
+    const branchBefore = sh(`git -C ${origin} rev-parse refs/heads/task/pr`).out;
 
     const r = sh(rescuePushCmd(REPO, STUDIO, root));
 
@@ -2877,6 +2950,7 @@ describe("#49 — a clean checkout whose HEAD is already on origin is nothing to
     expect(ref).toBeDefined();
     expect(sh(`git -C ${origin} rev-parse ${ref}`).out).toBe(head);
     expect(sh(`git -C ${origin} for-each-ref --format='%(refname)' refs/heads/task/pr`).out).toBe("refs/heads/task/pr");
+    expect(sh(`git -C ${origin} rev-parse refs/heads/task/pr`).out).toBe(branchBefore);
   });
 });
 

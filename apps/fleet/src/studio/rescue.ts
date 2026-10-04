@@ -263,7 +263,15 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
     `timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$w" push $nv "$__rdest" "${src}:refs/heads/$ref" 2>&1 1>/dev/null`;
   return (
     `rescue_try_push() {\n` +
-    `  local w="$1" nv="$2" src="$3" ref="$4" snap prc\n` +
+    // Issue #216 fix 4: `rbranch`, 5th and optional, is the real identifier
+    // (branch/stash name) this push is rescuing -- used only as the fallback
+    // snapshot's `Rescued-From:` trailer below. The `${5:-$4}` default exists
+    // purely so an UNANTICIPATED future call site that omits it entirely
+    // falls back to *something* readable rather than an empty trailer --
+    // every call site this file actually ships (rescue_push()'s own two, plus
+    // the branch walk's and stash walk's four direct calls below) passes its
+    // own real identifier explicitly; none relies on this default.
+    `  local w="$1" nv="$2" src="$3" ref="$4" rbranch="\${5:-$4}" snap prc\n` +
     // PR #65 review: an early budget return must not leave the PREVIOUS
     // push's stderr in perr for the caller to report as this one's.
     `  perr=""\n` +
@@ -285,7 +293,10 @@ function rescueTryPushFn(identity: string, pushTimeoutSeconds: number): string {
     // wording (see this function's own doc comment above). -E, not two
     // greps: one pipeline, one exit code, same short-circuit shape as before.
     `  printf '%s' "$perr" | grep -qiE 'shallow update not allowed|did not receive expected object' || return 1\n` +
-    `  snap=$(git -C "$w" ${identity} commit-tree "$src^{tree}" -m "fleet rescue snapshot of $(git -C "$w" rev-parse "$src") (shallow clone)" 2>/dev/null) || return 1\n` +
+    // Issue #216 fix 4: same `Rescued-From: <branch>` trailer (second `-m`,
+    // its own paragraph) every other rescue commit in this file already
+    // carries — this parentless snapshot was the one exception.
+    `  snap=$(git -C "$w" ${identity} commit-tree "$src^{tree}" -m "fleet rescue snapshot of $(git -C "$w" rev-parse "$src") (shallow clone)" -m "Rescued-From: $rbranch" 2>/dev/null) || return 1\n` +
     `  rescue_budget_ok "$ref" >/dev/null || { perr="snapshot push to $ref not attempted: rescue budget exhausted"; return 1; }\n` +
     `  perr="$(${push("$snap")})"; prc=$?\n` +
     `  [ "$prc" = 0 ] && return 0\n` +
@@ -872,7 +883,11 @@ export function rescuePushCmd(
     // that reaches rescueSnapshotCmd's own retry call site at all").
     rescueTryPushFn(identity, pushTimeoutSeconds) + rescueWtFn() + rescueOnOriginFn(pushTimeoutSeconds) +
     `rescue_push() {\n` +
-    `  local w="$1" id="$2" target="$3" ref="\${4:-HEAD}" perr prc ftarget\n` +
+    // Issue #216 fix 4: `rbranch`, 5th and optional, defaults to `$ref` when
+    // the caller omits it — forwarded to rescue_try_push's own new 5th
+    // param on both call sites below, for its parentless shallow-clone
+    // fallback snapshot's `Rescued-From:` trailer.
+    `  local w="$1" id="$2" target="$3" ref="\${4:-HEAD}" rbranch="\${5:-\${4:-HEAD}}" perr prc ftarget\n` +
     // Issue #359, measured live 2026-09-26: a slow or hanging pre-push hook
     // in the TARGET repo (lefthook, this codebase has no control over its
     // config) stalled rescue-all's push step on 4/5 busy studios — exactly
@@ -904,7 +919,7 @@ export function rescuePushCmd(
     // ever advancing the real `HEAD`; the clean-but-ahead branch still omits
     // it and gets `HEAD` unchanged, since those commits are the studio's own
     // real ones and pushing `HEAD` there was already correct.
-    `  rescue_try_push "$w" --no-verify "$ref" "$target"; prc=$?\n` +
+    `  rescue_try_push "$w" --no-verify "$ref" "$target" "$rbranch"; prc=$?\n` +
     `  if [ "$prc" = "0" ]; then printf '%s' "$target"; return 0; fi\n` +
     `  if printf '%s' "$perr" | grep -qiE 'non-fast-forward|fetch first'; then\n` +
     // HOLD-round fix: this used to sit flat between two dashes
@@ -924,12 +939,49 @@ export function rescuePushCmd(
     // always qualifies for --no-verify unconditionally — no case check
     // needed here the way the first attempt above needs one.
     // Issue #359 round 3: same per-push timeout bound as the first attempt.
-    `    if rescue_try_push "$w" --no-verify "$ref" "$ftarget"; then printf '%s' "$ftarget"; return 0; fi\n` +
+    `    if rescue_try_push "$w" --no-verify "$ref" "$ftarget" "$rbranch"; then printf '%s' "$ftarget"; return 0; fi\n` +
     `  fi\n` +
     // Issue #49: the reason reaches the caller (and the destroy/recycle
     // 409) instead of dying in this function's own \`perr\`.
     `  printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
     `  return 1\n` +
+    `}\n` +
+    // Issue #216 fix 3 (PR #212's own round-2 review): shared by rescue_one's
+    // two "nothing new to commit, is HEAD itself ahead of origin?" call
+    // sites below -- the genuinely-clean-tree branch, and (new) the
+    // dirty-tree branch's own tree-identity shortcut, once its `add -A`
+    // happens to reproduce HEAD's own tree byte-for-byte. Extracted so both
+    // never drift into two copies of the same ahead-of-origin/markers
+    // bookkeeping. `wall`, 4th and optional, defaults to empty: the
+    // tree-identity shortcut omits it deliberately (see its own call site's
+    // comment below) since a dirty-but-tree-equal file is not evidence of a
+    // genuine tool-marker-only state.
+    `rescue_check_ahead() {\n` +
+    `  local w="$1" id="$2" mode="$3" wall="\${4:-}" whead wahead target rbranch rc\n` +
+    // Issue #313 (PR #263 round 5 review, Finding 3): same ambiguous-bare-
+    // HEAD guard as this file's own rescue_one dirty-tree branch -- resolve
+    // to a SHA first, never pass a bare `HEAD` straight to `rev-list`.
+    `  whead=$(git -C "$w" rev-parse HEAD 2>/dev/null); rc=$?\n` +
+    `  if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-parse"; fail=$((fail+1)); return; fi\n` +
+    `  wahead=$(git -C "$w" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
+    // Issue #49: already an origin tip = already saved, nothing to push.
+    `  if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
+    `    rescue_target "$mode" "$id"\n` +
+    // Issue #371 review Finding 1: `mult=2`, same retry-pair worst case as
+    // every other rescue_push() call site in this file.
+    `    if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
+    // Issue #216 fix 4: same `Rescued-From: <branch>` capture as rescue_one's
+    // own dirty-tree branch, threaded through as rescue_push's 5th arg.
+    `    rbranch=$(git -C "$w" rev-parse --abbrev-ref HEAD 2>/dev/null); rbranch="\${rbranch:-HEAD}"\n` +
+    `    if ! target=$(rescue_push "$w" "$id" "$target" HEAD "$rbranch"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
+    `    git -C "$w" update-ref "refs/remotes/origin/$target" HEAD 2>/dev/null || true\n` +
+    // Issue #266: $wahead is a COMMIT count (rev-list --count, above) --
+    // never "file(s)".
+    `    echo "${RESCUE_PUSHED_PREFIX} $target $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; any=1\n` +
+    `  elif [ -n "$wall" ]; then\n` +
+    `    markers=1\n` +
+    `  fi\n` +
     `}\n` +
     // C1: every step is checked; the first that fails prints
     // RESCUE_FAILED and returns (a function `return`, never a top-level
@@ -966,11 +1018,48 @@ export function rescuePushCmd(
     // function's own failure paths below.
     `    idxfile=$(mktemp 2>/dev/null) || { echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; }\n` +
     `    realidx=$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
-    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; fi\n` +
+    // Issue #216 fix 5 (NIT): `mktemp` above already created `$idxfile` as a
+    // real, empty (0-byte) file. When `$realidx` does not exist (no real
+    // index to seed from), that 0-byte file must NOT be handed to
+    // `GIT_INDEX_FILE` below -- it is not a valid empty-index format, and
+    // `add -A` fails outright. `rm -f` it instead: pointing `GIT_INDEX_FILE`
+    // at a non-existent path makes git create a fresh, valid, empty index on
+    // its own.
+    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; else rm -f "$idxfile"; fi\n` +
     `    if ! GIT_INDEX_FILE="$idxfile" git -C "$w" add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
     `    tree=$(GIT_INDEX_FILE="$idxfile" git -C "$w" write-tree 2>/dev/null); rc=$?\n` +
     `    rm -f "$idxfile"\n` +
     `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
+    // Issue #216 fix 3 (PR #212's own round-2 review): a dirty tree whose
+    // final content is byte-identical to HEAD's own tree is not a real
+    // change -- stage something, then revert the working tree's own bytes
+    // back to HEAD's (without re-staging), and `status --porcelain` stays
+    // dirty (the INDEX still differs from HEAD) even though `add -A` above
+    // -- which captures the CURRENT working tree, not the stale index --
+    // just handed back HEAD's own tree right back. Committing and pushing
+    // that would be a hollow "rescue" reporting success for a push with
+    // nothing new in it. Falls through to the exact same ahead-of-origin/
+    // markers bookkeeping the clean-tree branch below already does, via the
+    // shared rescue_check_ahead() above -- `wall` deliberately omitted (see
+    // that function's own doc comment): this file was real, not a tool
+    // marker, so it must never be read as "markers-only" on its own.
+    //
+    // Board issue #216 review (minor, accepted tradeoff): `wall` was captured
+    // ONCE, at this function's own top, before this branch knew the dirty
+    // tree would turn out to revert to HEAD -- it can ALSO hold an unrelated,
+    // genuinely marker-only file dirty in the SAME worktree at the same time.
+    // Omitting it wholesale (rather than passing it through) loses that
+    // signal too: such a worktree now reports RESCUE_CLEAN here instead of
+    // RESCUE_MARKERS_ONLY. No work is lost either way (nothing is pushed in
+    // either outcome) -- only the reported status is less precise than
+    // before this fix existed. Filtering `wall` down to exclude just the
+    // reverted path(s) instead of dropping it wholesale was considered and
+    // rejected: `wall` (unscoped `status --porcelain`, captured before
+    // `${scope}` was known) and `wstatus`/`$tree` (both scoped, captured
+    // after) do not share a format simple enough to diff line-for-line
+    // without risking reintroducing the exact bug this fix closed. Do not
+    // "fix" this back to passing `wall` through unfiltered.
+    `    if [ "$tree" = "$(git -C "$w" rev-parse "HEAD^{tree}" 2>/dev/null)" ]; then rescue_check_ahead "$w" "$id" "$mode"; return; fi\n` +
     // MAJOR fix (survival brief review): every rescue commit this file
     // produces now names the real branch it came from, as a git trailer
     // (blank line + `Rescued-From: <value>`, via a second `-m` — both
@@ -1002,7 +1091,9 @@ export function rescuePushCmd(
     // BLOCKER fix: push the synthetic snapshot `$sha` (never `HEAD`, which
     // the real checkout's own HEAD still is, untouched) — same convention
     // rescueSnapshotCmd's own identical call site already uses.
-    `    if ! target=$(rescue_push "$w" "$id" "$target" "$sha"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
+    // Issue #216 fix 4: `$rbranch`, already captured above for this commit's
+    // own trailer, threaded through as rescue_push's 5th arg too.
+    `    if ! target=$(rescue_push "$w" "$id" "$target" "$sha" "$rbranch"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
     // C3: a --depth 1 clone gets no local remote-tracking ref for a
     // freshly generated target on its own — without this, the NEXT run
     // re-counts this exact commit as unpushed forever.
@@ -1014,37 +1105,12 @@ export function rescuePushCmd(
     // C2: this branch now ALWAYS runs when the scoped status is empty,
     // regardless of whether $wall was non-empty (a marker-only tree) —
     // never gated behind an if/elif that would skip it. `markers=1` is set
-    // only in the one case below where nothing else happened either.
-    // Issue #313 (PR #263 round 5 review, Finding 3): a bare `HEAD` argument
-    // is ambiguous the moment the worktree's own top level ALSO contains a
-    // real file literally named `HEAD` (nothing to do with `.git/HEAD`) --
-    // git cannot tell revision from pathspec and refuses to guess, and the
-    // old `|| echo 0` fallback could not tell that failure apart from
-    // "genuinely zero commits ahead", silently skipping a real push.
-    // Resolving `HEAD` to its own SHA via `rev-parse` first is never
-    // ambiguous the same way (verified live against the identical tree), and
-    // any OTHER genuine rev-list failure is now reported, never swallowed.
-    `    whead=$(git -C "$w" rev-parse HEAD 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-parse"; fail=$((fail+1)); return; fi\n` +
-    `    wahead=$(git -C "$w" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
-    // Issue #49: already an origin tip = already saved, nothing to push.
-    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
-    `      rescue_target "$mode" "$id"\n` +
-    // Issue #371: same single check ahead of the attempt+nff-retry pair as
-    // the dirty-tree branch above.
-    // #371 review Finding 1: `mult=2`, same reasoning as the dirty-tree
-    // branch's own identical call above — `$target` here is the SAME
-    // rescue_target() result, so the same retry-pair worst case applies.
-    `      if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
-    `      if ! target=$(rescue_push "$w" "$id" "$target"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
-    `      git -C "$w" update-ref "refs/remotes/origin/$target" HEAD 2>/dev/null || true\n` +
-    // Issue #266: $wahead is a COMMIT count (rev-list --count, above) —
-    // never "file(s)".
-    `      echo "${RESCUE_PUSHED_PREFIX} $target $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; any=1\n` +
-    `    elif [ -n "$wall" ]; then\n` +
-    `      markers=1\n` +
-    `    fi\n` +
+    // only in the one case where nothing else happened either.
+    // Issue #216 fix 3: delegates to rescue_check_ahead() (above), shared
+    // with the dirty-tree branch's own now-equivalent-to-clean shortcut —
+    // see that function's own doc comment for the full reasoning (#313
+    // Finding 3's ambiguous-bare-HEAD guard included, unchanged).
+    `    rescue_check_ahead "$w" "$id" "$mode" "$wall"\n` +
     `  fi\n` +
     `}\n` +
     // PR #263 round 3, N4: `rescue_one` runs inside the `while ... <<<
@@ -1227,7 +1293,11 @@ export function rescuePushCmd(
     // branch push, unlike rescue_push()'s own conditional check above.
     // Issue #359 round 3: same per-push timeout bound as rescue_push()'s own
     // pushes above — see this file's own header comment.
-    `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" </dev/null; then\n` +
+    // Issue #216 fix 1: 5th arg `"$b"` is the real branch name, for the
+    // shallow-clone fallback's `Rescued-From:` trailer should it fire here --
+    // without it the trailer would default to `$btarget`, the generated
+    // throwaway ref itself, naming nothing useful.
+    `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" "$b" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:$b push"; fail=$((fail+1))\n` +
     // Issue #58: the reason reaches the 409, same as rescue_push's.
     `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
@@ -1283,7 +1353,12 @@ export function rescuePushCmd(
     // unconditionally — never a real branch push.
     // Issue #359 round 3: same per-push timeout bound as every other push in
     // this file — see this file's own header comment.
-    `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" </dev/null; then\n` +
+    // Issue #216 fix 1: 5th arg `"stash-$sn"` is the real stash identifier
+    // (same spelling as `$starget`'s own suffix and the RESCUE_FAILED line
+    // above), for the shallow-clone fallback's `Rescued-From:` trailer should
+    // it fire here -- without it the trailer would default to `$starget`,
+    // the generated throwaway ref itself, naming nothing useful.
+    `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" "stash-$sn" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:stash-$sn push"; fail=$((fail+1))\n` +
     // Issue #58: the reason reaches the 409, same as rescue_push's.
     `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
@@ -1470,7 +1545,10 @@ export function rescueSnapshotCmd(
     // retry, same reasoning as rescuePushCmd's own N3 comment.
     rescueTryPushFn(identity, pushTimeoutSeconds) + rescueWtFn() + rescueOnOriginFn(pushTimeoutSeconds) +
     `rescue_push() {\n` +
-    `  local w="$1" id="$2" target="$3" ref="$4" perr prc ftarget\n` +
+    // Issue #216 fix 4: `rbranch`, 5th and optional, defaults to `$ref` when
+    // the caller omits it — forwarded to rescue_try_push's own new 5th
+    // param on both call sites below, same as rescuePushCmd's own copy.
+    `  local w="$1" id="$2" target="$3" ref="$4" rbranch="\${5:-$4}" perr prc ftarget\n` +
     // Issue #359: unlike rescuePushCmd's own rescue_push (above), `$target`
     // here is ALWAYS built by snapshot_target() — a freshly generated
     // fleet/rescue/... ref in EVERY mode, never the checked-out branch's own
@@ -1483,19 +1561,56 @@ export function rescueSnapshotCmd(
     // that stalls to its own small budget — see this file's own header
     // comment above.
     // Issue #16: same shallow-clone snapshot fallback as rescuePushCmd's copy.
-    `  rescue_try_push "$w" --no-verify "$ref" "$target"; prc=$?\n` +
+    `  rescue_try_push "$w" --no-verify "$ref" "$target" "$rbranch"; prc=$?\n` +
     `  if [ "$prc" = "0" ]; then printf '%s' "$target"; return 0; fi\n` +
     `  if printf '%s' "$perr" | grep -qiE 'non-fast-forward|fetch first'; then\n` +
     // HOLD-round fix: same wt/-nested, discoverable shape as rescuePushCmd's
     // own rescue_push (N3) above — see that copy's own comment.
     `    ftarget="fleet/rescue/${studio}/wt/$id-nff-$(date -u +%Y%m%d%H%M%S)"\n` +
     // Issue #359 round 3: same per-push timeout bound as the first attempt.
-    `    if rescue_try_push "$w" --no-verify "$ref" "$ftarget"; then printf '%s' "$ftarget"; return 0; fi\n` +
+    `    if rescue_try_push "$w" --no-verify "$ref" "$ftarget" "$rbranch"; then printf '%s' "$ftarget"; return 0; fi\n` +
     `  fi\n` +
     // Issue #49: the reason reaches the caller (and the destroy/recycle
     // 409) instead of dying in this function's own \`perr\`.
     `  printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
     `  return 1\n` +
+    `}\n` +
+    // Issue #216 fix 3 (PR #212's own round-2 review): shared by rescue_one's
+    // two "nothing new to commit, is HEAD itself ahead of origin?" call
+    // sites below -- the genuinely-clean-tree branch, and (new) the
+    // dirty-tree branch's own tree-identity shortcut, once its `add -A`
+    // happens to reproduce HEAD's own tree byte-for-byte. Extracted so both
+    // never drift into two copies of the same ahead-of-origin/markers
+    // bookkeeping. `wall`, 4th and optional, defaults to empty: the
+    // tree-identity shortcut omits it deliberately (see its own call site's
+    // comment below) since a dirty-but-tree-equal file is not evidence of a
+    // genuine tool-marker-only state.
+    `rescue_check_ahead() {\n` +
+    `  local w="$1" id="$2" mode="$3" wall="\${4:-}" whead wahead target rbranch rc\n` +
+    // Issue #313 (PR #263 round 5 review, Finding 3): same ambiguous-bare-
+    // HEAD guard as this file's own rescue_one dirty-tree branch -- resolve
+    // to a SHA first, never pass a bare `HEAD` straight to `rev-list`.
+    `  whead=$(git -C "$w" rev-parse HEAD 2>/dev/null); rc=$?\n` +
+    `  if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-parse"; fail=$((fail+1)); return; fi\n` +
+    `  wahead=$(git -C "$w" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
+    // Issue #49: already an origin tip = already saved, nothing to push.
+    `  if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
+    // PR #312 round 3 (MED): snapshot_target() here too, never the
+    // checked-out branch's own name.
+    `    target=$(snapshot_target "$mode" "$id")\n` +
+    // Issue #371 review Finding 1: `mult=2`, same retry-pair worst case as
+    // every other rescue_push() call site in this file.
+    `    if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
+    // Issue #216 fix 4: same `Rescued-From: <branch>` capture as rescue_one's
+    // own dirty-tree branch, threaded through as rescue_push's 5th arg.
+    `    rbranch=$(git -C "$w" rev-parse --abbrev-ref HEAD 2>/dev/null); rbranch="\${rbranch:-HEAD}"\n` +
+    `    if ! target=$(rescue_push "$w" "$id" "$target" "HEAD" "$rbranch"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
+    `    git -C "$w" update-ref "refs/remotes/origin/$target" HEAD 2>/dev/null || true\n` +
+    `    echo "${RESCUE_PUSHED_PREFIX} $target $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; any=1\n` +
+    `  elif [ -n "$wall" ]; then\n` +
+    `    markers=1\n` +
+    `  fi\n` +
     `}\n` +
     // The one part that differs from rescuePushCmd's own rescue_one: a dirty
     // tree is snapshotted via a detached, out-of-band index instead of
@@ -1535,11 +1650,45 @@ export function rescueSnapshotCmd(
     // ITS OWN admin dir, not the main checkout's -- so `/index` appended to
     // it is always the right file regardless of this script's own cwd.
     `    realidx=$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
-    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; fi\n` +
+    // Issue #216 fix 5 (NIT): same `rm -f` as rescuePushCmd's own identical
+    // seed step above -- `mktemp`'s 0-byte file is not a valid empty-index
+    // format, and must not reach `GIT_INDEX_FILE` below when there is no
+    // real index to seed from.
+    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; else rm -f "$idxfile"; fi\n` +
     `    if ! GIT_INDEX_FILE="$idxfile" git -C "$w" add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
     `    tree=$(GIT_INDEX_FILE="$idxfile" git -C "$w" write-tree 2>/dev/null); rc=$?\n` +
     `    rm -f "$idxfile"\n` +
     `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} $id add"; fail=$((fail+1)); return; fi\n` +
+    // Issue #216 fix 3 (PR #212's own round-2 review): a dirty tree whose
+    // final content is byte-identical to HEAD's own tree is not a real
+    // change -- stage something, then revert the working tree's own bytes
+    // back to HEAD's (without re-staging), and `status --porcelain` stays
+    // dirty (the INDEX still differs from HEAD) even though `add -A` above
+    // -- which captures the CURRENT working tree, not the stale index --
+    // just handed back HEAD's own tree right back. Committing and pushing
+    // that would be a hollow "rescue" reporting success for a push with
+    // nothing new in it. Falls through to the exact same ahead-of-origin/
+    // markers bookkeeping the clean-tree branch below already does, via the
+    // shared rescue_check_ahead() above -- `wall` deliberately omitted (see
+    // that function's own doc comment): this file was real, not a tool
+    // marker, so it must never be read as "markers-only" on its own.
+    //
+    // Board issue #216 review (minor, accepted tradeoff): `wall` was captured
+    // ONCE, at this function's own top, before this branch knew the dirty
+    // tree would turn out to revert to HEAD -- it can ALSO hold an unrelated,
+    // genuinely marker-only file dirty in the SAME worktree at the same time.
+    // Omitting it wholesale (rather than passing it through) loses that
+    // signal too: such a worktree now reports RESCUE_CLEAN here instead of
+    // RESCUE_MARKERS_ONLY. No work is lost either way (nothing is pushed in
+    // either outcome) -- only the reported status is less precise than
+    // before this fix existed. Filtering `wall` down to exclude just the
+    // reverted path(s) instead of dropping it wholesale was considered and
+    // rejected: `wall` (unscoped `status --porcelain`, captured before
+    // `${scope}` was known) and `wstatus`/`$tree` (both scoped, captured
+    // after) do not share a format simple enough to diff line-for-line
+    // without risking reintroducing the exact bug this fix closed. Do not
+    // "fix" this back to passing `wall` through unfiltered.
+    `    if [ "$tree" = "$(git -C "$w" rev-parse "HEAD^{tree}" 2>/dev/null)" ]; then rescue_check_ahead "$w" "$id" "$mode"; return; fi\n` +
     // MAJOR fix (survival brief review): same `Rescued-From: <branch>`
     // trailer rescuePushCmd's own rescue_one() now adds to its real commit —
     // see that function's own comment for why `rev-parse --abbrev-ref HEAD`
@@ -1558,44 +1707,20 @@ export function rescueSnapshotCmd(
     // is budgeted defensively for the same worst case as rescuePushCmd's own
     // identical call site, not the single-push figure.
     `    if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
-    `    if ! target=$(rescue_push "$w" "$id" "$target" "$sha"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
+    // Issue #216 fix 4: `$rbranch`, already captured above for this commit's
+    // own trailer, threaded through as rescue_push's 5th arg too.
+    `    if ! target=$(rescue_push "$w" "$id" "$target" "$sha" "$rbranch"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
     `    git -C "$w" update-ref "refs/remotes/origin/$target" "$sha" 2>/dev/null || true\n` +
     `    echo "${RESCUE_PUSHED_PREFIX} $target $wn ${RESCUE_PUSHED_KIND_FILES}"; any=1\n` +
     `  else\n` +
     // Unchanged from rescuePushCmd: pushing an EXISTING commit by ref
     // (`HEAD`) never touches local state, so there is nothing to protect
     // here beyond what rescuePushCmd already does.
-    // Issue #313 (PR #263 round 5 review, Finding 3): a bare `HEAD` argument
-    // is ambiguous the moment the worktree's own top level ALSO contains a
-    // real file literally named `HEAD` (nothing to do with `.git/HEAD`) --
-    // git cannot tell revision from pathspec and refuses to guess, and the
-    // old `|| echo 0` fallback could not tell that failure apart from
-    // "genuinely zero commits ahead", silently skipping a real push.
-    // Resolving `HEAD` to its own SHA via `rev-parse` first is never
-    // ambiguous the same way (verified live against the identical tree), and
-    // any OTHER genuine rev-list failure is now reported, never swallowed.
-    `    whead=$(git -C "$w" rev-parse HEAD 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-parse"; fail=$((fail+1)); return; fi\n` +
-    `    wahead=$(git -C "$w" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $id rev-list"; fail=$((fail+1)); return; fi\n` +
-    // Issue #49: already an origin tip = already saved, nothing to push.
-    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ] && ! rescue_on_origin "$w" "$whead" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)"; then\n` +
-    // PR #312 round 3 (MED): snapshot_target() here too, never the
-    // checked-out branch's own name. A live studio still owns that branch:
-    // pushing its unpushed commits there (and moving the local tracking ref
-    // below) is the same harm the dirty branch above was fixed for.
-    `      target=$(snapshot_target "$mode" "$id")\n` +
-    // Issue #371: same single check ahead of the attempt+nff-retry pair as
-    // this function's own dirty-tree branch above.
-    // #371 review Finding 1: `mult=2`, same reasoning as this function's own
-    // dirty-tree call site above.
-    `      if ! rescue_budget_ok "$id" 2; then fail=$((fail+1)); return; fi\n` +
-    `      if ! target=$(rescue_push "$w" "$id" "$target" "HEAD"); then echo "${RESCUE_FAILED_PREFIX} $id push"; fail=$((fail+1)); return; fi\n` +
-    `      git -C "$w" update-ref "refs/remotes/origin/$target" HEAD 2>/dev/null || true\n` +
-    `      echo "${RESCUE_PUSHED_PREFIX} $target $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; any=1\n` +
-    `    elif [ -n "$wall" ]; then\n` +
-    `      markers=1\n` +
-    `    fi\n` +
+    // Issue #216 fix 3: delegates to rescue_check_ahead() (above), shared
+    // with the dirty-tree branch's own now-equivalent-to-clean shortcut —
+    // see that function's own doc comment for the full reasoning (#313
+    // Finding 3's ambiguous-bare-HEAD guard included, unchanged).
+    `    rescue_check_ahead "$w" "$id" "$mode" "$wall"\n` +
     `  fi\n` +
     `}\n` +
     // N4 stdin-isolation posture, unchanged from rescuePushCmd.
@@ -1661,7 +1786,11 @@ export function rescueSnapshotCmd(
     // branch push, unlike rescue_push()'s own conditional check above.
     // Issue #359 round 3: same per-push timeout bound as rescue_push()'s own
     // pushes above — see this file's own header comment.
-    `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" </dev/null; then\n` +
+    // Issue #216 fix 1: 5th arg `"$b"` is the real branch name, for the
+    // shallow-clone fallback's `Rescued-From:` trailer should it fire here --
+    // without it the trailer would default to `$btarget`, the generated
+    // throwaway ref itself, naming nothing useful.
+    `      if ! rescue_try_push ${dir} --no-verify "refs/heads/$b" "$btarget" "$b" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:$b push"; fail=$((fail+1))\n` +
     // Issue #58: the reason reaches the 409, same as rescue_push's.
     `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +
@@ -1700,7 +1829,12 @@ export function rescueSnapshotCmd(
     // unconditionally — never a real branch push.
     // Issue #359 round 3: same per-push timeout bound as every other push in
     // this file — see this file's own header comment.
-    `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" </dev/null; then\n` +
+    // Issue #216 fix 1: 5th arg `"stash-$sn"` is the real stash identifier
+    // (same spelling as `$starget`'s own suffix and the RESCUE_FAILED line
+    // above), for the shallow-clone fallback's `Rescued-From:` trailer should
+    // it fire here -- without it the trailer would default to `$starget`,
+    // the generated throwaway ref itself, naming nothing useful.
+    `      if ! rescue_try_push ${dir} --no-verify "$ssha" "$starget" "stash-$sn" </dev/null; then\n` +
     `        echo "${RESCUE_FAILED_PREFIX} checkout:stash-$sn push"; fail=$((fail+1))\n` +
     // Issue #58: the reason reaches the 409, same as rescue_push's.
     `        printf '%s\\n' "$perr" | tail -n 5 >&2\n` +

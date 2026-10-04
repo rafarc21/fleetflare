@@ -15,7 +15,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   survivalBriefAllowed, paneBusy, midTurnRow,
   prArtifactNumbers, branchArtifacts, isRescueBranchFor, rescueBranchesFor,
-  attributeRescueBranch, rescueBranchPrefix,
+  attributeRescueBranch, rescueBranchPrefix, rescueBranchNestedPrefix, fetchRescueBranchCandidates,
   resolveSurvivalInput, composeSurvivalDelivery, deliverSurvivalBriefOnBringup,
   retryPendingSurvivalBrief, retryBoundExceeded,
   SURVIVAL_RETRY_MAX_ATTEMPTS, SURVIVAL_RETRY_WINDOW_MS,
@@ -265,6 +265,65 @@ describe("the 3 anchored branch sources", () => {
     expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}-2026092512000a`)).toBe(false);  // not digits
   });
 
+  /**
+   * MAJOR fix (#216, fresh-context review on #212 round 2): rescue.ts pushes
+   * 3 more anchored shapes under `fleet/rescue/<studio>/` besides the flat
+   * one above (member-worktree, its own -nff retry, and N1/N2's own unpushed
+   * local branch/stash shape) -- `discoverRescueRefsCmd` (provision.ts)
+   * already anchors and auto-fetches all three; `isRescueBranchFor` used to
+   * match none of them, so a rescue of any of them sat on origin, genuinely
+   * anchored and genuinely real, completely invisible to the survival
+   * re-brief.
+   */
+  it("SOURCE 3 — the 3 nested shapes rescue.ts pushes under fleet/rescue/<studio>/, byte-identical to discoverRescueRefsCmd's own anchored pattern", () => {
+    expect(rescueBranchNestedPrefix(STUDIO)).toBe(`fleet/rescue/${STUDIO}/`);
+    // Member worktree.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wt/agent-a1b2-20260925120000`)).toBe(true);
+    // Member worktree, its own non-fast-forward retry.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wt/agent-a1b2-nff-20260925120000`)).toBe(true);
+    // N1/N2: an unpushed local branch or stash entry, from the main
+    // checkout's own walk.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/20260925120000/checkout/task/pr`)).toBe(true);
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/20260925120000/checkout/stash-0`)).toBe(true);
+  });
+
+  it("SOURCE 3 — the nested shapes stay anchored: another studio's nested ref is still rejected", () => {
+    const other = `fleet/rescue/sibling--${STUDIO}/wt/agent-a1b2-20260925120000`;
+    expect(other.includes(STUDIO)).toBe(true);
+    expect(isRescueBranchFor(STUDIO, other)).toBe(false);
+    // The wt/ stamp still needs exactly 14 digits.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wt/agent-a1b2-2026092512000`)).toBe(false);
+    // The checkout stamp still needs exactly 14 digits.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/2026092512000/checkout/task/pr`)).toBe(false);
+    // A nested ref with no trailing name at all is not a real rescue ref.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wt/`)).toBe(false);
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/20260925120000/checkout/`)).toBe(false);
+  });
+
+  it("SOURCE 3 — fetchRescueBranchCandidates queries BOTH the flat and nested prefixes, merged and deduped", async () => {
+    const calls: string[] = [];
+    const listByPrefix = async (prefix: string) => {
+      calls.push(prefix);
+      if (prefix === rescueBranchPrefix(STUDIO)) {
+        return [`fleet/rescue/${STUDIO}-20260925120000`, `fleet/rescue/${STUDIO}-20260901010101`];
+      }
+      if (prefix === rescueBranchNestedPrefix(STUDIO)) {
+        // Duplicated on purpose: a real server could return overlapping
+        // listings across two separate prefix queries (defensive, not
+        // expected in practice, but cheap to guard against here).
+        return [`fleet/rescue/${STUDIO}/wt/agent-a1b2-20260925120000`, `fleet/rescue/${STUDIO}-20260925120000`];
+      }
+      throw new Error(`unexpected prefix ${prefix}`);
+    };
+    const out = await fetchRescueBranchCandidates(listByPrefix, STUDIO);
+    expect(calls).toEqual([rescueBranchPrefix(STUDIO), rescueBranchNestedPrefix(STUDIO)]);
+    expect(out).toEqual([
+      `fleet/rescue/${STUDIO}-20260925120000`,
+      `fleet/rescue/${STUDIO}-20260901010101`,
+      `fleet/rescue/${STUDIO}/wt/agent-a1b2-20260925120000`,
+    ]);
+  });
+
   it("SOURCE 3 — newest stamp first, so a chronological read is the default", () => {
     const older = `fleet/rescue/${STUDIO}-20260901010101`;
     const newer = `fleet/rescue/${STUDIO}-20260925120000`;
@@ -390,6 +449,41 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
         expect.objectContaining({ taskNumber: 2, branch: null }),
       ],
     });
+    expect(input.unclaimedRescueBranches).toEqual([ref]);
+  });
+
+  /**
+   * MAJOR fix (#216, fresh-context review on #212 round 2): `rescueBranches()`
+   * used to be called only `if (unresolved.length > 0)` — a task whose branch
+   * resolved via its own PR (zero unresolved tasks) could still coexist with a
+   * genuine rescue ref from a DIFFERENT, unrelated incarnation/crash of the
+   * same studio, and that ref was never fetched, never shown, the lead never
+   * told. Fixed by always fetching; `unclaimedRescueBranches` is now "every
+   * ref this attribution attempt did not assign" even when there were zero
+   * unresolved tasks to attribute to in the first place.
+   */
+  it("a rescue ref is surfaced even when EVERY task already resolved a branch (0 unresolved tasks)", async () => {
+    const ref = `fleet/rescue/${STUDIO}-20260925120000`;
+    const pull = async () => ({ headRef: "pr4b-survival-brief-delivery", title: "PR4b" });
+    const input = await resolveSurvivalInput(
+      sources({ pull, rescueBranches: async () => [ref] }),
+      { ok: true, value: [task({ artifacts: [{ kind: "pr", pr: "150" }] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true, value: [expect.objectContaining({ branch: "pr4b-survival-brief-delivery" })],
+    });
+    expect(input.unclaimedRescueBranches).toEqual([ref]);
+  });
+
+  it("a rescue ref is surfaced even on a studio with ZERO live tasks", async () => {
+    const ref = `fleet/rescue/${STUDIO}-20260925120000`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [ref] }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({ ok: true, value: [] });
     expect(input.unclaimedRescueBranches).toEqual([ref]);
   });
 
