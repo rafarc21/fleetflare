@@ -113,6 +113,18 @@ export const DEADLINE_SLACK_MS = KILL_GRACE_SECONDS * 1000 + 2_000;
  *                  a slow upload (a large node_modules over a middling link)
  *                  must never queue the ordinary 300s session-state sync
  *                  tick behind it.
+ *   wipSync   90s  board #208 fix round, item 5: the periodic WIP-sync
+ *                  tick's own budget — a cheap `git status`/`rev-list` probe
+ *                  (wipSyncProbeCmd) plus, only when something is actually
+ *                  dirty/unpushed, ONE wip_sync_push (rescue.ts), itself
+ *                  internally bounded to at most two
+ *                  WIP_SYNC_PUSH_TIMEOUT_SECONDS-long attempts (the #16/#140
+ *                  shallow-clone fallback) — comfortably inside this budget
+ *                  with room for the status/add/write-tree/commit steps
+ *                  around it. Deliberately its OWN, much shorter session and
+ *                  budget than `sync`'s 120s: wip-sync is a single small git
+ *                  operation, not a multi-MiB session-tar upload, and must
+ *                  never queue behind (or block) that tick.
  */
 export const EXEC_CLASSES = {
   ship: { sessionId: "fleet-ship", timeoutMs: 20_000 },
@@ -124,6 +136,7 @@ export const EXEC_CLASSES = {
   refresh: { sessionId: "fleet-refresh", timeoutMs: 150_000 },
   provision: { timeoutMs: 600_000 },
   installCache: { sessionId: "fleet-install-cache", timeoutMs: 900_000 },
+  wipSync: { sessionId: "fleet-wip-sync", timeoutMs: 90_000 },
 } as const satisfies Record<string, SbExecOptions>;
 
 export type ExecClass = keyof typeof EXEC_CLASSES;

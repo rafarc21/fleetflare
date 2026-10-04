@@ -1,4 +1,4 @@
-import { formatRescueReport, wipSyncCmd } from "../src/studio/rescue";
+import { formatRescueReport, wipSyncProbeCmd } from "../src/studio/rescue";
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
@@ -1440,8 +1440,10 @@ describe("syncSessionCycle — an auto-stop mid-tick must gate retrySurvivalBrie
     expect(after?.state).toBe("stopped");
     expect(after?.readiness?.kind).toBe("provisioned");
 
-    // The WIP-sync step must never have exec'd into the now-stopped row.
-    expect(syncDeps.execCalls).not.toContain(wipSyncCmd("websites", STUDIO_ID));
+    // The WIP-sync step must never have exec'd into the now-stopped row --
+    // not even the cheap probe wipSync now runs before resolving a rescue
+    // target (fix round item 6).
+    expect(syncDeps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
   });
 });
 
@@ -1482,6 +1484,113 @@ describe("syncSessionCycle — snapshot freshness (issue #85)", () => {
 
     const observed = await getObserved(observedStorage);
     expect(observed.lastSnapshotAt).toBe("2026-08-15T00:00:00.000Z");
+  });
+});
+
+/**
+ * Fix round (#208 PR #215 review): the WIP-sync step's own end-to-end wiring,
+ * plus items 1/4's own additional gates. The earlier "fixed-per-boot ref,
+ * force-pushed" suite (test/bun/rescue-push.test.ts) already pins
+ * `wipSyncCmd`/`wipSyncProbeCmd` themselves against real git; these tests pin
+ * the OTHER half — that `syncSessionCycle` actually reaches `wipSync` at all,
+ * with the right arguments, under the right conditions.
+ */
+describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)", () => {
+  function provisionedStorage(): StudioStorage & SessionSyncStorage & InstallCacheSaveStorage & { putKeys: string[] } {
+    return fakeCycleStorage({ status: cycleStatus({ state: "running", repoSlug: "example-org/websites" }) });
+  }
+
+  // Minor (b): an end-to-end wiring test, not just the gate-logic unit tests
+  // above — proves syncSessionCycle's own body genuinely calls wipSync (via
+  // its cheap probe, fix round item 6) when the studio is running, freshly
+  // confirmed provisioned, and a boot stamp has been captured.
+  it("wiring: a running, freshly-provisioned studio with a confirmed boot stamp runs wip-sync's own probe", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: "a-real-token", replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: "20261004000000",
+    });
+    const deps = fakeSyncDeps({});
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    expect(deps.execCalls).toContain(wipSyncProbeCmd("websites"));
+  });
+
+  // Item 1: wip-sync needs a CONFIRMED boot stamp to name its own per-boot
+  // ref — a studio whose incarnation-token write has never yet succeeded
+  // (Observed.wipBootStamp still null/absent) must not invent one.
+  it("gate: no confirmed wipBootStamp yet — wip-sync is skipped entirely, no probe exec", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: null, replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null,
+    });
+    const deps = fakeSyncDeps({});
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
+  });
+
+  // Item 4 (MAJOR): a row whose `STATUS_KEY.state` moves to "stopped"
+  // BETWEEN this tick's own `isStoppedIn` snapshot (checked right after the
+  // failover step, before checkAndRecordReadiness runs) and
+  // checkAndRecordReadiness's OWN read a moment later — a genuine race a
+  // real Durable Object's storage can hit (an external destroy landing mid-
+  // tick), which `stoppedAfterFailover` alone cannot see since it was
+  // already captured before the row changed. `checkAndRecordReadiness`'s own
+  // `state === "stopped"` early return hands back that row's STALE
+  // "provisioned" readiness verbatim — `checked.state !== "stopped"` is the
+  // guard that catches this, independent of `stoppedAfterFailover`.
+  it("gate: STATUS_KEY flips to stopped between the failover snapshot and checkAndRecordReadiness's own read — wip-sync never execs into it, even though the stale readiness still reads provisioned", async () => {
+    const runningRow = cycleStatus({
+      state: "running", repoSlug: "example-org/websites",
+      readiness: { kind: "provisioned", checkedAt: "2000-01-01T00:00:00.000Z" },
+    });
+    const stoppedRow = { ...runningRow, state: "stopped" as const };
+    const map = new Map<string, unknown>();
+    map.set(STATUS_KEY, runningRow);
+    let getCount = 0;
+    const storage: StudioStorage & SessionSyncStorage & InstallCacheSaveStorage & { putKeys: string[] } = {
+      putKeys: [],
+      get: (async (key: string) => {
+        if (key === STATUS_KEY) {
+          getCount += 1;
+          // 1st read: mirrorBurnToRegistry's own (do.ts) -- irrelevant to
+          // this race (no BURN_KEY seeded, so it returns early). 2nd:
+          // isStoppedIn's snapshot -- still "running". 3rd onward:
+          // checkAndRecordReadiness's own read -- the row has since stopped.
+          return getCount <= 2 ? runningRow : stoppedRow;
+        }
+        return map.get(key);
+      }) as StudioStorage["get"] & SessionSyncStorage["get"] & InstallCacheSaveStorage["get"],
+      put: (async (keyOrEntries: string | Record<string, unknown>, value?: unknown) => {
+        const entries: Record<string, unknown> =
+          typeof keyOrEntries === "string" ? { [keyOrEntries]: value } : keyOrEntries;
+        for (const [key, v] of Object.entries(entries)) map.set(key, v);
+      }) as StudioStorage["put"] & SessionSyncStorage["put"] & InstallCacheSaveStorage["put"],
+      delete: (async (key: string) => map.delete(key)) as NonNullable<SessionSyncStorage["delete"]>,
+    };
+    const observedStorage = storage as unknown as ObservedStorage;
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: "a-real-token", replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: "20261004000000",
+    });
+    const deps = fakeSyncDeps({});
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    // checkAndRecordReadiness really did hand back the stale "provisioned"
+    // verdict unchanged (proves the race fixture itself works as intended).
+    expect(stoppedRow.readiness?.kind).toBe("provisioned");
+    // The load-bearing assertion: wip-sync's own probe never ran.
+    expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
   });
 });
 
