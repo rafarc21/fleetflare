@@ -399,3 +399,49 @@ describe("provisionWithStorage — records which trigger caused freshSession: tr
     expect(observed.session?.freshSessionSource).toBeUndefined();
   });
 });
+
+// Issue #231 (fix 2b): the aside path(s) a confirmed fresh-session move
+// actually went to, persisted onto Observed.lastSessionAside so a later
+// heal/recycle's survival brief can tell a lead where an old session went.
+describe("provisionWithStorage — persists the aside path(s) onto Observed.lastSessionAside (issue #231)", () => {
+  function combinedStorage() {
+    const map = new Map<string, unknown>();
+    const storage = {
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"],
+    } as StudioStorage & ObservedStorage;
+    return { map, storage };
+  }
+
+  it("a confirmed move: the real path lands on Observed.lastSessionAside", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.lastSessionAside).toEqual([ASIDE]);
+  });
+
+  it("flag honored, nothing to move: lastSessionAside stays unset", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} none\n`);
+    const { storage } = combinedStorage();
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.lastSessionAside ?? null).toBeNull();
+  });
+
+  it("a LATER, ordinary provision leaves a prior aside path alone (not auto-cleared)", async () => {
+    const { storage } = combinedStorage();
+    const first = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    await provisionWithStorage(first.d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient", "provision", storage);
+
+    const second = deps("");
+    await provisionWithStorage(second.d, storage, { repo: REPO, role: "scratch" }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.lastSessionAside).toEqual([ASIDE]);
+  });
+});
