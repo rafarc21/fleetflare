@@ -18,7 +18,7 @@ import {
   attributeRescueBranch, rescueBranchPrefix, rescueBranchNestedPrefix, fetchRescueBranchCandidates,
   resolveSurvivalInput, composeSurvivalDelivery, deliverSurvivalBriefOnBringup,
   retryPendingSurvivalBrief, retryBoundExceeded,
-  SURVIVAL_RETRY_MAX_ATTEMPTS, SURVIVAL_RETRY_WINDOW_MS, SURVIVAL_RESCUE_REF_MAX_AGE_DAYS,
+  SURVIVAL_RETRY_MAX_ATTEMPTS, SURVIVAL_RETRY_WINDOW_MS,
   type ComposedBrief, type SurvivalSources, type SurvivalTaskRef, type SurvivalBringup,
 } from "../src/studio/survival-delivery";
 import { PANE_CAPTURE_MARKER, PANE_QUIESCE_SECONDS } from "../src/studio/failover";
@@ -583,8 +583,17 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
     expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [] });
   });
 
-  it("the age cap boundary is exactly SURVIVAL_RESCUE_REF_MAX_AGE_DAYS", () => {
-    expect(SURVIVAL_RESCUE_REF_MAX_AGE_DAYS).toBe(14);
+  it("the age cap boundary is INCLUSIVE: exactly SURVIVAL_RESCUE_REF_MAX_AGE_DAYS old is kept, one second older is dropped", async () => {
+    // NOW is 2026-09-25T12:00:00.000Z. Exactly 14 days earlier is
+    // 2026-09-11T12:00:00.000Z; one second further back crosses the cap.
+    const atBoundary = `fleet/rescue/${STUDIO}-20260911120000`;
+    const pastBoundary = `fleet/rescue/${STUDIO}-20260911115959`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [atBoundary, pastBoundary] }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [atBoundary] });
   });
 
   it("ahead_by 0 renders EMPTY — a CHECKED zero, never dropped and never fabricated", async () => {
