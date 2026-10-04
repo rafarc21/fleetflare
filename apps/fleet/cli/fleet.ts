@@ -373,7 +373,8 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
     // -- churn a coordinator can see without opening a container.
     formatRestartCell(s, now),
     // WIP column (board issue #208, part 2): age since the last periodic
-    // WIP safety-net sync (fleet/rescue/<studio>/wip) -- bounds how much a
+    // WIP safety-net check (fleet/rescue/<studio>/wip/<bootStamp>, #208 fix
+    // round item 1 -- scoped per container boot) -- bounds how much a
     // platform-side container replacement (no pre-replacement rescue hook)
     // could have cost, without opening a container.
     formatWipCell(s, now),

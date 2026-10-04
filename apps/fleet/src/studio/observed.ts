@@ -300,8 +300,9 @@ export interface Observed {
   restarts?: RestartLog;
   /**
    * Board issue #208: when do.ts's `wipSync` last actually pushed a periodic
-   * WIP safety-net snapshot (rescue.ts's `wipSyncCmd`, to the fixed
-   * `fleet/rescue/<studio>/wip` ref) — the bounding evidence for "how stale
+   * WIP safety-net snapshot (rescue.ts's `wipSyncCmd`, to this container's
+   * own `fleet/rescue/<studio>/wip/<wipBootStamp>` ref — see that field's own
+   * doc comment above, #208 fix round item 1) — the bounding evidence for "how stale
    * is the newest copy of this studio's work that survived a platform
    * container replacement with no pre-replacement hook to rescue-push from".
    *
