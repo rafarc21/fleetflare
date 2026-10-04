@@ -904,7 +904,7 @@ describe("(#208 part 2) the WIP safety-net line", () => {
       now: WIP_NOW,
     }));
     expect(out).toContain(
-      "- WIP safety net: fleet/rescue/demosite-life--release-studio/wip, last synced 4m ago — check it for anything lost since then.",
+      "- WIP safety net: fleet/rescue/demosite-life--release-studio/wip/*, last synced 4m ago — check it for anything lost since then.",
     );
   });
 
@@ -954,6 +954,30 @@ describe("(#208 part 2) the WIP safety-net line", () => {
       wipSyncedAt: "2026-10-03T11:56:00.000Z",
       now: WIP_NOW,
       tasks: { ok: true, value: [{ taskNumber: 1, taskTitle: "t", branch: "b", commitsAheadOfMain: 1, lastCommitAt: null }] },
+    }));
+    expect(out).not.toContain("WIP safety net");
+  });
+
+  // Fix round (#208 PR #215 review, minor (c)): round-2 review's own traced
+  // gap -- `via === "heal"` alone missed a bring-up that detected a
+  // replacement under a DIFFERENT via (restart/provision/recycle landing
+  // right after Observed.replacedAt was already set).
+  it("replacementDetected true, via NOT 'heal' -- the line still renders (the gate is an OR, not just via === heal)", () => {
+    for (const via of ["recycle", "restart", "provision"] as const) {
+      const out = composeSurvivalBrief(baseInput({
+        session: baseSession({ via, replacementDetected: true }),
+        wipSyncedAt: "2026-10-03T11:56:00.000Z",
+        now: WIP_NOW,
+      }));
+      expect(out).toContain("WIP safety net");
+    }
+  });
+
+  it("replacementDetected false/absent AND via NOT 'heal' -- still never rendered (the OR does not become an always-on)", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession({ via: "restart", replacementDetected: false }),
+      wipSyncedAt: "2026-10-03T11:56:00.000Z",
+      now: WIP_NOW,
     }));
     expect(out).not.toContain("WIP safety net");
   });

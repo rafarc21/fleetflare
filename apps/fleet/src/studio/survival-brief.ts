@@ -354,15 +354,19 @@ export const RESUMED_TRUST_ORIGIN_LINE =
   "- Your conversation resumed; files were replaced — trust origin, not memory.";
 
 /**
- * Board issue #208, part 2 -- BYTE-IDENTICAL to rescue.ts's `wipSyncRef`, the
- * one ref `wipSyncCmd` ever force-pushes to. Duplicated rather than imported,
- * same convention survival-delivery.ts's own `rescueBranchPrefix` already
- * follows for the identical reason (that function's own doc comment): this
- * file is the pure composer and has no business pulling in rescue.ts's own
- * exec/push machinery for one string.
+ * Board issue #208, part 2 -- the SAME per-boot-stamped-ref prefix
+ * `wipSyncRef` (rescue.ts) pushes under, as of the #208 fix round item 1
+ * design change: the exact ref now carries a per-container-boot stamp this
+ * composer does not have threaded through (`SurvivalInput` carries
+ * `wipSyncedAt`, not the boot stamp itself — widening that is a follow-up,
+ * not part of this fix round). A trailing `/*` makes the glob nature
+ * explicit rather than printing a literal ref that no longer exists on
+ * origin verbatim — `fleet inspect` (cli/wip-format.ts, which DOES have the
+ * studio's own `Observed.wipBootStamp` in hand) is where the exact ref name
+ * lives; this line only needs to point a lead at the right neighborhood.
  */
 function wipSyncRefEcho(studioId: string): string {
-  return `fleet/rescue/${studioId}/wip`;
+  return `fleet/rescue/${studioId}/wip/*`;
 }
 
 /**
@@ -376,17 +380,31 @@ function wipSyncRefEcho(studioId: string): string {
  * no task branch resolution will find. Naming the ref and its age is the
  * ONLY way this brief can point a resumed lead at it.
  *
- * GATED ON `session.via === "heal"`, deliberately -- the ONE bring-up kind
- * this line is for. A plain `restart`/`provision`/`recycle` already gets its
- * own accurate "what survived" from the task-branch/open-PR sections above;
- * stamping a WIP-ref line onto those too would describe a container that was
- * never silently replaced out from under a running lead, which is the one
- * thing `wipSyncedAt` exists to bound. `wipSyncedAt` absent/null (no WIP sync
- * had ever landed before this heal) renders nothing, same "no fabricated
- * evidence" rule every other section of this composer already follows.
+ * GATED ON `session.via === "heal" OR session.replacementDetected`,
+ * deliberately -- fix round (#208 PR #215 review, minor (c)): round-2 review
+ * traced a real gap `via === "heal"` alone misses -- `replacementDetected`
+ * (ObservedSession's own field, set whenever `Observed.replacedAt` was
+ * already non-null at bring-up time, see that field's own doc comment,
+ * observed.ts) can be true on a bring-up whose `via` is `restart`/
+ * `provision`/`recycle` too, not only `heal` -- any bring-up that landed
+ * AFTER a replacement was already detected is exactly the case this line
+ * exists for: the filesystem under the new lead is not the one the WIP sync
+ * was protecting continuity for. Widening the gate to an OR, never an AND,
+ * means neither condition can SUPPRESS a case the other alone would have
+ * caught. A plain `restart`/`provision`/`recycle` with NO replacement
+ * detected still gets no WIP-ref line, unchanged: that is the ordinary case
+ * this line was never for, stamping it there would describe a container
+ * that was never silently replaced out from under a running lead, which is
+ * the one thing `wipSyncedAt` exists to bound. `wipSyncedAt` absent/null (no
+ * WIP sync had ever landed before this bring-up) renders nothing, same "no
+ * fabricated evidence" rule every other section of this composer already
+ * follows.
  */
 function wipSyncLine(input: SurvivalInput): string | null {
-  if (input.session?.via !== "heal" || input.wipSyncedAt == null) return null;
+  const session = input.session;
+  if (session == null) return null;
+  if (!(session.via === "heal" || session.replacementDetected === true)) return null;
+  if (input.wipSyncedAt == null) return null;
   const age = ageFrom(input.wipSyncedAt, input.now);
   const ageText = age === null ? "unknown age" : `${formatSurvivalAge(age)} ago`;
   return `- WIP safety net: ${wipSyncRefEcho(input.studioId)}, last synced ${ageText} — check it for anything lost since then.`;

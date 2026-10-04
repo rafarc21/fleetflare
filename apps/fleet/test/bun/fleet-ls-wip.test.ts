@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { formatTable, formatLsHead } from "../../cli/fleet";
 import { formatWipCell, formatWipInspectLines, WIP_LEGEND, wipSyncRefEcho } from "../../cli/wip-format";
 import { emptyObserved } from "../../src/studio/observed";
+import { wipSyncRef } from "../../src/studio/rescue";
 import type { StudioStatus } from "../../src/studio/types";
 
 const NOW = new Date("2026-10-03T12:00:00.000Z");
@@ -64,7 +65,7 @@ describe("fleet ls table", () => {
   test("the WIP legend is part of fleet ls's head", () => {
     expect(formatLsHead([row(ago(1))])).toContain(WIP_LEGEND);
     expect(WIP_LEGEND).toContain("WIP");
-    expect(WIP_LEGEND).toContain("never synced");
+    expect(WIP_LEGEND).toContain("never checked");
   });
 });
 
@@ -82,7 +83,80 @@ describe("fleet inspect — WIP line(s)", () => {
   test("`observed` undefined (DO call failed, or a Worker predating #208) adds nothing", () => {
     expect(formatWipInspectLines("acmeclient--lead", undefined, NOW)).toEqual([]);
   });
-  test("the ref name is byte-identical to rescue.ts's own wipSyncRef convention", () => {
-    expect(wipSyncRefEcho("acmeclient--lead")).toBe("fleet/rescue/acmeclient--lead/wip");
+  test("with a known bootStamp, the ref name is byte-identical to rescue.ts's own wipSyncRef convention", () => {
+    expect(wipSyncRefEcho("acmeclient--lead", "20261004000000")).toBe(wipSyncRef("acmeclient--lead", "20261004000000"));
+  });
+
+  test("with no bootStamp known, falls back to a glob rather than a literal, possibly-nonexistent ref", () => {
+    expect(wipSyncRefEcho("acmeclient--lead")).toBe("fleet/rescue/acmeclient--lead/wip/*");
+    expect(wipSyncRefEcho("acmeclient--lead", null)).toBe("fleet/rescue/acmeclient--lead/wip/*");
+  });
+});
+
+/**
+ * Fix round (#208 PR #215 review, minor (a)): `Observed.wipLastCheck` lets
+ * `fleet ls`/`fleet inspect` distinguish "pushed Xm ago" from "checked
+ * clean Xm ago" from "last attempt FAILED Xm ago" -- `wipSyncedAt` alone
+ * could never tell those apart (a clean tick never advances it at all, and
+ * a failed tick looks identical to "nothing has run in a while").
+ */
+describe("WIP cell — wipLastCheck (minor (a))", () => {
+  function rowWithCheck(result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed", at: string): StudioStatus {
+    return {
+      id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      observed: { ...emptyObserved(), wipLastCheck: { at, result } },
+    };
+  }
+
+  test("a failed last attempt reads the age with a trailing '!'", () => {
+    expect(formatWipCell(rowWithCheck("failed", ago(2)), NOW)).toBe("2m!");
+  });
+
+  test("a clean (nothing-to-sync) check reads the plain age, no '!'", () => {
+    expect(formatWipCell(rowWithCheck("clean", ago(2)), NOW)).toBe("2m");
+  });
+
+  test("a real push reads the plain age, no '!'", () => {
+    expect(formatWipCell(rowWithCheck("pushed", ago(2)), NOW)).toBe("2m");
+  });
+
+  test("wipLastCheck takes priority over a stale wipSyncedAt from a much earlier real push", () => {
+    const s: StudioStatus = {
+      id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      observed: { ...emptyObserved(), wipSyncedAt: ago(90), wipLastCheck: { at: ago(2), result: "failed" } },
+    };
+    expect(formatWipCell(s, NOW)).toBe("2m!");
+  });
+
+  test("absent wipLastCheck (a row from before this field existed) falls back to wipSyncedAt unchanged", () => {
+    expect(formatWipCell(row(ago(4)), NOW)).toBe("4m");
+  });
+});
+
+describe("fleet inspect — last-FAILED-attempt line (minor (a))", () => {
+  test("appends a second line naming how long ago the last attempt failed", () => {
+    const lines = formatWipInspectLines("acmeclient--lead", {
+      ...emptyObserved(), wipSyncedAt: ago(90), wipLastCheck: { at: ago(2), result: "failed" },
+    }, NOW);
+    expect(lines).toEqual([
+      `wip sync:     ${wipSyncRefEcho("acmeclient--lead")}, last synced 90m ago`,
+      "wip sync:     last attempt FAILED 2m ago",
+    ]);
+  });
+
+  test("a successful last check adds no second line", () => {
+    const lines = formatWipInspectLines("acmeclient--lead", {
+      ...emptyObserved(), wipSyncedAt: ago(2), wipLastCheck: { at: ago(2), result: "pushed" },
+    }, NOW);
+    expect(lines).toEqual([`wip sync:     ${wipSyncRefEcho("acmeclient--lead")}, last synced 2m ago`]);
+  });
+
+  test("a known bootStamp names the exact ref, not the glob", () => {
+    const lines = formatWipInspectLines("acmeclient--lead", {
+      ...emptyObserved(), wipSyncedAt: ago(2), wipBootStamp: "20261004000000",
+    }, NOW);
+    expect(lines).toEqual([`wip sync:     ${wipSyncRef("acmeclient--lead", "20261004000000")}, last synced 2m ago`]);
   });
 });
