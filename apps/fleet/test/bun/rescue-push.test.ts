@@ -250,6 +250,72 @@ describe("#216 fix 3 — a dirty tree whose final content equals HEAD's own is n
 });
 
 /**
+ * Board issue #228 (review on #216's own fix round) — #216 fix 5 (the `else
+ * rm -f "$idxfile"` below) shipped with no test at all: every real
+ * precondition that reaches `rescue_one`'s dirty-tree branch already has a
+ * populated `.git/index` (or member-worktree admin-dir index) from its own
+ * prior checkout, so no FIXTURE looked reachable at the time. One is,
+ * though — deleting the real index file by hand, directly against an
+ * already-checked-out, already-committed-to worktree, before rescue runs.
+ * Measured directly in a scratch repro (not asserted here, since this is
+ * TypeScript shelling real git, not a unit test of the string itself): a
+ * 0-byte `GIT_INDEX_FILE` makes `git add -A` fail outright with `fatal:
+ * index file smaller than expected` (the exact `RESCUE_FAILED ... add` this
+ * fix prevents); an ABSENT `GIT_INDEX_FILE` path makes git build a fresh,
+ * valid, empty index on its own and `add -A` succeeds. Mirrored across both
+ * command builders, same as the `#216 fix 3` block directly above.
+ */
+describe("#228 — rescue_one's dirty-tree branch: a missing real index (not merely an unpopulated one) must not break `add -A`", () => {
+  for (const [label, cmdFn] of [
+    ["rescuePushCmd", rescuePushCmd],
+    ["rescueSnapshotCmd", rescueSnapshotCmd],
+  ] as const) {
+    test(`${label}: real .git/index removed by hand before rescue runs — RESCUE_PUSHED, never RESCUE_FAILED ... add`, () => {
+      sh(`cd ${checkout} && printf 'tracked\\n' > tracked.md && git add tracked.md && ` +
+        `git commit -q -m "add tracked.md" && git push -q origin main`);
+      sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 && rm -rf .claude`);
+      const realIndex = `${sh(`git -C ${checkout} rev-parse --absolute-git-dir`).out}/index`;
+      expect(existsSync(realIndex)).toBe(true);
+      sh(`rm -f ${realIndex}`);
+      writeFileSync(join(checkout, "new-work.md"), "genuinely new\n");
+      // Dirty per porcelain -- this is the precondition that routes into
+      // rescue_one's dirty-tree branch, where the index-seed step lives.
+      expect(sh(`git -C ${checkout} status --porcelain`).out).not.toBe("");
+
+      const out = sh(cmdFn(REPO, STUDIO, root)).out;
+
+      expect(bare(out)).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(bare(out)).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} \\d+ files$`));
+      const [ref] = rescueRefs();
+      const files = sh(`git -C ${origin} ls-tree -r --name-only ${ref}`).out.split("\n");
+      expect(files).toContain("new-work.md");
+      expect(files).toContain("tracked.md");
+    });
+  }
+
+  /**
+   * `wipSyncCmd` (board issue #208) has a THIRD, near-identical copy of this
+   * exact index-seeding pattern — added after #216's fix and never carrying
+   * it forward: `if [ -f "$realidx" ]; then cp ... || true; fi` with no
+   * `else rm -f` branch at all. Same bug class, same fixture, same fix
+   * (`rescue.ts`). Cheap enough (one line) to fix and cover in the same PR
+   * rather than deferred as a separately-scoped follow-up.
+   */
+  test("wipSyncCmd: real .git/index removed by hand before a wip-sync tick runs — RESCUE_PUSHED, never RESCUE_FAILED ... add", () => {
+    const realIndex = `${sh(`git -C ${checkout} rev-parse --absolute-git-dir`).out}/index`;
+    expect(existsSync(realIndex)).toBe(true);
+    sh(`rm -f ${realIndex}`);
+    writeFileSync(join(checkout, "wip-work.md"), "wip\n");
+    expect(sh(`git -C ${checkout} status --porcelain`).out).not.toBe("");
+
+    const out = sh(wipSyncCmd(REPO, STUDIO, "20261004000000", root)).out;
+
+    expect(bare(out)).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(bare(out)).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO, "20261004000000")} \\d+ files$`));
+  });
+});
+
+/**
  * Issue #251, measured live the same day as #217: a member subagent's own
  * worktree (`.claude/worktrees/<name>`) is a REAL git worktree, not a plain
  * directory — it can hold real, uncommitted or un-pushed work of its own,
