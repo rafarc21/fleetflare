@@ -21,6 +21,7 @@ import {
   archiveDoneRecords, doneRecordsListCmd, type DoneRecordPorts,
   DONE_RECORD_HASHES_KEY, type DoneRecordHashStorage,
   mirrorBurnToRegistry, checkAndRecordReadiness, syncSessionCycle, clearSessionGuard, RECYCLE_REFUSED_PREFIX,
+  wipLastCheckResultOf,
   clearForceMappedAccount,
 } from "../src/studio/do";
 import {
@@ -1591,6 +1592,27 @@ describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)",
     expect(stoppedRow.readiness?.kind).toBe("provisioned");
     // The load-bearing assertion: wip-sync's own probe never ran.
     expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
+  });
+});
+
+// Minor (a) plumbing: wipLastCheckResultOf's own mapping, pinned directly --
+// syncSessionCycle's own call site (above) just forwards whatever this
+// returns, so a regression here would otherwise only show up as a
+// mis-labeled fleet ls cell, never a failing assertion in this file.
+describe("wipLastCheckResultOf — RescueResult -> WipLastCheckResult mapping (#208 fix round minor a)", () => {
+  it("a real push -> 'pushed', regardless of skipped (never set together, but pushed wins first)", () => {
+    expect(wipLastCheckResultOf({ pushed: true, branch: "fleet/rescue/x/wip/1", files: 1 })).toBe("pushed");
+  });
+  it("skipped 'clean' -> 'clean'", () => {
+    expect(wipLastCheckResultOf({ pushed: false, branch: null, files: 0, skipped: "clean" })).toBe("clean");
+  });
+  it("skipped 'no checkout' -> 'no-checkout'", () => {
+    expect(wipLastCheckResultOf({ pushed: false, branch: null, files: 0, skipped: "no checkout" })).toBe("no-checkout");
+  });
+  it("skipped 'nothing to rescue (only tool markers)' -> 'markers-only'", () => {
+    expect(wipLastCheckResultOf({
+      pushed: false, branch: null, files: 0, skipped: "nothing to rescue (only tool markers)",
+    })).toBe("markers-only");
   });
 });
 
