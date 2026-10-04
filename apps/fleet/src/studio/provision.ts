@@ -47,7 +47,9 @@ import { buildStudioId, parseStudioId } from "./ids";
 import { repoIdSegment } from "./repo";
 import { parseFleetJson, parseRoleFile, assertRoleInFleet, roleBringupEnv } from "./blueprint";
 import { parseStudioFile, validateMemberFile, studioBringupEnv, type Studio, type MemberFile } from "./studio-blueprint";
-import { restorePlan, sessionDailyPrefix, dailyKeeperKeys, SESSION_FORCE_KEY, type RestoreAction } from "./session-sync";
+import {
+  restorePlan, sessionDailyPrefix, dailyKeeperKeys, SESSION_FORCE_KEY, SESSION_MARK_KEY, type RestoreAction,
+} from "./session-sync";
 import { sessionStats, newestMark, SessionArchiveFormatError, type SessionMark } from "./burn";
 import { MEMORY_INDEX_PATH } from "../memory/index-file";
 import { memoryIndexPrompt } from "../memory/prompt";
@@ -563,6 +565,57 @@ export const OPERATION_STALE_MS = 15 * 60 * 1000;
  * `provisionWithStorage` for the mechanism.
  */
 export const FRESH_SESSION_PENDING_KEY = "freshSessionPending";
+
+/**
+ * Issue #231 — the narrow, get-only port `provisionWithStorage` needs to
+ * read `session-sync.ts`'s own `SESSION_MARK_KEY` (the newest session
+ * transcript file's line count, the sync guard's own baseline) without
+ * widening its `storage: StudioStorage` parameter's type to the full
+ * `SessionSyncStorage` interface (which also demands `delete`/multi-key
+ * `put` overloads no caller of THIS check needs) — same "own small port for
+ * one key" discipline `ObservedStorage`/`SessionSyncStorage` themselves
+ * already establish. A real `this.ctx.storage` (DO storage) satisfies this
+ * structurally, with no cast, exactly like `observedStorage` already does.
+ */
+export interface SessionMarkStorage {
+  get(key: typeof SESSION_MARK_KEY): Promise<SessionMark | undefined>;
+}
+
+/**
+ * Issue #231 (revised fix 1) — the turn-count proxy threshold above which a
+ * session recovering from an INVOLUNTARY platform replacement is "real work",
+ * not noise. `SessionMark.lines` is the newest session transcript file's own
+ * line count (session-sync.ts); a JSONL transcript line is roughly one turn.
+ *
+ * Show your math: the incident this fix exists for lost a 2305-turn session.
+ * 30 is deliberately a tiny fraction of that — anywhere in the tens is
+ * defensibly conservative (the maestro's own ruling on this issue) — chosen
+ * so a session that has done ANY real back-and-forth (more than a first
+ * prompt or two) trips the refusal, while a brand-new or barely-started
+ * session (a handful of turns, nothing meaningfully at risk) still proceeds
+ * on a plain `--fresh-session` ask.
+ */
+export const FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD = 30;
+
+/** Issue #231 — every refusal this fix produces starts with this, the same
+ *  "a prefix, not an error class" convention `RECYCLE_REFUSED_PREFIX`
+ *  (recycle-cost.ts) already established — routes.ts's provision route maps
+ *  it to a 409, the same way recycle's own route already maps its prefix. */
+export const FRESH_SESSION_REFUSED_PREFIX = "fresh-session refused: ";
+
+/**
+ * Issue #231 (revised fix 1) — `provisionWithStorage`'s own refusal message:
+ * names the REAL line count (never the raw turn estimate the incident's own
+ * operator report used, since this file only ever has the transcript's line
+ * count to go on) and the way out, mirroring `recycleRefusal`'s own
+ * "name the price, name the escape hatch" shape (recycle-cost.ts).
+ */
+export function freshSessionInvoluntaryRefusal(id: string, lines: number): string {
+  return FRESH_SESSION_REFUSED_PREFIX +
+    `studio ${id}'s last stop was an involuntary platform replacement, and its session has ~${lines} lines ` +
+    "of transcript (a turn-count proxy) -- --fresh-session would discard it. " +
+    `Use plain provision to resume, or add --discard-session to force it: fleet provision ${id} --fresh-session --discard-session`;
+}
 
 /**
  * Issue #100 F3: "a destroy is in flight", as an ISO timestamp, or null.
@@ -3546,7 +3599,37 @@ export async function provisionWithStorage(
   // every caller (scheduled ticks, and the many tests that call this function
   // directly) that predates this feature and does not exercise the race.
   ctx: OpCtx = NEVER_MOVED_CTX,
+  // Issue #231 — see SessionMarkStorage's own doc comment. Optional, same
+  // "absence = today's behavior" shape `observedStorage` above already uses:
+  // a caller with no session-mark port in hand simply skips the refusal
+  // check below (treated as "lines unknown", never refused on a guess).
+  sessionMarkStorage?: SessionMarkStorage,
 ): Promise<StudioStatus> {
+  // Issue #231 (revised fix 1) — refuse an EXPLICIT --fresh-session ask on a
+  // studio whose last stop was an involuntary platform replacement (the
+  // ship tick's own `Observed.replacedAt` signal — the identical one
+  // `survivalBriefAllowed`/the wip-sync bootStamp gate already treat as "this
+  // bring-up is recovering from a replacement") with a non-trivial session
+  // (SessionMark.lines over FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD).
+  // Checked FIRST, before the op-lock or any write below — a fast refuse
+  // with no side effects, same posture every other up-front refusal in this
+  // file takes.
+  //
+  // `cfg.freshSession === true` ONLY — never `freshSessionPending` (the
+  // stored key, read further below as part of `requestedFresh`). The
+  // issue's own follow-up narrowed this refusal to an EXPLICIT ask meeting
+  // an involuntary-stop recovery; a bodyless retry that merely inherits a
+  // stuck pending intent is issue #100's own, separate concern.
+  if (cfg.freshSession === true && cfg.discardSession !== true && observedStorage) {
+    const obs = await getObserved(observedStorage);
+    if (obs.replacedAt !== null) {
+      const mark = sessionMarkStorage ? await sessionMarkStorage.get(SESSION_MARK_KEY) : undefined;
+      const lines = mark?.lines ?? 0;
+      if (lines > FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD) {
+        throw new Error(freshSessionInvoluntaryRefusal(buildStudioId(cfg), lines));
+      }
+    }
+  }
   // Review round 3 (issue #85 PR1), MUST-FIX 3 — stamped BEFORE doing
   // anything else, so recordBringupObservation can tell whether the live
   // lead it later finds PREDATES this bring-up (left untouched) or was

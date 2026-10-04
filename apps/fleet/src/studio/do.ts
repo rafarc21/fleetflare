@@ -6757,7 +6757,9 @@ export class StudioDO extends Sandbox<Env> {
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(cfg)), this.ctx.storage, id, ctx);
     const status = await provisionWithStorage(
-      this.deps(), this.ctx.storage, cfg, this.env.AGENT_REPO, via, this.ctx.storage, ctx,
+      // Issue #231: `this.ctx.storage` (real DO storage) also satisfies
+      // SessionMarkStorage structurally, no cast — same as `observedStorage`.
+      this.deps(), this.ctx.storage, cfg, this.env.AGENT_REPO, via, this.ctx.storage, ctx, this.ctx.storage,
     );
     // Issue #221 fix round 2, Fix 4 — a fresh bring-up has no continuous
     // activity state for `since`/`anchored` to describe; clear both before

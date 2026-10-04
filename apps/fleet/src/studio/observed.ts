@@ -98,6 +98,21 @@ export interface ObservedSession {
    *  whatever `computeSessionVerdict` (or the untouched-lead branch) already
    *  built. */
   snapshotSource?: string;
+  /**
+   * Issue #231 — WHICH of the two triggers caused `requestedFresh: true` for
+   * THIS bring-up (provisionWithStorage, provision.ts): the operator's own
+   * EXPLICIT `--fresh-session` flag, or a STORED `FRESH_SESSION_PENDING_KEY`
+   * left armed by an earlier attempt that never confirmed. Before this
+   * field, the two were conflated into one boolean with no record of which
+   * one fired — the exact gap #231's own code-reading left unresolved
+   * ("4 provisions, 4 lost sessions -- suspect stuck pending key or a
+   * --fresh-session passed per rebuild. Cannot tell after the fact:
+   * provenance not recorded."). Absent when this bring-up did not go fresh
+   * at all. Rendered by `formatSessionLine` (cli/readiness-format.ts),
+   * `fleet inspect`'s own `session:` line, the same place `via`/`reason`
+   * already render.
+   */
+  freshSessionSource?: "flag" | "pending-key";
   /** `burn.turns` at the moment of bring-up (lifetime count, never resets). */
   turnsBefore: number;
   /** Why a LOST or unknown verdict landed there — e.g. "cwd
@@ -343,6 +358,22 @@ export interface Observed {
    */
   wipLastCheck?: { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" } | null;
   /**
+   * Issue #231 — the on-disk path(s) a `--fresh-session` bring-up actually
+   * moved an old session aside to (`parseFreshSession`'s own successfully-
+   * moved entries, provision.ts), so a lead told "what survived" after a
+   * LATER heal/recycle has somewhere to go look rather than nothing: before
+   * this field, the move was logged into `StudioStatus.error` only, which a
+   * later bring-up overwrites, and a resumed/healed lead had no way to learn
+   * an old session existed at all, let alone where.
+   *
+   * Stamped ONLY on an actual confirmed move (`freshSessionMoved`, a
+   * non-empty list) — same "stamped on a real event, left alone otherwise"
+   * convention `wipSyncedAt` above already follows: a later bring-up that
+   * does not move anything leaves this exactly as it was, since the old
+   * aside path is still real, on-disk evidence worth keeping.
+   */
+  lastSessionAside?: string[] | null;
+  /**
    * Board issue #108 (#70 ask 4 remainder) — the lead's last visible,
    * non-chrome message line: redacted (`redactSecrets`, at the ship-tick
    * write boundary), bounded (activity.ts's `LAST_LINE_MAX_CHARS`), so a
@@ -416,6 +447,18 @@ export interface SurvivalBriefPending {
    * heal time" — the composer (survival-brief.ts) renders nothing for this
    * studio's WIP safety net in that case. */
   wipSyncedAt?: string | null;
+  /** Issue #231 — `Observed.wipBootStamp` AS IT STOOD at this bring-up, frozen
+   *  the same way `wipSyncedAt` above is: the real, exact wip ref name
+   *  (`wipSyncRef(studioId, wipBootStamp)`) rather than survival-brief.ts's
+   *  own glob fallback. OPTIONAL/absent reads as "no confirmed boot stamp at
+   *  bring-up time" — the composer falls back to the glob in that case. */
+  wipBootStamp?: string | null;
+  /** Issue #231 — `Observed.lastSessionAside` AS IT STOOD at this bring-up,
+   *  frozen the same way `session` above is: a retry can run long after a
+   *  LATER bring-up has already overwritten `lastSessionAside` with a
+   *  different move's own paths. OPTIONAL/absent reads as "nothing moved
+   *  aside as of this bring-up" — the composer renders nothing for it. */
+  lastSessionAside?: string[] | null;
 }
 
 /** The DO-storage slice this feature touches — same narrow-port style

@@ -140,7 +140,7 @@ describe("parseCliArgs", () => {
 
   it("provision requires an id", () => {
     expect(parseCliArgs(["provision", "websites--scratch"])).toEqual({
-      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false,
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false, discardSession: false,
     });
     expect(parseCliArgs(["provision"])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });
@@ -162,7 +162,7 @@ describe("parseCliArgs", () => {
   // Issue #28.
   it("--fresh-session: provision and recycle, in any order with --discard-unsynced; repeats and strays are usage errors", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session"])).toEqual({
-      cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false,
+      cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false, discardSession: false,
     });
     expect(parseCliArgs(["recycle", "websites--scratch", "--fresh-session"])).toEqual({
       cmd: "recycle", id: "websites--scratch", discardUnsynced: false, freshSession: true,
@@ -183,12 +183,30 @@ describe("parseCliArgs", () => {
   // silently ignored (recycle's own two-flag parsing's own posture).
   it("--no-fresh-session: cancels a pending intent; mutually exclusive with --fresh-session; repeats and strays are usage errors", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session"])).toEqual({
-      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: true,
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: true, discardSession: false,
     });
     expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session", "--no-fresh-session"]).cmd).toBe("usage");
     expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--fresh-session"]).cmd).toBe("usage");
     expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--no-fresh-session"]).cmd).toBe("usage");
     expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--bogus"]).cmd).toBe("usage");
+  });
+
+  // Issue #231: `--discard-session` — the operator's stated override of
+  // provisionWithStorage's own involuntary-stop refusal. Only meaningful
+  // alongside --fresh-session, but parses standalone too (the refusal check
+  // itself is what makes it a no-op otherwise).
+  it("--discard-session: provision only, any order with --fresh-session; repeats and strays are usage errors", () => {
+    expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session", "--discard-session"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false, discardSession: true,
+    });
+    expect(parseCliArgs(["provision", "websites--scratch", "--discard-session", "--fresh-session"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false, discardSession: true,
+    });
+    expect(parseCliArgs(["provision", "websites--scratch", "--discard-session"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false, discardSession: true,
+    });
+    expect(parseCliArgs(["provision", "websites--scratch", "--discard-session", "--discard-session"]).cmd).toBe("usage");
+    expect(parseCliArgs(["provision", "websites--scratch", "--discard-session", "--bogus"]).cmd).toBe("usage");
   });
 
   // Issue #35.

@@ -5,7 +5,7 @@ import {
   type ProvisionDeps, type StudioStorage, type SessionMarkStorage,
 } from "../src/studio/provision";
 import { SESSION_FORCE_KEY, SESSION_MARK_KEY } from "../src/studio/session-sync";
-import { OBSERVED_KEY, emptyObserved, type ObservedStorage } from "../src/studio/observed";
+import { OBSERVED_KEY, emptyObserved, getObserved, type ObservedStorage } from "../src/studio/observed";
 
 // Issue #28: `fleet provision|recycle --fresh-session`. ONE bring-up skips the
 // adopt and gets FLEET_FRESH_SESSION=1; the persisted role env never carries
@@ -309,7 +309,7 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
     await expect(provisionWithStorage(
       d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
       "provision", storage, undefined, storage,
-    )).rejects.toThrow(/use plain provision to resume/);
+    )).rejects.toThrow(/use plain provision to resume/i);
   });
 
   it("proceeds normally when --discard-session is also given", async () => {
@@ -352,5 +352,50 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
 
     expect(status.state).toBe("running");
     expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+  });
+});
+
+// Issue #231: bring-up log provenance — which of the two triggers
+// (explicit flag vs. a stored pending key) caused `freshSession: true` for
+// THIS bring-up, recorded on Observed.session so `fleet inspect` can show it.
+describe("provisionWithStorage — records which trigger caused freshSession: true (issue #231)", () => {
+  function combinedStorage() {
+    const map = new Map<string, unknown>();
+    const storage = {
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"],
+    } as StudioStorage & ObservedStorage;
+    return { map, storage };
+  }
+
+  it("explicit --fresh-session (no stored pending key): freshSessionSource is 'flag'", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.session?.freshSessionSource).toBe("flag");
+  });
+
+  it("no flag, but a stuck pending key from an earlier failed attempt: freshSessionSource is 'pending-key'", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+    await storage.put(FRESH_SESSION_PENDING_KEY, true);
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch" }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.session?.freshSessionSource).toBe("pending-key");
+  });
+
+  it("an ordinary, non-fresh provision: freshSessionSource is absent", async () => {
+    const { d } = deps("");
+    const { storage } = combinedStorage();
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch" }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.session?.freshSessionSource).toBeUndefined();
   });
 });
