@@ -1619,6 +1619,47 @@ describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)",
     // The load-bearing assertion: wip-sync's own probe never ran.
     expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
   });
+
+  // Issue #231 fix 3a — the gate used to require EXACTLY "provisioned",
+  // which skipped wip-sync on a busy lead (probe answers "inconclusive" —
+  // the incident's own observed failure mode). wip-sync only needs a real
+  // checkout to exist (the ONE thing "bare" rules out), not confirmation
+  // claude is cleanly running — unlike the assigned-task wake, which does.
+  it("#231 fix 3a: a busy-lead ('inconclusive') cycle still runs wip-sync's own probe", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: "a-real-token", replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: "20261004000000",
+    });
+    // 3 inconclusive answers in a row (CHECK_ATTEMPTS) -> the cycle's own
+    // readiness check settles on "inconclusive", never "provisioned".
+    const deps = fakeSyncDeps({ checks: [{ code: 0, stdout: "" }, { code: 0, stdout: "" }, { code: 0, stdout: "" }] });
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    expect((await storage.get(STATUS_KEY))?.readiness?.kind).toBe("inconclusive");
+    expect(deps.execCalls).toContain(wipSyncProbeCmd("websites"));
+  });
+
+  // "bare" is still the one verdict that correctly skips — no checkout to
+  // sync from at all.
+  it("#231 fix 3a: a 'bare' verdict still correctly skips wip-sync — no checkout to sync from", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: "a-real-token", replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: "20261004000000",
+    });
+    const deps = fakeSyncDeps({ checks: [{ code: 0, stdout: "no git checkout at /workspace/websites" }] });
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    expect((await storage.get(STATUS_KEY))?.readiness?.kind).toBe("bare");
+    expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
+  });
 });
 
 // Minor (a) plumbing: wipLastCheckResultOf's own mapping, pinned directly --
