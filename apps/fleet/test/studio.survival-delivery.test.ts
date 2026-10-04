@@ -22,6 +22,7 @@ import {
   type ComposedBrief, type SurvivalSources, type SurvivalTaskRef, type SurvivalBringup,
 } from "../src/studio/survival-delivery";
 import { PANE_CAPTURE_MARKER, PANE_QUIESCE_SECONDS } from "../src/studio/failover";
+import { wipSyncRef } from "../src/studio/rescue";
 import {
   OBSERVED_KEY, emptyObserved,
   type BringupVia, type Observed, type ObservedSession, type ObservedStorage,
@@ -298,6 +299,29 @@ describe("the 3 anchored branch sources", () => {
     // A nested ref with no trailing name at all is not a real rescue ref.
     expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wt/`)).toBe(false);
     expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/20260925120000/checkout/`)).toBe(false);
+  });
+
+  /**
+   * Fix round (#208 PR #215 review item 1, maestro DESIGN decision): the
+   * WIP-sync safety net (`wipSyncCmd`, rescue.ts) now pushes a PER-CONTAINER-
+   * BOOT ref — `fleet/rescue/<studio>/wip/<14digits>` — and this function now
+   * recognises it as a genuine 4th rescue-ref shape, so a survival re-brief's
+   * SOURCE 3 can discover and attribute it exactly like every other rescue
+   * ref. (Superseded: the OLD flat, non-timestamped `fleet/rescue/<studio>/wip`
+   * ref — no container-boot scoping at all — was deliberately EXCLUDED here,
+   * for the opposite reason: that shape could be silently clobbered across
+   * container boots and was never safe to attribute as "this studio's
+   * rescued work". The new per-boot shape does not have that problem.)
+   */
+  it("SOURCE 3 — the WIP-sync ref (#208 fix round) IS now a rescue ref, anchored to exactly 14 digits", () => {
+    expect(isRescueBranchFor(STUDIO, wipSyncRef(STUDIO, "20261004120000"))).toBe(true);
+    // Still anchored: a malformed/foreign stamp is never a false positive.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip/202610041200`)).toBe(false);
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip/`)).toBe(false);
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip`)).toBe(false);
+    // Still scoped: another (longer) studio's own wip ref never matches.
+    const other = `fleet/rescue/sibling--${STUDIO}/wip/20261004120000`;
+    expect(isRescueBranchFor(STUDIO, other)).toBe(false);
   });
 
   it("SOURCE 3 — fetchRescueBranchCandidates queries BOTH the flat and nested prefixes, merged and deduped", async () => {
@@ -858,6 +882,43 @@ describe("deliverSurvivalBriefOnBringup — the delivery", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Board issue #208, part 2 — `wipSyncedAt` threads from the bring-up's own
+// trigger thunk into the pending record it would defer into, frozen the
+// SAME way `session`/`via`/`replacementDetected` already are.
+// ---------------------------------------------------------------------------
+
+describe("deliverSurvivalBriefOnBringup — wipSyncedAt threading (#208 part 2)", () => {
+  it("a bring-up that never names wipSyncedAt at all defers a pending record with NO wipSyncedAt key — byte-identical to before this feature", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      bringup: bringup(), // no `wipSyncedAt` override at all
+    });
+    expect(await h.run()).toMatchObject({ kind: "deferred" });
+    const pending = h.observed.stored()?.survivalBriefPending;
+    expect(pending).not.toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(pending, "wipSyncedAt")).toBe(false);
+  });
+
+  it("a bring-up's own wipSyncedAt (set or null) survives into the deferred pending record", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      bringup: bringup({ wipSyncedAt: "2026-10-03T11:56:00.000Z" }),
+    });
+    expect(await h.run()).toMatchObject({ kind: "deferred" });
+    expect(h.observed.stored()?.survivalBriefPending?.wipSyncedAt).toBe("2026-10-03T11:56:00.000Z");
+  });
+
+  it("explicit null (no WIP sync had ever landed) is carried too, not dropped", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      bringup: bringup({ wipSyncedAt: null }),
+    });
+    expect(await h.run()).toMatchObject({ kind: "deferred" });
+    expect(h.observed.stored()?.survivalBriefPending?.wipSyncedAt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Shared single-flight: one wake path, one lock, source-pinned
 // ---------------------------------------------------------------------------
 
@@ -1354,7 +1415,9 @@ describe("the retry rides the REGULAR per-studio tick, not the maestro-only swee
     const src = env.TEST_STUDIO_DO_SRC;
     // One probe helper, one compose helper, each called from BOTH paths.
     expect(src).toContain("private async survivalBusy(): Promise<BusyVerdict>");
-    expect(src).toContain("private survivalCompose(workRepoSlug: string, session: ObservedSession)");
+    expect(src).toContain(
+      "private survivalCompose(workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null)",
+    );
     const code = codeOnly(src);
     expect(code.filter((l) => /this\.survivalBusy\(\)/.test(l))).toHaveLength(2);
     expect(code.filter((l) => /this\.survivalCompose\(/.test(l))).toHaveLength(2);

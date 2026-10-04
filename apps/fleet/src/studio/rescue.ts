@@ -216,6 +216,25 @@ export function rescuePushPrelude(opts: RescuePushOptions): string {
  * cached; a failed listing reads as "not on origin", so the push still runs
  * (the saving direction). Exact tip match only: an ancestor of a tip is not
  * provable without fetching.
+ *
+ * Fix round (#208 PR #215 review item 1): BLOCKER — a wip-sync tip
+ * (`fleet/rescue/<studio>/wip/<bootStamp>`, rescue.ts's `wipSyncCmd`) must
+ * NEVER count as "already safely rescued" here, even though it genuinely is
+ * a real tip on origin with the exact same sha teardown rescue is about to
+ * push. If it did, a studio whose dirty tree was wip-synced moments before
+ * teardown would see `rescue_on_origin` return true for that sha and skip
+ * the REAL rescue push entirely — leaving the work reachable ONLY from the
+ * wip ref, which the very NEXT container's own first wip-sync tick would
+ * then force-push over (see `wipSyncRef`'s own doc comment for that half of
+ * this same fix), losing it for good with no rescue log entry anywhere
+ * naming a loss. The listing below now excludes every ref matching
+ * `fleet/rescue/<studio>/wip` (optionally followed by more path) — the grep
+ * covers both the new per-boot-stamped shape and the OLD flat
+ * `fleet/rescue/<studio>/wip` shape, belt and braces against a stale ref
+ * some prior deploy may have left on origin) BEFORE the sha-match checks run
+ * — a wip tip is simply never in `$__rheads` to match against, so this
+ * function can only ever answer "on origin" from a REAL rescue ref or a
+ * genuine lead-pushed branch, exactly as issue #49 intended.
  */
 function rescueOnOriginFn(pushTimeoutSeconds: number): string {
   return (
@@ -235,8 +254,14 @@ function rescueOnOriginFn(pushTimeoutSeconds: number): string {
     `[ "$(git -C "$1" ls-remote --get-url origin 2>/dev/null)" = "$__rurl" ]; then\n` +
     // Issue #58: budgeted like every push. Out of budget = no listing =
     // "not on origin", so the push path (and its own budget refusal) runs.
+    // Fix round item 1: `grep -Ev` strips every `fleet/rescue/*/wip*` tip
+    // BEFORE it ever reaches `__rheads` — see this function's own doc
+    // comment above. A listing with nothing LEFT after the filter makes
+    // grep itself exit non-zero; that is never checked here (the assignment
+    // runs unconditionally inside this `if`), so `__rheads` simply ends up
+    // empty, same as "nothing on origin at all".
     `      if rescue_budget_ok on-origin >/dev/null; then ` +
-    `__rheads="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" ls-remote --heads origin </dev/null 2>/dev/null)"; fi\n` +
+    `__rheads="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" ls-remote --heads origin </dev/null 2>/dev/null | grep -Ev 'refs/heads/fleet/rescue/[^/[:space:]]+/wip(/|$)')"; fi\n` +
     `    fi\n` +
     `  fi\n` +
     `  [ -n "$2" ] || return 1\n` +
@@ -1849,5 +1874,420 @@ export function rescueSnapshotCmd(
     `  if [ "$markers" = "1" ]; then echo "${RESCUE_MARKERS_ONLY}"; else echo "${RESCUE_CLEAN}"; fi\n` +
     `fi\n` +
     `fi`
+  );
+}
+
+/**
+ * Fix round (#208 PR #215 review item 1): the ONE TypeScript-side place the
+ * `$(date -u +%Y%m%d%H%M%S)` 14-digit UTC-timestamp convention every rescue
+ * ref's own shell-generated stamp already uses needs reproducing OUTSIDE a
+ * generated shell script. wip-sync's own boot stamp (`Observed.wipBootStamp`)
+ * is captured ONCE per container boot by `recordBringupObservation`
+ * (provision.ts), at the exact same moment that function already captures
+ * the `incarnation` token — a Worker-side `Date`, never a shell exec, so it
+ * needs its own formatter rather than reusing a shell string. Zero-padded,
+ * UTC throughout — the same fields `date -u +%Y%m%d%H%M%S` reads, in the
+ * same order. Lives here, not survival-delivery.ts (which owns the matching
+ * `RESCUE_STAMP_DIGITS` constant and the read side, `isRescueBranchFor`):
+ * provision.ts already imports this file for `rescuePushPrelude`, and
+ * survival-delivery.ts itself imports failover.ts, which imports provision.ts
+ * — importing FROM survival-delivery.ts here would close that cycle.
+ */
+export function formatRescueStamp(now: Date): string {
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return (
+    `${now.getUTCFullYear()}${p(now.getUTCMonth() + 1)}${p(now.getUTCDate())}` +
+    `${p(now.getUTCHours())}${p(now.getUTCMinutes())}${p(now.getUTCSeconds())}`
+  );
+}
+
+/**
+ * Fix round (#208 PR #215 review item 2): wip-sync's own push timeout —
+ * deliberately its OWN constant, not a reuse of `RESCUE_PUSH_TIMEOUT_SECONDS`
+ * (45s, tuned for the teardown-time multi-push worktree/branch/stash walk,
+ * whose own `rescue_budget_ok` ledger already accounts for a first attempt
+ * plus one non-fast-forward retry at up to 2x that). `wip_sync_push`'s own
+ * fallback (below) can also run twice back-to-back on the shallow/parentless
+ * rejection path, so the worst case here is `2 * (WIP_SYNC_PUSH_TIMEOUT_SECONDS
+ * + KILL_GRACE_SECONDS)` — kept deliberately small (25s, not 45s) so that
+ * worst case (60s) sits comfortably inside `EXEC_CLASSES.wipSync`'s own short
+ * budget (sandbox-api.ts) with room to spare for the status/add/write-tree/
+ * commit-tree steps around it, rather than needing a budget anywhere close to
+ * `EXEC_CLASSES.sync`'s 120s.
+ */
+export const WIP_SYNC_PUSH_TIMEOUT_SECONDS = 25;
+
+/**
+ * Fix round (#208 PR #215 review item 6): the sentinel `wipSyncProbeCmd`
+ * (below) prints when — and ONLY when — there is genuinely something to
+ * sync (a dirty scoped status, or a clean tree with commits no
+ * remote-tracking ref already has). do.ts's `wipSync` checks for this exact
+ * string BEFORE calling `resolveRescueTarget` (which can mint a GitHub token
+ * and make a real API call) or running `wipSyncCmd`'s own full push script —
+ * a clean, nothing-to-sync tick (the common case, same "most studios die
+ * clean" expectation `rescuePushCmd`'s own header names) now costs one cheap
+ * local `git status`/`rev-list` probe and nothing else: no token mint, no
+ * API call, no `FLEET_RESCUE_REMOTE is unset` log line firing every single
+ * tick for a studio that never configured one.
+ */
+export const WIP_SYNC_NEEDED = "WIP_SYNC_NEEDED";
+
+/**
+ * Fix round (#208 PR #215 review item 6): the cheap, read-only probe half of
+ * wip-sync, split out of `wipSyncCmd` (below) so do.ts's `wipSync` can run it
+ * FIRST, alone, before deciding whether the expensive half (resolving a
+ * rescue target, which can mint a token and call GitHub's API, then the
+ * actual push) is worth running at all. Answers with exactly one of:
+ * `RESCUE_NO_CHECKOUT` / `RESCUE_CLEAN` / `RESCUE_MARKERS_ONLY` (nothing to
+ * do — identical meaning to `wipSyncCmd`'s own same-named outcomes) or
+ * `WIP_SYNC_NEEDED` (something is dirty or unpushed — the caller should go on
+ * to resolve a target and run `wipSyncCmd` for real) or a
+ * `RESCUE_FAILED_PREFIX`-led line (the probe's own `git` calls failed — the
+ * caller treats this as "unrecognised output", same fail-closed posture
+ * `parseRescueExecResult` already has for everything else it cannot read).
+ *
+ * No `exit` anywhere, same HARD RULE every other command builder in this
+ * file follows (this runs inside its own short-lived exec class's session,
+ * but never relies on that — see `rescuePushCmd`'s own doc comment for why):
+ * an if/else chain throughout, never an early `exit`. Reuses the EXACT same
+ * detection logic `wip_sync_one` (inside `wipSyncCmd`) uses for its own
+ * dirty/ahead split — kept as a second, small, read-only copy rather than a
+ * shared helper threaded through both command strings, since the two now
+ * diverge immediately after detection (the probe only ever echoes a
+ * sentinel; `wipSyncCmd` goes on to snapshot, commit, and push) and a shared
+ * fragment would have to be assembled identically into two independently
+ * exported top-level shell scripts regardless.
+ *
+ * `studio`/`bootStamp` are deliberately NOT parameters here: the probe never
+ * names a push target, so it needs neither.
+ */
+export function wipSyncProbeCmd(repo: string, root = "/workspace"): string {
+  const dir = `${root}/${repo}`;
+  const scope = `-- . ${RESCUE_MARKER_PATHSPECS}`;
+  return (
+    `if [ ! -d ${dir}/.git ]; then echo "${RESCUE_NO_CHECKOUT}"; else\n` +
+    // Fix round item 7: see wipSyncCmd's own identical comment on
+    // GIT_OPTIONAL_LOCKS=0 for `git status` — the same live-studio race
+    // applies here, since this probe runs on the same live checkout.
+    `  wall="$(GIT_OPTIONAL_LOCKS=0 git -C ${dir} status --porcelain 2>&1)"; rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe status"; else\n` +
+    `    wstatus="$(GIT_OPTIONAL_LOCKS=0 git -C ${dir} status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe status"\n` +
+    `    elif [ -n "$wstatus" ]; then echo "${WIP_SYNC_NEEDED}"\n` +
+    `    else\n` +
+    `      whead=$(git -C ${dir} rev-parse HEAD 2>/dev/null); rc=$?\n` +
+    `      if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe rev-parse"\n` +
+    `      else\n` +
+    `        wahead=$(git -C ${dir} rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
+    `        if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe rev-list"\n` +
+    `        elif [ -n "$wahead" ] && [ "$wahead" != "0" ]; then echo "${WIP_SYNC_NEEDED}"\n` +
+    `        elif [ -n "$wall" ]; then echo "${RESCUE_MARKERS_ONLY}"\n` +
+    `        else echo "${RESCUE_CLEAN}"\n` +
+    `        fi\n` +
+    `      fi\n` +
+    `    fi\n` +
+    `  fi\n` +
+    `fi`
+  );
+}
+
+/**
+ * Fix round (#208 PR #215 full review, item 1 — maestro DESIGN decision,
+ * 2026-10-04): BLOCKER found in review — the ORIGINAL ref here was FIXED per
+ * STUDIO ONLY (`fleet/rescue/<studio>/wip`, no boot stamp), shared by every
+ * container that studio ever runs. That made it invisible to the one check
+ * that most needed to see it: `rescue_on_origin` (`rescueOnOriginFn`, above)
+ * lists every tip on origin and treats an exact-sha match as "already safely
+ * rescued" — a wip
+ * tip from container A reads as "saved" to container A's OWN teardown
+ * rescue, which is correct, but the SAME shared ref then got force-pushed
+ * OVER by container B's very first wip-sync tick, the instant B booted,
+ * before B's own teardown rescue (or A's, if A's teardown raced B's bring-up)
+ * ever got a chance to look at it. The work that was only ever on the wip
+ * ref — never a real commit, never a real branch — was gone, on no branch
+ * anywhere, with no rescue log entry describing a loss at all, since from
+ * the writer's own point of view every individual push had "succeeded".
+ *
+ * Fixed by scoping the ref per CONTAINER BOOT, not just per studio:
+ * `fleet/rescue/<studio>/wip/<bootStamp>`, `bootStamp` a 14-digit UTC
+ * timestamp — the SAME fixed-width convention every other rescue ref in this
+ * file already uses (`RESCUE_STAMP_DIGITS`, survival-delivery.ts) — captured
+ * ONCE per container boot (provision.ts's `recordBringupObservation`, right
+ * alongside the `incarnation` token it already captures at the identical
+ * moment; stored as `Observed.wipBootStamp`) and threaded in here by the
+ * CALLER (do.ts's `wipSync`) on every tick of that one container's life.
+ * This function never generates `bootStamp` itself, so every tick within ONE
+ * container's lifetime still force-pushes the SAME ref — the rolling-
+ * snapshot property this function's own doc comment below still describes,
+ * unchanged — while a DIFFERENT container (a fresh boot, a fresh
+ * `bootStamp`) always gets its OWN, never-before-seen ref and can never
+ * touch a prior container's own wip ref, overwrite it, or race its teardown
+ * rescue for it. `isRescueBranchFor` (survival-delivery.ts) and
+ * `discoverRescueRefsCmd` (provision.ts) both gained a matching 4th shape so
+ * a wip ref is now discoverable/fetchable exactly like every other rescue
+ * shape — unlike the old flat ref, which `isRescueBranchFor` deliberately
+ * excluded (see that function's own history) precisely because it could
+ * never be safely attributed as "this studio's rescued work" while it was
+ * still being silently clobbered across container boots. `rescue_on_origin`
+ * (below) separately EXCLUDES every wip ref from its own "already on origin"
+ * listing regardless of this discoverability change —
+ * two different, deliberately independent fixes for two different
+ * questions: "can a lead find this work" (yes, now) vs. "does a wip tip ever
+ * count as proof a teardown rescue can skip" (no, never). Exported so a
+ * caller (do.ts, tests) names it without re-deriving the string.
+ */
+export function wipSyncRef(studio: string, bootStamp: string): string {
+  return `fleet/rescue/${studio}/wip/${bootStamp}`;
+}
+
+/**
+ * Board issue #208: a PERIODIC safety net for a studio whose container is
+ * replaced by the PLATFORM itself (Cloudflare-side host move/eviction/
+ * restart) rather than by any fleet operation. `rescuePushCmd`/
+ * `rescueSnapshotCmd` above only ever run at teardown (destroy/park/
+ * recycle, or this file's own pre-restart/pre-recycle sync) — the platform
+ * gives no pre-replacement hook, so neither gets a chance to run before a
+ * replacement lands, and whatever was dirty or committed-but-unpushed at
+ * that moment is simply gone. `wipSyncCmd` is wired into the EXISTING
+ * SYNC_SESSION_SECONDS (300s) tick (do.ts's `syncSessionCycle`) instead of a
+ * new schedule, so it runs every few minutes for the lifetime of the studio
+ * and bounds the loss window to roughly one tick interval, rather than
+ * closing it to zero (only a real teardown rescue can do that).
+ *
+ * NON-MUTATING, same technique `rescueSnapshotCmd` already proved live (see
+ * that function's own doc comment for the full "why a separate command"
+ * reasoning): a dirty tree is snapshotted via a THROWAWAY `GIT_INDEX_FILE`
+ * (seeded from a byte copy of the real index, so a deleted-but-uncommitted
+ * file is captured too) and `commit-tree`, never `git add -A`/`git commit`
+ * against the real index/HEAD. This studio is ALIVE and may be mid-edit the
+ * moment this runs — unlike `rescuePushCmd`, which only ever runs when the
+ * container is already doomed, so mutating its real index/HEAD one last time
+ * is harmless.
+ *
+ * TARGET IS FIXED PER CONTAINER BOOT, NOT PER CALL: `wipSyncRef(studio,
+ * bootStamp)` — see that function's own doc comment (and its fix-round
+ * history, #208 PR #215 review item 1) for the full reasoning. Every OTHER
+ * push target in this file (`rescue_target`/`snapshot_target`) always
+ * generates a fresh, timestamped, never-before-seen ref per CALL,
+ * specifically so a plain (non-force) push can never be rejected
+ * non-fast-forward against it. This function instead reuses the SAME ref
+ * every call WITHIN ONE CONTAINER'S LIFETIME (`bootStamp` fixed for that
+ * whole lifetime), on purpose — a periodic tick that generated a fresh ref
+ * every 5 minutes for a studio's entire multi-day lifetime would leave
+ * thousands of stale refs on origin. One rolling snapshot per CONTAINER BOOT
+ * is the whole point; a NEW boot gets a NEW ref, never overwriting the prior
+ * boot's own.
+ *
+ * FORCE-PUSH, AND ONLY HERE — THE ONE DELIBERATE EXCEPTION IN THIS FILE.
+ * Read literally: this file's own comments repeat "Never a `+`/`--force`
+ * push anywhere in this file" more than once, for good reason — every other
+ * push target here is either a REAL branch (a studio's own checked-out
+ * branch, or a local branch/stash the walk discovers: force-pushing one of
+ * those could silently discard a commit someone else pushed in the
+ * meantime) or a FRESHLY GENERATED, never-before-seen ref (force is simply
+ * pointless there — a brand-new ref has no existing tip to be rejected
+ * against, so a plain push always lands clean). `wipSyncCmd`'s own target
+ * (`wipSyncRef`) is neither of those: it is this ONE function's own
+ * exclusive, dedicated scratch ref. Nothing else in this codebase ever
+ * writes to it, reads it as a real branch, or treats it as anything other
+ * than "the last periodic WIP snapshot" — so overwriting it every tick can
+ * never discard anyone else's work, only this same function's own PRIOR
+ * snapshot, which is exactly the point (a rolling safety net, not a growing
+ * archive). That is what makes force safe HERE SPECIFICALLY, and nowhere
+ * else in this file.
+ *
+ * `rescueTryPushFn`/`rescueOnOriginFn` (both used by `rescuePushCmd`/
+ * `rescueSnapshotCmd` above) are deliberately NOT reused here: both are
+ * built around the generate-and-maybe-retry shape (a push rejected
+ * non-fast-forward retries ONCE, to a FRESH ref) and both explicitly forbid
+ * `--force`/`+`. There is nothing to retry against here — force already
+ * wins, unconditionally — so this function writes its own small, dedicated
+ * push step (`wip_sync_push` below) instead of bending either of those to a
+ * shape they were not built for.
+ *
+ * NO BUDGET LEDGER (`rescue_budget_ok`, the elaborate multi-push worst-case
+ * tracking both command builders above carry): that machinery exists
+ * because THOSE functions can run a first push attempt plus an independent
+ * non-fast-forward retry, several times over, across a whole worktree/
+ * branch/stash walk. This function runs exactly ONE push, to ONE target —
+ * fix round (#208 PR #215 review item 2) added ONE bounded fallback retry on
+ * top of that (see `wip_sync_push`'s own comment below), never a whole
+ * worktree/branch/stash walk, and the worst case (two `pushTimeoutSeconds`-
+ * bounded pushes back to back) comfortably fits this function's own short
+ * exec-class budget (`EXEC_CLASSES.wipSync`, sandbox-api.ts) with no
+ * cross-push accounting needed — there is still no multi-target walk for a
+ * ledger to protect against.
+ *
+ * Fix round (#208 PR #215 review item 2): PUBLIC WORK REPO + PRIVATE RESCUE
+ * REMOTE was a BLOCKER — `wip_sync_push` used to be a bare, un-retried `git
+ * push --force`, with none of `rescue_try_push`'s own #16/#140 shallow/
+ * parentless-snapshot fallback (see that function's own extensive doc
+ * comment above for the full history). Force does not exempt a push from
+ * that failure class: "shallow update not allowed" (and its #140 sibling,
+ * "did not receive expected object") are PRE-TRANSFER rejections about
+ * whether the REMOTE has ever seen the history behind a shallow clone's own
+ * boundary commit — a question force vs. non-force never touches, since
+ * force only changes how a NON-FAST-FORWARD TIP comparison is handled, and a
+ * brand-new per-boot ref never had an existing tip to compare against in the
+ * first place. A fresh `fleet/rescue/<studio>/wip/<bootStamp>` ref pushed
+ * from this file's own `guardedCloneCmd`-shallow checkout against a private
+ * rescue remote with no shared history hit this exact rejection, every
+ * single tick, forever (`RESCUE_FAILED wip-sync push` on repeat) — the work
+ * was never saved anywhere. `wip_sync_push` (below) now carries the
+ * identical fallback `rescue_try_push` does: on that specific rejection
+ * class, and ONLY that class, it builds a PARENTLESS snapshot of the exact
+ * same tree (`commit-tree "$src^{tree}"`, no `-p`) and retries the SAME
+ * force-push with that snapshot instead — content survives, only the
+ * (already-shallow, already-truncated) history cut is lost, exactly like
+ * `rescue_try_push`'s own documented contract.
+ *
+ * SCOPE: THE MAIN CHECKOUT ONLY, never a member subagent's own worktree. A
+ * deliberate v1 limitation (see this feature's own plan doc,
+ * docs/plans/2026-10-03-feat-208-wip-sync.md), not an oversight: this runs
+ * on a 5-minute cadence as a bounding safety net, not a one-shot teardown
+ * rescue, and the board issue's own Ask talks about "a running studio's
+ * container" and "worktree dirty" in the singular.
+ *
+ * Covers the same two shapes `rescue_one`/`snapshot_target` above already
+ * distinguish, reusing the identical detection: a dirty tree (scoped status
+ * non-empty — snapshotted and pushed by its synthetic SHA) and a clean tree
+ * that still holds commits no remote-tracking ref already has (`git
+ * rev-list --count HEAD --not --remotes` — pushed by `HEAD` itself, an
+ * EXISTING commit, no snapshot needed). Nothing to sync at all (clean AND
+ * zero ahead) emits `RESCUE_CLEAN`; a tree whose only change is a tool
+ * marker (#217) emits `RESCUE_MARKERS_ONLY` — neither attempts a push. Same
+ * exported constants (`RESCUE_CLEAN`/`RESCUE_MARKERS_ONLY`/
+ * `RESCUE_NO_CHECKOUT`/`RESCUE_PUSHED_PREFIX`/`RESCUE_FAILED_PREFIX`), same
+ * `RESCUE_PUSHED <target> <count> <files|commits>` line shape
+ * (`parseRescueExecResult`, do.ts, parses this generically already — no new
+ * parser needed), so every downstream consumer composes unchanged.
+ *
+ * `root`/`pushTimeoutSeconds` are the same test seams `rescuePushCmd`'s own
+ * doc comment explains (production always uses `WIP_SYNC_PUSH_TIMEOUT_SECONDS`
+ * below, deliberately shorter than `RESCUE_PUSH_TIMEOUT_SECONDS` — see that
+ * constant's own doc comment for why); `botName`/`botEmail`/`opts` are the
+ * same trailing shape too (issue #335, issue #1 piece 5) — this composes with
+ * `RescuePushOptions`/`rescuePushPrelude` exactly like the other two command
+ * builders. `bootStamp` (new, #208 fix round item 1) has NO default — unlike
+ * `root`, a missing boot stamp has no safe neutral value to fall back to
+ * (silently reusing a fixed/guessed value here is the exact per-container
+ * collision this fix round exists to close), so a caller must always resolve
+ * one first; do.ts's `wipSync` skips the whole sync for a tick rather than
+ * call this with one invented.
+ */
+export function wipSyncCmd(
+  repo: string, studio: string, bootStamp: string, root = "/workspace",
+  pushTimeoutSeconds = WIP_SYNC_PUSH_TIMEOUT_SECONDS,
+  botName = "fleetflare[bot]", botEmail = "fleetflare[bot]@users.noreply.github.com",
+  opts: RescuePushOptions = {},
+): string {
+  const dir = `${root}/${repo}`;
+  const scope = `-- . ${RESCUE_MARKER_PATHSPECS}`;
+  const identity = `-c user.name="${botName}" -c user.email="${botEmail}"`;
+  const target = wipSyncRef(studio, bootStamp);
+  return (
+    rescuePushPrelude(opts) +
+    // `$1`: the thing to push (a bare `HEAD`, or a synthetic snapshot SHA) —
+    // `--force --no-verify`, unconditionally: see this function's own doc
+    // comment above for why force is safe HERE, and nowhere else in this
+    // file. `--no-verify` for the same reason every OTHER generated-ref push
+    // in this file skips hooks: `$target` is never a real branch a repo's own
+    // pre-push hook needs to see.
+    //
+    // Fix round (#208 PR #215 review item 2): a #16/#140 shallow/parentless
+    // fallback, reusing `rescue_try_push`'s own recovery (see this function's
+    // doc comment above) — composed with FORCE rather than `rescue_try_push`'s
+    // own non-force shape, since force is this function's one deliberate
+    // exception. On the SAME rejection text that function's own grep already
+    // recognises, and ONLY that text, a second attempt force-pushes a
+    // PARENTLESS snapshot of the same tree instead. Prints its own error text
+    // on stdout (never `>&2`) so the caller's `$(wip_sync_push ...)` captures
+    // it exactly like the single-command version this replaces did.
+    //
+    // Fix round 2, item B (MAJOR): this studio's own live clone is a FULL
+    // clone with the default wildcard fetch refspec
+    // (`+refs/heads/*:refs/remotes/origin/*`), not the `--depth 1
+    // --single-branch` clone `rescue_on_origin`'s own doc comment above
+    // describes for a FRESH provision — so, unlike that shallow clone, a
+    // push here auto-creates a LOCAL `refs/remotes/origin/<target>`
+    // remote-tracking ref matching the refspec, even though `$__rdest` is a
+    // URL rather than the remote name (git matches the push destination
+    // against configured remotes BY URL too, so pushing by URL here does not
+    // avoid this the way it would if no remote named "origin" shared that
+    // URL). That stray tracking ref is purely this function's own transient
+    // snapshot bookkeeping, yet it reads to `rescuePushCmd`'s own
+    // `rev-list --not --remotes` ahead-check (unscoped to "real" refs) as
+    // genuine evidence HEAD is already saved — misreporting RESCUE_CLEAN at
+    // teardown for work that was never actually pushed anywhere but this
+    // rolling wip ref. Deleting the tracking ref immediately after every
+    // successful push here, the same deliberate single explicit
+    // `update-ref` this file's `rescuePushCmd` already runs for its OWN refs
+    // (see that function's C3 doc comment) — just the delete-equivalent —
+    // leaves nothing behind for a later, unrelated check to misread.
+    `wip_sync_push() {\n` +
+    `  local src="$1" snap perr prc\n` +
+    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --force --no-verify "$__rdest" "$src:refs/heads/${target}" 2>&1 1>/dev/null)"; prc=$?\n` +
+    `  if [ "$prc" = 0 ]; then git -C ${dir} update-ref -d refs/remotes/origin/${target} 2>/dev/null || true; return 0; fi\n` +
+    `  if [ -z "$perr" ]; then perr="push to ${target} failed (code $prc) with no output"; ` +
+    `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="push to ${target} killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
+    `  printf '%s' "$perr" | grep -qiE 'shallow update not allowed|did not receive expected object' || { printf '%s' "$perr"; return 1; }\n` +
+    `  snap=$(git -C ${dir} ${identity} commit-tree "$src^{tree}" -m "fleet: periodic WIP sync snapshot (shallow clone fallback)" 2>/dev/null) || { printf '%s' "$perr"; return 1; }\n` +
+    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --force --no-verify "$__rdest" "$snap:refs/heads/${target}" 2>&1 1>/dev/null)"; prc=$?\n` +
+    `  if [ "$prc" = 0 ]; then git -C ${dir} update-ref -d refs/remotes/origin/${target} 2>/dev/null || true; return 0; fi\n` +
+    `  if [ -z "$perr" ]; then perr="snapshot push to ${target} failed (code $prc) with no output"; ` +
+    `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="snapshot push to ${target} killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
+    `  printf '%s' "$perr"; return 1\n` +
+    `}\n` +
+    `wip_sync_one() {\n` +
+    `  local wall wstatus wn wahead whead idxfile realidx tree sha perr prc rc\n` +
+    // Fix round item 7: GIT_OPTIONAL_LOCKS=0 on every read-only `git status`
+    // here — this studio is LIVE and may have its own lead committing at the
+    // same moment this tick runs, unlike every teardown-time command above
+    // (the studio is already doomed by the time those run). A plain `git
+    // status` can create/refresh `.git/index.lock` as a side effect of its
+    // own untracked-cache maintenance, racing a concurrent `git commit` for
+    // the SAME lock file; GIT_OPTIONAL_LOCKS=0 makes git skip every
+    // lock-taking maintenance step it would otherwise attempt, which a
+    // purely informational `status --porcelain` call never needed anyway.
+    `  wall="$(GIT_OPTIONAL_LOCKS=0 git -C ${dir} status --porcelain 2>&1)"; rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync status"; return; fi\n` +
+    `  wstatus="$(GIT_OPTIONAL_LOCKS=0 git -C ${dir} status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync status"; return; fi\n` +
+    `  if [ -n "$wstatus" ]; then\n` +
+    `    wn=$(printf '%s\\n' "$wstatus" | wc -l | tr -d ' ')\n` +
+    // Same throwaway-index technique as rescueSnapshotCmd's own rescue_one
+    // (see that function's doc comment for why the real index is seeded
+    // in, never written to) — never the real `.git/index`.
+    `    idxfile=$(mktemp 2>/dev/null) || { echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; }\n` +
+    `    realidx=$(git -C ${dir} rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
+    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; fi\n` +
+    `    if ! GIT_INDEX_FILE="$idxfile" git -C ${dir} add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; fi\n` +
+    `    tree=$(GIT_INDEX_FILE="$idxfile" git -C ${dir} write-tree 2>/dev/null); rc=$?\n` +
+    `    rm -f "$idxfile"\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; fi\n` +
+    `    sha=$(git -C ${dir} ${identity} commit-tree "$tree" -p HEAD -m "fleet: periodic WIP sync (live, real HEAD/index untouched)" 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$sha" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync commit"; return; fi\n` +
+    `    perr="$(wip_sync_push "$sha")"; prc=$?\n` +
+    `    if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync push"; printf '%s\\n' "$perr" | tail -n 5 >&2; return; fi\n` +
+    `    echo "${RESCUE_PUSHED_PREFIX} ${target} $wn ${RESCUE_PUSHED_KIND_FILES}"\n` +
+    `  else\n` +
+    // Issue #313-style ambiguity guard, same as rescue_one's own copy above:
+    // `HEAD` resolved to its own SHA first, never passed bare.
+    `    whead=$(git -C ${dir} rev-parse HEAD 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync rev-parse"; return; fi\n` +
+    `    wahead=$(git -C ${dir} rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync rev-list"; return; fi\n` +
+    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ]; then\n` +
+    `      perr="$(wip_sync_push HEAD)"; prc=$?\n` +
+    `      if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync push"; printf '%s\\n' "$perr" | tail -n 5 >&2; return; fi\n` +
+    `      echo "${RESCUE_PUSHED_PREFIX} ${target} $wahead ${RESCUE_PUSHED_KIND_COMMITS}"\n` +
+    `    elif [ -n "$wall" ]; then\n` +
+    `      echo "${RESCUE_MARKERS_ONLY}"\n` +
+    `    else\n` +
+    `      echo "${RESCUE_CLEAN}"\n` +
+    `    fi\n` +
+    `  fi\n` +
+    `}\n` +
+    `if [ ! -d ${dir}/.git ]; then echo "${RESCUE_NO_CHECKOUT}"; else wip_sync_one; fi`
   );
 }

@@ -557,9 +557,10 @@ export async function restartWithSync(
 }
 
 import {
-  rescuePushCmd, rescueSnapshotCmd, RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX,
-  RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport, rescueMintPermissions,
-  type RescueWorktree, type RescueTarget,
+  rescuePushCmd, rescueSnapshotCmd, wipSyncCmd, wipSyncProbeCmd, WIP_SYNC_NEEDED,
+  RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY,
+  RESCUE_PUSHED_PREFIX, RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport,
+  rescueMintPermissions, type RescueWorktree, type RescueTarget,
 } from "./rescue";
 // Moved to src/studio/rescue.ts (pure, so a bun test runs it against real
 // git — issue #217); re-exported so every existing import keeps working.
@@ -711,6 +712,107 @@ export async function rescueSnapshot(deps: SessionSyncDeps, repo: string, studio
 }
 
 /**
+ * Board issue #208: the periodic WIP safety net — see `wipSyncCmd`'s own
+ * doc comment (rescue.ts) for the full design. Wired into the EXISTING
+ * SYNC_SESSION_SECONDS tick (`syncSessionCycle`, below), not a new schedule.
+ *
+ * Same shape as `rescuePush`/`rescueSnapshot` above (same `rescueTarget`
+ * resolution, same `parseRescueExecResult` parse, same throw-on-anything-
+ * not-provably-fine contract) — intentionally: this function itself does
+ * not decide whether a failure is safe to ignore, only its caller does.
+ * UNLIKE `rescuePush`'s own doc comment (which explicitly throws because a
+ * TEARDOWN caller must decide whether to refuse the kill), the caller here
+ * (`syncSessionCycle`) catches unconditionally and only logs: nothing is
+ * being torn down, and a WIP sync that fails this cycle just means the next
+ * tick tries again.
+ *
+ * `bootStamp` (#208 fix round item 1) is this container's OWN
+ * `Observed.wipBootStamp`, captured once at bring-up — threaded straight
+ * into `wipSyncRef`/`wipSyncCmd` as the per-boot segment of the ref. The
+ * caller (`syncSessionCycle`) is responsible for not calling this at all
+ * when no boot stamp has been confirmed yet (see that function's own
+ * comment) — this function has no safe value to invent one with.
+ *
+ * Fix round item 6: runs `wipSyncProbeCmd` FIRST, via `deps.wipExec` (fix
+ * round item 5's own short-budget exec port, falling back to `deps.exec`),
+ * entirely BEFORE `deps.rescueTarget?.()` — which can mint a GitHub token and
+ * make a real API call — ever runs. A clean, nothing-to-sync tick (the
+ * common case) now costs one cheap local probe and NOTHING else: no token
+ * mint, no API call, no `FLEET_RESCUE_REMOTE is unset` log line firing on
+ * every single tick for a studio that never configured a rescue remote.
+ * `resolveRescueTarget`'s own token mint + the real push only run when the
+ * probe answers `WIP_SYNC_NEEDED`.
+ */
+export async function wipSync(deps: SessionSyncDeps, repo: string, studio: string, bootStamp: string): Promise<RescueResult> {
+  const wipExec = deps.wipExec ?? deps.exec;
+  const probeRes = await wipExec(wipSyncProbeCmd(repo));
+  if (isDeadlineExit(probeRes.code)) {
+    throw new Error(
+      `wip-sync failed: probe exec killed by its own deadline (exit ${probeRes.code}), output cannot be trusted: ` +
+      `${probeRes.stdout.trim().slice(0, 500) || "no output"}`,
+    );
+  }
+  const probeOut = probeRes.stdout.trim();
+  if (probeOut === RESCUE_NO_CHECKOUT) return { pushed: false, branch: null, files: 0, skipped: "no checkout" };
+  if (probeOut === RESCUE_CLEAN) return { pushed: false, branch: null, files: 0, skipped: "clean" };
+  if (probeOut === RESCUE_MARKERS_ONLY) {
+    return { pushed: false, branch: null, files: 0, skipped: "nothing to rescue (only tool markers)" };
+  }
+  if (probeOut !== WIP_SYNC_NEEDED) {
+    throw new Error(`wip-sync failed: probe produced unrecognised output: ${probeOut.slice(0, 500) || "no output"}`);
+  }
+  const t = (await deps.rescueTarget?.()) ?? {};
+  const cmd = wipSyncCmd(repo, studio, bootStamp, undefined, undefined, deps.botName, deps.botEmail, { remoteUrl: t.remoteUrl });
+  const res = await (t.env ? wipExec(cmd, t.env) : wipExec(cmd));
+  return parseRescueExecResult(res, "wip-sync");
+}
+
+/**
+ * Board issue #208: stamps `Observed.wipSyncedAt` ONLY on an actual
+ * RESCUE_PUSHED outcome — same "only on real success" shape
+ * `recordSnapshotOnSuccess` above already follows for `lastSnapshotAt`.
+ * RESCUE_CLEAN/RESCUE_MARKERS_ONLY/RESCUE_NO_CHECKOUT leave the field
+ * exactly as it was: a stale stamp is still valid evidence of the last REAL
+ * sync, and there is nothing to overwrite it WITH on a quiet tick.
+ */
+export async function recordWipSyncOnSuccess(
+  observedStorage: ObservedStorage | null | undefined, result: RescueResult, now: string,
+): Promise<void> {
+  if (observedStorage && result.pushed) {
+    await mergeObserved(observedStorage, { wipSyncedAt: now });
+  }
+}
+
+/**
+ * Fix round (#208 PR #215 review, minor (a)): stamps `Observed.wipLastCheck`
+ * on EVERY wip-sync attempt this tick made — success, a quiet skip, or a
+ * caught failure — unlike `recordWipSyncOnSuccess` above, which only ever
+ * advances on a real push. `fleet ls`'s WIP column (cli/wip-format.ts) reads
+ * BOTH fields together so it can tell "pushed Xm ago" from "checked clean
+ * Xm ago" from "last attempt failed Xm ago", rather than only ever showing
+ * the age of the last successful push (or nothing at all for a studio stuck
+ * failing every tick).
+ */
+export type WipLastCheckResult = "pushed" | "clean" | "markers-only" | "no-checkout" | "failed";
+
+export async function recordWipLastCheck(
+  observedStorage: ObservedStorage | null | undefined, now: string, result: WipLastCheckResult,
+): Promise<void> {
+  if (observedStorage) await mergeObserved(observedStorage, { wipLastCheck: { at: now, result } });
+}
+
+/** Fix round (#208 PR #215 review, minor (a)): turns a `RescueResult` from
+ *  `wipSync` into the `WipLastCheckResult` label `recordWipLastCheck` above
+ *  stores — the one place that mapping lives, so `syncSessionCycle`'s own
+ *  call site stays a thin pass-through. */
+export function wipLastCheckResultOf(result: RescueResult): WipLastCheckResult {
+  if (result.pushed) return "pushed";
+  if (result.skipped === "clean") return "clean";
+  if (result.skipped === "no checkout") return "no-checkout";
+  return "markers-only";
+}
+
+/**
  * Throws on anything it cannot read as one of the three outcomes above (a
  * push rejected, no remote reachable, the exec itself throwing) —
  * deliberately the SAME contract syncSessionTick (session-sync.ts) already
@@ -740,7 +842,10 @@ export async function rescueSnapshot(deps: SessionSyncDeps, repo: string, studio
  */
 async function parseRescueExecResult(
   res: { code: number; stdout: string; stderr: string },
-  label: "rescue-push" | "rescue-snapshot",
+  // Issue #208: "wip-sync" is a THIRD label — wipSync (above) passes it so a
+  // caller's log line can tell which exec failed, same reason the other two
+  // exist.
+  label: "rescue-push" | "rescue-snapshot" | "wip-sync",
 ): Promise<RescueResult> {
   if (isDeadlineExit(res.code)) {
     throw new Error(
@@ -2916,6 +3021,13 @@ export async function syncSessionCycle(
   // exactly as it did before this feature, no account-burn write at all.
   accountBurnWrite?: ((name: string, window5hOutput: number) => Promise<void>) | null,
 ): Promise<void> {
+  // Fix round (#208 PR #215 review item 4): captured ONCE, at the very top of
+  // THIS tick, before anything below runs — the freshness anchor the WIP-sync
+  // step (further down) uses to prove `checked.readiness.checkedAt` was
+  // genuinely stamped DURING this cycle's own `checkAndRecordReadiness` call,
+  // never inherited verbatim from a stale row that function's own
+  // `state === "stopped"` early return can hand back unchanged.
+  const cycleStartedAt = syncDeps.now().toISOString();
   try {
     const now = syncDeps.now().toISOString();
     const result = await syncSessionTick(syncDeps, storage, idFallback);
@@ -2990,6 +3102,87 @@ export async function syncSessionCycle(
     checked = await checkAndRecordReadiness(syncDeps, storage, idFallback, recordStudioFn);
   } catch (err) {
     console.error(`studio ${idFallback}: readiness check failed`, err);
+  }
+  // Board issue #208: the periodic WIP safety net. Gated on THIS cycle's own
+  // readiness verdict (`checked`, just above) reading "provisioned" — a
+  // narrower gate than heal's own (`if (heal && checked)`, which also fires
+  // on "bare" precisely so it CAN heal it) — wip-sync additionally requires
+  // "provisioned" because, unlike heal, it execs commands into the container
+  // rather than restarting it. `checked` null (the check itself threw, or
+  // the studio has nothing provisioned yet) or `readiness.kind` anything
+  // other than "provisioned" (bare/inconclusive) skips this step entirely
+  // for the cycle — there is always a next tick.
+  //
+  // Best-effort, same as every step around it: a thrown error (or a
+  // RESCUE_FAILED from `wipSync`'s own `parseRescueExecResult` throw) is
+  // logged loudly and never blocks any other step in this cycle — contrast
+  // `rescuePush`/`rescueSnapshot`'s own doc comments, which explicitly throw
+  // because a TEARDOWN caller must decide whether to refuse the kill.
+  // Nothing here is being torn down; a missed sync this cycle just means the
+  // next one tries again.
+  //
+  // Review (post-#210 rebase), finding B (BLOCKER, FIXED): also skipped when
+  // the failover step above just auto-stopped this row THIS tick (see
+  // `stoppedAfterFailover`'s own doc comment above) — this step execs into
+  // the container too, same "would boot a destroyed one back up" gap
+  // `retrySurvivalBrief` and the detached `installCacheDeps` save below were
+  // already fixed for.
+  //
+  // Fix round (#208 PR #215 review item 4, MAJOR): `checked?.readiness?.kind
+  // === "provisioned"` alone is NOT enough — `checkAndRecordReadiness`'s own
+  // `state === "stopped"` early return (do.ts) hands back the EXISTING row
+  // VERBATIM, readiness included, so a row a DIFFERENT path (not just the
+  // failover step above) stopped between ticks can still carry a stale
+  // "provisioned" verdict from before it stopped. Two more guards close that:
+  // `checked.state !== "stopped"` (never exec into a row this very check just
+  // confirmed is stopped) and `checked.readiness.checkedAt >= cycleStartedAt`
+  // (the verdict must have been stamped DURING this cycle's own call above,
+  // never inherited unchanged from an earlier tick's row) — `cycleStartedAt`
+  // is captured once at the very top of this function, before this cycle did
+  // any work at all, so a genuinely fresh verdict (always stamped by
+  // `syncDeps.now()` sometime AFTER that capture) reliably compares `>=`.
+  if (
+    checked?.readiness?.kind === "provisioned" && !stoppedAfterFailover &&
+    checked.state !== "stopped" && checked.readiness.checkedAt >= cycleStartedAt
+  ) {
+    const parsed = parseStudioId(idFallback);
+    if (parsed) {
+      // Fix round item 1: wip-sync needs THIS container's own confirmed
+      // per-boot stamp (Observed.wipBootStamp) to name its ref — absent (no
+      // confirmed bring-up yet for this incarnation) skips the tick entirely
+      // rather than inventing one, which would defeat the whole per-boot-ref
+      // fix (see Observed.wipBootStamp's own doc comment, observed.ts).
+      //
+      // Fix round 2, item A (BLOCKER): `wipBootStamp` alone is not enough.
+      // `recordBringupObservation` (provision.ts) only refreshes it inside
+      // its own `if (tokenWritten)` block — the SAME block that clears
+      // `replacedAt` back to null — and not every bring-up writes a fresh
+      // token (some restart/heal paths do not). So a row can carry a STALE
+      // `wipBootStamp` left over from a PRIOR container while `replacedAt` is
+      // still non-null (this container has not yet proven itself the same
+      // incarnation that captured that stamp). Using it here would force-push
+      // onto `fleet/rescue/<studio>/wip/<OLD stamp>` — the prior, now-dead
+      // container's own ref — destroying whatever it had queued. Requiring
+      // `obs.replacedAt === null` (this container, not a replaced one) AND
+      // `obs.incarnation !== null` (a real incarnation really is recorded)
+      // before trusting `wipBootStamp` closes that gap; either check failing
+      // reads exactly like the "no confirmed boot stamp yet" case below.
+      const obs = observedStorage ? await getObserved(observedStorage) : null;
+      const bootStamp = obs && obs.replacedAt === null && obs.incarnation !== null ? obs.wipBootStamp ?? null : null;
+      const checkedAt = syncDeps.now().toISOString();
+      if (bootStamp) {
+        try {
+          const result = await wipSync(syncDeps, parsed.repo, idFallback, bootStamp);
+          await recordWipSyncOnSuccess(observedStorage, result, checkedAt);
+          await recordWipLastCheck(observedStorage, checkedAt, wipLastCheckResultOf(result));
+        } catch (err) {
+          console.error(`studio ${idFallback}: WIP sync failed`, err);
+          await recordWipLastCheck(observedStorage, checkedAt, "failed");
+        }
+      } else {
+        console.error(`studio ${idFallback}: WIP sync skipped -- no confirmed boot stamp yet for this incarnation`);
+      }
+    }
   }
   // Issue #71, LAST and in its own try/catch like the four steps above: the
   // verdict the tick just took is the only place in the system that knows a
@@ -3207,8 +3400,19 @@ export async function runScheduledTick(
  *                       own doc comment and ARCHIVE_DEADLINE_MS's own.
  *   refreshToken   60s  a GitHub mint + one refresh-class exec (30s).
  *   sweepMaestro  120s  board/GitHub reads + one wake (30s).
- *   syncSession   480s  tar + parts (120s each), failover, readiness (60s);
- *                       a heal it starts (bring-up, 600s) runs on detached.
+ *   syncSession   480s  tar + parts (120s each), failover, readiness (60s),
+ *                       and (board #208 fix round, item 5) the WIP-sync
+ *                       step's own budget — its own session, never queued
+ *                       behind or counted against the 120s `sync` tar budget
+ *                       above. NOT a single 90s call: `wipSync` (do.ts) runs
+ *                       a cheap probe fully to completion, then, only when
+ *                       dirty, a separate push command — both through
+ *                       `EXEC_CLASSES.wipSync` (sandbox-api.ts), and each
+ *                       independently bounded by that class's own 90s
+ *                       `timeoutMs` (see that constant's own "show your
+ *                       math" doc comment). Real worst case is therefore
+ *                       TWO sequential 90s waits, not one: 180s. A heal it
+ *                       starts (bring-up, 600s) runs on detached.
  *                       Board #350 round 2, item 5: the install-cache save
  *                       step (curl --max-time 900) does NOT count against
  *                       this budget at all — syncSessionCycle fires it
@@ -5779,9 +5983,13 @@ export class StudioDO extends Sandbox<Env> {
           via: session.via,
           replacementDetected: session.replacementDetected === true,
           session,
+          // Board issue #208, part 2: frozen here, at bring-up, for the same
+          // reason `session` is — see SurvivalBringup.wipSyncedAt's own doc
+          // comment (survival-delivery.ts).
+          wipSyncedAt: snapshot.wipSyncedAt ?? null,
         }),
         () => this.survivalBusy(),
-        this.survivalCompose(workRepoSlug, session),
+        this.survivalCompose(workRepoSlug, session, snapshot.wipSyncedAt ?? null),
         (prompt) => this.wakeStudioOnAssignment(prompt),
         () => ctx.moved(),
       );
@@ -5835,7 +6043,10 @@ export class StudioDO extends Sandbox<Env> {
       this.logSurvivalOutcome("deferred", await retryPendingSurvivalBrief(
         this.ctx.storage,
         () => this.survivalBusy(),
-        (pending) => this.survivalCompose(workRepoSlug, pending.session)(),
+        // Board issue #208, part 2: the pending record's OWN frozen
+        // `wipSyncedAt` (SurvivalBriefPending.wipSyncedAt), never a fresh
+        // read — same reason `pending.session` itself is never re-read.
+        (pending) => this.survivalCompose(workRepoSlug, pending.session, pending.wipSyncedAt ?? null)(),
         (prompt) => this.wakeStudioOnAssignment(prompt, true),
       ));
     } catch (err) {
@@ -5879,7 +6090,11 @@ export class StudioDO extends Sandbox<Env> {
    * instruction — a brief naming the surviving branches is worth delivering
    * without it.
    */
-  private survivalCompose(workRepoSlug: string, session: ObservedSession): () => Promise<ComposedBrief> {
+  // Board issue #208, part 2: `wipSyncedAt` is the caller's own frozen
+  // capture (bring-up's `snapshot.wipSyncedAt`, or the retry's
+  // `pending.wipSyncedAt`) — see composeSurvivalDelivery's own doc comment
+  // for why it only ever renders on a `via: "heal"` session.
+  private survivalCompose(workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null): () => Promise<ComposedBrief> {
     return async () => {
       let tasks: SurvivalTaskRef[];
       try {
@@ -5889,6 +6104,7 @@ export class StudioDO extends Sandbox<Env> {
       }
       return composeSurvivalDelivery(
         this.survivalSources(workRepoSlug), { ok: true, value: tasks }, session, new Date().toISOString(),
+        wipSyncedAt,
       );
     };
   }
@@ -6065,6 +6281,13 @@ export class StudioDO extends Sandbox<Env> {
       // to it; unset or a failed mint → origin, leak-gated, loudly (rescue.ts).
       // Issue #24: only for a PUBLIC work repo; private or unknown → origin.
       rescueTarget: () => this.rescueTarget(() => this.workRepoSlug(null)),
+      // Fix round (#208 PR #215 review item 5): wip-sync's own short-budget
+      // exec class, independent of whichever `cls` this particular syncDeps()
+      // object was built for — a wip-sync tick always rides EXEC_CLASSES.wipSync,
+      // never EXEC_CLASSES.sync's own 120s class, regardless of what the rest
+      // of this deps object is used for.
+      wipExec: (cmd: string, env?: Record<string, string>) =>
+        sbExec(this, cmd, env ? { ...EXEC_CLASSES.wipSync, env } : EXEC_CLASSES.wipSync),
     };
   }
 

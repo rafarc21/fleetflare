@@ -4,8 +4,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
-  rescuePushCmd, rescueSnapshotCmd, RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX, RESCUE_FAILED_PREFIX,
-  RESCUE_NO_CHECKOUT, RESCUE_PUSH_TIMEOUT_SECONDS, RESCUE_SERVER_DEADLINE_SECONDS, RESCUE_BUDGET_MARGIN_SECONDS,
+  rescuePushCmd, rescueSnapshotCmd, wipSyncCmd, wipSyncRef, wipSyncProbeCmd, WIP_SYNC_NEEDED,
+  RESCUE_CLEAN, RESCUE_MARKERS_ONLY, RESCUE_PUSHED_PREFIX,
+  RESCUE_FAILED_PREFIX, RESCUE_NO_CHECKOUT, RESCUE_PUSH_TIMEOUT_SECONDS, RESCUE_SERVER_DEADLINE_SECONDS,
+  RESCUE_BUDGET_MARGIN_SECONDS,
 } from "../../src/studio/rescue";
 import { discoverRescueRefsCmd } from "../../src/studio/provision";
 import { KILL_GRACE_SECONDS } from "../../src/studio/exec-deadline";
@@ -1064,6 +1066,226 @@ describe("#266 — rescueSnapshotCmd saves a dirty tree WITHOUT touching the liv
 });
 
 /**
+ * Board issue #208: `wipSyncCmd` is a periodic (every SYNC_SESSION_SECONDS,
+ * wired through do.ts's `syncSessionCycle`) safety net for a studio whose
+ * container is replaced by the PLATFORM (Cloudflare-side eviction/restart,
+ * not a fleet operation) — the platform gives no pre-replacement hook, so
+ * `rescuePushCmd`/`rescueSnapshotCmd` (both teardown-time only) never get a
+ * chance to run. Shares `rescueSnapshotCmd`'s non-mutating snapshot
+ * technique (the studio is ALIVE when this runs) but, unlike every other
+ * push target in this file, writes to a ref FIXED PER CONTAINER BOOT,
+ * repeatedly OVERWRITTEN within that one boot's own lifetime
+ * (`fleet/rescue/<studio>/wip/<bootStamp>`, `wipSyncRef`) via the one
+ * deliberate force-push exception documented on `wipSyncCmd` itself
+ * (rescue.ts).
+ *
+ * Fix round (#208 PR #215 review item 1 — maestro DESIGN decision): `BOOT_STAMP`
+ * stands in for `Observed.wipBootStamp`, captured once per container boot by
+ * do.ts's `recordBringupObservation` and threaded in here exactly like a real
+ * caller would.
+ */
+describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, force-pushed, main checkout only", () => {
+  const BOOT_STAMP = "20261004000000";
+  function wip(bootStamp = BOOT_STAMP): string {
+    return sh(wipSyncCmd(REPO, STUDIO, bootStamp, root)).out;
+  }
+  const WIP_REF = `refs/heads/${wipSyncRef(STUDIO, BOOT_STAMP)}`;
+
+  test("a dirty main checkout: force-pushes a snapshot to the fixed wip ref; real status/HEAD and origin's real branch are untouched", () => {
+    writeFileSync(join(checkout, "notes.md"), "wip work\n");
+    const statusBefore = sh(`git -C ${checkout} status --porcelain`).out;
+    const headBefore = sh(`git -C ${checkout} rev-parse HEAD`).out;
+    const mainBefore = sh(`git -C ${origin} rev-parse main`).out;
+
+    const out = wip();
+
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO, BOOT_STAMP)} 1 files$`, "m"));
+    expect(rescueRefs()).toEqual([WIP_REF]);
+    const files = sh(`git -C ${origin} ls-tree -r --name-only ${WIP_REF}`).out.split("\n");
+    expect(files).toContain("notes.md");
+    expect(sh(`git -C ${checkout} status --porcelain`).out).toBe(statusBefore);
+    expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(headBefore);
+    expect(sh(`git -C ${origin} rev-parse main`).out).toBe(mainBefore);
+  });
+
+  test("a clean tree with unpushed commits: force-pushes the existing HEAD commit to the fixed wip ref, by ref -- never touches local state", () => {
+    sh(`git -C ${checkout} commit -q --allow-empty -m "lead commit 1" && git -C ${checkout} commit -q --allow-empty -m "lead commit 2"`);
+    const leadSha = sh(`git -C ${checkout} rev-parse HEAD`).out;
+
+    const out = wip();
+
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO, BOOT_STAMP)} 2 commits$`, "m"));
+    expect(sh(`git -C ${origin} rev-parse ${WIP_REF}`).out).toBe(leadSha);
+    expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(leadSha);
+  });
+
+  test("clean, nothing unpushed: RESCUE_CLEAN, no push attempted at all", () => {
+    sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 && rm -rf .claude`);
+    expect(wip()).toBe(RESCUE_CLEAN);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("markers-only tree: RESCUE_MARKERS_ONLY, no push attempted", () => {
+    expect(wip()).toBe(RESCUE_MARKERS_ONLY);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("no checkout: RESCUE_NO_CHECKOUT", () => {
+    expect(sh(wipSyncCmd(REPO, "nope", BOOT_STAMP, join(dir, "no-such-workspace"))).out).toBe(RESCUE_NO_CHECKOUT);
+  });
+
+  test("running it twice with different dirty content both times OVERWRITES the same fixed ref -- proves the push is a real force-push, not a silent fallback to a freshly generated ref", () => {
+    writeFileSync(join(checkout, "a.md"), "first wip\n");
+    const out1 = wip();
+    expect(out1).toContain(RESCUE_PUSHED_PREFIX);
+    const sha1 = sh(`git -C ${origin} rev-parse ${WIP_REF}`).out;
+    expect(rescueRefs()).toEqual([WIP_REF]);
+
+    writeFileSync(join(checkout, "a.md"), "second wip, unrelated to the first\n");
+    const out2 = wip();
+    expect(out2).toContain(RESCUE_PUSHED_PREFIX);
+    const sha2 = sh(`git -C ${origin} rev-parse ${WIP_REF}`).out;
+
+    // Still exactly ONE ref under fleet/rescue/ -- never a second, timestamped
+    // one: proves the target is fixed, not generated.
+    expect(rescueRefs()).toEqual([WIP_REF]);
+    expect(sha2).not.toBe(sha1);
+    // Neither snapshot commit is an ancestor of the other (same parent HEAD,
+    // different content) -- a non-force push to an EXISTING tip here would
+    // have been rejected non-fast-forward; this only succeeds because the
+    // push IS forced.
+    expect(sh(`git -C ${origin} merge-base --is-ancestor ${sha1} ${sha2}`).code).not.toBe(0);
+    const files = sh(`git -C ${origin} ls-tree -r --name-only ${WIP_REF}`).out.split("\n");
+    expect(files).toContain("a.md");
+  });
+
+  test("never walks a member worktree -- scope is the main checkout only (deliberate v1 limitation)", () => {
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work\n");
+
+    const out = wip();
+
+    // The main checkout itself is clean beyond the member worktree's own
+    // gitlink directory (a marker, #217) -- so this reads MARKERS_ONLY, never
+    // a push, and the member worktree's own dirty file is never rescued.
+    expect(out).toBe(RESCUE_MARKERS_ONLY);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("the generated command carries exactly one `--force` push per attempt -- the one deliberate exception to this file's own 'never force' rule, and nowhere else", () => {
+    const cmd = wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root);
+    const forceCount = (cmd.match(/--force/g) ?? []).length;
+    // Fix round item 2: TWO `--force` occurrences now -- the main attempt and
+    // its own shallow-clone fallback retry, both force (see wip_sync_push's
+    // own doc comment) -- never a non-force push anywhere in this function.
+    expect(forceCount).toBe(2);
+    expect(cmd).toContain(`refs/heads/${wipSyncRef(STUDIO, BOOT_STAMP)}`);
+  });
+
+  // Fix round item 1 (#208 PR #215 review): a DIFFERENT boot stamp is a
+  // DIFFERENT ref entirely -- the load-bearing proof that a new container
+  // (a fresh bootStamp) never touches a prior container's own wip ref.
+  test("a different bootStamp pushes to a completely different ref -- a new container's wip-sync never touches an old container's own ref", () => {
+    writeFileSync(join(checkout, "a.md"), "container A's wip\n");
+    wip(BOOT_STAMP);
+    const oldRef = WIP_REF;
+    const oldSha = sh(`git -C ${origin} rev-parse ${oldRef}`).out;
+
+    const NEW_BOOT_STAMP = "20261004003000";
+    writeFileSync(join(checkout, "b.md"), "container B's wip\n");
+    const out = wip(NEW_BOOT_STAMP);
+
+    expect(out).toContain(RESCUE_PUSHED_PREFIX);
+    const newRef = `refs/heads/${wipSyncRef(STUDIO, NEW_BOOT_STAMP)}`;
+    expect(rescueRefs().sort()).toEqual([oldRef, newRef].sort());
+    // The OLD container's ref is byte-identical to what it was before the
+    // new container's own first tick ran -- never force-pushed over.
+    expect(sh(`git -C ${origin} rev-parse ${oldRef}`).out).toBe(oldSha);
+    const newFiles = sh(`git -C ${origin} ls-tree -r --name-only ${newRef}`).out.split("\n");
+    expect(newFiles).toContain("b.md");
+  });
+
+  // Fix round 2, item B (MAJOR): this test's own `checkout` fixture is a
+  // FULL clone (wildcard fetch refspec), the same shape a real studio's live
+  // worktree uses — not the `--depth 1 --single-branch` clone a fresh
+  // provision gets. A push from here to a ref matching that refspec
+  // auto-creates a LOCAL `refs/remotes/origin/<target>` remote-tracking ref
+  // as a side effect — purely wip-sync's own transient bookkeeping, never a
+  // real "this is safely rescued" signal. Left behind, it misleads
+  // `rescuePushCmd`'s own unscoped `rev-list --not --remotes` ahead-check at
+  // teardown into reporting RESCUE_CLEAN for work that was never actually
+  // pushed anywhere but this rolling wip ref — see `wip_sync_push`'s own doc
+  // comment. `wip_sync_push` must delete that tracking ref itself,
+  // immediately after every successful push, so nothing is left for a later,
+  // unrelated check to misread.
+  test("a successful push deletes its own local remote-tracking ref -- never leaves a stray refs/remotes/origin/<target> for an unrelated check to misread as 'already saved'", () => {
+    writeFileSync(join(checkout, "notes.md"), "wip work\n");
+
+    const out = wip();
+
+    expect(out).toContain(RESCUE_PUSHED_PREFIX);
+    // The push itself genuinely landed on origin...
+    expect(sh(`git -C ${origin} rev-parse ${WIP_REF}`).code).toBe(0);
+    // ...but the local tracking ref it would otherwise auto-create is gone.
+    expect(sh(`git -C ${checkout} rev-parse -q --verify refs/remotes/origin/${wipSyncRef(STUDIO, BOOT_STAMP)}`).code).not.toBe(0);
+  });
+});
+
+/**
+ * Fix round (#208 PR #215 review item 6): `wipSyncProbeCmd` is the cheap,
+ * read-only half of wip-sync, meant to run BEFORE any rescue-target
+ * resolution (which can mint a token and call GitHub's API) so a clean tick
+ * costs nothing but one local `git status`/`rev-list` round trip.
+ */
+describe("#208 fix round item 6 — wipSyncProbeCmd: cheap dirty/ahead probe, no push, no target needed", () => {
+  function probe(): string {
+    return sh(wipSyncProbeCmd(REPO, root)).out;
+  }
+
+  test("dirty main checkout: WIP_SYNC_NEEDED, and nothing is pushed or committed anywhere", () => {
+    writeFileSync(join(checkout, "notes.md"), "wip work\n");
+    const headBefore = sh(`git -C ${checkout} rev-parse HEAD`).out;
+
+    expect(probe()).toBe(WIP_SYNC_NEEDED);
+
+    expect(rescueRefs()).toEqual([]);
+    expect(sh(`git -C ${checkout} rev-parse HEAD`).out).toBe(headBefore);
+  });
+
+  test("clean tree with unpushed commits: WIP_SYNC_NEEDED", () => {
+    sh(`git -C ${checkout} commit -q --allow-empty -m "lead commit"`);
+    expect(probe()).toBe(WIP_SYNC_NEEDED);
+  });
+
+  test("clean, nothing unpushed: RESCUE_CLEAN, same meaning as wipSyncCmd's own", () => {
+    sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 && rm -rf .claude`);
+    expect(probe()).toBe(RESCUE_CLEAN);
+  });
+
+  test("markers-only tree: RESCUE_MARKERS_ONLY", () => {
+    expect(probe()).toBe(RESCUE_MARKERS_ONLY);
+  });
+
+  test("no checkout: RESCUE_NO_CHECKOUT", () => {
+    expect(sh(wipSyncProbeCmd(REPO, join(dir, "no-such-workspace"))).out).toBe(RESCUE_NO_CHECKOUT);
+  });
+
+  test("never calls `exit`, never bare `cd`s -- same shared-session discipline every other command builder in this file follows", () => {
+    const cmd = wipSyncProbeCmd(REPO, root);
+    expect(cmd).not.toMatch(/(^|[;&|(\s])exit\b/);
+    expect(cmd).not.toMatch(/(^|[;&|(\s])cd\b/);
+  });
+
+  test("every `git status` call runs under GIT_OPTIONAL_LOCKS=0 (fix round item 7)", () => {
+    const cmd = wipSyncProbeCmd(REPO, root);
+    const statusCalls = cmd.match(/git -C \S+ status --porcelain/g) ?? [];
+    expect(statusCalls.length).toBeGreaterThan(0);
+    for (const call of statusCalls) {
+      expect(cmd).toContain(`GIT_OPTIONAL_LOCKS=0 ${call}`);
+    }
+  });
+});
+
+/**
  * HOLD-round fix (real-git review on PR #312): rescueSnapshotCmd's dirty-tree
  * branch called the SAME rescue_target() checkout-mode resolution
  * rescuePushCmd uses to pick a push destination. In checkout mode, when the
@@ -1097,6 +1319,130 @@ describe("#266 — rescueSnapshotCmd saves a dirty tree WITHOUT touching the liv
  * otherwise silently repoint the studio's OWN local tracking ref at the
  * snapshot SHA too, on the buggy path).
  */
+/**
+ * Fix round (#208 PR #215 full review, item 1 — BLOCKER, maestro DESIGN
+ * decision): the full lifecycle this fix exists for. Without BOTH halves of
+ * the fix (the per-boot-stamped ref AND `rescue_on_origin`'s own wip-ref
+ * exclusion), a studio's genuinely unpushed commit could be silently lost —
+ * wip-sync pushes it to a wip ref; teardown rescue's own `rescue_on_origin`
+ * check sees that exact sha already on origin (the wip ref) and skips its
+ * real push; the NEXT container's first wip-sync tick then force-pushes a
+ * DIFFERENT snapshot over that SAME wip ref (the old flat, non-boot-stamped
+ * design) — at which point the commit is unreachable from any ref at all.
+ */
+describe("#208 fix round item 1 — the full lifecycle: wip-sync never hides a commit from teardown rescue, and a new container never clobbers an old one's wip ref", () => {
+  const BOOT_STAMP_A = "20261004020000";
+  const BOOT_STAMP_B = "20261004023000";
+
+  test("wip-sync pushes a clean-but-unpushed commit to the per-boot wip ref -> real teardown rescue STILL pushes its own proper rescue ref for it (not short-circuited by rescue_on_origin) -> a fresh container's first wip-sync tick creates a NEW ref and never touches the old one", () => {
+    // Container A: a real, unpushed commit -- the exact shape rescue_on_origin
+    // exists to check (#49).
+    sh(`git -C ${checkout} commit -q --allow-empty -m "real unpushed work"`);
+    const headSha = sh(`git -C ${checkout} rev-parse HEAD`).out;
+
+    // Step 1: container A's periodic wip-sync tick saves it to its own
+    // per-boot wip ref.
+    const wipOut = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP_A, root)).out;
+    expect(wipOut).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO, BOOT_STAMP_A)} 1 commits$`, "m"));
+    const wipRefA = `refs/heads/${wipSyncRef(STUDIO, BOOT_STAMP_A)}`;
+    expect(sh(`git -C ${origin} rev-parse ${wipRefA}`).out).toBe(headSha);
+    // Fix round 2, item B: `wip_sync_push` (rescue.ts) now deletes its own
+    // local `refs/remotes/origin/<target>` remote-tracking ref immediately
+    // after every successful push -- see that function's own doc comment --
+    // so this test's OUTER beforeEach can stay a REGULAR (full,
+    // wildcard-fetch-refspec) clone, the same shape a real studio's live
+    // worktree uses, with no test-side cleanup standing in for the
+    // production fix. Step 2 below (`rescue_on_origin`'s own sha-based
+    // "already on origin" check) is exercised against production's OWN
+    // post-push state, not a hand-trimmed one.
+
+    // Step 2: teardown rescue runs for real, for the SAME commit. Before this
+    // fix, rescue_on_origin's own un-filtered listing would find `headSha`
+    // already a tip on origin (the wip ref) and skip this push entirely --
+    // the load-bearing assertion below is that it does NOT.
+    const teardownOut = sh(rescuePushCmd(REPO, STUDIO, root)).out;
+    expect(teardownOut).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}-\\d{14} 1 commits$`, "m"));
+    const realRescueRef = rescueRefs().find((r) => !r.includes("/wip/") && !r.includes("agent-a1b2"));
+    expect(realRescueRef).toBeDefined();
+    expect(sh(`git -C ${origin} rev-parse ${realRescueRef!}`).out).toBe(headSha);
+
+    // Step 3: a fresh container boots (a NEW bootStamp) and its first
+    // wip-sync tick runs against new dirty work. It must create a BRAND NEW
+    // ref and never force-push over container A's own wip ref.
+    writeFileSync(join(checkout, "b-work.md"), "container B's own work\n");
+    const wipOutB = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP_B, root)).out;
+    expect(wipOutB).toContain(RESCUE_PUSHED_PREFIX);
+    const wipRefB = `refs/heads/${wipSyncRef(STUDIO, BOOT_STAMP_B)}`;
+    expect(sh(`git -C ${origin} rev-parse ${wipRefA}`).out).toBe(headSha); // untouched
+    expect(sh(`git -C ${origin} rev-parse ${wipRefB}`).out).not.toBe(headSha);
+    const filesB = sh(`git -C ${origin} ls-tree -r --name-only ${wipRefB}`).out.split("\n");
+    expect(filesB).toContain("b-work.md");
+  });
+});
+
+/**
+ * Fix round (#208 PR #215 review item 2, BLOCKER): a public work repo +
+ * private rescue remote combination used to fail wip-sync EVERY SINGLE TICK
+ * — `wip_sync_push` had none of `rescue_try_push`'s own #16/#140 shallow/
+ * parentless fallback, so a `--depth 1` checkout pushing to a private rescue
+ * remote with no shared history always hit "shallow update not allowed" and
+ * never recovered. Reuses the identical reproduction technique
+ * (`describe("issue #16 ...")` above): a genuinely EMPTY private bare remote
+ * against a real `--depth 1` clone.
+ */
+describe("#208 fix round item 2 — wip-sync's own shallow/parentless fallback (issue #16, reused)", () => {
+  const REAL_GIT = Bun.which("git", { PATH: process.env.PATH }) ?? "/usr/bin/git";
+  const BOOT_STAMP = "20261004013000";
+  let priv: string;
+
+  beforeEach(() => {
+    priv = join(dir, "private-wip.git");
+    sh(`git init -q --bare -b main ${priv}`);
+    const origin3 = join(dir, "origin3.git");
+    const seed = join(dir, "seed");
+    sh(`git init -q --bare -b main ${origin3}`);
+    sh(`git clone -q ${origin3} ${seed} 2>/dev/null; cd ${seed} && ` +
+      `for f in a b c; do echo "$f" > "$f.md" && git add "$f.md" && git commit -q -m "$f"; done && git push -q origin HEAD:main`);
+    rmSync(checkout, { recursive: true, force: true });
+    sh(`git clone -q --depth 1 file://${origin3} ${checkout}`);
+    expect(sh(`git -C ${checkout} rev-parse --is-shallow-repository`).out).toBe("true");
+  });
+
+  function wipPriv(): string {
+    return sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root, undefined, undefined, undefined,
+      { remoteUrl: priv, realGit: REAL_GIT })).out;
+  }
+  function privRefs(): string[] {
+    return sh(`git -C ${priv} for-each-ref --format='%(refname)' refs/heads/`).out.split("\n").filter(Boolean);
+  }
+
+  test("dirty shallow checkout against an empty private rescue remote: RESCUE_PUSHED via a parentless snapshot, content survives, never RESCUE_FAILED", () => {
+    writeFileSync(join(checkout, "notes.md"), "shallow wip\n");
+
+    const out = wipPriv();
+
+    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO, BOOT_STAMP)} 1 files$`, "m"));
+    const [ref] = privRefs();
+    expect(ref).toBeDefined();
+    const files = sh(`git -C ${priv} ls-tree -r --name-only ${ref}`).out.split("\n");
+    expect(files).toEqual(["a.md", "b.md", "c.md", "notes.md"]);
+    // Parentless: proves this is really the fallback snapshot path, not a
+    // plain successful push (which would carry the real a/b/c history).
+    expect(sh(`git -C ${priv} rev-list --count ${ref}`).out).toBe("1");
+  });
+
+  test("clean-but-ahead shallow checkout against an empty private rescue remote: RESCUE_PUSHED via the same fallback", () => {
+    sh(`git -C ${checkout} commit -q --allow-empty -m "unpushed"`);
+
+    const out = wipPriv();
+
+    expect(out).not.toContain(RESCUE_FAILED_PREFIX);
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO, BOOT_STAMP)} 1 commits$`, "m"));
+    expect(privRefs().length).toBe(1);
+  });
+});
+
 describe("HOLD round (PR #312 real-git review) — rescueSnapshotCmd on a live feature branch never targets that branch's own ref", () => {
   test("dirty checkout on a real (non-default) feature branch: origin/<branch> and the local refs/remotes/origin/<branch> tracking ref are BOTH unchanged; the snapshot lands under its own generated fleet/rescue/... ref instead", () => {
     sh(`git -C ${checkout} checkout -q -b task/feature`);

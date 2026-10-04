@@ -96,6 +96,19 @@ describe("EXEC_CLASSES — one session per fleet call class", () => {
     expect(EXEC_CLASSES.rescue.timeoutMs).toBe(300_000);
   });
 
+  // Board #208 fix round, item 5: wip-sync must NOT share `sync`'s own 120s
+  // budget/session — a single cheap git status probe plus at most one small
+  // bounded push has no business queueing behind (or blocking) a multi-MiB
+  // session-tar upload.
+  it("gives wip-sync its own short budget and session, distinct from sync's 120s (#208 fix round item 5)", () => {
+    expect(EXEC_CLASSES.wipSync).toBeDefined();
+    expect(EXEC_CLASSES.wipSync.sessionId).not.toBe(EXEC_CLASSES.sync.sessionId);
+    expect(EXEC_CLASSES.wipSync.timeoutMs).toBeLessThan(EXEC_CLASSES.sync.timeoutMs);
+    // Must comfortably cover TWO WIP_SYNC_PUSH_TIMEOUT_SECONDS-bounded pushes
+    // (the #16/#140 shallow-clone fallback) plus KILL_GRACE_SECONDS each.
+    expect(EXEC_CLASSES.wipSync.timeoutMs).toBeGreaterThan(2 * (25 + KILL_GRACE_SECONDS) * 1000);
+  });
+
   it("refresh survives a cold container: the SDK waits for it INSIDE the first exec (up to ~120s)", () => {
     expect(EXEC_CLASSES.refresh.timeoutMs).toBeGreaterThanOrEqual(150_000);
   });

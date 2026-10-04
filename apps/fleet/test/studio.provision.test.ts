@@ -757,6 +757,38 @@ describe("discoverRescueRefsCmd — the shell shape that discovers + fetches thi
     expect(re.test(ownWtRef)).toBe(true);
     expect(re.test(otherStudioWtRef)).toBe(false);
   });
+
+  // Fix round (#208 PR #215 review item 1, maestro DESIGN decision): a 4TH
+  // shape, rescue.ts's wipSyncCmd (the per-container-boot periodic WIP safety
+  // net) — `fleet/rescue/<studio>/wip/<14digits>`. Discoverable now that it
+  // is scoped per container boot rather than one fixed, silently-clobbered
+  // ref shared across every container a studio ever runs.
+  it("also greps the nested fleet/rescue/<studio>/wip/<ts> shape rescue.ts's wipSyncCmd generates, alongside the flat/checkout//wt/ shapes", () => {
+    const cmd = discoverRescueRefsCmd(DIR, STUDIO);
+    expect(cmd).toContain(`refs/heads/fleet/rescue/${STUDIO}/wip/`);
+  });
+
+  it("fetches a wip-sync rescue ref exactly like the other shapes, and never a longer studio's own wip ref", () => {
+    const shortStudio = "websites--maestro";
+    const longStudio = "websites--maestro-2";
+    const cmd = discoverRescueRefsCmd(DIR, shortStudio);
+
+    const grepMatch = cmd.match(/grep -o[E]? '([^']+)'/);
+    expect(grepMatch).not.toBeNull();
+    const jsSource = grepMatch![1]
+      .replace(/\\\{(\d+)\\\}/g, "{$1}")
+      .replace(/\[\^\[:space:\]\]/g, "[^\\s]");
+    const re = new RegExp(jsSource);
+
+    const ownWipRef = `refs/heads/fleet/rescue/${shortStudio}/wip/20260925120000`;
+    const otherStudioWipRef = `refs/heads/fleet/rescue/${longStudio}/wip/20260925120000`;
+    // Still anchored: exactly 14 digits, nothing after.
+    const malformedWipRef = `refs/heads/fleet/rescue/${shortStudio}/wip/2026092512000`;
+
+    expect(re.test(ownWipRef)).toBe(true);
+    expect(re.test(otherStudioWipRef)).toBe(false);
+    expect(re.test(malformedWipRef)).toBe(false);
+  });
 });
 
 describe("runProvision wiring — rescue-branch discovery runs after the clone, best-effort", () => {

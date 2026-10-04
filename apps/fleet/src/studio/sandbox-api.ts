@@ -113,6 +113,29 @@ export const DEADLINE_SLACK_MS = KILL_GRACE_SECONDS * 1000 + 2_000;
  *                  a slow upload (a large node_modules over a middling link)
  *                  must never queue the ordinary 300s session-state sync
  *                  tick behind it.
+ *   wipSync   90s  board #208 fix round, item 5: this 90s is the budget of
+ *                  ONE exec through this class, not the whole wip-sync
+ *                  tick's real worst case. `wipSync` (do.ts) runs TWO
+ *                  SEQUENTIAL execs through this SAME class, never
+ *                  concurrently: first a cheap `git status`/`rev-list` probe
+ *                  (wipSyncProbeCmd), fully awaited; only when that answers
+ *                  "dirty/unpushed" does it then run the real push command
+ *                  (rescue.ts's `wip_sync_push`, itself internally bounded to
+ *                  at most two WIP_SYNC_PUSH_TIMEOUT_SECONDS-long attempts —
+ *                  rescue.ts's own doc comment on that constant works out its
+ *                  worst case at 60s, comfortably inside a single 90s exec).
+ *                  Each of those two execs is independently bounded by this
+ *                  same 90s `timeoutMs` — a probe that stalls to its own full
+ *                  deadline, followed by a push that ALSO stalls to its own
+ *                  full deadline, is two separate 90s waits summed, not one
+ *                  shared 90s budget: real worst case for the whole tick step
+ *                  is 2 * 90s = 180s (see `TICK_DEADLINES_MS.syncSession`'s
+ *                  own doc comment, do.ts, for how that 180s fits inside the
+ *                  whole tick's own deadline). Deliberately its OWN, much
+ *                  shorter PER-EXEC session and budget than `sync`'s 120s:
+ *                  wip-sync is a single small git operation, not a multi-MiB
+ *                  session-tar upload, and must never queue behind (or
+ *                  block) that tick.
  */
 export const EXEC_CLASSES = {
   ship: { sessionId: "fleet-ship", timeoutMs: 20_000 },
@@ -124,6 +147,7 @@ export const EXEC_CLASSES = {
   refresh: { sessionId: "fleet-refresh", timeoutMs: 150_000 },
   provision: { timeoutMs: 600_000 },
   installCache: { sessionId: "fleet-install-cache", timeoutMs: 900_000 },
+  wipSync: { sessionId: "fleet-wip-sync", timeoutMs: 90_000 },
 } as const satisfies Record<string, SbExecOptions>;
 
 export type ExecClass = keyof typeof EXEC_CLASSES;

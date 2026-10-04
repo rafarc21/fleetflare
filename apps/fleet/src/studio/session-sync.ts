@@ -225,6 +225,15 @@ export interface SessionSyncDeps {
    * resolveRescueTarget). Absent, or `{}`, means origin, leak-gated.
    */
   rescueTarget?(): Promise<RescueTarget>;
+  /**
+   * Fix round (#208 PR #215 review item 5): wip-sync's OWN exec port, riding
+   * `EXEC_CLASSES.wipSync` (sandbox-api.ts) — a short, dedicated budget/
+   * session, deliberately separate from `exec`'s own `EXEC_CLASSES.sync`
+   * (120s, sized for a multi-MiB session-tar upload). Absent means `wipSync`
+   * (do.ts) falls back to `exec` itself — every existing caller/test that
+   * predates this fix keeps behaving exactly as it did before.
+   */
+  wipExec?(cmd: string, env?: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }>;
 }
 
 /** Issue #361: the Worker-side ports for a completion record's one copy

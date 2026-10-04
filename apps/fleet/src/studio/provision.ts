@@ -60,7 +60,7 @@ import {
   mergeObserved, bringupLeftLeadUntouched, resolveSnapshotAge,
 } from "./observed";
 import { JUNIOR_HOUSE_RULE } from "../junior/gate";
-import { rescuePushPrelude, type RescuePushOptions, type RescueTarget } from "./rescue";
+import { rescuePushPrelude, formatRescueStamp, type RescuePushOptions, type RescueTarget } from "./rescue";
 
 /**
  * Dependency seam — mirrors src/agents/do.ts's `LoopDeps`/src/deploy/do.ts's
@@ -992,8 +992,18 @@ export function discoverRescueRefsCmd(
   // same nested-prefix collision guard (a studio id can't be a literal
   // prefix of a different studio id immediately followed by `/`).
   const wtPrefix = `${nestedPrefix}wt/`;
+  // Fix round (#208 PR #215 review item 1, maestro DESIGN decision): a 4TH
+  // shape, `wip/<14digits>` — rescue.ts's `wipSyncCmd`, the per-container-boot
+  // periodic WIP safety net. Byte-identical anchoring discipline to `wtPrefix`
+  // just above (same nested-prefix collision guard, no `<id>` segment since
+  // wip-sync has no worktree identity to disambiguate — always the main
+  // checkout, one ref per container boot). See `isRescueBranchFor`'s own doc
+  // comment (survival-delivery.ts) for the full history of why this shape is
+  // discoverable now, unlike the OLD flat, un-boot-scoped ref it replaces.
+  const wipPrefix = `${nestedPrefix}wip/`;
   const pattern =
-    `${flatPrefix}[0-9]{14}$|${nestedPrefix}[0-9]{14}/checkout/[^[:space:]]+$|${wtPrefix}[^[:space:]]+-[0-9]{14}$`;
+    `${flatPrefix}[0-9]{14}$|${nestedPrefix}[0-9]{14}/checkout/[^[:space:]]+$|` +
+    `${wtPrefix}[^[:space:]]+-[0-9]{14}$|${wipPrefix}[0-9]{14}$`;
   const originCmd = (
     `{ mkdir -p ${listDir} && ` +
     `${bounded} git -C ${targetDir} ls-remote --heads origin > ${listFile} && ` +
@@ -3495,6 +3505,15 @@ export async function recordBringupObservation(
   if (tokenWritten) {
     patch.incarnation = token;
     patch.replacedAt = null;
+    // Fix round (#208 PR #215 review item 1, maestro DESIGN decision):
+    // captured at the EXACT SAME moment as the incarnation token right
+    // above, and gated on the identical `tokenWritten` confirmation — a
+    // confirmed bring-up is what "a new container" means here, same as it
+    // already does for `incarnation`. See Observed.wipBootStamp's own doc
+    // comment (observed.ts) for the full design and wipSyncRef's own
+    // (rescue.ts) for why a PER-BOOT stamp, rather than one shared across
+    // every container a studio ever runs, is the actual fix.
+    patch.wipBootStamp = formatRescueStamp(new Date(now));
   }
   // Issue #240 (VM1/VM1r): re-checked HERE, immediately before the write —
   // the callers' own pre-call check (issue #152 fix 5) cannot see a destroy

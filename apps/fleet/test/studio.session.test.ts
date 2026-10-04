@@ -1,4 +1,4 @@
-import { formatRescueReport } from "../src/studio/rescue";
+import { formatRescueReport, wipSyncProbeCmd } from "../src/studio/rescue";
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
@@ -21,6 +21,7 @@ import {
   archiveDoneRecords, doneRecordsListCmd, type DoneRecordPorts,
   DONE_RECORD_HASHES_KEY, type DoneRecordHashStorage,
   mirrorBurnToRegistry, checkAndRecordReadiness, syncSessionCycle, clearSessionGuard, RECYCLE_REFUSED_PREFIX,
+  wipLastCheckResultOf,
   clearForceMappedAccount,
 } from "../src/studio/do";
 import {
@@ -1408,6 +1409,43 @@ describe("syncSessionCycle — an auto-stop mid-tick must gate retrySurvivalBrie
     expect(retrySurvivalBrief).toHaveBeenCalledTimes(1);
     expect(sbExecCalls).toBeGreaterThan(0);
   });
+
+  // Post-#210-rebase finding (not yet fixed when either rebase of #208
+  // landed): board issue #208's own WIP-sync step sits BETWEEN the failover
+  // step and `retrySurvivalBrief` in the function body, reads the exact same
+  // mid-tick `checked?.readiness?.kind` this finding is about, and execs into
+  // the container exactly like the two steps above — but was missing the
+  // `&& !stoppedAfterFailover` guard those two already carry. `checked` only
+  // reads "provisioned" here because `checkAndRecordReadiness`'s own
+  // `state === "stopped"` early return (do.ts) hands back the row VERBATIM,
+  // readiness included — `destroyAndRecord` (destroy.ts) never clears
+  // `readiness` on the way to `state: "stopped"`, so a row stopped THIS tick
+  // can still carry last tick's "provisioned" verdict.
+  it("the failover step auto-stops this tick; the WIP-sync step must not exec into the now-stopped container either", async () => {
+    const storage = fakeCycleStorage({
+      status: { ...parkedPastAutoStop(), readiness: { kind: "provisioned", checkedAt: FAILOVER_NOW.toISOString() } },
+    });
+    const failoverDeps = failoverDepsThatAutoStops(storage);
+    const syncDeps = fakeSyncDeps({});
+
+    await syncSessionCycle(
+      syncDeps, storage, STUDIO_ID, async () => {},
+      failoverDeps, null, null, null, null,
+    );
+
+    // The load-bearing proof the fix actually happened: the row really did
+    // auto-stop THIS tick, with the stale "provisioned" readiness riding
+    // along (exactly the shape that lets the bug through unguarded).
+    expect(failoverDeps.stopParkedStudio).toHaveBeenCalledTimes(1);
+    const after = await storage.get(STATUS_KEY);
+    expect(after?.state).toBe("stopped");
+    expect(after?.readiness?.kind).toBe("provisioned");
+
+    // The WIP-sync step must never have exec'd into the now-stopped row --
+    // not even the cheap probe wipSync now runs before resolving a rescue
+    // target (fix round item 6).
+    expect(syncDeps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1447,6 +1485,160 @@ describe("syncSessionCycle — snapshot freshness (issue #85)", () => {
 
     const observed = await getObserved(observedStorage);
     expect(observed.lastSnapshotAt).toBe("2026-08-15T00:00:00.000Z");
+  });
+});
+
+/**
+ * Fix round (#208 PR #215 review): the WIP-sync step's own end-to-end wiring,
+ * plus items 1/4's own additional gates. The earlier "fixed-per-boot ref,
+ * force-pushed" suite (test/bun/rescue-push.test.ts) already pins
+ * `wipSyncCmd`/`wipSyncProbeCmd` themselves against real git; these tests pin
+ * the OTHER half — that `syncSessionCycle` actually reaches `wipSync` at all,
+ * with the right arguments, under the right conditions.
+ */
+describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)", () => {
+  function provisionedStorage(): StudioStorage & SessionSyncStorage & InstallCacheSaveStorage & { putKeys: string[] } {
+    return fakeCycleStorage({ status: cycleStatus({ state: "running", repoSlug: "example-org/websites" }) });
+  }
+
+  // Minor (b): an end-to-end wiring test, not just the gate-logic unit tests
+  // above — proves syncSessionCycle's own body genuinely calls wipSync (via
+  // its cheap probe, fix round item 6) when the studio is running, freshly
+  // confirmed provisioned, and a boot stamp has been captured.
+  it("wiring: a running, freshly-provisioned studio with a confirmed boot stamp runs wip-sync's own probe", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: "a-real-token", replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: "20261004000000",
+    });
+    const deps = fakeSyncDeps({});
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    expect(deps.execCalls).toContain(wipSyncProbeCmd("websites"));
+  });
+
+  // Item 1: wip-sync needs a CONFIRMED boot stamp to name its own per-boot
+  // ref — a studio whose incarnation-token write has never yet succeeded
+  // (Observed.wipBootStamp still null/absent) must not invent one.
+  it("gate: no confirmed wipBootStamp yet — wip-sync is skipped entirely, no probe exec", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: null, replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null,
+    });
+    const deps = fakeSyncDeps({});
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
+  });
+
+  // Fix round 2, item A (BLOCKER): `Observed.wipBootStamp` is only ever
+  // refreshed by `recordBringupObservation` (provision.ts) inside its own
+  // `if (tokenWritten)` block — the SAME block that clears `replacedAt` back
+  // to null. A bring-up that does NOT write a fresh token (some restart/heal
+  // paths) leaves a PRIOR container's `wipBootStamp` sitting in storage while
+  // `replacedAt` is still non-null (this container has not yet proven itself
+  // the same incarnation that captured that stamp). Using the stale stamp
+  // here would force-push onto `fleet/rescue/<studio>/wip/<OLD stamp>` — the
+  // prior, now-dead container's own ref — destroying whatever it had queued.
+  // `replacedAt !== null` must gate exactly like "no confirmed boot stamp
+  // yet" above: skip the tick entirely, no probe, no push.
+  it("gate: replacedAt is non-null — a stale wipBootStamp from a prior container must not be reused, wip-sync is skipped entirely, no probe exec", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: null, replacedAt: "2026-10-04T02:26:00.000Z", execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: "20261004000000",
+    });
+    const deps = fakeSyncDeps({});
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
+  });
+
+  // Item 4 (MAJOR): a row whose `STATUS_KEY.state` moves to "stopped"
+  // BETWEEN this tick's own `isStoppedIn` snapshot (checked right after the
+  // failover step, before checkAndRecordReadiness runs) and
+  // checkAndRecordReadiness's OWN read a moment later — a genuine race a
+  // real Durable Object's storage can hit (an external destroy landing mid-
+  // tick), which `stoppedAfterFailover` alone cannot see since it was
+  // already captured before the row changed. `checkAndRecordReadiness`'s own
+  // `state === "stopped"` early return hands back that row's STALE
+  // "provisioned" readiness verbatim — `checked.state !== "stopped"` is the
+  // guard that catches this, independent of `stoppedAfterFailover`.
+  it("gate: STATUS_KEY flips to stopped between the failover snapshot and checkAndRecordReadiness's own read — wip-sync never execs into it, even though the stale readiness still reads provisioned", async () => {
+    const runningRow = cycleStatus({
+      state: "running", repoSlug: "example-org/websites",
+      readiness: { kind: "provisioned", checkedAt: "2000-01-01T00:00:00.000Z" },
+    });
+    const stoppedRow = { ...runningRow, state: "stopped" as const };
+    const map = new Map<string, unknown>();
+    map.set(STATUS_KEY, runningRow);
+    let getCount = 0;
+    const storage: StudioStorage & SessionSyncStorage & InstallCacheSaveStorage & { putKeys: string[] } = {
+      putKeys: [],
+      get: (async (key: string) => {
+        if (key === STATUS_KEY) {
+          getCount += 1;
+          // 1st read: mirrorBurnToRegistry's own (do.ts) -- irrelevant to
+          // this race (no BURN_KEY seeded, so it returns early). 2nd:
+          // isStoppedIn's snapshot -- still "running". 3rd onward:
+          // checkAndRecordReadiness's own read -- the row has since stopped.
+          return getCount <= 2 ? runningRow : stoppedRow;
+        }
+        return map.get(key);
+      }) as StudioStorage["get"] & SessionSyncStorage["get"] & InstallCacheSaveStorage["get"],
+      put: (async (keyOrEntries: string | Record<string, unknown>, value?: unknown) => {
+        const entries: Record<string, unknown> =
+          typeof keyOrEntries === "string" ? { [keyOrEntries]: value } : keyOrEntries;
+        for (const [key, v] of Object.entries(entries)) map.set(key, v);
+      }) as StudioStorage["put"] & SessionSyncStorage["put"] & InstallCacheSaveStorage["put"],
+      delete: (async (key: string) => map.delete(key)) as NonNullable<SessionSyncStorage["delete"]>,
+    };
+    const observedStorage = storage as unknown as ObservedStorage;
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: "a-real-token", replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: "20261004000000",
+    });
+    const deps = fakeSyncDeps({});
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    // checkAndRecordReadiness really did hand back the stale "provisioned"
+    // verdict unchanged (proves the race fixture itself works as intended).
+    expect(stoppedRow.readiness?.kind).toBe("provisioned");
+    // The load-bearing assertion: wip-sync's own probe never ran.
+    expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
+  });
+});
+
+// Minor (a) plumbing: wipLastCheckResultOf's own mapping, pinned directly --
+// syncSessionCycle's own call site (above) just forwards whatever this
+// returns, so a regression here would otherwise only show up as a
+// mis-labeled fleet ls cell, never a failing assertion in this file.
+describe("wipLastCheckResultOf — RescueResult -> WipLastCheckResult mapping (#208 fix round minor a)", () => {
+  it("a real push -> 'pushed', regardless of skipped (never set together, but pushed wins first)", () => {
+    expect(wipLastCheckResultOf({ pushed: true, branch: "fleet/rescue/x/wip/1", files: 1 })).toBe("pushed");
+  });
+  it("skipped 'clean' -> 'clean'", () => {
+    expect(wipLastCheckResultOf({ pushed: false, branch: null, files: 0, skipped: "clean" })).toBe("clean");
+  });
+  it("skipped 'no checkout' -> 'no-checkout'", () => {
+    expect(wipLastCheckResultOf({ pushed: false, branch: null, files: 0, skipped: "no checkout" })).toBe("no-checkout");
+  });
+  it("skipped 'nothing to rescue (only tool markers)' -> 'markers-only'", () => {
+    expect(wipLastCheckResultOf({
+      pushed: false, branch: null, files: 0, skipped: "nothing to rescue (only tool markers)",
+    })).toBe("markers-only");
   });
 });
 

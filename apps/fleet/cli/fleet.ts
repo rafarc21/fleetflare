@@ -40,6 +40,7 @@ import type { RepoReach } from "../src/github/reach";
 import { fleetTotals, formatFleetTotalsLine } from "./fleet-totals";
 import { formatBurn, BURN_LEGEND } from "./burn-format";
 import { formatRestartCell, formatRestartChurn, RESTART_LEGEND } from "./restart-format";
+import { formatWipCell, formatWipInspectLines, WIP_LEGEND } from "./wip-format";
 import { requestInspect, renderInspect, formatSessionForceArmedLine, type InspectBody } from "./inspect-request";
 import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
@@ -105,6 +106,65 @@ export async function loadCredentials(): Promise<Credentials> {
   if (!raw.workerUrl || !raw.accessClientId || !raw.accessClientSecret) {
     console.error(`fleet: ${CREDENTIALS_PATH} is missing workerUrl/accessClientId/accessClientSecret`);
     process.exit(1);
+  }
+  return raw as Credentials;
+}
+
+/**
+ * Board issue #208 fix round, item 3 (BLOCKER): a NON-EXITING twin of
+ * `loadCredentials` above, for a caller that must survive a missing/
+ * malformed credentials file rather than crash the whole process.
+ * `loadCredentials`'s own `process.exit(1)` is the right call for every
+ * interactive CLI command (there is nothing useful left to do without
+ * credentials) — it is wrong for `scripts/sensors/run.ts`'s
+ * platform-replacements sensor, which runs inside GitHub Actions (no
+ * `~/.fleet/credentials` there, by design) ALONGSIDE two other sensors in
+ * the same `Promise.all` that need no credential at all; an `exit(1)` there
+ * killed the whole run, including those two.
+ *
+ * Deliberately a near-duplicate of `loadCredentials` rather than a shared
+ * refactor with an "exit or not" flag threaded through: `loadCredentials`
+ * has roughly a dozen existing call sites across this file and cli/ff.ts,
+ * every one of them relying on its current "exits, never returns a falsy
+ * value" contract; changing its own signature or adding a parameter risks
+ * a silent behavior change at one of those sites. A second, small, clearly-
+ * labeled function is the lower-risk shape here. Returns `null` on every
+ * condition `loadCredentials` treats as fatal (missing file, missing
+ * field) — logging the IDENTICAL messages, just without the exit. The
+ * mode-warning path is unaffected: a too-loose file still warns either way.
+ */
+export async function loadCredentialsIfPresent(): Promise<Credentials | null> {
+  const file = Bun.file(CREDENTIALS_PATH);
+  if (!(await file.exists())) {
+    console.error(`fleet: no credentials file at ${CREDENTIALS_PATH}`);
+    console.error('fleet: expected JSON {"workerUrl":"...","accessClientId":"...","accessClientSecret":"..."}');
+    return null;
+  }
+
+  const mode = statSync(CREDENTIALS_PATH).mode & 0o777;
+  if ((mode & 0o077) !== 0) {
+    console.error(
+      `fleet: warning: ${CREDENTIALS_PATH} is mode ${mode.toString(8)} (group/other accessible). ` +
+        `Run: chmod 600 ${CREDENTIALS_PATH}`,
+    );
+  }
+
+  // Fix round 2, item C1 (MINOR): a file that EXISTS but holds malformed
+  // JSON used to throw straight out of `file.json()`, uncaught -- the exact
+  // "kills the whole Promise.all" failure this soft variant exists to avoid
+  // (see this function's own doc comment above), just one step later than
+  // the missing-file case already guards against. Same soft-fail-to-null
+  // posture, same reporting style.
+  let raw: Partial<Credentials>;
+  try {
+    raw = (await file.json()) as Partial<Credentials>;
+  } catch (err) {
+    console.error(`fleet: ${CREDENTIALS_PATH} is not valid JSON`, err);
+    return null;
+  }
+  if (!raw.workerUrl || !raw.accessClientId || !raw.accessClientSecret) {
+    console.error(`fleet: ${CREDENTIALS_PATH} is missing workerUrl/accessClientId/accessClientSecret`);
+    return null;
   }
   return raw as Credentials;
 }
@@ -225,7 +285,7 @@ export function formatStudioCount(studios: StudioStatus[]): string {
 
 /** The lines `fleet ls` prints above its table: the denominator FIRST. */
 export function formatLsHead(studios: StudioStatus[]): string[] {
-  return [formatStudioCount(studios), BURN_LEGEND, RESTART_LEGEND];
+  return [formatStudioCount(studios), BURN_LEGEND, RESTART_LEGEND, WIP_LEGEND];
 }
 
 /** Issue #205: a 3,382-char ERROR padded every line of the table to ~3,600
@@ -312,7 +372,7 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
   // of truth, and a malformed id keeps rendering rather than crashing the
   // table.
   const headers = [
-    "ID", "REPO", "STATE", "RST", "READY", "SESSION", "ACTIVITY", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
+    "ID", "REPO", "STATE", "RST", "WIP", "READY", "SESSION", "ACTIVITY", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
   ];
   const rows = studios.map((s) => [
     s.id,
@@ -324,6 +384,12 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
     // RST column (issue #56): containers replaced in the last 24h / lifetime
     // -- churn a coordinator can see without opening a container.
     formatRestartCell(s, now),
+    // WIP column (board issue #208, part 2): age since the last periodic
+    // WIP safety-net check (fleet/rescue/<studio>/wip/<bootStamp>, #208 fix
+    // round item 1 -- scoped per container boot) -- bounds how much a
+    // platform-side container replacement (no pre-replacement rescue hook)
+    // could have cost, without opening a container.
+    formatWipCell(s, now),
     // Issue #85: `readyOverride` reads the DO's own Observed evidence
     // (replaced/unreachable/unverified) FIRST — that evidence contradicts or
     // supersedes the last container-side check `formatReady` renders, and
@@ -487,6 +553,10 @@ async function cmdInspect(creds: Credentials, id: string): Promise<void> {
   // renders the honest-floor line for that case instead of crashing on
   // `body.observed.replacedAt`.
   for (const line of formatObservedLines(body.observed)) console.log(line);
+  // Board issue #208, part 2: same "before the ok-check" treatment as
+  // formatObservedLines just above -- the WIP safety-net sync age is DO-
+  // stored evidence too, so a container-side failure still shows it.
+  for (const line of formatWipInspectLines(id, body.observed, new Date())) console.log(line);
   // Issue #228 HOLD fix, item 4: same "before the ok-check" treatment as
   // formatObservedLines just above — the Worker sends sessionForceArmedAt on
   // BOTH branches (routes.ts), so an ok:false inspect (a stopped studio, a

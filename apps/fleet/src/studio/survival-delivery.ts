@@ -275,6 +275,15 @@ export const RESCUE_STAMP_DIGITS = 14;
  * - nested, member worktree: `fleet/rescue/<studio>/wt/<id>-<14digits>`,
  *   optionally with `-nff-` before the stamp (that shape's own non-fast-
  *   forward retry).
+ * - nested, wip-sync: `fleet/rescue/<studio>/wip/<14digits>` (rescue.ts's
+ *   `wipSyncCmd`, the per-container-boot periodic WIP safety net — fix round
+ *   #208 PR #215 review item 1). Added here, and to `discoverRescueRefsCmd`'s
+ *   own grep pattern (provision.ts), so a wip ref is discoverable/fetchable
+ *   and attributable exactly like every other rescue shape, now that it is
+ *   scoped per boot rather than shared (and silently clobbered) across every
+ *   container a studio ever runs — see `wipSyncRef`'s own doc comment
+ *   (rescue.ts) for the full history of why the OLD flat, un-anchored shape
+ *   was deliberately excluded here instead.
  *
  * See this function's own body below for the nested shapes' match logic and
  * reasoning (#216) — the flat shape's own reasoning follows here since it's
@@ -328,6 +337,13 @@ export function isRescueBranchFor(studioId: string, branch: string): boolean {
   // characters before the final `-<14digits>`.
   if (rest.startsWith("wt/")) {
     return new RegExp(`^\\S+-[0-9]{${RESCUE_STAMP_DIGITS}}$`).test(rest.slice(3));
+  }
+  // Fix round (#208 PR #215 review item 1): wip-sync's own per-boot ref —
+  // `wip/<14digits>`, exactly like `wt/<id>-<14digits>` above but with no
+  // `<id>` segment at all (wip-sync has no worktree identity to disambiguate;
+  // it is always the main checkout, one ref per container boot).
+  if (rest.startsWith("wip/")) {
+    return new RegExp(`^[0-9]{${RESCUE_STAMP_DIGITS}}$`).test(rest.slice(4));
   }
   return false;
 }
@@ -467,6 +483,12 @@ export async function resolveSurvivalInput(
   tasks: Checked<SurvivalTaskRef[]>,
   session: ObservedSession | null,
   now: string,
+  // Board issue #208, part 2 — `Observed.wipSyncedAt` AS FROZEN at bring-up
+  // (see `SurvivalBriefPending.wipSyncedAt`'s own doc comment, observed.ts,
+  // for why it must be frozen rather than re-read). OPTIONAL with a `null`
+  // default so every pre-#208 caller (and every existing fixture in this
+  // file's own tests) keeps compiling unchanged.
+  wipSyncedAt: string | null = null,
 ): Promise<SurvivalInput> {
   if (!tasks.ok) {
     return {
@@ -479,6 +501,7 @@ export async function resolveSurvivalInput(
       unclaimedRescueBranches: [],
       session,
       now,
+      wipSyncedAt,
     };
   }
 
@@ -578,20 +601,24 @@ export async function resolveSurvivalInput(
 
   return {
     studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, unclaimedRescueBranches,
-    session, now,
+    session, now, wipSyncedAt,
   };
 }
 
 /** `resolveSurvivalInput` + PR4a's composer, in one call — the `compose`
  *  thunk the delivery function below takes. An EMPTY string is PR4a's own
- *  signal that there is nothing worth re-briefing about. */
+ *  signal that there is nothing worth re-briefing about.
+ *
+ *  `wipSyncedAt` (board issue #208, part 2) passes straight through to
+ *  `resolveSurvivalInput` — see that function's own doc comment. */
 export async function composeSurvivalDelivery(
   sources: SurvivalSources,
   tasks: Checked<SurvivalTaskRef[]>,
   session: ObservedSession | null,
   now: string,
+  wipSyncedAt: string | null = null,
 ): Promise<string> {
-  return composeSurvivalBrief(await resolveSurvivalInput(sources, tasks, session, now));
+  return composeSurvivalBrief(await resolveSurvivalInput(sources, tasks, session, now, wipSyncedAt));
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +642,13 @@ export interface SurvivalBringup {
    *  by then — the same "captured at bring-up, never re-read" discipline every
    *  other field on this interface already follows. */
   session: ObservedSession;
+  /** Board issue #208, part 2 — `Observed.wipSyncedAt` AS IT STOOD at this
+   *  bring-up, for the SAME "frozen, never re-read" reason `session` above
+   *  is: by the time a deferred brief finally lands, a later `wipSync` tick
+   *  may have overwritten this field with a timestamp describing time AFTER
+   *  the heal. OPTIONAL/absent (or null) means no WIP sync had ever landed at
+   *  this bring-up — the composer renders nothing for it. */
+  wipSyncedAt?: string | null;
 }
 
 /**
@@ -787,6 +821,16 @@ export async function deliverSurvivalBriefOnBringup(
     via: b.via,
     replacementDetected: b.replacementDetected,
     session: b.session,
+    // Board issue #208, part 2 — taken fresh from THIS bring-up, same as
+    // `via`/`replacementDetected`/`session` above (never carried over from
+    // `priorForThis`): this field describes the bring-up the pending record
+    // is ABOUT, not whichever bring-up happened to defer it first. Omitted
+    // entirely (never coerced to a stored `null`) when `b` itself never set
+    // it — same "absent stays absent" discipline `Observed.wipSyncedAt`
+    // itself follows (observed.ts) — so a caller that never learned about
+    // this feature's WIP sync at all (every bring-up before this field
+    // existed) keeps producing byte-identical `SurvivalBriefPending` records.
+    ...(b.wipSyncedAt !== undefined ? { wipSyncedAt: b.wipSyncedAt } : {}),
     since: priorForThis?.since ?? now().toISOString(),
     attempts: priorForThis?.attempts ?? 0,
     reason: "",
