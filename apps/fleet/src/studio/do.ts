@@ -3141,8 +3141,16 @@ export async function syncSessionCycle(
   // is captured once at the very top of this function, before this cycle did
   // any work at all, so a genuinely fresh verdict (always stamped by
   // `syncDeps.now()` sometime AFTER that capture) reliably compares `>=`.
+  // Issue #231 fix 3a: widened from `=== "provisioned"` to "anything but
+  // bare" — the incident's own observed failure was a busy lead making the
+  // readiness probe answer `inconclusive`, which this gate used to treat
+  // identically to a genuinely bare container and skip. wip-sync only needs
+  // the CONTAINER to have a real checkout (`"bare"` is the one verdict that
+  // rules that out) — unlike the assigned-task wake, it never needs
+  // confirmation claude is cleanly running. Every OTHER guard below is
+  // unchanged.
   if (
-    checked?.readiness?.kind === "provisioned" && !stoppedAfterFailover &&
+    checked?.readiness != null && checked.readiness.kind !== "bare" && !stoppedAfterFailover &&
     checked.state !== "stopped" && checked.readiness.checkedAt >= cycleStartedAt
   ) {
     const parsed = parseStudioId(idFallback);
