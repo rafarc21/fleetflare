@@ -7,7 +7,7 @@ import {
   provisionWithStorage, getStatusWithStorage, restartWithStorage,
   STATUS_KEY, ROLE_ENV_KEY, NO_ROLE_ENV_ERROR, BRINGUP_CMD, PROVISIONED_OK, provisionedCheckCmd,
   adoptWorktreeSessionCmd,
-  HEAL_ATTEMPT_KEY, OPERATION_KEY, LAST_STOP_KEY,
+  HEAL_ATTEMPT_KEY, OPERATION_KEY, LAST_STOP_KEY, FRESH_SESSION_REFUSED_PREFIX,
   type ProvisionDeps, type StudioStorage, type RoleEnv,
 } from "../src/studio/provision";
 import {
@@ -2825,6 +2825,42 @@ describe("repair verbs name the failing side (#96)", () => {
     );
     expect(res.status).toBe(400);
     expect(provision.mock.calls.length).toBe(2);
+  });
+
+  // Issue #231: `?discard-session=true` rides a query param on the provision
+  // route only, same shape as `?fresh-session=true`, and reaches the DO as
+  // cfg.discardSession.
+  it("#231: provision ?discard-session=true reaches the DO as cfg.discardSession; absent, no field", async () => {
+    authorized();
+    const { testEnv, fakeNs } = envWithFakeStudio();
+    const stub = fakeNs.get();
+    const provision = vi.fn(async () => ({ id: STUDIO_ID, state: "running" }) as StudioStatus);
+    const ns = { ...fakeNs, get: () => ({ ...stub, provision }) };
+    const e = { ...testEnv, STUDIO: ns } as unknown as Env;
+    await handleStudio(authorizedReq(`/studio/${STUDIO_ID}/provision?fresh-session=true`, { method: "POST" }), e);
+    await handleStudio(
+      authorizedReq(`/studio/${STUDIO_ID}/provision?fresh-session=true&discard-session=true`, { method: "POST" }), e,
+    );
+    const pcfg = (provision.mock.calls as unknown[][]).map((c) => (c[0] as ProvisionConfig).discardSession);
+    expect(pcfg).toEqual([undefined, true]);
+  });
+
+  // Issue #231: the involuntary-stop refusal (provisionWithStorage) is
+  // recognised by its message prefix, same "a decision, not a failure"
+  // posture recycle's own RECYCLE_REFUSED_PREFIX check already takes.
+  it("#231: provision refused (involuntary-stop recovery) is a 409 carrying the whole message, verbatim", async () => {
+    authorized();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const refusal = `${FRESH_SESSION_REFUSED_PREFIX}studio ${STUDIO_ID}'s last stop was an involuntary platform ` +
+      "replacement, and its session has ~40 lines of transcript (a turn-count proxy) -- --fresh-session would " +
+      `discard it. Use plain provision to resume, or add --discard-session to force it: fleet provision ${STUDIO_ID} ` +
+      "--fresh-session --discard-session";
+    const res = await handleStudio(
+      authorizedReq(`/studio/${STUDIO_ID}/provision?fresh-session=true`, { method: "POST" }),
+      envWithThrowingVerb("provision", Object.assign(new Error(refusal), { remote: true })),
+    );
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(refusal);
   });
 
   // Board task #131 ask 2: `fleet recycle <id> --account mapped` rides
