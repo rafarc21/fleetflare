@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   adoptWorktreeSessionCmd, runProvision, provisionWithStorage, BRINGUP_CMD, FRESH_SESSION_MARKER,
-  FRESH_SESSION_PENDING_KEY,
-  type ProvisionDeps, type StudioStorage,
+  FRESH_SESSION_PENDING_KEY, FRESH_SESSION_REFUSED_PREFIX, FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD,
+  type ProvisionDeps, type StudioStorage, type SessionMarkStorage,
 } from "../src/studio/provision";
-import { SESSION_FORCE_KEY } from "../src/studio/session-sync";
+import { SESSION_FORCE_KEY, SESSION_MARK_KEY } from "../src/studio/session-sync";
+import { OBSERVED_KEY, emptyObserved, type ObservedStorage } from "../src/studio/observed";
 
 // Issue #28: `fleet provision|recycle --fresh-session`. ONE bring-up skips the
 // adopt and gets FLEET_FRESH_SESSION=1; the persisted role env never carries
@@ -261,5 +262,95 @@ describe("provisionWithStorage — cfg.cancelFreshSession clears a stuck pending
     expect(status.state).toBe("running");
     expect(map.get(FRESH_SESSION_PENDING_KEY)).toBe(false);
     expect(status.freshSessionPending).toBe(false);
+  });
+});
+
+// Issue #231 (revised fix 1): operator convention "stopped studio + new task
+// => --fresh-session" was applied to a RECOVERY after an involuntary platform
+// replacement, discarding a 2305-turn session. `provision --fresh-session` on
+// a studio whose last stop was involuntary (Observed.replacedAt non-null) AND
+// whose session is non-trivial (SessionMark.lines over threshold) now refuses
+// unless --discard-session is also given.
+describe("provisionWithStorage — refuses --fresh-session on an involuntary-stop recovery with a real session (issue #231)", () => {
+  function combinedStorage() {
+    const map = new Map<string, unknown>();
+    const storage = {
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"],
+    } as StudioStorage & ObservedStorage & SessionMarkStorage;
+    return { map, storage };
+  }
+
+  const LINES_OVER = FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD + 10;
+  const LINES_UNDER = Math.max(0, FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD - 10);
+
+  async function seed(storage: StudioStorage & ObservedStorage & SessionMarkStorage, replacedAt: string | null, lines: number) {
+    await storage.put(OBSERVED_KEY, { ...emptyObserved(), replacedAt });
+    await storage.put(SESSION_MARK_KEY, { file: "a.jsonl", lines, lastTs: null });
+  }
+
+  it("refuses: involuntary stop + explicit flag + session over threshold, no --discard-session — error names the real count, nothing moved", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+    await seed(storage, "2026-09-29T09:00:00.000Z", LINES_OVER);
+
+    await expect(provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    )).rejects.toThrow(new RegExp(`${FRESH_SESSION_REFUSED_PREFIX}.*${LINES_OVER}`));
+    expect(calls.map((c) => c.cmd)).not.toContain(BRINGUP_CMD);
+  });
+
+  it("error says 'use plain provision to resume'", async () => {
+    const { d } = deps("");
+    const { storage } = combinedStorage();
+    await seed(storage, "2026-09-29T09:00:00.000Z", LINES_OVER);
+
+    await expect(provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    )).rejects.toThrow(/use plain provision to resume/);
+  });
+
+  it("proceeds normally when --discard-session is also given", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+    await seed(storage, "2026-09-29T09:00:00.000Z", LINES_OVER);
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true, discardSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    );
+
+    expect(status.state).toBe("running");
+    expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+  });
+
+  it("proceeds normally on a VOLUNTARY last stop (replacedAt null) even with the same large session", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+    await seed(storage, null, LINES_OVER);
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    );
+
+    expect(status.state).toBe("running");
+    expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+  });
+
+  it("proceeds normally when the session is under threshold, regardless of replacedAt", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+    await seed(storage, "2026-09-29T09:00:00.000Z", LINES_UNDER);
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    );
+
+    expect(status.state).toBe("running");
+    expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
   });
 });
