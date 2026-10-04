@@ -1225,16 +1225,46 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
     expect(files).toContain("a.md");
   });
 
-  test("never walks a member worktree -- scope is the main checkout only (deliberate v1 limitation)", () => {
+  // Issue #231 fix 3b: the v1 "main checkout only" limitation is lifted --
+  // wip-sync now also walks member worktrees, reusing the per-boot
+  // rolling-snapshot ref shape (`fleet/rescue/<studio>/wt/<wid>-<bootStamp>`),
+  // never the teardown-time fresh-timestamp `wt/` shape rescue-push uses.
+  test("also walks a dirty member worktree: force-pushes a snapshot to its own per-boot wt ref; the main checkout (markers-only alone) produces no push of its own", () => {
     writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work\n");
 
     const out = wip();
 
-    // The main checkout itself is clean beyond the member worktree's own
-    // gitlink directory (a marker, #217) -- so this reads MARKERS_ONLY, never
-    // a push, and the member worktree's own dirty file is never rescued.
-    expect(out).toBe(RESCUE_MARKERS_ONLY);
-    expect(rescueRefs()).toEqual([]);
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wt/agent-a1b2-${BOOT_STAMP}`;
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-${BOOT_STAMP} 1 files$`, "m"));
+    expect(rescueRefs()).toEqual([memberRef]);
+    const files = sh(`git -C ${origin} ls-tree -r --name-only ${memberRef}`).out.split("\n");
+    expect(files).toContain("member-wip.md");
+  });
+
+  test("a clean member worktree with unpushed commits: force-pushes the existing HEAD commit to its own per-boot wt ref", () => {
+    sh(`cd ${join(checkout, ".claude/worktrees/agent-a1b2")} && git commit -q --allow-empty -m "member commit"`);
+
+    const out = wip();
+
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wt/agent-a1b2-${BOOT_STAMP}`;
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-${BOOT_STAMP} 1 commits$`, "m"));
+    expect(rescueRefs()).toEqual([memberRef]);
+  });
+
+  test("running wip-sync twice with the SAME bootStamp OVERWRITES the SAME member-worktree ref -- rolling snapshot, same property the main checkout's own wip ref already has", () => {
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "first\n");
+    wip();
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wt/agent-a1b2-${BOOT_STAMP}`;
+    const sha1 = sh(`git -C ${origin} rev-parse ${memberRef}`).out;
+
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "second, unrelated to the first\n");
+    wip();
+    const sha2 = sh(`git -C ${origin} rev-parse ${memberRef}`).out;
+
+    // Still exactly ONE ref under fleet/rescue/ for this worktree -- never a
+    // second, timestamped one.
+    expect(rescueRefs()).toEqual([memberRef]);
+    expect(sha2).not.toBe(sha1);
   });
 
   test("the generated command carries exactly one `--force` push per attempt -- the one deliberate exception to this file's own 'never force' rule, and nowhere else", () => {
@@ -1328,6 +1358,19 @@ describe("#208 fix round item 6 — wipSyncProbeCmd: cheap dirty/ahead probe, no
   });
 
   test("markers-only tree: RESCUE_MARKERS_ONLY", () => {
+    expect(probe()).toBe(RESCUE_MARKERS_ONLY);
+  });
+
+  // Issue #231 fix 3b: the probe gates wipSyncCmd's own expensive push --
+  // leaving it main-checkout-only would make the wipSyncCmd fix dead code
+  // whenever the main checkout is clean but a member worktree is dirty.
+  test("#231 fix 3b: main checkout markers-only, but a member worktree is dirty -- WIP_SYNC_NEEDED, not RESCUE_MARKERS_ONLY", () => {
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work\n");
+    expect(probe()).toBe(WIP_SYNC_NEEDED);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("#231 fix 3b: main checkout markers-only, member worktree ALSO clean -- RESCUE_MARKERS_ONLY, unchanged", () => {
     expect(probe()).toBe(RESCUE_MARKERS_ONLY);
   });
 
