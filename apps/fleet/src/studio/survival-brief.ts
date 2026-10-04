@@ -75,12 +75,24 @@ export interface SurvivalInput {
    * the lead never learned a rescue ref existed for its own studio at all.
    * Rendered as its own line per ref (see `composeSurvivalBrief` below) so
    * a lead can go find it by name even though this composer could not
-   * safely guess which task, if any, it belongs to. Always `[]` when
-   * nothing is left unclaimed (including the common case: every task
+   * safely guess which task, if any, it belongs to. `{ok: true, value: []}`
+   * when nothing is left unclaimed (including the common case: every task
    * already had a branch, or exactly one task matched exactly one ref and
    * was attributed).
+   *
+   * MEDIUM fix (#228, review on #227): widened from a bare `string[]` to
+   * `Checked<string[]>` -- `resolveSurvivalInput`'s own fetch of this list
+   * (`sources.rescueBranches()`) can throw (a GitHub 5xx, rate-limit, or
+   * network blip), and before this fix that exception propagated out of the
+   * WHOLE `resolveSurvivalInput` call, failing every other section's worth of
+   * work over one section's transient failure. Same "a failed lookup renders
+   * 'could not check (<reason>)', never a silently blank section" discipline
+   * `tasks`/`openPrs` already follow (this file's own header comment) --
+   * attribution cannot run without the ref list, so a failed fetch leaves
+   * every unresolved task's `branch: null`, exactly as it would if there
+   * were genuinely zero refs.
    */
-  unclaimedRescueBranches: string[];
+  unclaimedRescueBranches: Checked<string[]>;
   /** PR1's (#85) own bring-up verdict record, passed through as-is -- null
    *  before any bring-up has completed under that feature. Replaces the
    *  bare `lastSnapshotAgeS: number | null` this field used to be: PR1's
@@ -414,7 +426,12 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
   const genuinelyEmpty =
     input.tasks.ok && input.tasks.value.length === 0 &&
     input.openPrs.ok && input.openPrs.value.length === 0 &&
-    input.unclaimedRescueBranches.length === 0 &&
+    // #228: a FAILED rescue-ref check is never "genuinely nothing to
+    // report" -- only a CHECKED, empty list is. Otherwise a studio whose
+    // rescue-ref fetch failed and had nothing else to say would suppress the
+    // whole brief, which drops the one line ("could not check") this fix
+    // exists to add.
+    input.unclaimedRescueBranches.ok && input.unclaimedRescueBranches.value.length === 0 &&
     input.session === null;
   if (genuinelyEmpty) return "";
 
@@ -448,8 +465,12 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
     }
   }
 
-  if (input.unclaimedRescueBranches.length > 0) {
-    const sorted = input.unclaimedRescueBranches.slice().sort();
+  // #228: same Checked-section rendering discipline as tasks/openPrs above --
+  // a failed fetch says so by name, never a silently blank/missing section.
+  if (!input.unclaimedRescueBranches.ok) {
+    lines.push(`- Rescue refs: could not check (${sanitizeText(input.unclaimedRescueBranches.reason)})`);
+  } else if (input.unclaimedRescueBranches.value.length > 0) {
+    const sorted = input.unclaimedRescueBranches.value.slice().sort();
     for (const ref of sorted.slice(0, MAX_LINES_PER_SECTION)) {
       lines.push(unclaimedRescueLine(ref));
     }

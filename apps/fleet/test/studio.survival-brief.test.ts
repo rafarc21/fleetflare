@@ -13,7 +13,7 @@ function baseInput(overrides: Partial<SurvivalInput> = {}): SurvivalInput {
     studioId: "demosite-life--release-studio",
     tasks: { ok: true, value: [] },
     openPrs: { ok: true, value: [] },
-    unclaimedRescueBranches: [],
+    unclaimedRescueBranches: { ok: true, value: [] },
     session: null,
     now: NOW,
     ...overrides,
@@ -210,6 +210,12 @@ describe("(a) a failed section lookup never collapses to empty string", () => {
     const input = baseInput({ openPrs: { ok: false, reason: "rate limited" } });
     const out = composeSurvivalBrief(input);
     expect(out).toContain("- Open PRs: could not check (rate limited)");
+  });
+
+  it("rescue-ref lookup failed -> '- Rescue refs: could not check (<reason>)'", () => {
+    const input = baseInput({ unclaimedRescueBranches: { ok: false, reason: "git ls-remote timeout" } });
+    const out = composeSurvivalBrief(input);
+    expect(out).toContain("- Rescue refs: could not check (git ls-remote timeout)");
   });
 });
 
@@ -479,6 +485,12 @@ describe("(i) empty string is returned ONLY when both sections are checked-and-e
 
   it("a FAILED openPrs check with everything else empty must NOT collapse to '' -- shows 'could not check'", () => {
     const out = composeSurvivalBrief(baseInput({ openPrs: { ok: false, reason: "boom" } }));
+    expect(out).not.toBe("");
+    expect(out).toContain("could not check (boom)");
+  });
+
+  it("a FAILED unclaimedRescueBranches check with everything else empty must NOT collapse to '' -- shows 'could not check'", () => {
+    const out = composeSurvivalBrief(baseInput({ unclaimedRescueBranches: { ok: false, reason: "boom" } }));
     expect(out).not.toBe("");
     expect(out).toContain("could not check (boom)");
   });

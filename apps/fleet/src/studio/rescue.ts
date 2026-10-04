@@ -2260,7 +2260,15 @@ export function wipSyncCmd(
     // in, never written to) — never the real `.git/index`.
     `    idxfile=$(mktemp 2>/dev/null) || { echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; }\n` +
     `    realidx=$(git -C ${dir} rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
-    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; fi\n` +
+    // Issue #228 (bonus fix, same bug class as #216 fix 5's `rescue_one`
+    // copies above): `mktemp` already created `$idxfile` as a real, empty
+    // (0-byte) file. When `$realidx` does not exist (no real index to seed
+    // from), that 0-byte file must NOT be handed to `GIT_INDEX_FILE` below --
+    // it is not a valid empty-index format, and `add -A` fails outright.
+    // `rm -f` it instead: pointing `GIT_INDEX_FILE` at a non-existent path
+    // makes git create a fresh, valid, empty index on its own. This copy was
+    // added later (#208) and never carried #216's own fix forward.
+    `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; else rm -f "$idxfile"; fi\n` +
     `    if ! GIT_INDEX_FILE="$idxfile" git -C ${dir} add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; fi\n` +
     `    tree=$(GIT_INDEX_FILE="$idxfile" git -C ${dir} write-tree 2>/dev/null); rc=$?\n` +
     `    rm -f "$idxfile"\n` +

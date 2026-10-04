@@ -14,7 +14,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   survivalBriefAllowed, paneBusy, midTurnRow,
-  prArtifactNumbers, branchArtifacts, isRescueBranchFor, rescueBranchesFor,
+  prArtifactNumbers, branchArtifacts, isRescueBranchFor, rescueBranchesFor, rescueRefStamp, parseRescueStamp,
   attributeRescueBranch, rescueBranchPrefix, rescueBranchNestedPrefix, fetchRescueBranchCandidates,
   resolveSurvivalInput, composeSurvivalDelivery, deliverSurvivalBriefOnBringup,
   retryPendingSurvivalBrief, retryBoundExceeded,
@@ -324,6 +324,46 @@ describe("the 3 anchored branch sources", () => {
     expect(isRescueBranchFor(STUDIO, other)).toBe(false);
   });
 
+  /**
+   * Board issue #228, item 3 — `isRescueBranchFor` refactored into a one-line
+   * wrapper around `rescueRefStamp`, which exposes the matched 14-digit
+   * stamp instead of a bare boolean, so age-capping (below) can reuse the
+   * exact same per-shape anchoring logic rather than re-deriving it.
+   */
+  it("rescueRefStamp exposes the matched stamp for every shape isRescueBranchFor accepts, and null for everything it rejects", () => {
+    expect(rescueRefStamp(STUDIO, `fleet/rescue/${STUDIO}-20260925120000`)).toBe("20260925120000");
+    expect(rescueRefStamp(STUDIO, `fleet/rescue/${STUDIO}/wt/agent-a1b2-20260925120000`)).toBe("20260925120000");
+    expect(rescueRefStamp(STUDIO, `fleet/rescue/${STUDIO}/wt/agent-a1b2-nff-20260925120000`)).toBe("20260925120000");
+    expect(rescueRefStamp(STUDIO, `fleet/rescue/${STUDIO}/20260925120000/checkout/task/pr`)).toBe("20260925120000");
+    expect(rescueRefStamp(STUDIO, wipSyncRef(STUDIO, "20261004120000"))).toBe("20261004120000");
+    // Everything isRescueBranchFor rejects, rescueRefStamp rejects too (null).
+    expect(rescueRefStamp(STUDIO, `fleet/rescue/sibling--${STUDIO}-20260925120000`)).toBeNull();
+    expect(rescueRefStamp(STUDIO, `fleet/rescue/${STUDIO}-20260925120000-wip`)).toBeNull();
+    expect(rescueRefStamp(STUDIO, `fleet/rescue/${STUDIO}/wt/`)).toBeNull();
+    // isRescueBranchFor is now exactly this wrapper.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}-20260925120000`)).toBe(true);
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/sibling--${STUDIO}-20260925120000`)).toBe(false);
+  });
+
+  /**
+   * Board issue #228, item 3 — the mirror image of rescue.ts's own
+   * `formatRescueStamp`: a pure, no-clock, no-DO parse of the same
+   * `YYYYMMDDHHMMSS` UTC convention back into a `Date`.
+   */
+  it("parseRescueStamp is the exact inverse of rescue.ts's formatRescueStamp", () => {
+    expect(parseRescueStamp("20260925120000")).toEqual(new Date("2026-09-25T12:00:00.000Z"));
+    expect(parseRescueStamp("20261231235959")).toEqual(new Date("2026-12-31T23:59:59.000Z"));
+  });
+
+  it("parseRescueStamp rejects anything that is not exactly 14 digits or not a real calendar date/time", () => {
+    expect(parseRescueStamp("2026092512000")).toBeNull();   // 13 digits
+    expect(parseRescueStamp("202609251200000")).toBeNull(); // 15 digits
+    expect(parseRescueStamp("2026092512000a")).toBeNull();  // not digits
+    expect(parseRescueStamp("20261332120000")).toBeNull();  // month 13
+    expect(parseRescueStamp("20260932120000")).toBeNull();  // day 32 (Sept has 30)
+    expect(parseRescueStamp("20260925250000")).toBeNull();  // hour 25
+  });
+
   it("SOURCE 3 — fetchRescueBranchCandidates queries BOTH the flat and nested prefixes, merged and deduped", async () => {
     const calls: string[] = [];
     const listByPrefix = async (prefix: string) => {
@@ -420,7 +460,7 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       null, NOW,
     );
     expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: ref })] });
-    expect(input.unclaimedRescueBranches).toEqual([]);
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [] });
   });
 
   /**
@@ -442,7 +482,8 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       null, NOW,
     );
     expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: null })] });
-    expect(input.unclaimedRescueBranches.slice().sort()).toEqual([refA, refB].sort());
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: expect.arrayContaining([refA, refB]) });
+    expect((input.unclaimedRescueBranches as { ok: true; value: string[] }).value).toHaveLength(2);
 
     const brief = await composeSurvivalDelivery(
       sources({ rescueBranches: async () => [refA, refB] }),
@@ -473,7 +514,7 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
         expect.objectContaining({ taskNumber: 2, branch: null }),
       ],
     });
-    expect(input.unclaimedRescueBranches).toEqual([ref]);
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [ref] });
   });
 
   /**
@@ -497,7 +538,7 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
     expect(input.tasks).toEqual({
       ok: true, value: [expect.objectContaining({ branch: "pr4b-survival-brief-delivery" })],
     });
-    expect(input.unclaimedRescueBranches).toEqual([ref]);
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [ref] });
   });
 
   it("a rescue ref is surfaced even on a studio with ZERO live tasks", async () => {
@@ -508,7 +549,51 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       null, NOW,
     );
     expect(input.tasks).toEqual({ ok: true, value: [] });
-    expect(input.unclaimedRescueBranches).toEqual([ref]);
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [ref] });
+  });
+
+  /**
+   * Board issue #228, item 3 — a rescue ref older than
+   * `SURVIVAL_RESCUE_REF_MAX_AGE_DAYS` is too stale to still be relevant to
+   * today's lead, and is dropped from both `unclaimedRescueBranches` AND the
+   * attribution candidate pool (too stale to list is also too stale to
+   * attribute). `now` controls "today" throughout -- never the real clock.
+   */
+  it("a rescue ref older than SURVIVAL_RESCUE_REF_MAX_AGE_DAYS is dropped; a recent one is kept", async () => {
+    // NOW is 2026-09-25T12:00:00.000Z. 20 days earlier is 2026-09-05; 2 days
+    // earlier is 2026-09-23.
+    const oldRef = `fleet/rescue/${STUDIO}-20260905120000`;
+    const recentRef = `fleet/rescue/${STUDIO}-20260923120000`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [oldRef, recentRef] }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [recentRef] });
+  });
+
+  it("an old rescue ref is excluded from attribution too — too stale to list is too stale to attribute", async () => {
+    const oldRef = `fleet/rescue/${STUDIO}-20260905120000`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [oldRef] }),
+      { ok: true, value: [task()] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: null })] });
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [] });
+  });
+
+  it("the age cap boundary is INCLUSIVE: exactly SURVIVAL_RESCUE_REF_MAX_AGE_DAYS old is kept, one second older is dropped", async () => {
+    // NOW is 2026-09-25T12:00:00.000Z. Exactly 14 days earlier is
+    // 2026-09-11T12:00:00.000Z; one second further back crosses the cap.
+    const atBoundary = `fleet/rescue/${STUDIO}-20260911120000`;
+    const pastBoundary = `fleet/rescue/${STUDIO}-20260911115959`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [atBoundary, pastBoundary] }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [atBoundary] });
   });
 
   it("ahead_by 0 renders EMPTY — a CHECKED zero, never dropped and never fabricated", async () => {
@@ -612,6 +697,41 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
     );
     expect(input.tasks.ok).toBe(true);
     expect(input.openPrs).toEqual({ ok: false, reason: "pulls unreachable" });
+  });
+
+  /**
+   * MEDIUM fix (#228, review on #227): `sources.rescueBranches()` is now
+   * called unconditionally (#216) with no try/catch around it -- before this
+   * fix, a GitHub 5xx/rate-limit/network blip there threw the WHOLE
+   * `resolveSurvivalInput` call, failing every OTHER section's already-
+   * resolved work too. Caught per-section now, same `Checked<T>` discipline
+   * `tasks`/`openPrs` already use: a failed fetch is "could not check
+   * (<reason>)", never a thrown exception and never a silently empty list.
+   */
+  it("a failed rescue-branch fetch fails only that section, never the whole resolveSurvivalInput call", async () => {
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => { throw new Error("rescue-branch fetch failed (502)"); } }),
+      { ok: true, value: [task({ artifacts: [{ kind: "branch", path: "fix/107" }] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true, value: [expect.objectContaining({ branch: "fix/107" })],
+    });
+    expect(input.unclaimedRescueBranches).toEqual({ ok: false, reason: "rescue-branch fetch failed (502)" });
+
+    const brief = await composeSurvivalDelivery(
+      sources({ rescueBranches: async () => { throw new Error("rescue-branch fetch failed (502)"); } }),
+      { ok: true, value: [task({ artifacts: [{ kind: "branch", path: "fix/107" }] })] },
+      session(), NOW,
+    );
+    expect(brief).toContain("Rescue refs: could not check (rescue-branch fetch failed (502))");
+  });
+
+  it("a failed task lookup also fails the rescue-ref section, symmetric with openPrs", async () => {
+    const input = await resolveSurvivalInput(
+      sources(), { ok: false, reason: "board read failed (503): upstream" }, null, NOW,
+    );
+    expect(input.unclaimedRescueBranches).toEqual({ ok: false, reason: "board read failed (503): upstream" });
   });
 });
 
