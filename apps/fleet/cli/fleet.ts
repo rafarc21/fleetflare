@@ -149,7 +149,19 @@ export async function loadCredentialsIfPresent(): Promise<Credentials | null> {
     );
   }
 
-  const raw = (await file.json()) as Partial<Credentials>;
+  // Fix round 2, item C1 (MINOR): a file that EXISTS but holds malformed
+  // JSON used to throw straight out of `file.json()`, uncaught -- the exact
+  // "kills the whole Promise.all" failure this soft variant exists to avoid
+  // (see this function's own doc comment above), just one step later than
+  // the missing-file case already guards against. Same soft-fail-to-null
+  // posture, same reporting style.
+  let raw: Partial<Credentials>;
+  try {
+    raw = (await file.json()) as Partial<Credentials>;
+  } catch (err) {
+    console.error(`fleet: ${CREDENTIALS_PATH} is not valid JSON`, err);
+    return null;
+  }
   if (!raw.workerUrl || !raw.accessClientId || !raw.accessClientSecret) {
     console.error(`fleet: ${CREDENTIALS_PATH} is missing workerUrl/accessClientId/accessClientSecret`);
     return null;

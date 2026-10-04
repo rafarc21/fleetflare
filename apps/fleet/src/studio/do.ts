@@ -3402,11 +3402,17 @@ export async function runScheduledTick(
  *   sweepMaestro  120s  board/GitHub reads + one wake (30s).
  *   syncSession   480s  tar + parts (120s each), failover, readiness (60s),
  *                       and (board #208 fix round, item 5) the WIP-sync
- *                       step's own EXEC_CLASSES.wipSync budget (90s — a
- *                       cheap probe plus at most one small bounded push,
- *                       its own session, never queued behind or counted
- *                       against the 120s `sync` tar budget above); a heal
- *                       it starts (bring-up, 600s) runs on detached.
+ *                       step's own budget — its own session, never queued
+ *                       behind or counted against the 120s `sync` tar budget
+ *                       above. NOT a single 90s call: `wipSync` (do.ts) runs
+ *                       a cheap probe fully to completion, then, only when
+ *                       dirty, a separate push command — both through
+ *                       `EXEC_CLASSES.wipSync` (sandbox-api.ts), and each
+ *                       independently bounded by that class's own 90s
+ *                       `timeoutMs` (see that constant's own "show your
+ *                       math" doc comment). Real worst case is therefore
+ *                       TWO sequential 90s waits, not one: 180s. A heal it
+ *                       starts (bring-up, 600s) runs on detached.
  *                       Board #350 round 2, item 5: the install-cache save
  *                       step (curl --max-time 900) does NOT count against
  *                       this budget at all — syncSessionCycle fires it
