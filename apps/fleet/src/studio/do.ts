@@ -3049,7 +3049,14 @@ export async function syncSessionCycle(
   // because a TEARDOWN caller must decide whether to refuse the kill.
   // Nothing here is being torn down; a missed sync this cycle just means the
   // next one tries again.
-  if (checked?.readiness?.kind === "provisioned") {
+  //
+  // Review (post-#210 rebase), finding B (BLOCKER, FIXED): also skipped when
+  // the failover step above just auto-stopped this row THIS tick (see
+  // `stoppedAfterFailover`'s own doc comment above) — this step execs into
+  // the container too, same "would boot a destroyed one back up" gap
+  // `retrySurvivalBrief` and the detached `installCacheDeps` save below were
+  // already fixed for.
+  if (checked?.readiness?.kind === "provisioned" && !stoppedAfterFailover) {
     const parsed = parseStudioId(idFallback);
     if (parsed) {
       try {

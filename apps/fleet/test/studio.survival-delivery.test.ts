@@ -22,6 +22,7 @@ import {
   type ComposedBrief, type SurvivalSources, type SurvivalTaskRef, type SurvivalBringup,
 } from "../src/studio/survival-delivery";
 import { PANE_CAPTURE_MARKER, PANE_QUIESCE_SECONDS } from "../src/studio/failover";
+import { wipSyncRef } from "../src/studio/rescue";
 import {
   OBSERVED_KEY, emptyObserved,
   type BringupVia, type Observed, type ObservedSession, type ObservedStorage,
@@ -298,6 +299,21 @@ describe("the 3 anchored branch sources", () => {
     // A nested ref with no trailing name at all is not a real rescue ref.
     expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wt/`)).toBe(false);
     expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/20260925120000/checkout/`)).toBe(false);
+  });
+
+  /**
+   * Board issue #208's WIP-sync safety net (`wipSyncCmd`, rescue.ts) pushes
+   * its OWN fixed, non-timestamped ref — `fleet/rescue/<studio>/wip` — under
+   * the exact same `fleet/rescue/<studio>/` nested prefix SOURCE 3 above
+   * anchors. True by construction today (`wip` matches neither the
+   * `wt/...` nor `<14digits>/checkout/...` shapes `isRescueBranchFor` checks
+   * for), but unpinned until now — #208 sits right next to this delivery
+   * feature, and a future change to either ref-naming scheme could silently
+   * make the two collide (the survival re-brief treating a rolling WIP
+   * snapshot as a real rescue candidate, or vice versa).
+   */
+  it("SOURCE 3 — the WIP-sync ref (#208) is NOT a rescue ref: the two ref-naming schemes must never collide", () => {
+    expect(isRescueBranchFor(STUDIO, wipSyncRef(STUDIO))).toBe(false);
   });
 
   it("SOURCE 3 — fetchRescueBranchCandidates queries BOTH the flat and nested prefixes, merged and deduped", async () => {

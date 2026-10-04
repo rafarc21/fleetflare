@@ -1,4 +1,4 @@
-import { formatRescueReport } from "../src/studio/rescue";
+import { formatRescueReport, wipSyncCmd } from "../src/studio/rescue";
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
@@ -1407,6 +1407,41 @@ describe("syncSessionCycle — an auto-stop mid-tick must gate retrySurvivalBrie
 
     expect(retrySurvivalBrief).toHaveBeenCalledTimes(1);
     expect(sbExecCalls).toBeGreaterThan(0);
+  });
+
+  // Post-#210-rebase finding (not yet fixed when either rebase of #208
+  // landed): board issue #208's own WIP-sync step sits BETWEEN the failover
+  // step and `retrySurvivalBrief` in the function body, reads the exact same
+  // mid-tick `checked?.readiness?.kind` this finding is about, and execs into
+  // the container exactly like the two steps above — but was missing the
+  // `&& !stoppedAfterFailover` guard those two already carry. `checked` only
+  // reads "provisioned" here because `checkAndRecordReadiness`'s own
+  // `state === "stopped"` early return (do.ts) hands back the row VERBATIM,
+  // readiness included — `destroyAndRecord` (destroy.ts) never clears
+  // `readiness` on the way to `state: "stopped"`, so a row stopped THIS tick
+  // can still carry last tick's "provisioned" verdict.
+  it("the failover step auto-stops this tick; the WIP-sync step must not exec into the now-stopped container either", async () => {
+    const storage = fakeCycleStorage({
+      status: { ...parkedPastAutoStop(), readiness: { kind: "provisioned", checkedAt: FAILOVER_NOW.toISOString() } },
+    });
+    const failoverDeps = failoverDepsThatAutoStops(storage);
+    const syncDeps = fakeSyncDeps({});
+
+    await syncSessionCycle(
+      syncDeps, storage, STUDIO_ID, async () => {},
+      failoverDeps, null, null, null, null,
+    );
+
+    // The load-bearing proof the fix actually happened: the row really did
+    // auto-stop THIS tick, with the stale "provisioned" readiness riding
+    // along (exactly the shape that lets the bug through unguarded).
+    expect(failoverDeps.stopParkedStudio).toHaveBeenCalledTimes(1);
+    const after = await storage.get(STATUS_KEY);
+    expect(after?.state).toBe("stopped");
+    expect(after?.readiness?.kind).toBe("provisioned");
+
+    // The WIP-sync step must never have exec'd into the now-stopped row.
+    expect(syncDeps.execCalls).not.toContain(wipSyncCmd("websites", STUDIO_ID));
   });
 });
 
