@@ -420,7 +420,7 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       null, NOW,
     );
     expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: ref })] });
-    expect(input.unclaimedRescueBranches).toEqual([]);
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [] });
   });
 
   /**
@@ -442,7 +442,8 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       null, NOW,
     );
     expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: null })] });
-    expect(input.unclaimedRescueBranches.slice().sort()).toEqual([refA, refB].sort());
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: expect.arrayContaining([refA, refB]) });
+    expect((input.unclaimedRescueBranches as { ok: true; value: string[] }).value).toHaveLength(2);
 
     const brief = await composeSurvivalDelivery(
       sources({ rescueBranches: async () => [refA, refB] }),
@@ -473,7 +474,7 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
         expect.objectContaining({ taskNumber: 2, branch: null }),
       ],
     });
-    expect(input.unclaimedRescueBranches).toEqual([ref]);
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [ref] });
   });
 
   /**
@@ -497,7 +498,7 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
     expect(input.tasks).toEqual({
       ok: true, value: [expect.objectContaining({ branch: "pr4b-survival-brief-delivery" })],
     });
-    expect(input.unclaimedRescueBranches).toEqual([ref]);
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [ref] });
   });
 
   it("a rescue ref is surfaced even on a studio with ZERO live tasks", async () => {
@@ -508,7 +509,7 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       null, NOW,
     );
     expect(input.tasks).toEqual({ ok: true, value: [] });
-    expect(input.unclaimedRescueBranches).toEqual([ref]);
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [ref] });
   });
 
   it("ahead_by 0 renders EMPTY — a CHECKED zero, never dropped and never fabricated", async () => {
@@ -612,6 +613,41 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
     );
     expect(input.tasks.ok).toBe(true);
     expect(input.openPrs).toEqual({ ok: false, reason: "pulls unreachable" });
+  });
+
+  /**
+   * MEDIUM fix (#228, review on #227): `sources.rescueBranches()` is now
+   * called unconditionally (#216) with no try/catch around it -- before this
+   * fix, a GitHub 5xx/rate-limit/network blip there threw the WHOLE
+   * `resolveSurvivalInput` call, failing every OTHER section's already-
+   * resolved work too. Caught per-section now, same `Checked<T>` discipline
+   * `tasks`/`openPrs` already use: a failed fetch is "could not check
+   * (<reason>)", never a thrown exception and never a silently empty list.
+   */
+  it("a failed rescue-branch fetch fails only that section, never the whole resolveSurvivalInput call", async () => {
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => { throw new Error("rescue-branch fetch failed (502)"); } }),
+      { ok: true, value: [task({ artifacts: [{ kind: "branch", path: "fix/107" }] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true, value: [expect.objectContaining({ branch: "fix/107" })],
+    });
+    expect(input.unclaimedRescueBranches).toEqual({ ok: false, reason: "rescue-branch fetch failed (502)" });
+
+    const brief = await composeSurvivalDelivery(
+      sources({ rescueBranches: async () => { throw new Error("rescue-branch fetch failed (502)"); } }),
+      { ok: true, value: [task({ artifacts: [{ kind: "branch", path: "fix/107" }] })] },
+      session(), NOW,
+    );
+    expect(brief).toContain("Rescue refs: could not check (rescue-branch fetch failed (502))");
+  });
+
+  it("a failed task lookup also fails the rescue-ref section, symmetric with openPrs", async () => {
+    const input = await resolveSurvivalInput(
+      sources(), { ok: false, reason: "board read failed (503): upstream" }, null, NOW,
+    );
+    expect(input.unclaimedRescueBranches).toEqual({ ok: false, reason: "board read failed (503): upstream" });
   });
 });
 

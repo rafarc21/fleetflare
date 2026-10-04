@@ -497,8 +497,14 @@ export async function resolveSurvivalInput(
       openPrs: { ok: false, reason: tasks.reason },
       // MAJOR fix (fresh-context review on #207): a failed task lookup
       // means attribution never ran at all (it needs the task list to know
-      // how many unresolved tasks there are) -- `[]`, never a guess.
-      unclaimedRescueBranches: [],
+      // how many unresolved tasks there are) -- never a guess.
+      //
+      // MEDIUM fix (#228, review on #227): `{ok: false, reason: tasks.reason}`,
+      // matching `openPrs`'s own choice just above -- full symmetry across
+      // all 3 `Checked` fields when the task data itself is unavailable,
+      // instead of the bare `[]` this used to be (which a reader could
+      // mistake for "checked, and genuinely nothing").
+      unclaimedRescueBranches: { ok: false, reason: tasks.reason },
       session,
       now,
       wipSyncedAt,
@@ -551,15 +557,31 @@ export async function resolveSurvivalInput(
   // guess remains impossible -- the only thing that changed is that a
   // non-empty `refs` with zero or >1 unresolved tasks now actually reaches
   // `unclaimedRescueBranches` instead of being replaced by a hardcoded `[]`.
+  // MEDIUM fix (#228, review on #227): the fetch itself can throw (a GitHub
+  // 5xx, rate-limit, or network blip) -- before this fix, an uncaught throw
+  // here failed the WHOLE `resolveSurvivalInput` call, taking down every
+  // other section's worth of already-resolved work over one section's
+  // transient failure. Caught here, PER SECTION, same discipline
+  // `compareAhead`/`openPullNumbers` already follow a few lines below --
+  // attribution cannot run without the ref list, so a failed fetch simply
+  // leaves every unresolved task's `branch: null`, exactly as it would if
+  // there were genuinely zero refs.
   const unresolved = resolved.filter((r) => r.branch === null);
-  const refs = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
-  let unclaimedRescueBranches: string[] = refs;
-  if (unresolved.length > 0) {
-    const attributed = attributeRescueBranch(unresolved.length, refs);
-    if (attributed !== null) {
-      unresolved[0]!.branch = attributed;
-      unclaimedRescueBranches = refs.filter((r) => r !== attributed);
+  let unclaimedRescueBranches: Checked<string[]>;
+  try {
+    const refs = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
+    let unclaimed = refs;
+    if (unresolved.length > 0) {
+      const attributed = attributeRescueBranch(unresolved.length, refs);
+      if (attributed !== null) {
+        unresolved[0]!.branch = attributed;
+        unclaimed = refs.filter((r) => r !== attributed);
+      }
     }
+    unclaimedRescueBranches = { ok: true, value: unclaimed };
+  } catch (err) {
+    console.error(`survival re-brief: rescue-branch fetch for ${sources.studioId} failed`, err);
+    unclaimedRescueBranches = { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 
   const taskBranches: SurvivalTaskBranch[] = [];
