@@ -994,3 +994,82 @@ describe("(#208 part 2) the WIP safety-net line", () => {
     expect(out).not.toContain("WIP safety net");
   });
 });
+
+// Issue #231 fix 2a -- the brief used to always print the glob
+// (fleet/rescue/<studio>/wip/*), never the exact, real ref -- forcing a human
+// to go look it up on GitHub directly, where the ref's own name embeds the
+// container's BOOT time (not the sync time). `wipBootStamp`, when known,
+// gives the exact ref `wipSyncRef` (rescue.ts) itself would produce.
+describe("(#231 fix 2a) the WIP safety-net line names the EXACT ref when wipBootStamp is known", () => {
+  const WIP_NOW = "2026-10-03T12:00:00.000Z";
+
+  it("wipBootStamp set -> the exact ref, not the glob", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession({ via: "heal" }),
+      wipSyncedAt: "2026-10-03T11:56:00.000Z",
+      wipBootStamp: "20261003115000",
+      now: WIP_NOW,
+    }));
+    expect(out).toContain(
+      "- WIP safety net: fleet/rescue/demosite-life--release-studio/wip/20261003115000, last synced 4m ago — check it for anything lost since then.",
+    );
+    expect(out).not.toContain("wip/*");
+  });
+
+  it("wipBootStamp absent/null -> falls back to the glob, unchanged", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession({ via: "heal" }),
+      wipSyncedAt: "2026-10-03T11:56:00.000Z",
+      now: WIP_NOW,
+    }));
+    expect(out).toContain("fleet/rescue/demosite-life--release-studio/wip/*, last synced 4m ago");
+  });
+});
+
+// Issue #231 fix 2b -- the old session's aside path was logged into
+// StudioStatus.error only (overwritten by a later bring-up); a lead told
+// "what survived" after a LATER heal had no way to learn an old session was
+// moved aside, or where. Persisted onto Observed.lastSessionAside, threaded
+// into the brief the same way wipBootStamp/wipSyncedAt are.
+describe("(#231 fix 2b) the old-session-moved-aside line", () => {
+  const ASIDE = "~/.claude/projects/fleet-aside-20261003T115000Z-42--workspace-acmeclient";
+
+  it("lastSessionAside non-empty -> names the path(s)", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession(),
+      lastSessionAside: [ASIDE],
+    }));
+    expect(out).toContain(`- Old session moved aside to ${ASIDE}; find it there.`);
+  });
+
+  it("lastSessionAside absent/null/empty -> no such line", () => {
+    for (const value of [undefined, null, []] as const) {
+      const out = composeSurvivalBrief(baseInput({
+        session: baseSession(),
+        ...(value === undefined ? {} : { lastSessionAside: value }),
+      }));
+      expect(out).not.toContain("moved aside");
+    }
+  });
+
+  it("multiple paths -> all named, comma-separated", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession(),
+      lastSessionAside: [ASIDE, `${ASIDE}-2`],
+    }));
+    expect(out).toContain(`- Old session moved aside to ${ASIDE}, ${ASIDE}-2; find it there.`);
+  });
+
+  it("no session at all -- never rendered regardless of lastSessionAside (genuinely nothing to report)", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: null,
+      lastSessionAside: [ASIDE],
+    }));
+    expect(out).not.toContain("moved aside");
+    // genuinelyEmpty is unaffected -- lastSessionAside is only ever non-null
+    // alongside a completed bring-up (session !== null) in real production
+    // wiring, but this input proves the composer itself does not need a
+    // SEPARATE genuinelyEmpty condition for it.
+    expect(out).toBe("");
+  });
+});
