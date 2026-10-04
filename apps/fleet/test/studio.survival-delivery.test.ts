@@ -1039,6 +1039,36 @@ describe("deliverSurvivalBriefOnBringup — wipSyncedAt threading (#208 part 2)"
 });
 
 // ---------------------------------------------------------------------------
+// Issue #231 — `wipBootStamp`/`lastSessionAside` thread the SAME way
+// `wipSyncedAt` just above already does: frozen at bring-up, into the
+// deferred pending record.
+// ---------------------------------------------------------------------------
+
+describe("deliverSurvivalBriefOnBringup — wipBootStamp/lastSessionAside threading (#231)", () => {
+  it("a bring-up that never names either at all defers a pending record with NEITHER key — byte-identical to before this feature", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      bringup: bringup(),
+    });
+    expect(await h.run()).toMatchObject({ kind: "deferred" });
+    const pending = h.observed.stored()?.survivalBriefPending;
+    expect(Object.prototype.hasOwnProperty.call(pending, "wipBootStamp")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(pending, "lastSessionAside")).toBe(false);
+  });
+
+  it("a bring-up's own wipBootStamp/lastSessionAside survive into the deferred pending record", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      bringup: bringup({ wipBootStamp: "20261003115000", lastSessionAside: ["~/.claude/projects/fleet-aside-x"] }),
+    });
+    expect(await h.run()).toMatchObject({ kind: "deferred" });
+    const pending = h.observed.stored()?.survivalBriefPending;
+    expect(pending?.wipBootStamp).toBe("20261003115000");
+    expect(pending?.lastSessionAside).toEqual(["~/.claude/projects/fleet-aside-x"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Shared single-flight: one wake path, one lock, source-pinned
 // ---------------------------------------------------------------------------
 
