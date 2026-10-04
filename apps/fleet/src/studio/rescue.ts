@@ -1979,14 +1979,14 @@ export function wipSyncProbeCmd(repo: string, root = "/workspace"): string {
     // GIT_OPTIONAL_LOCKS=0 for `git status` — the same live-studio race
     // applies here, since this probe runs on the same live checkout.
     `    wall="$(GIT_OPTIONAL_LOCKS=0 git -C "$wdir" status --porcelain 2>&1)"; rc=$?\n` +
-    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe status"; return; fi\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wdir status"; return; fi\n` +
     `    wstatus="$(GIT_OPTIONAL_LOCKS=0 git -C "$wdir" status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
-    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe status"; return; fi\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wdir status"; return; fi\n` +
     `    if [ -n "$wstatus" ]; then echo "${WIP_SYNC_NEEDED}"; return; fi\n` +
     `    whead=$(git -C "$wdir" rev-parse HEAD 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe rev-parse"; return; fi\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $wdir rev-parse"; return; fi\n` +
     `    wahead=$(git -C "$wdir" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe rev-list"; return; fi\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wdir rev-list"; return; fi\n` +
     `    if [ -n "$wahead" ] && [ "$wahead" != "0" ]; then echo "${WIP_SYNC_NEEDED}"; return; fi\n` +
     `    if [ -n "$wall" ]; then echo "${RESCUE_MARKERS_ONLY}"; return; fi\n` +
     `    echo "${RESCUE_CLEAN}"\n` +
@@ -2299,15 +2299,15 @@ export function wipSyncCmd(
     // lock-taking maintenance step it would otherwise attempt, which a
     // purely informational `status --porcelain` call never needed anyway.
     `  wall="$(GIT_OPTIONAL_LOCKS=0 git -C "$wdir" status --porcelain 2>&1)"; rc=$?\n` +
-    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync status"; WIP_RESULT=failed; return; fi\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget status"; WIP_RESULT=failed; return; fi\n` +
     `  wstatus="$(GIT_OPTIONAL_LOCKS=0 git -C "$wdir" status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
-    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync status"; WIP_RESULT=failed; return; fi\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget status"; WIP_RESULT=failed; return; fi\n` +
     `  if [ -n "$wstatus" ]; then\n` +
     `    wn=$(printf '%s\\n' "$wstatus" | wc -l | tr -d ' ')\n` +
     // Same throwaway-index technique as rescueSnapshotCmd's own rescue_one
     // (see that function's doc comment for why the real index is seeded
     // in, never written to) — never the real `.git/index`.
-    `    idxfile=$(mktemp 2>/dev/null) || { echo "${RESCUE_FAILED_PREFIX} wip-sync add"; WIP_RESULT=failed; return; }\n` +
+    `    idxfile=$(mktemp 2>/dev/null) || { echo "${RESCUE_FAILED_PREFIX} $wtarget add"; WIP_RESULT=failed; return; }\n` +
     `    realidx=$(git -C "$wdir" rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
     // Issue #228 (bonus fix, same bug class as #216 fix 5's `rescue_one`
     // copies above): `mktemp` already created `$idxfile` as a real, empty
@@ -2318,25 +2318,25 @@ export function wipSyncCmd(
     // makes git create a fresh, valid, empty index on its own. This copy was
     // added later (#208) and never carried #216's own fix forward.
     `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; else rm -f "$idxfile"; fi\n` +
-    `    if ! GIT_INDEX_FILE="$idxfile" git -C "$wdir" add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} wip-sync add"; WIP_RESULT=failed; return; fi\n` +
+    `    if ! GIT_INDEX_FILE="$idxfile" git -C "$wdir" add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} $wtarget add"; WIP_RESULT=failed; return; fi\n` +
     `    tree=$(GIT_INDEX_FILE="$idxfile" git -C "$wdir" write-tree 2>/dev/null); rc=$?\n` +
     `    rm -f "$idxfile"\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync add"; WIP_RESULT=failed; return; fi\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget add"; WIP_RESULT=failed; return; fi\n` +
     `    sha=$(git -C "$wdir" ${identity} commit-tree "$tree" -p HEAD -m "fleet: periodic WIP sync (live, real HEAD/index untouched)" 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$sha" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync commit"; WIP_RESULT=failed; return; fi\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$sha" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget commit"; WIP_RESULT=failed; return; fi\n` +
     `    perr="$(wip_sync_push "$wdir" "$wtarget" "$sha")"; prc=$?\n` +
-    `    if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync push"; printf '%s\\n' "$perr" | tail -n 5 >&2; WIP_RESULT=failed; return; fi\n` +
+    `    if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget push"; printf '%s\\n' "$perr" | tail -n 5 >&2; WIP_RESULT=failed; return; fi\n` +
     `    echo "${RESCUE_PUSHED_PREFIX} $wtarget $wn ${RESCUE_PUSHED_KIND_FILES}"; WIP_RESULT=pushed\n` +
     `  else\n` +
     // Issue #313-style ambiguity guard, same as rescue_one's own copy above:
     // `HEAD` resolved to its own SHA first, never passed bare.
     `    whead=$(git -C "$wdir" rev-parse HEAD 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync rev-parse"; WIP_RESULT=failed; return; fi\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget rev-parse"; WIP_RESULT=failed; return; fi\n` +
     `    wahead=$(git -C "$wdir" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync rev-list"; WIP_RESULT=failed; return; fi\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget rev-list"; WIP_RESULT=failed; return; fi\n` +
     `    if [ -n "$wahead" ] && [ "$wahead" != "0" ]; then\n` +
     `      perr="$(wip_sync_push "$wdir" "$wtarget" HEAD)"; prc=$?\n` +
-    `      if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync push"; printf '%s\\n' "$perr" | tail -n 5 >&2; WIP_RESULT=failed; return; fi\n` +
+    `      if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget push"; printf '%s\\n' "$perr" | tail -n 5 >&2; WIP_RESULT=failed; return; fi\n` +
     `      echo "${RESCUE_PUSHED_PREFIX} $wtarget $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; WIP_RESULT=pushed\n` +
     `    elif [ -n "$wall" ]; then\n` +
     `      WIP_RESULT=markers\n` +

@@ -1329,6 +1329,41 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
     // ...but the local tracking ref it would otherwise auto-create is gone.
     expect(sh(`git -C ${checkout} rev-parse -q --verify refs/remotes/origin/${wipSyncRef(STUDIO, BOOT_STAMP)}`).code).not.toBe(0);
   });
+
+  // Fresh-context review (fix-231-replaced-session, standards axis): every
+  // `RESCUE_FAILED` line `wip_sync_one` ever emitted named the LITERAL
+  // string "wip-sync" instead of the real target it was sync'ing -- fine
+  // when this function covered only the main checkout (a single target),
+  // but now that it also walks every member worktree (#231 fix 3b, this same
+  // describe block's own tests above), a failure in the main checkout and a
+  // failure in a member worktree produced the EXACT SAME ambiguous line,
+  // indistinguishable to `parseRescueExecResult` (do.ts) and whoever reads
+  // its report. The main checkout here is left clean/pushable; only the
+  // member worktree's push is rejected (a pre-receive hook scoped to its
+  // `wt/` ref, same technique rescuePushCmd's own #263 C1 "origin's hook
+  // rejects only the main ref" test above uses) -- the resulting
+  // RESCUE_FAILED line must name THAT member's own wtarget, not a generic
+  // "wip-sync" string a main-checkout failure would produce identically.
+  test("origin rejects only the member worktree's push: the RESCUE_FAILED line names that worktree's own ref, never a generic 'wip-sync' string indistinguishable from a main-checkout failure", () => {
+    writeFileSync(
+      join(origin, "hooks", "pre-receive"),
+      "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    refs/heads/fleet/rescue/*/wt/*) exit 1 ;;\n  esac\ndone\nexit 0\n",
+    );
+    chmodSync(join(origin, "hooks", "pre-receive"), 0o755);
+    writeFileSync(join(checkout, "notes.md"), "main work, accepted\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work, rejected\n");
+
+    const out = wip();
+    const memberTarget = `fleet/rescue/${STUDIO}/wt/agent-a1b2-${BOOT_STAMP}`;
+
+    // The main checkout's own push still succeeds...
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO, BOOT_STAMP)} 1 files$`, "m"));
+    // ...and the member worktree's failure names ITS OWN target, not the
+    // bare, ambiguous "wip-sync" literal the unfixed code emitted regardless
+    // of which target failed.
+    expect(out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} ${memberTarget} push$`, "m"));
+    expect(out).not.toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} wip-sync `, "m"));
+  });
 });
 
 /**
