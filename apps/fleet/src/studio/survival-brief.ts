@@ -118,6 +118,25 @@ export interface SurvivalInput {
    * it -- either way, nothing to say.
    */
   wipSyncedAt?: string | null;
+  /**
+   * Issue #231 fix 2a -- `Observed.wipBootStamp` as it stood AT THE MOMENT OF
+   * THIS BRING-UP (frozen the same way `wipSyncedAt` above is). `wipSyncLine`
+   * uses it to name the EXACT wip ref (`wipSyncRefEcho`'s own 2-arg form)
+   * rather than this file's own `/*` glob -- the glob forced a human to look
+   * the real ref up on GitHub directly, where the ref's own name embeds the
+   * container's BOOT time, easy to misread as the sync time. OPTIONAL/null:
+   * no confirmed boot stamp at bring-up time -- the glob fallback is used.
+   */
+  wipBootStamp?: string | null;
+  /**
+   * Issue #231 fix 2b -- `Observed.lastSessionAside` as it stood AT THE
+   * MOMENT OF THIS BRING-UP (frozen the same way `session` above is): the
+   * real on-disk path(s) a confirmed `--fresh-session` move actually went
+   * to. Rendered as its own line, only when non-null/non-empty -- a lead
+   * told "what survived" after a LATER heal otherwise has no way to learn an
+   * old session was moved aside, or where.
+   */
+  lastSessionAside?: string[] | null;
 }
 
 /** Lines per section before the rest collapses to a single "+N more". Keeps
@@ -367,18 +386,18 @@ export const RESUMED_TRUST_ORIGIN_LINE =
 
 /**
  * Board issue #208, part 2 -- the SAME per-boot-stamped-ref prefix
- * `wipSyncRef` (rescue.ts) pushes under, as of the #208 fix round item 1
- * design change: the exact ref now carries a per-container-boot stamp this
- * composer does not have threaded through (`SurvivalInput` carries
- * `wipSyncedAt`, not the boot stamp itself — widening that is a follow-up,
- * not part of this fix round). A trailing `/*` makes the glob nature
- * explicit rather than printing a literal ref that no longer exists on
- * origin verbatim — `fleet inspect` (cli/wip-format.ts, which DOES have the
- * studio's own `Observed.wipBootStamp` in hand) is where the exact ref name
- * lives; this line only needs to point a lead at the right neighborhood.
+ * `wipSyncRef` (rescue.ts) pushes under. Issue #231 fix 2a: `SurvivalInput`
+ * now threads `wipBootStamp` through the same path `wipSyncedAt` already
+ * takes, so this renders the EXACT, real ref when it is known -- the same
+ * 2-arg signature cli/wip-format.ts's own `wipSyncRefEcho` already has, kept
+ * as a separate copy here (not imported) because this file lives under
+ * src/studio/ and cli/wip-format.ts cannot be imported from here without
+ * crossing the cli/ tsconfig boundary (that file's own header). A trailing
+ * `/*` when the stamp is unknown makes the glob nature explicit rather than
+ * printing a literal ref that may not exist.
  */
-function wipSyncRefEcho(studioId: string): string {
-  return `fleet/rescue/${studioId}/wip/*`;
+function wipSyncRefEcho(studioId: string, bootStamp?: string | null): string {
+  return bootStamp ? `fleet/rescue/${studioId}/wip/${bootStamp}` : `fleet/rescue/${studioId}/wip/*`;
 }
 
 /**
@@ -419,7 +438,20 @@ function wipSyncLine(input: SurvivalInput): string | null {
   if (input.wipSyncedAt == null) return null;
   const age = ageFrom(input.wipSyncedAt, input.now);
   const ageText = age === null ? "unknown age" : `${formatSurvivalAge(age)} ago`;
-  return `- WIP safety net: ${wipSyncRefEcho(input.studioId)}, last synced ${ageText} — check it for anything lost since then.`;
+  return `- WIP safety net: ${wipSyncRefEcho(input.studioId, input.wipBootStamp)}, last synced ${ageText} — check it for anything lost since then.`;
+}
+
+/**
+ * Issue #231 fix 2b -- the real on-disk path(s) a confirmed `--fresh-session`
+ * move went to, named so a lead can go find the old conversation. `null`
+ * when nothing was moved aside (or this bring-up predates the field) — never
+ * rendered in that case, same "no fabricated evidence" rule every other
+ * section of this composer follows.
+ */
+function sessionAsideLine(input: SurvivalInput): string | null {
+  const paths = input.lastSessionAside;
+  if (paths == null || paths.length === 0) return null;
+  return `- Old session moved aside to ${paths.join(", ")}; find it there.`;
 }
 
 export function composeSurvivalBrief(input: SurvivalInput): string {
@@ -481,6 +513,10 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
 
   lines.push(sessionLine(input.session));
   if (input.session?.verdict === "resumed") lines.push(RESUMED_TRUST_ORIGIN_LINE);
+  // Issue #231 fix 2b — right after the session line(s), before the WIP
+  // safety-net line: both describe this bring-up's own session, grouped.
+  const asideLine = sessionAsideLine(input);
+  if (asideLine !== null) lines.push(asideLine);
   const wipLine = wipSyncLine(input);
   if (wipLine !== null) lines.push(wipLine);
 
