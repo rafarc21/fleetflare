@@ -1274,7 +1274,12 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
     // its own shallow-clone fallback retry, both force (see wip_sync_push's
     // own doc comment) -- never a non-force push anywhere in this function.
     expect(forceCount).toBe(2);
-    expect(cmd).toContain(`refs/heads/${wipSyncRef(STUDIO, BOOT_STAMP)}`);
+    // Issue #231 fix 3b: the push destination is now built from a shell
+    // variable (`refs/heads/$wtarget`), not a literal `refs/heads/<ref>` --
+    // the exact per-boot ref name itself still appears, as the literal
+    // argument `wip_sync_one`'s own call site passes it.
+    expect(cmd).toContain(wipSyncRef(STUDIO, BOOT_STAMP));
+    expect(cmd).toContain("refs/heads/$wtarget");
   });
 
   // Fix round item 1 (#208 PR #215 review): a DIFFERENT boot stamp is a
