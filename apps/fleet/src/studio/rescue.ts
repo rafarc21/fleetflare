@@ -2203,16 +2203,37 @@ export function wipSyncCmd(
     // PARENTLESS snapshot of the same tree instead. Prints its own error text
     // on stdout (never `>&2`) so the caller's `$(wip_sync_push ...)` captures
     // it exactly like the single-command version this replaces did.
+    //
+    // Fix round 2, item B (MAJOR): this studio's own live clone is a FULL
+    // clone with the default wildcard fetch refspec
+    // (`+refs/heads/*:refs/remotes/origin/*`), not the `--depth 1
+    // --single-branch` clone `rescue_on_origin`'s own doc comment above
+    // describes for a FRESH provision — so, unlike that shallow clone, a
+    // push here auto-creates a LOCAL `refs/remotes/origin/<target>`
+    // remote-tracking ref matching the refspec, even though `$__rdest` is a
+    // URL rather than the remote name (git matches the push destination
+    // against configured remotes BY URL too, so pushing by URL here does not
+    // avoid this the way it would if no remote named "origin" shared that
+    // URL). That stray tracking ref is purely this function's own transient
+    // snapshot bookkeeping, yet it reads to `rescuePushCmd`'s own
+    // `rev-list --not --remotes` ahead-check (unscoped to "real" refs) as
+    // genuine evidence HEAD is already saved — misreporting RESCUE_CLEAN at
+    // teardown for work that was never actually pushed anywhere but this
+    // rolling wip ref. Deleting the tracking ref immediately after every
+    // successful push here, the same deliberate single explicit
+    // `update-ref` this file's `rescuePushCmd` already runs for its OWN refs
+    // (see that function's C3 doc comment) — just the delete-equivalent —
+    // leaves nothing behind for a later, unrelated check to misread.
     `wip_sync_push() {\n` +
     `  local src="$1" snap perr prc\n` +
     `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --force --no-verify "$__rdest" "$src:refs/heads/${target}" 2>&1 1>/dev/null)"; prc=$?\n` +
-    `  [ "$prc" = 0 ] && return 0\n` +
+    `  if [ "$prc" = 0 ]; then git -C ${dir} update-ref -d refs/remotes/origin/${target} 2>/dev/null || true; return 0; fi\n` +
     `  if [ -z "$perr" ]; then perr="push to ${target} failed (code $prc) with no output"; ` +
     `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="push to ${target} killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
     `  printf '%s' "$perr" | grep -qiE 'shallow update not allowed|did not receive expected object' || { printf '%s' "$perr"; return 1; }\n` +
     `  snap=$(git -C ${dir} ${identity} commit-tree "$src^{tree}" -m "fleet: periodic WIP sync snapshot (shallow clone fallback)" 2>/dev/null) || { printf '%s' "$perr"; return 1; }\n` +
     `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --force --no-verify "$__rdest" "$snap:refs/heads/${target}" 2>&1 1>/dev/null)"; prc=$?\n` +
-    `  [ "$prc" = 0 ] && return 0\n` +
+    `  if [ "$prc" = 0 ]; then git -C ${dir} update-ref -d refs/remotes/origin/${target} 2>/dev/null || true; return 0; fi\n` +
     `  if [ -z "$perr" ]; then perr="snapshot push to ${target} failed (code $prc) with no output"; ` +
     `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="snapshot push to ${target} killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
     `  printf '%s' "$perr"; return 1\n` +

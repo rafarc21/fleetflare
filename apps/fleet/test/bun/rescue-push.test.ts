@@ -1203,6 +1203,31 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
     const newFiles = sh(`git -C ${origin} ls-tree -r --name-only ${newRef}`).out.split("\n");
     expect(newFiles).toContain("b.md");
   });
+
+  // Fix round 2, item B (MAJOR): this test's own `checkout` fixture is a
+  // FULL clone (wildcard fetch refspec), the same shape a real studio's live
+  // worktree uses — not the `--depth 1 --single-branch` clone a fresh
+  // provision gets. A push from here to a ref matching that refspec
+  // auto-creates a LOCAL `refs/remotes/origin/<target>` remote-tracking ref
+  // as a side effect — purely wip-sync's own transient bookkeeping, never a
+  // real "this is safely rescued" signal. Left behind, it misleads
+  // `rescuePushCmd`'s own unscoped `rev-list --not --remotes` ahead-check at
+  // teardown into reporting RESCUE_CLEAN for work that was never actually
+  // pushed anywhere but this rolling wip ref — see `wip_sync_push`'s own doc
+  // comment. `wip_sync_push` must delete that tracking ref itself,
+  // immediately after every successful push, so nothing is left for a later,
+  // unrelated check to misread.
+  test("a successful push deletes its own local remote-tracking ref -- never leaves a stray refs/remotes/origin/<target> for an unrelated check to misread as 'already saved'", () => {
+    writeFileSync(join(checkout, "notes.md"), "wip work\n");
+
+    const out = wip();
+
+    expect(out).toContain(RESCUE_PUSHED_PREFIX);
+    // The push itself genuinely landed on origin...
+    expect(sh(`git -C ${origin} rev-parse ${WIP_REF}`).code).toBe(0);
+    // ...but the local tracking ref it would otherwise auto-create is gone.
+    expect(sh(`git -C ${checkout} rev-parse -q --verify refs/remotes/origin/${wipSyncRef(STUDIO, BOOT_STAMP)}`).code).not.toBe(0);
+  });
 });
 
 /**
@@ -1321,16 +1346,15 @@ describe("#208 fix round item 1 — the full lifecycle: wip-sync never hides a c
     expect(wipOut).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO, BOOT_STAMP_A)} 1 commits$`, "m"));
     const wipRefA = `refs/heads/${wipSyncRef(STUDIO, BOOT_STAMP_A)}`;
     expect(sh(`git -C ${origin} rev-parse ${wipRefA}`).out).toBe(headSha);
-    // Test-fixture note: this file's OUTER beforeEach uses a REGULAR (full,
-    // wildcard-fetch-refspec) clone for every test's own convenience -- real
-    // production studios clone `--depth 1 --single-branch` (guardedCloneCmd),
-    // whose narrow fetch refspec never auto-creates a local remote-tracking
-    // ref for a freshly pushed, unrelated ref the way a wildcard refspec
-    // would. Deleting that test-only side effect here isolates this test to
-    // the ACTUAL mechanism under test -- rescue_on_origin's own sha-based
-    // "already on origin" check -- exactly like a real shallow clone would
-    // never need this line at all.
-    sh(`git -C ${checkout} update-ref -d refs/remotes/origin/${wipSyncRef(STUDIO, BOOT_STAMP_A)} 2>/dev/null; true`);
+    // Fix round 2, item B: `wip_sync_push` (rescue.ts) now deletes its own
+    // local `refs/remotes/origin/<target>` remote-tracking ref immediately
+    // after every successful push -- see that function's own doc comment --
+    // so this test's OUTER beforeEach can stay a REGULAR (full,
+    // wildcard-fetch-refspec) clone, the same shape a real studio's live
+    // worktree uses, with no test-side cleanup standing in for the
+    // production fix. Step 2 below (`rescue_on_origin`'s own sha-based
+    // "already on origin" check) is exercised against production's OWN
+    // post-push state, not a hand-trimmed one.
 
     // Step 2: teardown rescue runs for real, for the SAME commit. Before this
     // fix, rescue_on_origin's own un-filtered listing would find `headSha`
