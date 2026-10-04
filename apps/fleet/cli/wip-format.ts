@@ -88,6 +88,24 @@ export function formatWipCell(s: StudioStatus, now: Date): string {
  * ago the last FAILED attempt was — additive, never replacing the first
  * line, so an existing `toEqual([one line])` fixture (a row with no
  * `wipLastCheck` at all) keeps matching unchanged.
+ *
+ * Issue #231 (fix 5) — read this closely before touching either value below:
+ * `ref` (from `wipBootStamp`) IDENTIFIES which ref to go look at; its own
+ * embedded stamp is the container's BOOT time, not a sync time, and is easy
+ * to misread as one if a reader goes looking at the ref's bare name on
+ * GitHub with no other context (the incident this fix exists for was exactly
+ * that misread — see this issue's own "Measured" section). `at` (from
+ * `wipSyncedAt`) is the ACTUAL last push time, computed fresh here, every
+ * render. The two are deliberately kept as separate values, never derived
+ * from one another, and the line below renders them in that order (ref
+ * first, "last synced <age>" second) so a reader sees the real age
+ * immediately next to the ref, rather than having to compute "is this stamp
+ * the sync time or something else" themselves. Confirmed on review: no other
+ * call site in this file (or `formatWipCell`, `fleet ls`'s own column) ever
+ * derives an age from `wipBootStamp` — both already read `wipSyncedAt`/
+ * `wipLastCheck.at` exclusively for timing. The survival brief's own WIP
+ * line (survival-brief.ts's `wipSyncLine`) now renders the identical
+ * ref-next-to-real-age pairing — see that function's own fix (#231 fix 2a).
  */
 export function formatWipInspectLines(studioId: string, observed: Observed | undefined, now: Date): string[] {
   if (observed === undefined) return [];
