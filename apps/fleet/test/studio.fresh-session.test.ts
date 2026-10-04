@@ -4,7 +4,7 @@ import {
   FRESH_SESSION_PENDING_KEY, FRESH_SESSION_REFUSED_PREFIX, FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD,
   type ProvisionDeps, type StudioStorage, type SessionMarkStorage,
 } from "../src/studio/provision";
-import { SESSION_FORCE_KEY, SESSION_MARK_KEY } from "../src/studio/session-sync";
+import { SESSION_FORCE_KEY, SESSION_MARK_KEY, type SessionSyncStorage } from "../src/studio/session-sync";
 import { OBSERVED_KEY, emptyObserved, getObserved, type ObservedStorage } from "../src/studio/observed";
 
 // Issue #28: `fleet provision|recycle --fresh-session`. ONE bring-up skips the
@@ -275,8 +275,8 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
   function combinedStorage() {
     const map = new Map<string, unknown>();
     const storage = {
-      get: (async (k: string) => map.get(k)) as StudioStorage["get"],
-      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"],
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"] & ObservedStorage["get"] & SessionMarkStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"] & ObservedStorage["put"],
     } as StudioStorage & ObservedStorage & SessionMarkStorage;
     return { map, storage };
   }
@@ -284,15 +284,18 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
   const LINES_OVER = FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD + 10;
   const LINES_UNDER = Math.max(0, FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD - 10);
 
-  async function seed(storage: StudioStorage & ObservedStorage & SessionMarkStorage, replacedAt: string | null, lines: number) {
-    await storage.put(OBSERVED_KEY, { ...emptyObserved(), replacedAt });
-    await storage.put(SESSION_MARK_KEY, { file: "a.jsonl", lines, lastTs: null });
+  // Seeds the backing map directly (not through the typed `storage` port) --
+  // SESSION_MARK_KEY is session-sync.ts's own key, outside SessionMarkStorage's
+  // (get-only, by design) and StudioStorage's own `put` overloads.
+  function seed(map: Map<string, unknown>, replacedAt: string | null, lines: number): void {
+    map.set(OBSERVED_KEY, { ...emptyObserved(), replacedAt });
+    map.set(SESSION_MARK_KEY, { file: "a.jsonl", lines, lastTs: null });
   }
 
   it("refuses: involuntary stop + explicit flag + session over threshold, no --discard-session — error names the real count, nothing moved", async () => {
     const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
-    const { storage } = combinedStorage();
-    await seed(storage, "2026-09-29T09:00:00.000Z", LINES_OVER);
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
 
     await expect(provisionWithStorage(
       d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
@@ -303,8 +306,8 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
 
   it("error says 'use plain provision to resume'", async () => {
     const { d } = deps("");
-    const { storage } = combinedStorage();
-    await seed(storage, "2026-09-29T09:00:00.000Z", LINES_OVER);
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
 
     await expect(provisionWithStorage(
       d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
@@ -314,8 +317,8 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
 
   it("proceeds normally when --discard-session is also given", async () => {
     const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
-    const { storage } = combinedStorage();
-    await seed(storage, "2026-09-29T09:00:00.000Z", LINES_OVER);
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
 
     const status = await provisionWithStorage(
       d, storage, { repo: REPO, role: "scratch", freshSession: true, discardSession: true }, "example-org/acmeclient",
@@ -328,8 +331,8 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
 
   it("proceeds normally on a VOLUNTARY last stop (replacedAt null) even with the same large session", async () => {
     const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
-    const { storage } = combinedStorage();
-    await seed(storage, null, LINES_OVER);
+    const { map, storage } = combinedStorage();
+    seed(map, null, LINES_OVER);
 
     const status = await provisionWithStorage(
       d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
@@ -342,8 +345,8 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
 
   it("proceeds normally when the session is under threshold, regardless of replacedAt", async () => {
     const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
-    const { storage } = combinedStorage();
-    await seed(storage, "2026-09-29T09:00:00.000Z", LINES_UNDER);
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_UNDER);
 
     const status = await provisionWithStorage(
       d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
@@ -362,8 +365,8 @@ describe("provisionWithStorage — records which trigger caused freshSession: tr
   function combinedStorage() {
     const map = new Map<string, unknown>();
     const storage = {
-      get: (async (k: string) => map.get(k)) as StudioStorage["get"],
-      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"],
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"] & ObservedStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"] & ObservedStorage["put"],
     } as StudioStorage & ObservedStorage;
     return { map, storage };
   }
@@ -407,8 +410,8 @@ describe("provisionWithStorage — persists the aside path(s) onto Observed.last
   function combinedStorage() {
     const map = new Map<string, unknown>();
     const storage = {
-      get: (async (k: string) => map.get(k)) as StudioStorage["get"],
-      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"],
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"] & ObservedStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"] & ObservedStorage["put"],
     } as StudioStorage & ObservedStorage;
     return { map, storage };
   }

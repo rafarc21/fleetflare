@@ -3819,6 +3819,14 @@ export async function provisionWithStorage(
     await storage.put(SESSION_FORCE_KEY, true);
     // PR #46 review: the row says so, like clear-session-guard does.
     status = { ...status, sessionForceArmedAt: deps.now() };
+    // Issue #231 — the real on-disk destination(s), so a later heal/recycle's
+    // survival brief can tell a lead where an old session went (see
+    // Observed.lastSessionAside's own doc comment). Never written when the
+    // list is empty — a confirmed "nothing to move" leaves the field exactly
+    // as it was, same "stamped on a real event" discipline wipSyncedAt uses.
+    if (observedStorage && freshSessionAsidePaths && freshSessionAsidePaths.length > 0) {
+      await mergeObserved(observedStorage, { lastSessionAside: freshSessionAsidePaths });
+    }
   }
   // Issue #100: retire the pending marker ONLY once a fresh-session attempt
   // has actually reached `state: "running"` — any other outcome (a clone
