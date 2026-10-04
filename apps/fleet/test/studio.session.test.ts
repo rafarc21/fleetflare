@@ -1538,6 +1538,32 @@ describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)",
     expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
   });
 
+  // Fix round 2, item A (BLOCKER): `Observed.wipBootStamp` is only ever
+  // refreshed by `recordBringupObservation` (provision.ts) inside its own
+  // `if (tokenWritten)` block — the SAME block that clears `replacedAt` back
+  // to null. A bring-up that does NOT write a fresh token (some restart/heal
+  // paths) leaves a PRIOR container's `wipBootStamp` sitting in storage while
+  // `replacedAt` is still non-null (this container has not yet proven itself
+  // the same incarnation that captured that stamp). Using the stale stamp
+  // here would force-push onto `fleet/rescue/<studio>/wip/<OLD stamp>` — the
+  // prior, now-dead container's own ref — destroying whatever it had queued.
+  // `replacedAt !== null` must gate exactly like "no confirmed boot stamp
+  // yet" above: skip the tick entirely, no probe, no push.
+  it("gate: replacedAt is non-null — a stale wipBootStamp from a prior container must not be reused, wip-sync is skipped entirely, no probe exec", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: null, replacedAt: "2026-10-04T02:26:00.000Z", execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: "20261004000000",
+    });
+    const deps = fakeSyncDeps({});
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
+  });
+
   // Item 4 (MAJOR): a row whose `STATUS_KEY.state` moves to "stopped"
   // BETWEEN this tick's own `isStoppedIn` snapshot (checked right after the
   // failover step, before checkAndRecordReadiness runs) and

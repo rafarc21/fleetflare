@@ -3152,7 +3152,23 @@ export async function syncSessionCycle(
       // confirmed bring-up yet for this incarnation) skips the tick entirely
       // rather than inventing one, which would defeat the whole per-boot-ref
       // fix (see Observed.wipBootStamp's own doc comment, observed.ts).
-      const bootStamp = observedStorage ? (await getObserved(observedStorage)).wipBootStamp ?? null : null;
+      //
+      // Fix round 2, item A (BLOCKER): `wipBootStamp` alone is not enough.
+      // `recordBringupObservation` (provision.ts) only refreshes it inside
+      // its own `if (tokenWritten)` block — the SAME block that clears
+      // `replacedAt` back to null — and not every bring-up writes a fresh
+      // token (some restart/heal paths do not). So a row can carry a STALE
+      // `wipBootStamp` left over from a PRIOR container while `replacedAt` is
+      // still non-null (this container has not yet proven itself the same
+      // incarnation that captured that stamp). Using it here would force-push
+      // onto `fleet/rescue/<studio>/wip/<OLD stamp>` — the prior, now-dead
+      // container's own ref — destroying whatever it had queued. Requiring
+      // `obs.replacedAt === null` (this container, not a replaced one) AND
+      // `obs.incarnation !== null` (a real incarnation really is recorded)
+      // before trusting `wipBootStamp` closes that gap; either check failing
+      // reads exactly like the "no confirmed boot stamp yet" case below.
+      const obs = observedStorage ? await getObserved(observedStorage) : null;
+      const bootStamp = obs && obs.replacedAt === null && obs.incarnation !== null ? obs.wipBootStamp ?? null : null;
       const checkedAt = syncDeps.now().toISOString();
       if (bootStamp) {
         try {
