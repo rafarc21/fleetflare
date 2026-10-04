@@ -111,6 +111,53 @@ export async function loadCredentials(): Promise<Credentials> {
 }
 
 /**
+ * Board issue #208 fix round, item 3 (BLOCKER): a NON-EXITING twin of
+ * `loadCredentials` above, for a caller that must survive a missing/
+ * malformed credentials file rather than crash the whole process.
+ * `loadCredentials`'s own `process.exit(1)` is the right call for every
+ * interactive CLI command (there is nothing useful left to do without
+ * credentials) — it is wrong for `scripts/sensors/run.ts`'s
+ * platform-replacements sensor, which runs inside GitHub Actions (no
+ * `~/.fleet/credentials` there, by design) ALONGSIDE two other sensors in
+ * the same `Promise.all` that need no credential at all; an `exit(1)` there
+ * killed the whole run, including those two.
+ *
+ * Deliberately a near-duplicate of `loadCredentials` rather than a shared
+ * refactor with an "exit or not" flag threaded through: `loadCredentials`
+ * has roughly a dozen existing call sites across this file and cli/ff.ts,
+ * every one of them relying on its current "exits, never returns a falsy
+ * value" contract; changing its own signature or adding a parameter risks
+ * a silent behavior change at one of those sites. A second, small, clearly-
+ * labeled function is the lower-risk shape here. Returns `null` on every
+ * condition `loadCredentials` treats as fatal (missing file, missing
+ * field) — logging the IDENTICAL messages, just without the exit. The
+ * mode-warning path is unaffected: a too-loose file still warns either way.
+ */
+export async function loadCredentialsIfPresent(): Promise<Credentials | null> {
+  const file = Bun.file(CREDENTIALS_PATH);
+  if (!(await file.exists())) {
+    console.error(`fleet: no credentials file at ${CREDENTIALS_PATH}`);
+    console.error('fleet: expected JSON {"workerUrl":"...","accessClientId":"...","accessClientSecret":"..."}');
+    return null;
+  }
+
+  const mode = statSync(CREDENTIALS_PATH).mode & 0o777;
+  if ((mode & 0o077) !== 0) {
+    console.error(
+      `fleet: warning: ${CREDENTIALS_PATH} is mode ${mode.toString(8)} (group/other accessible). ` +
+        `Run: chmod 600 ${CREDENTIALS_PATH}`,
+    );
+  }
+
+  const raw = (await file.json()) as Partial<Credentials>;
+  if (!raw.workerUrl || !raw.accessClientId || !raw.accessClientSecret) {
+    console.error(`fleet: ${CREDENTIALS_PATH} is missing workerUrl/accessClientId/accessClientSecret`);
+    return null;
+  }
+  return raw as Credentials;
+}
+
+/**
  * The SOFT variant of loadCredentials, above — same file-read/JSON-shape
  * checks, deliberately duplicated rather than shared, because they diverge
  * on failure: loadCredentials() itself calls process.exit(1), which is

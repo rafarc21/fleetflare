@@ -47,7 +47,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadCredentials, accessHeaders } from "../../cli/fleet";
+import { loadCredentialsIfPresent, accessHeaders } from "../../cli/fleet";
 import { restartsInWindow } from "../../src/studio/restarts";
 import type { StudioStatus } from "../../src/studio/types";
 
@@ -68,9 +68,17 @@ export interface RawSensorInputs {
   ciFailures: number;
   ciTotal: number;
   knownFlaky: number;
-  /** Board issue #208 (ask 3) — summed `restartsInWindow` across every
-   *  studio `GET /studio/` returns, fleet-wide, for the last 24h. */
-  platformReplacements: number;
+  /**
+   * Board issue #208 (ask 3) — summed `restartsInWindow` across every studio
+   * `GET /studio/` returns, fleet-wide, for the last 24h. Fix round (#208 PR
+   * #215 review item 3): `null` means the sensor could not run at all THIS
+   * run (no `~/.fleet/credentials` — every real GitHub Actions runner,
+   * since this script's two other sensors need no credential and must not
+   * die alongside this one) — a soft "n/a", never a crash, never a
+   * fabricated 0 (which would read as "zero replacements" rather than
+   * "unknown").
+   */
+  platformReplacements: number | null;
 }
 
 export interface PreviousBaselines {
@@ -85,10 +93,20 @@ export interface SensorResult {
   dampener: Dampener;
 }
 
+/** Fix round (#208 PR #215 review item 3): the platform-replacements
+ *  sensor's own result shape — `current`/`baseline` are `number | null`
+ *  (unlike `SensorResult`'s always-a-number fields) because the sensor can
+ *  soft-fail to "unavailable this run" independently of the other two. */
+export interface NullableSensorResult {
+  current: number | null;
+  baseline: number | null;
+  dampener: Dampener;
+}
+
 export interface Report {
   ciFailures: SensorResult & { total: number };
   knownFlaky: SensorResult;
-  platformReplacements: SensorResult;
+  platformReplacements: NullableSensorResult;
 }
 
 /**
@@ -97,11 +115,25 @@ export interface Report {
  * own current number — the first run is always OK, never a false FIRED,
  * since the whole point is rolling the baseline forward each run instead
  * of hardcoding it (design doc, "Dampener design").
+ *
+ * Fix round (#208 PR #215 review item 3): `raw.platformReplacements === null`
+ * (the sensor could not run this run — see that field's own doc comment)
+ * reports `current: null`, dampener forced `"OK"` (never FIRED on a reading
+ * that was never taken), and CARRIES THE PREVIOUS BASELINE FORWARD UNCHANGED
+ * (never nulled out) — so the NEXT run, once credentials are available
+ * again, still has a real number to compare against instead of restarting
+ * from scratch. The other two sensors are computed exactly as before,
+ * entirely unaffected by this one sensor's own availability.
  */
 export function buildReport(raw: RawSensorInputs, previous: PreviousBaselines, slack = 1): Report {
   const ciBaseline = previous.ciFailures ?? raw.ciFailures;
   const flakyBaseline = previous.knownFlaky ?? raw.knownFlaky;
-  const platformBaseline = previous.platformReplacements ?? raw.platformReplacements;
+  const platformReplacements: NullableSensorResult = raw.platformReplacements === null
+    ? { current: null, baseline: previous.platformReplacements, dampener: "OK" }
+    : (() => {
+        const baseline = previous.platformReplacements ?? raw.platformReplacements;
+        return { current: raw.platformReplacements, baseline, dampener: dampenerState(raw.platformReplacements, baseline, slack) };
+      })();
   return {
     ciFailures: {
       current: raw.ciFailures,
@@ -114,11 +146,7 @@ export function buildReport(raw: RawSensorInputs, previous: PreviousBaselines, s
       baseline: flakyBaseline,
       dampener: dampenerState(raw.knownFlaky, flakyBaseline, slack),
     },
-    platformReplacements: {
-      current: raw.platformReplacements,
-      baseline: platformBaseline,
-      dampener: dampenerState(raw.platformReplacements, platformBaseline, slack),
-    },
+    platformReplacements,
   };
 }
 
@@ -153,11 +181,19 @@ export function parseState(body: string | null | undefined): PreviousBaselines {
  * NEXT run's baseline — round-trips with `parseState` by construction.
  */
 export function renderBody(report: Report, timestamp: string): string {
+  // Fix round (#208 PR #215 review item 3): the hidden state carries the
+  // CURRENT reading forward when the sensor ran, exactly as before — but
+  // when it did NOT run this time (`current: null`), it carries the
+  // BASELINE forward instead of `null`, so a genuinely-known prior number
+  // survives an outage run rather than being discarded. Only when NEITHER
+  // has ever been known (first run ever, no creds) does this fall through to
+  // `null`, same as `parseState`'s own "nothing known yet" reading.
   const state = JSON.stringify({
     ciFailures: report.ciFailures.current,
     knownFlaky: report.knownFlaky.current,
-    platformReplacements: report.platformReplacements.current,
+    platformReplacements: report.platformReplacements.current ?? report.platformReplacements.baseline,
   });
+  const fmt = (n: number | null): string => (n === null ? "n/a" : String(n));
   return [
     "# fleet sensor burn log",
     "",
@@ -174,7 +210,7 @@ export function renderBody(report: Report, timestamp: string): string {
     // Board issue #208 (ask 3): platform container replacements, fleet-wide,
     // per day — the same RST count `fleet ls` already shows per-studio
     // (restarts.ts's `restartsInWindow`), summed across the whole fleet.
-    `| platform replacements (fleet-wide, 24h) | last 24h | ${report.platformReplacements.current} | ${report.platformReplacements.baseline} | ${report.platformReplacements.dampener} |`,
+    `| platform replacements (fleet-wide, 24h) | last 24h | ${fmt(report.platformReplacements.current)} | ${fmt(report.platformReplacements.baseline)} | ${report.platformReplacements.dampener} |`,
     "",
     "<!-- fleet-sensor-state",
     state,
@@ -224,15 +260,29 @@ async function readKnownFlakyCount(): Promise<number> {
  * counter that already exists and is already surfaced per-studio
  * (`fleet ls`'s RST column).
  *
- * No bespoke soft-fail wrapper: `readCiFailures`/`readKnownFlakyCount` above
- * carry none either (a `gh` failure or an unreadable known-flaky.txt
- * propagates uncaught, same as `main`'s own `Promise.all` has always let it)
- * — this sensor's own failure (no credentials file, an unreachable Worker)
- * is left to propagate exactly the same way, rather than inventing a new,
- * sensor-specific isolation this script has never had for the other two.
+ * Fix round (#208 PR #215 review item 3, BLOCKER): `loadCredentials()`'s own
+ * `process.exit(1)` on a missing credentials file is correct for the
+ * interactive CLI (every other caller) but WRONG here — this script runs
+ * inside GitHub Actions (no `~/.fleet/credentials` there by design)
+ * alongside the two credential-free sensors below in the SAME `Promise.all`,
+ * and an `exit(1)` mid-`Promise.all` kills the whole process, including
+ * those two. `loadCredentialsIfPresent` (cli/fleet.ts) is the non-exiting
+ * twin: missing/malformed credentials log the identical message and return
+ * `null` here instead of exiting, and this function reads that as "sensor
+ * unavailable this run" (`RawSensorInputs.platformReplacements: null` — see
+ * that field's own doc comment) rather than crashing.
+ *
+ * No OTHER soft-fail wrapper beyond the credentials check: `readCiFailures`/
+ * `readKnownFlakyCount` above carry none either (a `gh` failure or an
+ * unreadable known-flaky.txt propagates uncaught, same as `main`'s own
+ * `Promise.all` has always let it), and once credentials ARE present, an
+ * unreachable Worker here still propagates uncaught too — only the ONE
+ * documented, GitHub-Actions-guaranteed failure mode (no credentials file at
+ * all) gets this soft-fail treatment.
  */
-async function readPlatformReplacements(): Promise<number> {
-  const creds = await loadCredentials();
+async function readPlatformReplacements(): Promise<number | null> {
+  const creds = await loadCredentialsIfPresent();
+  if (!creds) return null;
   const res = await fetch(new URL("/studio/", creds.workerUrl), {
     headers: { ...accessHeaders(creds), Accept: "application/json" },
   });

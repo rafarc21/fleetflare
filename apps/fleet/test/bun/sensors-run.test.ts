@@ -124,6 +124,66 @@ describe("buildReport — second run with a previous baseline", () => {
   });
 });
 
+/**
+ * Fix round (#208 PR #215 review item 3, BLOCKER): `loadCredentials()`'s
+ * own `process.exit(1)` on a missing `~/.fleet/credentials` file (every real
+ * GitHub Actions runner) used to kill the WHOLE `bun run sensors` process —
+ * including the two other sensors in the same `Promise.all`, which need no
+ * credential at all. `readPlatformReplacements` now soft-fails to `null`
+ * instead (via `loadCredentialsIfPresent`, cli/fleet.ts's own non-exiting
+ * variant); `buildReport`/`renderBody` both need to carry that `null`
+ * through as "n/a" rather than crash on a `number` they no longer always get.
+ */
+describe("buildReport — platform-replacements sensor unavailable (no credentials, #208 fix round item 3)", () => {
+  test("raw platformReplacements: null -> current null, dampener OK, baseline carried from the previous run", () => {
+    const report = buildReport(
+      { ciFailures: 1, ciTotal: 50, knownFlaky: 1, platformReplacements: null },
+      { ciFailures: 1, knownFlaky: 1, platformReplacements: 5 },
+    );
+    expect(report.platformReplacements.current).toBeNull();
+    expect(report.platformReplacements.baseline).toBe(5);
+    expect(report.platformReplacements.dampener).toBe("OK");
+    // The other two sensors are completely unaffected.
+    expect(report.ciFailures.dampener).toBe("OK");
+    expect(report.knownFlaky.dampener).toBe("OK");
+  });
+
+  test("raw platformReplacements: null on the very first run ever (no previous baseline either) -> baseline also null, never a crash", () => {
+    const report = buildReport(
+      { ciFailures: 0, ciTotal: 0, knownFlaky: 0, platformReplacements: null },
+      { ciFailures: null, knownFlaky: null, platformReplacements: null },
+    );
+    expect(report.platformReplacements.current).toBeNull();
+    expect(report.platformReplacements.baseline).toBeNull();
+    expect(report.platformReplacements.dampener).toBe("OK");
+  });
+});
+
+describe("renderBody — platform-replacements sensor unavailable renders n/a, never a crash", () => {
+  test("current null renders 'n/a' in the table row, and the hidden state carries the PREVIOUS baseline forward (not null) so the next run still has a real comparison point", () => {
+    const report = buildReport(
+      { ciFailures: 1, ciTotal: 50, knownFlaky: 1, platformReplacements: null },
+      { ciFailures: 1, knownFlaky: 1, platformReplacements: 5 },
+    );
+    const body = renderBody(report, "2026-10-04T00:00:00Z");
+    const row = body.split("\n").find((l) => l.includes("platform replacements"));
+    expect(row).toContain("n/a");
+    const parsed = parseState(body);
+    expect(parsed.platformReplacements).toBe(5);
+  });
+
+  test("current AND baseline both null (first run ever, no creds) renders n/a for both, round-trips to null", () => {
+    const report = buildReport(
+      { ciFailures: 0, ciTotal: 0, knownFlaky: 0, platformReplacements: null },
+      { ciFailures: null, knownFlaky: null, platformReplacements: null },
+    );
+    const body = renderBody(report, "2026-10-04T00:00:00Z");
+    const row = body.split("\n").find((l) => l.includes("platform replacements"));
+    expect(row).toMatch(/n\/a.*n\/a/);
+    expect(parseState(body).platformReplacements).toBeNull();
+  });
+});
+
 describe("renderBody / parseState round trip", () => {
   test("parsing a rendered body returns the same numbers as this run's current (next run's baseline)", () => {
     const report = buildReport(
