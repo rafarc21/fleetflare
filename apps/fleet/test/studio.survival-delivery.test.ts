@@ -302,18 +302,26 @@ describe("the 3 anchored branch sources", () => {
   });
 
   /**
-   * Board issue #208's WIP-sync safety net (`wipSyncCmd`, rescue.ts) pushes
-   * its OWN fixed, non-timestamped ref — `fleet/rescue/<studio>/wip` — under
-   * the exact same `fleet/rescue/<studio>/` nested prefix SOURCE 3 above
-   * anchors. True by construction today (`wip` matches neither the
-   * `wt/...` nor `<14digits>/checkout/...` shapes `isRescueBranchFor` checks
-   * for), but unpinned until now — #208 sits right next to this delivery
-   * feature, and a future change to either ref-naming scheme could silently
-   * make the two collide (the survival re-brief treating a rolling WIP
-   * snapshot as a real rescue candidate, or vice versa).
+   * Fix round (#208 PR #215 review item 1, maestro DESIGN decision): the
+   * WIP-sync safety net (`wipSyncCmd`, rescue.ts) now pushes a PER-CONTAINER-
+   * BOOT ref — `fleet/rescue/<studio>/wip/<14digits>` — and this function now
+   * recognises it as a genuine 4th rescue-ref shape, so a survival re-brief's
+   * SOURCE 3 can discover and attribute it exactly like every other rescue
+   * ref. (Superseded: the OLD flat, non-timestamped `fleet/rescue/<studio>/wip`
+   * ref — no container-boot scoping at all — was deliberately EXCLUDED here,
+   * for the opposite reason: that shape could be silently clobbered across
+   * container boots and was never safe to attribute as "this studio's
+   * rescued work". The new per-boot shape does not have that problem.)
    */
-  it("SOURCE 3 — the WIP-sync ref (#208) is NOT a rescue ref: the two ref-naming schemes must never collide", () => {
-    expect(isRescueBranchFor(STUDIO, wipSyncRef(STUDIO))).toBe(false);
+  it("SOURCE 3 — the WIP-sync ref (#208 fix round) IS now a rescue ref, anchored to exactly 14 digits", () => {
+    expect(isRescueBranchFor(STUDIO, wipSyncRef(STUDIO, "20261004120000"))).toBe(true);
+    // Still anchored: a malformed/foreign stamp is never a false positive.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip/202610041200`)).toBe(false);
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip/`)).toBe(false);
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip`)).toBe(false);
+    // Still scoped: another (longer) studio's own wip ref never matches.
+    const other = `fleet/rescue/sibling--${STUDIO}/wip/20261004120000`;
+    expect(isRescueBranchFor(STUDIO, other)).toBe(false);
   });
 
   it("SOURCE 3 — fetchRescueBranchCandidates queries BOTH the flat and nested prefixes, merged and deduped", async () => {

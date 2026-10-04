@@ -1878,6 +1878,30 @@ export function rescueSnapshotCmd(
 }
 
 /**
+ * Fix round (#208 PR #215 review item 1): the ONE TypeScript-side place the
+ * `$(date -u +%Y%m%d%H%M%S)` 14-digit UTC-timestamp convention every rescue
+ * ref's own shell-generated stamp already uses needs reproducing OUTSIDE a
+ * generated shell script. wip-sync's own boot stamp (`Observed.wipBootStamp`)
+ * is captured ONCE per container boot by `recordBringupObservation`
+ * (provision.ts), at the exact same moment that function already captures
+ * the `incarnation` token — a Worker-side `Date`, never a shell exec, so it
+ * needs its own formatter rather than reusing a shell string. Zero-padded,
+ * UTC throughout — the same fields `date -u +%Y%m%d%H%M%S` reads, in the
+ * same order. Lives here, not survival-delivery.ts (which owns the matching
+ * `RESCUE_STAMP_DIGITS` constant and the read side, `isRescueBranchFor`):
+ * provision.ts already imports this file for `rescuePushPrelude`, and
+ * survival-delivery.ts itself imports failover.ts, which imports provision.ts
+ * — importing FROM survival-delivery.ts here would close that cycle.
+ */
+export function formatRescueStamp(now: Date): string {
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return (
+    `${now.getUTCFullYear()}${p(now.getUTCMonth() + 1)}${p(now.getUTCDate())}` +
+    `${p(now.getUTCHours())}${p(now.getUTCMinutes())}${p(now.getUTCSeconds())}`
+  );
+}
+
+/**
  * Fix round (#208 PR #215 review item 2): wip-sync's own push timeout —
  * deliberately its OWN constant, not a reuse of `RESCUE_PUSH_TIMEOUT_SECONDS`
  * (45s, tuned for the teardown-time multi-push worktree/branch/stash walk,

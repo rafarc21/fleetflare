@@ -114,6 +114,33 @@ export interface Observed {
    *  tick. Null before the first successful write, or after a replacement
    *  is detected and cleared. */
   incarnation: string | null;
+  /**
+   * Fix round (#208 PR #215 review item 1, maestro DESIGN decision): a
+   * 14-digit UTC timestamp (`formatRescueStamp`, survival-delivery.ts —
+   * `$(date -u +%Y%m%d%H%M%S)`'s own TypeScript-side equivalent), captured
+   * ONCE per container boot, at the EXACT SAME moment `incarnation` (above)
+   * is captured — `recordBringupObservation` (provision.ts) sets both inside
+   * the same `if (tokenWritten)` block, so the two always move together.
+   * do.ts's `wipSync` threads this into `wipSyncCmd`/`wipSyncRef` as the
+   * per-boot segment of the WIP-sync ref
+   * (`fleet/rescue/<studio>/wip/<wipBootStamp>`), so every tick WITHIN one
+   * container's life keeps force-pushing the SAME ref (the rolling-snapshot
+   * property `wipSyncRef`'s own doc comment describes), while a DIFFERENT
+   * container boot (a fresh `recordBringupObservation` call, a fresh
+   * `tokenWritten`) always gets a NEW stamp and therefore a NEW ref — never
+   * touching a prior container's own wip ref. Null (or absent, for a row
+   * written before this field existed) means "no confirmed bring-up has
+   * captured one yet for this container" — `syncSessionCycle`'s own WIP-sync
+   * step skips the tick entirely rather than inventing one, since a guessed
+   * stamp here is the exact per-container collision this field exists to
+   * prevent (see `wipSyncRef`'s own doc comment, rescue.ts, for the full
+   * history of why the ref used to be silently clobbered across boots).
+   * OPTIONAL, same trailing-optional convention `survivalBriefDeliveredFor`
+   * above already uses: absent reads exactly like `null`, so every existing
+   * `Observed` fixture across the test suite (written before this field
+   * existed) keeps compiling and behaving unchanged.
+   */
+  wipBootStamp?: string | null;
   /** Set ONCE when the ship tick finds no incarnation token where one was
    *  expected (or a foreign one). Cleared when the container answers with
    *  the DO's own current token again. Never advanced by a later tick while
@@ -299,6 +326,21 @@ export interface Observed {
    * throw away that evidence for no reason.
    */
   wipSyncedAt?: string | null;
+  /**
+   * Fix round (#208 PR #215 review, minor (a)): `wipSyncedAt` above only ever
+   * advances on a genuine push — a studio that has been clean for days (the
+   * common case) shows the SAME age as a studio whose last three ticks all
+   * FAILED, because neither updates `wipSyncedAt` at all. `fleet ls`'s WIP
+   * column could not tell "nothing to sync, checked recently" from "sync has
+   * been failing" from "pushed recently" — all three rendered identically
+   * (or not at all). This stamps EVERY wip-sync attempt, success or failure,
+   * with WHAT happened on it — `fleet ls`/`fleet inspect` read this ALONGSIDE
+   * `wipSyncedAt` to tell the three cases apart. Absent means "no wip-sync
+   * tick has run yet for this row" (a studio not yet provisioned, or one from
+   * before this field existed) — same trailing-optional convention every
+   * other field in this struct added after its first release already uses.
+   */
+  wipLastCheck?: { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" } | null;
   /**
    * Board issue #108 (#70 ask 4 remainder) — the lead's last visible,
    * non-chrome message line: redacted (`redactSecrets`, at the ship-tick

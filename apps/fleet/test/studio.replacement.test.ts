@@ -607,6 +607,61 @@ describe("runRestart — incarnation token write (issue #85)", () => {
     expect(deps.cmds.some((c) => c.includes(INCARNATION_PATH))).toBe(false);
   });
 
+  // Fix round (#208 PR #215 review item 1, maestro DESIGN decision):
+  // `Observed.wipBootStamp` is captured at the EXACT SAME moment as
+  // `incarnation`, gated on the identical `tokenWritten` confirmation.
+  describe("runRestart — wip-sync boot stamp, captured alongside the incarnation token (#208 fix round)", () => {
+    it("a successful restart also captures a fresh 14-digit UTC wipBootStamp", async () => {
+      const deps = restartDeps(() => undefined);
+      const storage = fakeStorageWithObserved({
+        status: status({ repoSlug: `acme-org/${REPO}` }), roleEnv: STUDIO_ENV,
+      });
+
+      await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare", "restart", storage);
+
+      const observed = await getObserved(storage);
+      expect(observed.wipBootStamp).toMatch(/^[0-9]{14}$/);
+    });
+
+    it("a failed incarnation write leaves wipBootStamp unset too — same gate, same moment", async () => {
+      const deps = restartDeps((cmd) =>
+        cmd.includes(INCARNATION_PATH) ? { code: 1, stdout: "", stderr: "disk full" } : undefined,
+      );
+      const storage = fakeStorageWithObserved({
+        status: status({ repoSlug: `acme-org/${REPO}` }), roleEnv: STUDIO_ENV,
+      });
+
+      await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare", "restart", storage);
+
+      const observed = await getObserved(storage);
+      expect(observed.wipBootStamp ?? null).toBeNull();
+    });
+
+    it("a SECOND successful bring-up captures a DIFFERENT wipBootStamp than the first -- a new container never reuses a prior one's own stamp", async () => {
+      const deps = restartDeps(() => undefined);
+      // A real container's clock always advances between two bring-ups;
+      // `restartDeps`'s own `now` is a fixed constant (every other test here
+      // relies on that), so this one test overrides it with a clock that
+      // ticks forward one second per call.
+      const base = Date.parse(NOW);
+      let n = 0;
+      deps.now = () => new Date(base + n++ * 1000).toISOString();
+      const storage = fakeStorageWithObserved({
+        status: status({ repoSlug: `acme-org/${REPO}` }), roleEnv: STUDIO_ENV,
+      });
+
+      await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare", "restart", storage);
+      const first = (await getObserved(storage)).wipBootStamp;
+      expect(first).toMatch(/^[0-9]{14}$/);
+
+      // A second bring-up, one second later in this test's own fake clock.
+      await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare", "restart", storage);
+      const second = (await getObserved(storage)).wipBootStamp;
+      expect(second).toMatch(/^[0-9]{14}$/);
+      expect(second).not.toBe(first);
+    });
+  });
+
   it("a successful restart issues exactly one combined token-write + pane-probe exec after BRINGUP_CMD (maestro correction #6)", async () => {
     const deps = restartDeps(() => undefined);
     const storage = fakeStorageWithObserved({

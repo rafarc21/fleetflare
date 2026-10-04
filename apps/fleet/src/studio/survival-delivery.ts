@@ -275,6 +275,15 @@ export const RESCUE_STAMP_DIGITS = 14;
  * - nested, member worktree: `fleet/rescue/<studio>/wt/<id>-<14digits>`,
  *   optionally with `-nff-` before the stamp (that shape's own non-fast-
  *   forward retry).
+ * - nested, wip-sync: `fleet/rescue/<studio>/wip/<14digits>` (rescue.ts's
+ *   `wipSyncCmd`, the per-container-boot periodic WIP safety net — fix round
+ *   #208 PR #215 review item 1). Added here, and to `discoverRescueRefsCmd`'s
+ *   own grep pattern (provision.ts), so a wip ref is discoverable/fetchable
+ *   and attributable exactly like every other rescue shape, now that it is
+ *   scoped per boot rather than shared (and silently clobbered) across every
+ *   container a studio ever runs — see `wipSyncRef`'s own doc comment
+ *   (rescue.ts) for the full history of why the OLD flat, un-anchored shape
+ *   was deliberately excluded here instead.
  *
  * See this function's own body below for the nested shapes' match logic and
  * reasoning (#216) — the flat shape's own reasoning follows here since it's
@@ -328,6 +337,13 @@ export function isRescueBranchFor(studioId: string, branch: string): boolean {
   // characters before the final `-<14digits>`.
   if (rest.startsWith("wt/")) {
     return new RegExp(`^\\S+-[0-9]{${RESCUE_STAMP_DIGITS}}$`).test(rest.slice(3));
+  }
+  // Fix round (#208 PR #215 review item 1): wip-sync's own per-boot ref —
+  // `wip/<14digits>`, exactly like `wt/<id>-<14digits>` above but with no
+  // `<id>` segment at all (wip-sync has no worktree identity to disambiguate;
+  // it is always the main checkout, one ref per container boot).
+  if (rest.startsWith("wip/")) {
+    return new RegExp(`^[0-9]{${RESCUE_STAMP_DIGITS}}$`).test(rest.slice(4));
   }
   return false;
 }
