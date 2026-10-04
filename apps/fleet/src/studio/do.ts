@@ -5987,9 +5987,14 @@ export class StudioDO extends Sandbox<Env> {
           // reason `session` is — see SurvivalBringup.wipSyncedAt's own doc
           // comment (survival-delivery.ts).
           wipSyncedAt: snapshot.wipSyncedAt ?? null,
+          // Issue #231: same "frozen here" treatment as wipSyncedAt above.
+          wipBootStamp: snapshot.wipBootStamp ?? null,
+          lastSessionAside: snapshot.lastSessionAside ?? null,
         }),
         () => this.survivalBusy(),
-        this.survivalCompose(workRepoSlug, session, snapshot.wipSyncedAt ?? null),
+        this.survivalCompose(
+          workRepoSlug, session, snapshot.wipSyncedAt ?? null, snapshot.wipBootStamp ?? null, snapshot.lastSessionAside ?? null,
+        ),
         (prompt) => this.wakeStudioOnAssignment(prompt),
         () => ctx.moved(),
       );
@@ -6046,7 +6051,9 @@ export class StudioDO extends Sandbox<Env> {
         // Board issue #208, part 2: the pending record's OWN frozen
         // `wipSyncedAt` (SurvivalBriefPending.wipSyncedAt), never a fresh
         // read — same reason `pending.session` itself is never re-read.
-        (pending) => this.survivalCompose(workRepoSlug, pending.session, pending.wipSyncedAt ?? null)(),
+        (pending) => this.survivalCompose(
+          workRepoSlug, pending.session, pending.wipSyncedAt ?? null, pending.wipBootStamp ?? null, pending.lastSessionAside ?? null,
+        )(),
         (prompt) => this.wakeStudioOnAssignment(prompt, true),
       ));
     } catch (err) {
@@ -6094,7 +6101,12 @@ export class StudioDO extends Sandbox<Env> {
   // capture (bring-up's `snapshot.wipSyncedAt`, or the retry's
   // `pending.wipSyncedAt`) — see composeSurvivalDelivery's own doc comment
   // for why it only ever renders on a `via: "heal"` session.
-  private survivalCompose(workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null): () => Promise<ComposedBrief> {
+  private survivalCompose(
+    workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null,
+    // Issue #231: same "caller's own frozen capture" treatment wipSyncedAt
+    // above already gets — see composeSurvivalDelivery's own doc comment.
+    wipBootStamp: string | null = null, lastSessionAside: string[] | null = null,
+  ): () => Promise<ComposedBrief> {
     return async () => {
       let tasks: SurvivalTaskRef[];
       try {
@@ -6104,7 +6116,7 @@ export class StudioDO extends Sandbox<Env> {
       }
       return composeSurvivalDelivery(
         this.survivalSources(workRepoSlug), { ok: true, value: tasks }, session, new Date().toISOString(),
-        wipSyncedAt,
+        wipSyncedAt, wipBootStamp, lastSessionAside,
       );
     };
   }

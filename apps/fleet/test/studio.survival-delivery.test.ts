@@ -1566,7 +1566,7 @@ describe("the retry rides the REGULAR per-studio tick, not the maestro-only swee
     // One probe helper, one compose helper, each called from BOTH paths.
     expect(src).toContain("private async survivalBusy(): Promise<BusyVerdict>");
     expect(src).toContain(
-      "private survivalCompose(workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null)",
+      "private survivalCompose(\n    workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null,",
     );
     const code = codeOnly(src);
     expect(code.filter((l) => /this\.survivalBusy\(\)/.test(l))).toHaveLength(2);

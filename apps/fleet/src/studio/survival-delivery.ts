@@ -558,6 +558,10 @@ export async function resolveSurvivalInput(
   // default so every pre-#208 caller (and every existing fixture in this
   // file's own tests) keeps compiling unchanged.
   wipSyncedAt: string | null = null,
+  // Issue #231 — threaded the SAME path `wipSyncedAt` just above already
+  // takes, both OPTIONAL with a `null` default for the identical reason.
+  wipBootStamp: string | null = null,
+  lastSessionAside: string[] | null = null,
 ): Promise<SurvivalInput> {
   if (!tasks.ok) {
     return {
@@ -577,6 +581,8 @@ export async function resolveSurvivalInput(
       session,
       now,
       wipSyncedAt,
+      wipBootStamp,
+      lastSessionAside,
     };
   }
 
@@ -710,7 +716,7 @@ export async function resolveSurvivalInput(
 
   return {
     studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, unclaimedRescueBranches,
-    session, now, wipSyncedAt,
+    session, now, wipSyncedAt, wipBootStamp, lastSessionAside,
   };
 }
 
@@ -718,7 +724,8 @@ export async function resolveSurvivalInput(
  *  thunk the delivery function below takes. An EMPTY string is PR4a's own
  *  signal that there is nothing worth re-briefing about.
  *
- *  `wipSyncedAt` (board issue #208, part 2) passes straight through to
+ *  `wipSyncedAt` (board issue #208, part 2) and `wipBootStamp`/
+ *  `lastSessionAside` (issue #231) pass straight through to
  *  `resolveSurvivalInput` — see that function's own doc comment. */
 export async function composeSurvivalDelivery(
   sources: SurvivalSources,
@@ -726,8 +733,12 @@ export async function composeSurvivalDelivery(
   session: ObservedSession | null,
   now: string,
   wipSyncedAt: string | null = null,
+  wipBootStamp: string | null = null,
+  lastSessionAside: string[] | null = null,
 ): Promise<string> {
-  return composeSurvivalBrief(await resolveSurvivalInput(sources, tasks, session, now, wipSyncedAt));
+  return composeSurvivalBrief(
+    await resolveSurvivalInput(sources, tasks, session, now, wipSyncedAt, wipBootStamp, lastSessionAside),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -758,6 +769,14 @@ export interface SurvivalBringup {
    *  the heal. OPTIONAL/absent (or null) means no WIP sync had ever landed at
    *  this bring-up — the composer renders nothing for it. */
   wipSyncedAt?: string | null;
+  /** Issue #231 — `Observed.wipBootStamp` AS IT STOOD at this bring-up, same
+   *  "frozen, never re-read" reason `wipSyncedAt` above is. OPTIONAL/absent:
+   *  no confirmed boot stamp yet — the composer falls back to a glob. */
+  wipBootStamp?: string | null;
+  /** Issue #231 — `Observed.lastSessionAside` AS IT STOOD at this bring-up,
+   *  same "frozen, never re-read" reason `session` above is. OPTIONAL/absent:
+   *  nothing moved aside as of this bring-up. */
+  lastSessionAside?: string[] | null;
 }
 
 /**
@@ -940,6 +959,10 @@ export async function deliverSurvivalBriefOnBringup(
     // this feature's WIP sync at all (every bring-up before this field
     // existed) keeps producing byte-identical `SurvivalBriefPending` records.
     ...(b.wipSyncedAt !== undefined ? { wipSyncedAt: b.wipSyncedAt } : {}),
+    // Issue #231 — same "taken fresh from THIS bring-up, absent stays
+    // absent" treatment as `wipSyncedAt` just above.
+    ...(b.wipBootStamp !== undefined ? { wipBootStamp: b.wipBootStamp } : {}),
+    ...(b.lastSessionAside !== undefined ? { lastSessionAside: b.lastSessionAside } : {}),
     since: priorForThis?.since ?? now().toISOString(),
     attempts: priorForThis?.attempts ?? 0,
     reason: "",

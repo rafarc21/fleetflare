@@ -1043,7 +1043,7 @@ describe("(#231 fix 2b) the old-session-moved-aside line", () => {
   });
 
   it("lastSessionAside absent/null/empty -> no such line", () => {
-    for (const value of [undefined, null, []] as const) {
+    for (const value of [undefined, null, [] as string[]]) {
       const out = composeSurvivalBrief(baseInput({
         session: baseSession(),
         ...(value === undefined ? {} : { lastSessionAside: value }),
