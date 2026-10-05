@@ -282,6 +282,27 @@ describe("(c) one line per assigned task, always, never drop a task -- 4 states"
     expect(composeSurvivalBrief(input)).toContain("no branch on origin");
   });
 
+  // Issue #234 — SOURCE 4's own ambiguous-match outcome. Distinct from BOTH
+  // "found exactly one" (a resolved branch) and "found none" (branch ===
+  // null, "no branch on origin"): a reader must be able to tell all three
+  // apart, always.
+  it("ambiguousBranches present -> a distinct line, never 'no branch on origin', naming every candidate", () => {
+    const input = baseInput({
+      tasks: {
+        ok: true,
+        value: [{
+          taskNumber: 1, taskTitle: "t", branch: null, commitsAheadOfMain: null, lastCommitAt: null,
+          ambiguousBranches: ["fix-231-replaced-session", "231-another-attempt"],
+        }],
+      },
+    });
+    const out = composeSurvivalBrief(input);
+    expect(out).not.toContain("no branch on origin");
+    expect(out).toContain("fix-231-replaced-session");
+    expect(out).toContain("231-another-attempt");
+    expect(out).toContain("ambiguous");
+  });
+
   it("all 4 states present at once -- every task gets its own line, none dropped", () => {
     const input = baseInput({
       tasks: {

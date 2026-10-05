@@ -7,6 +7,7 @@ import {
   listOpenPullNumbers, listPullsForCommit, listPullCommits, closeIssue,
   closingIssuesForPull, getPullRequest, commitReachableFromBranch, getIssueCloser,
   pullsWithClosingIssuesForCommits, pullClaimsIssue, upsertRepoFile,
+  listAllBranchNames,
 } from "../src/github/api";
 import { doneRecordPutter } from "../src/studio/do";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
@@ -439,6 +440,22 @@ describe("listOpenPullNumbers", () => {
     // "could not tell", and swallowing it here would defeat that upstream.
     respond = () => new Response("boom", { status: 503 });
     await expect(listOpenPullNumbers("tok", "o/r")).rejects.toThrow(/503/);
+  });
+});
+
+describe("listAllBranchNames", () => {
+  it("GETs the plain branches-list endpoint, one page, and returns names", async () => {
+    respond = () => Response.json([{ name: "main" }, { name: "fix-231-replaced-session" }]);
+    const names = await listAllBranchNames("tok", "o/r");
+    expect(names).toEqual(["main", "fix-231-replaced-session"]);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches?per_page=100");
+    expect(calls[0].headers.authorization).toBe("Bearer tok");
+  });
+
+  it("throws GitHub's own words on a non-2xx, token never in the message", async () => {
+    respond = () => new Response("boom", { status: 503 });
+    await expect(listAllBranchNames("tok", "o/r")).rejects.toThrow(/503/);
   });
 });
 
