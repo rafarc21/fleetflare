@@ -29,7 +29,7 @@ import type { SessionSyncDeps, SessionSyncStorage } from "../src/studio/session-
 import { emptyObserved, type Observed } from "../src/studio/observed";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
-import { writeFleetAccountLimit, readFleetAccountLimits } from "../src/studio/account-limits-store";
+import { writeFleetAccountLimit, readFleetAccountLimits, readOneAccountLimit } from "../src/studio/account-limits-store";
 import { resolveClaudeAccounts } from "../src/studio/accounts";
 
 // ROLE_PROMPT_B64 is base64 of UTF-8 and every prompt now carries the house
@@ -2234,11 +2234,28 @@ describe("GET /studio/accounts", () => {
 // decisions already made elsewhere via writeFleetAccountLimit /
 // clearFleetAccountLimit, same auth lane as every other /studio/* route
 // (verifyAccess already ran before any pathname branch is reached).
+// Issue #232 review round: `claude-swap.ts`'s SyncDecision reshape — "clear"
+// now carries `seenAt` too, and the request carries a new top-level
+// `usageFetchedAt` (MAJOR 6's yardstick for whether a "clear" is stale
+// relative to a fresher row). `usageFetchedAt` defaults here to the same
+// instant the fixtures below treat as "now", so a test that wants a
+// pre-existing row to read as OLDER or NEWER than the snapshot overrides it
+// explicitly rather than relying on wall-clock time.
 describe("POST /studio/accounts/sync", () => {
+  const USAGE_FETCHED_AT = "2026-10-05T00:00:00.000Z";
+  type SyncBody = { applied: string[]; rejected: { name: string; reason: string }[]; skipped: { name: string; reason: string }[] };
+  const syncReq = (decisions: unknown[], usageFetchedAt: string | undefined = USAGE_FETCHED_AT) => authorizedReq(
+    "/studio/accounts/sync",
+    { method: "POST", body: JSON.stringify({ decisions, ...(usageFetchedAt === undefined ? {} : { usageFetchedAt }) }) },
+  );
+
   it("401 without an Access header", async () => {
     const { testEnv } = envWithFakeStudio();
     const res = await handleStudio(
-      new Request("https://x/studio/accounts/sync", { method: "POST", body: JSON.stringify({ decisions: [] }) }),
+      new Request("https://x/studio/accounts/sync", {
+        method: "POST",
+        body: JSON.stringify({ decisions: [], usageFetchedAt: USAGE_FETCHED_AT }),
+      }),
       testEnv,
     );
     expect(res.status).toBe(401);
@@ -2265,9 +2282,29 @@ describe("POST /studio/accounts/sync", () => {
     authorized();
     const { testEnv } = envWithFakeStudio();
     const res = await handleStudio(
-      authorizedReq("/studio/accounts/sync", { method: "POST", body: JSON.stringify({ decisions: "nope" }) }),
+      authorizedReq("/studio/accounts/sync", {
+        method: "POST",
+        body: JSON.stringify({ decisions: "nope", usageFetchedAt: USAGE_FETCHED_AT }),
+      }),
       testEnv,
     );
+    expect(res.status).toBe(400);
+  });
+
+  it("400s the whole request when usageFetchedAt is missing", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(
+      authorizedReq("/studio/accounts/sync", { method: "POST", body: JSON.stringify({ decisions: [] }) }),
+      testEnv,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("400s the whole request when usageFetchedAt is not a parseable timestamp", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(syncReq([], "not-a-date"), testEnv);
     expect(res.status).toBe(400);
   });
 
@@ -2277,74 +2314,238 @@ describe("POST /studio/accounts/sync", () => {
     const seenAt = "2026-10-05T00:00:00.000Z";
     const until = "2026-10-05T05:00:00.000Z";
     const res = await handleStudio(
-      authorizedReq("/studio/accounts/sync", {
-        method: "POST",
-        body: JSON.stringify({
-          decisions: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt }],
-        }),
-      }),
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt }]),
       testEnv,
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [] });
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
 
     const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
     expect(limits["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ until, seenAt });
     expect(limits["CLAUDE_CODE_OAUTH_TOKEN"]?.dead).toBeUndefined();
   });
 
-  it("a clear decision removes a previously-written row entirely", async () => {
+  // BLOCKER 2: `until: null` is a VALID limit (a window with no readable
+  // resetsAt) — only an ABSENT `until` key is invalid, never explicit null.
+  it("a limit decision with until: null explicitly is accepted and written", async () => {
     authorized();
     const { testEnv } = envWithFakeStudio();
-    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", "2026-10-05T05:00:00.000Z", "2026-10-05T00:00:00.000Z");
-
+    const seenAt = "2026-10-05T00:00:00.000Z";
     const res = await handleStudio(
-      authorizedReq("/studio/accounts/sync", {
-        method: "POST",
-        body: JSON.stringify({ decisions: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear" }] }),
-      }),
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: null, seenAt }]),
       testEnv,
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [] });
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(limits["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ until: null, seenAt });
+  });
+
+  // BLOCKER 2: a missing `until` key must never decode as "free" at the D1
+  // boundary — rejected outright, nothing written.
+  it("a limit decision missing the until key is rejected and writes nothing", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", seenAt }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SyncBody;
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "invalid until" }]);
 
     const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
     expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
   });
 
-  it("a clear decision also clears a dead:true row entirely", async () => {
+  it("a limit decision with a non-date seenAt is rejected and writes nothing", async () => {
     authorized();
     const { testEnv } = envWithFakeStudio();
-    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", null, "2026-10-05T00:00:00.000Z", true);
-
     const res = await handleStudio(
-      authorizedReq("/studio/accounts/sync", {
-        method: "POST",
-        body: JSON.stringify({ decisions: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear" }] }),
-      }),
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: null, seenAt: "not-a-date" }]),
       testEnv,
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [] });
+    const body = (await res.json()) as SyncBody;
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "invalid seenAt" }]);
 
     const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
     expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
+  });
+
+  // MAJOR 5: a usage sighting is orthogonal to "account is dead" — a "limit"
+  // write must preserve an existing dead:true flag rather than silently
+  // dropping it.
+  it("a limit write against a currently dead:true row leaves dead:true set", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", null, "2026-10-04T00:00:00.000Z", true);
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const until = "2026-10-05T05:00:00.000Z";
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const after = await readOneAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN");
+    expect(after).toEqual({ until, seenAt, dead: true, source: "usage" });
+  });
+
+  it("a limit write against a row with no prior dead flag leaves dead unset", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const until = "2026-10-05T05:00:00.000Z";
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const after = await readOneAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN");
+    expect(after?.dead).toBeUndefined();
+  });
+
+  // MINOR: every "limit" write from this route carries source: "usage".
+  it("a limit write carries source: usage on the stored row", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const until = "2026-10-05T05:00:00.000Z";
+
+    await handleStudio(syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt }]), testEnv);
+
+    const after = await readOneAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN");
+    expect(after?.source).toBe("usage");
+  });
+
+  it("a clear decision where no row currently exists is a no-op success, applied", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: "2026-10-05T00:00:00.000Z" }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
+  });
+
+  it("a clear decision deletes a row OLDER than usageFetchedAt, applied", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", "2026-10-05T05:00:00.000Z", "2026-10-04T00:00:00.000Z");
+
+    const res = await handleStudio(
+      syncReq(
+        [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: "2026-10-05T00:00:00.000Z" }],
+        "2026-10-05T00:00:00.000Z",
+      ),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
+  });
+
+  // MAJOR 6: a row at least as fresh as this usage snapshot must survive — a
+  // different path (failover.ts's pane capture) may have recorded it AFTER
+  // the snapshot this clear decision was computed from was taken.
+  it("a clear decision does NOT delete a row at least as NEW as usageFetchedAt — skipped, not applied", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const fresherSeenAt = "2026-10-05T00:00:00.000Z";
+    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", "2026-10-05T05:00:00.000Z", fresherSeenAt);
+
+    const res = await handleStudio(
+      syncReq(
+        [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: fresherSeenAt }],
+        "2026-10-04T23:00:00.000Z", // usageFetchedAt is OLDER than the row's own seenAt
+      ),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      applied: [], rejected: [], skipped: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "newer row exists" }],
+    });
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(limits["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ until: "2026-10-05T05:00:00.000Z", seenAt: fresherSeenAt });
+  });
+
+  it("a clear decision also clears a dead:true row entirely", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", null, "2026-10-04T00:00:00.000Z", true);
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: "2026-10-05T00:00:00.000Z" }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
+  });
+
+  it("a clear decision with a non-date seenAt is rejected and writes nothing", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", "2026-10-05T05:00:00.000Z", "2026-10-04T00:00:00.000Z");
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: "not-a-date" }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SyncBody;
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "invalid seenAt" }]);
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(limits["CLAUDE_CODE_OAUTH_TOKEN"]).toBeDefined();
   });
 
   it("an unmanaged decision writes nothing and is echoed in applied", async () => {
     authorized();
     const { testEnv } = envWithFakeStudio();
     const res = await handleStudio(
-      authorizedReq("/studio/accounts/sync", {
-        method: "POST",
-        body: JSON.stringify({
-          decisions: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "unmanaged", reason: "no-label" }],
-        }),
-      }),
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "unmanaged" }]),
       testEnv,
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [] });
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
+  });
+
+  // NEW action (claude-swap.ts's rework): same "handled, nothing to write"
+  // treatment as "unmanaged".
+  it("a no-data decision writes nothing and is echoed in applied", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "no-data", reason: "usageStatus: relogin_required" }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
 
     const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
     expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
@@ -2355,21 +2556,40 @@ describe("POST /studio/accounts/sync", () => {
     const { testEnv } = envWithFakeStudio();
 
     const res = await handleStudio(
-      authorizedReq("/studio/accounts/sync", {
-        method: "POST",
-        body: JSON.stringify({
-          decisions: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "nuke-it" }],
-        }),
-      }),
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "nuke-it" }]),
       testEnv,
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { applied: string[]; rejected: { name: string; reason: string }[] };
+    const body = (await res.json()) as SyncBody;
     expect(body.applied).toEqual([]);
     expect(body.rejected).toEqual([{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "invalid action" }]);
 
     const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
     expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
+  });
+
+  // MINOR: a malformed entry (null, missing name, non-string name) must never
+  // reach a property access that could throw/500 — rejected cleanly instead.
+  it("malformed entries (null, missing name, non-string name) are rejected cleanly, no 500", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+
+    const res = await handleStudio(
+      syncReq([
+        null,
+        { action: "limit", until: null, seenAt: "2026-10-05T00:00:00.000Z" },
+        { name: 42, action: "clear" },
+      ]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SyncBody;
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([
+      { name: "", reason: "malformed entry" },
+      { name: "", reason: "malformed entry" },
+      { name: "", reason: "malformed entry" },
+    ]);
   });
 
   it("two decisions for the same name in one batch are both rejected and neither writes", async () => {
@@ -2378,19 +2598,14 @@ describe("POST /studio/accounts/sync", () => {
     const seenAt = "2026-10-05T00:00:00.000Z";
 
     const res = await handleStudio(
-      authorizedReq("/studio/accounts/sync", {
-        method: "POST",
-        body: JSON.stringify({
-          decisions: [
-            { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: "2026-10-05T05:00:00.000Z", seenAt },
-            { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear" },
-          ],
-        }),
-      }),
+      syncReq([
+        { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: "2026-10-05T05:00:00.000Z", seenAt },
+        { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt },
+      ]),
       testEnv,
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { applied: string[]; rejected: { name: string; reason: string }[] };
+    const body = (await res.json()) as SyncBody;
     expect(body.applied).toEqual([]);
     expect(body.rejected).toEqual([
       { name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "duplicate name in batch" },
@@ -2407,19 +2622,14 @@ describe("POST /studio/accounts/sync", () => {
     const seenAt = "2026-10-05T00:00:00.000Z";
 
     const res = await handleStudio(
-      authorizedReq("/studio/accounts/sync", {
-        method: "POST",
-        body: JSON.stringify({
-          decisions: [
-            { name: "CLAUDE_CODE_OAUTH_TOKEN_NOPE", action: "clear" },
-            { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: null, seenAt },
-          ],
-        }),
-      }),
+      syncReq([
+        { name: "CLAUDE_CODE_OAUTH_TOKEN_NOPE", action: "clear" },
+        { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: null, seenAt },
+      ]),
       testEnv,
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { applied: string[]; rejected: { name: string; reason: string }[] };
+    const body = (await res.json()) as SyncBody;
     expect(body.applied).toEqual(["CLAUDE_CODE_OAUTH_TOKEN"]);
     expect(body.rejected).toHaveLength(1);
     expect(body.rejected[0]!.name).toBe("CLAUDE_CODE_OAUTH_TOKEN_NOPE");
