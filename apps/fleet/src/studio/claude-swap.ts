@@ -15,11 +15,26 @@
  * D1, no process spawn — those live in the CLI verb (step 3) and the Worker
  * route (step 2) that call this module's exports.
  *
+ * Reworked per the maestro's real-probe review of PR #237 (issue #232):
+ * `usageStatus` is "ok" when healthy, not the "active" an earlier draft
+ * invented — any other value means `usage` is null, no pct data at all, and
+ * a reading can ALSO be stale (`usageAgeSeconds` too high) even when
+ * `usageStatus` is "ok". Both gate independently to a new "no-data" action
+ * that never limits or clears. Per-account failures are isolated — a single
+ * malformed entry degrades to "no-data" for that slot only, never throws.
+ *
+ * The scope-add STATUS comment on issue #232 (2026-10-05T09:48:22Z) adds a
+ * second join pass: real fleet slots mostly don't carry a
+ * `CLAUDE_ACCOUNT_<n>_LABEL`, so slots unresolved by label are matched by
+ * RESET TIME instead — the slot's own currently-recorded `until` against an
+ * unclaimed cswap account's `fiveHour`/`sevenDay` `resetsAt`, within +/-5
+ * minutes, only when exactly one candidate qualifies.
+ *
  * `pickHeadroomAccount` (issue #232's item 5) is built and unit-tested here
  * but deliberately NOT wired into src/studio/accounts.ts, failover.ts, or
  * do.ts in this dispatch — those three are CI-enforced one-way-door files
  * (scripts/merge-danger.ts's ONE_WAY_GLOBS); wiring the comparator into the
- * live failover cascade is a follow-up board issue.
+ * live failover cascade is tracked as a separate board issue (#238).
  */
 
 /** One usage window as cswap reports it. */
@@ -33,97 +48,244 @@ export interface CswapScopedWindow extends CswapWindow {
   model: string;
 }
 
-/** One account's usage, as `cswap list --json` reports it. */
+/** One account's usage, as `cswap list --json` reports it.
+ *
+ *  `usageStatus`: "ok" when healthy (the real cswap value). Any other value
+ *  (seen in the wild: "relogin_required", "unavailable") means a failure
+ *  mode — `usage` itself is null, no pct data exists at all.
+ *
+ *  `usageAgeSeconds`: how many seconds old this reading is, self-reported by
+ *  cswap. A reading can be old even when `usageStatus` is "ok" (cswap didn't
+ *  refresh recently) — both conditions gate independently in
+ *  `decideAccountSync`. */
 export interface CswapAccount {
   email: string;
   usageStatus: string;
+  usageAgeSeconds: number;
   usage: {
     fiveHour: CswapWindow;
     sevenDay: CswapWindow & { willLastToReset: boolean };
     scoped: CswapScopedWindow[];
-  };
+  } | null;
 }
+
+/** How old a usage reading may be, in seconds, before it's untrustworthy for
+ *  ANY decision — not just headroom ordering (issue #232 item 5's own "fresh
+ *  (<10 min)" language, reused here as the general staleness gate). */
+export const MAX_USAGE_AGE_SECONDS = 600;
 
 /** One fleet account slot, as `GET /studio/accounts` reports it. `name` is
  *  the secret name (e.g. `CLAUDE_CODE_OAUTH_TOKEN_2`); `label` is the
  *  operator-set `CLAUDE_ACCOUNT_<n>_LABEL` (accounts.ts's `accountLabel`),
- *  or null when unset. */
+ *  or null when unset. `until` is that route's own currently-D1-recorded
+ *  reset time for this slot (account-limit:<slot>'s `until`), used here for
+ *  reset-time matching when no label resolves the slot. */
 export interface FleetAccountSlot {
   name: string;
   label: string | null;
+  until: string | null;
 }
 
-/** One join result per fleet slot. `cswap: null` means unmatched — the
- *  caller distinguishes WHY via `reason`:
- *    - "no-label": the slot has no CLAUDE_ACCOUNT_<n>_LABEL set.
+/** One join result per fleet slot.
+ *    - "label": matched by exact label===email.
+ *    - "inferred": matched by reset-time (no label match, exactly one
+ *      reset-time candidate within the window).
+ *    - "unmapped": no label match and no (or ambiguous) reset-time
+ *      candidate.
  *    - "cswap-missing": cswap itself could not run (binary missing/errored)
- *      — every slot reads this, regardless of label.
- *    - "not-managed": cswap ran fine, but no row's `email` matched this
- *      slot's own label. */
+ *      — every slot reads this, regardless of label/until. */
 export type SlotJoin =
-  | { name: string; label: string; cswap: CswapAccount }
-  | { name: string; label: string | null; cswap: null; reason: "no-label" | "cswap-missing" | "not-managed" };
+  | { name: string; label: string | null; until: string | null; cswap: CswapAccount; matchSource: "label" | "inferred" }
+  | { name: string; label: string | null; until: string | null; cswap: null; matchSource: "unmapped" | "cswap-missing" };
+
+/** +/-5 minutes, per the STATUS comment's own number. */
+export const RESET_MATCH_WINDOW_MS = 5 * 60 * 1000;
+
+function resetsAtCandidates(account: CswapAccount): (string | null)[] {
+  if (account.usage === null) return [];
+  return [account.usage.fiveHour.resetsAt, account.usage.sevenDay.resetsAt];
+}
+
+function withinResetWindow(untilMs: number, account: CswapAccount): boolean {
+  return resetsAtCandidates(account).some((resetsAt) => {
+    if (resetsAt === null) return false;
+    const diff = Math.abs(untilMs - Date.parse(resetsAt));
+    return diff <= RESET_MATCH_WINDOW_MS;
+  });
+}
 
 /**
- * Pure join by `label === email` — exact string match, case-sensitive, no
- * normalization (cswap emails and operator-set labels are both plain
- * strings; the issue implies no normalization anywhere).
+ * Pure join, two passes.
  *
  * `cswapAvailable: false` means cswap itself could not run at all: every
- * slot reads "cswap-missing", regardless of whether it has a label — this
- * is checked FIRST, before the no-label/not-managed distinction, since a
- * missing binary makes the label irrelevant.
+ * slot reads "cswap-missing", regardless of label/until — checked first,
+ * before anything else.
+ *
+ * Pass 0: any email appearing more than once in `cswapAccounts` is a
+ * duplicate — removed from the matching pool entirely, so neither label nor
+ * reset-time matching may ever select it (the minor fix noted in the PR
+ * review: a duplicate must never be silently first-wins).
+ *
+ * Pass 1 (label): for each slot with a non-null label, if the pool holds an
+ * account whose email matches, assign it ("label") and remove it from the
+ * pool — a cswap account backs at most one slot.
+ *
+ * Pass 2 (reset-time): for each slot not resolved in pass 1, if `until` is
+ * non-null, look for exactly one remaining pool account whose
+ * `fiveHour.resetsAt` or `sevenDay.resetsAt` falls within +/-5 min of
+ * `until`. Zero or more than one candidate -> unmapped. Exactly one ->
+ * tentative match.
+ *
+ * Cross-slot collision: if two or more slots tentatively resolve to the SAME
+ * pool account, that collision invalidates ALL of them (a cswap account
+ * cannot correspond to two real fleet slots) — they fall back to unmapped,
+ * and the account stays unconsumed, matching nobody.
  */
 export function joinAccountsToCswap(
   slots: FleetAccountSlot[], cswapAccounts: CswapAccount[], cswapAvailable: boolean,
 ): SlotJoin[] {
+  if (!cswapAvailable) {
+    return slots.map((slot) => ({
+      name: slot.name, label: slot.label, until: slot.until, cswap: null, matchSource: "cswap-missing" as const,
+    }));
+  }
+
+  const emailCounts = new Map<string, number>();
+  for (const a of cswapAccounts) emailCounts.set(a.email, (emailCounts.get(a.email) ?? 0) + 1);
+  const remaining = new Set(cswapAccounts.filter((a) => emailCounts.get(a.email) === 1));
+
+  const resolved = new Map<string, { account: CswapAccount; matchSource: "label" | "inferred" }>();
+
+  // Pass 1: label match.
+  for (const slot of slots) {
+    if (slot.label === null) continue;
+    const match = [...remaining].find((a) => a.email === slot.label);
+    if (match) {
+      resolved.set(slot.name, { account: match, matchSource: "label" });
+      remaining.delete(match);
+    }
+  }
+
+  // Pass 2: reset-time match, for slots not resolved in pass 1.
+  const tentative = new Map<string, CswapAccount>();
+  for (const slot of slots) {
+    if (resolved.has(slot.name)) continue;
+    if (slot.until === null) continue;
+    const untilMs = Date.parse(slot.until);
+    const candidates = [...remaining].filter((a) => withinResetWindow(untilMs, a));
+    if (candidates.length === 1) tentative.set(slot.name, candidates[0]);
+  }
+
+  // Cross-slot collision: group tentative assignments by which account they
+  // resolved to; anything claimed by more than one slot is invalidated.
+  const accountToSlotNames = new Map<CswapAccount, string[]>();
+  for (const [slotName, account] of tentative) {
+    const list = accountToSlotNames.get(account) ?? [];
+    list.push(slotName);
+    accountToSlotNames.set(account, list);
+  }
+  for (const [account, slotNames] of accountToSlotNames) {
+    if (slotNames.length !== 1) continue;
+    resolved.set(slotNames[0], { account, matchSource: "inferred" });
+    remaining.delete(account);
+  }
+
   return slots.map((slot) => {
-    if (!cswapAvailable) return { name: slot.name, label: slot.label, cswap: null, reason: "cswap-missing" as const };
-    if (slot.label === null) return { name: slot.name, label: null, cswap: null, reason: "no-label" as const };
-    const match = cswapAccounts.find((a) => a.email === slot.label);
-    if (!match) return { name: slot.name, label: slot.label, cswap: null, reason: "not-managed" as const };
-    return { name: slot.name, label: slot.label, cswap: match };
+    const match = resolved.get(slot.name);
+    if (match) return { name: slot.name, label: slot.label, until: slot.until, cswap: match.account, matchSource: match.matchSource };
+    return { name: slot.name, label: slot.label, until: slot.until, cswap: null, matchSource: "unmapped" as const };
   });
 }
 
 /** The default pct at or above which a window counts as limited. */
 export const DEFAULT_LIMIT_THRESHOLD_PCT = 95;
 
-/** The sync decision for one slot. */
+/** The sync decision for one slot.
+ *
+ *  "no-data": the join found a real cswap account, but its reading isn't
+ *  trustworthy (failed status, no usage, stale, or malformed shape) — never
+ *  limit, never clear, same "no D1 write" treatment as "unmanaged".
+ *
+ *  `until` on "limit" is ALWAYS string | null, never undefined — a window
+ *  with no resetsAt produces `until: null` explicitly. */
 export type SyncDecision =
   | { name: string; action: "limit"; until: string | null; seenAt: string }
-  | { name: string; action: "clear" }
-  | { name: string; action: "unmanaged"; reason: "no-label" | "cswap-missing" | "not-managed" };
+  | { name: string; action: "clear"; seenAt: string }
+  | { name: string; action: "unmanaged" }
+  | { name: string; action: "no-data"; reason: string };
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+function isValidWindow(w: unknown): w is CswapWindow {
+  if (typeof w !== "object" || w === null) return false;
+  const win = w as Record<string, unknown>;
+  return isFiniteNumber(win.pct) && (win.resetsAt === null || typeof win.resetsAt === "string");
+}
+
+function isValidScopedWindow(w: unknown): w is CswapScopedWindow {
+  if (!isValidWindow(w)) return false;
+  return typeof (w as unknown as Record<string, unknown>).model === "string";
+}
+
+function isValidUsage(usage: unknown): usage is NonNullable<CswapAccount["usage"]> {
+  if (typeof usage !== "object" || usage === null) return false;
+  const u = usage as Record<string, unknown>;
+  if (!isValidWindow(u.fiveHour) || !isValidWindow(u.sevenDay)) return false;
+  return typeof (u.sevenDay as unknown as Record<string, unknown>).willLastToReset === "boolean"
+    && Array.isArray(u.scoped) && u.scoped.every(isValidScopedWindow);
+}
 
 /**
  * pct >= thresholdPct on EITHER usage.fiveHour.pct, usage.sevenDay.pct, OR
  * any usage.scoped[].pct => "limit", `until` is the SPECIFIC window's own
- * resetsAt that tripped it — fiveHour's own resetsAt if fiveHour tripped,
- * sevenDay's if sevenDay tripped, a scoped window's own resetsAt if a
- * scoped model tripped it. Checked in that order; the first window to trip
- * wins (so a case where more than one window is simultaneously over
- * threshold still picks a single, well-defined `until`).
+ * resetsAt that tripped it (explicit `null` when that window has none,
+ * never undefined). Checked in that order; the first window to trip wins.
  *
  * All three below threshold => "clear", unconditionally — this is also the
  * dead-row clear path: a fresh low-pct reading is itself the "operator
- * re-login proved it's alive" signal the issue describes. This function
- * knows nothing about `dead` at all; that is the caller's/route's own
- * concern of which D1 helper (writeFleetAccountLimit vs
- * clearFleetAccountLimit) to call.
+ * re-login proved it's alive" signal the issue describes.
  *
- * An unjoined slot (`join.cswap === null`) always returns "unmanaged" with
- * its own `reason`, never defaults to limit or clear.
+ * Trustworthiness is validated FIRST, defensively, before any threshold
+ * logic runs — this function never throws, by construction, for any input
+ * shape:
+ *   - `usageStatus !== "ok"` -> "no-data" (failure mode, no pct data).
+ *   - `usage === null` -> "no-data".
+ *   - `usageAgeSeconds >= MAX_USAGE_AGE_SECONDS` -> "no-data" (stale, even
+ *     if usageStatus is "ok").
+ *   - malformed usage shape (missing/non-numeric fields, non-array scoped)
+ *     -> "no-data".
+ *
+ * An unjoined slot (`join.cswap === null`) always returns "unmanaged",
+ * never defaults to limit or clear — which of "unmapped"/"cswap-missing" it
+ * was lives on the join's own `matchSource`, not here.
  */
 export function decideAccountSync(
   join: SlotJoin, now: Date, thresholdPct: number = DEFAULT_LIMIT_THRESHOLD_PCT,
 ): SyncDecision {
-  if (join.cswap === null) return { name: join.name, action: "unmanaged", reason: join.reason };
-  const { fiveHour, sevenDay, scoped } = join.cswap.usage;
-  if (fiveHour.pct >= thresholdPct) return { name: join.name, action: "limit", until: fiveHour.resetsAt, seenAt: now.toISOString() };
-  if (sevenDay.pct >= thresholdPct) return { name: join.name, action: "limit", until: sevenDay.resetsAt, seenAt: now.toISOString() };
+  if (join.cswap === null) return { name: join.name, action: "unmanaged" };
+  const cswap = join.cswap;
+
+  if (cswap.usageStatus !== "ok") {
+    return { name: join.name, action: "no-data", reason: `usageStatus: ${cswap.usageStatus}` };
+  }
+  if (cswap.usage === null) {
+    return { name: join.name, action: "no-data", reason: "no usage data" };
+  }
+  if (!isFiniteNumber(cswap.usageAgeSeconds) || cswap.usageAgeSeconds >= MAX_USAGE_AGE_SECONDS) {
+    return { name: join.name, action: "no-data", reason: `usage data is ${cswap.usageAgeSeconds}s old (>= ${MAX_USAGE_AGE_SECONDS}s)` };
+  }
+  if (!isValidUsage(cswap.usage)) {
+    return { name: join.name, action: "no-data", reason: "malformed usage shape" };
+  }
+
+  const { fiveHour, sevenDay, scoped } = cswap.usage;
+  if (fiveHour.pct >= thresholdPct) return { name: join.name, action: "limit", until: fiveHour.resetsAt ?? null, seenAt: now.toISOString() };
+  if (sevenDay.pct >= thresholdPct) return { name: join.name, action: "limit", until: sevenDay.resetsAt ?? null, seenAt: now.toISOString() };
   const trippedScoped = scoped.find((w) => w.pct >= thresholdPct);
-  if (trippedScoped) return { name: join.name, action: "limit", until: trippedScoped.resetsAt, seenAt: now.toISOString() };
-  return { name: join.name, action: "clear" };
+  if (trippedScoped) return { name: join.name, action: "limit", until: trippedScoped.resetsAt ?? null, seenAt: now.toISOString() };
+  return { name: join.name, action: "clear", seenAt: now.toISOString() };
 }
 
 /** Item 5's pure comparator input: a candidate account with however fresh
@@ -136,9 +298,13 @@ export interface HeadroomCandidate {
 
 const DEFAULT_FRESHNESS_MS = 10 * 60 * 1000;
 
-/** maxPct(a) = max(fiveHour.pct, sevenDay.pct). */
+/** maxPct(a) = max(fiveHour.pct, sevenDay.pct). Callers of
+ *  `pickHeadroomAccount` only ever pass candidates with a real usage
+ *  reading already in hand (item 5 is unchanged/out of scope for this
+ *  rework — see this module's own header), so `usage` is asserted non-null
+ *  here rather than re-validated. */
 function maxPct(cswap: CswapAccount): number {
-  return Math.max(cswap.usage.fiveHour.pct, cswap.usage.sevenDay.pct);
+  return Math.max(cswap.usage!.fiveHour.pct, cswap.usage!.sevenDay.pct);
 }
 
 /**
