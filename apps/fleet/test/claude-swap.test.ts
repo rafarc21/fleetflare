@@ -205,6 +205,52 @@ describe("joinAccountsToCswap", () => {
       { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: null, until: null, cswap: null, matchSource: "cswap-missing" },
     ]);
   });
+
+  // Maestro review round 2, finding 3: a malformed cswap entry anywhere in
+  // the list must never crash the join — it is dropped from the matching
+  // pool entirely, up front, before any label/reset-time logic runs. Every
+  // case below uses an UNLABELED slot carrying a non-null `until` — the
+  // exact trigger the maestro named: it forces the reset-time pass to
+  // actually touch the malformed entry's `usage.fiveHour`/`sevenDay`, which
+  // is where the pre-fix crash happened.
+  it("a cswap entry missing usage.fiveHour entirely does not crash the reset-time join -- unmapped, never throws", () => {
+    const malformed = {
+      email: "missingfivehour@example.com", usageStatus: "ok", usageAgeSeconds: 10,
+      usage: {
+        sevenDay: { pct: 1, resetsAt: "2026-10-11T00:00:00Z", willLastToReset: true },
+        scoped: [],
+      },
+    } as unknown as CswapAccount;
+    const slots: FleetAccountSlot[] = [{ name: "CLAUDE_CODE_OAUTH_TOKEN_MALFORMED_1", label: null, until: "2026-10-05T14:00:00Z" }];
+    let joins: SlotJoin[] | undefined;
+    expect(() => { joins = joinAccountsToCswap(slots, [malformed], true); }).not.toThrow();
+    expect(joins![0]).toEqual({
+      name: "CLAUDE_CODE_OAUTH_TOKEN_MALFORMED_1", label: null, until: "2026-10-05T14:00:00Z", cswap: null, matchSource: "unmapped",
+    });
+  });
+
+  it("a cswap entry with usage: {} (present but empty) does not crash the reset-time join -- unmapped, never throws", () => {
+    const malformed = {
+      email: "emptyusage@example.com", usageStatus: "ok", usageAgeSeconds: 10,
+      usage: {},
+    } as unknown as CswapAccount;
+    const slots: FleetAccountSlot[] = [{ name: "CLAUDE_CODE_OAUTH_TOKEN_MALFORMED_2", label: null, until: "2026-10-05T14:00:00Z" }];
+    let joins: SlotJoin[] | undefined;
+    expect(() => { joins = joinAccountsToCswap(slots, [malformed], true); }).not.toThrow();
+    expect(joins![0]).toEqual({
+      name: "CLAUDE_CODE_OAUTH_TOKEN_MALFORMED_2", label: null, until: "2026-10-05T14:00:00Z", cswap: null, matchSource: "unmapped",
+    });
+  });
+
+  it("a bare null inside cswapAccounts does not crash the reset-time join -- unmapped, never throws, .email is never read off it", () => {
+    const cswapAccounts = [null] as unknown as CswapAccount[];
+    const slots: FleetAccountSlot[] = [{ name: "CLAUDE_CODE_OAUTH_TOKEN_MALFORMED_3", label: null, until: "2026-10-05T14:00:00Z" }];
+    let joins: SlotJoin[] | undefined;
+    expect(() => { joins = joinAccountsToCswap(slots, cswapAccounts, true); }).not.toThrow();
+    expect(joins![0]).toEqual({
+      name: "CLAUDE_CODE_OAUTH_TOKEN_MALFORMED_3", label: null, until: "2026-10-05T14:00:00Z", cswap: null, matchSource: "unmapped",
+    });
+  });
 });
 
 describe("decideAccountSync", () => {
@@ -331,7 +377,10 @@ describe("decideAccountSync", () => {
 
   it("all three below threshold -> clear", () => {
     const decision = decideAccountSync(joinFor(UNDER_THRESHOLD), now);
-    expect(decision).toEqual({ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: now.toISOString() });
+    expect(decision).toEqual({
+      name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: now.toISOString(),
+      usageAgeSeconds: UNDER_THRESHOLD.usageAgeSeconds,
+    });
   });
 
   it("exactly at threshold (95) counts as limit, not clear", () => {

@@ -493,18 +493,29 @@ export async function handleStudio(
    *
    * MAJOR 6: a "clear" must never stomp a FRESHER sighting a different path
    * (failover.ts's own pane-capture detector, untouched by this feature)
-   * already wrote to this exact row after this usage snapshot was taken. The
-   * request's own top-level `usageFetchedAt` (when the CLI took the whole
-   * cswap snapshot this batch's decisions were computed from) is the
-   * yardstick: before deleting, this route reads the row's current state —
-   * if one exists and its `seenAt` is >= `usageFetchedAt`, the delete is
-   * skipped (reported in the new `skipped` field, reason "newer row
-   * exists") rather than applied or rejected, since it is a correct no-op,
-   * not an error. Absent row, or one older than `usageFetchedAt`: delete
+   * already wrote to this exact row after this usage snapshot was taken.
+   *
+   * Reworked per the maestro's review-round-2 finding 6: the request's own
+   * top-level `usageFetchedAt` is ONLY the instant the CLI subprocess ran
+   * `cswap list --json` — it is NOT when this particular account's own
+   * reading was actually taken. Each cswap account self-reports its own
+   * `usageAgeSeconds`, which can make its real DATA time several minutes
+   * earlier than `usageFetchedAt`. A pane-capture sighting landing in that
+   * gap is genuinely fresher than the reading, even though it predates
+   * `usageFetchedAt` — comparing against `usageFetchedAt` directly would
+   * wrongly clear it. So the real yardstick is THIS decision's own
+   * `dataTime = usageFetchedAt − usageAgeSeconds * 1000` (per-decision
+   * `usageAgeSeconds`, optional on the wire for backward compatibility —
+   * absent/invalid falls back to `usageFetchedAt` itself, i.e. the old
+   * behaviour, same as age 0): before deleting, this route reads the row's
+   * current state — if one exists and its `seenAt` is >= `dataTime`, the
+   * delete is skipped (reported in the new `skipped` field, reason "newer
+   * row exists") rather than applied or rejected, since it is a correct
+   * no-op, not an error. Absent row, or one older than `dataTime`: delete
    * proceeds as before, reported in `applied`. `usageFetchedAt` itself is
-   * the one field validated for the WHOLE request (missing/unparseable ->
-   * 400) — every "clear" in the batch depends on it meaning something, and
-   * there is no sane partial-success story for a garbage snapshot time.
+   * still the one field validated for the WHOLE request (missing/unparseable
+   * -> 400) — every "clear" in the batch depends on it meaning something,
+   * and there is no sane partial-success story for a garbage snapshot time.
    *
    * MINOR: every "limit" write from this route carries `source: "usage"` —
    * failover.ts's own pane-capture writes never set it, so a row's `source`
@@ -631,10 +642,21 @@ export async function handleStudio(
           rejected.push({ name, reason: "invalid seenAt" });
           return;
         }
+        // Finding 6 (maestro review round 2): the freshness yardstick is
+        // THIS account's own data time, not the shared `usageFetchedAt` —
+        // see this route's own doc comment above for why. `usageAgeSeconds`
+        // is optional on the wire: absent or not a finite non-negative
+        // number falls back to age 0 (dataTime === usageFetchedAt), the same
+        // behaviour this route had before this fix.
+        const rawUsageAgeSeconds = (entry as Record<string, unknown>).usageAgeSeconds;
+        const usageAgeSeconds = typeof rawUsageAgeSeconds === "number" && Number.isFinite(rawUsageAgeSeconds) && rawUsageAgeSeconds >= 0
+          ? rawUsageAgeSeconds
+          : 0;
+        const dataTimeMs = Date.parse(usageFetchedAt) - usageAgeSeconds * 1000;
         // MAJOR 6: don't stomp a fresher sighting a different path already
-        // recorded after this usage snapshot was taken.
+        // recorded after this account's reading was actually taken.
         const current = await readOneAccountLimit(env.DB, name);
-        if (current && Date.parse(current.seenAt) >= Date.parse(usageFetchedAt)) {
+        if (current && Date.parse(current.seenAt) >= dataTimeMs) {
           skipped.push({ name, reason: "newer row exists" });
           return;
         }

@@ -2487,6 +2487,40 @@ describe("POST /studio/accounts/sync", () => {
     expect(limits["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ until: "2026-10-05T05:00:00.000Z", seenAt: fresherSeenAt });
   });
 
+  // Maestro review round 2, finding 6: the freshness yardstick for a "clear"
+  // must be THIS account's own data time (usageFetchedAt - usageAgeSeconds),
+  // never the bare usageFetchedAt the CLI subprocess happened to run at. The
+  // maestro's own example: a 499s-old reading, row seen ~4 minutes before the
+  // CLI run. The row's seenAt (23:56:00) is OLDER than usageFetchedAt
+  // (00:00:00 the next day) but NEWER than the reading's real data time
+  // (usageFetchedAt - 499s = 23:51:41) -- so the row is genuinely fresher
+  // than the usage reading once the reading's own staleness is accounted
+  // for, and must survive. The OLD (buggy) comparison against bare
+  // usageFetchedAt would have wrongly cleared it (see this test ported to a
+  // RED run against the pre-fix code in the dispatch's own regression-proof
+  // step).
+  it("finding 6 regression: a row seenAt before usageFetchedAt but after the per-account data time (usageFetchedAt - usageAgeSeconds) survives, not cleared", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const rowSeenAt = "2026-10-04T23:56:00.000Z"; // ~4 minutes before the CLI run
+    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", "2026-10-05T05:00:00.000Z", rowSeenAt);
+
+    const res = await handleStudio(
+      syncReq(
+        [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: "2026-10-05T00:00:00.000Z", usageAgeSeconds: 499 }],
+        "2026-10-05T00:00:00.000Z", // usageFetchedAt -- the CLI run's own instant
+      ),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      applied: [], rejected: [], skipped: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "newer row exists" }],
+    });
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(limits["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ until: "2026-10-05T05:00:00.000Z", seenAt: rowSeenAt });
+  });
+
   it("a clear decision also clears a dead:true row entirely", async () => {
     authorized();
     const { testEnv } = envWithFakeStudio();

@@ -16,7 +16,7 @@ const LIMITED: AccountCurrentState = { dead: false, until: "2026-10-05T14:00:00Z
 const DEAD: AccountCurrentState = { dead: true, until: null, seenAt: "2026-10-05T12:00:00Z" };
 
 const LIMIT_DECISION: SyncDecision = { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: "2026-10-05T14:00:00Z", seenAt: "2026-10-05T12:00:00Z" };
-const CLEAR_DECISION: SyncDecision = { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: "2026-10-05T12:00:00Z" };
+const CLEAR_DECISION: SyncDecision = { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: "2026-10-05T12:00:00Z", usageAgeSeconds: 10 };
 const UNMANAGED_DECISION: SyncDecision = { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "unmanaged" };
 const NO_DATA_DECISION: SyncDecision = { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "no-data", reason: "usageStatus: relogin_required" };
 

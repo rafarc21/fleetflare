@@ -115,11 +115,37 @@ function withinResetWindow(untilMs: number, account: CswapAccount): boolean {
 }
 
 /**
+ * Join-time shape guard (maestro review round 2, finding 3): `cswapAccounts`
+ * is untrusted (parsed from a subprocess's stdout, same provenance as the
+ * JSON `decideAccountSync` already treats defensively) — a genuinely
+ * malformed entry (a bare `null` in the array, a non-object, a non-string/
+ * empty `email`, or a non-null `usage` that isn't well-formed) must never
+ * reach label matching (`.email`) or reset-time matching
+ * (`.usage.fiveHour.resetsAt`/`.usage.sevenDay.resetsAt`) — both throw the
+ * instant they touch it. Reuses `isValidUsage`, the SAME shape validator
+ * `decideAccountSync` already uses for this exact purpose, rather than a
+ * second copy of it. A failing entry is treated as entirely ABSENT from the
+ * matching pool — it cannot be matched by label OR reset-time, same as if it
+ * were never in `cswapAccounts` at all. */
+function isValidCswapAccountForJoin(a: unknown): a is CswapAccount {
+  if (typeof a !== "object" || a === null) return false;
+  const acc = a as Record<string, unknown>;
+  if (typeof acc.email !== "string" || acc.email.length === 0) return false;
+  return acc.usage === null || isValidUsage(acc.usage);
+}
+
+/**
  * Pure join, two passes.
  *
  * `cswapAvailable: false` means cswap itself could not run at all: every
  * slot reads "cswap-missing", regardless of label/until — checked first,
  * before anything else.
+ *
+ * Pass -1 (shape validation, maestro review round 2 finding 3): every entry
+ * in `cswapAccounts` is validated ONCE, up front, by
+ * `isValidCswapAccountForJoin` — a malformed entry is dropped from the pool
+ * entirely before pass 0 even runs, so it can never reach label or
+ * reset-time matching (both would otherwise throw on it).
  *
  * Pass 0: any email appearing more than once in `cswapAccounts` is a
  * duplicate — removed from the matching pool entirely, so neither label nor
@@ -150,9 +176,14 @@ export function joinAccountsToCswap(
     }));
   }
 
+  // Pass -1 (shape validation, applied ONCE, up front): drop every malformed
+  // entry from the pool before any label/reset-time matching logic runs —
+  // see `isValidCswapAccountForJoin`'s own doc comment.
+  const validAccounts = cswapAccounts.filter(isValidCswapAccountForJoin);
+
   const emailCounts = new Map<string, number>();
-  for (const a of cswapAccounts) emailCounts.set(a.email, (emailCounts.get(a.email) ?? 0) + 1);
-  const remaining = new Set(cswapAccounts.filter((a) => emailCounts.get(a.email) === 1));
+  for (const a of validAccounts) emailCounts.set(a.email, (emailCounts.get(a.email) ?? 0) + 1);
+  const remaining = new Set(validAccounts.filter((a) => emailCounts.get(a.email) === 1));
 
   const resolved = new Map<string, { account: CswapAccount; matchSource: "label" | "inferred" }>();
 
@@ -207,10 +238,18 @@ export const DEFAULT_LIMIT_THRESHOLD_PCT = 95;
  *  limit, never clear, same "no D1 write" treatment as "unmanaged".
  *
  *  `until` on "limit" is ALWAYS string | null, never undefined — a window
- *  with no resetsAt produces `until: null` explicitly. */
+ *  with no resetsAt produces `until: null` explicitly.
+ *
+ *  `usageAgeSeconds` on "clear" (maestro review round 2, finding 6): the
+ *  cswap reading this decision was computed FROM is itself up to this many
+ *  seconds stale — `seenAt` (this decision's own wall-clock instant) minus
+ *  `usageAgeSeconds` is the real DATA time the reading describes, which is
+ *  what a "clear" must be judged fresher-than, never the wall-clock instant
+ *  the whole batch's snapshot happened to be taken at. Threaded through to
+ *  routes.ts so its MAJOR 6 freshness check can anchor to the right clock. */
 export type SyncDecision =
   | { name: string; action: "limit"; until: string | null; seenAt: string }
-  | { name: string; action: "clear"; seenAt: string }
+  | { name: string; action: "clear"; seenAt: string; usageAgeSeconds: number }
   | { name: string; action: "unmanaged" }
   | { name: string; action: "no-data"; reason: string };
 
@@ -285,7 +324,7 @@ export function decideAccountSync(
   if (sevenDay.pct >= thresholdPct) return { name: join.name, action: "limit", until: sevenDay.resetsAt ?? null, seenAt: now.toISOString() };
   const trippedScoped = scoped.find((w) => w.pct >= thresholdPct);
   if (trippedScoped) return { name: join.name, action: "limit", until: trippedScoped.resetsAt ?? null, seenAt: now.toISOString() };
-  return { name: join.name, action: "clear", seenAt: now.toISOString() };
+  return { name: join.name, action: "clear", seenAt: now.toISOString(), usageAgeSeconds: cswap.usageAgeSeconds };
 }
 
 /** Item 5's pure comparator input: a candidate account with however fresh

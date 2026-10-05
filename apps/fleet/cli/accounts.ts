@@ -13,7 +13,7 @@
 // write route. `fleet accounts sync` is the one that writes.
 import { accessHeaders, type Credentials } from "./fleet";
 import {
-  joinAccountsToCswap, decideAccountSync, type CswapAccount, type FleetAccountSlot, type SyncDecision,
+  joinAccountsToCswap, decideAccountSync, type CswapAccount, type FleetAccountSlot, type SlotJoin, type SyncDecision,
 } from "../src/studio/claude-swap";
 import {
   formatAccountsTable, snapshotsEqual, buildLabelSuggestions, type AccountSnapshotRow, type AccountCurrentState,
@@ -128,11 +128,29 @@ export interface AccountsSnapshot {
  * every other slot either — one bad row degrades to its own error state,
  * same posture routes.ts's `renderStudioGrid` already takes for a bad DO
  * round trip.
+ *
+ * Maestro review round 2, finding 3: `joinAccountsToCswap` itself is now
+ * ALSO provably non-throwing by construction (every `cswapAccounts` entry
+ * is shape-validated up front, before any label/reset-time logic runs — see
+ * its own doc comment) — this is not a defensive rewrite of that fix, just
+ * one extra belt-and-suspenders `try`/`catch` around the one call that sits
+ * outside the per-slot loop below (it needs cross-slot visibility for the
+ * collision check, so it runs once over the whole batch): a future
+ * regression there degrades to every slot reading "unmapped" rather than
+ * killing the whole command, never load-bearing today.
  */
 export async function buildAccountsSnapshot(creds: Credentials, fetchedAt: Date = new Date()): Promise<AccountsSnapshot> {
   const [apiRows, cswap] = await Promise.all([fetchAccountsApi(creds), readCswapList()]);
   const slots: FleetAccountSlot[] = apiRows.map((r) => ({ name: r.name, label: r.label, until: r.until }));
-  const joins = joinAccountsToCswap(slots, cswap.available ? cswap.accounts : [], cswap.available);
+  let joins: SlotJoin[];
+  try {
+    joins = joinAccountsToCswap(slots, cswap.available ? cswap.accounts : [], cswap.available);
+  } catch (err) {
+    console.error(`fleet accounts: join failed, every slot reads unmapped (${errText(err)})`);
+    joins = slots.map((slot) => ({
+      name: slot.name, label: slot.label, until: slot.until, cswap: null, matchSource: "unmapped" as const,
+    }));
+  }
   const rows = apiRows.map((r, i): AccountSnapshotRow => {
     try {
       const join = joins[i]!;
