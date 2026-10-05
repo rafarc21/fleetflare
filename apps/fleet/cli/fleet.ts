@@ -30,6 +30,7 @@ import { parseStudioId } from "../src/studio/ids";
 import { parseGitRemote, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
 import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior, cmdJuniorStats } from "./junior";
+import { cmdAccounts, cmdAccountsSync } from "./accounts";
 import { sweepAllPages, type SweepPage } from "./junior-sweep";
 import { reapTerminalAll, type TerminalPage } from "./reap-terminal";
 import { runTaskStateTransition, type TaskStateFetchResult } from "../src/studio/task-state";
@@ -2685,6 +2686,10 @@ async function main(): Promise<void> {
       // Only "stats" reaches here — enable/disable/status already returned
       // above, before loadCredentials(), per #218's early-dispatch guard.
       return cmdJuniorStats(creds, parsed.since);
+    case "accounts":
+      return parsed.sync
+        ? cmdAccountsSync(creds, { watch: parsed.watch, json: parsed.json })
+        : cmdAccounts(creds, { watch: parsed.watch, json: parsed.json });
   }
 }
 
