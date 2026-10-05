@@ -9,6 +9,7 @@
  */
 import { getFlag, setFlag, deleteFlag } from "../state";
 import { accountLimitStateKey, encodeAccountLimitState, decodeAccountLimitState } from "./rate-limit";
+import type { AccountLimitState } from "./rate-limit";
 import type { AccountLimits, ClaudeAccount } from "./accounts";
 
 /**
@@ -38,15 +39,40 @@ export async function readFleetAccountLimits(db: D1Database, accounts: ClaudeAcc
  *  unchanged to `encodeAccountLimitState` — no auto-expiry TTL logic here,
  *  the D1 row itself is written with no different treatment than any other
  *  account-limit sighting; only `accountIsFree`'s own read of it treats it
- *  as permanent. */
+ *  as permanent. Issue #232: `source` is passed through the same way — the
+ *  sync route (routes.ts) always passes `"usage"` on its own "limit" writes;
+ *  every other caller (failover.ts's pane-capture path) omits it, same as it
+ *  omits `dead` today. */
 export async function writeFleetAccountLimit(
-  db: D1Database, name: string, until: string | null, seenAt: string, dead?: true,
+  db: D1Database, name: string, until: string | null, seenAt: string, dead?: true, source?: "usage",
 ): Promise<void> {
   await setFlag(
     db, accountLimitStateKey(name),
-    encodeAccountLimitState({ until, seenAt, ...(dead ? { dead: true as const } : {}) }),
+    encodeAccountLimitState({
+      until, seenAt,
+      ...(dead ? { dead: true as const } : {}),
+      ...(source ? { source } : {}),
+    }),
     Date.parse(seenAt),
   );
+}
+
+/**
+ * Issue #232 — the single-account read the sync route (routes.ts) needs
+ * PER DECISION, before it writes: whether this row currently carries
+ * `dead: true` (a "limit" write must never drop it — see
+ * `writeFleetAccountLimit`'s own call site there) and, for a "clear"
+ * decision, whether the row's own `seenAt` is already fresher than the
+ * usage snapshot being applied (a "clear" must never stomp a sighting a
+ * different path — e.g. failover.ts's pane-capture detector — recorded
+ * after this snapshot was taken).
+ *
+ * `readFleetAccountLimits` above reads MANY accounts in parallel, built for
+ * the GET listing route; this is the per-decision counterpart, one row at a
+ * time, kept as small/pure a persistence function as the rest of this file.
+ */
+export async function readOneAccountLimit(db: D1Database, name: string): Promise<AccountLimitState | null> {
+  return decodeAccountLimitState(await getFlag(db, accountLimitStateKey(name)));
 }
 
 /**
