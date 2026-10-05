@@ -11,7 +11,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CSWAP_LIST_FIXTURE, OVER_FIVE_HOUR, UNDER_THRESHOLD } from "../fixtures/cswap-list";
+import { CSWAP_LIST_FIXTURE, OVER_FIVE_HOUR, UNDER_THRESHOLD, RELOGIN_REQUIRED, STALE_OK } from "../fixtures/cswap-list";
 
 const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
 
@@ -47,9 +47,16 @@ function writeFakeCswap(accounts: unknown[]): string {
   return dir;
 }
 
-interface SyncCall { decisions: { name: string; action: string; until?: string | null; seenAt?: string }[] }
+interface SyncCall { usageFetchedAt: string; decisions: { name: string; action: string; until?: string | null; seenAt?: string }[] }
 
-function startWorker(accountsRows: { name: string; label: string | null; dead: boolean; until: string | null; seenAt: string | null }[]) {
+/** `syncResponse` overrides the worker's own `{applied, rejected, skipped}`
+ *  answer (default: every posted decision applied, nothing rejected/skipped)
+ *  — used by the "skipped" coverage below, which needs the fake Worker to
+ *  answer with a `skipped` entry rather than echoing every name as applied. */
+function startWorker(
+  accountsRows: { name: string; label: string | null; dead: boolean; until: string | null; seenAt: string | null }[],
+  syncResponse?: (body: SyncCall) => { applied: string[]; rejected: { name: string; reason: string }[]; skipped: { name: string; reason: string }[] },
+) {
   const syncCalls: SyncCall[] = [];
   const server = Bun.serve({
     port: 0,
@@ -61,7 +68,8 @@ function startWorker(accountsRows: { name: string; label: string | null; dead: b
       if (url.pathname === "/studio/accounts/sync" && req.method === "POST") {
         const body = (await req.json()) as SyncCall;
         syncCalls.push(body);
-        return Response.json({ applied: body.decisions.map((d) => d.name), rejected: [] });
+        if (syncResponse) return Response.json(syncResponse(body));
+        return Response.json({ applied: body.decisions.map((d) => d.name), rejected: [], skipped: [] });
       }
       return new Response("not found", { status: 404 });
     },
@@ -132,7 +140,8 @@ describe("fleet accounts", () => {
     expect(r.out).toContain("primary@example.com");
     expect(r.out).toContain("97%");
     expect(r.out).toContain("free"); // ROW STATE: D1 currently holds nothing
-    expect(r.out).toContain(OVER_FIVE_HOUR.usage.fiveHour.resetsAt!); // WOULD: limit until this
+    expect(r.out).toContain(OVER_FIVE_HOUR.usage!.fiveHour.resetsAt!); // WOULD: limit until this
+    expect(r.out).toContain("label"); // MATCH column: matched by label===email
     expect(syncCalls.length).toBe(0);
   });
 
@@ -146,16 +155,62 @@ describe("fleet accounts", () => {
     server.stop(true);
 
     expect(r.code).toBe(0);
-    const rows = JSON.parse(r.out) as { name: string; decision: { action: string } }[];
+    const rows = JSON.parse(r.out) as { name: string; matchSource: string; decision: { action: string } }[];
     expect(rows).toHaveLength(3);
     const byName = Object.fromEntries(rows.map((row) => [row.name, row]));
     expect(byName["CLAUDE_CODE_OAUTH_TOKEN"]!.decision.action).toBe("limit");
+    expect(byName["CLAUDE_CODE_OAUTH_TOKEN"]!.matchSource).toBe("label");
     expect(byName["CLAUDE_CODE_OAUTH_TOKEN_2"]!.decision.action).toBe("clear");
     expect(byName["CLAUDE_CODE_OAUTH_TOKEN_3"]!.decision.action).toBe("unmanaged");
+    expect(byName["CLAUDE_CODE_OAUTH_TOKEN_3"]!.matchSource).toBe("unmapped");
     expect(syncCalls.length).toBe(0);
   });
 
-  test("missing cswap binary: every slot reads unmanaged, table still prints, no crash", async () => {
+  // Issue #232 code review finding, this dispatch's own item 1: cswap's own
+  // failure-status (RELOGIN_REQUIRED) and stale-but-otherwise-ok (STALE_OK)
+  // accounts both gate to "no-data" — never "unmanaged" — distinctly from a
+  // slot with genuinely no label/reset-time match at all. Labels two slots
+  // straight onto those two fixtures (label===email, so the join is a clean
+  // "label" match either way) and leaves a third slot with no label and no
+  // `until` to exercise the genuinely-unmapped case side by side.
+  test("a failed-status and a stale-but-ok cswap reading both read no-data, distinctly from unmanaged", async () => {
+    const home = tmpDir("accounts-home-");
+    const cswapDir = writeFakeCswap([RELOGIN_REQUIRED, STALE_OK]);
+    const slots = [
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", label: RELOGIN_REQUIRED.email, dead: false, until: null, seenAt: null },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: STALE_OK.email, dead: false, until: null, seenAt: null },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_3", label: null, dead: false, until: null, seenAt: null },
+    ];
+    const { server, syncCalls } = startWorker(slots);
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await run(["accounts", "--json"], home, cswapDir);
+
+    expect(r.code).toBe(0);
+    const rows = JSON.parse(r.out) as { name: string; matchSource: string; decision: { action: string; reason?: string } }[];
+    const byName = Object.fromEntries(rows.map((row) => [row.name, row]));
+    expect(byName["CLAUDE_CODE_OAUTH_TOKEN"]!.matchSource).toBe("label");
+    expect(byName["CLAUDE_CODE_OAUTH_TOKEN"]!.decision.action).toBe("no-data");
+    expect(byName["CLAUDE_CODE_OAUTH_TOKEN"]!.decision.reason).toContain("relogin_required");
+    expect(byName["CLAUDE_CODE_OAUTH_TOKEN_2"]!.matchSource).toBe("label");
+    expect(byName["CLAUDE_CODE_OAUTH_TOKEN_2"]!.decision.action).toBe("no-data");
+    expect(byName["CLAUDE_CODE_OAUTH_TOKEN_2"]!.decision.reason).toContain("900s old");
+    expect(byName["CLAUDE_CODE_OAUTH_TOKEN_3"]!.matchSource).toBe("unmapped");
+    expect(byName["CLAUDE_CODE_OAUTH_TOKEN_3"]!.decision.action).toBe("unmanaged");
+    expect(syncCalls.length).toBe(0);
+
+    // Plain-text table: the two no-data rows read "no data (...)" in WOULD,
+    // the genuinely-unmapped row reads a bare "-" — never the same text.
+    const r2 = await run(["accounts"], home, cswapDir);
+    server.stop(true);
+    expect(r2.out).toContain("no data (usageStatus: relogin_required)");
+    expect(r2.out).toContain("no data (usage data is 900s old");
+    const lines = r2.out.split("\n");
+    const unmappedLine = lines.find((l) => l.startsWith("CLAUDE_CODE_OAUTH_TOKEN_3"))!;
+    expect(unmappedLine.trim().endsWith("-")).toBe(true);
+  });
+
+  test("missing cswap binary: every slot reads unmanaged (matchSource cswap-missing), table still prints, no crash", async () => {
     const home = tmpDir("accounts-home-");
     const { server, syncCalls } = startWorker(ACCOUNT_SLOTS);
     writeCredentials(home, `http://127.0.0.1:${server.port}`);
@@ -167,13 +222,101 @@ describe("fleet accounts", () => {
     server.stop(true);
 
     expect(r.code).toBe(0);
-    const rows = JSON.parse(r.out) as { name: string; decision: { action: string; reason?: string } }[];
+    const rows = JSON.parse(r.out) as { name: string; matchSource: string; decision: { action: string } }[];
     expect(rows).toHaveLength(3);
     for (const row of rows) {
       expect(row.decision.action).toBe("unmanaged");
-      expect(row.decision.reason).toBe("cswap-missing");
+      // "cswap-missing" is the JOIN's own matchSource now, not a decision
+      // reason — decideAccountSync's "unmanaged" carries no `reason` field
+      // at all (claude-swap.ts's SyncDecision union).
+      expect(row.matchSource).toBe("cswap-missing");
     }
     expect(syncCalls.length).toBe(0);
+  });
+
+  // This dispatch's item 4: a slot resolved by reset-time INFERENCE (no
+  // label match at all) must still show up correctly — `matchSource:
+  // "inferred"`, not "label" — in both the JSON snapshot and the table's own
+  // MATCH column. One fake cswap account, one slot with no label whose own
+  // `until` sits within the +/-5min reset-match window of that account's
+  // fiveHour reset.
+  test("a reset-time-inferred match reads matchSource 'inferred' in JSON and the table's MATCH column", async () => {
+    const home = tmpDir("accounts-home-");
+    const cswapDir = writeFakeCswap([OVER_FIVE_HOUR]);
+    const inferredUntil = new Date(Date.parse(OVER_FIVE_HOUR.usage!.fiveHour.resetsAt!) + 60_000).toISOString();
+    const slots = [{ name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: inferredUntil, seenAt: null }];
+    const { server, syncCalls } = startWorker(slots);
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await run(["accounts", "--json"], home, cswapDir);
+
+    expect(r.code).toBe(0);
+    const rows = JSON.parse(r.out) as { name: string; matchSource: string; matchedEmail: string | null }[];
+    expect(rows[0]!.matchSource).toBe("inferred");
+    expect(rows[0]!.matchedEmail).toBe(OVER_FIVE_HOUR.email);
+
+    const r2 = await run(["accounts"], home, cswapDir);
+    server.stop(true);
+    const [header, body] = r2.out.split("\n");
+    expect(header.split(/\s{2,}/)).toContain("MATCH");
+    expect(body).toContain("inferred");
+    expect(syncCalls.length).toBe(0);
+  });
+
+  // This dispatch's item 3: --write-labels prints one CLAUDE_ACCOUNT_<n>_LABEL
+  // suggestion per inferred slot, in the plain-text path as extra lines after
+  // the table, and — combined with --json — folded into the SAME JSON object
+  // rather than a separate stdout line that would corrupt it as JSON.
+  describe("fleet accounts --write-labels", () => {
+    test("plain text: prints a CLAUDE_ACCOUNT_<n>_LABEL suggestion after the table for an inferred match", async () => {
+      const home = tmpDir("accounts-home-");
+      const cswapDir = writeFakeCswap([OVER_FIVE_HOUR]);
+      const inferredUntil = OVER_FIVE_HOUR.usage!.fiveHour.resetsAt!;
+      const slots = [{ name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: inferredUntil, seenAt: null }];
+      const { server } = startWorker(slots);
+      writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+      const r = await run(["accounts", "--write-labels"], home, cswapDir);
+      server.stop(true);
+
+      expect(r.code).toBe(0);
+      expect(r.out).toContain(`CLAUDE_ACCOUNT_1_LABEL=${OVER_FIVE_HOUR.email}`);
+    });
+
+    test("--json folds label suggestions into the JSON object, never a separate corrupting stdout line", async () => {
+      const home = tmpDir("accounts-home-");
+      const cswapDir = writeFakeCswap([OVER_FIVE_HOUR]);
+      const inferredUntil = OVER_FIVE_HOUR.usage!.fiveHour.resetsAt!;
+      const slots = [{ name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: inferredUntil, seenAt: null }];
+      const { server } = startWorker(slots);
+      writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+      const r = await run(["accounts", "--write-labels", "--json"], home, cswapDir);
+      server.stop(true);
+
+      expect(r.code).toBe(0);
+      // Parsing the WHOLE stdout as one JSON value is itself the "never a
+      // separate corrupting stdout line" assertion — a bare suggestion line
+      // mixed into stdout would break this parse outright.
+      const parsed = JSON.parse(r.out) as { accounts: { name: string }[]; labelSuggestions: string[] };
+      expect(parsed.accounts).toHaveLength(1);
+      expect(parsed.labelSuggestions).toEqual([`CLAUDE_ACCOUNT_1_LABEL=${OVER_FIVE_HOUR.email}`]);
+    });
+
+    test("no inferred matches: plain text prints no suggestion line, --json prints an empty array", async () => {
+      const home = tmpDir("accounts-home-");
+      const cswapDir = writeFakeCswap(CSWAP_LIST_FIXTURE);
+      const { server } = startWorker(ACCOUNT_SLOTS); // label matches only — no inferred rows
+      writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+      const r = await run(["accounts", "--write-labels"], home, cswapDir);
+      expect(r.out).not.toContain("CLAUDE_ACCOUNT_");
+
+      const r2 = await run(["accounts", "--write-labels", "--json"], home, cswapDir);
+      server.stop(true);
+      const parsed = JSON.parse(r2.out) as { labelSuggestions: string[] };
+      expect(parsed.labelSuggestions).toEqual([]);
+    });
   });
 });
 
@@ -196,9 +339,15 @@ describe("fleet accounts sync", () => {
     expect(decisions.map((d) => d.name).sort()).toEqual(["CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_2"]);
     const limit = decisions.find((d) => d.name === "CLAUDE_CODE_OAUTH_TOKEN")!;
     expect(limit.action).toBe("limit");
-    expect(limit.until).toBe(OVER_FIVE_HOUR.usage.fiveHour.resetsAt);
+    expect(limit.until).toBe(OVER_FIVE_HOUR.usage!.fiveHour.resetsAt);
     const clear = decisions.find((d) => d.name === "CLAUDE_CODE_OAUTH_TOKEN_2")!;
     expect(clear.action).toBe("clear");
+    // The ONE snapshot timestamp (buildAccountsSnapshot's own `fetchedAt`),
+    // ISO-stringified, rides the POST's top-level `usageFetchedAt` — the
+    // yardstick routes.ts's MAJOR 6 clear-skip check compares a row's own
+    // `seenAt` against.
+    expect(typeof syncCalls[0]!.usageFetchedAt).toBe("string");
+    expect(Number.isFinite(Date.parse(syncCalls[0]!.usageFetchedAt))).toBe(true);
 
     expect(r.err).toContain("applied 2");
     expect(r.out).toContain("CLAUDE_CODE_OAUTH_TOKEN");
@@ -217,7 +366,7 @@ describe("fleet accounts sync", () => {
           ]);
         }
         if (url.pathname === "/studio/accounts/sync" && req.method === "POST") {
-          return Response.json({ applied: [], rejected: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "unknown account name" }] });
+          return Response.json({ applied: [], rejected: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "unknown account name" }], skipped: [] });
         }
         return new Response("not found", { status: 404 });
       },
@@ -229,6 +378,31 @@ describe("fleet accounts sync", () => {
 
     expect(r.code).toBe(0);
     expect(r.err).toContain("rejected CLAUDE_CODE_OAUTH_TOKEN (unknown account name)");
+    expect(r.out).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+  });
+
+  // Issue #232 review MAJOR 6: a "clear" the route skipped (a fresher
+  // sighting already recorded after this snapshot's own usageFetchedAt) is a
+  // correct no-op, not an error — this dispatch's item 5 asks for it to be
+  // reported distinctly from both applied and rejected.
+  test("reports what the route skipped, distinctly from applied/rejected, still exits 0", async () => {
+    const home = tmpDir("accounts-home-");
+    const cswapDir = writeFakeCswap(CSWAP_LIST_FIXTURE);
+    const { server, syncCalls } = startWorker(ACCOUNT_SLOTS, (body) => ({
+      applied: [body.decisions.find((d) => d.name === "CLAUDE_CODE_OAUTH_TOKEN")!.name],
+      rejected: [],
+      skipped: [{ name: "CLAUDE_CODE_OAUTH_TOKEN_2", reason: "newer row exists" }],
+    }));
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await run(["accounts", "sync"], home, cswapDir);
+    server.stop(true);
+
+    expect(r.code).toBe(0);
+    expect(syncCalls.length).toBe(1);
+    expect(r.err).toContain("applied 1 (CLAUDE_CODE_OAUTH_TOKEN)");
+    expect(r.err).toContain("skipped CLAUDE_CODE_OAUTH_TOKEN_2 (newer row exists)");
+    expect(r.err).not.toContain("rejected");
     expect(r.out).toContain("CLAUDE_CODE_OAUTH_TOKEN");
   });
 });
