@@ -36,7 +36,8 @@ import {
 } from "./rpc-failure";
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
 import { resolveClaudeAccounts, accountLabel } from "./accounts";
-import { readFleetAccountLimits } from "./account-limits-store";
+import { readFleetAccountLimits, writeFleetAccountLimit, clearFleetAccountLimit } from "./account-limits-store";
+import type { SyncDecision } from "./claude-swap";
 import { countWorkerExceptions } from "../exceptions";
 
 const ROUTE_RE = /^\/studio\/([^/]+)\/(status|provisioned|provision|restart|recycle|destroy|wake|check|rescue|inspect|ws\/terminal|paste|terminal|clear-session-guard)$/;
@@ -452,6 +453,56 @@ export async function handleStudio(
       until: limits[a.name]?.until ?? null,
       seenAt: limits[a.name]?.seenAt ?? null,
     })));
+  }
+
+  /**
+   * Issue #232, step 2 — the dumb, validated persistence half of
+   * `fleet accounts sync`: step 1's `claude-swap.ts` (decideAccountSync) runs
+   * on the OPERATOR's own machine (step 3, the CLI), never here — this route
+   * neither calls cswap nor computes a decision, it only applies decisions
+   * the caller already made. No studio id in this path either, so it sits
+   * alongside `/studio/accounts` rather than inside ROUTE_RE's id-scoped
+   * dispatch, and reuses the SAME Access-gated lane (verifyAccess already ran
+   * above, unconditionally) — "auth like other verbs" from the issue IS this
+   * reuse, no new auth surface added.
+   *
+   * Per-entry validation against `resolveClaudeAccounts(env)`: an unknown
+   * `name` is rejected and reported back, but does not abort the rest of the
+   * batch — a typo'd slot name must not block every other slot's legitimate
+   * write (partial success, not all-or-nothing). `action: "limit"` never
+   * carries a `dead` flag from this route — dead-marking stays the pane-
+   * capture path's own job (failover.ts, untouched here); a usage-based
+   * sighting from cswap is never "dead", only "limited until X".
+   * `action: "unmanaged"` makes no D1 write at all — purely informational,
+   * echoed back in `applied` alongside limit/clear since all three are
+   * "handled", distinct from `rejected` (unknown account name).
+   */
+  if (url.pathname === "/studio/accounts/sync") {
+    if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return new Response("bad json body", { status: 400 });
+    }
+    const decisions = (body as { decisions?: unknown } | null)?.decisions;
+    if (!Array.isArray(decisions)) {
+      return new Response("\"decisions\" must be an array", { status: 400 });
+    }
+    const known = new Set(resolveClaudeAccounts(env).map((a) => a.name));
+    const applied: string[] = [];
+    const rejected: { name: string; reason: string }[] = [];
+    await Promise.all((decisions as SyncDecision[]).map(async (d) => {
+      if (!known.has(d.name)) {
+        rejected.push({ name: d.name, reason: "unknown account name" });
+        return;
+      }
+      if (d.action === "limit") await writeFleetAccountLimit(env.DB, d.name, d.until, d.seenAt);
+      else if (d.action === "clear") await clearFleetAccountLimit(env.DB, d.name);
+      // "unmanaged": no D1 write — informational only.
+      applied.push(d.name);
+    }));
+    return Response.json({ applied, rejected });
   }
 
   /**
