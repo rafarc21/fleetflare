@@ -3579,3 +3579,64 @@ describe("#80 — HEAD already reachable from origin is nothing to rescue; a pus
     });
   }
 });
+
+/**
+ * Issue #233: a member worktree's HEAD can be a DETACHED checkout (no
+ * branch name at all -- `symbolic-ref --short HEAD` fails) with no local
+ * `refs/remotes/origin/main` tracking ref (a fetch-by-sha checkout never
+ * creates one). `rescue_on_origin`'s own ancestor-check (issue #80) used to
+ * require a non-empty, origin-listed BRANCH NAME to even attempt its
+ * fetch+merge-base check -- a detached worktree never had one, so a HEAD
+ * genuinely behind (not AT) origin's moved-ahead default-branch tip fell
+ * through to a real push attempt, which is exactly the shape that got
+ * rejected pushing to a disjoint-history private rescue remote ("refusing
+ * to allow a Personal Access Token to create or update workflow ... without
+ * `workflow` scope" -- the remote had never seen this repo's history, so
+ * GitHub read the push as a workflow create/update). Skipping the push
+ * entirely closes the false failure regardless of the rescue token's own
+ * scope (the separate, independent fix in rescueMintPermissions).
+ */
+describe("#233 — a worktree already covered by origin's default branch never attempts a push at all", () => {
+  /** The beforeEach's own nested member worktree (`.claude/worktrees/agent-a1b2`,
+   *  branch `agent-a1b2`, never pushed) would otherwise show up as its own
+   *  RESCUE_PUSHED and pollute every "nothing happened at all" assertion
+   *  below -- same cleanup convention as the #80 describe block above. */
+  function dropNestedWorktree(): void {
+    sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 2>/dev/null; rm -rf .claude; true`);
+  }
+
+  for (const [label, cmdFn] of RESCUE_CMDS) {
+    test(`${label}: HEAD detached exactly AT origin's default-branch tip, no local tracking ref -> RESCUE_CLEAN, no push (already correct today -- regression coverage)`, () => {
+      dropNestedWorktree();
+      sh(`cd ${checkout} && git commit -q --allow-empty -m c1 && git push -q origin main`);
+      const tip = sh(`git -C ${checkout} rev-parse HEAD`).out;
+      sh(`git -C ${checkout} checkout -q --detach ${tip}`);
+      sh(`git -C ${checkout} update-ref -d refs/remotes/origin/main`);
+      const before = sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out;
+
+      const r = sh(cmdFn(REPO, STUDIO, root));
+
+      expect(r.out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(bare(r.out)).toBe(RESCUE_CLEAN);
+      expect(r.out).toMatch(/^RESCUE_WT checkout nothing$/m);
+      expect(sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out).toBe(before);
+    });
+
+    test(`${label}: HEAD detached an ANCESTOR of origin's default-branch tip (behind, no unique commits), no local tracking ref -> RESCUE_CLEAN, no push`, () => {
+      dropNestedWorktree();
+      sh(`cd ${checkout} && git commit -q --allow-empty -m c1 && git push -q origin main`);
+      const c1 = sh(`git -C ${checkout} rev-parse HEAD`).out;
+      sh(`cd ${checkout} && git commit -q --allow-empty -m c2 && git push -q origin main`);
+      sh(`git -C ${checkout} checkout -q --detach ${c1}`);
+      sh(`git -C ${checkout} update-ref -d refs/remotes/origin/main`);
+      const before = sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out;
+
+      const r = sh(cmdFn(REPO, STUDIO, root));
+
+      expect(r.out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(bare(r.out)).toBe(RESCUE_CLEAN);
+      expect(r.out).toMatch(/^RESCUE_WT checkout nothing$/m);
+      expect(sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out).toBe(before);
+    });
+  }
+});

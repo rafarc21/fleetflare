@@ -7,9 +7,9 @@ import { rescueMintPermissions } from "../src/studio/rescue";
 // and keeps contents:write. Least privilege: a read token that leaks from a
 // provision exec cannot write the archive.
 describe("rescue token permissions (issue #45)", () => {
-  it("discovery reads, push writes", () => {
+  it("discovery reads, push writes + widens to workflows (issue #233: a worktree touching .github/workflows/* must mint a token that can push one)", () => {
     expect(rescueMintPermissions("discovery")).toEqual({ contents: "read" });
-    expect(rescueMintPermissions("push")).toEqual({ contents: "write" });
+    expect(rescueMintPermissions("push")).toEqual({ contents: "write", workflows: "write" });
   });
 
   // StudioDO cannot be constructed here (see studio.backup-guard.test.ts's
