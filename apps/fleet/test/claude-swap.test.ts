@@ -100,6 +100,40 @@ describe("joinAccountsToCswap", () => {
     expect(joined.cswap).toBeNull();
   });
 
+  it("a reset-time candidate exactly RESET_MATCH_WINDOW_MS away still matches -- the window's own edge is inclusive", () => {
+    const resetsAt = "2026-10-05T14:00:00Z";
+    const untilMs = Date.parse(resetsAt) + RESET_MATCH_WINDOW_MS;
+    const account: CswapAccount = {
+      email: "edge@example.com", usageStatus: "ok", usageAgeSeconds: 10,
+      usage: {
+        fiveHour: { pct: 1, resetsAt },
+        sevenDay: { pct: 1, resetsAt: "2026-10-20T00:00:00Z", willLastToReset: true },
+        scoped: [],
+      },
+    };
+    const slots: FleetAccountSlot[] = [{ name: "CLAUDE_CODE_OAUTH_TOKEN_EDGE", label: null, until: new Date(untilMs).toISOString() }];
+    const [joined] = joinAccountsToCswap(slots, [account], true);
+    expect(joined.matchSource).toBe("inferred");
+    expect(joined.cswap).toEqual(account);
+  });
+
+  it("a reset-time candidate one millisecond past RESET_MATCH_WINDOW_MS falls outside the window -> unmapped", () => {
+    const resetsAt = "2026-10-05T14:00:00Z";
+    const untilMs = Date.parse(resetsAt) + RESET_MATCH_WINDOW_MS + 1;
+    const account: CswapAccount = {
+      email: "edge2@example.com", usageStatus: "ok", usageAgeSeconds: 10,
+      usage: {
+        fiveHour: { pct: 1, resetsAt },
+        sevenDay: { pct: 1, resetsAt: "2026-10-20T00:00:00Z", willLastToReset: true },
+        scoped: [],
+      },
+    };
+    const slots: FleetAccountSlot[] = [{ name: "CLAUDE_CODE_OAUTH_TOKEN_EDGE2", label: null, until: new Date(untilMs).toISOString() }];
+    const [joined] = joinAccountsToCswap(slots, [account], true);
+    expect(joined.matchSource).toBe("unmapped");
+    expect(joined.cswap).toBeNull();
+  });
+
   it("a slot with no label and no until cannot reset-match -> unmapped", () => {
     const slots: FleetAccountSlot[] = [{ name: "CLAUDE_CODE_OAUTH_TOKEN_6", label: null, until: null }];
     const [joined] = joinAccountsToCswap(slots, CSWAP_LIST_FIXTURE, true);
@@ -197,6 +231,32 @@ describe("decideAccountSync", () => {
   it("the fixture's stale-but-ok reading (900s, over the 600s ceiling) also gates to no-data", () => {
     expect(STALE_OK.usageAgeSeconds).toBeGreaterThanOrEqual(MAX_USAGE_AGE_SECONDS);
     const decision = decideAccountSync(joinFor(STALE_OK), now);
+    expect(decision.action).toBe("no-data");
+  });
+
+  it("usageAgeSeconds one below MAX_USAGE_AGE_SECONDS is fresh enough -- a real over-threshold reading still decides limit", () => {
+    const account: CswapAccount = {
+      email: "freshedge@example.com", usageStatus: "ok", usageAgeSeconds: MAX_USAGE_AGE_SECONDS - 1,
+      usage: {
+        fiveHour: { pct: 99, resetsAt: "2026-10-05T15:00:00Z" },
+        sevenDay: { pct: 10, resetsAt: "2026-10-11T00:00:00Z", willLastToReset: true },
+        scoped: [],
+      },
+    };
+    const decision = decideAccountSync(joinFor(account), now);
+    expect(decision.action).toBe("limit");
+  });
+
+  it("usageAgeSeconds exactly MAX_USAGE_AGE_SECONDS is already too stale -> no-data, even with an over-threshold reading", () => {
+    const account: CswapAccount = {
+      email: "staleedge@example.com", usageStatus: "ok", usageAgeSeconds: MAX_USAGE_AGE_SECONDS,
+      usage: {
+        fiveHour: { pct: 99, resetsAt: "2026-10-05T15:00:00Z" },
+        sevenDay: { pct: 10, resetsAt: "2026-10-11T00:00:00Z", willLastToReset: true },
+        scoped: [],
+      },
+    };
+    const decision = decideAccountSync(joinFor(account), now);
     expect(decision.action).toBe("no-data");
   });
 
@@ -363,15 +423,5 @@ describe("pickHeadroomAccount", () => {
     const c = candidate("a", 10, 10, 5000);
     expect(pickHeadroomAccount([c], 1000)).toBeNull();
     expect(pickHeadroomAccount([c], 10000)).toBe("a");
-  });
-});
-
-describe("constants", () => {
-  it("RESET_MATCH_WINDOW_MS is +/-5 minutes, per the STATUS comment's own number", () => {
-    expect(RESET_MATCH_WINDOW_MS).toBe(5 * 60 * 1000);
-  });
-
-  it("MAX_USAGE_AGE_SECONDS is 10 minutes", () => {
-    expect(MAX_USAGE_AGE_SECONDS).toBe(600);
   });
 });
