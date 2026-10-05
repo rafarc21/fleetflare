@@ -657,6 +657,52 @@ keyed by the repo part of a studio id (`<repo>--<role>`):
 - A studio's account is fixed when its container starts. To move a running
   studio after a map change, `fleet recycle <id>` it between tasks.
 
+### Proactive account-limit sync (claude-swap)
+
+Fleet only LEARNS a limit reactively today — a pane shows the modal, a row
+gets marked `dead`, and that row can stay stale (reinstated account, nobody
+cleared it) until hand-deleted. `cswap` (claude-swap, MIT) holds account
+logins on YOUR Mac and reports real usage per account; `fleet accounts sync`
+reads that and writes/clears fleet's own limit rows BEFORE a modal ever
+shows.
+
+Setup, on your own Mac, once per account:
+
+```bash
+uv tool install claude-swap
+cswap add                 # logs in interactively; run once per account
+```
+
+**Never run `/logout` first.** It revokes the refresh token `cswap` needs —
+log in fresh instead, or add an account `cswap` already holds a login for.
+
+Label each fleet account slot with the matching email, so sync can join
+them (same label fleet ls already shows, see above):
+
+```jsonc
+"CLAUDE_ACCOUNT_2_LABEL": "second@example.com"
+```
+
+Must equal the email `cswap list` reports for that login, exact string, case
+sensitive. No match = that slot reads `unmanaged`, sync skips it, no row
+touched.
+
+Run it:
+
+```bash
+fleet accounts              # table: slot, label, 5h%, 7d% usage, reset, row state (D1 now), would (what sync would change) — READ ONLY, writes nothing
+fleet accounts sync         # same read, then WRITES: posts limit/clear decisions to fleet
+fleet accounts sync --watch # loops every 60s, prints only on change, ctrl-c stops
+```
+
+Rule: pct >= 95 on EITHER the 5h window, the 7d window, OR any per-model
+window marks that slot limited until THAT window's own reset time.
+Everything under 95 clears the slot — including a stale `dead` row: a fresh
+low reading right after re-login IS fleet's proof the account is alive
+again, no separate check. `cswap` missing or erroring never crashes any of
+this — every slot just reads `unmanaged (cswap-missing)` and the command
+still runs.
+
 Deploy — from `apps/fleet`, with `$FLEET_CONFIG` (or `$FLEET_OPS_DIR`) already
 pointing at your filled-in `wrangler.jsonc` copy (see **Quickstart from
 zero**'s intro above). Run the migrations held back from step 1 now too,
