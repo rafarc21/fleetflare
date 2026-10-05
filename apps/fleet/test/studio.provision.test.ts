@@ -789,6 +789,42 @@ describe("discoverRescueRefsCmd — the shell shape that discovers + fetches thi
     expect(re.test(otherStudioWipRef)).toBe(false);
     expect(re.test(malformedWipRef)).toBe(false);
   });
+
+  // Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231) — a 5TH
+  // shape, a MEMBER worktree's own wip-sync ref, nested one level deeper
+  // than the main-checkout wip ref just above:
+  // `fleet/rescue/<studio>/wip/<14digits>/wt/<id>`.
+  it("also greps the nested fleet/rescue/<studio>/wip/<ts>/wt/<id> shape (a member worktree's own wip-sync ref), alongside every other shape", () => {
+    const cmd = discoverRescueRefsCmd(DIR, STUDIO);
+    expect(cmd).toContain(`refs/heads/fleet/rescue/${STUDIO}/wip/`);
+  });
+
+  it("fetches a member worktree's wip-sync rescue ref exactly like the other shapes, and never a longer studio's own", () => {
+    const shortStudio = "websites--maestro";
+    const longStudio = "websites--maestro-2";
+    const cmd = discoverRescueRefsCmd(DIR, shortStudio);
+
+    const grepMatch = cmd.match(/grep -o[E]? '([^']+)'/);
+    expect(grepMatch).not.toBeNull();
+    const jsSource = grepMatch![1]
+      .replace(/\\\{(\d+)\\\}/g, "{$1}")
+      .replace(/\[\^\[:space:\]\]/g, "[^\\s]");
+    const re = new RegExp(jsSource);
+
+    const ownMemberWipRef = `refs/heads/fleet/rescue/${shortStudio}/wip/20260925120000/wt/agent-a1b2`;
+    const otherStudioMemberWipRef = `refs/heads/fleet/rescue/${longStudio}/wip/20260925120000/wt/agent-a1b2`;
+    // Still anchored: exactly 14 digits before the `/wt/<id>` segment.
+    const malformedMemberWipRef = `refs/heads/fleet/rescue/${shortStudio}/wip/2026092512000/wt/agent-a1b2`;
+    // The TEARDOWN member-worktree shape (no `wip/` segment at all) is
+    // matched by its OWN, pre-existing branch of this same pattern, never by
+    // the new one.
+    const teardownMemberRef = `refs/heads/fleet/rescue/${shortStudio}/wt/agent-a1b2-20260925120000`;
+
+    expect(re.test(ownMemberWipRef)).toBe(true);
+    expect(re.test(otherStudioMemberWipRef)).toBe(false);
+    expect(re.test(malformedMemberWipRef)).toBe(false);
+    expect(re.test(teardownMemberRef)).toBe(true); // via the pre-existing wt/ branch
+  });
 });
 
 describe("runProvision wiring — rescue-branch discovery runs after the clone, best-effort", () => {

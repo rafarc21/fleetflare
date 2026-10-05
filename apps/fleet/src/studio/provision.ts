@@ -1054,9 +1054,19 @@ export function discoverRescueRefsCmd(
   // comment (survival-delivery.ts) for the full history of why this shape is
   // discoverable now, unlike the OLD flat, un-boot-scoped ref it replaces.
   const wipPrefix = `${nestedPrefix}wip/`;
+  // Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231): a 5TH shape,
+  // `wip/<14digits>/wt/<id>` — a MEMBER worktree's own wip-sync ref, nested
+  // one level deeper than the main-checkout `wipPrefix` shape just above.
+  // Deliberately distinct from `wtPrefix`'s own teardown-time member ref
+  // (`wt/<id>-<14digits>`, no `wip/` segment): the two used to be
+  // byte-identical, which is exactly the collision `rescue_on_origin`'s own
+  // wip-exclusion filter (rescue.ts) missed — see `wip_sync_one`'s own call
+  // sites' doc comment (rescue.ts) for the full history. Same anchoring
+  // discipline as every pattern above: a studio id cannot be a literal
+  // prefix of a different studio id immediately followed by `/`.
   const pattern =
     `${flatPrefix}[0-9]{14}$|${nestedPrefix}[0-9]{14}/checkout/[^[:space:]]+$|` +
-    `${wtPrefix}[^[:space:]]+-[0-9]{14}$|${wipPrefix}[0-9]{14}$`;
+    `${wtPrefix}[^[:space:]]+-[0-9]{14}$|${wipPrefix}[0-9]{14}$|${wipPrefix}[0-9]{14}/wt/[^[:space:]]+$`;
   const originCmd = (
     `{ mkdir -p ${listDir} && ` +
     `${bounded} git -C ${targetDir} ls-remote --heads origin > ${listFile} && ` +

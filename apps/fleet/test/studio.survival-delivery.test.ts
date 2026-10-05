@@ -325,6 +325,57 @@ describe("the 3 anchored branch sources", () => {
   });
 
   /**
+   * Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231) — a MEMBER
+   * worktree's own wip-sync ref is nested one level deeper still:
+   * `fleet/rescue/<studio>/wip/<14digits>/wt/<id>`. Deliberately a DISTINCT
+   * shape from both the main-checkout wip ref just above (no `/wt/<id>`
+   * suffix) and the teardown-time member-worktree rescue ref (`wt/<id>-
+   * <14digits>`, no `wip/` segment at all) — the member wip-sync ref used to
+   * be byte-identical to the LATTER, which broke `rescue_on_origin`'s own
+   * wip-exclusion filter (rescue.ts).
+   */
+  it("SOURCE 3 — the MEMBER wip-sync ref (#231 review round 1) is a DISTINCT rescue-ref shape, anchored to exactly 14 digits plus a worktree id", () => {
+    const memberWip = `fleet/rescue/${STUDIO}/wip/20261004120000/wt/agent-a1b2`;
+    expect(isRescueBranchFor(STUDIO, memberWip)).toBe(true);
+    expect(rescueRefStamp(STUDIO, memberWip)).toBe("20261004120000");
+    // Still anchored: a malformed/foreign stamp is never a false positive.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip/202610041200/wt/agent-a1b2`)).toBe(false);
+    // No worktree id at all -- that's the main-checkout shape's own job, not
+    // this one's (still matches, but via the OTHER branch -- see the test
+    // just above).
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip/20261004120000/wt/`)).toBe(false);
+    // Still scoped: another (longer) studio's own member wip ref never
+    // matches.
+    const other = `fleet/rescue/sibling--${STUDIO}/wip/20261004120000/wt/agent-a1b2`;
+    expect(isRescueBranchFor(STUDIO, other)).toBe(false);
+    // Never confused with the teardown-time member-worktree shape (no `wip/`
+    // segment) -- that one is still matched by the OTHER, `wt/`-first branch.
+    expect(rescueRefStamp(STUDIO, `fleet/rescue/${STUDIO}/wt/agent-a1b2-20261004120000`)).toBe("20261004120000");
+  });
+
+  /**
+   * Maestro review round 1 on PR #235, MAJOR 4 + 5 — traced, not guessed: a
+   * MAIN-checkout wip ref is NOT specially excluded from
+   * `unclaimedRescueBranches` anywhere in `resolveSurvivalInput` (only the
+   * 14-day age cap, shared by every rescue-ref shape, ever drops one) -- it
+   * is deliberately DISCOVERABLE and ATTRIBUTABLE "exactly like every other
+   * rescue shape" (this function's own doc comment above). The new nested
+   * MEMBER wip ref gets the IDENTICAL treatment: it is a genuine rescue ref,
+   * not specially hidden, and is now self-describing (its own path contains
+   * "wip") rather than confusable with a genuine abandoned teardown rescue —
+   * which is the whole of the round-1 review's "confusing" complaint fixed by
+   * the shape change itself, not by a new exclusion list.
+   */
+  it("the nested member wip ref gets the SAME unclaimedRescueBranches treatment the main-checkout wip ref already gets -- genuinely a rescue ref, never specially hidden", async () => {
+    const memberWip = `fleet/rescue/${STUDIO}/wip/20261004120000/wt/agent-a1b2`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [memberWip] }),
+      { ok: true, value: [] }, null, NOW,
+    );
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [memberWip] });
+  });
+
+  /**
    * Board issue #228, item 3 — `isRescueBranchFor` refactored into a one-line
    * wrapper around `rescueRefStamp`, which exposes the matched 14-digit
    * stamp instead of a bare boolean, so age-capping (below) can reuse the

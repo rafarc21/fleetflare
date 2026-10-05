@@ -265,7 +265,7 @@ export function rescueBranchNestedPrefix(studioId: string): string {
 export const RESCUE_STAMP_DIGITS = 14;
 
 /**
- * SOURCE 3 — this fleet's own rescue-ref naming convention. Matches all 4 ref
+ * SOURCE 3 — this fleet's own rescue-ref naming convention. Matches all 5 ref
  * shapes `rescue.ts` actually pushes, every one ANCHORED AT BOTH ENDS and
  * nothing else:
  *
@@ -275,15 +275,27 @@ export const RESCUE_STAMP_DIGITS = 14;
  * - nested, member worktree: `fleet/rescue/<studio>/wt/<id>-<14digits>`,
  *   optionally with `-nff-` before the stamp (that shape's own non-fast-
  *   forward retry).
- * - nested, wip-sync: `fleet/rescue/<studio>/wip/<14digits>` (rescue.ts's
- *   `wipSyncCmd`, the per-container-boot periodic WIP safety net — fix round
- *   #208 PR #215 review item 1). Added here, and to `discoverRescueRefsCmd`'s
- *   own grep pattern (provision.ts), so a wip ref is discoverable/fetchable
- *   and attributable exactly like every other rescue shape, now that it is
- *   scoped per boot rather than shared (and silently clobbered) across every
- *   container a studio ever runs — see `wipSyncRef`'s own doc comment
- *   (rescue.ts) for the full history of why the OLD flat, un-anchored shape
- *   was deliberately excluded here instead.
+ * - nested, wip-sync (main checkout): `fleet/rescue/<studio>/wip/<14digits>`
+ *   (rescue.ts's `wipSyncCmd`, the per-container-boot periodic WIP safety
+ *   net — fix round #208 PR #215 review item 1). Added here, and to
+ *   `discoverRescueRefsCmd`'s own grep pattern (provision.ts), so a wip ref
+ *   is discoverable/fetchable and attributable exactly like every other
+ *   rescue shape, now that it is scoped per boot rather than shared (and
+ *   silently clobbered) across every container a studio ever runs — see
+ *   `wipSyncRef`'s own doc comment (rescue.ts) for the full history of why
+ *   the OLD flat, un-anchored shape was deliberately excluded here instead.
+ * - nested, wip-sync (member worktree): `fleet/rescue/<studio>/wip/<14digits>
+ *   /wt/<id>` — maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231).
+ *   Deliberately a DISTINCT shape from the member-worktree TEARDOWN rescue
+ *   ref above (`wt/<id>-<14digits>`, no `wip/` segment at all): the two used
+ *   to be byte-identical, which broke `rescue_on_origin`'s own wip-exclusion
+ *   filter (rescue.ts) — it only ever excluded a path under `/wip/`, never
+ *   `/wt/` — and let a member's wip-sync tip wrongly stand in as proof its
+ *   real work was already rescued. Nesting under `wip/` first fixes that for
+ *   free (the filter's `/wip(/|$)` already matches it) and also makes this
+ *   shape self-describing as a LIVE, continuously-refreshed ref rather than
+ *   an abandoned teardown rescue, exactly the same way the main-checkout wip
+ *   shape just above already reads.
  *
  * See this function's own body below for the nested shapes' match logic and
  * reasoning (#216) — the flat shape's own reasoning follows here since it's
@@ -361,12 +373,26 @@ export function rescueRefStamp(studioId: string, branch: string): string | null 
     const wtMatch = rest.slice(3).match(new RegExp(`^\\S+-([0-9]{${RESCUE_STAMP_DIGITS}})$`));
     return wtMatch ? wtMatch[1]! : null;
   }
-  // Fix round (#208 PR #215 review item 1): wip-sync's own per-boot ref —
-  // `wip/<14digits>`, exactly like `wt/<id>-<14digits>` above but with no
-  // `<id>` segment at all (wip-sync has no worktree identity to disambiguate;
-  // it is always the main checkout, one ref per container boot).
+  // Fix round (#208 PR #215 review item 1): wip-sync's own per-boot ref,
+  // main checkout — `wip/<14digits>`, exactly like `wt/<id>-<14digits>`
+  // above but with no `<id>` segment at all (wip-sync has no worktree
+  // identity to disambiguate; it is always the main checkout, one ref per
+  // container boot).
+  //
+  // Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231): a member
+  // worktree's own wip-sync ref is nested ONE level deeper still —
+  // `wip/<14digits>/wt/<id>` — checked FIRST, before the bare
+  // `wip/<14digits>$` match below, so a member ref is never mistaken for the
+  // main-checkout shape (it would otherwise fail that `$`-anchored match
+  // anyway, since there is a trailing `/wt/<id>`, but checking this shape
+  // first keeps the two branches independent and easy to read). `\S+` for
+  // `<id>`, same no-whitespace discipline every other trailing name in this
+  // function already uses.
   if (rest.startsWith("wip/")) {
-    const wipMatch = rest.slice(4).match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})$`));
+    const afterWip = rest.slice(4);
+    const memberMatch = afterWip.match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})\\/wt\\/\\S+$`));
+    if (memberMatch) return memberMatch[1]!;
+    const wipMatch = afterWip.match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})$`));
     return wipMatch ? wipMatch[1]! : null;
   }
   return null;

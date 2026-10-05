@@ -2256,7 +2256,10 @@ export function wipSyncCmd(
     // Issue #231 fix 3b: `wdir`/`wtarget` are now shell ARGUMENTS ($1/$2),
     // never build-time `${dir}`/`${target}` string interpolation — the same
     // function now runs once for the main checkout and once per member
-    // worktree, each with its own directory and its own per-boot `wt/` ref
+    // worktree, each with its own directory and its own per-boot nested
+    // `wip/<bootStamp>/wt/<wid>` ref (maestro review round 1 on PR #235,
+    // MAJOR 4 + 5 — see `wip_sync_one`'s own call sites' doc comment below
+    // for why this is nested under `wip/`, not `wt/`)
     // (see `wip_sync_one`'s own call sites at the bottom of this script).
     `wip_sync_push() {\n` +
     `  local wdir="$1" wtarget="$2" src="$3" snap perr prc\n` +
@@ -2353,11 +2356,28 @@ export function wipSyncCmd(
     // immune to word-splitting), minus the budget-ledger machinery
     // (`rescue_budget_ok`) that function also carries: this function runs
     // exactly ONE push per target with no multi-attempt worst-case to bound.
-    // Target ref per worktree: `fleet/rescue/<studio>/wt/<wid>-<bootStamp>` —
-    // the SAME per-boot rolling-snapshot property the main checkout's own
+    // Target ref per worktree: `fleet/rescue/<studio>/wip/<bootStamp>/wt/<wid>`
+    // — the SAME per-boot rolling-snapshot property the main checkout's own
     // `${target}` already has (force-pushed, overwritten every tick), never
     // the teardown-time `wt/<id>-<14-digit-timestamp>` shape `rescuePushCmd`
     // mints fresh on every push.
+    //
+    // Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231) —
+    // deliberately NESTED UNDER `wip/`, not `wt/`: the OLD shape
+    // (`wt/<wid>-<bootStamp>`) was byte-identical to `rescuePushCmd`'s own
+    // teardown-time member-worktree rescue ref, which broke two things —
+    // `rescue_on_origin`'s own wip-exclusion filter below (`grep -Ev
+    // '.../wip(/|$)'`) never matched it (it lives under `/wt/`, not `/wip/`),
+    // so teardown rescue could see a member's wip-sync tip already on origin
+    // and wrongly skip its own real, durable push; and `rescueRefStamp`
+    // (survival-delivery.ts) matched it as a genuine teardown rescue ref,
+    // surfacing it, unexplained, as an "unclaimed rescue ref" subject to
+    // teardown's own 14-day age cap, even though it is a LIVE ref refreshed
+    // every ~5 minutes. Nesting under `wip/` fixes BOTH for free: the
+    // EXISTING `/wip(/|$)` filter already matches `.../wip/<bootStamp>/wt/
+    // <wid>` (it starts with `/wip/`), so no filter change was needed; see
+    // `rescueRefStamp`'s own doc comment for the new, distinct match this
+    // shape needed there.
     `  any_pushed=0; any_failed=0; any_markers=0\n` +
     `  wip_sync_one ${dir} ${target}\n` +
     `  [ "$WIP_RESULT" = pushed ] && any_pushed=1\n` +
@@ -2370,7 +2390,7 @@ export function wipSyncCmd(
     `      [ "$w" = "${dir}" ] && continue\n` +
     `      [ -d "$w" ] || continue\n` +
     `      wid=$(basename "$(git -C "$w" rev-parse --git-dir)")\n` +
-    `      wip_sync_one "$w" "fleet/rescue/${studio}/wt/$wid-${bootStamp}"\n` +
+    `      wip_sync_one "$w" "fleet/rescue/${studio}/wip/${bootStamp}/wt/$wid"\n` +
     `      [ "$WIP_RESULT" = pushed ] && any_pushed=1\n` +
     `      [ "$WIP_RESULT" = failed ] && any_failed=1\n` +
     `      [ "$WIP_RESULT" = markers ] && any_markers=1\n` +
