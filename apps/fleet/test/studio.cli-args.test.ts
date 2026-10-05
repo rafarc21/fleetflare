@@ -983,20 +983,28 @@ describe("fleet junior", () => {
 // never a value-taking flag — the Worker POST it triggers is real, so it must
 // be spelled out, never defaulted to by a flag combination.
 describe("fleet accounts", () => {
-  it("bare accounts: read-only, no watch, no json", () => {
-    expect(parseCliArgs(["accounts"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: false });
+  it("bare accounts: read-only, no watch, no json, no write-labels", () => {
+    expect(parseCliArgs(["accounts"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: false, writeLabels: false });
   });
 
   it("accounts sync sets sync: true", () => {
-    expect(parseCliArgs(["accounts", "sync"])).toEqual({ cmd: "accounts", sync: true, watch: false, json: false });
+    expect(parseCliArgs(["accounts", "sync"])).toEqual({ cmd: "accounts", sync: true, watch: false, json: false, writeLabels: false });
   });
 
   it("--watch and --json combine, in any order, with or without sync", () => {
-    expect(parseCliArgs(["accounts", "--watch"])).toEqual({ cmd: "accounts", sync: false, watch: true, json: false });
-    expect(parseCliArgs(["accounts", "--json"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: true });
-    expect(parseCliArgs(["accounts", "--watch", "--json"])).toEqual({ cmd: "accounts", sync: false, watch: true, json: true });
-    expect(parseCliArgs(["accounts", "sync", "--watch"])).toEqual({ cmd: "accounts", sync: true, watch: true, json: false });
-    expect(parseCliArgs(["accounts", "sync", "--json", "--watch"])).toEqual({ cmd: "accounts", sync: true, watch: true, json: true });
+    expect(parseCliArgs(["accounts", "--watch"])).toEqual({ cmd: "accounts", sync: false, watch: true, json: false, writeLabels: false });
+    expect(parseCliArgs(["accounts", "--json"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: true, writeLabels: false });
+    expect(parseCliArgs(["accounts", "--watch", "--json"])).toEqual({ cmd: "accounts", sync: false, watch: true, json: true, writeLabels: false });
+    expect(parseCliArgs(["accounts", "sync", "--watch"])).toEqual({ cmd: "accounts", sync: true, watch: true, json: false, writeLabels: false });
+    expect(parseCliArgs(["accounts", "sync", "--json", "--watch"])).toEqual({ cmd: "accounts", sync: true, watch: true, json: true, writeLabels: false });
+  });
+
+  // MAJOR 4 (STATUS comment): --write-labels is independent of every other
+  // flag here, combinable with any of them, in any order.
+  it("--write-labels combines with sync/--watch/--json, in any order", () => {
+    expect(parseCliArgs(["accounts", "--write-labels"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: false, writeLabels: true });
+    expect(parseCliArgs(["accounts", "--json", "--write-labels"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: true, writeLabels: true });
+    expect(parseCliArgs(["accounts", "sync", "--write-labels", "--watch"])).toEqual({ cmd: "accounts", sync: true, watch: true, json: false, writeLabels: true });
   });
 
   it("an unrecognised token is a usage error, not silently ignored", () => {

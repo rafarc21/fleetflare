@@ -216,15 +216,19 @@ export type CliCommand =
   // string; parsing it to an epoch-ms cutoff happens in cmdJuniorStats, not
   // here (this file only validates argv shape — see this file's own header).
   | { cmd: "junior"; action: "enable" | "disable" | "status" | "stats"; account?: string; since?: string }
-  // Issue #232, step 3: `fleet accounts [sync] [--watch] [--json]`. Bare is
-  // READ-ONLY — it joins each configured account slot to a LOCAL `cswap list
-  // --json` read (cli/accounts.ts) and shows what a sync WOULD do, but never
-  // POSTs it. `sync: true` (the sub-action word "sync", same shape `fleet
-  // memory ls|compact` already splits on) is the one that POSTs the
-  // non-"unmanaged" decisions to /studio/accounts/sync. `watch` reruns every
-  // 60s, printing only when something changed (cli/accounts-format.ts's
-  // snapshotsEqual); `json` prints the raw snapshot instead of the table.
-  | { cmd: "accounts"; sync: boolean; watch: boolean; json: boolean }
+  // Issue #232, step 3: `fleet accounts [sync] [--watch] [--json]
+  // [--write-labels]`. Bare is READ-ONLY — it joins each configured account
+  // slot to a LOCAL `cswap list --json` read (cli/accounts.ts) and shows
+  // what a sync WOULD do, but never POSTs it. `sync: true` (the sub-action
+  // word "sync", same shape `fleet memory ls|compact` already splits on) is
+  // the one that POSTs the limit/clear decisions to /studio/accounts/sync.
+  // `watch` reruns every 60s, printing only when something changed
+  // (cli/accounts-format.ts's snapshotsEqual); `json` prints the raw
+  // snapshot instead of the table. `writeLabels` (MAJOR 4, the STATUS
+  // comment's own requirement) prints one `CLAUDE_ACCOUNT_<n>_LABEL=<email>`
+  // suggestion per slot resolved by reset-time inference — independent of
+  // every other flag here, combinable with any of them.
+  | { cmd: "accounts"; sync: boolean; watch: boolean; json: boolean; writeLabels: boolean }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -380,8 +384,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Opt this Mac into the junior skill (Workers AI delegation, skills/junior/SKILL.md). enable symlinks ~/.claude/skills/junior to this checkout and stores the Cloudflare account id in ~/.config/fleet/junior.json; disable removes only that symlink; status prints whether it is on, the account, and which auth path a call would take. enable/disable/status are local only — never touch the Worker or any studio. stats is DIFFERENT: it calls the Worker's /studio/junior/usage route (needs ~/.fleet/credentials, like every other board/studio verb) and merges it with this machine's own local usage log (~/.local/share/fleet/junior-usage.jsonl, laptop/direct-transport calls that never reach the Worker), printing one row per studio/id plus a TOTAL. --since <dur|date> (e.g. 24h, 7d, or an ISO date) narrows both halves; omitted means all time.",
   },
   accounts: {
-    args: "[sync] [--watch] [--json]",
-    summary: "Issue #232: join each configured Claude account slot (CLAUDE_ACCOUNT_<n>_LABEL) to a LOCAL `cswap list --json` read (claude-swap, operator's own machine — docs/setup.md's \"Proactive account-limit sync\") by label===email, and show what a sync would do: SLOT, LABEL, 5h%/7d% usage, the reset time that would trip a limit, ROW STATE (what D1 holds now), WOULD (what sync would change it to, '-' if nothing). Bare `fleet accounts` is READ-ONLY — it never calls the Worker's write route. `sync` POSTs every non-unmanaged decision to /studio/accounts/sync: pct >= 95 on any window marks that slot limited until that window's own reset; everything under 95 clears it, including a stale dead row (a fresh low reading right after re-login IS the proof it's alive again). --watch reruns every 60s, printing only when something changed; --json prints the raw snapshot instead of the table. cswap missing/erroring never crashes this — every slot just reads unmanaged (cswap-missing).",
+    args: "[sync] [--watch] [--json] [--write-labels]",
+    summary: "Issue #232: join each configured Claude account slot to a LOCAL `cswap list --json` read (claude-swap, operator's own machine — docs/setup.md's \"Proactive account-limit sync\") — first by label===email, then (no label, or no match) by matching the slot's own recorded reset time against an unclaimed cswap account's reset time, within +/-5min, only when exactly one candidate qualifies — and show what a sync would do: SLOT, LABEL, MATCH (label/inferred/unmapped/cswap-missing), 5h%/7d% usage, the reset time that would trip a limit, ROW STATE (what D1 holds now), WOULD (what sync would change it to, '-' if nothing, 'no data (...)' when cswap's own reading for a known account is stale or failed — distinct from unmapped). Bare `fleet accounts` is READ-ONLY — it never calls the Worker's write route. `sync` POSTs every limit/clear decision to /studio/accounts/sync: pct >= 95 on any window marks that slot limited until that window's own reset; everything under 95 clears it, including a stale dead row (a fresh low reading right after re-login IS the proof it's alive again); reports applied/rejected/skipped (skipped = a fresher sighting already recorded, correct no-op). --watch reruns every 60s, printing only when something changed; --json prints the raw snapshot instead of the table. --write-labels prints a pasteable CLAUDE_ACCOUNT_<n>_LABEL=<email> line per inferred match (folded into the JSON object under labelSuggestions when combined with --json, never a bare line that would corrupt it) — this command never writes any config file itself. cswap missing/erroring never crashes this — every slot just reads matchSource cswap-missing.",
   },
 };
 
@@ -976,12 +980,14 @@ export function parseCliArgs(argv: string[]): CliCommand {
       const flags = rest.slice(sync ? 1 : 0);
       let watch = false;
       let json = false;
+      let writeLabels = false;
       for (const token of flags) {
         if (token === "--watch") { watch = true; continue; }
         if (token === "--json") { json = true; continue; }
+        if (token === "--write-labels") { writeLabels = true; continue; }
         return usage(`unexpected ${JSON.stringify(token)}`);
       }
-      return { cmd: "accounts", sync, watch, json };
+      return { cmd: "accounts", sync, watch, json, writeLabels };
     }
     default:
       return { cmd: "usage", message: CLI_USAGE };

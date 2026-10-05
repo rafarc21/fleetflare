@@ -1,5 +1,5 @@
-// apps/fleet/cli/accounts.ts — `fleet accounts [sync] [--watch] [--json]`
-// (issue #232, step 3).
+// apps/fleet/cli/accounts.ts — `fleet accounts [sync] [--watch] [--json]
+// [--write-labels]` (issue #232, step 3).
 //
 // Step 1 (src/studio/claude-swap.ts) built the pure join/decision logic;
 // step 2 (src/studio/routes.ts) built the dumb, validated persistence route
@@ -15,14 +15,22 @@ import { accessHeaders, type Credentials } from "./fleet";
 import {
   joinAccountsToCswap, decideAccountSync, type CswapAccount, type FleetAccountSlot, type SyncDecision,
 } from "../src/studio/claude-swap";
-import { formatAccountsTable, snapshotsEqual, type AccountSnapshotRow, type AccountCurrentState } from "./accounts-format";
+import {
+  formatAccountsTable, snapshotsEqual, buildLabelSuggestions, type AccountSnapshotRow, type AccountCurrentState,
+} from "./accounts-format";
 
 export interface AccountsFlags {
   watch: boolean;
   json: boolean;
+  /** MAJOR 4 (STATUS comment): prints a pasteable `CLAUDE_ACCOUNT_<n>_LABEL=
+   *  <email>` line per `"inferred"` slot. Orthogonal to `watch`/`json`/sync —
+   *  see `printSnapshot`'s own doc comment for how it combines with `json`. */
+  writeLabels: boolean;
 }
 
-/** GET /studio/accounts's own row shape (routes.ts) — the D1-held truth. */
+/** GET /studio/accounts's own row shape (routes.ts) — the D1-held truth,
+ *  `until` included (account-limit:<slot>'s own reset time), which
+ *  claude-swap.ts's reset-time join pass needs. */
 interface AccountsApiRow {
   name: string;
   label: string | null;
@@ -40,7 +48,8 @@ type CswapRead = { available: true; accounts: CswapAccount[] } | { available: fa
  * crashes the rest of the command: ENOENT (cswap not installed), a non-zero
  * exit, or unparseable JSON all fold into `{ available: false }`, which
  * `joinAccountsToCswap`'s own `cswapAvailable: false` path turns into every
- * slot reading "cswap-missing" — never a defaulted limit/clear guess.
+ * slot reading `matchSource: "cswap-missing"` — never a defaulted
+ * limit/clear guess.
  */
 export async function readCswapList(): Promise<CswapRead> {
   let stdout: string;
@@ -87,38 +96,105 @@ async function fetchAccountsApi(creds: Credentials): Promise<AccountsApiRow[]> {
   return (await res.json()) as AccountsApiRow[];
 }
 
+/** `buildAccountsSnapshot`'s own result: the per-slot rows, and the ONE
+ *  instant (ISO) the local cswap read happened — the exact same instant
+ *  `decideAccountSync` below was handed as `now`. These two must never drift
+ *  apart (a dispatch requirement): a sync POST's `usageFetchedAt` is the
+ *  yardstick routes.ts compares a D1 row's own `seenAt` against (MAJOR 6),
+ *  and a `seenAt`/`usageFetchedAt` pair stamped from two separate `new
+ *  Date()` calls could disagree by milliseconds in exactly the edge case
+ *  that comparison exists to catch. */
+export interface AccountsSnapshot {
+  rows: AccountSnapshotRow[];
+  usageFetchedAt: string;
+}
+
 /**
  * The shared snapshot: one GET /studio/accounts + one local `cswap list
  * --json` read, joined and decided per slot (default threshold). Used by
  * the bare table command, `sync`, and `--watch`'s own loop body — exactly
  * the "shared snapshot function" this dispatch's brief asks for, so all
  * three read the SAME join/decision logic rather than three copies of it.
+ *
+ * `fetchedAt` is captured ONCE, before either network call resolves, and
+ * reused both as `decideAccountSync`'s own `now` AND (ISO-stringified) as
+ * `usageFetchedAt` — see `AccountsSnapshot`'s own doc comment for why.
+ *
+ * MAJOR 3 belt-and-suspenders: `joinAccountsToCswap`/`decideAccountSync`
+ * (claude-swap.ts) are already defensive by construction — a malformed
+ * cswap entry degrades to "no-data" for that one slot, never throws. This
+ * loop wraps its OWN mapping/rendering work in the same per-slot try/catch
+ * anyway, so a bug in THIS file's code can never kill the whole command for
+ * every other slot either — one bad row degrades to its own error state,
+ * same posture routes.ts's `renderStudioGrid` already takes for a bad DO
+ * round trip.
  */
-export async function buildAccountsSnapshot(creds: Credentials, now: Date = new Date()): Promise<AccountSnapshotRow[]> {
+export async function buildAccountsSnapshot(creds: Credentials, fetchedAt: Date = new Date()): Promise<AccountsSnapshot> {
   const [apiRows, cswap] = await Promise.all([fetchAccountsApi(creds), readCswapList()]);
-  const slots: FleetAccountSlot[] = apiRows.map((r) => ({ name: r.name, label: r.label }));
+  const slots: FleetAccountSlot[] = apiRows.map((r) => ({ name: r.name, label: r.label, until: r.until }));
   const joins = joinAccountsToCswap(slots, cswap.available ? cswap.accounts : [], cswap.available);
-  return apiRows.map((r, i) => {
-    const join = joins[i]!;
-    const decision = decideAccountSync(join, now);
-    const usage = join.cswap;
-    return {
-      name: r.name,
-      label: r.label,
-      fiveHourPct: usage ? usage.usage.fiveHour.pct : null,
-      sevenDayPct: usage ? usage.usage.sevenDay.pct : null,
-      decision,
-      current: { dead: r.dead, until: r.until, seenAt: r.seenAt },
-    };
+  const rows = apiRows.map((r, i): AccountSnapshotRow => {
+    try {
+      const join = joins[i]!;
+      const decision = decideAccountSync(join, fetchedAt);
+      const usage = join.cswap?.usage ?? null;
+      return {
+        name: r.name,
+        label: r.label,
+        matchSource: join.matchSource,
+        matchedEmail: join.cswap?.email ?? null,
+        fiveHourPct: usage ? usage.fiveHour.pct : null,
+        sevenDayPct: usage ? usage.sevenDay.pct : null,
+        decision,
+        current: { dead: r.dead, until: r.until, seenAt: r.seenAt },
+      };
+    } catch (err) {
+      return {
+        name: r.name,
+        label: r.label,
+        matchSource: "unmapped",
+        matchedEmail: null,
+        fiveHourPct: null,
+        sevenDayPct: null,
+        decision: { name: r.name, action: "no-data", reason: `fleet accounts: ${errText(err)}` },
+        current: { dead: r.dead, until: r.until, seenAt: r.seenAt },
+      };
+    }
   });
+  return { rows, usageFetchedAt: fetchedAt.toISOString() };
 }
 
-function printSnapshot(snapshot: AccountSnapshotRow[], json: boolean): void {
-  if (json) {
-    console.log(JSON.stringify(snapshot, null, 2));
+/**
+ * Prints one snapshot. `--write-labels` combines with EITHER output shape
+ * (never a separate stdout line mixed into `--json`'s own output, which
+ * would corrupt it as JSON): plain text gets the suggestions as extra lines
+ * after the table; `--json` folds them into the SAME JSON object, under
+ * `labelSuggestions`, alongside the rows under `accounts` — so `--json`'s
+ * output is a bare array exactly as before whenever `--write-labels` is NOT
+ * given (every existing `--json` consumer sees no shape change at all), and
+ * becomes `{ accounts, labelSuggestions }` only when it is.
+ */
+function printSnapshot(rows: AccountSnapshotRow[], flags: Pick<AccountsFlags, "json" | "writeLabels">): void {
+  if (flags.writeLabels) {
+    const labelSuggestions = buildLabelSuggestions(rows);
+    if (flags.json) {
+      console.log(JSON.stringify({ accounts: rows, labelSuggestions }, null, 2));
+      return;
+    }
+    console.log(formatAccountsTable(rows));
+    if (labelSuggestions.length > 0) {
+      console.log("");
+      for (const line of labelSuggestions) console.log(line);
+    } else {
+      console.log("\n(no inferred matches — nothing to suggest)");
+    }
     return;
   }
-  console.log(formatAccountsTable(snapshot));
+  if (flags.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  console.log(formatAccountsTable(rows));
 }
 
 /**
@@ -128,45 +204,54 @@ function printSnapshot(snapshot: AccountSnapshotRow[], json: boolean): void {
  * carries everything a fresh `current` needs. Cheaper and just as accurate
  * as re-fetching: the only way a second GET could disagree is a write from
  * somewhere else landing in the same instant, which a re-fetch cannot rule
- * out either. `rejected` names are left with their PRE-sync `current`
- * untouched (the route refused to write them, so nothing changed).
+ * out either. `rejected`/`skipped` names are left with their PRE-sync
+ * `current` untouched (the route did not write them, so nothing changed).
+ *
+ * A "limit" write preserves the row's own PRE-sync `dead` flag locally too —
+ * routes.ts's MAJOR 5 fix means the Worker never un-deads a row on a usage
+ * sighting alone, and this local projection must not show something the
+ * Worker itself did not do.
  */
-function applyLocally(snapshot: AccountSnapshotRow[], applied: string[]): AccountSnapshotRow[] {
+function applyLocally(rows: AccountSnapshotRow[], applied: string[]): AccountSnapshotRow[] {
   const appliedSet = new Set(applied);
-  return snapshot.map((row) => {
+  return rows.map((row) => {
     if (!appliedSet.has(row.name)) return row;
     const current: AccountCurrentState = row.decision.action === "limit"
-      ? { dead: false, until: row.decision.until, seenAt: row.decision.seenAt }
+      ? { dead: row.current.dead, until: row.decision.until, seenAt: row.decision.seenAt }
       : row.decision.action === "clear"
         ? { dead: false, until: null, seenAt: null }
-        : row.current; // "unmanaged" never writes — unreachable here since it's filtered out before POSTing, kept for completeness.
+        : row.current; // "unmanaged"/"no-data" never write — unreachable here since both are filtered out before POSTing, kept for completeness.
     return { ...row, current };
   });
 }
 
 interface SyncResult {
-  snapshot: AccountSnapshotRow[];
+  rows: AccountSnapshotRow[];
   applied: string[];
   rejected: { name: string; reason: string }[];
+  skipped: { name: string; reason: string }[];
 }
 
 /**
- * The real write: builds the snapshot, POSTs every non-"unmanaged" decision
- * (routes.ts's own posture — "unmanaged" writes nothing, so sending it would
- * be a no-op the route would just echo back) to /studio/accounts/sync, and
- * returns the POST-sync snapshot built locally (see `applyLocally` above).
+ * The real write: builds the snapshot, POSTs every "limit"/"clear" decision
+ * (routes.ts's own posture — "unmanaged"/"no-data" write nothing, so sending
+ * either would be a no-op the route would just echo back) to
+ * /studio/accounts/sync alongside the snapshot's own `usageFetchedAt`
+ * (MAJOR 6 — the yardstick the route compares a "clear"'s target row against
+ * before applying it), and returns the POST-sync snapshot built locally (see
+ * `applyLocally` above).
  */
-async function doSync(creds: Credentials, now: Date = new Date()): Promise<SyncResult> {
-  const snapshot = await buildAccountsSnapshot(creds, now);
-  const decisions: SyncDecision[] = snapshot
+async function doSync(creds: Credentials, fetchedAt: Date = new Date()): Promise<SyncResult> {
+  const { rows, usageFetchedAt } = await buildAccountsSnapshot(creds, fetchedAt);
+  const decisions: SyncDecision[] = rows
     .map((r) => r.decision)
-    .filter((d) => d.action !== "unmanaged");
+    .filter((d) => d.action === "limit" || d.action === "clear");
   let res: Response;
   try {
     res = await fetch(new URL("/studio/accounts/sync", creds.workerUrl), {
       method: "POST",
       headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
-      body: JSON.stringify({ decisions }),
+      body: JSON.stringify({ usageFetchedAt, decisions }),
     });
   } catch (err) {
     throw new Error(`fleet accounts sync: could not reach ${creds.workerUrl}: ${errText(err)}`);
@@ -174,13 +259,25 @@ async function doSync(creds: Credentials, now: Date = new Date()): Promise<SyncR
   if (!res.ok) {
     throw new Error(`fleet accounts sync: ${res.status} ${(await res.text()).slice(0, 300)}`);
   }
-  const { applied, rejected } = (await res.json()) as { applied: string[]; rejected: { name: string; reason: string }[] };
-  return { snapshot: applyLocally(snapshot, applied), applied, rejected };
+  const { applied, rejected, skipped } = (await res.json()) as {
+    applied: string[];
+    rejected: { name: string; reason: string }[];
+    skipped: { name: string; reason: string }[];
+  };
+  return { rows: applyLocally(rows, applied), applied, rejected, skipped: skipped ?? [] };
 }
 
-function reportSyncOutcome(applied: string[], rejected: { name: string; reason: string }[]): void {
+/** `applied`/`rejected` as before, plus a `skipped` line per entry — distinct
+ *  from both: `skipped` is routes.ts's own "correct no-op, not an error"
+ *  outcome (MAJOR 6 — a fresher sighting already recorded after this
+ *  snapshot was taken, so the clear this batch asked for was never applied
+ *  on purpose). */
+function reportSyncOutcome(
+  applied: string[], rejected: { name: string; reason: string }[], skipped: { name: string; reason: string }[],
+): void {
   console.error(`fleet accounts sync: applied ${applied.length} (${applied.join(", ") || "none"})`);
   for (const r of rejected) console.error(`fleet accounts sync: rejected ${r.name} (${r.reason})`);
+  for (const s of skipped) console.error(`fleet accounts sync: skipped ${s.name} (${s.reason})`);
 }
 
 /** Minimum (and, since there is no --interval flag, ALSO the only) delay
@@ -216,17 +313,17 @@ async function watchAccounts(creds: Credentials, flags: AccountsFlags, sync: boo
   let prev: AccountSnapshotRow[] | null = null;
   for (;;) {
     try {
-      let snapshot: AccountSnapshotRow[];
+      let rows: AccountSnapshotRow[];
       if (sync) {
         const result = await doSync(creds);
-        reportSyncOutcome(result.applied, result.rejected);
-        snapshot = result.snapshot;
+        reportSyncOutcome(result.applied, result.rejected, result.skipped);
+        rows = result.rows;
       } else {
-        snapshot = await buildAccountsSnapshot(creds);
+        rows = (await buildAccountsSnapshot(creds)).rows;
       }
-      if (prev === null || !snapshotsEqual(prev, snapshot)) printSnapshot(snapshot, flags.json);
+      if (prev === null || !snapshotsEqual(prev, rows)) printSnapshot(rows, flags);
       else console.error(`fleet accounts: no change (${new Date().toISOString()})`);
-      prev = snapshot;
+      prev = rows;
     } catch (err) {
       console.error(`fleet accounts: iteration failed, retrying in ${WATCH_INTERVAL_MS / 1000}s (${errText(err)})`);
     }
@@ -240,24 +337,24 @@ async function watchAccounts(creds: Credentials, flags: AccountsFlags, sync: boo
 export async function cmdAccounts(creds: Credentials, flags: AccountsFlags): Promise<void> {
   if (flags.watch) return watchAccounts(creds, flags, false);
   try {
-    printSnapshot(await buildAccountsSnapshot(creds), flags.json);
+    printSnapshot((await buildAccountsSnapshot(creds)).rows, flags);
   } catch (err) {
     console.error(errText(err));
     process.exit(1);
   }
 }
 
-/** `fleet accounts sync` — builds the snapshot, POSTs the non-"unmanaged"
- *  decisions, reports what was applied/rejected, then prints the post-sync
- *  table (built locally — see `applyLocally`'s own doc comment for why no
- *  second GET round-trip). One-shot: a failed fetch/non-2xx exits loudly
- *  (same as this route's previous behavior), unlike `--watch`'s loop. */
+/** `fleet accounts sync` — builds the snapshot, POSTs the limit/clear
+ *  decisions, reports what was applied/rejected/skipped, then prints the
+ *  post-sync table (built locally — see `applyLocally`'s own doc comment for
+ *  why no second GET round-trip). One-shot: a failed fetch/non-2xx exits
+ *  loudly (same as this route's previous behavior), unlike `--watch`'s loop. */
 export async function cmdAccountsSync(creds: Credentials, flags: AccountsFlags): Promise<void> {
   if (flags.watch) return watchAccounts(creds, flags, true);
   try {
-    const { snapshot, applied, rejected } = await doSync(creds);
-    reportSyncOutcome(applied, rejected);
-    printSnapshot(snapshot, flags.json);
+    const { rows, applied, rejected, skipped } = await doSync(creds);
+    reportSyncOutcome(applied, rejected, skipped);
+    printSnapshot(rows, flags);
   } catch (err) {
     console.error(errText(err));
     process.exit(1);

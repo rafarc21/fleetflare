@@ -2688,8 +2688,8 @@ async function main(): Promise<void> {
       return cmdJuniorStats(creds, parsed.since);
     case "accounts":
       return parsed.sync
-        ? cmdAccountsSync(creds, { watch: parsed.watch, json: parsed.json })
-        : cmdAccounts(creds, { watch: parsed.watch, json: parsed.json });
+        ? cmdAccountsSync(creds, { watch: parsed.watch, json: parsed.json, writeLabels: parsed.writeLabels })
+        : cmdAccounts(creds, { watch: parsed.watch, json: parsed.json, writeLabels: parsed.writeLabels });
   }
 }
 
