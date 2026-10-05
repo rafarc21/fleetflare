@@ -277,6 +277,41 @@ describe("fleet accounts", () => {
     expect(syncCalls.length).toBe(0);
   });
 
+  // Maestro real-probe review of PR #242 (issue #240): the maestro ran the
+  // real PR CLI against REAL claude-swap output and found EVERY slot read
+  // "unmapped" -- even a slot whose label genuinely equaled a real cswap
+  // account's email -- because the per-account shape validators
+  // (isValidScopedWindow/isValidWindow/isValidUsage) rejected every real
+  // account entry outright (scoped `name` vs `model`, an absent `resetsAt`
+  // key, `willLastToReset: null`), dropping all real accounts from the
+  // matching pool before label matching ever ran. CSWAP_LIST_ENVELOPE now
+  // carries that corrected real shape (test/fixtures/cswap-list.ts's own
+  // header) -- this is the exact regression: a labeled slot whose label
+  // equals a real-shaped account's email must show matchSource "label" with
+  // real pct data, never "unmapped".
+  test("regression (maestro real-probe review): a labeled slot matching a real-shaped account's email shows matchSource 'label' with real pct data, not unmapped", async () => {
+    const home = tmpDir("accounts-home-");
+    const cswapDir = writeFakeCswap(CSWAP_LIST_ENVELOPE);
+    const { server, syncCalls } = startWorker(ACCOUNT_SLOTS);
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await run(["accounts", "--json"], home, cswapDir);
+    server.stop(true);
+
+    expect(r.code).toBe(0);
+    const rows = JSON.parse(r.out) as { name: string; matchSource: string; matchedEmail: string | null; fiveHourPct: number | null; sevenDayPct: number | null }[];
+    const primary = rows.find((row) => row.name === "CLAUDE_CODE_OAUTH_TOKEN")!;
+    expect(primary.matchSource).toBe("label");
+    expect(primary.matchSource).not.toBe("unmapped");
+    expect(primary.matchedEmail).toBe(OVER_FIVE_HOUR.email);
+    expect(primary.fiveHourPct).toBe(97);
+    expect(primary.sevenDayPct).toBe(40);
+    const spare = rows.find((row) => row.name === "CLAUDE_CODE_OAUTH_TOKEN_2")!;
+    expect(spare.matchSource).toBe("label");
+    expect(spare.matchSource).not.toBe("unmapped");
+    expect(syncCalls.length).toBe(0);
+  });
+
   // Issue #240 item 1: an envelope with a schemaVersion this build doesn't
   // recognize must never be silently accepted (the shape could have changed
   // incompatibly) -- every slot reads cswap-missing, same as cswap being

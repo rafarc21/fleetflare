@@ -37,15 +37,29 @@
  * live failover cascade is tracked as a separate board issue (#238).
  */
 
-/** One usage window as cswap reports it. */
+/** One usage window as cswap reports it.
+ *
+ *  `resetsAt` (maestro real-probe review of PR #242, issue #240): a window
+ *  with no readable reset OMITS this key entirely in real output
+ *  (`{"pct": 0.0}`, no `resetsAt` property at all) — it is never present and
+ *  explicitly `null`. The type marks it optional so BOTH "key absent" and
+ *  "key present, `null`" are the same valid shape; every reader in this
+ *  module treats them identically (see `resetsAtCandidates` and
+ *  `decideAccountSync`'s own `?? null`). */
 export interface CswapWindow {
   pct: number;
-  resetsAt: string | null;
+  resetsAt?: string | null;
 }
 
-/** A per-model weekly window — same shape as CswapWindow plus which model. */
+/** A per-model weekly window — same shape as CswapWindow plus a display
+ *  name. `name` (maestro real-probe review, issue #240): real `cswap list
+ *  --json` calls this field `name`, never `model` — an earlier draft
+ *  invented `model` and every real scoped entry failed shape validation
+ *  because of it. Nothing in this module reads `name` for any DECISION
+ *  (`decideAccountSync`'s scoped-window threshold check only ever touches
+ *  `.pct`/`.resetsAt`) — this is purely a shape/typing correction. */
 export interface CswapScopedWindow extends CswapWindow {
-  model: string;
+  name: string;
 }
 
 /** One account's usage, as `cswap list --json` reports it.
@@ -64,7 +78,12 @@ export interface CswapAccount {
   usageAgeSeconds: number;
   usage: {
     fiveHour: CswapWindow;
-    sevenDay: CswapWindow & { willLastToReset: boolean };
+    // willLastToReset (maestro real-probe review, issue #240): real cswap
+    // reports `null` here, not just `true`/`false` -- nothing in this
+    // module reads this field for any decision (it is carried through the
+    // type only), so the validator need only tolerate its real range of
+    // values, never interpret them.
+    sevenDay: CswapWindow & { willLastToReset: boolean | null };
     scoped: CswapScopedWindow[];
   } | null;
 }
@@ -103,7 +122,12 @@ export const RESET_MATCH_WINDOW_MS = 5 * 60 * 1000;
 
 function resetsAtCandidates(account: CswapAccount): (string | null)[] {
   if (account.usage === null) return [];
-  return [account.usage.fiveHour.resetsAt, account.usage.sevenDay.resetsAt];
+  // `?? null` normalizes an absent `resetsAt` key (real shape, see
+  // CswapWindow's own doc comment) to the same `null` an explicit
+  // `resetsAt: null` already produces -- one normalization point, so every
+  // reader downstream (just `withinResetWindow` below) never has to care
+  // which of the two it actually was.
+  return [account.usage.fiveHour.resetsAt ?? null, account.usage.sevenDay.resetsAt ?? null];
 }
 
 function withinResetWindow(untilMs: number, account: CswapAccount): boolean {
@@ -257,22 +281,40 @@ function isFiniteNumber(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
 }
 
+// Maestro real-probe review of PR #242 (issue #240): real `cswap list
+// --json` output omits `resetsAt` entirely on a reset-less window rather
+// than setting it `null` -- `win.resetsAt === undefined` (an absent key
+// reads as `undefined` off a plain object, same as `in` would say "not
+// present") is accepted here as the SAME valid "no reset" case an explicit
+// `null` already was. Extra unrecognized keys on `w` (real cswap carries
+// `countdown`/`clock`/`expectedPct`/`aheadOfPace`, none of which this
+// codebase models) never affect this check -- it only ever reads the two
+// named properties it cares about, never an exact-keys comparison.
 function isValidWindow(w: unknown): w is CswapWindow {
   if (typeof w !== "object" || w === null) return false;
   const win = w as Record<string, unknown>;
-  return isFiniteNumber(win.pct) && (win.resetsAt === null || typeof win.resetsAt === "string");
+  return isFiniteNumber(win.pct)
+    && (win.resetsAt === undefined || win.resetsAt === null || typeof win.resetsAt === "string");
 }
 
+// `name`, not `model` -- see CswapScopedWindow's own doc comment on this
+// field-name correction.
 function isValidScopedWindow(w: unknown): w is CswapScopedWindow {
   if (!isValidWindow(w)) return false;
-  return typeof (w as unknown as Record<string, unknown>).model === "string";
+  return typeof (w as unknown as Record<string, unknown>).name === "string";
 }
 
 function isValidUsage(usage: unknown): usage is NonNullable<CswapAccount["usage"]> {
   if (typeof usage !== "object" || usage === null) return false;
   const u = usage as Record<string, unknown>;
   if (!isValidWindow(u.fiveHour) || !isValidWindow(u.sevenDay)) return false;
-  return typeof (u.sevenDay as unknown as Record<string, unknown>).willLastToReset === "boolean"
+  // willLastToReset: real cswap reports `null` here too, not just
+  // `true`/`false` -- see CswapAccount["usage"]'s own doc comment on this
+  // field; nothing downstream reads its value for a decision, so the
+  // validator only needs to confirm the KEY exists with one of its real
+  // values, never a strict boolean.
+  const willLastToReset = (u.sevenDay as unknown as Record<string, unknown>).willLastToReset;
+  return (typeof willLastToReset === "boolean" || willLastToReset === null)
     && Array.isArray(u.scoped) && u.scoped.every(isValidScopedWindow);
 }
 
