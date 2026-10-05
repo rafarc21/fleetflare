@@ -285,17 +285,27 @@ export const RESCUE_STAMP_DIGITS = 14;
  *   `wipSyncRef`'s own doc comment (rescue.ts) for the full history of why
  *   the OLD flat, un-anchored shape was deliberately excluded here instead.
  * - nested, wip-sync (member worktree): `fleet/rescue/<studio>/wip/<14digits>
- *   /wt/<id>` — maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231).
+ *   -wt-<id>` — maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231).
  *   Deliberately a DISTINCT shape from the member-worktree TEARDOWN rescue
  *   ref above (`wt/<id>-<14digits>`, no `wip/` segment at all): the two used
  *   to be byte-identical, which broke `rescue_on_origin`'s own wip-exclusion
  *   filter (rescue.ts) — it only ever excluded a path under `/wip/`, never
  *   `/wt/` — and let a member's wip-sync tip wrongly stand in as proof its
- *   real work was already rescued. Nesting under `wip/` first fixes that for
+ *   real work was already rescued. Living under `wip/` first fixes that for
  *   free (the filter's `/wip(/|$)` already matches it) and also makes this
  *   shape self-describing as a LIVE, continuously-refreshed ref rather than
  *   an abandoned teardown rescue, exactly the same way the main-checkout wip
- *   shape just above already reads.
+ *   shape just above already reads. A HYPHEN joins the stamp and the
+ *   worktree id, never a further `/wt/` nesting (that was this fix's own
+ *   first attempt, and the review's own illustrative example) — measured
+ *   directly against a real push: git's ref namespace forbids a ref from
+ *   being a strict path-component PREFIX of another, so `wip/<14digits>`
+ *   (the main checkout's own leaf, just above) and `wip/<14digits>/wt/<id>`
+ *   cannot coexist on origin at the SAME time for the SAME boot — exactly
+ *   the ordinary case (main checkout AND a member worktree both dirty in
+ *   the same tick). `wip/<14digits>-wt-<id>` is a SIBLING LEAF under the
+ *   same `wip/` directory, never a path-component prefix of the bare shape
+ *   or vice versa, so the two always coexist.
  *
  * See this function's own body below for the nested shapes' match logic and
  * reasoning (#216) — the flat shape's own reasoning follows here since it's
@@ -380,17 +390,24 @@ export function rescueRefStamp(studioId: string, branch: string): string | null 
   // container boot).
   //
   // Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231): a member
-  // worktree's own wip-sync ref is nested ONE level deeper still —
-  // `wip/<14digits>/wt/<id>` — checked FIRST, before the bare
-  // `wip/<14digits>$` match below, so a member ref is never mistaken for the
-  // main-checkout shape (it would otherwise fail that `$`-anchored match
-  // anyway, since there is a trailing `/wt/<id>`, but checking this shape
-  // first keeps the two branches independent and easy to read). `\S+` for
-  // `<id>`, same no-whitespace discipline every other trailing name in this
-  // function already uses.
+  // worktree's own wip-sync ref is a SIBLING leaf under this same `wip/`
+  // directory — `wip/<14digits>-wt-<id>`, a HYPHEN (never a further `/`)
+  // joining the stamp and the worktree id. See `wip_sync_one`'s own call
+  // sites' doc comment (rescue.ts) for why: a `/wt/<id>` nesting would make
+  // this ref a strict path-component PREFIX extension of the bare
+  // `wip/<14digits>` shape just below, which git's ref namespace forbids —
+  // the two would collide on origin the moment a single tick needs to push
+  // BOTH the main checkout and a member worktree under the SAME boot stamp,
+  // which is the ordinary case, not an edge one. Checked FIRST, before the
+  // bare `wip/<14digits>$` match below, so a member ref is never mistaken
+  // for the main-checkout shape (it would otherwise fail that `$`-anchored
+  // match anyway, since there is a trailing `-wt-<id>`, but checking this
+  // shape first keeps the two branches independent and easy to read). `\S+`
+  // for `<id>`, same no-whitespace discipline every other trailing name in
+  // this function already uses.
   if (rest.startsWith("wip/")) {
     const afterWip = rest.slice(4);
-    const memberMatch = afterWip.match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})\\/wt\\/\\S+$`));
+    const memberMatch = afterWip.match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})-wt-\\S+$`));
     if (memberMatch) return memberMatch[1]!;
     const wipMatch = afterWip.match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})$`));
     return wipMatch ? wipMatch[1]! : null;

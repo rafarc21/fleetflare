@@ -1230,7 +1230,7 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
   // rolling-snapshot property.
   //
   // Maestro review round 1 on PR #235, MAJOR 4 + 5 — the ref shape is now
-  // `fleet/rescue/<studio>/wip/<bootStamp>/wt/<wid>`, nested under `wip/`,
+  // `fleet/rescue/<studio>/wip/<bootStamp>-wt-<wid>`, nested under `wip/`,
   // never the teardown-time fresh-timestamp `wt/<wid>-<ts>` shape
   // rescue-push uses (the two used to be byte-identical; see
   // `wip_sync_one`'s own call sites' doc comment, rescue.ts, for why that was
@@ -1241,8 +1241,8 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
 
     const out = wip();
 
-    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}/wt/agent-a1b2`;
-    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}/wt/agent-a1b2 1 files$`, "m"));
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2 1 files$`, "m"));
     expect(rescueRefs()).toEqual([memberRef]);
     const files = sh(`git -C ${origin} ls-tree -r --name-only ${memberRef}`).out.split("\n");
     expect(files).toContain("member-wip.md");
@@ -1253,15 +1253,15 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
 
     const out = wip();
 
-    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}/wt/agent-a1b2`;
-    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}/wt/agent-a1b2 1 commits$`, "m"));
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2 1 commits$`, "m"));
     expect(rescueRefs()).toEqual([memberRef]);
   });
 
   test("running wip-sync twice with the SAME bootStamp OVERWRITES the SAME member-worktree ref -- rolling snapshot, same property the main checkout's own wip ref already has", () => {
     writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "first\n");
     wip();
-    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}/wt/agent-a1b2`;
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
     const sha1 = sh(`git -C ${origin} rev-parse ${memberRef}`).out;
 
     writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "second, unrelated to the first\n");
@@ -1354,14 +1354,17 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
   test("origin rejects only the member worktree's push: the RESCUE_FAILED line names that worktree's own ref, never a generic 'wip-sync' string indistinguishable from a main-checkout failure", () => {
     writeFileSync(
       join(origin, "hooks", "pre-receive"),
-      "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    refs/heads/fleet/rescue/*/wt/*) exit 1 ;;\n  esac\ndone\nexit 0\n",
+      // Maestro review round 1 on PR #235, MAJOR 4 + 5: the member wip-sync
+      // ref no longer contains a literal `/wt/` (it's `wip/<stamp>-wt-<id>`,
+      // a hyphen, not a further nested path) -- matched on `-wt-` instead.
+      "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    refs/heads/fleet/rescue/*-wt-*) exit 1 ;;\n  esac\ndone\nexit 0\n",
     );
     chmodSync(join(origin, "hooks", "pre-receive"), 0o755);
     writeFileSync(join(checkout, "notes.md"), "main work, accepted\n");
     writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work, rejected\n");
 
     const out = wip();
-    const memberTarget = `fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}/wt/agent-a1b2`;
+    const memberTarget = `fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
 
     // The main checkout's own push still succeeds...
     expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO, BOOT_STAMP)} 1 files$`, "m"));
@@ -1537,6 +1540,63 @@ describe("#208 fix round item 1 — the full lifecycle: wip-sync never hides a c
 });
 
 /**
+ * Maestro review round 1 on PR #235, MINOR 6 (issue #231) — `wipSyncCmd`'s
+ * own 90s `EXEC_CLASSES.wipSync` budget was sized for exactly ONE push
+ * target (the main checkout, this feature's pre-#231-fix-3b design); now
+ * that it walks every member worktree in the SAME exec, 2+ slow targets can
+ * exceed it, and a fixed-order walk killed partway through starves every
+ * LATER worktree on every single tick. `wip_budget_ok` (rescue.ts) is this
+ * file's own `rescue_budget_ok` pattern, mirrored at wip-sync's own scale —
+ * reuses the IDENTICAL slow-post-receive-hook fixture and the SAME proven,
+ * non-flaky (`pushTimeoutSeconds=2, serverDeadlineSeconds=17,
+ * budgetMarginSeconds=0`) margin this file's own "#371" describe block above
+ * already validated for the teardown ledger — the per-push timing class
+ * (one `timeout -k`-bounded force-push against the same slow remote hook) is
+ * identical, so the same numbers hold here without re-deriving new ones.
+ */
+describe("#231 review round 1, MINOR 6 — wip_budget_ok: wipSyncCmd never starts a target's push it cannot finish before its own 90s exec budget", () => {
+  test("3 stalled member-worktree pushes, main checkout clean: a couple are attempted and killed, the rest are skipped as RESCUE_FAILED <target> budget <n> not attempted, never hanging for their own full stall", () => {
+    const targets: string[] = [];
+    for (let i = 1; i <= 3; i++) {
+      const name = `wt${i}`;
+      const wtPath = join(checkout, ".claude/worktrees", name);
+      sh(`git -C ${checkout} worktree add -q ${wtPath} -b ${name}`);
+      writeFileSync(join(wtPath, "wip.md"), `member work ${i}\n`);
+      targets.push(`fleet/rescue/${STUDIO}/wip/20261004040000-wt-${name}`);
+    }
+    installSlowPostReceiveHook(3);
+
+    const start = Date.now();
+    // budgetMarginSeconds=0, same reason the "#371" describe block's own
+    // test uses it: this test's hand-derived push/budget-fail counts are
+    // pinned against the exact zero-margin threshold math.
+    const out = sh(wipSyncCmd(REPO, STUDIO, "20261004040000", root, 2, undefined, undefined, undefined, 17, 0)).out;
+    const elapsedMs = Date.now() - start;
+
+    const pushFails = targets.filter((t) => new RegExp(`^${RESCUE_FAILED_PREFIX} ${t} push$`, "m").test(out));
+    const budgetFails = targets.filter((t) => new RegExp(`^${RESCUE_FAILED_PREFIX} ${t} budget -?\\d+ not attempted$`, "m").test(out));
+
+    expect(out).not.toContain(RESCUE_PUSHED_PREFIX);
+    expect(pushFails.length).toBe(2);
+    expect(budgetFails.length).toBe(1);
+    expect(pushFails.length + budgetFails.length).toBe(3);
+    // The real point: fast, never anywhere near 3 * (pushTimeoutSeconds +
+    // KILL_GRACE_SECONDS) of real stalling.
+    expect(elapsedMs).toBeLessThan(8000);
+  }, 15000);
+
+  test("the main checkout's own push still runs ahead of every worktree, and a healthy exec (no stalls) never prints a single budget line", () => {
+    writeFileSync(join(checkout, "notes.md"), "main checkout work\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work\n");
+
+    const out = sh(wipSyncCmd(REPO, STUDIO, "20261004050000", root)).out;
+
+    expect(out).not.toContain("budget");
+    expect(out.split("\n").filter((l) => l.startsWith(RESCUE_PUSHED_PREFIX)).length).toBe(2);
+  });
+});
+
+/**
  * Maestro review round 1 on PR #235, MAJOR 4 + MAJOR 5 (issue #231) — a
  * member worktree's own wip-sync ref used to be `fleet/rescue/<studio>/
  * wt/<wid>-<bootStamp>`, the EXACT SAME SHAPE `rescuePushCmd`'s own teardown-
@@ -1554,22 +1614,30 @@ describe("#208 fix round item 1 — the full lifecycle: wip-sync never hides a c
  *   aged out on teardown's own 14-day cap, even though it is a LIVE ref
  *   refreshed every ~5 minutes.
  *
- * Fixed by nesting the member ref UNDER `wip/`, not `wt/`:
- * `fleet/rescue/<studio>/wip/<bootStamp>/wt/<wid>` — the EXISTING
+ * Fixed by moving the member ref UNDER `wip/`, not `wt/`:
+ * `fleet/rescue/<studio>/wip/<bootStamp>-wt-<wid>` — the EXISTING
  * `/wip(/|$)` filter already excludes anything starting with `.../wip/`, no
- * filter change needed; `rescueRefStamp` gains a new, distinct match for this
- * nested shape.
+ * filter change needed; `rescueRefStamp` gains a new, distinct match for
+ * this shape. A HYPHEN joins the stamp and the worktree id, deliberately
+ * NOT a further `/wt/` nesting (the review's own illustrative example) --
+ * measured directly against a real push, `wip/<bootStamp>/wt/<wid>` cannot
+ * coexist with the main checkout's own `wip/<bootStamp>` leaf (git's ref
+ * namespace forbids one ref being a strict path-component prefix of
+ * another), which would collide on EVERY tick where both the main checkout
+ * and a member worktree are dirty under the same boot -- see
+ * `wip_sync_one`'s own call sites' doc comment (rescue.ts) for the full
+ * history.
  */
 describe("#231 review round 1, MAJOR 4 + 5 — member wip-sync refs are nested under wip/, not wt/", () => {
   const BOOT_STAMP = "20261004030000";
 
-  test("a member worktree's wip-sync push uses the nested wip/<bootStamp>/wt/<wid> shape, never the teardown wt/<wid>-<bootStamp> shape", () => {
+  test("a member worktree's wip-sync push uses the nested wip/<bootStamp>-wt-<wid> shape, never the teardown wt/<wid>-<bootStamp> shape", () => {
     writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work\n");
 
     const out = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root)).out;
 
-    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}/wt/agent-a1b2`;
-    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}/wt/agent-a1b2 1 files$`, "m"));
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2 1 files$`, "m"));
     expect(rescueRefs()).toContain(memberRef);
     // The OLD, teardown-colliding shape never appears.
     expect(rescueRefs().some((r) => r.includes(`/wt/agent-a1b2-${BOOT_STAMP}`))).toBe(false);
@@ -1587,7 +1655,7 @@ describe("#231 review round 1, MAJOR 4 + 5 — member wip-sync refs are nested u
     // its own per-boot nested wip ref.
     const wipOut = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root)).out;
     expect(wipOut).toContain(RESCUE_PUSHED_PREFIX);
-    const memberWipRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}/wt/agent-a1b2`;
+    const memberWipRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
     expect(sh(`git -C ${origin} rev-parse ${memberWipRef}`).out).toBe(memberHeadSha);
 
     // Step 2: teardown rescue runs for real, for the SAME commit. Before this

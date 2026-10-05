@@ -791,10 +791,15 @@ describe("discoverRescueRefsCmd — the shell shape that discovers + fetches thi
   });
 
   // Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231) — a 5TH
-  // shape, a MEMBER worktree's own wip-sync ref, nested one level deeper
-  // than the main-checkout wip ref just above:
-  // `fleet/rescue/<studio>/wip/<14digits>/wt/<id>`.
-  it("also greps the nested fleet/rescue/<studio>/wip/<ts>/wt/<id> shape (a member worktree's own wip-sync ref), alongside every other shape", () => {
+  // shape, a MEMBER worktree's own wip-sync ref, a SIBLING leaf under the
+  // same `wip/` directory the main-checkout wip ref just above lives under:
+  // `fleet/rescue/<studio>/wip/<14digits>-wt-<id>` (a HYPHEN, not a further
+  // nested `/wt/<id>` path — git's ref namespace forbids a ref from being a
+  // strict path-component prefix of another, which `/wt/<id>` nesting would
+  // have been of the bare `wip/<14digits>` leaf; see rescue.ts's own
+  // `wip_sync_one` call-sites doc comment for the measured collision this
+  // avoids).
+  it("also greps the fleet/rescue/<studio>/wip/<ts>-wt-<id> shape (a member worktree's own wip-sync ref), alongside every other shape", () => {
     const cmd = discoverRescueRefsCmd(DIR, STUDIO);
     expect(cmd).toContain(`refs/heads/fleet/rescue/${STUDIO}/wip/`);
   });
@@ -811,10 +816,10 @@ describe("discoverRescueRefsCmd — the shell shape that discovers + fetches thi
       .replace(/\[\^\[:space:\]\]/g, "[^\\s]");
     const re = new RegExp(jsSource);
 
-    const ownMemberWipRef = `refs/heads/fleet/rescue/${shortStudio}/wip/20260925120000/wt/agent-a1b2`;
-    const otherStudioMemberWipRef = `refs/heads/fleet/rescue/${longStudio}/wip/20260925120000/wt/agent-a1b2`;
-    // Still anchored: exactly 14 digits before the `/wt/<id>` segment.
-    const malformedMemberWipRef = `refs/heads/fleet/rescue/${shortStudio}/wip/2026092512000/wt/agent-a1b2`;
+    const ownMemberWipRef = `refs/heads/fleet/rescue/${shortStudio}/wip/20260925120000-wt-agent-a1b2`;
+    const otherStudioMemberWipRef = `refs/heads/fleet/rescue/${longStudio}/wip/20260925120000-wt-agent-a1b2`;
+    // Still anchored: exactly 14 digits before the `-wt-<id>` segment.
+    const malformedMemberWipRef = `refs/heads/fleet/rescue/${shortStudio}/wip/2026092512000-wt-agent-a1b2`;
     // The TEARDOWN member-worktree shape (no `wip/` segment at all) is
     // matched by its OWN, pre-existing branch of this same pattern, never by
     // the new one.

@@ -1918,6 +1918,34 @@ export function formatRescueStamp(now: Date): string {
 export const WIP_SYNC_PUSH_TIMEOUT_SECONDS = 25;
 
 /**
+ * Maestro review round 1 on PR #235, MINOR 6 (issue #231) — `wipSyncCmd`'s
+ * own budget ledger ceiling, the exact seconds this function's own exec gets
+ * under `EXEC_CLASSES.wipSync` (sandbox-api.ts). `WIP_SYNC_PUSH_TIMEOUT_
+ * SECONDS`'s own doc comment above worked out ONE target's worst case at 60s
+ * — comfortably inside this 90s ceiling when `wipSyncCmd` covered the main
+ * checkout only (its pre-#231-fix-3b design). Now that it walks every member
+ * worktree IN THE SAME EXEC, 2+ slow targets can exceed it, and because
+ * targets are processed in a FIXED order (main checkout, then every
+ * worktree in `git worktree list` order), an exec killed partway through
+ * starves every LATER worktree on EVERY tick, never just once. `wip_budget_
+ * ok` (below) is this file's own `rescue_budget_ok` pattern, mirrored at
+ * wip-sync's own 90s scale rather than reusing `RESCUE_SERVER_DEADLINE_
+ * SECONDS` (300s, sized for teardown's much longer `EXEC_CLASSES.rescue`
+ * budget) — refusing to START a target's push once what remains cannot
+ * cover it, rather than risking a silent exec-kill that discards every
+ * already-printed line (see `rescue_budget_ok`'s own doc comment,
+ * RESCUE_SERVER_DEADLINE_SECONDS, for why that risk is the whole reason this
+ * pattern exists at all).
+ */
+export const WIP_SYNC_SERVER_DEADLINE_SECONDS = 90;
+
+/** Maestro review round 1 on PR #235, MINOR 6 — same margin reasoning
+ *  `RESCUE_BUDGET_MARGIN_SECONDS` gives for the teardown ledger: covers one
+ *  pair of truncated `date +%s` samples, independent of wip-sync's own
+ *  (much shorter) scale. */
+export const WIP_SYNC_BUDGET_MARGIN_SECONDS = 5;
+
+/**
  * Fix round (#208 PR #215 review item 6): the sentinel `wipSyncProbeCmd`
  * (below) prints when — and ONLY when — there is genuinely something to
  * sync (a dirty scoped status, or a clean tree with commits no
@@ -2133,18 +2161,20 @@ export function wipSyncRef(studio: string, bootStamp: string): string {
  * push step (`wip_sync_push` below) instead of bending either of those to a
  * shape they were not built for.
  *
- * NO BUDGET LEDGER (`rescue_budget_ok`, the elaborate multi-push worst-case
- * tracking both command builders above carry): that machinery exists
- * because THOSE functions can run a first push attempt plus an independent
- * non-fast-forward retry, several times over, across a whole worktree/
- * branch/stash walk. This function runs exactly ONE push, to ONE target —
- * fix round (#208 PR #215 review item 2) added ONE bounded fallback retry on
- * top of that (see `wip_sync_push`'s own comment below), never a whole
- * worktree/branch/stash walk, and the worst case (two `pushTimeoutSeconds`-
- * bounded pushes back to back) comfortably fits this function's own short
- * exec-class budget (`EXEC_CLASSES.wipSync`, sandbox-api.ts) with no
- * cross-push accounting needed — there is still no multi-target walk for a
- * ledger to protect against.
+ * BUDGET LEDGER, ADDED (maestro review round 1 on PR #235, MINOR 6; issue
+ * #231) — this function used to need none: it ran exactly ONE push, to ONE
+ * target (the main checkout), and fix round (#208 PR #215 review item 2)'s
+ * own ONE bounded fallback retry on top of that (see `wip_sync_push`'s own
+ * comment below) comfortably fit this function's own short exec-class
+ * budget (`EXEC_CLASSES.wipSync`, sandbox-api.ts) with no cross-push
+ * accounting needed. Issue #231 fix 3b then widened this SAME exec to walk
+ * every member worktree too, in a FIXED order, all within the SAME 90s
+ * budget — now `wip_budget_ok` (below, mirroring `rescue_budget_ok`'s own
+ * pattern at wip-sync's own 90s scale, `WIP_SYNC_SERVER_DEADLINE_SECONDS`)
+ * checks what remains before EVERY target's own push attempt, refusing to
+ * start one that cannot finish rather than risking the whole exec being
+ * killed partway through (which would starve every worktree AFTER the one
+ * in flight, on every single tick, not just once).
  *
  * Fix round (#208 PR #215 review item 2): PUBLIC WORK REPO + PRIVATE RESCUE
  * REMOTE was a BLOCKER — `wip_sync_push` used to be a bare, un-retried `git
@@ -2169,12 +2199,18 @@ export function wipSyncRef(studio: string, bootStamp: string): string {
  * (already-shallow, already-truncated) history cut is lost, exactly like
  * `rescue_try_push`'s own documented contract.
  *
- * SCOPE: THE MAIN CHECKOUT ONLY, never a member subagent's own worktree. A
- * deliberate v1 limitation (see this feature's own plan doc,
- * docs/plans/2026-10-03-feat-208-wip-sync.md), not an oversight: this runs
- * on a 5-minute cadence as a bounding safety net, not a one-shot teardown
- * rescue, and the board issue's own Ask talks about "a running studio's
- * container" and "worktree dirty" in the singular.
+ * SCOPE, UPDATED (issue #231 fix 3b): the v1 "main checkout only" limitation
+ * (see this feature's own plan doc, docs/plans/2026-10-03-feat-208-wip-sync.md)
+ * is lifted — this now walks the main checkout, then every member worktree
+ * (`wip_sync_one`'s own call sites at the bottom of this script), each to
+ * its own per-boot ref (`wip/<bootStamp>-wt-<wid>` — maestro review round 1
+ * on PR #235, MAJOR 4 + 5; see `wipSyncRef`'s sibling ref shape for the main
+ * checkout's own, and `wip_sync_one`'s own call sites' doc comment below for
+ * why a hyphen, not a further nested `/`, joins the two). ALL of it still
+ * runs on the SAME 5-minute
+ * cadence, within the SAME single `EXEC_CLASSES.wipSync` exec, bounded by
+ * `wip_budget_ok` (MINOR 6, above) rather than a worktree count this file
+ * has no way to know ahead of time.
  *
  * Covers the same two shapes `rescue_one`/`snapshot_target` above already
  * distinguish, reusing the identical detection: a dirty tree (scoped status
@@ -2202,19 +2238,57 @@ export function wipSyncRef(studio: string, bootStamp: string): string {
  * collision this fix round exists to close), so a caller must always resolve
  * one first; do.ts's `wipSync` skips the whole sync for a tick rather than
  * call this with one invented.
+ *
+ * Maestro review round 1 on PR #235, MINOR 6 — `serverDeadlineSeconds`/
+ * `budgetMarginSeconds` are the SAME test-seam convention `rescuePushCmd`
+ * gives its own two (production always uses `WIP_SYNC_SERVER_DEADLINE_
+ * SECONDS`/`WIP_SYNC_BUDGET_MARGIN_SECONDS` below), but appended at the END
+ * of the parameter list here rather than slotted in right after
+ * `pushTimeoutSeconds` the way `rescuePushCmd` does — this function already
+ * shipped with `botName`/`botEmail`/`opts` as its own trailing positional
+ * params, and existing callers (this file's own tests, do.ts) pass those
+ * positionally; inserting new params in the middle would silently shift
+ * every one of those into the wrong slot.
  */
 export function wipSyncCmd(
   repo: string, studio: string, bootStamp: string, root = "/workspace",
   pushTimeoutSeconds = WIP_SYNC_PUSH_TIMEOUT_SECONDS,
   botName = "fleetflare[bot]", botEmail = "fleetflare[bot]@users.noreply.github.com",
   opts: RescuePushOptions = {},
+  serverDeadlineSeconds = WIP_SYNC_SERVER_DEADLINE_SECONDS, budgetMarginSeconds = WIP_SYNC_BUDGET_MARGIN_SECONDS,
 ): string {
   const dir = `${root}/${repo}`;
   const scope = `-- . ${RESCUE_MARKER_PATHSPECS}`;
   const identity = `-c user.name="${botName}" -c user.email="${botEmail}"`;
   const target = wipSyncRef(studio, bootStamp);
   return (
+    // Maestro review round 1 on PR #235, MINOR 6 — same `date +%s`-based
+    // wall-clock ledger `rescue_budget_ok` (above) uses, scoped to THIS
+    // function's own 90s exec budget rather than teardown's 300s. Captured
+    // first, before `rescuePushPrelude`, so every target's own budget check
+    // (inside `wip_sync_one`, below) measures against the true start of this
+    // exec.
+    `__wip_start=$(date +%s)\n` +
     rescuePushPrelude(opts) +
+    // Maestro review round 1 on PR #235, MINOR 6 — checked once before EVERY
+    // target's own push attempt (`wip_sync_one`'s two `wip_sync_push` call
+    // sites, below), never before the cheap status/rev-list probe that
+    // precedes them: a target that turns out clean never needed a push at
+    // all, so budget-failing it on a borderline exec would refuse work this
+    // ledger was never protecting against. `mult=2`: `wip_sync_push` itself
+    // can run its own main attempt AND its shallow/parentless fallback retry
+    // back-to-back (`WIP_SYNC_PUSH_TIMEOUT_SECONDS`'s own doc comment), the
+    // identical worst-case reasoning `rescue_budget_ok`'s own `mult=2`
+    // call sites use.
+    `wip_budget_ok() {\n` +
+    `  local id="$1" now remaining\n` +
+    `  now=$(date +%s)\n` +
+    `  remaining=$(( ${serverDeadlineSeconds} - (now - __wip_start) ))\n` +
+    `  if [ "$remaining" -lt $(( 2 * (${pushTimeoutSeconds} + ${KILL_GRACE_SECONDS}) + ${budgetMarginSeconds} )) ]; then\n` +
+    `    echo "${RESCUE_FAILED_PREFIX} $id budget $remaining not attempted"\n` +
+    `    return 1\n` +
+    `  fi\n` +
+    `}\n` +
     // `$2`: the thing to push (a bare `HEAD`, or a synthetic snapshot SHA) —
     // `--force --no-verify`, unconditionally: see this function's own doc
     // comment above for why force is safe HERE, and nowhere else in this
@@ -2256,11 +2330,11 @@ export function wipSyncCmd(
     // Issue #231 fix 3b: `wdir`/`wtarget` are now shell ARGUMENTS ($1/$2),
     // never build-time `${dir}`/`${target}` string interpolation — the same
     // function now runs once for the main checkout and once per member
-    // worktree, each with its own directory and its own per-boot nested
-    // `wip/<bootStamp>/wt/<wid>` ref (maestro review round 1 on PR #235,
+    // worktree, each with its own directory and its own per-boot
+    // `wip/<bootStamp>-wt-<wid>` ref (maestro review round 1 on PR #235,
     // MAJOR 4 + 5 — see `wip_sync_one`'s own call sites' doc comment below
-    // for why this is nested under `wip/`, not `wt/`)
-    // (see `wip_sync_one`'s own call sites at the bottom of this script).
+    // for why this lives under `wip/`, not `wt/`, and why a hyphen, not a
+    // further `/`, joins the stamp and the worktree id).
     `wip_sync_push() {\n` +
     `  local wdir="$1" wtarget="$2" src="$3" snap perr prc\n` +
     `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$wdir" push --force --no-verify "$__rdest" "$src:refs/heads/$wtarget" 2>&1 1>/dev/null)"; prc=$?\n` +
@@ -2327,6 +2401,7 @@ export function wipSyncCmd(
     `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget add"; WIP_RESULT=failed; return; fi\n` +
     `    sha=$(git -C "$wdir" ${identity} commit-tree "$tree" -p HEAD -m "fleet: periodic WIP sync (live, real HEAD/index untouched)" 2>/dev/null); rc=$?\n` +
     `    if [ "$rc" != "0" ] || [ -z "$sha" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget commit"; WIP_RESULT=failed; return; fi\n` +
+    `    wip_budget_ok "$wtarget" || { WIP_RESULT=failed; return; }\n` +
     `    perr="$(wip_sync_push "$wdir" "$wtarget" "$sha")"; prc=$?\n` +
     `    if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget push"; printf '%s\\n' "$perr" | tail -n 5 >&2; WIP_RESULT=failed; return; fi\n` +
     `    echo "${RESCUE_PUSHED_PREFIX} $wtarget $wn ${RESCUE_PUSHED_KIND_FILES}"; WIP_RESULT=pushed\n` +
@@ -2338,6 +2413,7 @@ export function wipSyncCmd(
     `    wahead=$(git -C "$wdir" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
     `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget rev-list"; WIP_RESULT=failed; return; fi\n` +
     `    if [ -n "$wahead" ] && [ "$wahead" != "0" ]; then\n` +
+    `      wip_budget_ok "$wtarget" || { WIP_RESULT=failed; return; }\n` +
     `      perr="$(wip_sync_push "$wdir" "$wtarget" HEAD)"; prc=$?\n` +
     `      if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget push"; printf '%s\\n' "$perr" | tail -n 5 >&2; WIP_RESULT=failed; return; fi\n` +
     `      echo "${RESCUE_PUSHED_PREFIX} $wtarget $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; WIP_RESULT=pushed\n` +
@@ -2356,14 +2432,14 @@ export function wipSyncCmd(
     // immune to word-splitting), minus the budget-ledger machinery
     // (`rescue_budget_ok`) that function also carries: this function runs
     // exactly ONE push per target with no multi-attempt worst-case to bound.
-    // Target ref per worktree: `fleet/rescue/<studio>/wip/<bootStamp>/wt/<wid>`
+    // Target ref per worktree: `fleet/rescue/<studio>/wip/<bootStamp>-wt-<wid>`
     // — the SAME per-boot rolling-snapshot property the main checkout's own
     // `${target}` already has (force-pushed, overwritten every tick), never
     // the teardown-time `wt/<id>-<14-digit-timestamp>` shape `rescuePushCmd`
     // mints fresh on every push.
     //
     // Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231) —
-    // deliberately NESTED UNDER `wip/`, not `wt/`: the OLD shape
+    // deliberately UNDER `wip/`, never `wt/`: the OLD shape
     // (`wt/<wid>-<bootStamp>`) was byte-identical to `rescuePushCmd`'s own
     // teardown-time member-worktree rescue ref, which broke two things —
     // `rescue_on_origin`'s own wip-exclusion filter below (`grep -Ev
@@ -2373,11 +2449,26 @@ export function wipSyncCmd(
     // (survival-delivery.ts) matched it as a genuine teardown rescue ref,
     // surfacing it, unexplained, as an "unclaimed rescue ref" subject to
     // teardown's own 14-day age cap, even though it is a LIVE ref refreshed
-    // every ~5 minutes. Nesting under `wip/` fixes BOTH for free: the
-    // EXISTING `/wip(/|$)` filter already matches `.../wip/<bootStamp>/wt/
-    // <wid>` (it starts with `/wip/`), so no filter change was needed; see
-    // `rescueRefStamp`'s own doc comment for the new, distinct match this
-    // shape needed there.
+    // every ~5 minutes.
+    //
+    // NOT `wip/<bootStamp>/wt/<wid>` (a further NESTED path under the main
+    // checkout's own `wip/<bootStamp>` leaf), despite that being the review's
+    // own illustrative example: measured directly (a real push, not a static
+    // read) — git's ref namespace forbids a ref name from being a strict
+    // path-component PREFIX of another ref's name, so `wip/<bootStamp>` (the
+    // main checkout's leaf, `wipSyncRef`) and `wip/<bootStamp>/wt/<wid>`
+    // cannot coexist: the SAME tick, with the SAME bootStamp, dirty on BOTH
+    // the main checkout and a member worktree, hit "cannot lock ref ...:
+    // ... exists; cannot create ..." on EVERY tick — a guaranteed, permanent
+    // collision, not an edge case. `wip/<bootStamp>-wt-<wid>` (a HYPHEN, not
+    // a `/`, joining the two) is a SIBLING leaf under the same `wip/`
+    // directory, never a path-component prefix of `wip/<bootStamp>` or vice
+    // versa, so the two coexist exactly like two different boots' own
+    // `wip/<bootStamp1>` / `wip/<bootStamp2>` already do. The EXISTING
+    // `/wip(/|$)` filter still matches `.../wip/<bootStamp>-wt-<wid>` (it
+    // starts with `/wip/`, which is all that pattern checks) — still no
+    // filter change needed; see `rescueRefStamp`'s own doc comment for the
+    // new, distinct match this shape needed there.
     `  any_pushed=0; any_failed=0; any_markers=0\n` +
     `  wip_sync_one ${dir} ${target}\n` +
     `  [ "$WIP_RESULT" = pushed ] && any_pushed=1\n` +
@@ -2390,7 +2481,7 @@ export function wipSyncCmd(
     `      [ "$w" = "${dir}" ] && continue\n` +
     `      [ -d "$w" ] || continue\n` +
     `      wid=$(basename "$(git -C "$w" rev-parse --git-dir)")\n` +
-    `      wip_sync_one "$w" "fleet/rescue/${studio}/wip/${bootStamp}/wt/$wid"\n` +
+    `      wip_sync_one "$w" "fleet/rescue/${studio}/wip/${bootStamp}-wt-$wid"\n` +
     `      [ "$WIP_RESULT" = pushed ] && any_pushed=1\n` +
     `      [ "$WIP_RESULT" = failed ] && any_failed=1\n` +
     `      [ "$WIP_RESULT" = markers ] && any_markers=1\n` +
