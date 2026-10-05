@@ -492,11 +492,39 @@ export async function handleStudio(
     const known = new Set(resolveClaudeAccounts(env).map((a) => a.name));
     const applied: string[] = [];
     const rejected: { name: string; reason: string }[] = [];
-    await Promise.all((decisions as SyncDecision[]).map(async (d) => {
-      if (!known.has(d.name)) {
-        rejected.push({ name: d.name, reason: "unknown account name" });
+    // Duplicate `name` within one batch is a race, not a decision: two
+    // writes for the same slot in the same Promise.all have no defined
+    // winner, so every entry sharing a repeated name is rejected outright
+    // rather than picking one to "win".
+    // The incoming body is untrusted — `decisions` is only KNOWN to be an
+    // array at this point, not an array of valid SyncDecisions. `name` is
+    // read loosely here (it is used only as a grouping/lookup key before
+    // any validation), and `action` is deliberately typed `unknown` so the
+    // invalid-action check below is real runtime validation, not a cast
+    // that TS would otherwise narrow away to `never`.
+    type RawDecision = { name: string; action: unknown };
+    const raw = decisions as RawDecision[];
+    const nameCounts = new Map<string, number>();
+    for (const d of raw) nameCounts.set(d.name, (nameCounts.get(d.name) ?? 0) + 1);
+    await Promise.all(raw.map(async (r) => {
+      if ((nameCounts.get(r.name) ?? 0) > 1) {
+        rejected.push({ name: r.name, reason: "duplicate name in batch" });
         return;
       }
+      if (!known.has(r.name)) {
+        rejected.push({ name: r.name, reason: "unknown account name" });
+        return;
+      }
+      // A known name with a garbage `action` must never fall through to
+      // `applied` as a silent no-op — validate against the real union
+      // before acting, same convention as this file's other POST routes
+      // (e.g. the wake route's prompt check, the provision route's
+      // blueprintRef/task checks).
+      if (r.action !== "limit" && r.action !== "clear" && r.action !== "unmanaged") {
+        rejected.push({ name: r.name, reason: "invalid action" });
+        return;
+      }
+      const d = r as SyncDecision;
       if (d.action === "limit") await writeFleetAccountLimit(env.DB, d.name, d.until, d.seenAt);
       else if (d.action === "clear") await clearFleetAccountLimit(env.DB, d.name);
       // "unmanaged": no D1 write — informational only.
