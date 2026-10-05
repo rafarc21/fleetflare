@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   adoptWorktreeSessionCmd, runProvision, provisionWithStorage, BRINGUP_CMD, FRESH_SESSION_MARKER,
   FRESH_SESSION_PENDING_KEY, FRESH_SESSION_REFUSED_PREFIX, FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD,
+  freshSessionInvoluntaryRefusal,
   type ProvisionDeps, type StudioStorage, type SessionMarkStorage,
 } from "../src/studio/provision";
 import { SESSION_FORCE_KEY, SESSION_MARK_KEY, type SessionSyncStorage } from "../src/studio/session-sync";
@@ -313,6 +314,57 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
       d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
       "provision", storage, undefined, storage,
     )).rejects.toThrow(/use plain provision to resume/i);
+  });
+
+  // Maestro review round 1 on PR #235, MINOR 8 (issue #231) — a human
+  // hitting this refusal on a STALE fleet CLI binary (one built before
+  // --discard-session existed) would otherwise be stuck guessing why their
+  // CLI has no such flag: the server-side message now says so plainly.
+  it("error mentions that an older CLI without --discard-session support needs to update", async () => {
+    const { d } = deps("");
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
+
+    await expect(provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    )).rejects.toThrow(/older .*CLI.*update|CLI.*predates.*--discard-session/i);
+  });
+
+  // Maestro review round 1 on PR #235, MINOR 8 — a SEPARATE, independent
+  // escape hatch (issue #115's own --no-fresh-session, for a STUCK PENDING
+  // intent left armed by an earlier failed attempt) is named in the
+  // refusal message ONLY when that pending key is actually armed at the
+  // moment this refusal fires -- never fabricated as generic advice when it
+  // is not actually relevant.
+  it("mentions --no-fresh-session as a remedy when a pending key is ALSO independently armed", async () => {
+    const { d } = deps("");
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
+    map.set(FRESH_SESSION_PENDING_KEY, true);
+
+    await expect(provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    )).rejects.toThrow(/--no-fresh-session/);
+  });
+
+  it("never mentions --no-fresh-session when no pending key is armed", async () => {
+    const { d } = deps("");
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
+
+    let message = "";
+    try {
+      await provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      );
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).not.toContain("--no-fresh-session");
+    expect(message).not.toBe(""); // the refusal really did fire
   });
 
   it("proceeds normally when --discard-session is also given", async () => {

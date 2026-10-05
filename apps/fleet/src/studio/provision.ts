@@ -609,12 +609,32 @@ export const FRESH_SESSION_REFUSED_PREFIX = "fresh-session refused: ";
  * operator report used, since this file only ever has the transcript's line
  * count to go on) and the way out, mirroring `recycleRefusal`'s own
  * "name the price, name the escape hatch" shape (recycle-cost.ts).
+ *
+ * Maestro review round 1 on PR #235, MINOR 8 — two additions:
+ *
+ * - The 409 this message becomes (routes.ts) now names the possibility that
+ *   the human reading it is on a STALE `fleet` CLI binary predating
+ *   `--discard-session` entirely — without this, the server's own advice
+ *   ("add --discard-session") would send them to a flag their local CLI
+ *   rejects as unknown, with no hint why.
+ * - `pendingAlsoArmed` — true when `FRESH_SESSION_PENDING_KEY` is ALSO
+ *   independently armed at the moment THIS refusal fires (checked by the
+ *   caller, `provisionWithStorage`, right there — never guessed). When true,
+ *   names `--no-fresh-session` (issue #115's own, SEPARATE escape hatch) as
+ *   the remedy for a stuck pending intent specifically — distinct from
+ *   `--discard-session`'s role here, and never fabricated as generic advice
+ *   when no pending key is actually armed.
  */
-export function freshSessionInvoluntaryRefusal(id: string, lines: number): string {
-  return FRESH_SESSION_REFUSED_PREFIX +
+export function freshSessionInvoluntaryRefusal(id: string, lines: number, pendingAlsoArmed = false): string {
+  const base = FRESH_SESSION_REFUSED_PREFIX +
     `studio ${id}'s last stop was an involuntary platform replacement, and its session has ~${lines} lines ` +
     "of transcript (a turn-count proxy) -- --fresh-session would discard it. " +
-    `Use plain provision to resume, or add --discard-session to force it: fleet provision ${id} --fresh-session --discard-session`;
+    `Use plain provision to resume, or add --discard-session to force it: fleet provision ${id} --fresh-session --discard-session ` +
+    "(an older fleet CLI that predates --discard-session will reject that flag as unknown -- update the CLI first).";
+  if (!pendingAlsoArmed) return base;
+  return base +
+    ` Separately: a stuck --fresh-session pending intent is also armed for this studio -- ` +
+    `fleet provision ${id} --no-fresh-session clears that instead, if that is what you meant to resolve.`;
 }
 
 /**
@@ -3694,7 +3714,15 @@ export async function provisionWithStorage(
       const mark = sessionMarkStorage ? await sessionMarkStorage.get(SESSION_MARK_KEY) : undefined;
       const lines = mark?.lines ?? 0;
       if (lines > FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD) {
-        throw new Error(freshSessionInvoluntaryRefusal(buildStudioId(cfg), lines));
+        // Maestro review round 1 on PR #235, MINOR 8 — read HERE, at the
+        // point this refusal fires, never reusing `requestedFresh`'s own
+        // MUCH LATER read of the same key (below): this message is about
+        // what the operator should do RIGHT NOW, and the key's value could
+        // change between this throw and that later read if it didn't
+        // matter (it doesn't reach that read on this path anyway, since
+        // this throw aborts the call).
+        const pendingAlsoArmed = (await storage.get(FRESH_SESSION_PENDING_KEY)) === true;
+        throw new Error(freshSessionInvoluntaryRefusal(buildStudioId(cfg), lines, pendingAlsoArmed));
       }
     }
   }

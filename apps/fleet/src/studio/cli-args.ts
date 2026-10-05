@@ -782,6 +782,15 @@ export function parseCliArgs(argv: string[]): CliCommand {
       const cancelFreshSession = rest.includes("--no-fresh-session");
       const discardSession = rest.includes("--discard-session");
       if (freshSession && cancelFreshSession) return usage("--fresh-session and --no-fresh-session are mutually exclusive");
+      // Maestro review round 1 on PR #235, MINOR 8 (issue #231) —
+      // `--discard-session` only ever does anything alongside an explicit
+      // `--fresh-session` (it is provisionWithStorage's own override of the
+      // involuntary-stop refusal, which never even runs without
+      // `--fresh-session` on the same call) — a standalone
+      // `--discard-session` used to parse fine and silently do nothing,
+      // same "unknown/invalid combination" usage-error convention this
+      // parser already gives `--fresh-session`/`--no-fresh-session` above.
+      if (discardSession && !freshSession) return usage("--discard-session needs --fresh-session on the same call");
       return { cmd: "provision", id: arg, freshSession, cancelFreshSession, discardSession };
     }
     // Issue #96: same bespoke shape as `destroy --force` below, same reasons.

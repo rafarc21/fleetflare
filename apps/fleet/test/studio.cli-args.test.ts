@@ -193,8 +193,14 @@ describe("parseCliArgs", () => {
 
   // Issue #231: `--discard-session` — the operator's stated override of
   // provisionWithStorage's own involuntary-stop refusal. Only meaningful
-  // alongside --fresh-session, but parses standalone too (the refusal check
-  // itself is what makes it a no-op otherwise).
+  // alongside --fresh-session.
+  //
+  // Maestro review round 1 on PR #235, MINOR 8 — `--discard-session` WITHOUT
+  // `--fresh-session` used to parse fine and silently do nothing (the
+  // refusal check it exists to override never runs without `--fresh-session`
+  // in the first place) — now a usage error, same "unknown/invalid
+  // combination" convention this parser already uses for
+  // `--fresh-session`/`--no-fresh-session` together.
   it("--discard-session: provision only, any order with --fresh-session; repeats and strays are usage errors", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session", "--discard-session"])).toEqual({
       cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false, discardSession: true,
@@ -202,11 +208,15 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--discard-session", "--fresh-session"])).toEqual({
       cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false, discardSession: true,
     });
-    expect(parseCliArgs(["provision", "websites--scratch", "--discard-session"])).toEqual({
-      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false, discardSession: true,
-    });
     expect(parseCliArgs(["provision", "websites--scratch", "--discard-session", "--discard-session"]).cmd).toBe("usage");
     expect(parseCliArgs(["provision", "websites--scratch", "--discard-session", "--bogus"]).cmd).toBe("usage");
+  });
+
+  // Maestro review round 1 on PR #235, MINOR 8 (issue #231) — standalone
+  // `--discard-session`, with no `--fresh-session` on the same call, is now
+  // rejected outright rather than silently accepted and ignored.
+  it("--discard-session without --fresh-session: usage error, never silently accepted", () => {
+    expect(parseCliArgs(["provision", "websites--scratch", "--discard-session"]).cmd).toBe("usage");
   });
 
   // Issue #35.
