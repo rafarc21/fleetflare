@@ -969,6 +969,29 @@ export async function listMatchingBranches(token: string, repo: string, prefix: 
   return refs.map((r) => ({ name: r.ref.replace(/^refs\/heads\//, ""), sha: r.object.sha }));
 }
 
+/**
+ * Issue #234, survival re-brief SOURCE 4 (`resolveSurvivalInput`,
+ * src/studio/survival-delivery.ts): every branch name on origin, by plain
+ * listing rather than a prefix query — the task-number match this feeds is a
+ * NAME match anywhere in the branch name (anchored on `-`/`/` boundaries),
+ * not a prefix match, and a task number is rarely the literal first token of
+ * a branch name (`fix-231-replaced-session`, not `231-...`), so
+ * `listMatchingBranches` above (a prefix-anchored `git/matching-refs` query)
+ * does not help here.
+ *
+ * One page, GitHub's own 100-item max — same posture `listOpenPullNumbers`
+ * above already states for itself: a fleet with more branches on origin than
+ * that is out of scope for this check.
+ */
+export async function listAllBranchNames(token: string, repo: string): Promise<string[]> {
+  const raw = await ghJson<{ name: string }[]>(
+    `https://api.github.com/repos/${repo}/branches?per_page=100`,
+    { method: "GET", headers: GH_HEADERS(token) },
+    `list branches for ${repo}`,
+  );
+  return raw.map((b) => b.name);
+}
+
 /** A commit's committer date (ISO). */
 export async function commitDate(token: string, repo: string, sha: string): Promise<string> {
   const c = await ghJson<{ commit: { committer: { date: string } } }>(

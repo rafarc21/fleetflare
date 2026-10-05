@@ -51,6 +51,18 @@ export interface SurvivalTaskBranch {
    *  "commits ahead unknown"). */
   commitsAheadOfMain: number | null;
   lastCommitAt: string | null;
+  /**
+   * Issue #234, SOURCE 4's own "never guess" outcome: more than one branch
+   * on origin anchored-matched this task's number (`matchesTaskNumber`,
+   * survival-delivery.ts) and `resolveSurvivalInput` refused to pick one —
+   * same "a wrong guess is worse than silence" reasoning
+   * `attributeRescueBranch`'s own doc comment gives for SOURCE 3's ambiguous
+   * case. Populated ONLY in that ambiguous case; `branch` stays `null`
+   * alongside it, but `taskLine` must render this differently from the
+   * ordinary "no branch on origin" (zero matches) — a reader needs to tell
+   * "found none" and "found several, could not pick" apart, always.
+   */
+  ambiguousBranches?: string[];
 }
 
 export interface SurvivalOpenPr {
@@ -206,6 +218,15 @@ function ageFrom(iso: string, now: string): number | null {
 
 function taskLine(b: SurvivalTaskBranch, now: string): string {
   const prefix = `- Task #${b.taskNumber} ${quoted(b.taskTitle)}:`;
+
+  // Issue #234, SOURCE 4's ambiguous case — checked BEFORE `branch === null`
+  // below: both states share `branch: null`, but they are different answers
+  // ("found several, could not pick" vs "found none") and must render
+  // differently.
+  if (b.ambiguousBranches !== undefined && b.ambiguousBranches.length > 0) {
+    const names = b.ambiguousBranches.map(sanitizeBranch).join(", ");
+    return `${prefix} ambiguous: ${b.ambiguousBranches.length} branches match (${names}) — resolve manually`;
+  }
 
   if (b.branch === null) {
     return `${prefix} no branch on origin`;

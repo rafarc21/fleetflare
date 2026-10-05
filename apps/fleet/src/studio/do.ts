@@ -146,6 +146,10 @@ import {
   // single-branch, so `git log origin/main..origin/<branch>` run inside one
   // overcounts a genuinely 0-ahead branch.
   compareAhead, getPullRequest, listMatchingBranches,
+  // Issue #234, SOURCE 4: a plain branches-list query, matched by NAME
+  // against each unresolved task's own number — see survivalSources()'s own
+  // doc comment just below.
+  listAllBranchNames,
 } from "../github/api";
 import { sendCard } from "../telegram/api";
 import { parseLearnings, parseEnvelopeComment } from "../board/envelope";
@@ -5883,6 +5887,11 @@ export class StudioDO extends Sandbox<Env> {
         ),
       compareAhead: async (branch) => compareAhead(await token(), repo, SURVIVAL_COMPARE_BASE, branch),
       openPullNumbers: async () => listOpenPullNumbers(await token(), repo),
+      // Issue #234, SOURCE 4 — every branch name on origin, by plain listing
+      // (`listAllBranchNames`), matched by `matchesTaskNumber`
+      // (survival-delivery.ts) against each task still unresolved after
+      // sources 1-3.
+      branchNames: async () => listAllBranchNames(await token(), repo),
     };
   }
 
