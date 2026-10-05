@@ -132,3 +132,68 @@ ambiguity in this same file.
   `apps/fleet/test/studio.survival-brief.test.ts`,
   `apps/fleet/test/github.api.test.ts` — coverage above.
 - This file.
+
+## Round 2 (PR #239 review, 2026-10-05) — 2 real findings, both confirmed by reading code first
+
+Owner review on #239: `gh pr view 239 --repo rafarc21/fleetflare --comments`.
+Both re-derived from the actual code, not trusted from the summary.
+
+### Finding 1: one page only, and this repo is ALREADY past it
+
+`listAllBranchNames` did ONE `GET .../branches?per_page=100` call, no
+pagination. `git ls-remote origin 'refs/heads/*' | wc -l` against this repo's
+real origin, 2026-10-05: **116 branches**. Already past one page TODAY, not a
+someday-maybe. A task branch on page 2 was invisible to SOURCE 4 — the
+original #234 bug, unfixed for any repo this size.
+
+Fix: follow the `Link: rel="next"` response header GitHub's REST pagination
+sends, capped at `BRANCH_NAMES_MAX_PAGES = 10` (1,000 branches — same "orders
+of magnitude above this fleet's scale" sizing `INSTALLATION_REPOS_MAX_PAGES`
+already uses). Return shape widened `string[] -> {names, truncated}` — every
+caller/mock/fixture updated (api.ts's own test, `SurvivalSources.branchNames`,
+every `sources({branchNames})` fixture in survival-delivery.test.ts).
+`truncated` threads through `resolveSurvivalInput` onto a new optional
+`SurvivalInput.branchLookupTruncated`, rendered by `composeSurvivalBrief` as
+its own line naming the cap (1,000) — never silently read as "that's
+everything".
+
+Test: exactly 2 pages (page 1 full + `Link: rel="next"`, page 2 the real
+tail) — confirms a name that only exists on page 2 is actually found. Plus a
+page-cap test (`Link: rel="next"` still present after `MAX_PAGES` fetches ->
+`truncated: true`).
+
+### Finding 2: a rescue ref anchor-matches a task number — genuine false positive
+
+Hand-traced `matchesTaskNumber("fleet/rescue/x--web-studio--40/wip/<stamp>",
+40)` against the real regex `(^|[-/])40([-/]|$)`: the char before "40" is "-"
+(from "--40"), the char after is "/" — BOTH are valid anchor boundaries. True
+match, not hypothetical. Any studio id ending `--<n>` collides with task `n`.
+
+SOURCE 3 already owns rescue-ref attribution end to end (including its own
+"never guess" ambiguous case) — a `fleet/rescue/` name must never re-enter
+SOURCE 4's pool. Fix: filter `allBranchNames` to drop every
+`fleet/rescue/`-prefixed name BEFORE `matchesTaskNumber` ever runs against
+it, not merely deprioritize it against a real match.
+
+Test (exact reviewer scenario): task 40, candidates
+`[fleet/rescue/x--web-studio--40/wip/20261004000000, fix-40-y]` -> resolves to
+`fix-40-y`, not ambiguous, not the rescue ref. Plus a variant proving the
+exclusion doesn't suppress a GENUINE ambiguous case (2 real branches + 1
+rescue decoy -> still ambiguous on the 2 real ones only).
+
+### Files touched, round 2
+
+- `apps/fleet/src/github/api.ts` — `listAllBranchNames` pagination,
+  `parseNextLink`, `BRANCH_NAMES_PAGE_SIZE`/`BRANCH_NAMES_MAX_PAGES`.
+- `apps/fleet/src/studio/survival-delivery.ts` — `SurvivalSources.branchNames`
+  return shape, SOURCE 4's rescue-ref exclusion + truncation threading.
+- `apps/fleet/src/studio/survival-brief.ts` —
+  `SurvivalInput.branchLookupTruncated`, its rendered line.
+- `apps/fleet/test/github.api.test.ts`,
+  `apps/fleet/test/studio.survival-delivery.test.ts`,
+  `apps/fleet/test/studio.survival-brief.test.ts` — coverage above.
+- `do.ts`'s `survivalSources()` wiring needed NO change: `branchNames: async
+  () => listAllBranchNames(...)` was already a bare pass-through, and
+  `listAllBranchNames`'s new `{names, truncated}` return IS the new
+  `SurvivalSources.branchNames` contract.
+- This file.
