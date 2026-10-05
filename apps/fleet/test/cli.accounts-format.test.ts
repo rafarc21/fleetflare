@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
   formatAccountsTable, describeCurrentState, describeWould, wouldChange, snapshotsEqual, buildLabelSuggestions,
+  parseCswapListOutput, formatCswapUnavailableNote,
   type AccountSnapshotRow, type AccountCurrentState,
 } from "../cli/accounts-format";
 import type { SyncDecision } from "../src/studio/claude-swap";
+import { CSWAP_LIST_FIXTURE, CSWAP_LIST_ENVELOPE, OVER_FIVE_HOUR } from "./fixtures/cswap-list";
 
 // Imports cli/accounts-format.ts specifically, NOT cli/accounts.ts or
 // cli/fleet.ts — same reason test/cli.task-format.test.ts imports
@@ -216,5 +218,60 @@ describe("snapshotsEqual", () => {
 
   it("empty snapshots are equal", () => {
     expect(snapshotsEqual([], [])).toBe(true);
+  });
+});
+
+// Issue #240: real `cswap list --json` prints an envelope OBJECT
+// (`{schemaVersion, activeAccountNumber, accounts}`), never the bare array
+// the old `readCswapList` required — every one of these pins the real shape,
+// not the fiction test/fixtures/cswap-list.ts used to invent.
+describe("parseCswapListOutput", () => {
+  it("parses the real envelope shape ({schemaVersion: 1, activeAccountNumber, accounts}) into the accounts array", () => {
+    const result = parseCswapListOutput(JSON.stringify(CSWAP_LIST_ENVELOPE));
+    expect(result).toEqual({ available: true, accounts: CSWAP_LIST_FIXTURE });
+  });
+
+  it("still parses a bare array (the old shape) -- kept tolerated, cheap to keep", () => {
+    const result = parseCswapListOutput(JSON.stringify(CSWAP_LIST_FIXTURE));
+    expect(result).toEqual({ available: true, accounts: CSWAP_LIST_FIXTURE });
+  });
+
+  it("an unknown schemaVersion reads available: false, with a reason naming the actual version seen", () => {
+    const result = parseCswapListOutput(JSON.stringify({ schemaVersion: 2, activeAccountNumber: 1, accounts: [OVER_FIVE_HOUR] }));
+    expect(result.available).toBe(false);
+    expect((result as { reason: string }).reason).toContain("2");
+    expect((result as { reason: string }).reason).toContain("schemaVersion");
+  });
+
+  it("a well-formed-looking object missing its own accounts array reads available: false, reason describing what's missing", () => {
+    const result = parseCswapListOutput(JSON.stringify({ schemaVersion: 1, activeAccountNumber: 1 }));
+    expect(result.available).toBe(false);
+    expect((result as { reason: string }).reason).toContain("accounts");
+  });
+
+  it("accounts present but not an array reads available: false, same malformed-envelope reason", () => {
+    const result = parseCswapListOutput(JSON.stringify({ schemaVersion: 1, activeAccountNumber: 1, accounts: "nope" }));
+    expect(result.available).toBe(false);
+    expect((result as { reason: string }).reason).toContain("accounts");
+  });
+
+  it("unparseable JSON reads available: false with its own distinct reason", () => {
+    const result = parseCswapListOutput("{not json");
+    expect(result).toEqual({ available: false, reason: "printed unparseable JSON" });
+  });
+
+  it("a bare JSON scalar (neither an array nor an object) reads available: false", () => {
+    const result = parseCswapListOutput("42");
+    expect(result.available).toBe(false);
+  });
+});
+
+describe("formatCswapUnavailableNote", () => {
+  it("null reason (cswap WAS available) -> no note to print", () => {
+    expect(formatCswapUnavailableNote(null)).toBeNull();
+  });
+
+  it("a reason prints as one 'cswap: <reason>' line", () => {
+    expect(formatCswapUnavailableNote("binary not found on PATH")).toBe("cswap: binary not found on PATH");
   });
 });

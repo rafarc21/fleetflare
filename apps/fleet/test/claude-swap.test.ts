@@ -429,6 +429,89 @@ describe("decideAccountSync", () => {
   });
 });
 
+// Maestro real-probe review of PR #242 (issue #240): the real `cswap list
+// --json` per-account usage shape differs from this codebase's own
+// validators/types in four ways, and the strictness rejected every real
+// account outright -- every slot read "unmapped" even when a label matched a
+// real account's email. These four cases each pin ONE real-shape mismatch
+// directly against decideAccountSync/isValidUsage (there's no separate
+// export for the validators themselves -- decideAccountSync is the one
+// place that calls isValidUsage and turns "malformed shape" into an
+// observable "no-data" outcome, so that's the behavior these tests pin).
+describe("real cswap shape tolerance (maestro real-probe review, issue #240)", () => {
+  const now = new Date("2026-10-05T12:00:00Z");
+  function joinFor(cswap: CswapAccount): SlotJoin {
+    return { name: "CLAUDE_CODE_OAUTH_TOKEN", label: cswap.email, until: null, cswap, matchSource: "label" };
+  }
+
+  it("a scoped window using 'name' (real shape) instead of 'model' is accepted, not rejected as malformed", () => {
+    const account: CswapAccount = {
+      email: "scopedname@example.com", usageStatus: "ok", usageAgeSeconds: 10,
+      usage: {
+        fiveHour: { pct: 1, resetsAt: "2026-10-05T14:00:00Z" },
+        sevenDay: { pct: 1, resetsAt: "2026-10-11T00:00:00Z", willLastToReset: true },
+        scoped: [{ name: "claude-opus-4", pct: 97, resetsAt: "2026-10-06T00:00:00Z" } as unknown as CswapAccount["usage"] extends { scoped: (infer S)[] } ? S : never],
+      },
+    };
+    const decision = decideAccountSync(joinFor(account), now);
+    // Real shape must trip the scoped window's own 97% -- "limit", never
+    // "no-data" (which is what the old 'model'-expecting validator decided,
+    // dropping this account's usage entirely).
+    expect(decision.action).toBe("limit");
+  });
+
+  it("a window with the resetsAt KEY ENTIRELY ABSENT is accepted, identically to an explicit resetsAt: null", () => {
+    const missingKey: CswapAccount = {
+      email: "missingkey@example.com", usageStatus: "ok", usageAgeSeconds: 10,
+      usage: {
+        fiveHour: { pct: 99 } as unknown as CswapAccount["usage"] extends { fiveHour: infer W } ? W : never, // no resetsAt key at all
+        sevenDay: { pct: 1, resetsAt: "2026-10-11T00:00:00Z", willLastToReset: true },
+        scoped: [],
+      },
+    };
+    const explicitNull: CswapAccount = {
+      ...missingKey, email: "explicitnull@example.com",
+      usage: { ...missingKey.usage!, fiveHour: { pct: 99, resetsAt: null } },
+    };
+    const missingDecision = decideAccountSync(joinFor(missingKey), now);
+    const nullDecision = decideAccountSync(joinFor(explicitNull), now);
+    expect(missingDecision.action).toBe("limit");
+    expect(missingDecision).toEqual({ ...nullDecision, name: missingDecision.name });
+    expect((missingDecision as { until: string | null }).until).toBeNull();
+  });
+
+  it("sevenDay.willLastToReset: null (not a boolean) is accepted, not rejected as malformed", () => {
+    const account: CswapAccount = {
+      email: "nullwilllast@example.com", usageStatus: "ok", usageAgeSeconds: 10,
+      usage: {
+        fiveHour: { pct: 1, resetsAt: "2026-10-05T14:00:00Z" },
+        sevenDay: { pct: 97, resetsAt: "2026-10-11T00:00:00Z", willLastToReset: null as unknown as boolean },
+        scoped: [],
+      },
+    };
+    const decision = decideAccountSync(joinFor(account), now);
+    // sevenDay's own 97% must trip "limit" -- the old boolean-only validator
+    // decided "no-data" (malformed usage shape) for this exact account.
+    expect(decision.action).toBe("limit");
+  });
+
+  it("extra unrecognized keys on a window (countdown, clock, expectedPct, aheadOfPace) were already tolerated -- confirms this, not a fix", () => {
+    const account: CswapAccount = {
+      email: "extrakeys@example.com", usageStatus: "ok", usageAgeSeconds: 10,
+      usage: {
+        fiveHour: {
+          pct: 97, resetsAt: "2026-10-05T14:00:00Z",
+          countdown: "3h12m", clock: "14:00:00Z", expectedPct: 95, aheadOfPace: true,
+        } as unknown as CswapAccount["usage"] extends { fiveHour: infer W } ? W : never,
+        sevenDay: { pct: 1, resetsAt: "2026-10-11T00:00:00Z", willLastToReset: true },
+        scoped: [],
+      },
+    };
+    const decision = decideAccountSync(joinFor(account), now);
+    expect(decision.action).toBe("limit");
+  });
+});
+
 describe("pickHeadroomAccount", () => {
   function candidate(name: string, fiveHour: number, sevenDay: number, dataAgeMs: number = 0): HeadroomCandidate {
     return {
