@@ -557,7 +557,7 @@ export async function restartWithSync(
 }
 
 import {
-  rescuePushCmd, rescueSnapshotCmd, wipSyncCmd, wipSyncProbeCmd, WIP_SYNC_NEEDED,
+  rescuePushCmd, rescueSnapshotCmd, wipSyncCmd, wipSyncProbeCmd, WIP_SYNC_NEEDED, wipSyncRef,
   RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY,
   RESCUE_PUSHED_PREFIX, RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport,
   rescueMintPermissions, type RescueWorktree, type RescueTarget,
@@ -799,6 +799,37 @@ export async function recordWipLastCheck(
   observedStorage: ObservedStorage | null | undefined, now: string, result: WipLastCheckResult,
 ): Promise<void> {
   if (observedStorage) await mergeObserved(observedStorage, { wipLastCheck: { at: now, result } });
+}
+
+/**
+ * Maestro review round 1 on PR #235, MINOR 7 (issue #231) — `wipSync` (via
+ * `parseRescueExecResult`) throws a `RescuePushFailedError` the MOMENT any
+ * target in the exec failed, even when the MAIN CHECKOUT's own push (a
+ * DIFFERENT target, in the SAME exec — rescue.ts's `wip_sync_one` walks the
+ * main checkout first, then every member worktree, each independently)
+ * genuinely landed. `syncSessionCycle`'s own catch block used to record
+ * every throw as `wipLastCheck: "failed"` unconditionally, and never call
+ * `recordWipSyncOnSuccess` at all — masking a real, confirmed push because
+ * an UNRELATED worktree failed alongside it.
+ *
+ * This pulls the main checkout's own `RESCUE_PUSHED` entry back out of a
+ * caught error, matched by its EXACT target name (`wipSyncRef(studio,
+ * bootStamp)`) — never a member worktree's own, which always carries a
+ * distinct `-wt-<id>` suffix (rescue.ts's own `wip_sync_one` call sites), so
+ * a member's push can never be mistaken for the main checkout's. Returns
+ * `null` — never a guess — when `err` is not even this shape (a killed exec,
+ * a thrown exec, any other error), or when the main checkout's OWN push is
+ * not among the ones that landed (it failed too, or the exec never reached
+ * it at all).
+ */
+export function mainCheckoutPushFromFailure(
+  err: unknown, studio: string, bootStamp: string,
+): RescueResult | null {
+  if (!(err instanceof RescuePushFailedError)) return null;
+  const mainRef = wipSyncRef(studio, bootStamp);
+  const main = err.pushes.find((p) => p.branch === mainRef);
+  if (!main) return null;
+  return { pushed: true, branch: main.branch, files: main.files, kind: main.kind };
 }
 
 /** Fix round (#208 PR #215 review, minor (a)): turns a `RescueResult` from
@@ -3185,7 +3216,18 @@ export async function syncSessionCycle(
           await recordWipLastCheck(observedStorage, checkedAt, wipLastCheckResultOf(result));
         } catch (err) {
           console.error(`studio ${idFallback}: WIP sync failed`, err);
-          await recordWipLastCheck(observedStorage, checkedAt, "failed");
+          // Maestro review round 1 on PR #235, MINOR 7 (issue #231) — a
+          // member worktree's own failure must never mask the main
+          // checkout's own real, confirmed push. See
+          // `mainCheckoutPushFromFailure`'s own doc comment for the full
+          // reasoning.
+          const mainResult = mainCheckoutPushFromFailure(err, idFallback, bootStamp);
+          if (mainResult) {
+            await recordWipSyncOnSuccess(observedStorage, mainResult, checkedAt);
+            await recordWipLastCheck(observedStorage, checkedAt, "pushed");
+          } else {
+            await recordWipLastCheck(observedStorage, checkedAt, "failed");
+          }
         }
       } else {
         console.error(`studio ${idFallback}: WIP sync skipped -- no confirmed boot stamp yet for this incarnation`);

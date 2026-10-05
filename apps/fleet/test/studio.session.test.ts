@@ -1,4 +1,4 @@
-import { formatRescueReport, wipSyncProbeCmd } from "../src/studio/rescue";
+import { formatRescueReport, wipSyncProbeCmd, wipSyncCmd, wipSyncRef, WIP_SYNC_NEEDED } from "../src/studio/rescue";
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
@@ -21,7 +21,7 @@ import {
   archiveDoneRecords, doneRecordsListCmd, type DoneRecordPorts,
   DONE_RECORD_HASHES_KEY, type DoneRecordHashStorage,
   mirrorBurnToRegistry, checkAndRecordReadiness, syncSessionCycle, clearSessionGuard, RECYCLE_REFUSED_PREFIX,
-  wipLastCheckResultOf,
+  wipLastCheckResultOf, mainCheckoutPushFromFailure,
   clearForceMappedAccount,
 } from "../src/studio/do";
 import {
@@ -1659,6 +1659,100 @@ describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)",
 
     expect((await storage.get(STATUS_KEY))?.readiness?.kind).toBe("bare");
     expect(deps.execCalls).not.toContain(wipSyncProbeCmd("websites"));
+  });
+
+  // Maestro review round 1 on PR #235, MINOR 7 (issue #231) — one bad
+  // member worktree used to make parseRescueExecResult throw a
+  // RescuePushFailedError for the WHOLE wip-sync tick, and syncSessionCycle's
+  // own catch block recorded wipLastCheck as "failed" UNCONDITIONALLY on any
+  // throw -- masking the main checkout's own genuinely successful push,
+  // which rode along as a RESCUE_PUSHED line in the SAME exec output. This
+  // is the load-bearing, end-to-end proof: a real syncSessionCycle run whose
+  // wip-sync push exec answers BOTH a main-checkout RESCUE_PUSHED line and a
+  // member-worktree RESCUE_FAILED line still advances wipSyncedAt/
+  // wipLastCheck, exactly as if the member worktree did not exist.
+  it("a member worktree's wip-sync failure never masks the main checkout's own real success: wipSyncedAt/wipLastCheck still advance", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    const BOOT_STAMP = "20261004000000";
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: "a-real-token", replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: BOOT_STAMP,
+    });
+    const base = fakeSyncDeps({});
+    const probeCmd = wipSyncProbeCmd("websites");
+    const pushCmd = wipSyncCmd("websites", STUDIO_ID, BOOT_STAMP);
+    const mainRef = wipSyncRef(STUDIO_ID, BOOT_STAMP);
+    const memberRef = `fleet/rescue/${STUDIO_ID}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+    const deps: SessionSyncDeps = {
+      ...base,
+      exec: async (cmd: string, env?: Record<string, string>) => {
+        if (cmd === probeCmd) return { code: 0, stdout: WIP_SYNC_NEEDED, stderr: "" };
+        if (cmd === pushCmd) {
+          return {
+            code: 0,
+            stdout: `${RESCUE_PUSHED_PREFIX} ${mainRef} 1 files\n${RESCUE_FAILED_PREFIX} ${memberRef} push`,
+            stderr: "",
+          };
+        }
+        return base.exec(cmd, env);
+      },
+    };
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    const observed = await getObserved(observedStorage);
+    expect(observed.wipSyncedAt).toBeTruthy();
+    expect(observed.wipLastCheck?.result).toBe("pushed");
+  });
+});
+
+/**
+ * Maestro review round 1 on PR #235, MINOR 7 (issue #231) — `wipSync` throws
+ * a `RescuePushFailedError` the moment ANY target in the exec failed, even
+ * when the MAIN CHECKOUT's own push (a different target, same exec) landed.
+ * `mainCheckoutPushFromFailure` pulls that partial success back out of the
+ * caught error, by the main checkout's own EXACT target name
+ * (`wipSyncRef(studio, bootStamp)`) — never a member worktree's, which carry
+ * a distinct `-wt-<id>` suffix (rescue.ts's own `wip_sync_one` call sites)
+ * and so can never be mistaken for it.
+ */
+describe("mainCheckoutPushFromFailure — recovers the main checkout's own push from a caught member-worktree failure (#231 review round 1, MINOR 7)", () => {
+  const STUDIO = "websites--pilot";
+  const BOOT_STAMP = "20261004000000";
+  const mainRef = wipSyncRef(STUDIO, BOOT_STAMP);
+
+  it("the main checkout pushed, a member worktree failed: returns the main checkout's own RescueResult", () => {
+    const err = new RescuePushFailedError(
+      "wip-sync failed", [{ branch: mainRef, files: 1, kind: "files" }],
+      [{ worktree: `fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`, step: "push" }],
+    );
+    expect(mainCheckoutPushFromFailure(err, STUDIO, BOOT_STAMP)).toEqual({
+      pushed: true, branch: mainRef, files: 1, kind: "files",
+    });
+  });
+
+  it("the main checkout itself failed (no matching push entry at all): null", () => {
+    const err = new RescuePushFailedError(
+      "wip-sync failed", [],
+      [{ worktree: mainRef, step: "push" }],
+    );
+    expect(mainCheckoutPushFromFailure(err, STUDIO, BOOT_STAMP)).toBeNull();
+  });
+
+  it("only a member worktree pushed (never the main checkout): null -- a member's own push must never be mistaken for the main checkout's", () => {
+    const err = new RescuePushFailedError(
+      "wip-sync failed",
+      [{ branch: `fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`, files: 1, kind: "files" }],
+      [{ worktree: mainRef, step: "push" }],
+    );
+    expect(mainCheckoutPushFromFailure(err, STUDIO, BOOT_STAMP)).toBeNull();
+  });
+
+  it("not a RescuePushFailedError at all (a killed exec, a thrown exec): null, never guesses", () => {
+    expect(mainCheckoutPushFromFailure(new Error("exec threw"), STUDIO, BOOT_STAMP)).toBeNull();
+    expect(mainCheckoutPushFromFailure("not even an Error", STUDIO, BOOT_STAMP)).toBeNull();
   });
 });
 
