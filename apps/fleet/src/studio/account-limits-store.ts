@@ -7,7 +7,7 @@
  * (the key/encode/decode this module doesn't own), same "pure persistence,
  * no do.ts" boundary accounts.ts's own header states for itself.
  */
-import { getFlag, setFlag } from "../state";
+import { getFlag, setFlag, deleteFlag } from "../state";
 import { accountLimitStateKey, encodeAccountLimitState, decodeAccountLimitState } from "./rate-limit";
 import type { AccountLimits, ClaudeAccount } from "./accounts";
 
@@ -47,4 +47,19 @@ export async function writeFleetAccountLimit(
     encodeAccountLimitState({ until, seenAt, ...(dead ? { dead: true as const } : {}) }),
     Date.parse(seenAt),
   );
+}
+
+/**
+ * Issue #232 — the proactive clear: a fresh cswap reading below threshold
+ * for an account, including one whose row currently carries `dead: true`
+ * (operator re-login proves it's alive again — there is no separate "dead"
+ * check anywhere in this path, a fresh low-pct reading IS the proof).
+ * Deletes the row rather than writing `until: null`: a null-until WRITE
+ * would trip the 24h NULL_UNTIL_CEILING_MS grace period `accountIsFree`
+ * (rate-limit.ts) applies to a null-until entry — wrong semantics for
+ * "clear now". A fully absent row reads free immediately via
+ * `accountIsFree`'s own `!(a.name in limits)` branch.
+ */
+export async function clearFleetAccountLimit(db: D1Database, name: string): Promise<void> {
+  await deleteFlag(db, accountLimitStateKey(name));
 }
