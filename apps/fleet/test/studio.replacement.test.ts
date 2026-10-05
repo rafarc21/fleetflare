@@ -662,6 +662,71 @@ describe("runRestart — incarnation token write (issue #85)", () => {
     });
   });
 
+  // Maestro review round 1 on PR #235, BLOCKER 1 — `deliverSurvivalOnBringup`
+  // (do.ts) used to read the LIVE `Observed.wipBootStamp` when composing the
+  // brief, but `recordBringupObservation` has, by that point, ALREADY
+  // overwritten it with a BRAND-NEW stamp for THIS SAME bring-up (the
+  // `tokenWritten` branch right above). The brief ended up naming the NEW
+  // container's (empty) wip ref next to an age line describing the OLD
+  // container's last real push — a ref/age mismatch. Fixed by freezing the
+  // PRE-bring-up stamp onto the session record (`wipBootStampBefore`), the
+  // same "computed once, never re-read live" discipline `replacementDetected`
+  // already uses. This test runs a REAL bring-up (not a hand-assembled
+  // SurvivalInput) and then composes the brief exactly the way do.ts's
+  // `survivalCompose` does, to prove the ORDER — write-then-read — never
+  // leaks the new stamp into the brief.
+  describe("BLOCKER 1 (#231 review round 1) — survival brief names the OLD wip ref after a replacement bring-up", () => {
+    it("recordBringupObservation freezes the PRE-bring-up wipBootStamp onto the session record, even though the live field is overwritten with a new one", async () => {
+      const deps = restartDeps(() => undefined);
+      const storage = fakeStorageWithObserved({
+        status: status({ repoSlug: `acme-org/${REPO}` }), roleEnv: STUDIO_ENV,
+      });
+      const OLD_STAMP = "20261004000000";
+      await mergeObserved(storage, { wipBootStamp: OLD_STAMP, replacedAt: "2026-09-23T17:00:00.000Z" });
+
+      await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare", "restart", storage);
+
+      const observed = await getObserved(storage);
+      // the LIVE field really was overwritten with a brand-new stamp...
+      expect(observed.wipBootStamp).toMatch(/^[0-9]{14}$/);
+      expect(observed.wipBootStamp).not.toBe(OLD_STAMP);
+      // ...but the session record froze the OLD one, for the brief to use.
+      expect(observed.session?.wipBootStampBefore).toBe(OLD_STAMP);
+    });
+
+    it("the composed brief names the OLD stamp's ref, not the new one just written for this same bring-up", async () => {
+      const deps = restartDeps(() => undefined);
+      const storage = fakeStorageWithObserved({
+        status: status({ repoSlug: `acme-org/${REPO}` }), roleEnv: STUDIO_ENV,
+      });
+      const OLD_STAMP = "20261004000000";
+      await mergeObserved(storage, {
+        wipBootStamp: OLD_STAMP,
+        replacedAt: "2026-09-23T17:00:00.000Z",
+        wipSyncedAt: "2026-09-23T17:10:00.000Z",
+      });
+
+      await restartWithStorage(deps, storage, STUDIO_ID, "rafarc21/fleetflare", "restart", storage);
+
+      const observed = await getObserved(storage);
+      // do.ts's own fixed wiring: `session.wipBootStampBefore`, never the
+      // live `Observed.wipBootStamp`.
+      const brief = composeSurvivalBrief({
+        studioId: STUDIO_ID,
+        tasks: { ok: true, value: [] },
+        openPrs: { ok: true, value: [] },
+        unclaimedRescueBranches: { ok: true, value: [] },
+        session: observed.session,
+        now: NOW,
+        wipSyncedAt: observed.wipSyncedAt ?? null,
+        wipBootStamp: observed.session?.wipBootStampBefore ?? null,
+      });
+
+      expect(brief).toContain(`fleet/rescue/${STUDIO_ID}/wip/${OLD_STAMP}`);
+      expect(brief).not.toContain(`fleet/rescue/${STUDIO_ID}/wip/${observed.wipBootStamp}`);
+    });
+  });
+
   it("a successful restart issues exactly one combined token-write + pane-probe exec after BRINGUP_CMD (maestro correction #6)", async () => {
     const deps = restartDeps(() => undefined);
     const storage = fakeStorageWithObserved({

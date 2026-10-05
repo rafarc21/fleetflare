@@ -84,6 +84,31 @@ export interface ObservedSession {
    *  uses, so an `Observed` record written before this field existed reads
    *  as "no replacement detected" rather than `undefined`. */
   replacementDetected?: boolean;
+  /** Maestro review round 1 on PR #235, BLOCKER 1 (issue #231) —
+   *  `Observed.wipBootStamp` AS IT STOOD IMMEDIATELY BEFORE this bring-up,
+   *  frozen here the same way `replacementDetected` above is.
+   *
+   *  `recordBringupObservation` (provision.ts) sets `patch.wipBootStamp` to a
+   *  BRAND-NEW stamp inside the exact same `if (tokenWritten)` block that
+   *  clears `replacedAt` — and it does so BEFORE the bring-up wakes
+   *  (`deliverSurvivalOnBringup`, do.ts) ever run. A delivery-time reader of
+   *  the live `Observed.wipBootStamp` would therefore always see the NEW
+   *  container's own (as yet unsynced) stamp, never the OLD one whose ref
+   *  actually holds the WIP safety net this bring-up's own brief is pointing
+   *  at — exactly the kind of live-re-read bug `replacementDetected`'s own
+   *  doc comment already warns about for `Observed.replacedAt`.
+   *
+   *  Captured from `observedBefore.wipBootStamp` — read at the TOP of
+   *  `recordBringupObservation`, before `patch.wipBootStamp` is computed —
+   *  and applied to the SAME two "this bring-up" branches
+   *  `replacementDetected`/`freshSessionSource` are, never to the "untouched,
+   *  keep the prior verdict" branch (which describes an EARLIER bring-up).
+   *
+   *  OPTIONAL/absent means "no confirmed boot stamp existed before this
+   *  bring-up" — `wipSyncLine` (survival-brief.ts) falls back to its own glob
+   *  rendering in that case, same as it already does for a null
+   *  `SurvivalInput.wipBootStamp`. */
+  wipBootStampBefore?: string | null;
   /** Board #250 (#85/#118 follow-up) — the keeper's own source label
    *  (`daily <date>`, `pickRestoreSource`'s own doc comment, provision.ts)
    *  when this restore came from a daily keeper rather than `latest`. Absent

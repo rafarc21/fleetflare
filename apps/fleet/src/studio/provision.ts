@@ -3544,6 +3544,16 @@ export async function recordBringupObservation(
   // verdict" branch above (that branch describes an EARLIER bring-up, which
   // this call's own `freshSessionSource` says nothing about).
   const freshSessionFlag = freshSessionSource !== null ? { freshSessionSource } : {};
+  // Maestro review round 1 on PR #235, BLOCKER 1 (issue #231) — captured
+  // HERE, from `observedBefore` (read at the top of this function, BEFORE
+  // the `patch.wipBootStamp = formatRescueStamp(...)` write further below
+  // ever runs), for the identical reason `replacementDetected` above is
+  // captured from `observedBefore.replacedAt` rather than read live at
+  // delivery time. See `ObservedSession.wipBootStampBefore`'s own doc
+  // comment (observed.ts) for the full bug this closes.
+  const wipBootStampBeforeFlag = observedBefore.wipBootStamp !== undefined && observedBefore.wipBootStamp !== null
+    ? { wipBootStampBefore: observedBefore.wipBootStamp }
+    : {};
   // Review round 6, MUST-FIX 9: MUST-FIX 3 above only covers the case where a
   // PRIOR verdict exists to fall back on. An untouched lead with NO prior
   // verdict at all (a studio's very first bring-up ever, or a pre-#85 studio
@@ -3562,6 +3572,7 @@ export async function recordBringupObservation(
           ...(snapshotAgeIsUpperBound ? { snapshotAgeIsUpperBound: true } : {}),
           ...replacementFlag,
           ...freshSessionFlag,
+          ...wipBootStampBeforeFlag,
           ...(keeperSource ? { snapshotSource: keeperSource } : {}),
         }
       : {
@@ -3569,6 +3580,7 @@ export async function recordBringupObservation(
           ...(snapshotAgeIsUpperBound ? { snapshotAgeIsUpperBound: true } : {}),
           ...replacementFlag,
           ...freshSessionFlag,
+          ...wipBootStampBeforeFlag,
           ...(keeperSource ? { snapshotSource: keeperSource } : {}),
         };
 

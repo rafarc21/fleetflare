@@ -5995,13 +5995,18 @@ export class StudioDO extends Sandbox<Env> {
           // reason `session` is — see SurvivalBringup.wipSyncedAt's own doc
           // comment (survival-delivery.ts).
           wipSyncedAt: snapshot.wipSyncedAt ?? null,
-          // Issue #231: same "frozen here" treatment as wipSyncedAt above.
-          wipBootStamp: snapshot.wipBootStamp ?? null,
+          // Maestro review round 1 on PR #235, BLOCKER 1 (issue #231) —
+          // `session.wipBootStampBefore`, NEVER the live `snapshot.wipBootStamp`:
+          // `recordBringupObservation` (provision.ts) has, by the time this runs,
+          // already overwritten the live field with a BRAND-NEW stamp for THIS
+          // SAME bring-up. See `ObservedSession.wipBootStampBefore`'s own doc
+          // comment (observed.ts) for the full bug this closes.
+          wipBootStamp: session.wipBootStampBefore ?? null,
           lastSessionAside: snapshot.lastSessionAside ?? null,
         }),
         () => this.survivalBusy(),
         this.survivalCompose(
-          workRepoSlug, session, snapshot.wipSyncedAt ?? null, snapshot.wipBootStamp ?? null, snapshot.lastSessionAside ?? null,
+          workRepoSlug, session, snapshot.wipSyncedAt ?? null, session.wipBootStampBefore ?? null, snapshot.lastSessionAside ?? null,
         ),
         (prompt) => this.wakeStudioOnAssignment(prompt),
         () => ctx.moved(),
@@ -6059,8 +6064,15 @@ export class StudioDO extends Sandbox<Env> {
         // Board issue #208, part 2: the pending record's OWN frozen
         // `wipSyncedAt` (SurvivalBriefPending.wipSyncedAt), never a fresh
         // read — same reason `pending.session` itself is never re-read.
+        //
+        // Maestro review round 1 on PR #235, BLOCKER 1 (issue #231) —
+        // `pending.session.wipBootStampBefore`, not `pending.wipBootStamp`:
+        // the session record's own frozen copy is the one source of truth
+        // this fix threads everywhere (see `deliverSurvivalOnBringup` above);
+        // `pending.wipBootStamp` is left in place on `SurvivalBriefPending`
+        // for wire back-compat only and is no longer read for composition.
         (pending) => this.survivalCompose(
-          workRepoSlug, pending.session, pending.wipSyncedAt ?? null, pending.wipBootStamp ?? null, pending.lastSessionAside ?? null,
+          workRepoSlug, pending.session, pending.wipSyncedAt ?? null, pending.session.wipBootStampBefore ?? null, pending.lastSessionAside ?? null,
         )(),
         (prompt) => this.wakeStudioOnAssignment(prompt, true),
       ));
