@@ -4,6 +4,7 @@
 import { RESCUE_MARKER_PATHSPECS } from "./rescue-gc";
 import { KILL_GRACE_SECONDS } from "./exec-deadline";
 import { STUDIO_REAL_GIT_PATH } from "./credentials";
+import { MintTokenError } from "../github/app";
 
 /**
  * Issue #1 piece 5: origin can be PUBLIC, so rescued work goes to a PRIVATE
@@ -57,7 +58,8 @@ export function resolveRescueRemote(env: { FLEET_RESCUE_REMOTE?: string }): stri
  * unknown and origin is where that studio's work already lives.
  */
 export async function resolveRescueTarget(
-  env: { FLEET_RESCUE_REMOTE?: string }, mint: (repo: string) => Promise<string | null>,
+  env: { FLEET_RESCUE_REMOTE?: string },
+  mint: (repo: string, permissions: { contents: "read" | "write"; workflows?: "write" }) => Promise<string | null>,
   workRepoIsPrivate: () => Promise<boolean>,
   // PR #42 review: provision's discovery (issue #30) asks every provision.
   // There the expected cases (unset, private repo) are silent, and real
@@ -110,7 +112,7 @@ export async function resolveRescueTarget(
     if (!priv) return toOrigin(`${slug} is not confirmed private`);
   }
   try {
-    const token = await mint(slug);
+    const token = await mintRescuePushToken(mint, slug, rescueMintPermissions(purpose));
     if (token === null) return toOrigin(`no write token for ${slug} (PAT fleet: set FLEET_RESCUE_GITHUB_TOKEN)`);
     return { remoteUrl: `https://github.com/${slug}.git`, env: { [RESCUE_TOKEN_ENV]: token } };
   } catch (err) {
@@ -145,12 +147,77 @@ export async function resolveRescueTarget(
  * `mintInstallationToken` doc comment) -- asking for `workflows: write`
  * here does nothing unless the App installation itself was already granted
  * that permission in its own GitHub settings, an operator-side change this
- * code cannot make.
+ * code cannot make. PR #236 review round 2: that unverified fact is exactly
+ * why `resolveRescueTarget` never mints with THIS function's `"push"` result
+ * directly without a fallback -- see `mintRescuePushToken` below, which asks
+ * for it first but is prepared to retry without it.
  */
 export function rescueMintPermissions(
   purpose: "push" | "discovery",
 ): { contents: "read" | "write"; workflows?: "write" } {
   return purpose === "discovery" ? { contents: "read" } : { contents: "write", workflows: "write" };
+}
+
+/**
+ * PR #236 review round 2, BLOCKER: `rescueMintPermissions("push")` asking for
+ * `workflows: write` on EVERY push-purpose mint means an App installation
+ * that was never granted that permission 422s EVERY rescue push, not only the
+ * rare one that actually touches `.github/workflows/*` -- turning a narrow,
+ * correct fix (issue #233, above) into a universal regression: every rescue
+ * would fall back to the leak-gated origin path (refused, or forced
+ * `--discard-unsynced`, per that path's own doc comment) whenever the
+ * installation lacks Workflows, a fact nothing in this codebase can verify
+ * ahead of time.
+ *
+ * Tries `permissions` as given first. On a rejection, retries ONCE with
+ * `{ contents: "write" }` -- the ORIGINAL, pre-#233 request, which the App
+ * installation has always had to support for rescue to have ever worked at
+ * all -- but ONLY when both of these hold:
+ *   (a) `permissions.workflows` was actually requested (`undefined` for a
+ *       discovery-purpose or already-narrow call -- those have nothing to
+ *       retry narrower, and discovery's own contract stays untouched, exactly
+ *       as the review asked);
+ *   (b) the rejection is a `MintTokenError` with `status === 422` -- GitHub's
+ *       "Unprocessable Entity", which already rules out network/auth/rate-
+ *       limit failures (401/403/429/5xx, or a thrown non-`MintTokenError` at
+ *       all) that a narrower permission request could never fix anyway.
+ *
+ * Detection note (documented, not guessed): a 422 alone does NOT uniquely
+ * mean "GitHub rejected these permissions" -- `mintRepoToken` (github/
+ * auth.ts) already has its OWN 422 case, a renamed/transferred repo, and
+ * retries THAT internally before ever re-throwing. GitHub's response body
+ * for a permission-not-granted mint is not a documented, stable,
+ * machine-parseable shape this code can safely text-match against (and there
+ * is no live App installation lacking Workflows available to confirm one
+ * against). So this does not attempt to distinguish "permissions" 422s from
+ * "something else" 422s by parsing text -- by the time a 422 reaches here,
+ * `mintRepoToken`'s own rename-retry has ALREADY run and ruled itself out (it
+ * only re-throws the original error once its own canonical-name retry also
+ * found nothing to fix), so what's left is either a genuine permissions
+ * rejection or some other validation failure this code cannot name. Retrying
+ * narrower on EITHER is safe: it costs one extra mint call, and succeeding is
+ * strictly better than falling back to origin -- if the real cause was
+ * unrelated to `workflows`, the narrower mint fails too and this falls
+ * through to the SAME origin fallback a pre-this-fix failure already used.
+ * If it succeeds, the resulting token genuinely lacks `workflows` regardless
+ * of why the first attempt failed, so the warning logged below is accurate
+ * either way.
+ */
+async function mintRescuePushToken(
+  mint: (repo: string, permissions: { contents: "read" | "write"; workflows?: "write" }) => Promise<string | null>,
+  repo: string,
+  permissions: { contents: "read" | "write"; workflows?: "write" },
+): Promise<string | null> {
+  try {
+    return await mint(repo, permissions);
+  } catch (err) {
+    if (permissions.workflows === undefined || !(err instanceof MintTokenError) || err.status !== 422) throw err;
+    const token = await mint(repo, { contents: "write" });
+    console.error(
+      "rescue: token minted without workflows; workflow-touching pushes may be refused -- grant App Workflows: write",
+    );
+    return token;
+  }
 }
 
 /** Single-quotes `s` for bash. */

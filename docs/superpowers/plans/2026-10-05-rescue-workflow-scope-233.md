@@ -150,3 +150,138 @@ with `systematic-debugging`, not assumed:
    PATH (no `PATH=` override): `bun test
    apps/fleet/test/bun/rescue-push.test.ts` -- 160 pass, 0 fail, 613
    expect() calls.
+
+## Round 2 (2026-10-05, PR #236 maestro review) -- Fix 1's blocker + Fix 2's extra coverage
+
+Maestro's own review on PR #236, quoted in full in the dispatch for this
+round: `rescueMintPermissions("push")` always asking for `workflows: write`
+means an App installation that was never granted that permission 422s
+EVERY push-purpose mint, not only the rare one that touches
+`.github/workflows/*` -- turns a narrow fix into a universal regression
+(every rescue push falls back to the leak-gated origin path). Required a
+retry: full permissions first, narrower (`{contents: write}` only) on a
+mint rejection shaped like a permissions rejection.
+
+### Where the retry lives
+
+Traced before touching anything (systematic-debugging): `do.ts`'s
+`rescueTarget()` used to call `rescueMintPermissions(purpose)` ITSELF,
+outside the `mint` closure it hands to `resolveRescueTarget` -- so
+`resolveRescueTarget` never had the permissions object in hand at all, only
+an already-scoped `mint(repo) => Promise<string|null>`. A retry with a
+DIFFERENT permissions object has to be able to ask for that different
+object, so `mint`'s own signature had to grow a second parameter:
+`(repo, permissions) => Promise<string|null>`. `resolveRescueTarget` now
+computes `rescueMintPermissions(purpose)` itself and passes it to `mint` on
+every call (full, then narrower on retry) -- `do.ts`'s closure shrank to a
+single parameter rename (`permissions` in, `rescueMintPermissions(purpose)`
+out), since `containerToken` already took permissions as a plain argument.
+
+New helper `mintRescuePushToken` (rescue.ts, not exported -- tested through
+`resolveRescueTarget`'s own stubbed `mint`, same convention every other
+case in that function already uses): tries `mint(repo, permissions)`; on a
+rejection, retries ONCE with `{contents: "write"}` only, but ONLY when
+`permissions.workflows !== undefined` (discovery/narrow calls have nothing
+to retry -- its own contract stays untouched, exactly as the review asked)
+AND the rejection is a `MintTokenError` with `status === 422`. On a
+successful narrower retry: logs exactly one line (`"rescue: token minted
+without workflows; workflow-touching pushes may be refused -- grant App
+Workflows: write"`) and returns that token -- used for the push, never
+discarded in favor of origin.
+
+### Detecting "this 422 is about permissions" -- documented decision
+
+A 422 alone does not uniquely mean "GitHub rejected these permissions" --
+`mintRepoToken` (github/auth.ts) already has its OWN 422 case (a
+renamed/transferred repo) and retries that internally before ever
+re-throwing. GitHub's response body for a permission-not-granted mint is
+not a documented, stable, machine-parseable shape this code can safely
+text-match against, and there is no live App installation lacking
+Workflows available to confirm one against -- so this does NOT attempt to
+text-match the response body at all. Decision: by the time a 422 escapes
+`mint()`, `mintRepoToken`'s own rename-retry has ALREADY run and ruled
+itself out (it only re-throws the original error once its own
+canonical-name retry also found nothing to fix) -- what's left is either a
+genuine permissions rejection or some other validation failure this code
+cannot name from here. Retrying narrower on EITHER is safe: it costs one
+extra mint call, and succeeding is strictly better than falling back to
+origin regardless of the real cause; if the real cause was unrelated, the
+narrower mint fails too and this falls through to the exact SAME
+origin-fallback a pre-this-fix failure already used. The warning logged on
+a successful narrower retry is accurate either way: the resulting token
+genuinely lacks `workflows`.
+
+**Test** (`test/bun/rescue-remote.test.ts`, new describe block): a stubbed
+`mint` rejecting with `MintTokenError(422, ...)` whenever `permissions.
+workflows` is set, succeeding otherwise -- asserts both calls happen in
+order with the right permissions objects, the one-line warning is logged,
+and the narrower token is the one actually returned for the push. Three
+more cases: discovery never retries (never asks for workflows at all); the
+narrower retry ALSO failing falls back to origin exactly like any other
+mint failure (no infinite retry, `calls` stays at 2); a non-`MintTokenError`
+or non-422 failure never retries at all (`calls` stays at 1) -- RED against
+the unmodified code (3 of 5 failed for the right reason: no second call,
+no permissions argument at all, or wrong returned content), GREEN after
+`mintRescuePushToken` shipped.
+
+### Fix 2's extra coverage (dirty-tree snapshot on an ancestor HEAD)
+
+Read `rescue_one`'s own dirty-tree branch (both command builders) before
+writing anything: it does NOT call `rescue_on_origin` at all for a
+genuinely dirty tree -- it unconditionally commits a throwaway snapshot and
+pushes it; `rescue_on_origin`'s ancestor-check only ever guards the
+CLEAN-but-ahead path (`rescue_check_ahead`) and the separate local-branch
+walk (a real branch tip, never a synthetic snapshot sha). So the exact
+scenario the review named -- Part 2's new default-branch-name ancestor arm
+accidentally gating a real new commit -- is not reachable in the shipped
+code today; this is regression coverage against a FUTURE version of that
+mistake, not a bug found in the current one.
+
+Added to the existing `#233` describe block in
+`test/bun/rescue-push.test.ts`: a worktree detached at an OLD ancestor of
+origin's moved-ahead default-branch tip (no local tracking ref, same
+fixture shape as the existing two cases in that block) PLUS a real file
+change (not a marker) -- asserts `RESCUE_PUSHED` appears, never
+`RESCUE_CLEAN`, never skipped. Verified meaningful by two live mutations,
+reverted immediately after (not committed): (a) adding a bogus
+`rescue_on_origin "$w" "$sha" "$rbranch"` gate into the dirty-tree branch
+alone left this test GREEN -- proving `rescue_on_origin`'s own ancestor
+logic correctly answers "no" for a genuinely new, never-pushed commit sha
+(ancestry only ever runs the other direction); (b) the same bogus gate
+PLUS forcing `rescue_on_origin` to unconditionally `return 0` turned this
+test RED (`RESCUE_CLEAN` instead of a push) -- confirming the test does
+catch the real failure shape the review was worried about, it just isn't
+present in the code as shipped.
+
+### Files touched (round 2)
+
+- `apps/fleet/src/studio/rescue.ts` -- `resolveRescueTarget`'s `mint` param
+  grew a `permissions` argument; new `mintRescuePushToken` helper; doc
+  comments on `rescueMintPermissions` and the new helper.
+- `apps/fleet/src/studio/do.ts` -- `rescueTarget()`'s mint closure now takes
+  `permissions` as its own parameter instead of calling
+  `rescueMintPermissions(purpose)` itself; dropped the now-unused
+  `rescueMintPermissions` import.
+- `apps/fleet/test/bun/rescue-remote.test.ts` -- five new cases for the
+  retry (and its boundaries).
+- `apps/fleet/test/bun/rescue-push.test.ts` -- one new case for Fix 2's
+  extra coverage.
+- `apps/fleet/test/studio.rescue-token.test.ts` -- pinned-source assertion
+  updated to match the new closure shape (`permissions` passed straight
+  through, never hard-coded, never calling `rescueMintPermissions` from
+  `do.ts` directly any more).
+- This file.
+
+### Verification run (round 2, scoped -- no full gate)
+
+- `bun test apps/fleet/test/bun/rescue-remote.test.ts` -- 21 pass, 0 fail.
+- `bun test apps/fleet/test/bun/rescue-push.test.ts` -- 162 pass, 0 fail,
+  621 expect() calls (160 pre-existing + 2 new).
+- `npx vitest run test/studio.rescue-token.test.ts` -- 2 pass.
+- `npx vitest run test/studio.provision.test.ts` -- 99 pass (unaffected
+  source-pinning test for the shared `resolveRescueTarget(` call site).
+- `npx vitest run test/studio.session.test.ts` -- 262 pass (unaffected
+  `rescueTarget` port stub).
+- Full `check`/`test`/`bun-test` gate deliberately NOT run here -- reserved
+  for the lead, serialized, after this fix and the sibling #234 fix both
+  land (per this round's own dispatch).
