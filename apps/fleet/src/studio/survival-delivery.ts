@@ -532,8 +532,15 @@ export interface SurvivalSources {
    * directly to origin with no PR opened yet and no `{kind:"branch"}`
    * artifact recorded — invisible to sources 1-3 even though it is sitting
    * right there on origin (the exact gap #234 reports).
+   *
+   * PR #239 review finding 1 — `names` may be an INCOMPLETE prefix of the
+   * real branch list when `truncated` is true: `listAllBranchNames` hit its
+   * own page cap while GitHub still had more pages to offer. `truncated`
+   * flows through to `SurvivalInput.branchLookupTruncated` unchanged, so the
+   * composed brief can say so rather than let a page-capped lookup read as
+   * "that's everything".
    */
-  branchNames: () => Promise<string[]>;
+  branchNames: () => Promise<{ names: string[]; truncated: boolean }>;
 }
 
 /** What `main` is called here. The compare's base — never hardcoded at a
@@ -718,12 +725,25 @@ export async function resolveSurvivalInput(
   // leaves every still-unresolved task exactly as it already was — never
   // fails the whole `resolveSurvivalInput` call over one source's transient
   // failure.
+  //
+  // PR #239 review finding 2: a rescue ref anchor-matches a task number too
+  // -- a studio id ending `--<n>` (e.g. `web-studio--40`) makes
+  // `matchesTaskNumber` read the `-` before and the `/` after the number in
+  // `fleet/rescue/x--web-studio--40/wip/<stamp>` as valid boundaries, a
+  // genuine false positive. SOURCE 3 above already owns rescue-ref
+  // attribution in full (including its own "never guess" ambiguous case);
+  // a `fleet/rescue/` name must never re-enter THIS source's candidate pool
+  // at all, so it is filtered out here, before `matchesTaskNumber` ever
+  // runs against it -- not merely deprioritized against a real match.
+  let branchLookupTruncated = false;
   const stillUnresolved = resolved.filter((r) => r.branch === null);
   if (stillUnresolved.length > 0) {
     try {
-      const allBranchNames = await sources.branchNames();
+      const { names: allBranchNames, truncated } = await sources.branchNames();
+      branchLookupTruncated = truncated;
+      const candidatePool = allBranchNames.filter((name) => !name.startsWith("fleet/rescue/"));
       for (const r of stillUnresolved) {
-        const matches = allBranchNames.filter((name) => matchesTaskNumber(name, r.task.taskNumber));
+        const matches = candidatePool.filter((name) => matchesTaskNumber(name, r.task.taskNumber));
         if (matches.length === 1) {
           // Mutates in place, same pattern SOURCE 3's own
           // `unresolved[0]!.branch = attributed` already uses just above —
@@ -790,6 +810,11 @@ export async function resolveSurvivalInput(
   return {
     studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, unclaimedRescueBranches,
     session, now, wipSyncedAt,
+    // PR #239 review finding 1 -- only set when true, same "absent stays
+    // absent" discipline `wipSyncedAt`'s own field doc comment follows: a
+    // lookup that was never truncated says nothing extra, rather than a
+    // stored `false` a reader could mistake for a deliberate signal.
+    ...(branchLookupTruncated ? { branchLookupTruncated: true } : {}),
   };
 }
 

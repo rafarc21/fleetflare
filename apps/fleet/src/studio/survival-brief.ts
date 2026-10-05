@@ -30,6 +30,7 @@
  */
 
 import type { ObservedSession, RestoreOutcome } from "./observed";
+import { BRANCH_NAMES_MAX_PAGES, BRANCH_NAMES_PAGE_SIZE } from "../github/api";
 
 export type Checked<T> = { ok: true; value: T } | { ok: false; reason: string };
 
@@ -130,6 +131,20 @@ export interface SurvivalInput {
    * it -- either way, nothing to say.
    */
   wipSyncedAt?: string | null;
+  /**
+   * PR #239 review finding 1 -- true when `resolveSurvivalInput`'s own
+   * `sources.branchNames()` fetch (SOURCE 4, survival-delivery.ts) hit
+   * `listAllBranchNames`'s page cap (`BRANCH_NAMES_MAX_PAGES`,
+   * src/github/api.ts) while GitHub still had more branches to offer. The
+   * task-number match SOURCE 4 runs is only as complete as the branch list
+   * it searched -- a task branch living past the cap reads exactly like one
+   * that is not on origin at all, and a reader of this brief must be told
+   * the search itself was incomplete rather than trust a false "no branch on
+   * origin". Absent/undefined (never a stored `false`) when the lookup never
+   * ran or never hit the cap -- same "absent stays absent" discipline every
+   * other optional field on this interface already follows.
+   */
+  branchLookupTruncated?: boolean;
 }
 
 /** Lines per section before the rest collapses to a single "+N more". Keeps
@@ -470,6 +485,15 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
     if (sorted.length > MAX_LINES_PER_SECTION) {
       lines.push(`- +${sorted.length - MAX_LINES_PER_SECTION} more`);
     }
+  }
+
+  // PR #239 review finding 1 -- the task-branch section above is only as
+  // complete as the branch list SOURCE 4 searched; say so when it was cut.
+  if (input.branchLookupTruncated === true) {
+    lines.push(
+      `- Branch lookup truncated — results may be incomplete past ` +
+      `${BRANCH_NAMES_PAGE_SIZE * BRANCH_NAMES_MAX_PAGES} branches`,
+    );
   }
 
   if (!input.openPrs.ok) {
