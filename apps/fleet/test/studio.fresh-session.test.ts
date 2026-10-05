@@ -514,4 +514,18 @@ describe("provisionWithStorage — persists the aside path(s) onto Observed.last
     const observed = await getObserved(storage);
     expect(observed.lastSessionAside).toEqual([ASIDE]);
   });
+
+  // Maestro review round 1 on PR #235, MAJOR 3 — stamped in the SAME
+  // mergeObserved call as the paths themselves, so a MUCH later brief can
+  // render an honest age instead of repeating the claim as if it just
+  // happened.
+  it("a confirmed move also stamps Observed.lastSessionAsideAt (#231 review round 1, MAJOR 3)", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.lastSessionAsideAt).toBe(NOW);
+  });
 });

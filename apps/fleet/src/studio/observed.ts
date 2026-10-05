@@ -399,6 +399,22 @@ export interface Observed {
    */
   lastSessionAside?: string[] | null;
   /**
+   * Maestro review round 1 on PR #235, MAJOR 3 (issue #231) — WHEN
+   * `lastSessionAside` above was stamped, same "sibling scalar, not a nested
+   * object" shape `wipBootStamp` is to `incarnation`. `lastSessionAside`
+   * itself never clears (a stale claim is still real, on-disk-once evidence,
+   * same reasoning its own doc comment above gives for never auto-clearing
+   * it), so a brief composed many bring-ups later needs this to render an
+   * AGE next to the claim rather than repeat it as if it just happened —
+   * `sessionAsideLine` (survival-brief.ts) is what reads it. Also the only
+   * way that line can tell "this just happened" from "this is from weeks
+   * ago, and the container has very likely been replaced since" — see that
+   * line's own doc comment for the R2-vs-local-path half of this same fix.
+   * OPTIONAL/absent: a record written before this field existed (or a
+   * pre-#231 fixture) renders "unknown age" rather than failing to compile.
+   */
+  lastSessionAsideAt?: string | null;
+  /**
    * Board issue #108 (#70 ask 4 remainder) — the lead's last visible,
    * non-chrome message line: redacted (`redactSecrets`, at the ship-tick
    * write boundary), bounded (activity.ts's `LAST_LINE_MAX_CHARS`), so a
@@ -484,6 +500,13 @@ export interface SurvivalBriefPending {
    *  different move's own paths. OPTIONAL/absent reads as "nothing moved
    *  aside as of this bring-up" — the composer renders nothing for it. */
   lastSessionAside?: string[] | null;
+  /** Maestro review round 1 on PR #235, MAJOR 3 (issue #231) —
+   *  `Observed.lastSessionAsideAt` AS IT STOOD at this bring-up, frozen the
+   *  same way `lastSessionAside` above is, so a retry composed long after the
+   *  heal still renders the real age rather than "just now". OPTIONAL/absent
+   *  reads as "unknown age" — see `Observed.lastSessionAsideAt`'s own doc
+   *  comment for the full reasoning. */
+  lastSessionAsideAt?: string | null;
 }
 
 /** The DO-storage slice this feature touches — same narrow-port style

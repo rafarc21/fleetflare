@@ -562,6 +562,9 @@ export async function resolveSurvivalInput(
   // takes, both OPTIONAL with a `null` default for the identical reason.
   wipBootStamp: string | null = null,
   lastSessionAside: string[] | null = null,
+  // Maestro review round 1 on PR #235, MAJOR 3 — same OPTIONAL/`null`-default
+  // threading every other frozen-at-bring-up field above already takes.
+  lastSessionAsideAt: string | null = null,
 ): Promise<SurvivalInput> {
   if (!tasks.ok) {
     return {
@@ -583,6 +586,7 @@ export async function resolveSurvivalInput(
       wipSyncedAt,
       wipBootStamp,
       lastSessionAside,
+      lastSessionAsideAt,
     };
   }
 
@@ -716,7 +720,7 @@ export async function resolveSurvivalInput(
 
   return {
     studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, unclaimedRescueBranches,
-    session, now, wipSyncedAt, wipBootStamp, lastSessionAside,
+    session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt,
   };
 }
 
@@ -725,8 +729,8 @@ export async function resolveSurvivalInput(
  *  signal that there is nothing worth re-briefing about.
  *
  *  `wipSyncedAt` (board issue #208, part 2) and `wipBootStamp`/
- *  `lastSessionAside` (issue #231) pass straight through to
- *  `resolveSurvivalInput` — see that function's own doc comment. */
+ *  `lastSessionAside`/`lastSessionAsideAt` (issue #231) pass straight
+ *  through to `resolveSurvivalInput` — see that function's own doc comment. */
 export async function composeSurvivalDelivery(
   sources: SurvivalSources,
   tasks: Checked<SurvivalTaskRef[]>,
@@ -735,9 +739,10 @@ export async function composeSurvivalDelivery(
   wipSyncedAt: string | null = null,
   wipBootStamp: string | null = null,
   lastSessionAside: string[] | null = null,
+  lastSessionAsideAt: string | null = null,
 ): Promise<string> {
   return composeSurvivalBrief(
-    await resolveSurvivalInput(sources, tasks, session, now, wipSyncedAt, wipBootStamp, lastSessionAside),
+    await resolveSurvivalInput(sources, tasks, session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt),
   );
 }
 
@@ -777,6 +782,11 @@ export interface SurvivalBringup {
    *  same "frozen, never re-read" reason `session` above is. OPTIONAL/absent:
    *  nothing moved aside as of this bring-up. */
   lastSessionAside?: string[] | null;
+  /** Maestro review round 1 on PR #235, MAJOR 3 (issue #231) —
+   *  `Observed.lastSessionAsideAt` AS IT STOOD at this bring-up, same
+   *  "frozen, never re-read" reason `lastSessionAside` above is. OPTIONAL/
+   *  absent: the composer renders "unknown age" for the aside line. */
+  lastSessionAsideAt?: string | null;
 }
 
 /**
@@ -963,6 +973,9 @@ export async function deliverSurvivalBriefOnBringup(
     // absent" treatment as `wipSyncedAt` just above.
     ...(b.wipBootStamp !== undefined ? { wipBootStamp: b.wipBootStamp } : {}),
     ...(b.lastSessionAside !== undefined ? { lastSessionAside: b.lastSessionAside } : {}),
+    // Maestro review round 1 on PR #235, MAJOR 3 — same "taken fresh, absent
+    // stays absent" treatment as `lastSessionAside` just above.
+    ...(b.lastSessionAsideAt !== undefined ? { lastSessionAsideAt: b.lastSessionAsideAt } : {}),
     since: priorForThis?.since ?? now().toISOString(),
     attempts: priorForThis?.attempts ?? 0,
     reason: "",

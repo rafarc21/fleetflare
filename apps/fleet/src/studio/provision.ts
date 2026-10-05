@@ -3849,7 +3849,11 @@ export async function provisionWithStorage(
     // list is empty — a confirmed "nothing to move" leaves the field exactly
     // as it was, same "stamped on a real event" discipline wipSyncedAt uses.
     if (observedStorage && freshSessionAsidePaths && freshSessionAsidePaths.length > 0) {
-      await mergeObserved(observedStorage, { lastSessionAside: freshSessionAsidePaths });
+      // Maestro review round 1 on PR #235, MAJOR 3 — stamped in the SAME
+      // breath as the paths themselves, so a MUCH later brief can render an
+      // honest age next to the claim instead of repeating it as fact
+      // forever. See Observed.lastSessionAsideAt's own doc comment.
+      await mergeObserved(observedStorage, { lastSessionAside: freshSessionAsidePaths, lastSessionAsideAt: deps.now() });
     }
   }
   // Issue #100: retire the pending marker ONLY once a fresh-session attempt

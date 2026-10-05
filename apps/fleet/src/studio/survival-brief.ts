@@ -137,6 +137,15 @@ export interface SurvivalInput {
    * old session was moved aside, or where.
    */
   lastSessionAside?: string[] | null;
+  /**
+   * Maestro review round 1 on PR #235, MAJOR 3 (issue #231) — WHEN
+   * `lastSessionAside` above was stamped, so `sessionAsideLine` can render an
+   * honest age next to the claim rather than repeat it as freshly-true
+   * forever (`lastSessionAside` itself never auto-clears — see its own doc
+   * comment, observed.ts). OPTIONAL/null: renders "unknown age" rather than
+   * suppressing the line.
+   */
+  lastSessionAsideAt?: string | null;
 }
 
 /** Lines per section before the rest collapses to a single "+N more". Keeps
@@ -442,16 +451,67 @@ function wipSyncLine(input: SurvivalInput): string | null {
 }
 
 /**
- * Issue #231 fix 2b -- the real on-disk path(s) a confirmed `--fresh-session`
- * move went to, named so a lead can go find the old conversation. `null`
- * when nothing was moved aside (or this bring-up predates the field) — never
- * rendered in that case, same "no fabricated evidence" rule every other
- * section of this composer follows.
+ * Maestro review round 1 on PR #235, MAJOR 3 (issue #231) — a replacement
+ * AFTER the move wipes the local disk `lastSessionAside` names
+ * (`~/.claude/projects/fleet-aside-<dir>`), so a lead reading that path on a
+ * NEW container finds nothing there; only the R2-shipped copy
+ * (`sessions/<studioId>/aside/<dir>/`, named in `freshSessionNoteFor`'s own
+ * row note, provision.ts) is guaranteed to still exist. `<dir>` is the exact
+ * same segment both paths share by construction (`parseFreshSession`'s own
+ * regex, provision.ts, anchors the local path to
+ * `fleet-aside-[A-Za-z0-9-]+`) — this just re-derives the R2 key from it
+ * rather than keeping a second, parallel path around.
+ */
+function asideRefPath(studioId: string, localPath: string): string {
+  const prefix = "~/.claude/projects/fleet-aside-";
+  const dir = localPath.startsWith(prefix) ? localPath.slice(prefix.length) : localPath;
+  return `sessions/${studioId}/aside/${dir}/`;
+}
+
+/**
+ * Maestro review round 1 on PR #235, MAJOR 3 — same reasoning
+ * `SURVIVAL_RESCUE_REF_MAX_AGE_DAYS` (survival-delivery.ts) gives for its own
+ * 14-day cap: an aside move from over 2 weeks ago is very unlikely to still
+ * be relevant to today's lead, and unlike a kept ref or a retry budget, this
+ * costs nothing but a brief-rendering line, so there is no pressure to cut it
+ * close. A separate constant, not an import of that one — importing FROM
+ * survival-delivery.ts here would cycle (that file imports
+ * `composeSurvivalBrief` FROM this one).
+ */
+export const SURVIVAL_ASIDE_MAX_AGE_DAYS = 14;
+
+/**
+ * Issue #231 fix 2b, revised by maestro review round 1 on PR #235 (MAJOR 3)
+ * -- the real on-disk path(s) a confirmed `--fresh-session` move went to.
+ * `null` when nothing was moved aside (or this bring-up predates the field)
+ * — never rendered in that case, same "no fabricated evidence" rule every
+ * other section of this composer follows.
+ *
+ * Renders the R2 destination, not the local path `Observed.lastSessionAside`
+ * actually stores -- see `asideRefPath`'s own doc comment for why the local
+ * one may no longer exist by the time anyone reads this. An AGE is rendered
+ * alongside, the same way every other timestamp-bearing line in this
+ * composer already does (`wipSyncLine` above) -- `lastSessionAside` itself
+ * is never auto-cleared (observed.ts's own doc comment), so this is the
+ * mechanism by which a stale claim visibly ages out in the text itself,
+ * rather than silently repeating as fresh fact forever. Past
+ * `SURVIVAL_ASIDE_MAX_AGE_DAYS`, the line still renders (the move is still
+ * real, on-disk-once evidence worth keeping) but is marked stale in words,
+ * not suppressed -- dropping it would throw away the one thing this line
+ * exists to preserve for no safety gain.
  */
 function sessionAsideLine(input: SurvivalInput): string | null {
   const paths = input.lastSessionAside;
   if (paths == null || paths.length === 0) return null;
-  return `- Old session moved aside to ${paths.join(", ")}; find it there.`;
+  const refs = paths.map((p) => asideRefPath(input.studioId, p));
+  const age = input.lastSessionAsideAt != null ? ageFrom(input.lastSessionAsideAt, input.now) : null;
+  const ageText = age === null ? "unknown age" : `${formatSurvivalAge(age)} ago`;
+  const stale = age !== null && age >= SURVIVAL_ASIDE_MAX_AGE_DAYS * 24 * 60 * 60;
+  const staleNote = stale ? " (stale -- may no longer be relevant)" : "";
+  return (
+    `- Old session moved aside to ${refs.join(", ")} (R2 -- the local copy is gone if this container was ` +
+    `later replaced), ${ageText}${staleNote}; check it for anything lost since then.`
+  );
 }
 
 export function composeSurvivalBrief(input: SurvivalInput): string {

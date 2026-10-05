@@ -1031,15 +1031,35 @@ describe("(#231 fix 2a) the WIP safety-net line names the EXACT ref when wipBoot
 // "what survived" after a LATER heal had no way to learn an old session was
 // moved aside, or where. Persisted onto Observed.lastSessionAside, threaded
 // into the brief the same way wipBootStamp/wipSyncedAt are.
-describe("(#231 fix 2b) the old-session-moved-aside line", () => {
+//
+// Maestro review round 1 on PR #235, MAJOR 3 -- the LOCAL path this field
+// stores is gone from disk once the container that wrote it is replaced; the
+// R2 copy (sessions/<studioId>/aside/<dir>/) is the one that survives. The
+// field never auto-clears, so a LATER brief now renders an age alongside the
+// claim instead of repeating it as freshly-true forever.
+describe("(#231 fix 2b, revised round 1 MAJOR 3) the old-session-moved-aside line", () => {
   const ASIDE = "~/.claude/projects/fleet-aside-20261003T115000Z-42--workspace-acmeclient";
+  const ASIDE_R2 = "sessions/demosite-life--release-studio/aside/20261003T115000Z-42--workspace-acmeclient/";
 
-  it("lastSessionAside non-empty -> names the path(s)", () => {
+  it("lastSessionAside non-empty -> names the R2 destination, never the local path, with an age", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession(),
+      lastSessionAside: [ASIDE],
+      lastSessionAsideAt: "2026-09-24T13:50:00.000Z", // 10m before baseInput's default `now`
+    }));
+    expect(out).toContain(
+      `- Old session moved aside to ${ASIDE_R2} (R2 -- the local copy is gone if this container was later ` +
+      "replaced), 10m ago; check it for anything lost since then.",
+    );
+    expect(out).not.toContain(ASIDE); // the local path itself never appears
+  });
+
+  it("lastSessionAsideAt absent (a pre-fix record) -> renders \"unknown age\", never suppressed", () => {
     const out = composeSurvivalBrief(baseInput({
       session: baseSession(),
       lastSessionAside: [ASIDE],
     }));
-    expect(out).toContain(`- Old session moved aside to ${ASIDE}; find it there.`);
+    expect(out).toContain(`- Old session moved aside to ${ASIDE_R2} (R2 -- the local copy is gone if this container was later replaced), unknown age; check it for anything lost since then.`);
   });
 
   it("lastSessionAside absent/null/empty -> no such line", () => {
@@ -1052,12 +1072,40 @@ describe("(#231 fix 2b) the old-session-moved-aside line", () => {
     }
   });
 
-  it("multiple paths -> all named, comma-separated", () => {
+  it("multiple paths -> all named as R2 destinations, comma-separated", () => {
     const out = composeSurvivalBrief(baseInput({
       session: baseSession(),
       lastSessionAside: [ASIDE, `${ASIDE}-2`],
+      lastSessionAsideAt: "2026-09-24T13:50:00.000Z",
     }));
-    expect(out).toContain(`- Old session moved aside to ${ASIDE}, ${ASIDE}-2; find it there.`);
+    expect(out).toContain(
+      `- Old session moved aside to ${ASIDE_R2}, sessions/demosite-life--release-studio/aside/` +
+      "20261003T115000Z-42--workspace-acmeclient-2/ (R2 -- the local copy is gone if this container was later " +
+      "replaced), 10m ago; check it for anything lost since then.",
+    );
+  });
+
+  // Maestro review round 1 on PR #235, MAJOR 3 -- the field is never
+  // auto-cleared (its own doc comment, observed.ts), so a brief composed
+  // weeks later must say so plainly rather than repeat the claim as if it
+  // just happened.
+  it("an aside move older than SURVIVAL_ASIDE_MAX_AGE_DAYS still renders, but is clearly marked stale", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession(),
+      lastSessionAside: [ASIDE],
+      lastSessionAsideAt: "2026-09-01T00:00:00.000Z", // well over 14 days before baseInput's default `now`
+    }));
+    expect(out).toContain(`- Old session moved aside to ${ASIDE_R2}`);
+    expect(out).toContain("(stale -- may no longer be relevant)");
+  });
+
+  it("an aside move just under the staleness threshold is NOT marked stale", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession(),
+      lastSessionAside: [ASIDE],
+      lastSessionAsideAt: "2026-09-11T14:00:00.000Z", // exactly 13 days before baseInput's default `now`
+    }));
+    expect(out).not.toContain("stale");
   });
 
   it("no session at all -- never rendered regardless of lastSessionAside (genuinely nothing to report)", () => {
