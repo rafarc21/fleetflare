@@ -216,6 +216,15 @@ export type CliCommand =
   // string; parsing it to an epoch-ms cutoff happens in cmdJuniorStats, not
   // here (this file only validates argv shape — see this file's own header).
   | { cmd: "junior"; action: "enable" | "disable" | "status" | "stats"; account?: string; since?: string }
+  // Issue #232, step 3: `fleet accounts [sync] [--watch] [--json]`. Bare is
+  // READ-ONLY — it joins each configured account slot to a LOCAL `cswap list
+  // --json` read (cli/accounts.ts) and shows what a sync WOULD do, but never
+  // POSTs it. `sync: true` (the sub-action word "sync", same shape `fleet
+  // memory ls|compact` already splits on) is the one that POSTs the
+  // non-"unmanaged" decisions to /studio/accounts/sync. `watch` reruns every
+  // 60s, printing only when something changed (cli/accounts-format.ts's
+  // snapshotsEqual); `json` prints the raw snapshot instead of the table.
+  | { cmd: "accounts"; sync: boolean; watch: boolean; json: boolean }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -369,6 +378,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   junior: {
     args: "enable [--account <id>] | disable | status | stats [--since <dur|date>]",
     summary: "Opt this Mac into the junior skill (Workers AI delegation, skills/junior/SKILL.md). enable symlinks ~/.claude/skills/junior to this checkout and stores the Cloudflare account id in ~/.config/fleet/junior.json; disable removes only that symlink; status prints whether it is on, the account, and which auth path a call would take. enable/disable/status are local only — never touch the Worker or any studio. stats is DIFFERENT: it calls the Worker's /studio/junior/usage route (needs ~/.fleet/credentials, like every other board/studio verb) and merges it with this machine's own local usage log (~/.local/share/fleet/junior-usage.jsonl, laptop/direct-transport calls that never reach the Worker), printing one row per studio/id plus a TOTAL. --since <dur|date> (e.g. 24h, 7d, or an ISO date) narrows both halves; omitted means all time.",
+  },
+  accounts: {
+    args: "[sync] [--watch] [--json]",
+    summary: "Issue #232: join each configured Claude account slot (CLAUDE_ACCOUNT_<n>_LABEL) to a LOCAL `cswap list --json` read (claude-swap, operator's own machine — docs/setup.md's \"Proactive account-limit sync\") by label===email, and show what a sync would do: SLOT, LABEL, 5h%/7d% usage, the reset time that would trip a limit, ROW STATE (what D1 holds now), WOULD (what sync would change it to, '-' if nothing). Bare `fleet accounts` is READ-ONLY — it never calls the Worker's write route. `sync` POSTs every non-unmanaged decision to /studio/accounts/sync: pct >= 95 on any window marks that slot limited until that window's own reset; everything under 95 clears it, including a stale dead row (a fresh low reading right after re-login IS the proof it's alive again). --watch reruns every 60s, printing only when something changed; --json prints the raw snapshot instead of the table. cswap missing/erroring never crashes this — every slot just reads unmanaged (cswap-missing).",
   },
 };
 
@@ -951,6 +964,24 @@ export function parseCliArgs(argv: string[]): CliCommand {
       }
       if (rest.length === 2 && rest[0] === "--account" && rest[1] !== "") return { cmd: "junior", action, account: rest[1] };
       return { cmd: "usage", message: "usage: fleet junior enable [--account <id>]" };
+    }
+    // Issue #232, step 3: `fleet accounts [sync] [--watch] [--json]`. `sync`
+    // (when present) must be the FIRST token after the verb — same
+    // "sub-action word, never a flag" shape `fleet memory ls|compact` already
+    // takes, because the Worker POST it triggers is a real write and must be
+    // spelled out explicitly rather than inferred from a flag combination.
+    case "accounts": {
+      const rest = argv.slice(1);
+      const sync = rest[0] === "sync";
+      const flags = rest.slice(sync ? 1 : 0);
+      let watch = false;
+      let json = false;
+      for (const token of flags) {
+        if (token === "--watch") { watch = true; continue; }
+        if (token === "--json") { json = true; continue; }
+        return usage(`unexpected ${JSON.stringify(token)}`);
+      }
+      return { cmd: "accounts", sync, watch, json };
     }
     default:
       return { cmd: "usage", message: CLI_USAGE };
