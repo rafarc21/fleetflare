@@ -132,9 +132,25 @@ export async function resolveRescueTarget(
  * Rescue pushes (write). Provision's rescue-branch discovery only lists and
  * fetches, so it gets read: a token leaked from a provision exec cannot
  * write the archive.
+ *
+ * Issue #233: `push` also asks for `workflows: write`. A rescue remote with
+ * disjoint history (it has never seen this repo before) reads a push that
+ * touches `.github/workflows/*` as a workflow CREATE/UPDATE -- GitHub
+ * refuses that outright for a token with no `workflow` scope, even though
+ * the push is otherwise a plain `contents: write`. `discovery` never pushes
+ * (list + fetch only), so it has no workflow-scope need and stays
+ * read-only. NOTE (see this fix's own PR body / plan doc): GitHub's
+ * token-mint `permissions` field can only NARROW the App installation's own
+ * configured permissions, never widen past them (github/app.ts's
+ * `mintInstallationToken` doc comment) -- asking for `workflows: write`
+ * here does nothing unless the App installation itself was already granted
+ * that permission in its own GitHub settings, an operator-side change this
+ * code cannot make.
  */
-export function rescueMintPermissions(purpose: "push" | "discovery"): { contents: "read" | "write" } {
-  return { contents: purpose === "discovery" ? "read" : "write" };
+export function rescueMintPermissions(
+  purpose: "push" | "discovery",
+): { contents: "read" | "write"; workflows?: "write" } {
+  return purpose === "discovery" ? { contents: "read" } : { contents: "write", workflows: "write" };
 }
 
 /** Single-quotes `s` for bash. */
@@ -272,13 +288,37 @@ function rescueOnOriginFn(pushTimeoutSeconds: number): string {
     // failure = not on origin, so the push still runs. `grep -F`: a branch
     // name is not a regex. `--refmap=`: a configured wide fetch refspec must
     // not move refs/remotes/origin/<branch> behind the lead's back.
-    `  [ -n "\${3:-}" ] || return 1\n` +
-    `  printf '%s\\n' "$__rheads" | cut -f2 | grep -Fqx -e "refs/heads/$3" || return 1\n` +
-    `  rescue_budget_ok on-origin >/dev/null || return 1\n` +
-    `  timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" fetch -q --no-tags --refmap= origin "+refs/heads/$3:refs/fleet-rescue-check/tip" </dev/null >/dev/null 2>&1 || return 1\n` +
-    `  git -C "$1" merge-base --is-ancestor "$2" refs/fleet-rescue-check/tip 2>/dev/null; __ranc=$?\n` +
-    `  git -C "$1" update-ref -d refs/fleet-rescue-check/tip 2>/dev/null\n` +
-    `  [ "$__ranc" = 0 ]\n` +
+    //
+    // Issue #233: tried for TWO names, in order -- `$3` (the worktree's own
+    // checked-out branch, #80's original case) and origin's own DEFAULT
+    // branch (via `refs/remotes/origin/HEAD`, set by every clone, shallow
+    // included). A detached-HEAD worktree has no `$3` at all (`symbolic-ref
+    // --short HEAD` on a detached checkout fails, and the caller passes that
+    // empty) -- the only way such a worktree, genuinely behind (not AT) a
+    // moved-ahead default-branch tip with no local tracking ref to prove it
+    // for free, is ever recognized as already-saved. A loop, not two copies
+    // of this block: same budget check, same scratch ref, same cleanup, one
+    // name tried at a time, first ancestry match wins. `$__rdef` is resolved
+    // once, outside the loop (cheap, local, no network): the full ref form
+    // (`symbolic-ref -q`, not `--short`) is stripped of its known
+    // `refs/remotes/origin/` prefix by parameter expansion -- `--short`'s own
+    // shortening of a `refs/remotes/...` ref leaves the `origin/` SEGMENT on
+    // (`origin/main`, not `main`), which would never match a `refs/heads/$3`
+    // membership test against `$__rheads` below.
+    `  __rdef=$(git -C "$1" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null); __rdef=\${__rdef#refs/remotes/origin/}\n` +
+    `  __rseen=""\n` +
+    `  for __rname in "\${3:-}" "$__rdef"; do\n` +
+    `    [ -n "$__rname" ] || continue\n` +
+    `    case " $__rseen " in *" $__rname "*) continue ;; esac\n` +
+    `    __rseen="$__rseen $__rname"\n` +
+    `    printf '%s\\n' "$__rheads" | cut -f2 | grep -Fqx -e "refs/heads/$__rname" || continue\n` +
+    `    rescue_budget_ok on-origin >/dev/null || return 1\n` +
+    `    timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" fetch -q --no-tags --refmap= origin "+refs/heads/$__rname:refs/fleet-rescue-check/tip" </dev/null >/dev/null 2>&1 || continue\n` +
+    `    git -C "$1" merge-base --is-ancestor "$2" refs/fleet-rescue-check/tip 2>/dev/null; __ranc=$?\n` +
+    `    git -C "$1" update-ref -d refs/fleet-rescue-check/tip 2>/dev/null\n` +
+    `    [ "$__ranc" = 0 ] && return 0\n` +
+    `  done\n` +
+    `  return 1\n` +
     `}\n`
   );
 }
