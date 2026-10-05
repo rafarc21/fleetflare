@@ -13,10 +13,11 @@
 // write route. `fleet accounts sync` is the one that writes.
 import { accessHeaders, type Credentials } from "./fleet";
 import {
-  joinAccountsToCswap, decideAccountSync, type CswapAccount, type FleetAccountSlot, type SlotJoin, type SyncDecision,
+  joinAccountsToCswap, decideAccountSync, type FleetAccountSlot, type SlotJoin, type SyncDecision,
 } from "../src/studio/claude-swap";
 import {
-  formatAccountsTable, snapshotsEqual, buildLabelSuggestions, type AccountSnapshotRow, type AccountCurrentState,
+  formatAccountsTable, snapshotsEqual, buildLabelSuggestions, parseCswapListOutput, formatCswapUnavailableNote,
+  type AccountSnapshotRow, type AccountCurrentState, type CswapRead,
 } from "./accounts-format";
 
 export interface AccountsFlags {
@@ -39,35 +40,39 @@ interface AccountsApiRow {
   seenAt: string | null;
 }
 
-type CswapRead = { available: true; accounts: CswapAccount[] } | { available: false; reason: string };
-
 /**
  * Runs `cswap list --json` as a real subprocess on THIS (operator's)
  * machine — same house style as cli/fleet.ts's `detectRepo` (a bare
  * Bun.spawn, stdout/stderr piped, exit code checked). Never throws and never
  * crashes the rest of the command: ENOENT (cswap not installed), a non-zero
- * exit, or unparseable JSON all fold into `{ available: false }`, which
- * `joinAccountsToCswap`'s own `cswapAvailable: false` path turns into every
- * slot reading `matchSource: "cswap-missing"` — never a defaulted
- * limit/clear guess.
+ * exit, or unparseable/malformed JSON all fold into `{ available: false,
+ * reason }`, which `joinAccountsToCswap`'s own `cswapAvailable: false` path
+ * turns into every slot reading `matchSource: "cswap-missing"` — never a
+ * defaulted limit/clear guess. `reason` rides along so the table-printing
+ * side (`printSnapshot` below) can surface WHY, once per snapshot — see
+ * accounts-format.ts's `formatCswapUnavailableNote`.
+ *
+ * Issue #240: the actual JSON-shape parsing (bare array / schemaVersion-1
+ * envelope / anything else) lives in `parseCswapListOutput`
+ * (accounts-format.ts) — pure, so it's unit-testable without a subprocess.
+ * This function's own job is just running the subprocess and special-casing
+ * ENOENT (binary genuinely missing from PATH) distinctly from any other
+ * spawn failure.
  */
 export async function readCswapList(): Promise<CswapRead> {
   let stdout: string;
   try {
     const proc = Bun.spawn(["cswap", "list", "--json"], { stdout: "pipe", stderr: "pipe" });
     const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-    if (code !== 0) return { available: false, reason: `cswap exited ${code}` };
+    if (code !== 0) return { available: false, reason: `exited ${code}` };
     stdout = out;
   } catch (err) {
-    return { available: false, reason: `could not run cswap: ${err instanceof Error ? err.message : String(err)}` };
+    if (err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { available: false, reason: "binary not found on PATH" };
+    }
+    return { available: false, reason: `could not run cswap: ${errText(err)}` };
   }
-  try {
-    const parsed = JSON.parse(stdout);
-    if (!Array.isArray(parsed)) return { available: false, reason: "cswap list --json did not print an array" };
-    return { available: true, accounts: parsed as CswapAccount[] };
-  } catch {
-    return { available: false, reason: "cswap list --json printed unparseable JSON" };
-  }
+  return parseCswapListOutput(stdout);
 }
 
 /** Message text, not console output: `--watch`'s loop needs to catch and
@@ -107,6 +112,11 @@ async function fetchAccountsApi(creds: Credentials): Promise<AccountsApiRow[]> {
 export interface AccountsSnapshot {
   rows: AccountSnapshotRow[];
   usageFetchedAt: string;
+  /** Issue #240: null when cswap WAS available this snapshot; otherwise the
+   *  `readCswapList`/`parseCswapListOutput` reason naming why every slot
+   *  reads `matchSource: "cswap-missing"` — `printSnapshot` below surfaces
+   *  this once, not per slot. */
+  cswapUnavailableReason: string | null;
 }
 
 /**
@@ -179,7 +189,11 @@ export async function buildAccountsSnapshot(creds: Credentials, fetchedAt: Date 
       };
     }
   });
-  return { rows, usageFetchedAt: fetchedAt.toISOString() };
+  return {
+    rows,
+    usageFetchedAt: fetchedAt.toISOString(),
+    cswapUnavailableReason: cswap.available ? null : cswap.reason,
+  };
 }
 
 /**
@@ -191,8 +205,21 @@ export async function buildAccountsSnapshot(creds: Credentials, fetchedAt: Date 
  * output is a bare array exactly as before whenever `--write-labels` is NOT
  * given (every existing `--json` consumer sees no shape change at all), and
  * becomes `{ accounts, labelSuggestions }` only when it is.
+ *
+ * Issue #240: `cswapUnavailableReason` (null when cswap read fine) is
+ * surfaced via `console.error` — stderr, never folded into stdout — so the
+ * `--json` bare-array contract above is never put at risk by this (an
+ * operator piping `--json` into `jq` must keep getting a bare array even on
+ * a cswap-unavailable run); a human watching either mode's stdout still sees
+ * it on the same terminal, immediately after the table/JSON is printed.
  */
-function printSnapshot(rows: AccountSnapshotRow[], flags: Pick<AccountsFlags, "json" | "writeLabels">): void {
+function printSnapshot(
+  rows: AccountSnapshotRow[],
+  flags: Pick<AccountsFlags, "json" | "writeLabels">,
+  cswapUnavailableReason: string | null,
+): void {
+  const note = formatCswapUnavailableNote(cswapUnavailableReason);
+  if (note !== null) console.error(note);
   if (flags.writeLabels) {
     const labelSuggestions = buildLabelSuggestions(rows);
     if (flags.json) {
@@ -248,6 +275,7 @@ interface SyncResult {
   applied: string[];
   rejected: { name: string; reason: string }[];
   skipped: { name: string; reason: string }[];
+  cswapUnavailableReason: string | null;
 }
 
 /**
@@ -260,7 +288,7 @@ interface SyncResult {
  * `applyLocally` above).
  */
 async function doSync(creds: Credentials, fetchedAt: Date = new Date()): Promise<SyncResult> {
-  const { rows, usageFetchedAt } = await buildAccountsSnapshot(creds, fetchedAt);
+  const { rows, usageFetchedAt, cswapUnavailableReason } = await buildAccountsSnapshot(creds, fetchedAt);
   const decisions: SyncDecision[] = rows
     .map((r) => r.decision)
     .filter((d) => d.action === "limit" || d.action === "clear");
@@ -282,7 +310,7 @@ async function doSync(creds: Credentials, fetchedAt: Date = new Date()): Promise
     rejected: { name: string; reason: string }[];
     skipped: { name: string; reason: string }[];
   };
-  return { rows: applyLocally(rows, applied), applied, rejected, skipped: skipped ?? [] };
+  return { rows: applyLocally(rows, applied), applied, rejected, skipped: skipped ?? [], cswapUnavailableReason };
 }
 
 /** `applied`/`rejected` as before, plus a `skipped` line per entry — distinct
@@ -332,14 +360,18 @@ async function watchAccounts(creds: Credentials, flags: AccountsFlags, sync: boo
   for (;;) {
     try {
       let rows: AccountSnapshotRow[];
+      let cswapUnavailableReason: string | null;
       if (sync) {
         const result = await doSync(creds);
         reportSyncOutcome(result.applied, result.rejected, result.skipped);
         rows = result.rows;
+        cswapUnavailableReason = result.cswapUnavailableReason;
       } else {
-        rows = (await buildAccountsSnapshot(creds)).rows;
+        const snapshot = await buildAccountsSnapshot(creds);
+        rows = snapshot.rows;
+        cswapUnavailableReason = snapshot.cswapUnavailableReason;
       }
-      if (prev === null || !snapshotsEqual(prev, rows)) printSnapshot(rows, flags);
+      if (prev === null || !snapshotsEqual(prev, rows)) printSnapshot(rows, flags, cswapUnavailableReason);
       else console.error(`fleet accounts: no change (${new Date().toISOString()})`);
       prev = rows;
     } catch (err) {
@@ -355,7 +387,8 @@ async function watchAccounts(creds: Credentials, flags: AccountsFlags, sync: boo
 export async function cmdAccounts(creds: Credentials, flags: AccountsFlags): Promise<void> {
   if (flags.watch) return watchAccounts(creds, flags, false);
   try {
-    printSnapshot((await buildAccountsSnapshot(creds)).rows, flags);
+    const { rows, cswapUnavailableReason } = await buildAccountsSnapshot(creds);
+    printSnapshot(rows, flags, cswapUnavailableReason);
   } catch (err) {
     console.error(errText(err));
     process.exit(1);
@@ -370,9 +403,9 @@ export async function cmdAccounts(creds: Credentials, flags: AccountsFlags): Pro
 export async function cmdAccountsSync(creds: Credentials, flags: AccountsFlags): Promise<void> {
   if (flags.watch) return watchAccounts(creds, flags, true);
   try {
-    const { rows, applied, rejected, skipped } = await doSync(creds);
+    const { rows, applied, rejected, skipped, cswapUnavailableReason } = await doSync(creds);
     reportSyncOutcome(applied, rejected, skipped);
-    printSnapshot(rows, flags);
+    printSnapshot(rows, flags, cswapUnavailableReason);
   } catch (err) {
     console.error(errText(err));
     process.exit(1);

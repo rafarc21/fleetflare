@@ -6,7 +6,66 @@
 // same way cli/task-format.ts and cli/restart-format.ts already are (see
 // cli/burn-format.ts's own header for the general "pure sibling of an impure
 // cli/ file" convention this follows).
-import type { SlotJoin, SyncDecision } from "../src/studio/claude-swap";
+import type { CswapAccount, SlotJoin, SyncDecision } from "../src/studio/claude-swap";
+
+/**
+ * Issue #240 fix: real `cswap list --json` prints an ENVELOPE object
+ * (`{schemaVersion, activeAccountNumber, accounts}`), never the bare array
+ * `cli/accounts.ts`'s `readCswapList` used to assume (test/fixtures/
+ * cswap-list.ts's own fixture invented that bare-array shape — every test
+ * validated the parser against fiction, never the real tool's own output).
+ *
+ * Pure (JSON.parse plus shape checks only, no subprocess) so it is directly
+ * vitest-testable here, the same Bun/node-free convention every other helper
+ * in this module already follows — `cli/accounts.ts`'s `readCswapList` is
+ * the one IMPURE caller (runs the real subprocess, then hands this function
+ * whatever it printed).
+ *
+ * Three ways this reads `available: false`, each with its own `reason` (the
+ * table-printing side turns this into one footer line — see
+ * `formatCswapUnavailableNote` below):
+ *   - unparseable JSON at all.
+ *   - a well-formed envelope object whose `schemaVersion` isn't `1` — an
+ *     unrecognized version could mean the shape changed incompatibly, so
+ *     this never silently guesses at the (possibly different) field layout.
+ *   - anything else that's neither a bare array (the OLD shape, kept
+ *     tolerated here — cheap, and some installs may still be on it) nor a
+ *     well-formed `{schemaVersion: 1, accounts: [...]}` envelope.
+ */
+export type CswapRead = { available: true; accounts: CswapAccount[] } | { available: false; reason: string };
+
+export function parseCswapListOutput(stdout: string): CswapRead {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return { available: false, reason: "printed unparseable JSON" };
+  }
+  if (Array.isArray(parsed)) return { available: true, accounts: parsed as CswapAccount[] };
+  if (parsed !== null && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    if (obj.schemaVersion !== 1) {
+      return { available: false, reason: `unsupported schemaVersion: ${JSON.stringify(obj.schemaVersion)}` };
+    }
+    if (!Array.isArray(obj.accounts)) {
+      return { available: false, reason: "malformed output (no accounts array)" };
+    }
+    return { available: true, accounts: obj.accounts as CswapAccount[] };
+  }
+  return { available: false, reason: "did not print an array or an envelope object" };
+}
+
+/**
+ * One footer line naming WHY cswap was unavailable this snapshot — printed
+ * ONCE per snapshot, never per slot: every `"cswap-missing"` row already
+ * shows the join's own verdict in its own MATCH column (`describeWould`/
+ * `formatAccountsTable` above), so this is the single "why" behind ALL of
+ * them, not a repeat of the same fact per row. `null` when cswap WAS
+ * available this snapshot — nothing to print.
+ */
+export function formatCswapUnavailableNote(reason: string | null): string | null {
+  return reason === null ? null : `cswap: ${reason}`;
+}
 
 /** The row's state exactly as GET /studio/accounts reports it — what D1
  *  currently HOLDS, before any sync runs. Deliberately a separate type from
