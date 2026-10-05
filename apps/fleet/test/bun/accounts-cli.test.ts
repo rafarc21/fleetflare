@@ -6,12 +6,14 @@
 // with a synthetic credentials file, and — for the "cswap available" tests —
 // a fake `cswap` executable on PATH that prints the SAME fixture
 // test/fixtures/cswap-list.ts's claude-swap.test.ts already uses, never new
-// inline data.
+// inline data. Issue #240: the fake binary prints the REAL envelope shape
+// (`{schemaVersion, activeAccountNumber, accounts}`), never a bare array —
+// see `writeFakeCswap`'s own header below.
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CSWAP_LIST_FIXTURE, OVER_FIVE_HOUR, UNDER_THRESHOLD, RELOGIN_REQUIRED, STALE_OK } from "../fixtures/cswap-list";
+import { CSWAP_LIST_FIXTURE, CSWAP_LIST_ENVELOPE, OVER_FIVE_HOUR, UNDER_THRESHOLD, RELOGIN_REQUIRED, STALE_OK } from "../fixtures/cswap-list";
 
 const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
 
@@ -33,18 +35,31 @@ function writeCredentials(home: string, workerUrl: string) {
   chmodSync(path, 0o600);
 }
 
-/** A fake `cswap` on PATH: `cswap list --json` prints `accounts` verbatim,
- *  anything else exits 1. Reuses the real fixture's own values — never new
- *  inline data (see this file's own header). */
-function writeFakeCswap(accounts: unknown[]): string {
+/** A fake `cswap` on PATH: `cswap list --json` prints `payload` verbatim
+ *  (`JSON.stringify`'d), anything else exits 1. Issue #240: the real `cswap
+ *  list --json` prints an ENVELOPE object, never a bare array — `payload` is
+ *  whatever this test wants that real subprocess to have printed, so a test
+ *  can hand it a well-formed envelope (`envelope()` below, or
+ *  `CSWAP_LIST_ENVELOPE` directly) OR a deliberately malformed one (bad
+ *  `schemaVersion`, a missing `accounts` key, etc) — this function stays a
+ *  dumb "print exactly this" helper either way. */
+function writeFakeCswap(payload: unknown): string {
   const dir = tmpDir("fake-cswap-");
   const path = join(dir, "cswap");
   writeFileSync(
     path,
-    `#!/bin/sh\nif [ "$1" = "list" ] && [ "$2" = "--json" ]; then\n  cat <<'CSWAP_JSON'\n${JSON.stringify(accounts)}\nCSWAP_JSON\nelse\n  exit 1\nfi\n`,
+    `#!/bin/sh\nif [ "$1" = "list" ] && [ "$2" = "--json" ]; then\n  cat <<'CSWAP_JSON'\n${JSON.stringify(payload)}\nCSWAP_JSON\nelse\n  exit 1\nfi\n`,
   );
   chmodSync(path, 0o755);
   return dir;
+}
+
+/** The real envelope shape, wrapping `accounts` — reuses the real fixture's
+ *  own per-account values at every call site below, never new inline data
+ *  (see this file's own header), just a smaller ad-hoc subset of them than
+ *  `CSWAP_LIST_ENVELOPE` carries. */
+function envelope(accounts: unknown[], activeAccountNumber = 1) {
+  return { schemaVersion: 1, activeAccountNumber, accounts };
 }
 
 interface SyncCall { usageFetchedAt: string; decisions: { name: string; action: string; until?: string | null; seenAt?: string }[] }
@@ -128,7 +143,7 @@ const ACCOUNT_SLOTS = [
 describe("fleet accounts", () => {
   test("bare: prints a table, never calls the sync route", async () => {
     const home = tmpDir("accounts-home-");
-    const cswapDir = writeFakeCswap(CSWAP_LIST_FIXTURE);
+    const cswapDir = writeFakeCswap(CSWAP_LIST_ENVELOPE);
     const { server, syncCalls } = startWorker(ACCOUNT_SLOTS);
     writeCredentials(home, `http://127.0.0.1:${server.port}`);
 
@@ -147,7 +162,7 @@ describe("fleet accounts", () => {
 
   test("--json prints parseable JSON matching the table's own data", async () => {
     const home = tmpDir("accounts-home-");
-    const cswapDir = writeFakeCswap(CSWAP_LIST_FIXTURE);
+    const cswapDir = writeFakeCswap(CSWAP_LIST_ENVELOPE);
     const { server, syncCalls } = startWorker(ACCOUNT_SLOTS);
     writeCredentials(home, `http://127.0.0.1:${server.port}`);
 
@@ -175,7 +190,7 @@ describe("fleet accounts", () => {
   // `until` to exercise the genuinely-unmapped case side by side.
   test("a failed-status and a stale-but-ok cswap reading both read no-data, distinctly from unmanaged", async () => {
     const home = tmpDir("accounts-home-");
-    const cswapDir = writeFakeCswap([RELOGIN_REQUIRED, STALE_OK]);
+    const cswapDir = writeFakeCswap(envelope([RELOGIN_REQUIRED, STALE_OK]));
     const slots = [
       { name: "CLAUDE_CODE_OAUTH_TOKEN", label: RELOGIN_REQUIRED.email, dead: false, until: null, seenAt: null },
       { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: STALE_OK.email, dead: false, until: null, seenAt: null },
@@ -234,6 +249,64 @@ describe("fleet accounts", () => {
     expect(syncCalls.length).toBe(0);
   });
 
+  // Issue #240's own core regression: a fake `cswap list --json` that prints
+  // the REAL envelope shape (an object, never a bare array) must actually
+  // join and show real usage data — before this fix, EVERY slot fell
+  // through to `cswap-missing` even with cswap fully installed and working,
+  // because `readCswapList` required a bare array directly and silently
+  // treated the real tool's own object output as "not an array" ->
+  // unavailable. `writeFakeCswap` above always prints an envelope now (see
+  // its own header), so in a strict sense every other test in this file
+  // already re-proves this fix too — this one is the explicit, named case.
+  test("regression #240: a fake cswap printing the real envelope shape actually joins -- slots show real data, never cswap-missing", async () => {
+    const home = tmpDir("accounts-home-");
+    const cswapDir = writeFakeCswap(CSWAP_LIST_ENVELOPE);
+    const { server, syncCalls } = startWorker(ACCOUNT_SLOTS);
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await run(["accounts", "--json"], home, cswapDir);
+    server.stop(true);
+
+    expect(r.code).toBe(0);
+    const rows = JSON.parse(r.out) as { name: string; matchSource: string; matchedEmail: string | null; fiveHourPct: number | null }[];
+    const primary = rows.find((row) => row.name === "CLAUDE_CODE_OAUTH_TOKEN")!;
+    expect(primary.matchSource).toBe("label");
+    expect(primary.matchSource).not.toBe("cswap-missing");
+    expect(primary.matchedEmail).toBe(OVER_FIVE_HOUR.email);
+    expect(primary.fiveHourPct).toBe(97);
+    expect(syncCalls.length).toBe(0);
+  });
+
+  // Issue #240 item 1: an envelope with a schemaVersion this build doesn't
+  // recognize must never be silently accepted (the shape could have changed
+  // incompatibly) -- every slot reads cswap-missing, same as cswap being
+  // entirely absent, and the one-line reason (item 2) names the actual
+  // version seen so an operator isn't left guessing why.
+  test("unsupported cswap schemaVersion: every slot reads cswap-missing, and the reason names the version seen", async () => {
+    const home = tmpDir("accounts-home-");
+    const cswapDir = writeFakeCswap({ schemaVersion: 2, activeAccountNumber: 1, accounts: CSWAP_LIST_FIXTURE });
+    const { server, syncCalls } = startWorker(ACCOUNT_SLOTS);
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await run(["accounts", "--json"], home, cswapDir);
+    server.stop(true);
+
+    expect(r.code).toBe(0);
+    const rows = JSON.parse(r.out) as { name: string; matchSource: string; decision: { action: string } }[];
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.matchSource).toBe("cswap-missing");
+      expect(row.decision.action).toBe("unmanaged");
+    }
+    // --json's own stdout stays a bare array (the existing contract) --
+    // the reason surfaces on stderr instead (cli/accounts.ts's
+    // printSnapshot), naming the actual unsupported version.
+    expect(r.err).toContain("cswap:");
+    expect(r.err).toContain("schemaVersion");
+    expect(r.err).toContain("2");
+    expect(syncCalls.length).toBe(0);
+  });
+
   // This dispatch's item 4: a slot resolved by reset-time INFERENCE (no
   // label match at all) must still show up correctly — `matchSource:
   // "inferred"`, not "label" — in both the JSON snapshot and the table's own
@@ -242,7 +315,7 @@ describe("fleet accounts", () => {
   // fiveHour reset.
   test("a reset-time-inferred match reads matchSource 'inferred' in JSON and the table's MATCH column", async () => {
     const home = tmpDir("accounts-home-");
-    const cswapDir = writeFakeCswap([OVER_FIVE_HOUR]);
+    const cswapDir = writeFakeCswap(envelope([OVER_FIVE_HOUR]));
     const inferredUntil = new Date(Date.parse(OVER_FIVE_HOUR.usage!.fiveHour.resetsAt!) + 60_000).toISOString();
     const slots = [{ name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: inferredUntil, seenAt: null }];
     const { server, syncCalls } = startWorker(slots);
@@ -270,7 +343,7 @@ describe("fleet accounts", () => {
   describe("fleet accounts --write-labels", () => {
     test("plain text: prints a CLAUDE_ACCOUNT_<n>_LABEL suggestion after the table for an inferred match", async () => {
       const home = tmpDir("accounts-home-");
-      const cswapDir = writeFakeCswap([OVER_FIVE_HOUR]);
+      const cswapDir = writeFakeCswap(envelope([OVER_FIVE_HOUR]));
       const inferredUntil = OVER_FIVE_HOUR.usage!.fiveHour.resetsAt!;
       const slots = [{ name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: inferredUntil, seenAt: null }];
       const { server } = startWorker(slots);
@@ -285,7 +358,7 @@ describe("fleet accounts", () => {
 
     test("--json folds label suggestions into the JSON object, never a separate corrupting stdout line", async () => {
       const home = tmpDir("accounts-home-");
-      const cswapDir = writeFakeCswap([OVER_FIVE_HOUR]);
+      const cswapDir = writeFakeCswap(envelope([OVER_FIVE_HOUR]));
       const inferredUntil = OVER_FIVE_HOUR.usage!.fiveHour.resetsAt!;
       const slots = [{ name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: inferredUntil, seenAt: null }];
       const { server } = startWorker(slots);
@@ -305,7 +378,7 @@ describe("fleet accounts", () => {
 
     test("no inferred matches: plain text prints no suggestion line, --json prints an empty array", async () => {
       const home = tmpDir("accounts-home-");
-      const cswapDir = writeFakeCswap(CSWAP_LIST_FIXTURE);
+      const cswapDir = writeFakeCswap(CSWAP_LIST_ENVELOPE);
       const { server } = startWorker(ACCOUNT_SLOTS); // label matches only — no inferred rows
       writeCredentials(home, `http://127.0.0.1:${server.port}`);
 
@@ -323,7 +396,7 @@ describe("fleet accounts", () => {
 describe("fleet accounts sync", () => {
   test("posts the non-unmanaged decisions to the sync route", async () => {
     const home = tmpDir("accounts-home-");
-    const cswapDir = writeFakeCswap(CSWAP_LIST_FIXTURE);
+    const cswapDir = writeFakeCswap(CSWAP_LIST_ENVELOPE);
     const { server, syncCalls } = startWorker(ACCOUNT_SLOTS);
     writeCredentials(home, `http://127.0.0.1:${server.port}`);
 
@@ -355,7 +428,7 @@ describe("fleet accounts sync", () => {
 
   test("reports what the route rejected, still prints the table, exits 0", async () => {
     const home = tmpDir("accounts-home-");
-    const cswapDir = writeFakeCswap([OVER_FIVE_HOUR, UNDER_THRESHOLD]);
+    const cswapDir = writeFakeCswap(envelope([OVER_FIVE_HOUR, UNDER_THRESHOLD]));
     const server = Bun.serve({
       port: 0,
       async fetch(req) {
@@ -387,7 +460,7 @@ describe("fleet accounts sync", () => {
   // reported distinctly from both applied and rejected.
   test("reports what the route skipped, distinctly from applied/rejected, still exits 0", async () => {
     const home = tmpDir("accounts-home-");
-    const cswapDir = writeFakeCswap(CSWAP_LIST_FIXTURE);
+    const cswapDir = writeFakeCswap(CSWAP_LIST_ENVELOPE);
     const { server, syncCalls } = startWorker(ACCOUNT_SLOTS, (body) => ({
       applied: [body.decisions.find((d) => d.name === "CLAUDE_CODE_OAUTH_TOKEN")!.name],
       rejected: [],
