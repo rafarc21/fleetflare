@@ -2350,6 +2350,57 @@ describe("POST /studio/accounts/sync", () => {
     expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
   });
 
+  it("a known name with an invalid action is rejected, not applied, and writes nothing", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+
+    const res = await handleStudio(
+      authorizedReq("/studio/accounts/sync", {
+        method: "POST",
+        body: JSON.stringify({
+          decisions: [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "nuke-it" }],
+        }),
+      }),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { applied: string[]; rejected: { name: string; reason: string }[] };
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "invalid action" }]);
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
+  });
+
+  it("two decisions for the same name in one batch are both rejected and neither writes", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+
+    const res = await handleStudio(
+      authorizedReq("/studio/accounts/sync", {
+        method: "POST",
+        body: JSON.stringify({
+          decisions: [
+            { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: "2026-10-05T05:00:00.000Z", seenAt },
+            { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear" },
+          ],
+        }),
+      }),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { applied: string[]; rejected: { name: string; reason: string }[] };
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "duplicate name in batch" },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "duplicate name in batch" },
+    ]);
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
+  });
+
   it("an unknown account name is rejected but a valid entry in the same batch still applies", async () => {
     authorized();
     const { testEnv } = envWithFakeStudio();
