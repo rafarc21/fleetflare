@@ -657,6 +657,65 @@ keyed by the repo part of a studio id (`<repo>--<role>`):
 - A studio's account is fixed when its container starts. To move a running
   studio after a map change, `fleet recycle <id>` it between tasks.
 
+### Proactive account-limit sync (claude-swap)
+
+Fleet only LEARNS a limit reactively today — a pane shows the modal, a row
+gets marked `dead`, and that row can stay stale (reinstated account, nobody
+cleared it) until hand-deleted. `cswap` (claude-swap, MIT) holds account
+logins on YOUR Mac and reports real usage per account; `fleet accounts sync`
+reads that and writes/clears fleet's own limit rows BEFORE a modal ever
+shows.
+
+Setup, on your own Mac, once per account:
+
+```bash
+uv tool install claude-swap
+cswap add                 # logs in interactively; run once per account
+```
+
+**Never run `/logout` first.** It revokes the refresh token `cswap` needs —
+log in fresh instead, or add an account `cswap` already holds a login for.
+
+Labels are optional. Label a slot with the matching email, so sync joins it
+by exact match:
+
+```jsonc
+"CLAUDE_ACCOUNT_2_LABEL": "second@example.com"
+```
+
+Must equal the email `cswap list` reports for that login, exact string, case
+sensitive. Unlabelled slots are not stuck `unmanaged` forever, though:
+reset-time inference covers them whenever BOTH a usage reading and a
+recorded reset already exist — the slot's own currently-recorded reset time
+(`fleet ls`'s limited-until) is matched against an unclaimed cswap account's
+own `fiveHour`/`sevenDay` reset, within +/-5min, only when exactly one
+candidate qualifies. No label and no reset to match against yet = that slot
+reads `unmapped`, sync skips it, no row touched. `fleet accounts
+--write-labels` prints a pasteable `CLAUDE_ACCOUNT_<n>_LABEL=<email>` line
+for every slot it resolved by inference, so a label can be made explicit
+once seen — it only prints suggestions, it never writes config itself.
+
+Run it:
+
+```bash
+fleet accounts                # table: slot, label, match (label/inferred/unmapped/cswap-missing), 5h%, 7d% usage, reset, row state (D1 now), would (what sync would change) — READ ONLY, writes nothing
+fleet accounts --write-labels # same, plus pasteable CLAUDE_ACCOUNT_<n>_LABEL=<email> suggestions for inferred slots (folds into --json's own object instead of a bare line when combined with --json)
+fleet accounts sync           # same read, then WRITES: posts limit/clear decisions to fleet; reports applied/rejected/skipped
+fleet accounts sync --watch   # loops every 60s, prints only on change, ctrl-c stops
+```
+
+Rule: pct >= 95 on EITHER the 5h window, the 7d window, OR any per-model
+window marks that slot limited until THAT window's own reset time.
+Everything under 95 clears the slot — including a stale `dead` row: a fresh
+low reading right after re-login IS fleet's proof the account is alive
+again, no separate check. A slot can also read `no data` instead of
+`unmanaged`: that means a real cswap account WAS found for it (labelled or
+inferred), but its own reading can't be trusted right now (relogin
+required, or the reading itself is stale) — distinct from `unmanaged`
+("we don't know which account this is at all"). Neither ever writes a row.
+`cswap` missing or erroring never crashes any of this — every slot just
+reads match `cswap-missing` and the command still runs.
+
 Deploy — from `apps/fleet`, with `$FLEET_CONFIG` (or `$FLEET_OPS_DIR`) already
 pointing at your filled-in `wrangler.jsonc` copy (see **Quickstart from
 zero**'s intro above). Run the migrations held back from step 1 now too,

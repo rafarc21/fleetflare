@@ -36,7 +36,9 @@ import {
 } from "./rpc-failure";
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
 import { resolveClaudeAccounts, accountLabel } from "./accounts";
-import { readFleetAccountLimits } from "./account-limits-store";
+import {
+  readFleetAccountLimits, writeFleetAccountLimit, clearFleetAccountLimit, readOneAccountLimit,
+} from "./account-limits-store";
 import { countWorkerExceptions } from "../exceptions";
 
 const ROUTE_RE = /^\/studio\/([^/]+)\/(status|provisioned|provision|restart|recycle|destroy|wake|check|rescue|inspect|ws\/terminal|paste|terminal|clear-session-guard)$/;
@@ -452,6 +454,221 @@ export async function handleStudio(
       until: limits[a.name]?.until ?? null,
       seenAt: limits[a.name]?.seenAt ?? null,
     })));
+  }
+
+  /**
+   * Issue #232, step 2 — the dumb, validated persistence half of
+   * `fleet accounts sync`: step 1's `claude-swap.ts` (decideAccountSync) runs
+   * on the OPERATOR's own machine (step 3, the CLI), never here — this route
+   * neither calls cswap nor computes a decision, it only applies decisions
+   * the caller already made. No studio id in this path either, so it sits
+   * alongside `/studio/accounts` rather than inside ROUTE_RE's id-scoped
+   * dispatch, and reuses the SAME Access-gated lane (verifyAccess already ran
+   * above, unconditionally) — "auth like other verbs" from the issue IS this
+   * reuse, no new auth surface added.
+   *
+   * Reworked per the maestro's real-probe review of PR #237 (issue #232):
+   *
+   * BLOCKER 2: `claude-swap.ts`'s `decideAccountSync` now always emits
+   * `until: string | null`, never `undefined`, for a "limit" decision — but
+   * this route validates it again anyway, at the request boundary, since the
+   * body is untrusted JSON, not a typed `SyncDecision`: `until` must be
+   * PRESENT as a string or an explicit `null` (an absent key — dropped by
+   * `JSON.stringify` of an `undefined` value, or simply never sent — is
+   * rejected, never silently treated as `null`). `seenAt` must parse to a
+   * real timestamp, for BOTH "limit" and "clear" (clear carries `seenAt` too
+   * now). Any failure here degrades that ONE entry to `rejected`, same
+   * partial-success convention as an unknown name — never a whole-request
+   * 400, which would regress the guarantee this route already gives the rest
+   * of a batch.
+   *
+   * MAJOR 5: a "limit" write must never silently drop an existing `dead:
+   * true` flag on that row (`writeFleetAccountLimit` with no `dead` arg
+   * overwrites the whole row) — a usage-threshold sighting from cswap is an
+   * orthogonal signal from "account is dead" (org disabled the subscription,
+   * failover.ts's own job to detect). So every "limit" write reads the row's
+   * CURRENT state first (`readOneAccountLimit`) and passes `dead: true`
+   * through when it's already set, otherwise writes without it — unchanged
+   * behaviour for a non-dead row.
+   *
+   * MAJOR 6: a "clear" must never stomp a FRESHER sighting a different path
+   * (failover.ts's own pane-capture detector, untouched by this feature)
+   * already wrote to this exact row after this usage snapshot was taken.
+   *
+   * Reworked per the maestro's review-round-2 finding 6: the request's own
+   * top-level `usageFetchedAt` is ONLY the instant the CLI subprocess ran
+   * `cswap list --json` — it is NOT when this particular account's own
+   * reading was actually taken. Each cswap account self-reports its own
+   * `usageAgeSeconds`, which can make its real DATA time several minutes
+   * earlier than `usageFetchedAt`. A pane-capture sighting landing in that
+   * gap is genuinely fresher than the reading, even though it predates
+   * `usageFetchedAt` — comparing against `usageFetchedAt` directly would
+   * wrongly clear it. So the real yardstick is THIS decision's own
+   * `dataTime = usageFetchedAt − usageAgeSeconds * 1000` (per-decision
+   * `usageAgeSeconds`, optional on the wire for backward compatibility —
+   * absent/invalid falls back to `usageFetchedAt` itself, i.e. the old
+   * behaviour, same as age 0): before deleting, this route reads the row's
+   * current state — if one exists and its `seenAt` is >= `dataTime`, the
+   * delete is skipped (reported in the new `skipped` field, reason "newer
+   * row exists") rather than applied or rejected, since it is a correct
+   * no-op, not an error. Absent row, or one older than `dataTime`: delete
+   * proceeds as before, reported in `applied`. `usageFetchedAt` itself is
+   * still the one field validated for the WHOLE request (missing/unparseable
+   * -> 400) — every "clear" in the batch depends on it meaning something,
+   * and there is no sane partial-success story for a garbage snapshot time.
+   *
+   * MINOR: every "limit" write from this route carries `source: "usage"` —
+   * failover.ts's own pane-capture writes never set it, so a row's `source`
+   * tells the two paths apart after the fact. A malformed `decisions` entry
+   * (not an object, or a non-string `name`) is rejected with no property
+   * access that could throw — same partial-success posture as an unknown
+   * name, never a 500.
+   *
+   * `action: "unmanaged"` and the new `action: "no-data"` both make no D1
+   * write at all — purely informational, echoed back in `applied` alongside
+   * limit/clear/skip since all are "handled", distinct from `rejected`
+   * (unknown name, malformed entry, invalid action, invalid until/seenAt).
+   */
+  if (url.pathname === "/studio/accounts/sync") {
+    if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return new Response("bad json body", { status: 400 });
+    }
+    const decisions = (body as { decisions?: unknown } | null)?.decisions;
+    if (!Array.isArray(decisions)) {
+      return new Response("\"decisions\" must be an array", { status: 400 });
+    }
+    // MAJOR 6: the one whole-request validation this route makes — every
+    // "clear" decision in the batch is meaningless without a real snapshot
+    // time to compare a row's `seenAt` against, so a missing/garbage value
+    // here 400s the entire request rather than degrading each clear
+    // individually (there is no partial-success story for "I don't know
+    // when this snapshot was taken").
+    const usageFetchedAtRaw = (body as { usageFetchedAt?: unknown } | null)?.usageFetchedAt;
+    if (typeof usageFetchedAtRaw !== "string" || !Number.isFinite(Date.parse(usageFetchedAtRaw))) {
+      return new Response("\"usageFetchedAt\" must be a valid ISO timestamp", { status: 400 });
+    }
+    const usageFetchedAt = usageFetchedAtRaw;
+
+    const known = new Set(resolveClaudeAccounts(env).map((a) => a.name));
+    const applied: string[] = [];
+    const rejected: { name: string; reason: string }[] = [];
+    const skipped: { name: string; reason: string }[] = [];
+
+    // The incoming body is untrusted — `decisions` is only KNOWN to be an
+    // array at this point, not an array of valid SyncDecisions. A "shape-ok"
+    // entry is an object with a string `name` and one of the four real
+    // action literals; anything else is rejected before any property access
+    // that could throw (a `null` entry, a non-string `name`, a garbage
+    // `action`) — never a 500.
+    const shapeOk = (entry: unknown): entry is { name: string; action: unknown } => {
+      if (entry === null || typeof entry !== "object") return false;
+      const name = (entry as Record<string, unknown>).name;
+      const action = (entry as Record<string, unknown>).action;
+      return typeof name === "string"
+        && (action === "limit" || action === "clear" || action === "unmanaged" || action === "no-data");
+    };
+
+    // Duplicate `name` within one batch is a race, not a decision: two
+    // writes for the same slot in the same Promise.all have no defined
+    // winner, so every entry sharing a repeated name is rejected outright
+    // rather than picking one to "win". Precomputed over shape-ok entries
+    // only — a malformed entry has already been rejected on its own by the
+    // time duplicate-checking would matter, and contributes no reportable
+    // name to count.
+    const nameCounts = new Map<string, number>();
+    for (const entry of decisions) {
+      if (shapeOk(entry)) nameCounts.set(entry.name, (nameCounts.get(entry.name) ?? 0) + 1);
+    }
+
+    await Promise.all(decisions.map(async (entry) => {
+      if (entry === null || typeof entry !== "object") {
+        rejected.push({ name: "", reason: "malformed entry" });
+        return;
+      }
+      const rawName = (entry as Record<string, unknown>).name;
+      if (typeof rawName !== "string") {
+        rejected.push({ name: "", reason: "malformed entry" });
+        return;
+      }
+      const name = rawName;
+      const action = (entry as Record<string, unknown>).action;
+      // A known-shape name with a garbage `action` must never fall through
+      // to `applied` as a silent no-op — validate against the real union
+      // before acting, same convention as this file's other POST routes
+      // (e.g. the wake route's prompt check, the provision route's
+      // blueprintRef/task checks).
+      if (action !== "limit" && action !== "clear" && action !== "unmanaged" && action !== "no-data") {
+        rejected.push({ name, reason: "invalid action" });
+        return;
+      }
+      if (!known.has(name)) {
+        rejected.push({ name, reason: "unknown account name" });
+        return;
+      }
+      if ((nameCounts.get(name) ?? 0) > 1) {
+        rejected.push({ name, reason: "duplicate name in batch" });
+        return;
+      }
+
+      if (action === "limit") {
+        // BLOCKER 2: `until` must be PRESENT (string or explicit null) — an
+        // absent key is rejected, never treated as `null`.
+        const hasUntil = "until" in entry;
+        const until = (entry as Record<string, unknown>).until;
+        if (!hasUntil || !(typeof until === "string" || until === null)) {
+          rejected.push({ name, reason: "invalid until" });
+          return;
+        }
+        const seenAt = (entry as Record<string, unknown>).seenAt;
+        if (typeof seenAt !== "string" || !Number.isFinite(Date.parse(seenAt))) {
+          rejected.push({ name, reason: "invalid seenAt" });
+          return;
+        }
+        // MAJOR 5: a usage sighting must never un-dead an account — read the
+        // row's current state first and preserve `dead: true` if it's set.
+        const current = await readOneAccountLimit(env.DB, name);
+        await writeFleetAccountLimit(env.DB, name, until, seenAt, current?.dead ? true : undefined, "usage");
+        applied.push(name);
+        return;
+      }
+
+      if (action === "clear") {
+        const seenAt = (entry as Record<string, unknown>).seenAt;
+        if (typeof seenAt !== "string" || !Number.isFinite(Date.parse(seenAt))) {
+          rejected.push({ name, reason: "invalid seenAt" });
+          return;
+        }
+        // Finding 6 (maestro review round 2): the freshness yardstick is
+        // THIS account's own data time, not the shared `usageFetchedAt` —
+        // see this route's own doc comment above for why. `usageAgeSeconds`
+        // is optional on the wire: absent or not a finite non-negative
+        // number falls back to age 0 (dataTime === usageFetchedAt), the same
+        // behaviour this route had before this fix.
+        const rawUsageAgeSeconds = (entry as Record<string, unknown>).usageAgeSeconds;
+        const usageAgeSeconds = typeof rawUsageAgeSeconds === "number" && Number.isFinite(rawUsageAgeSeconds) && rawUsageAgeSeconds >= 0
+          ? rawUsageAgeSeconds
+          : 0;
+        const dataTimeMs = Date.parse(usageFetchedAt) - usageAgeSeconds * 1000;
+        // MAJOR 6: don't stomp a fresher sighting a different path already
+        // recorded after this account's reading was actually taken.
+        const current = await readOneAccountLimit(env.DB, name);
+        if (current && Date.parse(current.seenAt) >= dataTimeMs) {
+          skipped.push({ name, reason: "newer row exists" });
+          return;
+        }
+        await clearFleetAccountLimit(env.DB, name);
+        applied.push(name);
+        return;
+      }
+
+      // "unmanaged"/"no-data": no D1 write — informational only.
+      applied.push(name);
+    }));
+    return Response.json({ applied, rejected, skipped });
   }
 
   /**
