@@ -356,6 +356,73 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
     expect(status.state).toBe("running");
     expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
   });
+
+  // Maestro review round 1 on PR #235, MAJOR 2 — `recordBringupObservation`
+  // (every confirmed token-write bring-up, including an unrelated HEAL that
+  // happens to land within the SAME incarnation's recovery window) clears
+  // `Observed.replacedAt` back to null. A heal that lands between a genuine
+  // involuntary replacement and a LATER, explicit `--fresh-session` erases
+  // the ONLY signal the check above reads — so the refusal never fires for
+  // the exact incident it exists to protect against. `session.
+  // replacementDetected` is written once, at the heal itself, and never
+  // cleared afterwards — it survives exactly where `replacedAt` does not.
+  describe("the heal's own frozen session.replacementDetected survives a later replacedAt clear (#231 review round 1, MAJOR 2)", () => {
+    function seedHealed(map: Map<string, unknown>, lines: number): void {
+      // replacedAt already cleared by the intervening heal's own confirmed
+      // bring-up (recordBringupObservation's `tokenWritten` branch) -- but
+      // THAT heal's own session record still says a replacement was detected
+      // at the time it ran, and that record is never rewritten afterwards.
+      map.set(OBSERVED_KEY, {
+        ...emptyObserved(), replacedAt: null,
+        session: { verdict: "resumed", at: "2026-09-29T09:05:00.000Z", via: "heal", restore: "not-attempted", snapshotAgeS: null, turnsBefore: 5, reason: null, replacementDetected: true },
+      });
+      map.set(SESSION_MARK_KEY, { file: "a.jsonl", lines, lastTs: null });
+    }
+
+    it("still refuses an explicit --fresh-session with a large session, even though replacedAt reads null", async () => {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      seedHealed(map, LINES_OVER);
+
+      await expect(provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      )).rejects.toThrow(new RegExp(`${FRESH_SESSION_REFUSED_PREFIX}.*${LINES_OVER}`));
+      expect(calls.map((c) => c.cmd)).not.toContain(BRINGUP_CMD);
+    });
+
+    it("--discard-session still forces it through, same escape hatch as the direct replacedAt case", async () => {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      seedHealed(map, LINES_OVER);
+
+      const status = await provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true, discardSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      );
+
+      expect(status.state).toBe("running");
+      expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+    });
+
+    it("a GENUINELY voluntary stop-then-restart (no replacement ever detected) still allows fresh session normally -- never overcorrect into refusing everything", async () => {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      map.set(OBSERVED_KEY, {
+        ...emptyObserved(), replacedAt: null,
+        session: { verdict: "resumed", at: "2026-09-29T09:05:00.000Z", via: "restart", restore: "not-attempted", snapshotAgeS: null, turnsBefore: 5, reason: null },
+      });
+      map.set(SESSION_MARK_KEY, { file: "a.jsonl", lines: LINES_OVER, lastTs: null });
+
+      const status = await provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      );
+
+      expect(status.state).toBe("running");
+      expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+    });
+  });
 });
 
 // Issue #231: bring-up log provenance — which of the two triggers

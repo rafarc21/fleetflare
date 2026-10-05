@@ -3663,7 +3663,19 @@ export async function provisionWithStorage(
   // stuck pending intent is issue #100's own, separate concern.
   if (cfg.freshSession === true && cfg.discardSession !== true && observedStorage) {
     const obs = await getObserved(observedStorage);
-    if (obs.replacedAt !== null) {
+    // Maestro review round 1 on PR #235, MAJOR 2 — `obs.replacedAt` alone is
+    // not enough: `recordBringupObservation` clears it to null on ANY
+    // confirmed token-write bring-up, including an unrelated HEAL that lands
+    // within the same incarnation's recovery window, well before a LATER,
+    // explicit `--fresh-session` ever gets here. `obs.session?.
+    // replacementDetected` is that heal's own FROZEN record of "a replacement
+    // had already been detected when I ran" (ObservedSession's own doc
+    // comment, observed.ts) — written once and never rewritten afterwards,
+    // so it survives exactly where `replacedAt` does not. Refuse on EITHER
+    // signal, never requiring both: a plain voluntary stop-then-restart (no
+    // replacement ever detected, replacedAt null AND replacementDetected
+    // never true) must still proceed normally.
+    if (obs.replacedAt !== null || obs.session?.replacementDetected === true) {
       const mark = sessionMarkStorage ? await sessionMarkStorage.get(SESSION_MARK_KEY) : undefined;
       const lines = mark?.lines ?? 0;
       if (lines > FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD) {
