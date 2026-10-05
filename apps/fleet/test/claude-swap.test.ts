@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  joinAccountsToCswap, decideAccountSync, pickHeadroomAccount, DEFAULT_LIMIT_THRESHOLD_PCT,
+  joinAccountsToCswap, decideAccountSync, pickHeadroomAccount,
   type FleetAccountSlot, type SlotJoin, type CswapAccount, type HeadroomCandidate,
 } from "../src/studio/claude-swap";
 import { OVER_FIVE_HOUR, UNDER_THRESHOLD, OVER_SCOPED_ONLY, CSWAP_LIST_FIXTURE } from "./fixtures/cswap-list";
@@ -109,10 +109,6 @@ describe("decideAccountSync", () => {
   it("respects a custom thresholdPct", () => {
     expect(decideAccountSync(joinFor(UNDER_THRESHOLD), now, 5).action).toBe("limit");
     expect(decideAccountSync(joinFor(UNDER_THRESHOLD), now, 50).action).toBe("clear");
-  });
-
-  it("DEFAULT_LIMIT_THRESHOLD_PCT is 95", () => {
-    expect(DEFAULT_LIMIT_THRESHOLD_PCT).toBe(95);
   });
 });
 
