@@ -3688,5 +3688,34 @@ describe("#233 — a worktree already covered by origin's default branch never a
       expect(r.out).toMatch(/^RESCUE_WT checkout nothing$/m);
       expect(sh(`git -C ${origin} for-each-ref --format='%(refname)'`).out).toBe(before);
     });
+
+    // Round 2 (PR #236 review, Fix 2 coverage): the dirty-tree branch of
+    // rescue_one() never calls rescue_on_origin at all -- it unconditionally
+    // commits a throwaway snapshot and pushes it (see rescue.ts's own
+    // rescue_one() doc comment: the ancestor-check only guards the
+    // CLEAN-but-ahead path, via rescue_check_ahead). This is regression
+    // coverage proving the NEW default-branch-name arm this fix round's
+    // own ancestor-check loop added (the `$__rdef` entry in rescue_on_origin's
+    // `for __rname in "${3:-}" "$__rdef"` loop) does not somehow reach the
+    // dirty-tree branch and skip a real, new, unpushed snapshot commit --
+    // that snapshot's own sha is NOT itself reachable from origin's default
+    // branch (it has a real file change on top of an old, ancestor-of-main
+    // HEAD), so it must still push, never read as "already on origin".
+    test(`${label}: HEAD detached an ANCESTOR of origin's default-branch tip, but the tree is DIRTY (a real new change) -> still pushes, never skipped`, () => {
+      dropNestedWorktree();
+      sh(`cd ${checkout} && git commit -q --allow-empty -m c1 && git push -q origin main`);
+      const c1 = sh(`git -C ${checkout} rev-parse HEAD`).out;
+      sh(`cd ${checkout} && git commit -q --allow-empty -m c2 && git push -q origin main`);
+      sh(`git -C ${checkout} checkout -q --detach ${c1}`);
+      sh(`git -C ${checkout} update-ref -d refs/remotes/origin/main`);
+      writeFileSync(join(checkout, "notes.md"), "dirty work sitting on an old detached tip\n");
+
+      const r = sh(cmdFn(REPO, STUDIO, root));
+
+      expect(r.out).not.toContain(RESCUE_FAILED_PREFIX);
+      expect(bare(r.out)).not.toBe(RESCUE_CLEAN);
+      expect(r.out).toContain(RESCUE_PUSHED_PREFIX);
+      expect(r.out).toMatch(/^RESCUE_WT checkout pushed /m);
+    });
   }
 });

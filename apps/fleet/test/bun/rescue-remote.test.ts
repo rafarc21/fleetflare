@@ -4,6 +4,7 @@
 // push is leak-gated (blocker 2): a denylist hit refuses it.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { resolveRescueRemote, resolveRescueTarget, RESCUE_TOKEN_ENV } from "../../src/studio/rescue";
+import { MintTokenError } from "../../src/github/app";
 
 let errSpy: ReturnType<typeof spyOn>;
 beforeEach(() => { errSpy = spyOn(console, "error").mockImplementation(() => {}); });
@@ -142,6 +143,77 @@ describe("resolveRescueTarget, purpose discovery", () => {
   test("confirmed-private rescue repo + token: the private target", async () => {
     const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, async () => "ghs_fake", PUBLIC, "push", async () => true);
     expect(t.remoteUrl).toBe("https://github.com/acme/rescue-vault.git");
+  });
+});
+
+// PR #236 review round 2, BLOCKER: rescueMintPermissions("push") now always
+// asks for `workflows: write`. The App installation backing FLEET_RESCUE_REMOTE
+// may never have been granted that permission (an unverified, operator-side
+// fact) -- GitHub 422s the WHOLE mint when that happens, turning a rare
+// "this push touches .github/workflows/*" failure into a universal one: every
+// single rescue push would fall back to the leak-gated origin path. `mint` is
+// now called with the permissions it should ask for, as a second argument, so
+// resolveRescueTarget itself can retry once, narrower, on a mint rejection
+// that is at least plausibly about the requested permissions.
+describe("resolveRescueTarget, push-purpose mint retries without workflows on a mint rejection (PR #236 review, round 2)", () => {
+  test("mint rejects {contents:write, workflows:write} with a 422 -> retries once with {contents:write} only, logs exactly one line, uses that narrower token for the push", async () => {
+    const calls: Array<{ repo: string; permissions: unknown }> = [];
+    const mint = async (repo: string, permissions: { contents: "read" | "write"; workflows?: "write" }) => {
+      calls.push({ repo, permissions });
+      if (permissions?.workflows !== undefined) throw new MintTokenError(422, "Validation Failed");
+      return "ghs_narrow";
+    };
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, mint, PUBLIC, "push", async () => true);
+    expect(calls).toEqual([
+      { repo: "acme/rescue-vault", permissions: { contents: "write", workflows: "write" } },
+      { repo: "acme/rescue-vault", permissions: { contents: "write" } },
+    ]);
+    // The resulting token -- minted WITHOUT workflows -- is still used for
+    // this push, not silently discarded in favor of falling back to origin.
+    expect(t).toEqual({ remoteUrl: "https://github.com/acme/rescue-vault.git", env: { [RESCUE_TOKEN_ENV]: "ghs_narrow" } });
+    expect(logged()).toMatch(/workflows.*grant App Workflows: write/);
+  });
+
+  test("discovery purpose never retries -- it never asks for workflows in the first place", async () => {
+    let calls = 0;
+    const mint = async (_repo: string, permissions: { contents: "read" | "write"; workflows?: "write" }) => {
+      calls++;
+      expect(permissions).toEqual({ contents: "read" });
+      return "ghs_fake";
+    };
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, mint, PUBLIC, "discovery");
+    expect(calls).toBe(1);
+    expect(t).toEqual({ remoteUrl: "https://github.com/acme/rescue-vault.git", env: { [RESCUE_TOKEN_ENV]: "ghs_fake" } });
+    expect(logged()).toBe("");
+  });
+
+  test("the narrower retry ALSO fails -> falls back to origin exactly like any other mint failure (no infinite retry)", async () => {
+    let calls = 0;
+    const mint = async () => { calls++; throw new MintTokenError(422, "Validation Failed"); };
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, mint, PUBLIC, "push", async () => true);
+    expect(calls).toBe(2);
+    expect(t).toEqual({});
+    expect(logged()).toMatch(/token mint for acme\/rescue-vault failed.*origin.*leak-gated/);
+  });
+
+  test("a non-422 mint failure never retries -- only a permissions-shaped rejection does", async () => {
+    let calls = 0;
+    const mint = async () => { calls++; throw new Error("network down"); };
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, mint, PUBLIC, "push", async () => true);
+    expect(calls).toBe(1);
+    expect(t).toEqual({});
+  });
+
+  test("a 422 that is NOT about workflows (e.g. the renamed-repo case mintRepoToken already retries internally) still only tries once here -- workflows was never requested", async () => {
+    let calls = 0;
+    const mint = async (_repo: string, permissions: { contents: "read" | "write"; workflows?: "write" }) => {
+      calls++;
+      expect(permissions.workflows).toBeUndefined();
+      throw new MintTokenError(422, "Validation Failed");
+    };
+    const t = await resolveRescueTarget({ FLEET_RESCUE_REMOTE: "acme/rescue-vault" }, mint, PUBLIC, "discovery");
+    expect(calls).toBe(1);
+    expect(t).toEqual({});
   });
 });
 
