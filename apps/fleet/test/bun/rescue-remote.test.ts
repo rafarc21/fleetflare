@@ -4,7 +4,7 @@
 // push is leak-gated (blocker 2): a denylist hit refuses it.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { resolveRescueRemote, resolveRescueTarget, RESCUE_TOKEN_ENV } from "../../src/studio/rescue";
-import { MintTokenError } from "../../src/github/app";
+import { MintTokenError } from "../../src/github/mint-token-error";
 
 let errSpy: ReturnType<typeof spyOn>;
 beforeEach(() => { errSpy = spyOn(console, "error").mockImplementation(() => {}); });

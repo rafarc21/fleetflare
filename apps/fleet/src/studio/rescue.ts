@@ -4,7 +4,7 @@
 import { RESCUE_MARKER_PATHSPECS } from "./rescue-gc";
 import { KILL_GRACE_SECONDS } from "./exec-deadline";
 import { STUDIO_REAL_GIT_PATH } from "./credentials";
-import { MintTokenError } from "../github/app";
+import { MintTokenError } from "../github/mint-token-error";
 
 /**
  * Issue #1 piece 5: origin can be PUBLIC, so rescued work goes to a PRIVATE

@@ -285,3 +285,63 @@ present in the code as shipped.
 - Full `check`/`test`/`bun-test` gate deliberately NOT run here -- reserved
   for the lead, serialized, after this fix and the sibling #234 fix both
   land (per this round's own dispatch).
+
+### Round 3 -- TS project-boundary regression (lead's own `check` run)
+
+The lead's own `cd apps/fleet && bun run check` on this branch found a
+genuine, deterministic break (reproduced fresh clone + fresh `bun install`,
+not a flake): round 2 added `import { MintTokenError } from "../github/app"`
+to `rescue.ts` and the same import to `test/bun/rescue-remote.test.ts`.
+`rescue.ts` is documented as pure (no Worker bindings) and is imported
+directly by `cli/fleet.ts`, which `cli/tsconfig.json` type-checks under
+`"types": ["bun"]` -- no Cloudflare Workers ambient types at all. `app.ts`
+(home of `mintInstallationToken`, which genuinely needs `Env`) imports
+`Env`, which needs `D1Database`/`DurableObjectNamespace`/`R2Bucket`/etc from
+`@cloudflare/workers-types`. TypeScript type-checks an imported file in full
+once it's in a program's graph, regardless of which single export is
+actually used -- so importing anything from `app.ts` dragged that whole
+Workers-typed graph (every Durable Object class, `env.ts`, `state.ts`, etc.)
+into `cli/tsconfig.json`'s and `test/tsconfig.json`'s `types:["bun"]`
+projects, breaking both with ~288 lines of unrelated `Cannot find name
+'D1Database'` / `Property 'env' does not exist on type 'StudioDO'` errors.
+No runtime test caught this since none of them exercise TS project
+boundaries -- only `tsc -p <project>` does.
+
+Fix: moved `MintTokenError` (a tiny, self-contained class with zero
+dependency on `Env`) out of `app.ts` into its own dependency-free module,
+`apps/fleet/src/github/mint-token-error.ts`. `app.ts` now imports it and
+re-exports it (so `auth.ts`'s existing import from `./app` is untouched);
+`rescue.ts` and `rescue-remote.test.ts` import directly from the new module
+instead of from `app.ts`. Pure file reorganization, zero behavior change,
+same class, same semantics.
+
+#### Files touched (round 3)
+
+- `apps/fleet/src/github/mint-token-error.ts` -- new file, `MintTokenError`
+  class moved here verbatim (plus its doc comment, plus a note on why it's
+  split out).
+- `apps/fleet/src/github/app.ts` -- removed the class definition; now
+  imports and re-exports `MintTokenError` from the new module.
+- `apps/fleet/src/studio/rescue.ts` -- import changed from `../github/app`
+  to `../github/mint-token-error`.
+- `apps/fleet/test/bun/rescue-remote.test.ts` -- import changed from
+  `../../src/github/app` to `../../src/github/mint-token-error`.
+- This file.
+
+#### Verification run (round 3)
+
+- RED confirmed first: `bun run check` on the branch as fetched (before this
+  fix) failed with ~288 unrelated TS errors across `src/studio/do.ts`,
+  `src/studio/sandbox-api.ts`, `src/studio/terminal.ts`,
+  `src/tasks/loop.ts`, `src/tasks/watchdog.ts` -- all `Cannot find name
+  'D1Database'`/`'WebSocketPair'` or `Property 'ctx'/'env' does not exist on
+  type 'StudioDO'`, exactly the Workers-ambient-types-missing shape the root
+  cause predicts.
+- GREEN after the fix: `bun run check` -- exit 0, no output (all 5 `tsc
+  --noEmit` invocations: root, `-p container`, `-p cli`, `-p
+  test-integration`, `-p test`).
+- `bun test test/bun/rescue-remote.test.ts test/bun/rescue-push.test.ts` --
+  183 pass, 0 fail, 673 expect() calls.
+- `npx vitest run test/studio.rescue-token.test.ts` -- 2 pass.
+- Full `check`/`test`/`bun-test` heavy gate deliberately NOT re-run here --
+  reserved for the lead, serialized, once.
