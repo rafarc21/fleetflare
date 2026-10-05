@@ -774,12 +774,23 @@ export async function wipSync(deps: SessionSyncDeps, repo: string, studio: strin
  * RESCUE_CLEAN/RESCUE_MARKERS_ONLY/RESCUE_NO_CHECKOUT leave the field
  * exactly as it was: a stale stamp is still valid evidence of the last REAL
  * sync, and there is nothing to overwrite it WITH on a quiet tick.
+ *
+ * Maestro review round 2 on PR #235 (issue #231), item 1 — `bootStamp` (the
+ * SAME per-boot stamp this tick's own `wipSync` call just pushed under) is
+ * now persisted in the SAME `mergeObserved` write, onto
+ * `Observed.wipSyncedBootStamp` — paired with `wipSyncedAt` rather than
+ * derived later from bring-up ordering. See that field's own doc comment
+ * (observed.ts) for the bug this closes: deriving the ref from
+ * `ObservedSession.wipBootStampBefore` answers "what container was this
+ * before", not "what did the last successful push actually target", and the
+ * two questions disagree whenever a second bring-up lands with no wip-sync
+ * tick in between.
  */
 export async function recordWipSyncOnSuccess(
-  observedStorage: ObservedStorage | null | undefined, result: RescueResult, now: string,
+  observedStorage: ObservedStorage | null | undefined, result: RescueResult, now: string, bootStamp: string,
 ): Promise<void> {
   if (observedStorage && result.pushed) {
-    await mergeObserved(observedStorage, { wipSyncedAt: now });
+    await mergeObserved(observedStorage, { wipSyncedAt: now, wipSyncedBootStamp: bootStamp });
   }
 }
 
@@ -3212,7 +3223,7 @@ export async function syncSessionCycle(
       if (bootStamp) {
         try {
           const result = await wipSync(syncDeps, parsed.repo, idFallback, bootStamp);
-          await recordWipSyncOnSuccess(observedStorage, result, checkedAt);
+          await recordWipSyncOnSuccess(observedStorage, result, checkedAt, bootStamp);
           await recordWipLastCheck(observedStorage, checkedAt, wipLastCheckResultOf(result));
         } catch (err) {
           console.error(`studio ${idFallback}: WIP sync failed`, err);
@@ -3223,7 +3234,7 @@ export async function syncSessionCycle(
           // reasoning.
           const mainResult = mainCheckoutPushFromFailure(err, idFallback, bootStamp);
           if (mainResult) {
-            await recordWipSyncOnSuccess(observedStorage, mainResult, checkedAt);
+            await recordWipSyncOnSuccess(observedStorage, mainResult, checkedAt, bootStamp);
             await recordWipLastCheck(observedStorage, checkedAt, "pushed");
           } else {
             await recordWipLastCheck(observedStorage, checkedAt, "failed");
@@ -6037,12 +6048,20 @@ export class StudioDO extends Sandbox<Env> {
           // reason `session` is — see SurvivalBringup.wipSyncedAt's own doc
           // comment (survival-delivery.ts).
           wipSyncedAt: snapshot.wipSyncedAt ?? null,
+          // Maestro review round 2 on PR #235 (issue #231), item 1 — the
+          // LIVE `snapshot.wipSyncedBootStamp`, same as `wipSyncedAt` just
+          // above: unlike `wipBootStamp` below, this field only ever moves on
+          // a genuine push (`recordWipSyncOnSuccess`), so a live read here is
+          // safe for the identical reason a live read of `wipSyncedAt` is.
+          wipSyncedBootStamp: snapshot.wipSyncedBootStamp ?? null,
           // Maestro review round 1 on PR #235, BLOCKER 1 (issue #231) —
           // `session.wipBootStampBefore`, NEVER the live `snapshot.wipBootStamp`:
           // `recordBringupObservation` (provision.ts) has, by the time this runs,
           // already overwritten the live field with a BRAND-NEW stamp for THIS
           // SAME bring-up. See `ObservedSession.wipBootStampBefore`'s own doc
-          // comment (observed.ts) for the full bug this closes.
+          // comment (observed.ts) for the full bug this closes. Kept on the
+          // wire (survival-brief.ts's `wipSyncLine` no longer reads it — see
+          // `wipSyncedBootStamp` above) for back-compat only.
           wipBootStamp: session.wipBootStampBefore ?? null,
           lastSessionAside: snapshot.lastSessionAside ?? null,
           // Maestro review round 1 on PR #235, MAJOR 3 (issue #231): same
@@ -6053,6 +6072,7 @@ export class StudioDO extends Sandbox<Env> {
         this.survivalCompose(
           workRepoSlug, session, snapshot.wipSyncedAt ?? null, session.wipBootStampBefore ?? null,
           snapshot.lastSessionAside ?? null, snapshot.lastSessionAsideAt ?? null,
+          snapshot.wipSyncedBootStamp ?? null,
         ),
         (prompt) => this.wakeStudioOnAssignment(prompt),
         () => ctx.moved(),
@@ -6111,6 +6131,16 @@ export class StudioDO extends Sandbox<Env> {
         // `wipSyncedAt` (SurvivalBriefPending.wipSyncedAt), never a fresh
         // read — same reason `pending.session` itself is never re-read.
         //
+        // Maestro review round 2 on PR #235 (issue #231), item 1 —
+        // `pending.wipSyncedBootStamp`, the pending record's OWN frozen copy
+        // of the stamp the last GENUINELY SYNCED push targeted, not
+        // `pending.session.wipBootStampBefore` (bring-up ordering, the wrong
+        // question across a second bring-up with no sync tick in between —
+        // see `Observed.wipSyncedBootStamp`'s own doc comment). Superseded
+        // from the BLOCKER 1 fix below, which is left in place on
+        // `SurvivalBriefPending` for wire back-compat only and is no longer
+        // read for composition.
+        //
         // Maestro review round 1 on PR #235, BLOCKER 1 (issue #231) —
         // `pending.session.wipBootStampBefore`, not `pending.wipBootStamp`:
         // the session record's own frozen copy is the one source of truth
@@ -6120,6 +6150,7 @@ export class StudioDO extends Sandbox<Env> {
         (pending) => this.survivalCompose(
           workRepoSlug, pending.session, pending.wipSyncedAt ?? null, pending.session.wipBootStampBefore ?? null,
           pending.lastSessionAside ?? null, pending.lastSessionAsideAt ?? null,
+          pending.wipSyncedBootStamp ?? null,
         )(),
         (prompt) => this.wakeStudioOnAssignment(prompt, true),
       ));
@@ -6176,6 +6207,10 @@ export class StudioDO extends Sandbox<Env> {
     // Maestro review round 1 on PR #235, MAJOR 3 (issue #231): same
     // "caller's own frozen capture" treatment as the three params above.
     lastSessionAsideAt: string | null = null,
+    // Maestro review round 2 on PR #235 (issue #231), item 1: same
+    // "caller's own frozen capture" treatment as every param above — see
+    // composeSurvivalDelivery's own doc comment.
+    wipSyncedBootStamp: string | null = null,
   ): () => Promise<ComposedBrief> {
     return async () => {
       let tasks: SurvivalTaskRef[];
@@ -6186,7 +6221,7 @@ export class StudioDO extends Sandbox<Env> {
       }
       return composeSurvivalDelivery(
         this.survivalSources(workRepoSlug), { ok: true, value: tasks }, session, new Date().toISOString(),
-        wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt,
+        wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp,
       );
     };
   }

@@ -608,6 +608,12 @@ export async function resolveSurvivalInput(
   // Maestro review round 1 on PR #235, MAJOR 3 — same OPTIONAL/`null`-default
   // threading every other frozen-at-bring-up field above already takes.
   lastSessionAsideAt: string | null = null,
+  // Maestro review round 2 on PR #235 (issue #231), item 1 — same
+  // OPTIONAL/`null`-default threading every other frozen-at-bring-up field
+  // above already takes. See `SurvivalInput.wipSyncedBootStamp`'s own doc
+  // comment (survival-brief.ts) for why this, and not `wipBootStamp` above,
+  // is what `wipSyncLine` actually renders.
+  wipSyncedBootStamp: string | null = null,
 ): Promise<SurvivalInput> {
   if (!tasks.ok) {
     return {
@@ -630,6 +636,7 @@ export async function resolveSurvivalInput(
       wipBootStamp,
       lastSessionAside,
       lastSessionAsideAt,
+      wipSyncedBootStamp,
     };
   }
 
@@ -763,7 +770,7 @@ export async function resolveSurvivalInput(
 
   return {
     studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, unclaimedRescueBranches,
-    session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt,
+    session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp,
   };
 }
 
@@ -773,7 +780,9 @@ export async function resolveSurvivalInput(
  *
  *  `wipSyncedAt` (board issue #208, part 2) and `wipBootStamp`/
  *  `lastSessionAside`/`lastSessionAsideAt` (issue #231) pass straight
- *  through to `resolveSurvivalInput` — see that function's own doc comment. */
+ *  through to `resolveSurvivalInput` — see that function's own doc comment.
+ *  `wipSyncedBootStamp` (maestro review round 2 on PR #235, issue #231, item
+ *  1) does too. */
 export async function composeSurvivalDelivery(
   sources: SurvivalSources,
   tasks: Checked<SurvivalTaskRef[]>,
@@ -783,9 +792,12 @@ export async function composeSurvivalDelivery(
   wipBootStamp: string | null = null,
   lastSessionAside: string[] | null = null,
   lastSessionAsideAt: string | null = null,
+  wipSyncedBootStamp: string | null = null,
 ): Promise<string> {
   return composeSurvivalBrief(
-    await resolveSurvivalInput(sources, tasks, session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt),
+    await resolveSurvivalInput(
+      sources, tasks, session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp,
+    ),
   );
 }
 
@@ -817,6 +829,14 @@ export interface SurvivalBringup {
    *  the heal. OPTIONAL/absent (or null) means no WIP sync had ever landed at
    *  this bring-up — the composer renders nothing for it. */
   wipSyncedAt?: string | null;
+  /** Maestro review round 2 on PR #235 (issue #231), item 1 —
+   *  `Observed.wipSyncedBootStamp` AS IT STOOD at this bring-up, same
+   *  "frozen, never re-read" reason `wipSyncedAt` just above is — the exact
+   *  ref the last GENUINELY SYNCED push targeted, never derived from
+   *  bring-up ordering (see that field's own doc comment, observed.ts).
+   *  OPTIONAL/absent: no push has ever landed — the composer falls back to
+   *  `wipBootStamp` below's glob. */
+  wipSyncedBootStamp?: string | null;
   /** Issue #231 — `Observed.wipBootStamp` AS IT STOOD at this bring-up, same
    *  "frozen, never re-read" reason `wipSyncedAt` above is. OPTIONAL/absent:
    *  no confirmed boot stamp yet — the composer falls back to a glob. */
@@ -1012,6 +1032,10 @@ export async function deliverSurvivalBriefOnBringup(
     // this feature's WIP sync at all (every bring-up before this field
     // existed) keeps producing byte-identical `SurvivalBriefPending` records.
     ...(b.wipSyncedAt !== undefined ? { wipSyncedAt: b.wipSyncedAt } : {}),
+    // Maestro review round 2 on PR #235 (issue #231), item 1 — same "taken
+    // fresh from THIS bring-up, absent stays absent" treatment as
+    // `wipSyncedAt` just above.
+    ...(b.wipSyncedBootStamp !== undefined ? { wipSyncedBootStamp: b.wipSyncedBootStamp } : {}),
     // Issue #231 — same "taken fresh from THIS bring-up, absent stays
     // absent" treatment as `wipSyncedAt` just above.
     ...(b.wipBootStamp !== undefined ? { wipBootStamp: b.wipBootStamp } : {}),

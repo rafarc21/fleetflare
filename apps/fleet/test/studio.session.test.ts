@@ -1706,6 +1706,65 @@ describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)",
     expect(observed.wipSyncedAt).toBeTruthy();
     expect(observed.wipLastCheck?.result).toBe("pushed");
   });
+
+  // Maestro review round 2 on PR #235 (issue #231), item 1 — the boot stamp
+  // an ACTUAL successful push targeted is now persisted alongside
+  // `wipSyncedAt`, in the SAME `mergeObserved` write, so the survival brief
+  // can later render the ref the last GENUINELY SYNCED push used rather than
+  // deriving one from bring-up ordering (see `Observed.wipSyncedBootStamp`'s
+  // own doc comment, observed.ts, for the full bug this closes).
+  it("a successful wip-sync push persists wipSyncedBootStamp alongside wipSyncedAt", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    const BOOT_STAMP = "20261004000000";
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: "a-real-token", replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: BOOT_STAMP,
+    });
+    const base = fakeSyncDeps({});
+    const probeCmd = wipSyncProbeCmd("websites");
+    const pushCmd = wipSyncCmd("websites", STUDIO_ID, BOOT_STAMP);
+    const mainRef = wipSyncRef(STUDIO_ID, BOOT_STAMP);
+    const deps: SessionSyncDeps = {
+      ...base,
+      exec: async (cmd: string, env?: Record<string, string>) => {
+        if (cmd === probeCmd) return { code: 0, stdout: WIP_SYNC_NEEDED, stderr: "" };
+        if (cmd === pushCmd) return { code: 0, stdout: `${RESCUE_PUSHED_PREFIX} ${mainRef} 1 files`, stderr: "" };
+        return base.exec(cmd, env);
+      },
+    };
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    const observed = await getObserved(observedStorage);
+    expect(observed.wipSyncedAt).toBeTruthy();
+    expect(observed.wipSyncedBootStamp).toBe(BOOT_STAMP);
+  });
+
+  // Same "only on a real push" discipline `wipSyncedAt` itself already
+  // follows: a quiet (clean) tick must leave a PRIOR `wipSyncedBootStamp`
+  // exactly as it was, same as it leaves `wipSyncedAt` untouched.
+  it("a clean (nothing-to-sync) tick leaves a prior wipSyncedBootStamp exactly as it was", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    const BOOT_STAMP = "20261004000000";
+    const PRIOR_SYNCED_AT = "2026-10-03T17:10:00.000Z";
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: "a-real-token", replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: BOOT_STAMP,
+      wipSyncedAt: PRIOR_SYNCED_AT, wipSyncedBootStamp: BOOT_STAMP,
+    });
+    // Default fakeSyncDeps answers the probe with RESCUE_CLEAN -- no push.
+    const deps = fakeSyncDeps({});
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+
+    const observed = await getObserved(observedStorage);
+    expect(observed.wipSyncedAt).toBe(PRIOR_SYNCED_AT);
+    expect(observed.wipSyncedBootStamp).toBe(BOOT_STAMP);
+  });
 });
 
 /**

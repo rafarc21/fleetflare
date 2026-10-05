@@ -368,6 +368,25 @@ export interface Observed {
    */
   wipSyncedAt?: string | null;
   /**
+   * Maestro review round 2 on PR #235 (issue #231), item 1 — the EXACT boot
+   * stamp the push that stamped `wipSyncedAt` above actually targeted,
+   * written in the SAME `mergeObserved` call, same "only on a real push"
+   * discipline. Before this field, the survival brief derived the ref to
+   * show from BRING-UP ORDERING (`ObservedSession.wipBootStampBefore` —
+   * "what container was this before") rather than from the last successful
+   * push itself: fine for the FIRST bring-up after a replacement (nothing
+   * synced since, so "before" and "last synced" agree), but wrong for a
+   * SECOND bring-up with no wip-sync tick in between — that bring-up's own
+   * `wipBootStampBefore` is the FIRST bring-up's brand-new, never-synced
+   * stamp, while `wipSyncedAt` still describes a push that happened under an
+   * EARLIER stamp still. Rides `mergeObserved` exactly like `wipSyncedAt`
+   * (own value, no separate DO-storage key) so it flows through
+   * `getObserved`/`getObservedWithActivity`/`withObserved` automatically.
+   * OPTIONAL/absent, same convention `wipSyncedAt` itself uses: no push has
+   * ever landed yet, or this row predates the field.
+   */
+  wipSyncedBootStamp?: string | null;
+  /**
    * Fix round (#208 PR #215 review, minor (a)): `wipSyncedAt` above only ever
    * advances on a genuine push — a studio that has been clean for days (the
    * common case) shows the SAME age as a studio whose last three ticks all
@@ -488,6 +507,17 @@ export interface SurvivalBriefPending {
    * heal time" — the composer (survival-brief.ts) renders nothing for this
    * studio's WIP safety net in that case. */
   wipSyncedAt?: string | null;
+  /** Maestro review round 2 on PR #235 (issue #231), item 1 —
+   *  `Observed.wipSyncedBootStamp` AS IT STOOD at the moment this bring-up
+   *  happened, frozen the same way `wipSyncedAt` just above is: the exact
+   *  ref the LAST GENUINELY SYNCED push actually targeted, never derived
+   *  from bring-up ordering (`wipBootStamp` below, which answers "what
+   *  container was this before", a different question whenever two
+   *  bring-ups happen with no wip-sync tick between them). See
+   *  `Observed.wipSyncedBootStamp`'s own doc comment for the full bug this
+   *  closes. OPTIONAL/absent: no push has ever landed — the composer falls
+   *  back to `wipBootStamp` below's glob rendering. */
+  wipSyncedBootStamp?: string | null;
   /** Issue #231 — `Observed.wipBootStamp` AS IT STOOD at this bring-up, frozen
    *  the same way `wipSyncedAt` above is: the real, exact wip ref name
    *  (`wipSyncRef(studioId, wipBootStamp)`) rather than survival-brief.ts's

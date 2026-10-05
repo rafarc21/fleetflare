@@ -998,16 +998,22 @@ describe("(#208 part 2) the WIP safety-net line", () => {
 // Issue #231 fix 2a -- the brief used to always print the glob
 // (fleet/rescue/<studio>/wip/*), never the exact, real ref -- forcing a human
 // to go look it up on GitHub directly, where the ref's own name embeds the
-// container's BOOT time (not the sync time). `wipBootStamp`, when known,
-// gives the exact ref `wipSyncRef` (rescue.ts) itself would produce.
-describe("(#231 fix 2a) the WIP safety-net line names the EXACT ref when wipBootStamp is known", () => {
+// container's BOOT time (not the sync time).
+//
+// Maestro review round 2 on PR #235 (issue #231), item 1 -- superseded to
+// read `wipSyncedBootStamp` (the stamp the last GENUINELY SYNCED push
+// actually targeted), never `wipBootStamp` (bring-up ordering -- the wrong
+// question across a second bring-up with no wip-sync tick in between). See
+// `SurvivalInput.wipSyncedBootStamp`'s own doc comment for the full bug this
+// closes.
+describe("(#231 fix 2a, superseded by round 2 item 1) the WIP safety-net line names the EXACT ref when wipSyncedBootStamp is known", () => {
   const WIP_NOW = "2026-10-03T12:00:00.000Z";
 
-  it("wipBootStamp set -> the exact ref, not the glob", () => {
+  it("wipSyncedBootStamp set -> the exact ref, not the glob", () => {
     const out = composeSurvivalBrief(baseInput({
       session: baseSession({ via: "heal" }),
       wipSyncedAt: "2026-10-03T11:56:00.000Z",
-      wipBootStamp: "20261003115000",
+      wipSyncedBootStamp: "20261003115000",
       now: WIP_NOW,
     }));
     expect(out).toContain(
@@ -1016,13 +1022,28 @@ describe("(#231 fix 2a) the WIP safety-net line names the EXACT ref when wipBoot
     expect(out).not.toContain("wip/*");
   });
 
-  it("wipBootStamp absent/null -> falls back to the glob, unchanged", () => {
+  it("wipSyncedBootStamp absent/null -> falls back to the glob, unchanged", () => {
     const out = composeSurvivalBrief(baseInput({
       session: baseSession({ via: "heal" }),
       wipSyncedAt: "2026-10-03T11:56:00.000Z",
       now: WIP_NOW,
     }));
     expect(out).toContain("fleet/rescue/demosite-life--release-studio/wip/*, last synced 4m ago");
+  });
+
+  // The root-cause half of the fix: `wipBootStamp` (bring-up ordering) must
+  // no longer drive the ref even when IT is set -- only `wipSyncedBootStamp`
+  // (the last genuinely synced push) may, since the two can disagree across
+  // a second bring-up with no sync tick between it and the first.
+  it("wipBootStamp set but wipSyncedBootStamp absent -> still the glob, never wipBootStamp's own value", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession({ via: "heal" }),
+      wipSyncedAt: "2026-10-03T11:56:00.000Z",
+      wipBootStamp: "20261003115000",
+      now: WIP_NOW,
+    }));
+    expect(out).toContain("fleet/rescue/demosite-life--release-studio/wip/*, last synced 4m ago");
+    expect(out).not.toContain("wip/20261003115000");
   });
 });
 

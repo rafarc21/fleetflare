@@ -119,13 +119,30 @@ export interface SurvivalInput {
    */
   wipSyncedAt?: string | null;
   /**
+   * Maestro review round 2 on PR #235 (issue #231), item 1 --
+   * `Observed.wipSyncedBootStamp` as it stood AT THE MOMENT OF THIS BRING-UP
+   * (frozen the same way `wipSyncedAt` above is) -- the exact ref the last
+   * GENUINELY SYNCED push actually targeted. `wipSyncLine` renders this
+   * instead of `wipBootStamp` below: `wipBootStamp` answers "what container
+   * was this before", which is the wrong question whenever a SECOND bring-up
+   * happens with no wip-sync tick in between -- it would then name the
+   * FIRST bring-up's own fresh, never-synced stamp right next to an age
+   * that describes a push from an even earlier incarnation. OPTIONAL/null:
+   * no push has ever landed -- the glob fallback is used, same as
+   * `wipBootStamp` below's own absent case.
+   */
+  wipSyncedBootStamp?: string | null;
+  /**
    * Issue #231 fix 2a -- `Observed.wipBootStamp` as it stood AT THE MOMENT OF
-   * THIS BRING-UP (frozen the same way `wipSyncedAt` above is). `wipSyncLine`
-   * uses it to name the EXACT wip ref (`wipSyncRefEcho`'s own 2-arg form)
-   * rather than this file's own `/*` glob -- the glob forced a human to look
-   * the real ref up on GitHub directly, where the ref's own name embeds the
-   * container's BOOT time, easy to misread as the sync time. OPTIONAL/null:
-   * no confirmed boot stamp at bring-up time -- the glob fallback is used.
+   * THIS BRING-UP (frozen the same way `wipSyncedAt` above is).
+   *
+   * Maestro review round 2 on PR #235 (issue #231), item 1 -- no longer read
+   * by `wipSyncLine` (superseded by `wipSyncedBootStamp` above, which names
+   * what was actually SYNCED rather than what container this WAS); kept on
+   * the wire and still threaded through `resolveSurvivalInput` for
+   * back-compat and because `ObservedSession.wipBootStampBefore` (the field
+   * this is sourced from) may still matter for other reasoning. OPTIONAL/
+   * null: no confirmed boot stamp at bring-up time.
    */
   wipBootStamp?: string | null;
   /**
@@ -447,7 +464,13 @@ function wipSyncLine(input: SurvivalInput): string | null {
   if (input.wipSyncedAt == null) return null;
   const age = ageFrom(input.wipSyncedAt, input.now);
   const ageText = age === null ? "unknown age" : `${formatSurvivalAge(age)} ago`;
-  return `- WIP safety net: ${wipSyncRefEcho(input.studioId, input.wipBootStamp)}, last synced ${ageText} — check it for anything lost since then.`;
+  // Maestro review round 2 on PR #235 (issue #231), item 1 -- `wipSyncedBootStamp`
+  // (the stamp the push that set `wipSyncedAt` actually targeted), never
+  // `wipBootStamp` (which answers "what container was this before", a
+  // different and sometimes WRONG question across a second bring-up with no
+  // sync tick between it and the first -- see `SurvivalInput.wipSyncedBootStamp`'s
+  // own doc comment for the full bug this closes).
+  return `- WIP safety net: ${wipSyncRefEcho(input.studioId, input.wipSyncedBootStamp)}, last synced ${ageText} — check it for anything lost since then.`;
 }
 
 /**
