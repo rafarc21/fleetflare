@@ -61,13 +61,28 @@ export async function readCswapList(): Promise<CswapRead> {
   }
 }
 
+/** Message text, not console output: `--watch`'s loop needs to catch and
+ *  retry on exactly the same failures a one-shot command exits on (see
+ *  cli/ff.ts's `errText`, same shape), so both the bad-status and the raw
+ *  network-exception case THROW here rather than printing/exiting directly.
+ *  The two one-shot callers (`cmdAccounts`, `cmdAccountsSync`) catch this at
+ *  their own top level and print+exit exactly as before; `watchAccounts`'s
+ *  loop catches it per-iteration and retries instead. */
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 async function fetchAccountsApi(creds: Credentials): Promise<AccountsApiRow[]> {
-  const res = await fetch(new URL("/studio/accounts", creds.workerUrl), {
-    headers: { ...accessHeaders(creds), Accept: "application/json" },
-  });
+  let res: Response;
+  try {
+    res = await fetch(new URL("/studio/accounts", creds.workerUrl), {
+      headers: { ...accessHeaders(creds), Accept: "application/json" },
+    });
+  } catch (err) {
+    throw new Error(`fleet accounts: could not reach ${creds.workerUrl}: ${errText(err)}`);
+  }
   if (!res.ok) {
-    console.error(`fleet accounts: ${res.status} ${(await res.text()).slice(0, 300)}`);
-    process.exit(1);
+    throw new Error(`fleet accounts: ${res.status} ${(await res.text()).slice(0, 300)}`);
   }
   return (await res.json()) as AccountsApiRow[];
 }
@@ -146,14 +161,18 @@ async function doSync(creds: Credentials, now: Date = new Date()): Promise<SyncR
   const decisions: SyncDecision[] = snapshot
     .map((r) => r.decision)
     .filter((d) => d.action !== "unmanaged");
-  const res = await fetch(new URL("/studio/accounts/sync", creds.workerUrl), {
-    method: "POST",
-    headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
-    body: JSON.stringify({ decisions }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(new URL("/studio/accounts/sync", creds.workerUrl), {
+      method: "POST",
+      headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
+      body: JSON.stringify({ decisions }),
+    });
+  } catch (err) {
+    throw new Error(`fleet accounts sync: could not reach ${creds.workerUrl}: ${errText(err)}`);
+  }
   if (!res.ok) {
-    console.error(`fleet accounts sync: ${res.status} ${(await res.text()).slice(0, 300)}`);
-    process.exit(1);
+    throw new Error(`fleet accounts sync: ${res.status} ${(await res.text()).slice(0, 300)}`);
   }
   const { applied, rejected } = (await res.json()) as { applied: string[]; rejected: { name: string; reason: string }[] };
   return { snapshot: applyLocally(snapshot, applied), applied, rejected };
@@ -178,40 +197,69 @@ export const WATCH_INTERVAL_MS = 60_000;
  * snapshotsEqual) only gets a one-line "no change" heartbeat, never a
  * reprinted table. Ctrl-C (SIGINT) exits the process directly — no
  * in-flight request this loop needs to clean up first.
+ *
+ * Fault tolerance: this is the one caller of `buildAccountsSnapshot`/
+ * `doSync` that must NOT exit on a failed iteration — issue #232 item 4's
+ * whole point is running unattended for extended periods, so one transient
+ * 5xx or dropped connection must not kill the session. Matches
+ * `waitProvisioned`'s own shape (`fetchVerdict`/`fetchStatus` there fold
+ * every network error or non-2xx into a non-throwing "inconclusive" the loop
+ * just retries): here the per-iteration work is wrapped in try/catch, and a
+ * caught failure prints one stderr status line and falls through to the same
+ * `Bun.sleep(WATCH_INTERVAL_MS)` every other iteration ends with, rather than
+ * exiting. The bare one-shot commands (`cmdAccounts`/`cmdAccountsSync`,
+ * below) deliberately do NOT get this treatment — a one-shot command failing
+ * loudly is correct, only the long-running loop needs to tolerate a blip.
  */
 async function watchAccounts(creds: Credentials, flags: AccountsFlags, sync: boolean): Promise<void> {
   process.on("SIGINT", () => process.exit(0));
   let prev: AccountSnapshotRow[] | null = null;
   for (;;) {
-    let snapshot: AccountSnapshotRow[];
-    if (sync) {
-      const result = await doSync(creds);
-      reportSyncOutcome(result.applied, result.rejected);
-      snapshot = result.snapshot;
-    } else {
-      snapshot = await buildAccountsSnapshot(creds);
+    try {
+      let snapshot: AccountSnapshotRow[];
+      if (sync) {
+        const result = await doSync(creds);
+        reportSyncOutcome(result.applied, result.rejected);
+        snapshot = result.snapshot;
+      } else {
+        snapshot = await buildAccountsSnapshot(creds);
+      }
+      if (prev === null || !snapshotsEqual(prev, snapshot)) printSnapshot(snapshot, flags.json);
+      else console.error(`fleet accounts: no change (${new Date().toISOString()})`);
+      prev = snapshot;
+    } catch (err) {
+      console.error(`fleet accounts: iteration failed, retrying in ${WATCH_INTERVAL_MS / 1000}s (${errText(err)})`);
     }
-    if (prev === null || !snapshotsEqual(prev, snapshot)) printSnapshot(snapshot, flags.json);
-    else console.error(`fleet accounts: no change (${new Date().toISOString()})`);
-    prev = snapshot;
     await Bun.sleep(WATCH_INTERVAL_MS);
   }
 }
 
 /** `fleet accounts` — read-only: builds the snapshot, prints it, never
- *  calls the write route. */
+ *  calls the write route. One-shot: a failed fetch/non-2xx exits loudly
+ *  (same as this route's previous behavior), unlike `--watch`'s loop. */
 export async function cmdAccounts(creds: Credentials, flags: AccountsFlags): Promise<void> {
   if (flags.watch) return watchAccounts(creds, flags, false);
-  printSnapshot(await buildAccountsSnapshot(creds), flags.json);
+  try {
+    printSnapshot(await buildAccountsSnapshot(creds), flags.json);
+  } catch (err) {
+    console.error(errText(err));
+    process.exit(1);
+  }
 }
 
 /** `fleet accounts sync` — builds the snapshot, POSTs the non-"unmanaged"
  *  decisions, reports what was applied/rejected, then prints the post-sync
  *  table (built locally — see `applyLocally`'s own doc comment for why no
- *  second GET round-trip). */
+ *  second GET round-trip). One-shot: a failed fetch/non-2xx exits loudly
+ *  (same as this route's previous behavior), unlike `--watch`'s loop. */
 export async function cmdAccountsSync(creds: Credentials, flags: AccountsFlags): Promise<void> {
   if (flags.watch) return watchAccounts(creds, flags, true);
-  const { snapshot, applied, rejected } = await doSync(creds);
-  reportSyncOutcome(applied, rejected);
-  printSnapshot(snapshot, flags.json);
+  try {
+    const { snapshot, applied, rejected } = await doSync(creds);
+    reportSyncOutcome(applied, rejected);
+    printSnapshot(snapshot, flags.json);
+  } catch (err) {
+    console.error(errText(err));
+    process.exit(1);
+  }
 }

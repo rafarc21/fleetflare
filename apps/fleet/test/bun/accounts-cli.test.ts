@@ -82,6 +82,31 @@ async function run(args: string[], home: string, extraPath?: string) {
   return { out, err, code };
 }
 
+/** Reads `stream` incrementally until `predicate` matches the text seen so
+ *  far, or `timeoutMs` elapses (whichever first). Used ONLY for the
+ *  long-running `--watch` test below, which must observe a stderr line
+ *  WITHOUT waiting for the process to exit (it never does on its own) —
+ *  the whole loop races against a single timeout rather than racing each
+ *  individual `reader.read()`, so an abandoned pending read on timeout is
+ *  left for the test's own `proc.kill()` to clean up, never a stuck lock. */
+function readUntil(stream: ReadableStream<Uint8Array>, predicate: (text: string) => boolean, timeoutMs: number): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  const loop = (async () => {
+    while (!predicate(text)) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`readUntil: stream ended before match; saw: ${JSON.stringify(text)}`);
+      text += decoder.decode(value, { stream: true });
+    }
+    return text;
+  })();
+  const timeout = new Promise<string>((_, reject) => {
+    setTimeout(() => reject(new Error(`readUntil: timed out waiting for match; saw: ${JSON.stringify(text)}`)), timeoutMs);
+  });
+  return Promise.race([loop, timeout]);
+}
+
 // Fleet slots joined to CSWAP_LIST_FIXTURE by label===email: primary ->
 // OVER_FIVE_HOUR (limit), spare -> UNDER_THRESHOLD (clear), a third with no
 // label -> unmanaged (no-label). Exercises all three decision kinds in one
@@ -205,5 +230,63 @@ describe("fleet accounts sync", () => {
     expect(r.code).toBe(0);
     expect(r.err).toContain("rejected CLAUDE_CODE_OAUTH_TOKEN (unknown account name)");
     expect(r.out).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+  });
+});
+
+// Issue #232 code review finding 3: `--watch` must tolerate a failed
+// iteration (a non-2xx or a dropped connection) rather than exiting the
+// whole long-running session, unlike the bare one-shot commands above
+// (which correctly keep exiting loudly on the same failure — see the
+// "bad status -> exit 1" coverage already in the two describe blocks
+// above this one, left unchanged by this fix).
+//
+// WATCH_INTERVAL_MS is a real 60s, so this test only observes the FIRST
+// iteration: a GET /studio/accounts that always 500s, which previously made
+// `fetchAccountsApi` call `process.exit(1)` directly (even inside the
+// watch loop). It never waits for — or asserts anything about — a second
+// iteration, since that would need a real 60s sleep to elapse; "the process
+// is still alive and printed the retry line shortly after the failing
+// fetch" is already the fault-tolerance claim this finding is about.
+describe("fleet accounts --watch", () => {
+  test("a failing iteration prints a retry line and does not exit the process", async () => {
+    const home = tmpDir("accounts-home-");
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/studio/accounts" && req.method === "GET") {
+          return new Response("boom", { status: 500 });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const proc = Bun.spawn({
+      cmd: [process.execPath, FLEET, "accounts", "--watch"],
+      env: { PATH: process.env.PATH!, HOME: home },
+      stdin: "ignore", stdout: "ignore", stderr: "pipe",
+    });
+    try {
+      const seen = await readUntil(
+        proc.stderr as ReadableStream<Uint8Array>,
+        (text) => text.includes("iteration failed"),
+        10_000,
+      );
+      expect(seen).toContain("iteration failed, retrying");
+
+      // The bug this finding describes was `process.exit(1)` running
+      // synchronously right after printing the (old) error line — so give
+      // the event loop a moment, then confirm the process has NOT exited
+      // on its own (it is still sleeping out WATCH_INTERVAL_MS).
+      const stillRunning = await Promise.race([
+        proc.exited.then(() => false),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 300)),
+      ]);
+      expect(stillRunning).toBe(true);
+    } finally {
+      proc.kill();
+      server.stop(true);
+    }
   });
 });
