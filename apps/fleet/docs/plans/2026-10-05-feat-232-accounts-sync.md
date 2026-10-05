@@ -153,3 +153,131 @@ No token, email, or org id printed in logs/PR/tests — fixtures use
 `example.com`. Docs: operator setup (`cswap add` per account; never
 `/logout` first — revokes refresh token) land with step 3 (the CLI verb),
 not here.
+
+## Addendum 2026-10-05: rework after external review
+
+First pass (15 commits, `8f24f9e`..`d146252`, PR #237) shipped per above.
+Maestro review round 1 of 2 on PR #237: REQUEST CHANGES, 2 blocker + 4 major.
+Plus scope-add from issue #232 STATUS comments (2026-10-05T09:48:22Z,
+2026-10-05T10:17:38Z). 3-dispatch rework (`ad9807f`..`c5897ea`) addressed
+all of it. This section records what changed and why; original sections
+above are history, not edited.
+
+**1. Review findings + scope-add.**
+
+Blocker 1: stale/failed cswap data cleared real limits. `usageStatus`/
+`usageAgeSeconds` never read by decide logic. Probe: 86400s-old 1% reading →
+`clear` → deletes `dead:true` row → launch into disabled account.
+
+Blocker 2: limit w/ no `resetsAt` → `until: undefined` → row decodes
+null → slot reads FREE. Probe confirmed at 99%.
+
+Scope-add (STATUS 09:48:22Z): only 2 of 6 real fleet slots carry a
+`CLAUDE_ACCOUNT_<n>_LABEL` — label-only join near-useless in practice.
+Required reset-time join as fallback.
+
+STATUS 10:17:38Z: claude-swap = usage-number SOURCE only, operator decision.
+Fleet never calls `cswap switch`/`auto`. No new switching path — unchanged
+from original plan, just confirmed explicitly.
+
+**2. `CswapAccount` corrected shape.**
+
+`usageStatus === "ok"` = healthy (real cswap value; original plan's `"active"`
+was invented, never verified against real cswap). Any other value (seen:
+`relogin_required`, `unavailable`) = failure, `usage: null`. New field
+`usageAgeSeconds: number` (seconds old, self-reported by cswap) — can be old
+even when `usageStatus` is `"ok"`. `usage` now `{ fiveHour, sevenDay, scoped }
+| null`. New const `MAX_USAGE_AGE_SECONDS = 600` — the general staleness
+gate for ANY decision, not just item-5 headroom ordering.
+
+**3. New `SyncDecision` action `"no-data"`.**
+
+Distinct from `"unmanaged"`. `"unmanaged"`: join found no cswap match at all
+(label miss + no reset-time candidate, or cswap itself unavailable).
+`"no-data"`: join DID find a cswap account, but reading untrustworthy —
+`usageStatus !== "ok"`, `usage === null`, `usageAgeSeconds >=
+MAX_USAGE_AGE_SECONDS`, or malformed usage shape (non-numeric pct, non-array
+scoped, etc). Both → no D1 write, same as before, but reason now visible.
+`decideAccountSync` never throws by construction — a single malformed entry
+degrades to `"no-data"` for that slot only, isolated.
+
+**4. Two-pass join algorithm.**
+
+`FleetAccountSlot` gained `until: string | null` (slot's own currently-D1-
+recorded reset, for reset-time matching). `SlotJoin` gained `matchSource:
+"label" | "inferred" | "unmapped" | "cswap-missing"`, replacing the old
+per-branch `reason` field.
+
+Pass 0: any email appearing >1x in `cswapAccounts` excluded from the
+matching pool entirely (minor review fix — duplicate must never silently
+first-win).
+
+Pass 1 (label): exact `label === email`, same as original plan. Match
+removes account from pool.
+
+Pass 2 (reset-time, only for slots unresolved by pass 1): slot's own
+`until` vs each remaining pool account's `fiveHour.resetsAt` /
+`sevenDay.resetsAt`, within `RESET_MATCH_WINDOW_MS` = ±5 min. Exactly one
+candidate → tentative `"inferred"` match. Zero or >1 → stays unmapped,
+never guesses.
+
+Cross-slot collision: if ≥2 slots tentatively resolve to the SAME pool
+account, collision invalidates ALL of them back to `"unmapped"` — a cswap
+account can't back two real fleet slots. Account stays unconsumed.
+
+Fixture case required: two slots with identical reset time → both unmapped
+(not a 50/50 guess).
+
+**5. `--write-labels` CLI flag.**
+
+`fleet accounts --write-labels` (and `--json` combo → `labelSuggestions`
+key in JSON output) prints one pasteable `CLAUDE_ACCOUNT_<n>_LABEL=<email>`
+line per `"inferred"` match. Never writes any config file itself — operator
+pastes into ops config by hand. Bare `fleet accounts` stays read-only
+(never calls the sync write route).
+
+**6. Route (`POST /studio/accounts/sync`) changes.**
+
+Request body gained top-level `usageFetchedAt` (ISO timestamp of the whole
+cswap snapshot) — the ONE whole-request validation (missing/unparseable →
+400 for the entire request; every `"clear"` in the batch is meaningless
+without it, no partial-success story for a garbage snapshot time).
+
+Response gained `skipped: { name, reason }[]`, distinct from `applied`/
+`rejected` — a `"clear"` that lost to a fresher existing row (row's own
+`seenAt` >= `usageFetchedAt`) reports here as a correct no-op, not an error.
+
+A `"limit"` write now reads the row's current state first
+(`readOneAccountLimit`, new export on `account-limits-store.ts`) and
+preserves an existing `dead: true` flag instead of dropping it — a usage
+threshold sighting is orthogonal to "account is dead" (failover.ts's own
+pane-capture concern).
+
+Every sync-route `"limit"`/`"clear"` write now tags `source: "usage"` on
+the row — `AccountLimitState` (`rate-limit.ts`) gained optional `source`
+field so a row's origin (usage sync vs pane-capture) is visible after the
+fact. `writeFleetAccountLimit` signature gained a 6th optional `source?:
+"usage"` param.
+
+Per-entry validation tightened: `"limit"` requires `until` PRESENT (string
+or explicit `null`, never absent/undefined) and `seenAt` parseable;
+`"clear"` requires `seenAt` parseable too (clear now carries `seenAt`).
+Malformed entry (null, non-object, non-string `name`, garbage `action`) →
+rejected, never a 500. Duplicate names in one batch still all-reject, same
+as before.
+
+**7. Item 5 (headroom ordering) — officially out of scope, not deferred.**
+
+Maestro's own round-1 review split it to issue #238 explicitly ("Remove
+from this PR's claims"). `pickHeadroomAccount` ships built+tested in
+`claude-swap.ts`, still unwired into `accounts.ts`/`failover.ts`/`do.ts`
+(CI-enforced one-way-door files) — same non-wiring as original plan, but
+now tracked under its own issue rather than an open-ended "follow-up" note
+on this PR.
+
+**8. Review status on reworked code.**
+
+Both code-reviewer rounds on the reworked code: spec APPROVE, standards
+APPROVE, nothing blocking. Current state — the 2-blocker/4-major external
+maestro review (point 1 above) is what triggered this whole rework/
+addendum, fully resolved by points 2-7 above.
