@@ -94,7 +94,59 @@ existing real-git fixture style (`#263 C3`'s pattern):
 ## Files touched
 
 - `apps/fleet/src/studio/rescue.ts` -- `rescueMintPermissions` (Part 1),
-  `rescueOnOriginFn` (Part 2).
+  `rescueOnOriginFn` (Part 2), and its own stale doc comment ("exact tip
+  match only" -- no longer true once Part 2's ancestor check shipped).
 - `apps/fleet/test/studio.rescue-token.test.ts` -- Part 1 assertion update.
-- `apps/fleet/test/bun/rescue-push.test.ts` -- Part 2's two new cases.
+- `apps/fleet/test/bun/rescue-push.test.ts` -- Part 2's two new cases, plus
+  a real-git test-infra fix (Part 3, below).
 - This file.
+
+## Part 3 (added after QA flagged the suite RED) -- the #253 git-safety
+## wrapper was refusing this file's own throwaway fixture pushes
+
+QA re-ran `bun test apps/fleet/test/bun/rescue-push.test.ts` fresh inside a
+provisioned studio container and got 10 real failures (6 pre-existing, 4 on
+Part 2's own new cases), contradicting the "green" self-report. Root-caused
+with `systematic-debugging`, not assumed:
+
+1. Reproduced directly: `/usr/local/bin/git` -- this very repo's OWN #253
+   `studioGitWrapperScript`, installed into every PROVISIONED studio
+   container ahead of real git on PATH -- refuses any push whose dry run
+   says it would move the remote's resolved default branch. It cannot tell
+   a real tracked repo apart from this test file's own throwaway
+   `git init --bare` fixtures (`origin`/`priv`, under `tmpdir()`, deleted
+   every `afterEach`) -- a SECOND push to an already-real "main" on one of
+   those scratch repos (simulating origin having moved, or confirming a
+   worktree is already covered by it) gets the exact same refusal a real
+   studio pushing the real default branch would get.
+2. Confirmed this is NOT a Part 2 regression: checked out `main` (pre-#233)
+   in a scratch worktree and ran the identical suite -- the SAME 6 failures
+   (`#216 fix 3`, `#313 Finding 3`, issue #1's `-nff` fallback, each x2
+   builders) reproduce byte-for-byte already on `main`. Part 2's own 4 new
+   cases fail the SAME way, for the SAME reason (their own fixtures push a
+   second time to a scratch "main" too) -- not a flaw in the new
+   `rescue_on_origin` ancestor-check loop.
+3. Proved Part 2's shipped code is correct: ran the suite with the wrapper
+   excluded from PATH (`PATH="/usr/bin:/bin:$PATH"`) -- 160/160 pass, 0
+   fail, including both of Part 2's own new cases. The ancestor-check loop
+   (`$3` then `$__rdef`) works exactly as designed; the failures were pure
+   test-environment interference, never a logic bug.
+4. Fixed at the right layer -- the TEST file, not `rescue.ts` (whose logic
+   was already proven correct): `resolveRealGit()`/`REAL_GIT_SHIM_DIR`
+   (new, module-level, same "goes first on every fixture's PATH" convention
+   `TIMEOUT_SHIM_DIR` already uses) route `git` straight past
+   `STUDIO_GIT_WRAPPER_PATH` for every fixture in this file, reusing
+   `STUDIO_REAL_GIT_PATH` (credentials.ts) instead of a second,
+   independently-PATH-dependent lookup. The pre-existing `issue #1` describe
+   block's own `REAL_GIT` constant (`Bun.which("git", { PATH:
+   process.env.PATH })`) had the identical bug -- it resolved to the wrapper
+   itself inside a provisioned studio container, which is exactly the
+   failure its own doc comment already described for a DIFFERENT prior
+   cause (issue #8) without catching this one -- now reuses the shared,
+   fixed `REAL_GIT_BIN`. A host with no wrapper installed (CI, a developer's
+   own machine) builds no shim at all: `STUDIO_GIT_WRAPPER_PATH` simply does
+   not exist there, so `git` resolves exactly as it always did.
+5. Re-verified genuinely green with the wrapper back in its normal place on
+   PATH (no `PATH=` override): `bun test
+   apps/fleet/test/bun/rescue-push.test.ts` -- 160 pass, 0 fail, 613
+   expect() calls.

@@ -230,8 +230,12 @@ export function rescuePushPrelude(opts: RescuePushOptions): string {
  * runs (#359) — and a hook resolving `@{u}` on an upstream-less branch
  * failed the rescue, refusing destroy. One bounded `ls-remote` per run,
  * cached; a failed listing reads as "not on origin", so the push still runs
- * (the saving direction). Exact tip match only: an ancestor of a tip is not
- * provable without fetching.
+ * (the saving direction). Originally exact-tip-match only ("an ancestor of
+ * a tip is not provable without fetching") — issue #80 (below) added a
+ * bounded fetch-and-merge-base ancestor check for the worktree's OWN
+ * checked-out branch name, and issue #233 (further below) extended that
+ * same check to also try origin's own default-branch name, so an ancestor
+ * (not just an exact tip) is provable today, for either name.
  *
  * Fix round (#208 PR #215 review item 1): BLOCKER — a wip-sync tip
  * (`fleet/rescue/<studio>/wip/<bootStamp>`, rescue.ts's `wipSyncCmd`) must

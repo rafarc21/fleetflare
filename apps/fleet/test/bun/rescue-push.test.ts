@@ -11,6 +11,7 @@ import {
 } from "../../src/studio/rescue";
 import { discoverRescueRefsCmd } from "../../src/studio/provision";
 import { KILL_GRACE_SECONDS } from "../../src/studio/exec-deadline";
+import { STUDIO_GIT_WRAPPER_PATH, STUDIO_REAL_GIT_PATH } from "../../src/studio/credentials";
 
 /**
  * Issue #217, measured 2026-09-24: origin/fleet/rescue/demosite-life--release-studio-20260924211846
@@ -92,11 +93,52 @@ const TIMEOUT_SHIM_DIR = ((): string | null => {
   chmodSync(shim, 0o755);
   return shimDir;
 })();
+/**
+ * Issue #253 shipped `studioGitWrapperScript` (credentials.ts) into every
+ * PROVISIONED studio container's own PATH at `STUDIO_GIT_WRAPPER_PATH`,
+ * ahead of the real git — refusing any push whose own dry run says it would
+ * move the remote's resolved default branch. Correct for a real studio
+ * protecting the real tracked repo; this file's own `sh()` never pushes to
+ * anything real — `origin`/`priv` (and every other remote this suite builds)
+ * are throwaway `git init --bare` repos under `tmpdir()`, deleted every
+ * `afterEach`, and the wrapper has no way to tell one of those apart from
+ * the genuine article. Measured directly inside a provisioned studio
+ * container: every fixture that pushes a SECOND time to an already-existing
+ * default-branch ref (simulating origin having moved, or confirming a
+ * worktree is already covered by it — #216 fix 3, #313 Finding 3, issue #1's
+ * own `-nff` fallback case, #233's own two cases) hit the wrapper's "studios
+ * never push the default branch" refusal instead of the real git behavior
+ * the test means to exercise, a false refusal against a repo that was never
+ * real. `resolveRealGit`/`REAL_GIT_SHIM_DIR` route `git` straight past the
+ * wrapper for every fixture in this file — same "goes first on every
+ * fixture's PATH" convention as `TIMEOUT_SHIM_DIR` above. A host with no
+ * wrapper installed at all (CI, a developer's own machine) has nothing to
+ * bypass: `STUDIO_GIT_WRAPPER_PATH` simply does not exist there, so no shim
+ * is built and `git` resolves exactly as it always did.
+ */
+function resolveRealGit(): string {
+  if (existsSync(STUDIO_REAL_GIT_PATH)) return STUDIO_REAL_GIT_PATH;
+  return Bun.which("git", { PATH: process.env.PATH }) ?? "git";
+}
+const REAL_GIT_BIN = resolveRealGit();
+const REAL_GIT_SHIM_DIR = ((): string | null => {
+  if (!existsSync(STUDIO_GIT_WRAPPER_PATH)) return null;
+  const shimDir = mkdtempSync(join(tmpdir(), "fleet-rescue-realgit-shim-"));
+  writeFileSync(join(shimDir, "git"), `#!/bin/sh\nexec '${REAL_GIT_BIN}' "$@"\n`);
+  chmodSync(join(shimDir, "git"), 0o755);
+  return shimDir;
+})();
 /** Goes FIRST on every fixture's PATH (ahead of the inherited one) so
  *  rescue.ts's hardcoded `timeout` invocation resolves to something real
  *  regardless of which of `timeout`/`gtimeout`/neither/perl-shimmed this host
- *  has. */
-const BASE_PATH = `${TIMEOUT_SHIM_DIR ? `${TIMEOUT_SHIM_DIR}:` : ""}${process.env.PATH ?? ""}`;
+ *  has, and so `git` resolves past a provisioned studio's own #253 wrapper
+ *  (see `REAL_GIT_SHIM_DIR`'s own doc comment above) -- in that order, so a
+ *  `gtimeout`/perl shim never shadows this file's own `git` symlink or vice
+ *  versa (neither directory provides the other's binary, so the order
+ *  between the two is not actually load-bearing, only documented for
+ *  clarity). */
+const BASE_PATH = `${REAL_GIT_SHIM_DIR ? `${REAL_GIT_SHIM_DIR}:` : ""}` +
+  `${TIMEOUT_SHIM_DIR ? `${TIMEOUT_SHIM_DIR}:` : ""}${process.env.PATH ?? ""}`;
 
 // Unlike git-wrapper.test.ts's own lane (which skips entirely without a real
 // git on PATH), this file has never had a "no real git" escape hatch — a real
@@ -2356,11 +2398,19 @@ describe("issue #335 — the rescue commit's git identity is configurable, neutr
 // `git` on PATH (the wrapper), leak-gated -- see rescue-leak-gate.test.ts.
 describe("issue #1 — rescue pushes go to a configurable private remote, never origin", () => {
   let priv: string;
-  // Issue #8: the explicit PATH is load-bearing. No-options Bun.which reads
-  // the startup PATH, not the preload's real-git shim (real-git-preload.ts),
-  // so in a studio it returned the leak-gate wrapper; the wrapper's unborn-HEAD
-  // refusal hid "(fetch first)" and the -nff retry never ran.
-  const REAL_GIT = Bun.which("git", { PATH: process.env.PATH }) ?? "/usr/bin/git";
+  // Issue #8 (superseded): this used to resolve via `Bun.which("git", {
+  // PATH: process.env.PATH })` -- load-bearing because no-options Bun.which
+  // reads the preload's real-git shim (real-git-preload.ts) instead of the
+  // startup PATH, hiding the wrapper. That explicit-PATH spelling has the
+  // SAME failure it was trying to dodge inside a provisioned studio
+  // container, though: `process.env.PATH` there puts `STUDIO_GIT_WRAPPER_PATH`
+  // ahead of the real git too, so this constant resolved to the wrapper
+  // itself -- the wrapper's unborn-HEAD refusal hid "(fetch first)" and the
+  // `-nff` retry never ran (measured directly). `REAL_GIT_BIN` (this file's
+  // own module-level `resolveRealGit()`, used to build `REAL_GIT_SHIM_DIR`
+  // above) already resolves past the wrapper unconditionally -- reused here
+  // instead of a second, independently-buggy PATH lookup.
+  const REAL_GIT = REAL_GIT_BIN;
 
   beforeEach(() => {
     priv = join(dir, "private.git");
