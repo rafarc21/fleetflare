@@ -409,6 +409,54 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
     expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
   });
 
+  // Maestro review round 1 on PR #235, MINOR 9 (issue #231) — `const lines =
+  // mark?.lines ?? 0` is a DELIBERATE choice: a studio whose SessionMark has
+  // never synced yet (no mark recorded for it at all) must never be refused
+  // on a guess. Pinned at the EXACT boundary this file's own doc comment
+  // describes, plus the missing-mark case itself.
+  it("MINOR 9: a MISSING SessionMark (never synced yet) is always allowed, regardless of replacedAt/replacementDetected", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { map, storage } = combinedStorage();
+    // Deliberately no `map.set(SESSION_MARK_KEY, ...)` call at all -- the
+    // exact "never synced yet" shape this test exists to pin.
+    map.set(OBSERVED_KEY, { ...emptyObserved(), replacedAt: "2026-09-29T09:00:00.000Z" });
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    );
+
+    expect(status.state).toBe("running");
+    expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+  });
+
+  it("MINOR 9: lines EXACTLY AT the threshold is still allowed; threshold + 1 refuses", async () => {
+    {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      seed(map, "2026-09-29T09:00:00.000Z", FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD);
+
+      const status = await provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      );
+
+      expect(status.state).toBe("running");
+      expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+    }
+    {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      seed(map, "2026-09-29T09:00:00.000Z", FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD + 1);
+
+      await expect(provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      )).rejects.toThrow(FRESH_SESSION_REFUSED_PREFIX);
+      expect(calls.map((c) => c.cmd)).not.toContain(BRINGUP_CMD);
+    }
+  });
+
   // Maestro review round 1 on PR #235, MAJOR 2 — `recordBringupObservation`
   // (every confirmed token-write bring-up, including an unrelated HEAL that
   // happens to land within the SAME incarnation's recovery window) clears

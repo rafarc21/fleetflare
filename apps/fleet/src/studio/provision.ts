@@ -3712,6 +3712,23 @@ export async function provisionWithStorage(
     // never true) must still proceed normally.
     if (obs.replacedAt !== null || obs.session?.replacementDetected === true) {
       const mark = sessionMarkStorage ? await sessionMarkStorage.get(SESSION_MARK_KEY) : undefined;
+      // Maestro review round 1 on PR #235, MINOR 9 (issue #231) — DELIBERATE:
+      // a MISSING SessionMark (no `sessionMarkStorage` port at all, or one
+      // that has never synced a mark for this studio yet) reads as `0`
+      // lines, which is BELOW the threshold and therefore never refuses.
+      // This is an intentional "never refuse on a guess" choice, the same
+      // posture `sessionMarkStorage`'s own trailing-optional parameter doc
+      // comment states: this refusal exists to stop a CONFIRMED large
+      // session from being silently discarded, not to block a provision
+      // this file genuinely cannot measure. A false negative here (missing
+      // mark, but the real session IS large) still lets the operator
+      // through — exactly the SAME trade-off `sessionMarkStorage` being
+      // entirely optional already makes, just extended to the one case
+      // where the port exists but has nothing recorded yet. Pinned by this
+      // file's own test suite at two points: a missing mark (always
+      // allowed, regardless of `replacedAt`/`replacementDetected`) and the
+      // EXACT threshold boundary (`lines === FRESH_SESSION_INVOLUNTARY_LINE_
+      // THRESHOLD` itself still allowed; one line over refuses).
       const lines = mark?.lines ?? 0;
       if (lines > FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD) {
         // Maestro review round 1 on PR #235, MINOR 8 — read HERE, at the
