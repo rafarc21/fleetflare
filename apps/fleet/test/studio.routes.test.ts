@@ -30,7 +30,7 @@ import { emptyObserved, type Observed } from "../src/studio/observed";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { writeFleetAccountLimit, readFleetAccountLimits, readOneAccountLimit } from "../src/studio/account-limits-store";
-import { readFleetAccountUsage } from "../src/studio/account-usage-store";
+import { readFleetAccountUsage, writeFleetAccountUsage } from "../src/studio/account-usage-store";
 import { resolveClaudeAccounts, selectByHeadroom } from "../src/studio/accounts";
 
 // ROLE_PROMPT_B64 is base64 of UTF-8 and every prompt now carries the house
@@ -2961,6 +2961,112 @@ describe("POST /studio/accounts/sync", () => {
     const slightlyFuture = new Date(Date.now() + 30_000).toISOString();
     const res = await handleStudio(syncReq([], slightlyFuture), testEnv);
     expect(res.status).toBe(200);
+  });
+
+  // Issue #246: the `account-usage:<slot>` row has its OWN freshness race,
+  // independent of the account-limit row's own "newer row exists" skip --
+  // that skip only ever guarded the account-limit row, never the separate
+  // usage store the write lands in a moment earlier. An older batch's
+  // "clear" decision must never stomp a newer usage reading already
+  // recorded, even though its account-limit clear is itself (correctly)
+  // applied, because no account-limit row exists to skip against here.
+  it("a clear decision's usage write does NOT stomp a NEWER usage row already recorded (#246)", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const newerSnapshot = { fiveHourPct: 99, sevenDayPct: 88, scopedMaxPct: 77, seenAt: "2026-10-05T00:10:00.000Z" };
+    await writeFleetAccountUsage(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", newerSnapshot);
+
+    const olderUsage = { fiveHourPct: 1, sevenDayPct: 1, scopedMaxPct: 1 };
+    const res = await handleStudio(
+      syncReq(
+        [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: "2026-10-05T00:00:00.000Z", usageAgeSeconds: 0, usage: olderUsage }],
+        "2026-10-05T00:00:00.000Z", // dataTime == usageFetchedAt here, OLDER than the row's own 00:10:00 seenAt
+      ),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(usageRows["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual(newerSnapshot);
+  });
+
+  // Same bug class, the "limit" branch: it writes account-usage:<slot>
+  // unconditionally too (it has no limit-row skip concept at all, since a
+  // limit write is never skipped) -- an older "limit" batch landing late
+  // must not overwrite a newer usage reading either.
+  it("a limit decision's usage write does NOT stomp a NEWER usage row already recorded (#246)", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const newerSnapshot = { fiveHourPct: 99, sevenDayPct: 88, scopedMaxPct: 77, seenAt: "2026-10-05T00:10:00.000Z" };
+    await writeFleetAccountUsage(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", newerSnapshot);
+
+    const olderUsage = { fiveHourPct: 1, sevenDayPct: 1, scopedMaxPct: 1 };
+    const res = await handleStudio(
+      syncReq(
+        [{
+          name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: "2026-10-05T05:00:00.000Z",
+          seenAt: "2026-10-05T00:00:00.000Z", usageAgeSeconds: 0, usage: olderUsage,
+        }],
+        "2026-10-05T00:00:00.000Z",
+      ),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(usageRows["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual(newerSnapshot);
+  });
+
+  // The positive case, not just the regression guard: a genuinely NEWER
+  // usage reading arriving after an older one DOES overwrite it -- the
+  // store must stay live-updatable, not become write-once/immutable.
+  it("a clear decision's usage write DOES overwrite a genuinely OLDER usage row (#246)", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const olderSnapshot = { fiveHourPct: 1, sevenDayPct: 1, scopedMaxPct: 1, seenAt: "2026-10-04T23:50:00.000Z" };
+    await writeFleetAccountUsage(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", olderSnapshot);
+
+    const newerUsage = { fiveHourPct: 99, sevenDayPct: 88, scopedMaxPct: 77 };
+    const usageFetchedAt = "2026-10-05T00:00:00.000Z";
+    const res = await handleStudio(
+      syncReq(
+        [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: usageFetchedAt, usageAgeSeconds: 0, usage: newerUsage }],
+        usageFetchedAt,
+      ),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(usageRows["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ ...newerUsage, seenAt: usageFetchedAt });
+  });
+
+  it("a limit decision's usage write DOES overwrite a genuinely OLDER usage row (#246)", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const olderSnapshot = { fiveHourPct: 1, sevenDayPct: 1, scopedMaxPct: 1, seenAt: "2026-10-04T23:50:00.000Z" };
+    await writeFleetAccountUsage(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", olderSnapshot);
+
+    const newerUsage = { fiveHourPct: 99, sevenDayPct: 88, scopedMaxPct: 77 };
+    const usageFetchedAt = "2026-10-05T00:00:00.000Z";
+    const res = await handleStudio(
+      syncReq(
+        [{
+          name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: "2026-10-05T05:00:00.000Z",
+          seenAt: usageFetchedAt, usageAgeSeconds: 0, usage: newerUsage,
+        }],
+        usageFetchedAt,
+      ),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(usageRows["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ ...newerUsage, seenAt: usageFetchedAt });
   });
 });
 

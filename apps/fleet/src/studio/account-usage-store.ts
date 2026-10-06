@@ -50,3 +50,15 @@ export async function writeFleetAccountUsage(
 ): Promise<void> {
   await setFlag(db, accountUsageStateKey(name), encodeAccountUsageSnapshot(snapshot), Date.parse(snapshot.seenAt));
 }
+
+/**
+ * Issue #246 — the single-account read the sync route (routes.ts) needs PER
+ * DECISION, before it writes: whether this row currently carries a `seenAt`
+ * at least as fresh as the usage reading about to be written. Mirrors
+ * account-limits-store.ts's own `readOneAccountLimit` exactly (same
+ * per-account, single-row read shape) — a different store, kept separate
+ * on purpose, see this file's own header comment for why.
+ */
+export async function readOneAccountUsage(db: D1Database, name: string): Promise<AccountUsageSnapshot | null> {
+  return decodeAccountUsageSnapshot(await getFlag(db, accountUsageStateKey(name)));
+}
