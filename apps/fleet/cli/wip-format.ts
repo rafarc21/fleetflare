@@ -55,11 +55,58 @@ const WIP_CHECK_PRIORITY: Record<"pushed" | "clean" | "markers-only" | "no-check
   failed: 0, pushed: 1, "no-checkout": 2, "markers-only": 3, clean: 4,
 };
 
-function worstWipCheck(
-  checks: Record<string, { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" }>,
-): { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" } | null {
-  let best: { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" } | null = null;
-  for (const c of Object.values(checks)) {
+type WipCheckEntry = { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" };
+
+/**
+ * Maestro review round 1 on PR #245 (issue #241), MAJOR 1 — `wipLastCheck`
+ * changed TYPE, from one blended `{at,result}` object to a per-target map,
+ * with no back-compat either direction:
+ *   - OLD record (written before this field became a map): the WHOLE stored
+ *     value itself IS `{at: "...", result: "failed"}`. Read as a
+ *     `Record<target,{at,result}>`, `Object.values` yields the bare STRINGS
+ *     `"..."`/`"failed"` as "entries" -- neither has a `.result` property,
+ *     so the failure silently vanishes.
+ *   - NEW record read by an old reader expecting the flat shape: symmetric
+ *     problem the other way (see `recordWipLastCheck`'s own back-compat
+ *     write, do.ts, for the fix on THAT side).
+ * Duck-typed ONCE here, so `worstWipCheck` below and `formatWipInspectLines`
+ * share the identical normalized shape rather than two copies of the same
+ * logic that could drift. A key whose own VALUE is itself `{at,result}`
+ * -shaped (`typeof v.at === "string" && typeof v.result === "string"`) is a
+ * REAL per-target entry and always wins over the top-level decoration
+ * `recordWipLastCheck` now also stamps onto the SAME object (its own
+ * `at`/`result` keys) for old-reader back-compat -- those two keys are only
+ * ever read as a target when NO real per-target entry exists at all, i.e.
+ * the stored value genuinely is the OLD flat shape. `LEGACY_WIP_CHECK_KEY`
+ * is a parenthesized sentinel (never a bare ref name -- every real target is
+ * a `/`-bearing git ref) so it can never collide with a genuine target.
+ */
+const LEGACY_WIP_CHECK_KEY = "(legacy)";
+
+function normalizeWipLastCheck(stored: unknown): Record<string, WipCheckEntry> {
+  if (stored == null || typeof stored !== "object") return {};
+  const obj = stored as Record<string, unknown>;
+  const targets: Record<string, WipCheckEntry> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (
+      value !== null && typeof value === "object" &&
+      typeof (value as Partial<WipCheckEntry>).at === "string" &&
+      typeof (value as Partial<WipCheckEntry>).result === "string"
+    ) {
+      targets[key] = value as WipCheckEntry;
+    }
+  }
+  if (Object.keys(targets).length > 0) return targets;
+  if (typeof obj.at === "string" && typeof obj.result === "string") {
+    return { [LEGACY_WIP_CHECK_KEY]: { at: obj.at, result: obj.result as WipCheckEntry["result"] } };
+  }
+  return {};
+}
+
+function worstWipCheck(checks: unknown): WipCheckEntry | null {
+  const normalized = normalizeWipLastCheck(checks);
+  let best: WipCheckEntry | null = null;
+  for (const c of Object.values(normalized)) {
     if (best === null || WIP_CHECK_PRIORITY[c.result] < WIP_CHECK_PRIORITY[best.result]) best = c;
   }
   return best;
@@ -166,8 +213,13 @@ export function formatWipInspectLines(studioId: string, observed: Observed | und
         })();
   const checks = observed.wipLastCheck;
   if (checks != null) {
-    for (const target of Object.keys(checks).sort()) {
-      const check = checks[target];
+    // Maestro review round 1 on PR #245 (issue #241), MAJOR 1 — same
+    // normalization `worstWipCheck` uses above, so an OLD flat-shaped record
+    // still surfaces its own FAILED line here instead of being read as a
+    // target-less map with nothing to iterate.
+    const normalized = normalizeWipLastCheck(checks);
+    for (const target of Object.keys(normalized).sort()) {
+      const check = normalized[target]!;
       if (check.result !== "failed") continue;
       const ms = Date.parse(check.at);
       if (Number.isNaN(ms)) continue;

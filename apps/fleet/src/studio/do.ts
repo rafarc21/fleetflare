@@ -832,16 +832,45 @@ export async function recordWipSyncOnSuccess(
  * just per-target now. Never merged with a prior call's own map: a target
  * silently absent from THIS tick's own map has no fresh evidence either way,
  * so nothing is carried forward or dropped on its behalf.
+ *
+ * Maestro review round 1 on PR #245 (issue #241), MAJOR 1 — old-CLI
+ * back-compat: an OLD reader (pre-#241-item5) expects `wipLastCheck` itself
+ * to BE a flat `{at,result}` object, not a map. Rather than choosing
+ * between the two shapes, this writes BOTH into the SAME object: every real
+ * per-target entry (keyed by its own target name) PLUS a derived `at`/
+ * `result` SUMMARY pair as two extra top-level keys — the WORST result
+ * across every named target this tick, by the identical priority order
+ * `cli/wip-format.ts`'s own rollup uses (duplicated here, not imported: this
+ * file is `src/`, that one is `cli/`, which imports FROM `src/`, never the
+ * reverse). A target literally named `"at"` or `"result"` would collide and
+ * never happens in practice -- every real target name is a `/`-bearing git
+ * ref (`wipSyncRef`'s own shape). An old reader that only ever looked at
+ * `wipLastCheck.at`/`.result` directly keeps seeing a sensible single value
+ * instead of `undefined`; a new reader (`normalizeWipLastCheck`,
+ * cli/wip-format.ts) recognizes the real per-target entries and ignores the
+ * two decoration keys entirely.
  */
 export type WipLastCheckResult = "pushed" | "clean" | "markers-only" | "no-checkout" | "failed";
+
+const WIP_LAST_CHECK_PRIORITY: Record<WipLastCheckResult, number> = {
+  failed: 0, pushed: 1, "no-checkout": 2, "markers-only": 3, clean: 4,
+};
 
 export async function recordWipLastCheck(
   observedStorage: ObservedStorage | null | undefined, now: string, checks: Record<string, WipLastCheckResult>,
 ): Promise<void> {
   if (!observedStorage) return;
-  const entries: Record<string, { at: string; result: WipLastCheckResult }> = {};
-  for (const [target, result] of Object.entries(checks)) entries[target] = { at: now, result };
-  await mergeObserved(observedStorage, { wipLastCheck: entries });
+  const entries: Record<string, unknown> = {};
+  let worst: WipLastCheckResult | null = null;
+  for (const [target, result] of Object.entries(checks)) {
+    entries[target] = { at: now, result };
+    if (worst === null || WIP_LAST_CHECK_PRIORITY[result] < WIP_LAST_CHECK_PRIORITY[worst]) worst = result;
+  }
+  if (worst !== null && !("at" in entries) && !("result" in entries)) {
+    entries.at = now;
+    entries.result = worst;
+  }
+  await mergeObserved(observedStorage, { wipLastCheck: entries as NonNullable<Observed["wipLastCheck"]> });
 }
 
 /**
@@ -863,14 +892,29 @@ export async function recordWipLastCheck(
  * per-target line for a QUIET (clean/markers-only) target, only ONE overall
  * RESCUE_CLEAN/RESCUE_MARKERS_ONLY when NOTHING across every target pushed
  * or failed (`wipSyncCmd`'s own doc comment, rescue.ts). On a fully quiet
- * SUCCESS (`result` given, nothing named by `.pushes`), the main target
- * specifically is labelled with `wipLastCheckResultOf(result)`'s own blended
- * reading (the best available signal — the main's ref name is always known
- * statically, `wipSyncRef(studio, bootStamp)`, unlike a member's own
- * `-wt-<id>` suffix, which this function has no way to invent). A quiet
- * member on that SAME tick is left unlabeled — a real limitation of what
- * wip-sync's own script output can say, not something this function
- * papers over with a guess.
+ * SUCCESS (`result` given, nothing named by `.pushes` AT ALL), the main
+ * target specifically is labelled with `wipLastCheckResultOf(result)`'s own
+ * blended reading (the best available signal — the main's ref name is
+ * always known statically, `wipSyncRef(studio, bootStamp)`, unlike a
+ * member's own `-wt-<id>` suffix, which this function has no way to
+ * invent). A quiet member on that SAME tick is left unlabeled — a real
+ * limitation of what wip-sync's own script output can say, not something
+ * this function papers over with a guess.
+ *
+ * Maestro review round 1 on PR #245 (issue #241), MINOR 5 — that same
+ * `wipLastCheckResultOf(result)` fallback used to run UNCONDITIONALLY
+ * whenever `mainRef` was absent from `.pushes`, including when some OTHER
+ * target (a member worktree) DID push this tick. `result.pushed` is a
+ * BLENDED flag -- true the moment ANYTHING in the whole exec pushed, not
+ * specifically the main checkout -- so `wipLastCheckResultOf` read it as
+ * "pushed" and labelled main "pushed" even though main's own push never
+ * happened. Only called now when `pushes.length === 0` (genuinely nothing
+ * named at all, the fully-quiet case its own doc comment describes); when
+ * something else named a push but main wasn't among them, main reads
+ * "clean" -- the one honest thing this function can say (main did NOT push,
+ * and wip-sync's own script never emits a per-target quiet reason when
+ * ANYTHING else in the same tick pushed, so there is no finer label to
+ * give it) — never "pushed", which was the mislabeling this fixes.
  */
 export function wipTargetChecksFrom(
   studio: string, bootStamp: string, result: RescueResult | null, err: RescuePushFailedError | null,
@@ -880,7 +924,7 @@ export function wipTargetChecksFrom(
   if (result) {
     const pushes = result.pushes ?? (result.pushed && result.branch ? [{ branch: result.branch }] : []);
     for (const p of pushes) out[p.branch] = "pushed";
-    if (!(mainRef in out)) out[mainRef] = wipLastCheckResultOf(result);
+    if (!(mainRef in out)) out[mainRef] = pushes.length === 0 ? wipLastCheckResultOf(result) : "clean";
   }
   if (err) {
     for (const p of err.pushes) out[p.branch] = "pushed";

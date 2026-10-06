@@ -190,6 +190,74 @@ describe("WIP cell — multi-target rollup (#241 item 5)", () => {
   });
 });
 
+/**
+ * Maestro review round 1 on PR #245 (issue #241), MAJOR 1 -- fixture test
+ * "both directions": (a) here -- NEW code reading an OLD-shape stored
+ * record (the pre-#241-item5 flat `{at,result}` object, byte-identical to
+ * what a Worker running before this field became a map would have
+ * written). The rollup must still correctly surface a failure, never
+ * silently read as "pushed" or "-" because a bare string got iterated as
+ * an "entry". See test/studio.session.test.ts's own
+ * "recordWipLastCheck — old-CLI back-compat" describe block for direction
+ * (b) -- an old reader seeing a record written by the NEW code.
+ */
+describe("WIP cell/inspect — legacy single-value back-compat (#241 review round 1, MAJOR 1)", () => {
+  /** Exactly the pre-#241-item5 shape: `wipLastCheck` itself IS `{at,result}`,
+   *  never a map. */
+  function rowWithLegacyWipLastCheck(result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed", at: string): StudioStatus {
+    return {
+      id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      observed: { ...emptyObserved(), wipLastCheck: { at, result } },
+    };
+  }
+
+  test("formatWipCell: a legacy flat FAILED record still reads the age with a trailing '!', never hidden", () => {
+    expect(formatWipCell(rowWithLegacyWipLastCheck("failed", ago(2)), NOW)).toBe("2m!");
+  });
+
+  test("formatWipCell: a legacy flat 'pushed' record reads the plain age, no '!'", () => {
+    expect(formatWipCell(rowWithLegacyWipLastCheck("pushed", ago(2)), NOW)).toBe("2m");
+  });
+
+  test("formatWipInspectLines: a legacy flat FAILED record still appends its own FAILED line", () => {
+    const observed = { ...emptyObserved(), wipSyncedAt: ago(90), wipLastCheck: { at: ago(2), result: "failed" as const } };
+    const lines = formatWipInspectLines("acmeclient--lead", observed, NOW);
+    expect(lines).toEqual([
+      `wip sync:     ${wipSyncRefEcho("acmeclient--lead")}, last synced 90m ago`,
+      "wip sync:     last attempt FAILED for (legacy) 2m ago",
+    ]);
+  });
+
+  test("formatWipInspectLines: a legacy flat successful record appends no FAILED line", () => {
+    const observed = { ...emptyObserved(), wipSyncedAt: ago(2), wipLastCheck: { at: ago(2), result: "pushed" as const } };
+    const lines = formatWipInspectLines("acmeclient--lead", observed, NOW);
+    expect(lines).toEqual([`wip sync:     ${wipSyncRefEcho("acmeclient--lead")}, last synced 2m ago`]);
+  });
+
+  // The NEW hybrid shape (real per-target map PLUS the legacy at/result
+  // decoration recordWipLastCheck now also stamps) must still roll up to
+  // the real per-target entries, never be mistaken for the legacy shape --
+  // decoration is ignored whenever even one real target entry exists.
+  test("formatWipCell: a hybrid record (map + legacy decoration) rolls up the REAL per-target entries, ignoring the decoration", () => {
+    const s: StudioStatus = {
+      id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      observed: {
+        ...emptyObserved(),
+        wipLastCheck: {
+          main: { at: ago(1), result: "pushed" },
+          "member-a": { at: ago(3), result: "failed" },
+          // Legacy decoration -- would read as "pushed" if a reader
+          // mistakenly treated these two keys as the whole value.
+          at: ago(1), result: "pushed",
+        } as unknown as NonNullable<StudioStatus["observed"]>["wipLastCheck"],
+      },
+    };
+    expect(formatWipCell(s, NOW)).toBe("3m!");
+  });
+});
+
 describe("fleet inspect — last-FAILED-attempt line (minor (a))", () => {
   test("appends a second line naming how long ago the last attempt failed", () => {
     const lines = formatWipInspectLines("acmeclient--lead", {

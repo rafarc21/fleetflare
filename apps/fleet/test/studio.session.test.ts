@@ -1910,6 +1910,26 @@ describe("wipTargetChecksFrom — per-target wip-sync status (#241 item 5)", () 
     });
   });
 
+  /**
+   * Maestro review round 1 on PR #245 (issue #241), MINOR 5 -- a successful
+   * `RescueResult` naming ONLY a member push (main's own ref never among
+   * `.pushes`) used to call `wipLastCheckResultOf(result)` on the whole
+   * BLENDED result, which reads `result.pushed === true` (true because the
+   * MEMBER pushed) and wrongly labels main "pushed" too. Main must report
+   * its OWN result -- it did not push, so "clean" (the one honest label
+   * available; wip-sync's own script never emits a per-target quiet reason
+   * when anything ELSE in the same tick pushed), never "pushed".
+   */
+  it("a successful RescueResult naming only a member push: main reads 'clean', never borrows the member's 'pushed'", () => {
+    const result = {
+      pushed: true, branch: memberRef, files: 2, kind: "files" as const,
+      pushes: [{ branch: memberRef, files: 2, kind: "files" as const }],
+    };
+    expect(wipTargetChecksFrom(STUDIO, BOOT_STAMP, result, null)).toEqual({
+      [memberRef]: "pushed", [mainRef]: "clean",
+    });
+  });
+
   it("a quiet (clean) RescueResult naming nothing: main reads the blended skip value, nothing else is named", () => {
     const result = { pushed: false, branch: null, files: 0, skipped: "clean" as const };
     expect(wipTargetChecksFrom(STUDIO, BOOT_STAMP, result, null)).toEqual({ [mainRef]: "clean" });
@@ -1944,7 +1964,15 @@ describe("wipTargetChecksFrom — per-target wip-sync status (#241 item 5)", () 
  *  `WipLastCheckResult` -- stamps `now` onto EVERY entry, replaces the whole
  *  stored map each call (same "stamps on every attempt" discipline as
  *  before, just per-target now; never merged with a prior tick's own map --
- *  a target silently absent this tick has no fresh evidence either way). */
+ *  a target silently absent this tick has no fresh evidence either way).
+ *
+ *  Maestro review round 1 on PR #245 (issue #241), MAJOR 1 -- every write
+ *  below now ALSO carries a derived `at`/`result` legacy summary pair
+ *  (the WORST result across every named target) alongside the real
+ *  per-target entries, in the SAME object, for an old reader that still
+ *  expects `wipLastCheck` to BE that flat shape. See the dedicated
+ *  "old-CLI back-compat" describe block below for the fixture the maestro
+ *  explicitly asked for. */
 describe("recordWipLastCheck — writes the per-target map (#241 item 5)", () => {
   it("writes one {at, result} entry per named target", async () => {
     const storage = fakeCycleStorage({});
@@ -1957,6 +1985,8 @@ describe("recordWipLastCheck — writes the per-target map (#241 item 5)", () =>
     expect(observed.wipLastCheck).toEqual({
       "main-ref": { at: NOW, result: "pushed" },
       "member-ref": { at: NOW, result: "failed" },
+      // Legacy back-compat summary: "failed" is the worst of the two.
+      at: NOW, result: "failed",
     });
   });
 
@@ -1968,11 +1998,57 @@ describe("recordWipLastCheck — writes the per-target map (#241 item 5)", () =>
     await recordWipLastCheck(observedStorage, "2026-10-06T12:05:00.000Z", { a: "pushed" });
 
     const observed = await getObserved(observedStorage);
-    expect(observed.wipLastCheck).toEqual({ a: { at: "2026-10-06T12:05:00.000Z", result: "pushed" } });
+    expect(observed.wipLastCheck).toEqual({
+      a: { at: "2026-10-06T12:05:00.000Z", result: "pushed" },
+      at: "2026-10-06T12:05:00.000Z", result: "pushed",
+    });
   });
 
   it("no observedStorage: a no-op, never throws", async () => {
     await expect(recordWipLastCheck(null, "2026-10-06T12:00:00.000Z", { a: "pushed" })).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * Maestro review round 1 on PR #245 (issue #241), MAJOR 1 -- the fixture
+ * tests explicitly requested, "both directions":
+ *   (a) NEW code reading an OLD-shape stored record -- covered in
+ *       test/bun/fleet-ls-wip.test.ts (`formatWipCell`/`formatWipInspectLines`
+ *       against a hand-written flat `{at,result}` value, the exact shape OLD
+ *       code wrote before this field became a map).
+ *   (b) an OLD reader (simulated here by reading `wipLastCheck.at`/`.result`
+ *       directly, the only two fields an old reader would ever look at)
+ *       seeing a record written by the NEW `recordWipLastCheck` -- still a
+ *       sensible single value, never `undefined`.
+ */
+describe("recordWipLastCheck — old-CLI back-compat (#241 review round 1, MAJOR 1)", () => {
+  it("an old reader (reading .at/.result directly off the stored value) sees the WORST entry's own result, never undefined", async () => {
+    const storage = fakeCycleStorage({});
+    const observedStorage = storage as unknown as ObservedStorage;
+    const NOW = "2026-10-06T12:00:00.000Z";
+
+    // Main pushed, a member failed, same tick -- the exact #241 item 5
+    // bug-report scenario. An old reader must still see "failed", the worst
+    // of the two, never "pushed" and never undefined.
+    await recordWipLastCheck(observedStorage, NOW, { "main-ref": "pushed", "member-ref": "failed" });
+
+    const observed = await getObserved(observedStorage);
+    const oldReaderView = observed.wipLastCheck as unknown as { at: string; result: string };
+    expect(oldReaderView.at).toBe(NOW);
+    expect(oldReaderView.result).toBe("failed");
+  });
+
+  it("every target clean: an old reader sees 'clean', not undefined", async () => {
+    const storage = fakeCycleStorage({});
+    const observedStorage = storage as unknown as ObservedStorage;
+    const NOW = "2026-10-06T12:00:00.000Z";
+
+    await recordWipLastCheck(observedStorage, NOW, { "main-ref": "clean" });
+
+    const observed = await getObserved(observedStorage);
+    const oldReaderView = observed.wipLastCheck as unknown as { at: string; result: string };
+    expect(oldReaderView.at).toBe(NOW);
+    expect(oldReaderView.result).toBe("clean");
   });
 });
 

@@ -440,8 +440,24 @@ export interface Observed {
    * or dropped on its behalf). `cli/wip-format.ts` rolls this up to the
    * WORST status across every named target for its own single-line
    * display — see that file's own doc comment for the exact priority order.
+   *
+   * Maestro review round 1 on PR #245 (issue #241), MAJOR 1 — the type
+   * widens to ALSO allow the pre-#241-item5 flat `{at,result}` shape: a row
+   * written by OLD code (before this field became a map) still has that
+   * shape on disk, and a Worker that rolls back, or a CLI that hasn't
+   * redeployed yet, can still write or read it. `cli/wip-format.ts`'s own
+   * `normalizeWipLastCheck` duck-types which shape a given stored value
+   * actually is, ONCE, so every reader runs the SAME rollup logic
+   * regardless. `recordWipLastCheck` (do.ts) keeps writing a derived
+   * `at`/`result` SUMMARY pair alongside the real per-target map (never
+   * instead of it) — same object, extra top-level keys — so an OLD reader
+   * that only ever looked at `wipLastCheck.at`/`.result` directly still sees
+   * a sensible single value instead of `undefined`.
    */
-  wipLastCheck?: Record<string, { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" }> | null;
+  wipLastCheck?:
+    | Record<string, { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" }>
+    | { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" }
+    | null;
   /**
    * Issue #231 — the on-disk path(s) a `--fresh-session` bring-up actually
    * moved an old session aside to (`parseFreshSession`'s own successfully-
