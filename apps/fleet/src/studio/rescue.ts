@@ -2367,6 +2367,20 @@ export function wipSyncCmd(
   botName = "fleetflare[bot]", botEmail = "fleetflare[bot]@users.noreply.github.com",
   opts: RescuePushOptions = {},
   serverDeadlineSeconds = WIP_SYNC_SERVER_DEADLINE_SECONDS, budgetMarginSeconds = WIP_SYNC_BUDGET_MARGIN_SECONDS,
+  // Issue #241 item 4: the main checkout always went first, members always
+  // walked in the SAME fixed `worktree list --porcelain` order -- a slow
+  // early target that burns most of `wip_budget_ok`'s own remaining budget
+  // starves every LATER target in that fixed order, every single tick,
+  // forever (never just once). `rotationIndex` (do.ts's own `wipSync`
+  // persists and increments `Observed.wipRotationIndex` across ticks, see
+  // that field's own doc comment) picks a DIFFERENT starting target each
+  // tick instead -- `0` default, so every existing call site that does not
+  // pass one keeps today's exact fixed order (main always first). Appended
+  // at the very end, same positional-param-stability reasoning this
+  // function's own doc comment already gives for `serverDeadlineSeconds`/
+  // `budgetMarginSeconds` above: existing callers pass every earlier
+  // parameter positionally, so a new one can only ever be added at the end.
+  rotationIndex = 0,
 ): string {
   const dir = `${root}/${repo}`;
   const scope = `-- . ${RESCUE_MARKER_PATHSPECS}`;
@@ -2580,11 +2594,19 @@ export function wipSyncCmd(
     // starts with `/wip/`, which is all that pattern checks) — still no
     // filter change needed; see `rescueRefStamp`'s own doc comment for the
     // new, distinct match this shape needed there.
+    // Issue #241 item 4: the walk used to be "main unconditionally first,
+    // THEN loop over every member worktree" -- now it is "collect ALL
+    // targets (main plus every member worktree, same discovery order as
+    // before) into one flat array, THEN loop `tcount` times starting from a
+    // ROTATED index" so a slow target never permanently starves whichever
+    // target happens to sort last. Bash 3.2 safe (macOS's own shipped
+    // `/bin/bash` -- see PR #263 round 5's comment on `checked_out` above
+    // for why that constraint is load-bearing in this file): plain indexed
+    // arrays only, no `case` inside a `$(...)` substitution.
     `  any_pushed=0; any_failed=0; any_markers=0\n` +
-    `  wip_sync_one ${dir} ${target}\n` +
-    `  [ "$WIP_RESULT" = pushed ] && any_pushed=1\n` +
-    `  [ "$WIP_RESULT" = failed ] && any_failed=1\n` +
-    `  [ "$WIP_RESULT" = markers ] && any_markers=1\n` +
+    `  tdir=(); tref=()\n` +
+    `  tdir[0]="${dir}"; tref[0]="${target}"\n` +
+    `  tcount=1\n` +
     `  wtporcelain="$(git -C ${dir} worktree list --porcelain 2>/dev/null)"\n` +
     `  wtlist="$(printf '%s\\n' "$wtporcelain" | sed -n 's/^worktree //p')"\n` +
     `  if [ -n "$wtlist" ]; then\n` +
@@ -2592,12 +2614,28 @@ export function wipSyncCmd(
     `      [ "$w" = "${dir}" ] && continue\n` +
     `      [ -d "$w" ] || continue\n` +
     `      wid=$(basename "$(git -C "$w" rev-parse --git-dir)")\n` +
-    `      wip_sync_one "$w" "fleet/rescue/${studio}/wip/${bootStamp}-wt-$wid"\n` +
-    `      [ "$WIP_RESULT" = pushed ] && any_pushed=1\n` +
-    `      [ "$WIP_RESULT" = failed ] && any_failed=1\n` +
-    `      [ "$WIP_RESULT" = markers ] && any_markers=1\n` +
+    `      tdir[$tcount]="$w"; tref[$tcount]="fleet/rescue/${studio}/wip/${bootStamp}-wt-$wid"\n` +
+    `      tcount=$((tcount+1))\n` +
     `    done <<< "$wtlist"\n` +
     `  fi\n` +
+    // `rotationIndex` is a fixed literal baked into this generated script
+    // (do.ts's own `wipSync` resolves it from `Observed.wipRotationIndex`
+    // before building the command) -- `tcount` is NOT known until the
+    // worktree walk above actually runs, so the real `% tcount` has to
+    // happen here, in bash, every single tick, never precomputed in
+    // TypeScript. Negative-safe even though do.ts never persists a negative
+    // value, the same defensive posture every other `%`-based index in this
+    // file already takes.
+    `  tstart=$(( ${rotationIndex} % tcount )); [ "$tstart" -lt 0 ] && tstart=$(( tstart + tcount ))\n` +
+    `  ti=0\n` +
+    `  while [ "$ti" -lt "$tcount" ]; do\n` +
+    `    tidx=$(( (tstart + ti) % tcount ))\n` +
+    `    wip_sync_one "\${tdir[$tidx]}" "\${tref[$tidx]}"\n` +
+    `    [ "$WIP_RESULT" = pushed ] && any_pushed=1\n` +
+    `    [ "$WIP_RESULT" = failed ] && any_failed=1\n` +
+    `    [ "$WIP_RESULT" = markers ] && any_markers=1\n` +
+    `    ti=$((ti+1))\n` +
+    `  done\n` +
     `  if [ "$any_pushed" = 0 ] && [ "$any_failed" = 0 ]; then\n` +
     `    if [ "$any_markers" = 1 ]; then echo "${RESCUE_MARKERS_ONLY}"; else echo "${RESCUE_CLEAN}"; fi\n` +
     `  fi\n` +
