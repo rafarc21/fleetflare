@@ -15,6 +15,7 @@ import {
 } from "../src/studio/claude-swap";
 import {
   OVER_FIVE_HOUR, UNDER_THRESHOLD, OVER_SCOPED_ONLY, RELOGIN_REQUIRED, STALE_OK, CSWAP_LIST_FIXTURE,
+  ABSENT_WILL_LAST_TO_RESET,
 } from "./fixtures/cswap-list";
 
 describe("joinAccountsToCswap", () => {
@@ -250,6 +251,40 @@ describe("joinAccountsToCswap", () => {
     expect(joins![0]).toEqual({
       name: "CLAUDE_CODE_OAUTH_TOKEN_MALFORMED_3", label: null, until: "2026-10-05T14:00:00Z", cswap: null, matchSource: "unmapped",
     });
+  });
+
+  // Regression (issue #244): the fix must stay surgical -- `email` is on
+  // the task's own keep-required list, so an empty/missing email must still
+  // fail `isValidCswapAccountForJoin`, same as before this fix.
+  it("regression: an empty email still fails join validation -- dropped from the pool, never matched", () => {
+    const malformed = {
+      email: "", usageStatus: "ok", usageAgeSeconds: 10,
+      usage: {
+        fiveHour: { pct: 1, resetsAt: null },
+        sevenDay: { pct: 1, resetsAt: null },
+        scoped: [],
+      },
+    } as unknown as CswapAccount;
+    const slots: FleetAccountSlot[] = [{ name: "CLAUDE_CODE_OAUTH_TOKEN_MALFORMED_4", label: "", until: null }];
+    const [joined] = joinAccountsToCswap(slots, [malformed], true);
+    expect(joined.matchSource).toBe("unmapped");
+    expect(joined.cswap).toBeNull();
+  });
+
+  // Issue #244: a real-shape account missing `sevenDay.willLastToReset`
+  // entirely (and `scoped[0].name` entirely) must still pass
+  // `isValidCswapAccountForJoin` and match by label, never get dropped from
+  // the pool as malformed (the pre-fix behavior for this exact shape).
+  it("a real-shape account missing willLastToReset and scoped[].name entirely still matches by label, never dropped as malformed", () => {
+    const slots: FleetAccountSlot[] = [
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", label: ABSENT_WILL_LAST_TO_RESET.email, until: null },
+    ];
+    const [joined] = joinAccountsToCswap(slots, [ABSENT_WILL_LAST_TO_RESET], true);
+    expect(joined).toEqual({
+      name: "CLAUDE_CODE_OAUTH_TOKEN", label: ABSENT_WILL_LAST_TO_RESET.email, until: null,
+      cswap: ABSENT_WILL_LAST_TO_RESET, matchSource: "label",
+    });
+    expect(joined.matchSource).not.toBe("unmapped");
   });
 });
 
@@ -509,6 +544,27 @@ describe("real cswap shape tolerance (maestro real-probe review, issue #240)", (
     };
     const decision = decideAccountSync(joinFor(account), now);
     expect(decision.action).toBe("limit");
+  });
+
+  // Issue #244: `willLastToReset` can be ABSENT entirely (never a key on
+  // `sevenDay` at all), not just `null`/boolean -- observed live, 2026-10-06,
+  // on a fresh account. The old validator required `typeof willLastToReset
+  // === "boolean" || willLastToReset === null`, which an absent key
+  // (reading as `undefined`) failed -- dropping the account as malformed.
+  it("sevenDay.willLastToReset entirely ABSENT (no key at all) is accepted, not rejected as malformed", () => {
+    expect("willLastToReset" in ABSENT_WILL_LAST_TO_RESET.usage!.sevenDay).toBe(false);
+    const decision = decideAccountSync(joinFor(ABSENT_WILL_LAST_TO_RESET), now);
+    expect(decision.action).toBe("clear");
+    expect(decision.action).not.toBe("no-data");
+  });
+
+  // Issue #244's second finding, same bug class: a scoped window missing
+  // `name` entirely (real shape, some accounts) must stay valid -- nothing
+  // in this module reads `.scoped[].name` for any decision.
+  it("a scoped window missing 'name' entirely is accepted, not rejected as malformed", () => {
+    expect("name" in ABSENT_WILL_LAST_TO_RESET.usage!.scoped[0]).toBe(false);
+    const decision = decideAccountSync(joinFor(ABSENT_WILL_LAST_TO_RESET), now);
+    expect(decision.action).not.toBe("no-data");
   });
 });
 

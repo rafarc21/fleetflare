@@ -59,6 +59,17 @@
  * fix (already tolerated; see `OVER_FIVE_HOUR.usage.fiveHour` below, which
  * now carries a couple of these to prove it directly, instead of a new
  * untested claim).
+ *
+ * REVISED again, 2026-10-06, board issue #244: finding 3 above (`null`) was
+ * itself incomplete. Live on a real fresh account (same date), `sevenDay`
+ * OMITTED `willLastToReset` entirely -- that `sevenDay` object carried only
+ * `pct`/`resetsAt`/`countdown`/`clock`, no `willLastToReset` key at all,
+ * same "key absent, not null" pattern finding 2 already found for
+ * `resetsAt`. `ABSENT_WILL_LAST_TO_RESET` below is a new fixture account
+ * matching that exact real shape (including the real `countdown`/`clock`
+ * extra keys, faithfully, same as finding 4 above). The same review also
+ * found a scoped window missing `name` entirely in real output for some
+ * accounts -- `ABSENT_WILL_LAST_TO_RESET.usage.scoped[0]` below omits it too.
  */
 import type { CswapAccount, CswapWindow } from "../../src/studio/claude-swap";
 
@@ -141,6 +152,26 @@ export const STALE_OK: CswapAccount = {
     fiveHour: { pct: 1, resetsAt: "2026-10-05T17:00:00Z" },
     sevenDay: { pct: 2, resetsAt: "2026-10-11T00:00:00Z", willLastToReset: null },
     scoped: [],
+  },
+};
+
+/** Issue #244: matches the exact real shape reported live, 2026-10-06, on a
+ *  fresh account -- `usage.sevenDay` carries only `pct`/`resetsAt`/
+ *  `countdown`/`clock`, no `willLastToReset` key at all (never present,
+ *  never `null` either -- genuinely absent). Also omits `scoped[0].name`
+ *  entirely (issue #244's second finding, same bug class). Comfortably
+ *  under threshold everywhere, fresh reading -- isolates the shape fix from
+ *  any threshold logic. */
+export const ABSENT_WILL_LAST_TO_RESET: CswapAccount = {
+  email: "fresh@example.com",
+  usageStatus: "ok",
+  usageAgeSeconds: 15,
+  usage: {
+    fiveHour: { pct: 2, resetsAt: "2026-10-06T18:00:00Z" },
+    sevenDay: {
+      pct: 3, resetsAt: "2026-10-13T00:00:00Z", countdown: "6d23h", clock: "00:00:00Z",
+    } as unknown as CswapWindow,
+    scoped: [{ pct: 1, resetsAt: "2026-10-13T00:00:00Z" }],
   },
 };
 
