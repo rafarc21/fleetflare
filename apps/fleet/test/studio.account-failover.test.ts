@@ -2,8 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   resolveClaudeAccounts, nextClaudeAccount, claudeAccountToken, accountsTried, earliestAccountReset,
   MAX_CLAUDE_ACCOUNTS, claudeAccountVarName, otherRepoPrimaries, nextBorrowedAccount, repoForAccount,
-  accountIsFree,
-  type ClaudeAccount,
+  accountIsFree, firstFreeAccount, selectFreeAccount, selectByHeadroom, USAGE_ORDERING_FRESHNESS_MS,
+  type ClaudeAccount, type AccountUsageMap,
 } from "../src/studio/accounts";
 import {
   detectRateLimitModal, paneCaptureCmd, accountSwitchCmd, runAccountFailover, FLEET_TOKEN_ENV,
@@ -300,6 +300,178 @@ describe("nextClaudeAccount", () => {
     expect(claudeAccountToken(accounts, null)).toBe(TOKEN_1);
     expect(claudeAccountToken(accounts, "CLAUDE_CODE_OAUTH_TOKEN_9")).toBe(TOKEN_1);
     expect(claudeAccountToken([], null)).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #238 (step 3) — wiring the now-persisted fleet-wide `account-usage:
+// <slot>` rows into the live tier-1/tier-2 failover cascade: a free candidate
+// with a FRESH usage row (<10 min) wins over plain list/wrap order when it
+// has the most headroom (lowest usageMaxPct); stale/missing data falls back
+// to today's unchanged order.
+// ---------------------------------------------------------------------------
+describe("selectByHeadroom (issue #238 step 3)", () => {
+  const A: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 };
+  const B: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
+  const NOW_H = new Date("2026-10-05T12:00:00.000Z");
+
+  function snapshot(fiveHourPct: number, sevenDayPct: number, scopedMaxPct: number | null, ageMs: number): AccountUsageMap[string] {
+    return { fiveHourPct, sevenDayPct, scopedMaxPct, seenAt: new Date(NOW_H.getTime() - ageMs).toISOString() };
+  }
+
+  it("fresh usage wins: the candidate with the lower maxPct is picked over list order", () => {
+    const usage: AccountUsageMap = {
+      [A.name]: snapshot(80, 10, null, 60_000),
+      [B.name]: snapshot(20, 10, null, 60_000),
+    };
+    // Plain list order would pick A first; headroom ordering must prefer B
+    // (maxPct 20 < A's 80).
+    expect(selectByHeadroom([A, B], usage, NOW_H)?.name).toBe(B.name);
+  });
+
+  it("a row pushed just past the 10-minute freshness ceiling loses, falling back to null (today's order)", () => {
+    const usage: AccountUsageMap = {
+      [A.name]: snapshot(80, 10, null, 60_000),
+      [B.name]: snapshot(20, 10, null, USAGE_ORDERING_FRESHNESS_MS), // exactly at the ceiling: >= is stale
+    };
+    // B's own low-pct row is now stale and must never be trusted — A's own
+    // fresh (if worse) row is the only one left, so A wins.
+    expect(selectByHeadroom([A, B], usage, NOW_H)?.name).toBe(A.name);
+  });
+
+  it("a scoped window with a HIGHER pct than fiveHour/sevenDay makes that candidate lose, proving usageMaxPct's scoped-fold is wired end to end", () => {
+    const usage: AccountUsageMap = {
+      // A's plain fiveHour/sevenDay numbers are both LOWER than B's, but A
+      // carries a scoped-model window at 99% — its real usageMaxPct (99) is
+      // worse than B's (40), so B must win.
+      [A.name]: snapshot(10, 10, 99, 60_000),
+      [B.name]: snapshot(40, 40, null, 60_000),
+    };
+    expect(selectByHeadroom([A, B], usage, NOW_H)?.name).toBe(B.name);
+  });
+
+  it("a tie in maxPct resolves to the candidates' own (current/list) order, never a coin-flip", () => {
+    const usage: AccountUsageMap = {
+      [A.name]: snapshot(50, 50, null, 60_000),
+      [B.name]: snapshot(50, 50, null, 60_000),
+    };
+    expect(selectByHeadroom([A, B], usage, NOW_H)?.name).toBe(A.name);
+    // Order reversed in the candidates array: the FIRST element still wins —
+    // "current order" means candidates' own order, not a fixed name.
+    expect(selectByHeadroom([B, A], usage, NOW_H)?.name).toBe(B.name);
+  });
+
+  it("missing usage for every candidate returns null — the caller's own cue to fall back unchanged", () => {
+    expect(selectByHeadroom([A, B], {}, NOW_H)).toBeNull();
+  });
+
+  // Maestro review round 2, MINOR 5: `Date.parse` on a malformed `seenAt`
+  // returns NaN, and `NaN >= freshnessMs` is `false` in JS — so a row with a
+  // genuinely unparseable `seenAt` must never survive the staleness filter as
+  // if it were fresh. A's own pct (10) is the lowest in this fixture, so if
+  // the bug were present A would wrongly win; the fix must exclude it
+  // entirely, leaving B (the only genuinely fresh candidate) as the pick.
+  it("a malformed (unparseable) seenAt is treated as stale, never as the freshest reading", () => {
+    const usage: AccountUsageMap = {
+      [A.name]: { fiveHourPct: 10, sevenDayPct: 10, scopedMaxPct: null, seenAt: "not-a-real-date" },
+      [B.name]: snapshot(50, 10, null, 60_000),
+    };
+    expect(selectByHeadroom([A, B], usage, NOW_H)?.name).toBe(B.name);
+  });
+
+  // Maestro review round 2, MINOR 3: a fresh-but-nearly-spent reading must
+  // never jump ahead of an unknown (no-data) candidate. A has no usage data
+  // at all; B's own fresh reading is 94% used (over the 80 threshold) —
+  // promoting B over the genuinely unknown A is backwards, so the whole
+  // comparator must defer to the caller's own plain-order fallback (null).
+  it("a candidate with no usage data at all is never passed over for a fresh-but-nearly-spent (94%) candidate — defers to null", () => {
+    const usage: AccountUsageMap = { [B.name]: snapshot(94, 10, null, 60_000) };
+    expect(selectByHeadroom([A, B], usage, NOW_H)).toBeNull();
+  });
+
+  // Same shape, but B's fresh reading is a comfortable 30% — promoting a
+  // known-good candidate over an unknown one is correct, so B must win.
+  it("a candidate with no usage data at all loses to a fresh, comfortable (30%) candidate", () => {
+    const usage: AccountUsageMap = { [B.name]: snapshot(30, 10, null, 60_000) };
+    expect(selectByHeadroom([A, B], usage, NOW_H)?.name).toBe(B.name);
+  });
+
+  // Sanity check for the "fresh vs no-data" rule: the 80% threshold only ever
+  // gates a fresh candidate against an UNKNOWN one, never fresh against
+  // fresh. Both A and B have fresh data here (85% and 92%) — the lower one
+  // (85%) must still win even though 85 is itself over 80.
+  it("the 80% promotion threshold never applies between two candidates that both have fresh data", () => {
+    const usage: AccountUsageMap = {
+      [A.name]: snapshot(85, 10, null, 60_000),
+      [B.name]: snapshot(92, 10, null, 60_000),
+    };
+    expect(selectByHeadroom([A, B], usage, NOW_H)?.name).toBe(A.name);
+  });
+});
+
+describe("nextClaudeAccount / firstFreeAccount — headroom ordering (issue #238 step 3)", () => {
+  const A: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN", token: TOKEN_1 };
+  const B: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 };
+  const C: ClaudeAccount = { name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 };
+  const three = [A, B, C];
+  const now = new Date("2026-10-05T12:00:00.000Z");
+
+  function fresh(pct: number, ageMs = 60_000): AccountUsageMap[string] {
+    return { fiveHourPct: pct, sevenDayPct: 0, scopedMaxPct: null, seenAt: new Date(now.getTime() - ageMs).toISOString() };
+  }
+
+  it("nextClaudeAccount: a fresh usage row reorders the forward wrap to the most-headroom free candidate", () => {
+    // Forward wrap from A would plainly land on B first; B's usage is worse
+    // than C's, so C must be picked instead.
+    const usage: AccountUsageMap = { [B.name]: fresh(90), [C.name]: fresh(5) };
+    expect(nextClaudeAccount(three, A.name, {}, now, new Set(), usage)?.name).toBe(C.name);
+  });
+
+  it("nextClaudeAccount: with NO usage data at all (default `{}`), the plain forward-wrap pick is unchanged", () => {
+    expect(nextClaudeAccount(three, A.name)?.name).toBe(B.name);
+  });
+
+  it("nextClaudeAccount: never picks a candidate with a live fleet-wide limit, even if its usage pct is the lowest", () => {
+    // B has the LOWEST usage pct (most headroom) but is fleet-wide limited
+    // right now — selectByHeadroom only ever sees the already-free-filtered
+    // candidate list, so it must still land on C.
+    const limits = { [B.name]: { until: new Date(now.getTime() + 60_000).toISOString(), seenAt: now.toISOString() } };
+    const usage: AccountUsageMap = { [B.name]: fresh(1), [C.name]: fresh(50) };
+    expect(nextClaudeAccount(three, A.name, limits, now, new Set(), usage)?.name).toBe(C.name);
+  });
+
+  it("firstFreeAccount: a fresh usage row reorders the list-order scan to the most-headroom free candidate", () => {
+    const usage: AccountUsageMap = { [A.name]: fresh(90), [B.name]: fresh(5) };
+    expect(firstFreeAccount(three, new Set(), {}, now, usage)?.name).toBe(B.name);
+  });
+
+  it("firstFreeAccount: with NO usage data at all (default `{}`), the plain list-order pick is unchanged", () => {
+    expect(firstFreeAccount(three, new Set(), {}, now)?.name).toBe(A.name);
+  });
+
+  it("firstFreeAccount: stale usage for every candidate falls back to list order, unchanged", () => {
+    const usage: AccountUsageMap = { [A.name]: fresh(90, USAGE_ORDERING_FRESHNESS_MS), [B.name]: fresh(5, USAGE_ORDERING_FRESHNESS_MS) };
+    expect(firstFreeAccount(three, new Set(), {}, now, usage)?.name).toBe(A.name);
+  });
+
+  it("selectFreeAccount: threads usage through to its own tier-1 call (nextClaudeAccount)", () => {
+    // anchor 0, current A, not out-of-scope: tier 1 is nextClaudeAccount over
+    // the whole list — same reordering nextClaudeAccount's own test proves.
+    const usage: AccountUsageMap = { [B.name]: fresh(90), [C.name]: fresh(5) };
+    expect(selectFreeAccount(three, 0, A.name, false, new Set(), {}, now, usage)?.name).toBe(C.name);
+  });
+
+  it("selectFreeAccount: threads usage through to its own tier-2 call (firstFreeAccount over the before-anchor slice)", () => {
+    // anchor 2 (C is this studio's own primary): scopedAccounts = [C], and
+    // nextClaudeAccount(scopedAccounts, current=C, ...) has no OTHER position
+    // to step forward to, so tier 1 always misses here — tier 2 then scans
+    // the before-anchor slice [A, B], and usage must reorder THAT scan too.
+    const usage: AccountUsageMap = { [A.name]: fresh(90), [B.name]: fresh(5) };
+    expect(selectFreeAccount(three, 2, C.name, false, new Set(), {}, now, usage)?.name).toBe(B.name);
+  });
+
+  it("selectFreeAccount: with no usage argument at all (default `{}`), behaves exactly as before this feature", () => {
+    expect(selectFreeAccount(three, 0, A.name, false, new Set(), {}, now)?.name).toBe(B.name);
   });
 });
 
@@ -613,6 +785,11 @@ function harness(opts: {
   /** Issue #131 (Stage B): names the repo a borrowed account belongs to, for
    *  the loud borrow/return notify messages. */
   otherRepoOf?: (name: string) => string | null;
+  /** Issue #238 (step 3): seed a fleet-wide headroom usage fixture, keyed by
+   *  account name — absent entirely (the default) wires NO `deps.accountUsage`
+   *  at all, so `runAccountFailover`'s own `deps.accountUsage ? ... : {}`
+   *  ternary runs its "no dep" branch, same as every pre-#238 test. */
+  accountUsage?: AccountUsageMap;
 }): Harness {
   const execs: string[] = [];
   const recorded: StudioStatus[] = [];
@@ -643,6 +820,7 @@ function harness(opts: {
       ...(opts.display ? { display: opts.display } : {}),
       ...(opts.reservedAccounts ? { reservedAccounts: opts.reservedAccounts } : {}),
       ...(opts.otherRepoOf ? { otherRepoOf: opts.otherRepoOf } : {}),
+      ...(opts.accountUsage ? { accountUsage: { read: async () => opts.accountUsage! } } : {}),
       now: () => opts.now ?? NOW,
       accountLimits: {
         read: async () => Object.fromEntries(accountLimits),
@@ -767,6 +945,60 @@ describe("runAccountFailover — (a) a pane showing the rate-limit modal trigger
     expect(out.kind).toBe("no-modal");
     expect(h.execs.filter((c) => c.includes("respawn-pane"))).toHaveLength(1);
     expect(h.relaunches).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #238 (step 3) — `deps.accountUsage` wired into runAccountFailover's
+// own tier-1/tier-2 cascade: absent behaves identically to every pre-#238
+// test above (no dep at all, `{}` read, plain order); present and fresh
+// genuinely changes which free account a switch lands on.
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — issue #238 step 3: deps.accountUsage reorders the switch target by headroom", () => {
+  it("absent deps.accountUsage: plain forward-wrap order, unchanged (both account 2 and 3 are free)", async () => {
+    const h = harness({ accounts: THREE_ACCOUNTS, pane: captured(MODAL_PANE) });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+  });
+
+  it("present and fresh deps.accountUsage: the switch lands on the free account with the most headroom, not the plain-order one", async () => {
+    const h = harness({
+      accounts: THREE_ACCOUNTS, pane: captured(MODAL_PANE),
+      accountUsage: {
+        // Plain forward wrap from account 1 would land on account 2 first;
+        // account 2's own usage is far worse than account 3's, so the switch
+        // must land on account 3 instead.
+        CLAUDE_CODE_OAUTH_TOKEN_2: { fiveHourPct: 92, sevenDayPct: 10, scopedMaxPct: null, seenAt: NOW.toISOString() },
+        CLAUDE_CODE_OAUTH_TOKEN_3: { fiveHourPct: 4, sevenDayPct: 10, scopedMaxPct: null, seenAt: NOW.toISOString() },
+      },
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_3" });
+  });
+
+  it("present but STALE deps.accountUsage (seenAt past the 10-minute ceiling): falls back to plain order, unchanged", async () => {
+    const stale = new Date(NOW.getTime() - USAGE_ORDERING_FRESHNESS_MS).toISOString();
+    const h = harness({
+      accounts: THREE_ACCOUNTS, pane: captured(MODAL_PANE),
+      accountUsage: {
+        CLAUDE_CODE_OAUTH_TOKEN_2: { fiveHourPct: 92, sevenDayPct: 10, scopedMaxPct: null, seenAt: stale },
+        CLAUDE_CODE_OAUTH_TOKEN_3: { fiveHourPct: 4, sevenDayPct: 10, scopedMaxPct: null, seenAt: stale },
+      },
+    });
+    const out = await run(h);
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+  });
+
+  // Maestro review round 2, MAJOR 2: a transient D1 hiccup on this read must
+  // fail OPEN (plain order, same as if deps.accountUsage were absent), never
+  // abort the whole failover tick -- that would leave a studio stuck on an
+  // already-limited account until the next tick, purely because the
+  // headroom-ordering nice-to-have failed.
+  it("a throwing deps.accountUsage.read() fails open to plain order, instead of aborting the whole tick", async () => {
+    const h = harness({ accounts: THREE_ACCOUNTS, pane: captured(MODAL_PANE) });
+    h.deps.accountUsage = { read: async () => { throw new Error("D1 hiccup"); } };
+    const out = await run(h);
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
   });
 });
 

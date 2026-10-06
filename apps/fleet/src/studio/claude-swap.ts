@@ -264,16 +264,32 @@ export const DEFAULT_LIMIT_THRESHOLD_PCT = 95;
  *  `until` on "limit" is ALWAYS string | null, never undefined — a window
  *  with no resetsAt produces `until: null` explicitly.
  *
- *  `usageAgeSeconds` on "clear" (maestro review round 2, finding 6): the
- *  cswap reading this decision was computed FROM is itself up to this many
- *  seconds stale — `seenAt` (this decision's own wall-clock instant) minus
- *  `usageAgeSeconds` is the real DATA time the reading describes, which is
- *  what a "clear" must be judged fresher-than, never the wall-clock instant
- *  the whole batch's snapshot happened to be taken at. Threaded through to
- *  routes.ts so its MAJOR 6 freshness check can anchor to the right clock. */
+ *  `usageAgeSeconds` on BOTH "limit" and "clear" (maestro review round 2,
+ *  finding 6, and round-2-of-round-2 MAJOR 1): the cswap reading this
+ *  decision was computed FROM is itself up to this many seconds stale —
+ *  `seenAt` (this decision's own wall-clock instant) minus `usageAgeSeconds`
+ *  is the real DATA time the reading describes. On "clear" this is what a
+ *  clear must be judged fresher-than, never the wall-clock instant the whole
+ *  batch's snapshot happened to be taken at (threaded through to routes.ts so
+ *  its MAJOR 6 freshness check can anchor to the right clock). On "limit" it
+ *  is the SAME correction, needed so routes.ts can stamp the persisted
+ *  `account-usage:<slot>` row's own `seenAt` as real data time rather than
+ *  CLI-run-time — a reading already ~10 minutes stale at CLI-run-time would
+ *  otherwise be stored as if it were taken AT CLI-run-time, letting its real
+ *  age reach ~20 minutes by the time a live failover reads the row.
+ *
+ *  Issue #238 step 2: `usage` on "limit"/"clear" is the SAME `UsageHeadroom`
+ *  `toUsageHeadroom` extracts (defined further below in this file) — present
+ *  on BOTH, because a cleared/under-threshold reading's pct is just as
+ *  useful for headroom ordering as a limited one's (the whole reason the new
+ *  `account-usage:<slot>` D1 store, written by routes.ts, is separate from
+ *  the binary `account-limit:<slot>` row). Attached only on the branch that
+ *  already passed every trustworthiness gate below (`usageStatus === "ok"`,
+ *  non-null, fresh, well-formed) — "unmanaged"/"no-data" never carry it,
+ *  since neither has a trustworthy pct to attach. */
 export type SyncDecision =
-  | { name: string; action: "limit"; until: string | null; seenAt: string }
-  | { name: string; action: "clear"; seenAt: string; usageAgeSeconds: number }
+  | { name: string; action: "limit"; until: string | null; seenAt: string; usageAgeSeconds: number; usage?: UsageHeadroom }
+  | { name: string; action: "clear"; seenAt: string; usageAgeSeconds: number; usage?: UsageHeadroom }
   | { name: string; action: "unmanaged" }
   | { name: string; action: "no-data"; reason: string };
 
@@ -362,11 +378,27 @@ export function decideAccountSync(
   }
 
   const { fiveHour, sevenDay, scoped } = cswap.usage;
-  if (fiveHour.pct >= thresholdPct) return { name: join.name, action: "limit", until: fiveHour.resetsAt ?? null, seenAt: now.toISOString() };
-  if (sevenDay.pct >= thresholdPct) return { name: join.name, action: "limit", until: sevenDay.resetsAt ?? null, seenAt: now.toISOString() };
+  const usage = toUsageHeadroom(cswap);
+  if (fiveHour.pct >= thresholdPct) {
+    return {
+      name: join.name, action: "limit", until: fiveHour.resetsAt ?? null, seenAt: now.toISOString(),
+      usageAgeSeconds: cswap.usageAgeSeconds, usage,
+    };
+  }
+  if (sevenDay.pct >= thresholdPct) {
+    return {
+      name: join.name, action: "limit", until: sevenDay.resetsAt ?? null, seenAt: now.toISOString(),
+      usageAgeSeconds: cswap.usageAgeSeconds, usage,
+    };
+  }
   const trippedScoped = scoped.find((w) => w.pct >= thresholdPct);
-  if (trippedScoped) return { name: join.name, action: "limit", until: trippedScoped.resetsAt ?? null, seenAt: now.toISOString() };
-  return { name: join.name, action: "clear", seenAt: now.toISOString(), usageAgeSeconds: cswap.usageAgeSeconds };
+  if (trippedScoped) {
+    return {
+      name: join.name, action: "limit", until: trippedScoped.resetsAt ?? null, seenAt: now.toISOString(),
+      usageAgeSeconds: cswap.usageAgeSeconds, usage,
+    };
+  }
+  return { name: join.name, action: "clear", seenAt: now.toISOString(), usageAgeSeconds: cswap.usageAgeSeconds, usage };
 }
 
 /** Item 5's pure comparator input: a candidate account with however fresh
@@ -379,13 +411,54 @@ export interface HeadroomCandidate {
 
 const DEFAULT_FRESHNESS_MS = 10 * 60 * 1000;
 
-/** maxPct(a) = max(fiveHour.pct, sevenDay.pct). Callers of
- *  `pickHeadroomAccount` only ever pass candidates with a real usage
- *  reading already in hand (item 5 is unchanged/out of scope for this
- *  rework — see this module's own header), so `usage` is asserted non-null
- *  here rather than re-validated. */
+/** The three numbers `usageMaxPct` compares — already-extracted, so it never
+ *  touches `CswapAccount`'s own nested shape. */
+export interface UsageHeadroom {
+  fiveHourPct: number;
+  sevenDayPct: number;
+  /** null when no scoped windows exist/are reported — never 0, which would
+   *  wrongly dominate a real low reading. */
+  scopedMaxPct: number | null;
+}
+
+/**
+ * Issue #238: the real "how limited is this account" number — the fold-in
+ * `pickHeadroomAccount` was missing before this fix (it only ever compared
+ * fiveHourPct/sevenDayPct, silently blind to a scoped per-model window that
+ * is itself the tightest constraint). `scopedMaxPct ?? -Infinity` means a
+ * null (no scoped windows) never wins/dominates the max — it simply drops
+ * out, leaving plain max(fiveHourPct, sevenDayPct).
+ */
+export function usageMaxPct(u: UsageHeadroom): number {
+  return Math.max(u.fiveHourPct, u.sevenDayPct, u.scopedMaxPct ?? -Infinity);
+}
+
+/**
+ * Extracts a `CswapAccount`'s three headroom numbers. Assumes well-formed,
+ * already-validated input (same posture `decideAccountSync`'s own
+ * threshold-check code takes once past its own validation gates) — callers
+ * of `pickHeadroomAccount` only ever pass candidates with a real usage
+ * reading already in hand, so `usage` is asserted non-null here rather than
+ * re-validated.
+ */
+export function toUsageHeadroom(cswap: CswapAccount): UsageHeadroom {
+  const usage = cswap.usage!;
+  return {
+    fiveHourPct: usage.fiveHour.pct,
+    sevenDayPct: usage.sevenDay.pct,
+    scopedMaxPct: usage.scoped.length ? Math.max(...usage.scoped.map((s) => s.pct)) : null,
+  };
+}
+
+/** maxPct(a) = usageMaxPct(toUsageHeadroom(a)) — folds the scoped window in,
+ *  fixed per issue #238 (previously `max(fiveHour.pct, sevenDay.pct)` only,
+ *  silently blind to a scoped window that was itself the tightest
+ *  constraint). Callers of `pickHeadroomAccount` only ever pass candidates
+ *  with a real usage reading already in hand (item 5 is unchanged/out of
+ *  scope for the #232 rework — see this module's own header), so `usage` is
+ *  asserted non-null inside `toUsageHeadroom` rather than re-validated. */
 function maxPct(cswap: CswapAccount): number {
-  return Math.max(cswap.usage!.fiveHour.pct, cswap.usage!.sevenDay.pct);
+  return usageMaxPct(toUsageHeadroom(cswap));
 }
 
 /**

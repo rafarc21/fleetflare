@@ -16,7 +16,7 @@
  * this feature's usual reason (do.ts imports "@cloudflare/sandbox"; see
  * provision.ts's header). do.ts wires the ports and owns the schedule.
  */
-import type { ClaudeAccount, AccountLimits } from "./accounts";
+import type { ClaudeAccount, AccountLimits, AccountUsageMap } from "./accounts";
 import {
   accountsTried, nextClaudeAccount, earliestAccountReset, nextBorrowedAccount, accountIsFree, firstFreeAccount,
   selectFreeAccount, deriveSearchAnchor,
@@ -1200,6 +1200,24 @@ export interface FailoverDeps {
    */
   accountBurn?: {
     read(): Promise<Record<string, { window5hOutput: number }>>;
+  };
+  /**
+   * Issue #238 (step 3) — fleet-wide per-account headroom usage pct
+   * (account-usage-store.ts's `readFleetAccountUsage`, D1-backed the same way
+   * `accountLimits`/`accountBurn` are), read ONCE per tick and handed to
+   * accounts.ts's tier-1/tier-2 cascade (`nextClaudeAccount`/
+   * `firstFreeAccount`/`selectFreeAccount`) so a switch prefers the free
+   * candidate with the most headroom when its usage row is fresh (<10 min —
+   * accounts.ts's `USAGE_ORDERING_FRESHNESS_MS`), falling back to today's
+   * plain order when it is stale, missing, or this whole field is absent.
+   * Never read by the tier-3 borrow pass (`nextBorrowedAccount`) — out of
+   * scope, a different metric (burn, not usage-limit pct), see accounts.ts's
+   * own header for the full reasoning. Absent (every caller/test that
+   * predates this feature): no fleet-wide headroom is known, and every tier
+   * reads `{}` — i.e. plain order, byte-identical to before this feature.
+   */
+  accountUsage?: {
+    read(): Promise<AccountUsageMap>;
   };
   /**
    * Issue #131 (Stage B) — accounts.ts's `repoForAccount`, wired here for the
@@ -2564,6 +2582,28 @@ export async function runAccountFailover(
   const scopedAccounts = deps.accounts.slice(anchor);
   const limits = deps.accountLimits ? await deps.accountLimits.read() : {};
   const reserved = deps.reservedAccounts ?? new Set();
+  // Issue #238 (step 3) — fleet-wide headroom usage, read ONCE per tick (same
+  // "absent dep -> never an extra D1 read" shape `limits`/`accountBurn`
+  // already give) and threaded only into the tier-1/tier-2 calls just below —
+  // never into the tier-3 borrow pass (`nextBorrowedAccount`, further down),
+  // out of scope (see accounts.ts's own header and FailoverDeps.accountUsage's
+  // own doc comment for why).
+  //
+  // Maestro review round 2, MAJOR 2: a transient D1 hiccup on this read must
+  // never abort the WHOLE failover tick -- that would leave a studio stuck on
+  // an already-limited account until the next tick, purely because the
+  // headroom-ordering nice-to-have failed, exactly backwards for a feature
+  // whose whole design is "fail open to {}, never worse than doing nothing".
+  // Same fail-open-to-"{}"-plus-console.warn pattern do.ts's own
+  // launchAccountOrRefuse already uses for its own readFleetAccountUsage call.
+  let usage: AccountUsageMap = {};
+  if (deps.accountUsage) {
+    try {
+      usage = await deps.accountUsage.read();
+    } catch (err) {
+      console.warn(`studio ${idFallback}: deps.accountUsage.read() failed, reordering as if no headroom were known (fail open)`, err);
+    }
+  }
   // Review round 2, finding 4 — `current` falls OUTSIDE `scopedAccounts`
   // only in the new borrowed-before-`start` case the anchor above pins:
   // every other caller still lands inside it by construction. Ordinary
@@ -2573,8 +2613,8 @@ export async function runAccountFailover(
   // convention wrongly skips position 0 rather than treating it as a
   // genuine candidate).
   const candidate = currentOutOfScope
-    ? firstFreeAccount(scopedAccounts, reserved, limits, deps.now())
-    : nextClaudeAccount(scopedAccounts, current, limits, deps.now(), reserved);
+    ? firstFreeAccount(scopedAccounts, reserved, limits, deps.now(), usage)
+    : nextClaudeAccount(scopedAccounts, current, limits, deps.now(), reserved, usage);
   // Review round 2 (maestro review of PR #135), finding 3 — tier 2, tried
   // ONLY once the first pass just above found nothing: an "unclaimed spare"
   // — an account positioned BEFORE this studio's own primary (never visible
@@ -2601,7 +2641,7 @@ export async function runAccountFailover(
   // never let a tier-2 spare it never acts on change what a studio is
   // reported as parked on — see `parkedOn`'s own first use below).
   const outOfScopeSpare = candidate === null && deps.autoFailover
-    ? selectFreeAccount(deps.accounts, anchor, current, currentOutOfScope, reserved, limits, deps.now())
+    ? selectFreeAccount(deps.accounts, anchor, current, currentOutOfScope, reserved, limits, deps.now(), usage)
     : null;
   // Issue #131 (Stage B) — the borrow third pass, entered ONLY when BOTH
   // passes above found NOTHING (`candidate === null && outOfScopeSpare ===

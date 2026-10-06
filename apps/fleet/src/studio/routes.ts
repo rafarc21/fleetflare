@@ -40,6 +40,7 @@ import { resolveClaudeAccounts, accountLabel } from "./accounts";
 import {
   readFleetAccountLimits, writeFleetAccountLimit, clearFleetAccountLimit, readOneAccountLimit,
 } from "./account-limits-store";
+import { writeFleetAccountUsage } from "./account-usage-store";
 import { countWorkerExceptions } from "../exceptions";
 
 const ROUTE_RE = /^\/studio\/([^/]+)\/(status|provisioned|provision|restart|recycle|destroy|wake|check|rescue|inspect|ws\/terminal|paste|terminal|clear-session-guard)$/;
@@ -529,6 +530,25 @@ export async function handleStudio(
    * write at all — purely informational, echoed back in `applied` alongside
    * limit/clear/skip since all are "handled", distinct from `rejected`
    * (unknown name, malformed entry, invalid action, invalid until/seenAt).
+   *
+   * Issue #238 step 2: a "limit"/"clear" entry MAY also carry a `usage`
+   * field (claude-swap.ts's `UsageHeadroom`, attached by `decideAccountSync`
+   * whenever its own reading passed every trustworthiness gate). When
+   * present, this route ALSO writes it to the new, separate
+   * `account-usage:<slot>` row (`writeFleetAccountUsage`, account-usage-
+   * store.ts) — a DIFFERENT store from the binary `account-limit:<slot>` row
+   * above, kept for headroom-ordering's own pct need (see that store's own
+   * header for why the two are never merged). Written on BOTH "limit" and
+   * "clear" — a cleared/under-threshold pct is just as useful for ordering
+   * as a limited one's — and independently of whichever applied/skipped
+   * outcome the account-limit row itself got. `usage`'s own shape is
+   * validated when present (`isValidUsageField`): each pct a finite number,
+   * `scopedMaxPct` a finite number or explicit null. A malformed `usage`
+   * rejects the WHOLE entry (no limit/clear write either) — same
+   * partial-success convention as every other per-entry validation above,
+   * never a silent garbage write or a partial one. An absent `usage` key
+   * (older/future caller) skips this extra write entirely — unchanged
+   * existing limit/clear behaviour.
    */
   if (url.pathname === "/studio/accounts/sync") {
     if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
@@ -552,6 +572,14 @@ export async function handleStudio(
     if (typeof usageFetchedAtRaw !== "string" || !Number.isFinite(Date.parse(usageFetchedAtRaw))) {
       return new Response("\"usageFetchedAt\" must be a valid ISO timestamp", { status: 400 });
     }
+    // Maestro review round 2, MINOR 4: a clock-skewed or malicious client
+    // claiming a FUTURE snapshot time must not be trusted — same whole-
+    // request 400 as the "must parse" check just above, since every "clear"
+    // in the batch depends on usageFetchedAt meaning something real.
+    const USAGE_FETCHED_AT_FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
+    if (Date.parse(usageFetchedAtRaw) - Date.now() > USAGE_FETCHED_AT_FUTURE_TOLERANCE_MS) {
+      return new Response("\"usageFetchedAt\" must not be more than 2 minutes in the future", { status: 400 });
+    }
     const usageFetchedAt = usageFetchedAtRaw;
 
     const known = new Set(resolveClaudeAccounts(env).map((a) => a.name));
@@ -572,6 +600,33 @@ export async function handleStudio(
       return typeof name === "string"
         && (action === "limit" || action === "clear" || action === "unmanaged" || action === "no-data");
     };
+
+    // Issue #238 step 2: `usage`'s own shape, when present on a "limit"/
+    // "clear" entry — each pct a finite number, `scopedMaxPct` a finite
+    // number or explicit null (never a string/NaN/undefined). An ABSENT
+    // `usage` key is not validated here at all (that's the caller's "no
+    // usage field" case, handled separately below) — this only runs once a
+    // `usage` key is confirmed present.
+    const isFiniteNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+    // Maestro review round 2, MINOR 4 (tightened, not duplicated): a pct must
+    // be a finite number WITHIN [0, 100] — the pre-existing check only ever
+    // tested "finite number", never a real range, so a garbage value like
+    // 150 or -5 slipped straight through.
+    const isValidPct = (v: unknown): v is number => isFiniteNum(v) && v >= 0 && v <= 100;
+    const isValidUsageField = (usage: unknown): usage is { fiveHourPct: number; sevenDayPct: number; scopedMaxPct: number | null } => {
+      if (typeof usage !== "object" || usage === null) return false;
+      const u = usage as Record<string, unknown>;
+      return isValidPct(u.fiveHourPct) && isValidPct(u.sevenDayPct) && (u.scopedMaxPct === null || isValidPct(u.scopedMaxPct));
+    };
+
+    // Maestro review round 2, MAJOR 1: this account's own data time —
+    // `usageFetchedAt - usageAgeSeconds` — is the real DATA time a usage
+    // reading describes, never the bare `usageFetchedAt` the CLI subprocess
+    // happened to run at. Shared by both "limit" and "clear" below, same
+    // optional-on-the-wire, falls-back-to-age-0 convention finding 6 already
+    // established for "clear" alone — now also applied to "limit".
+    const parseUsageAgeSeconds = (v: unknown): number =>
+      typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
 
     // Duplicate `name` within one batch is a race, not a decision: two
     // writes for the same slot in the same Promise.all have no defined
@@ -629,10 +684,40 @@ export async function handleStudio(
           rejected.push({ name, reason: "invalid seenAt" });
           return;
         }
+        // Issue #238 step 2: a `usage` key, if present at all, must be
+        // well-formed — reject the WHOLE entry (no limit write, no usage
+        // write) on a malformed shape rather than writing garbage or
+        // crashing. Absent `usage` (older/future caller) just skips the
+        // extra write below, same existing behaviour otherwise.
+        const rawUsage = (entry as Record<string, unknown>).usage;
+        if (rawUsage !== undefined && !isValidUsageField(rawUsage)) {
+          rejected.push({ name, reason: "invalid usage" });
+          return;
+        }
+        // Maestro review round 2, MAJOR 1: the persisted `account-usage:
+        // <slot>` row's own `seenAt` must be the real DATA time — this
+        // account's own `usageFetchedAt - usageAgeSeconds`, same formula
+        // finding 6 already used for the account-limit store's freshness
+        // comparison — never the bare `usageFetchedAt` (CLI-run-time), which
+        // can already be up to MAX_USAGE_AGE_SECONDS (10 min) stale on its
+        // own. Same optional-on-the-wire, falls-back-to-age-0 convention
+        // finding 6 established for "clear", now also applied to "limit".
+        const usageAgeSeconds = parseUsageAgeSeconds((entry as Record<string, unknown>).usageAgeSeconds);
+        const usageDataTimeIso = new Date(Date.parse(usageFetchedAt) - usageAgeSeconds * 1000).toISOString();
         // MAJOR 5: a usage sighting must never un-dead an account — read the
         // row's current state first and preserve `dead: true` if it's set.
         const current = await readOneAccountLimit(env.DB, name);
         await writeFleetAccountLimit(env.DB, name, until, seenAt, current?.dead ? true : undefined, "usage");
+        if (rawUsage !== undefined) {
+          // Maestro review round 2, MINOR 4: built field-by-field, never a
+          // `{ ...rawUsage, seenAt }` spread — a spread would persist
+          // arbitrary extra keys from a client-controlled JSON body straight
+          // into D1.
+          await writeFleetAccountUsage(env.DB, name, {
+            fiveHourPct: rawUsage.fiveHourPct, sevenDayPct: rawUsage.sevenDayPct, scopedMaxPct: rawUsage.scopedMaxPct,
+            seenAt: usageDataTimeIso,
+          });
+        }
         applied.push(name);
         return;
       }
@@ -643,20 +728,43 @@ export async function handleStudio(
           rejected.push({ name, reason: "invalid seenAt" });
           return;
         }
+        // Issue #238 step 2 — same whole-entry rejection as the "limit"
+        // branch above; see that branch's own comment for why.
+        const rawUsage = (entry as Record<string, unknown>).usage;
+        if (rawUsage !== undefined && !isValidUsageField(rawUsage)) {
+          rejected.push({ name, reason: "invalid usage" });
+          return;
+        }
         // Finding 6 (maestro review round 2): the freshness yardstick is
         // THIS account's own data time, not the shared `usageFetchedAt` —
         // see this route's own doc comment above for why. `usageAgeSeconds`
         // is optional on the wire: absent or not a finite non-negative
         // number falls back to age 0 (dataTime === usageFetchedAt), the same
         // behaviour this route had before this fix.
-        const rawUsageAgeSeconds = (entry as Record<string, unknown>).usageAgeSeconds;
-        const usageAgeSeconds = typeof rawUsageAgeSeconds === "number" && Number.isFinite(rawUsageAgeSeconds) && rawUsageAgeSeconds >= 0
-          ? rawUsageAgeSeconds
-          : 0;
+        const usageAgeSeconds = parseUsageAgeSeconds((entry as Record<string, unknown>).usageAgeSeconds);
         const dataTimeMs = Date.parse(usageFetchedAt) - usageAgeSeconds * 1000;
         // MAJOR 6: don't stomp a fresher sighting a different path already
         // recorded after this account's reading was actually taken.
         const current = await readOneAccountLimit(env.DB, name);
+        // Issue #238 step 2: the usage-pct store is independent of the
+        // account-limit row's own skip/clear outcome above — a cleared OR
+        // skipped account's pct is equally real and worth recording for
+        // headroom ordering, so this write runs regardless of which branch
+        // below is taken.
+        //
+        // Maestro review round 2, MAJOR 1: this row's own `seenAt` is the
+        // same real-data-time correction as the "limit" branch above — this
+        // branch already computed `dataTimeMs` for its own MAJOR-6 skip
+        // check just below, but was still stamping the usage row with the
+        // bare wall-clock `seenAt` rather than that same data time.
+        if (rawUsage !== undefined) {
+          // Maestro review round 2, MINOR 4: same field-by-field write, no
+          // spread — see the "limit" branch above for why.
+          await writeFleetAccountUsage(env.DB, name, {
+            fiveHourPct: rawUsage.fiveHourPct, sevenDayPct: rawUsage.sevenDayPct, scopedMaxPct: rawUsage.scopedMaxPct,
+            seenAt: new Date(dataTimeMs).toISOString(),
+          });
+        }
         if (current && Date.parse(current.seenAt) >= dataTimeMs) {
           skipped.push({ name, reason: "newer row exists" });
           return;
