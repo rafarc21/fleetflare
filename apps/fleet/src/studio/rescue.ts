@@ -4,6 +4,7 @@
 import { RESCUE_MARKER_PATHSPECS } from "./rescue-gc";
 import { KILL_GRACE_SECONDS } from "./exec-deadline";
 import { STUDIO_REAL_GIT_PATH } from "./credentials";
+import { MintTokenError } from "../github/mint-token-error";
 
 /**
  * Issue #1 piece 5: origin can be PUBLIC, so rescued work goes to a PRIVATE
@@ -57,7 +58,8 @@ export function resolveRescueRemote(env: { FLEET_RESCUE_REMOTE?: string }): stri
  * unknown and origin is where that studio's work already lives.
  */
 export async function resolveRescueTarget(
-  env: { FLEET_RESCUE_REMOTE?: string }, mint: (repo: string) => Promise<string | null>,
+  env: { FLEET_RESCUE_REMOTE?: string },
+  mint: (repo: string, permissions: { contents: "read" | "write"; workflows?: "write" }) => Promise<string | null>,
   workRepoIsPrivate: () => Promise<boolean>,
   // PR #42 review: provision's discovery (issue #30) asks every provision.
   // There the expected cases (unset, private repo) are silent, and real
@@ -110,7 +112,7 @@ export async function resolveRescueTarget(
     if (!priv) return toOrigin(`${slug} is not confirmed private`);
   }
   try {
-    const token = await mint(slug);
+    const token = await mintRescuePushToken(mint, slug, rescueMintPermissions(purpose));
     if (token === null) return toOrigin(`no write token for ${slug} (PAT fleet: set FLEET_RESCUE_GITHUB_TOKEN)`);
     return { remoteUrl: `https://github.com/${slug}.git`, env: { [RESCUE_TOKEN_ENV]: token } };
   } catch (err) {
@@ -132,9 +134,90 @@ export async function resolveRescueTarget(
  * Rescue pushes (write). Provision's rescue-branch discovery only lists and
  * fetches, so it gets read: a token leaked from a provision exec cannot
  * write the archive.
+ *
+ * Issue #233: `push` also asks for `workflows: write`. A rescue remote with
+ * disjoint history (it has never seen this repo before) reads a push that
+ * touches `.github/workflows/*` as a workflow CREATE/UPDATE -- GitHub
+ * refuses that outright for a token with no `workflow` scope, even though
+ * the push is otherwise a plain `contents: write`. `discovery` never pushes
+ * (list + fetch only), so it has no workflow-scope need and stays
+ * read-only. NOTE (see this fix's own PR body / plan doc): GitHub's
+ * token-mint `permissions` field can only NARROW the App installation's own
+ * configured permissions, never widen past them (github/app.ts's
+ * `mintInstallationToken` doc comment) -- asking for `workflows: write`
+ * here does nothing unless the App installation itself was already granted
+ * that permission in its own GitHub settings, an operator-side change this
+ * code cannot make. PR #236 review round 2: that unverified fact is exactly
+ * why `resolveRescueTarget` never mints with THIS function's `"push"` result
+ * directly without a fallback -- see `mintRescuePushToken` below, which asks
+ * for it first but is prepared to retry without it.
  */
-export function rescueMintPermissions(purpose: "push" | "discovery"): { contents: "read" | "write" } {
-  return { contents: purpose === "discovery" ? "read" : "write" };
+export function rescueMintPermissions(
+  purpose: "push" | "discovery",
+): { contents: "read" | "write"; workflows?: "write" } {
+  return purpose === "discovery" ? { contents: "read" } : { contents: "write", workflows: "write" };
+}
+
+/**
+ * PR #236 review round 2, BLOCKER: `rescueMintPermissions("push")` asking for
+ * `workflows: write` on EVERY push-purpose mint means an App installation
+ * that was never granted that permission 422s EVERY rescue push, not only the
+ * rare one that actually touches `.github/workflows/*` -- turning a narrow,
+ * correct fix (issue #233, above) into a universal regression: every rescue
+ * would fall back to the leak-gated origin path (refused, or forced
+ * `--discard-unsynced`, per that path's own doc comment) whenever the
+ * installation lacks Workflows, a fact nothing in this codebase can verify
+ * ahead of time.
+ *
+ * Tries `permissions` as given first. On a rejection, retries ONCE with
+ * `{ contents: "write" }` -- the ORIGINAL, pre-#233 request, which the App
+ * installation has always had to support for rescue to have ever worked at
+ * all -- but ONLY when both of these hold:
+ *   (a) `permissions.workflows` was actually requested (`undefined` for a
+ *       discovery-purpose or already-narrow call -- those have nothing to
+ *       retry narrower, and discovery's own contract stays untouched, exactly
+ *       as the review asked);
+ *   (b) the rejection is a `MintTokenError` with `status === 422` -- GitHub's
+ *       "Unprocessable Entity", which already rules out network/auth/rate-
+ *       limit failures (401/403/429/5xx, or a thrown non-`MintTokenError` at
+ *       all) that a narrower permission request could never fix anyway.
+ *
+ * Detection note (documented, not guessed): a 422 alone does NOT uniquely
+ * mean "GitHub rejected these permissions" -- `mintRepoToken` (github/
+ * auth.ts) already has its OWN 422 case, a renamed/transferred repo, and
+ * retries THAT internally before ever re-throwing. GitHub's response body
+ * for a permission-not-granted mint is not a documented, stable,
+ * machine-parseable shape this code can safely text-match against (and there
+ * is no live App installation lacking Workflows available to confirm one
+ * against). So this does not attempt to distinguish "permissions" 422s from
+ * "something else" 422s by parsing text -- by the time a 422 reaches here,
+ * `mintRepoToken`'s own rename-retry has ALREADY run and ruled itself out (it
+ * only re-throws the original error once its own canonical-name retry also
+ * found nothing to fix), so what's left is either a genuine permissions
+ * rejection or some other validation failure this code cannot name. Retrying
+ * narrower on EITHER is safe: it costs one extra mint call, and succeeding is
+ * strictly better than falling back to origin -- if the real cause was
+ * unrelated to `workflows`, the narrower mint fails too and this falls
+ * through to the SAME origin fallback a pre-this-fix failure already used.
+ * If it succeeds, the resulting token genuinely lacks `workflows` regardless
+ * of why the first attempt failed, so the warning logged below is accurate
+ * either way.
+ */
+async function mintRescuePushToken(
+  mint: (repo: string, permissions: { contents: "read" | "write"; workflows?: "write" }) => Promise<string | null>,
+  repo: string,
+  permissions: { contents: "read" | "write"; workflows?: "write" },
+): Promise<string | null> {
+  try {
+    return await mint(repo, permissions);
+  } catch (err) {
+    if (permissions.workflows === undefined || !(err instanceof MintTokenError) || err.status !== 422) throw err;
+    const token = await mint(repo, { contents: "write" });
+    console.error(
+      "rescue: token minted without workflows; workflow-touching pushes may be refused -- grant App Workflows: write",
+    );
+    return token;
+  }
 }
 
 /** Single-quotes `s` for bash. */
@@ -214,8 +297,12 @@ export function rescuePushPrelude(opts: RescuePushOptions): string {
  * runs (#359) — and a hook resolving `@{u}` on an upstream-less branch
  * failed the rescue, refusing destroy. One bounded `ls-remote` per run,
  * cached; a failed listing reads as "not on origin", so the push still runs
- * (the saving direction). Exact tip match only: an ancestor of a tip is not
- * provable without fetching.
+ * (the saving direction). Originally exact-tip-match only ("an ancestor of
+ * a tip is not provable without fetching") — issue #80 (below) added a
+ * bounded fetch-and-merge-base ancestor check for the worktree's OWN
+ * checked-out branch name, and issue #233 (further below) extended that
+ * same check to also try origin's own default-branch name, so an ancestor
+ * (not just an exact tip) is provable today, for either name.
  *
  * Fix round (#208 PR #215 review item 1): BLOCKER — a wip-sync tip
  * (`fleet/rescue/<studio>/wip/<bootStamp>`, rescue.ts's `wipSyncCmd`) must
@@ -272,13 +359,37 @@ function rescueOnOriginFn(pushTimeoutSeconds: number): string {
     // failure = not on origin, so the push still runs. `grep -F`: a branch
     // name is not a regex. `--refmap=`: a configured wide fetch refspec must
     // not move refs/remotes/origin/<branch> behind the lead's back.
-    `  [ -n "\${3:-}" ] || return 1\n` +
-    `  printf '%s\\n' "$__rheads" | cut -f2 | grep -Fqx -e "refs/heads/$3" || return 1\n` +
-    `  rescue_budget_ok on-origin >/dev/null || return 1\n` +
-    `  timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" fetch -q --no-tags --refmap= origin "+refs/heads/$3:refs/fleet-rescue-check/tip" </dev/null >/dev/null 2>&1 || return 1\n` +
-    `  git -C "$1" merge-base --is-ancestor "$2" refs/fleet-rescue-check/tip 2>/dev/null; __ranc=$?\n` +
-    `  git -C "$1" update-ref -d refs/fleet-rescue-check/tip 2>/dev/null\n` +
-    `  [ "$__ranc" = 0 ]\n` +
+    //
+    // Issue #233: tried for TWO names, in order -- `$3` (the worktree's own
+    // checked-out branch, #80's original case) and origin's own DEFAULT
+    // branch (via `refs/remotes/origin/HEAD`, set by every clone, shallow
+    // included). A detached-HEAD worktree has no `$3` at all (`symbolic-ref
+    // --short HEAD` on a detached checkout fails, and the caller passes that
+    // empty) -- the only way such a worktree, genuinely behind (not AT) a
+    // moved-ahead default-branch tip with no local tracking ref to prove it
+    // for free, is ever recognized as already-saved. A loop, not two copies
+    // of this block: same budget check, same scratch ref, same cleanup, one
+    // name tried at a time, first ancestry match wins. `$__rdef` is resolved
+    // once, outside the loop (cheap, local, no network): the full ref form
+    // (`symbolic-ref -q`, not `--short`) is stripped of its known
+    // `refs/remotes/origin/` prefix by parameter expansion -- `--short`'s own
+    // shortening of a `refs/remotes/...` ref leaves the `origin/` SEGMENT on
+    // (`origin/main`, not `main`), which would never match a `refs/heads/$3`
+    // membership test against `$__rheads` below.
+    `  __rdef=$(git -C "$1" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null); __rdef=\${__rdef#refs/remotes/origin/}\n` +
+    `  __rseen=""\n` +
+    `  for __rname in "\${3:-}" "$__rdef"; do\n` +
+    `    [ -n "$__rname" ] || continue\n` +
+    `    case " $__rseen " in *" $__rname "*) continue ;; esac\n` +
+    `    __rseen="$__rseen $__rname"\n` +
+    `    printf '%s\\n' "$__rheads" | cut -f2 | grep -Fqx -e "refs/heads/$__rname" || continue\n` +
+    `    rescue_budget_ok on-origin >/dev/null || return 1\n` +
+    `    timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} git -C "$1" fetch -q --no-tags --refmap= origin "+refs/heads/$__rname:refs/fleet-rescue-check/tip" </dev/null >/dev/null 2>&1 || continue\n` +
+    `    git -C "$1" merge-base --is-ancestor "$2" refs/fleet-rescue-check/tip 2>/dev/null; __ranc=$?\n` +
+    `    git -C "$1" update-ref -d refs/fleet-rescue-check/tip 2>/dev/null\n` +
+    `    [ "$__ranc" = 0 ] && return 0\n` +
+    `  done\n` +
+    `  return 1\n` +
     `}\n`
   );
 }
