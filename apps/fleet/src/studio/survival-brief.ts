@@ -107,6 +107,22 @@ export interface SurvivalInput {
    * were genuinely zero refs.
    */
   unclaimedRescueBranches: Checked<string[]>;
+  /**
+   * Issue #241, item 1 — SOURCE 3's own wip-sync refs (`survival-delivery.ts`'s
+   * `isWipRescueRef`: main checkout's `wip/<14digits>`, member worktree's
+   * `wip/<14digits>-wt-<id>`), partitioned OUT of `unclaimedRescueBranches`
+   * and out of `attributeRescueBranch`'s candidate pool entirely, before
+   * either ever runs. A wip ref is a LIVE, periodically-refreshed safety
+   * net, not an abandoned teardown rescue -- attributing one to a task is
+   * nonsense (item 3's own fix, a direct consequence of this exclusion), and
+   * labeling it "unclaimed" implies an abandonment it doesn't have. Rendered
+   * as its own "Live wip snapshot" line (see `liveWipSnapshotLine` below),
+   * worded distinctly from `unclaimedRescueLine` so neither section is ever
+   * mistaken for the other. Same `Checked<T>` discipline as
+   * `unclaimedRescueBranches` -- a failed rescue-branch fetch, or a failed
+   * task lookup, fails this section too, symmetrically.
+   */
+  liveWipRefs: Checked<string[]>;
   /** PR1's (#85) own bring-up verdict record, passed through as-is -- null
    *  before any bring-up has completed under that feature. Replaces the
    *  bare `lastSnapshotAgeS: number | null` this field used to be: PR1's
@@ -342,6 +358,17 @@ function prLine(pr: SurvivalOpenPr): string {
  *  nothing here should assume that holds for every ref ever pushed). */
 function unclaimedRescueLine(ref: string): string {
   return `- Unclaimed rescue ref: ${sanitizeBranch(ref)} (not attributed to any task)`;
+}
+
+/** Issue #241, item 1 — one line per LIVE wip-sync ref (`liveWipRefs`),
+ *  worded distinctly from `unclaimedRescueLine` above: "unclaimed" implies
+ *  an abandonment a continuously-refreshed safety net doesn't have. Same
+ *  `sanitizeBranch` treatment as every other ref this composer renders. */
+function liveWipSnapshotLine(ref: string): string {
+  return (
+    `- Live wip snapshot: ${sanitizeBranch(ref)} ` +
+    "(refreshed periodically while the studio was running, not attributed to any task)"
+  );
 }
 
 /** Review fix (#107 re-review): the restore outcome's own word, shown
@@ -655,6 +682,9 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
     // whole brief, which drops the one line ("could not check") this fix
     // exists to add.
     input.unclaimedRescueBranches.ok && input.unclaimedRescueBranches.value.length === 0 &&
+    // Issue #241, item 1 -- same "a FAILED check is never genuinely nothing
+    // to report" discipline as `unclaimedRescueBranches` just above.
+    input.liveWipRefs.ok && input.liveWipRefs.value.length === 0 &&
     input.session === null;
   if (genuinelyEmpty) return "";
 
@@ -705,6 +735,22 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
     const sorted = input.unclaimedRescueBranches.value.slice().sort();
     for (const ref of sorted.slice(0, MAX_LINES_PER_SECTION)) {
       lines.push(unclaimedRescueLine(ref));
+    }
+    if (sorted.length > MAX_LINES_PER_SECTION) {
+      lines.push(`- +${sorted.length - MAX_LINES_PER_SECTION} more`);
+    }
+  }
+
+  // Issue #241, item 1 -- same Checked-section rendering discipline as
+  // unclaimedRescueBranches just above, right next to it (both are SOURCE
+  // 3's own output), but worded distinctly: a live wip snapshot is not an
+  // "unclaimed" rescue ref.
+  if (!input.liveWipRefs.ok) {
+    lines.push(`- Live wip snapshots: could not check (${sanitizeText(input.liveWipRefs.reason)})`);
+  } else if (input.liveWipRefs.value.length > 0) {
+    const sorted = input.liveWipRefs.value.slice().sort();
+    for (const ref of sorted.slice(0, MAX_LINES_PER_SECTION)) {
+      lines.push(liveWipSnapshotLine(ref));
     }
     if (sorted.length > MAX_LINES_PER_SECTION) {
       lines.push(`- +${sorted.length - MAX_LINES_PER_SECTION} more`);

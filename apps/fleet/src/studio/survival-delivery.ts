@@ -417,6 +417,35 @@ export function rescueRefStamp(studioId: string, branch: string): string | null 
 }
 
 /**
+ * Issue #241, item 1 — picks the 2 WIP-SYNC shapes (main checkout's
+ * `wip/<14digits>`, member worktree's `wip/<14digits>-wt-<id>`) out of the 5
+ * `rescueRefStamp` matches, so SOURCE 3 can partition them from the other 3
+ * genuine-rescue shapes BEFORE attribution ever runs (see
+ * `resolveSurvivalInput`'s own SOURCE 3 block below): a wip ref is a LIVE,
+ * periodically-refreshed safety net, never an abandoned teardown rescue —
+ * attributing one to a task is nonsense, and "unclaimed" implies an
+ * abandonment it doesn't have.
+ *
+ * Reuses `rescueBranchNestedPrefix` rather than re-deriving it, and copies
+ * (never rewrites) the exact two `wip/`-branch regexes `rescueRefStamp`
+ * itself already anchors — this is a NARROWER re-check of the same shapes,
+ * not a second, independently-anchored matcher that could drift. A branch
+ * that doesn't even match the nested prefix, or that matches it but isn't
+ * one of the 3 OTHER shapes `rescueRefStamp` recognizes, is simply `false`
+ * here too: this predicate answers "is this specifically a wip ref", never
+ * "is this a rescue ref at all" (that's still `isRescueBranchFor`'s job).
+ */
+export function isWipRescueRef(studioId: string, branch: string): boolean {
+  const nested = rescueBranchNestedPrefix(studioId);
+  if (!branch.startsWith(nested)) return false;
+  const rest = branch.slice(nested.length);
+  if (!rest.startsWith("wip/")) return false;
+  const afterWip = rest.slice(4);
+  if (new RegExp(`^[0-9]{${RESCUE_STAMP_DIGITS}}-wt-\\S+$`).test(afterWip)) return true;
+  return new RegExp(`^[0-9]{${RESCUE_STAMP_DIGITS}}$`).test(afterWip);
+}
+
+/**
  * Board issue #228, item 3 — the inverse of `rescue.ts`'s own
  * `formatRescueStamp`: parses a 14-digit `YYYYMMDDHHMMSS` UTC stamp (same
  * zero-padded field order) back into a `Date`. Lives HERE, not rescue.ts,
@@ -668,6 +697,10 @@ export async function resolveSurvivalInput(
       // instead of the bare `[]` this used to be (which a reader could
       // mistake for "checked, and genuinely nothing").
       unclaimedRescueBranches: { ok: false, reason: tasks.reason },
+      // Issue #241, item 1 — same symmetry as `unclaimedRescueBranches` just
+      // above: attribution never ran, so the wip/real partition never ran
+      // either.
+      liveWipRefs: { ok: false, reason: tasks.reason },
       session,
       now,
       wipSyncedAt,
@@ -738,8 +771,24 @@ export async function resolveSurvivalInput(
   // there were genuinely zero refs.
   const unresolved = resolved.filter((r) => r.branch === null);
   let unclaimedRescueBranches: Checked<string[]>;
+  let liveWipRefs: Checked<string[]>;
   try {
     const fetched = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
+    // Issue #241, item 1 — partitioned BEFORE the age filter, BEFORE
+    // `attributeRescueBranch`, BEFORE `unclaimedRescueBranches`: a wip ref is
+    // a LIVE, periodically-refreshed safety net, never an abandoned teardown
+    // rescue. Excluding it here, rather than filtering it out of the
+    // attribution candidate pool further down, is what makes item 3 (never
+    // attribute a wip ref as a task's branch) a direct, structural
+    // consequence of this split rather than a second check that could be
+    // forgotten later.
+    const wipRefs: string[] = [];
+    const realRefs: string[] = [];
+    for (const b of fetched) {
+      if (isWipRescueRef(sources.studioId, b)) wipRefs.push(b);
+      else realRefs.push(b);
+    }
+
     // Board issue #228, item 3 — too stale to list is also too stale to
     // attribute: a ref whose own embedded stamp is older than
     // `SURVIVAL_RESCUE_REF_MAX_AGE_DAYS` (measured against `now`, NEVER the
@@ -748,10 +797,11 @@ export async function resolveSurvivalInput(
     // practice -- `rescueBranchesFor` already filtered to `isRescueBranchFor`
     // matches, which `rescueRefStamp` agrees with by construction) is kept
     // rather than dropped: never discard a real ref over an age this
-    // function failed to compute.
+    // function failed to compute. Real (non-wip) refs ONLY -- unchanged from
+    // before #241, same stamp-based cap for the other 3 shapes.
     const maxAgeMs = SURVIVAL_RESCUE_REF_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
     const nowMs = Date.parse(now);
-    const refs = fetched.filter((b) => {
+    const refs = realRefs.filter((b) => {
       const stamp = rescueRefStamp(sources.studioId, b);
       if (stamp === null) return true;
       const at = parseRescueStamp(stamp);
@@ -767,9 +817,40 @@ export async function resolveSurvivalInput(
       }
     }
     unclaimedRescueBranches = { ok: true, value: unclaimed };
+
+    // Issue #241, item 2 — a wip ref's embedded stamp is the CONTAINER'S
+    // BOOT TIME, fixed for that container's whole lifetime while
+    // `wipSyncCmd` force-pushes an ever-newer commit to the SAME ref name
+    // every ~5 minutes -- the stamp-based filter above is wrong for this
+    // shape (a 3-week-old boot reads as "too stale" even with a 2-minute-old
+    // commit). `sources.compareAhead` gives the REAL last-commit time; the
+    // SAME 14-day cutoff applies against THAT instead. Per-ref outcomes,
+    // same discipline every other lookup in this function already uses: a
+    // 404 (`null`) means the ref is genuinely gone -- drop it. A thrown
+    // error, or a `lastCommitAt` GitHub didn't return, means this function
+    // failed to compute the age -- KEEP it, never discard a real ref over a
+    // lookup this function failed to make (the exact words the age-filter
+    // comment above already uses for the equivalent case on the other
+    // shapes).
+    const liveWip: string[] = [];
+    for (const b of wipRefs) {
+      try {
+        const cmp = await sources.compareAhead(b);
+        if (cmp === null) continue;
+        if (cmp.lastCommitAt === null) { liveWip.push(b); continue; }
+        const at = Date.parse(cmp.lastCommitAt);
+        if (Number.isNaN(at) || Number.isNaN(nowMs) || nowMs - at <= maxAgeMs) liveWip.push(b);
+      } catch (err) {
+        console.error(`survival re-brief: wip-ref age compare for ${sources.studioId} failed`, err);
+        liveWip.push(b);
+      }
+    }
+    liveWipRefs = { ok: true, value: liveWip };
   } catch (err) {
     console.error(`survival re-brief: rescue-branch fetch for ${sources.studioId} failed`, err);
-    unclaimedRescueBranches = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    const reason = err instanceof Error ? err.message : String(err);
+    unclaimedRescueBranches = { ok: false, reason };
+    liveWipRefs = { ok: false, reason };
   }
 
   // SOURCE 4 (#234) — anchored task-number match against every branch name
@@ -877,6 +958,7 @@ export async function resolveSurvivalInput(
 
   return {
     studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, unclaimedRescueBranches,
+    liveWipRefs,
     session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp,
     asideShip,
     // PR #239 review finding 1 -- only set when true, same "absent stays
