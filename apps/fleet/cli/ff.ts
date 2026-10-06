@@ -2,10 +2,14 @@
 /**
  * `ff` — spawn-or-attach in two letters (P4 design §2.13 decision 13, §10).
  *
- * the operator types `ff` in a repo folder and lands in a working claude session for
- * that repo's Maestro. Nothing else typed. That is the whole product surface.
+ * the operator types `ff <role>` in a repo folder and lands in a working claude
+ * session for that repo's role. Nothing else typed, almost the whole product
+ * surface — EXCEPT the role `maestro`: board issue #250 (maestro is ALWAYS
+ * LOCAL, never a cloud studio) means bare `ff` and `ff maestro` both refuse
+ * instead of spawning, since the role they'd resolve to is maestro. See
+ * src/studio/ff.ts's ffDecision for the refusal and the maestro-playbook
+ * skill's Role section for why.
  *
- *   ff                   this repo's maestro
  *   ff <role>            this repo's web-studio / release-studio / ...
  *   ff <role> "<task>"   file that task, spawn the studio FOR it, attach
  *   ff <role> <n>        adopt existing issue #n, spawn the studio FOR it, attach

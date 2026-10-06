@@ -24,7 +24,7 @@ when the laptop closes, and they carry guardrails a local session does not.
 | parallel work across repos | you need to watch every keystroke |
 
 The fleet costs a container boot and a task on the board. **Provisioning
-takes about 5 minutes** — measured 2026-09-16, `acme-os--maestro` spawned
+takes about 5 minutes** — measured 2026-09-16, `acme-os--web-studio` spawned
 09:18, `provisioned` 09:23. Below that threshold, work locally.
 
 **Leave a provisioning studio alone.** Destroying and respawning inside that
@@ -35,7 +35,7 @@ this way and concluded the fleet was broken.
 
 A **studio** is one container: one claude session (the **lead**) plus member
 subagents. Its id is `<repo>--<role>` — `websites--web-studio`,
-`beta--maestro` — or `<repo>--<role>--<n>` for the second and later studio of
+`beta--release-studio` — or `<repo>--<role>--<n>` for the second and later studio of
 the same role in one repo (issue #269): `websites--pilot--2`,
 `beta--web-studio--3`. There is no `--1`; instance 1 IS the bare
 `<repo>--<role>` id, and every id that existed before #269 keeps meaning
@@ -50,12 +50,17 @@ told to dispatch.
 task specs, spawns studios, reports status. Other studios never message it —
 they report to the board.
 
-**Vocabulary (the operator 2026-09-18): CTO = the operator, the human. Maestro = the
-coordinator role, on two substrates with ONE rulebook** — the *local* maestro is
-the Claude session the operator talks to (formerly called "CTO"); the *cloud* maestro is
-the `<repo>--maestro` studio, running while he is away. `org.json` still lists a
-`cto` role and an `operator` node from before this; those are being reconciled
-in the blueprint (board task).
+**Vocabulary (board issue #250, 2026-10-06): CTO = the operator, the human.
+Maestro is ALWAYS LOCAL** — a Claude Code session on the operator's own
+machine (formerly called "CTO"), where he can see and control it directly.
+There is no cloud substrate for this role: a `<repo>--maestro` cloud studio
+is a misconfiguration, not a normal spawn target, and
+`fleet/blueprint/studios/maestro/studio.md` is a stub for exactly that case
+— a cloud studio provisioned with this role stops and escalates to the
+operator instead of coordinating anything. See the `maestro-playbook`
+skill's Role section for the full rule. `org.json` still lists a `cto` role
+and an `operator` node from before this; those are being reconciled in the
+blueprint (board task).
 
 A maestro uses subagents only when the output INFORMS or ADMINISTERS (status,
 PR checks, grooming, closing issues, research, briefs, creating a worker) —
@@ -87,6 +92,11 @@ look undefined. That misdiagnosis has already been made once.
 | `pilot` | `scratch` |
 | `web-studio`, `release-studio`, `scratch` | **nothing** |
 
+The `maestro` row describes what the LOCAL maestro's own (unrestricted,
+operator-credentialed) spawns map onto in-container — never a cloud
+`maestro` lead exercising it, since that substrate never runs (see
+Vocabulary above).
+
 So a `web-studio` lead gets 403 for every role. That is the gate working, not
 a dead capability. The in-container help says "within this studio's org-chart
 edges" and does not list them — this table does. A lead that cannot fan out
@@ -104,15 +114,21 @@ so in the brief. The envelope comment on the board is the lead's own channel.
 ## Start here
 
 ```
-ff                      # this repo's maestro — spawn if absent, then attach
-ff web-studio           # another role, same repo
+ff web-studio           # this repo's web-studio — spawn if absent, then attach
+ff release-studio       # another role, same repo
 ff web-studio "<task>"  # file the task, spawn a studio FOR it, attach
 ff web-studio 42        # adopt EXISTING issue #42, spawn a studio on it
 ff pilot --new "<task>" # an ADDITIONAL pilot beside the one already running
 ```
 
-Repo comes from your cwd's git remote. Run `ff` in `~/code/example-repo` and you
-get `example-repo--maestro` working on example-repo.
+Repo comes from your cwd's git remote. Run `ff web-studio` in
+`~/code/example-repo` and you get `example-repo--web-studio` working on
+example-repo.
+
+**Bare `ff` (no role) and `ff maestro` both REFUSE**, on purpose (board issue
+#250): the role they would resolve to is `maestro`, and maestro never runs
+as a cloud studio — see the Vocabulary note above. The refusal names a local
+maestro session as the alternative; nothing to spawn or attach to here.
 
 `ctrl-]` detaches. The studio keeps running.
 
