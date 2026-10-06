@@ -97,7 +97,7 @@ import type { MemguardKillLogEntry } from "./memguard-log";
 import {
   syncSessionTick, shipAsideSessions, asideNotShippedNote, ASIDE_SHIP_KEY, BURN_KEY, SYNC_SESSION_SECONDS, SESSION_GUARD_KEY, SESSION_MARK_KEY, SESSION_FORCE_KEY,
   BURN_PERSIST_ERROR_KEY,
-  type SessionSyncDeps, type SessionSyncStorage, type SyncResult,
+  type SessionSyncDeps, type SessionSyncStorage, type SyncResult, type AsideShipRecord,
 } from "./session-sync";
 import { runDestroy, type DestroyOutcome } from "./destroy";
 import {
@@ -6037,6 +6037,13 @@ export class StudioDO extends Sandbox<Env> {
       const snapshot = await getObserved(this.ctx.storage);
       const session = snapshot.session;
       if (session === null) return;
+      // Maestro review round 2 on PR #235 (issue #231), item 2b — its own
+      // DO-storage key (ASIDE_SHIP_KEY), not part of the merged Observed
+      // blob `snapshot` above (same split mirrorBurnToRegistry's own
+      // `asideShip` read already follows). A live read here is safe for the
+      // same reason `snapshot.wipSyncedBootStamp` above's is: this key only
+      // ever moves on a genuine ship tick, never mid-bring-up.
+      const asideShip = await this.ctx.storage.get(ASIDE_SHIP_KEY);
       const outcome = await deliverSurvivalBriefOnBringup(
         this.ctx.storage,
         async () => ({
@@ -6067,12 +6074,16 @@ export class StudioDO extends Sandbox<Env> {
           // Maestro review round 1 on PR #235, MAJOR 3 (issue #231): same
           // "frozen here" treatment as wipSyncedAt/wipBootStamp above.
           lastSessionAsideAt: snapshot.lastSessionAsideAt ?? null,
+          // Maestro review round 2 on PR #235 (issue #231), item 2b — passed
+          // through AS READ: `undefined` (no ship has run) must stay distinct
+          // from `null` (a ship ran clean), never coerced with `?? null`.
+          asideShip,
         }),
         () => this.survivalBusy(),
         this.survivalCompose(
           workRepoSlug, session, snapshot.wipSyncedAt ?? null, session.wipBootStampBefore ?? null,
           snapshot.lastSessionAside ?? null, snapshot.lastSessionAsideAt ?? null,
-          snapshot.wipSyncedBootStamp ?? null,
+          snapshot.wipSyncedBootStamp ?? null, asideShip,
         ),
         (prompt) => this.wakeStudioOnAssignment(prompt),
         () => ctx.moved(),
@@ -6151,6 +6162,11 @@ export class StudioDO extends Sandbox<Env> {
           workRepoSlug, pending.session, pending.wipSyncedAt ?? null, pending.session.wipBootStampBefore ?? null,
           pending.lastSessionAside ?? null, pending.lastSessionAsideAt ?? null,
           pending.wipSyncedBootStamp ?? null,
+          // Maestro review round 2 on PR #235 (issue #231), item 2b — the
+          // pending record's OWN frozen copy (SurvivalBriefPending.
+          // asideShip), never a fresh read, same reason every other field in
+          // this call is the pending record's own copy and not a live one.
+          pending.asideShip,
         )(),
         (prompt) => this.wakeStudioOnAssignment(prompt, true),
       ));
@@ -6211,6 +6227,12 @@ export class StudioDO extends Sandbox<Env> {
     // "caller's own frozen capture" treatment as every param above — see
     // composeSurvivalDelivery's own doc comment.
     wipSyncedBootStamp: string | null = null,
+    // Maestro review round 2 on PR #235 (issue #231), item 2b: same
+    // "caller's own frozen capture" treatment as every param above.
+    // `undefined` (no ship has run) and `null` (a ship ran clean) are both
+    // meaningful and distinct — see `SurvivalInput.asideShip`'s own doc
+    // comment, survival-brief.ts.
+    asideShip?: AsideShipRecord | null,
   ): () => Promise<ComposedBrief> {
     return async () => {
       let tasks: SurvivalTaskRef[];
@@ -6221,7 +6243,7 @@ export class StudioDO extends Sandbox<Env> {
       }
       return composeSurvivalDelivery(
         this.survivalSources(workRepoSlug), { ok: true, value: tasks }, session, new Date().toISOString(),
-        wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp,
+        wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp, asideShip,
       );
     };
   }

@@ -1058,15 +1058,29 @@ describe("(#231 fix 2a, superseded by round 2 item 1) the WIP safety-net line na
 // R2 copy (sessions/<studioId>/aside/<dir>/) is the one that survives. The
 // field never auto-clears, so a LATER brief now renders an age alongside the
 // claim instead of repeating it as freshly-true forever.
-describe("(#231 fix 2b, revised round 1 MAJOR 3) the old-session-moved-aside line", () => {
+//
+// Maestro review round 2 on PR #235 (issue #231), item 2a -- `ASIDE_R2`
+// below now keeps the full `fleet-aside-` prefix: the REAL R2 key
+// (`sessionAsideManifestKey`/`sessionAsidePartKey`, session-sync.ts) uses
+// the aside dir's OWN FULL NAME (`ASIDE_DIR_RE`,
+// `/^fleet-aside-[A-Za-z0-9-]+$/`), which includes that prefix. The PRE-fix
+// constant here stripped it too, pinning the exact bug the maestro's own
+// review traced.
+//
+// Item 2b -- every test in this describe block that renders the confident
+// R2 path now passes `asideShip: null` ("the last ship attempt had nothing
+// failing") explicitly: `asideShip` undefined/absent means "no ship attempt
+// has run since the move", which is its own, separately-tested rendering.
+describe("(#231 fix 2b, revised round 1 MAJOR 3, round 2 items 2a/2b) the old-session-moved-aside line", () => {
   const ASIDE = "~/.claude/projects/fleet-aside-20261003T115000Z-42--workspace-acmeclient";
-  const ASIDE_R2 = "sessions/demosite-life--release-studio/aside/20261003T115000Z-42--workspace-acmeclient/";
+  const ASIDE_R2 = "sessions/demosite-life--release-studio/aside/fleet-aside-20261003T115000Z-42--workspace-acmeclient/";
 
-  it("lastSessionAside non-empty -> names the R2 destination, never the local path, with an age", () => {
+  it("lastSessionAside non-empty, ship confirmed -> names the R2 destination, never the local path, with an age", () => {
     const out = composeSurvivalBrief(baseInput({
       session: baseSession(),
       lastSessionAside: [ASIDE],
       lastSessionAsideAt: "2026-09-24T13:50:00.000Z", // 10m before baseInput's default `now`
+      asideShip: null,
     }));
     expect(out).toContain(
       `- Old session moved aside to ${ASIDE_R2} (R2 -- the local copy is gone if this container was later ` +
@@ -1079,6 +1093,7 @@ describe("(#231 fix 2b, revised round 1 MAJOR 3) the old-session-moved-aside lin
     const out = composeSurvivalBrief(baseInput({
       session: baseSession(),
       lastSessionAside: [ASIDE],
+      asideShip: null,
     }));
     expect(out).toContain(`- Old session moved aside to ${ASIDE_R2} (R2 -- the local copy is gone if this container was later replaced), unknown age; check it for anything lost since then.`);
   });
@@ -1087,21 +1102,23 @@ describe("(#231 fix 2b, revised round 1 MAJOR 3) the old-session-moved-aside lin
     for (const value of [undefined, null, [] as string[]]) {
       const out = composeSurvivalBrief(baseInput({
         session: baseSession(),
+        asideShip: null,
         ...(value === undefined ? {} : { lastSessionAside: value }),
       }));
       expect(out).not.toContain("moved aside");
     }
   });
 
-  it("multiple paths -> all named as R2 destinations, comma-separated", () => {
+  it("multiple paths, ship confirmed -> all named as R2 destinations, comma-separated", () => {
     const out = composeSurvivalBrief(baseInput({
       session: baseSession(),
       lastSessionAside: [ASIDE, `${ASIDE}-2`],
       lastSessionAsideAt: "2026-09-24T13:50:00.000Z",
+      asideShip: null,
     }));
     expect(out).toContain(
       `- Old session moved aside to ${ASIDE_R2}, sessions/demosite-life--release-studio/aside/` +
-      "20261003T115000Z-42--workspace-acmeclient-2/ (R2 -- the local copy is gone if this container was later " +
+      "fleet-aside-20261003T115000Z-42--workspace-acmeclient-2/ (R2 -- the local copy is gone if this container was later " +
       "replaced), 10m ago; check it for anything lost since then.",
     );
   });
@@ -1115,6 +1132,7 @@ describe("(#231 fix 2b, revised round 1 MAJOR 3) the old-session-moved-aside lin
       session: baseSession(),
       lastSessionAside: [ASIDE],
       lastSessionAsideAt: "2026-09-01T00:00:00.000Z", // well over 14 days before baseInput's default `now`
+      asideShip: null,
     }));
     expect(out).toContain(`- Old session moved aside to ${ASIDE_R2}`);
     expect(out).toContain("(stale -- may no longer be relevant)");
@@ -1125,6 +1143,7 @@ describe("(#231 fix 2b, revised round 1 MAJOR 3) the old-session-moved-aside lin
       session: baseSession(),
       lastSessionAside: [ASIDE],
       lastSessionAsideAt: "2026-09-11T14:00:00.000Z", // exactly 13 days before baseInput's default `now`
+      asideShip: null,
     }));
     expect(out).not.toContain("stale");
   });
@@ -1133,6 +1152,7 @@ describe("(#231 fix 2b, revised round 1 MAJOR 3) the old-session-moved-aside lin
     const out = composeSurvivalBrief(baseInput({
       session: null,
       lastSessionAside: [ASIDE],
+      asideShip: null,
     }));
     expect(out).not.toContain("moved aside");
     // genuinelyEmpty is unaffected -- lastSessionAside is only ever non-null
@@ -1140,5 +1160,52 @@ describe("(#231 fix 2b, revised round 1 MAJOR 3) the old-session-moved-aside lin
     // wiring, but this input proves the composer itself does not need a
     // SEPARATE genuinelyEmpty condition for it.
     expect(out).toBe("");
+  });
+
+  // Maestro review round 2 on PR #235 (issue #231), item 2b -- the R2 path
+  // must never be asserted as settled fact before a ship attempt has
+  // actually confirmed it.
+  it("asideShip absent (no ship attempt since the move) -> \"will ship on next sync\", never the confident R2 path", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession(),
+      lastSessionAside: [ASIDE],
+      lastSessionAsideAt: "2026-09-24T13:50:00.000Z",
+      // asideShip deliberately omitted -- absent, not null.
+    }));
+    expect(out).toContain(
+      "- Old session moved aside locally; it will ship to R2 on the next session sync, 10m ago; " +
+      "check it for anything lost since then.",
+    );
+    expect(out).not.toContain(ASIDE_R2);
+    expect(out).not.toContain("sessions/demosite-life--release-studio/aside/");
+  });
+
+  it("asideShip recorded this dir as failed -> names the failure, never the confident R2 path", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession(),
+      lastSessionAside: [ASIDE],
+      lastSessionAsideAt: "2026-09-24T13:50:00.000Z",
+      asideShip: {
+        failed: [{ dir: "fleet-aside-20261003T115000Z-42--workspace-acmeclient", reason: "r2 put failed: bucket unavailable" }],
+      },
+    }));
+    expect(out).toContain(
+      "- Old session moved aside locally, but a prior ship attempt to R2 failed: r2 put failed: bucket " +
+      "unavailable -- it has not reached R2 yet, 10m ago; check it for anything lost since then.",
+    );
+    expect(out).not.toContain(ASIDE_R2);
+  });
+
+  it("asideShip ran and recorded OTHER dirs failed, but not this one -> still the confident R2 path", () => {
+    const out = composeSurvivalBrief(baseInput({
+      session: baseSession(),
+      lastSessionAside: [ASIDE],
+      lastSessionAsideAt: "2026-09-24T13:50:00.000Z",
+      asideShip: { failed: [{ dir: "fleet-aside-some-other-dir", reason: "pack failed" }] },
+    }));
+    expect(out).toContain(
+      `- Old session moved aside to ${ASIDE_R2} (R2 -- the local copy is gone if this container was later ` +
+      "replaced), 10m ago; check it for anything lost since then.",
+    );
   });
 });

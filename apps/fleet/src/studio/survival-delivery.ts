@@ -24,6 +24,7 @@ import {
   type BringupVia, type ObservedSession, type ObservedStorage, type SurvivalBriefPending,
 } from "./observed";
 import { redactSecrets } from "./redact";
+import type { AsideShipRecord } from "./session-sync";
 import {
   composeSurvivalBrief,
   type Checked, type SurvivalInput, type SurvivalOpenPr, type SurvivalTaskBranch,
@@ -614,6 +615,12 @@ export async function resolveSurvivalInput(
   // comment (survival-brief.ts) for why this, and not `wipBootStamp` above,
   // is what `wipSyncLine` actually renders.
   wipSyncedBootStamp: string | null = null,
+  // Maestro review round 2 on PR #235 (issue #231), item 2b — same OPTIONAL,
+  // caller's-own-frozen-capture threading as every param above. See
+  // `SurvivalInput.asideShip`'s own doc comment (survival-brief.ts) for the
+  // three states this carries; `undefined` (never passed) is distinct from
+  // `null` and both must survive unchanged through this function.
+  asideShip?: AsideShipRecord | null,
 ): Promise<SurvivalInput> {
   if (!tasks.ok) {
     return {
@@ -637,6 +644,7 @@ export async function resolveSurvivalInput(
       lastSessionAside,
       lastSessionAsideAt,
       wipSyncedBootStamp,
+      asideShip,
     };
   }
 
@@ -771,6 +779,7 @@ export async function resolveSurvivalInput(
   return {
     studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, unclaimedRescueBranches,
     session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp,
+    asideShip,
   };
 }
 
@@ -782,7 +791,7 @@ export async function resolveSurvivalInput(
  *  `lastSessionAside`/`lastSessionAsideAt` (issue #231) pass straight
  *  through to `resolveSurvivalInput` — see that function's own doc comment.
  *  `wipSyncedBootStamp` (maestro review round 2 on PR #235, issue #231, item
- *  1) does too. */
+ *  1) does too. `asideShip` (same review, item 2b) does too. */
 export async function composeSurvivalDelivery(
   sources: SurvivalSources,
   tasks: Checked<SurvivalTaskRef[]>,
@@ -793,10 +802,12 @@ export async function composeSurvivalDelivery(
   lastSessionAside: string[] | null = null,
   lastSessionAsideAt: string | null = null,
   wipSyncedBootStamp: string | null = null,
+  asideShip?: AsideShipRecord | null,
 ): Promise<string> {
   return composeSurvivalBrief(
     await resolveSurvivalInput(
-      sources, tasks, session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp,
+      sources, tasks, session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt,
+      wipSyncedBootStamp, asideShip,
     ),
   );
 }
@@ -850,6 +861,13 @@ export interface SurvivalBringup {
    *  "frozen, never re-read" reason `lastSessionAside` above is. OPTIONAL/
    *  absent: the composer renders "unknown age" for the aside line. */
   lastSessionAsideAt?: string | null;
+  /** Maestro review round 2 on PR #235 (issue #231), item 2b —
+   *  `Observed`'s own `ASIDE_SHIP_KEY` record AS IT STOOD at this bring-up,
+   *  same "frozen, never re-read" reason `lastSessionAside` above is. See
+   *  `SurvivalInput.asideShip`'s own doc comment (survival-brief.ts) for the
+   *  three states this carries. OPTIONAL/absent: no ship attempt has run
+   *  since the move. */
+  asideShip?: AsideShipRecord | null;
 }
 
 /**
@@ -1043,6 +1061,13 @@ export async function deliverSurvivalBriefOnBringup(
     // Maestro review round 1 on PR #235, MAJOR 3 — same "taken fresh, absent
     // stays absent" treatment as `lastSessionAside` just above.
     ...(b.lastSessionAsideAt !== undefined ? { lastSessionAsideAt: b.lastSessionAsideAt } : {}),
+    // Maestro review round 2 on PR #235 (issue #231), item 2b — same "taken
+    // fresh, absent stays absent" treatment as `lastSessionAside` above. The
+    // conditional spread is load-bearing here specifically: `undefined` (no
+    // ship has run) and `null` (a ship ran clean) are two DIFFERENT, both
+    // meaningful states (see `SurvivalInput.asideShip`'s own doc comment),
+    // and only the conditional spread keeps them distinct through storage.
+    ...(b.asideShip !== undefined ? { asideShip: b.asideShip } : {}),
     since: priorForThis?.since ?? now().toISOString(),
     attempts: priorForThis?.attempts ?? 0,
     reason: "",
@@ -1224,6 +1249,22 @@ async function attemptSurvivalDelivery(
   }
   await mergeObserved(storage, {
     survivalBriefDeliveredFor: pending.incarnation, survivalBriefPending: null,
+    // Maestro review round 2 on PR #235 (issue #231), item 2b (second half)
+    // -- once the brief that actually CARRIED this aside claim has landed,
+    // clear it, in the SAME merge as the dedup marker above. `Observed.
+    // lastSessionAside`/`lastSessionAsideAt` never auto-clear (that field's
+    // own doc comment, observed.ts) precisely so a stale claim can still age
+    // visibly in the text (`sessionAsideLine`, survival-brief.ts) -- but once
+    // a lead has actually BEEN TOLD, a later brief (a deferred retry for a
+    // different reason, or a future incarnation that reads this one's
+    // leftovers) must not repeat the exact same claim as though it just
+    // happened again. Gated on `pending.lastSessionAside` itself: a delivery
+    // whose own frozen pending record never carried an aside has nothing to
+    // clear, and leaving the fields alone in that case cannot ever erase a
+    // claim this delivery never described.
+    ...(pending.lastSessionAside != null && pending.lastSessionAside.length > 0
+      ? { lastSessionAside: null, lastSessionAsideAt: null }
+      : {}),
   });
   return { kind: "delivered", incarnation: pending.incarnation };
 }

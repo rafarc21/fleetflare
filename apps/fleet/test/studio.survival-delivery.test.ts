@@ -22,6 +22,7 @@ import {
   type ComposedBrief, type SurvivalSources, type SurvivalTaskRef, type SurvivalBringup,
 } from "../src/studio/survival-delivery";
 import { PANE_CAPTURE_MARKER, PANE_QUIESCE_SECONDS } from "../src/studio/failover";
+import { composeSurvivalBrief } from "../src/studio/survival-brief";
 import { wipSyncRef } from "../src/studio/rescue";
 import {
   OBSERVED_KEY, emptyObserved,
@@ -1116,6 +1117,62 @@ describe("deliverSurvivalBriefOnBringup — wipBootStamp/lastSessionAside thread
     const pending = h.observed.stored()?.survivalBriefPending;
     expect(pending?.wipBootStamp).toBe("20261003115000");
     expect(pending?.lastSessionAside).toEqual(["~/.claude/projects/fleet-aside-x"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Maestro review round 2 on PR #235 (issue #231), item 2b (second half) —
+// once the brief carrying `lastSessionAside`/`lastSessionAsideAt` has
+// actually been DELIVERED, both fields clear in the SAME merge as the dedup
+// marker. Neither field ever auto-clears on its own (Observed's own doc
+// comment) -- without this fix a LATER brief (composed after a successful
+// delivery, for a reason unrelated to the aside move) would repeat the exact
+// same "moved aside" claim as though it had just happened again.
+// ---------------------------------------------------------------------------
+
+describe("deliverSurvivalBriefOnBringup — lastSessionAside clears once actually delivered (#231 fix 2, second half)", () => {
+  const ASIDE_PATH = "~/.claude/projects/fleet-aside-20261003T115000Z-42--workspace-acmeclient";
+
+  it("a landed delivery whose pending record carried lastSessionAside clears both fields on Observed", async () => {
+    const h = harness({
+      seed: { session: session(), lastSessionAside: [ASIDE_PATH], lastSessionAsideAt: "2026-09-24T13:50:00.000Z" },
+      bringup: bringup({ lastSessionAside: [ASIDE_PATH], lastSessionAsideAt: "2026-09-24T13:50:00.000Z" }),
+    });
+    expect(await h.run()).toEqual({ kind: "delivered", incarnation: INCARNATION });
+    expect(h.observed.stored()?.survivalBriefDeliveredFor).toBe(INCARNATION);
+    expect(h.observed.stored()?.lastSessionAside).toBeNull();
+    expect(h.observed.stored()?.lastSessionAsideAt).toBeNull();
+  });
+
+  it("a landed delivery whose bring-up never carried an aside leaves both fields untouched", async () => {
+    const h = harness({ bringup: bringup() });
+    expect(await h.run()).toEqual({ kind: "delivered", incarnation: INCARNATION });
+    expect(Object.prototype.hasOwnProperty.call(h.observed.stored() ?? {}, "lastSessionAside")).toBe(false);
+  });
+
+  it("a SECOND brief, composed after the first (which carried the aside line) was delivered, does not repeat it", async () => {
+    const h = harness({
+      seed: { session: session(), lastSessionAside: [ASIDE_PATH], lastSessionAsideAt: "2026-09-24T13:50:00.000Z" },
+      bringup: bringup({ lastSessionAside: [ASIDE_PATH], lastSessionAsideAt: "2026-09-24T13:50:00.000Z" }),
+      brief: "What survived, s:\n- Old session moved aside to sessions/s/aside/fleet-aside-x/, 10m ago; check it for anything lost since then.",
+    });
+    expect(await h.run()).toEqual({ kind: "delivered", incarnation: INCARNATION });
+    const afterDelivery = h.observed.stored();
+    expect(afterDelivery?.lastSessionAside).toBeNull();
+
+    // A later composition reading Observed as it now stands (post-delivery)
+    // has nothing left to render the aside line from.
+    const secondBrief = composeSurvivalBrief({
+      studioId: "s",
+      tasks: { ok: true, value: [] },
+      openPrs: { ok: true, value: [] },
+      unclaimedRescueBranches: { ok: true, value: [] },
+      session: session(),
+      now: "2026-09-25T12:00:00.000Z",
+      lastSessionAside: afterDelivery?.lastSessionAside ?? null,
+      lastSessionAsideAt: afterDelivery?.lastSessionAsideAt ?? null,
+    });
+    expect(secondBrief).not.toContain("moved aside");
   });
 });
 

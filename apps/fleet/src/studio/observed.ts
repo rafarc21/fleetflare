@@ -28,6 +28,9 @@ import type { MemberAlert } from "./member-alerts";
 // Issue #56 — type-only for the same cycle reason: restarts.ts imports
 // BringupVia from this file.
 import type { RestartLog } from "./restarts";
+// Maestro review round 2 on PR #235 (issue #231), item 2b — type-only, no
+// cycle: session-sync.ts imports nothing from this file.
+import type { AsideShipRecord } from "./session-sync";
 
 export const OBSERVED_KEY = "observed";
 
@@ -537,6 +540,17 @@ export interface SurvivalBriefPending {
    *  reads as "unknown age" — see `Observed.lastSessionAsideAt`'s own doc
    *  comment for the full reasoning. */
   lastSessionAsideAt?: string | null;
+  /**
+   * Maestro review round 2 on PR #235 (issue #231), item 2b — the DO's own
+   * `ASIDE_SHIP_KEY` record (session-sync.ts), AS IT STOOD at this bring-up,
+   * frozen the same way `lastSessionAside` above is: a retry runs on a later
+   * sync tick, by which point a fresh ship attempt may have overwritten the
+   * live key with a record describing a DIFFERENT move. See
+   * `SurvivalInput.asideShip`'s own doc comment (survival-brief.ts) for the
+   * three states this carries. OPTIONAL/absent reads as "no ship attempt had
+   * run yet at bring-up time" — the composer renders "will ship on the next
+   * session sync" in that case, never the confident R2 path. */
+  asideShip?: AsideShipRecord | null;
 }
 
 /** The DO-storage slice this feature touches — same narrow-port style

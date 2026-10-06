@@ -30,6 +30,7 @@
  */
 
 import type { ObservedSession, RestoreOutcome } from "./observed";
+import type { AsideShipRecord } from "./session-sync";
 
 export type Checked<T> = { ok: true; value: T } | { ok: false; reason: string };
 
@@ -163,6 +164,27 @@ export interface SurvivalInput {
    * suppressing the line.
    */
   lastSessionAsideAt?: string | null;
+  /**
+   * Maestro review round 2 on PR #235 (issue #231), item 2b --
+   * `Observed`'s own `ASIDE_SHIP_KEY` record (session-sync.ts's
+   * `AsideShipRecord`), as it stood AT THE MOMENT OF THIS BRING-UP (frozen
+   * the same way `lastSessionAside` above is). Three distinct states, not
+   * two:
+   *   - UNDEFINED/absent -- no ship attempt has run since the move at all
+   *     (`shipAsideSessions` has never ticked, or this bring-up predates the
+   *     field). `sessionAsideLine` below must not claim the R2 copy exists
+   *     in this case -- nothing has tried yet.
+   *   - `null` -- a ship attempt ran and nothing in `lastSessionAside`
+   *     failed (`ASIDE_SHIP_KEY`'s own writer, do.ts, stores exactly `null`
+   *     once `failed` comes back empty). This is the only state in which
+   *     the confident R2 path may be rendered.
+   *   - `{ failed: [...] }` -- a ship attempt ran and recorded failures,
+   *     keyed by the aside dir's own full name (the same string
+   *     `asideRefPath` derives from the local path). A dir NOT in `failed`
+   *     still reads as "confirmed" even when this record is present, same
+   *     as the `null` case.
+   */
+  asideShip?: AsideShipRecord | null;
 }
 
 /** Lines per section before the rest collapses to a single "+N more". Keeps
@@ -485,10 +507,23 @@ function wipSyncLine(input: SurvivalInput): string | null {
  * `fleet-aside-[A-Za-z0-9-]+`) — this just re-derives the R2 key from it
  * rather than keeping a second, parallel path around.
  */
+/**
+ * Maestro review round 2 on PR #235 (issue #231), item 2a — the stripped
+ * prefix is `~/.claude/projects/` ONLY, never the longer
+ * `~/.claude/projects/fleet-aside-`. The REAL R2 key
+ * (`sessionAsideManifestKey`/`sessionAsidePartKey`, session-sync.ts) is
+ * built from the aside dir's OWN FULL NAME, which `ASIDE_DIR_RE`
+ * (session-sync.ts, `/^fleet-aside-[A-Za-z0-9-]+$/`) anchors as including
+ * that `fleet-aside-` prefix — stripping it here produced an R2 path this
+ * composer's own claim never actually pointed at.
+ */
+function asideDirName(localPath: string): string {
+  const prefix = "~/.claude/projects/";
+  return localPath.startsWith(prefix) ? localPath.slice(prefix.length) : localPath;
+}
+
 function asideRefPath(studioId: string, localPath: string): string {
-  const prefix = "~/.claude/projects/fleet-aside-";
-  const dir = localPath.startsWith(prefix) ? localPath.slice(prefix.length) : localPath;
-  return `sessions/${studioId}/aside/${dir}/`;
+  return `sessions/${studioId}/aside/${asideDirName(localPath)}/`;
 }
 
 /**
@@ -522,13 +557,50 @@ export const SURVIVAL_ASIDE_MAX_AGE_DAYS = 14;
  * real, on-disk-once evidence worth keeping) but is marked stale in words,
  * not suppressed -- dropping it would throw away the one thing this line
  * exists to preserve for no safety gain.
+ *
+ * Maestro review round 2 on PR #235 (issue #231), item 2b -- the confident
+ * R2-path rendering above must never be asserted before a ship attempt has
+ * actually CONFIRMED the copy landed. Three branches, keyed off
+ * `input.asideShip` (see that field's own doc comment, `SurvivalInput`,
+ * for the three states):
+ *   - absent -- no ship has run since the move; renders "it will ship to
+ *     R2 on the next session sync" instead of naming any R2 path at all.
+ *   - this path's own dir name (`asideDirName`, same derivation
+ *     `asideRefPath` uses) appears in `asideShip.failed` -- renders the
+ *     recorded failure reason and says the copy has NOT reached R2 yet.
+ *   - otherwise (including `asideShip: null`, or a `failed` list that
+ *     names only OTHER dirs) -- the original confident R2-path rendering,
+ *     unchanged.
+ * With multiple paths (`lastSessionAside.length > 1`), the failed check is
+ * PER DIR: any one of the moved paths landing in `asideShip.failed` is
+ * enough to take the failed branch, naming that path's own reason --
+ * consistent with the single-path case rather than a special case bolted
+ * on beside it.
  */
 function sessionAsideLine(input: SurvivalInput): string | null {
   const paths = input.lastSessionAside;
   if (paths == null || paths.length === 0) return null;
-  const refs = paths.map((p) => asideRefPath(input.studioId, p));
   const age = input.lastSessionAsideAt != null ? ageFrom(input.lastSessionAsideAt, input.now) : null;
   const ageText = age === null ? "unknown age" : `${formatSurvivalAge(age)} ago`;
+
+  if (input.asideShip === undefined) {
+    return (
+      `- Old session moved aside locally; it will ship to R2 on the next session sync, ${ageText}; ` +
+      "check it for anything lost since then."
+    );
+  }
+
+  const failedByDir = new Map((input.asideShip?.failed ?? []).map((f) => [f.dir, f.reason] as const));
+  const failedPath = paths.find((p) => failedByDir.has(asideDirName(p)));
+  if (failedPath !== undefined) {
+    const reason = sanitizeText(failedByDir.get(asideDirName(failedPath))!);
+    return (
+      `- Old session moved aside locally, but a prior ship attempt to R2 failed: ${reason} -- it has not ` +
+      `reached R2 yet, ${ageText}; check it for anything lost since then.`
+    );
+  }
+
+  const refs = paths.map((p) => asideRefPath(input.studioId, p));
   const stale = age !== null && age >= SURVIVAL_ASIDE_MAX_AGE_DAYS * 24 * 60 * 60;
   const staleNote = stale ? " (stale -- may no longer be relevant)" : "";
   return (
