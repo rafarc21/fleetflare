@@ -257,3 +257,135 @@ Tests:
   `apps/fleet/test/studio.session.test.ts`,
   `apps/fleet/test/bun/fleet-ls-wip.test.ts` — new/updated coverage.
 - This file.
+
+## Round 1 review fixes (PR #245, maestro round 1 of 2 — round 2 is final)
+
+2 major (small), 3 minor ("fix if cheap" — done, not deferred).
+
+### MAJOR 1 — `wipLastCheck` shape change has no back-compat either direction
+
+Bug: item 5 changed `Observed.wipLastCheck` from one blended `{at,result}`
+object to a per-target map, with no migration. An OLD record (`{at,
+result:"failed"}`, written before this field became a map) read by the NEW
+`worstWipCheck`/`formatWipInspectLines` iterates `Object.values` and gets the
+bare strings `"<iso>"`/`"failed"` as "entries" — neither has `.result`, so the
+failure silently vanishes (`formatWipCell` reads `-`/age-with-no-`!`, inspect
+prints no FAILED line). Reverse (old CLI/reader expecting the flat shape,
+reading a record the NEW code wrote as a map) also hides it: `.result` on a
+`Record` is `undefined`.
+
+Fix:
+- Read side (`cli/wip-format.ts`): new `normalizeWipLastCheck(stored)`,
+  duck-types which shape a stored value actually is, ONCE — any key whose own
+  VALUE is itself `{at,result}`-shaped is a real per-target entry; when NONE
+  are (the value itself has top-level `at`/`result` strings), it's folded
+  into a single entry under a fixed sentinel key (`"(legacy)"`, never a real
+  ref name — those always contain `/`). `worstWipCheck` and
+  `formatWipInspectLines`'s own loop both run through this ONE normalized
+  shape — no duplicated rollup logic.
+- Write side (`do.ts`'s `recordWipLastCheck`): now ALSO stamps a derived
+  `at`/`result` SUMMARY pair (the worst result across every named target, by
+  the identical priority order `wip-format.ts` uses, duplicated here since
+  `src/` cannot import `cli/`) onto the SAME stored object, alongside the
+  real per-target entries — an old reader that only ever looks at
+  `wipLastCheck.at`/`.result` directly still sees a sensible single value.
+  `normalizeWipLastCheck` recognizes this hybrid shape correctly: real
+  per-target entries win whenever even one exists; the decoration keys are
+  only read as a target when none do.
+- `Observed.wipLastCheck`'s TYPE widened to a union (map OR legacy flat
+  object) so a row genuinely written before this field existed types cleanly
+  too.
+- Fixture tests, both directions, as asked:
+  (a) NEW code reading an OLD-shape record (`test/bun/fleet-ls-wip.test.ts`,
+      "legacy single-value back-compat" describe block) — `formatWipCell`/
+      `formatWipInspectLines` against a hand-written flat `{at,result}`
+      value; a hybrid (map + legacy decoration) fixture too, proving
+      decoration is ignored whenever real per-target entries exist.
+  (b) an old reader (simulated by reading `.at`/`.result` directly off the
+      stored value) seeing a record `recordWipLastCheck` (NEW code) wrote —
+      `test/studio.session.test.ts`'s "old-CLI back-compat" describe block.
+
+### MAJOR 2 — a `compareAhead` 404 must not drop a live wip ref
+
+Bug: `survival-delivery.ts`'s wip-ref age-filter loop treated `compareAhead`
+returning `null` as "ref genuinely gone, drop it" — correct for every other
+ref shape (real shared history with `main`, so a 404 really does mean gone),
+wrong for a wip ref specifically: rescue.ts's own shallow-clone fallback can
+push one as a PARENTLESS commit with no shared ancestry with `main` at all,
+and GitHub's compare API answers THAT with its own 404 ("No common
+ancestor") — indistinguishable from "ref doesn't exist" at the HTTP level,
+but the ref is very much alive.
+
+Fix: a wip ref's `compareAhead` 404 is now treated exactly like the
+thrown-error case right next to it — KEEP, age unknown (`lastCommitAt:
+null`). There is no OTHER signal in this function to confirm a wip ref is
+genuinely absent (that confirmation already happened upstream, in the
+`rescueBranches()` listing it came from) — only a confirmed-absent ref from
+THAT listing should ever drop one, never this per-ref compare's own 404.
+`SurvivalInput.liveWipRefs` widened from `string[]` to a new
+`SurvivalWipRef[]` (`{branch, lastCommitAt}`) so "age unknown" can thread
+through to the render side; `liveWipSnapshotLine` (survival-brief.ts) renders
+it explicitly ("age unknown"), same "unknown" word `taskLine` already uses
+for the identical "checked, could not tell" situation, rather than silently
+omitting any age.
+
+### MINOR 3 — sort wip refs newest-first before the display cap
+
+Bug: `composeSurvivalBrief`'s "Live wip snapshot" section sorted ascending
+(oldest boot stamp first) before capping at `MAX_LINES_PER_SECTION` (8) — a
+fleet with more than 8 live wip refs always truncated the NEWEST one into
+"+N more", exactly backwards from what a reader needs.
+
+Fix: sort DESCENDING (newest boot stamp first) before capping — one
+`.sort()` direction flip. The ref's own embedded boot stamp is still fine for
+SORTING (a weaker, display-ordering-only use) even though MAJOR 2 means it's
+no longer trusted for the age/staleness DECISION.
+
+### MINOR 4 — bound the per-wip-ref `compareAhead` lookups
+
+Bug: the age-filter loop called `compareAhead` once per wip ref, serially,
+unbounded — a studio with many member worktrees could burn a lot of
+sequential API calls composing ONE re-brief, many of which would be
+immediately truncated into "+N more" by the render cap anyway.
+
+Fix: sort wip refs descending by boot stamp (same sort MINOR 3 needs) and
+slice to `MAX_LINES_PER_SECTION` (now exported from survival-brief.ts and
+reused here, rather than a second constant that could drift) BEFORE any
+`compareAhead` call runs — only the refs that could possibly be displayed
+are ever looked up at all.
+
+### MINOR 5 — main must report its own result, never borrow a member's
+
+Bug: `wipTargetChecksFrom`'s fallback label for the main target
+(`out[mainRef] = wipLastCheckResultOf(result)`) ran whenever `mainRef` was
+absent from `.pushes`, including when some OTHER target (a member worktree)
+DID push in the same tick. `result.pushed` is a BLENDED flag — true the
+moment ANYTHING in the whole exec pushed — so `wipLastCheckResultOf` read it
+as "pushed" and mislabeled main "pushed" even though main's own push never
+happened.
+
+Fix: that fallback now only runs when `pushes.length === 0` (genuinely
+nothing named at all — the fully-quiet case it was meant for). When
+something else named a push but main wasn't among them, main reads "clean"
+— the one honest label available (main did not push, and wip-sync's own
+script emits no per-target quiet reason when anything else in the same tick
+pushed, so there's no finer label to give it) — never "pushed".
+
+### Tests touched (round 1 fixes)
+
+- `apps/fleet/cli/wip-format.ts` — `normalizeWipLastCheck`.
+- `apps/fleet/src/studio/do.ts` — `recordWipLastCheck`'s legacy-summary
+  write, `wipTargetChecksFrom`'s main-fallback fix.
+- `apps/fleet/src/studio/observed.ts` — `wipLastCheck`'s widened type.
+- `apps/fleet/src/studio/survival-brief.ts` — `SurvivalWipRef`,
+  `MAX_LINES_PER_SECTION` exported, `liveWipSnapshotLine`'s "age unknown"
+  rendering + newest-first sort.
+- `apps/fleet/src/studio/survival-delivery.ts` — wip-ref age-filter loop:
+  404-keeps, sort+cap before `compareAhead`.
+- `apps/fleet/test/bun/fleet-ls-wip.test.ts`,
+  `apps/fleet/test/studio.session.test.ts`,
+  `apps/fleet/test/studio.survival-brief.test.ts`,
+  `apps/fleet/test/studio.survival-delivery.test.ts` — new/updated coverage
+  for all 5 findings, including both explicitly-requested MAJOR 1 fixture
+  directions.
+- This file.
