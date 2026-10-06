@@ -1186,6 +1186,7 @@ describe("(#231 fix 2b, revised round 1 MAJOR 3, round 2 items 2a/2b) the old-se
       lastSessionAside: [ASIDE],
       lastSessionAsideAt: "2026-09-24T13:50:00.000Z",
       asideShip: {
+        at: "2026-09-24T13:51:00.000Z",
         failed: [{ dir: "fleet-aside-20261003T115000Z-42--workspace-acmeclient", reason: "r2 put failed: bucket unavailable" }],
       },
     }));
@@ -1201,7 +1202,7 @@ describe("(#231 fix 2b, revised round 1 MAJOR 3, round 2 items 2a/2b) the old-se
       session: baseSession(),
       lastSessionAside: [ASIDE],
       lastSessionAsideAt: "2026-09-24T13:50:00.000Z",
-      asideShip: { failed: [{ dir: "fleet-aside-some-other-dir", reason: "pack failed" }] },
+      asideShip: { at: "2026-09-24T13:51:00.000Z", failed: [{ dir: "fleet-aside-some-other-dir", reason: "pack failed" }] },
     }));
     expect(out).toContain(
       `- Old session moved aside to ${ASIDE_R2} (R2 -- the local copy is gone if this container was later ` +

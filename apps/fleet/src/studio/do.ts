@@ -6043,7 +6043,7 @@ export class StudioDO extends Sandbox<Env> {
       // `asideShip` read already follows). A live read here is safe for the
       // same reason `snapshot.wipSyncedBootStamp` above's is: this key only
       // ever moves on a genuine ship tick, never mid-bring-up.
-      const asideShip = await this.ctx.storage.get(ASIDE_SHIP_KEY);
+      const asideShip = await this.ctx.storage.get<AsideShipRecord>(ASIDE_SHIP_KEY);
       const outcome = await deliverSurvivalBriefOnBringup(
         this.ctx.storage,
         async () => ({
