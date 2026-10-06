@@ -40,7 +40,7 @@ import { resolveClaudeAccounts, accountLabel } from "./accounts";
 import {
   readFleetAccountLimits, writeFleetAccountLimit, clearFleetAccountLimit, readOneAccountLimit,
 } from "./account-limits-store";
-import { writeFleetAccountUsage } from "./account-usage-store";
+import { writeFleetAccountUsage, readOneAccountUsage } from "./account-usage-store";
 import { countWorkerExceptions } from "../exceptions";
 
 const ROUTE_RE = /^\/studio\/([^/]+)\/(status|provisioned|provision|restart|recycle|destroy|wake|check|rescue|inspect|ws\/terminal|paste|terminal|clear-session-guard)$/;
@@ -709,14 +709,24 @@ export async function handleStudio(
         const current = await readOneAccountLimit(env.DB, name);
         await writeFleetAccountLimit(env.DB, name, until, seenAt, current?.dead ? true : undefined, "usage");
         if (rawUsage !== undefined) {
-          // Maestro review round 2, MINOR 4: built field-by-field, never a
-          // `{ ...rawUsage, seenAt }` spread — a spread would persist
-          // arbitrary extra keys from a client-controlled JSON body straight
-          // into D1.
-          await writeFleetAccountUsage(env.DB, name, {
-            fiveHourPct: rawUsage.fiveHourPct, sevenDayPct: rawUsage.sevenDayPct, scopedMaxPct: rawUsage.scopedMaxPct,
-            seenAt: usageDataTimeIso,
-          });
+          // Issue #246: the account-usage:<slot> row has its OWN freshness
+          // race, independent of the account-limit row's own skip/apply
+          // outcome above — an older batch's "limit" decision must never
+          // stomp a newer usage reading a different (possibly overlapping)
+          // sync run already recorded. Silent D1-level guard only — no new
+          // `skipped` entry, that array's semantics stay about the
+          // account-limit row's own clear being skipped.
+          const currentUsage = await readOneAccountUsage(env.DB, name);
+          if (!currentUsage || Date.parse(currentUsage.seenAt) < Date.parse(usageDataTimeIso)) {
+            // Maestro review round 2, MINOR 4: built field-by-field, never a
+            // `{ ...rawUsage, seenAt }` spread — a spread would persist
+            // arbitrary extra keys from a client-controlled JSON body straight
+            // into D1.
+            await writeFleetAccountUsage(env.DB, name, {
+              fiveHourPct: rawUsage.fiveHourPct, sevenDayPct: rawUsage.sevenDayPct, scopedMaxPct: rawUsage.scopedMaxPct,
+              seenAt: usageDataTimeIso,
+            });
+          }
         }
         applied.push(name);
         return;
@@ -758,12 +768,22 @@ export async function handleStudio(
         // check just below, but was still stamping the usage row with the
         // bare wall-clock `seenAt` rather than that same data time.
         if (rawUsage !== undefined) {
-          // Maestro review round 2, MINOR 4: same field-by-field write, no
-          // spread — see the "limit" branch above for why.
-          await writeFleetAccountUsage(env.DB, name, {
-            fiveHourPct: rawUsage.fiveHourPct, sevenDayPct: rawUsage.sevenDayPct, scopedMaxPct: rawUsage.scopedMaxPct,
-            seenAt: new Date(dataTimeMs).toISOString(),
-          });
+          // Issue #246: same silent D1-level guard as the "limit" branch
+          // above — the usage write below is a SEPARATE store from the
+          // account-limit skip check just below it (that check only ever
+          // guarded the account-limit row's own clear, never this write,
+          // which used to run unconditionally one line earlier). Reuses
+          // this branch's own `dataTimeMs` already computed for that check
+          // — same data-time value, no re-parse.
+          const currentUsage = await readOneAccountUsage(env.DB, name);
+          if (!currentUsage || Date.parse(currentUsage.seenAt) < dataTimeMs) {
+            // Maestro review round 2, MINOR 4: same field-by-field write, no
+            // spread — see the "limit" branch above for why.
+            await writeFleetAccountUsage(env.DB, name, {
+              fiveHourPct: rawUsage.fiveHourPct, sevenDayPct: rawUsage.sevenDayPct, scopedMaxPct: rawUsage.scopedMaxPct,
+              seenAt: new Date(dataTimeMs).toISOString(),
+            });
+          }
         }
         if (current && Date.parse(current.seenAt) >= dataTimeMs) {
           skipped.push({ name, reason: "newer row exists" });
