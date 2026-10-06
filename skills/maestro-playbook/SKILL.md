@@ -352,6 +352,85 @@ top of that general rule, specific to this playbook:
   costs. Blanket approvals exist; record their exact conditions and apply
   them strictly, not generously.
 
+### Supervision: what wakes you, and what you report every time
+
+You supervise the studios you run. You do not poll them — you are woken, and
+you answer with one wave.
+
+Two things wake you.
+
+**Event.** A board or PR change arrives at the Worker as a GitHub webhook: a
+studio's envelope comment, a task state change, a PR opened, CI concluding, a
+merge. The Worker wakes you with the delta.
+
+**Sweep.** Twenty minutes pass with no event. The Worker wakes you anyway.
+This is not a formality: a studio that crashes, goes bare, or whose READY
+check goes stale emits no event at all — Cloudflare Containers push nothing.
+The sweep is the only thing that ever catches a dead studio. Never treat a
+quiet fleet as a healthy one.
+
+Every wake, event or sweep, resets the twenty minutes. A busy fleet sweeps
+zero times.
+
+#### Every wave, these nine fields, in this order
+
+Print all nine, every time. A field with nothing to say prints `—`. Never
+drop a field: a missing field and a forgotten field look identical, and the
+operator cannot tell which he is reading.
+
+```
+🎯 WAVE      EVENT(<what fired>) | SWEEP #n | FINAL
+🏭 STUDIOS   name · state/ready · age of READY · burn
+📋 BOARD     in flight · newly completed · backlog count
+🔀 PRS       number · CI verdict · mergeability · door · action taken
+✅ DONE      delta since your last wave only — never restate standing state
+🚧 BLOCKED   what is stuck, and exactly what it needs to move
+🧭 NEXT      what you do next, unprompted
+⏱️ NEXT      sweep at <ts> | STOPPED — quiescent
+💸 SPEND     output tokens this wave / cumulative
+```
+
+Comment the wave on the pinned board issue `fleet: maestro wave log`. That
+issue is the wave history; nothing else is.
+
+`✅ DONE` is a delta. Restating what was already true last wave is the
+failure mode that makes a wave log unreadable — the operator scrolls looking
+for the one line that changed. If nothing changed, `✅ DONE` prints `—` and
+the wave is three lines long.
+
+#### Stopping
+
+Stop sweeping when the fleet is done. Quiescent means all three, measured,
+never guessed:
+
+- no board task in flight on a running studio
+- no open fleet PR waiting on CI or merge
+- every studio either stopped, or running with no unfinished envelope
+
+Two guards on that decision:
+
+**Two consecutive quiescent sweeps before you stop.** One flaps — a PR
+opened seconds after your check reads as an empty fleet.
+
+**A check that fails is not a check that passed.** `fleet ls` errors, GitHub
+500s, `gh` times out — you do NOT declare quiescence. You keep sweeping and
+you say the check failed. Stopping supervision is a gate, and this fleet
+fails a gate CLOSED. A broken check never means the work is done.
+
+On quiescence: emit a `FINAL` wave describing the end state, and say you
+have stopped. You wake again when a task is assigned, a studio spawns, a PR
+opens, or the operator says so.
+
+Approvals and checklist links surface here — that's this session's whole
+point. You never press merge or deploy yourself. Tempted to run one: print
+this fenced block, exactly this shape, then stop.
+```
+APPROVAL REQUEST: <merge_staging|deploy_staging|merge_main|deploy_prod> — <what and why>
+```
+Wait for the operator's reply here. His call, not yours.
+
+Caveman prose to the operator. Short, direct, no hedging.
+
 ## 9. Accounts and capacity
 
 See [accounts and capacity](references/accounts-and-capacity.md) — usage
