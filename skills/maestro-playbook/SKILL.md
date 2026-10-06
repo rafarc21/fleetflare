@@ -223,6 +223,18 @@ that had actually errored out immediately, and a studio can separately
 ignore a wake queued mid-turn and later report "done" against stale state;
 verify the PR head actually moved before believing either.
 
+**A delivery-confirmation token can confirm nothing but your own echo.**
+Asking an agent to "reply with TOKEN twice" and waiting for the screen's
+count of TOKEN to reach 2 can pass on your OWN message alone — the screen
+already holds the token from the brief itself 2-3 times before the agent
+has done anything. Wait for the count to reach at least the number of times
+TOKEN appears in your own message, plus 2, not just 2 outright. Some leads
+also classify an unexplained token as an injection probe and refuse it
+outright — while still quietly doing the real work underneath the refusal.
+Prefer a state readback (`git rev-parse HEAD`, `git status --short`) over a
+token for confirming delivery or liveness; if a token is used anyway, say
+why in the message so it is not mistaken for a probe.
+
 Done means done financially too: an idle studio is burning money. On a
 finished task, `fleet task state N completed` and `destroy --park` in the
 same step — `--park` keeps it resumable; see the agent-lifecycle skill for
@@ -383,6 +395,42 @@ report; a control downstream of the suspect step exonerates nothing about
 the suspect step itself. A doc's claim about remote state expires silently
 — re-measure. Read a log for the step that is ABSENT, not only its errors. A
 timestamp in a ref's NAME is not the time of the data inside it.
+
+**A fix that shrinks a fixture can neuter the scale guard it was meant to
+keep green.** A flaky test "fixed" by shrinking its fixture (e.g. 500x50 to
+26x2) can report the same assertion passing for the wrong reason — a
+per-item leak that GROWS with n stays under the bound at small n and only
+surfaces at scale; the gate approved exactly this once, caught only one
+level up. Before shrinking any fixture to de-flake a test, ask "does this
+property depend on n?" If yes: keep the scale, make the slow part of the
+fixture fast instead (an O(1) lookup, not a smaller n), and when mutating
+the guard to prove it still catches real damage, mutate with damage that
+GROWS with n — never a constant one.
+
+**A `{} as Interface` test double blinds the type checker to an interface
+change.** A new required interface method has shipped green on typecheck
+plus every targeted test, only for the full suite to surface a runtime
+TypeError in a completely untouched test whose fake was `{} as Interface`
+(or `as unknown as Interface`, or `Partial<Interface>`, or a `vi.mock(...)`
+stub) — none of which the compiler can check against the new method. On any
+interface change, grep every double for that interface specifically before
+trusting typecheck-green; fix the double itself, never optional-chain the
+real call site to dodge it — optional-chaining just silently skips the new
+behavior instead of exercising it.
+
+**No toolchain in the container does not mean untested.** A studio lacking
+the compiler for a pure function's language reported "did not run" as a
+final answer; the fix was to compile and run the single file standalone
+outside the full project build (e.g. `rustc --edition 2021 --test file.rs`)
+— seconds, no crate build — then mutate the guard inside it to confirm it
+actually goes red. Keep logic like this in pure, dependency-free functions
+with an injected flag (an `is_debug`-style parameter, never a compile-time
+check buried inside the function itself) specifically so it stays testable
+this way regardless of what toolchain the current container has. The same
+review found the one route a guard failed to cover by reading every call
+site of the relevant pattern directly (every call to a given helper, not
+just the PR's own list of what it touched) — the uncovered route was a
+legacy path nobody had thought to list.
 
 ## 13. Memory, handoff, and security
 

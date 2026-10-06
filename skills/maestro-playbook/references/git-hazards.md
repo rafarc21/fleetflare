@@ -25,6 +25,15 @@ Specific traps, each measured against a real incident.
 - **Rescue pushes to a separate remote may be refused** for commits touching
   `.github/workflows/*` unless the credential doing the pushing has Workflows
   permission explicitly, even when it can write everything else in the repo.
+- **Screenshots committed to a PR branch ship binaries to main.** A request
+  for before/after PR screenshots can result in PNGs committed straight onto
+  the PR branch (e.g. under `.github/pr-assets/`) — merging that PR ships
+  the binaries into `main` too. Keep image assets on a separate,
+  never-merged assets branch cut from `origin/main`, PNGs only, and link the
+  raw URLs in the PR body rather than committing them to the PR branch;
+  revert any PNG commit found on a PR branch before merge. On a private
+  repo, a raw URL 404s for anyone not logged in — verify it resolves via the
+  API, never by `curl`ing it logged out.
 
 ## Review guards the gate must actually run
 
