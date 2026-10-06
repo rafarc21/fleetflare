@@ -8,6 +8,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   parseResetUtc, formatRateLimited, encodeAccountLimitState, decodeAccountLimitState,
+  encodeAccountUsageSnapshot, decodeAccountUsageSnapshot,
 } from "../src/studio/rate-limit";
 import { detectRateLimitModal, runAccountFailover, paneCaptureCmd, PANE_CAPTURE_MARKER, type FailoverDeps } from "../src/studio/failover";
 import { runGatedWake, PANE_PROBE_CMD, PANE_SCREEN_CMD, wakeCmd } from "../src/studio/wake";
@@ -125,6 +126,33 @@ describe("encodeAccountLimitState / decodeAccountLimitState — issue #141's dea
 
   it("null for a key never written, unchanged by this feature", () => {
     expect(decodeAccountLimitState(null)).toBeNull();
+  });
+});
+
+describe("encodeAccountUsageSnapshot / decodeAccountUsageSnapshot — issue #238's headroom pct row", () => {
+  it("round-trips a snapshot with a real scopedMaxPct", () => {
+    const snap = { fiveHourPct: 40, sevenDayPct: 55, scopedMaxPct: 80, seenAt: NOW.toISOString() };
+    expect(decodeAccountUsageSnapshot(encodeAccountUsageSnapshot(snap))).toEqual(snap);
+  });
+
+  it("round-trips scopedMaxPct: null — no scoped windows reported", () => {
+    const snap = { fiveHourPct: 10, sevenDayPct: 20, scopedMaxPct: null, seenAt: NOW.toISOString() };
+    expect(decodeAccountUsageSnapshot(encodeAccountUsageSnapshot(snap))).toEqual(snap);
+  });
+
+  it("malformed JSON reads back null, never thrown", () => {
+    expect(decodeAccountUsageSnapshot("{not json")).toBeNull();
+  });
+
+  it("a shape missing required fields reads back null", () => {
+    expect(decodeAccountUsageSnapshot(JSON.stringify({ fiveHourPct: 1, seenAt: NOW.toISOString() }))).toBeNull();
+    expect(decodeAccountUsageSnapshot(JSON.stringify({
+      fiveHourPct: 1, sevenDayPct: 2, scopedMaxPct: "80", seenAt: NOW.toISOString(),
+    }))).toBeNull();
+  });
+
+  it("null for a key never written", () => {
+    expect(decodeAccountUsageSnapshot(null)).toBeNull();
   });
 });
 

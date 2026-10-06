@@ -17,7 +17,7 @@
  *
  * `wrangler secret put CLAUDE_CODE_OAUTH_TOKEN_2` is the whole procedure.
  *
- * Lives in src/studio/ and imports NOTHING — not do.ts (which pulls in
+ * Lives in src/studio/ and imports NOTHING from do.ts (which pulls in
  * "@cloudflare/sandbox"), and deliberately not src/env.ts either. `Env`'s own
  * module type-imports StudioDO, so a file that names `Env` drags do.ts,
  * terminal.ts and the whole workers-types graph behind it, and the bun:test
@@ -25,7 +25,13 @@
  * structural parameter type below is what keeps this module — and failover.ts
  * through it — reachable from a test that can ask a real shell what a command
  * actually does. Same boundary reasoning as credentials.ts's own header.
+ *
+ * Issue #238 (step 3): the ONE exception is `./claude-swap`, imported below
+ * for `usageMaxPct` — that module itself imports nothing at all (no do.ts, no
+ * D1, no `Env`), so pulling one pure function out of it costs this file
+ * nothing it doesn't already pay for its own pure helpers.
  */
+import { usageMaxPct } from "./claude-swap";
 
 /** Just the part of the Worker environment this module reads. `Env`
  *  (src/env.ts) satisfies it structurally, with no cast at any call site. */
@@ -159,6 +165,105 @@ export type AccountLimits = Record<string, AccountLimitEntry>;
 const NULL_UNTIL_CEILING_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Issue #238 (step 3) — the live-failover-cascade half of headroom ordering.
+ * Steps 1+2 (claude-swap.ts, account-usage-store.ts) built the pure
+ * comparator and the D1-backed persistence; this is the shape a caller here
+ * hands both of them in. Keyed by account NAME (account-usage-store.ts's own
+ * `readFleetAccountUsage` return shape) — absent key means "never observed",
+ * same "absent means nothing observed" convention `AccountLimits` already
+ * uses, never a default/zero entry.
+ */
+export type AccountUsageMap = Record<
+  string,
+  { fiveHourPct: number; sevenDayPct: number; scopedMaxPct: number | null; seenAt: string }
+>;
+
+/**
+ * Issue #238 (step 3) — how old a PERSISTED `account-usage:<slot>` D1 row may
+ * be before a live failover decision trusts it enough to reorder candidates
+ * by it. Distinct from claude-swap.ts's own `MAX_USAGE_AGE_SECONDS`: that one
+ * gates cswap's own self-reported reading age at DECISION time (inside
+ * `decideAccountSync`, before a row is even written) — this one gates how
+ * stale the row itself has gone since it was written, from a live failover's
+ * own point of view, potentially many sync cycles later. Same 10-minute
+ * number the plan doc's "fresh (<10 min)" language already specifies.
+ */
+export const USAGE_ORDERING_FRESHNESS_MS = 10 * 60 * 1000;
+
+/**
+ * Maestro review round 2, MINOR 3 — the pct, above which a fresh-but-known
+ * candidate must NOT be promoted over a genuinely unknown (no fresh data)
+ * one. Only gates "fresh vs no-data": two candidates that BOTH have fresh
+ * data are compared on pct alone, regardless of this ceiling (see
+ * `selectByHeadroom`'s own doc comment, rule 4 vs rule 5).
+ */
+const UNKNOWN_PROMOTION_CEILING_PCT = 80;
+
+/**
+ * Issue #238 (step 3) — picks the FRESH candidate with the most headroom
+ * (lowest `usageMaxPct`) among `candidates`, or null when none has a fresh
+ * usage row at all — the caller's own cue to fall back to today's plain
+ * order/wrap behaviour unchanged. Never excludes anything itself beyond
+ * "stale or missing data": `candidates` is always handed in ALREADY filtered
+ * to free (not fleet-wide-limited, not reserved) accounts by the caller
+ * (`nextClaudeAccount`/`firstFreeAccount` below), so this can never pick an
+ * account carrying a live limit row — it never even sees one.
+ *
+ * Strict `<` (never `<=`): the FIRST candidate at the best pct seen so far
+ * keeps winning a tie, i.e. ties resolve to `candidates`' own order — the
+ * forward-wrap/list order every caller already uses as its own fallback, so
+ * "current order wins ties" holds whether headroom ordering fired or not.
+ *
+ * Maestro review round 2, MINOR 3 — a fresh-but-nearly-spent reading must
+ * never jump ahead of an UNKNOWN (no fresh data at all) candidate: knowing
+ * one account is nearly out of headroom is not a reason to prefer it over one
+ * we simply have no fresh reading for (which might be fine). The real
+ * algorithm, in full:
+ *
+ *   1. Partition `candidates` into a "fresh" set (real, fresh usage entry)
+ *      and a "rest" set (no entry at all, or stale).
+ *   2. Fresh set empty -> null (defer entirely, same as before this fix).
+ *   3. Among the fresh set, find the lowest `usageMaxPct` (ties: first in
+ *      `candidates`' own order, same rule as always).
+ *   4. Rest set EMPTY (every candidate has fresh data, nothing unknown to
+ *      defer to instead) -> that best-fresh candidate wins regardless of its
+ *      own pct — picking the best of several known quantities is still
+ *      correct even when none of them are great.
+ *   5. Rest set NON-empty AND best-fresh's own pct is over
+ *      `UNKNOWN_PROMOTION_CEILING_PCT` -> null — do not promote a
+ *      nearly-spent-but-known account over a genuinely unknown one.
+ *   6. Otherwise (rest non-empty, best-fresh's pct at or below the ceiling)
+ *      -> that best-fresh candidate wins, same as rule 4.
+ */
+export function selectByHeadroom(
+  candidates: ClaudeAccount[], usage: AccountUsageMap, now: Date, freshnessMs: number = USAGE_ORDERING_FRESHNESS_MS,
+): ClaudeAccount | null {
+  const fresh: { account: ClaudeAccount; pct: number }[] = [];
+  let hasRest = false;
+  for (const c of candidates) {
+    const u = usage[c.name];
+    // Maestro review round 2, MINOR 5: `Date.parse` on a malformed `seenAt`
+    // returns NaN, and `NaN >= freshnessMs` is `false` in JS, so a row with a
+    // genuinely unparseable `seenAt` would otherwise survive this filter as
+    // if it were fresh. A non-finite age must count as stale, same final
+    // effect as before for a REAL age, but correct for the right reason now.
+    const age = u ? now.getTime() - Date.parse(u.seenAt) : NaN;
+    if (u && Number.isFinite(age) && age < freshnessMs) {
+      fresh.push({ account: c, pct: usageMaxPct(u) });
+    } else {
+      hasRest = true;
+    }
+  }
+  if (fresh.length === 0) return null;
+  let best = fresh[0];
+  for (const f of fresh.slice(1)) {
+    if (f.pct < best.pct) best = f;
+  }
+  if (hasRest && best.pct > UNKNOWN_PROMOTION_CEILING_PCT) return null;
+  return best.account;
+}
+
+/**
  * CTO decision 2026-09-30 (issue #102) — the account to fail over TO, or null
  * when every OTHER account is still limited. Superseded rule, stated so the
  * change is legible against #53's original one below: issue #53 shipped
@@ -204,19 +309,31 @@ const NULL_UNTIL_CEILING_MS = 24 * 60 * 60 * 1000;
  * limit sighting, so it must hold even for an account nobody has ever seen
  * exhausted. Defaults to empty so every call site written before #103 keeps
  * its old behaviour exactly.
+ *
+ * Issue #238 (step 3) — `usage`: an OPTIONAL fleet-wide headroom snapshot
+ * (account-usage-store.ts's own read shape). Defaults to `{}` so every
+ * EXISTING call site keeps the plain forward-wrap behaviour above BYTE
+ * IDENTICAL. When non-empty, every free candidate found walking the wrap is
+ * collected (same order as before) and handed to `selectByHeadroom`: a fresh
+ * usage row picks the one with the most headroom; stale/missing data for
+ * every candidate falls back to exactly the first-found-walking-forward
+ * account above, i.e. today's behaviour, unchanged.
  */
 export function nextClaudeAccount(
   accounts: ClaudeAccount[], currentName: string | null | undefined,
   limits: AccountLimits = {}, now: Date = new Date(), reserved: Set<string> = new Set(),
+  usage: AccountUsageMap = {},
 ): ClaudeAccount | null {
   const idx = currentIndex(accounts, currentName);
   if (idx < 0 || accounts.length === 0) return null;
   const isFree = (a: ClaudeAccount): boolean => !reserved.has(a.name) && accountIsFree(a, limits, now);
+  const free: ClaudeAccount[] = [];
   for (let step = 1; step < accounts.length; step++) {
     const candidate = accounts[(idx + step) % accounts.length];
-    if (isFree(candidate)) return candidate;
+    if (isFree(candidate)) free.push(candidate);
   }
-  return null;
+  if (free.length === 0) return null;
+  return selectByHeadroom(free, usage, now) ?? free[0];
 }
 
 /**
@@ -309,15 +426,24 @@ export function nextBorrowedAccount(
  * has claimed, or between this studio's own scoped accounts — the first free
  * one wins, same "first match in order" rule the ordinary forward wrap
  * already uses everywhere else in this file.
+ *
+ * Issue #238 (step 3) — `usage`: same optional headroom snapshot
+ * `nextClaudeAccount` now takes, same `{}`-default byte-identical-behaviour
+ * guarantee. Every free candidate in list order is collected first, then
+ * handed to `selectByHeadroom`; stale/missing data for all of them falls back
+ * to the first one found in list order, i.e. today's behaviour.
  */
 export function firstFreeAccount(
   accounts: ClaudeAccount[], reserved: Set<string>, limits: AccountLimits = {}, now: Date = new Date(),
+  usage: AccountUsageMap = {},
 ): ClaudeAccount | null {
+  const free: ClaudeAccount[] = [];
   for (const a of accounts) {
     if (reserved.has(a.name)) continue;
-    if (accountIsFree(a, limits, now)) return a;
+    if (accountIsFree(a, limits, now)) free.push(a);
   }
-  return null;
+  if (free.length === 0) return null;
+  return selectByHeadroom(free, usage, now) ?? free[0];
 }
 
 /**
@@ -393,17 +519,23 @@ export function deriveSearchAnchor(
  * rather than list order, and is read from fleet-wide burn lazily, on this
  * rare path only, by callers that have I/O to pay for it — this module
  * stays pure, see its own header).
+ *
+ * Issue #238 (step 3) — `usage`: threaded unchanged to BOTH of this
+ * function's own tier-1/tier-2 calls below (never to the borrow tier, out of
+ * scope — see this module's own header for why). Same optional `{}` default,
+ * same byte-identical-when-absent guarantee the two functions it calls
+ * already give.
  */
 export function selectFreeAccount(
   accounts: ClaudeAccount[], anchor: number, current: string | null, currentOutOfScope: boolean,
-  reserved: Set<string>, limits: AccountLimits, now: Date,
+  reserved: Set<string>, limits: AccountLimits, now: Date, usage: AccountUsageMap = {},
 ): ClaudeAccount | null {
   const scopedAccounts = accounts.slice(anchor);
   const tier1 = currentOutOfScope
-    ? firstFreeAccount(scopedAccounts, reserved, limits, now)
-    : nextClaudeAccount(scopedAccounts, current, limits, now, reserved);
+    ? firstFreeAccount(scopedAccounts, reserved, limits, now, usage)
+    : nextClaudeAccount(scopedAccounts, current, limits, now, reserved, usage);
   if (tier1 !== null) return tier1;
-  return firstFreeAccount(accounts.slice(0, anchor), reserved, limits, now);
+  return firstFreeAccount(accounts.slice(0, anchor), reserved, limits, now, usage);
 }
 
 /**
@@ -685,12 +817,18 @@ export function launchAccount(env: ClaudeAccountEnv, repo: string | null, record
  * — this function's own check is a second, redundant guard, not the only
  * one, so a caller that forgets the outer gate still cannot make this
  * reroute.
+ *
+ * Issue #238 (step 3) — `usage`: threaded unchanged to the tiers-1+2
+ * `selectFreeAccount` call below only (never to the tier-3 borrow pass,
+ * out of scope — see this module's own header). Same optional `{}` default,
+ * same byte-identical-when-absent guarantee.
  */
 export async function launchAccountOrReroute(
   env: ClaudeAccountEnv, repo: string | null, recorded: string | null | undefined,
   limits: AccountLimits, reserved: Set<string>, now: Date = new Date(),
   borrowedAccount: string | null | undefined = null,
   readBurn: () => Promise<Record<string, { window5hOutput: number }>> = async () => ({}),
+  usage: AccountUsageMap = {},
 ): Promise<LaunchAccount> {
   const launch = launchAccount(env, repo, recorded);
   if (!launch.ok || !autoFailoverOn(env)) return launch;
@@ -700,7 +838,7 @@ export async function launchAccountOrReroute(
   const primary = launchAccount(env, repo, null);
   const start = primary.ok ? Math.max(0, accounts.findIndex((a) => a.name === primary.name)) : 0;
   const { anchor, currentOutOfScope } = deriveSearchAnchor(accounts, start, launch.name, borrowedAccount != null);
-  const free = selectFreeAccount(accounts, anchor, launch.name, currentOutOfScope, reserved, limits, now);
+  const free = selectFreeAccount(accounts, anchor, launch.name, currentOutOfScope, reserved, limits, now, usage);
   if (free !== null) return { ok: true, name: free.name, token: free.token };
   const borrowed = nextBorrowedAccount(accounts, reserved, limits, await readBurn(), now);
   if (borrowed !== null) return { ok: true, name: borrowed.name, token: borrowed.token };

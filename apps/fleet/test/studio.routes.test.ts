@@ -30,7 +30,8 @@ import { emptyObserved, type Observed } from "../src/studio/observed";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { writeFleetAccountLimit, readFleetAccountLimits, readOneAccountLimit } from "../src/studio/account-limits-store";
-import { resolveClaudeAccounts } from "../src/studio/accounts";
+import { readFleetAccountUsage } from "../src/studio/account-usage-store";
+import { resolveClaudeAccounts, selectByHeadroom } from "../src/studio/accounts";
 
 // ROLE_PROMPT_B64 is base64 of UTF-8 and every prompt now carries the house
 // rules, whose em dashes are multi-byte — bare atob() hands back Latin-1.
@@ -2670,6 +2671,296 @@ describe("POST /studio/accounts/sync", () => {
 
     const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
     expect(limits["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ until: null, seenAt });
+  });
+
+  // Issue #238 step 2: a "limit" decision carrying a valid `usage` field also
+  // writes the new, separate account-usage:<slot> row.
+  it("a limit decision with a valid usage field writes a readFleetAccountUsage snapshot too", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const until = "2026-10-05T05:00:00.000Z";
+    const usage = { fiveHourPct: 97, sevenDayPct: 40, scopedMaxPct: 20 };
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt, usage }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(usageRows["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ ...usage, seenAt });
+  });
+
+  // Issue #238 step 2: the whole point of the separate-store design -- a
+  // "clear" decision writes a usage snapshot even though no account-limit row
+  // survives the clear at all (the two stores are independent).
+  it("a clear decision with a valid usage field writes a usage snapshot even though no account-limit row survives", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const usage = { fiveHourPct: 10, sevenDayPct: 25, scopedMaxPct: 5 };
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt, usage }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
+
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(usageRows["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ ...usage, seenAt });
+  });
+
+  // Issue #238 step 2: a malformed usage field rejects the WHOLE entry --
+  // no usage write, and the limit/clear action itself must NOT be
+  // half-applied either.
+  it("a limit decision with a malformed usage field (non-numeric fiveHourPct) is rejected entirely, no partial write", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const until = "2026-10-05T05:00:00.000Z";
+    const usage = { fiveHourPct: "not a number", sevenDayPct: 40, scopedMaxPct: 20 };
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt, usage }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SyncBody;
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "invalid usage" }]);
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in limits).toBe(false);
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in usageRows).toBe(false);
+  });
+
+  it("a clear decision with a malformed usage field (scopedMaxPct neither number nor null) is rejected entirely, no partial write", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN", "2026-10-05T05:00:00.000Z", "2026-10-04T00:00:00.000Z");
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const usage = { fiveHourPct: 10, sevenDayPct: 25, scopedMaxPct: "none" };
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt, usage }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SyncBody;
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "invalid usage" }]);
+
+    // The pre-existing limit row must survive untouched -- the clear itself
+    // must never have been applied once the whole entry was rejected.
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(limits["CLAUDE_CODE_OAUTH_TOKEN"]).toBeDefined();
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in usageRows).toBe(false);
+  });
+
+  // Issue #238 step 2: a decision with NO usage field at all is unchanged
+  // existing (#232/#240) behaviour -- no usage write, limit/clear applies
+  // exactly as before.
+  it("a limit decision with no usage field at all writes no usage snapshot, limit still applies", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const until = "2026-10-05T05:00:00.000Z";
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const limits = await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(limits["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ until, seenAt });
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in usageRows).toBe(false);
+  });
+
+  // Maestro review round 2, MAJOR 1: the persisted account-usage row's
+  // seenAt must be the real DATA time (usageFetchedAt - usageAgeSeconds),
+  // never the CLI-run-time usageFetchedAt itself -- the same correction
+  // finding 6 already applied to the account-limit store's own freshness
+  // comparison, now also needed on the account-usage store's OWN stored
+  // seenAt for a "limit" decision.
+  it("a limit decision's persisted usage row seenAt accounts for usageAgeSeconds, not the bare usageFetchedAt", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const usageFetchedAt = "2026-10-05T00:00:00.000Z";
+    const seenAt = usageFetchedAt; // same instant the CLI stamps onto every decision
+    const until = "2026-10-05T05:00:00.000Z";
+    const usageAgeSeconds = 480; // 8 minutes old at CLI-run-time
+    const usage = { fiveHourPct: 97, sevenDayPct: 40, scopedMaxPct: 20 };
+
+    const res = await handleStudio(
+      syncReq(
+        [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt, usageAgeSeconds, usage }],
+        usageFetchedAt,
+      ),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    const expectedSeenAt = new Date(Date.parse(usageFetchedAt) - usageAgeSeconds * 1000).toISOString();
+    expect(usageRows["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ ...usage, seenAt: expectedSeenAt });
+
+    // A live-failover read 3 minutes LATER must treat this row as STALE: the
+    // real data age is 8 + 3 = 11 minutes, past the 10-minute ceiling -- even
+    // though the row's own wall-clock age from usageFetchedAt is only 3 min.
+    const laterNow = new Date(Date.parse(usageFetchedAt) + 3 * 60_000);
+    const account = resolveClaudeAccounts(testEnv).find((a) => a.name === "CLAUDE_CODE_OAUTH_TOKEN")!;
+    expect(selectByHeadroom([account], usageRows, laterNow)).toBeNull();
+  });
+
+  // Same bug, "clear" branch: this route already computes dataTimeMs for its
+  // OWN MAJOR-6 skip comparison against the account-limit row, but was still
+  // stamping the account-usage row's seenAt from the bare wall-clock seenAt
+  // rather than that same dataTimeMs.
+  it("a clear decision's persisted usage row seenAt also accounts for usageAgeSeconds, not the bare usageFetchedAt", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const usageFetchedAt = "2026-10-05T00:00:00.000Z";
+    const seenAt = usageFetchedAt;
+    const usageAgeSeconds = 480;
+    const usage = { fiveHourPct: 10, sevenDayPct: 25, scopedMaxPct: 5 };
+
+    const res = await handleStudio(
+      syncReq(
+        [{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt, usageAgeSeconds, usage }],
+        usageFetchedAt,
+      ),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    const expectedSeenAt = new Date(Date.parse(usageFetchedAt) - usageAgeSeconds * 1000).toISOString();
+    expect(usageRows["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ ...usage, seenAt: expectedSeenAt });
+  });
+
+  // Maestro review round 2, MINOR 4: a pct outside [0, 100] must be rejected
+  // -- the pre-existing isValidUsageField check only tested "finite number",
+  // never a real range, so a garbage pct like 150 slipped through.
+  it("a usage pct of 150 (outside [0, 100]) is rejected entirely", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const until = "2026-10-05T05:00:00.000Z";
+    const usage = { fiveHourPct: 150, sevenDayPct: 40, scopedMaxPct: 20 };
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt, usage }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SyncBody;
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "invalid usage" }]);
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in usageRows).toBe(false);
+  });
+
+  it("a usage pct of -5 (outside [0, 100]) is rejected entirely", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const usage = { fiveHourPct: -5, sevenDayPct: 40, scopedMaxPct: 20 };
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt, usage }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SyncBody;
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "invalid usage" }]);
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in usageRows).toBe(false);
+  });
+
+  it("a scopedMaxPct that is neither a number nor null (\"high\") is rejected entirely", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const until = "2026-10-05T05:00:00.000Z";
+    const usage = { fiveHourPct: 10, sevenDayPct: 40, scopedMaxPct: "high" };
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt, usage }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as SyncBody;
+    expect(body.applied).toEqual([]);
+    expect(body.rejected).toEqual([{ name: "CLAUDE_CODE_OAUTH_TOKEN", reason: "invalid usage" }]);
+  });
+
+  // Maestro review round 2, MINOR 4: the write to D1 must build the usage
+  // object field-by-field, never a `{ ...usage, seenAt }` spread -- a spread
+  // would persist arbitrary extra keys from a client-controlled JSON body
+  // straight into D1.
+  it("a usage object carrying an extra unexpected key never persists that key to D1", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const seenAt = "2026-10-05T00:00:00.000Z";
+    const until = "2026-10-05T05:00:00.000Z";
+    const usage = { fiveHourPct: 10, sevenDayPct: 40, scopedMaxPct: 20, evil: "injected" };
+
+    const res = await handleStudio(
+      syncReq([{ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until, seenAt, usage }]),
+      testEnv,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: ["CLAUDE_CODE_OAUTH_TOKEN"], rejected: [], skipped: [] });
+
+    // Asserted on the RAW D1 row, not the parsed/sanitized read API: the
+    // guarantee this finding is about is that the extra key never reaches D1
+    // in the first place, not merely that the read path happens to filter it
+    // back out afterward.
+    const raw = await testEnv.DB
+      .prepare("SELECT value FROM fleet_state WHERE key = ?")
+      .bind("account-usage:CLAUDE_CODE_OAUTH_TOKEN")
+      .first<{ value: string }>();
+    expect(raw?.value).not.toContain("evil");
+    expect(raw?.value).not.toContain("injected");
+    expect(JSON.parse(raw!.value)).toEqual({ fiveHourPct: 10, sevenDayPct: 40, scopedMaxPct: 20, seenAt });
+
+    const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
+    expect(usageRows["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({
+      fiveHourPct: 10, sevenDayPct: 40, scopedMaxPct: 20, seenAt,
+    });
+  });
+
+  // Maestro review round 2, MINOR 4: a clock-skewed or malicious client
+  // claiming a usageFetchedAt more than 2 minutes in the future must not be
+  // trusted -- whole-request 400, same as the existing "must parse" check.
+  it("400s the whole request when usageFetchedAt is more than 2 minutes in the future", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const future = new Date(Date.now() + 5 * 60_000).toISOString();
+    const res = await handleStudio(syncReq([], future), testEnv);
+    expect(res.status).toBe(400);
+  });
+
+  it("does NOT 400 when usageFetchedAt is only slightly in the future (clock skew within tolerance)", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const slightlyFuture = new Date(Date.now() + 30_000).toISOString();
+    const res = await handleStudio(syncReq([], slightlyFuture), testEnv);
+    expect(res.status).toBe(200);
   });
 });
 

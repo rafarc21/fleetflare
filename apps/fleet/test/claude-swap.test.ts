@@ -9,9 +9,9 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  joinAccountsToCswap, decideAccountSync, pickHeadroomAccount,
+  joinAccountsToCswap, decideAccountSync, pickHeadroomAccount, usageMaxPct, toUsageHeadroom,
   MAX_USAGE_AGE_SECONDS, RESET_MATCH_WINDOW_MS,
-  type FleetAccountSlot, type SlotJoin, type CswapAccount, type HeadroomCandidate,
+  type FleetAccountSlot, type SlotJoin, type CswapAccount, type HeadroomCandidate, type UsageHeadroom,
 } from "../src/studio/claude-swap";
 import {
   OVER_FIVE_HOUR, UNDER_THRESHOLD, OVER_SCOPED_ONLY, RELOGIN_REQUIRED, STALE_OK, CSWAP_LIST_FIXTURE,
@@ -351,7 +351,10 @@ describe("decideAccountSync", () => {
 
   it("fiveHour pct >= 95 -> limit with fiveHour's own resetsAt", () => {
     const decision = decideAccountSync(joinFor(OVER_FIVE_HOUR), now);
-    expect(decision).toEqual({ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: OVER_FIVE_HOUR.usage!.fiveHour.resetsAt, seenAt: now.toISOString() });
+    expect(decision).toEqual({
+      name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: OVER_FIVE_HOUR.usage!.fiveHour.resetsAt, seenAt: now.toISOString(),
+      usageAgeSeconds: OVER_FIVE_HOUR.usageAgeSeconds, usage: toUsageHeadroom(OVER_FIVE_HOUR),
+    });
   });
 
   it("sevenDay pct >= 95 -> limit with sevenDay's own resetsAt", () => {
@@ -364,7 +367,10 @@ describe("decideAccountSync", () => {
       },
     };
     const decision = decideAccountSync(joinFor(account), now);
-    expect(decision).toEqual({ name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: "2026-10-09T00:00:00Z", seenAt: now.toISOString() });
+    expect(decision).toEqual({
+      name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit", until: "2026-10-09T00:00:00Z", seenAt: now.toISOString(),
+      usageAgeSeconds: account.usageAgeSeconds, usage: toUsageHeadroom(account),
+    });
   });
 
   it("a scoped model >= 95, fiveHour/sevenDay both low -> limit with that scoped window's own resetsAt", () => {
@@ -372,6 +378,7 @@ describe("decideAccountSync", () => {
     expect(decision).toEqual({
       name: "CLAUDE_CODE_OAUTH_TOKEN", action: "limit",
       until: OVER_SCOPED_ONLY.usage!.scoped[0].resetsAt, seenAt: now.toISOString(),
+      usageAgeSeconds: OVER_SCOPED_ONLY.usageAgeSeconds, usage: toUsageHeadroom(OVER_SCOPED_ONLY),
     });
   });
 
@@ -380,7 +387,41 @@ describe("decideAccountSync", () => {
     expect(decision).toEqual({
       name: "CLAUDE_CODE_OAUTH_TOKEN", action: "clear", seenAt: now.toISOString(),
       usageAgeSeconds: UNDER_THRESHOLD.usageAgeSeconds,
+      usage: toUsageHeadroom(UNDER_THRESHOLD),
     });
+  });
+
+  // Issue #238 step 2: a "limit" decision's usage field matches
+  // toUsageHeadroom(cswap) for the SAME cswap input that tripped it -- not
+  // just present, the real extracted numbers.
+  it("issue #238: a limit decision's usage field equals toUsageHeadroom(cswap) for its own cswap input", () => {
+    const decision = decideAccountSync(joinFor(OVER_FIVE_HOUR), now);
+    expect(decision.action).toBe("limit");
+    expect((decision as { usage?: unknown }).usage).toEqual(toUsageHeadroom(OVER_FIVE_HOUR));
+  });
+
+  // Issue #238 step 2: the key behaviour change from #232's original design
+  // -- a "clear" decision ALSO carries a usage field now, not just seenAt.
+  it("issue #238: a clear decision ALSO carries a usage field matching toUsageHeadroom(cswap)", () => {
+    const decision = decideAccountSync(joinFor(UNDER_THRESHOLD), now);
+    expect(decision.action).toBe("clear");
+    expect("usage" in decision).toBe(true);
+    expect((decision as { usage?: unknown }).usage).toEqual(toUsageHeadroom(UNDER_THRESHOLD));
+  });
+
+  // Issue #238 step 2: "unmanaged"/"no-data" never carry a usage field -- no
+  // trustworthy pct exists for either.
+  it("issue #238: an unmanaged decision never carries a usage field", () => {
+    const unmapped: SlotJoin = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: null, until: null, cswap: null, matchSource: "unmapped" };
+    const decision = decideAccountSync(unmapped, now);
+    expect(decision.action).toBe("unmanaged");
+    expect("usage" in decision).toBe(false);
+  });
+
+  it("issue #238: a no-data decision never carries a usage field", () => {
+    const decision = decideAccountSync(joinFor(RELOGIN_REQUIRED), now);
+    expect(decision.action).toBe("no-data");
+    expect("usage" in decision).toBe(false);
   });
 
   it("exactly at threshold (95) counts as limit, not clear", () => {
@@ -512,8 +553,30 @@ describe("real cswap shape tolerance (maestro real-probe review, issue #240)", (
   });
 });
 
+describe("usageMaxPct / toUsageHeadroom — issue #238's scoped-window fold-in", () => {
+  it("usageMaxPct: a higher scopedMaxPct dominates both fiveHourPct and sevenDayPct", () => {
+    const u: UsageHeadroom = { fiveHourPct: 10, sevenDayPct: 20, scopedMaxPct: 90 };
+    expect(usageMaxPct(u)).toBe(90);
+  });
+
+  it("usageMaxPct: scopedMaxPct: null falls back to max(fiveHourPct, sevenDayPct), no crash", () => {
+    expect(usageMaxPct({ fiveHourPct: 30, sevenDayPct: 70, scopedMaxPct: null })).toBe(70);
+    expect(usageMaxPct({ fiveHourPct: 85, sevenDayPct: 10, scopedMaxPct: null })).toBe(85);
+  });
+
+  it("toUsageHeadroom extracts scopedMaxPct as the max of usage.scoped[].pct", () => {
+    expect(toUsageHeadroom(OVER_SCOPED_ONLY)).toEqual({ fiveHourPct: 30, sevenDayPct: 45, scopedMaxPct: 96 });
+  });
+
+  it("toUsageHeadroom: scopedMaxPct is null when usage.scoped is empty", () => {
+    expect(toUsageHeadroom(STALE_OK)).toEqual({ fiveHourPct: 1, sevenDayPct: 2, scopedMaxPct: null });
+  });
+});
+
 describe("pickHeadroomAccount", () => {
-  function candidate(name: string, fiveHour: number, sevenDay: number, dataAgeMs: number = 0): HeadroomCandidate {
+  function candidate(
+    name: string, fiveHour: number, sevenDay: number, dataAgeMs: number = 0, scoped: number[] = [],
+  ): HeadroomCandidate {
     return {
       name,
       cswap: {
@@ -523,7 +586,7 @@ describe("pickHeadroomAccount", () => {
         usage: {
           fiveHour: { pct: fiveHour, resetsAt: null },
           sevenDay: { pct: sevenDay, resetsAt: null, willLastToReset: true },
-          scoped: [],
+          scoped: scoped.map((pct, i) => ({ name: `model-${i}`, pct, resetsAt: null })),
         },
       },
       dataAgeMs,
@@ -555,5 +618,16 @@ describe("pickHeadroomAccount", () => {
     const c = candidate("a", 10, 10, 5000);
     expect(pickHeadroomAccount([c], 1000)).toBeNull();
     expect(pickHeadroomAccount([c], 10000)).toBe("a");
+  });
+
+  it("issue #238: a candidate's SCOPED window, not its fiveHour/sevenDay, is what makes it the WORSE choice — proves the fold-in fix changed real behaviour, not just added an unused helper", () => {
+    // "scoped" has low fiveHour/sevenDay (10/20) but a scoped window at 99% —
+    // the pre-fix maxPct (max(fiveHour, sevenDay) only) would have read this
+    // as 20, the best of the two, and wrongly picked it. "plain" has no
+    // scoped windows and a real maxPct of 50 — genuinely more headroom once
+    // scoped is correctly folded in.
+    const scopedWorse = candidate("scoped", 10, 20, 0, [99]);
+    const plainBetter = candidate("plain", 40, 50, 0, []);
+    expect(pickHeadroomAccount([scopedWorse, plainBetter])).toBe("plain");
   });
 });

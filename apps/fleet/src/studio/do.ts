@@ -85,6 +85,9 @@ import { getFlag, setFlag } from "../state";
 // src/studio/routes.ts can reach it without pulling in do.ts's own
 // "@cloudflare/sandbox" import (see account-limits-store.ts's own header).
 import { readFleetAccountLimits, writeFleetAccountLimit } from "./account-limits-store";
+// Issue #238 (step 3) — the D1 read half of fleet-wide headroom usage, same
+// sandbox-free-module boundary as account-limits-store.ts just above.
+import { readFleetAccountUsage } from "./account-usage-store";
 import {
   shipTranscriptTick, getTranscriptTailWithStorage, type ShipDeps, type TranscriptStorage, type ShipResult,
 } from "./transcript";
@@ -4089,11 +4092,25 @@ export async function launchAccountOrRefuse(
   // shipped) rather than throwing is the fix; logged so the hiccup still
   // shows up in a tail.
   let limits: Awaited<ReturnType<typeof readFleetAccountLimits>> = {};
+  // Issue #238 (step 3) — fleet-wide headroom usage, read alongside `limits`
+  // for the identical reason: `launchAccountOrReroute`'s own tiers 1+2 read it
+  // synchronously (no lazy callback the way tier 3's burn gets below), so it
+  // must already be in hand before that call, not fetched from inside it.
+  // Same autoFailoverOn gate, same fail-open-to-"{}" (no headroom known, i.e.
+  // plain order) on a transient D1 hiccup — a usage-read failure here must
+  // never throw this gate into refusing a launch tiers 1+2 could otherwise
+  // have served in plain order.
+  let usage: Awaited<ReturnType<typeof readFleetAccountUsage>> = {};
   if (autoFailoverOn(env)) {
     try {
       limits = await readFleetAccountLimits(env.DB, resolveClaudeAccounts(env));
     } catch (err) {
       console.warn(`studio ${id}: readFleetAccountLimits failed, launching as if nothing were fleet-wide limited (fail open)`, err);
+    }
+    try {
+      usage = await readFleetAccountUsage(env.DB, resolveClaudeAccounts(env));
+    } catch (err) {
+      console.warn(`studio ${id}: readFleetAccountUsage failed, launching as if no headroom were known (fail open)`, err);
     }
   }
   const reserved = otherRepoPrimaries(env, repo);
@@ -4114,6 +4131,7 @@ export async function launchAccountOrRefuse(
         return {};
       }
     },
+    usage,
   );
   if (launch.ok) {
     // #273 r2: flag off, an earlier failover's recorded account is stale — this
@@ -6578,6 +6596,12 @@ export class StudioDO extends Sandbox<Env> {
       // second pass.
       accountBurn: {
         read: () => readFleetAccountBurn(this.env.DB, resolveClaudeAccounts(this.env)),
+      },
+      // Issue #238 (step 3): fleet-wide per-account headroom usage pct, same
+      // D1-backed shape/reasoning as accountLimits/accountBurn above, read
+      // once per tick and handed to accounts.ts's tier-1/tier-2 cascade only.
+      accountUsage: {
+        read: () => readFleetAccountUsage(this.env.DB, resolveClaudeAccounts(this.env)),
       },
       // Issue #131 (Stage B): names the repo a borrowed account is reserved
       // for, in the loud "borrowed"/"returned" notify messages only — never a

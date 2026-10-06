@@ -280,6 +280,77 @@ export function decodeAccountBurnState(raw: string | null): AccountBurnState | n
 }
 
 /**
+ * Issue #238 — the fleet_state key holding ONE account's most recent
+ * TRUSTWORTHY usage reading, for headroom ordering. Separate row, separate
+ * key prefix, separate type from `accountLimitStateKey`/`AccountLimitState`
+ * just above: that pair answers "is this account currently limited"
+ * (consumed by `accountIsFree`, no hard staleness ceiling beyond the 24h
+ * null-until grace); this answers "how much headroom does it have" (consumed
+ * by headroom ordering, a hard 10-minute freshness cutoff — see
+ * claude-swap.ts's `pickHeadroomAccount`). Widening `AccountLimitState` to
+ * also carry pct would conflate two different staleness rules under one
+ * type; this module's own convention (see `AccountBurnState` below) is one
+ * type per concern, never merged even where today's shapes happen to
+ * overlap.
+ */
+const ACCOUNT_USAGE_STATE_PREFIX = "account-usage:";
+export function accountUsageStateKey(accountName: string): string {
+  return `${ACCOUNT_USAGE_STATE_PREFIX}${accountName}`;
+}
+
+/** The value stored at accountUsageStateKey(name) — JSON, `fleet_state.value`
+ *  is TEXT. Written by the sync route (routes.ts's POST
+ *  /studio/accounts/sync) on BOTH a "limit" and a "clear" decision — a
+ *  cleared/under-threshold account still has a real pct worth recording for
+ *  ordering; only an "unmanaged"/"no-data" decision carries no trustworthy
+ *  pct, and writes nothing here. */
+export interface AccountUsageSnapshot {
+  /** usage.fiveHour.pct, as cswap reported it. */
+  fiveHourPct: number;
+  /** usage.sevenDay.pct, as cswap reported it. */
+  sevenDayPct: number;
+  /** max(usage.scoped[].pct), or null when usage.scoped was empty — never 0,
+   *  which would wrongly read as "a scoped window exists and it's at 0%". */
+  scopedMaxPct: number | null;
+  /** When THIS reading was taken, ISO — same seenAt convention as
+   *  AccountLimitState, headroom ordering's own 10-minute freshness cutoff is
+   *  computed against this, not against when the row was written. */
+  seenAt: string;
+}
+
+export function encodeAccountUsageSnapshot(s: AccountUsageSnapshot): string {
+  return JSON.stringify(s);
+}
+
+/** `null` for a key never written, or a value that is not this shape — never
+ *  thrown: a corrupt fleet_state row must read as "no usage observed", never
+ *  crash a headroom-ordering decision that has nothing to do with writing
+ *  it. */
+export function decodeAccountUsageSnapshot(raw: string | null): AccountUsageSnapshot | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const p = parsed as Record<string, unknown>;
+  if (
+    typeof p.fiveHourPct !== "number"
+    || typeof p.sevenDayPct !== "number"
+    || !("scopedMaxPct" in p) || !(typeof p.scopedMaxPct === "number" || p.scopedMaxPct === null)
+    || typeof p.seenAt !== "string"
+  ) {
+    return null;
+  }
+  return {
+    fiveHourPct: p.fiveHourPct, sevenDayPct: p.sevenDayPct,
+    scopedMaxPct: p.scopedMaxPct as number | null, seenAt: p.seenAt,
+  };
+}
+
+/**
  * The row's words while the limit holds:
  *   - "claude account dead — org disabled subscription access (ff <id>)" —
  *     issue #141: permanent, no clock ever ends it;
