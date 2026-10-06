@@ -379,9 +379,12 @@ describe("the 3 anchored branch sources", () => {
     );
     expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [] });
     expect(input.liveWipRefs).toEqual({
-      ok: true, value: expect.arrayContaining([mainWip, memberWip]),
+      ok: true,
+      value: expect.arrayContaining([
+        expect.objectContaining({ branch: mainWip }), expect.objectContaining({ branch: memberWip }),
+      ]),
     });
-    expect((input.liveWipRefs as { ok: true; value: string[] }).value).toHaveLength(2);
+    expect((input.liveWipRefs as { ok: true; value: unknown[] }).value).toHaveLength(2);
     // The lone unresolved task stays unattributed -- a wip snapshot is never
     // a task's "branch".
     expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: null })] });
@@ -405,7 +408,9 @@ describe("the 3 anchored branch sources", () => {
     );
     expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: null })] });
     expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [] });
-    expect(input.liveWipRefs).toEqual({ ok: true, value: [memberWip] });
+    expect(input.liveWipRefs).toEqual({
+      ok: true, value: [{ branch: memberWip, lastCommitAt: "2026-09-25T11:00:00.000Z" }],
+    });
   });
 
   /**
@@ -729,7 +734,9 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       { ok: true, value: [] },
       null, NOW,
     );
-    expect(input.liveWipRefs).toEqual({ ok: true, value: [memberWip] });
+    expect(input.liveWipRefs).toEqual({
+      ok: true, value: [{ branch: memberWip, lastCommitAt: "2026-09-25T11:58:00.000Z" }],
+    });
     // The real (non-wip) ref with the identical old stamp is still dropped:
     // the existing stamp-based filter for every other shape is unchanged.
     expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [] });
@@ -748,14 +755,25 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
     expect(input.liveWipRefs).toEqual({ ok: true, value: [] });
   });
 
-  it("a wip ref's compareAhead 404s (null) -- dropped from liveWipRefs, the ref is genuinely gone", async () => {
+  /**
+   * Maestro review round 1 on PR #245 (issue #241), MAJOR 2 -- a wip ref's
+   * `compareAhead` 404 used to read as "the ref is genuinely gone, drop
+   * it". Wrong for this shape: rescue.ts's own shallow-clone fallback can
+   * push a wip ref as a PARENTLESS commit with no shared ancestry with
+   * `main` at all, so GitHub's compare API answers a LIVE ref with its own
+   * 404 ("No common ancestor") -- indistinguishable from "ref doesn't
+   * exist" at the HTTP level, but a completely different, much more common
+   * situation for THIS shape. Now kept, age unknown (`lastCommitAt: null`),
+   * same as the thrown-error case right below.
+   */
+  it("a wip ref's compareAhead 404s (null) -- kept, age unknown, never dropped (a parentless shallow-clone snapshot's own 404 is not a confirmed-absent ref)", async () => {
     const memberWip = `fleet/rescue/${STUDIO}/wip/20261004120000-wt-agent-a1b2`;
     const input = await resolveSurvivalInput(
       sources({ rescueBranches: async () => [memberWip], compareAhead: async () => null }),
       { ok: true, value: [] },
       null, NOW,
     );
-    expect(input.liveWipRefs).toEqual({ ok: true, value: [] });
+    expect(input.liveWipRefs).toEqual({ ok: true, value: [{ branch: memberWip, lastCommitAt: null }] });
   });
 
   it("a wip ref's compareAhead THROWS -- kept, never discard a real ref over a lookup this function failed to make", async () => {
@@ -768,7 +786,7 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       { ok: true, value: [] },
       null, NOW,
     );
-    expect(input.liveWipRefs).toEqual({ ok: true, value: [memberWip] });
+    expect(input.liveWipRefs).toEqual({ ok: true, value: [{ branch: memberWip, lastCommitAt: null }] });
   });
 
   it("a wip ref's compareAhead returns a null lastCommitAt -- kept, same 'never discard' reasoning", async () => {
@@ -781,7 +799,36 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       { ok: true, value: [] },
       null, NOW,
     );
-    expect(input.liveWipRefs).toEqual({ ok: true, value: [memberWip] });
+    expect(input.liveWipRefs).toEqual({ ok: true, value: [{ branch: memberWip, lastCommitAt: null }] });
+  });
+
+  /**
+   * Maestro review round 1 on PR #245 (issue #241), MINOR 4 -- the
+   * `compareAhead` loop used to run once per wip ref, serially, with no
+   * cap. A studio with more wip refs than `composeSurvivalBrief`'s own
+   * display cap (`MAX_LINES_PER_SECTION`, survival-brief.ts) would burn an
+   * API call on a ref that render step immediately truncates into "+N
+   * more" anyway. Now capped to the newest `MAX_LINES_PER_SECTION` (by
+   * boot stamp) BEFORE any `compareAhead` call runs at all -- the older
+   * ones are never looked up, never land in `liveWipRefs` either.
+   */
+  it("compareAhead is only ever called for the newest MAX_LINES_PER_SECTION wip refs, never the older overflow", async () => {
+    // 10 member wip refs, boot stamps strictly increasing by one minute.
+    const stamps = Array.from({ length: 10 }, (_, i) => `202610040000${String(10 + i).padStart(2, "0")}`);
+    const refs = stamps.map((s) => `fleet/rescue/${STUDIO}/wip/${s}-wt-agent-a1b2`);
+    const compareAhead = vi.fn(async () => ({ aheadBy: 1, lastCommitAt: "2026-09-25T11:00:00.000Z" }));
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => refs, compareAhead }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    // Only the newest 8 (highest boot stamp) were ever queried.
+    const queried = compareAhead.mock.calls.map((c) => c[0]);
+    expect(queried).toHaveLength(8);
+    const newest8 = refs.slice(2); // the last 8 of the ascending list
+    for (const r of newest8) expect(queried).toContain(r);
+    for (const r of refs.slice(0, 2)) expect(queried).not.toContain(r);
+    expect((input.liveWipRefs as { ok: true; value: unknown[] }).value).toHaveLength(8);
   });
 
   it("a failed rescue-branch fetch also fails liveWipRefs, symmetric with unclaimedRescueBranches", async () => {

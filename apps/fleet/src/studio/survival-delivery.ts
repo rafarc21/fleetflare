@@ -26,8 +26,8 @@ import {
 import { redactSecrets } from "./redact";
 import type { AsideShipRecord } from "./session-sync";
 import {
-  composeSurvivalBrief,
-  type Checked, type SurvivalInput, type SurvivalOpenPr, type SurvivalTaskBranch,
+  composeSurvivalBrief, MAX_LINES_PER_SECTION,
+  type Checked, type SurvivalInput, type SurvivalOpenPr, type SurvivalTaskBranch, type SurvivalWipRef,
 } from "./survival-brief";
 import type { WakeOutcome } from "./wake";
 import type { EnvelopeArtifact } from "../board/types";
@@ -771,7 +771,7 @@ export async function resolveSurvivalInput(
   // there were genuinely zero refs.
   const unresolved = resolved.filter((r) => r.branch === null);
   let unclaimedRescueBranches: Checked<string[]>;
-  let liveWipRefs: Checked<string[]>;
+  let liveWipRefs: Checked<SurvivalWipRef[]>;
   try {
     const fetched = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
     // Issue #241, item 1 — partitioned BEFORE the age filter, BEFORE
@@ -824,25 +824,55 @@ export async function resolveSurvivalInput(
     // every ~5 minutes -- the stamp-based filter above is wrong for this
     // shape (a 3-week-old boot reads as "too stale" even with a 2-minute-old
     // commit). `sources.compareAhead` gives the REAL last-commit time; the
-    // SAME 14-day cutoff applies against THAT instead. Per-ref outcomes,
-    // same discipline every other lookup in this function already uses: a
-    // 404 (`null`) means the ref is genuinely gone -- drop it. A thrown
-    // error, or a `lastCommitAt` GitHub didn't return, means this function
-    // failed to compute the age -- KEEP it, never discard a real ref over a
-    // lookup this function failed to make (the exact words the age-filter
-    // comment above already uses for the equivalent case on the other
-    // shapes).
-    const liveWip: string[] = [];
-    for (const b of wipRefs) {
+    // SAME 14-day cutoff applies against THAT instead.
+    //
+    // Maestro review round 1 on PR #245 (issue #241), MAJOR 2 — a 404
+    // (`compareAhead` returning `null`) used to read as "the ref is
+    // genuinely gone, drop it", same as every other lookup in this function.
+    // Correct for every OTHER ref shape (each has real shared history with
+    // `main`, so GitHub's compare API can always diff it -- a 404 there
+    // really does mean gone), but WRONG specifically for a wip ref:
+    // rescue.ts's own shallow-clone fallback can push one as a PARENTLESS
+    // commit with no shared ancestry with `main` at all, and GitHub answers
+    // THAT with its own 404 ("No common ancestor") -- indistinguishable at
+    // the HTTP-status level from "ref doesn't exist", but meaning something
+    // completely different: the ref is very much alive, GitHub just cannot
+    // diff it against main. There is no OTHER signal available in this
+    // function to confirm a wip ref is genuinely absent (that confirmation
+    // already happened upstream, in the `rescueBranches()` listing this ref
+    // came from) -- so for a wip ref, a `compareAhead` 404 is now treated
+    // exactly like the thrown-error case already below it: KEEP the ref,
+    // age unknown (`lastCommitAt: null`, rendered as "age unknown" by
+    // `liveWipSnapshotLine`, survival-brief.ts), never drop.
+    //
+    // Maestro review round 1 on PR #245 (issue #241), MINOR 4 — this loop
+    // used to call `compareAhead` once per wip ref, serially, with no cap --
+    // a studio with many member worktrees could rack up a lot of sequential
+    // API calls composing ONE re-brief. `composeSurvivalBrief`'s own render
+    // cap (`MAX_LINES_PER_SECTION`) only ever shows the newest 8 anyway (see
+    // that section's own MINOR 3 fix, sorting newest-boot-stamp-first before
+    // capping) -- looking up a ref that render step would immediately
+    // truncate into "+N more" burns an API call for nothing. Sorted
+    // DESCENDING by the ref's own embedded boot stamp (the same weaker,
+    // display-ordering-only use `SurvivalWipRef`'s own doc comment
+    // describes -- never trusted for the age DECISION itself, only for
+    // picking which refs are even worth asking about) and sliced to that
+    // same cap BEFORE any `compareAhead` call runs.
+    const sortedWipRefs = wipRefs.slice().sort((a, b) => b.localeCompare(a));
+    const cappedWipRefs = sortedWipRefs.slice(0, MAX_LINES_PER_SECTION);
+    const liveWip: SurvivalWipRef[] = [];
+    for (const b of cappedWipRefs) {
       try {
         const cmp = await sources.compareAhead(b);
-        if (cmp === null) continue;
-        if (cmp.lastCommitAt === null) { liveWip.push(b); continue; }
+        if (cmp === null) { liveWip.push({ branch: b, lastCommitAt: null }); continue; }
+        if (cmp.lastCommitAt === null) { liveWip.push({ branch: b, lastCommitAt: null }); continue; }
         const at = Date.parse(cmp.lastCommitAt);
-        if (Number.isNaN(at) || Number.isNaN(nowMs) || nowMs - at <= maxAgeMs) liveWip.push(b);
+        if (Number.isNaN(at) || Number.isNaN(nowMs) || nowMs - at <= maxAgeMs) {
+          liveWip.push({ branch: b, lastCommitAt: cmp.lastCommitAt });
+        }
       } catch (err) {
         console.error(`survival re-brief: wip-ref age compare for ${sources.studioId} failed`, err);
-        liveWip.push(b);
+        liveWip.push({ branch: b, lastCommitAt: null });
       }
     }
     liveWipRefs = { ok: true, value: liveWip };
