@@ -24,6 +24,10 @@ script. All bit a real run.
   mangles the string — write `"${T}:path"`. zsh also does not word-split a
   bare `$var` inside a loop the way bash does; quote and array-expand
   explicitly.
+- **zsh `set --` inside a loop silently breaks the positional args** for
+  the rest of that iteration — it has bitten a fleet-management loop (assign,
+  then destroy) twice the same way. Write explicit per-item commands instead
+  of relying on `set --`/`$1`/`$2` surviving across loop iterations in zsh.
 - **A merge script that prints "merged" without checking the PR's state
   afterward is lying some of the time.** The host can refuse an out-of-date or
   conflicting merge silently inside a pipe. Assert `state == MERGED` as a

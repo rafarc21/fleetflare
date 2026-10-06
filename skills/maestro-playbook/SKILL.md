@@ -1,6 +1,6 @@
 ---
 name: maestro-playbook
-description: Use when acting as a maestro coordinating a fleet of studios — running the merge gate, dispatching briefs to workers, deploying, monitoring whether dispatched work is actually alive, or talking to the operator about any of that. Covers brief discipline, the dispatch-is-not-done-until-watched rule, the merge gate's core shape, deploy basics, accounts/capacity, and the operator-facing message shape. Applies to every maestro, local Mac session or cloud `maestro` studio, on the same rulebook. Read this first, every maestro session, before touching the board.
+description: Use when acting as a maestro coordinating a fleet of studios — running the merge gate, dispatching briefs to workers, deploying, monitoring whether dispatched work is actually alive, or talking to the operator about any of that. Covers brief discipline, the dispatch-is-not-done-until-watched rule, the merge gate's core shape, deploy basics, accounts/capacity, and the operator-facing message shape. The maestro is always a LOCAL session, on the operator's own machine — never a cloud studio. Read this first, every maestro session, before touching the board.
 ---
 
 # Maestro playbook
@@ -14,6 +14,24 @@ A" / "project B" mean other repos sharing the same fleet.
 
 Maestro = coordinator. The scarce resource is your AVAILABILITY to the
 operator — stay free for the next message from him, always.
+
+**Maestro is ALWAYS LOCAL.** A maestro is a Claude Code session on the
+operator's own machine, where he can see and control it directly — never a
+cloud studio. Cloud studios are workers only: they implement, review, and
+run under a release gate, never coordinate a fleet or hold a merge gate
+themselves. A cloud studio mistakenly provisioned with the `maestro` role is
+misconfigured — it stops immediately and escalates to the operator instead
+of operating; see `fleet/blueprint/studios/maestro/studio.md`, which is a
+stub for exactly this case, not a working rulebook.
+
+**A link in a report is not a deliverable.** When an artifact's SOURCE is a
+self-contained file (an HTML render, a design board, anything a worker
+produces that is not itself code in the PR diff), committing it to the repo
+or PR AND handing it over are two separate obligations — a report carrying
+only a URL loses the work the moment the account that created it is
+disabled, removed, or exhausted. Both or it isn't done. See this skill's
+brief-discipline section for the same rule applied to every worker brief
+that produces one.
 
 **Maestro never writes deliverable code. Workers do.** Maestro gates, merges,
 deploys, dispatches, closes, relays. Subagents are fine for INFO (PR status,
@@ -45,7 +63,16 @@ applied to a fleet-wide image rollout.
 - **Deliverable (code/PR)** → cloud studio, the default:
   `fleet task new ... --studio <id>`.
 - **Needs this machine** (local dev server, hardware) → local worktree agent,
-  the exception, not the default.
+  the exception, not the default. **Local fan-out can wedge the machine you
+  are running on.** Four local worktree agents each running a parallel
+  tsc/eslint/vitest pass, stacked on top of whatever else is already running
+  there, has pushed host load high enough with zero memory free that the
+  ordinary tools a maestro depends on (a terminal multiplexer, `gh`, `curl`,
+  a process-check) start failing intermittently, and every local lane dies
+  together. Prefer a cloud studio for anything that can be one. If you must
+  run locally, run one agent at a time, serialize its gates, and lower its
+  scheduling priority (`renice 19`) rather than letting several compete for
+  the same CPU and memory at once.
 - **Info for this conversation only** → an in-session subagent. Dies with the
   turn.
 - **Worker tiers:** junior (cheap model, `--junior`) is the default for
@@ -85,6 +112,23 @@ The objective lists issues by number. The rules block:
   it rather than letting the junior tier touch it.
 - **Done means setting the task `awaiting_merge`**, with the required tail
   lines from house rules verbatim — no agent is dispatched without them.
+- **Cloud studios never publish a Claude artifact — they list it under NEEDS
+  PUBLISHING instead.** A cloud studio has no claude.ai browser login of its
+  own; an artifact it creates belongs to the studio's slot account, is
+  private, and returns a 404 to every other account — there is no sharing it
+  after the fact (measured). The rule for any brief whose worker produces one:
+  write a self-contained HTML file into the PR or issue (the source, not a
+  render-and-discard), and list its path under a `NEEDS PUBLISHING` heading
+  in the report. The local maestro — the only session with claude.ai browser
+  access — is the one who actually runs the Artifact publish-and-share flow
+  from that committed source; see this skill's Role section for why that
+  split exists at all.
+- **An artifact brief needs its source committed, not just its link
+  reported.** Same rule as the Role section's "a link in a report is not a
+  deliverable", restated here because it is a brief-writing failure as much
+  as a report-writing one: a brief that asks a worker to produce an artifact
+  must say, explicitly, that the self-contained source file is committed to
+  the repo or PR — never accept "here is the link" alone as the deliverable.
 
 Keep one shared `_tail.txt`; `$(cat _tail.txt)` into every objective, never
 retype it. **Generate dispatch args from a file, never type a list by hand**
@@ -122,6 +166,16 @@ eventually be believed over reality. A process-check pattern (`pgrep -f
 command line and wait forever on itself — anchor it (e.g. `^/bin/bash
 .*script`).
 
+**Never poll a local terminal's screen from inside a monitor loop.**
+Screen-scraping a live session (e.g. an Orca pane) on every tick feeds load
+back into the very runtime the monitor is trying to observe, and a busy
+runtime can starve the poll itself — the monitor's own activity becomes part
+of the problem it exists to catch. Watch external signals instead: git
+heads, `ps`, `gh`, fleet/board state. Treat an empty or stalled screen read
+as "this read was slow", not as "the agent is dead" — check whether the
+process still exists before ever declaring a lane GONE from a screen read
+alone.
+
 **A single reading is rarely the full verdict, in either direction.**
 `[STUDIO-GONE]` alone is often a transient `fleet ls` read, not a dead
 studio — re-check before acting. The same table has read `provisioned` on
@@ -146,6 +200,15 @@ it can sit at an empty prompt while its task still reads `working`, since
 waiting on the operator's next input needs no nudge at all, and nudging it
 only burns tokens on a lane that idles again immediately regardless —
 distinguish the two before nudging anything.
+
+**Verify a turn actually started after briefing ANY agent, local or
+cloud.** A send is not a brief delivered — the call returning success proves
+only that the call returned, never that the agent read it and started
+working. Read the screen (or the equivalent status) for an actually-running
+turn after every brief; never trust the send's own return value as the
+proof. This generalizes the specific trap below — it is the same failure
+wherever a brief travels through anything other than a fresh process
+argument.
 
 **A send to a long-lived terminal can silently swallow the Enter that
 submits it.** Text lands in the input box, no turn starts, and the only
@@ -233,6 +296,13 @@ rollout specifics — `provision` vs `recycle`, the "first recycle can still
 land the old image" race, batching image-changing PRs, and the clean-worktree
 requirement that has pushed a stale image fleet-wide before.
 
+**Freeze staging while a human reviews it.** No deploys and no migrations
+during that window, including ones you believe leave the served sha
+unchanged — a deploy that is a true no-op from the gate's point of view can
+still be a surprise to someone mid-review. Say the freeze out loud to
+whatever release agent or script would otherwise run on its own schedule;
+a freeze nobody was told about is not a freeze.
+
 ## 7. Release checklists for the operator
 
 Deploy to staging FIRST; build every checklist item against the SERVED sha
@@ -241,6 +311,11 @@ checklist item — file it as an issue instead, never "after deploy" or
 "blocked on deploy". A hosted checklist page with write-through ticks, read
 back as JSON, lets you triage flagged items straight into facts-only
 follow-up issues.
+
+**A checklist release id is single-use.** Re-binding an already-reviewed id
+to a new round of changes makes the old verdicts on it indistinguishable
+from the new ones, and the reviewer has no way to tell which is which. Give
+every pass its own new id, with zero prior verdicts on it.
 
 ## 8. Talking to the operator
 
