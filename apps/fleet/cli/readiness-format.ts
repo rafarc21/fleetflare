@@ -694,6 +694,11 @@ function formatUnreachableLine(observed: Observed, now: Date): string {
  */
 function formatSessionLine(session: Observed["session"]): string {
   if (!session) return "? (no verdict recorded yet)";
-  const base = `${session.verdict} (via ${session.via})`;
+  // Issue #231 — bring-up log provenance: which trigger (explicit flag vs. a
+  // stored pending key) caused `freshSession: true` for THIS bring-up.
+  // Absent on every ordinary (non-fresh) bring-up — renders exactly as
+  // before in that case.
+  const fresh = session.freshSessionSource ? `, fresh: ${session.freshSessionSource}` : "";
+  const base = `${session.verdict} (via ${session.via}${fresh})`;
   return session.reason ? `${base} — ${session.reason}` : base;
 }

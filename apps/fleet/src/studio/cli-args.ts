@@ -71,7 +71,9 @@ export type CliCommand =
   | { cmd: "spawn"; role: string; newInstance: boolean }
   // Issue #115: `cancelFreshSession` — `--no-fresh-session`, mutually
   // exclusive with `freshSession` above.
-  | { cmd: "provision"; id: string; freshSession: boolean; cancelFreshSession: boolean }
+  // Issue #231: `discardSession` — `--discard-session`, the operator's
+  // stated override of provisionWithStorage's own involuntary-stop refusal.
+  | { cmd: "provision"; id: string; freshSession: boolean; cancelFreshSession: boolean; discardSession: boolean }
   // Issue #37: one studio, checked LIVE, right now. The container check
   // (provision.ts's provisionedCheckCmd) always tested the right things;
   // until this verb, nothing exposed it on demand, so the only way to tell a
@@ -304,8 +306,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Create a studio for <role> in the repo you are standing in (maestro, web-studio, release-studio, pilot, scratch). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them.",
   },
   provision: {
-    args: "<id> [--fresh-session|--no-fresh-session]",
-    summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict. " + FRESH_SESSION_HELP + " Issue #115: --no-fresh-session cancels a pending fresh-session intent left armed by a PRIOR --fresh-session attempt that failed before it was confirmed — that intent otherwise keeps forcing every later provision (flagged or not) to run fresh until one finally succeeds; this call clears it explicitly and proceeds as an ordinary (non-fresh) provision. `fleet ls` shows a pending intent as \"FRESH SESSION <id>: fresh-session pending\".",
+    args: "<id> [--fresh-session [--discard-session]|--no-fresh-session]",
+    summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict. " + FRESH_SESSION_HELP + " Issue #115: --no-fresh-session cancels a pending fresh-session intent left armed by a PRIOR --fresh-session attempt that failed before it was confirmed — that intent otherwise keeps forcing every later provision (flagged or not) to run fresh until one finally succeeds; this call clears it explicitly and proceeds as an ordinary (non-fresh) provision. `fleet ls` shows a pending intent as \"FRESH SESSION <id>: fresh-session pending\". Issue #231: --fresh-session on a studio whose last stop was an involuntary platform replacement (not a park/destroy) with a non-trivial session REFUSES (409), naming the session's real size — recovering from a replacement should resume, not discard real work. --discard-session forces it anyway, as a stated choice.",
   },
   check: {
     args: "<id>",
@@ -790,13 +792,23 @@ export function parseCliArgs(argv: string[]): CliCommand {
     case "provision": {
       if (!arg || arg.startsWith("--")) return { cmd: "usage", message: CLI_USAGE };
       const rest = argv.slice(2);
-      const known = ["--fresh-session", "--no-fresh-session"];
+      const known = ["--fresh-session", "--no-fresh-session", "--discard-session"];
       const stray = rest.find((f, i) => !known.includes(f) || rest.indexOf(f) !== i);
       if (stray !== undefined) return usage(`unexpected ${JSON.stringify(stray)}`);
       const freshSession = rest.includes("--fresh-session");
       const cancelFreshSession = rest.includes("--no-fresh-session");
+      const discardSession = rest.includes("--discard-session");
       if (freshSession && cancelFreshSession) return usage("--fresh-session and --no-fresh-session are mutually exclusive");
-      return { cmd: "provision", id: arg, freshSession, cancelFreshSession };
+      // Maestro review round 1 on PR #235, MINOR 8 (issue #231) —
+      // `--discard-session` only ever does anything alongside an explicit
+      // `--fresh-session` (it is provisionWithStorage's own override of the
+      // involuntary-stop refusal, which never even runs without
+      // `--fresh-session` on the same call) — a standalone
+      // `--discard-session` used to parse fine and silently do nothing,
+      // same "unknown/invalid combination" usage-error convention this
+      // parser already gives `--fresh-session`/`--no-fresh-session` above.
+      if (discardSession && !freshSession) return usage("--discard-session needs --fresh-session on the same call");
+      return { cmd: "provision", id: arg, freshSession, cancelFreshSession, discardSession };
     }
     // Issue #96: same bespoke shape as `destroy --force` below, same reasons.
     // Issue #28: plus `--fresh-session`, either order, each at most once.

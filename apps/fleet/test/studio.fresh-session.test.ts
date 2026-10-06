@@ -1,10 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   adoptWorktreeSessionCmd, runProvision, provisionWithStorage, BRINGUP_CMD, FRESH_SESSION_MARKER,
-  FRESH_SESSION_PENDING_KEY,
-  type ProvisionDeps, type StudioStorage,
+  FRESH_SESSION_PENDING_KEY, FRESH_SESSION_REFUSED_PREFIX, FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD,
+  freshSessionInvoluntaryRefusal,
+  type ProvisionDeps, type StudioStorage, type SessionMarkStorage,
 } from "../src/studio/provision";
-import { SESSION_FORCE_KEY } from "../src/studio/session-sync";
+import { SESSION_FORCE_KEY, SESSION_MARK_KEY, type SessionSyncStorage } from "../src/studio/session-sync";
+import { OBSERVED_KEY, emptyObserved, getObserved, type ObservedStorage } from "../src/studio/observed";
 
 // Issue #28: `fleet provision|recycle --fresh-session`. ONE bring-up skips the
 // adopt and gets FLEET_FRESH_SESSION=1; the persisted role env never carries
@@ -261,5 +263,369 @@ describe("provisionWithStorage — cfg.cancelFreshSession clears a stuck pending
     expect(status.state).toBe("running");
     expect(map.get(FRESH_SESSION_PENDING_KEY)).toBe(false);
     expect(status.freshSessionPending).toBe(false);
+  });
+});
+
+// Issue #231 (revised fix 1): operator convention "stopped studio + new task
+// => --fresh-session" was applied to a RECOVERY after an involuntary platform
+// replacement, discarding a 2305-turn session. `provision --fresh-session` on
+// a studio whose last stop was involuntary (Observed.replacedAt non-null) AND
+// whose session is non-trivial (SessionMark.lines over threshold) now refuses
+// unless --discard-session is also given.
+describe("provisionWithStorage — refuses --fresh-session on an involuntary-stop recovery with a real session (issue #231)", () => {
+  function combinedStorage() {
+    const map = new Map<string, unknown>();
+    const storage = {
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"] & ObservedStorage["get"] & SessionMarkStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"] & ObservedStorage["put"],
+    } as StudioStorage & ObservedStorage & SessionMarkStorage;
+    return { map, storage };
+  }
+
+  const LINES_OVER = FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD + 10;
+  const LINES_UNDER = Math.max(0, FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD - 10);
+
+  // Seeds the backing map directly (not through the typed `storage` port) --
+  // SESSION_MARK_KEY is session-sync.ts's own key, outside SessionMarkStorage's
+  // (get-only, by design) and StudioStorage's own `put` overloads.
+  function seed(map: Map<string, unknown>, replacedAt: string | null, lines: number): void {
+    map.set(OBSERVED_KEY, { ...emptyObserved(), replacedAt });
+    map.set(SESSION_MARK_KEY, { file: "a.jsonl", lines, lastTs: null });
+  }
+
+  it("refuses: involuntary stop + explicit flag + session over threshold, no --discard-session — error names the real count, nothing moved", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
+
+    await expect(provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    )).rejects.toThrow(new RegExp(`${FRESH_SESSION_REFUSED_PREFIX}.*${LINES_OVER}`));
+    expect(calls.map((c) => c.cmd)).not.toContain(BRINGUP_CMD);
+  });
+
+  it("error says 'use plain provision to resume'", async () => {
+    const { d } = deps("");
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
+
+    await expect(provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    )).rejects.toThrow(/use plain provision to resume/i);
+  });
+
+  // Maestro review round 1 on PR #235, MINOR 8 (issue #231) — a human
+  // hitting this refusal on a STALE fleet CLI binary (one built before
+  // --discard-session existed) would otherwise be stuck guessing why their
+  // CLI has no such flag: the server-side message now says so plainly.
+  it("error mentions that an older CLI without --discard-session support needs to update", async () => {
+    const { d } = deps("");
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
+
+    await expect(provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    )).rejects.toThrow(/older .*CLI.*update|CLI.*predates.*--discard-session/i);
+  });
+
+  // Maestro review round 1 on PR #235, MINOR 8 — a SEPARATE, independent
+  // escape hatch (issue #115's own --no-fresh-session, for a STUCK PENDING
+  // intent left armed by an earlier failed attempt) is named in the
+  // refusal message ONLY when that pending key is actually armed at the
+  // moment this refusal fires -- never fabricated as generic advice when it
+  // is not actually relevant.
+  it("mentions --no-fresh-session as a remedy when a pending key is ALSO independently armed", async () => {
+    const { d } = deps("");
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
+    map.set(FRESH_SESSION_PENDING_KEY, true);
+
+    await expect(provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    )).rejects.toThrow(/--no-fresh-session/);
+  });
+
+  it("never mentions --no-fresh-session when no pending key is armed", async () => {
+    const { d } = deps("");
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
+
+    let message = "";
+    try {
+      await provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      );
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).not.toContain("--no-fresh-session");
+    expect(message).not.toBe(""); // the refusal really did fire
+  });
+
+  it("proceeds normally when --discard-session is also given", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_OVER);
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true, discardSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    );
+
+    expect(status.state).toBe("running");
+    expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+  });
+
+  it("proceeds normally on a VOLUNTARY last stop (replacedAt null) even with the same large session", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { map, storage } = combinedStorage();
+    seed(map, null, LINES_OVER);
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    );
+
+    expect(status.state).toBe("running");
+    expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+  });
+
+  it("proceeds normally when the session is under threshold, regardless of replacedAt", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { map, storage } = combinedStorage();
+    seed(map, "2026-09-29T09:00:00.000Z", LINES_UNDER);
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    );
+
+    expect(status.state).toBe("running");
+    expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+  });
+
+  // Maestro review round 1 on PR #235, MINOR 9 (issue #231) — `const lines =
+  // mark?.lines ?? 0` is a DELIBERATE choice: a studio whose SessionMark has
+  // never synced yet (no mark recorded for it at all) must never be refused
+  // on a guess. Pinned at the EXACT boundary this file's own doc comment
+  // describes, plus the missing-mark case itself.
+  it("MINOR 9: a MISSING SessionMark (never synced yet) is always allowed, regardless of replacedAt/replacementDetected", async () => {
+    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { map, storage } = combinedStorage();
+    // Deliberately no `map.set(SESSION_MARK_KEY, ...)` call at all -- the
+    // exact "never synced yet" shape this test exists to pin.
+    map.set(OBSERVED_KEY, { ...emptyObserved(), replacedAt: "2026-09-29T09:00:00.000Z" });
+
+    const status = await provisionWithStorage(
+      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+      "provision", storage, undefined, storage,
+    );
+
+    expect(status.state).toBe("running");
+    expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+  });
+
+  it("MINOR 9: lines EXACTLY AT the threshold is still allowed; threshold + 1 refuses", async () => {
+    {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      seed(map, "2026-09-29T09:00:00.000Z", FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD);
+
+      const status = await provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      );
+
+      expect(status.state).toBe("running");
+      expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+    }
+    {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      seed(map, "2026-09-29T09:00:00.000Z", FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD + 1);
+
+      await expect(provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      )).rejects.toThrow(FRESH_SESSION_REFUSED_PREFIX);
+      expect(calls.map((c) => c.cmd)).not.toContain(BRINGUP_CMD);
+    }
+  });
+
+  // Maestro review round 1 on PR #235, MAJOR 2 — `recordBringupObservation`
+  // (every confirmed token-write bring-up, including an unrelated HEAL that
+  // happens to land within the SAME incarnation's recovery window) clears
+  // `Observed.replacedAt` back to null. A heal that lands between a genuine
+  // involuntary replacement and a LATER, explicit `--fresh-session` erases
+  // the ONLY signal the check above reads — so the refusal never fires for
+  // the exact incident it exists to protect against. `session.
+  // replacementDetected` is written once, at the heal itself, and never
+  // cleared afterwards — it survives exactly where `replacedAt` does not.
+  describe("the heal's own frozen session.replacementDetected survives a later replacedAt clear (#231 review round 1, MAJOR 2)", () => {
+    function seedHealed(map: Map<string, unknown>, lines: number): void {
+      // replacedAt already cleared by the intervening heal's own confirmed
+      // bring-up (recordBringupObservation's `tokenWritten` branch) -- but
+      // THAT heal's own session record still says a replacement was detected
+      // at the time it ran, and that record is never rewritten afterwards.
+      map.set(OBSERVED_KEY, {
+        ...emptyObserved(), replacedAt: null,
+        session: { verdict: "resumed", at: "2026-09-29T09:05:00.000Z", via: "heal", restore: "not-attempted", snapshotAgeS: null, turnsBefore: 5, reason: null, replacementDetected: true },
+      });
+      map.set(SESSION_MARK_KEY, { file: "a.jsonl", lines, lastTs: null });
+    }
+
+    it("still refuses an explicit --fresh-session with a large session, even though replacedAt reads null", async () => {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      seedHealed(map, LINES_OVER);
+
+      await expect(provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      )).rejects.toThrow(new RegExp(`${FRESH_SESSION_REFUSED_PREFIX}.*${LINES_OVER}`));
+      expect(calls.map((c) => c.cmd)).not.toContain(BRINGUP_CMD);
+    });
+
+    it("--discard-session still forces it through, same escape hatch as the direct replacedAt case", async () => {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      seedHealed(map, LINES_OVER);
+
+      const status = await provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true, discardSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      );
+
+      expect(status.state).toBe("running");
+      expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+    });
+
+    it("a GENUINELY voluntary stop-then-restart (no replacement ever detected) still allows fresh session normally -- never overcorrect into refusing everything", async () => {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      map.set(OBSERVED_KEY, {
+        ...emptyObserved(), replacedAt: null,
+        session: { verdict: "resumed", at: "2026-09-29T09:05:00.000Z", via: "restart", restore: "not-attempted", snapshotAgeS: null, turnsBefore: 5, reason: null },
+      });
+      map.set(SESSION_MARK_KEY, { file: "a.jsonl", lines: LINES_OVER, lastTs: null });
+
+      const status = await provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      );
+
+      expect(status.state).toBe("running");
+      expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+    });
+  });
+});
+
+// Issue #231: bring-up log provenance — which of the two triggers
+// (explicit flag vs. a stored pending key) caused `freshSession: true` for
+// THIS bring-up, recorded on Observed.session so `fleet inspect` can show it.
+describe("provisionWithStorage — records which trigger caused freshSession: true (issue #231)", () => {
+  function combinedStorage() {
+    const map = new Map<string, unknown>();
+    const storage = {
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"] & ObservedStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"] & ObservedStorage["put"],
+    } as StudioStorage & ObservedStorage;
+    return { map, storage };
+  }
+
+  it("explicit --fresh-session (no stored pending key): freshSessionSource is 'flag'", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.session?.freshSessionSource).toBe("flag");
+  });
+
+  it("no flag, but a stuck pending key from an earlier failed attempt: freshSessionSource is 'pending-key'", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+    await storage.put(FRESH_SESSION_PENDING_KEY, true);
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch" }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.session?.freshSessionSource).toBe("pending-key");
+  });
+
+  it("an ordinary, non-fresh provision: freshSessionSource is absent", async () => {
+    const { d } = deps("");
+    const { storage } = combinedStorage();
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch" }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.session?.freshSessionSource).toBeUndefined();
+  });
+});
+
+// Issue #231 (fix 2b): the aside path(s) a confirmed fresh-session move
+// actually went to, persisted onto Observed.lastSessionAside so a later
+// heal/recycle's survival brief can tell a lead where an old session went.
+describe("provisionWithStorage — persists the aside path(s) onto Observed.lastSessionAside (issue #231)", () => {
+  function combinedStorage() {
+    const map = new Map<string, unknown>();
+    const storage = {
+      get: (async (k: string) => map.get(k)) as StudioStorage["get"] & ObservedStorage["get"],
+      put: (async (k: string, v: unknown) => { map.set(k, v); }) as StudioStorage["put"] & ObservedStorage["put"],
+    } as StudioStorage & ObservedStorage;
+    return { map, storage };
+  }
+
+  it("a confirmed move: the real path lands on Observed.lastSessionAside", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.lastSessionAside).toEqual([ASIDE]);
+  });
+
+  it("flag honored, nothing to move: lastSessionAside stays unset", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} none\n`);
+    const { storage } = combinedStorage();
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.lastSessionAside ?? null).toBeNull();
+  });
+
+  it("a LATER, ordinary provision leaves a prior aside path alone (not auto-cleared)", async () => {
+    const { storage } = combinedStorage();
+    const first = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    await provisionWithStorage(first.d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient", "provision", storage);
+
+    const second = deps("");
+    await provisionWithStorage(second.d, storage, { repo: REPO, role: "scratch" }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.lastSessionAside).toEqual([ASIDE]);
+  });
+
+  // Maestro review round 1 on PR #235, MAJOR 3 — stamped in the SAME
+  // mergeObserved call as the paths themselves, so a MUCH later brief can
+  // render an honest age instead of repeating the claim as if it just
+  // happened.
+  it("a confirmed move also stamps Observed.lastSessionAsideAt (#231 review round 1, MAJOR 3)", async () => {
+    const { d } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+    const { storage } = combinedStorage();
+
+    await provisionWithStorage(d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient", "provision", storage);
+
+    const observed = await getObserved(storage);
+    expect(observed.lastSessionAsideAt).toBe(NOW);
   });
 });

@@ -2029,6 +2029,34 @@ export function formatRescueStamp(now: Date): string {
 export const WIP_SYNC_PUSH_TIMEOUT_SECONDS = 25;
 
 /**
+ * Maestro review round 1 on PR #235, MINOR 6 (issue #231) — `wipSyncCmd`'s
+ * own budget ledger ceiling, the exact seconds this function's own exec gets
+ * under `EXEC_CLASSES.wipSync` (sandbox-api.ts). `WIP_SYNC_PUSH_TIMEOUT_
+ * SECONDS`'s own doc comment above worked out ONE target's worst case at 60s
+ * — comfortably inside this 90s ceiling when `wipSyncCmd` covered the main
+ * checkout only (its pre-#231-fix-3b design). Now that it walks every member
+ * worktree IN THE SAME EXEC, 2+ slow targets can exceed it, and because
+ * targets are processed in a FIXED order (main checkout, then every
+ * worktree in `git worktree list` order), an exec killed partway through
+ * starves every LATER worktree on EVERY tick, never just once. `wip_budget_
+ * ok` (below) is this file's own `rescue_budget_ok` pattern, mirrored at
+ * wip-sync's own 90s scale rather than reusing `RESCUE_SERVER_DEADLINE_
+ * SECONDS` (300s, sized for teardown's much longer `EXEC_CLASSES.rescue`
+ * budget) — refusing to START a target's push once what remains cannot
+ * cover it, rather than risking a silent exec-kill that discards every
+ * already-printed line (see `rescue_budget_ok`'s own doc comment,
+ * RESCUE_SERVER_DEADLINE_SECONDS, for why that risk is the whole reason this
+ * pattern exists at all).
+ */
+export const WIP_SYNC_SERVER_DEADLINE_SECONDS = 90;
+
+/** Maestro review round 1 on PR #235, MINOR 6 — same margin reasoning
+ *  `RESCUE_BUDGET_MARGIN_SECONDS` gives for the teardown ledger: covers one
+ *  pair of truncated `date +%s` samples, independent of wip-sync's own
+ *  (much shorter) scale. */
+export const WIP_SYNC_BUDGET_MARGIN_SECONDS = 5;
+
+/**
  * Fix round (#208 PR #215 review item 6): the sentinel `wipSyncProbeCmd`
  * (below) prints when — and ONLY when — there is genuinely something to
  * sync (a dirty scoped status, or a clean tree with commits no
@@ -2077,27 +2105,55 @@ export function wipSyncProbeCmd(repo: string, root = "/workspace"): string {
   const scope = `-- . ${RESCUE_MARKER_PATHSPECS}`;
   return (
     `if [ ! -d ${dir}/.git ]; then echo "${RESCUE_NO_CHECKOUT}"; else\n` +
+    // Issue #231 fix 3b: factored into a function (echoes exactly ONE
+    // sentinel for `$1`), called once for the main checkout and once per
+    // member worktree below — required so this cheap probe's own verdict
+    // actually covers what `wipSyncCmd` now covers (see that function's own
+    // doc comment): leaving this main-checkout-only would make a dirty
+    // member worktree alongside a clean main checkout read RESCUE_CLEAN,
+    // silently skipping the expensive push half every tick.
+    `  wip_probe_one() {\n` +
+    `    local wdir="$1" wall wstatus whead wahead rc\n` +
     // Fix round item 7: see wipSyncCmd's own identical comment on
     // GIT_OPTIONAL_LOCKS=0 for `git status` — the same live-studio race
     // applies here, since this probe runs on the same live checkout.
-    `  wall="$(GIT_OPTIONAL_LOCKS=0 git -C ${dir} status --porcelain 2>&1)"; rc=$?\n` +
-    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe status"; else\n` +
-    `    wstatus="$(GIT_OPTIONAL_LOCKS=0 git -C ${dir} status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
-    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe status"\n` +
-    `    elif [ -n "$wstatus" ]; then echo "${WIP_SYNC_NEEDED}"\n` +
-    `    else\n` +
-    `      whead=$(git -C ${dir} rev-parse HEAD 2>/dev/null); rc=$?\n` +
-    `      if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe rev-parse"\n` +
-    `      else\n` +
-    `        wahead=$(git -C ${dir} rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
-    `        if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync-probe rev-list"\n` +
-    `        elif [ -n "$wahead" ] && [ "$wahead" != "0" ]; then echo "${WIP_SYNC_NEEDED}"\n` +
-    `        elif [ -n "$wall" ]; then echo "${RESCUE_MARKERS_ONLY}"\n` +
-    `        else echo "${RESCUE_CLEAN}"\n` +
-    `        fi\n` +
-    `      fi\n` +
+    `    wall="$(GIT_OPTIONAL_LOCKS=0 git -C "$wdir" status --porcelain 2>&1)"; rc=$?\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wdir status"; return; fi\n` +
+    `    wstatus="$(GIT_OPTIONAL_LOCKS=0 git -C "$wdir" status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wdir status"; return; fi\n` +
+    `    if [ -n "$wstatus" ]; then echo "${WIP_SYNC_NEEDED}"; return; fi\n` +
+    `    whead=$(git -C "$wdir" rev-parse HEAD 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $wdir rev-parse"; return; fi\n` +
+    `    wahead=$(git -C "$wdir" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wdir rev-list"; return; fi\n` +
+    `    if [ -n "$wahead" ] && [ "$wahead" != "0" ]; then echo "${WIP_SYNC_NEEDED}"; return; fi\n` +
+    `    if [ -n "$wall" ]; then echo "${RESCUE_MARKERS_ONLY}"; return; fi\n` +
+    `    echo "${RESCUE_CLEAN}"\n` +
+    `  }\n` +
+    // Best-of-N across every target: NEEDED beats FAILED beats MARKERS_ONLY
+    // beats CLEAN — the first genuinely actionable (or failed) target found
+    // anywhere decides the overall answer, never masked by a later, quieter
+    // target. Same worktree enumeration as wipSyncCmd's own driver.
+    `  wip_probe_best=${RESCUE_CLEAN}; wip_probe_rank=0\n` +
+    `  wip_probe_check() {\n` +
+    `    local r="$1" rk=0\n` +
+    `    if [ "$r" = "${WIP_SYNC_NEEDED}" ]; then rk=3\n` +
+    `    elif [ "\${r#${RESCUE_FAILED_PREFIX}}" != "$r" ]; then rk=2\n` +
+    `    elif [ "$r" = "${RESCUE_MARKERS_ONLY}" ]; then rk=1\n` +
     `    fi\n` +
+    `    if [ "$rk" -gt "$wip_probe_rank" ]; then wip_probe_best="$r"; wip_probe_rank=$rk; fi\n` +
+    `  }\n` +
+    `  wip_probe_check "$(wip_probe_one ${dir})"\n` +
+    `  wtporcelain="$(git -C ${dir} worktree list --porcelain 2>/dev/null)"\n` +
+    `  wtlist="$(printf '%s\\n' "$wtporcelain" | sed -n 's/^worktree //p')"\n` +
+    `  if [ -n "$wtlist" ]; then\n` +
+    `    while IFS= read -r w; do\n` +
+    `      [ "$w" = "${dir}" ] && continue\n` +
+    `      [ -d "$w" ] || continue\n` +
+    `      wip_probe_check "$(wip_probe_one "$w")"\n` +
+    `    done <<< "$wtlist"\n` +
     `  fi\n` +
+    `  echo "$wip_probe_best"\n` +
     `fi`
   );
 }
@@ -2216,18 +2272,20 @@ export function wipSyncRef(studio: string, bootStamp: string): string {
  * push step (`wip_sync_push` below) instead of bending either of those to a
  * shape they were not built for.
  *
- * NO BUDGET LEDGER (`rescue_budget_ok`, the elaborate multi-push worst-case
- * tracking both command builders above carry): that machinery exists
- * because THOSE functions can run a first push attempt plus an independent
- * non-fast-forward retry, several times over, across a whole worktree/
- * branch/stash walk. This function runs exactly ONE push, to ONE target —
- * fix round (#208 PR #215 review item 2) added ONE bounded fallback retry on
- * top of that (see `wip_sync_push`'s own comment below), never a whole
- * worktree/branch/stash walk, and the worst case (two `pushTimeoutSeconds`-
- * bounded pushes back to back) comfortably fits this function's own short
- * exec-class budget (`EXEC_CLASSES.wipSync`, sandbox-api.ts) with no
- * cross-push accounting needed — there is still no multi-target walk for a
- * ledger to protect against.
+ * BUDGET LEDGER, ADDED (maestro review round 1 on PR #235, MINOR 6; issue
+ * #231) — this function used to need none: it ran exactly ONE push, to ONE
+ * target (the main checkout), and fix round (#208 PR #215 review item 2)'s
+ * own ONE bounded fallback retry on top of that (see `wip_sync_push`'s own
+ * comment below) comfortably fit this function's own short exec-class
+ * budget (`EXEC_CLASSES.wipSync`, sandbox-api.ts) with no cross-push
+ * accounting needed. Issue #231 fix 3b then widened this SAME exec to walk
+ * every member worktree too, in a FIXED order, all within the SAME 90s
+ * budget — now `wip_budget_ok` (below, mirroring `rescue_budget_ok`'s own
+ * pattern at wip-sync's own 90s scale, `WIP_SYNC_SERVER_DEADLINE_SECONDS`)
+ * checks what remains before EVERY target's own push attempt, refusing to
+ * start one that cannot finish rather than risking the whole exec being
+ * killed partway through (which would starve every worktree AFTER the one
+ * in flight, on every single tick, not just once).
  *
  * Fix round (#208 PR #215 review item 2): PUBLIC WORK REPO + PRIVATE RESCUE
  * REMOTE was a BLOCKER — `wip_sync_push` used to be a bare, un-retried `git
@@ -2252,12 +2310,18 @@ export function wipSyncRef(studio: string, bootStamp: string): string {
  * (already-shallow, already-truncated) history cut is lost, exactly like
  * `rescue_try_push`'s own documented contract.
  *
- * SCOPE: THE MAIN CHECKOUT ONLY, never a member subagent's own worktree. A
- * deliberate v1 limitation (see this feature's own plan doc,
- * docs/plans/2026-10-03-feat-208-wip-sync.md), not an oversight: this runs
- * on a 5-minute cadence as a bounding safety net, not a one-shot teardown
- * rescue, and the board issue's own Ask talks about "a running studio's
- * container" and "worktree dirty" in the singular.
+ * SCOPE, UPDATED (issue #231 fix 3b): the v1 "main checkout only" limitation
+ * (see this feature's own plan doc, docs/plans/2026-10-03-feat-208-wip-sync.md)
+ * is lifted — this now walks the main checkout, then every member worktree
+ * (`wip_sync_one`'s own call sites at the bottom of this script), each to
+ * its own per-boot ref (`wip/<bootStamp>-wt-<wid>` — maestro review round 1
+ * on PR #235, MAJOR 4 + 5; see `wipSyncRef`'s sibling ref shape for the main
+ * checkout's own, and `wip_sync_one`'s own call sites' doc comment below for
+ * why a hyphen, not a further nested `/`, joins the two). ALL of it still
+ * runs on the SAME 5-minute
+ * cadence, within the SAME single `EXEC_CLASSES.wipSync` exec, bounded by
+ * `wip_budget_ok` (MINOR 6, above) rather than a worktree count this file
+ * has no way to know ahead of time.
  *
  * Covers the same two shapes `rescue_one`/`snapshot_target` above already
  * distinguish, reusing the identical detection: a dirty tree (scoped status
@@ -2285,25 +2349,63 @@ export function wipSyncRef(studio: string, bootStamp: string): string {
  * collision this fix round exists to close), so a caller must always resolve
  * one first; do.ts's `wipSync` skips the whole sync for a tick rather than
  * call this with one invented.
+ *
+ * Maestro review round 1 on PR #235, MINOR 6 — `serverDeadlineSeconds`/
+ * `budgetMarginSeconds` are the SAME test-seam convention `rescuePushCmd`
+ * gives its own two (production always uses `WIP_SYNC_SERVER_DEADLINE_
+ * SECONDS`/`WIP_SYNC_BUDGET_MARGIN_SECONDS` below), but appended at the END
+ * of the parameter list here rather than slotted in right after
+ * `pushTimeoutSeconds` the way `rescuePushCmd` does — this function already
+ * shipped with `botName`/`botEmail`/`opts` as its own trailing positional
+ * params, and existing callers (this file's own tests, do.ts) pass those
+ * positionally; inserting new params in the middle would silently shift
+ * every one of those into the wrong slot.
  */
 export function wipSyncCmd(
   repo: string, studio: string, bootStamp: string, root = "/workspace",
   pushTimeoutSeconds = WIP_SYNC_PUSH_TIMEOUT_SECONDS,
   botName = "fleetflare[bot]", botEmail = "fleetflare[bot]@users.noreply.github.com",
   opts: RescuePushOptions = {},
+  serverDeadlineSeconds = WIP_SYNC_SERVER_DEADLINE_SECONDS, budgetMarginSeconds = WIP_SYNC_BUDGET_MARGIN_SECONDS,
 ): string {
   const dir = `${root}/${repo}`;
   const scope = `-- . ${RESCUE_MARKER_PATHSPECS}`;
   const identity = `-c user.name="${botName}" -c user.email="${botEmail}"`;
   const target = wipSyncRef(studio, bootStamp);
   return (
+    // Maestro review round 1 on PR #235, MINOR 6 — same `date +%s`-based
+    // wall-clock ledger `rescue_budget_ok` (above) uses, scoped to THIS
+    // function's own 90s exec budget rather than teardown's 300s. Captured
+    // first, before `rescuePushPrelude`, so every target's own budget check
+    // (inside `wip_sync_one`, below) measures against the true start of this
+    // exec.
+    `__wip_start=$(date +%s)\n` +
     rescuePushPrelude(opts) +
-    // `$1`: the thing to push (a bare `HEAD`, or a synthetic snapshot SHA) —
+    // Maestro review round 1 on PR #235, MINOR 6 — checked once before EVERY
+    // target's own push attempt (`wip_sync_one`'s two `wip_sync_push` call
+    // sites, below), never before the cheap status/rev-list probe that
+    // precedes them: a target that turns out clean never needed a push at
+    // all, so budget-failing it on a borderline exec would refuse work this
+    // ledger was never protecting against. `mult=2`: `wip_sync_push` itself
+    // can run its own main attempt AND its shallow/parentless fallback retry
+    // back-to-back (`WIP_SYNC_PUSH_TIMEOUT_SECONDS`'s own doc comment), the
+    // identical worst-case reasoning `rescue_budget_ok`'s own `mult=2`
+    // call sites use.
+    `wip_budget_ok() {\n` +
+    `  local id="$1" now remaining\n` +
+    `  now=$(date +%s)\n` +
+    `  remaining=$(( ${serverDeadlineSeconds} - (now - __wip_start) ))\n` +
+    `  if [ "$remaining" -lt $(( 2 * (${pushTimeoutSeconds} + ${KILL_GRACE_SECONDS}) + ${budgetMarginSeconds} )) ]; then\n` +
+    `    echo "${RESCUE_FAILED_PREFIX} $id budget $remaining not attempted"\n` +
+    `    return 1\n` +
+    `  fi\n` +
+    `}\n` +
+    // `$2`: the thing to push (a bare `HEAD`, or a synthetic snapshot SHA) —
     // `--force --no-verify`, unconditionally: see this function's own doc
     // comment above for why force is safe HERE, and nowhere else in this
     // file. `--no-verify` for the same reason every OTHER generated-ref push
-    // in this file skips hooks: `$target` is never a real branch a repo's own
-    // pre-push hook needs to see.
+    // in this file skips hooks: `$wtarget` is never a real branch a repo's
+    // own pre-push hook needs to see.
     //
     // Fix round (#208 PR #215 review item 2): a #16/#140 shallow/parentless
     // fallback, reusing `rescue_try_push`'s own recovery (see this function's
@@ -2335,21 +2437,45 @@ export function wipSyncCmd(
     // `update-ref` this file's `rescuePushCmd` already runs for its OWN refs
     // (see that function's C3 doc comment) — just the delete-equivalent —
     // leaves nothing behind for a later, unrelated check to misread.
+    //
+    // Issue #231 fix 3b: `wdir`/`wtarget` are now shell ARGUMENTS ($1/$2),
+    // never build-time `${dir}`/`${target}` string interpolation — the same
+    // function now runs once for the main checkout and once per member
+    // worktree, each with its own directory and its own per-boot
+    // `wip/<bootStamp>-wt-<wid>` ref (maestro review round 1 on PR #235,
+    // MAJOR 4 + 5 — see `wip_sync_one`'s own call sites' doc comment below
+    // for why this lives under `wip/`, not `wt/`, and why a hyphen, not a
+    // further `/`, joins the stamp and the worktree id).
     `wip_sync_push() {\n` +
-    `  local src="$1" snap perr prc\n` +
-    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --force --no-verify "$__rdest" "$src:refs/heads/${target}" 2>&1 1>/dev/null)"; prc=$?\n` +
-    `  if [ "$prc" = 0 ]; then git -C ${dir} update-ref -d refs/remotes/origin/${target} 2>/dev/null || true; return 0; fi\n` +
-    `  if [ -z "$perr" ]; then perr="push to ${target} failed (code $prc) with no output"; ` +
-    `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="push to ${target} killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
+    `  local wdir="$1" wtarget="$2" src="$3" snap perr prc\n` +
+    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$wdir" push --force --no-verify "$__rdest" "$src:refs/heads/$wtarget" 2>&1 1>/dev/null)"; prc=$?\n` +
+    `  if [ "$prc" = 0 ]; then git -C "$wdir" update-ref -d "refs/remotes/origin/$wtarget" 2>/dev/null || true; return 0; fi\n` +
+    `  if [ -z "$perr" ]; then perr="push to $wtarget failed (code $prc) with no output"; ` +
+    `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="push to $wtarget killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
     `  printf '%s' "$perr" | grep -qiE 'shallow update not allowed|did not receive expected object' || { printf '%s' "$perr"; return 1; }\n` +
-    `  snap=$(git -C ${dir} ${identity} commit-tree "$src^{tree}" -m "fleet: periodic WIP sync snapshot (shallow clone fallback)" 2>/dev/null) || { printf '%s' "$perr"; return 1; }\n` +
-    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C ${dir} push --force --no-verify "$__rdest" "$snap:refs/heads/${target}" 2>&1 1>/dev/null)"; prc=$?\n` +
-    `  if [ "$prc" = 0 ]; then git -C ${dir} update-ref -d refs/remotes/origin/${target} 2>/dev/null || true; return 0; fi\n` +
-    `  if [ -z "$perr" ]; then perr="snapshot push to ${target} failed (code $prc) with no output"; ` +
-    `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="snapshot push to ${target} killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
+    `  snap=$(git -C "$wdir" ${identity} commit-tree "$src^{tree}" -m "fleet: periodic WIP sync snapshot (shallow clone fallback)" 2>/dev/null) || { printf '%s' "$perr"; return 1; }\n` +
+    `  perr="$(timeout -k ${KILL_GRACE_SECONDS} ${pushTimeoutSeconds} "\${__rgit[@]}" -C "$wdir" push --force --no-verify "$__rdest" "$snap:refs/heads/$wtarget" 2>&1 1>/dev/null)"; prc=$?\n` +
+    `  if [ "$prc" = 0 ]; then git -C "$wdir" update-ref -d "refs/remotes/origin/$wtarget" 2>/dev/null || true; return 0; fi\n` +
+    `  if [ -z "$perr" ]; then perr="snapshot push to $wtarget failed (code $prc) with no output"; ` +
+    `if [ "$prc" = 124 ] || [ "$prc" = 137 ]; then perr="snapshot push to $wtarget killed after ${pushTimeoutSeconds}s (timeout)"; fi; fi\n` +
     `  printf '%s' "$perr"; return 1\n` +
     `}\n` +
+    // Issue #231 fix 3b: also takes `(wdir, wtarget)` as shell arguments now.
+    // CLEAN/MARKERS_ONLY are no longer echoed directly here — called once
+    // per target (main checkout, then every member worktree) below, and a
+    // per-target "nothing to do" sentinel would corrupt do.ts's
+    // `parseRescueExecResult` (which already tolerates MULTIPLE
+    // RESCUE_PUSHED/RESCUE_FAILED lines, the same way `rescuePushCmd`'s own
+    // worktree/branch/stash walk produces them, but expects every
+    // non-`remote:` line to be one of those two shapes). Sets `WIP_RESULT`
+    // (a plain variable, visible to the caller: this function runs as a
+    // normal shell function call, never inside a `$(...)` subshell) to
+    // `pushed`/`failed`/`markers`/`clean` instead, so the driver at the
+    // bottom of this script can aggregate across every target and print
+    // AT MOST one overall CLEAN/MARKERS_ONLY line, only when NOTHING
+    // across every target pushed or failed.
     `wip_sync_one() {\n` +
+    `  local wdir="$1" wtarget="$2"\n` +
     `  local wall wstatus wn wahead whead idxfile realidx tree sha perr prc rc\n` +
     // Fix round item 7: GIT_OPTIONAL_LOCKS=0 on every read-only `git status`
     // here — this studio is LIVE and may have its own lead committing at the
@@ -2360,17 +2486,17 @@ export function wipSyncCmd(
     // the SAME lock file; GIT_OPTIONAL_LOCKS=0 makes git skip every
     // lock-taking maintenance step it would otherwise attempt, which a
     // purely informational `status --porcelain` call never needed anyway.
-    `  wall="$(GIT_OPTIONAL_LOCKS=0 git -C ${dir} status --porcelain 2>&1)"; rc=$?\n` +
-    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync status"; return; fi\n` +
-    `  wstatus="$(GIT_OPTIONAL_LOCKS=0 git -C ${dir} status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
-    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync status"; return; fi\n` +
+    `  wall="$(GIT_OPTIONAL_LOCKS=0 git -C "$wdir" status --porcelain 2>&1)"; rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget status"; WIP_RESULT=failed; return; fi\n` +
+    `  wstatus="$(GIT_OPTIONAL_LOCKS=0 git -C "$wdir" status --porcelain --untracked-files=all ${scope} 2>&1)"; rc=$?\n` +
+    `  if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget status"; WIP_RESULT=failed; return; fi\n` +
     `  if [ -n "$wstatus" ]; then\n` +
     `    wn=$(printf '%s\\n' "$wstatus" | wc -l | tr -d ' ')\n` +
     // Same throwaway-index technique as rescueSnapshotCmd's own rescue_one
     // (see that function's doc comment for why the real index is seeded
     // in, never written to) — never the real `.git/index`.
-    `    idxfile=$(mktemp 2>/dev/null) || { echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; }\n` +
-    `    realidx=$(git -C ${dir} rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
+    `    idxfile=$(mktemp 2>/dev/null) || { echo "${RESCUE_FAILED_PREFIX} $wtarget add"; WIP_RESULT=failed; return; }\n` +
+    `    realidx=$(git -C "$wdir" rev-parse --absolute-git-dir 2>/dev/null)/index\n` +
     // Issue #228 (bonus fix, same bug class as #216 fix 5's `rescue_one`
     // copies above): `mktemp` already created `$idxfile` as a real, empty
     // (0-byte) file. When `$realidx` does not exist (no real index to seed
@@ -2380,33 +2506,101 @@ export function wipSyncCmd(
     // makes git create a fresh, valid, empty index on its own. This copy was
     // added later (#208) and never carried #216's own fix forward.
     `    if [ -f "$realidx" ]; then cp "$realidx" "$idxfile" 2>/dev/null || true; else rm -f "$idxfile"; fi\n` +
-    `    if ! GIT_INDEX_FILE="$idxfile" git -C ${dir} add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; fi\n` +
-    `    tree=$(GIT_INDEX_FILE="$idxfile" git -C ${dir} write-tree 2>/dev/null); rc=$?\n` +
+    `    if ! GIT_INDEX_FILE="$idxfile" git -C "$wdir" add -A ${scope}; then rm -f "$idxfile"; echo "${RESCUE_FAILED_PREFIX} $wtarget add"; WIP_RESULT=failed; return; fi\n` +
+    `    tree=$(GIT_INDEX_FILE="$idxfile" git -C "$wdir" write-tree 2>/dev/null); rc=$?\n` +
     `    rm -f "$idxfile"\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync add"; return; fi\n` +
-    `    sha=$(git -C ${dir} ${identity} commit-tree "$tree" -p HEAD -m "fleet: periodic WIP sync (live, real HEAD/index untouched)" 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$sha" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync commit"; return; fi\n` +
-    `    perr="$(wip_sync_push "$sha")"; prc=$?\n` +
-    `    if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync push"; printf '%s\\n' "$perr" | tail -n 5 >&2; return; fi\n` +
-    `    echo "${RESCUE_PUSHED_PREFIX} ${target} $wn ${RESCUE_PUSHED_KIND_FILES}"\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$tree" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget add"; WIP_RESULT=failed; return; fi\n` +
+    `    sha=$(git -C "$wdir" ${identity} commit-tree "$tree" -p HEAD -m "fleet: periodic WIP sync (live, real HEAD/index untouched)" 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$sha" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget commit"; WIP_RESULT=failed; return; fi\n` +
+    `    wip_budget_ok "$wtarget" || { WIP_RESULT=failed; return; }\n` +
+    `    perr="$(wip_sync_push "$wdir" "$wtarget" "$sha")"; prc=$?\n` +
+    `    if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget push"; printf '%s\\n' "$perr" | tail -n 5 >&2; WIP_RESULT=failed; return; fi\n` +
+    `    echo "${RESCUE_PUSHED_PREFIX} $wtarget $wn ${RESCUE_PUSHED_KIND_FILES}"; WIP_RESULT=pushed\n` +
     `  else\n` +
     // Issue #313-style ambiguity guard, same as rescue_one's own copy above:
     // `HEAD` resolved to its own SHA first, never passed bare.
-    `    whead=$(git -C ${dir} rev-parse HEAD 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync rev-parse"; return; fi\n` +
-    `    wahead=$(git -C ${dir} rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
-    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync rev-list"; return; fi\n` +
+    `    whead=$(git -C "$wdir" rev-parse HEAD 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ] || [ -z "$whead" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget rev-parse"; WIP_RESULT=failed; return; fi\n` +
+    `    wahead=$(git -C "$wdir" rev-list --count "$whead" --not --remotes 2>/dev/null); rc=$?\n` +
+    `    if [ "$rc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget rev-list"; WIP_RESULT=failed; return; fi\n` +
     `    if [ -n "$wahead" ] && [ "$wahead" != "0" ]; then\n` +
-    `      perr="$(wip_sync_push HEAD)"; prc=$?\n` +
-    `      if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} wip-sync push"; printf '%s\\n' "$perr" | tail -n 5 >&2; return; fi\n` +
-    `      echo "${RESCUE_PUSHED_PREFIX} ${target} $wahead ${RESCUE_PUSHED_KIND_COMMITS}"\n` +
+    `      wip_budget_ok "$wtarget" || { WIP_RESULT=failed; return; }\n` +
+    `      perr="$(wip_sync_push "$wdir" "$wtarget" HEAD)"; prc=$?\n` +
+    `      if [ "$prc" != "0" ]; then echo "${RESCUE_FAILED_PREFIX} $wtarget push"; printf '%s\\n' "$perr" | tail -n 5 >&2; WIP_RESULT=failed; return; fi\n` +
+    `      echo "${RESCUE_PUSHED_PREFIX} $wtarget $wahead ${RESCUE_PUSHED_KIND_COMMITS}"; WIP_RESULT=pushed\n` +
     `    elif [ -n "$wall" ]; then\n` +
-    `      echo "${RESCUE_MARKERS_ONLY}"\n` +
+    `      WIP_RESULT=markers\n` +
     `    else\n` +
-    `      echo "${RESCUE_CLEAN}"\n` +
+    `      WIP_RESULT=clean\n` +
     `    fi\n` +
     `  fi\n` +
     `}\n` +
-    `if [ ! -d ${dir}/.git ]; then echo "${RESCUE_NO_CHECKOUT}"; else wip_sync_one; fi`
+    `if [ ! -d ${dir}/.git ]; then echo "${RESCUE_NO_CHECKOUT}"; else\n` +
+    // Issue #231 fix 3b: main checkout first, then every member worktree —
+    // same enumeration pattern `rescuePushCmd` already uses (`git worktree
+    // list --porcelain`, the `wid=$(basename $(git -C "$w" rev-parse
+    // --git-dir))` unique-id derivation, a here-string `while read` loop
+    // immune to word-splitting), minus the budget-ledger machinery
+    // (`rescue_budget_ok`) that function also carries: this function runs
+    // exactly ONE push per target with no multi-attempt worst-case to bound.
+    // Target ref per worktree: `fleet/rescue/<studio>/wip/<bootStamp>-wt-<wid>`
+    // — the SAME per-boot rolling-snapshot property the main checkout's own
+    // `${target}` already has (force-pushed, overwritten every tick), never
+    // the teardown-time `wt/<id>-<14-digit-timestamp>` shape `rescuePushCmd`
+    // mints fresh on every push.
+    //
+    // Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231) —
+    // deliberately UNDER `wip/`, never `wt/`: the OLD shape
+    // (`wt/<wid>-<bootStamp>`) was byte-identical to `rescuePushCmd`'s own
+    // teardown-time member-worktree rescue ref, which broke two things —
+    // `rescue_on_origin`'s own wip-exclusion filter below (`grep -Ev
+    // '.../wip(/|$)'`) never matched it (it lives under `/wt/`, not `/wip/`),
+    // so teardown rescue could see a member's wip-sync tip already on origin
+    // and wrongly skip its own real, durable push; and `rescueRefStamp`
+    // (survival-delivery.ts) matched it as a genuine teardown rescue ref,
+    // surfacing it, unexplained, as an "unclaimed rescue ref" subject to
+    // teardown's own 14-day age cap, even though it is a LIVE ref refreshed
+    // every ~5 minutes.
+    //
+    // NOT `wip/<bootStamp>/wt/<wid>` (a further NESTED path under the main
+    // checkout's own `wip/<bootStamp>` leaf), despite that being the review's
+    // own illustrative example: measured directly (a real push, not a static
+    // read) — git's ref namespace forbids a ref name from being a strict
+    // path-component PREFIX of another ref's name, so `wip/<bootStamp>` (the
+    // main checkout's leaf, `wipSyncRef`) and `wip/<bootStamp>/wt/<wid>`
+    // cannot coexist: the SAME tick, with the SAME bootStamp, dirty on BOTH
+    // the main checkout and a member worktree, hit "cannot lock ref ...:
+    // ... exists; cannot create ..." on EVERY tick — a guaranteed, permanent
+    // collision, not an edge case. `wip/<bootStamp>-wt-<wid>` (a HYPHEN, not
+    // a `/`, joining the two) is a SIBLING leaf under the same `wip/`
+    // directory, never a path-component prefix of `wip/<bootStamp>` or vice
+    // versa, so the two coexist exactly like two different boots' own
+    // `wip/<bootStamp1>` / `wip/<bootStamp2>` already do. The EXISTING
+    // `/wip(/|$)` filter still matches `.../wip/<bootStamp>-wt-<wid>` (it
+    // starts with `/wip/`, which is all that pattern checks) — still no
+    // filter change needed; see `rescueRefStamp`'s own doc comment for the
+    // new, distinct match this shape needed there.
+    `  any_pushed=0; any_failed=0; any_markers=0\n` +
+    `  wip_sync_one ${dir} ${target}\n` +
+    `  [ "$WIP_RESULT" = pushed ] && any_pushed=1\n` +
+    `  [ "$WIP_RESULT" = failed ] && any_failed=1\n` +
+    `  [ "$WIP_RESULT" = markers ] && any_markers=1\n` +
+    `  wtporcelain="$(git -C ${dir} worktree list --porcelain 2>/dev/null)"\n` +
+    `  wtlist="$(printf '%s\\n' "$wtporcelain" | sed -n 's/^worktree //p')"\n` +
+    `  if [ -n "$wtlist" ]; then\n` +
+    `    while IFS= read -r w; do\n` +
+    `      [ "$w" = "${dir}" ] && continue\n` +
+    `      [ -d "$w" ] || continue\n` +
+    `      wid=$(basename "$(git -C "$w" rev-parse --git-dir)")\n` +
+    `      wip_sync_one "$w" "fleet/rescue/${studio}/wip/${bootStamp}-wt-$wid"\n` +
+    `      [ "$WIP_RESULT" = pushed ] && any_pushed=1\n` +
+    `      [ "$WIP_RESULT" = failed ] && any_failed=1\n` +
+    `      [ "$WIP_RESULT" = markers ] && any_markers=1\n` +
+    `    done <<< "$wtlist"\n` +
+    `  fi\n` +
+    `  if [ "$any_pushed" = 0 ] && [ "$any_failed" = 0 ]; then\n` +
+    `    if [ "$any_markers" = 1 ]; then echo "${RESCUE_MARKERS_ONLY}"; else echo "${RESCUE_CLEAN}"; fi\n` +
+    `  fi\n` +
+    `fi`
   );
 }

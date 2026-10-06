@@ -35,6 +35,7 @@ import {
   threwInsideDurableObject, runtimeFlags, errorMessage, durableObjectUnreachable, launchOrStartRefusalResponse,
 } from "./rpc-failure";
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
+import { FRESH_SESSION_REFUSED_PREFIX } from "./provision";
 import { resolveClaudeAccounts, accountLabel } from "./accounts";
 import {
   readFleetAccountLimits, writeFleetAccountLimit, clearFleetAccountLimit, readOneAccountLimit,
@@ -999,6 +1000,10 @@ export async function handleStudio(
     if (wantsFresh && wantsCancelFresh) {
       return new Response("fresh-session and no-fresh-session are mutually exclusive", { status: 400 });
     }
+    // Issue #231: `?discard-session=true` — the operator's stated choice to
+    // override provisionWithStorage's own involuntary-stop refusal. See
+    // ProvisionConfig.discardSession's own doc comment.
+    const wantsDiscardSession = url.searchParams.get("discard-session") === "true";
     const projectCard = await resolveProjectCard(env, id.repo);
     const cfg: ProvisionConfig = {
       // Issue #269: the instance comes off the id this route was ADDRESSED
@@ -1016,10 +1021,19 @@ export async function handleStudio(
       // Issue #115: an explicit clear of a stuck FRESH_SESSION_PENDING_KEY —
       // see ProvisionConfig.cancelFreshSession's own doc comment.
       ...(wantsCancelFresh ? { cancelFreshSession: true } : {}),
+      ...(wantsDiscardSession ? { discardSession: true } : {}),
     };
     try {
       return Response.json(burnView(await stub.provision(cfg)));
     } catch (err) {
+      // Issue #231: recognised by its message prefix FIRST, same "a decision,
+      // not a failure" posture the recycle route's own RECYCLE_REFUSED_PREFIX
+      // check already takes, just below.
+      const message = errorMessage(err);
+      if (message.startsWith(FRESH_SESSION_REFUSED_PREFIX)) {
+        console.error(`studio ${id.full} provision refused`, message);
+        return new Response(message, { status: 409 });
+      }
       const refusal = launchOrStartRefusalResponse(err);
       if (refusal) return refusal;
       if (threwInsideDurableObject(err)) throw err;

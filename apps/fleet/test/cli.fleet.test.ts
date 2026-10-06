@@ -735,6 +735,41 @@ describe("formatObservedLines (cli/readiness-format.ts) — issue #85 review BLO
     ]);
   });
 
+  // Issue #231 — bring-up log provenance: which trigger caused
+  // `freshSession: true`. Rendered right after `via`, before `reason`.
+  it("issue #231: a session verdict with freshSessionSource renders it after via, before the reason", () => {
+    const observed = {
+      ...emptyObserved(),
+      session: {
+        verdict: "lost" as const, at: "2026-09-24T11:55:00.000Z", via: "provision" as const,
+        restore: "not-attempted" as const, snapshotAgeS: null, turnsBefore: 40, reason: "no --continue",
+        freshSessionSource: "flag" as const,
+      },
+    };
+    expect(formatObservedLines(observed)).toEqual([
+      "replaced:     no",
+      "unreachable:  no",
+      "session:      lost (via provision, fresh: flag) — no --continue",
+      "activity:     ?",
+    ]);
+  });
+
+  it("issue #231: freshSessionSource absent renders exactly as before (no 'fresh:' segment)", () => {
+    const observed = {
+      ...emptyObserved(),
+      session: {
+        verdict: "lost" as const, at: "2026-09-24T11:55:00.000Z", via: "provision" as const,
+        restore: "not-attempted" as const, snapshotAgeS: null, turnsBefore: 40, reason: "no --continue",
+      },
+    };
+    expect(formatObservedLines(observed)).toEqual([
+      "replaced:     no",
+      "unreachable:  no",
+      "session:      lost (via provision) — no --continue",
+      "activity:     ?",
+    ]);
+  });
+
   it("case 4: replacedAt AND unreachableSince both set at once (the simultaneous edge case)", () => {
     const NOW = new Date("2026-09-24T12:00:00.000Z");
     const observed = {

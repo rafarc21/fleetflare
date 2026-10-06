@@ -47,7 +47,9 @@ import { buildStudioId, parseStudioId } from "./ids";
 import { repoIdSegment } from "./repo";
 import { parseFleetJson, parseRoleFile, assertRoleInFleet, roleBringupEnv } from "./blueprint";
 import { parseStudioFile, validateMemberFile, studioBringupEnv, type Studio, type MemberFile } from "./studio-blueprint";
-import { restorePlan, sessionDailyPrefix, dailyKeeperKeys, SESSION_FORCE_KEY, type RestoreAction } from "./session-sync";
+import {
+  restorePlan, sessionDailyPrefix, dailyKeeperKeys, SESSION_FORCE_KEY, SESSION_MARK_KEY, type RestoreAction,
+} from "./session-sync";
 import { sessionStats, newestMark, SessionArchiveFormatError, type SessionMark } from "./burn";
 import { MEMORY_INDEX_PATH } from "../memory/index-file";
 import { memoryIndexPrompt } from "../memory/prompt";
@@ -565,6 +567,77 @@ export const OPERATION_STALE_MS = 15 * 60 * 1000;
 export const FRESH_SESSION_PENDING_KEY = "freshSessionPending";
 
 /**
+ * Issue #231 — the narrow, get-only port `provisionWithStorage` needs to
+ * read `session-sync.ts`'s own `SESSION_MARK_KEY` (the newest session
+ * transcript file's line count, the sync guard's own baseline) without
+ * widening its `storage: StudioStorage` parameter's type to the full
+ * `SessionSyncStorage` interface (which also demands `delete`/multi-key
+ * `put` overloads no caller of THIS check needs) — same "own small port for
+ * one key" discipline `ObservedStorage`/`SessionSyncStorage` themselves
+ * already establish. A real `this.ctx.storage` (DO storage) satisfies this
+ * structurally, with no cast, exactly like `observedStorage` already does.
+ */
+export interface SessionMarkStorage {
+  get(key: typeof SESSION_MARK_KEY): Promise<SessionMark | undefined>;
+}
+
+/**
+ * Issue #231 (revised fix 1) — the turn-count proxy threshold above which a
+ * session recovering from an INVOLUNTARY platform replacement is "real work",
+ * not noise. `SessionMark.lines` is the newest session transcript file's own
+ * line count (session-sync.ts); a JSONL transcript line is roughly one turn.
+ *
+ * Show your math: the incident this fix exists for lost a 2305-turn session.
+ * 30 is deliberately a tiny fraction of that — anywhere in the tens is
+ * defensibly conservative (the maestro's own ruling on this issue) — chosen
+ * so a session that has done ANY real back-and-forth (more than a first
+ * prompt or two) trips the refusal, while a brand-new or barely-started
+ * session (a handful of turns, nothing meaningfully at risk) still proceeds
+ * on a plain `--fresh-session` ask.
+ */
+export const FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD = 30;
+
+/** Issue #231 — every refusal this fix produces starts with this, the same
+ *  "a prefix, not an error class" convention `RECYCLE_REFUSED_PREFIX`
+ *  (recycle-cost.ts) already established — routes.ts's provision route maps
+ *  it to a 409, the same way recycle's own route already maps its prefix. */
+export const FRESH_SESSION_REFUSED_PREFIX = "fresh-session refused: ";
+
+/**
+ * Issue #231 (revised fix 1) — `provisionWithStorage`'s own refusal message:
+ * names the REAL line count (never the raw turn estimate the incident's own
+ * operator report used, since this file only ever has the transcript's line
+ * count to go on) and the way out, mirroring `recycleRefusal`'s own
+ * "name the price, name the escape hatch" shape (recycle-cost.ts).
+ *
+ * Maestro review round 1 on PR #235, MINOR 8 — two additions:
+ *
+ * - The 409 this message becomes (routes.ts) now names the possibility that
+ *   the human reading it is on a STALE `fleet` CLI binary predating
+ *   `--discard-session` entirely — without this, the server's own advice
+ *   ("add --discard-session") would send them to a flag their local CLI
+ *   rejects as unknown, with no hint why.
+ * - `pendingAlsoArmed` — true when `FRESH_SESSION_PENDING_KEY` is ALSO
+ *   independently armed at the moment THIS refusal fires (checked by the
+ *   caller, `provisionWithStorage`, right there — never guessed). When true,
+ *   names `--no-fresh-session` (issue #115's own, SEPARATE escape hatch) as
+ *   the remedy for a stuck pending intent specifically — distinct from
+ *   `--discard-session`'s role here, and never fabricated as generic advice
+ *   when no pending key is actually armed.
+ */
+export function freshSessionInvoluntaryRefusal(id: string, lines: number, pendingAlsoArmed = false): string {
+  const base = FRESH_SESSION_REFUSED_PREFIX +
+    `studio ${id}'s last stop was an involuntary platform replacement, and its session has ~${lines} lines ` +
+    "of transcript (a turn-count proxy) -- --fresh-session would discard it. " +
+    `Use plain provision to resume, or add --discard-session to force it: fleet provision ${id} --fresh-session --discard-session ` +
+    "(an older fleet CLI that predates --discard-session will reject that flag as unknown -- update the CLI first).";
+  if (!pendingAlsoArmed) return base;
+  return base +
+    ` Separately: a stuck --fresh-session pending intent is also armed for this studio -- ` +
+    `fleet provision ${id} --no-fresh-session clears that instead, if that is what you meant to resolve.`;
+}
+
+/**
  * Issue #100 F3: "a destroy is in flight", as an ISO timestamp, or null.
  *
  * runDestroy writes `stopped` only AFTER destroy() resolves, so a wake that
@@ -1001,9 +1074,24 @@ export function discoverRescueRefsCmd(
   // comment (survival-delivery.ts) for the full history of why this shape is
   // discoverable now, unlike the OLD flat, un-boot-scoped ref it replaces.
   const wipPrefix = `${nestedPrefix}wip/`;
+  // Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231): a 5TH shape,
+  // `wip/<14digits>-wt-<id>` — a MEMBER worktree's own wip-sync ref, a
+  // SIBLING leaf under the same `wipPrefix` directory the main-checkout
+  // shape just above lives under (a HYPHEN joins the stamp and the id, never
+  // a further `/wt/` nesting — git's ref namespace forbids a ref from being
+  // a strict path-component prefix of another, so `wip/<14digits>` and
+  // `wip/<14digits>/wt/<id>` could never coexist on origin for the same
+  // boot; see `wip_sync_one`'s own call sites' doc comment, rescue.ts, for
+  // the measured collision this avoids). Deliberately distinct from
+  // `wtPrefix`'s own teardown-time member ref (`wt/<id>-<14digits>`, no
+  // `wip/` segment): the two used to be byte-identical, which is exactly the
+  // collision `rescue_on_origin`'s own wip-exclusion filter (rescue.ts)
+  // missed. Same anchoring discipline as every pattern above: a studio id
+  // cannot be a literal prefix of a different studio id immediately
+  // followed by `/`.
   const pattern =
     `${flatPrefix}[0-9]{14}$|${nestedPrefix}[0-9]{14}/checkout/[^[:space:]]+$|` +
-    `${wtPrefix}[^[:space:]]+-[0-9]{14}$|${wipPrefix}[0-9]{14}$`;
+    `${wtPrefix}[^[:space:]]+-[0-9]{14}$|${wipPrefix}[0-9]{14}$|${wipPrefix}[0-9]{14}-wt-[^[:space:]]+$`;
   const originCmd = (
     `{ mkdir -p ${listDir} && ` +
     `${bounded} git -C ${targetDir} ls-remote --heads origin > ${listFile} && ` +
@@ -2409,6 +2497,12 @@ export async function runProvision(
    *  NOT the same thing as freshSessionMoved (false both when unconfirmed
    *  AND when confirmed-but-nothing-to-move). */
   freshSessionConfirmed?: boolean;
+  /** Issue #231 — the real on-disk path(s) a confirmed move actually went
+   *  to (`parseFreshSession`'s successfully-moved entries only, `failed `
+   *  ones excluded): the durable half of `freshSessionNote`'s human-readable
+   *  string, for `provisionWithStorage` to persist onto `Observed.
+   *  lastSessionAside`. Absent/empty when nothing was ever moved. */
+  freshSessionAsidePaths?: string[];
 }> {
   const id = buildStudioId(cfg);
   // Dynamic repo selection (P4a) — see resolveWorkRepoSlug's own doc comment
@@ -2445,6 +2539,9 @@ export async function runProvision(
   // channel: a discard nobody is told about is the thing this must never be.
   let freshSessionNote: string | null = null;
   let freshSessionMoved = false;
+  // Issue #231 — the real paths behind `freshSessionMoved`, for
+  // `provisionWithStorage` to persist onto `Observed.lastSessionAside`.
+  let freshSessionAsidePaths: string[] = [];
   // Issue #100 review round 1: distinct from `freshSessionMoved` above, which
   // is ALSO `false` for the legitimate "flag honored, nothing to move" case
   // (`moved` is `[]`) -- indistinguishable there from "never confirmed at
@@ -2560,6 +2657,10 @@ export async function runProvision(
       const moved = parseFreshSession(bringupRes.stdout);
       freshSessionNote = freshSessionNoteFor(moved, id);
       freshSessionMoved = moved !== null && moved.some((m) => !m.startsWith("failed "));
+      // Issue #231 — the successfully-moved paths only, `failed ` entries
+      // excluded: these are real, on-disk destinations, never a path a move
+      // actually failed to reach.
+      freshSessionAsidePaths = moved === null ? [] : moved.filter((m) => !m.startsWith("failed "));
       // Issue #100 review round 1: see freshSessionConfirmed's own doc
       // comment above -- `moved !== null` (a marker line printed) and no
       // entry failed. `[]` (nothing to move) is confirmed; `null` or any
@@ -2655,6 +2756,7 @@ export async function runProvision(
     status, roleEnv, keepAlive,
     ...(freshSessionMoved ? { freshSessionMoved } : {}),
     ...(freshSessionConfirmed ? { freshSessionConfirmed } : {}),
+    ...(freshSessionAsidePaths.length > 0 ? { freshSessionAsidePaths } : {}),
   };
 }
 
@@ -3359,6 +3461,13 @@ export async function recordBringupObservation(
   // restartWithStorage's own `ctx` parameter) — see this function's own doc
   // comment above for why the callers' pre-call check alone is insufficient.
   ctx: OpCtx,
+  // Issue #231 — WHICH trigger caused `requestedFresh: true` for THIS
+  // bring-up (provisionWithStorage's own local variable of the same name),
+  // or null when this bring-up did not go fresh at all (every
+  // restartWithStorage call, which never computes one). Stamped onto the
+  // session record below — see ObservedSession.freshSessionSource's own
+  // doc comment (observed.ts).
+  freshSessionSource: "flag" | "pending-key" | null = null,
 ): Promise<void> {
   if (!observedStorage) return;
   const token = crypto.randomUUID();
@@ -3464,6 +3573,22 @@ export async function recordBringupObservation(
   // replacement just took away.
   const replacementDetected = observedBefore.replacedAt !== null;
   const replacementFlag = replacementDetected ? { replacementDetected: true } : {};
+  // Issue #231 — same external-spread pattern as `replacementFlag`/
+  // `keeperSource` just below: applied to BOTH branches that build a verdict
+  // describing THIS bring-up, never to the "untouched, keep the prior
+  // verdict" branch above (that branch describes an EARLIER bring-up, which
+  // this call's own `freshSessionSource` says nothing about).
+  const freshSessionFlag = freshSessionSource !== null ? { freshSessionSource } : {};
+  // Maestro review round 1 on PR #235, BLOCKER 1 (issue #231) — captured
+  // HERE, from `observedBefore` (read at the top of this function, BEFORE
+  // the `patch.wipBootStamp = formatRescueStamp(...)` write further below
+  // ever runs), for the identical reason `replacementDetected` above is
+  // captured from `observedBefore.replacedAt` rather than read live at
+  // delivery time. See `ObservedSession.wipBootStampBefore`'s own doc
+  // comment (observed.ts) for the full bug this closes.
+  const wipBootStampBeforeFlag = observedBefore.wipBootStamp !== undefined && observedBefore.wipBootStamp !== null
+    ? { wipBootStampBefore: observedBefore.wipBootStamp }
+    : {};
   // Review round 6, MUST-FIX 9: MUST-FIX 3 above only covers the case where a
   // PRIOR verdict exists to fall back on. An untouched lead with NO prior
   // verdict at all (a studio's very first bring-up ever, or a pre-#85 studio
@@ -3481,12 +3606,16 @@ export async function recordBringupObservation(
           reason: "lead predates bring-up",
           ...(snapshotAgeIsUpperBound ? { snapshotAgeIsUpperBound: true } : {}),
           ...replacementFlag,
+          ...freshSessionFlag,
+          ...wipBootStampBeforeFlag,
           ...(keeperSource ? { snapshotSource: keeperSource } : {}),
         }
       : {
           ...computeSessionVerdict(probe, expectedCwd, restoreOutcome, turnsBefore, snapshotAgeS, now, via),
           ...(snapshotAgeIsUpperBound ? { snapshotAgeIsUpperBound: true } : {}),
           ...replacementFlag,
+          ...freshSessionFlag,
+          ...wipBootStampBeforeFlag,
           ...(keeperSource ? { snapshotSource: keeperSource } : {}),
         };
 
@@ -3546,7 +3675,74 @@ export async function provisionWithStorage(
   // every caller (scheduled ticks, and the many tests that call this function
   // directly) that predates this feature and does not exercise the race.
   ctx: OpCtx = NEVER_MOVED_CTX,
+  // Issue #231 — see SessionMarkStorage's own doc comment. Optional, same
+  // "absence = today's behavior" shape `observedStorage` above already uses:
+  // a caller with no session-mark port in hand simply skips the refusal
+  // check below (treated as "lines unknown", never refused on a guess).
+  sessionMarkStorage?: SessionMarkStorage,
 ): Promise<StudioStatus> {
+  // Issue #231 (revised fix 1) — refuse an EXPLICIT --fresh-session ask on a
+  // studio whose last stop was an involuntary platform replacement (the
+  // ship tick's own `Observed.replacedAt` signal — the identical one
+  // `survivalBriefAllowed`/the wip-sync bootStamp gate already treat as "this
+  // bring-up is recovering from a replacement") with a non-trivial session
+  // (SessionMark.lines over FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD).
+  // Checked FIRST, before the op-lock or any write below — a fast refuse
+  // with no side effects, same posture every other up-front refusal in this
+  // file takes.
+  //
+  // `cfg.freshSession === true` ONLY — never `freshSessionPending` (the
+  // stored key, read further below as part of `requestedFresh`). The
+  // issue's own follow-up narrowed this refusal to an EXPLICIT ask meeting
+  // an involuntary-stop recovery; a bodyless retry that merely inherits a
+  // stuck pending intent is issue #100's own, separate concern.
+  if (cfg.freshSession === true && cfg.discardSession !== true && observedStorage) {
+    const obs = await getObserved(observedStorage);
+    // Maestro review round 1 on PR #235, MAJOR 2 — `obs.replacedAt` alone is
+    // not enough: `recordBringupObservation` clears it to null on ANY
+    // confirmed token-write bring-up, including an unrelated HEAL that lands
+    // within the same incarnation's recovery window, well before a LATER,
+    // explicit `--fresh-session` ever gets here. `obs.session?.
+    // replacementDetected` is that heal's own FROZEN record of "a replacement
+    // had already been detected when I ran" (ObservedSession's own doc
+    // comment, observed.ts) — written once and never rewritten afterwards,
+    // so it survives exactly where `replacedAt` does not. Refuse on EITHER
+    // signal, never requiring both: a plain voluntary stop-then-restart (no
+    // replacement ever detected, replacedAt null AND replacementDetected
+    // never true) must still proceed normally.
+    if (obs.replacedAt !== null || obs.session?.replacementDetected === true) {
+      const mark = sessionMarkStorage ? await sessionMarkStorage.get(SESSION_MARK_KEY) : undefined;
+      // Maestro review round 1 on PR #235, MINOR 9 (issue #231) — DELIBERATE:
+      // a MISSING SessionMark (no `sessionMarkStorage` port at all, or one
+      // that has never synced a mark for this studio yet) reads as `0`
+      // lines, which is BELOW the threshold and therefore never refuses.
+      // This is an intentional "never refuse on a guess" choice, the same
+      // posture `sessionMarkStorage`'s own trailing-optional parameter doc
+      // comment states: this refusal exists to stop a CONFIRMED large
+      // session from being silently discarded, not to block a provision
+      // this file genuinely cannot measure. A false negative here (missing
+      // mark, but the real session IS large) still lets the operator
+      // through — exactly the SAME trade-off `sessionMarkStorage` being
+      // entirely optional already makes, just extended to the one case
+      // where the port exists but has nothing recorded yet. Pinned by this
+      // file's own test suite at two points: a missing mark (always
+      // allowed, regardless of `replacedAt`/`replacementDetected`) and the
+      // EXACT threshold boundary (`lines === FRESH_SESSION_INVOLUNTARY_LINE_
+      // THRESHOLD` itself still allowed; one line over refuses).
+      const lines = mark?.lines ?? 0;
+      if (lines > FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD) {
+        // Maestro review round 1 on PR #235, MINOR 8 — read HERE, at the
+        // point this refusal fires, never reusing `requestedFresh`'s own
+        // MUCH LATER read of the same key (below): this message is about
+        // what the operator should do RIGHT NOW, and the key's value could
+        // change between this throw and that later read if it didn't
+        // matter (it doesn't reach that read on this path anyway, since
+        // this throw aborts the call).
+        const pendingAlsoArmed = (await storage.get(FRESH_SESSION_PENDING_KEY)) === true;
+        throw new Error(freshSessionInvoluntaryRefusal(buildStudioId(cfg), lines, pendingAlsoArmed));
+      }
+    }
+  }
   // Review round 3 (issue #85 PR1), MUST-FIX 3 — stamped BEFORE doing
   // anything else, so recordBringupObservation can tell whether the live
   // lead it later finds PREDATES this bring-up (left untouched) or was
@@ -3635,13 +3831,22 @@ export async function provisionWithStorage(
     ? { ...cfg, freshSession: false }
     : requestedFresh ? { ...cfg, freshSession: true } : cfg;
   if (requestedFresh) await storage.put(FRESH_SESSION_PENDING_KEY, true);
+  // Issue #231 — WHICH of the two triggers caused `requestedFresh` on THIS
+  // call, for the bring-up log (ObservedSession.freshSessionSource below).
+  // `cfg.freshSession === true` (the explicit ask) takes priority over a
+  // merely-stored pending key when BOTH happen to be true on the same call
+  // — the explicit ask is the more specific, more recent fact.
+  const freshSessionSource: "flag" | "pending-key" | undefined = cfg.cancelFreshSession === true
+    ? undefined
+    : cfg.freshSession === true ? "flag" : freshSessionPending ? "pending-key" : undefined;
   let status: StudioStatus;
   let roleEnv: RoleEnv | StudioEnv | null;
   let keepAlive: boolean | null;
   let freshSessionMoved: boolean | undefined;
   let freshSessionConfirmed: boolean | undefined;
+  let freshSessionAsidePaths: string[] | undefined;
   try {
-    ({ status, roleEnv, keepAlive, freshSessionMoved, freshSessionConfirmed } = await runProvision(
+    ({ status, roleEnv, keepAlive, freshSessionMoved, freshSessionConfirmed, freshSessionAsidePaths } = await runProvision(
       { ...provisionDeps, recordStudio: guardRecordStudio(deps, ctx) }, provisionCfg, fleetRepoSlug, existing,
     ));
     // Review round 3 (issue #85 PR1), MUST-FIX 9 (maestro correction #4):
@@ -3658,7 +3863,10 @@ export async function provisionWithStorage(
     // the exec succeeds it is observing a container this op no longer owns.
     if (status.state === "running" && !(await ctx.moved())) {
       try {
-        await recordBringupObservation(deps, observedStorage, status, existing, restoreOutcome, via, lastSnapshotAtBefore, bringupStartedAt, restoreObservedAt, restoreSource, lastStopAt, ctx);
+        await recordBringupObservation(
+          deps, observedStorage, status, existing, restoreOutcome, via, lastSnapshotAtBefore, bringupStartedAt,
+          restoreObservedAt, restoreSource, lastStopAt, ctx, freshSessionSource ?? null,
+        );
       } catch (err) {
         console.error(`studio ${status.id}: recordBringupObservation failed, continuing`, err instanceof Error ? err.message : String(err));
       }
@@ -3695,6 +3903,18 @@ export async function provisionWithStorage(
     await storage.put(SESSION_FORCE_KEY, true);
     // PR #46 review: the row says so, like clear-session-guard does.
     status = { ...status, sessionForceArmedAt: deps.now() };
+    // Issue #231 — the real on-disk destination(s), so a later heal/recycle's
+    // survival brief can tell a lead where an old session went (see
+    // Observed.lastSessionAside's own doc comment). Never written when the
+    // list is empty — a confirmed "nothing to move" leaves the field exactly
+    // as it was, same "stamped on a real event" discipline wipSyncedAt uses.
+    if (observedStorage && freshSessionAsidePaths && freshSessionAsidePaths.length > 0) {
+      // Maestro review round 1 on PR #235, MAJOR 3 — stamped in the SAME
+      // breath as the paths themselves, so a MUCH later brief can render an
+      // honest age next to the claim instead of repeating it as fact
+      // forever. See Observed.lastSessionAsideAt's own doc comment.
+      await mergeObserved(observedStorage, { lastSessionAside: freshSessionAsidePaths, lastSessionAsideAt: deps.now() });
+    }
   }
   // Issue #100: retire the pending marker ONLY once a fresh-session attempt
   // has actually reached `state: "running"` — any other outcome (a clone

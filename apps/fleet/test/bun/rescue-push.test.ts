@@ -1267,16 +1267,53 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
     expect(files).toContain("a.md");
   });
 
-  test("never walks a member worktree -- scope is the main checkout only (deliberate v1 limitation)", () => {
+  // Issue #231 fix 3b: the v1 "main checkout only" limitation is lifted --
+  // wip-sync now also walks member worktrees, reusing the per-boot
+  // rolling-snapshot property.
+  //
+  // Maestro review round 1 on PR #235, MAJOR 4 + 5 — the ref shape is now
+  // `fleet/rescue/<studio>/wip/<bootStamp>-wt-<wid>`, nested under `wip/`,
+  // never the teardown-time fresh-timestamp `wt/<wid>-<ts>` shape
+  // rescue-push uses (the two used to be byte-identical; see
+  // `wip_sync_one`'s own call sites' doc comment, rescue.ts, for why that was
+  // a real bug, and the dedicated describe block below for its own fix
+  // proof).
+  test("also walks a dirty member worktree: force-pushes a snapshot to its own per-boot nested wip ref; the main checkout (markers-only alone) produces no push of its own", () => {
     writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work\n");
 
     const out = wip();
 
-    // The main checkout itself is clean beyond the member worktree's own
-    // gitlink directory (a marker, #217) -- so this reads MARKERS_ONLY, never
-    // a push, and the member worktree's own dirty file is never rescued.
-    expect(out).toBe(RESCUE_MARKERS_ONLY);
-    expect(rescueRefs()).toEqual([]);
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2 1 files$`, "m"));
+    expect(rescueRefs()).toEqual([memberRef]);
+    const files = sh(`git -C ${origin} ls-tree -r --name-only ${memberRef}`).out.split("\n");
+    expect(files).toContain("member-wip.md");
+  });
+
+  test("a clean member worktree with unpushed commits: force-pushes the existing HEAD commit to its own per-boot nested wip ref", () => {
+    sh(`cd ${join(checkout, ".claude/worktrees/agent-a1b2")} && git commit -q --allow-empty -m "member commit"`);
+
+    const out = wip();
+
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2 1 commits$`, "m"));
+    expect(rescueRefs()).toEqual([memberRef]);
+  });
+
+  test("running wip-sync twice with the SAME bootStamp OVERWRITES the SAME member-worktree ref -- rolling snapshot, same property the main checkout's own wip ref already has", () => {
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "first\n");
+    wip();
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+    const sha1 = sh(`git -C ${origin} rev-parse ${memberRef}`).out;
+
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "second, unrelated to the first\n");
+    wip();
+    const sha2 = sh(`git -C ${origin} rev-parse ${memberRef}`).out;
+
+    // Still exactly ONE ref under fleet/rescue/ for this worktree -- never a
+    // second, timestamped one.
+    expect(rescueRefs()).toEqual([memberRef]);
+    expect(sha2).not.toBe(sha1);
   });
 
   test("the generated command carries exactly one `--force` push per attempt -- the one deliberate exception to this file's own 'never force' rule, and nowhere else", () => {
@@ -1286,7 +1323,12 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
     // its own shallow-clone fallback retry, both force (see wip_sync_push's
     // own doc comment) -- never a non-force push anywhere in this function.
     expect(forceCount).toBe(2);
-    expect(cmd).toContain(`refs/heads/${wipSyncRef(STUDIO, BOOT_STAMP)}`);
+    // Issue #231 fix 3b: the push destination is now built from a shell
+    // variable (`refs/heads/$wtarget`), not a literal `refs/heads/<ref>` --
+    // the exact per-boot ref name itself still appears, as the literal
+    // argument `wip_sync_one`'s own call site passes it.
+    expect(cmd).toContain(wipSyncRef(STUDIO, BOOT_STAMP));
+    expect(cmd).toContain("refs/heads/$wtarget");
   });
 
   // Fix round item 1 (#208 PR #215 review): a DIFFERENT boot stamp is a
@@ -1336,6 +1378,44 @@ describe("#208 — wipSyncCmd: a periodic WIP safety net, fixed-per-boot ref, fo
     // ...but the local tracking ref it would otherwise auto-create is gone.
     expect(sh(`git -C ${checkout} rev-parse -q --verify refs/remotes/origin/${wipSyncRef(STUDIO, BOOT_STAMP)}`).code).not.toBe(0);
   });
+
+  // Fresh-context review (fix-231-replaced-session, standards axis): every
+  // `RESCUE_FAILED` line `wip_sync_one` ever emitted named the LITERAL
+  // string "wip-sync" instead of the real target it was sync'ing -- fine
+  // when this function covered only the main checkout (a single target),
+  // but now that it also walks every member worktree (#231 fix 3b, this same
+  // describe block's own tests above), a failure in the main checkout and a
+  // failure in a member worktree produced the EXACT SAME ambiguous line,
+  // indistinguishable to `parseRescueExecResult` (do.ts) and whoever reads
+  // its report. The main checkout here is left clean/pushable; only the
+  // member worktree's push is rejected (a pre-receive hook scoped to its
+  // `wt/` ref, same technique rescuePushCmd's own #263 C1 "origin's hook
+  // rejects only the main ref" test above uses) -- the resulting
+  // RESCUE_FAILED line must name THAT member's own wtarget, not a generic
+  // "wip-sync" string a main-checkout failure would produce identically.
+  test("origin rejects only the member worktree's push: the RESCUE_FAILED line names that worktree's own ref, never a generic 'wip-sync' string indistinguishable from a main-checkout failure", () => {
+    writeFileSync(
+      join(origin, "hooks", "pre-receive"),
+      // Maestro review round 1 on PR #235, MAJOR 4 + 5: the member wip-sync
+      // ref no longer contains a literal `/wt/` (it's `wip/<stamp>-wt-<id>`,
+      // a hyphen, not a further nested path) -- matched on `-wt-` instead.
+      "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    refs/heads/fleet/rescue/*-wt-*) exit 1 ;;\n  esac\ndone\nexit 0\n",
+    );
+    chmodSync(join(origin, "hooks", "pre-receive"), 0o755);
+    writeFileSync(join(checkout, "notes.md"), "main work, accepted\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work, rejected\n");
+
+    const out = wip();
+    const memberTarget = `fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+
+    // The main checkout's own push still succeeds...
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} ${wipSyncRef(STUDIO, BOOT_STAMP)} 1 files$`, "m"));
+    // ...and the member worktree's failure names ITS OWN target, not the
+    // bare, ambiguous "wip-sync" literal the unfixed code emitted regardless
+    // of which target failed.
+    expect(out).toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} ${memberTarget} push$`, "m"));
+    expect(out).not.toMatch(new RegExp(`^${RESCUE_FAILED_PREFIX} wip-sync `, "m"));
+  });
 });
 
 /**
@@ -1370,6 +1450,19 @@ describe("#208 fix round item 6 — wipSyncProbeCmd: cheap dirty/ahead probe, no
   });
 
   test("markers-only tree: RESCUE_MARKERS_ONLY", () => {
+    expect(probe()).toBe(RESCUE_MARKERS_ONLY);
+  });
+
+  // Issue #231 fix 3b: the probe gates wipSyncCmd's own expensive push --
+  // leaving it main-checkout-only would make the wipSyncCmd fix dead code
+  // whenever the main checkout is clean but a member worktree is dirty.
+  test("#231 fix 3b: main checkout markers-only, but a member worktree is dirty -- WIP_SYNC_NEEDED, not RESCUE_MARKERS_ONLY", () => {
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work\n");
+    expect(probe()).toBe(WIP_SYNC_NEEDED);
+    expect(rescueRefs()).toEqual([]);
+  });
+
+  test("#231 fix 3b: main checkout markers-only, member worktree ALSO clean -- RESCUE_MARKERS_ONLY, unchanged", () => {
     expect(probe()).toBe(RESCUE_MARKERS_ONLY);
   });
 
@@ -1485,6 +1578,137 @@ describe("#208 fix round item 1 — the full lifecycle: wip-sync never hides a c
     expect(sh(`git -C ${origin} rev-parse ${wipRefB}`).out).not.toBe(headSha);
     const filesB = sh(`git -C ${origin} ls-tree -r --name-only ${wipRefB}`).out.split("\n");
     expect(filesB).toContain("b-work.md");
+  });
+});
+
+/**
+ * Maestro review round 1 on PR #235, MINOR 6 (issue #231) — `wipSyncCmd`'s
+ * own 90s `EXEC_CLASSES.wipSync` budget was sized for exactly ONE push
+ * target (the main checkout, this feature's pre-#231-fix-3b design); now
+ * that it walks every member worktree in the SAME exec, 2+ slow targets can
+ * exceed it, and a fixed-order walk killed partway through starves every
+ * LATER worktree on every single tick. `wip_budget_ok` (rescue.ts) is this
+ * file's own `rescue_budget_ok` pattern, mirrored at wip-sync's own scale —
+ * reuses the IDENTICAL slow-post-receive-hook fixture and the SAME proven,
+ * non-flaky (`pushTimeoutSeconds=2, serverDeadlineSeconds=17,
+ * budgetMarginSeconds=0`) margin this file's own "#371" describe block above
+ * already validated for the teardown ledger — the per-push timing class
+ * (one `timeout -k`-bounded force-push against the same slow remote hook) is
+ * identical, so the same numbers hold here without re-deriving new ones.
+ */
+describe("#231 review round 1, MINOR 6 — wip_budget_ok: wipSyncCmd never starts a target's push it cannot finish before its own 90s exec budget", () => {
+  test("3 stalled member-worktree pushes, main checkout clean: a couple are attempted and killed, the rest are skipped as RESCUE_FAILED <target> budget <n> not attempted, never hanging for their own full stall", () => {
+    const targets: string[] = [];
+    for (let i = 1; i <= 3; i++) {
+      const name = `wt${i}`;
+      const wtPath = join(checkout, ".claude/worktrees", name);
+      sh(`git -C ${checkout} worktree add -q ${wtPath} -b ${name}`);
+      writeFileSync(join(wtPath, "wip.md"), `member work ${i}\n`);
+      targets.push(`fleet/rescue/${STUDIO}/wip/20261004040000-wt-${name}`);
+    }
+    installSlowPostReceiveHook(3);
+
+    const start = Date.now();
+    // budgetMarginSeconds=0, same reason the "#371" describe block's own
+    // test uses it: this test's hand-derived push/budget-fail counts are
+    // pinned against the exact zero-margin threshold math.
+    const out = sh(wipSyncCmd(REPO, STUDIO, "20261004040000", root, 2, undefined, undefined, undefined, 17, 0)).out;
+    const elapsedMs = Date.now() - start;
+
+    const pushFails = targets.filter((t) => new RegExp(`^${RESCUE_FAILED_PREFIX} ${t} push$`, "m").test(out));
+    const budgetFails = targets.filter((t) => new RegExp(`^${RESCUE_FAILED_PREFIX} ${t} budget -?\\d+ not attempted$`, "m").test(out));
+
+    expect(out).not.toContain(RESCUE_PUSHED_PREFIX);
+    expect(pushFails.length).toBe(2);
+    expect(budgetFails.length).toBe(1);
+    expect(pushFails.length + budgetFails.length).toBe(3);
+    // The real point: fast, never anywhere near 3 * (pushTimeoutSeconds +
+    // KILL_GRACE_SECONDS) of real stalling.
+    expect(elapsedMs).toBeLessThan(8000);
+  }, 15000);
+
+  test("the main checkout's own push still runs ahead of every worktree, and a healthy exec (no stalls) never prints a single budget line", () => {
+    writeFileSync(join(checkout, "notes.md"), "main checkout work\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work\n");
+
+    const out = sh(wipSyncCmd(REPO, STUDIO, "20261004050000", root)).out;
+
+    expect(out).not.toContain("budget");
+    expect(out.split("\n").filter((l) => l.startsWith(RESCUE_PUSHED_PREFIX)).length).toBe(2);
+  });
+});
+
+/**
+ * Maestro review round 1 on PR #235, MAJOR 4 + MAJOR 5 (issue #231) — a
+ * member worktree's own wip-sync ref used to be `fleet/rescue/<studio>/
+ * wt/<wid>-<bootStamp>`, the EXACT SAME SHAPE `rescuePushCmd`'s own teardown-
+ * time member-worktree rescue ref uses. Two real bugs followed:
+ *
+ * - `rescue_on_origin`'s wip-exclusion filter (`grep -Ev
+ *   'refs/heads/fleet/rescue/[^/[:space:]]+/wip(/|$)'`) only ever excluded a
+ *   path containing `/wip/` or ending in `/wip` — the OLD member shape lived
+ *   under `/wt/`, so it was NEVER excluded. Teardown rescue could see a
+ *   member worktree's own wip-sync tip already on origin and wrongly skip
+ *   its real, durable push for that worktree -- breaking #208's own core
+ *   invariant that a wip tip must never count as proof of rescue.
+ * - `rescueRefStamp` matched this same shape generically (the `wt/` branch),
+ *   so it was surfaced, unexplained, as a teardown "unclaimed rescue ref" and
+ *   aged out on teardown's own 14-day cap, even though it is a LIVE ref
+ *   refreshed every ~5 minutes.
+ *
+ * Fixed by moving the member ref UNDER `wip/`, not `wt/`:
+ * `fleet/rescue/<studio>/wip/<bootStamp>-wt-<wid>` — the EXISTING
+ * `/wip(/|$)` filter already excludes anything starting with `.../wip/`, no
+ * filter change needed; `rescueRefStamp` gains a new, distinct match for
+ * this shape. A HYPHEN joins the stamp and the worktree id, deliberately
+ * NOT a further `/wt/` nesting (the review's own illustrative example) --
+ * measured directly against a real push, `wip/<bootStamp>/wt/<wid>` cannot
+ * coexist with the main checkout's own `wip/<bootStamp>` leaf (git's ref
+ * namespace forbids one ref being a strict path-component prefix of
+ * another), which would collide on EVERY tick where both the main checkout
+ * and a member worktree are dirty under the same boot -- see
+ * `wip_sync_one`'s own call sites' doc comment (rescue.ts) for the full
+ * history.
+ */
+describe("#231 review round 1, MAJOR 4 + 5 — member wip-sync refs are nested under wip/, not wt/", () => {
+  const BOOT_STAMP = "20261004030000";
+
+  test("a member worktree's wip-sync push uses the nested wip/<bootStamp>-wt-<wid> shape, never the teardown wt/<wid>-<bootStamp> shape", () => {
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "member-wip.md"), "member work\n");
+
+    const out = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root)).out;
+
+    const memberRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+    expect(out).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2 1 files$`, "m"));
+    expect(rescueRefs()).toContain(memberRef);
+    // The OLD, teardown-colliding shape never appears.
+    expect(rescueRefs().some((r) => r.includes(`/wt/agent-a1b2-${BOOT_STAMP}`))).toBe(false);
+  });
+
+  // The load-bearing proof: without the nested shape, this test goes RED --
+  // rescue_on_origin's filter does not exclude the old wt/-shaped wip ref, so
+  // it sees the member worktree's own HEAD sha already "on origin" (via its
+  // own wip-sync tip) and skips the real teardown push entirely.
+  test("a member worktree's wip-sync push does NOT short-circuit teardown rescue's own durable push for that same worktree", () => {
+    sh(`cd ${join(checkout, ".claude/worktrees/agent-a1b2")} && git commit -q --allow-empty -m "real unpushed member work"`);
+    const memberHeadSha = sh(`git -C ${join(checkout, ".claude/worktrees/agent-a1b2")} rev-parse HEAD`).out;
+
+    // Step 1: the member worktree's periodic wip-sync tick saves its HEAD to
+    // its own per-boot nested wip ref.
+    const wipOut = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root)).out;
+    expect(wipOut).toContain(RESCUE_PUSHED_PREFIX);
+    const memberWipRef = `refs/heads/fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+    expect(sh(`git -C ${origin} rev-parse ${memberWipRef}`).out).toBe(memberHeadSha);
+
+    // Step 2: teardown rescue runs for real, for the SAME commit. Before this
+    // fix, rescue_on_origin's own un-filtered listing would find
+    // `memberHeadSha` already a tip on origin (the member's own wip ref) and
+    // skip this push entirely -- the assertion below is that it does NOT.
+    const teardownOut = sh(rescuePushCmd(REPO, STUDIO, root)).out;
+    expect(teardownOut).toMatch(new RegExp(`^${RESCUE_PUSHED_PREFIX} fleet/rescue/${STUDIO}/wt/agent-a1b2-\\d{14} 1 commits$`, "m"));
+    const realMemberRescueRef = rescueRefs().find((r) => r.includes("/wt/agent-a1b2-") && !r.includes("/wip/"));
+    expect(realMemberRescueRef).toBeDefined();
+    expect(sh(`git -C ${origin} rev-parse ${realMemberRescueRef!}`).out).toBe(memberHeadSha);
   });
 });
 

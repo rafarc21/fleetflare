@@ -22,6 +22,7 @@ import {
   type ComposedBrief, type SurvivalSources, type SurvivalTaskRef, type SurvivalBringup,
 } from "../src/studio/survival-delivery";
 import { PANE_CAPTURE_MARKER, PANE_QUIESCE_SECONDS } from "../src/studio/failover";
+import { composeSurvivalBrief } from "../src/studio/survival-brief";
 import { wipSyncRef } from "../src/studio/rescue";
 import {
   OBSERVED_KEY, emptyObserved,
@@ -322,6 +323,57 @@ describe("the 3 anchored branch sources", () => {
     // Still scoped: another (longer) studio's own wip ref never matches.
     const other = `fleet/rescue/sibling--${STUDIO}/wip/20261004120000`;
     expect(isRescueBranchFor(STUDIO, other)).toBe(false);
+  });
+
+  /**
+   * Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231) — a MEMBER
+   * worktree's own wip-sync ref is nested one level deeper still:
+   * `fleet/rescue/<studio>/wip/<14digits>-wt-<id>`. Deliberately a DISTINCT
+   * shape from both the main-checkout wip ref just above (no `/wt/<id>`
+   * suffix) and the teardown-time member-worktree rescue ref (`wt/<id>-
+   * <14digits>`, no `wip/` segment at all) — the member wip-sync ref used to
+   * be byte-identical to the LATTER, which broke `rescue_on_origin`'s own
+   * wip-exclusion filter (rescue.ts).
+   */
+  it("SOURCE 3 — the MEMBER wip-sync ref (#231 review round 1) is a DISTINCT rescue-ref shape, anchored to exactly 14 digits plus a worktree id", () => {
+    const memberWip = `fleet/rescue/${STUDIO}/wip/20261004120000-wt-agent-a1b2`;
+    expect(isRescueBranchFor(STUDIO, memberWip)).toBe(true);
+    expect(rescueRefStamp(STUDIO, memberWip)).toBe("20261004120000");
+    // Still anchored: a malformed/foreign stamp is never a false positive.
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip/202610041200-wt-agent-a1b2`)).toBe(false);
+    // No worktree id at all -- that's the main-checkout shape's own job, not
+    // this one's (still matches, but via the OTHER branch -- see the test
+    // just above).
+    expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}/wip/20261004120000-wt-`)).toBe(false);
+    // Still scoped: another (longer) studio's own member wip ref never
+    // matches.
+    const other = `fleet/rescue/sibling--${STUDIO}/wip/20261004120000-wt-agent-a1b2`;
+    expect(isRescueBranchFor(STUDIO, other)).toBe(false);
+    // Never confused with the teardown-time member-worktree shape (no `wip/`
+    // segment) -- that one is still matched by the OTHER, `wt/`-first branch.
+    expect(rescueRefStamp(STUDIO, `fleet/rescue/${STUDIO}/wt/agent-a1b2-20261004120000`)).toBe("20261004120000");
+  });
+
+  /**
+   * Maestro review round 1 on PR #235, MAJOR 4 + 5 — traced, not guessed: a
+   * MAIN-checkout wip ref is NOT specially excluded from
+   * `unclaimedRescueBranches` anywhere in `resolveSurvivalInput` (only the
+   * 14-day age cap, shared by every rescue-ref shape, ever drops one) -- it
+   * is deliberately DISCOVERABLE and ATTRIBUTABLE "exactly like every other
+   * rescue shape" (this function's own doc comment above). The new nested
+   * MEMBER wip ref gets the IDENTICAL treatment: it is a genuine rescue ref,
+   * not specially hidden, and is now self-describing (its own path contains
+   * "wip") rather than confusable with a genuine abandoned teardown rescue —
+   * which is the whole of the round-1 review's "confusing" complaint fixed by
+   * the shape change itself, not by a new exclusion list.
+   */
+  it("the nested member wip ref gets the SAME unclaimedRescueBranches treatment the main-checkout wip ref already gets -- genuinely a rescue ref, never specially hidden", async () => {
+    const memberWip = `fleet/rescue/${STUDIO}/wip/20261004120000-wt-agent-a1b2`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [memberWip] }),
+      { ok: true, value: [] }, null, NOW,
+    );
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [memberWip] });
   });
 
   /**
@@ -1039,6 +1091,92 @@ describe("deliverSurvivalBriefOnBringup — wipSyncedAt threading (#208 part 2)"
 });
 
 // ---------------------------------------------------------------------------
+// Issue #231 — `wipBootStamp`/`lastSessionAside` thread the SAME way
+// `wipSyncedAt` just above already does: frozen at bring-up, into the
+// deferred pending record.
+// ---------------------------------------------------------------------------
+
+describe("deliverSurvivalBriefOnBringup — wipBootStamp/lastSessionAside threading (#231)", () => {
+  it("a bring-up that never names either at all defers a pending record with NEITHER key — byte-identical to before this feature", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      bringup: bringup(),
+    });
+    expect(await h.run()).toMatchObject({ kind: "deferred" });
+    const pending = h.observed.stored()?.survivalBriefPending;
+    expect(Object.prototype.hasOwnProperty.call(pending, "wipBootStamp")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(pending, "lastSessionAside")).toBe(false);
+  });
+
+  it("a bring-up's own wipBootStamp/lastSessionAside survive into the deferred pending record", async () => {
+    const h = harness({
+      busyStdout: captured(MIDTURN_PANE),
+      bringup: bringup({ wipBootStamp: "20261003115000", lastSessionAside: ["~/.claude/projects/fleet-aside-x"] }),
+    });
+    expect(await h.run()).toMatchObject({ kind: "deferred" });
+    const pending = h.observed.stored()?.survivalBriefPending;
+    expect(pending?.wipBootStamp).toBe("20261003115000");
+    expect(pending?.lastSessionAside).toEqual(["~/.claude/projects/fleet-aside-x"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Maestro review round 2 on PR #235 (issue #231), item 2b (second half) —
+// once the brief carrying `lastSessionAside`/`lastSessionAsideAt` has
+// actually been DELIVERED, both fields clear in the SAME merge as the dedup
+// marker. Neither field ever auto-clears on its own (Observed's own doc
+// comment) -- without this fix a LATER brief (composed after a successful
+// delivery, for a reason unrelated to the aside move) would repeat the exact
+// same "moved aside" claim as though it had just happened again.
+// ---------------------------------------------------------------------------
+
+describe("deliverSurvivalBriefOnBringup — lastSessionAside clears once actually delivered (#231 fix 2, second half)", () => {
+  const ASIDE_PATH = "~/.claude/projects/fleet-aside-20261003T115000Z-42--workspace-acmeclient";
+
+  it("a landed delivery whose pending record carried lastSessionAside clears both fields on Observed", async () => {
+    const h = harness({
+      seed: { session: session(), lastSessionAside: [ASIDE_PATH], lastSessionAsideAt: "2026-09-24T13:50:00.000Z" },
+      bringup: bringup({ lastSessionAside: [ASIDE_PATH], lastSessionAsideAt: "2026-09-24T13:50:00.000Z" }),
+    });
+    expect(await h.run()).toEqual({ kind: "delivered", incarnation: INCARNATION });
+    expect(h.observed.stored()?.survivalBriefDeliveredFor).toBe(INCARNATION);
+    expect(h.observed.stored()?.lastSessionAside).toBeNull();
+    expect(h.observed.stored()?.lastSessionAsideAt).toBeNull();
+  });
+
+  it("a landed delivery whose bring-up never carried an aside leaves both fields untouched", async () => {
+    const h = harness({ bringup: bringup() });
+    expect(await h.run()).toEqual({ kind: "delivered", incarnation: INCARNATION });
+    expect(Object.prototype.hasOwnProperty.call(h.observed.stored() ?? {}, "lastSessionAside")).toBe(false);
+  });
+
+  it("a SECOND brief, composed after the first (which carried the aside line) was delivered, does not repeat it", async () => {
+    const h = harness({
+      seed: { session: session(), lastSessionAside: [ASIDE_PATH], lastSessionAsideAt: "2026-09-24T13:50:00.000Z" },
+      bringup: bringup({ lastSessionAside: [ASIDE_PATH], lastSessionAsideAt: "2026-09-24T13:50:00.000Z" }),
+      brief: "What survived, s:\n- Old session moved aside to sessions/s/aside/fleet-aside-x/, 10m ago; check it for anything lost since then.",
+    });
+    expect(await h.run()).toEqual({ kind: "delivered", incarnation: INCARNATION });
+    const afterDelivery = h.observed.stored();
+    expect(afterDelivery?.lastSessionAside).toBeNull();
+
+    // A later composition reading Observed as it now stands (post-delivery)
+    // has nothing left to render the aside line from.
+    const secondBrief = composeSurvivalBrief({
+      studioId: "s",
+      tasks: { ok: true, value: [] },
+      openPrs: { ok: true, value: [] },
+      unclaimedRescueBranches: { ok: true, value: [] },
+      session: session(),
+      now: "2026-09-25T12:00:00.000Z",
+      lastSessionAside: afterDelivery?.lastSessionAside ?? null,
+      lastSessionAsideAt: afterDelivery?.lastSessionAsideAt ?? null,
+    });
+    expect(secondBrief).not.toContain("moved aside");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Shared single-flight: one wake path, one lock, source-pinned
 // ---------------------------------------------------------------------------
 
@@ -1536,7 +1674,7 @@ describe("the retry rides the REGULAR per-studio tick, not the maestro-only swee
     // One probe helper, one compose helper, each called from BOTH paths.
     expect(src).toContain("private async survivalBusy(): Promise<BusyVerdict>");
     expect(src).toContain(
-      "private survivalCompose(workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null)",
+      "private survivalCompose(\n    workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null,",
     );
     const code = codeOnly(src);
     expect(code.filter((l) => /this\.survivalBusy\(\)/.test(l))).toHaveLength(2);
