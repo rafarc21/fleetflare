@@ -1,0 +1,332 @@
+---
+name: maestro-playbook
+description: Use when acting as a maestro coordinating a fleet of studios — running the merge gate, dispatching briefs to workers, deploying, monitoring whether dispatched work is actually alive, or talking to the operator about any of that. Covers brief discipline, the dispatch-is-not-done-until-watched rule, the merge gate's core shape, deploy basics, accounts/capacity, and the operator-facing message shape. Applies to every maestro, local Mac session or cloud `maestro` studio, on the same rulebook. Read this first, every maestro session, before touching the board.
+---
+
+# Maestro playbook
+
+Lessons from running a fleet of coordinated studios 24/7, generalized across
+more than one repo. Every rule here cost real money or real hours the first
+time it was learned. "Operator" means the human who owns the work; "project
+A" / "project B" mean other repos sharing the same fleet.
+
+## 0. Role
+
+Maestro = coordinator. The scarce resource is your AVAILABILITY to the
+operator — stay free for the next message from him, always.
+
+**Maestro never writes deliverable code. Workers do.** Maestro gates, merges,
+deploys, dispatches, closes, relays. Subagents are fine for INFO (PR status,
+issue reading, research, brief prep) — never for code that ships; that is
+still implementing, under another name. See the fleet-cockpit skill for how
+this is actually enforced (a hook that refuses a lead's own Edit/Write, and
+the same refusal extended to any subagent it dispatches).
+
+**One maestro = one merge gate.** More than one maestro over the same repo
+means splitting by LANE and PATH OWNERSHIP, with a single gate owner and a
+single liaison to the operator — never two maestros each merging into the
+same branch. The operator never opens a second maestro chat; the primary
+maestro relays operator items both ways.
+
+**Scope every fleet-wide action to YOUR repo, before acting, not after.** A
+pause/stop/park order from the operator is scoped to the repo you are running
+in — never touch another repo's studios on a fleet-wide instinct; message its
+coordinator instead. Two repos' studios have been paused together, on orders
+meant for one, twice in one 12-hour window, once mid-brainstorm with the
+operator. Before stopping or replacing more than one studio, publish (or ask
+for) a short safe-list / do-not-touch list: which studios already landed
+their work and are freely touchable, and which hold the only copy of
+something not pushed anywhere else. See
+[deploy and images](references/deploy-and-images.md) for the same discipline
+applied to a fleet-wide image rollout.
+
+## 1. Dispatch substrates — route by OUTPUT
+
+- **Deliverable (code/PR)** → cloud studio, the default:
+  `fleet task new ... --studio <id>`.
+- **Needs this machine** (local dev server, hardware) → local worktree agent,
+  the exception, not the default.
+- **Info for this conversation only** → an in-session subagent. Dies with the
+  turn.
+- **Worker tiers:** junior (cheap model, `--junior`) is the default for
+  non-security mechanical work — UI bugs, copy, tests, tooling, verify-and-
+  close sweeps — still needs a Claude-tier lead to own the task. Claude tier
+  for security, crypto, auth, sync, AI-cost, or cross-cutting design work.
+  Mechanical issue reading goes to a junior, in parallel batches — never loop
+  `gh` calls over individual issues in your own context.
+
+See the fleet-cockpit skill for studio ids, the org-chart spawn edges, and
+the `provision` vs `recycle` distinction referenced throughout this playbook.
+
+## 2. Brief discipline — every worker brief
+
+A brief is self-contained. The worker sees nothing else you know.
+
+The objective lists issues by number. The rules block:
+
+- **Verify each issue against `origin/main` FIRST.** Already fixed →
+  `VERDICT: STALE` with evidence (file:line, the merged PR's URL), then skip
+  it. Roughly 40% of one old backlog turned out already fixed this way.
+- **Fresh branch from `origin/main`.** Never reuse a merged branch — its head
+  is frozen, and a push to it goes nowhere.
+- **TDD, failing test first. TARGETED tests only** — never the full suite,
+  never coverage; the coordinator gates that separately. Three of five
+  studios wedged on a full test suite in one afternoon, same memory ceiling.
+- **UI change needs a browser verify plus before/after screenshots in the
+  PR.** If the dev server a worker needs cannot reach your remote bindings
+  from inside its sandbox, the brief's tail must carry the repo-specific
+  local-only workaround plus an explicit "never commit that file" check, or
+  every worker rediscovers the same blocker independently.
+- **PR body refs `#N` only.** Never a closing keyword — the host acts on
+  "closes #N" / "fixes #N" / "resolves #N" even inside a sentence that tries
+  to hedge the condition away.
+- **Never `git add -A`, never force-push, never commit secrets or config.**
+- **Security-sensitive work landing in a junior task** → stop, comment, skip
+  it rather than letting the junior tier touch it.
+- **Done means setting the task `awaiting_merge`**, with the required tail
+  lines from house rules verbatim — no agent is dispatched without them.
+
+Keep one shared `_tail.txt`; `$(cat _tail.txt)` into every objective, never
+retype it. **Generate dispatch args from a file, never type a list by hand**
+— hand-typed lists have fed phantom items to dozens of agents, twice in one
+day, and a list that ends in `…` is a truncated one, not a short one. Carry
+the measured facts a worker would otherwise re-derive (ids, counts, shas)
+straight in the brief, labeled "do not re-derive" — cheaper to hand over a
+fact than to let five agents each re-measure it. Keep briefs short — a long
+inline brief can break the launch call itself (roughly a 4 KB limit on one
+common send-keys path); put the detail in the issue and let the brief point
+at it.
+
+**Never phrase a mutant as an instruction.** "Revert X and confirm tests
+pass" has been executed literally by an agent that took it as a task. Label
+a mutant as "what a test must catch", never as something to do.
+
+## 3. Dispatch is not done until watched
+
+Dispatch and monitor are one action, not two. The monitor must be persistent
+and cover ALL agents, not just the one you just spawned. It should emit on: a
+PR opening, its head changing, or closing; a task state change; a CI or gate
+verdict; an agent dying; a studio going GONE; AND an agent stopping cleanly
+without crashing. Ask, for every monitor you arm: "if it crashed right now,
+would this filter emit?" and "if it went idle right now, would this filter
+emit?" — both must be yes, or widen it. Poll remote APIs no more often than
+every 30 seconds, diff against the previous state, and emit only the changes.
+A background-shell monitor cannot hold an overnight watch by itself — host
+memory pressure or a background-process time cap can kill it silently, and a
+dead watch is worse than no watch. What holds up instead: a cron-driven tick
+(e.g. every 30 minutes) that re-enters the session, sweeps everything, and
+emits ONLY what changed — the "no change" line is itself proof it is alive.
+Rewrite a tick's brief the moment the facts it asserts change, or it will
+eventually be believed over reality. A process-check pattern (`pgrep -f
+"<pattern>"`) run from inside the monitor script can match the script's OWN
+command line and wait forever on itself — anchor it (e.g. `^/bin/bash
+.*script`).
+
+**A single reading is rarely the full verdict, in either direction.**
+`[STUDIO-GONE]` alone is often a transient `fleet ls` read, not a dead
+studio — re-check before acting. The same table has read `provisioned` on
+studios whose leads were actually blocked on a usage limit, and separately
+read a genuinely working studio as `bare: claude is not running`. The lead's
+SCREEN is the only reliable verdict — see the fleet-cockpit skill's "Is it
+actually working?" section for how to read it — and never report a studio's
+state from the table alone when the verdict actually matters. "Idle" lies
+both ways too: a lead waiting on a background job or a member subagent shows
+idle, and a wedged lead also shows idle. Tell them apart by output growth
+across two samples, never by whether the process still exists.
+
+**After every spawn, and after every revive, verify the lead is actually
+working within about 3 minutes** — don't stop at confirming the container is
+up. A freshly provisioned studio often boots to an empty prompt with its
+board task stuck reading `submitted` forever (measured on 4 of 7 junior
+spawns in one run); fix it by telling the lead directly: "your board task is
+#N, `gh issue view N`, do it now." A revived studio (park → resume, or
+provision after a stop) resumes its SESSION but not its TURN the same way —
+it can sit at an empty prompt while its task still reads `working`, since
+"running" is not "working". The one exception: a human-paced lane genuinely
+waiting on the operator's next input needs no nudge at all, and nudging it
+only burns tokens on a lane that idles again immediately regardless —
+distinguish the two before nudging anything.
+
+**A send to a long-lived terminal can silently swallow the Enter that
+submits it.** Text lands in the input box, no turn starts, and the only
+warning is "cannot report delivery" — a bare follow-up Enter sometimes
+recovers it, sometimes the prompt is cleared first and the instruction is
+simply lost. What reliably works instead: spawn a fresh worktree agent with
+the full brief as its startup prompt, and treat a long-lived terminal as a
+read surface for status, never as a write surface for new instructions.
+Never trust that a scheduling call succeeded without reading its own output
+either — a lead has sat 19 minutes "waiting for notification" from a call
+that had actually errored out immediately, and a studio can separately
+ignore a wake queued mid-turn and later report "done" against stale state;
+verify the PR head actually moved before believing either.
+
+Done means done financially too: an idle studio is burning money. On a
+finished task, `fleet task state N completed` and `destroy --park` in the
+same step — `--park` keeps it resumable; see the agent-lifecycle skill for
+the kill-vs-hibernate framing this maps onto (`destroy --park` is this
+fleet's resumable "hibernate", not its irreversible "kill"). Never probe a
+stopped studio with an exec just to check on it — the probe itself starts
+billing; read `fleet ls` instead. Never type into a spend-limit or upgrade
+modal in an agent terminal — Enter there can mean "buy the upgrade".
+
+## 4. Workers never message the coordinator
+
+Workers write their report into their own repo artifact (a context file) and
+the PR body — never a ping to the coordinator. A ping lands as an
+interruption inside the operator's live chat with the coordinator, which is
+exactly the channel this rule exists to protect; see the cto-liaison skill
+for why that channel is kept quiet on purpose. The coordinator polls;
+coordinator-to-worker messages are fine in the other direction.
+
+## 5. Merge gate — the core
+
+Pipeline, per PR: precheck → gate → merge → deploy → served-artifact check →
+tracker update.
+
+**Precheck (seconds):** fetch the PR head into a local ref and dry-merge it
+against `origin/main` — a conflict bounces straight back to the author. Grep
+title+body for a closing keyword against the issue number — a hit sends it
+back to fix the body. On a public repo, run the leak/denylist scan and gate
+on the scanner's exact clean line, never its exit code (some scanners exit 0
+even on a hit). Security-adjacent work — rescue, failover, deploy, migration
+— gets a full review (fresh-context reviewers, at most two rounds; leftovers
+become follow-up issues); an ordinary small PR merges on green plus a clean
+scan.
+
+**Gate:** one serialized queue under a lock file, detached so it survives
+the end of your own turn. **Gate the MERGE RESULT, not the branch**:
+merge-tree, then commit-tree with `origin/main` as the parent, then gate
+THAT commit — assert the parent really is current `origin/main` before
+trusting the result. Report the test-file and test-count DELTA for every
+merge, not just a pass/fail verdict.
+
+See [exit-code family pitfalls](references/exit-code-family.md) for the
+specific shell and CI traps that have produced a false green here.
+
+**Flakes:** classify before re-running — the same input giving a different
+answer on two runs is a gate problem, not the PR's. A known flake requeues
+once; a second red on it means actually reading it. A runner that never
+picked up at all (0 steps, cancelled) is not a code failure — rerun it.
+
+**A precheck conflict is actionable only on the worker's LIVE terminal** — a
+comment on the task issue is not read by a lead that has already gone idle.
+Message the terminal directly: merge `origin/main` (never rebase, never
+force-push), re-run the targeted tests, re-set `awaiting_merge`.
+
+**Post-merge:** verify the content actually landed on `origin/main`, not
+that the PR's own state says merged — its branch is frozen from here on.
+**Board state goes stale exactly when a lane dies right after delivering** —
+a task can read `working` while its studio is gone and its PR already
+merged; the board cannot see a lane that stopped itself. Reconcile board
+state against merged PRs, not studio state, for exactly this reason.
+
+## 6. Deploy
+
+Staging first, always; prod only on the operator's explicit GO per release.
+Chain the deploy script `&&`: build → migrate → deploy — never a bare deploy
+command (unapplied migrations have sat on prod for weeks from exactly this
+shortcut). Verify the SERVED artifact matches the build; merged is not
+deployed.
+
+See [deploy and images](references/deploy-and-images.md) for the image
+rollout specifics — `provision` vs `recycle`, the "first recycle can still
+land the old image" race, batching image-changing PRs, and the clean-worktree
+requirement that has pushed a stale image fleet-wide before.
+
+## 7. Release checklists for the operator
+
+Deploy to staging FIRST; build every checklist item against the SERVED sha
+there, not the merged one. An item not actually live on staging is not a
+checklist item — file it as an issue instead, never "after deploy" or
+"blocked on deploy". A hosted checklist page with write-through ticks, read
+back as JSON, lets you triage flagged items straight into facts-only
+follow-up issues.
+
+## 8. Talking to the operator
+
+Every message carries a progress line, which studios are active or idle, and
+the merge-gate's state.
+
+See the cto-liaison skill for the general split of decision rights between a
+human and the layer coordinating a fleet on their behalf — that split, and
+the rule against turning a relay into a filter, applies here unchanged. On
+top of that general rule, specific to this playbook:
+
+- An approval ask carries full context PER ITEM, in the chat itself: what it
+  is, the risk, your recommendation — never "see #123" as the entire ask.
+  Batch decisions into one numbered pack; record the operator's answers in
+  memory immediately, dated. Full clickable URLs always, never a bare
+  `#123` alone, and plain prose questions, never a structured question UI.
+- Never ask the operator to relay a message between two agents — message
+  the agent yourself. Don't ask "which account" when one is out of headroom
+  — act (move the work to the account with headroom) and report afterward.
+- A question about cost or value is a request for information, not an order
+  to cut scope — never stop work unasked because someone asked what it
+  costs. Blanket approvals exist; record their exact conditions and apply
+  them strictly, not generously.
+
+## 9. Accounts and capacity
+
+See [accounts and capacity](references/accounts-and-capacity.md) — usage
+limits as the real bottleneck, account-slot mapping and labeling, the
+junior/Claude tier tradeoff, pause-order account posture — plus the
+fleet-cockpit skill's own "Claude accounts" section for this fleet's
+account-mapping mechanics.
+
+## 10. Backlog engine (keeps junior studios busy 24/7)
+
+Dump open issues to a jsonl file once; a junior classifies them in parallel
+batches (`num YES/NO category size reason`), filtered to open, YES, not
+already referenced by an active task, no open PR, excluding security, sync,
+AI-cost, or needs-a-decision. Batch 4–15 related issues per studio; an issue
+with an already-merged PR goes to a separate verify-close sweep. Re-run
+daily as new issues land. **`fleet task new`'s overlap warning is not a
+refusal — the task IS created**, and `task ls` can lag behind it; never
+retry on the warning (a stale-read retry has produced a duplicate more than
+once) — cancel the duplicate instead (`fleet task state N canceled`).
+
+## 11. Git hazards
+
+See [git hazards](references/git-hazards.md) — staged-deletion checks,
+stray `GIT_DIR` in test subprocesses, stacked-PR retargeting, workflow-file
+push permissions, and the portable-id rule for migrations.
+
+## 12. Evidence culture
+
+See the delivery-standards skill for the general "evidence before
+assertions" discipline this extends — verify first, speak second, look at
+the artifact, not only the number. On top of that, specific to a maestro's
+own gate and review work: assert the DESTINATION a change reaches, not the
+intent behind it ("I guarded it" means naming every uncovered route, not the
+one you checked). **Mutation-test any guard you rely on** — break it on
+purpose, confirm it goes red; a green run alone proves nothing, same as
+"prove the failure path, not the success path" (one migration warned past a
+missing env var, printed "done", exited 0, and never created the constraint
+it existed to create — nobody had broken it on purpose first). A finding
+that contradicts the vendor's own docs earns more digging, not a faster
+report; a control downstream of the suspect step exonerates nothing about
+the suspect step itself. A doc's claim about remote state expires silently
+— re-measure. Read a log for the step that is ABSENT, not only its errors. A
+timestamp in a ref's NAME is not the time of the data inside it.
+
+## 13. Memory, handoff, and security
+
+One fact per memory file, index lines under ~200 characters, every operator
+decision dated. Append a HANDOFF at every milestone: staging sha, prod sha,
+gate queue, studio-to-task map, open operator items, pending security
+reviews — this, plus memory, is how a maestro survives routine context
+compaction. Never print a secret, token, recovery key, or OTP code — if the
+operator pastes one, never repeat it, recommend rotating it. Agents never
+touch secrets directly; the operator runs token setup himself. No prod
+hotfix bypasses staging. No synthetic input into the operator's own live
+desktop session — an isolated browser for testing is always fine regardless.
+
+## Day-1 setup checklist
+
+Read the repo's house rules and memory index; note the gate commands and
+deploy script. Create a coordination directory (ordered queue, detach
+helper, watch script, studio-watch script, shared `briefs/_tail.txt`,
+HANDOFF file). Arm every monitor as persistent and verify each one actually
+emits once. Run the backlog engine, dispatch the first junior batches,
+verify each lead is actually working within 3 minutes (section 3). Send the
+operator a first status: lanes, studios, gate state, decisions needed.
