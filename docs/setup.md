@@ -51,6 +51,13 @@ On your own Mac, `fleet junior enable --account <id>` enables the junior
 skill locally (a direct Workers AI call, not through the Worker); `fleet
 junior disable` removes it.
 
+A local maestro (your own Mac session, not a cloud studio) needs the
+`maestro-playbook` skill symlinked once, the same single-source pattern
+`fleet-cockpit` already uses (see `fleet/blueprint/README.md`): `ln -sfn
+<this-checkout>/skills/maestro-playbook ~/.claude/skills/maestro-playbook`.
+Unlike junior, there is no enable/disable toggle or account config for it —
+once linked, it is just another skill your local Claude session reads.
+
 ---
 
 ## Quickstart from zero

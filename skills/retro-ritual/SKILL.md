@@ -97,14 +97,12 @@ scheduling, and everything else about the task is decided the same way as
 any other `fleet task new` call.
 
 `--template retro` only exists on the operator's Mac CLI
-(`apps/fleet/src/studio/cli-args.ts`). A cloud maestro session runs a
-different, more limited in-container binary
-(`apps/fleet/container/studio-fleet`) whose own `fleet task new` takes
-`[--studio <id>]` plus brief JSON on stdin — no `--template` flag at all.
-That's not a grant maestro lacks, the way `--junior` is (see
-`fleet/blueprint/studios/maestro/studio.md`'s "Junior" section) — the
-template's four fields are fixed, public strings, reproduced above and in
-`apps/fleet/src/studio/retro-template.ts`. So a cloud maestro session doesn't
-wait on the operator to file the weekly retro task: it reads those four
-fields itself and types them into the brief JSON by hand against
-`fleet task new --studio <id>`.
+(`apps/fleet/src/studio/cli-args.ts`) — which is exactly where the weekly
+retro task gets filed, since maestro is ALWAYS LOCAL (board issue #250, the
+`maestro-playbook` skill's Role section): there is no cloud `maestro`
+session that would need a workaround for a flag it lacks. The limited
+in-container binary (`apps/fleet/container/studio-fleet`), whose own `fleet
+task new` takes `[--studio <id>]` plus brief JSON on stdin with no
+`--template` flag at all, is what a worker studio (web-studio,
+release-studio) runs — never the maestro, which files this task directly
+with `--template retro` from the operator's own machine.

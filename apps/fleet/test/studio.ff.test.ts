@@ -15,9 +15,13 @@ import type { StudioStatus } from "../src/studio/types";
 // test/: those files carry bun-only globals. Same split src/studio/cli-args.ts
 // already draws for argv.
 
+// Board issue #250: maestro is ALWAYS LOCAL and `ffDecision` refuses it
+// outright (see the dedicated describe block below), so the generic
+// placeholder studio every other ffDecision test reaches for here is
+// "release-studio" — a real, non-singleton role — not "maestro".
 function row(overrides: Partial<StudioStatus> = {}): StudioStatus {
   return {
-    id: "websites--maestro", state: "running", tailscaleHost: null, lastRefresh: null,
+    id: "websites--release-studio", state: "running", tailscaleHost: null, lastRefresh: null,
     error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null,
     repoSlug: "acme-org/websites",
     ...overrides,
@@ -175,27 +179,27 @@ describe("describeState", () => {
 
 describe("ffDecision — inside a repo", () => {
   it("attaches to a provisioned studio", () => {
-    expect(ffDecision([row()], "websites", "maestro", "acme-org/websites"))
-      .toEqual({ kind: "attach", id: "websites--maestro" });
+    expect(ffDecision([row()], "websites", "release-studio", "acme-org/websites"))
+      .toEqual({ kind: "attach", id: "websites--release-studio" });
   });
 
   it("spawns when this repo has no studio for the role yet", () => {
-    expect(ffDecision([row()], "beta", "maestro", "acme-org/beta"))
-      .toEqual({ kind: "spawn", id: "beta--maestro" });
+    expect(ffDecision([row()], "beta", "release-studio", "acme-org/beta"))
+      .toEqual({ kind: "spawn", id: "beta--release-studio" });
   });
 
   it("provisions — never attaches — when the studio exists but is degraded", () => {
     const rows = [row({ state: "degraded", error: "bring-up failed (1): boom" })];
-    expect(ffDecision(rows, "websites", "maestro", "acme-org/websites")).toEqual({
-      kind: "provision", id: "websites--maestro",
+    expect(ffDecision(rows, "websites", "release-studio", "acme-org/websites")).toEqual({
+      kind: "provision", id: "websites--release-studio",
       reason: "degraded: bring-up failed (1): boom",
     });
   });
 
   it("provisions a studio still mid-provision rather than racing it", () => {
     const rows = [row({ state: "provisioning" })];
-    expect(ffDecision(rows, "websites", "maestro", "acme-org/websites"))
-      .toEqual({ kind: "provision", id: "websites--maestro", reason: "provisioning" });
+    expect(ffDecision(rows, "websites", "release-studio", "acme-org/websites"))
+      .toEqual({ kind: "provision", id: "websites--release-studio", reason: "provisioning" });
   });
 
   it("the role picks the studio, not the repo", () => {
@@ -206,8 +210,39 @@ describe("ffDecision — inside a repo", () => {
 
   it("ignores rows whose id does not parse", () => {
     const rows = [row({ id: "not-an-id" }), row()];
-    expect(ffDecision(rows, "websites", "maestro", "acme-org/websites"))
-      .toEqual({ kind: "attach", id: "websites--maestro" });
+    expect(ffDecision(rows, "websites", "release-studio", "acme-org/websites"))
+      .toEqual({ kind: "attach", id: "websites--release-studio" });
+  });
+});
+
+// Board issue #250: maestro is ALWAYS LOCAL. `ffDecision` refuses the role
+// outright, before any of its other branching (repo, instance, folded
+// segment) — this supersedes the old "--new" singleton-only refusal, which
+// covered only the --new path and left a plain `ff maestro` attaching to a
+// (now nonsensical) cloud studio.
+describe("ffDecision — maestro refuses, always (#250)", () => {
+  it("refuses bare `ff` (role defaults to maestro) inside a repo", () => {
+    const decision = ffDecision([row({ id: "websites--maestro" })], "websites", "maestro", "acme-org/websites");
+    expect(decision.kind).toBe("error");
+    if (decision.kind !== "error") throw new Error("unreachable");
+    expect(decision.message).toContain("locally");
+  });
+
+  it("refuses outside any repo too", () => {
+    expect(ffDecision([], null, "maestro", null).kind).toBe("error");
+  });
+
+  it("refuses with `--new`, the same way — no more singleton-only special case", () => {
+    const decision = ffDecision([row({ id: "websites--maestro" })], "websites", "maestro", "acme-org/websites", true);
+    expect(decision.kind).toBe("error");
+    if (decision.kind !== "error") throw new Error("unreachable");
+    expect(decision.message).toContain("locally");
+  });
+
+  it("refuses even when a cloud maestro studio already exists and looks provisioned", () => {
+    const decision = ffDecision([row({ id: "websites--maestro" })], "websites", "maestro", "acme-org/websites");
+    // Never "attach" — a healthy-looking row changes nothing about the rule.
+    expect(decision.kind).toBe("error");
   });
 });
 
@@ -220,15 +255,15 @@ describe("ffDecision — --new allocates a fresh instance (#269)", () => {
       .toEqual({ kind: "spawn", id: "websites--pilot--2", instance: 2 });
   });
 
-  // Round 2: maestro is a SINGLETON role — refused client-side, matching
-  // runSpawn's own server-side 409 (spawn.ts). Also covers bare `ff --new`
-  // (no role given), which defaults to DEFAULT_FF_ROLE ("maestro") and would
-  // otherwise silently try to allocate `<repo>--maestro--2`.
-  it("refuses --new for maestro — a singleton role, never a second instance", () => {
+  // Board issue #250: maestro refuses outright (see the dedicated describe
+  // block above) — this also covers bare `ff --new` (no role given), which
+  // defaults to DEFAULT_FF_ROLE ("maestro") and would otherwise silently try
+  // to allocate `<repo>--maestro--2`.
+  it("refuses --new for maestro — it is local-only, never a cloud instance at all", () => {
     const decision = ffDecision([row()], "websites", "maestro", "acme-org/websites", true);
     expect(decision.kind).toBe("error");
     if (decision.kind !== "error") throw new Error("unreachable");
-    expect(decision.message).toContain("singleton");
+    expect(decision.message).toContain("locally");
   });
 
   it("lands on instance 1 when the role has nothing running — a free slot, not a second one", () => {
@@ -267,36 +302,36 @@ describe("ffDecision — --new allocates a fresh instance (#269)", () => {
   });
 
   it("without the flag, every answer is exactly what it was before #269", () => {
-    expect(ffDecision([row()], "websites", "maestro", "acme-org/websites", false))
-      .toEqual({ kind: "attach", id: "websites--maestro" });
-    expect(ffDecision([row()], "websites", "maestro", "acme-org/websites"))
-      .toEqual({ kind: "attach", id: "websites--maestro" });
+    expect(ffDecision([row()], "websites", "release-studio", "acme-org/websites", false))
+      .toEqual({ kind: "attach", id: "websites--release-studio" });
+    expect(ffDecision([row()], "websites", "release-studio", "acme-org/websites"))
+      .toEqual({ kind: "attach", id: "websites--release-studio" });
   });
 });
 
 describe("ffDecision — outside any repo", () => {
   it("spawns with no id at all, so the Worker names it from the fleet default repo", () => {
-    expect(ffDecision([], null, "maestro", null)).toEqual({ kind: "spawn", id: null });
+    expect(ffDecision([], null, "release-studio", null)).toEqual({ kind: "spawn", id: null });
   });
 
   it("uses the one existing studio for that role", () => {
     const rows = [row(), row({ id: "websites--pilot" })];
-    expect(ffDecision(rows, null, "maestro", null)).toEqual({ kind: "attach", id: "websites--maestro" });
+    expect(ffDecision(rows, null, "release-studio", null)).toEqual({ kind: "attach", id: "websites--release-studio" });
   });
 
   it("re-provisions that one studio when it is not provisioned", () => {
     const rows = [row({ state: "stopped" })];
-    expect(ffDecision(rows, null, "maestro", null))
-      .toEqual({ kind: "provision", id: "websites--maestro", reason: "stopped" });
+    expect(ffDecision(rows, null, "release-studio", null))
+      .toEqual({ kind: "provision", id: "websites--release-studio", reason: "stopped" });
   });
 
   it("refuses to guess between two repos' studios for the same role", () => {
-    const rows = [row(), row({ id: "beta--maestro" })];
-    const decision = ffDecision(rows, null, "maestro", null);
+    const rows = [row(), row({ id: "beta--release-studio" })];
+    const decision = ffDecision(rows, null, "release-studio", null);
     expect(decision.kind).toBe("error");
     if (decision.kind !== "error") throw new Error("unreachable");
-    expect(decision.message).toContain("websites--maestro");
-    expect(decision.message).toContain("beta--maestro");
+    expect(decision.message).toContain("websites--release-studio");
+    expect(decision.message).toContain("beta--release-studio");
   });
 
   // #281: once instances exist, "more than one" no longer means "more than
@@ -333,30 +368,30 @@ describe("ffDecision — outside any repo", () => {
 
 describe("ffDecision — a folded-segment collision is refused, never attached to", () => {
   it("refuses when the studio holding this segment is bound to a DIFFERENT repo", () => {
-    const rows = [row({ id: "a-b--maestro", repoSlug: "acme-org/a.b" })];
-    const decision = ffDecision(rows, "a-b", "maestro", "acme-org/a-b");
+    const rows = [row({ id: "a-b--release-studio", repoSlug: "acme-org/a.b" })];
+    const decision = ffDecision(rows, "a-b", "release-studio", "acme-org/a-b");
     expect(decision.kind).toBe("error");
     if (decision.kind !== "error") throw new Error("unreachable");
-    expect(decision.message).toContain("a-b--maestro");
+    expect(decision.message).toContain("a-b--release-studio");
     expect(decision.message).toContain("acme-org/a.b");
     expect(decision.message).toContain("acme-org/a-b");
   });
 
   it("attaches to a dotted repo's own studio — same segment, same repo", () => {
-    const rows = [row({ id: "exampleorg-com--maestro", repoSlug: "demosite-life/exampleorg.com" })];
-    expect(ffDecision(rows, "exampleorg-com", "maestro", "demosite-life/exampleorg.com"))
-      .toEqual({ kind: "attach", id: "exampleorg-com--maestro" });
+    const rows = [row({ id: "exampleorg-com--release-studio", repoSlug: "demosite-life/exampleorg.com" })];
+    expect(ffDecision(rows, "exampleorg-com", "release-studio", "demosite-life/exampleorg.com"))
+      .toEqual({ kind: "attach", id: "exampleorg-com--release-studio" });
   });
 
   it("compares case-insensitively — a slug is a repo name, not a byte string", () => {
-    const rows = [row({ id: "a-b--maestro", repoSlug: "Acme-Org/A.B" })];
-    expect(ffDecision(rows, "a-b", "maestro", "acme-org/a.b").kind).toBe("attach");
+    const rows = [row({ id: "a-b--release-studio", repoSlug: "Acme-Org/A.B" })];
+    expect(ffDecision(rows, "a-b", "release-studio", "acme-org/a.b").kind).toBe("attach");
   });
 
   it("a legacy row with no repoSlug is not treated as a collision", () => {
-    const rows = [row({ id: "websites--maestro", repoSlug: null })];
-    expect(ffDecision(rows, "websites", "maestro", "acme-org/websites"))
-      .toEqual({ kind: "attach", id: "websites--maestro" });
+    const rows = [row({ id: "websites--release-studio", repoSlug: null })];
+    expect(ffDecision(rows, "websites", "release-studio", "acme-org/websites"))
+      .toEqual({ kind: "attach", id: "websites--release-studio" });
   });
 });
 
