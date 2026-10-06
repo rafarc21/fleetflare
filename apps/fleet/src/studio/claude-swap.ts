@@ -57,9 +57,15 @@ export interface CswapWindow {
  *  invented `model` and every real scoped entry failed shape validation
  *  because of it. Nothing in this module reads `name` for any DECISION
  *  (`decideAccountSync`'s scoped-window threshold check only ever touches
- *  `.pct`/`.resetsAt`) — this is purely a shape/typing correction. */
+ *  `.pct`/`.resetsAt`) — this is purely a shape/typing correction.
+ *
+ *  `name` is optional (issue #244's own second finding, same bug class as
+ *  `willLastToReset` below): since nothing reads it for a decision, the
+ *  shape validator (`isValidWindow`, applied directly to scoped entries —
+ *  see `isValidUsage`) never required it either, so the type shouldn't
+ *  claim a guarantee the validator doesn't enforce. */
 export interface CswapScopedWindow extends CswapWindow {
-  name: string;
+  name?: string;
 }
 
 /** One account's usage, as `cswap list --json` reports it.
@@ -78,12 +84,18 @@ export interface CswapAccount {
   usageAgeSeconds: number;
   usage: {
     fiveHour: CswapWindow;
-    // willLastToReset (maestro real-probe review, issue #240): real cswap
-    // reports `null` here, not just `true`/`false` -- nothing in this
-    // module reads this field for any decision (it is carried through the
-    // type only), so the validator need only tolerate its real range of
-    // values, never interpret them.
-    sevenDay: CswapWindow & { willLastToReset: boolean | null };
+    // willLastToReset (maestro real-probe review, issue #240, corrected
+    // again under board issue #244): real cswap can OMIT this key entirely
+    // (observed live, 2026-10-06, on a fresh account whose `sevenDay` had
+    // only `pct`/`resetsAt`/`countdown`/`clock`, no `willLastToReset` key
+    // at all) -- it is never present, explicitly `null`, AND a real
+    // `true`/`false`. The type marks it optional so "key absent", "key
+    // present, `null`", and "key present, a real boolean" are all the same
+    // valid shape -- same pattern as `CswapWindow.resetsAt`'s own doc
+    // comment above. Nothing in this module reads this field for any
+    // decision (it is carried through the type only), so the validator
+    // (isValidUsage) doesn't check it at all, not even for presence.
+    sevenDay: CswapWindow & { willLastToReset?: boolean | null };
     scoped: CswapScopedWindow[];
   } | null;
 }
@@ -297,25 +309,24 @@ function isValidWindow(w: unknown): w is CswapWindow {
     && (win.resetsAt === undefined || win.resetsAt === null || typeof win.resetsAt === "string");
 }
 
-// `name`, not `model` -- see CswapScopedWindow's own doc comment on this
-// field-name correction.
-function isValidScopedWindow(w: unknown): w is CswapScopedWindow {
-  if (!isValidWindow(w)) return false;
-  return typeof (w as unknown as Record<string, unknown>).name === "string";
-}
+// issue #244: `name` used to be required here (string-typed), but nothing
+// in this module reads `.scoped[].name` for any decision -- see
+// CswapScopedWindow's own doc comment. A scoped window is validated with
+// the SAME `isValidWindow` every other window uses; there's no scoped-only
+// shape requirement left to check, so the separate function this used to be
+// (`isValidScopedWindow`) is gone -- `isValidUsage` below calls
+// `isValidWindow` directly on each scoped entry.
 
 function isValidUsage(usage: unknown): usage is NonNullable<CswapAccount["usage"]> {
   if (typeof usage !== "object" || usage === null) return false;
   const u = usage as Record<string, unknown>;
   if (!isValidWindow(u.fiveHour) || !isValidWindow(u.sevenDay)) return false;
-  // willLastToReset: real cswap reports `null` here too, not just
-  // `true`/`false` -- see CswapAccount["usage"]'s own doc comment on this
-  // field; nothing downstream reads its value for a decision, so the
-  // validator only needs to confirm the KEY exists with one of its real
-  // values, never a strict boolean.
-  const willLastToReset = (u.sevenDay as unknown as Record<string, unknown>).willLastToReset;
-  return (typeof willLastToReset === "boolean" || willLastToReset === null)
-    && Array.isArray(u.scoped) && u.scoped.every(isValidScopedWindow);
+  // issue #244: `willLastToReset` used to be required here (boolean or
+  // explicit null) -- real cswap can OMIT the key entirely (see
+  // CswapAccount["usage"]'s own doc comment). Nothing downstream reads its
+  // value for a decision, so this validator doesn't check it at all, not
+  // even for presence.
+  return Array.isArray(u.scoped) && u.scoped.every(isValidWindow);
 }
 
 /**
