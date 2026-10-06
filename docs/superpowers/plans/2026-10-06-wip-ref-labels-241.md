@@ -389,3 +389,78 @@ pushed, so there's no finer label to give it) — never "pushed".
   for all 5 findings, including both explicitly-requested MAJOR 1 fixture
   directions.
 - This file.
+
+## Round 2 review fixes (PR #245, fresh-context review, final round)
+
+### Problems 1-2 — real `tsc --noEmit` compile errors
+
+Bug 1: round 1's own MAJOR 1 widened `Observed.wipLastCheck` to a union
+that also allows the legacy flat `{at,result}` shape. A union where one
+member has no index signature can never be indexed by an arbitrary string
+key at compile time (`TS7053`) — broke two pre-existing, untouched
+`observed.wipLastCheck?.[target]?.result` call sites in
+`test/studio.session.test.ts` (~line 1709).
+
+Fix: exported `normalizeWipLastCheck` (and its `WipCheckEntry` type) from
+`cli/wip-format.ts` — it already duck-types this exact union at runtime for
+every other reader (`worstWipCheck`, `formatWipInspectLines`). The two call
+sites now run `normalizeWipLastCheck(observed.wipLastCheck)[target]`
+instead of indexing the raw union directly: always a plain, indexable
+`Record<string, WipCheckEntry>`, with no cast and no loss of type safety.
+
+Bug 2: round 1's own MINOR 4 test in
+`test/studio.survival-delivery.test.ts` declared its `compareAhead` mock as
+`vi.fn(async () => (...))` — zero parameters — so `.mock.calls` typed as
+`[][]`, and `c[0]` on an empty tuple is a compile error (`TS2493`).
+
+Fix: gave the mock an explicit `(_branch: string)` parameter, matching
+every other `compareAhead` mock already in that file (e.g. the ones a few
+lines above/below it).
+
+### Problem 3 — the "+N more" wip-ref overflow count went silently wrong
+
+Bug: MINOR 4 (above) now caps `liveWipRefs` itself to the newest
+`MAX_LINES_PER_SECTION` entries BEFORE `compareAhead` ever runs, so
+`liveWipRefs.value.length` can never exceed the display cap any more.
+`composeSurvivalBrief`'s own "+N more" overflow line for this section
+computed its count from that same (now pre-capped) length — a studio with,
+say, 10 live wip refs went from correctly showing 8 lines + "+2 more" to
+silently showing exactly 8 lines with no overflow indicator at all, even
+though 2 real refs beyond the cap still exist (just never
+`compareAhead`-checked, by design).
+
+Fix: new optional `SurvivalInput.liveWipRefsTotalCount` field
+(survival-brief.ts) carries the TRUE, pre-cap candidate count alongside the
+already-capped `liveWipRefs` list. `survival-delivery.ts`'s wip-ref
+age-filter loop captures `sortedWipRefs.length` (the full count, after the
+newest-first sort MINOR 3 needs, before the MINOR-4 slice) and threads it
+through; absent on a failed rescue-branch fetch (same "nothing honest to
+say" convention `liveWipRefs`'s own `Checked` failure case already uses).
+`composeSurvivalBrief`'s render step now computes the overflow as
+`(liveWipRefsTotalCount ?? sorted.length) - shown.length`, falling back to
+the old plain cap-check when the field is absent — so a direct
+`SurvivalInput` fixture that predates this field keeps behaving exactly as
+before. The extra, not-looked-up refs beyond the cap still never get a
+`compareAhead` call — only their COUNT is now preserved for display, so
+MINOR 4's own fix stays intact.
+
+New test (TDD, RED first): `test/studio.survival-delivery.test.ts` — "more
+than MAX_LINES_PER_SECTION wip refs: compareAhead still only called 8
+times, and the brief still shows an accurate +N more" — 10 member wip refs,
+asserts `compareAhead` called exactly 8 times (MINOR 4 stays fixed) AND the
+rendered brief still contains `"- +2 more"` (the real overflow, newest-first
+per MINOR 3).
+
+### Tests touched (round 2 fixes)
+
+- `apps/fleet/cli/wip-format.ts` — exported `normalizeWipLastCheck`/
+  `WipCheckEntry`.
+- `apps/fleet/test/studio.session.test.ts` — the two `wipLastCheck`
+  indexing call sites now go through `normalizeWipLastCheck`.
+- `apps/fleet/test/studio.survival-delivery.test.ts` — typed the MINOR-4
+  `compareAhead` mock's param; new problem-3 overflow-count test.
+- `apps/fleet/src/studio/survival-brief.ts` — new
+  `SurvivalInput.liveWipRefsTotalCount` field; "+N more" render fix.
+- `apps/fleet/src/studio/survival-delivery.ts` — captures the pre-cap wip
+  ref count and threads it through `resolveSurvivalInput`'s return value.
+- This file.

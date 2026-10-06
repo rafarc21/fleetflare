@@ -148,6 +148,24 @@ export interface SurvivalInput {
    * below) rather than just a bare name.
    */
   liveWipRefs: Checked<SurvivalWipRef[]>;
+  /**
+   * Maestro review round 2 on PR #245 (issue #241), problem 3 -- MINOR 4
+   * (`survival-delivery.ts`'s own age-filter loop doc comment) now caps
+   * `liveWipRefs` ITSELF to the newest `MAX_LINES_PER_SECTION` entries
+   * BEFORE any `compareAhead` call runs, so `liveWipRefs.value.length` can
+   * never exceed the display cap any more -- the render step's own "+N
+   * more" overflow line below, computed from that same length, could then
+   * never fire, even for a studio with far more than 8 live wip refs. This
+   * carries the TRUE, pre-cap candidate count alongside the already-capped
+   * list, so the overflow line can report the real number of refs beyond
+   * what was shown (and beyond what ever got `compareAhead`-checked at
+   * all) rather than silently dropping the "+N more" indicator. OPTIONAL,
+   * defaulting to `liveWipRefs.value.length` when absent (a direct
+   * `SurvivalInput` fixture that predates this field, or one with 8 or
+   * fewer refs where no capping ever happened) -- same "absent means as
+   * before" discipline `branchLookupTruncated` above already follows.
+   */
+  liveWipRefsTotalCount?: number;
   /** PR1's (#85) own bring-up verdict record, passed through as-is -- null
    *  before any bring-up has completed under that feature. Replaces the
    *  bare `lastSnapshotAgeS: number | null` this field used to be: PR1's
@@ -799,11 +817,18 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
     // own doc comment) -- a weaker, display-only use of that stamp that
     // stays fine even though it is no longer trusted for the age DECISION.
     const sorted = input.liveWipRefs.value.slice().sort((a, b) => b.branch.localeCompare(a.branch));
-    for (const ref of sorted.slice(0, MAX_LINES_PER_SECTION)) {
+    const shown = sorted.slice(0, MAX_LINES_PER_SECTION);
+    for (const ref of shown) {
       lines.push(liveWipSnapshotLine(ref, input.now));
     }
-    if (sorted.length > MAX_LINES_PER_SECTION) {
-      lines.push(`- +${sorted.length - MAX_LINES_PER_SECTION} more`);
+    // Problem 3 (review round 2 on PR #245) -- `liveWipRefsTotalCount` is
+    // the TRUE pre-cap count when the caller capped `liveWipRefs` itself
+    // before this composer ever saw it (MINOR 4); absent/equal to
+    // `sorted.length` falls back to the plain cap-overflow check this used
+    // to be.
+    const total = input.liveWipRefsTotalCount ?? sorted.length;
+    if (total > shown.length) {
+      lines.push(`- +${total - shown.length} more`);
     }
   }
 

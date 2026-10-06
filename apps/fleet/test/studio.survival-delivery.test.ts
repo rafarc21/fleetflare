@@ -831,6 +831,37 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
     expect((input.liveWipRefs as { ok: true; value: unknown[] }).value).toHaveLength(8);
   });
 
+  /**
+   * Maestro review round 2 on PR #245 (issue #241), problem 3 -- MINOR 4
+   * above caps the CANDIDATE list to `MAX_LINES_PER_SECTION` BEFORE
+   * `compareAhead` ever runs, so `liveWipRefs` itself never carries more
+   * than 8 entries. `composeSurvivalBrief`'s own "+N more" overflow line
+   * (same pattern `unclaimedRescueLine`'s section already uses) computed
+   * its count from `liveWipRefs.value.length` alone, which can now never
+   * exceed the cap -- a studio with MORE than 8 live wip refs silently lost
+   * its "+N more" line entirely, even though real refs beyond the cap
+   * still exist and are simply never checked. The true pre-cap count must
+   * survive alongside the capped list so the render step can report the
+   * real overflow.
+   */
+  it("more than MAX_LINES_PER_SECTION wip refs: compareAhead still only called 8 times, and the brief still shows an accurate +N more", async () => {
+    // 10 member wip refs, boot stamps strictly increasing by one minute.
+    const stamps = Array.from({ length: 10 }, (_, i) => `202610040000${String(10 + i).padStart(2, "0")}`);
+    const refs = stamps.map((s) => `fleet/rescue/${STUDIO}/wip/${s}-wt-agent-a1b2`);
+    const compareAhead = vi.fn(async (_branch: string) => ({ aheadBy: 1, lastCommitAt: "2026-09-25T11:00:00.000Z" }));
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => refs, compareAhead }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    // MINOR 4 stays fixed: still only the newest 8 ever get a compareAhead call.
+    expect(compareAhead).toHaveBeenCalledTimes(8);
+
+    const brief = composeSurvivalBrief(input);
+    // The 2 oldest refs (never looked up at all) are still the real overflow.
+    expect(brief).toContain("- +2 more");
+  });
+
   it("a failed rescue-branch fetch also fails liveWipRefs, symmetric with unclaimedRescueBranches", async () => {
     const input = await resolveSurvivalInput(
       sources({ rescueBranches: async () => { throw new Error("rescue-branch fetch failed (502)"); } }),

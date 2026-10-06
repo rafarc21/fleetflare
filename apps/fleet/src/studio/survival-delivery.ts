@@ -772,6 +772,16 @@ export async function resolveSurvivalInput(
   const unresolved = resolved.filter((r) => r.branch === null);
   let unclaimedRescueBranches: Checked<string[]>;
   let liveWipRefs: Checked<SurvivalWipRef[]>;
+  // Problem 3 (Maestro review round 2 on PR #245, issue #241) -- the TRUE,
+  // pre-cap count of candidate wip refs, captured BEFORE the MINOR-4 slice
+  // below throws the overflow away. Threaded through to
+  // `SurvivalInput.liveWipRefsTotalCount` (survival-brief.ts) so the render
+  // step's own "+N more" line can still report the real overflow even
+  // though `liveWipRefs` itself never carries more than
+  // `MAX_LINES_PER_SECTION` entries any more. Left `undefined` on a failed
+  // fetch (the catch block below) -- same "absent, nothing honest to say"
+  // convention `liveWipRefs`'s own `Checked<T>` failure case already uses.
+  let liveWipRefsTotalCount: number | undefined;
   try {
     const fetched = rescueBranchesFor(sources.studioId, await sources.rescueBranches());
     // Issue #241, item 1 — partitioned BEFORE the age filter, BEFORE
@@ -859,6 +869,7 @@ export async function resolveSurvivalInput(
     // picking which refs are even worth asking about) and sliced to that
     // same cap BEFORE any `compareAhead` call runs.
     const sortedWipRefs = wipRefs.slice().sort((a, b) => b.localeCompare(a));
+    liveWipRefsTotalCount = sortedWipRefs.length;
     const cappedWipRefs = sortedWipRefs.slice(0, MAX_LINES_PER_SECTION);
     const liveWip: SurvivalWipRef[] = [];
     for (const b of cappedWipRefs) {
@@ -996,6 +1007,11 @@ export async function resolveSurvivalInput(
     // lookup that was never truncated says nothing extra, rather than a
     // stored `false` a reader could mistake for a deliberate signal.
     ...(branchLookupTruncated ? { branchLookupTruncated: true } : {}),
+    // Problem 3 (review round 2 on PR #245) -- absent on a failed
+    // rescue-branch fetch (same "nothing honest to say" convention as
+    // `liveWipRefs` itself in that case), same `undefined`-stays-absent
+    // discipline as `branchLookupTruncated` just above otherwise.
+    ...(liveWipRefsTotalCount !== undefined ? { liveWipRefsTotalCount } : {}),
   };
 }
 
