@@ -749,8 +749,19 @@ export async function rescueSnapshot(deps: SessionSyncDeps, repo: string, studio
  * every single tick for a studio that never configured a rescue remote.
  * `resolveRescueTarget`'s own token mint + the real push only run when the
  * probe answers `WIP_SYNC_NEEDED`.
+ *
+ * Issue #241 item 4: `rotationIndex` (default `0`, same as `wipSyncCmd`'s own
+ * default — see that function's own doc comment) is threaded straight
+ * through to `wipSyncCmd`'s identical trailing param. The caller
+ * (`syncSessionCycle`) resolves it from `Observed.wipRotationIndex` before
+ * calling this and persists the incremented value after, regardless of
+ * outcome — this function itself has no storage access and does not decide
+ * fairness, only passes whatever index it was given through to the one
+ * place that bash-side `% tcount` math actually happens.
  */
-export async function wipSync(deps: SessionSyncDeps, repo: string, studio: string, bootStamp: string): Promise<RescueResult> {
+export async function wipSync(
+  deps: SessionSyncDeps, repo: string, studio: string, bootStamp: string, rotationIndex = 0,
+): Promise<RescueResult> {
   const wipExec = deps.wipExec ?? deps.exec;
   const probeRes = await wipExec(wipSyncProbeCmd(repo));
   if (isDeadlineExit(probeRes.code)) {
@@ -769,7 +780,10 @@ export async function wipSync(deps: SessionSyncDeps, repo: string, studio: strin
     throw new Error(`wip-sync failed: probe produced unrecognised output: ${probeOut.slice(0, 500) || "no output"}`);
   }
   const t = (await deps.rescueTarget?.()) ?? {};
-  const cmd = wipSyncCmd(repo, studio, bootStamp, undefined, undefined, deps.botName, deps.botEmail, { remoteUrl: t.remoteUrl });
+  const cmd = wipSyncCmd(
+    repo, studio, bootStamp, undefined, undefined, deps.botName, deps.botEmail, { remoteUrl: t.remoteUrl },
+    undefined, undefined, rotationIndex,
+  );
   const res = await (t.env ? wipExec(cmd, t.env) : wipExec(cmd));
   return parseRescueExecResult(res, "wip-sync");
 }
@@ -3228,8 +3242,17 @@ export async function syncSessionCycle(
       const bootStamp = obs && obs.replacedAt === null && obs.incarnation !== null ? obs.wipBootStamp ?? null : null;
       const checkedAt = syncDeps.now().toISOString();
       if (bootStamp) {
+        // Issue #241 item 4: read the PERSISTED rotation counter before
+        // building this tick's own command, and persist the incremented
+        // value (`finally`, below) regardless of whether this tick
+        // succeeded, partially failed, or fully failed — fairness across
+        // targets is over TIME, not only on a successful tick. Wrapped at
+        // 1_000_000 before persisting (Observed.wipRotationIndex's own doc
+        // comment, observed.ts) — a cheap safety valve, never load-bearing:
+        // the real `% tcount` happens fresh in bash every run.
+        const rotationIndex = obs?.wipRotationIndex ?? 0;
         try {
-          const result = await wipSync(syncDeps, parsed.repo, idFallback, bootStamp);
+          const result = await wipSync(syncDeps, parsed.repo, idFallback, bootStamp, rotationIndex);
           await recordWipSyncOnSuccess(observedStorage, result, checkedAt, bootStamp);
           await recordWipLastCheck(observedStorage, checkedAt, wipLastCheckResultOf(result));
         } catch (err) {
@@ -3246,6 +3269,8 @@ export async function syncSessionCycle(
           } else {
             await recordWipLastCheck(observedStorage, checkedAt, "failed");
           }
+        } finally {
+          if (observedStorage) await mergeObserved(observedStorage, { wipRotationIndex: (rotationIndex + 1) % 1_000_000 });
         }
       } else {
         console.error(`studio ${idFallback}: WIP sync skipped -- no confirmed boot stamp yet for this incarnation`);

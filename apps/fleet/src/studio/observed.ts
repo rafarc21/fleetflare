@@ -390,6 +390,27 @@ export interface Observed {
    */
   wipSyncedBootStamp?: string | null;
   /**
+   * Issue #241 item 4: the wip-sync target walk (rescue.ts's `wipSyncCmd`)
+   * used to always start at the main checkout, then every member worktree in
+   * the SAME fixed `worktree list --porcelain` order, every tick — a slow
+   * target early in that order could burn most of the exec's own
+   * `wip_budget_ok` budget and starve whichever target sorted last,
+   * permanently, not just occasionally. This is the PERSISTED rotation
+   * counter `wipSync` (do.ts) reads before building each tick's own command
+   * (threaded in as `wipSyncCmd`'s `rotationIndex` param) and increments
+   * AFTER, regardless of whether that tick succeeded, partially failed, or
+   * fully failed — fairness is over TIME, not only on success. The real `%
+   * tcount` (how many targets THIS tick actually found) only ever happens in
+   * bash, every run; this value just needs to keep advancing. Absent/undefined
+   * reads as `0` (every row that predates this field, or has never had a
+   * wip-sync tick run) — same convention `wipSyncedAt` above already uses.
+   * Wrapped at 1_000_000 before persisting — a cheap safety valve, never load
+   * -bearing at any normal tick cadence (bash's own modulo against the real
+   * target count is what actually matters), chosen simply to keep the stored
+   * number small forever rather than growing without bound.
+   */
+  wipRotationIndex?: number;
+  /**
    * Fix round (#208 PR #215 review, minor (a)): `wipSyncedAt` above only ever
    * advances on a genuine push — a studio that has been clean for days (the
    * common case) shows the SAME age as a studio whose last three ticks all
