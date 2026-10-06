@@ -824,13 +824,69 @@ export async function recordWipSyncOnSuccess(
  * Xm ago" from "last attempt failed Xm ago", rather than only ever showing
  * the age of the last successful push (or nothing at all for a studio stuck
  * failing every tick).
+ *
+ * Issue #241 item 5: `result` is now a PER-TARGET map (one `WipLastCheckResult`
+ * per named target, built by `wipTargetChecksFrom` below), not one blended
+ * value — `now` is stamped onto EVERY entry, and the whole stored map is
+ * REPLACED each call, same "stamps on every attempt" discipline as before,
+ * just per-target now. Never merged with a prior call's own map: a target
+ * silently absent from THIS tick's own map has no fresh evidence either way,
+ * so nothing is carried forward or dropped on its behalf.
  */
 export type WipLastCheckResult = "pushed" | "clean" | "markers-only" | "no-checkout" | "failed";
 
 export async function recordWipLastCheck(
-  observedStorage: ObservedStorage | null | undefined, now: string, result: WipLastCheckResult,
+  observedStorage: ObservedStorage | null | undefined, now: string, checks: Record<string, WipLastCheckResult>,
 ): Promise<void> {
-  if (observedStorage) await mergeObserved(observedStorage, { wipLastCheck: { at: now, result } });
+  if (!observedStorage) return;
+  const entries: Record<string, { at: string; result: WipLastCheckResult }> = {};
+  for (const [target, result] of Object.entries(checks)) entries[target] = { at: now, result };
+  await mergeObserved(observedStorage, { wipLastCheck: entries });
+}
+
+/**
+ * Issue #241 item 5 — the composition point that fixes the bug: main pushes,
+ * a member fails, SAME tick (`wipSync`'s single exec covers every target —
+ * rescue.ts's `wip_sync_one` call sites) used to collapse to ONE
+ * `WipLastCheckResult` for the whole tick (`wipLastCheckResultOf` below, fed
+ * by `mainCheckoutPushFromFailure`'s own recovered main-only `RescueResult`),
+ * silently erasing the member's own real failure. This instead labels EVERY
+ * NAMED target independently, from whichever of `result` (a successful
+ * `RescueResult`, parsed from `RESCUE_PUSHED` lines) / `err` (a caught
+ * `RescuePushFailedError`, carrying BOTH its own `.pushes` — targets that
+ * landed before/alongside the failure — AND `.fails` — the `RESCUE_FAILED
+ * <target> <step>` lines rescue.ts's `wip_sync_one` already emits for every
+ * one of its own failure returns, nothing new to parse) the caller passed.
+ *
+ * A target is "named" only when its own RESCUE_PUSHED/RESCUE_FAILED line
+ * actually printed this tick — wip-sync's own script never emits a
+ * per-target line for a QUIET (clean/markers-only) target, only ONE overall
+ * RESCUE_CLEAN/RESCUE_MARKERS_ONLY when NOTHING across every target pushed
+ * or failed (`wipSyncCmd`'s own doc comment, rescue.ts). On a fully quiet
+ * SUCCESS (`result` given, nothing named by `.pushes`), the main target
+ * specifically is labelled with `wipLastCheckResultOf(result)`'s own blended
+ * reading (the best available signal — the main's ref name is always known
+ * statically, `wipSyncRef(studio, bootStamp)`, unlike a member's own
+ * `-wt-<id>` suffix, which this function has no way to invent). A quiet
+ * member on that SAME tick is left unlabeled — a real limitation of what
+ * wip-sync's own script output can say, not something this function
+ * papers over with a guess.
+ */
+export function wipTargetChecksFrom(
+  studio: string, bootStamp: string, result: RescueResult | null, err: RescuePushFailedError | null,
+): Record<string, WipLastCheckResult> {
+  const mainRef = wipSyncRef(studio, bootStamp);
+  const out: Record<string, WipLastCheckResult> = {};
+  if (result) {
+    const pushes = result.pushes ?? (result.pushed && result.branch ? [{ branch: result.branch }] : []);
+    for (const p of pushes) out[p.branch] = "pushed";
+    if (!(mainRef in out)) out[mainRef] = wipLastCheckResultOf(result);
+  }
+  if (err) {
+    for (const p of err.pushes) out[p.branch] = "pushed";
+    for (const f of err.fails) out[f.worktree] = "failed";
+  }
+  return out;
 }
 
 /**
@@ -3254,7 +3310,7 @@ export async function syncSessionCycle(
         try {
           const result = await wipSync(syncDeps, parsed.repo, idFallback, bootStamp, rotationIndex);
           await recordWipSyncOnSuccess(observedStorage, result, checkedAt, bootStamp);
-          await recordWipLastCheck(observedStorage, checkedAt, wipLastCheckResultOf(result));
+          await recordWipLastCheck(observedStorage, checkedAt, wipTargetChecksFrom(idFallback, bootStamp, result, null));
         } catch (err) {
           console.error(`studio ${idFallback}: WIP sync failed`, err);
           // Maestro review round 1 on PR #235, MINOR 7 (issue #231) — a
@@ -3263,12 +3319,17 @@ export async function syncSessionCycle(
           // `mainCheckoutPushFromFailure`'s own doc comment for the full
           // reasoning.
           const mainResult = mainCheckoutPushFromFailure(err, idFallback, bootStamp);
-          if (mainResult) {
-            await recordWipSyncOnSuccess(observedStorage, mainResult, checkedAt, bootStamp);
-            await recordWipLastCheck(observedStorage, checkedAt, "pushed");
-          } else {
-            await recordWipLastCheck(observedStorage, checkedAt, "failed");
-          }
+          if (mainResult) await recordWipSyncOnSuccess(observedStorage, mainResult, checkedAt, bootStamp);
+          // Issue #241 item 5: per-target, not blended -- a
+          // `RescuePushFailedError` already carries every target's own
+          // outcome (`wipTargetChecksFrom`'s own doc comment); anything else
+          // thrown (a killed exec, the exec call itself throwing) carries no
+          // per-target detail at all, so the main target is the only one
+          // this can honestly say anything about, and only "failed".
+          const checks = err instanceof RescuePushFailedError
+            ? wipTargetChecksFrom(idFallback, bootStamp, null, err)
+            : { [wipSyncRef(idFallback, bootStamp)]: "failed" as WipLastCheckResult };
+          await recordWipLastCheck(observedStorage, checkedAt, checks);
         } finally {
           if (observedStorage) await mergeObserved(observedStorage, { wipRotationIndex: (rotationIndex + 1) % 1_000_000 });
         }

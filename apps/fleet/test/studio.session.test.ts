@@ -1805,11 +1805,11 @@ describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)",
     };
 
     await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
-    expect(deps.execCalls).toContain(pushCmd0);
+    expect(base.execCalls).toContain(pushCmd0);
     expect((await getObserved(observedStorage)).wipRotationIndex).toBe(1);
 
     await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
-    expect(deps.execCalls).toContain(pushCmd1);
+    expect(base.execCalls).toContain(pushCmd1);
     expect((await getObserved(observedStorage)).wipRotationIndex).toBe(2);
   });
 });

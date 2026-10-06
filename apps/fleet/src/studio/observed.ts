@@ -423,8 +423,25 @@ export interface Observed {
    * tick has run yet for this row" (a studio not yet provisioned, or one from
    * before this field existed) — same trailing-optional convention every
    * other field in this struct added after its first release already uses.
+   *
+   * Issue #241 item 5: this USED to be one blended `{at, result}` for the
+   * WHOLE tick — a member worktree's own failure could be (and was) masked
+   * by the main checkout's genuinely successful push in the SAME tick
+   * (`mainCheckoutPushFromFailure`, do.ts, recovers the main's push from a
+   * caught per-target failure; the old blended shape then had no way to
+   * record the member's own failure ALONGSIDE it). Now PER-TARGET: one
+   * `{at, result}` entry per target NAMED this tick (do.ts's
+   * `wipTargetChecksFrom`), keyed by that target's own push/fail ref name —
+   * the SAME string `wipSyncRef(studio, bootStamp)` produces for the main
+   * checkout, or rescue.ts's own `wip/<bootStamp>-wt-<id>` shape for a
+   * member worktree. `recordWipLastCheck` (do.ts) REPLACES the whole map
+   * each tick (never merges with a prior tick's own map — a target silently
+   * absent this tick has no fresh evidence either way, so nothing is kept
+   * or dropped on its behalf). `cli/wip-format.ts` rolls this up to the
+   * WORST status across every named target for its own single-line
+   * display — see that file's own doc comment for the exact priority order.
    */
-  wipLastCheck?: { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" } | null;
+  wipLastCheck?: Record<string, { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" }> | null;
   /**
    * Issue #231 — the on-disk path(s) a `--fresh-session` bring-up actually
    * moved an old session aside to (`parseFreshSession`'s own successfully-
