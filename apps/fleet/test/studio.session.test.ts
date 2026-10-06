@@ -21,7 +21,7 @@ import {
   archiveDoneRecords, doneRecordsListCmd, type DoneRecordPorts,
   DONE_RECORD_HASHES_KEY, type DoneRecordHashStorage,
   mirrorBurnToRegistry, checkAndRecordReadiness, syncSessionCycle, clearSessionGuard, RECYCLE_REFUSED_PREFIX,
-  wipLastCheckResultOf, mainCheckoutPushFromFailure,
+  wipLastCheckResultOf, mainCheckoutPushFromFailure, wipTargetChecksFrom, recordWipLastCheck,
   clearForceMappedAccount,
 } from "../src/studio/do";
 import {
@@ -1669,9 +1669,11 @@ describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)",
   // which rode along as a RESCUE_PUSHED line in the SAME exec output. This
   // is the load-bearing, end-to-end proof: a real syncSessionCycle run whose
   // wip-sync push exec answers BOTH a main-checkout RESCUE_PUSHED line and a
-  // member-worktree RESCUE_FAILED line still advances wipSyncedAt/
-  // wipLastCheck, exactly as if the member worktree did not exist.
-  it("a member worktree's wip-sync failure never masks the main checkout's own real success: wipSyncedAt/wipLastCheck still advance", async () => {
+  // member-worktree RESCUE_FAILED line still advances wipSyncedAt, AND --
+  // issue #241 item 5 -- `wipLastCheck` now records BOTH outcomes AT ONCE,
+  // per target, rather than collapsing the whole tick to one blended
+  // "pushed" value that silently erased the member's own real failure.
+  it("a member worktree's wip-sync failure never masks the main checkout's own real success: wipSyncedAt advances, AND both the main's pushed + the member's failed status land in wipLastCheck simultaneously", async () => {
     const storage = provisionedStorage();
     const observedStorage = storage as unknown as ObservedStorage;
     const BOOT_STAMP = "20261004000000";
@@ -1704,7 +1706,8 @@ describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)",
 
     const observed = await getObserved(observedStorage);
     expect(observed.wipSyncedAt).toBeTruthy();
-    expect(observed.wipLastCheck?.result).toBe("pushed");
+    expect(observed.wipLastCheck?.[mainRef]?.result).toBe("pushed");
+    expect(observed.wipLastCheck?.[memberRef]?.result).toBe("failed");
   });
 
   // Maestro review round 2 on PR #235 (issue #231), item 1 — the boot stamp
@@ -1877,6 +1880,99 @@ describe("wipLastCheckResultOf — RescueResult -> WipLastCheckResult mapping (#
     expect(wipLastCheckResultOf({
       pushed: false, branch: null, files: 0, skipped: "nothing to rescue (only tool markers)",
     })).toBe("markers-only");
+  });
+});
+
+/**
+ * Issue #241 item 5 — `Observed.wipLastCheck` is now PER-TARGET, never one
+ * blended value. `wipTargetChecksFrom` is the composition point: given
+ * whichever of a successful `RescueResult` / a caught `RescuePushFailedError`
+ * this tick actually produced, it labels every NAMED target (one whose own
+ * RESCUE_PUSHED/RESCUE_FAILED line this tick's exec actually printed)
+ * "pushed"/"failed", and falls back to `wipLastCheckResultOf`'s own blended
+ * reading for the MAIN target specifically when nothing named it (the quiet
+ * clean/markers-only/no-checkout cases, where wip-sync's own script never
+ * emits a per-target line for ANY target at all).
+ */
+describe("wipTargetChecksFrom — per-target wip-sync status (#241 item 5)", () => {
+  const STUDIO = "websites--pilot";
+  const BOOT_STAMP = "20261004000000";
+  const mainRef = wipSyncRef(STUDIO, BOOT_STAMP);
+  const memberRef = `fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+
+  it("a successful RescueResult naming both main and a member: both read 'pushed'", () => {
+    const result = {
+      pushed: true, branch: mainRef, files: 1, kind: "files" as const,
+      pushes: [{ branch: mainRef, files: 1, kind: "files" as const }, { branch: memberRef, files: 2, kind: "files" as const }],
+    };
+    expect(wipTargetChecksFrom(STUDIO, BOOT_STAMP, result, null)).toEqual({
+      [mainRef]: "pushed", [memberRef]: "pushed",
+    });
+  });
+
+  it("a quiet (clean) RescueResult naming nothing: main reads the blended skip value, nothing else is named", () => {
+    const result = { pushed: false, branch: null, files: 0, skipped: "clean" as const };
+    expect(wipTargetChecksFrom(STUDIO, BOOT_STAMP, result, null)).toEqual({ [mainRef]: "clean" });
+  });
+
+  it("the load-bearing bug-report scenario: main pushed, a member failed, SAME tick (caught RescuePushFailedError) -- both land simultaneously, never collapsing to one value", () => {
+    const err = new RescuePushFailedError(
+      "wip-sync failed", [{ branch: mainRef, files: 1, kind: "files" }],
+      [{ worktree: memberRef, step: "push" }],
+    );
+    expect(wipTargetChecksFrom(STUDIO, BOOT_STAMP, null, err)).toEqual({
+      [mainRef]: "pushed", [memberRef]: "failed",
+    });
+  });
+
+  it("only a member is named in the error (main never reached, or quietly clean): main is left unlabeled, never guessed", () => {
+    const err = new RescuePushFailedError("wip-sync failed", [], [{ worktree: memberRef, step: "push" }]);
+    expect(wipTargetChecksFrom(STUDIO, BOOT_STAMP, null, err)).toEqual({ [memberRef]: "failed" });
+  });
+
+  it("the main checkout itself failed: 'failed', not silently absent", () => {
+    const err = new RescuePushFailedError("wip-sync failed", [], [{ worktree: mainRef, step: "push" }]);
+    expect(wipTargetChecksFrom(STUDIO, BOOT_STAMP, null, err)).toEqual({ [mainRef]: "failed" });
+  });
+
+  it("neither result nor err given: empty map, never a guess", () => {
+    expect(wipTargetChecksFrom(STUDIO, BOOT_STAMP, null, null)).toEqual({});
+  });
+});
+
+/** `recordWipLastCheck`'s own signature is now the per-target map, not one
+ *  `WipLastCheckResult` -- stamps `now` onto EVERY entry, replaces the whole
+ *  stored map each call (same "stamps on every attempt" discipline as
+ *  before, just per-target now; never merged with a prior tick's own map --
+ *  a target silently absent this tick has no fresh evidence either way). */
+describe("recordWipLastCheck — writes the per-target map (#241 item 5)", () => {
+  it("writes one {at, result} entry per named target", async () => {
+    const storage = fakeCycleStorage({});
+    const observedStorage = storage as unknown as ObservedStorage;
+    const NOW = "2026-10-06T12:00:00.000Z";
+
+    await recordWipLastCheck(observedStorage, NOW, { "main-ref": "pushed", "member-ref": "failed" });
+
+    const observed = await getObserved(observedStorage);
+    expect(observed.wipLastCheck).toEqual({
+      "main-ref": { at: NOW, result: "pushed" },
+      "member-ref": { at: NOW, result: "failed" },
+    });
+  });
+
+  it("a later call REPLACES the whole map, never merges with a target absent from the new call", async () => {
+    const storage = fakeCycleStorage({});
+    const observedStorage = storage as unknown as ObservedStorage;
+
+    await recordWipLastCheck(observedStorage, "2026-10-06T12:00:00.000Z", { a: "pushed", b: "failed" });
+    await recordWipLastCheck(observedStorage, "2026-10-06T12:05:00.000Z", { a: "pushed" });
+
+    const observed = await getObserved(observedStorage);
+    expect(observed.wipLastCheck).toEqual({ a: { at: "2026-10-06T12:05:00.000Z", result: "pushed" } });
+  });
+
+  it("no observedStorage: a no-op, never throws", async () => {
+    await expect(recordWipLastCheck(null, "2026-10-06T12:00:00.000Z", { a: "pushed" })).resolves.toBeUndefined();
   });
 });
 
