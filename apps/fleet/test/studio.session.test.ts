@@ -1765,6 +1765,50 @@ describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)",
     expect(observed.wipSyncedAt).toBe(PRIOR_SYNCED_AT);
     expect(observed.wipSyncedBootStamp).toBe(BOOT_STAMP);
   });
+
+  // Issue #241 item 4: the main checkout always went first, members always
+  // walked in the SAME fixed order -- a slow early target starved whoever
+  // sorted last, every tick, forever. `Observed.wipRotationIndex` is read
+  // before each tick's own `wipSync` call and persisted incremented by one
+  // after, regardless of outcome -- the load-bearing proof that two
+  // consecutive ticks against the SAME storage actually generate two
+  // DIFFERENT `wipSyncCmd` strings (rotationIndex 0, then 1).
+  it("#241 item 4: wipRotationIndex advances by one tick-over-tick, threaded into each tick's own wipSyncCmd", async () => {
+    const storage = provisionedStorage();
+    const observedStorage = storage as unknown as ObservedStorage;
+    const BOOT_STAMP = "20261006000000";
+    await observedStorage.put(OBSERVED_KEY, {
+      incarnation: "a-real-token", replacedAt: null, execFailures: 0, unreachableSince: null,
+      lastShipOkAt: null, lastSnapshotAt: null, session: null, activity: null, memberAlerts: null,
+      lastMessageLine: null, wipBootStamp: BOOT_STAMP,
+    });
+    const base = fakeSyncDeps({});
+    const probeCmd = wipSyncProbeCmd("websites");
+    const pushCmd0 = wipSyncCmd("websites", STUDIO_ID, BOOT_STAMP);
+    const pushCmd1 = wipSyncCmd(
+      "websites", STUDIO_ID, BOOT_STAMP, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 1,
+    );
+    const mainRef = wipSyncRef(STUDIO_ID, BOOT_STAMP);
+    const deps: SessionSyncDeps = {
+      ...base,
+      exec: async (cmd: string, env?: Record<string, string>) => {
+        if (cmd === probeCmd) return { code: 0, stdout: WIP_SYNC_NEEDED, stderr: "" };
+        if (cmd === pushCmd0 || cmd === pushCmd1) {
+          base.execCalls.push(cmd);
+          return { code: 0, stdout: `${RESCUE_PUSHED_PREFIX} ${mainRef} 1 files`, stderr: "" };
+        }
+        return base.exec(cmd, env);
+      },
+    };
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+    expect(deps.execCalls).toContain(pushCmd0);
+    expect((await getObserved(observedStorage)).wipRotationIndex).toBe(1);
+
+    await syncSessionCycle(deps, storage, STUDIO_ID, async () => {}, null, null, observedStorage);
+    expect(deps.execCalls).toContain(pushCmd1);
+    expect((await getObserved(observedStorage)).wipRotationIndex).toBe(2);
+  });
 });
 
 /**
