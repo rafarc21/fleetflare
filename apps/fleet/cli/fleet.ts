@@ -30,6 +30,7 @@ import { parseStudioId } from "../src/studio/ids";
 import { parseGitRemote, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
 import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior, cmdJuniorStats } from "./junior";
+import { cmdAccounts, cmdAccountsSync } from "./accounts";
 import { sweepAllPages, type SweepPage } from "./junior-sweep";
 import { reapTerminalAll, type TerminalPage } from "./reap-terminal";
 import { runTaskStateTransition, type TaskStateFetchResult } from "../src/studio/task-state";
@@ -1086,7 +1087,9 @@ async function cmdSpawn(creds: Credentials, role: string, newInstance: boolean):
  * below); routes.ts's own `req.json().catch(() => ({}))` reads `{}` and an
  * absent body identically, so neither shape means "blueprintRef override".
  */
-async function cmdProvision(creds: Credentials, id: string, freshSession = false, cancelFreshSession = false): Promise<void> {
+async function cmdProvision(
+  creds: Credentials, id: string, freshSession = false, cancelFreshSession = false, discardSession = false,
+): Promise<void> {
   // Dynamic repo selection (P4a): unlike spawn, this command is ADDRESSED by
   // a studio id, and that id already names a repo segment. The detected repo
   // is sent only when the two agree — re-provisioning `websites--pilot`
@@ -1105,12 +1108,15 @@ async function cmdProvision(creds: Credentials, id: string, freshSession = false
   if (matchesId) reportRepo("fleet provision", detected);
   // Issue #115: same query-string convention `?fresh-session=true` already
   // uses. cli-args.ts's own parsing already refuses both flags at once, so
-  // at most one of these is ever true here.
-  const provisionPath = freshSession
-    ? "/provision?fresh-session=true"
-    : cancelFreshSession
-      ? "/provision?no-fresh-session=true"
-      : "/provision";
+  // at most one of freshSession/cancelFreshSession is ever true here.
+  // Issue #231: `discardSession` rides alongside freshSession as a second
+  // query param, never its own branch — it is meaningless without
+  // freshSession also set, and cli-args.ts places no exclusivity on it.
+  const provisionParams = new URLSearchParams();
+  if (freshSession) provisionParams.set("fresh-session", "true");
+  if (cancelFreshSession) provisionParams.set("no-fresh-session", "true");
+  if (discardSession) provisionParams.set("discard-session", "true");
+  const provisionPath = provisionParams.size > 0 ? `/provision?${provisionParams.toString()}` : "/provision";
   const res = await fetch(studioUrl(creds, id, provisionPath), {
     method: "POST",
     headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
@@ -2650,7 +2656,7 @@ async function main(): Promise<void> {
     case "spawn":
       return cmdSpawn(creds, parsed.role, parsed.newInstance);
     case "provision":
-      return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession);
+      return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession, parsed.discardSession);
     case "recycle":
       return cmdRecycle(creds, parsed.id, parsed.discardUnsynced, parsed.freshSession, parsed.forceMappedAccount === true);
     case "destroy":
@@ -2685,6 +2691,10 @@ async function main(): Promise<void> {
       // Only "stats" reaches here — enable/disable/status already returned
       // above, before loadCredentials(), per #218's early-dispatch guard.
       return cmdJuniorStats(creds, parsed.since);
+    case "accounts":
+      return parsed.sync
+        ? cmdAccountsSync(creds, { watch: parsed.watch, json: parsed.json, writeLabels: parsed.writeLabels })
+        : cmdAccounts(creds, { watch: parsed.watch, json: parsed.json, writeLabels: parsed.writeLabels });
   }
 }
 

@@ -28,6 +28,9 @@ import type { MemberAlert } from "./member-alerts";
 // Issue #56 — type-only for the same cycle reason: restarts.ts imports
 // BringupVia from this file.
 import type { RestartLog } from "./restarts";
+// Maestro review round 2 on PR #235 (issue #231), item 2b — type-only, no
+// cycle: session-sync.ts imports nothing from this file.
+import type { AsideShipRecord } from "./session-sync";
 
 export const OBSERVED_KEY = "observed";
 
@@ -84,6 +87,31 @@ export interface ObservedSession {
    *  uses, so an `Observed` record written before this field existed reads
    *  as "no replacement detected" rather than `undefined`. */
   replacementDetected?: boolean;
+  /** Maestro review round 1 on PR #235, BLOCKER 1 (issue #231) —
+   *  `Observed.wipBootStamp` AS IT STOOD IMMEDIATELY BEFORE this bring-up,
+   *  frozen here the same way `replacementDetected` above is.
+   *
+   *  `recordBringupObservation` (provision.ts) sets `patch.wipBootStamp` to a
+   *  BRAND-NEW stamp inside the exact same `if (tokenWritten)` block that
+   *  clears `replacedAt` — and it does so BEFORE the bring-up wakes
+   *  (`deliverSurvivalOnBringup`, do.ts) ever run. A delivery-time reader of
+   *  the live `Observed.wipBootStamp` would therefore always see the NEW
+   *  container's own (as yet unsynced) stamp, never the OLD one whose ref
+   *  actually holds the WIP safety net this bring-up's own brief is pointing
+   *  at — exactly the kind of live-re-read bug `replacementDetected`'s own
+   *  doc comment already warns about for `Observed.replacedAt`.
+   *
+   *  Captured from `observedBefore.wipBootStamp` — read at the TOP of
+   *  `recordBringupObservation`, before `patch.wipBootStamp` is computed —
+   *  and applied to the SAME two "this bring-up" branches
+   *  `replacementDetected`/`freshSessionSource` are, never to the "untouched,
+   *  keep the prior verdict" branch (which describes an EARLIER bring-up).
+   *
+   *  OPTIONAL/absent means "no confirmed boot stamp existed before this
+   *  bring-up" — `wipSyncLine` (survival-brief.ts) falls back to its own glob
+   *  rendering in that case, same as it already does for a null
+   *  `SurvivalInput.wipBootStamp`. */
+  wipBootStampBefore?: string | null;
   /** Board #250 (#85/#118 follow-up) — the keeper's own source label
    *  (`daily <date>`, `pickRestoreSource`'s own doc comment, provision.ts)
    *  when this restore came from a daily keeper rather than `latest`. Absent
@@ -98,6 +126,21 @@ export interface ObservedSession {
    *  whatever `computeSessionVerdict` (or the untouched-lead branch) already
    *  built. */
   snapshotSource?: string;
+  /**
+   * Issue #231 — WHICH of the two triggers caused `requestedFresh: true` for
+   * THIS bring-up (provisionWithStorage, provision.ts): the operator's own
+   * EXPLICIT `--fresh-session` flag, or a STORED `FRESH_SESSION_PENDING_KEY`
+   * left armed by an earlier attempt that never confirmed. Before this
+   * field, the two were conflated into one boolean with no record of which
+   * one fired — the exact gap #231's own code-reading left unresolved
+   * ("4 provisions, 4 lost sessions -- suspect stuck pending key or a
+   * --fresh-session passed per rebuild. Cannot tell after the fact:
+   * provenance not recorded."). Absent when this bring-up did not go fresh
+   * at all. Rendered by `formatSessionLine` (cli/readiness-format.ts),
+   * `fleet inspect`'s own `session:` line, the same place `via`/`reason`
+   * already render.
+   */
+  freshSessionSource?: "flag" | "pending-key";
   /** `burn.turns` at the moment of bring-up (lifetime count, never resets). */
   turnsBefore: number;
   /** Why a LOST or unknown verdict landed there — e.g. "cwd
@@ -328,6 +371,25 @@ export interface Observed {
    */
   wipSyncedAt?: string | null;
   /**
+   * Maestro review round 2 on PR #235 (issue #231), item 1 — the EXACT boot
+   * stamp the push that stamped `wipSyncedAt` above actually targeted,
+   * written in the SAME `mergeObserved` call, same "only on a real push"
+   * discipline. Before this field, the survival brief derived the ref to
+   * show from BRING-UP ORDERING (`ObservedSession.wipBootStampBefore` —
+   * "what container was this before") rather than from the last successful
+   * push itself: fine for the FIRST bring-up after a replacement (nothing
+   * synced since, so "before" and "last synced" agree), but wrong for a
+   * SECOND bring-up with no wip-sync tick in between — that bring-up's own
+   * `wipBootStampBefore` is the FIRST bring-up's brand-new, never-synced
+   * stamp, while `wipSyncedAt` still describes a push that happened under an
+   * EARLIER stamp still. Rides `mergeObserved` exactly like `wipSyncedAt`
+   * (own value, no separate DO-storage key) so it flows through
+   * `getObserved`/`getObservedWithActivity`/`withObserved` automatically.
+   * OPTIONAL/absent, same convention `wipSyncedAt` itself uses: no push has
+   * ever landed yet, or this row predates the field.
+   */
+  wipSyncedBootStamp?: string | null;
+  /**
    * Fix round (#208 PR #215 review, minor (a)): `wipSyncedAt` above only ever
    * advances on a genuine push — a studio that has been clean for days (the
    * common case) shows the SAME age as a studio whose last three ticks all
@@ -342,6 +404,38 @@ export interface Observed {
    * other field in this struct added after its first release already uses.
    */
   wipLastCheck?: { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" } | null;
+  /**
+   * Issue #231 — the on-disk path(s) a `--fresh-session` bring-up actually
+   * moved an old session aside to (`parseFreshSession`'s own successfully-
+   * moved entries, provision.ts), so a lead told "what survived" after a
+   * LATER heal/recycle has somewhere to go look rather than nothing: before
+   * this field, the move was logged into `StudioStatus.error` only, which a
+   * later bring-up overwrites, and a resumed/healed lead had no way to learn
+   * an old session existed at all, let alone where.
+   *
+   * Stamped ONLY on an actual confirmed move (`freshSessionMoved`, a
+   * non-empty list) — same "stamped on a real event, left alone otherwise"
+   * convention `wipSyncedAt` above already follows: a later bring-up that
+   * does not move anything leaves this exactly as it was, since the old
+   * aside path is still real, on-disk evidence worth keeping.
+   */
+  lastSessionAside?: string[] | null;
+  /**
+   * Maestro review round 1 on PR #235, MAJOR 3 (issue #231) — WHEN
+   * `lastSessionAside` above was stamped, same "sibling scalar, not a nested
+   * object" shape `wipBootStamp` is to `incarnation`. `lastSessionAside`
+   * itself never clears (a stale claim is still real, on-disk-once evidence,
+   * same reasoning its own doc comment above gives for never auto-clearing
+   * it), so a brief composed many bring-ups later needs this to render an
+   * AGE next to the claim rather than repeat it as if it just happened —
+   * `sessionAsideLine` (survival-brief.ts) is what reads it. Also the only
+   * way that line can tell "this just happened" from "this is from weeks
+   * ago, and the container has very likely been replaced since" — see that
+   * line's own doc comment for the R2-vs-local-path half of this same fix.
+   * OPTIONAL/absent: a record written before this field existed (or a
+   * pre-#231 fixture) renders "unknown age" rather than failing to compile.
+   */
+  lastSessionAsideAt?: string | null;
   /**
    * Board issue #108 (#70 ask 4 remainder) — the lead's last visible,
    * non-chrome message line: redacted (`redactSecrets`, at the ship-tick
@@ -416,6 +510,47 @@ export interface SurvivalBriefPending {
    * heal time" — the composer (survival-brief.ts) renders nothing for this
    * studio's WIP safety net in that case. */
   wipSyncedAt?: string | null;
+  /** Maestro review round 2 on PR #235 (issue #231), item 1 —
+   *  `Observed.wipSyncedBootStamp` AS IT STOOD at the moment this bring-up
+   *  happened, frozen the same way `wipSyncedAt` just above is: the exact
+   *  ref the LAST GENUINELY SYNCED push actually targeted, never derived
+   *  from bring-up ordering (`wipBootStamp` below, which answers "what
+   *  container was this before", a different question whenever two
+   *  bring-ups happen with no wip-sync tick between them). See
+   *  `Observed.wipSyncedBootStamp`'s own doc comment for the full bug this
+   *  closes. OPTIONAL/absent: no push has ever landed — the composer falls
+   *  back to `wipBootStamp` below's glob rendering. */
+  wipSyncedBootStamp?: string | null;
+  /** Issue #231 — `Observed.wipBootStamp` AS IT STOOD at this bring-up, frozen
+   *  the same way `wipSyncedAt` above is: the real, exact wip ref name
+   *  (`wipSyncRef(studioId, wipBootStamp)`) rather than survival-brief.ts's
+   *  own glob fallback. OPTIONAL/absent reads as "no confirmed boot stamp at
+   *  bring-up time" — the composer falls back to the glob in that case. */
+  wipBootStamp?: string | null;
+  /** Issue #231 — `Observed.lastSessionAside` AS IT STOOD at this bring-up,
+   *  frozen the same way `session` above is: a retry can run long after a
+   *  LATER bring-up has already overwritten `lastSessionAside` with a
+   *  different move's own paths. OPTIONAL/absent reads as "nothing moved
+   *  aside as of this bring-up" — the composer renders nothing for it. */
+  lastSessionAside?: string[] | null;
+  /** Maestro review round 1 on PR #235, MAJOR 3 (issue #231) —
+   *  `Observed.lastSessionAsideAt` AS IT STOOD at this bring-up, frozen the
+   *  same way `lastSessionAside` above is, so a retry composed long after the
+   *  heal still renders the real age rather than "just now". OPTIONAL/absent
+   *  reads as "unknown age" — see `Observed.lastSessionAsideAt`'s own doc
+   *  comment for the full reasoning. */
+  lastSessionAsideAt?: string | null;
+  /**
+   * Maestro review round 2 on PR #235 (issue #231), item 2b — the DO's own
+   * `ASIDE_SHIP_KEY` record (session-sync.ts), AS IT STOOD at this bring-up,
+   * frozen the same way `lastSessionAside` above is: a retry runs on a later
+   * sync tick, by which point a fresh ship attempt may have overwritten the
+   * live key with a record describing a DIFFERENT move. See
+   * `SurvivalInput.asideShip`'s own doc comment (survival-brief.ts) for the
+   * three states this carries. OPTIONAL/absent reads as "no ship attempt had
+   * run yet at bring-up time" — the composer renders "will ship on the next
+   * session sync" in that case, never the confident R2 path. */
+  asideShip?: AsideShipRecord | null;
 }
 
 /** The DO-storage slice this feature touches — same narrow-port style

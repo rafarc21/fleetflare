@@ -31,6 +31,7 @@
 
 import type { ObservedSession, RestoreOutcome } from "./observed";
 import { BRANCH_NAMES_MAX_PAGES, BRANCH_NAMES_PAGE_SIZE } from "../github/api";
+import type { AsideShipRecord } from "./session-sync";
 
 export type Checked<T> = { ok: true; value: T } | { ok: false; reason: string };
 
@@ -145,6 +146,72 @@ export interface SurvivalInput {
    * other optional field on this interface already follows.
    */
   branchLookupTruncated?: boolean;
+  /**
+   * Maestro review round 2 on PR #235 (issue #231), item 1 --
+   * `Observed.wipSyncedBootStamp` as it stood AT THE MOMENT OF THIS BRING-UP
+   * (frozen the same way `wipSyncedAt` above is) -- the exact ref the last
+   * GENUINELY SYNCED push actually targeted. `wipSyncLine` renders this
+   * instead of `wipBootStamp` below: `wipBootStamp` answers "what container
+   * was this before", which is the wrong question whenever a SECOND bring-up
+   * happens with no wip-sync tick in between -- it would then name the
+   * FIRST bring-up's own fresh, never-synced stamp right next to an age
+   * that describes a push from an even earlier incarnation. OPTIONAL/null:
+   * no push has ever landed -- the glob fallback is used, same as
+   * `wipBootStamp` below's own absent case.
+   */
+  wipSyncedBootStamp?: string | null;
+  /**
+   * Issue #231 fix 2a -- `Observed.wipBootStamp` as it stood AT THE MOMENT OF
+   * THIS BRING-UP (frozen the same way `wipSyncedAt` above is).
+   *
+   * Maestro review round 2 on PR #235 (issue #231), item 1 -- no longer read
+   * by `wipSyncLine` (superseded by `wipSyncedBootStamp` above, which names
+   * what was actually SYNCED rather than what container this WAS); kept on
+   * the wire and still threaded through `resolveSurvivalInput` for
+   * back-compat and because `ObservedSession.wipBootStampBefore` (the field
+   * this is sourced from) may still matter for other reasoning. OPTIONAL/
+   * null: no confirmed boot stamp at bring-up time.
+   */
+  wipBootStamp?: string | null;
+  /**
+   * Issue #231 fix 2b -- `Observed.lastSessionAside` as it stood AT THE
+   * MOMENT OF THIS BRING-UP (frozen the same way `session` above is): the
+   * real on-disk path(s) a confirmed `--fresh-session` move actually went
+   * to. Rendered as its own line, only when non-null/non-empty -- a lead
+   * told "what survived" after a LATER heal otherwise has no way to learn an
+   * old session was moved aside, or where.
+   */
+  lastSessionAside?: string[] | null;
+  /**
+   * Maestro review round 1 on PR #235, MAJOR 3 (issue #231) — WHEN
+   * `lastSessionAside` above was stamped, so `sessionAsideLine` can render an
+   * honest age next to the claim rather than repeat it as freshly-true
+   * forever (`lastSessionAside` itself never auto-clears — see its own doc
+   * comment, observed.ts). OPTIONAL/null: renders "unknown age" rather than
+   * suppressing the line.
+   */
+  lastSessionAsideAt?: string | null;
+  /**
+   * Maestro review round 2 on PR #235 (issue #231), item 2b --
+   * `Observed`'s own `ASIDE_SHIP_KEY` record (session-sync.ts's
+   * `AsideShipRecord`), as it stood AT THE MOMENT OF THIS BRING-UP (frozen
+   * the same way `lastSessionAside` above is). Three distinct states, not
+   * two:
+   *   - UNDEFINED/absent -- no ship attempt has run since the move at all
+   *     (`shipAsideSessions` has never ticked, or this bring-up predates the
+   *     field). `sessionAsideLine` below must not claim the R2 copy exists
+   *     in this case -- nothing has tried yet.
+   *   - `null` -- a ship attempt ran and nothing in `lastSessionAside`
+   *     failed (`ASIDE_SHIP_KEY`'s own writer, do.ts, stores exactly `null`
+   *     once `failed` comes back empty). This is the only state in which
+   *     the confident R2 path may be rendered.
+   *   - `{ failed: [...] }` -- a ship attempt ran and recorded failures,
+   *     keyed by the aside dir's own full name (the same string
+   *     `asideRefPath` derives from the local path). A dir NOT in `failed`
+   *     still reads as "confirmed" even when this record is present, same
+   *     as the `null` case.
+   */
+  asideShip?: AsideShipRecord | null;
 }
 
 /** Lines per section before the rest collapses to a single "+N more". Keeps
@@ -403,18 +470,18 @@ export const RESUMED_TRUST_ORIGIN_LINE =
 
 /**
  * Board issue #208, part 2 -- the SAME per-boot-stamped-ref prefix
- * `wipSyncRef` (rescue.ts) pushes under, as of the #208 fix round item 1
- * design change: the exact ref now carries a per-container-boot stamp this
- * composer does not have threaded through (`SurvivalInput` carries
- * `wipSyncedAt`, not the boot stamp itself — widening that is a follow-up,
- * not part of this fix round). A trailing `/*` makes the glob nature
- * explicit rather than printing a literal ref that no longer exists on
- * origin verbatim — `fleet inspect` (cli/wip-format.ts, which DOES have the
- * studio's own `Observed.wipBootStamp` in hand) is where the exact ref name
- * lives; this line only needs to point a lead at the right neighborhood.
+ * `wipSyncRef` (rescue.ts) pushes under. Issue #231 fix 2a: `SurvivalInput`
+ * now threads `wipBootStamp` through the same path `wipSyncedAt` already
+ * takes, so this renders the EXACT, real ref when it is known -- the same
+ * 2-arg signature cli/wip-format.ts's own `wipSyncRefEcho` already has, kept
+ * as a separate copy here (not imported) because this file lives under
+ * src/studio/ and cli/wip-format.ts cannot be imported from here without
+ * crossing the cli/ tsconfig boundary (that file's own header). A trailing
+ * `/*` when the stamp is unknown makes the glob nature explicit rather than
+ * printing a literal ref that may not exist.
  */
-function wipSyncRefEcho(studioId: string): string {
-  return `fleet/rescue/${studioId}/wip/*`;
+function wipSyncRefEcho(studioId: string, bootStamp?: string | null): string {
+  return bootStamp ? `fleet/rescue/${studioId}/wip/${bootStamp}` : `fleet/rescue/${studioId}/wip/*`;
 }
 
 /**
@@ -455,7 +522,127 @@ function wipSyncLine(input: SurvivalInput): string | null {
   if (input.wipSyncedAt == null) return null;
   const age = ageFrom(input.wipSyncedAt, input.now);
   const ageText = age === null ? "unknown age" : `${formatSurvivalAge(age)} ago`;
-  return `- WIP safety net: ${wipSyncRefEcho(input.studioId)}, last synced ${ageText} — check it for anything lost since then.`;
+  // Maestro review round 2 on PR #235 (issue #231), item 1 -- `wipSyncedBootStamp`
+  // (the stamp the push that set `wipSyncedAt` actually targeted), never
+  // `wipBootStamp` (which answers "what container was this before", a
+  // different and sometimes WRONG question across a second bring-up with no
+  // sync tick between it and the first -- see `SurvivalInput.wipSyncedBootStamp`'s
+  // own doc comment for the full bug this closes).
+  return `- WIP safety net: ${wipSyncRefEcho(input.studioId, input.wipSyncedBootStamp)}, last synced ${ageText} — check it for anything lost since then.`;
+}
+
+/**
+ * Maestro review round 1 on PR #235, MAJOR 3 (issue #231) — a replacement
+ * AFTER the move wipes the local disk `lastSessionAside` names
+ * (`~/.claude/projects/fleet-aside-<dir>`), so a lead reading that path on a
+ * NEW container finds nothing there; only the R2-shipped copy
+ * (`sessions/<studioId>/aside/<dir>/`, named in `freshSessionNoteFor`'s own
+ * row note, provision.ts) is guaranteed to still exist. `<dir>` is the exact
+ * same segment both paths share by construction (`parseFreshSession`'s own
+ * regex, provision.ts, anchors the local path to
+ * `fleet-aside-[A-Za-z0-9-]+`) — this just re-derives the R2 key from it
+ * rather than keeping a second, parallel path around.
+ */
+/**
+ * Maestro review round 2 on PR #235 (issue #231), item 2a — the stripped
+ * prefix is `~/.claude/projects/` ONLY, never the longer
+ * `~/.claude/projects/fleet-aside-`. The REAL R2 key
+ * (`sessionAsideManifestKey`/`sessionAsidePartKey`, session-sync.ts) is
+ * built from the aside dir's OWN FULL NAME, which `ASIDE_DIR_RE`
+ * (session-sync.ts, `/^fleet-aside-[A-Za-z0-9-]+$/`) anchors as including
+ * that `fleet-aside-` prefix — stripping it here produced an R2 path this
+ * composer's own claim never actually pointed at.
+ */
+function asideDirName(localPath: string): string {
+  const prefix = "~/.claude/projects/";
+  return localPath.startsWith(prefix) ? localPath.slice(prefix.length) : localPath;
+}
+
+function asideRefPath(studioId: string, localPath: string): string {
+  return `sessions/${studioId}/aside/${asideDirName(localPath)}/`;
+}
+
+/**
+ * Maestro review round 1 on PR #235, MAJOR 3 — same reasoning
+ * `SURVIVAL_RESCUE_REF_MAX_AGE_DAYS` (survival-delivery.ts) gives for its own
+ * 14-day cap: an aside move from over 2 weeks ago is very unlikely to still
+ * be relevant to today's lead, and unlike a kept ref or a retry budget, this
+ * costs nothing but a brief-rendering line, so there is no pressure to cut it
+ * close. A separate constant, not an import of that one — importing FROM
+ * survival-delivery.ts here would cycle (that file imports
+ * `composeSurvivalBrief` FROM this one).
+ */
+export const SURVIVAL_ASIDE_MAX_AGE_DAYS = 14;
+
+/**
+ * Issue #231 fix 2b, revised by maestro review round 1 on PR #235 (MAJOR 3)
+ * -- the real on-disk path(s) a confirmed `--fresh-session` move went to.
+ * `null` when nothing was moved aside (or this bring-up predates the field)
+ * — never rendered in that case, same "no fabricated evidence" rule every
+ * other section of this composer follows.
+ *
+ * Renders the R2 destination, not the local path `Observed.lastSessionAside`
+ * actually stores -- see `asideRefPath`'s own doc comment for why the local
+ * one may no longer exist by the time anyone reads this. An AGE is rendered
+ * alongside, the same way every other timestamp-bearing line in this
+ * composer already does (`wipSyncLine` above) -- `lastSessionAside` itself
+ * is never auto-cleared (observed.ts's own doc comment), so this is the
+ * mechanism by which a stale claim visibly ages out in the text itself,
+ * rather than silently repeating as fresh fact forever. Past
+ * `SURVIVAL_ASIDE_MAX_AGE_DAYS`, the line still renders (the move is still
+ * real, on-disk-once evidence worth keeping) but is marked stale in words,
+ * not suppressed -- dropping it would throw away the one thing this line
+ * exists to preserve for no safety gain.
+ *
+ * Maestro review round 2 on PR #235 (issue #231), item 2b -- the confident
+ * R2-path rendering above must never be asserted before a ship attempt has
+ * actually CONFIRMED the copy landed. Three branches, keyed off
+ * `input.asideShip` (see that field's own doc comment, `SurvivalInput`,
+ * for the three states):
+ *   - absent -- no ship has run since the move; renders "it will ship to
+ *     R2 on the next session sync" instead of naming any R2 path at all.
+ *   - this path's own dir name (`asideDirName`, same derivation
+ *     `asideRefPath` uses) appears in `asideShip.failed` -- renders the
+ *     recorded failure reason and says the copy has NOT reached R2 yet.
+ *   - otherwise (including `asideShip: null`, or a `failed` list that
+ *     names only OTHER dirs) -- the original confident R2-path rendering,
+ *     unchanged.
+ * With multiple paths (`lastSessionAside.length > 1`), the failed check is
+ * PER DIR: any one of the moved paths landing in `asideShip.failed` is
+ * enough to take the failed branch, naming that path's own reason --
+ * consistent with the single-path case rather than a special case bolted
+ * on beside it.
+ */
+function sessionAsideLine(input: SurvivalInput): string | null {
+  const paths = input.lastSessionAside;
+  if (paths == null || paths.length === 0) return null;
+  const age = input.lastSessionAsideAt != null ? ageFrom(input.lastSessionAsideAt, input.now) : null;
+  const ageText = age === null ? "unknown age" : `${formatSurvivalAge(age)} ago`;
+
+  if (input.asideShip === undefined) {
+    return (
+      `- Old session moved aside locally; it will ship to R2 on the next session sync, ${ageText}; ` +
+      "check it for anything lost since then."
+    );
+  }
+
+  const failedByDir = new Map((input.asideShip?.failed ?? []).map((f) => [f.dir, f.reason] as const));
+  const failedPath = paths.find((p) => failedByDir.has(asideDirName(p)));
+  if (failedPath !== undefined) {
+    const reason = sanitizeText(failedByDir.get(asideDirName(failedPath))!);
+    return (
+      `- Old session moved aside locally, but a prior ship attempt to R2 failed: ${reason} -- it has not ` +
+      `reached R2 yet, ${ageText}; check it for anything lost since then.`
+    );
+  }
+
+  const refs = paths.map((p) => asideRefPath(input.studioId, p));
+  const stale = age !== null && age >= SURVIVAL_ASIDE_MAX_AGE_DAYS * 24 * 60 * 60;
+  const staleNote = stale ? " (stale -- may no longer be relevant)" : "";
+  return (
+    `- Old session moved aside to ${refs.join(", ")} (R2 -- the local copy is gone if this container was ` +
+    `later replaced), ${ageText}${staleNote}; check it for anything lost since then.`
+  );
 }
 
 export function composeSurvivalBrief(input: SurvivalInput): string {
@@ -526,6 +713,10 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
 
   lines.push(sessionLine(input.session));
   if (input.session?.verdict === "resumed") lines.push(RESUMED_TRUST_ORIGIN_LINE);
+  // Issue #231 fix 2b — right after the session line(s), before the WIP
+  // safety-net line: both describe this bring-up's own session, grouped.
+  const asideLine = sessionAsideLine(input);
+  if (asideLine !== null) lines.push(asideLine);
   const wipLine = wipSyncLine(input);
   if (wipLine !== null) lines.push(wipLine);
 

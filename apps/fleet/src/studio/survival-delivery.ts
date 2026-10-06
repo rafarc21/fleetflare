@@ -24,6 +24,7 @@ import {
   type BringupVia, type ObservedSession, type ObservedStorage, type SurvivalBriefPending,
 } from "./observed";
 import { redactSecrets } from "./redact";
+import type { AsideShipRecord } from "./session-sync";
 import {
   composeSurvivalBrief,
   type Checked, type SurvivalInput, type SurvivalOpenPr, type SurvivalTaskBranch,
@@ -265,7 +266,7 @@ export function rescueBranchNestedPrefix(studioId: string): string {
 export const RESCUE_STAMP_DIGITS = 14;
 
 /**
- * SOURCE 3 — this fleet's own rescue-ref naming convention. Matches all 4 ref
+ * SOURCE 3 — this fleet's own rescue-ref naming convention. Matches all 5 ref
  * shapes `rescue.ts` actually pushes, every one ANCHORED AT BOTH ENDS and
  * nothing else:
  *
@@ -275,15 +276,37 @@ export const RESCUE_STAMP_DIGITS = 14;
  * - nested, member worktree: `fleet/rescue/<studio>/wt/<id>-<14digits>`,
  *   optionally with `-nff-` before the stamp (that shape's own non-fast-
  *   forward retry).
- * - nested, wip-sync: `fleet/rescue/<studio>/wip/<14digits>` (rescue.ts's
- *   `wipSyncCmd`, the per-container-boot periodic WIP safety net — fix round
- *   #208 PR #215 review item 1). Added here, and to `discoverRescueRefsCmd`'s
- *   own grep pattern (provision.ts), so a wip ref is discoverable/fetchable
- *   and attributable exactly like every other rescue shape, now that it is
- *   scoped per boot rather than shared (and silently clobbered) across every
- *   container a studio ever runs — see `wipSyncRef`'s own doc comment
- *   (rescue.ts) for the full history of why the OLD flat, un-anchored shape
- *   was deliberately excluded here instead.
+ * - nested, wip-sync (main checkout): `fleet/rescue/<studio>/wip/<14digits>`
+ *   (rescue.ts's `wipSyncCmd`, the per-container-boot periodic WIP safety
+ *   net — fix round #208 PR #215 review item 1). Added here, and to
+ *   `discoverRescueRefsCmd`'s own grep pattern (provision.ts), so a wip ref
+ *   is discoverable/fetchable and attributable exactly like every other
+ *   rescue shape, now that it is scoped per boot rather than shared (and
+ *   silently clobbered) across every container a studio ever runs — see
+ *   `wipSyncRef`'s own doc comment (rescue.ts) for the full history of why
+ *   the OLD flat, un-anchored shape was deliberately excluded here instead.
+ * - nested, wip-sync (member worktree): `fleet/rescue/<studio>/wip/<14digits>
+ *   -wt-<id>` — maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231).
+ *   Deliberately a DISTINCT shape from the member-worktree TEARDOWN rescue
+ *   ref above (`wt/<id>-<14digits>`, no `wip/` segment at all): the two used
+ *   to be byte-identical, which broke `rescue_on_origin`'s own wip-exclusion
+ *   filter (rescue.ts) — it only ever excluded a path under `/wip/`, never
+ *   `/wt/` — and let a member's wip-sync tip wrongly stand in as proof its
+ *   real work was already rescued. Living under `wip/` first fixes that for
+ *   free (the filter's `/wip(/|$)` already matches it) and also makes this
+ *   shape self-describing as a LIVE, continuously-refreshed ref rather than
+ *   an abandoned teardown rescue, exactly the same way the main-checkout wip
+ *   shape just above already reads. A HYPHEN joins the stamp and the
+ *   worktree id, never a further `/wt/` nesting (that was this fix's own
+ *   first attempt, and the review's own illustrative example) — measured
+ *   directly against a real push: git's ref namespace forbids a ref from
+ *   being a strict path-component PREFIX of another, so `wip/<14digits>`
+ *   (the main checkout's own leaf, just above) and `wip/<14digits>/wt/<id>`
+ *   cannot coexist on origin at the SAME time for the SAME boot — exactly
+ *   the ordinary case (main checkout AND a member worktree both dirty in
+ *   the same tick). `wip/<14digits>-wt-<id>` is a SIBLING LEAF under the
+ *   same `wip/` directory, never a path-component prefix of the bare shape
+ *   or vice versa, so the two always coexist.
  *
  * See this function's own body below for the nested shapes' match logic and
  * reasoning (#216) — the flat shape's own reasoning follows here since it's
@@ -361,12 +384,33 @@ export function rescueRefStamp(studioId: string, branch: string): string | null 
     const wtMatch = rest.slice(3).match(new RegExp(`^\\S+-([0-9]{${RESCUE_STAMP_DIGITS}})$`));
     return wtMatch ? wtMatch[1]! : null;
   }
-  // Fix round (#208 PR #215 review item 1): wip-sync's own per-boot ref —
-  // `wip/<14digits>`, exactly like `wt/<id>-<14digits>` above but with no
-  // `<id>` segment at all (wip-sync has no worktree identity to disambiguate;
-  // it is always the main checkout, one ref per container boot).
+  // Fix round (#208 PR #215 review item 1): wip-sync's own per-boot ref,
+  // main checkout — `wip/<14digits>`, exactly like `wt/<id>-<14digits>`
+  // above but with no `<id>` segment at all (wip-sync has no worktree
+  // identity to disambiguate; it is always the main checkout, one ref per
+  // container boot).
+  //
+  // Maestro review round 1 on PR #235, MAJOR 4 + 5 (issue #231): a member
+  // worktree's own wip-sync ref is a SIBLING leaf under this same `wip/`
+  // directory — `wip/<14digits>-wt-<id>`, a HYPHEN (never a further `/`)
+  // joining the stamp and the worktree id. See `wip_sync_one`'s own call
+  // sites' doc comment (rescue.ts) for why: a `/wt/<id>` nesting would make
+  // this ref a strict path-component PREFIX extension of the bare
+  // `wip/<14digits>` shape just below, which git's ref namespace forbids —
+  // the two would collide on origin the moment a single tick needs to push
+  // BOTH the main checkout and a member worktree under the SAME boot stamp,
+  // which is the ordinary case, not an edge one. Checked FIRST, before the
+  // bare `wip/<14digits>$` match below, so a member ref is never mistaken
+  // for the main-checkout shape (it would otherwise fail that `$`-anchored
+  // match anyway, since there is a trailing `-wt-<id>`, but checking this
+  // shape first keeps the two branches independent and easy to read). `\S+`
+  // for `<id>`, same no-whitespace discipline every other trailing name in
+  // this function already uses.
   if (rest.startsWith("wip/")) {
-    const wipMatch = rest.slice(4).match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})$`));
+    const afterWip = rest.slice(4);
+    const memberMatch = afterWip.match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})-wt-\\S+$`));
+    if (memberMatch) return memberMatch[1]!;
+    const wipMatch = afterWip.match(new RegExp(`^([0-9]{${RESCUE_STAMP_DIGITS}})$`));
     return wipMatch ? wipMatch[1]! : null;
   }
   return null;
@@ -589,6 +633,25 @@ export async function resolveSurvivalInput(
   // default so every pre-#208 caller (and every existing fixture in this
   // file's own tests) keeps compiling unchanged.
   wipSyncedAt: string | null = null,
+  // Issue #231 — threaded the SAME path `wipSyncedAt` just above already
+  // takes, both OPTIONAL with a `null` default for the identical reason.
+  wipBootStamp: string | null = null,
+  lastSessionAside: string[] | null = null,
+  // Maestro review round 1 on PR #235, MAJOR 3 — same OPTIONAL/`null`-default
+  // threading every other frozen-at-bring-up field above already takes.
+  lastSessionAsideAt: string | null = null,
+  // Maestro review round 2 on PR #235 (issue #231), item 1 — same
+  // OPTIONAL/`null`-default threading every other frozen-at-bring-up field
+  // above already takes. See `SurvivalInput.wipSyncedBootStamp`'s own doc
+  // comment (survival-brief.ts) for why this, and not `wipBootStamp` above,
+  // is what `wipSyncLine` actually renders.
+  wipSyncedBootStamp: string | null = null,
+  // Maestro review round 2 on PR #235 (issue #231), item 2b — same OPTIONAL,
+  // caller's-own-frozen-capture threading as every param above. See
+  // `SurvivalInput.asideShip`'s own doc comment (survival-brief.ts) for the
+  // three states this carries; `undefined` (never passed) is distinct from
+  // `null` and both must survive unchanged through this function.
+  asideShip?: AsideShipRecord | null,
 ): Promise<SurvivalInput> {
   if (!tasks.ok) {
     return {
@@ -608,6 +671,11 @@ export async function resolveSurvivalInput(
       session,
       now,
       wipSyncedAt,
+      wipBootStamp,
+      lastSessionAside,
+      lastSessionAsideAt,
+      wipSyncedBootStamp,
+      asideShip,
     };
   }
 
@@ -809,7 +877,8 @@ export async function resolveSurvivalInput(
 
   return {
     studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, unclaimedRescueBranches,
-    session, now, wipSyncedAt,
+    session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp,
+    asideShip,
     // PR #239 review finding 1 -- only set when true, same "absent stays
     // absent" discipline `wipSyncedAt`'s own field doc comment follows: a
     // lookup that was never truncated says nothing extra, rather than a
@@ -822,16 +891,29 @@ export async function resolveSurvivalInput(
  *  thunk the delivery function below takes. An EMPTY string is PR4a's own
  *  signal that there is nothing worth re-briefing about.
  *
- *  `wipSyncedAt` (board issue #208, part 2) passes straight through to
- *  `resolveSurvivalInput` — see that function's own doc comment. */
+ *  `wipSyncedAt` (board issue #208, part 2) and `wipBootStamp`/
+ *  `lastSessionAside`/`lastSessionAsideAt` (issue #231) pass straight
+ *  through to `resolveSurvivalInput` — see that function's own doc comment.
+ *  `wipSyncedBootStamp` (maestro review round 2 on PR #235, issue #231, item
+ *  1) does too. `asideShip` (same review, item 2b) does too. */
 export async function composeSurvivalDelivery(
   sources: SurvivalSources,
   tasks: Checked<SurvivalTaskRef[]>,
   session: ObservedSession | null,
   now: string,
   wipSyncedAt: string | null = null,
+  wipBootStamp: string | null = null,
+  lastSessionAside: string[] | null = null,
+  lastSessionAsideAt: string | null = null,
+  wipSyncedBootStamp: string | null = null,
+  asideShip?: AsideShipRecord | null,
 ): Promise<string> {
-  return composeSurvivalBrief(await resolveSurvivalInput(sources, tasks, session, now, wipSyncedAt));
+  return composeSurvivalBrief(
+    await resolveSurvivalInput(
+      sources, tasks, session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt,
+      wipSyncedBootStamp, asideShip,
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -862,6 +944,34 @@ export interface SurvivalBringup {
    *  the heal. OPTIONAL/absent (or null) means no WIP sync had ever landed at
    *  this bring-up — the composer renders nothing for it. */
   wipSyncedAt?: string | null;
+  /** Maestro review round 2 on PR #235 (issue #231), item 1 —
+   *  `Observed.wipSyncedBootStamp` AS IT STOOD at this bring-up, same
+   *  "frozen, never re-read" reason `wipSyncedAt` just above is — the exact
+   *  ref the last GENUINELY SYNCED push targeted, never derived from
+   *  bring-up ordering (see that field's own doc comment, observed.ts).
+   *  OPTIONAL/absent: no push has ever landed — the composer falls back to
+   *  `wipBootStamp` below's glob. */
+  wipSyncedBootStamp?: string | null;
+  /** Issue #231 — `Observed.wipBootStamp` AS IT STOOD at this bring-up, same
+   *  "frozen, never re-read" reason `wipSyncedAt` above is. OPTIONAL/absent:
+   *  no confirmed boot stamp yet — the composer falls back to a glob. */
+  wipBootStamp?: string | null;
+  /** Issue #231 — `Observed.lastSessionAside` AS IT STOOD at this bring-up,
+   *  same "frozen, never re-read" reason `session` above is. OPTIONAL/absent:
+   *  nothing moved aside as of this bring-up. */
+  lastSessionAside?: string[] | null;
+  /** Maestro review round 1 on PR #235, MAJOR 3 (issue #231) —
+   *  `Observed.lastSessionAsideAt` AS IT STOOD at this bring-up, same
+   *  "frozen, never re-read" reason `lastSessionAside` above is. OPTIONAL/
+   *  absent: the composer renders "unknown age" for the aside line. */
+  lastSessionAsideAt?: string | null;
+  /** Maestro review round 2 on PR #235 (issue #231), item 2b —
+   *  `Observed`'s own `ASIDE_SHIP_KEY` record AS IT STOOD at this bring-up,
+   *  same "frozen, never re-read" reason `lastSessionAside` above is. See
+   *  `SurvivalInput.asideShip`'s own doc comment (survival-brief.ts) for the
+   *  three states this carries. OPTIONAL/absent: no ship attempt has run
+   *  since the move. */
+  asideShip?: AsideShipRecord | null;
 }
 
 /**
@@ -1044,6 +1154,24 @@ export async function deliverSurvivalBriefOnBringup(
     // this feature's WIP sync at all (every bring-up before this field
     // existed) keeps producing byte-identical `SurvivalBriefPending` records.
     ...(b.wipSyncedAt !== undefined ? { wipSyncedAt: b.wipSyncedAt } : {}),
+    // Maestro review round 2 on PR #235 (issue #231), item 1 — same "taken
+    // fresh from THIS bring-up, absent stays absent" treatment as
+    // `wipSyncedAt` just above.
+    ...(b.wipSyncedBootStamp !== undefined ? { wipSyncedBootStamp: b.wipSyncedBootStamp } : {}),
+    // Issue #231 — same "taken fresh from THIS bring-up, absent stays
+    // absent" treatment as `wipSyncedAt` just above.
+    ...(b.wipBootStamp !== undefined ? { wipBootStamp: b.wipBootStamp } : {}),
+    ...(b.lastSessionAside !== undefined ? { lastSessionAside: b.lastSessionAside } : {}),
+    // Maestro review round 1 on PR #235, MAJOR 3 — same "taken fresh, absent
+    // stays absent" treatment as `lastSessionAside` just above.
+    ...(b.lastSessionAsideAt !== undefined ? { lastSessionAsideAt: b.lastSessionAsideAt } : {}),
+    // Maestro review round 2 on PR #235 (issue #231), item 2b — same "taken
+    // fresh, absent stays absent" treatment as `lastSessionAside` above. The
+    // conditional spread is load-bearing here specifically: `undefined` (no
+    // ship has run) and `null` (a ship ran clean) are two DIFFERENT, both
+    // meaningful states (see `SurvivalInput.asideShip`'s own doc comment),
+    // and only the conditional spread keeps them distinct through storage.
+    ...(b.asideShip !== undefined ? { asideShip: b.asideShip } : {}),
     since: priorForThis?.since ?? now().toISOString(),
     attempts: priorForThis?.attempts ?? 0,
     reason: "",
@@ -1225,6 +1353,22 @@ async function attemptSurvivalDelivery(
   }
   await mergeObserved(storage, {
     survivalBriefDeliveredFor: pending.incarnation, survivalBriefPending: null,
+    // Maestro review round 2 on PR #235 (issue #231), item 2b (second half)
+    // -- once the brief that actually CARRIED this aside claim has landed,
+    // clear it, in the SAME merge as the dedup marker above. `Observed.
+    // lastSessionAside`/`lastSessionAsideAt` never auto-clear (that field's
+    // own doc comment, observed.ts) precisely so a stale claim can still age
+    // visibly in the text (`sessionAsideLine`, survival-brief.ts) -- but once
+    // a lead has actually BEEN TOLD, a later brief (a deferred retry for a
+    // different reason, or a future incarnation that reads this one's
+    // leftovers) must not repeat the exact same claim as though it just
+    // happened again. Gated on `pending.lastSessionAside` itself: a delivery
+    // whose own frozen pending record never carried an aside has nothing to
+    // clear, and leaving the fields alone in that case cannot ever erase a
+    // claim this delivery never described.
+    ...(pending.lastSessionAside != null && pending.lastSessionAside.length > 0
+      ? { lastSessionAside: null, lastSessionAsideAt: null }
+      : {}),
   });
   return { kind: "delivered", incarnation: pending.incarnation };
 }

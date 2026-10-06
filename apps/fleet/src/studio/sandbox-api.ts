@@ -120,22 +120,39 @@ export const DEADLINE_SLACK_MS = KILL_GRACE_SECONDS * 1000 + 2_000;
  *                  concurrently: first a cheap `git status`/`rev-list` probe
  *                  (wipSyncProbeCmd), fully awaited; only when that answers
  *                  "dirty/unpushed" does it then run the real push command
- *                  (rescue.ts's `wip_sync_push`, itself internally bounded to
- *                  at most two WIP_SYNC_PUSH_TIMEOUT_SECONDS-long attempts —
- *                  rescue.ts's own doc comment on that constant works out its
- *                  worst case at 60s, comfortably inside a single 90s exec).
- *                  Each of those two execs is independently bounded by this
- *                  same 90s `timeoutMs` — a probe that stalls to its own full
- *                  deadline, followed by a push that ALSO stalls to its own
- *                  full deadline, is two separate 90s waits summed, not one
- *                  shared 90s budget: real worst case for the whole tick step
- *                  is 2 * 90s = 180s (see `TICK_DEADLINES_MS.syncSession`'s
- *                  own doc comment, do.ts, for how that 180s fits inside the
- *                  whole tick's own deadline). Deliberately its OWN, much
- *                  shorter PER-EXEC session and budget than `sync`'s 120s:
- *                  wip-sync is a single small git operation, not a multi-MiB
- *                  session-tar upload, and must never queue behind (or
- *                  block) that tick.
+ *                  (rescue.ts's `wipSyncCmd`).
+ *
+ *                  Maestro review round 1 on PR #235, MINOR 6 (issue #231) —
+ *                  the push exec's own math, UPDATED: issue #231 fix 3b
+ *                  widened `wipSyncCmd` to walk every member worktree, not
+ *                  only the main checkout, ALL within this SAME 90s exec, in
+ *                  a FIXED order (main checkout first, then worktrees in
+ *                  `git worktree list` order). One target's own worst case
+ *                  (`wip_sync_push`, up to two WIP_SYNC_PUSH_TIMEOUT_SECONDS-
+ *                  long attempts — rescue.ts's own doc comment on that
+ *                  constant works out 60s) still comfortably fits a single
+ *                  90s exec, but 2+ slow targets no longer do — a plain
+ *                  N-target sum has no ceiling at all. `wip_budget_ok`
+ *                  (rescue.ts) is the actual bound now: it refuses to START
+ *                  a target's push once what remains of THIS exec's own 90s
+ *                  cannot cover one more target's worst case, printing
+ *                  `RESCUE_FAILED <target> budget ... not attempted` instead
+ *                  of risking the whole exec being killed mid-push (which
+ *                  would discard every already-printed line and starve every
+ *                  LATER worktree in the fixed order, every single tick, not
+ *                  just once). The PROBE exec (wipSyncProbeCmd) is unaffected
+ *                  by any of this — it is a single cheap read, never a
+ *                  multi-target walk — so the "two separate, independently-
+ *                  bounded 90s execs, 180s real worst case for the whole tick
+ *                  step" accounting (`TICK_DEADLINES_MS.syncSession`'s own
+ *                  doc comment, do.ts) still holds for THAT half unchanged;
+ *                  only the PUSH exec's own internal worst case changed from
+ *                  "one target, 60s" to "bounded by `wip_budget_ok`, never
+ *                  exceeding 90s regardless of worktree count". Deliberately
+ *                  its OWN, much shorter PER-EXEC session and budget than
+ *                  `sync`'s 120s: wip-sync is a handful of small git
+ *                  operations, not a multi-MiB session-tar upload, and must
+ *                  never queue behind (or block) that tick.
  */
 export const EXEC_CLASSES = {
   ship: { sessionId: "fleet-ship", timeoutMs: 20_000 },

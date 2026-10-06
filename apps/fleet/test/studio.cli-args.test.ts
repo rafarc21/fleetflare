@@ -140,7 +140,7 @@ describe("parseCliArgs", () => {
 
   it("provision requires an id", () => {
     expect(parseCliArgs(["provision", "websites--scratch"])).toEqual({
-      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false,
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false, discardSession: false,
     });
     expect(parseCliArgs(["provision"])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });
@@ -162,7 +162,7 @@ describe("parseCliArgs", () => {
   // Issue #28.
   it("--fresh-session: provision and recycle, in any order with --discard-unsynced; repeats and strays are usage errors", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session"])).toEqual({
-      cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false,
+      cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false, discardSession: false,
     });
     expect(parseCliArgs(["recycle", "websites--scratch", "--fresh-session"])).toEqual({
       cmd: "recycle", id: "websites--scratch", discardUnsynced: false, freshSession: true,
@@ -183,12 +183,40 @@ describe("parseCliArgs", () => {
   // silently ignored (recycle's own two-flag parsing's own posture).
   it("--no-fresh-session: cancels a pending intent; mutually exclusive with --fresh-session; repeats and strays are usage errors", () => {
     expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session"])).toEqual({
-      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: true,
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: true, discardSession: false,
     });
     expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session", "--no-fresh-session"]).cmd).toBe("usage");
     expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--fresh-session"]).cmd).toBe("usage");
     expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--no-fresh-session"]).cmd).toBe("usage");
     expect(parseCliArgs(["provision", "websites--scratch", "--no-fresh-session", "--bogus"]).cmd).toBe("usage");
+  });
+
+  // Issue #231: `--discard-session` — the operator's stated override of
+  // provisionWithStorage's own involuntary-stop refusal. Only meaningful
+  // alongside --fresh-session.
+  //
+  // Maestro review round 1 on PR #235, MINOR 8 — `--discard-session` WITHOUT
+  // `--fresh-session` used to parse fine and silently do nothing (the
+  // refusal check it exists to override never runs without `--fresh-session`
+  // in the first place) — now a usage error, same "unknown/invalid
+  // combination" convention this parser already uses for
+  // `--fresh-session`/`--no-fresh-session` together.
+  it("--discard-session: provision only, any order with --fresh-session; repeats and strays are usage errors", () => {
+    expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session", "--discard-session"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false, discardSession: true,
+    });
+    expect(parseCliArgs(["provision", "websites--scratch", "--discard-session", "--fresh-session"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false, discardSession: true,
+    });
+    expect(parseCliArgs(["provision", "websites--scratch", "--discard-session", "--discard-session"]).cmd).toBe("usage");
+    expect(parseCliArgs(["provision", "websites--scratch", "--discard-session", "--bogus"]).cmd).toBe("usage");
+  });
+
+  // Maestro review round 1 on PR #235, MINOR 8 (issue #231) — standalone
+  // `--discard-session`, with no `--fresh-session` on the same call, is now
+  // rejected outright rather than silently accepted and ignored.
+  it("--discard-session without --fresh-session: usage error, never silently accepted", () => {
+    expect(parseCliArgs(["provision", "websites--scratch", "--discard-session"]).cmd).toBe("usage");
   });
 
   // Issue #35.
@@ -975,5 +1003,41 @@ describe("fleet junior", () => {
     expect(parseCliArgs(["junior"]).cmd).toBe("usage");
     expect(parseCliArgs(["junior", "nuke"]).cmd).toBe("usage");
     expect(parseCliArgs(["junior", "enable", "--acount", "x"]).cmd).toBe("usage");
+  });
+});
+
+// Issue #232, step 3: `fleet accounts [sync] [--watch] [--json]`. `sync` is
+// an optional sub-action (like `fleet memory ls|compact`'s bare-word split),
+// never a value-taking flag — the Worker POST it triggers is real, so it must
+// be spelled out, never defaulted to by a flag combination.
+describe("fleet accounts", () => {
+  it("bare accounts: read-only, no watch, no json, no write-labels", () => {
+    expect(parseCliArgs(["accounts"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: false, writeLabels: false });
+  });
+
+  it("accounts sync sets sync: true", () => {
+    expect(parseCliArgs(["accounts", "sync"])).toEqual({ cmd: "accounts", sync: true, watch: false, json: false, writeLabels: false });
+  });
+
+  it("--watch and --json combine, in any order, with or without sync", () => {
+    expect(parseCliArgs(["accounts", "--watch"])).toEqual({ cmd: "accounts", sync: false, watch: true, json: false, writeLabels: false });
+    expect(parseCliArgs(["accounts", "--json"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: true, writeLabels: false });
+    expect(parseCliArgs(["accounts", "--watch", "--json"])).toEqual({ cmd: "accounts", sync: false, watch: true, json: true, writeLabels: false });
+    expect(parseCliArgs(["accounts", "sync", "--watch"])).toEqual({ cmd: "accounts", sync: true, watch: true, json: false, writeLabels: false });
+    expect(parseCliArgs(["accounts", "sync", "--json", "--watch"])).toEqual({ cmd: "accounts", sync: true, watch: true, json: true, writeLabels: false });
+  });
+
+  // MAJOR 4 (STATUS comment): --write-labels is independent of every other
+  // flag here, combinable with any of them, in any order.
+  it("--write-labels combines with sync/--watch/--json, in any order", () => {
+    expect(parseCliArgs(["accounts", "--write-labels"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: false, writeLabels: true });
+    expect(parseCliArgs(["accounts", "--json", "--write-labels"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: true, writeLabels: true });
+    expect(parseCliArgs(["accounts", "sync", "--write-labels", "--watch"])).toEqual({ cmd: "accounts", sync: true, watch: true, json: false, writeLabels: true });
+  });
+
+  it("an unrecognised token is a usage error, not silently ignored", () => {
+    expect(parseCliArgs(["accounts", "--fresh"]).cmd).toBe("usage");
+    expect(parseCliArgs(["accounts", "sync", "--force"]).cmd).toBe("usage");
+    expect(parseCliArgs(["accounts", "nuke"]).cmd).toBe("usage");
   });
 });

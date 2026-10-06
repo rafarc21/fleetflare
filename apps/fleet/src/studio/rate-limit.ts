@@ -192,6 +192,12 @@ export interface AccountLimitState {
    *  subscription access): no auto-expiry, unlike a null `until`'s
    *  NULL_UNTIL_CEILING_MS grace. */
   dead?: true;
+  /** Issue #232 — set when this sighting came from `fleet accounts sync`'s
+   *  cswap usage read (routes.ts's POST /studio/accounts/sync), rather than
+   *  failover.ts's own pane-capture detector, which never sets this field
+   *  and so always reads `undefined` here — an optional field a caller never
+   *  sets is simply absent, same as before this field existed. */
+  source?: "usage";
 }
 
 export function encodeAccountLimitState(state: AccountLimitState): string {
@@ -214,11 +220,16 @@ export function decodeAccountLimitState(raw: string | null): AccountLimitState |
     || !("seenAt" in parsed) || typeof (parsed as { seenAt: unknown }).seenAt !== "string"
     || !("until" in parsed) || !(typeof (parsed as { until: unknown }).until === "string" || (parsed as { until: unknown }).until === null)
     || ("dead" in parsed && (parsed as { dead: unknown }).dead !== true)
+    || ("source" in parsed && (parsed as { source: unknown }).source !== "usage")
   ) {
     return null;
   }
   const p = parsed as AccountLimitState;
-  return { until: p.until, seenAt: p.seenAt, ...(p.dead ? { dead: true as const } : {}) };
+  return {
+    until: p.until, seenAt: p.seenAt,
+    ...(p.dead ? { dead: true as const } : {}),
+    ...(p.source ? { source: p.source } : {}),
+  };
 }
 
 /**

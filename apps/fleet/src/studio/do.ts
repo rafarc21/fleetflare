@@ -97,7 +97,7 @@ import type { MemguardKillLogEntry } from "./memguard-log";
 import {
   syncSessionTick, shipAsideSessions, asideNotShippedNote, ASIDE_SHIP_KEY, BURN_KEY, SYNC_SESSION_SECONDS, SESSION_GUARD_KEY, SESSION_MARK_KEY, SESSION_FORCE_KEY,
   BURN_PERSIST_ERROR_KEY,
-  type SessionSyncDeps, type SessionSyncStorage, type SyncResult,
+  type SessionSyncDeps, type SessionSyncStorage, type SyncResult, type AsideShipRecord,
 } from "./session-sync";
 import { runDestroy, type DestroyOutcome } from "./destroy";
 import {
@@ -561,10 +561,10 @@ export async function restartWithSync(
 }
 
 import {
-  rescuePushCmd, rescueSnapshotCmd, wipSyncCmd, wipSyncProbeCmd, WIP_SYNC_NEEDED,
+  rescuePushCmd, rescueSnapshotCmd, wipSyncCmd, wipSyncProbeCmd, WIP_SYNC_NEEDED, wipSyncRef,
   RESCUE_NO_CHECKOUT, RESCUE_CLEAN, RESCUE_MARKERS_ONLY,
   RESCUE_PUSHED_PREFIX, RESCUE_FAILED_PREFIX, resolveRescueTarget, RESCUE_WT_PREFIX, formatRescueReport,
-  rescueMintPermissions, type RescueWorktree, type RescueTarget,
+  type RescueWorktree, type RescueTarget,
 } from "./rescue";
 // Moved to src/studio/rescue.ts (pure, so a bun test runs it against real
 // git — issue #217); re-exported so every existing import keeps working.
@@ -778,12 +778,23 @@ export async function wipSync(deps: SessionSyncDeps, repo: string, studio: strin
  * RESCUE_CLEAN/RESCUE_MARKERS_ONLY/RESCUE_NO_CHECKOUT leave the field
  * exactly as it was: a stale stamp is still valid evidence of the last REAL
  * sync, and there is nothing to overwrite it WITH on a quiet tick.
+ *
+ * Maestro review round 2 on PR #235 (issue #231), item 1 — `bootStamp` (the
+ * SAME per-boot stamp this tick's own `wipSync` call just pushed under) is
+ * now persisted in the SAME `mergeObserved` write, onto
+ * `Observed.wipSyncedBootStamp` — paired with `wipSyncedAt` rather than
+ * derived later from bring-up ordering. See that field's own doc comment
+ * (observed.ts) for the bug this closes: deriving the ref from
+ * `ObservedSession.wipBootStampBefore` answers "what container was this
+ * before", not "what did the last successful push actually target", and the
+ * two questions disagree whenever a second bring-up lands with no wip-sync
+ * tick in between.
  */
 export async function recordWipSyncOnSuccess(
-  observedStorage: ObservedStorage | null | undefined, result: RescueResult, now: string,
+  observedStorage: ObservedStorage | null | undefined, result: RescueResult, now: string, bootStamp: string,
 ): Promise<void> {
   if (observedStorage && result.pushed) {
-    await mergeObserved(observedStorage, { wipSyncedAt: now });
+    await mergeObserved(observedStorage, { wipSyncedAt: now, wipSyncedBootStamp: bootStamp });
   }
 }
 
@@ -803,6 +814,37 @@ export async function recordWipLastCheck(
   observedStorage: ObservedStorage | null | undefined, now: string, result: WipLastCheckResult,
 ): Promise<void> {
   if (observedStorage) await mergeObserved(observedStorage, { wipLastCheck: { at: now, result } });
+}
+
+/**
+ * Maestro review round 1 on PR #235, MINOR 7 (issue #231) — `wipSync` (via
+ * `parseRescueExecResult`) throws a `RescuePushFailedError` the MOMENT any
+ * target in the exec failed, even when the MAIN CHECKOUT's own push (a
+ * DIFFERENT target, in the SAME exec — rescue.ts's `wip_sync_one` walks the
+ * main checkout first, then every member worktree, each independently)
+ * genuinely landed. `syncSessionCycle`'s own catch block used to record
+ * every throw as `wipLastCheck: "failed"` unconditionally, and never call
+ * `recordWipSyncOnSuccess` at all — masking a real, confirmed push because
+ * an UNRELATED worktree failed alongside it.
+ *
+ * This pulls the main checkout's own `RESCUE_PUSHED` entry back out of a
+ * caught error, matched by its EXACT target name (`wipSyncRef(studio,
+ * bootStamp)`) — never a member worktree's own, which always carries a
+ * distinct `-wt-<id>` suffix (rescue.ts's own `wip_sync_one` call sites), so
+ * a member's push can never be mistaken for the main checkout's. Returns
+ * `null` — never a guess — when `err` is not even this shape (a killed exec,
+ * a thrown exec, any other error), or when the main checkout's OWN push is
+ * not among the ones that landed (it failed too, or the exec never reached
+ * it at all).
+ */
+export function mainCheckoutPushFromFailure(
+  err: unknown, studio: string, bootStamp: string,
+): RescueResult | null {
+  if (!(err instanceof RescuePushFailedError)) return null;
+  const mainRef = wipSyncRef(studio, bootStamp);
+  const main = err.pushes.find((p) => p.branch === mainRef);
+  if (!main) return null;
+  return { pushed: true, branch: main.branch, files: main.files, kind: main.kind };
 }
 
 /** Fix round (#208 PR #215 review, minor (a)): turns a `RescueResult` from
@@ -3145,8 +3187,16 @@ export async function syncSessionCycle(
   // is captured once at the very top of this function, before this cycle did
   // any work at all, so a genuinely fresh verdict (always stamped by
   // `syncDeps.now()` sometime AFTER that capture) reliably compares `>=`.
+  // Issue #231 fix 3a: widened from `=== "provisioned"` to "anything but
+  // bare" — the incident's own observed failure was a busy lead making the
+  // readiness probe answer `inconclusive`, which this gate used to treat
+  // identically to a genuinely bare container and skip. wip-sync only needs
+  // the CONTAINER to have a real checkout (`"bare"` is the one verdict that
+  // rules that out) — unlike the assigned-task wake, it never needs
+  // confirmation claude is cleanly running. Every OTHER guard below is
+  // unchanged.
   if (
-    checked?.readiness?.kind === "provisioned" && !stoppedAfterFailover &&
+    checked?.readiness != null && checked.readiness.kind !== "bare" && !stoppedAfterFailover &&
     checked.state !== "stopped" && checked.readiness.checkedAt >= cycleStartedAt
   ) {
     const parsed = parseStudioId(idFallback);
@@ -3177,11 +3227,22 @@ export async function syncSessionCycle(
       if (bootStamp) {
         try {
           const result = await wipSync(syncDeps, parsed.repo, idFallback, bootStamp);
-          await recordWipSyncOnSuccess(observedStorage, result, checkedAt);
+          await recordWipSyncOnSuccess(observedStorage, result, checkedAt, bootStamp);
           await recordWipLastCheck(observedStorage, checkedAt, wipLastCheckResultOf(result));
         } catch (err) {
           console.error(`studio ${idFallback}: WIP sync failed`, err);
-          await recordWipLastCheck(observedStorage, checkedAt, "failed");
+          // Maestro review round 1 on PR #235, MINOR 7 (issue #231) — a
+          // member worktree's own failure must never mask the main
+          // checkout's own real, confirmed push. See
+          // `mainCheckoutPushFromFailure`'s own doc comment for the full
+          // reasoning.
+          const mainResult = mainCheckoutPushFromFailure(err, idFallback, bootStamp);
+          if (mainResult) {
+            await recordWipSyncOnSuccess(observedStorage, mainResult, checkedAt, bootStamp);
+            await recordWipLastCheck(observedStorage, checkedAt, "pushed");
+          } else {
+            await recordWipLastCheck(observedStorage, checkedAt, "failed");
+          }
         }
       } else {
         console.error(`studio ${idFallback}: WIP sync skipped -- no confirmed boot stamp yet for this incarnation`);
@@ -5985,6 +6046,13 @@ export class StudioDO extends Sandbox<Env> {
       const snapshot = await getObserved(this.ctx.storage);
       const session = snapshot.session;
       if (session === null) return;
+      // Maestro review round 2 on PR #235 (issue #231), item 2b — its own
+      // DO-storage key (ASIDE_SHIP_KEY), not part of the merged Observed
+      // blob `snapshot` above (same split mirrorBurnToRegistry's own
+      // `asideShip` read already follows). A live read here is safe for the
+      // same reason `snapshot.wipSyncedBootStamp` above's is: this key only
+      // ever moves on a genuine ship tick, never mid-bring-up.
+      const asideShip = await this.ctx.storage.get<AsideShipRecord>(ASIDE_SHIP_KEY);
       const outcome = await deliverSurvivalBriefOnBringup(
         this.ctx.storage,
         async () => ({
@@ -5996,9 +6064,36 @@ export class StudioDO extends Sandbox<Env> {
           // reason `session` is — see SurvivalBringup.wipSyncedAt's own doc
           // comment (survival-delivery.ts).
           wipSyncedAt: snapshot.wipSyncedAt ?? null,
+          // Maestro review round 2 on PR #235 (issue #231), item 1 — the
+          // LIVE `snapshot.wipSyncedBootStamp`, same as `wipSyncedAt` just
+          // above: unlike `wipBootStamp` below, this field only ever moves on
+          // a genuine push (`recordWipSyncOnSuccess`), so a live read here is
+          // safe for the identical reason a live read of `wipSyncedAt` is.
+          wipSyncedBootStamp: snapshot.wipSyncedBootStamp ?? null,
+          // Maestro review round 1 on PR #235, BLOCKER 1 (issue #231) —
+          // `session.wipBootStampBefore`, NEVER the live `snapshot.wipBootStamp`:
+          // `recordBringupObservation` (provision.ts) has, by the time this runs,
+          // already overwritten the live field with a BRAND-NEW stamp for THIS
+          // SAME bring-up. See `ObservedSession.wipBootStampBefore`'s own doc
+          // comment (observed.ts) for the full bug this closes. Kept on the
+          // wire (survival-brief.ts's `wipSyncLine` no longer reads it — see
+          // `wipSyncedBootStamp` above) for back-compat only.
+          wipBootStamp: session.wipBootStampBefore ?? null,
+          lastSessionAside: snapshot.lastSessionAside ?? null,
+          // Maestro review round 1 on PR #235, MAJOR 3 (issue #231): same
+          // "frozen here" treatment as wipSyncedAt/wipBootStamp above.
+          lastSessionAsideAt: snapshot.lastSessionAsideAt ?? null,
+          // Maestro review round 2 on PR #235 (issue #231), item 2b — passed
+          // through AS READ: `undefined` (no ship has run) must stay distinct
+          // from `null` (a ship ran clean), never coerced with `?? null`.
+          asideShip,
         }),
         () => this.survivalBusy(),
-        this.survivalCompose(workRepoSlug, session, snapshot.wipSyncedAt ?? null),
+        this.survivalCompose(
+          workRepoSlug, session, snapshot.wipSyncedAt ?? null, session.wipBootStampBefore ?? null,
+          snapshot.lastSessionAside ?? null, snapshot.lastSessionAsideAt ?? null,
+          snapshot.wipSyncedBootStamp ?? null, asideShip,
+        ),
         (prompt) => this.wakeStudioOnAssignment(prompt),
         () => ctx.moved(),
       );
@@ -6055,7 +6150,33 @@ export class StudioDO extends Sandbox<Env> {
         // Board issue #208, part 2: the pending record's OWN frozen
         // `wipSyncedAt` (SurvivalBriefPending.wipSyncedAt), never a fresh
         // read — same reason `pending.session` itself is never re-read.
-        (pending) => this.survivalCompose(workRepoSlug, pending.session, pending.wipSyncedAt ?? null)(),
+        //
+        // Maestro review round 2 on PR #235 (issue #231), item 1 —
+        // `pending.wipSyncedBootStamp`, the pending record's OWN frozen copy
+        // of the stamp the last GENUINELY SYNCED push targeted, not
+        // `pending.session.wipBootStampBefore` (bring-up ordering, the wrong
+        // question across a second bring-up with no sync tick in between —
+        // see `Observed.wipSyncedBootStamp`'s own doc comment). Superseded
+        // from the BLOCKER 1 fix below, which is left in place on
+        // `SurvivalBriefPending` for wire back-compat only and is no longer
+        // read for composition.
+        //
+        // Maestro review round 1 on PR #235, BLOCKER 1 (issue #231) —
+        // `pending.session.wipBootStampBefore`, not `pending.wipBootStamp`:
+        // the session record's own frozen copy is the one source of truth
+        // this fix threads everywhere (see `deliverSurvivalOnBringup` above);
+        // `pending.wipBootStamp` is left in place on `SurvivalBriefPending`
+        // for wire back-compat only and is no longer read for composition.
+        (pending) => this.survivalCompose(
+          workRepoSlug, pending.session, pending.wipSyncedAt ?? null, pending.session.wipBootStampBefore ?? null,
+          pending.lastSessionAside ?? null, pending.lastSessionAsideAt ?? null,
+          pending.wipSyncedBootStamp ?? null,
+          // Maestro review round 2 on PR #235 (issue #231), item 2b — the
+          // pending record's OWN frozen copy (SurvivalBriefPending.
+          // asideShip), never a fresh read, same reason every other field in
+          // this call is the pending record's own copy and not a live one.
+          pending.asideShip,
+        )(),
         (prompt) => this.wakeStudioOnAssignment(prompt, true),
       ));
     } catch (err) {
@@ -6103,7 +6224,25 @@ export class StudioDO extends Sandbox<Env> {
   // capture (bring-up's `snapshot.wipSyncedAt`, or the retry's
   // `pending.wipSyncedAt`) — see composeSurvivalDelivery's own doc comment
   // for why it only ever renders on a `via: "heal"` session.
-  private survivalCompose(workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null): () => Promise<ComposedBrief> {
+  private survivalCompose(
+    workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null,
+    // Issue #231: same "caller's own frozen capture" treatment wipSyncedAt
+    // above already gets — see composeSurvivalDelivery's own doc comment.
+    wipBootStamp: string | null = null, lastSessionAside: string[] | null = null,
+    // Maestro review round 1 on PR #235, MAJOR 3 (issue #231): same
+    // "caller's own frozen capture" treatment as the three params above.
+    lastSessionAsideAt: string | null = null,
+    // Maestro review round 2 on PR #235 (issue #231), item 1: same
+    // "caller's own frozen capture" treatment as every param above — see
+    // composeSurvivalDelivery's own doc comment.
+    wipSyncedBootStamp: string | null = null,
+    // Maestro review round 2 on PR #235 (issue #231), item 2b: same
+    // "caller's own frozen capture" treatment as every param above.
+    // `undefined` (no ship has run) and `null` (a ship ran clean) are both
+    // meaningful and distinct — see `SurvivalInput.asideShip`'s own doc
+    // comment, survival-brief.ts.
+    asideShip?: AsideShipRecord | null,
+  ): () => Promise<ComposedBrief> {
     return async () => {
       let tasks: SurvivalTaskRef[];
       try {
@@ -6113,7 +6252,7 @@ export class StudioDO extends Sandbox<Env> {
       }
       return composeSurvivalDelivery(
         this.survivalSources(workRepoSlug), { ok: true, value: tasks }, session, new Date().toISOString(),
-        wipSyncedAt,
+        wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp, asideShip,
       );
     };
   }
@@ -6312,7 +6451,7 @@ export class StudioDO extends Sandbox<Env> {
     // a rescue-only token. And only for a rescue repo confirmed private.
     // Issue #45: discovery only reads the remote — read token, not write.
     return resolveRescueTarget(this.env,
-      async (repo) => (await containerToken(this.env, await workRepoSlug(), repo, rescueMintPermissions(purpose)))
+      async (repo, permissions) => (await containerToken(this.env, await workRepoSlug(), repo, permissions))
         ?? (this.env.FLEET_RESCUE_GITHUB_TOKEN || null),
       async () => {
         const slug = await workRepoSlug();
@@ -6766,7 +6905,9 @@ export class StudioDO extends Sandbox<Env> {
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(cfg)), this.ctx.storage, id, ctx);
     const status = await provisionWithStorage(
-      this.deps(), this.ctx.storage, cfg, this.env.AGENT_REPO, via, this.ctx.storage, ctx,
+      // Issue #231: `this.ctx.storage` (real DO storage) also satisfies
+      // SessionMarkStorage structurally, no cast — same as `observedStorage`.
+      this.deps(), this.ctx.storage, cfg, this.env.AGENT_REPO, via, this.ctx.storage, ctx, this.ctx.storage,
     );
     // Issue #221 fix round 2, Fix 4 — a fresh bring-up has no continuous
     // activity state for `since`/`anchored` to describe; clear both before

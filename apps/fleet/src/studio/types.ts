@@ -711,6 +711,18 @@ export interface ProvisionConfig {
    */
   cancelFreshSession?: boolean;
   /**
+   * Issue #231: `fleet provision <id> --fresh-session --discard-session`.
+   * Explicitly overrides the involuntary-stop refusal
+   * (provision.ts's `provisionWithStorage`, FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD's
+   * own doc comment) — a studio whose last stop was an involuntary platform
+   * replacement AND whose session is non-trivial normally refuses
+   * `freshSession: true`; this field is the operator's stated choice to
+   * discard it anyway. Meaningless (and never checked) without `freshSession`
+   * also true on the same call. Never persisted onto the stored role env,
+   * same as `freshSession`/`cancelFreshSession` above.
+   */
+  discardSession?: boolean;
+  /**
    * Board task #131 ask 2: `fleet recycle <id> --account mapped`. With
    * FLEET_AUTO_FAILOVER=on, `launchAccount` (src/studio/accounts.ts) serves a
    * studio's RECORDED account verbatim, without even consulting

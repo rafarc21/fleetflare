@@ -1,7 +1,54 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test as bunTest } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+
+/**
+ * Every test below calls deploy(), which spawns a REAL `bash deploy.sh`
+ * subprocess (itself invoking the stub wrangler/docker binaries and, for
+ * some tests, a real spawned fake-CF-API server process). bun:test's bare
+ * 5000ms default was too tight for this container's real subprocess-spawn
+ * overhead and flaked 5/138 tests whenever the file ran in full (same class
+ * of bug as #216's install-cache-security.test.ts, fixed the same way:
+ * measure, then give the test an honest explicit ceiling instead of the
+ * bare default).
+ *
+ * Measured directly in this container (2026-10-05), a single `bash
+ * deploy.sh` invocation outside bun:test entirely (Bun.spawnSync, same temp
+ * tree shape as beforeEach below, no sibling tests running): 2906ms cold,
+ * then 1281-1570ms warm across 4 more runs -- pure subprocess-spawn cost,
+ * nothing network- or disk-scan-bound (the fake CF API is unreachable in
+ * that probe and the command still returns in under 3s).
+ *
+ * Measured through bun:test, one test in isolation (`bun test
+ * deploy-rescue-gate.test.ts -t <name>`, no contention from the other 137
+ * tests): single-deploy()-call tests took 3.5-4.9s -- already within ~100ms
+ * of the 5000ms default even with ZERO contention, because this file's own
+ * beforeAll (spawns a real bun process for the fake CF API) and beforeEach
+ * (builds a fresh temp tree, chmods a stub wrangler, symlinks real
+ * node_modules/wrangler) add real setup cost on top of the spawn itself.
+ *
+ * Measured running the FULL 138-test file (real contention: ~140 sequential
+ * bash+wrangler+docker subprocess spawns sharing this container's CPU/IO):
+ * the 5 that failed were single-deploy()-call tests at 5109-5315ms and
+ * two-deploy()-call tests at 5181-5548ms -- just over the 5000ms line, the
+ * sole and complete explanation for all 5 failures. Nothing here points at
+ * a genuinely slow underlying command (no network call deploy.sh makes
+ * actually succeeds against a real host in these tests; the fake CF API and
+ * stub wrangler/docker are both instant local scripts) -- this is pure
+ * subprocess-spawn/scheduling overhead under contention, not slow logic.
+ *
+ * 20s gives >3.6x margin over the worst value measured above (5548ms, a
+ * two-deploy()-call test under full contention) for every test in this
+ * file, including the handful that call deploy() twice. Scoped to this
+ * file's own local `test` (shadowing bun:test's), not bunfig.toml, because
+ * no other suite in this repo shares this file's real-subprocess-per-test
+ * shape.
+ */
+const DEPLOY_SUBPROCESS_TIMEOUT_MS = 20_000;
+function test(name: string, fn: () => void | Promise<void>, timeout: number = DEPLOY_SUBPROCESS_TIMEOUT_MS) {
+  bunTest(name, fn, timeout);
+}
 
 /**
  * Issue #20: the pre-deploy rescue gate was a README convention
