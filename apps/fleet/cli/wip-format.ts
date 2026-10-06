@@ -55,7 +55,7 @@ const WIP_CHECK_PRIORITY: Record<"pushed" | "clean" | "markers-only" | "no-check
   failed: 0, pushed: 1, "no-checkout": 2, "markers-only": 3, clean: 4,
 };
 
-type WipCheckEntry = { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" };
+export type WipCheckEntry = { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" };
 
 /**
  * Maestro review round 1 on PR #245 (issue #241), MAJOR 1 — `wipLastCheck`
@@ -80,10 +80,25 @@ type WipCheckEntry = { at: string; result: "pushed" | "clean" | "markers-only" |
  * the stored value genuinely is the OLD flat shape. `LEGACY_WIP_CHECK_KEY`
  * is a parenthesized sentinel (never a bare ref name -- every real target is
  * a `/`-bearing git ref) so it can never collide with a genuine target.
+ *
+ * Maestro review round 2 on PR #245 (issue #241), problem 1 -- exported (was
+ * file-private) so a caller holding a raw `Observed["wipLastCheck"]` can
+ * index it BY TARGET without re-deriving this same duck-typing itself.
+ * `Observed.wipLastCheck`'s own declared type is a union of the per-target
+ * map and the legacy flat `{at,result}` shape (MAJOR 1 above) -- a union
+ * where one member has no index signature can never be indexed by an
+ * arbitrary string key at compile time (`TS7053`), regardless of which
+ * shape is actually on disk. Running the value through this function FIRST
+ * (its return type is a plain `Record<string, WipCheckEntry>`, always
+ * indexable) is the correct fix rather than a cast or a narrower type: it
+ * reuses the exact same normalization every other reader of this field
+ * already runs, so a direct per-target lookup can never drift from
+ * `worstWipCheck`/`formatWipInspectLines`'s own idea of what the stored
+ * value means.
  */
 const LEGACY_WIP_CHECK_KEY = "(legacy)";
 
-function normalizeWipLastCheck(stored: unknown): Record<string, WipCheckEntry> {
+export function normalizeWipLastCheck(stored: unknown): Record<string, WipCheckEntry> {
   if (stored == null || typeof stored !== "object") return {};
   const obj = stored as Record<string, unknown>;
   const targets: Record<string, WipCheckEntry> = {};

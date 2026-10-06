@@ -816,7 +816,7 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
     // 10 member wip refs, boot stamps strictly increasing by one minute.
     const stamps = Array.from({ length: 10 }, (_, i) => `202610040000${String(10 + i).padStart(2, "0")}`);
     const refs = stamps.map((s) => `fleet/rescue/${STUDIO}/wip/${s}-wt-agent-a1b2`);
-    const compareAhead = vi.fn(async () => ({ aheadBy: 1, lastCommitAt: "2026-09-25T11:00:00.000Z" }));
+    const compareAhead = vi.fn(async (_branch: string) => ({ aheadBy: 1, lastCommitAt: "2026-09-25T11:00:00.000Z" }));
     const input = await resolveSurvivalInput(
       sources({ rescueBranches: async () => refs, compareAhead }),
       { ok: true, value: [] },

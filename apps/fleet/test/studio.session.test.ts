@@ -1,4 +1,5 @@
 import { formatRescueReport, wipSyncProbeCmd, wipSyncCmd, wipSyncRef, WIP_SYNC_NEEDED } from "../src/studio/rescue";
+import { normalizeWipLastCheck } from "../cli/wip-format";
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
@@ -1706,8 +1707,16 @@ describe("syncSessionCycle — WIP-sync step wiring and gates (#208 fix round)",
 
     const observed = await getObserved(observedStorage);
     expect(observed.wipSyncedAt).toBeTruthy();
-    expect(observed.wipLastCheck?.[mainRef]?.result).toBe("pushed");
-    expect(observed.wipLastCheck?.[memberRef]?.result).toBe("failed");
+    // Maestro review round 2 on PR #245 (issue #241), problem 1 --
+    // `observed.wipLastCheck`'s own declared type is now a union with the
+    // legacy flat shape (MAJOR 1), which has no index signature, so a raw
+    // `observed.wipLastCheck?.[target]` no longer type-checks regardless of
+    // what is actually on disk. Routed through `normalizeWipLastCheck`
+    // (cli/wip-format.ts) -- the same duck-typing every other reader of this
+    // field already runs -- which always returns a plain, indexable map.
+    const checks = normalizeWipLastCheck(observed.wipLastCheck);
+    expect(checks[mainRef]?.result).toBe("pushed");
+    expect(checks[memberRef]?.result).toBe("failed");
   });
 
   // Maestro review round 2 on PR #235 (issue #231), item 1 — the boot stamp
