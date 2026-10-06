@@ -722,6 +722,7 @@ describe("runRestart — incarnation token write (issue #85)", () => {
         tasks: { ok: true, value: [] },
         openPrs: { ok: true, value: [] },
         unclaimedRescueBranches: { ok: true, value: [] },
+        liveWipRefs: { ok: true, value: [] },
         session: observed.session,
         now: NOW,
         wipSyncedAt: observed.wipSyncedAt ?? null,
@@ -805,6 +806,7 @@ describe("runRestart — incarnation token write (issue #85)", () => {
           tasks: { ok: true, value: [] },
           openPrs: { ok: true, value: [] },
           unclaimedRescueBranches: { ok: true, value: [] },
+          liveWipRefs: { ok: true, value: [] },
           session: afterB.session!,
           now: NOW,
           wipSyncedAt: afterB.wipSyncedAt ?? null,
@@ -2002,6 +2004,7 @@ describe("recordBringupObservation — the keeper's own r2Head failing never fal
       tasks: { ok: true, value: [] },
       openPrs: { ok: true, value: [] },
       unclaimedRescueBranches: { ok: true, value: [] },
+      liveWipRefs: { ok: true, value: [] },
       session: observed.session ?? null,
       now: NOW,
     });

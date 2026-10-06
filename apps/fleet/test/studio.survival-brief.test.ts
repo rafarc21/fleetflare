@@ -14,6 +14,7 @@ function baseInput(overrides: Partial<SurvivalInput> = {}): SurvivalInput {
     tasks: { ok: true, value: [] },
     openPrs: { ok: true, value: [] },
     unclaimedRescueBranches: { ok: true, value: [] },
+    liveWipRefs: { ok: true, value: [] },
     session: null,
     now: NOW,
     ...overrides,
@@ -38,6 +39,39 @@ function baseSession(overrides: Partial<ObservedSession> = {}): ObservedSession 
 describe("composeSurvivalBrief basics (issue #107)", () => {
   it("everything checked and genuinely empty -> empty string", () => {
     expect(composeSurvivalBrief(baseInput())).toBe("");
+  });
+
+  // Issue #241 item 1 — a checked-but-non-empty liveWipRefs must NOT be
+  // swallowed by genuinelyEmpty, same as unclaimedRescueBranches already is.
+  it("a non-empty liveWipRefs alone is enough to NOT collapse to empty string", () => {
+    const out = composeSurvivalBrief(baseInput({
+      liveWipRefs: { ok: true, value: ["fleet/rescue/demosite-life--release-studio/wip/20261004120000"] },
+    }));
+    expect(out).not.toBe("");
+    expect(out).toContain("- Live wip snapshot:");
+  });
+
+  // Issue #241 items 1+3 — the new "Live wip snapshot" line is distinct
+  // wording from "Unclaimed rescue ref", and neither section absorbs or
+  // replaces the other when both are present at once.
+  it("liveWipRefs renders as its own 'Live wip snapshot' line, distinct from and alongside 'Unclaimed rescue ref'", () => {
+    const out = composeSurvivalBrief(baseInput({
+      unclaimedRescueBranches: { ok: true, value: ["fleet/rescue/demosite-life--release-studio-20260920120000"] },
+      liveWipRefs: { ok: true, value: ["fleet/rescue/demosite-life--release-studio/wip/20261004120000"] },
+    }));
+    expect(out).toContain(
+      "- Unclaimed rescue ref: fleet/rescue/demosite-life--release-studio-20260920120000 (not attributed to any task)",
+    );
+    expect(out).toContain(
+      "- Live wip snapshot: fleet/rescue/demosite-life--release-studio/wip/20261004120000 " +
+      "(refreshed periodically while the studio was running, not attributed to any task)",
+    );
+    // Neither line's wording is a substring of the other.
+    const unclaimedLine = out.split("\n").find((l) => l.startsWith("- Unclaimed rescue ref:"))!;
+    const liveWipLine = out.split("\n").find((l) => l.startsWith("- Live wip snapshot:"))!;
+    expect(unclaimedLine).not.toBe(liveWipLine);
+    expect(liveWipLine).not.toContain("Unclaimed");
+    expect(unclaimedLine).not.toContain("Live wip snapshot");
   });
 
   it("a task branch with commits ahead is listed, age computed from lastCommitAt", () => {
@@ -216,6 +250,14 @@ describe("(a) a failed section lookup never collapses to empty string", () => {
     const input = baseInput({ unclaimedRescueBranches: { ok: false, reason: "git ls-remote timeout" } });
     const out = composeSurvivalBrief(input);
     expect(out).toContain("- Rescue refs: could not check (git ls-remote timeout)");
+  });
+
+  // Issue #241 item 1 — `liveWipRefs` follows the identical Checked<T>
+  // "could not check" discipline as every other section above.
+  it("live-wip-ref lookup failed -> '- Live wip snapshots: could not check (<reason>)'", () => {
+    const input = baseInput({ liveWipRefs: { ok: false, reason: "git ls-remote timeout" } });
+    const out = composeSurvivalBrief(input);
+    expect(out).toContain("- Live wip snapshots: could not check (git ls-remote timeout)");
   });
 });
 
