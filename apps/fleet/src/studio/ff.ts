@@ -1,8 +1,16 @@
 // `ff` — spawn-or-attach in two letters (P4 design §2.13 decision 13, §10).
 //
-// the operator types `ff` in a repo folder and lands in a working claude session for
-// that repo's Maestro. Nothing else typed. This file is the DECISION half of
-// that command: which studio does `ff` mean, and may it be attached to yet.
+// the operator types `ff <role>` in a repo folder and lands in a working
+// claude session for that repo's role. Nothing else typed. This file is the
+// DECISION half of that command: which studio does `ff` mean, and may it be
+// attached to yet.
+//
+// Board issue #250 (maestro is ALWAYS LOCAL, never a cloud studio): bare
+// `ff` and `ff maestro` both resolve to the role "maestro" and both REFUSE
+// here — see ffDecision's own leading check — instead of spawning or
+// attaching to a cloud studio that would immediately stop and escalate
+// anyway (fleet/blueprint/studios/maestro/studio.md is a stub for exactly
+// that case). The maestro-playbook skill's Role section has the full rule.
 //
 // Pure — argv and registry rows in, a plain discriminated result out — for
 // exactly the reason src/studio/cli-args.ts is: cli/ff.ts (like cli/fleet.ts)
@@ -20,18 +28,24 @@ import { buildStudioId, isIdSegment, nextFreeInstance, parseStudioId } from "./i
 import { TASK_TITLE_MAX } from "../board/brief";
 import type { StudioStatus } from "./types";
 
-/** Bare `ff` means the Maestro — the one persistent session, and the operator's
- *  interface to the fleet (§2.13). Every other studio is `ff <role>`. */
+/** Bare `ff` means the Maestro by the §2.13 grammar — but board issue #250
+ *  (maestro is ALWAYS LOCAL, never a cloud studio) makes that role a
+ *  refusal now, not a spawn target: see ffDecision's leading check. This
+ *  constant stays "maestro" because that is still the role the grammar
+ *  resolves an omitted role to; it is ffDecision, one level down, that
+ *  turns that resolution into a refusal rather than a spawn-or-attach. */
 export const DEFAULT_FF_ROLE = "maestro";
 
 export const FF_USAGE =
-  `usage: ff [<role>] [--new] ["<task>" | <issue-number>]   (role defaults to "${DEFAULT_FF_ROLE}"; try ff --help)`;
+  `usage: ff [<role>] [--new] ["<task>" | <issue-number>]   (role defaults to "${DEFAULT_FF_ROLE}", which refuses — see ff --help; name a real role)`;
 
 export const FF_HELP = [
   "ff — spawn-or-attach the studio for the repo you are standing in.",
   "",
-  `  ff              attach this repo's ${DEFAULT_FF_ROLE} (spawning it first if it does not exist)`,
-  "  ff <role>       same, for another role (web-studio, release-studio, ...)",
+  `  ff              REFUSES — "${DEFAULT_FF_ROLE}" runs locally only, never as a`,
+  "                  cloud studio (board issue #250). Same for `ff maestro`",
+  "                  explicitly. Start a local maestro session instead.",
+  "  ff <role>       another role, e.g. web-studio, release-studio, ...",
   '  ff <role> "<task>"  file that task on the board, assign it to that studio,',
   "                  spawn the studio FOR it, wait, attach",
   "  ff <role> <n>   ADOPT existing issue #n: assign it to that studio, reset it",
@@ -250,6 +264,11 @@ export type FfDecision =
 /**
  * The whole of `ff`'s branching, in one place.
  *
+ * `role === "maestro"` refuses before any of the below — board issue #250,
+ * maestro is ALWAYS LOCAL, never a cloud studio. See that check's own
+ * comment for why it subsumes the `--new` singleton refusal this used to
+ * need separately.
+ *
  * `repoSegment` is the detected repo's short name as an id segment
  * (repo.ts's repoIdSegment), or null when the current folder names no GitHub
  * repo at all. With one, the studio id is `<repo>--<role>` — the same
@@ -288,16 +307,24 @@ export function ffDecision(
   rows: StudioStatus[], repoSegment: string | null, role: string, repoSlug: string | null,
   newInstance = false,
 ): FfDecision {
+  // Board issue #250: maestro is ALWAYS LOCAL — a Claude Code session on
+  // the operator's own machine, never a cloud studio `ff` would spawn or
+  // attach to. Refused before anything else below (the "--new" singleton
+  // check this used to need, and every ordinary spawn/attach/provision
+  // branch), so bare `ff` (defaults to "maestro"), `ff maestro`, and
+  // `ff maestro --new` all refuse the same way, regardless of repo or
+  // instance. A cloud studio mistakenly provisioned with this role would
+  // stop and escalate immediately anyway — see
+  // fleet/blueprint/studios/maestro/studio.md, now a stub for exactly that
+  // case — so there is nothing here `ff` could usefully spawn or attach to.
+  if (role === "maestro") {
+    return {
+      kind: "error",
+      message: "maestro runs locally, not as a cloud studio — start it from your own " +
+        "machine (see docs/setup.md's local-maestro note), never with ff",
+    };
+  }
   if (newInstance) {
-    // Issue #269 round 2: maestro is a SINGLETON role — a repo has exactly
-    // one, and `fleet spawn`'s own runSpawn refuses a second with a 409.
-    // Refused here too, client-side, for a clear "--new" error instead of a
-    // raw 409 body — this also covers bare `ff --new` (no role given), which
-    // defaults to maestro and would otherwise silently try to allocate
-    // `<repo>--maestro--2`.
-    if (role === "maestro") {
-      return { kind: "error", message: 'maestro is a singleton role — no "--new" instance' };
-    }
     if (repoSegment === null) {
       return {
         kind: "error",
