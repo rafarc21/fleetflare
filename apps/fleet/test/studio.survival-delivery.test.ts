@@ -17,7 +17,7 @@ import {
   prArtifactNumbers, branchArtifacts, isRescueBranchFor, rescueBranchesFor, rescueRefStamp, parseRescueStamp,
   attributeRescueBranch, rescueBranchPrefix, rescueBranchNestedPrefix, fetchRescueBranchCandidates,
   resolveSurvivalInput, composeSurvivalDelivery, deliverSurvivalBriefOnBringup,
-  retryPendingSurvivalBrief, retryBoundExceeded,
+  retryPendingSurvivalBrief, retryBoundExceeded, matchesTaskNumber,
   SURVIVAL_RETRY_MAX_ATTEMPTS, SURVIVAL_RETRY_WINDOW_MS,
   type ComposedBrief, type SurvivalSources, type SurvivalTaskRef, type SurvivalBringup,
 } from "../src/studio/survival-delivery";
@@ -469,6 +469,7 @@ function sources(over: Partial<SurvivalSources> = {}): SurvivalSources {
     rescueBranches: async () => [],
     compareAhead: async () => ({ aheadBy: 3, lastCommitAt: "2026-09-25T11:00:00.000Z" }),
     openPullNumbers: async () => [],
+    branchNames: async () => ({ names: [], truncated: false }),
     ...over,
   };
 }
@@ -784,6 +785,213 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       sources(), { ok: false, reason: "board read failed (503): upstream" }, null, NOW,
     );
     expect(input.unclaimedRescueBranches).toEqual({ ok: false, reason: "board read failed (503): upstream" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SOURCE 4 (#234) — anchored task-number match against every branch name
+// ---------------------------------------------------------------------------
+
+describe("matchesTaskNumber — anchored on '-'/'/' boundaries, never a substring hit", () => {
+  it("matches realistic branch-naming shapes", () => {
+    expect(matchesTaskNumber("fix-231-replaced-session", 231)).toBe(true);
+    expect(matchesTaskNumber("234-some-slug", 234)).toBe(true);
+    expect(matchesTaskNumber("task/231-foo", 231)).toBe(true);
+  });
+
+  it("the issue's own anchoring example: fix-2310-x must NOT match task 231", () => {
+    expect(matchesTaskNumber("fix-2310-x", 231)).toBe(false);
+  });
+
+  it("a number embedded with no boundary on either side does not match", () => {
+    expect(matchesTaskNumber("x231y", 231)).toBe(false);
+    expect(matchesTaskNumber("12310", 231)).toBe(false);
+  });
+});
+
+describe("resolveSurvivalInput SOURCE 4 — branch found by anchored name match, no PR, no artifact", () => {
+  it("a real remote branch matching the task number, with no PR and no {kind:'branch'} artifact, is found", async () => {
+    const branchNames = async () => ({ names: ["main", "fix-231-replaced-session"], truncated: false });
+    const input = await resolveSurvivalInput(
+      sources({ branchNames }),
+      { ok: true, value: [task({ taskNumber: 231, artifacts: [] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true,
+      value: [expect.objectContaining({ taskNumber: 231, branch: "fix-231-replaced-session", commitsAheadOfMain: 3 })],
+    });
+  });
+
+  it("fix-2310-x on origin never resolves task 231 — anchoring holds end to end, not just in the unit test", async () => {
+    const branchNames = async () => ({ names: ["fix-2310-x"], truncated: false });
+    const input = await resolveSurvivalInput(
+      sources({ branchNames }),
+      { ok: true, value: [task({ taskNumber: 231, artifacts: [] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true, value: [expect.objectContaining({ branch: null })],
+    });
+  });
+
+  it("zero matches: branch stays null, renders exactly as 'no branch on origin' today", async () => {
+    const input = await resolveSurvivalInput(
+      sources({ branchNames: async () => ({ names: ["unrelated-branch"], truncated: false }) }),
+      { ok: true, value: [task({ taskNumber: 231, artifacts: [] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: null })] });
+  });
+
+  it("two matching branches for the same task: never guess — branch stays null, both surfaced as ambiguousBranches", async () => {
+    const branchNames = async () => ({ names: ["fix-231-replaced-session", "231-another-attempt"], truncated: false });
+    const input = await resolveSurvivalInput(
+      sources({ branchNames }),
+      { ok: true, value: [task({ taskNumber: 231, artifacts: [] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true,
+      value: [expect.objectContaining({
+        branch: null,
+        ambiguousBranches: expect.arrayContaining(["fix-231-replaced-session", "231-another-attempt"]),
+      })],
+    });
+    const list = (input.tasks as { ok: true; value: { ambiguousBranches?: string[] }[] }).value[0]!.ambiguousBranches!;
+    expect(list).toHaveLength(2);
+  });
+
+  it("the ambiguous brief line is DISTINCT from 'no branch on origin' and names both candidates", async () => {
+    const branchNames = async () => ({ names: ["fix-231-replaced-session", "231-another-attempt"], truncated: false });
+    const brief = await composeSurvivalDelivery(
+      sources({ branchNames }),
+      { ok: true, value: [task({ taskNumber: 231, artifacts: [] })] },
+      session(), NOW,
+    );
+    expect(brief).not.toContain("no branch on origin");
+    expect(brief).toContain("fix-231-replaced-session");
+    expect(brief).toContain("231-another-attempt");
+  });
+
+  it("SOURCE 4 never touches a task already resolved by an earlier source, even with a same-numbered branch sitting on origin", async () => {
+    const pull = async () => ({ headRef: "pr-branch", title: "PR" });
+    const branchNames = vi.fn(async () => ({ names: ["fix-231-decoy"], truncated: false }));
+    const input = await resolveSurvivalInput(
+      sources({ pull, branchNames }),
+      { ok: true, value: [task({ taskNumber: 231, artifacts: [{ kind: "pr", pr: "150" }] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true, value: [expect.objectContaining({ branch: "pr-branch" })],
+    });
+  });
+
+  it("branchNames() is fetched at most ONCE for the whole composition, even with multiple unresolved tasks", async () => {
+    const branchNames = vi.fn(async () => ({ names: ["fix-1-a", "fix-2-b"], truncated: false }));
+    await resolveSurvivalInput(
+      sources({ branchNames }),
+      {
+        ok: true,
+        value: [task({ taskNumber: 1, artifacts: [] }), task({ taskNumber: 2, artifacts: [] })],
+      },
+      null, NOW,
+    );
+    expect(branchNames).toHaveBeenCalledTimes(1);
+  });
+
+  it("branchNames() is never fetched when every task is already resolved", async () => {
+    const branchNames = vi.fn(async () => ({ names: [], truncated: false }));
+    await resolveSurvivalInput(
+      sources({ branchNames }),
+      { ok: true, value: [task({ taskNumber: 231, artifacts: [{ kind: "branch", path: "fix/107" }] })] },
+      null, NOW,
+    );
+    expect(branchNames).not.toHaveBeenCalled();
+  });
+
+  it("a thrown branchNames() fetch fails only SOURCE 4 — every other already-resolved section is unaffected", async () => {
+    const branchNames = async () => { throw new Error("branches unreachable (502)"); };
+    const input = await resolveSurvivalInput(
+      sources({ branchNames }),
+      {
+        ok: true,
+        value: [
+          task({ taskNumber: 231, artifacts: [] }),
+          task({ taskNumber: 150, artifacts: [{ kind: "branch", path: "fix/107" }] }),
+        ],
+      },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true,
+      value: [
+        expect.objectContaining({ taskNumber: 231, branch: null }),
+        expect.objectContaining({ taskNumber: 150, branch: "fix/107" }),
+      ],
+    });
+  });
+
+  // Reviewer finding 2 (PR #239): rescue refs anchor-match a task number too
+  // -- a studio id ending `--web-studio--40` makes `matchesTaskNumber`
+  // consider "40" bounded by "-" and "/" in
+  // `fleet/rescue/x--web-studio--40/wip/<stamp>`, a genuine false positive,
+  // not a hypothetical. SOURCE 3 already owns rescue-ref attribution; a
+  // rescue ref must never re-enter SOURCE 4's own candidate pool.
+  it("a rescue ref whose stamp anchors on the task number is excluded from SOURCE 4 entirely, and the real branch still resolves", async () => {
+    const rescueDecoy = `fleet/rescue/x--web-studio--40/wip/20261004000000`;
+    const branchNames = async () => ({ names: [rescueDecoy, "fix-40-y"], truncated: false });
+    const input = await resolveSurvivalInput(
+      sources({ branchNames }),
+      { ok: true, value: [task({ taskNumber: 40, artifacts: [] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true,
+      value: [expect.objectContaining({ taskNumber: 40, branch: "fix-40-y" })],
+    });
+  });
+
+  it("the rescue-ref exclusion still leaves a genuine ambiguous match ambiguous (two real branches, one rescue decoy)", async () => {
+    const rescueDecoy = `fleet/rescue/x--web-studio--8/wip/20261004000000`;
+    const branchNames = async () => ({ names: [rescueDecoy, "fix-8-a", "task/8-b"], truncated: false });
+    const input = await resolveSurvivalInput(
+      sources({ branchNames }),
+      { ok: true, value: [task({ taskNumber: 8, artifacts: [] })] },
+      null, NOW,
+    );
+    expect(input.tasks).toEqual({
+      ok: true,
+      value: [expect.objectContaining({
+        branch: null,
+        ambiguousBranches: expect.arrayContaining(["fix-8-a", "task/8-b"]),
+      })],
+    });
+    const list = (input.tasks as { ok: true; value: { ambiguousBranches?: string[] }[] }).value[0]!.ambiguousBranches!;
+    expect(list).toHaveLength(2);
+  });
+
+  // Reviewer finding 1 (PR #239): `listAllBranchNames`'s own page-cap signal
+  // (`truncated`) must reach the composed `SurvivalInput` so a re-review of
+  // the brief can tell an incomplete lookup apart from a genuinely clean one.
+  it("a truncated branchNames() fetch sets branchLookupTruncated on the resolved input", async () => {
+    const branchNames = async () => ({ names: ["fix-231-replaced-session"], truncated: true });
+    const input = await resolveSurvivalInput(
+      sources({ branchNames }),
+      { ok: true, value: [task({ taskNumber: 231, artifacts: [] })] },
+      null, NOW,
+    );
+    expect(input.branchLookupTruncated).toBe(true);
+  });
+
+  it("branchLookupTruncated is absent when the fetch was not truncated", async () => {
+    const branchNames = async () => ({ names: ["fix-231-replaced-session"], truncated: false });
+    const input = await resolveSurvivalInput(
+      sources({ branchNames }),
+      { ok: true, value: [task({ taskNumber: 231, artifacts: [] })] },
+      null, NOW,
+    );
+    expect(input.branchLookupTruncated).toBeUndefined();
   });
 });
 

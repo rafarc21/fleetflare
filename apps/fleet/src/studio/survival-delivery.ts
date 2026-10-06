@@ -525,6 +525,19 @@ export function attributeRescueBranch(unresolvedTasks: number, rescueRefs: strin
   return rescueRefs[0]!;
 }
 
+/**
+ * Issue #234, SOURCE 4 — does `branch` name this task's own number, anchored
+ * on `-`/`/` boundaries at BOTH ends of the number so a substring hit never
+ * counts? Task 231 must match `fix-231-replaced-session`, `231-some-slug`,
+ * and `task/231-foo`, and must NOT match `fix-2310-x` (the issue's own
+ * anchoring example) — `2310` has no `-`/`/`/string-end immediately after
+ * the `231` substring, so the anchored regex below never considers it a hit.
+ */
+export function matchesTaskNumber(branch: string, taskNumber: number): boolean {
+  const re = new RegExp(`(^|[-/])${taskNumber}([-/]|$)`);
+  return re.test(branch);
+}
+
 // ---------------------------------------------------------------------------
 // 4. COMPOSING THE SurvivalInput
 // ---------------------------------------------------------------------------
@@ -554,6 +567,24 @@ export interface SurvivalSources {
   compareAhead: (branch: string) => Promise<{ aheadBy: number; lastCommitAt: string | null } | null>;
   /** Open PR numbers in the work repo (`listOpenPullNumbers`). */
   openPullNumbers: () => Promise<number[]>;
+  /**
+   * Issue #234, SOURCE 4 — every branch name on origin (`listAllBranchNames`,
+   * src/github/api.ts), fetched AT MOST ONCE per composition and matched
+   * against each task STILL unresolved after sources 1-3 via
+   * `matchesTaskNumber`, anchored on `-`/`/` boundaries so task 231 can never
+   * match a branch like `fix-2310-x`. Catches a branch a lead pushed
+   * directly to origin with no PR opened yet and no `{kind:"branch"}`
+   * artifact recorded — invisible to sources 1-3 even though it is sitting
+   * right there on origin (the exact gap #234 reports).
+   *
+   * PR #239 review finding 1 — `names` may be an INCOMPLETE prefix of the
+   * real branch list when `truncated` is true: `listAllBranchNames` hit its
+   * own page cap while GitHub still had more pages to offer. `truncated`
+   * flows through to `SurvivalInput.branchLookupTruncated` unchanged, so the
+   * composed brief can say so rather than let a page-capped lookup read as
+   * "that's everything".
+   */
+  branchNames: () => Promise<{ names: string[]; truncated: boolean }>;
 }
 
 /** What `main` is called here. The compare's base — never hardcoded at a
@@ -656,7 +687,9 @@ export async function resolveSurvivalInput(
     return pulls.get(n) ?? null;
   };
 
-  const resolved: { task: SurvivalTaskRef; prs: number[]; branch: string | null }[] = [];
+  const resolved: {
+    task: SurvivalTaskRef; prs: number[]; branch: string | null; ambiguousBranches?: string[];
+  }[] = [];
   for (const task of tasks.value) {
     const prs = prArtifactNumbers(task.artifacts);
     let branch: string | null = null;
@@ -739,11 +772,77 @@ export async function resolveSurvivalInput(
     unclaimedRescueBranches = { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 
+  // SOURCE 4 (#234) — anchored task-number match against every branch name
+  // on origin. ADDITIVE over SOURCE 3 above: rescue refs live under a
+  // DIFFERENT namespace (`fleet/rescue/<studio>/...`), so this never
+  // re-examines anything SOURCE 3 already attributed. Catches a branch a
+  // lead pushed directly to origin with no PR opened and no
+  // `{kind:"branch"}` artifact recorded — sources 1-3 have no way to find
+  // it even though it is sitting right there on origin (#234's own bug).
+  //
+  // `sources.branchNames()` is fetched AT MOST ONCE for the whole
+  // composition (same "one lookup, not one per task" discipline `pull`'s own
+  // memoization and `sources.rescueBranches()` above already follow), and
+  // only when at least one task is still unresolved — unlike SOURCE 3's own
+  // rescue refs, there is no "surface it even with zero unresolved tasks"
+  // requirement here: a branch name with no task to attach to has nothing
+  // worth reporting on its own.
+  //
+  // Caught here, same per-section discipline as the rescue-branch fetch just
+  // above: a thrown fetch (GitHub 5xx, rate-limit, network blip) logs and
+  // leaves every still-unresolved task exactly as it already was — never
+  // fails the whole `resolveSurvivalInput` call over one source's transient
+  // failure.
+  //
+  // PR #239 review finding 2: a rescue ref anchor-matches a task number too
+  // -- a studio id ending `--<n>` (e.g. `web-studio--40`) makes
+  // `matchesTaskNumber` read the `-` before and the `/` after the number in
+  // `fleet/rescue/x--web-studio--40/wip/<stamp>` as valid boundaries, a
+  // genuine false positive. SOURCE 3 above already owns rescue-ref
+  // attribution in full (including its own "never guess" ambiguous case);
+  // a `fleet/rescue/` name must never re-enter THIS source's candidate pool
+  // at all, so it is filtered out here, before `matchesTaskNumber` ever
+  // runs against it -- not merely deprioritized against a real match.
+  let branchLookupTruncated = false;
+  const stillUnresolved = resolved.filter((r) => r.branch === null);
+  if (stillUnresolved.length > 0) {
+    try {
+      const { names: allBranchNames, truncated } = await sources.branchNames();
+      branchLookupTruncated = truncated;
+      const candidatePool = allBranchNames.filter((name) => !name.startsWith("fleet/rescue/"));
+      for (const r of stillUnresolved) {
+        const matches = candidatePool.filter((name) => matchesTaskNumber(name, r.task.taskNumber));
+        if (matches.length === 1) {
+          // Mutates in place, same pattern SOURCE 3's own
+          // `unresolved[0]!.branch = attributed` already uses just above —
+          // the `compareAhead` loop right below still runs for this branch,
+          // so ahead-count/last-commit-date resolve normally, no duplicated
+          // lookup logic.
+          r.branch = matches[0]!;
+        } else if (matches.length > 1) {
+          // NEVER guess (same reasoning `attributeRescueBranch`'s own doc
+          // comment gives for SOURCE 3's ambiguous case) — surfaced on its
+          // own field rather than silently kept as "no branch on origin".
+          r.ambiguousBranches = matches;
+        }
+      }
+    } catch (err) {
+      console.error(`survival re-brief: branch-name lookup for ${sources.studioId} failed`, err);
+    }
+  }
+
   const taskBranches: SurvivalTaskBranch[] = [];
   for (const r of resolved) {
     const base = { taskNumber: r.task.taskNumber, taskTitle: r.task.taskTitle };
     if (r.branch === null) {
-      taskBranches.push({ ...base, branch: null, commitsAheadOfMain: null, lastCommitAt: null });
+      // SOURCE 4's ambiguous outcome (#234) carries through here only when
+      // present -- an ordinary zero-match "no branch on origin" task gets no
+      // such field, keeping this the exact same shape every existing caller
+      // already expects.
+      taskBranches.push({
+        ...base, branch: null, commitsAheadOfMain: null, lastCommitAt: null,
+        ...(r.ambiguousBranches !== undefined ? { ambiguousBranches: r.ambiguousBranches } : {}),
+      });
       continue;
     }
     try {
@@ -780,6 +879,11 @@ export async function resolveSurvivalInput(
     studioId: sources.studioId, tasks: { ok: true, value: taskBranches }, openPrs, unclaimedRescueBranches,
     session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp,
     asideShip,
+    // PR #239 review finding 1 -- only set when true, same "absent stays
+    // absent" discipline `wipSyncedAt`'s own field doc comment follows: a
+    // lookup that was never truncated says nothing extra, rather than a
+    // stored `false` a reader could mistake for a deliberate signal.
+    ...(branchLookupTruncated ? { branchLookupTruncated: true } : {}),
   };
 }
 

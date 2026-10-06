@@ -7,6 +7,7 @@ import {
   listOpenPullNumbers, listPullsForCommit, listPullCommits, closeIssue,
   closingIssuesForPull, getPullRequest, commitReachableFromBranch, getIssueCloser,
   pullsWithClosingIssuesForCommits, pullClaimsIssue, upsertRepoFile,
+  listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES,
 } from "../src/github/api";
 import { doneRecordPutter } from "../src/studio/do";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
@@ -439,6 +440,64 @@ describe("listOpenPullNumbers", () => {
     // "could not tell", and swallowing it here would defeat that upstream.
     respond = () => new Response("boom", { status: 503 });
     await expect(listOpenPullNumbers("tok", "o/r")).rejects.toThrow(/503/);
+  });
+});
+
+describe("listAllBranchNames", () => {
+  it("GETs the plain branches-list endpoint, one page, and returns names, not truncated", async () => {
+    respond = () => Response.json([{ name: "main" }, { name: "fix-231-replaced-session" }]);
+    const result = await listAllBranchNames("tok", "o/r");
+    expect(result).toEqual({ names: ["main", "fix-231-replaced-session"], truncated: false });
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches?per_page=100");
+    expect(calls[0].headers.authorization).toBe("Bearer tok");
+  });
+
+  it("throws GitHub's own words on a non-2xx, token never in the message", async () => {
+    respond = () => new Response("boom", { status: 503 });
+    await expect(listAllBranchNames("tok", "o/r")).rejects.toThrow(/503/);
+  });
+
+  // Reviewer finding 1 (PR #239): a single `per_page=100` page silently
+  // missed a match past branch 100 on any repo with more than one page --
+  // the ORIGINAL #234 bug, reappearing for any repo past 100 branches.
+  // `git ls-remote origin 'refs/heads/*'` against this very repo on
+  // 2026-10-05 counted 116 -- already past one page today.
+  it("follows Link: rel=\"next\" across pages and finds a name that only exists on page 2", async () => {
+    const first = Array.from({ length: BRANCH_NAMES_PAGE_SIZE }, (_, i) => ({ name: `branch-${i}` }));
+    let page = 0;
+    respond = () => {
+      page++;
+      if (page === 1) {
+        return new Response(JSON.stringify(first), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            link: '<https://api.github.com/repos/o/r/branches?per_page=100&page=2>; rel="next"',
+          },
+        });
+      }
+      return Response.json([{ name: "fix-999-tail" }]);
+    };
+    const result = await listAllBranchNames("tok", "o/r");
+    expect(calls).toHaveLength(2);
+    expect(calls[1].url).toBe("https://api.github.com/repos/o/r/branches?per_page=100&page=2");
+    expect(result.names).toContain("fix-999-tail");
+    expect(result.names).toHaveLength(BRANCH_NAMES_PAGE_SIZE + 1);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("stops at the page cap and reports truncated:true when a next link still remains", async () => {
+    respond = () => new Response(JSON.stringify([{ name: "branch-x" }]), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        link: '<https://api.github.com/repos/o/r/branches?per_page=100&page=99>; rel="next"',
+      },
+    });
+    const result = await listAllBranchNames("tok", "o/r");
+    expect(calls).toHaveLength(BRANCH_NAMES_MAX_PAGES);
+    expect(result.truncated).toBe(true);
   });
 });
 

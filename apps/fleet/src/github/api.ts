@@ -969,6 +969,71 @@ export async function listMatchingBranches(token: string, repo: string, prefix: 
   return refs.map((r) => ({ name: r.ref.replace(/^refs\/heads\//, ""), sha: r.object.sha }));
 }
 
+/**
+ * Issue #234, survival re-brief SOURCE 4 (`resolveSurvivalInput`,
+ * src/studio/survival-delivery.ts): every branch name on origin, by plain
+ * listing rather than a prefix query — the task-number match this feeds is a
+ * NAME match anywhere in the branch name (anchored on `-`/`/` boundaries),
+ * not a prefix match, and a task number is rarely the literal first token of
+ * a branch name (`fix-231-replaced-session`, not `231-...`), so
+ * `listMatchingBranches` above (a prefix-anchored `git/matching-refs` query)
+ * does not help here.
+ *
+ * PR #239 review finding 1: one page (GitHub's own 100-item max) used to be
+ * the whole of this function, which is the ORIGINAL #234 bug all over again
+ * for any repo with more than one page of branches — a task branch sitting
+ * on page 2 was invisible to this check exactly the way it used to be
+ * invisible to `listAllBranchNames`'s own absence before #234 was fixed.
+ * Measured against this repo's own origin, 2026-10-05:
+ * `git ls-remote origin 'refs/heads/*' | wc -l` → 116, already past one page
+ * today. Same page-size/page-cap shape `listInstallationRepos` above already
+ * uses, except the terminator here is GitHub's OWN pagination signal (the
+ * `Link: rel="next"` response header) rather than a trusted `total_count` —
+ * the branches-list endpoint carries no body-level total this function could
+ * read instead.
+ */
+export const BRANCH_NAMES_PAGE_SIZE = 100;
+export const BRANCH_NAMES_MAX_PAGES = 10;
+
+/** Picks the `rel="next"` target out of a `Link` response header
+ *  (RFC 8288, comma-joined `<url>; rel="..."` entries) — `null` when there is
+ *  no such header or no `next` entry in it, i.e. "no more pages". */
+function parseNextLink(linkHeader: string | null): string | null {
+  if (linkHeader === null) return null;
+  for (const part of linkHeader.split(",")) {
+    const match = part.match(/<([^>]+)>\s*;\s*rel="next"/);
+    if (match) return match[1]!;
+  }
+  return null;
+}
+
+/**
+ * `truncated: true` means the page cap (`BRANCH_NAMES_MAX_PAGES`) was hit
+ * while GitHub still had a `next` link to offer — the result is a genuine
+ * PREFIX of the real branch list, not the whole of it, and callers must say
+ * so rather than let an incomplete list read as "that's everything" (the
+ * same distinction `listRepoTree`'s own `truncated` check draws, just
+ * recovered instead of thrown — a repo this large is exactly the case #234
+ * exists to still cover, not a reason to give up on it).
+ */
+export async function listAllBranchNames(
+  token: string, repo: string,
+): Promise<{ names: string[]; truncated: boolean }> {
+  const names: string[] = [];
+  let url: string | null = `https://api.github.com/repos/${repo}/branches?per_page=${BRANCH_NAMES_PAGE_SIZE}`;
+  for (let page = 1; page <= BRANCH_NAMES_MAX_PAGES && url !== null; page++) {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": USER_AGENT },
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`list branches for ${repo} failed (${res.status}): ${text.slice(0, 300)}`);
+    for (const b of JSON.parse(text) as { name: string }[]) names.push(b.name);
+    url = parseNextLink(res.headers.get("link"));
+  }
+  return { names, truncated: url !== null };
+}
+
 /** A commit's committer date (ISO). */
 export async function commitDate(token: string, repo: string, sha: string): Promise<string> {
   const c = await ghJson<{ commit: { committer: { date: string } } }>(

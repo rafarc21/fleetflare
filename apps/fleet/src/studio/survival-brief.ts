@@ -30,6 +30,7 @@
  */
 
 import type { ObservedSession, RestoreOutcome } from "./observed";
+import { BRANCH_NAMES_MAX_PAGES, BRANCH_NAMES_PAGE_SIZE } from "../github/api";
 import type { AsideShipRecord } from "./session-sync";
 
 export type Checked<T> = { ok: true; value: T } | { ok: false; reason: string };
@@ -52,6 +53,18 @@ export interface SurvivalTaskBranch {
    *  "commits ahead unknown"). */
   commitsAheadOfMain: number | null;
   lastCommitAt: string | null;
+  /**
+   * Issue #234, SOURCE 4's own "never guess" outcome: more than one branch
+   * on origin anchored-matched this task's number (`matchesTaskNumber`,
+   * survival-delivery.ts) and `resolveSurvivalInput` refused to pick one —
+   * same "a wrong guess is worse than silence" reasoning
+   * `attributeRescueBranch`'s own doc comment gives for SOURCE 3's ambiguous
+   * case. Populated ONLY in that ambiguous case; `branch` stays `null`
+   * alongside it, but `taskLine` must render this differently from the
+   * ordinary "no branch on origin" (zero matches) — a reader needs to tell
+   * "found none" and "found several, could not pick" apart, always.
+   */
+  ambiguousBranches?: string[];
 }
 
 export interface SurvivalOpenPr {
@@ -119,6 +132,20 @@ export interface SurvivalInput {
    * it -- either way, nothing to say.
    */
   wipSyncedAt?: string | null;
+  /**
+   * PR #239 review finding 1 -- true when `resolveSurvivalInput`'s own
+   * `sources.branchNames()` fetch (SOURCE 4, survival-delivery.ts) hit
+   * `listAllBranchNames`'s page cap (`BRANCH_NAMES_MAX_PAGES`,
+   * src/github/api.ts) while GitHub still had more branches to offer. The
+   * task-number match SOURCE 4 runs is only as complete as the branch list
+   * it searched -- a task branch living past the cap reads exactly like one
+   * that is not on origin at all, and a reader of this brief must be told
+   * the search itself was incomplete rather than trust a false "no branch on
+   * origin". Absent/undefined (never a stored `false`) when the lookup never
+   * ran or never hit the cap -- same "absent stays absent" discipline every
+   * other optional field on this interface already follows.
+   */
+  branchLookupTruncated?: boolean;
   /**
    * Maestro review round 2 on PR #235 (issue #231), item 1 --
    * `Observed.wipSyncedBootStamp` as it stood AT THE MOMENT OF THIS BRING-UP
@@ -273,6 +300,15 @@ function ageFrom(iso: string, now: string): number | null {
 
 function taskLine(b: SurvivalTaskBranch, now: string): string {
   const prefix = `- Task #${b.taskNumber} ${quoted(b.taskTitle)}:`;
+
+  // Issue #234, SOURCE 4's ambiguous case — checked BEFORE `branch === null`
+  // below: both states share `branch: null`, but they are different answers
+  // ("found several, could not pick" vs "found none") and must render
+  // differently.
+  if (b.ambiguousBranches !== undefined && b.ambiguousBranches.length > 0) {
+    const names = b.ambiguousBranches.map(sanitizeBranch).join(", ");
+    return `${prefix} ambiguous: ${b.ambiguousBranches.length} branches match (${names}) — resolve manually`;
+  }
 
   if (b.branch === null) {
     return `${prefix} no branch on origin`;
@@ -636,6 +672,15 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
     if (sorted.length > MAX_LINES_PER_SECTION) {
       lines.push(`- +${sorted.length - MAX_LINES_PER_SECTION} more`);
     }
+  }
+
+  // PR #239 review finding 1 -- the task-branch section above is only as
+  // complete as the branch list SOURCE 4 searched; say so when it was cut.
+  if (input.branchLookupTruncated === true) {
+    lines.push(
+      `- Branch lookup truncated — results may be incomplete past ` +
+      `${BRANCH_NAMES_PAGE_SIZE * BRANCH_NAMES_MAX_PAGES} branches`,
+    );
   }
 
   if (!input.openPrs.ok) {
