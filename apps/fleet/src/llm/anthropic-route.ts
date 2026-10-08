@@ -19,9 +19,12 @@ import { readCappedBody } from "../http/capped-body";
 import { isSpawnTokenShaped, resolveSpawnParent, type SpawnParent } from "../studio/spawn";
 import { listStudios } from "../studio/registry";
 import type { StudioStatus } from "../studio/types";
+import { checkAndConsumeJuniorRateLimit } from "../junior/ratelimit";
+import { insertJuniorUsage } from "../junior/usage";
 import {
   GLM_LEAD_MODEL, anthropicRequestToOpenAI, openAIResponseToAnthropic, classifyAiError,
   createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStream, parseSseDataLine,
+  streamErrorFrame,
 } from "./translate";
 
 export const ANTHROPIC_MESSAGES_PATH = "/fleet/llm/anthropic/v1/messages";
@@ -65,6 +68,13 @@ function extractPresentedToken(req: Request): string | null {
   return req.headers.get("x-api-key");
 }
 
+/** What `pumpAnthropicStream` resolves to — the real counts the caller logs
+ *  through `insertJuniorUsage` (MAJOR 2/4), and whether the stream reached a
+ *  genuine end (`ok: true`, `closeStream`'s normal frames were sent) or was
+ *  cut short by an upstream failure (`ok: false`, a `streamErrorFrame` was
+ *  sent instead — see MAJOR 3). */
+interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean }
+
 /** Builds the Anthropic SSE byte stream for one request: the prelude,
  *  then every chunk the upstream OpenAI-compatible stream yields, translated
  *  through translate.ts's pure state machine, then the closing frames. Kept
@@ -72,11 +82,20 @@ function extractPresentedToken(req: Request): string | null {
  *  loop — decode, split on blank-line-delimited SSE frames, feed each
  *  `data:` line through parseSseDataLine — is the one and only place this
  *  file touches raw stream bytes.
+ *
+ * MAJOR 3 (maestro review round 1): a `reader.read()` throw (the upstream
+ * Workers AI call failing PARTWAY through an already-started stream) used to
+ * fall into this function's own `finally` block, which unconditionally ran
+ * `closeStream` — the exact bug: a real mid-stream failure got silently
+ * reported to the client as `end_turn` + `message_stop`, a normal end. Fixed
+ * by catching the read failure explicitly, INSIDE the loop, and branching:
+ * a mid-stream error emits `streamErrorFrame` instead of `closeStream`'s
+ * frames, never both.
  */
 async function pumpAnthropicStream(
   upstream: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<Uint8Array>,
   id: string, model: string,
-): Promise<void> {
+): Promise<PumpResult> {
   const enc = new TextEncoder();
   const write = async (frames: string[]) => { for (const f of frames) await writer.write(enc.encode(f)); };
 
@@ -86,38 +105,72 @@ async function pumpAnthropicStream(
   const decoder = new TextDecoder();
   let buffer = "";
   let done = false;
-  try {
-    while (!done) {
-      const { done: readerDone, value } = await reader.read();
-      if (readerDone) { done = true; buffer += decoder.decode(); } else { buffer += decoder.decode(value, { stream: true }); }
-      // SSE frames are blank-line delimited; a frame can carry more than one
-      // `data:` line (rare for this backend, but parseSseDataLine is run per
-      // LINE regardless, same as the spec requires).
-      const frames = buffer.split("\n\n");
-      buffer = done ? "" : (frames.pop() ?? "");
-      if (done) {
-        // Nothing left to hold back for — process every remaining frame,
-        // including a final one with no trailing blank-line delimiter.
-      }
-      for (const frame of frames) {
-        for (const line of frame.split("\n")) {
-          const parsed = parseSseDataLine(line);
-          if (parsed === "DONE" || parsed === null) continue;
-          await write(applyOpenAIStreamChunk(state, parsed));
-        }
+  while (!done) {
+    let step: { done: boolean; value?: Uint8Array };
+    try {
+      step = await reader.read();
+    } catch (e) {
+      // The upstream failed after message_start (and possibly a content
+      // block) already reached the client — a genuine mid-stream error, not
+      // a normal end. See this function's own doc comment, MAJOR 3.
+      const message = e instanceof Error ? e.message : String(e);
+      await write([streamErrorFrame(message)]);
+      return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: false };
+    }
+    const { done: readerDone, value } = step;
+    if (readerDone) { done = true; buffer += decoder.decode(); } else { buffer += decoder.decode(value, { stream: true }); }
+    // SSE frames are blank-line delimited; a frame can carry more than one
+    // `data:` line (rare for this backend, but parseSseDataLine is run per
+    // LINE regardless, same as the spec requires).
+    const frames = buffer.split("\n\n");
+    buffer = done ? "" : (frames.pop() ?? "");
+    for (const frame of frames) {
+      for (const line of frame.split("\n")) {
+        const parsed = parseSseDataLine(line);
+        if (parsed === "DONE" || parsed === null) continue;
+        await write(applyOpenAIStreamChunk(state, parsed));
       }
     }
-  } finally {
-    await write(closeStream(state));
   }
+  await write(closeStream(state));
+  return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: true };
+}
+
+// MAJOR 2 (maestro review round 1): this route's own usage-log `mode` value
+// — junior_usage_log's `mode` column otherwise only ever carries "edit"/
+// "text" (junior/route.ts's JUNIOR_MODES), neither of which describes a lead
+// turn. A distinct literal keeps a GLM-lead row visibly different from a
+// junior delegation row in the SAME table, without needing a schema change.
+const USAGE_MODE = "lead";
+
+/** MAJOR 2: one `insertJuniorUsage` call, every exit path from this route
+ *  that actually dispatched a request to `env.AI.run` (reused verbatim —
+ *  same table, same shape junior/route.ts's own call site writes — see that
+ *  file's own doc comment on why this is `ctx.waitUntil`, not a bare `void`:
+ *  the Workers runtime can tear down this execution context the instant the
+ *  response is returned/closes). Never throws into the caller — the
+ *  `.catch(() => {})` matches insertJuniorUsage's own doc comment: a
+ *  logging failure must never affect a response already on its way to the
+ *  studio. */
+function logUsage(
+  env: Env, ctx: ExecutionContext, studioId: string, inputTokens: number, outputTokens: number, ok: boolean,
+): void {
+  ctx.waitUntil(insertJuniorUsage(env.DB, {
+    id: crypto.randomUUID(), ts: Date.now(), studioId, mode: USAGE_MODE, model: GLM_LEAD_MODEL,
+    inputTokens, outputTokens, ok,
+  }).catch(() => {}));
 }
 
 export async function handleFleetAnthropicMessages(
-  req: Request, env: Env, _ctx: ExecutionContext,
+  req: Request, env: Env, ctx: ExecutionContext,
   rows: () => Promise<StudioStatus[]> = () => listStudios(env),
 ): Promise<Response> {
   if (new URL(req.url).pathname !== ANTHROPIC_MESSAGES_PATH) return text("not found", 404);
-  if (!env.AI) return text("not found", 404);
+  // MAJOR 2: reuses junior's OWN feature flag (same env.FLEET_JUNIOR !== "on"
+  // check junior/route.ts:101 already applies) rather than inventing a
+  // second, parallel on/off switch for a second Workers-AI-spending route —
+  // one flag, one place an operator has to remember to flip.
+  if (env.FLEET_JUNIOR !== "on" || !env.AI) return text("not found", 404);
   if (req.method !== "POST") return text("method not allowed", 405);
 
   // Cheapest possible refusal first, same order /fleet/junior already
@@ -131,8 +184,37 @@ export async function handleFleetAnthropicMessages(
 
   const presented = extractPresentedToken(req);
   if (!isSpawnTokenShaped(presented)) return text("unauthorized", 401);
-  const studio: SpawnParent | null = await resolveSpawnParent(await rows(), presented);
+  const allRows = await rows();
+  const studio: SpawnParent | null = await resolveSpawnParent(allRows, presented);
   if (!studio) return text("unauthorized", 401);
+  // MAJOR 2 (BLOCKER-adjacent): spawn-token validity alone used to be the
+  // entire gate — ANY studio's token, any leadType, could spend Workers AI
+  // budget here with zero spend controls. `SpawnParent` (spawn.ts) carries
+  // no `leadType` (it is a registry-row field, not part of the parent-
+  // resolution shape every OTHER route needs), so the full `StudioStatus`
+  // row is looked up here, by the same id resolveSpawnParent just verified
+  // owns this token — the one field this route actually needs that
+  // `SpawnParent` does not carry.
+  const studioRow = allRows.find((r) => r.id === studio.id);
+  if (studioRow?.leadType !== "glm") {
+    return text("this route serves glm-led studios only", 403);
+  }
+
+  // F1 (junior/route.ts's own naming): only an authorized, flag-enabled,
+  // correctly-led call consumes rate budget — checked after every refusal
+  // above, before any body work or the AI call itself. Reuses junior's own
+  // D1-backed per-minute/daily counters (ratelimit.ts) keyed by studio id —
+  // the SAME caps a junior delegation call already spends against, since
+  // both routes spend out of the same Workers AI budget.
+  const rate = await checkAndConsumeJuniorRateLimit(env.DB, env, studio.id, Date.now());
+  if (!rate.ok) {
+    return text(
+      rate.limit === "per-minute"
+        ? "rate limit exceeded: too many glm-lead calls this minute"
+        : "rate limit exceeded: daily glm-lead cap reached",
+      429,
+    );
+  }
 
   const raw = await readCappedBody(req, ANTHROPIC_BODY_CAP);
   if (raw === null) return text("payload too large", 413);
@@ -151,8 +233,9 @@ export async function handleFleetAnthropicMessages(
       upstream = await ai.run(GLM_LEAD_MODEL, openaiBody);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      const { status, type } = classifyAiError(message);
-      return json(anthropicErrorBody(type, message), status);
+      const { status, type, message: overrideMessage } = classifyAiError(message);
+      logUsage(env, ctx, studio.id, 0, 0, false);
+      return json(anthropicErrorBody(type, overrideMessage ?? message), status);
     }
     if (!(upstream instanceof ReadableStream)) {
       // Defensive: the untyped fallback overload's return type is
@@ -163,6 +246,7 @@ export async function handleFleetAnthropicMessages(
       // anyway is translated through the non-streaming path rather than
       // crashing on `.getReader()`.
       const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel });
+      logUsage(env, ctx, studio.id, anthropic.usage.input_tokens, anthropic.usage.output_tokens, true);
       return json(anthropic, 200);
     }
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -170,9 +254,13 @@ export async function handleFleetAnthropicMessages(
     const writer = writable.getWriter();
     // Detached, same fire-and-await-elsewhere shape /fleet/junior's own
     // heartbeat IIFE uses — the Response below returns `readable`
-    // immediately; this is what actually fills it.
+    // immediately; this is what actually fills it. MAJOR 2/4: the real
+    // token counts (and whether the stream ended cleanly — MAJOR 3) only
+    // exist once pumpAnthropicStream resolves, so the usage row is logged
+    // from its own `.then()`, not alongside the other two call sites above.
     void pumpAnthropicStream(upstream, writer, id, requestedModel)
-      .catch(() => { /* client disconnected or upstream errored mid-stream — nothing left to deliver to */ })
+      .then((result) => logUsage(env, ctx, studio.id, result.inputTokens, result.outputTokens, result.ok))
+      .catch(() => { /* client disconnected before the stream could even start writing — nothing to log or deliver */ })
       .finally(() => { writer.close().catch(() => {}); });
     return new Response(readable, { status: 200, headers: { "content-type": "text/event-stream" } });
   }
@@ -182,9 +270,11 @@ export async function handleFleetAnthropicMessages(
     result = await ai.run(GLM_LEAD_MODEL, openaiBody);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    const { status, type } = classifyAiError(message);
-    return json(anthropicErrorBody(type, message), status);
+    const { status, type, message: overrideMessage } = classifyAiError(message);
+    logUsage(env, ctx, studio.id, 0, 0, false);
+    return json(anthropicErrorBody(type, overrideMessage ?? message), status);
   }
   const anthropic = openAIResponseToAnthropic(result, { model: requestedModel });
+  logUsage(env, ctx, studio.id, anthropic.usage.input_tokens, anthropic.usage.output_tokens, true);
   return json(anthropic, 200);
 }

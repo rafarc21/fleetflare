@@ -15,17 +15,43 @@ import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 
 const ME = "acme-org--web-studio";
-function row(id: string, hash: string): StudioStatus {
+// Maestro review round 1, MAJOR 2: every row here carries `leadType: "glm"`
+// by default — the route now refuses any studio whose own registry row
+// isn't glm-led, so a fixture that omitted this would 403 before reaching
+// whatever the test actually means to exercise. Tests that specifically
+// cover the leadType gate build their OWN row with a different value.
+function row(id: string, hash: string, leadType: "claude" | "glm" | undefined = "glm"): StudioStatus {
   return { id, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
-    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: hash, repoSlug: "acme-org/websites" };
+    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: hash, repoSlug: "acme-org/websites",
+    ...(leadType === undefined ? {} : { leadType }) };
 }
-const ctx = {} as ExecutionContext;
+function fakeCtx() {
+  const tasks: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: vi.fn((p: Promise<unknown>) => { tasks.push(p); p.catch(() => {}); }),
+    passThroughOnException: () => {},
+    drain: () => Promise.all(tasks),
+  };
+  return ctx as unknown as ExecutionContext & { waitUntil: ReturnType<typeof vi.fn>; drain: () => Promise<unknown[]> };
+}
+let ctx: ReturnType<typeof fakeCtx>;
 
-async function setup(aiResult: unknown = { choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } }) {
+async function usageRows() {
+  const res = await env.DB.prepare(
+    "SELECT studio_id AS studioId, mode, model, input_tokens AS inputTokens, output_tokens AS outputTokens, ok FROM junior_usage_log ORDER BY ts ASC",
+  ).all<{ studioId: string; mode: string; model: string; inputTokens: number; outputTokens: number; ok: number }>();
+  return res.results ?? [];
+}
+
+async function setup(
+  aiResult: unknown = { choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } },
+  envOverrides: Partial<Env> = {},
+  leadType: "claude" | "glm" | undefined = "glm",
+) {
   const token = mintSpawnToken();
-  const rows = async () => [row(ME, await hashSpawnToken(token))];
+  const rows = async () => [row(ME, await hashSpawnToken(token), leadType)];
   const run = vi.fn(async () => aiResult);
-  const e = { ...env, AI: { run } } as unknown as Env;
+  const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...envOverrides } as unknown as Env;
   return { token, rows, run, e };
 }
 
@@ -44,6 +70,8 @@ function req(opts: { token?: string | null; apiKey?: string; body?: unknown; pat
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
+  await env.DB.prepare("DELETE FROM junior_usage_log").run();
+  ctx = fakeCtx();
 });
 
 describe("handleFleetAnthropicMessages — gates", () => {
@@ -105,6 +133,87 @@ describe("handleFleetAnthropicMessages — gates", () => {
     const { max_tokens: _omit, ...withoutMaxTokens } = good;
     expect((await handleFleetAnthropicMessages(req({ token, body: withoutMaxTokens }), e, ctx, rows)).status).toBe(400);
     expect((await handleFleetAnthropicMessages(req({ token, body: { ...good, max_tokens: 0 } }), e, ctx, rows)).status).toBe(400);
+  });
+});
+
+// Maestro review round 1, MAJOR 2: spend controls. Before this fix, spawn-
+// token validity alone was the whole gate — any studio, any leadType, could
+// reach env.AI.run with no flag, no rate limit, no usage row.
+describe("handleFleetAnthropicMessages — spend controls (MAJOR 2)", () => {
+  it("404 when FLEET_JUNIOR is not 'on' — reuses junior's own feature flag", async () => {
+    const { token, rows, e, run } = await setup(undefined, { FLEET_JUNIOR: undefined });
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(404);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("403 when the calling studio's own leadType is not 'glm' — a claude-led studio may not spend here", async () => {
+    const { token, rows, e, run } = await setup(undefined, {}, "claude");
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(403);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("403 when the calling studio's row has no leadType at all (pre-#249 row, defaults to claude)", async () => {
+    // Built directly, bypassing setup()'s own default param (passing
+    // `undefined` explicitly for leadType there would re-trigger its "glm"
+    // default, same JS semantics row()'s own default has) — this row
+    // genuinely has no `leadType` key at all, the real pre-#249 shape.
+    const token = mintSpawnToken();
+    const hash = await hashSpawnToken(token);
+    const noLeadTypeRow: StudioStatus = {
+      id: ME, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: hash, repoSlug: "acme-org/websites",
+    };
+    const rows = async () => [noLeadTypeRow];
+    const run = vi.fn(async () => ({ choices: [{ message: { content: "hi" }, finish_reason: "stop" } ], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(403);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("429 once the per-minute rate limit is exceeded — reuses junior's own D1 counters", async () => {
+    const { token, rows, e } = await setup(undefined, { JUNIOR_RATE_PER_MINUTE: "1" });
+    const first = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(first.status).toBe(200);
+    const second = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(second.status).toBe(429);
+    expect(await second.text()).toContain("too many glm-lead calls this minute");
+  });
+
+  it("a successful non-streaming call logs a junior_usage_log row with the REAL input/output tokens (MAJOR 4)", async () => {
+    const { token, rows, e } = await setup({
+      choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 11, completion_tokens: 4 },
+    });
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ studioId: ME, model: GLM_LEAD_MODEL, inputTokens: 11, outputTokens: 4, ok: 1 });
+  });
+
+  it("a failed non-streaming call (env.AI.run throws) still logs a usage row, ok: false", async () => {
+    const { token, rows, e } = await setup();
+    (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => { throw new Error("AiError: capacity exceeded"); });
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(529);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ studioId: ME, ok: 0, inputTokens: 0, outputTokens: 0 });
+  });
+
+  it("a context-overflow-shaped upstream error maps to 400 invalid_request_error, not a 500 the client would just retry (MAJOR 4)", async () => {
+    const { token, rows, e } = await setup();
+    (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => {
+      throw new Error("This model's maximum context length is 32768 tokens");
+    });
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(400);
+    expect(await r.json()).toEqual({ type: "error", error: { type: "invalid_request_error", message: "prompt is too long" } });
   });
 });
 
@@ -170,7 +279,7 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     const run = vi.fn(async () => upstream);
     const token = mintSpawnToken();
     const rows = async () => [row(ME, await hashSpawnToken(token))];
-    const e = { ...env, AI: { run } } as unknown as Env;
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
 
     const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
     expect(r.status).toBe(200);
@@ -181,6 +290,68 @@ describe("handleFleetAnthropicMessages — streaming", () => {
       "message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop",
     ]);
     expect(text).toContain('"text":"hi"');
-    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, expect.objectContaining({ stream: true }));
+    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, expect.objectContaining({ stream: true, stream_options: { include_usage: true } }));
+  });
+
+  // Maestro review round 1, MAJOR 3: the exact bug — a mid-stream upstream
+  // failure (after message_start AND a content block already reached the
+  // client) used to be silently reported as a normal end_turn/message_stop.
+  it("a mid-stream upstream failure emits event: error — never a faked end_turn/message_stop", async () => {
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`));
+      },
+      pull() {
+        throw new Error("AiError: capacity exceeded mid-stream");
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    expect(eventTypes).not.toContain("message_stop");
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toEqual({
+      type: "error", error: { type: "overloaded_error", message: "AiError: capacity exceeded mid-stream" },
+    });
+
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].ok).toBe(0);
+  });
+
+  it("a successful stream logs a usage row with the real tokens from the final usage-bearing chunk (MAJOR 4)", async () => {
+    const enc = new TextEncoder();
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 2 } },
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    await r.text();
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1 });
   });
 });
