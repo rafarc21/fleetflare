@@ -34,7 +34,9 @@ describe("anthropicRequestToOpenAI — text", () => {
     });
     expect(out.model).toBe(GLM_LEAD_MODEL);
     expect(out.messages).toEqual([{ role: "user", content: "hi there" }]);
-    expect(out.max_tokens).toBe(1024);
+    // 1024 is below GLM_MIN_MAX_TOKENS — see the dedicated floor describe
+    // block below for the behavior this assertion now reflects.
+    expect(out.max_tokens).toBe(GLM_MIN_MAX_TOKENS);
   });
 
   test("top-level system string becomes a leading system message", () => {

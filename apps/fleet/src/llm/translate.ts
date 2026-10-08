@@ -27,6 +27,19 @@ type Json = any;
  *  response's `model` field, for display; it never selects the backend. */
 export const GLM_LEAD_MODEL = "@cf/zai-org/glm-5.3";
 
+/** Floor on the `max_tokens` sent to GLM — PR #255 STATUS comment, measured
+ *  live 2026-10-08T08:40:12Z (Workers AI, @cf/zai-org/glm-5.3, chat
+ *  completions): GLM spends most of `max_tokens` on `reasoning_content`
+ *  before it ever produces visible content. At `max_tokens: 3000` -> content
+ *  came back `""` (all 3000 tokens went to reasoning). At `max_tokens:
+ *  12000` -> 6861 completion tokens, ~24k chars of reasoning, good content.
+ *  Claude Code's own requested `max_tokens` is sized for Claude, which
+ *  doesn't spend budget on a reasoning phase first — a small Claude-sized
+ *  request leaves nothing left over for content on THIS backend. This is a
+ *  FLOOR, never a cap: a request asking for more than this still gets
+ *  exactly what it asked for (see anthropicRequestToOpenAI below). */
+export const GLM_MIN_MAX_TOKENS = 16000;
+
 // ---------------------------------------------------------------------------
 // Anthropic request -> OpenAI chat-completions request
 // ---------------------------------------------------------------------------
@@ -131,7 +144,9 @@ export function anthropicRequestToOpenAI(body: Json): Json {
     messages.push(...anthropicMessageToOpenAI(m));
   }
 
-  const out: Json = { model: GLM_LEAD_MODEL, messages, max_tokens: body.max_tokens };
+  // GLM_MIN_MAX_TOKENS floor — see that constant's own doc comment. Never
+  // lowers a client request that's already asking for more.
+  const out: Json = { model: GLM_LEAD_MODEL, messages, max_tokens: Math.max(Number(body.max_tokens) || 0, GLM_MIN_MAX_TOKENS) };
   if (body.stream === true) {
     out.stream = true;
     // Maestro review round 1, MAJOR 4: the OpenAI-compatible streaming
@@ -233,17 +248,43 @@ export function openAIResponseToAnthropic(resp: Json, opts: { model: string; id?
     content.push({ type: "tool_use", id: toolUseId(tc.id), name: tc.function?.name, input });
   }
 
+  let stopReason = anyToolUseBlocks(content) ? "tool_use" : mapFinishReason(choice.finish_reason);
+  // PR #255 STATUS comment, measured live 2026-10-08T08:40:12Z: the exact
+  // measured failure shape — all of max_tokens got spent on
+  // reasoning_content, nothing visible came back, and this backend reported
+  // it under a finish_reason that does NOT say "length" (observed: "stop").
+  // Trusting finish_reason alone here would tell Claude Code this was a
+  // normal completed turn with nothing to say; force max_tokens instead so
+  // it retries/compacts. Checked on the content array itself (empty, no
+  // text block, no tool_use block) rather than only on finish_reason, since
+  // that is the one signal the live measurement showed was reliable.
+  if (content.length === 0) stopReason = "max_tokens";
+
   return {
     id: opts.id ?? newMessageId(),
     type: "message",
     role: "assistant",
     model: opts.model,
     content,
-    stop_reason: anyToolUseBlocks(content) ? "tool_use" : mapFinishReason(choice.finish_reason),
+    stop_reason: stopReason,
     stop_sequence: null,
     usage: {
       input_tokens: resp?.usage?.prompt_tokens ?? 0,
-      output_tokens: resp?.usage?.completion_tokens ?? 0,
+      // PR #255 STATUS comment, measured live 2026-10-08T08:40:12Z: GLM's
+      // usage object may report `completion_tokens_details.reasoning_tokens`
+      // (the OpenAI o1-style reasoning-model convention) as a BREAKDOWN
+      // alongside `completion_tokens`. Whether `completion_tokens` already
+      // includes reasoning tokens or excludes them is NOT verifiable from
+      // inside this repo (no live backend access here) — the STATUS
+      // comment's own numbers read as two distinct figures ("6861
+      // completion tokens, ~24k chars reasoning"), which is the basis for
+      // treating them as additive below. Flagged risk either way:
+      // undercounting a real cost (if they're additive and this doesn't add
+      // them) is worse than double-counting a figure that turns out to
+      // already be included (if they're NOT additive and this does add
+      // them) — so this takes the directionally-safer side, but is not
+      // asserted as confirmed fact.
+      output_tokens: (resp?.usage?.completion_tokens ?? 0) + (resp?.usage?.completion_tokens_details?.reasoning_tokens ?? 0),
     },
   };
 }
@@ -394,7 +435,13 @@ export function streamPrelude(id: string, model: string): string[] {
  *  a trailing usage-only chunk) produces no frames and never throws. */
 export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[] {
   const choice = chunk?.choices?.[0];
-  if (chunk?.usage?.completion_tokens !== undefined) state.outputTokens = chunk.usage.completion_tokens;
+  if (chunk?.usage?.completion_tokens !== undefined) {
+    // PR #255 STATUS comment, measured live 2026-10-08T08:40:12Z: same
+    // reasoning-tokens handling as openAIResponseToAnthropic's usage field
+    // above — see that comment for the directionally-safer-but-unverified
+    // assumption this is built on.
+    state.outputTokens = chunk.usage.completion_tokens + (chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0);
+  }
   // MAJOR 4: the SAME final usage-bearing chunk also carries the real
   // prompt_tokens count — this backend only ever sends `usage` once
   // `stream_options.include_usage` is set on the outbound request, same
@@ -489,7 +536,20 @@ export function closeStream(state: StreamState): string[] {
   // actually opened any tool_use block, not only from the upstream's own
   // self-reported finish_reason — same reasoning as anyToolUseBlocks above,
   // applied to the streaming path.
-  const stopReason = state.toolIndexByOpenAiIndex.size > 0 ? "tool_use" : mapFinishReason(state.finishReason);
+  //
+  // PR #255 STATUS comment, measured live 2026-10-08T08:40:12Z: the
+  // streaming equivalent of openAIResponseToAnthropic's empty-content
+  // guard — `state.nextIndex === 0` means this stream never opened ANY
+  // content block at all (it only increments when a block opens), the
+  // streaming shape of the measured failure (all of max_tokens spent on
+  // reasoning, nothing visible ever streamed). Forced to max_tokens
+  // regardless of finish_reason, for the same reason as the non-streaming
+  // guard: finish_reason alone is not a reliable signal for this failure.
+  const stopReason = state.toolIndexByOpenAiIndex.size > 0
+    ? "tool_use"
+    : state.nextIndex === 0
+      ? "max_tokens"
+      : mapFinishReason(state.finishReason);
   events.push(sseEvent("message_delta", {
     type: "message_delta",
     delta: { stop_reason: stopReason, stop_sequence: null },
