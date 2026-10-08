@@ -315,3 +315,95 @@ junior's rate-limit/usage machinery) — 172 tests total. Also ran a single
 scoped `tsc --noEmit` (this app's own root project only, not the 5-project
 `bun run check` gate) — zero errors. Did NOT run `bun-test`/`check`/the full
 suite — reserved for the lead's own final verification.
+
+## Round 1 maestro review fixes (admission-level)
+
+The 3 remaining MINORs from the same round-1 review, all admission/board-side
+(the route-level BLOCKER/MAJORs/2 MINORs above were a separate dispatch; HEAD
+at start here: 6b47af6). RED-first for the two real fixes; the third turned
+out to already be correct on inspection -- see below. 3 commits, pushed after
+each.
+
+### MINOR -- leadType not truly set-once
+
+Gap: `runProvision`'s seed guard was `cfg.leadType !== undefined &&
+existing?.leadType === undefined`. `existing?.leadType === undefined` is true
+for TWO different things: (a) no row has ever existed (genuine first-ever
+provision -- the only case that should seed from cfg) and (b) a row that
+already exists, already ran, and simply never wrote this field (every studio
+provisioned before #249 shipped, and every claude-lead studio since). A
+re-provision/restart/recycle of an EXISTING studio in case (b), carrying
+`cfg.leadType: "glm"` for any reason, silently flipped a real running claude
+studio to glm.
+
+Fix: key the seed off `existing === null` instead -- "no row at all" is the
+only "first-ever" signal; once a row exists (whatever it carries, including
+nothing) the field is frozen, carried forward via the `...existing` spread.
+
+RED: new test -- existing row (`state: "running"`, no `leadType` field),
+`runProvision` called again with `cfg.leadType: "glm"` -- asserted
+`status.leadType` stays `undefined`. Failed with `"glm"` before the fix
+(`studio.provision.test.ts`). Fixed, 107/107 pass.
+
+### MINOR -- security label added AFTER assignment, not caught
+
+Gap: `securityRefusesGlmLead` (board.ts) only ran inside createTask/assignTask
+-- refuses a security task going IN. A task assigned to a glm-lead studio
+WITHOUT the label, then relabelled `security` later by anything other than
+those two functions (GitHub UI, a hand-run `gh issue edit --add-label
+security`), stayed silently owned by that studio with nothing watching for
+the label's arrival.
+
+Mechanism chosen: revoke-and-write, not refuse-per-request -- `/fleet/llm/
+anthropic/v1/messages` is STUDIO-scoped (leadType gate only), carries no task
+number, so "recheck labels fresh on the next call" has no call site to hang
+off. The board-level precedent (junior/authz.ts's header: "revoking only,
+never granting" for its own reopened-task case) fits better: a task's
+assignment IS its studio label, so revoking means removing it, the same way
+assignTask's own reassignment write sequence does.
+
+New `revokeGlmLeadOnSecurityLabel(api, repo, number, getLeadType)` (board.ts):
+fresh `api.getIssue` read (not the caller's own payload labels -- same
+defensive posture assignTask already takes), no-ops unless the task carries
+`SECURITY_LABEL`, then for every CURRENT owner whose leadType resolves
+`"glm"`: removes their studio label, resets backlog state to `submitted` if
+it wasn't already, posts one comment naming why. Wired into webhook.ts's
+`issues`-event branch (`revokeGlmLeadOnSecurityLabelEvent`, cheapest early-out
+first: only `action === "labeled"` + `label.name === SECURITY_LABEL` is ever
+worth a GitHub read), same shape as the existing `revokeJuniorOnIssueEvent`
+call right beside it -- `getLeadType` built straight off `listStudios(env)`,
+not routes.ts's `AssignWakeDeps`-based adapter (no `AssignWakeDeps` in hand
+at this call site, no reason to build one just for this field). Once
+revoked, nothing (a later unlabel/relabel) brings it back on its own -- a
+human has to reassign through assignTask, which already refuses to hand a
+security task back to a glm-lead studio.
+
+RED: new tests in `board.board.test.ts` calling the not-yet-existing function
+-- `TypeError: revokeGlmLeadOnSecurityLabel is not a function`. Implemented,
+169/169 pass. Added two more tests in `github.webhook.test.ts` (inside the
+existing auto-close-on-promote describe block, reusing its real
+`githubBoardApi` fetch fixture) proving the real `issues` `labeled` delivery
+reaches the function end-to-end -- not just the pure unit; 74/74 pass. Also
+added a narrative test chaining revoke -> a later identical re-adoption call
+that would have succeeded before the label landed, now refuses (the exact
+"next call against this task's own assignment" the dispatch asked to prove).
+
+### MINOR -- history comments "removed" from do.ts (#110, #134, #211)
+
+Investigated, found nothing to restore. `git diff d94ce15 HEAD -- do.ts`
+(`d94ce15` = the commit immediately before #249 first touched do.ts) shows
+every `-` line referencing #110/#134/#211 (2 + 9 + 3 lines, across
+provisionUngated/restartStudio/recycle's post-destroy closure) has an exact
+verbatim `+` match in the SAME commit (`1d764d5`, the glm-admission-bypass
+refactor) -- reindented one level deeper, now inside the new `else` branch
+alongside the claude-path code the comment always described, never deleted
+and left behind. Confirmed by reading the current file at all three sites
+(do.ts:7080-7150, :7360-7420ish, recycle's closure) end to end: the "see
+provisionUngated's identical comment above its own call" cross-references
+still point at comments that are still actually there, and the
+"studio.exec-deadlines.test.ts's own pinned... exact standalone conditional
+statement" the #134 comment describes is still the literal next line. The
+maestro's citation is accurate for the per-commit diff (deletion in one hunk)
+but not for the branch's own final, cumulative state -- the restoring `+` was
+already part of the same commit that moved the code, not a later one. No
+code change made; verified via `git diff`, not guessed.
