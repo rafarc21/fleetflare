@@ -199,3 +199,119 @@ check gate — reserved for the lead's own final verification).
 
 RED (bun:test for translate.ts) -> GREEN -> RED (vitest for the route) ->
 GREEN. Caveman-compressed commit messages. Push after every commit.
+
+## Round 1 maestro review fixes (route-level)
+
+Real maestro review on PR #255 (round 1 of 2). Fixed the BLOCKER + 4 MAJORs
++ 2 cheap MINORs, all route/translation-layer. Round 2 will be the last.
+
+### BLOCKER — route never mounted
+
+`handleFleetAnthropicMessages` existed but index.ts never called it —
+every request to `/fleet/llm/anthropic/*` fell through to the `/fleet/`
+catch-all (handleFleetSpawn) and 404'd. Mounted at index.ts, right after
+`/fleet/junior`'s own mount, before the `/fleet/` catch-all (confirmed real
+line: 122-123, not the maestro's cited ~135, which is the catch-all itself).
+
+Test (test/index.test.ts, through worker.fetch — the real entry point, not
+just the handler in isolation): a GET to the path. handleFleetSpawn's own
+method check runs AFTER its path check, so it still 404s a GET; the
+anthropic handler's method check runs after ITS OWN path/flag/AI checks and
+answers 405 — 405 is only reachable if the route is genuinely mounted ahead
+of the catch-all. RED confirmed by temporarily gating the mount line with
+`false &&` — both new tests failed with 404 (not 405/401), for the right
+reason; restored, GREEN.
+
+### MAJOR 2 — no spend controls
+
+Any studio's spawn token, any leadType, could reach `env.AI.run` with zero
+flag, rate limit, or usage row. Fixed in anthropic-route.ts:
+- Feature flag: reuses junior's own `env.FLEET_JUNIOR !== "on"` check
+  verbatim (not the fuller `juniorEnabled` with its JUNIOR_REPOS narrowing —
+  the maestro's instruction named the flag check at junior/route.ts:142
+  specifically, not the repo-scoping wrapper around it).
+- leadType gate: `SpawnParent` (spawn.ts) carries no `leadType` field (it's
+  a `StudioStatus` registry-row field, not part of what every OTHER spawn-
+  token route needs) — so the route now looks the calling studio's own row
+  up in the SAME `rows()` array `resolveSpawnParent` already scanned, and
+  403s unless `leadType === "glm"` (absent/claude both refused).
+- Rate limit: `checkAndConsumeJuniorRateLimit` (junior/ratelimit.ts), same
+  call shape junior/route.ts makes, keyed by studio id — same D1 counters,
+  same budget, both routes draw from one pool.
+- Usage: `insertJuniorUsage` (junior/usage.ts) via `ctx.waitUntil`, same
+  table junior writes to, new `mode: "lead"` literal so a GLM-lead row is
+  visibly distinct from a junior-delegation row in the same table.
+
+### MAJOR 3 — mid-stream error faked as a normal end
+
+`pumpAnthropicStream`'s old `try { ... } finally { closeStream }` ran
+`closeStream` unconditionally — a `reader.read()` throw after `message_start`
+and a content block already reached the client got silently reported as
+`end_turn` + `message_stop`. Fixed: the read is now awaited inside its own
+try/catch, INSIDE the loop; a throw there writes `translate.ts`'s new
+`streamErrorFrame` (a genuine Anthropic `event: error`) and returns early —
+`closeStream`'s frames and the error frame are now mutually exclusive, never
+both. Also threads real token counts (see MAJOR 4) out of the pump via a new
+`PumpResult` return value, since the usage row can only be logged once the
+stream actually resolves.
+
+RED confirmed: reverted pumpAnthropicStream to the old unconditional
+try/finally shape, ran the new mid-stream test — failed exactly as the
+original bug would (`content_block_stop`/`message_delta`/`message_stop`
+instead of `error`). Restored, GREEN.
+
+### MAJOR 4 — usage always 0; context overflow maps to a retried 500
+
+- `translate.ts`'s `anthropicRequestToOpenAI` now sets
+  `stream_options: {include_usage: true}` whenever `stream: true` — without
+  it, no chunk this backend sends (including the final one) ever carries a
+  `usage` field. `applyOpenAIStreamChunk` now also tracks `state.inputTokens`
+  off that chunk's `usage.prompt_tokens` (output was already tracked, just
+  never fed by a real usage chunk before this fix). The route logs these
+  real counts into the SAME `junior_usage_log` row MAJOR 2 added.
+- `classifyAiError` gained a context-overflow case: `invalid_request_error`/
+  400, fixed message `"prompt is too long"` (never the raw upstream text) —
+  the one shape Claude Code's client treats as "compact, don't retry".
+  FLAGGED UNCERTAINTY (stated in the function's own doc comment, not
+  silently assumed): the real Workers AI wording for an overflowed context
+  has not been observed firsthand; the regex matches the common OpenAI-
+  compatible phrasings ("maximum context length", "context_length_exceeded",
+  "context window"). A wrong guess here falls through to the generic 500
+  bucket, never a worse outcome than before.
+
+### MINOR (both fixed — cheap)
+
+1. `toolUseId()` helper in translate.ts: generates a `toolu_`-prefixed id
+   whenever GLM's own tool-call response omits one (undefined, null, or
+   empty string) — applied at both the non-streaming tool_use block AND the
+   streaming `content_block_start`'s tool_use block. A real id from the
+   upstream is kept as-is.
+2. `stop_reason`/streaming `message_delta`'s `stop_reason` are now derived
+   from whether a tool_use block was ACTUALLY produced this turn (non-stream:
+   `anyToolUseBlocks(content)`; stream: `state.toolIndexByOpenAiIndex.size >
+   0`), not only from the upstream's self-reported finish_reason — this
+   backend is not reliably observed to always set that field correctly even
+   when it did emit a tool call.
+
+### Not touched (separate dispatch, per the lead's scope)
+
+`studio/provision.ts` (leadType-set-once hardening), `studio/do.ts`
+(security-label-added-after-assignment refusal, restoring the removed
+history comments), `board/*` — all explicitly out of scope for this
+dispatch.
+
+### Verification discipline
+
+RED-confirmed the two highest-value fixes by reverting them locally and
+re-running just the affected test (BLOCKER mount line gated with `false &&`;
+MAJOR 3's pumpAnthropicStream reverted to the old try/finally shape),
+confirmed each failed for the right reason, restored, reran GREEN. Ran only
+the touched test files throughout: `test/bun/llm-translate.test.ts` (50
+pass), `test/llm.anthropic-route.test.ts` + `test/index.test.ts` (45 pass),
+`test/junior.route.test.ts` + `test/junior.ratelimit.test.ts` +
+`test/junior.usage.test.ts` + `test/junior.authz.test.ts` +
+`test/junior.provision.test.ts` (77 pass, no regression from reusing
+junior's rate-limit/usage machinery) — 172 tests total. Also ran a single
+scoped `tsc --noEmit` (this app's own root project only, not the 5-project
+`bun run check` gate) — zero errors. Did NOT run `bun-test`/`check`/the full
+suite — reserved for the lead's own final verification.
