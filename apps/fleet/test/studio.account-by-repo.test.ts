@@ -482,6 +482,21 @@ describe("launchAccountOrReroute — issue #251: a stale account-limit row must 
     expect(result.error).toContain("every account limited");
   });
 
+  it("a fresh, under-threshold usage row on an account D1 records as DEAD (not merely limited): still refused -- a dead account has no working subscription at all, no usage reading can rescue it", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      // dead -- org disabled subscription access, not merely rate-limited.
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: null, seenAt: SEEN_AT, dead: true },
+    };
+    const usage: AccountUsageMap = { CLAUDE_CODE_OAUTH_TOKEN_3: freshUsage(14, 5 * 60 * 1000) }; // 14%, 5 min old
+    const result = await launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW, null, undefined, usage);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("every account limited");
+  });
+
   it("the refusal message names the earliest-reset account and suggests 'fleet accounts sync'", async () => {
     const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
     const limits: AccountLimits = {
