@@ -389,6 +389,11 @@ export type RoleEnv = {
   ROLE_PROMPT_B64: string;
   ROLE_ALLOWED_TOOLS: string;
   ROLE_EFFORT: string;
+  /** Issue #276: the role's `mcp:` names, comma-joined. Optional on the TYPE
+   *  for the same reason as StudioEnv.STUDIO_COMPLETION_GATE: an env stored
+   *  before this field existed has no such key, and bring-up reads it as
+   *  `${ROLE_MCP:-}` — no MCP until the next provision re-resolves. */
+  ROLE_MCP?: string;
 };
 
 /**

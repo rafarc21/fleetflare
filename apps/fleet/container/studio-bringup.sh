@@ -871,60 +871,8 @@ for fn, b64 in bundle.items():
     done
   fi
 
-  # mcp: fixed server templates keyed by name -- adding a server means
-  # editing this map, not touching studio.md. Secrets are already in the
-  # container's env by the time this runs (provision's own concern, not this
-  # script's).
-  if [ -n "${STUDIO_MCP:-}" ]; then
-    # WHERE, not just what (fix wave, Important #3). claude reads a project
-    # .mcp.json out of ITS OWN cwd, and the claude pane's cwd is whatever the
-    # tmux server started in -- /container-server, the sandbox exec's own
-    # directory -- never /workspace. Measured on the built image: `claude mcp
-    # list` from /container-server said "No MCP servers configured" while the
-    # same command from /workspace listed the playwright entry, i.e. the file
-    # was being written somewhere claude never looks and the whole mcp: block
-    # was dead. Asked of tmux rather than hardcoded, so this keeps working if
-    # the pty's start directory ever moves. Deliberately NOT fixed by cd-ing
-    # the tmux session to /workspace instead: /workspace is load-bearing at
-    # its absolute path elsewhere in this very script (transcript pipe,
-    # .ts-host, session-restore), and moving the session would be a much
-    # wider change than the bug warrants.
-    mcp_dir="$(tmux display-message -p -t studio:claude '#{pane_current_path}' 2>/dev/null || true)"
-    [ -n "$mcp_dir" ] || mcp_dir="$PWD"
-    # command is "bun", not "bunx" -- review fix round: this base image's
-    # bun (1.3.12) ships no `bunx` binary at all, only the `bun x`
-    # subcommand (verified in the built T5 image, "bunx: command not
-    # found"). MCP spawns command+args directly, no shell in between, so
-    # the subcommand has to be its own argv element, same as typing
-    # `bun x @playwright/mcp@latest` at a prompt.
-    MCP_PATH="$mcp_dir/.mcp.json" python3 -c '
-import json, os
-known = {"playwright": {"command": "bun", "args": ["x", "@playwright/mcp@latest"]}}
-names = [n for n in os.environ.get("STUDIO_MCP", "").split(",") if n]
-cfg = {"mcpServers": {n: known[n] for n in names if n in known}}
-with open(os.environ["MCP_PATH"], "w") as f:
-    json.dump(cfg, f)
-'
-    # A project .mcp.json is APPROVAL-GATED per project directory: without
-    # this, claude prompts before it will use any server declared there, and
-    # nothing in a headless studio pane ever answers that prompt. Set
-    # alongside the file itself, in the same guarded block, so the two can
-    # never drift apart. Merge-not-clobber, same idiom the lead-gate
-    # settings.json write below already uses.
-    mkdir -p ~/.claude
-    python3 -c '
-import json, os
-path = os.path.expanduser("~/.claude/settings.json")
-try:
-    with open(path) as f:
-        cfg = json.load(f)
-except (FileNotFoundError, ValueError):
-    cfg = {}
-cfg["enableAllProjectMcpServers"] = True
-with open(path, "w") as f:
-    json.dump(cfg, f, indent=2)
-'
-  fi
+  # mcp: written AFTER this block, for studios and roles alike -- see
+  # fleet_mcp_config (issue #276).
 
   # lead gate: PreToolUse hook, not --disallowedTools. Task 0 spike ruling
   # (.superpowers/spike-lead-tools.md): --disallowedTools removes the tool
@@ -1273,6 +1221,56 @@ with open(path, "w") as f:
   # which is the same lifetime the harness it describes has.
   printf '%s' "$STUDIO_NAME" > ~/.claude/.fleet-studio
 fi
+
+# MCP servers, for studios (STUDIO_MCP) AND roles (ROLE_MCP) -- issue #276.
+# Fixed server templates keyed by name: adding a server means editing this
+# map, not touching a blueprint file. Secrets are already in the container's
+# env by the time this runs (provision's own concern, not this script's).
+#
+# Written to ONE file under ~/.claude and handed to claude as --mcp-config at
+# launch (claude-launch below), never as a project .mcp.json. Measured with
+# claude 2.1.294: a project .mcp.json is read only from claude's OWN cwd, and
+# claude_launch_line cds claude into the checkout -- so the old file, written
+# to the tmux pane's directory, was invisible ("No MCP servers configured")
+# whenever a checkout existed. --mcp-config from the same cwd reports the
+# server "connected" and registers its tools, and is not approval-gated the
+# way a project .mcp.json is. The role path used to write nothing at all: the
+# old writer lived inside the STUDIO_NAME block above.
+#
+# No names -> the file is REMOVED, so dropping mcp: from a blueprint takes
+# effect on the next bring-up instead of a stale config lingering. A failed
+# write never stops the boot: claude without its MCP is degraded, a claude
+# that never launches is dead.
+#
+# command is "bun", not "bunx": this base image's bun (1.3.12) ships no
+# `bunx` binary, only the `bun x` subcommand. MCP spawns command+args
+# directly, no shell in between, so the subcommand is its own argv element.
+fleet_mcp_config() {
+  local file="$1" names="$2"
+  if [ -z "$names" ]; then
+    rm -f "$file"
+    return 0
+  fi
+  mkdir -p "${file%/*}" || return 1
+  MCP_PATH="$file" MCP_NAMES="$names" python3 -c '
+import json, os, sys
+known = {"playwright": {"command": "bun", "args": ["x", "@playwright/mcp@latest"]}}
+servers = {}
+for n in [n for n in os.environ["MCP_NAMES"].split(",") if n]:
+    if n in known:
+        servers[n] = known[n]
+    else:
+        print("studio-bringup: declared mcp server \"%s\" is not in the known-server map -- skipped" % n, file=sys.stderr)
+with open(os.environ["MCP_PATH"], "w") as f:
+    json.dump({"mcpServers": servers}, f)
+'
+}
+
+bringup_step mcp-config
+# >>> mcp-config >>>
+fleet_mcp_config "${FLEET_MCP_CONFIG:-$HOME/.claude/fleet-mcp.json}" "${STUDIO_MCP:-${ROLE_MCP:-}}" \
+  || echo "studio-bringup: could not write the MCP config -- claude launches without its MCP servers" >&2
+# <<< mcp-config <<<
 
 # window 0 ("claude") launch/respawn. Deliberately NOT
 # `tmux new-session ... claude --continue ...` in one shot (handing the whole
@@ -1780,6 +1778,10 @@ if claude_launch_needed; then
   # frontmatter effort wins, else "max" for the cto role, else empty. Empty
   # means claude's own default: only pass --effort when a real value is set.
   [ -n "${ROLE_EFFORT:-}" ] && claude_args+=(--effort "$ROLE_EFFORT")
+  # Issue #276: the MCP config the mcp-config step wrote (or removed) above.
+  # A failed write may have left a partial file, so only a file that parses
+  # is handed over -- a config claude cannot parse would stop it starting.
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${FLEET_MCP_CONFIG:-$HOME/.claude/fleet-mcp.json}" 2>/dev/null && claude_args+=(--mcp-config "${FLEET_MCP_CONFIG:-$HOME/.claude/fleet-mcp.json}")
   cmd_str="$(claude_launch_line "$role_prompt" "${repo_dir:-}" "${claude_args[@]}")"
   # Issue #6: the typed line's size, on record in the bring-up log. It no
   # longer grows with the brief; a large number here means it leaked back.

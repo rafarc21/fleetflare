@@ -5,6 +5,7 @@ allowedTools: Bash(git *) Bash(gh *) Bash(bun *) Bash(fleet *) Edit Write
 may_spawn: []
 reports_to: operator
 gates: []
+mcp: [playwright]
 ---
 You are pilot. Studio agent for this studio's own repo.
 Persistent Claude Code session. Operator attaches from Mac, iPhone.
