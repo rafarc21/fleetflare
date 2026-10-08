@@ -18,14 +18,15 @@ describe("parseTestCredsConfig — guard", () => {
   });
 
   it("accepts dev-like environments and nested /test-accounts paths", () => {
-    for (const environment of ["staging", "dev", "development", "test", "Staging"]) {
+    for (const environment of ["staging", "dev", "development", "test"]) {
       const r = parseTestCredsConfig(cfg({ "acme/web": { viewer: entry({ environment, secretPath: "/test-accounts/web" }) } }));
       expect(r.ok, environment).toBe(true);
     }
   });
 
   it("rejects a prod environment at load", () => {
-    for (const environment of ["prod", "production", "PROD", "live", "main", ""]) {
+    // Review round 1, fix 5: Infisical env slugs are case-sensitive — exact match only.
+    for (const environment of ["prod", "production", "PROD", "live", "main", "", "Staging", "DEV", " staging"]) {
       const r = parseTestCredsConfig(cfg({ "acme/web": { viewer: entry({ environment }) } }));
       expect(r.ok, environment).toBe(false);
     }
@@ -37,6 +38,14 @@ describe("parseTestCredsConfig — guard", () => {
       const r = parseTestCredsConfig(cfg({ "acme/web": { viewer: entry({ secretPath }) } }));
       expect(r.ok, secretPath).toBe(false);
     }
+  });
+
+  // Review round 1, fix 2: `/raw/..` would normalize to the list endpoint.
+  it("rejects a key that is . or .. or does not start alphanumeric", () => {
+    for (const key of [".", "..", ".hidden", "-x", "_x"]) {
+      expect(parseTestCredsConfig(cfg({ "acme/web": { viewer: entry({ key }) } })).ok, key).toBe(false);
+    }
+    expect(parseTestCredsConfig(cfg({ "acme/web": { viewer: entry({ key: "Viewer.pass_1-x" }) } })).ok).toBe(true);
   });
 
   it("rejects an admin-looking entry name, key or path", () => {

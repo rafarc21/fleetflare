@@ -59,6 +59,16 @@ describe("studio-fleet creds get", () => {
     expect(r.out).toBe("");
   });
 
+  // Review round 1, fix 4: a non-JSON 200 is never echoed to stdout.
+  test("a non-JSON 200 goes to stderr as an error, exit 1, nothing on stdout", async () => {
+    reply = () => new Response("not json at all", { status: 200 });
+    const r = await run(["creds", "get", "viewer"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toBe("");
+    expect(r.err).toContain("not JSON");
+    expect(r.err).not.toContain("not json at all");
+  });
+
   test("usage errors never call the Worker", async () => {
     for (const args of [["creds"], ["creds", "get"], ["creds", "ls"], ["creds", "get", "a/b"], ["creds", "get", "x", "y"]]) {
       const r = await run(args);

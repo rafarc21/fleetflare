@@ -37,7 +37,8 @@ export type TestCredsConfig = Record<string, Record<string, TestCredEntry>>;
 const ALLOWED_ENVIRONMENTS = new Set(["staging", "dev", "development", "test"]);
 const SLUG_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const KEY_RE = /^[A-Za-z0-9_.-]{1,128}$/;
+// Leading alnum: a key of `.` or `..` would turn `/raw/<key>` into another endpoint.
+const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const TEST_ROOT = "/test-accounts";
 
 /** Every segment after the root a plain name: no `..`, `.`, or empty segment. */
@@ -55,11 +56,12 @@ function entryProblem(name: string, raw: unknown): string | null {
     if (typeof e[f] !== "string" || e[f] === "") return `${f} missing or not a string`;
   }
   const { environment, secretPath, key } = e as unknown as TestCredEntry;
-  if (!ALLOWED_ENVIRONMENTS.has(environment.toLowerCase())) {
+  // Exact match: Infisical environment slugs are case-sensitive.
+  if (!ALLOWED_ENVIRONMENTS.has(environment)) {
     return `environment "${environment}" is not staging/dev/test`;
   }
   if (!isTestAccountsPath(secretPath)) return `secretPath "${secretPath}" is outside ${TEST_ROOT}`;
-  if (!KEY_RE.test(key)) return `key is not [A-Za-z0-9_.-]`;
+  if (!KEY_RE.test(key)) return "key must start alphanumeric, then [A-Za-z0-9_.-]";
   if ([name, key, secretPath].some((s) => /admin/i.test(s))) return "admin credentials are out of scope";
   return null;
 }
@@ -147,6 +149,10 @@ async function readSecret(id: InfisicalIdentity, entry: TestCredEntry, f: typeof
   url.searchParams.set("workspaceId", entry.workspaceId);
   url.searchParams.set("environment", entry.environment);
   url.searchParams.set("secretPath", entry.secretPath);
+  // An import or a ${ref} could resolve to a value outside /test-accounts,
+  // past the path guard. Both off, explicitly, never left to the default.
+  url.searchParams.set("include_imports", "false");
+  url.searchParams.set("expandSecretReferences", "false");
   let res: Response;
   try {
     res = await f(url.toString(), {
@@ -163,7 +169,12 @@ async function readSecret(id: InfisicalIdentity, entry: TestCredEntry, f: typeof
   }
   if (res.status === 404) return { ok: false, status: 404, message: "credential not found in infisical" };
   if (!res.ok) return { ok: false, status: 502, message: `infisical read failed (${res.status})` };
-  const body = await res.json().catch(() => null) as { secret?: { secretValue?: unknown } } | null;
+  const body = await res.json().catch(() => null) as
+    { secret?: { secretValue?: unknown; secretValueHidden?: unknown } } | null;
+  // A hidden value is Infisical's placeholder, never the password.
+  if (body?.secret?.secretValueHidden === true) {
+    return { ok: false, status: 403, message: "infisical identity cannot read secret values" };
+  }
   const value = body?.secret?.secretValue;
   if (typeof value !== "string") return { ok: false, status: 502, message: "infisical returned no value" };
   return { ok: true, value };

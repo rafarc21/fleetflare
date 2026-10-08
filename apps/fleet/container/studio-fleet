@@ -656,6 +656,20 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  if (cmd.kind === "creds-get") {
+    // Issue #279 review: a creds 200 that is not JSON is an error, and its
+    // body is never echoed anywhere — it may be the value itself.
+    let json: unknown;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      console.error("studio-fleet: creds get: the Worker answered 200 with a body that is not JSON");
+      process.exit(1);
+    }
+    console.log(built.render(json));
+    return;
+  }
+
   try {
     console.log(built.render(JSON.parse(text)));
   } catch {

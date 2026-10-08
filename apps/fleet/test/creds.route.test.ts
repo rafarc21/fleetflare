@@ -93,6 +93,10 @@ describe("handleFleetCreds — auth and allowlist", () => {
     expect(u.searchParams.get("workspaceId")).toBe("ws-1");
     expect(u.searchParams.get("environment")).toBe("staging");
     expect(u.searchParams.get("secretPath")).toBe("/test-accounts");
+    // Review round 1, fix 1: an import or ${ref} could pull a value from
+    // outside /test-accounts past the path guard. Both off, explicitly.
+    expect(u.searchParams.get("include_imports")).toBe("false");
+    expect(u.searchParams.get("expandSecretReferences")).toBe("false");
     expect(read.auth).toBe(`Bearer ${ACCESS_TOKEN}`);
     const login = up.calls.find((x) => x.method === "POST")!;
     expect(JSON.parse(login.body!)).toEqual({ clientId: "fake-client-id", clientSecret: CLIENT_SECRET });
@@ -237,6 +241,9 @@ describe("handleFleetCreds — Infisical error mapping", () => {
     ["secret 500", { secret: () => new Response(`upstream ${SECRET_VALUE}`, { status: 500 }) }, 502],
     ["secret network error", { secret: () => { throw new TypeError("network down"); } }, 502],
     ["secret 200 without secretValue", { secret: () => Response.json({ secret: {} }) }, 502],
+    // Review round 1, fix 3: a hidden value is a placeholder, never a password.
+    ["secret 200 with secretValueHidden", { secret: () => Response.json({ secret: { secretValue: "<hidden-by-infisical>",
+      secretValueHidden: true } }) }, 403],
   ];
   for (const [label, opts, status] of cases) {
     it(`${label} -> ${status}, upstream body never echoed`, async () => {
