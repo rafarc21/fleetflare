@@ -497,6 +497,68 @@ describe("launchAccountOrReroute — issue #251: a stale account-limit row must 
     expect(result.error).toContain("every account limited");
   });
 
+  it("a fresh, under-threshold usage row that PREDATES a newer live limit sighting: still refused -- the usage reading is stale RELATIVE to the limit, even though it is within its own 10-min window", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      // The limit itself was sighted LIVE just 2 minutes ago.
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: new Date(NOW.getTime() - 2 * 60 * 1000).toISOString() },
+    };
+    // The usage reading is 8 minutes old -- within its own 10-min freshness
+    // window, genuinely under threshold -- but it PREDATES the limit sighting.
+    const usage: AccountUsageMap = { CLAUDE_CODE_OAUTH_TOKEN_3: freshUsage(14, 8 * 60 * 1000) };
+    const result = await launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW, null, undefined, usage);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("every account limited");
+  });
+
+  it("a fresh, under-threshold usage row genuinely NEWER than the limit sighting: still admitted -- the ordering guard must not break the rescue itself", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      // The limit was sighted 8 minutes ago.
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: new Date(NOW.getTime() - 8 * 60 * 1000).toISOString() },
+    };
+    // The usage reading is only 2 minutes old -- genuinely newer than the
+    // limit sighting, fresh, and under threshold.
+    const usage: AccountUsageMap = { CLAUDE_CODE_OAUTH_TOKEN_3: freshUsage(14, 2 * 60 * 1000) };
+    await expect(launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW, null, undefined, usage))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
+  });
+
+  it("the limit row's own seenAt is unparseable: refused -- ambiguous data never overrides a limit (fail safe)", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: "not-a-real-timestamp" },
+    };
+    const usage: AccountUsageMap = { CLAUDE_CODE_OAUTH_TOKEN_3: freshUsage(14, 2 * 60 * 1000) }; // fresh, under threshold
+    const result = await launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW, null, undefined, usage);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("every account limited");
+  });
+
+  it("the usage row's own seenAt is unparseable: refused -- ambiguous data never overrides a limit (fail safe)", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: new Date(NOW.getTime() - 8 * 60 * 1000).toISOString() },
+    };
+    const usage: AccountUsageMap = {
+      CLAUDE_CODE_OAUTH_TOKEN_3: { fiveHourPct: 14, sevenDayPct: 0, scopedMaxPct: null, seenAt: "also-not-a-real-timestamp" },
+    };
+    const result = await launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW, null, undefined, usage);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("every account limited");
+  });
+
   it("the refusal message names the earliest-reset account and suggests 'fleet accounts sync'", async () => {
     const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
     const limits: AccountLimits = {
