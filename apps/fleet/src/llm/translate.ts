@@ -272,19 +272,15 @@ export function openAIResponseToAnthropic(resp: Json, opts: { model: string; id?
       input_tokens: resp?.usage?.prompt_tokens ?? 0,
       // PR #255 STATUS comment, measured live 2026-10-08T08:40:12Z: GLM's
       // usage object may report `completion_tokens_details.reasoning_tokens`
-      // (the OpenAI o1-style reasoning-model convention) as a BREAKDOWN
-      // alongside `completion_tokens`. Whether `completion_tokens` already
-      // includes reasoning tokens or excludes them is NOT verifiable from
-      // inside this repo (no live backend access here) — the STATUS
-      // comment's own numbers read as two distinct figures ("6861
-      // completion tokens, ~24k chars reasoning"), which is the basis for
-      // treating them as additive below. Flagged risk either way:
-      // undercounting a real cost (if they're additive and this doesn't add
-      // them) is worse than double-counting a figure that turns out to
-      // already be included (if they're NOT additive and this does add
-      // them) — so this takes the directionally-safer side, but is not
-      // asserted as confirmed fact.
-      output_tokens: (resp?.usage?.completion_tokens ?? 0) + (resp?.usage?.completion_tokens_details?.reasoning_tokens ?? 0),
+      // alongside `completion_tokens`. `completion_tokens` is treated as
+      // already INCLUSIVE of reasoning tokens — OpenAI's own documented
+      // convention for `completion_tokens_details.reasoning_tokens` on
+      // reasoning models (o1/o3-style): it's a breakdown subset, not a
+      // figure additional to the total. The maestro's own measured numbers
+      // confirm this: ~24k chars of reasoning at ~4 chars/token is ~6000
+      // tokens, almost exactly the reported 6861 completion_tokens — if they
+      // were additive, completion_tokens would need to be far larger.
+      output_tokens: resp?.usage?.completion_tokens ?? 0,
     },
   };
 }
@@ -438,9 +434,9 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
   if (chunk?.usage?.completion_tokens !== undefined) {
     // PR #255 STATUS comment, measured live 2026-10-08T08:40:12Z: same
     // reasoning-tokens handling as openAIResponseToAnthropic's usage field
-    // above — see that comment for the directionally-safer-but-unverified
-    // assumption this is built on.
-    state.outputTokens = chunk.usage.completion_tokens + (chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0);
+    // above — `completion_tokens` already includes any reasoning tokens, so
+    // `completion_tokens_details.reasoning_tokens` is ignored here.
+    state.outputTokens = chunk.usage.completion_tokens;
   }
   // MAJOR 4: the SAME final usage-bearing chunk also carries the real
   // prompt_tokens count — this backend only ever sends `usage` once
