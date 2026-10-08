@@ -1,10 +1,12 @@
 # deep-modules + pr-body skills, standards out of the implementer, review-fix loop (issue #259, Part A)
 
 Issue: https://github.com/rafarc21/fleetflare/issues/259 (Part A only — skills.
-Part B/C/D are a separate, future, out-of-scope lane). Spec committed verbatim
-at `docs/superpowers/specs/2026-10-08-deep-modules-maintainability-design.md`
-— that file is the source of truth for exactly what was asked; this plan is
-how it gets built.
+Part B/C/D are a separate, future, out-of-scope lane). Spec: see
+`docs/superpowers/specs/2026-10-08-deep-modules-maintainability-design.md` —
+that file is a link-only placeholder, not a verbatim copy of the issue body.
+A verbatim copy was attempted and refused by this repo's own leak gate, so
+that file links to the issue directly and carries a short summary paragraph
+instead; see board issue #259 for the full spec text.
 
 Branch: `feat-259-deep-modules-skills` off `origin/main`. Docs/skills only —
 no app code, no tests beyond what already exists for skill-file structure.
@@ -166,7 +168,7 @@ either way: if the module holds up against the checklist, say so.
 
 ## Files touched
 
-- `docs/superpowers/specs/2026-10-08-deep-modules-maintainability-design.md` — step 0, issue body verbatim.
+- `docs/superpowers/specs/2026-10-08-deep-modules-maintainability-design.md` — step 0, link-only placeholder (issue body not reproduced; leak gate refused a verbatim copy).
 - `docs/superpowers/plans/2026-10-08-deep-modules-skills-259.md` — this file.
 - `skills/deep-modules/SKILL.md` — vendored (mattpocock/skills@b0618bc436ad) + local addendum.
 - `skills/deep-modules/DEEPENING.md`, `skills/deep-modules/DESIGN-IT-TWICE.md` — vendored, companion files SKILL.md links to.
