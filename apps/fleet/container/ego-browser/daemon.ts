@@ -13,7 +13,7 @@ import { resolvePaths } from "./paths";
 import { encodeMessage, MessageFramer, type RpcRequest } from "./rpc";
 import { Registry, type FinishKeep, type TaskSpaceRecord } from "./registry";
 import { IdleShutdown, resolveIdleMs } from "./idle-shutdown";
-import { findDirectChildPid, raceWithTimeout } from "./process-reap";
+import { findDirectChildPid, raceWithTimeout, raceWithTimeoutOrReject } from "./process-reap";
 import type { FnOrStringWire, SnapshotOpts, UrlMatcherWire } from "./wire";
 
 const paths = resolvePaths();
@@ -52,6 +52,21 @@ process.on("unhandledRejection", (err) => log(`unhandledRejection: ${err instanc
 // same-generation crashpad handler.
 const CHROMIUM_PATH = process.env.EGO_BROWSER_CHROMIUM_PATH?.trim() || "/usr/local/bin/chromium";
 
+// Board #276: chromium.launch() itself had no bound, unlike its sibling
+// browser.close() call in shutdown() (CLOSE_TIMEOUT_MS below). A Chrome
+// process that starts but never completes its CDP handshake -- a real-world
+// failure mode under container resource/memory pressure -- hung
+// getBrowser() indefinitely, with every later call (and the whole daemon's
+// RPC dispatch for that call) stuck behind it forever. 30000ms matches
+// playwright-core's own documented default launch timeout (same order of
+// magnitude as CLOSE_TIMEOUT_MS below, scaled up for how much slower a real
+// browser launch is than a close()) -- this is a backstop in front of
+// whatever Playwright does internally, not a replacement for it. Overridable
+// via EGO_BROWSER_LAUNCH_TIMEOUT_MS, same override-via-env convention as
+// EGO_BROWSER_CHROMIUM_PATH, so a test can use a short bound instead of
+// waiting out 30+ real seconds (see ego-browser-launch-timeout.test.ts).
+const LAUNCH_TIMEOUT_MS = Number(process.env.EGO_BROWSER_LAUNCH_TIMEOUT_MS?.trim()) || 30000;
+
 let browserPromise: Promise<Browser> | undefined;
 /** The real Chromium OS pid, once known -- see process-reap.ts's
  * findDirectChildPid(). Read by shutdown()'s SIGKILL backstop and logged
@@ -68,8 +83,8 @@ function getBrowser(): Promise<Browser> {
     // second real attempt ever happened. See
     // ego-browser-launch-self-heal.test.ts.
     log("getBrowser: attempting chromium launch");
-    browserPromise = chromium
-      .launch({
+    browserPromise = raceWithTimeoutOrReject(
+      chromium.launch({
         executablePath: CHROMIUM_PATH,
         headless: true,
         // Running as root in a container with no chrome-sandbox setuid
@@ -77,7 +92,10 @@ function getBrowser(): Promise<Browser> {
         // reasoning Dockerfile.studio documents for the Playwright MCP
         // server's own chromium install).
         args: ["--no-sandbox"],
-      })
+      }),
+      LAUNCH_TIMEOUT_MS,
+      `ego-browser: chromium failed to start within ${LAUNCH_TIMEOUT_MS}ms -- likely container resource/memory pressure, check ${paths.logFile} and the studio's available memory`,
+    )
       .then((browser) => {
         browserPid = findDirectChildPid(process.pid, { chromiumBinaryName: basename(CHROMIUM_PATH) });
         log(`browser launched, pid ${browserPid ?? "unknown"}`);

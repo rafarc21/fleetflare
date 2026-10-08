@@ -133,3 +133,43 @@ export function raceWithTimeout(promise: Promise<unknown>, timeoutMs: number, se
     promise.then(finish, finish);
   });
 }
+
+/**
+ * Same bounded-wait shape as raceWithTimeout(), but for callers that need
+ * the timeout itself to become a REAL rejection with a caller-supplied,
+ * actionable message -- board #276's getBrowser() bound on chromium.launch().
+ * raceWithTimeout() deliberately only resolves either way (right for
+ * shutdown()'s browser.close(), which doesn't care whether close() actually
+ * succeeded, only that the wait ends); a hung launch() must surface as an
+ * honest failure to whatever is awaiting getBrowser(), not a silent "assume
+ * it launched". Does not cancel the underlying promise (there is no such
+ * thing for a plain Promise) -- if it later settles anyway, that settlement
+ * is simply ignored by the `settled` guard, same spirit as raceWithTimeout().
+ */
+export function raceWithTimeoutOrReject<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+  setTimeoutFn: typeof setTimeout = setTimeout,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    setTimeoutFn(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      },
+    );
+  });
+}
