@@ -407,3 +407,55 @@ maestro's citation is accurate for the per-commit diff (deletion in one hunk)
 but not for the branch's own final, cumulative state -- the restoring `+` was
 already part of the same commit that moved the code, not a later one. No
 code change made; verified via `git diff`, not guessed.
+
+## Fresh-context review fixes (round 2, backend dispatch)
+
+### Finding 1 -- streaming usage still reported 0 to the CLIENT
+
+MAJOR 4 above only fixed `state.inputTokens` internally (the D1 usage-log
+row read it back fine) -- it never reached any outbound SSE frame Claude
+Code itself reads. `message_start`'s usage stays `{input_tokens: 0,
+output_tokens: 0}` on purpose: it fires before any upstream chunk is even
+read, and this OpenAI-compatible backend only reports `usage.prompt_tokens`
+on the FINAL chunk, long after `message_start` already hit the wire -- 0 is
+the real, honest value at that point, not a bug. `message_delta` is the one
+remaining client-visible frame with a real number to put it in, so
+`closeStream` now emits `usage: {input_tokens: state.inputTokens,
+output_tokens: state.outputTokens}` there -- a deliberate, flagged deviation
+from Anthropic's strict wire shape (the real API never puts input_tokens on
+message_delta; it's already known up front on message_start, which this
+backend cannot replicate). An extra key on a JSON object message_delta
+already carries is not a shape Claude Code's own SSE parsing has a reason to
+reject.
+
+RED: new test in `llm-translate.test.ts` -- asserted the closeStream
+message_delta frame's usage object equals `{input_tokens: 5, output_tokens:
+9}` after a final chunk carrying both. Failed (`input_tokens` missing,
+`output_tokens` only) before the fix. Fixed, 51/51 pass
+(`bun test apps/fleet/test/bun/llm-translate.test.ts`); 24/24 pass
+(`test/llm.anthropic-route.test.ts`, vitest).
+
+### Finding 2 -- glm-lead usage silently conflated with the junior-adoption dashboard
+
+`anthropic-route.ts`'s `logUsage` writes into the SAME `junior_usage_log`
+table `/fleet/junior` uses, tagged `mode: "lead"`. `aggregateJuniorUsage`
+(backing `GET /studio/junior/usage`) grouped/summed EVERY row with no mode
+filter, despite this module's own header doc comment stating its purpose is
+specifically "measure GLM (junior) adoption vs Claude" -- a studio running
+its entire lead on GLM had that whole volume folded into "junior adoption".
+
+Fix: `aggregateJuniorUsage`'s SQL gained `AND mode != 'lead'` -- the minimum
+fix the dispatch asked for. Lead-mode rows are still written (still real
+usage/billing data, still raw-queryable), just excluded from this one
+aggregate. No `JUNIOR_MODES` import from route.ts (would create a route.ts
+<-> usage.ts import cycle; route.ts already imports `insertJuniorUsage` from
+usage.ts) -- the literal `"lead"` is usage.ts's own exclusion, not an
+enumeration of route.ts's modes.
+
+RED: new test in `junior.usage.test.ts` -- one "edit" row + one "lead" row
+inserted, asserted the aggregate's rows/totals reflect only the "edit" row,
+and a raw `SELECT ... WHERE mode = 'lead'` still finds the lead row (proving
+it's excluded from the aggregate, not deleted). Failed (`calls: 2`,
+`inputTokens: 1010`) before the fix. Fixed, 13/13 pass
+(`test/junior.usage.test.ts`); re-ran `test/llm.anthropic-route.test.ts`
+alongside it (shares the same table) -- 37/37 pass across both files.
