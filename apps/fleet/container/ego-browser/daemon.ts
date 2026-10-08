@@ -60,6 +60,14 @@ let browserPromise: Promise<Browser> | undefined;
 let browserPid: number | undefined;
 function getBrowser(): Promise<Browser> {
   if (!browserPromise) {
+    // Logged once per actual re-entry into this branch (never on a cache
+    // hit) -- board #276's own repro signal: a launch failure's error
+    // message is textually identical whether it comes from a genuinely
+    // fresh attempt or a stale replayed rejection (same bad path, same
+    // ENOENT), so this log line is the only externally-observable proof a
+    // second real attempt ever happened. See
+    // ego-browser-launch-self-heal.test.ts.
+    log("getBrowser: attempting chromium launch");
     browserPromise = chromium
       .launch({
         executablePath: CHROMIUM_PATH,
