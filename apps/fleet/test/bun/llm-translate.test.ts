@@ -14,6 +14,7 @@ import {
   applyOpenAIStreamChunk,
   closeStream,
   parseSseDataLine,
+  streamErrorFrame,
 } from "../../src/llm/translate";
 
 /** Splits a raw `event: X\ndata: Y\n\n` frame back into its two halves, for
@@ -67,6 +68,25 @@ describe("anthropicRequestToOpenAI — text", () => {
       messages: [{ role: "user", content: "hi" }],
     });
     expect(out.stream).toBe(true);
+  });
+
+  // MAJOR 4 (maestro review round 1): without this, no chunk the upstream
+  // sends (including the final one) ever carries a `usage` field, and every
+  // streamed reply reports 0/0 regardless of the real call.
+  test("stream:true also requests usage on the final chunk (stream_options.include_usage)", () => {
+    const out = anthropicRequestToOpenAI({
+      model: "x", max_tokens: 10, stream: true,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(out.stream_options).toEqual({ include_usage: true });
+  });
+
+  test("stream_options is absent on a non-streaming request", () => {
+    const out = anthropicRequestToOpenAI({
+      model: "x", max_tokens: 10,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(out.stream_options).toBeUndefined();
   });
 });
 
@@ -244,6 +264,51 @@ describe("openAIResponseToAnthropic — tool_calls", () => {
     }, { model: "m" });
     expect(out.content[0]).toEqual({ type: "tool_use", id: "c1", name: "f", input: {} });
   });
+
+  // Minor fix (maestro review round 1): a toolu_-prefixed id is generated
+  // when GLM's own tool-call response omits one, rather than leaving an
+  // empty/undefined id on a block Claude Code expects to reference later
+  // (e.g. in its own next-turn tool_result).
+  test.each([[undefined], [null], [""]])("a missing/empty tool_call id (%j) gets a generated toolu_ id", (missing) => {
+    const out = openAIResponseToAnthropic({
+      choices: [{
+        message: { role: "assistant", content: null, tool_calls: [{ id: missing, type: "function", function: { name: "f", arguments: "{}" } }] },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }, { model: "m" });
+    expect(out.content[0].id).toMatch(/^toolu_[0-9a-f]{32}$/);
+  });
+
+  test("a real tool_call id is kept as-is, never replaced", () => {
+    const out = openAIResponseToAnthropic({
+      choices: [{
+        message: { role: "assistant", content: null, tool_calls: [{ id: "call_abc123", type: "function", function: { name: "f", arguments: "{}" } }] },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }, { model: "m" });
+    expect(out.content[0].id).toBe("call_abc123");
+  });
+
+  // Minor fix (maestro review round 1): stop_reason derived from whether any
+  // tool_use block was actually produced, not only from the upstream's own
+  // finish_reason — this backend is not reliably observed to always set
+  // finish_reason to the tool-calling value even when it DID emit a tool
+  // call.
+  test("stop_reason is tool_use whenever a tool_use block was emitted, even if finish_reason says 'stop'", () => {
+    const out = openAIResponseToAnthropic({
+      choices: [{
+        message: {
+          role: "assistant", content: null,
+          tool_calls: [{ id: "call_1", type: "function", function: { name: "f", arguments: "{}" } }],
+        },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }, { model: "m" });
+    expect(out.stop_reason).toBe("tool_use");
+  });
 });
 
 describe("classifyAiError", () => {
@@ -254,6 +319,31 @@ describe("classifyAiError", () => {
     ["something else entirely", 500, "api_error"],
   ])("%j -> status %j, type %j", (message, status, type) => {
     expect(classifyAiError(message)).toEqual({ status, type });
+  });
+
+  // MAJOR 4 (maestro review round 1): a context-overflow failure maps to
+  // 400/invalid_request_error with a FIXED message, so Claude Code's own
+  // client treats it as "compact your context", not "retry the same
+  // request" (what a 500/504/529 all read as). Flagged uncertainty — see
+  // classifyAiError's own doc comment on the exact wording not being
+  // confirmed against a real observed error string from this binding.
+  test.each([
+    "This model's maximum context length is 32768 tokens, however you requested 40000 tokens",
+    "context_length_exceeded",
+    "prompt exceeds the context window for this model",
+  ])("a context-overflow-shaped message (%j) -> 400 invalid_request_error, fixed message", (message) => {
+    expect(classifyAiError(message)).toEqual({
+      status: 400, type: "invalid_request_error", message: "prompt is too long",
+    });
+  });
+});
+
+describe("streamErrorFrame", () => {
+  test("builds a genuine Anthropic event: error SSE frame, classified the same way as the non-streaming path", () => {
+    const frame = streamErrorFrame("AiError: capacity exceeded");
+    const { event, data } = parseFrame(frame);
+    expect(event).toBe("error");
+    expect(data).toEqual({ type: "error", error: { type: "overloaded_error", message: "AiError: capacity exceeded" } });
   });
 });
 
@@ -339,8 +429,49 @@ describe("streaming: prelude + chunk application + close", () => {
     expect((delta.data as { usage: { output_tokens: number } }).usage.output_tokens).toBe(9);
   });
 
+  // MAJOR 4 (maestro review round 1): the same final usage-bearing chunk
+  // also carries the real prompt_tokens — tracked on the state for the
+  // ROUTE to read back after the stream ends (for the usage-log row), since
+  // Anthropic's own message_delta event has no input_tokens field to carry
+  // it in (closeStream's own doc comment).
+  test("usage from the final OpenAI chunk also reaches state.inputTokens", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 9 } });
+    expect(state.inputTokens).toBe(5);
+  });
+
   test("a chunk with no choices (e.g. a usage-only trailing chunk) produces no frames and does not throw", () => {
     const state = createStreamState();
     expect(applyOpenAIStreamChunk(state, { choices: [], usage: { prompt_tokens: 1, completion_tokens: 1 } })).toEqual([]);
+  });
+
+  // Minor fix (maestro review round 1): a toolu_-prefixed id is generated
+  // for a streamed tool_use block's content_block_start when GLM's own
+  // delta omits one, same fix as the non-streaming path above.
+  test("a streamed tool call with no id gets a generated toolu_ id on content_block_start", () => {
+    const state = createStreamState();
+    const frames = applyOpenAIStreamChunk(state, {
+      choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "f", arguments: "" } }] } }],
+    });
+    const [start] = frames.map(parseFrame);
+    const block = (start.data as { content_block: { id: string } }).content_block;
+    expect(block.id).toMatch(/^toolu_[0-9a-f]{32}$/);
+  });
+
+  // Minor fix (maestro review round 1): closeStream's own stop_reason is
+  // derived from whether any tool_use block was actually OPENED during this
+  // stream, not only from the upstream's self-reported finish_reason — this
+  // backend is not reliably observed to always set finish_reason to the
+  // tool-calling value even when a tool call streamed through.
+  test("closeStream reports stop_reason: tool_use whenever a tool block opened, even if finish_reason never said so", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, {
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "f", arguments: "{}" } }] } }],
+    });
+    // No finish_reason chunk at all this time — e.g. the upstream closed the
+    // stream without ever sending one.
+    const [delta] = closeStream(state).filter((f) => f.includes("message_delta")).map(parseFrame);
+    expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("tool_use");
   });
 });

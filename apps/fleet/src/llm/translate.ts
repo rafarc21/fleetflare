@@ -132,7 +132,16 @@ export function anthropicRequestToOpenAI(body: Json): Json {
   }
 
   const out: Json = { model: GLM_LEAD_MODEL, messages, max_tokens: body.max_tokens };
-  if (body.stream === true) out.stream = true;
+  if (body.stream === true) {
+    out.stream = true;
+    // Maestro review round 1, MAJOR 4: the OpenAI-compatible streaming
+    // convention for getting real token counts back at all — without this,
+    // no chunk this backend sends (including the final one) ever carries a
+    // `usage` field, and every streamed reply reports 0/0 regardless of the
+    // real call. Only meaningful alongside `stream: true`; a non-streaming
+    // call already gets `usage` on its one response object for free.
+    out.stream_options = { include_usage: true };
+  }
   if (body.temperature !== undefined) out.temperature = body.temperature;
   if (Array.isArray(body.stop_sequences) && body.stop_sequences.length > 0) out.stop = body.stop_sequences;
   if (Array.isArray(body.tools) && body.tools.length > 0) {
@@ -180,6 +189,31 @@ function newMessageId(): string {
   return `msg_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
+/** Minor fix (maestro review round 1): Anthropic's own tool_use block ids
+ *  look like `toolu_01XFDUDY...` — generated here whenever GLM's own
+ *  tool-call response omits one (empty string counts as omitted, same as
+ *  absent), rather than leaving an empty/undefined id on a block Claude Code
+ *  expects to be able to reference. */
+function newToolUseId(): string {
+  return `toolu_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+function toolUseId(raw: unknown): string {
+  return typeof raw === "string" && raw.length > 0 ? raw : newToolUseId();
+}
+
+/** Minor fix (maestro review round 1): whether any tool_use content block
+ *  was actually produced this turn. Anthropic's own `stop_reason` is derived
+ *  from this, NOT only from the upstream's self-reported finish_reason/
+ *  equivalent — this specific GLM-backed model/backend is not reliably
+ *  observed to always set that field to the tool-calling value even when it
+ *  did emit a tool call, so trusting it alone would under-report
+ *  `stop_reason: "tool_use"` to Claude Code on exactly the turns where it
+ *  matters most (a client that doesn't see `tool_use` has no signal to go
+ *  run the tool at all). */
+function anyToolUseBlocks(blocks: Json[]): boolean {
+  return blocks.some((b) => b && b.type === "tool_use");
+}
+
 /**
  * Workers AI's OpenAI-chat-completions response -> one Anthropic Messages
  * API response (non-streaming shape: `{id, type:"message", role:"assistant",
@@ -196,7 +230,7 @@ export function openAIResponseToAnthropic(resp: Json, opts: { model: string; id?
     let input: Json = {};
     try { input = JSON.parse(tc.function?.arguments ?? "{}"); }
     catch { /* malformed model output — an empty input beats throwing on a tool the caller DID ask for */ }
-    content.push({ type: "tool_use", id: tc.id, name: tc.function?.name, input });
+    content.push({ type: "tool_use", id: toolUseId(tc.id), name: tc.function?.name, input });
   }
 
   return {
@@ -205,7 +239,7 @@ export function openAIResponseToAnthropic(resp: Json, opts: { model: string; id?
     role: "assistant",
     model: opts.model,
     content,
-    stop_reason: mapFinishReason(choice.finish_reason),
+    stop_reason: anyToolUseBlocks(content) ? "tool_use" : mapFinishReason(choice.finish_reason),
     stop_sequence: null,
     usage: {
       input_tokens: resp?.usage?.prompt_tokens ?? 0,
@@ -230,11 +264,32 @@ export function openAIResponseToAnthropic(resp: Json, opts: { model: string; id?
  * with: `invalid_request_error`(400), `authentication_error`(401),
  * `permission_error`(403), `not_found_error`(404),
  * `request_too_large`(413), `rate_limit_error`(429), `api_error`(500),
- * `overloaded_error`(529). Only the three this backend can actually produce
+ * `overloaded_error`(529). Only the four this backend can actually produce
  * are classified; everything else is `api_error`/500 — the generic bucket a
  * caller already has to handle for an unrecognized failure.
+ *
+ * MAJOR 4 (maestro review round 1): a context-overflow failure maps to
+ * `invalid_request_error`/400 with a FIXED message ("prompt is too long"),
+ * never the raw upstream text — this is the one shape Claude Code's own
+ * client is built to recognize as "compact your context, don't just retry
+ * the same request" (a 500/504/529 all read as transient-and-retryable to
+ * it; a 400 does not). FLAGGED UNCERTAINTY, not a guess silently assumed
+ * correct (same posture as mapFinishReason's content_filter case above): the
+ * exact wording Workers AI's own backend uses for an overflowed context has
+ * not been observed against a REAL error string from this binding as of
+ * this fix — the regex below matches the common OpenAI-compatible phrasings
+ * ("maximum context length", "context_length_exceeded", "context window")
+ * this backend is most likely to use, same unscoped-substring-matching
+ * convention junior/route.ts's own aiErrorCode already uses for this exact
+ * binding (env.AI.run throws a bare Error with free-text, no HTTP status
+ * line to scope a match against). If the real wording differs, this falls
+ * through to the generic `api_error`/500 bucket below instead of
+ * misclassifying — never a worse outcome than before this fix.
  */
-export function classifyAiError(message: string): { status: number; type: string } {
+export function classifyAiError(message: string): { status: number; type: string; message?: string } {
+  if (/context.?length|context window|context_length_exceeded/i.test(message)) {
+    return { status: 400, type: "invalid_request_error", message: "prompt is too long" };
+  }
   if (/timeout/i.test(message)) return { status: 504, type: "api_error" };
   if (/capacity/i.test(message)) return { status: 529, type: "overloaded_error" };
   if (/rate limit|too many/i.test(message)) return { status: 429, type: "rate_limit_error" };
@@ -286,12 +341,18 @@ export interface StreamState {
   openKind: "text" | number | null;
   finishReason: unknown;
   outputTokens: number;
+  /** MAJOR 4: the real prompt token count, read off the final OpenAI chunk's
+   *  `usage.prompt_tokens` (only present when the outbound request carried
+   *  `stream_options.include_usage` — see anthropicRequestToOpenAI). Zero
+   *  until that chunk arrives, same "0 until proven otherwise" posture
+   *  `outputTokens` already had. */
+  inputTokens: number;
 }
 
 export function createStreamState(): StreamState {
   return {
     nextIndex: 0, textIndex: null, toolIndexByOpenAiIndex: new Map(),
-    openIndex: null, openKind: null, finishReason: null, outputTokens: 0,
+    openIndex: null, openKind: null, finishReason: null, outputTokens: 0, inputTokens: 0,
   };
 }
 
@@ -334,6 +395,11 @@ export function streamPrelude(id: string, model: string): string[] {
 export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[] {
   const choice = chunk?.choices?.[0];
   if (chunk?.usage?.completion_tokens !== undefined) state.outputTokens = chunk.usage.completion_tokens;
+  // MAJOR 4: the SAME final usage-bearing chunk also carries the real
+  // prompt_tokens count — this backend only ever sends `usage` once
+  // `stream_options.include_usage` is set on the outbound request, same
+  // chunk shape OpenAI's own convention documents for both fields together.
+  if (chunk?.usage?.prompt_tokens !== undefined) state.inputTokens = chunk.usage.prompt_tokens;
   if (!choice) return [];
   const events: string[] = [];
   const delta = choice.delta ?? {};
@@ -366,7 +432,7 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
       state.openKind = openAiIndex;
       events.push(sseEvent("content_block_start", {
         type: "content_block_start", index: anthropicIndex,
-        content_block: { type: "tool_use", id: tc.id, name: tc.function?.name, input: {} },
+        content_block: { type: "tool_use", id: toolUseId(tc.id), name: tc.function?.name, input: {} },
       }));
     } else if (state.openKind !== openAiIndex) {
       // A delta for an openAiIndex this stream has already seen (and
@@ -406,11 +472,32 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
 export function closeStream(state: StreamState): string[] {
   const events: string[] = [];
   closeOpenBlock(state, events);
+  // Minor fix (maestro review round 1): derived from whether this stream
+  // actually opened any tool_use block, not only from the upstream's own
+  // self-reported finish_reason — same reasoning as anyToolUseBlocks above,
+  // applied to the streaming path.
+  const stopReason = state.toolIndexByOpenAiIndex.size > 0 ? "tool_use" : mapFinishReason(state.finishReason);
   events.push(sseEvent("message_delta", {
     type: "message_delta",
-    delta: { stop_reason: mapFinishReason(state.finishReason), stop_sequence: null },
+    delta: { stop_reason: stopReason, stop_sequence: null },
     usage: { output_tokens: state.outputTokens },
   }));
   events.push(sseEvent("message_stop", { type: "message_stop" }));
   return events;
+}
+
+/**
+ * MAJOR 3 (maestro review round 1): the Anthropic SSE frame for a genuine
+ * mid-stream upstream failure — `event: error`, never a faked `end_turn` +
+ * `message_stop` pair. `type` reuses classifyAiError's own error-type
+ * mapping (the override `message` field, when present, is deliberately
+ * dropped here — a mid-stream caller gets the raw upstream text, same as
+ * every other error path in this file; only the non-streaming route's
+ * context-overflow case gets the fixed "prompt is too long" message, since
+ * only that path can still retry with a shorter prompt instead of
+ * discarding a partially-delivered reply).
+ */
+export function streamErrorFrame(message: string): string {
+  const { type } = classifyAiError(message);
+  return sseEvent("error", { type: "error", error: { type, message } });
 }
