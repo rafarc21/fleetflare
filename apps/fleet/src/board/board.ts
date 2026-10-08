@@ -23,7 +23,7 @@ import { parseBrief, renderBriefPrompt, renderTaskBody, taskKeyMarker, type Task
 import { parseEnvelope, parseEnvelopeComment, renderEnvelopeComment } from "./envelope";
 import {
   isStaleBacklog, isTaskState, studioLabel, taskAssignees, taskStates, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES,
-  JUNIOR_LABEL,
+  JUNIOR_LABEL, SECURITY_LABEL,
   type BoardTask, type BoardTaskView, type EnvelopeDoc, type TaskState, type CloseReason,
 } from "./types";
 import { GitHubError, type BoardComment, type IssueInput, type ListIssuesQuery } from "./api";
@@ -99,6 +99,36 @@ const ENTRY_STATE: TaskState = "submitted";
  * a "why" for an assignment that has not happened yet.
  */
 export type OnAssigned = (studioId: string, task: BoardTask, why?: string | null) => Promise<void>;
+
+/**
+ * Issue #249 (maestro spec point 5): the one port createTask/assignTask need
+ * to enforce "security-class work never routed to `lead: glm`" — a studio's
+ * own recorded `StudioStatus.leadType`, resolved by whatever registry read
+ * routes.ts wires (never a request field: a caller must not be able to
+ * claim a studio's lead type any more than it can claim its repo). Optional
+ * on both callers, same "absence = skip the check" shape every other
+ * injectable port on this file's own `BoardApi`-adjacent surface uses for a
+ * feature a caller predates — every existing test/call site that omits it
+ * keeps compiling and behaving exactly as before #249.
+ */
+export type GetLeadType = (studioId: string) => Promise<"claude" | "glm" | undefined>;
+
+/**
+ * Issue #249 (maestro spec point 5): true exactly when a task labelled
+ * SECURITY_LABEL would land on a `leadType: "glm"` studio — the one
+ * condition createTask/assignTask both refuse on, before any write. Pure,
+ * so the rule itself (not the plumbing around it) is directly testable.
+ */
+function securityRefusesGlmLead(labels: string[], leadType: "claude" | "glm" | undefined): boolean {
+  return leadType === "glm" && labels.includes(SECURITY_LABEL);
+}
+
+/** The shared refusal message both createTask and assignTask answer with —
+ *  one wording, so an operator sees the identical sentence whichever path
+ *  tripped it. */
+function securityGlmRefusalMessage(studioId: string): string {
+  return `task is labelled "${SECURITY_LABEL}" — cannot assign to ${studioId}, a lead:glm studio never runs security-class work`;
+}
 
 /** Board issue #41, half one. Never lets a hook failure escape into the
  *  assign path — see `OnAssigned`. */
@@ -184,7 +214,7 @@ async function pathClaimWarnings(
  * step here. A new board repo therefore works on its first task.
  */
 export async function createTask(
-  api: BoardApi, repo: string, raw: unknown, onAssigned?: OnAssigned,
+  api: BoardApi, repo: string, raw: unknown, onAssigned?: OnAssigned, getLeadType?: GetLeadType,
 ): Promise<BoardResult<BoardTask & { pathWarnings?: string[] }>> {
   const lineage = await resolveContinues(api, repo, raw);
   if (!lineage.ok) return lineage;
@@ -199,6 +229,18 @@ export async function createTask(
   // being spawned for it, and `ff` spawns immediately after filing.
   const labels = brief.assignee === null ? [ENTRY_STATE] : [ENTRY_STATE, studioLabel(brief.assignee)];
   if (brief.junior === true) labels.push(JUNIOR_LABEL);
+  if (brief.security === true) labels.push(SECURITY_LABEL);
+  // Issue #249 (maestro spec point 5): refused BEFORE any write — a
+  // security-labelled task filed straight onto a glm-lead studio, at
+  // creation, never gets as far as `api.createIssue`. `getLeadType`
+  // absent (every caller that predates this feature) skips the check
+  // entirely, same posture every other optional port here takes.
+  if (brief.assignee !== null && getLeadType) {
+    const leadType = await getLeadType(brief.assignee);
+    if (securityRefusesGlmLead(labels, leadType)) {
+      return { ok: false, status: 400, message: securityGlmRefusalMessage(brief.assignee) };
+    }
+  }
   const input: IssueInput = {
     title: brief.title,
     body: renderTaskBody(brief),
@@ -675,7 +717,7 @@ export function renderLineageComment(
  */
 export async function assignTask(
   api: BoardApi, repo: string, number: number, raw: unknown,
-  opts: { mode: AssignMode; at?: string; onAssigned?: OnAssigned },
+  opts: { mode: AssignMode; at?: string; onAssigned?: OnAssigned; getLeadType?: GetLeadType },
 ): Promise<BoardResult<BoardTask>> {
   const body = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
 
@@ -697,6 +739,18 @@ export async function assignTask(
   }
 
   const task = await api.getIssue(repo, number);
+  // Issue #249 (maestro spec point 5): refused BEFORE any write — a task
+  // already carrying SECURITY_LABEL (createTask's own write, above, or a
+  // hand-labelled issue — either way, the label on the issue is what this
+  // checks, not whatever the caller claims) must never move onto a
+  // glm-lead studio, adopt or reassign alike. `getLeadType` absent (every
+  // caller that predates this feature) skips the check entirely.
+  if (opts.getLeadType) {
+    const leadType = await opts.getLeadType(to);
+    if (securityRefusesGlmLead(task.labels, leadType)) {
+      return { ok: false, status: 400, message: securityGlmRefusalMessage(to) };
+    }
+  }
   const states = taskStates(task.labels);
   // Zero state labels is BACKLOG, not drift — that is the whole of P5 §3, and
   // adopting one is the point of this function. Two is drift, and unlike an

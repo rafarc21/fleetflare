@@ -36,7 +36,7 @@ import {
   createTask, transitionTask, commentEnvelope, listTasks, showTask, resolveBoardRepo, assignTask,
   commentStudioEnvelope, showStudioTask, transitionStudioTask, resolveBriefPrompt, resolveLatestAssignedBrief,
   openAssignedTasks, closeTerminalTasks,
-  type BoardApi, type BoardResult, type ListTasksQuery, type OnAssigned,
+  type BoardApi, type BoardResult, type ListTasksQuery, type OnAssigned, type GetLeadType,
 } from "./board";
 import { recordJuniorAuthorization, revokeJuniorAuthorization, sweepJuniorAuthorizations } from "../junior/authz";
 import { wakeOnAssign, checkAssignRepo, type AssignWakeDeps, type AssignWakeReport } from "./assign-wake";
@@ -485,7 +485,12 @@ function realAssignWake(env: Env): AssignWakeDeps {
       // `null` does. Normalized at this one read boundary rather than in
       // assign-wake.ts's own check, the same posture StudioStatus.repoSlug's
       // own doc comment already documents for this exact ambiguity.
-      return row ? { state: row.state, repoSlug: row.repoSlug ?? null } : null;
+      // Issue #249: `leadType` rides along unchanged from the row (`??
+      // undefined` is a no-op — `row.leadType` is already `"claude" |
+      // "glm" | undefined`) — stated explicitly rather than left implicit,
+      // the same "every field this port answers is named here" discipline
+      // `repoSlug`'s own normalization line just above follows.
+      return row ? { state: row.state, repoSlug: row.repoSlug ?? null, leadType: row.leadType } : null;
     },
     wake: async (studioId, prompt) => (await getStudioStub(env, studioId)).wakeStudioOnAssignment(prompt),
     // Issue #284 round 2 (issue #268's own fix, reused): GitHub's canonical
@@ -494,6 +499,19 @@ function realAssignWake(env: Env): AssignWakeDeps {
     // lexical trick, is what a rename or ownership transfer needs.
     resolveCanonicalRepo: async (slug) => resolveCanonicalRepoName(await mint(slug), slug),
   };
+}
+
+/**
+ * Issue #249 (maestro spec point 5): board.ts's `GetLeadType` port, adapted
+ * from whichever `AssignWakeDeps` the caller already has in hand — no extra
+ * D1 read, since `studioState` already answers `leadType` alongside
+ * `state`/`repoSlug`. Threaded into every createTask/assignTask call this
+ * file makes (both board surfaces, create AND assign/adopt alike), so a
+ * security-labelled task is refused the same way no matter which route it
+ * came through.
+ */
+function getLeadTypeFrom(deps: AssignWakeDeps): GetLeadType {
+  return async (studioId) => (await deps.studioState(studioId))?.leadType;
 }
 
 /**
@@ -748,7 +766,7 @@ export async function handleBoard(
         const createPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee, body.pendingSpawn !== true);
         if (createPreflight) return createPreflight;
         return await withAssignWake(assignWake, repo.value, async (onAssigned) => {
-          const result = await createTask(api, repo.value, body, onAssigned);
+          const result = await createTask(api, repo.value, body, onAssigned, getLeadTypeFrom(assignWake));
           await recordJuniorAuthorizationIfNeeded(env, repo.value, result);
           return result;
         });
@@ -791,7 +809,7 @@ export async function handleBoard(
       const assignPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee, action === "assign");
       if (assignPreflight) return assignPreflight;
       return await withAssignWake(assignWake, repo.value, (onAssigned) =>
-        assignTask(api, repo.value, number, body, { mode, onAssigned }));
+        assignTask(api, repo.value, number, body, { mode, onAssigned, getLeadType: getLeadTypeFrom(assignWake) }));
     }
     // Task #119: read-only in the sense that it never moves task state, but
     // it makes outbound fetches and posts a comment — so it is matched as
@@ -998,7 +1016,8 @@ export async function handleFleetBoard(
       // filed for a studio outside the caller's edges included — and fires
       // the assign wake on it. A studio's create is never a replay.
       const { idempotencyKey: _dropped, ...brief } = body;
-      return await withAssignWake(assignWake, repo.value, (onAssigned) => createTask(api, repo.value, brief, onAssigned));
+      return await withAssignWake(assignWake, repo.value, (onAssigned) =>
+        createTask(api, repo.value, brief, onAssigned, getLeadTypeFrom(assignWake)));
     }
     // Issue #59: hand a task to a studio the caller directs. The task may be
     // taken only from nobody, the caller, or another studio the caller
@@ -1037,7 +1056,7 @@ export async function handleFleetBoard(
       const preflight = await assignRepoPreflight(assignWake, repo.value, to, true);
       if (preflight) return preflight;
       return await withAssignWake(assignWake, repo.value, (onAssigned) =>
-        assignTask(api, repo.value, number, body, { mode: "reassign", onAssigned }));
+        assignTask(api, repo.value, number, body, { mode: "reassign", onAssigned, getLeadType: getLeadTypeFrom(assignWake) }));
     }
     if (number === null) {
       const query: ListTasksQuery = { assignedTo: studio.id };

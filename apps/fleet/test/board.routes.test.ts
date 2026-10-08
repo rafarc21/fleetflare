@@ -1415,3 +1415,72 @@ describe("create/assign to a studio with no registry row (issue #81)", () => {
   });
 });
 
+// Issue #249 (maestro spec point 5), end to end through handleBoard: a
+// security-labelled task never lands on a glm-lead studio, whether that is
+// a fresh `fleet task new --security --studio <id>` or a later
+// `fleet task assign`/`ff <role> <n>` onto one. The GLM_STUDIO/CLAUDE_STUDIO
+// split proves the IDENTICAL request differs only in what the registry
+// says about the TARGET studio's own leadType.
+describe("task new/assign refuses security-labelled work onto a glm-lead studio (#249)", () => {
+  const GLM_STUDIO = "websites--glm-studio";
+  const CLAUDE_STUDIO = "websites--web-studio";
+  const wake = (leadType?: "claude" | "glm") => ({
+    studioState: vi.fn(async (id: string) =>
+      id === GLM_STUDIO ? { state: "running", repoSlug: "acme-org/websites", leadType: "glm" as const }
+        : id === CLAUDE_STUDIO ? { state: "running", repoSlug: "acme-org/websites", leadType }
+          : null),
+    wake: vi.fn(async () => ({ ok: true as const })),
+    resolveCanonicalRepo: vi.fn(async (slug: string) => slug),
+  });
+  const securityBrief = { title: "T", objective: "O", outputFormat: "F", boundaries: "B", security: true };
+
+  it("task new --security --studio <glm studio>: 400, nothing filed", async () => {
+    authorized();
+    const api = fakeApi();
+    const res = await handleBoard(
+      req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...securityBrief, assignee: GLM_STUDIO }) }),
+      testEnv, api, reach, undefined, undefined, wake(),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("security");
+    expect(api.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("the IDENTICAL request against a claude-lead studio succeeds", async () => {
+    authorized();
+    const api = fakeApi();
+    const res = await handleBoard(
+      req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...securityBrief, assignee: CLAUDE_STUDIO }) }),
+      testEnv, api, reach, undefined, undefined, wake("claude"),
+    );
+    expect(res.status).toBe(200);
+    expect(api.createIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("fleet task assign <n> <glm studio> on an already-security-labelled task: 400, nothing written", async () => {
+    authorized();
+    const api = fakeApi({
+      getIssue: vi.fn(async () => task({ number: 42, state: "submitted", labels: ["submitted", "security"], assignee: null })),
+    });
+    const res = await handleBoard(
+      req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: GLM_STUDIO }) }),
+      testEnv, api, reach, undefined, undefined, wake(),
+    );
+    expect(res.status).toBe(400);
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("the IDENTICAL assign onto a claude-lead studio succeeds", async () => {
+    authorized();
+    const api = fakeApi({
+      getIssue: vi.fn(async () => task({ number: 42, state: "submitted", labels: ["submitted", "security"], assignee: null })),
+    });
+    const res = await handleBoard(
+      req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: CLAUDE_STUDIO }) }),
+      testEnv, api, reach, undefined, undefined, wake("claude"),
+    );
+    expect(res.status).toBe(200);
+    expect(api.addLabels).toHaveBeenCalled();
+  });
+});
+

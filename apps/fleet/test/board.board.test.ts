@@ -181,6 +181,77 @@ describe("createTask", () => {
       .toEqual(["submitted", "studio:websites--web-studio", "junior"]);
   });
 
+  // Issue #249 (maestro spec point 5): same single-create-call shape as
+  // junior, for the SECURITY_LABEL half.
+  it("createTask writes the security label in the same single create call", async () => {
+    const api = fakeApi();
+    await createTask(api, "acme-org/websites", {
+      title: "t", objective: "o", outputFormat: "f", boundaries: "b",
+      assignee: "websites--web-studio", security: true,
+    });
+    expect(vi.mocked(api.createIssue).mock.calls.length).toBe(1);
+    expect(vi.mocked(api.createIssue).mock.calls[0][1].labels)
+      .toEqual(["submitted", "studio:websites--web-studio", "security"]);
+  });
+
+  describe("createTask — security refuses a glm-lead studio (#249)", () => {
+    const securityBrief = {
+      title: "t", objective: "o", outputFormat: "f", boundaries: "b",
+      assignee: "websites--web-studio", security: true,
+    };
+
+    it("refuses, writes NOTHING, when the assignee studio resolves to leadType glm", async () => {
+      const api = fakeApi();
+      const getLeadType = vi.fn(async () => "glm" as const);
+      const res = await createTask(api, "acme-org/websites", securityBrief, undefined, getLeadType);
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.status).toBe(400);
+      expect(res.message).toContain("security");
+      expect(res.message).toContain("websites--web-studio");
+      expect(api.createIssue).not.toHaveBeenCalled();
+    });
+
+    it("the IDENTICAL security task against a claude-lead studio is NOT refused", async () => {
+      const api = fakeApi();
+      const getLeadType = vi.fn(async () => "claude" as const);
+      const res = await createTask(api, "acme-org/websites", securityBrief, undefined, getLeadType);
+      expect(res.ok).toBe(true);
+      expect(api.createIssue).toHaveBeenCalledTimes(1);
+    });
+
+    it("an unlabelled task against a glm-lead studio is NOT refused — only security triggers this", async () => {
+      const api = fakeApi();
+      const getLeadType = vi.fn(async () => "glm" as const);
+      const res = await createTask(
+        api, "acme-org/websites",
+        { title: "t", objective: "o", outputFormat: "f", boundaries: "b", assignee: "websites--web-studio" },
+        undefined, getLeadType,
+      );
+      expect(res.ok).toBe(true);
+      expect(api.createIssue).toHaveBeenCalledTimes(1);
+    });
+
+    it("no getLeadType port wired at all: skips the check entirely (every caller that predates #249)", async () => {
+      const api = fakeApi();
+      const res = await createTask(api, "acme-org/websites", securityBrief);
+      expect(res.ok).toBe(true);
+      expect(api.createIssue).toHaveBeenCalledTimes(1);
+    });
+
+    it("no assignee at all: never calls getLeadType (nothing to resolve)", async () => {
+      const api = fakeApi();
+      const getLeadType = vi.fn(async () => "glm" as const);
+      const res = await createTask(
+        api, "acme-org/websites",
+        { title: "t", objective: "o", outputFormat: "f", boundaries: "b", security: true },
+        undefined, getLeadType,
+      );
+      expect(res.ok).toBe(true);
+      expect(getLeadType).not.toHaveBeenCalled();
+    });
+  });
+
   // PR #9 review, blocker B1: `hasJuniorAuthorizedTask` (label-gated) is gone
   // — JUNIOR_LABEL is no longer this module's concern at all, on purpose (see
   // findLiveAssignedTask's own doc comment). This block now proves only the
@@ -790,6 +861,70 @@ describe("assignTask — adoption and reassignment (P5 §3)", () => {
       if (!res.ok) expect(res.status).toBe(400);
     }
     expect(api.getIssue).not.toHaveBeenCalled();
+  });
+
+  // Issue #249 (maestro spec point 5): the assign/reassign half of the same
+  // refusal createTask enforces at creation — a security-labelled task
+  // already on the board must not be handed (or re-handed) to a glm-lead
+  // studio either.
+  describe("security refuses a glm-lead studio (#249)", () => {
+    const securityTask = () => task({ number: 42, labels: ["submitted", "security"], state: "submitted", assignee: null });
+
+    it("refuses adoption, writes NOTHING, when the target studio resolves to leadType glm", async () => {
+      const api = fakeApi({ getIssue: vi.fn(async () => securityTask()) });
+      const getLeadType = vi.fn(async () => "glm" as const);
+      const res = await assignTask(api, "o/r", 42, { assignee: WEB }, { ...adopt, getLeadType });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.status).toBe(400);
+      expect(res.message).toContain("security");
+      expect(res.message).toContain(WEB);
+      expect(api.addLabels).not.toHaveBeenCalled();
+      expect(api.removeLabel).not.toHaveBeenCalled();
+      expect(api.createComment).not.toHaveBeenCalled();
+    });
+
+    it("refuses REASSIGNMENT too, same task, same target studio", async () => {
+      const api = fakeApi({
+        getIssue: vi.fn(async () => task({
+          number: 42, labels: ["working", studioLabel(RELEASE), "security"], state: "working", assignee: RELEASE,
+        })),
+      });
+      const getLeadType = vi.fn(async () => "glm" as const);
+      const res = await assignTask(api, "o/r", 42, { assignee: WEB }, { ...reassign, getLeadType });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.status).toBe(400);
+      expect(api.addLabels).not.toHaveBeenCalled();
+    });
+
+    it("the IDENTICAL security task against a claude-lead studio is NOT refused", async () => {
+      const api = fakeApi({ getIssue: vi.fn(async () => securityTask()) });
+      const getLeadType = vi.fn(async () => "claude" as const);
+      const res = await assignTask(api, "o/r", 42, { assignee: WEB }, { ...adopt, getLeadType });
+
+      expect(res.ok).toBe(true);
+      expect(api.addLabels).toHaveBeenCalledTimes(1);
+    });
+
+    it("an unlabelled task against a glm-lead studio is NOT refused — only security triggers this", async () => {
+      const api = fakeApi({ getIssue: vi.fn(async () => bare()) });
+      const getLeadType = vi.fn(async () => "glm" as const);
+      const res = await assignTask(api, "o/r", 42, { assignee: WEB }, { ...adopt, getLeadType });
+
+      expect(res.ok).toBe(true);
+      expect(api.addLabels).toHaveBeenCalledTimes(1);
+    });
+
+    it("no getLeadType port wired at all: skips the check entirely (every caller that predates #249)", async () => {
+      const api = fakeApi({ getIssue: vi.fn(async () => securityTask()) });
+      const res = await assignTask(api, "o/r", 42, { assignee: WEB }, adopt);
+
+      expect(res.ok).toBe(true);
+      expect(api.addLabels).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
