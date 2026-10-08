@@ -13,7 +13,7 @@ in depth.
 |---|---|
 | **studio** | One Cloudflare container running one Claude Code session (the lead) plus the member subagents it dispatches. |
 | **lead** | The Claude Code session in a studio's tmux window 0. Never implements directly — a hook forces it to dispatch to members. |
-| **maestro** | The role that coordinates a repo's work and never implements; one of the roles alongside `web-studio`, `release-studio`, `pilot`, `scratch`. |
+| **maestro** | The LOCAL session — a Claude Code session on the operator's own machine, never a cloud studio — that coordinates a repo's work: dispatches briefs, holds the merge gate, never implements. The cloud studios that actually carry out the work are `web-studio`, `release-studio`, `pilot`, `scratch`. |
 | **board** | The GitHub Issues in your target repo. Labels are the state machine work moves through. |
 | **rescue** | Before any deploy that replaces containers, `fleet rescue-all` commits and pushes every studio's uncommitted work to its own `fleet/rescue/...` branch so nothing is lost. See [docs/operations.md](operations.md). |
 | **junior / GLM** | The opt-in `FLEET_JUNIOR` skill: studios can delegate mechanical, low-risk edits to a Workers AI model (GLM) and review its diff before applying. See [docs/setup.md](setup.md). |
@@ -45,10 +45,12 @@ registry key. Dots and underscores in a repo name fold to hyphens.
 
 ### Roles
 
-`maestro` coordinates and never implements. `web-studio` and `release-studio`
-carry members. `pilot` and `scratch` are lightweight. A studio id is
-`<repo>--<role>`, so one repo supports one studio per role — parallelism beyond
-that comes from members inside each studio, which is the intended shape.
+A local `maestro` session (the operator's own machine, never a cloud studio)
+coordinates a repo's work and never implements — it dispatches briefs to the
+cloud studios that do. `web-studio` and `release-studio` carry members.
+`pilot` and `scratch` are lightweight. A studio id is `<repo>--<role>`, so one
+repo supports one studio per role — parallelism beyond that comes from
+members inside each studio, which is the intended shape.
 
 ## Safety
 
@@ -98,10 +100,11 @@ Worker instead; and no studio ever holds a Cloudflare deploy credential. See
 [docs/threat-model.md](threat-model.md).
 
 **Can I run more than one studio per repo?**
-One studio per role — a studio id is `<repo>--<role>`, so `maestro`,
-`web-studio`, `release-studio`, `pilot`, and `scratch` can all run at once on
-the same repo. Parallelism beyond that comes from the member subagents
-inside each studio.
+One studio per role — a studio id is `<repo>--<role>`, so `web-studio`,
+`release-studio`, `pilot`, and `scratch` can all run at once on the same
+repo (`maestro` itself is a local session on the operator's own machine,
+never one of these cloud studios). Parallelism beyond that comes from the
+member subagents inside each studio.
 
 **Can leads implement code themselves?**
 No. A PreToolUse hook refuses a lead's `Edit`/`Write` and its file-writing

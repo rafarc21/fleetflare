@@ -28,9 +28,10 @@ sync.
 - 🧯 **Rescue-first lifecycle.** `fleet recycle`/`fleet destroy` rescue
   uncommitted work to its own branch first, and refuse outright if that
   rescue is impossible.
-- 🎭 **A role per job.** `maestro` coordinates, `web-studio`/`release-studio`
-  carry members, `pilot`/`scratch` are lightweight — one studio per role per
-  repo.
+- 🎭 **A role per job.** A local `maestro` session (your own machine, never a
+  cloud studio) coordinates each repo's work; the cloud studios that carry it
+  out are `web-studio`/`release-studio` (carry members), `pilot`/`scratch`
+  (lightweight) — one studio per role per repo.
 
 Key concepts, the architecture, the full FAQ, and the repository layout are
 in **[docs/architecture.md](docs/architecture.md)**.
@@ -116,10 +117,13 @@ Issues board:
 The commands you actually type, from inside any repo you want a studio for:
 
 ```bash
-ff                          # this repo's maestro: spawn if absent, then attach
+ff web-studio               # spawn this repo's web-studio if absent, then attach
 ff web-studio "<brief>"     # file a task, spawn a studio for it, attach
 ff web-studio 412           # adopt existing issue #412
 ```
+
+(Bare `ff` refuses — `maestro` coordinates from a local Claude Code session
+on your own machine, never as a cloud studio `ff` can spawn or attach to.)
 
 `ctrl-]` detaches. The studio keeps running.
 
@@ -138,7 +142,7 @@ A studio's id is `<repo>--<role>` — say hello to `fleet ls`:
 ```
 $ fleet ls
 ID                          STATE      READY                 BURN
-acme-site--maestro          running    provisioned           12400o/5h:3100
+acme-site--release-studio   running    provisioned           12400o/5h:3100
 acme-site--web-studio       running    provisioned           8200o/5h:1900
 acme-docs--release-studio   degraded   bare: no session       0o/5h:0
 ```
