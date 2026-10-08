@@ -11,12 +11,12 @@
 //     the one predicate a spawn route needs: R-P3-1's "Worker is law" —
 //     spawn requests validate against org.json's edges SERVER-side.
 //   - mintSpawnToken/fetchOrgCached: R-P3-1's per-studio spawn-auth token
-//     (`fsp_` + 64 lowercase hex, crypto-random) and a module-level cache
-//     for org.json fetches, mirroring auth.ts's JWKS cache SHAPE (TTL,
-//     refetch-on-expiry, stale-on-error, retry backoff, __reset/__seed test
-//     hooks) minus its one staleness CAP: org.json is repo-controlled
-//     config a human wrote, not a security boundary that can be silently
-//     revoked out from under a live signing key, so serving a
+//     (`fsp_` + 64 lowercase hex, crypto-random) and a cache for org.json
+//     fetches, mirroring auth.ts's JWKS cache SHAPE (TTL, refetch-on-expiry,
+//     stale-on-error, retry backoff) minus its one staleness CAP: org.json
+//     is repo-controlled config a human wrote, not a security boundary
+//     that can be silently revoked out from under a live signing key, so
+//     serving a
 //     stale-but-once-valid copy indefinitely (once nothing fresher is
 //     reachable) is the right failure mode here — unlike JWKS, this never
 //     fails closed. See auth.ts's own header for the pattern this mirrors.
@@ -142,44 +142,9 @@ export async function hashSpawnToken(token: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// fetchOrgCached — module-level cache, mirrors auth.ts's jwksCache shape
-// minus the staleness cap (see this file's own header for why).
+// createOrgCache / fetchOrgCached — mirrors auth.ts's jwksCache shape minus
+// the staleness cap (see this file's own header for why).
 // ---------------------------------------------------------------------------
-
-interface CachedOrg {
-  fetched: number;
-  org: Org;
-  /** Set only after a FAILED refresh attempt; absent after a successful
-   *  fetch — same meaning as auth.ts's CachedJwks.lastAttempt. */
-  lastAttempt?: number;
-}
-
-// Keyed by ref alone, not repo+ref: this fleet's blueprint is one repo
-// (fleet.json's own `blueprint.repo`) — see this file's header.
-const orgCache = new Map<string, CachedOrg>();
-
-/**
- * Fleet Spawn P3, Task 2 (review carry-over from Task 1): the SAME backoff
- * `CachedOrg.lastAttempt` gives a ref that once succeeded, for the ref that
- * NEVER has. Keyed by ref, value = the last failed attempt's timestamp.
- *
- * Task 1's cache only backed off refs with something cached to fall back on;
- * a ref whose very first fetch failed (a bad pin, a deleted tag, a blueprint
- * repo the installation cannot read) fell straight through to the live
- * fetcher on every single call. That was harmless while the only caller was
- * provision (operator-driven, Access-gated), and is not once /fleet/spawn
- * exists: that route is network-reachable and authenticated by a token a
- * container holds, so one studio calling it in a loop against a broken pin
- * would amplify into unbounded outbound GitHub traffic. Same ORG_RETRY_MS
- * floor, same per-ref granularity — a broken ref costs at most one fetch
- * attempt per minute no matter how often it is asked for.
- *
- * A separate map rather than a nullable `org` on CachedOrg: every reader of
- * `orgCache` treats an entry as "an org we can serve", and widening that to
- * "maybe an org" would put a null check on the two hot paths above for the
- * sake of the cold one.
- */
-const orgFailures = new Map<string, number>();
 
 export const ORG_CACHE_TTL_MS = 300_000; // 300s — the design spec's own number.
 // Same backoff floor as auth.ts's JWKS_RETRY_MS, same reason: an outage must
@@ -199,7 +164,9 @@ export interface OrgFetchDeps {
 }
 
 /**
- * Fetches + parses org.json at `ref`, through a 300s module cache. On a
+ * Builds one org.json cache; its `fetch(deps, ref)` fetches + parses
+ * org.json at `ref` through a 300s cache, keyed by ref alone (this fleet's
+ * blueprint is one repo — fleet.json's own `blueprint.repo`). On a
  * cache hit within the TTL, returns immediately with no fetch. Past the
  * TTL, attempts a refetch: success repopulates the cache; failure serves
  * the held-stale entry instead (logged, never thrown) — UNLIKE auth.ts's
@@ -210,66 +177,31 @@ export interface OrgFetchDeps {
  * sustained GitHub outage costs one fetch attempt per minute, not one per
  * spawn call. Only when NOTHING has ever been cached does a failure
  * propagate — there is nothing to fall back on — and that case gets the SAME
- * one-attempt-per-ORG_RETRY_MS floor via `orgFailures` (see its own doc
- * comment): it keeps throwing for the rest of the window, but without
- * touching the network again.
+ * one-attempt-per-ORG_RETRY_MS floor (see createRefCache's `failures`): it
+ * keeps throwing for the rest of the window, but without touching the
+ * network again. `now` is injectable so tests drive time directly.
  */
-export async function fetchOrgCached(deps: OrgFetchDeps, ref: string): Promise<Org> {
-  const cached = orgCache.get(ref);
-  const now = Date.now();
-  if (cached && now - cached.fetched < ORG_CACHE_TTL_MS) return cached.org;
-
-  if (cached?.lastAttempt !== undefined && now - cached.lastAttempt < ORG_RETRY_MS) {
-    return cached.org;
-  }
-
-  // Only reachable with nothing cached for this ref (a cached entry takes one
-  // of the two branches above, or refetches below and clears this on
-  // success) — the never-successful case, whose only honest answer is the
-  // same error, minus the fetch.
-  const failedAt = orgFailures.get(ref);
-  if (failedAt !== undefined && now - failedAt < ORG_RETRY_MS) {
-    throw new Error(`org.json for ref ${ref} is in failure backoff (last attempt ${now - failedAt}ms ago)`);
-  }
-
-  try {
-    const org = parseOrgJson(await deps.fetchOrgFile(ref));
-    orgCache.set(ref, { fetched: now, org });
-    orgFailures.delete(ref);
-    return org;
-  } catch (err) {
-    console.error(`org.json refresh failed for ref ${ref}`, err);
-    if (!cached) {
-      orgFailures.set(ref, now);
-      throw err;
-    }
-    orgCache.set(ref, { ...cached, lastAttempt: now });
-    return cached.org;
-  }
+export function createOrgCache({ now = Date.now }: { now?: () => number } = {}) {
+  const refs = createRefCache<Org>(ORG_CACHE_TTL_MS, ORG_RETRY_MS, now, (ref) => `org.json for ref ${ref}`);
+  return {
+    fetch: (deps: OrgFetchDeps, ref: string): Promise<Org> =>
+      refs.fetchCached(async () => parseOrgJson(await deps.fetchOrgFile(ref)), ref),
+    clear: refs.clear,
+  };
 }
 
-// Test-only surface — same reset/seed pair auth.ts exposes, for the same
-// reason: deterministic cache-age control without depending on real
-// elapsed time or test execution order (the cache is process-global).
+// The process-wide instance spawn.ts's resolveSpawnPolicy reads through.
+const orgCache = createOrgCache();
+
+export function fetchOrgCached(deps: OrgFetchDeps, ref: string): Promise<Org> {
+  return orgCache.fetch(deps, ref);
+}
+
+// Test-only: route tests (studio.spawn, studio.fleet-resume) go through the
+// process-wide instance and need a clean slate per test. Cache behavior
+// itself is tested on fresh createOrgCache instances with an injected clock.
 export function __resetOrgCacheForTests(): void {
   orgCache.clear();
-  orgFailures.clear();
-}
-
-export function __seedOrgCacheForTests(
-  ref: string, ageMs: number, org: Org, lastAttemptAgeMs?: number,
-): void {
-  const now = Date.now();
-  const entry: CachedOrg = { fetched: now - ageMs, org };
-  if (lastAttemptAgeMs !== undefined) entry.lastAttempt = now - lastAttemptAgeMs;
-  orgCache.set(ref, entry);
-}
-
-/** Seeds the never-successful backoff (orgFailures) for one ref, `ageMs`
- *  ago — the counterpart of __seedOrgCacheForTests's `lastAttemptAgeMs` for
- *  the case where nothing was ever cached. */
-export function __seedOrgFailureForTests(ref: string, ageMs: number): void {
-  orgFailures.set(ref, Date.now() - ageMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -293,50 +225,55 @@ export function __seedOrgFailureForTests(ref: string, ageMs: number): void {
 // tradeoff than org.json's own, already-accepted one) for the same
 // amplification defence.
 //
-// Extracted into a small generic helper rather than a hand-copied second
-// block: the two caches must behave IDENTICALLY (same TTL/backoff shape,
-// stated above), and one shared implementation is what actually guarantees
-// that rather than merely documenting it — a future edit to one copy's
-// timing logic without the other is exactly the kind of drift this avoids.
-// `fetchOrgCached` above is untouched by this (zero behavior change to
-// already-shipped, already-reviewed code): this factory is new code, used
-// only to build the fleet.json cache below.
+// One generic helper backs both caches: they must behave IDENTICALLY (same
+// TTL/backoff shape, stated above), and one shared implementation is what
+// actually guarantees that rather than merely documenting it.
 // ---------------------------------------------------------------------------
 
 interface CachedRef<T> {
   fetched: number;
   value: T;
-  /** Set only after a FAILED refresh attempt — same meaning as CachedOrg's
-   *  own `lastAttempt` above. */
+  /** Set only after a FAILED refresh attempt; absent after a successful
+   *  fetch — same meaning as auth.ts's CachedJwks.lastAttempt. */
   lastAttempt?: number;
 }
 
 /**
  * Builds one independent cache instance: its own `Map` pair, closed over by
- * the four functions returned. A factory, not a shared module-level cache,
+ * the two functions returned. A factory, not a shared module-level cache,
  * so org.json's cache (above) and fleet.json's (below) never share a
  * keyspace even though both happen to key on a plain string — a fresh call
- * per consumer, not a generic registry keyed by type.
+ * per consumer, not a generic registry keyed by type. `label(key)` names
+ * the key in the backoff error and the failure log.
+ *
+ * `failures` is the never-successful backoff (Fleet Spawn P3, Task 2): a key
+ * whose very first fetch failed (a bad pin, a deleted tag, a blueprint repo
+ * the installation cannot read) would otherwise hit the fetcher on every
+ * call — and /fleet/spawn is network-reachable, so one studio calling it in
+ * a loop would amplify into unbounded GitHub traffic. A separate map rather
+ * than a nullable cached value, so the two hot paths never null-check for
+ * the sake of the cold one.
  */
-function createRefCache<T>(ttlMs: number, retryMs: number) {
+function createRefCache<T>(ttlMs: number, retryMs: number, clock: () => number, label: (key: string) => string) {
   const cache = new Map<string, CachedRef<T>>();
   const failures = new Map<string, number>();
 
-  // Mirrors fetchOrgCached's own body exactly (see that function's doc
-  // comment for the line-by-line reasoning) — `fetchFn`/`key` stand in for
-  // `deps.fetchOrgFile`/`ref`.
   async function fetchCached(fetchFn: (key: string) => Promise<T>, key: string): Promise<T> {
     const cached = cache.get(key);
-    const now = Date.now();
+    const now = clock();
     if (cached && now - cached.fetched < ttlMs) return cached.value;
 
     if (cached?.lastAttempt !== undefined && now - cached.lastAttempt < retryMs) {
       return cached.value;
     }
 
+    // Only reachable with nothing cached for this key (a cached entry takes
+    // one of the two branches above, or refetches below and clears this on
+    // success) — the never-successful case, whose only honest answer is the
+    // same error, minus the fetch.
     const failedAt = failures.get(key);
     if (failedAt !== undefined && now - failedAt < retryMs) {
-      throw new Error(`ref ${key} is in failure backoff (last attempt ${now - failedAt}ms ago)`);
+      throw new Error(`${label(key)} is in failure backoff (last attempt ${now - failedAt}ms ago)`);
     }
 
     try {
@@ -345,7 +282,7 @@ function createRefCache<T>(ttlMs: number, retryMs: number) {
       failures.delete(key);
       return value;
     } catch (err) {
-      console.error(`cached ref fetch failed for ${key}`, err);
+      console.error(`${label(key)} refresh failed`, err);
       if (!cached) {
         failures.set(key, now);
         throw err;
@@ -355,26 +292,13 @@ function createRefCache<T>(ttlMs: number, retryMs: number) {
     }
   }
 
-  function __reset(): void {
+  function clear(): void {
     cache.clear();
     failures.clear();
   }
 
-  function __seed(key: string, ageMs: number, value: T, lastAttemptAgeMs?: number): void {
-    const now = Date.now();
-    const entry: CachedRef<T> = { fetched: now - ageMs, value };
-    if (lastAttemptAgeMs !== undefined) entry.lastAttempt = now - lastAttemptAgeMs;
-    cache.set(key, entry);
-  }
-
-  function __seedFailure(key: string, ageMs: number): void {
-    failures.set(key, Date.now() - ageMs);
-  }
-
-  return { fetchCached, __reset, __seed, __seedFailure };
+  return { fetchCached, clear };
 }
-
-const fleetJsonRefCache = createRefCache<FleetConfig>(ORG_CACHE_TTL_MS, ORG_RETRY_MS);
 
 export interface FleetJsonFetchDeps {
   /** Fetches fleet.json's raw text for `repo` at `ref` — the same split
@@ -385,8 +309,9 @@ export interface FleetJsonFetchDeps {
 }
 
 /**
- * Fetches + parses fleet.json for `repo` at `ref`, through the same
- * TTL/backoff cache fetchOrgCached uses (see this section's own header).
+ * Builds one fleet.json cache; its `fetch(deps, repo, ref)` fetches + parses
+ * fleet.json for `repo` at `ref`, through the same TTL/backoff cache
+ * createOrgCache uses (see this section's own header).
  * Keyed by `repo@ref`, not ref alone: fleet.json is read per TARGET repo
  * (spawn.ts's resolveSpawnPolicy calls this with `env.AGENT_REPO`), and
  * while today's single-repo deployment never actually varies that, keying
@@ -394,27 +319,24 @@ export interface FleetJsonFetchDeps {
  * for the same reason a cache keyed on the wrong dimension would silently
  * serve one repo's fleet.json to a request about another.
  */
-export async function fetchFleetJsonCached(
+export function createFleetJsonCache({ now = Date.now }: { now?: () => number } = {}) {
+  const refs = createRefCache<FleetConfig>(ORG_CACHE_TTL_MS, ORG_RETRY_MS, now, (key) => `ref ${key}`);
+  return {
+    fetch: (deps: FleetJsonFetchDeps, repo: string, ref: string): Promise<FleetConfig> =>
+      refs.fetchCached(async () => parseFleetJson(await deps.fetchFleetJsonFile(repo, ref)), `${repo}@${ref}`),
+    clear: refs.clear,
+  };
+}
+
+const fleetJsonCache = createFleetJsonCache();
+
+export function fetchFleetJsonCached(
   deps: FleetJsonFetchDeps, repo: string, ref: string,
 ): Promise<FleetConfig> {
-  return fleetJsonRefCache.fetchCached(
-    async () => parseFleetJson(await deps.fetchFleetJsonFile(repo, ref)),
-    `${repo}@${ref}`,
-  );
+  return fleetJsonCache.fetch(deps, repo, ref);
 }
 
-// Test-only surface — same shape as fetchOrgCached's own __reset/__seed pair,
-// keyed by `repo@ref` to match fetchFleetJsonCached above.
+// Test-only — same role as __resetOrgCacheForTests above.
 export function __resetFleetJsonCacheForTests(): void {
-  fleetJsonRefCache.__reset();
-}
-
-export function __seedFleetJsonCacheForTests(
-  repo: string, ref: string, ageMs: number, fleet: FleetConfig, lastAttemptAgeMs?: number,
-): void {
-  fleetJsonRefCache.__seed(`${repo}@${ref}`, ageMs, fleet, lastAttemptAgeMs);
-}
-
-export function __seedFleetJsonFailureForTests(repo: string, ref: string, ageMs: number): void {
-  fleetJsonRefCache.__seedFailure(`${repo}@${ref}`, ageMs);
+  fleetJsonCache.clear();
 }
