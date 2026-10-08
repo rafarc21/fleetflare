@@ -174,6 +174,24 @@ export function describeWould(row: AccountSnapshotRow, now: Date): string {
 }
 
 /**
+ * Issue #253: every timestamp this table prints (`seenAt`/`until`/RESETS) is
+ * already a full UTC instant with an explicit `Z` suffix — proven bit-for-
+ * bit correct end to end (see this module's test file's own round-trip
+ * regression guard). The reported "2 hours early" symptom was traced to an
+ * operator comparing this table against `cswap list`'s own separate CLI
+ * output, which likely renders the SAME instant in local wall-clock time —
+ * not a data defect, but an easy cross-tool misread with real safety stakes
+ * (a coordinator spawning into a still-limited account because it read an
+ * early time as later). This one-line, purely-additive footer removes that
+ * ambiguity without touching a single cell's own text — printed once per
+ * table, never per row, and only in human-readable mode: `--json` output
+ * already carries raw ISO instants and needs no prose (cli/accounts.ts's
+ * `printSnapshot` never calls `formatAccountsTable` on the `--json` path, so
+ * this note can never end up inside the JSON object).
+ */
+export const ACCOUNTS_TABLE_UTC_NOTE = "(reset times shown in UTC)";
+
+/**
  * `fleet accounts`'s table. Columns: SLOT, LABEL, MATCH, 5H%, 7D%, RESETS,
  * ROW STATE (what D1 holds now), WOULD (what sync would change it to, "-"
  * when nothing would change, "no data (...)" when cswap's own reading can't
@@ -186,7 +204,9 @@ export function describeWould(row: AccountSnapshotRow, now: Date): string {
  *
  * Same column-table house style as cli/task-format.ts's formatTaskTable:
  * header + one row per slot, widths from the longest cell per column, two
- * spaces between columns, right edge never padded.
+ * spaces between columns, right edge never padded. One blank line, then
+ * `ACCOUNTS_TABLE_UTC_NOTE`, always closes the table (see that constant's
+ * own doc comment for why).
  */
 export function formatAccountsTable(rows: AccountSnapshotRow[], now: Date): string {
   if (rows.length === 0) return "(no accounts configured)";
@@ -204,7 +224,7 @@ export function formatAccountsTable(rows: AccountSnapshotRow[], now: Date): stri
   const widths = headers.map((h, i) => Math.max(h.length, ...body.map((row) => row[i].length)));
   const last = headers.length - 1;
   const line = (cols: string[]) => cols.map((c, i) => (i === last ? c : c.padEnd(widths[i]))).join("  ");
-  return [line(headers), ...body.map(line)].join("\n");
+  return [line(headers), ...body.map(line), "", ACCOUNTS_TABLE_UTC_NOTE].join("\n");
 }
 
 /**

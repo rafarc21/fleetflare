@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   formatAccountsTable, describeCurrentState, describeWould, wouldChange, snapshotsEqual, buildLabelSuggestions,
-  parseCswapListOutput, formatCswapUnavailableNote,
+  parseCswapListOutput, formatCswapUnavailableNote, ACCOUNTS_TABLE_UTC_NOTE,
   type AccountSnapshotRow, type AccountCurrentState,
 } from "../cli/accounts-format";
 import type { SyncDecision } from "../src/studio/claude-swap";
@@ -208,6 +208,23 @@ describe("formatAccountsTable", () => {
     })], NOW);
     const body = out.split("\n")[1]!;
     expect(body).toContain("inferred");
+  });
+
+  // Issue #253 — the "2 hours early" symptom traced to an operator comparing
+  // this (correctly UTC) table against cswap's own separate local-time
+  // output: one plain footer line stating the displayed times are UTC,
+  // printed once per table (never per row), closes every non-empty render.
+  it("ends with a single '(reset times shown in UTC)' footer line, once per table, not per row", () => {
+    const out = formatAccountsTable([row(), row({ name: "CLAUDE_CODE_OAUTH_TOKEN_2" })], NOW);
+    const lines = out.split("\n");
+    expect(lines[lines.length - 1]).toBe(ACCOUNTS_TABLE_UTC_NOTE);
+    expect(lines.filter((l) => l === ACCOUNTS_TABLE_UTC_NOTE)).toHaveLength(1);
+  });
+
+  // The empty-table message is its own distinct one-liner — no footer note
+  // tacked onto it (nothing to clarify when there's no table to misread).
+  it("the empty-table message carries no UTC footer", () => {
+    expect(formatAccountsTable([], NOW)).toBe("(no accounts configured)");
   });
 });
 
