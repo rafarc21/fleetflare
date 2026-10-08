@@ -429,6 +429,25 @@ describe("streaming: prelude + chunk application + close", () => {
     expect((delta.data as { usage: { output_tokens: number } }).usage.output_tokens).toBe(9);
   });
 
+  // Fresh-context review finding 1: the prior fix (MAJOR 4 above) only got
+  // state.inputTokens right internally (the D1 usage-log row) — it never
+  // reached any outbound SSE frame Claude Code itself reads. message_delta
+  // is the real Anthropic wire event Claude Code reads a turn's FINAL usage
+  // off of, so the real input_tokens has to land there too, not stay
+  // client-visible-0 forever. (message_start legitimately stays 0 — see
+  // streamPrelude's own doc comment: this backend only learns the real
+  // prompt_tokens count off the LAST chunk, long after message_start has
+  // already been written to the wire.)
+  test("message_delta's usage ALSO carries the real input_tokens — not just output_tokens — so Claude Code itself stops seeing input_tokens: 0 on every streamed turn", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 9 } });
+    const [delta] = closeStream(state).filter((f) => f.includes("message_delta")).map(parseFrame);
+    expect((delta.data as { usage: { input_tokens: number; output_tokens: number } }).usage).toEqual({
+      input_tokens: 5, output_tokens: 9,
+    });
+  });
+
   // MAJOR 4 (maestro review round 1): the same final usage-bearing chunk
   // also carries the real prompt_tokens — tracked on the state for the
   // ROUTE to read back after the stream ends (for the usage-log row), since
