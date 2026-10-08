@@ -3,6 +3,7 @@ import { env as testEnv } from "cloudflare:test";
 import {
   launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch,
   decideAccountClears, applyAccountClears, clearForceMappedAccount, refuseUnlessMappedAccountLaunchable,
+  resolveLeadType,
 } from "../src/studio/do";
 import { otherRepoPrimaries, type AccountLimits } from "../src/studio/accounts";
 import { withAccountDisplay } from "../src/studio/registry";
@@ -76,6 +77,23 @@ describe("launchAccountName — the account a container start's env carries", ()
   it("null when the mapping cannot launch (the start is refused anyway)", () => {
     expect(launchAccountName(envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_ACCOUNT_BY_REPO: MAP_2 }), "demosite-life--pilot", null))
       .toBeNull();
+  });
+});
+
+describe("resolveLeadType — which lead a studio boots (#249)", () => {
+  it("an existing row's leadType wins, regardless of cfgLeadType", () => {
+    expect(resolveLeadType(status({ leadType: "glm" }), "claude")).toBe("glm");
+    expect(resolveLeadType(status({ leadType: "claude" }), "glm")).toBe("claude");
+  });
+
+  it("no row yet (the studio's first-ever provision): cfgLeadType is the fallback", () => {
+    expect(resolveLeadType(null, "glm")).toBe("glm");
+    expect(resolveLeadType(undefined, "glm")).toBe("glm");
+  });
+
+  it("neither an existing leadType nor a cfgLeadType: defaults to claude", () => {
+    expect(resolveLeadType(status(), undefined)).toBe("claude");
+    expect(resolveLeadType(null, undefined)).toBe("claude");
   });
 });
 
@@ -162,8 +180,27 @@ describe("StudioDO wiring (source) — #292 r2", () => {
     expect(sites.length).toBe(2);
     // #134 review round 2: both sites now pass `commitOkClears: false` (a
     // trailing `, false`) — see launchAccountOrRefuse's own doc comment.
-    const paired = doSrc.match(/const launch = await launchAccountOrRefuse\(this\.env, this\.ctx\.storage, id, this\.recordFn\(\), false\);\n(    \/\/[^\n]*\n)?    \(\{ envVars: this\.envVars, envAccount: this\.envAccount \} = launchFields\(this\.env, id, spawnToken, launch\.name\)\);/g);
+    // Issue #249: both sites now sit inside the claude-path `else` branch of
+    // a `leadType === "glm"` guard (do.ts's provisionUngated/restartUngated),
+    // one indent level deeper than before (6 spaces, not 4) — the pin is
+    // updated to that new indentation, not relaxed to ignore it.
+    const paired = doSrc.match(/const launch = await launchAccountOrRefuse\(this\.env, this\.ctx\.storage, id, this\.recordFn\(\), false\);\n(      \/\/[^\n]*\n)?      \(\{ envVars: this\.envVars, envAccount: this\.envAccount \} = launchFields\(this\.env, id, spawnToken, launch\.name\)\);/g);
     expect(paired?.length).toBe(2);
+  });
+
+  // Issue #249: the NEW half of the same gate — a glm-lead studio takes the
+  // `if` branch instead, and never reaches `launchAccountOrRefuse` at all.
+  // See test/studio.do.glm-admission.test.ts for the dedicated, per-call-site
+  // coverage of this guard (all 4 sites, not just these 2).
+  it("provisionUngated and restartUngated both guard the gate on leadType === \"glm\"", () => {
+    const guard = "if (leadType === \"glm\") {";
+    const sites = doSrc.split("\n").filter((l) => l.trim() === guard);
+    // studioEnvVars, launchFields (both 2-space, module-level functions),
+    // provisionUngated, restartUngated, and recycle's own post-destroy
+    // closure (all 3 at 4/6/8-space, class-method level) — 5 total.
+    // Recycle's entry call uses the inverse `if (leadType !== "glm")`
+    // instead (counted separately, see the recycle-specific describe block).
+    expect(sites.length).toBe(5);
   });
 });
 
@@ -245,7 +282,12 @@ describe("StudioDO.recycle wiring — envAccount re-derived fresh, not reused fr
   };
   const recycleBody = body("async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {");
   const closureStart = recycleBody.indexOf("async () => {");
-  const closureEnd = recycleBody.indexOf("await sbAwaitReady(this);", closureStart) + "await sbAwaitReady(this);".length;
+  // Issue #249: anchored on the CLOSING statement of the claude (`else`)
+  // branch, not the first `await sbAwaitReady(this);` found — the glm branch
+  // (now textually FIRST inside this closure) has its own, earlier
+  // `await sbAwaitReady(this);` that is not the end of the closure any more.
+  const closureEnd = recycleBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);", closureStart)
+    + "await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);".length;
   const closureBody = recycleBody.slice(closureStart, closureEnd);
 
   it("recycle() resolves the launch TWICE — once to refuse early, once fresh right before the container starts", () => {
@@ -253,14 +295,33 @@ describe("StudioDO.recycle wiring — envAccount re-derived fresh, not reused fr
     expect(calls.length).toBe(2);
   });
 
-  it("the awaitReady closure calls launchAccountOrRefuse itself, rather than closing over recycle()'s entry-time result", () => {
+  it("the awaitReady closure calls launchAccountOrRefuse itself (claude path), rather than closing over recycle()'s entry-time result", () => {
     expect(closureBody).toContain("launchAccountOrRefuse(");
   });
 
+  // Issue #249: the closure's OWN glm guard — the sibling of the two
+  // claude-path assertions below, proving this closure skips
+  // launchAccountOrRefuse for a glm-lead studio exactly the way
+  // provisionUngated/restartUngated do.
+  it("the closure guards the claude path behind leadType === \"glm\", same as provisionUngated/restartUngated", () => {
+    const glmIdx = closureBody.indexOf("if (leadType === \"glm\") {");
+    const claudeLaunchIdx = closureBody.indexOf("launchAccountOrRefuse(");
+    expect(glmIdx).toBeGreaterThan(-1);
+    expect(claudeLaunchIdx).toBeGreaterThan(-1);
+    // glm branch is textually FIRST (the `if`), claude's launchAccountOrRefuse
+    // call lives in the `else` — so the guard precedes it.
+    expect(glmIdx).toBeLessThan(claudeLaunchIdx);
+  });
+
   it("that fresh call resolves before envAccount is assigned from it, before the container actually starts", () => {
+    // Issue #249: searched from the claude-path `launchAccountOrRefuse(`
+    // call itself, not from closureBody's start — the glm branch (textually
+    // first) has its own, unrelated `envAccount: this.envAccount } =
+    // launchFields(` and `await sbAwaitReady(this)` that must not be confused
+    // for the claude path's own ordering being asserted here.
     const launchIdx = closureBody.indexOf("launchAccountOrRefuse(");
-    const envAccountIdx = closureBody.indexOf("envAccount: this.envAccount } = launchFields(");
-    const awaitReadyIdx = closureBody.indexOf("await sbAwaitReady(this)");
+    const envAccountIdx = closureBody.indexOf("envAccount: this.envAccount } = launchFields(", launchIdx);
+    const awaitReadyIdx = closureBody.indexOf("await sbAwaitReady(this)", envAccountIdx);
     expect(launchIdx).toBeGreaterThan(-1);
     expect(envAccountIdx).toBeGreaterThan(-1);
     expect(awaitReadyIdx).toBeGreaterThan(-1);
@@ -922,7 +983,10 @@ describe("StudioDO.recycle wiring — decide before sbAwaitReady, apply only aft
 
   it("decideAccountClears, sbAwaitReady, applyAccountClears run in that exact order", () => {
     const decideIdx = closureBody.indexOf("const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);");
-    const awaitReadyIdx = closureBody.indexOf("await sbAwaitReady(this);");
+    // Issue #249: searched FROM decideIdx — the glm branch (textually first
+    // in this closure) has its own, unrelated, earlier
+    // `await sbAwaitReady(this);` with no decide/apply around it at all.
+    const awaitReadyIdx = closureBody.indexOf("await sbAwaitReady(this);", decideIdx);
     const applyIdx = closureBody.indexOf("await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);");
     expect(decideIdx).toBeGreaterThan(-1);
     expect(awaitReadyIdx).toBeGreaterThan(-1);
@@ -1220,12 +1284,19 @@ describe("StudioDO start config — one derivation everywhere, failover included
     expect(block).toContain(ASSIGN);
   });
 
-  it("provision, restart and recycle set the start config through the same one assignment, from launch.name", () => {
+  it("provision, restart and recycle set the start config through the same one assignment, from launch.name (claude) or the glm stand-in (glm)", () => {
     const uses = doSrc.split(ASSIGN).length - 1;
-    // failover + provisionUngated + restartUngated + recycle's awaitReady closure
-    expect(uses).toBe(4);
+    // failover(1) + [provisionUngated, restartUngated, recycle's awaitReady
+    // closure] x [claude branch, glm branch] (2 each) = 1 + 3*2 = 7. Issue
+    // #249 doubled the 3 call-site uses — each now carries its own glm
+    // sibling right beside the claude-path one this test already pinned.
+    expect(uses).toBe(7);
     expect(doSrc.split(`${ASSIGN}this.env, id, spawnToken, launch.name))`).length - 1).toBe(2);
     expect(doSrc).toContain(`${ASSIGN}this.env, this.selfId(), spawnToken, launch.name))`);
+    // Issue #249: the glm stand-in — same 3 call sites, `"", "glm"` in place
+    // of `launch.name` (there is no claude account to derive a name from).
+    expect(doSrc.split(`${ASSIGN}this.env, id, spawnToken, "", "glm"))`).length - 1).toBe(2);
+    expect(doSrc).toContain(`${ASSIGN}this.env, this.selfId(), spawnToken, "", "glm"))`);
   });
 
   it("no site sets envVars from a second, separate account read any more", () => {

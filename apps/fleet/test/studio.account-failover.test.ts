@@ -2519,6 +2519,16 @@ describe("runAccountFailover — the in-memory start config follows a completed 
     expect(f.envAccount).toBe("CLAUDE_CODE_OAUTH_TOKEN_2");
   });
 
+  // Issue #249: a glm-lead studio has no claude account at all — `name` is
+  // ignored, envAccount is undefined (there is nothing to record), and
+  // envVars carries the ANTHROPIC_* pair instead.
+  it("launchFields(..., \"glm\") ignores `name` and produces the ANTHROPIC_* env, envAccount undefined", () => {
+    const f = launchFields(ENV, STUDIO_ID, SPAWN, "whatever", "glm");
+    expect(f.envAccount).toBeUndefined();
+    expect(f.envVars.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(f.envVars.ANTHROPIC_AUTH_TOKEN).toBe(SPAWN);
+  });
+
   // #357 review item 1: the REAL StudioDO.failoverDeps closure, not a
   // test-built stand-in — called on a fake `this` holding only what the
   // closure reads (env, ctx.storage, selfId, primaryAccount, primaryIsMapped)

@@ -3836,7 +3836,17 @@ async function writeFleetAccountBurn(
  */
 export function launchFields(
   env: Env, studioId: string, spawnToken: string, name: string,
+  leadType?: "claude" | "glm",
 ): { envVars: Record<string, string>; envAccount: string | undefined } {
+  // Issue #249: a glm-lead studio has no claude account at all — `name` is
+  // whatever the caller's own account-gate resolution produced (irrelevant
+  // here, since every glm call site skips that gate entirely — see do.ts's
+  // 4 launchAccountOrRefuse call sites), and envAccount stays undefined:
+  // there is no account to record, the same "unknown, never a guess" rule
+  // recordLaunchedAccount(..., undefined) already follows.
+  if (leadType === "glm") {
+    return { envVars: studioEnvVars(env, studioId, spawnToken, null, "glm"), envAccount: undefined };
+  }
   // envAccount is resolved exactly as studioEnvVars resolves the token
   // (launchAccount over the same inputs) — not `name` verbatim: with
   // auto-failover off, launchAccount serves the mapped primary whatever
@@ -4158,6 +4168,27 @@ export async function refuseUnlessMappedAccountLaunchable(
   await storage.put(STATUS_KEY, refused);
   await recordStudioFn(refused);
   throw new LaunchRefusedError(launch.error);
+}
+
+/**
+ * Issue #249: which lead a studio boots — the one check every one of
+ * `launchAccountOrRefuse`'s 4 call sites (do.ts's provisionUngated,
+ * restartUngated, and recycle's own two) runs FIRST, to decide whether to
+ * call it at all. `existing` wins whenever a row already exists (sticky,
+ * same rule `StudioStatus.leadType`'s own doc comment states — a later
+ * provision/restart/recycle must never re-derive this from `cfgLeadType`
+ * and silently flip an already-"glm" studio back to "claude" just because
+ * this particular call forgot to repeat the flag). `cfgLeadType` is
+ * consulted ONLY as the fallback for the one case `existing` cannot answer:
+ * a studio's very first-ever provision, where `runProvision` (provision.ts)
+ * has not yet written the row this reads back from existing?.leadType at
+ * the point this runs (it runs moments later, inside the SAME call).
+ * Absent either way resolves to `"claude"` — todays only behaviour.
+ */
+export function resolveLeadType(
+  existing: StudioStatus | null | undefined, cfgLeadType?: "claude" | "glm",
+): "claude" | "glm" {
+  return existing?.leadType ?? cfgLeadType ?? "claude";
 }
 
 /**
@@ -7046,63 +7077,76 @@ export class StudioDO extends Sandbox<Env> {
       async (s: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, s)),
       doClass,
     );
-    // Issue #271: a repo mapped to an unset account refuses here, before any
-    // container touch, with the reason on the row.
-    //
-    // Issue #134 review round 2: `false` — provision() is idempotent and can
-    // run against an already-running container (studio.routes.test.ts's
-    // "provision idempotent" coverage), in which case the guard right below
-    // skips the actual start and this resolution never reaches a container
-    // at all. Committing an ok-branch clear here regardless of that outcome
-    // would falsely report a studio that never moved as no longer
-    // rate-limited / no longer on its old account. The decide/apply pair
-    // below runs ONLY inside the cold-start branch, once a cold start is
-    // certain, and only actually WRITES once that cold start has succeeded.
-    const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, id, this.recordFn(), false);
-    // Issue #354 (the #348 shape, here too): both fields from the ONE launch.
-    ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));
-    // #110 review: the refresh write below is this path's FIRST container
-    // touch, and the SDK waits for a cold container inside that exec. Wait
-    // here, under bring-up's own budget, so the refresh budget never has to.
-    if (!this.ctx.container?.running) {
-      // Issue #134 review round 3+4: DECIDE before sbAwaitReady (onStart's
-      // recordLaunchedAccount write runs INSIDE sbAwaitReady itself, before
-      // it resolves, and would otherwise make accountClears' own
-      // `launchedAccount !== launch.name` guard always read false — see
-      // decideAccountClears's own doc comment) but only APPLY it after
-      // sbAwaitReady has actually resolved successfully. `sbAwaitReady` can
-      // itself throw on a genuine cold-start failure (timeout, bad image, a
-      // rollout killing the container mid-boot); if it does, `clears` is
-      // simply never persisted — the row keeps describing whatever account
-      // the studio is actually still on. See applyAccountClears's own doc
-      // comment for why re-reading storage fresh here (rather than reusing
-      // `existing`) does not clobber onStart's own launchedAccount write.
-      //
-      // CI fix (#134 follow-up, PR #147): the repeated condition guarding the
-      // container-start call on the next line is provably redundant here —
-      // nothing between entering this block and running that call can flip
-      // container readiness — but it is load-bearing for
-      // studio.exec-deadlines.test.ts's own pinned "waits for a cold
-      // container before the first (refresh-class) exec" check, which greps
-      // do.ts's compiled source for that exact standalone conditional
-      // statement. That pin predates and is unrelated to #134; the bare,
-      // unconditional call round 3/4 introduced here (to make room for
-      // decide/apply) silently broke it. Re-guarding it here restores the
-      // exact pinned shape without moving decide/apply relative to it. (Not
-      // quoting the literal statement in this comment on purpose — it would
-      // otherwise satisfy the round-4 wiring test's own ordering check via
-      // this comment instead of the real code below.)
-      //
-      // #211 review round 3, finding 1 — `repo`/`reserved`, derived the
-      // identical way `launchAccountOrRefuse` itself already does, so
-      // `decideAccountClears` (and the `accountClears` it calls) can compute
-      // the borrow fields too — this is the ONLY path every real production
-      // caller actually commits a clear through.
-      const repo = parseStudioId(id)?.repo ?? null;
-      const reserved = otherRepoPrimaries(this.env, repo);
-      const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);
+    // Issue #249: which lead THIS studio boots — resolved once, before the
+    // Claude-account gate below, so a glm-lead studio never calls it at
+    // all (see resolveLeadType's own doc comment for the existing-row-wins/
+    // cfg-fallback rule).
+    const leadType = resolveLeadType(await this.ctx.storage.get<StudioStatus>(STATUS_KEY), cfg.leadType);
+    if (leadType === "glm") {
+      // No Claude account, no launchAccountOrRefuse call, no D1 limits/
+      // usage/burn read, no account-clear bookkeeping — none of it applies
+      // to a studio that never runs on a Claude account at all.
+      ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, "", "glm"));
       if (!this.ctx.container?.running) await sbAwaitReady(this);
-      await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
+    } else {
+      // Issue #271: a repo mapped to an unset account refuses here, before any
+      // container touch, with the reason on the row.
+      //
+      // Issue #134 review round 2: `false` — provision() is idempotent and can
+      // run against an already-running container (studio.routes.test.ts's
+      // "provision idempotent" coverage), in which case the guard right below
+      // skips the actual start and this resolution never reaches a container
+      // at all. Committing an ok-branch clear here regardless of that outcome
+      // would falsely report a studio that never moved as no longer
+      // rate-limited / no longer on its old account. The decide/apply pair
+      // below runs ONLY inside the cold-start branch, once a cold start is
+      // certain, and only actually WRITES once that cold start has succeeded.
+      const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, id, this.recordFn(), false);
+      // Issue #354 (the #348 shape, here too): both fields from the ONE launch.
+      ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));
+      // #110 review: the refresh write below is this path's FIRST container
+      // touch, and the SDK waits for a cold container inside that exec. Wait
+      // here, under bring-up's own budget, so the refresh budget never has to.
+      if (!this.ctx.container?.running) {
+        // Issue #134 review round 3+4: DECIDE before sbAwaitReady (onStart's
+        // recordLaunchedAccount write runs INSIDE sbAwaitReady itself, before
+        // it resolves, and would otherwise make accountClears' own
+        // `launchedAccount !== launch.name` guard always read false — see
+        // decideAccountClears's own doc comment) but only APPLY it after
+        // sbAwaitReady has actually resolved successfully. `sbAwaitReady` can
+        // itself throw on a genuine cold-start failure (timeout, bad image, a
+        // rollout killing the container mid-boot); if it does, `clears` is
+        // simply never persisted — the row keeps describing whatever account
+        // the studio is actually still on. See applyAccountClears's own doc
+        // comment for why re-reading storage fresh here (rather than reusing
+        // `existing`) does not clobber onStart's own launchedAccount write.
+        //
+        // CI fix (#134 follow-up, PR #147): the repeated condition guarding the
+        // container-start call on the next line is provably redundant here —
+        // nothing between entering this block and running that call can flip
+        // container readiness — but it is load-bearing for
+        // studio.exec-deadlines.test.ts's own pinned "waits for a cold
+        // container before the first (refresh-class) exec" check, which greps
+        // do.ts's compiled source for that exact standalone conditional
+        // statement. That pin predates and is unrelated to #134; the bare,
+        // unconditional call round 3/4 introduced here (to make room for
+        // decide/apply) silently broke it. Re-guarding it here restores the
+        // exact pinned shape without moving decide/apply relative to it. (Not
+        // quoting the literal statement in this comment on purpose — it would
+        // otherwise satisfy the round-4 wiring test's own ordering check via
+        // this comment instead of the real code below.)
+        //
+        // #211 review round 3, finding 1 — `repo`/`reserved`, derived the
+        // identical way `launchAccountOrRefuse` itself already does, so
+        // `decideAccountClears` (and the `accountClears` it calls) can compute
+        // the borrow fields too — this is the ONLY path every real production
+        // caller actually commits a clear through.
+        const repo = parseStudioId(id)?.repo ?? null;
+        const reserved = otherRepoPrimaries(this.env, repo);
+        const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);
+        if (!this.ctx.container?.running) await sbAwaitReady(this);
+        await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
+      }
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(cfg)), this.ctx.storage, id, ctx);
     const status = await provisionWithStorage(
@@ -7316,39 +7360,49 @@ export class StudioDO extends Sandbox<Env> {
       async (s: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, s)),
       doClass,
     );
-    // Issue #271: a repo mapped to an unset account refuses here, before any
-    // container touch, with the reason on the row.
-    //
-    // Issue #134 review round 2: `false` — restartStudio is likewise
-    // callable against an already-live container, in which case the guard
-    // right below skips the actual start; see provisionUngated's identical
-    // comment above its own call for the full reasoning.
-    const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, id, this.recordFn(), false);
-    // Issue #354 (the #348 shape, here too): both fields from the ONE launch.
-    ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));
-    // #110 review: the refresh write below is this path's FIRST container
-    // touch, and the SDK waits for a cold container inside that exec. Wait
-    // here, under bring-up's own budget, so the refresh budget never has to.
-    if (!this.ctx.container?.running) {
-      // Issue #134 review round 3+4: DECIDE before sbAwaitReady, APPLY only
-      // once it resolves successfully — see provisionUngated's identical
-      // comment above its own call for the full reasoning (onStart's
-      // recordLaunchedAccount runs INSIDE sbAwaitReady itself; sbAwaitReady
-      // can itself throw on a genuine cold-start failure, in which case
-      // `clears` is simply never persisted).
-      //
-      // CI fix (#134 follow-up, PR #147): see provisionUngated's identical
-      // comment above its own call — the inner guard on the next line is
-      // provably redundant here but restores the exact standalone statement
-      // studio.exec-deadlines.test.ts pins.
-      //
-      // #211 review round 3, finding 1 — see provisionUngated's identical
-      // comment above its own call.
-      const repo = parseStudioId(id)?.repo ?? null;
-      const reserved = otherRepoPrimaries(this.env, repo);
-      const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);
+    // Issue #249: see provisionUngated's identical comment above its own
+    // call — no cfg at this call site (a restart has only the id), so the
+    // existing row is the only source; a studio's leadType is already
+    // written by the provision that came before any restart.
+    const leadType = resolveLeadType(await this.ctx.storage.get<StudioStatus>(STATUS_KEY));
+    if (leadType === "glm") {
+      ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, "", "glm"));
       if (!this.ctx.container?.running) await sbAwaitReady(this);
-      await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
+    } else {
+      // Issue #271: a repo mapped to an unset account refuses here, before any
+      // container touch, with the reason on the row.
+      //
+      // Issue #134 review round 2: `false` — restartStudio is likewise
+      // callable against an already-live container, in which case the guard
+      // right below skips the actual start; see provisionUngated's identical
+      // comment above its own call for the full reasoning.
+      const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, id, this.recordFn(), false);
+      // Issue #354 (the #348 shape, here too): both fields from the ONE launch.
+      ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));
+      // #110 review: the refresh write below is this path's FIRST container
+      // touch, and the SDK waits for a cold container inside that exec. Wait
+      // here, under bring-up's own budget, so the refresh budget never has to.
+      if (!this.ctx.container?.running) {
+        // Issue #134 review round 3+4: DECIDE before sbAwaitReady, APPLY only
+        // once it resolves successfully — see provisionUngated's identical
+        // comment above its own call for the full reasoning (onStart's
+        // recordLaunchedAccount runs INSIDE sbAwaitReady itself; sbAwaitReady
+        // can itself throw on a genuine cold-start failure, in which case
+        // `clears` is simply never persisted).
+        //
+        // CI fix (#134 follow-up, PR #147): see provisionUngated's identical
+        // comment above its own call — the inner guard on the next line is
+        // provably redundant here but restores the exact standalone statement
+        // studio.exec-deadlines.test.ts pins.
+        //
+        // #211 review round 3, finding 1 — see provisionUngated's identical
+        // comment above its own call.
+        const repo = parseStudioId(id)?.repo ?? null;
+        const reserved = otherRepoPrimaries(this.env, repo);
+        const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);
+        if (!this.ctx.container?.running) await sbAwaitReady(this);
+        await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
+      }
     }
     await refreshWithStorage(this.refreshDeps(await this.workRepoSlug(null)), this.ctx.storage, id, ctx);
     const restarted = await restartWithSync(
@@ -7460,6 +7514,11 @@ export class StudioDO extends Sandbox<Env> {
    * two covers does not come back.
    */
   async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {
+    // Issue #249: resolved ONCE, at entry — leadType is sticky (unlike
+    // claudeAccount, it is never subject to a concurrent failover mid-
+    // recycle), so both this entry-call guard and the post-destroy closure
+    // below share this one snapshot rather than each re-reading storage.
+    const leadType = resolveLeadType(await this.ctx.storage.get<StudioStatus>(STATUS_KEY), cfg.leadType);
     // Board task #131 ask 2: `fleet recycle <id> --account mapped`. This
     // clear runs FIRST — before either launchAccountOrRefuse call below — so
     // both see the cleared state and fall through to CLAUDE_ACCOUNT_BY_REPO's
@@ -7499,7 +7558,11 @@ export class StudioDO extends Sandbox<Env> {
     // launchAccountOrRefuse's own doc comment for the full reasoning; the
     // second, post-destroy call below (inside the awaitReady closure) is the
     // only one that commits either clear.
-    await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);
+    // Issue #249: a glm-lead studio has no Claude account to refuse on —
+    // skip the gate entirely rather than call it only to discard an `ok`.
+    if (leadType !== "glm") {
+      await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);
+    }
     const { resolveMemoryRepo, commitFile } = this.memoryDeps();
     // Issue #123: an explicit start — the post-destroy sbAwaitReady runs
     // outside provisionCore's own allowance. Issue #152: ONE ctx for this
@@ -7622,36 +7685,45 @@ export class StudioDO extends Sandbox<Env> {
         // ruling) and provisionCore's own ensureSpawnToken republishes its
         // hash exactly as before if it ever needs to.
         const spawnToken = await loadOrMintSpawnToken(this.ctx.storage);
-        // Issue #134 review round 4: `false` — this call's own resolution is
-        // no longer, by itself, proof the studio is about to run on
-        // `launch.name`: `sbAwaitReady` below can throw on a genuine
-        // cold-start failure even though destroy() has already
-        // unconditionally happened. See decideAccountClears/
-        // applyAccountClears's own doc comments, and provisionUngated's
-        // identical comment above its own call, for the full reasoning.
-        const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);
-        // Review round 3, finding 1 (issue #328): `launch.name` straight from
-        // the call just above, NOT a second (now-removed) claudeAccountName()
-        // storage read — see this closure's own doc comment for why the
-        // second read was never actually atomic with this one, only
-        // practically safe on an unstated DO-input-gate precondition. Both
-        // fields below now come from the ONE resolved `launch`, with no
-        // read, storage-only or not, in between.
-        ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, this.selfId(), spawnToken, launch.name));
-        // Issue #134 review round 4: DECIDE from the pre-touch snapshot here,
-        // APPLY only once sbAwaitReady below has actually resolved
-        // successfully — never from a catch, never unconditionally. A throw
-        // from sbAwaitReady (recycleWithSync's own try/catch, above) now
-        // finds `rateLimited`/`claudeAccount` exactly as they were before
-        // this closure ran, not falsely cleared.
-        //
-        // #211 review round 3, finding 1 — see provisionUngated's identical
-        // comment above its own call.
-        const repo = parseStudioId(this.selfId())?.repo ?? null;
-        const reserved = otherRepoPrimaries(this.env, repo);
-        const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);
-        await sbAwaitReady(this);
-        await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
+        // Issue #249: a glm-lead studio skips the gate here too — the same
+        // `leadType` this recycle() call resolved once, at its own entry
+        // (never re-read: see that assignment's own doc comment for why a
+        // stale snapshot is safe here, unlike claudeAccount).
+        if (leadType === "glm") {
+          ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, this.selfId(), spawnToken, "", "glm"));
+          await sbAwaitReady(this);
+        } else {
+          // Issue #134 review round 4: `false` — this call's own resolution is
+          // no longer, by itself, proof the studio is about to run on
+          // `launch.name`: `sbAwaitReady` below can throw on a genuine
+          // cold-start failure even though destroy() has already
+          // unconditionally happened. See decideAccountClears/
+          // applyAccountClears's own doc comments, and provisionUngated's
+          // identical comment above its own call, for the full reasoning.
+          const launch = await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);
+          // Review round 3, finding 1 (issue #328): `launch.name` straight from
+          // the call just above, NOT a second (now-removed) claudeAccountName()
+          // storage read — see this closure's own doc comment for why the
+          // second read was never actually atomic with this one, only
+          // practically safe on an unstated DO-input-gate precondition. Both
+          // fields below now come from the ONE resolved `launch`, with no
+          // read, storage-only or not, in between.
+          ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, this.selfId(), spawnToken, launch.name));
+          // Issue #134 review round 4: DECIDE from the pre-touch snapshot here,
+          // APPLY only once sbAwaitReady below has actually resolved
+          // successfully — never from a catch, never unconditionally. A throw
+          // from sbAwaitReady (recycleWithSync's own try/catch, above) now
+          // finds `rateLimited`/`claudeAccount` exactly as they were before
+          // this closure ran, not falsely cleared.
+          //
+          // #211 review round 3, finding 1 — see provisionUngated's identical
+          // comment above its own call.
+          const repo = parseStudioId(this.selfId())?.repo ?? null;
+          const reserved = otherRepoPrimaries(this.env, repo);
+          const clears = await decideAccountClears(this.env, this.ctx.storage, launch, repo, reserved);
+          await sbAwaitReady(this);
+          await applyAccountClears(this.ctx.storage, this.recordFn(), clears, ctx);
+        }
       },
       (c) => this.provisionCore(c, "recycle", ctx),
       async (s: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, s)), cfg,
