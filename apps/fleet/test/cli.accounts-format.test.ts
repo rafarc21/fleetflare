@@ -13,6 +13,14 @@ import { CSWAP_LIST_FIXTURE, CSWAP_LIST_ENVELOPE, OVER_FIVE_HOUR } from "./fixtu
 // tsconfig's "workers-types" type set cannot resolve. This module is
 // deliberately Bun/node-free (see its own header).
 
+// Issue #253 — the "now" every describeCurrentState/wouldChange/
+// describeWould/formatAccountsTable call below is measured against. Sits
+// strictly between LIMITED's own seenAt (12:00) and until (14:00), so every
+// PRE-EXISTING assertion using LIMITED keeps reading "limited" unchanged —
+// only the self-free fix (a PAST until) or a deliberately past fixture
+// changes behavior.
+const NOW = new Date("2026-10-05T13:00:00Z");
+
 const FREE: AccountCurrentState = { dead: false, until: null, seenAt: null };
 const LIMITED: AccountCurrentState = { dead: false, until: "2026-10-05T14:00:00Z", seenAt: "2026-10-05T12:00:00Z" };
 const DEAD: AccountCurrentState = { dead: true, until: null, seenAt: "2026-10-05T12:00:00Z" };
@@ -32,67 +40,96 @@ function row(overrides: Partial<AccountSnapshotRow> = {}): AccountSnapshotRow {
 
 describe("describeCurrentState", () => {
   it("free: neither dead nor until", () => {
-    expect(describeCurrentState(FREE)).toBe("free");
+    expect(describeCurrentState(FREE, NOW)).toBe("free");
   });
-  it("limited: until set, not dead", () => {
-    expect(describeCurrentState(LIMITED)).toBe("limited until 2026-10-05T14:00:00Z");
+  it("limited: until set, not dead, and still in the future at now", () => {
+    expect(describeCurrentState(LIMITED, NOW)).toBe("limited until 2026-10-05T14:00:00Z");
   });
   it("dead wins over a stale until", () => {
-    expect(describeCurrentState({ dead: true, until: "2026-10-05T14:00:00Z", seenAt: null })).toBe("dead");
+    expect(describeCurrentState({ dead: true, until: "2026-10-05T14:00:00Z", seenAt: null }, NOW)).toBe("dead");
+  });
+
+  // Issue #253 — "ROW STATE / WOULD disagree, only WOULD is right": one
+  // concrete cause was a `until` already in the past still printing "limited
+  // until <stale date>" forever. `accountIsFree` (src/studio/accounts.ts)
+  // already treats a passed `until` as free again; this function had no such
+  // check at all until this fix.
+  it("self-frees: a until already in the past at now reads free, matching accountIsFree's own convention", () => {
+    const pastLimit: AccountCurrentState = { dead: false, until: "2026-10-05T10:00:00Z", seenAt: "2026-10-05T08:00:00Z" };
+    expect(describeCurrentState(pastLimit, NOW)).toBe("free");
+  });
+
+  it("self-frees exactly AT now too (until <= now, not only until < now)", () => {
+    const exactlyNow: AccountCurrentState = { dead: false, until: NOW.toISOString(), seenAt: "2026-10-05T08:00:00Z" };
+    expect(describeCurrentState(exactlyNow, NOW)).toBe("free");
+  });
+
+  it("dead wins over a PAST until too, unconditionally — same precedence accountIsFree gives dead over everything else", () => {
+    const deadWithPastUntil: AccountCurrentState = { dead: true, until: "2026-10-05T10:00:00Z", seenAt: "2026-10-05T08:00:00Z" };
+    expect(describeCurrentState(deadWithPastUntil, NOW)).toBe("dead");
   });
 });
 
 describe("wouldChange / describeWould", () => {
   it("no-op: current already matches the limit decision's own until", () => {
-    expect(wouldChange(LIMITED, LIMIT_DECISION)).toBe(false);
-    expect(describeWould(row({ current: LIMITED, decision: LIMIT_DECISION }))).toBe("-");
+    expect(wouldChange(LIMITED, LIMIT_DECISION, NOW)).toBe(false);
+    expect(describeWould(row({ current: LIMITED, decision: LIMIT_DECISION }), NOW)).toBe("-");
   });
 
   it("change: current free, decision says limit", () => {
-    expect(wouldChange(FREE, LIMIT_DECISION)).toBe(true);
-    expect(describeWould(row({ current: FREE, decision: LIMIT_DECISION }))).toBe("limited until 2026-10-05T14:00:00Z");
+    expect(wouldChange(FREE, LIMIT_DECISION, NOW)).toBe(true);
+    expect(describeWould(row({ current: FREE, decision: LIMIT_DECISION }), NOW)).toBe("limited until 2026-10-05T14:00:00Z");
   });
 
   it("change: current limited until a DIFFERENT time than the decision", () => {
     const olderLimit: AccountCurrentState = { dead: false, until: "2026-10-04T00:00:00Z", seenAt: null };
-    expect(wouldChange(olderLimit, LIMIT_DECISION)).toBe(true);
+    expect(wouldChange(olderLimit, LIMIT_DECISION, NOW)).toBe(true);
   });
 
   it("change: current dead, decision clears (fresh low reading proves it's alive)", () => {
-    expect(wouldChange(DEAD, CLEAR_DECISION)).toBe(true);
-    expect(describeWould(row({ current: DEAD, decision: CLEAR_DECISION }))).toBe("free");
+    expect(wouldChange(DEAD, CLEAR_DECISION, NOW)).toBe(true);
+    expect(describeWould(row({ current: DEAD, decision: CLEAR_DECISION }), NOW)).toBe("free");
   });
 
   it("no-op: current already free, decision clears", () => {
-    expect(wouldChange(FREE, CLEAR_DECISION)).toBe(false);
+    expect(wouldChange(FREE, CLEAR_DECISION, NOW)).toBe(false);
   });
 
   it("unmanaged never counts as a change, regardless of current state", () => {
-    expect(wouldChange(FREE, UNMANAGED_DECISION)).toBe(false);
-    expect(wouldChange(DEAD, UNMANAGED_DECISION)).toBe(false);
-    expect(describeWould(row({ current: DEAD, decision: UNMANAGED_DECISION }))).toBe("-");
+    expect(wouldChange(FREE, UNMANAGED_DECISION, NOW)).toBe(false);
+    expect(wouldChange(DEAD, UNMANAGED_DECISION, NOW)).toBe(false);
+    expect(describeWould(row({ current: DEAD, decision: UNMANAGED_DECISION }), NOW)).toBe("-");
   });
 
   // MAJOR 4: "no-data" (a real cswap account, untrustworthy reading) must
   // never write either, same as "unmanaged" — but it must read DIFFERENTLY
   // in the WOULD column, so an operator can tell the two apart.
   it("no-data never counts as a change, but reads distinctly from unmanaged in the WOULD column", () => {
-    expect(wouldChange(FREE, NO_DATA_DECISION)).toBe(false);
-    expect(wouldChange(DEAD, NO_DATA_DECISION)).toBe(false);
-    const would = describeWould(row({ current: DEAD, decision: NO_DATA_DECISION }));
+    expect(wouldChange(FREE, NO_DATA_DECISION, NOW)).toBe(false);
+    expect(wouldChange(DEAD, NO_DATA_DECISION, NOW)).toBe(false);
+    const would = describeWould(row({ current: DEAD, decision: NO_DATA_DECISION }), NOW);
     expect(would).not.toBe("-");
     expect(would).toContain("no data");
     expect(would).toContain("relogin_required");
+  });
+
+  // Issue #253 — a PAST current `until` must self-free for WOULD purposes
+  // too (describeWould/wouldChange both call describeCurrentState), not
+  // just for the standalone ROW STATE text.
+  it("a current until already past at now is treated as free when comparing against a would-be decision", () => {
+    const pastLimit: AccountCurrentState = { dead: false, until: "2026-10-05T10:00:00Z", seenAt: "2026-10-05T08:00:00Z" };
+    expect(wouldChange(pastLimit, CLEAR_DECISION, NOW)).toBe(false);
+    expect(describeWould(row({ current: pastLimit, decision: CLEAR_DECISION }), NOW)).toBe("-");
   });
 });
 
 describe("formatAccountsTable", () => {
   it("says so plainly when there are no accounts", () => {
-    expect(formatAccountsTable([])).toBe("(no accounts configured)");
+    expect(formatAccountsTable([], NOW)).toBe("(no accounts configured)");
   });
 
   it("renders SLOT, LABEL, MATCH, 5H%, 7D%, RESETS, ROW STATE, WOULD", () => {
-    const out = formatAccountsTable([row({ current: FREE, decision: LIMIT_DECISION, fiveHourPct: 97, sevenDayPct: 40 })]);
+    const out = formatAccountsTable([row({ current: FREE, decision: LIMIT_DECISION, fiveHourPct: 97, sevenDayPct: 40 })], NOW);
     const [header, body] = out.split("\n");
     expect(header.split(/\s{2,}/)).toEqual(["SLOT", "LABEL", "MATCH", "5H%", "7D%", "RESETS", "ROW STATE", "WOULD"]);
     expect(body).toContain("CLAUDE_CODE_OAUTH_TOKEN");
@@ -105,12 +142,35 @@ describe("formatAccountsTable", () => {
     expect(body).toContain("limited until 2026-10-05T14:00:00Z");
   });
 
+  // Issue #253 — the "2h earlier than reality" symptom is exactly what a
+  // silently-stripped offset/truncated instant would cause. Real assertion,
+  // not a tautology: re-parses the printed RESETS/WOULD cells independently
+  // and checks they round-trip to the EXACT epoch ms cswap reported, and
+  // that each one carries an explicit "Z" a reader can see is UTC — not just
+  // that the function returned whatever it returned.
+  it("RESETS and WOULD print the full UTC instant with its Z marker intact, never truncated", () => {
+    const until = "2026-10-05T14:00:00.000Z";
+    const out = formatAccountsTable(
+      [row({ current: FREE, decision: { ...LIMIT_DECISION, until }, fiveHourPct: 97, sevenDayPct: 40 })],
+      NOW,
+    );
+    const [, body] = out.split("\n");
+    const cells = body!.trim().split(/\s{2,}/);
+    const resets = cells[5]!;
+    const would = cells[7]!;
+    expect(resets).toBe(until);
+    expect(would).toBe(`limited until ${until}`);
+    expect(resets.endsWith("Z")).toBe(true);
+    expect(Date.parse(resets)).toBe(Date.parse(until));
+    expect(Date.parse(would.replace("limited until ", ""))).toBe(Date.parse(until));
+  });
+
   it("an unmanaged/cswap-missing row shows dashes for pct/resets, never crashes", () => {
     const missing: SyncDecision = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", action: "unmanaged" };
     const out = formatAccountsTable([row({
       name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: null, matchSource: "cswap-missing", matchedEmail: null,
       fiveHourPct: null, sevenDayPct: null, decision: missing, current: FREE,
-    })]);
+    })], NOW);
     const body = out.split("\n")[1]!;
     expect(body).toContain("CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(body).toContain("cswap-missing");
@@ -132,7 +192,7 @@ describe("formatAccountsTable", () => {
       name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: "stale@example.com", matchSource: "label", matchedEmail: "stale@example.com",
       decision: noData, current: FREE,
     });
-    const out = formatAccountsTable([unmanagedRow, noDataRow]);
+    const out = formatAccountsTable([unmanagedRow, noDataRow], NOW);
     const [, unmanagedLine, noDataLine] = out.split("\n");
     expect(unmanagedLine.trim().endsWith("-")).toBe(true); // WOULD column ends in a bare "-"
     expect(noDataLine).toContain("no data (usage data is 900s old (>= 600s))");
@@ -145,7 +205,7 @@ describe("formatAccountsTable", () => {
     const out = formatAccountsTable([row({
       label: null, matchSource: "inferred", matchedEmail: "primary@example.com",
       decision: { name: "CLAUDE_CODE_OAUTH_TOKEN", action: "unmanaged" },
-    })]);
+    })], NOW);
     const body = out.split("\n")[1]!;
     expect(body).toContain("inferred");
   });
