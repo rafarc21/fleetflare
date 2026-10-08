@@ -459,3 +459,49 @@ it's excluded from the aggregate, not deleted). Failed (`calls: 2`,
 `inputTokens: 1010`) before the fix. Fixed, 13/13 pass
 (`test/junior.usage.test.ts`); re-ran `test/llm.anthropic-route.test.ts`
 alongside it (shares the same table) -- 37/37 pass across both files.
+
+## STATUS comment fixes (PR #255, round 1 re-review)
+
+Source: maestro's STATUS comment on PR #255, measured LIVE against the real
+backend 2026-10-08T08:40:12Z (Workers AI, `@cf/zai-org/glm-5.3`, chat
+completions): GLM spends most of `max_tokens` on `reasoning_content` before
+it ever produces visible content -- at `max_tokens: 3000` content came back
+`""` (all 3000 went to reasoning); at `max_tokens: 12000` -> 6861 completion
+tokens, ~24k chars of reasoning, good content. All fixes land in
+`translate.ts` only (`anthropic-route.ts` untouched, per the dispatch).
+
+1. **max_tokens floor** -- new `GLM_MIN_MAX_TOKENS = 16000` constant;
+   `anthropicRequestToOpenAI`'s outbound `max_tokens` is now
+   `Math.max(Number(body.max_tokens) || 0, GLM_MIN_MAX_TOKENS)` -- a floor,
+   never a cap, so a client asking for more than 16000 still gets exactly
+   that.
+2. **Empty-content guard, non-streaming** -- `openAIResponseToAnthropic`
+   forces `stop_reason: "max_tokens"` whenever the resulting `content` array
+   is empty (no text block, no tool_use block), regardless of
+   `finish_reason` -- the measured failure reported `finish_reason: "stop"`,
+   not `"length"`, so finish_reason alone is not a reliable signal for this
+   case.
+3. **Empty-content guard, streaming** -- `closeStream` does the same, keyed
+   off `state.nextIndex === 0` (the stream never opened any content block at
+   all).
+4. **Reasoning tokens counted in usage** -- if
+   `completion_tokens_details.reasoning_tokens` is present on the OpenAI
+   `usage` object (non-streaming response, or the usage-bearing streaming
+   chunk), it is added to `output_tokens`/`state.outputTokens`. Flagged,
+   not asserted as fact: whether GLM's `completion_tokens` already includes
+   reasoning tokens or excludes them is not verifiable from inside this
+   repo (no live backend access) -- the STATUS comment's own numbers read
+   as two distinct figures ("6861 completion tokens, ~24k chars reasoning"),
+   which is the basis for treating them as additive; undercounting a real
+   cost was judged worse than double-counting a figure that might already
+   be included.
+
+RED: added tests for all four behaviors to `llm-translate.test.ts` first --
+confirmed failing (missing `GLM_MIN_MAX_TOKENS` export broke the whole
+module load, by design). Also had to update one pre-existing assertion
+(`max_tokens: 1024` passthrough) to reflect the new floor, since that
+existing test's expectation was never a target of the STATUS comment but
+became stale the moment the floor shipped. Fixed, 58/58 pass
+(`bun test test/bun/llm-translate.test.ts`); scoped `tsc --noEmit` on this
+app's own project only -- zero errors. Did not run the full repo test
+suite/`bun run check` -- scoped verification only, per the dispatch.
