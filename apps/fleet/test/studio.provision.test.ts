@@ -2179,4 +2179,24 @@ describe("runProvision — seeds StudioStatus.leadType from cfg, first-ever prov
     );
     expect(status.leadType).toBe("claude");
   });
+
+  it("an EXISTING row already provisioned once (running, no leadType field at all) -> a re-provision carrying cfg.leadType: \"glm\" must NOT flip it (maestro round 1 MINOR, #255)", async () => {
+    // The gap the maestro flagged: `existing?.leadType === undefined` is true
+    // both for "this row has never been provisioned before" (existing ===
+    // null) AND for "this row has been running as a real claude studio all
+    // along, the field was simply never written" (existing is a real,
+    // already-provisioned row). Only the FORMER is "first-ever provision" —
+    // the latter is an ordinary re-provision/restart of an existing claude
+    // studio and must never read cfg.leadType at all, no matter what it
+    // carries. Keying the seed off `existing === null` (not
+    // `existing?.leadType === undefined`) is what tells the two apart.
+    const existing: StudioStatus = {
+      id: "fleetflare--scratch", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: "rafarc21/fleetflare",
+    };
+    const { status } = await runProvision(
+      minimalDeps(), { repo: "fleetflare", role: "scratch", leadType: "glm" }, "rafarc21/fleetflare", existing,
+    );
+    expect(status.leadType).toBeUndefined();
+  });
 });
