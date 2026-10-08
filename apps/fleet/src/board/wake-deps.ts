@@ -43,7 +43,12 @@ export function realWakeDeps(env: Env): AssignWakeDeps {
       // `null` does. Normalized at this one read boundary rather than in
       // assign-wake.ts's own check, the same posture StudioStatus.repoSlug's
       // own doc comment already documents for this exact ambiguity.
-      return row ? { state: row.state, repoSlug: row.repoSlug ?? null } : null;
+      // Issue #249: `leadType` rides along unchanged from the row (`??
+      // undefined` is a no-op — `row.leadType` is already `"claude" |
+      // "glm" | undefined`) — stated explicitly rather than left implicit,
+      // the same "every field this port answers is named here" discipline
+      // `repoSlug`'s own normalization line just above follows.
+      return row ? { state: row.state, repoSlug: row.repoSlug ?? null, leadType: row.leadType } : null;
     },
     wake: async (studioId, prompt) => (await getStudioStub(env, studioId)).wakeStudioOnAssignment(prompt),
     // Issue #284 round 2 (issue #268's own fix, reused): GitHub's canonical

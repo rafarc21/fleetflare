@@ -19,13 +19,13 @@ import {
   resolveIssuesForPushCommits, resolveIssuesFromEnvelopeArtifacts, type ClosableIssue, type PromoteCloseApi,
 } from "./promote-close";
 import { githubBoardApi } from "../board/routes";
-import { listTasks } from "../board/board";
+import { listTasks, revokeGlmLeadOnSecurityLabel, type GetLeadType } from "../board/board";
 import { openTasksWithLatestPr } from "../board/pr-landed";
 import { closeTaskOnPromote } from "../board/close-action";
 import type { BoardApi } from "../board/board";
 import { makeTimeBudget, budgetExceeded, AUTO_CLOSE_BUDGET_MS, type TimeBudget } from "../time-budget";
 import { getFlag, setFlag } from "../state";
-import { taskAssignees, taskStates, type TaskState } from "../board/types";
+import { taskAssignees, taskStates, SECURITY_LABEL, type TaskState } from "../board/types";
 import { qualifiesForCommentWake, wakeOnComment } from "../board/comment-wake";
 import { realWakeDeps } from "../board/wake-deps";
 
@@ -120,6 +120,42 @@ async function revokeJuniorOnIssueEvent(env: Env, body: string): Promise<void> {
     console.log(`junior: revoked ${repo}#${number} on issues webhook (${why})`);
   } catch (err) {
     console.error("junior: issues webhook revoke failed", err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
+ * Maestro review round 1 MINOR (#249, #255): board/board.ts's
+ * createTask/assignTask refuse `security` going ONTO a glm-lead studio, but
+ * neither sees the label arriving AFTER the fact — this is that missing
+ * watcher, same `labeled` trigger and same "revoke only, never grant"
+ * posture revokeJuniorOnIssueEvent above already answers for issue #35.
+ * Cheapest possible early-out first: only `action === "labeled"` with
+ * `label.name === SECURITY_LABEL` is ever worth a GitHub read, let alone a
+ * write — every OTHER labeled/unlabeled/closed/reopened delivery on this
+ * same webhook returns before touching board.ts or minting a token.
+ *
+ * `getLeadType` reads the registry directly (`listStudios`), not
+ * routes.ts's own `getLeadTypeFrom(AssignWakeDeps)` — this call site has no
+ * `AssignWakeDeps` in hand and has no reason to build the rest of one just
+ * for this single field.
+ */
+async function revokeGlmLeadOnSecurityLabelEvent(env: Env, body: string): Promise<void> {
+  try {
+    const p = JSON.parse(body) as {
+      action?: string; label?: { name?: string }; issue?: { number?: number }; repository?: { full_name?: string };
+    };
+    if (p.action !== "labeled" || p.label?.name !== SECURITY_LABEL) return;
+    const repo = p.repository?.full_name;
+    const number = p.issue?.number;
+    if (typeof repo !== "string" || typeof number !== "number") return;
+    const rows = await listStudios(env);
+    const getLeadType: GetLeadType = async (studioId) => rows.find((r) => r.id === studioId)?.leadType;
+    const { revoked } = await revokeGlmLeadOnSecurityLabel(githubBoardApi(env), repo, number, getLeadType);
+    if (revoked.length > 0) {
+      console.log(`board: revoked glm-lead assignment on ${repo}#${number} (security label added) — ${revoked.join(", ")}`);
+    }
+  } catch (err) {
+    console.error("board: glm-lead security-label revoke failed", err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -579,7 +615,10 @@ export async function handleGithubWebhook(
     // Issue #41: the revoke FIRST. GitHub cancels a delivery after 10s and
     // the maestro wake below can outlast that; a cancelled request must not
     // take the revoke with it.
-    if (event === "issues") await revokeJuniorOnIssueEvent(env, body);
+    if (event === "issues") {
+      await revokeJuniorOnIssueEvent(env, body);
+      await revokeGlmLeadOnSecurityLabelEvent(env, body);
+    }
     if (event) await wakeMaestro(env, event, body, now());
     // Board issue #236: an ADDITIONAL, targeted wake for the commented-on
     // task's own assignee — independent of wakeMaestro above, which still

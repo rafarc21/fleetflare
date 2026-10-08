@@ -54,7 +54,14 @@ export interface AssignWakeDeps {
    * see `wakeOnAssign`'s own comment for the failure this closes and the
    * fail-open decision on `null`.
    */
-  studioState: (studioId: string) => Promise<{ state: string; repoSlug: string | null } | null>;
+  /**
+   * Issue #249: `leadType` rides the SAME registry row this read already
+   * fetches — added here, not as a second port, so routes.ts's security-
+   * refusal wiring (board.ts's `GetLeadType`) spends no extra D1 read.
+   * `undefined` means "claude" (StudioStatus.leadType's own doc comment),
+   * same as every reader of that field.
+   */
+  studioState: (studioId: string) => Promise<{ state: string; repoSlug: string | null; leadType?: "claude" | "glm" } | null>;
   /** RPC into that studio's own Durable Object. The DO applies its own
    *  stopped/pane gates (src/studio/wake.ts's runGatedWake) — this port never
    *  types into a container itself. */

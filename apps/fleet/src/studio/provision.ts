@@ -2512,6 +2512,22 @@ export async function runProvision(
     ...(existing ?? freshStatus(id)),
     state: "provisioning",
     ...(cfg.spawnedBy ? { spawnedBy: cfg.spawnedBy } : {}),
+    // Issue #249, maestro review round 1 MINOR: seeded from cfg ONLY on a
+    // studio's first-ever provision — `existing === null`, meaning no row
+    // has EVER been written for this id before. Keying this off
+    // `existing?.leadType === undefined` instead (the original shape) was
+    // the bug: that condition is ALSO true for an already-provisioned,
+    // already-running claude studio whose row simply never carried the
+    // field (every studio provisioned before #249 shipped, and every studio
+    // provisioned since without an explicit leadType) — a later
+    // re-provision/restart/recycle of THAT studio must never read
+    // cfg.leadType at all, no matter what value it happens to carry, because
+    // the studio has already been running (as claude, implicitly) since its
+    // real first-ever provision. Once `existing` is non-null the field is
+    // frozen: carried forward unchanged via the `...existing` spread above,
+    // same "existing wins, cfg only fills a genuine gap" shape do.ts's
+    // ensureSpawnToken already uses for doClass.
+    ...(existing === null && cfg.leadType !== undefined ? { leadType: cfg.leadType } : {}),
     // Bound on every provision, not only the first: this is the record of
     // which repo the container was actually pointed at, and it has to stay
     // true across a re-provision that moved it.

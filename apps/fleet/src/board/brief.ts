@@ -45,6 +45,16 @@ export interface TaskBrief {
   /** Maestro's per-task authorization for the junior skill. Absent = not
    *  authorized. Becomes the `junior` label (types.ts JUNIOR_LABEL). */
   junior?: boolean;
+  /**
+   * Issue #249 (maestro spec point 5): "security-class work never routed to
+   * `lead: glm`" — this is the marker, same boolean shape `junior` already
+   * uses. Becomes the `security` label (types.ts SECURITY_LABEL). The
+   * REFUSAL itself (a security task assigned/reassigned to a glm-lead
+   * studio) is board.ts's createTask/assignTask job, not this file's — this
+   * field only carries the flag through parsing, same boundary `junior`
+   * already draws for its own authorization half.
+   */
+  security?: boolean;
 }
 
 // GitHub's own limits, not ours — a longer title/body is refused by the API
@@ -129,9 +139,18 @@ export function parseBrief(raw: unknown): BriefResult {
     return { ok: false, message: "junior must be a boolean" };
   }
 
+  // Issue #249: same boolean-only discipline as `junior` just above, for
+  // the identical reason — a hand-rolled "true" string must not silently
+  // mark a task security-class.
+  const rawSecurity = body.security;
+  if (rawSecurity !== undefined && rawSecurity !== null && typeof rawSecurity !== "boolean") {
+    return { ok: false, message: "security must be a boolean" };
+  }
+
   const brief: TaskBrief = {
     title, objective, outputFormat, boundaries, milestone, assignee,
     ...(rawJunior === true ? { junior: true } : {}),
+    ...(rawSecurity === true ? { security: true } : {}),
   };
   const rawKey = body.idempotencyKey;
   if (rawKey !== undefined && rawKey !== null) {

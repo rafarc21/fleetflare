@@ -332,6 +332,24 @@ export function readInstanceRequest(body: unknown): number | "next" | null {
 }
 
 /**
+ * Issue #249: the `leadType` request field — `fleet spawn --lead glm`'s
+ * whole wire surface, on BOTH spawn routes (`/studio/spawn`'s operator body
+ * and `/fleet/spawn`'s machine body both resolve to this one `runSpawn`
+ * core). `undefined` out means "absent/null" — the ordinary case, every
+ * caller that predates this field, and the default `StudioStatus.leadType`
+ * itself already treats as `"claude"`. `null` out means "malformed" — any
+ * other string, or any non-string — never coerced: a typo'd
+ * `leadType: "gpt4"` is a 400 worth seeing, not a silently-ignored claude
+ * studio.
+ */
+export function readLeadTypeRequest(body: unknown): "claude" | "glm" | undefined | null {
+  const raw = (body as { leadType?: unknown } | null)?.leadType;
+  if (raw === undefined || raw === null) return undefined;
+  if (raw === "claude" || raw === "glm") return raw;
+  return null;
+}
+
+/**
  * Issue #59: may studio `parent` DIRECT studio `targetId` — file a task for
  * it, hand it one, resume it? The same gate runSpawn applies (maySpawn over
  * org.json edges, caller role -> target ROLE; every instance inherits its
@@ -525,6 +543,16 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
     );
   }
 
+  // Issue #249: `fleet spawn --lead glm` — same cheapest-check-first order
+  // as `instance` just above, before any org.json fetch or registry scan.
+  const leadType = readLeadTypeRequest(body);
+  if (leadType === null) {
+    return new Response(
+      `bad leadType ${JSON.stringify((body as { leadType?: unknown }).leadType)} — expected "claude" or "glm"`,
+      { status: 400 },
+    );
+  }
+
   // Issue #269 round 2: maestro is a SINGLETON role. A repo has exactly one
   // maestro — wake-events.ts's own maestroIdFor always builds the bare
   // two-segment id, and do.ts's isMaestro() (the sweep gate) only recognizes
@@ -682,6 +710,12 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
       repo: claimed.repo, role: claimed.role,
       ...(claimed.instance === 1 ? {} : { instance: claimed.instance }),
       spawnedBy: parent.id, repoSlug: parent.repoSlug, briefPrompt,
+      // Issue #249: omitted rather than sent as `"claude"` on the ordinary
+      // path, same "absent means today's behaviour" discipline `instance`
+      // just above follows — runProvision only ever reads this on a
+      // studio's first-ever provision anyway (ProvisionConfig.leadType's
+      // own doc comment).
+      ...(leadType === undefined ? {} : { leadType }),
     });
   } catch (err) {
     // A provision that threw may have left nothing but the placeholder: free

@@ -5,6 +5,10 @@
 // right after the AI call resolves/fails), read back through
 // aggregateJuniorUsage for the `GET /studio/junior/usage` stats route below.
 //
+// #249's glm-lead route (anthropic-route.ts) also writes into this table
+// now, tagged `mode: "lead"` — see aggregateJuniorUsage's own doc comment
+// for why that mode is excluded from the adoption aggregate by default.
+//
 // Only counts/ids/booleans ever cross into this module's own signatures —
 // never prompt/response text — so there is nothing here to redact, by
 // construction (the design doc's own "no secrets, no prompt/response text"
@@ -51,14 +55,26 @@ export interface JuniorUsageAggregate {
 
 /** One GROUP BY studio_id query over rows with `ts >= sinceTs`, plus totals
  *  summed in JS over the grouped rows — cheaper than a second SQL round trip
- *  for a result set this small (one row per studio). */
+ *  for a result set this small (one row per studio).
+ *
+ * Fresh-context review finding 2: `anthropic-route.ts`'s glm-lead route
+ * writes into this SAME table, tagged `mode: "lead"` (its own `USAGE_MODE`
+ * constant) — a studio's entire lead-inference volume, not an occasional
+ * junior delegation. This module's own header doc comment states its
+ * purpose is specifically "measure GLM (junior) adoption vs Claude", so
+ * `mode: "lead"` rows are excluded here by default — real usage/billing
+ * data, still inserted and still readable by a raw query, just not junior-
+ * adoption data. `JUNIOR_MODES` (junior/route.ts) isn't imported here to
+ * express this — that would create a route.ts <-> usage.ts import cycle
+ * (route.ts already imports `insertJuniorUsage` from this file) for the sake
+ * of one literal that this file needs to exclude, not enumerate. */
 export async function aggregateJuniorUsage(db: D1Database, sinceTs: number): Promise<JuniorUsageAggregate> {
   const result = await db
     .prepare(
       `SELECT studio_id AS studioId, COUNT(*) AS calls,
               SUM(input_tokens) AS inputTokens, SUM(output_tokens) AS outputTokens
        FROM junior_usage_log
-       WHERE ts >= ?
+       WHERE ts >= ? AND mode != 'lead'
        GROUP BY studio_id
        ORDER BY studio_id`,
     )

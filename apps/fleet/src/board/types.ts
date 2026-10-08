@@ -55,6 +55,16 @@ export function isTaskState(raw: unknown): raw is TaskState {
 export const JUNIOR_LABEL = "junior";
 
 /**
+ * Issue #249 (maestro spec point 5): "security-class work never routed to
+ * `lead: glm`". Written only by createTask, only when the caller filed with
+ * `security: true` (brief.ts's TaskBrief.security) — same write-once shape
+ * JUNIOR_LABEL already has. createTask/assignTask (board.ts) both refuse
+ * (before any write) an attempt to assign or reassign a task carrying this
+ * label to a studio whose own `StudioStatus.leadType` resolves to `"glm"`.
+ */
+export const SECURITY_LABEL = "security";
+
+/**
  * Every board state label carried by one issue, in vocabulary order.
  *
  * Returns a LIST, not a single state, on purpose: "no state label" and "two

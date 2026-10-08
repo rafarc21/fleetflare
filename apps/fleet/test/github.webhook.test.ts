@@ -1632,6 +1632,70 @@ describe("github webhook -> auto-close on promote (board issue #8)", () => {
     expect(msg).toContain("2/3");
     errors.mockRestore();
   });
+
+  // Maestro review round 1 MINOR (#249, #255): the end-to-end wiring for
+  // revokeGlmLeadOnSecurityLabelEvent -- board.board.test.ts proves the pure
+  // revoke function itself; this proves the real `issues` `labeled` delivery
+  // actually reaches it through handleGithubWebhook, against the real
+  // githubBoardApi (the fixture's own fetch mock above, not a fake BoardApi).
+  it("an `issues` labeled-security delivery revokes a glm-lead studio's live assignment", async () => {
+    const GLM_STUDIO = "scratch--glm-lead-studio";
+    await recordStudio(env as any, {
+      id: GLM_STUDIO, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, leadType: "glm",
+    } as StudioStatus);
+    // GitHub's `labeled` delivery reflects the issue's labels AFTER the add
+    // already landed on GitHub's side -- the fixture's own `security` entry
+    // mirrors that, same as the real world this webhook reacts to.
+    issueState[42] = { state: "open", labels: ["working", `studio:${GLM_STUDIO}`, "security"] };
+
+    const body = JSON.stringify({
+      action: "labeled", label: { name: "security" }, issue: { number: 42 },
+      repository: { full_name: REPO }, sender: { login: "someone" },
+    });
+    const res = await handleGithubWebhook(
+      new Request("https://x/gh", {
+        method: "POST",
+        headers: { "x-github-event": "issues", "x-hub-signature-256": await sign(body) },
+        body,
+      }),
+      envWithToken(),
+      () => 5_000_000,
+      fakeCtx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(issueState[42].labels).not.toContain(`studio:${GLM_STUDIO}`);
+    expect(issueState[42].labels).toContain("submitted");
+    expect(githubCalls.some((c) => c.method === "POST" && c.url.includes("/issues/42/comments"))).toBe(true);
+  });
+
+  it("the IDENTICAL delivery against a claude-lead studio's assignment: nothing revoked", async () => {
+    const CLAUDE_STUDIO = "scratch--claude-lead-studio";
+    await recordStudio(env as any, {
+      id: CLAUDE_STUDIO, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, leadType: "claude",
+    } as StudioStatus);
+    issueState[43] = { state: "open", labels: ["working", `studio:${CLAUDE_STUDIO}`, "security"] };
+
+    const body = JSON.stringify({
+      action: "labeled", label: { name: "security" }, issue: { number: 43 },
+      repository: { full_name: REPO }, sender: { login: "someone" },
+    });
+    const res = await handleGithubWebhook(
+      new Request("https://x/gh", {
+        method: "POST",
+        headers: { "x-github-event": "issues", "x-hub-signature-256": await sign(body) },
+        body,
+      }),
+      envWithToken(),
+      () => 5_000_000,
+      fakeCtx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(issueState[43].labels).toEqual(["working", `studio:${CLAUDE_STUDIO}`, "security"]);
+  });
 });
 
 // Issue #35: a label change made anywhere (GitHub UI, a studio's own gh
