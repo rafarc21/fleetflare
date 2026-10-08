@@ -265,16 +265,19 @@ describe("openAIResponseToAnthropic — text", () => {
 
   // STATUS comment on PR #255, measured live 2026-10-08T08:40:12Z: GLM's
   // usage object may report completion_tokens_details.reasoning_tokens as a
-  // breakdown alongside completion_tokens. The measured numbers ("6861
-  // completion tokens, ~24k chars reasoning") read as two distinct figures,
-  // so this is added on top rather than assumed already included — see the
-  // implementation's own comment on the flagged risk either way.
-  test("completion_tokens_details.reasoning_tokens is added to output_tokens", () => {
+  // breakdown of completion_tokens (OpenAI's own documented convention for
+  // reasoning models, e.g. o1/o3) rather than a figure additional to it. The
+  // maestro's own measured numbers ("6861 completion tokens, ~24k chars
+  // reasoning") confirm this: ~24k chars of reasoning at ~4 chars/token is
+  // ~6000 tokens, almost exactly the reported completion_tokens — if the two
+  // were additive, completion_tokens would need to be far larger. So
+  // reasoning_tokens is ignored; completion_tokens alone is the full count.
+  test("completion_tokens_details.reasoning_tokens is ignored, not added to output_tokens", () => {
     const out = openAIResponseToAnthropic({
       choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
       usage: { prompt_tokens: 500, completion_tokens: 6861, completion_tokens_details: { reasoning_tokens: 9000 } },
     }, { model: "m" });
-    expect(out.usage).toEqual({ input_tokens: 500, output_tokens: 15861 });
+    expect(out.usage).toEqual({ input_tokens: 500, output_tokens: 6861 });
   });
 });
 
@@ -573,14 +576,15 @@ describe("streaming: prelude + chunk application + close", () => {
 
   // STATUS comment on PR #255, measured live 2026-10-08T08:40:12Z: same
   // reasoning-tokens handling as the non-streaming path above, applied to
-  // the usage-bearing chunk's completion_tokens_details field.
-  test("completion_tokens_details.reasoning_tokens on the usage chunk is added to state.outputTokens", () => {
+  // the usage-bearing chunk's completion_tokens_details field — ignored,
+  // not added, since completion_tokens already includes reasoning tokens.
+  test("completion_tokens_details.reasoning_tokens on the usage chunk is ignored, not added to state.outputTokens", () => {
     const state = createStreamState();
     applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });
     applyOpenAIStreamChunk(state, {
       choices: [{ delta: {}, finish_reason: "stop" }],
       usage: { prompt_tokens: 500, completion_tokens: 6861, completion_tokens_details: { reasoning_tokens: 9000 } },
     });
-    expect(state.outputTokens).toBe(15861);
+    expect(state.outputTokens).toBe(6861);
   });
 });
