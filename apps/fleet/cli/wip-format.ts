@@ -37,6 +37,97 @@ export function wipSyncRefEcho(studioId: string, bootStamp?: string | null): str
 }
 
 /**
+ * Issue #241 item 5: `Observed.wipLastCheck` is now PER-TARGET (one entry
+ * per target named this tick — main checkout vs each member worktree's own
+ * ref), never one blended value — see that field's own doc comment
+ * (observed.ts) for the full bug this fixes. `fleet ls`'s own WIP column has
+ * room for exactly one age, so this rolls every named target down to the
+ * SINGLE worst one, by priority: a FAILED target always wins (the floor
+ * requirement this item exists for — a lead must never see "pushed" while a
+ * target's own safety net is genuinely broken), then a real PUSH (the most
+ * informative outcome among the rest), then the two quiet-but-abnormal
+ * skips, then plain CLEAN last (nothing happened, nothing to say). Ties
+ * within the same priority keep whichever entry `Object.values` visits
+ * first — this map is rebuilt fresh every tick (never merged across ticks),
+ * so a genuine tie only ever means "either one is an equally honest answer".
+ */
+const WIP_CHECK_PRIORITY: Record<"pushed" | "clean" | "markers-only" | "no-checkout" | "failed", number> = {
+  failed: 0, pushed: 1, "no-checkout": 2, "markers-only": 3, clean: 4,
+};
+
+export type WipCheckEntry = { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" };
+
+/**
+ * Maestro review round 1 on PR #245 (issue #241), MAJOR 1 — `wipLastCheck`
+ * changed TYPE, from one blended `{at,result}` object to a per-target map,
+ * with no back-compat either direction:
+ *   - OLD record (written before this field became a map): the WHOLE stored
+ *     value itself IS `{at: "...", result: "failed"}`. Read as a
+ *     `Record<target,{at,result}>`, `Object.values` yields the bare STRINGS
+ *     `"..."`/`"failed"` as "entries" -- neither has a `.result` property,
+ *     so the failure silently vanishes.
+ *   - NEW record read by an old reader expecting the flat shape: symmetric
+ *     problem the other way (see `recordWipLastCheck`'s own back-compat
+ *     write, do.ts, for the fix on THAT side).
+ * Duck-typed ONCE here, so `worstWipCheck` below and `formatWipInspectLines`
+ * share the identical normalized shape rather than two copies of the same
+ * logic that could drift. A key whose own VALUE is itself `{at,result}`
+ * -shaped (`typeof v.at === "string" && typeof v.result === "string"`) is a
+ * REAL per-target entry and always wins over the top-level decoration
+ * `recordWipLastCheck` now also stamps onto the SAME object (its own
+ * `at`/`result` keys) for old-reader back-compat -- those two keys are only
+ * ever read as a target when NO real per-target entry exists at all, i.e.
+ * the stored value genuinely is the OLD flat shape. `LEGACY_WIP_CHECK_KEY`
+ * is a parenthesized sentinel (never a bare ref name -- every real target is
+ * a `/`-bearing git ref) so it can never collide with a genuine target.
+ *
+ * Maestro review round 2 on PR #245 (issue #241), problem 1 -- exported (was
+ * file-private) so a caller holding a raw `Observed["wipLastCheck"]` can
+ * index it BY TARGET without re-deriving this same duck-typing itself.
+ * `Observed.wipLastCheck`'s own declared type is a union of the per-target
+ * map and the legacy flat `{at,result}` shape (MAJOR 1 above) -- a union
+ * where one member has no index signature can never be indexed by an
+ * arbitrary string key at compile time (`TS7053`), regardless of which
+ * shape is actually on disk. Running the value through this function FIRST
+ * (its return type is a plain `Record<string, WipCheckEntry>`, always
+ * indexable) is the correct fix rather than a cast or a narrower type: it
+ * reuses the exact same normalization every other reader of this field
+ * already runs, so a direct per-target lookup can never drift from
+ * `worstWipCheck`/`formatWipInspectLines`'s own idea of what the stored
+ * value means.
+ */
+const LEGACY_WIP_CHECK_KEY = "(legacy)";
+
+export function normalizeWipLastCheck(stored: unknown): Record<string, WipCheckEntry> {
+  if (stored == null || typeof stored !== "object") return {};
+  const obj = stored as Record<string, unknown>;
+  const targets: Record<string, WipCheckEntry> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (
+      value !== null && typeof value === "object" &&
+      typeof (value as Partial<WipCheckEntry>).at === "string" &&
+      typeof (value as Partial<WipCheckEntry>).result === "string"
+    ) {
+      targets[key] = value as WipCheckEntry;
+    }
+  }
+  if (Object.keys(targets).length > 0) return targets;
+  if (typeof obj.at === "string" && typeof obj.result === "string") {
+    return { [LEGACY_WIP_CHECK_KEY]: { at: obj.at, result: obj.result as WipCheckEntry["result"] } };
+  }
+  return {};
+}
+
+function worstWipCheck(checks: unknown): WipCheckEntry | null {
+  const normalized = normalizeWipLastCheck(checks);
+  let best: WipCheckEntry | null = null;
+  for (const c of Object.values(normalized)) {
+    if (best === null || WIP_CHECK_PRIORITY[c.result] < WIP_CHECK_PRIORITY[best.result]) best = c;
+  }
+  return best;
+}
+
+/**
  * `-` while never checked — `observed.wipLastCheck`/`wipSyncedAt` both
  * absent/null, or a row from an older Worker that never had either field at
  * all. Same "unknown, not an error" convention `formatRestartCell`
@@ -54,9 +145,16 @@ export function wipSyncRefEcho(studioId: string, bootStamp?: string | null): str
  * trailing `!` when the last attempt FAILED. Absent (a row written before
  * this field existed) falls back to the original `wipSyncedAt`-only
  * behavior unchanged.
+ *
+ * Issue #241 item 5: `wipLastCheck` is now per-target — `worstWipCheck`
+ * above picks the ONE entry to render (see its own doc comment); an empty
+ * map (no target has ever been named, e.g. every tick so far quiet AND
+ * somehow never named main either) falls back to `wipSyncedAt` unchanged,
+ * same as an absent map always has.
  */
 export function formatWipCell(s: StudioStatus, now: Date): string {
-  const check = s.observed?.wipLastCheck;
+  const checks = s.observed?.wipLastCheck;
+  const check = checks != null ? worstWipCheck(checks) : null;
   if (check != null) {
     const ms = Date.parse(check.at);
     if (!Number.isNaN(ms)) {
@@ -84,10 +182,18 @@ export function formatWipCell(s: StudioStatus, now: Date): string {
  * crashing on a field that was never there.
  *
  * Fix round (#208 PR #215 review, minor (a)): a SECOND line is appended,
- * ONLY when `observed.wipLastCheck.result === "failed"`, naming how long
- * ago the last FAILED attempt was — additive, never replacing the first
- * line, so an existing `toEqual([one line])` fixture (a row with no
- * `wipLastCheck` at all) keeps matching unchanged.
+ * ONLY when the last attempt FAILED, naming how long ago that was —
+ * additive, never replacing the first line, so an existing
+ * `toEqual([one line])` fixture (a row with no `wipLastCheck` at all) keeps
+ * matching unchanged.
+ *
+ * Issue #241 item 5: `wipLastCheck` is now per-target, and more than one
+ * target can be FAILED in the SAME tick (the exact bug-report scenario this
+ * item fixes) — unlike `formatWipCell`'s own single-line rollup (`fleet
+ * ls` has room for exactly one age), this detailed view has room to name
+ * every one: one "last attempt FAILED for <target>" line PER failed target,
+ * sorted by target name for deterministic output, never collapsing
+ * multiple failures into one line.
  *
  * Issue #231 (fix 5) — read this closely before touching either value below:
  * `ref` (from `wipBootStamp`) IDENTIFIES which ref to go look at; its own
@@ -120,12 +226,20 @@ export function formatWipInspectLines(studioId: string, observed: Observed | und
           const seconds = Math.max(0, Math.floor((now.getTime() - ms) / 1000));
           return [`wip sync:     ${ref}, last synced ${formatAge(seconds)} ago`];
         })();
-  const check = observed.wipLastCheck;
-  if (check?.result === "failed") {
-    const ms = Date.parse(check.at);
-    if (!Number.isNaN(ms)) {
+  const checks = observed.wipLastCheck;
+  if (checks != null) {
+    // Maestro review round 1 on PR #245 (issue #241), MAJOR 1 — same
+    // normalization `worstWipCheck` uses above, so an OLD flat-shaped record
+    // still surfaces its own FAILED line here instead of being read as a
+    // target-less map with nothing to iterate.
+    const normalized = normalizeWipLastCheck(checks);
+    for (const target of Object.keys(normalized).sort()) {
+      const check = normalized[target]!;
+      if (check.result !== "failed") continue;
+      const ms = Date.parse(check.at);
+      if (Number.isNaN(ms)) continue;
       const seconds = Math.max(0, Math.floor((now.getTime() - ms) / 1000));
-      lines.push(`wip sync:     last attempt FAILED ${formatAge(seconds)} ago`);
+      lines.push(`wip sync:     last attempt FAILED for ${target} ${formatAge(seconds)} ago`);
     }
   }
   return lines;

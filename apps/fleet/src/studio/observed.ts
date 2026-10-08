@@ -390,6 +390,27 @@ export interface Observed {
    */
   wipSyncedBootStamp?: string | null;
   /**
+   * Issue #241 item 4: the wip-sync target walk (rescue.ts's `wipSyncCmd`)
+   * used to always start at the main checkout, then every member worktree in
+   * the SAME fixed `worktree list --porcelain` order, every tick — a slow
+   * target early in that order could burn most of the exec's own
+   * `wip_budget_ok` budget and starve whichever target sorted last,
+   * permanently, not just occasionally. This is the PERSISTED rotation
+   * counter `wipSync` (do.ts) reads before building each tick's own command
+   * (threaded in as `wipSyncCmd`'s `rotationIndex` param) and increments
+   * AFTER, regardless of whether that tick succeeded, partially failed, or
+   * fully failed — fairness is over TIME, not only on success. The real `%
+   * tcount` (how many targets THIS tick actually found) only ever happens in
+   * bash, every run; this value just needs to keep advancing. Absent/undefined
+   * reads as `0` (every row that predates this field, or has never had a
+   * wip-sync tick run) — same convention `wipSyncedAt` above already uses.
+   * Wrapped at 1_000_000 before persisting — a cheap safety valve, never load
+   * -bearing at any normal tick cadence (bash's own modulo against the real
+   * target count is what actually matters), chosen simply to keep the stored
+   * number small forever rather than growing without bound.
+   */
+  wipRotationIndex?: number;
+  /**
    * Fix round (#208 PR #215 review, minor (a)): `wipSyncedAt` above only ever
    * advances on a genuine push — a studio that has been clean for days (the
    * common case) shows the SAME age as a studio whose last three ticks all
@@ -402,8 +423,41 @@ export interface Observed {
    * tick has run yet for this row" (a studio not yet provisioned, or one from
    * before this field existed) — same trailing-optional convention every
    * other field in this struct added after its first release already uses.
+   *
+   * Issue #241 item 5: this USED to be one blended `{at, result}` for the
+   * WHOLE tick — a member worktree's own failure could be (and was) masked
+   * by the main checkout's genuinely successful push in the SAME tick
+   * (`mainCheckoutPushFromFailure`, do.ts, recovers the main's push from a
+   * caught per-target failure; the old blended shape then had no way to
+   * record the member's own failure ALONGSIDE it). Now PER-TARGET: one
+   * `{at, result}` entry per target NAMED this tick (do.ts's
+   * `wipTargetChecksFrom`), keyed by that target's own push/fail ref name —
+   * the SAME string `wipSyncRef(studio, bootStamp)` produces for the main
+   * checkout, or rescue.ts's own `wip/<bootStamp>-wt-<id>` shape for a
+   * member worktree. `recordWipLastCheck` (do.ts) REPLACES the whole map
+   * each tick (never merges with a prior tick's own map — a target silently
+   * absent this tick has no fresh evidence either way, so nothing is kept
+   * or dropped on its behalf). `cli/wip-format.ts` rolls this up to the
+   * WORST status across every named target for its own single-line
+   * display — see that file's own doc comment for the exact priority order.
+   *
+   * Maestro review round 1 on PR #245 (issue #241), MAJOR 1 — the type
+   * widens to ALSO allow the pre-#241-item5 flat `{at,result}` shape: a row
+   * written by OLD code (before this field became a map) still has that
+   * shape on disk, and a Worker that rolls back, or a CLI that hasn't
+   * redeployed yet, can still write or read it. `cli/wip-format.ts`'s own
+   * `normalizeWipLastCheck` duck-types which shape a given stored value
+   * actually is, ONCE, so every reader runs the SAME rollup logic
+   * regardless. `recordWipLastCheck` (do.ts) keeps writing a derived
+   * `at`/`result` SUMMARY pair alongside the real per-target map (never
+   * instead of it) — same object, extra top-level keys — so an OLD reader
+   * that only ever looked at `wipLastCheck.at`/`.result` directly still sees
+   * a sensible single value instead of `undefined`.
    */
-  wipLastCheck?: { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" } | null;
+  wipLastCheck?:
+    | Record<string, { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" }>
+    | { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" }
+    | null;
   /**
    * Issue #231 — the on-disk path(s) a `--fresh-session` bring-up actually
    * moved an old session aside to (`parseFreshSession`'s own successfully-

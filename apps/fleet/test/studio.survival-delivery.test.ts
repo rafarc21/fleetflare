@@ -14,7 +14,8 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   survivalBriefAllowed, paneBusy, midTurnRow,
-  prArtifactNumbers, branchArtifacts, isRescueBranchFor, rescueBranchesFor, rescueRefStamp, parseRescueStamp,
+  prArtifactNumbers, branchArtifacts, isRescueBranchFor, isWipRescueRef, rescueBranchesFor, rescueRefStamp,
+  parseRescueStamp,
   attributeRescueBranch, rescueBranchPrefix, rescueBranchNestedPrefix, fetchRescueBranchCandidates,
   resolveSurvivalInput, composeSurvivalDelivery, deliverSurvivalBriefOnBringup,
   retryPendingSurvivalBrief, retryBoundExceeded, matchesTaskNumber,
@@ -355,25 +356,61 @@ describe("the 3 anchored branch sources", () => {
   });
 
   /**
-   * Maestro review round 1 on PR #235, MAJOR 4 + 5 — traced, not guessed: a
-   * MAIN-checkout wip ref is NOT specially excluded from
-   * `unclaimedRescueBranches` anywhere in `resolveSurvivalInput` (only the
-   * 14-day age cap, shared by every rescue-ref shape, ever drops one) -- it
-   * is deliberately DISCOVERABLE and ATTRIBUTABLE "exactly like every other
-   * rescue shape" (this function's own doc comment above). The new nested
-   * MEMBER wip ref gets the IDENTICAL treatment: it is a genuine rescue ref,
-   * not specially hidden, and is now self-describing (its own path contains
-   * "wip") rather than confusable with a genuine abandoned teardown rescue —
-   * which is the whole of the round-1 review's "confusing" complaint fixed by
-   * the shape change itself, not by a new exclusion list.
+   * Issue #241, item 1+3 (follow-up on PR #235's own round-1 review above):
+   * a wip ref is a LIVE, periodically-refreshed safety net, never an
+   * abandoned teardown rescue -- attributing it to a task is nonsense, and
+   * "unclaimed" implies an abandonment it doesn't have. Superseded here: a
+   * previous round of this test pinned exactly the OPPOSITE claim ("the
+   * nested member wip ref gets the SAME unclaimedRescueBranches treatment
+   * the main-checkout wip ref already gets") -- that was the bug #241 item 1
+   * reports. Both the main-checkout and member wip shapes now land in the
+   * NEW `liveWipRefs` field instead, never in `unclaimedRescueBranches`, and
+   * never attributed even as the LONE candidate for a LONE unresolved task
+   * (item 3's own direct consequence of excluding wip refs before
+   * `attributeRescueBranch` ever runs).
    */
-  it("the nested member wip ref gets the SAME unclaimedRescueBranches treatment the main-checkout wip ref already gets -- genuinely a rescue ref, never specially hidden", async () => {
+  it("wip refs (main + member) land in liveWipRefs, never unclaimedRescueBranches, never attributed even as the lone candidate for a lone unresolved task", async () => {
+    const mainWip = `fleet/rescue/${STUDIO}/wip/20261004120000`;
+    const memberWip = `fleet/rescue/${STUDIO}/wip/20261004120000-wt-agent-a1b2`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [mainWip, memberWip] }),
+      { ok: true, value: [task()] },
+      null, NOW,
+    );
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [] });
+    expect(input.liveWipRefs).toEqual({
+      ok: true,
+      value: expect.arrayContaining([
+        expect.objectContaining({ branch: mainWip }), expect.objectContaining({ branch: memberWip }),
+      ]),
+    });
+    expect((input.liveWipRefs as { ok: true; value: unknown[] }).value).toHaveLength(2);
+    // The lone unresolved task stays unattributed -- a wip snapshot is never
+    // a task's "branch".
+    expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: null })] });
+  });
+
+  /**
+   * Issue #241, item 3 -- the exact single-candidate shape
+   * `attributeRescueBranch` would otherwise attribute (one unresolved task,
+   * one candidate ref). Proven here with a MEMBER wip ref as the ONLY
+   * candidate: before this fix it was indistinguishable from a real rescue
+   * ref and would have been assigned as the task's own branch.
+   * `attributeRescueBranch` itself is untouched -- it never even sees this
+   * ref, because `resolveSurvivalInput` excludes wip refs before calling it.
+   */
+  it("a lone member wip ref, the only candidate for a lone unresolved task, is never attributed as that task's branch", async () => {
     const memberWip = `fleet/rescue/${STUDIO}/wip/20261004120000-wt-agent-a1b2`;
     const input = await resolveSurvivalInput(
       sources({ rescueBranches: async () => [memberWip] }),
-      { ok: true, value: [] }, null, NOW,
+      { ok: true, value: [task()] },
+      null, NOW,
     );
-    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [memberWip] });
+    expect(input.tasks).toEqual({ ok: true, value: [expect.objectContaining({ branch: null })] });
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [] });
+    expect(input.liveWipRefs).toEqual({
+      ok: true, value: [{ branch: memberWip, lastCommitAt: "2026-09-25T11:00:00.000Z" }],
+    });
   });
 
   /**
@@ -395,6 +432,25 @@ describe("the 3 anchored branch sources", () => {
     // isRescueBranchFor is now exactly this wrapper.
     expect(isRescueBranchFor(STUDIO, `fleet/rescue/${STUDIO}-20260925120000`)).toBe(true);
     expect(isRescueBranchFor(STUDIO, `fleet/rescue/sibling--${STUDIO}-20260925120000`)).toBe(false);
+  });
+
+  /**
+   * Issue #241, item 1 — `isWipRescueRef` recognizes ONLY the two wip-sync
+   * shapes (main checkout, and member worktree) distinctly from the other 3
+   * genuine-rescue shapes `isRescueBranchFor` also matches, so SOURCE 3 can
+   * partition them before attribution ever sees the list.
+   */
+  it("isWipRescueRef matches only the two wip shapes, never the other 3 rescue shapes, never a foreign studio", () => {
+    expect(isWipRescueRef(STUDIO, `fleet/rescue/${STUDIO}/wip/20261004120000`)).toBe(true);
+    expect(isWipRescueRef(STUDIO, `fleet/rescue/${STUDIO}/wip/20261004120000-wt-agent-a1b2`)).toBe(true);
+    // The other 3 genuine-rescue shapes: never a wip ref.
+    expect(isWipRescueRef(STUDIO, `fleet/rescue/${STUDIO}-20260925120000`)).toBe(false);
+    expect(isWipRescueRef(STUDIO, `fleet/rescue/${STUDIO}/wt/agent-a1b2-20260925120000`)).toBe(false);
+    expect(isWipRescueRef(STUDIO, `fleet/rescue/${STUDIO}/20260925120000/checkout/task/pr`)).toBe(false);
+    // Anchored the same way every other shape in this file already is.
+    expect(isWipRescueRef(STUDIO, `fleet/rescue/sibling--${STUDIO}/wip/20261004120000`)).toBe(false);
+    expect(isWipRescueRef(STUDIO, `fleet/rescue/${STUDIO}/wip/202610041200`)).toBe(false);
+    expect(isWipRescueRef(STUDIO, `fleet/rescue/${STUDIO}/wip/`)).toBe(false);
   });
 
   /**
@@ -647,6 +703,226 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
       null, NOW,
     );
     expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [atBoundary] });
+  });
+
+  /**
+   * Issue #241, item 2 -- a wip ref's embedded stamp is the CONTAINER'S BOOT
+   * TIME, fixed for that container's whole lifetime while `wipSyncCmd`
+   * force-pushes an ever-newer commit to the SAME ref name. The stamp-based
+   * age filter above is correct for every OTHER shape (their stamp genuinely
+   * IS "when this ref was created, once, never touched again") but wrong
+   * here: a studio running 3 weeks straight has a wip ref whose BOOT stamp
+   * reads 21 days old even though its last commit might be 2 minutes old.
+   * Fixed by using `compareAhead`'s own `lastCommitAt` for wip refs,
+   * never `parseRescueStamp`. A REAL (non-wip) ref with the SAME old stamp
+   * must still be dropped -- confirms the stamp-based filter for every other
+   * shape is untouched.
+   */
+  it("a wip ref's age comes from compareAhead's lastCommitAt, not its boot stamp -- a real ref with the same old stamp is still dropped", async () => {
+    // NOW is 2026-09-25T12:00:00.000Z. 20 days earlier is 2026-09-05 -- past
+    // the 14-day cap by stamp, but compareAhead below reports a commit from
+    // 2 minutes before NOW for the wip ref.
+    const oldStamp = "20260905120000";
+    const memberWip = `fleet/rescue/${STUDIO}/wip/${oldStamp}-wt-agent-a1b2`;
+    const realRef = `fleet/rescue/${STUDIO}-${oldStamp}`;
+    const compareAhead = vi.fn(async (branch: string) => {
+      if (branch === memberWip) return { aheadBy: 5, lastCommitAt: "2026-09-25T11:58:00.000Z" };
+      return { aheadBy: 1, lastCommitAt: null };
+    });
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [memberWip, realRef], compareAhead }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.liveWipRefs).toEqual({
+      ok: true, value: [{ branch: memberWip, lastCommitAt: "2026-09-25T11:58:00.000Z" }],
+    });
+    // The real (non-wip) ref with the identical old stamp is still dropped:
+    // the existing stamp-based filter for every other shape is unchanged.
+    expect(input.unclaimedRescueBranches).toEqual({ ok: true, value: [] });
+  });
+
+  it("a wip ref whose compareAhead's lastCommitAt is ALSO too old is dropped from liveWipRefs", async () => {
+    const memberWip = `fleet/rescue/${STUDIO}/wip/20260905120000-wt-agent-a1b2`;
+    const input = await resolveSurvivalInput(
+      sources({
+        rescueBranches: async () => [memberWip],
+        compareAhead: async () => ({ aheadBy: 2, lastCommitAt: "2026-09-05T12:00:00.000Z" }),
+      }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.liveWipRefs).toEqual({ ok: true, value: [] });
+  });
+
+  /**
+   * Maestro review round 1 on PR #245 (issue #241), MAJOR 2 -- a wip ref's
+   * `compareAhead` 404 used to read as "the ref is genuinely gone, drop
+   * it". Wrong for this shape: rescue.ts's own shallow-clone fallback can
+   * push a wip ref as a PARENTLESS commit with no shared ancestry with
+   * `main` at all, so GitHub's compare API answers a LIVE ref with its own
+   * 404 ("No common ancestor") -- indistinguishable from "ref doesn't
+   * exist" at the HTTP level, but a completely different, much more common
+   * situation for THIS shape. Now kept, age unknown (`lastCommitAt: null`),
+   * same as the thrown-error case right below.
+   */
+  it("a wip ref's compareAhead 404s (null) -- kept, age unknown, never dropped (a parentless shallow-clone snapshot's own 404 is not a confirmed-absent ref)", async () => {
+    const memberWip = `fleet/rescue/${STUDIO}/wip/20261004120000-wt-agent-a1b2`;
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => [memberWip], compareAhead: async () => null }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.liveWipRefs).toEqual({ ok: true, value: [{ branch: memberWip, lastCommitAt: null }] });
+  });
+
+  it("a wip ref's compareAhead THROWS -- kept, never discard a real ref over a lookup this function failed to make", async () => {
+    const memberWip = `fleet/rescue/${STUDIO}/wip/20260905120000-wt-agent-a1b2`;
+    const input = await resolveSurvivalInput(
+      sources({
+        rescueBranches: async () => [memberWip],
+        compareAhead: async () => { throw new Error("compare failed (502)"); },
+      }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.liveWipRefs).toEqual({ ok: true, value: [{ branch: memberWip, lastCommitAt: null }] });
+  });
+
+  it("a wip ref's compareAhead returns a null lastCommitAt -- kept, same 'never discard' reasoning", async () => {
+    const memberWip = `fleet/rescue/${STUDIO}/wip/20260905120000-wt-agent-a1b2`;
+    const input = await resolveSurvivalInput(
+      sources({
+        rescueBranches: async () => [memberWip],
+        compareAhead: async () => ({ aheadBy: 1, lastCommitAt: null }),
+      }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.liveWipRefs).toEqual({ ok: true, value: [{ branch: memberWip, lastCommitAt: null }] });
+  });
+
+  /**
+   * Maestro review round 1 on PR #245 (issue #241), MINOR 4 -- the
+   * `compareAhead` loop used to run once per wip ref, serially, with no
+   * cap. A studio with more wip refs than `composeSurvivalBrief`'s own
+   * display cap (`MAX_LINES_PER_SECTION`, survival-brief.ts) would burn an
+   * API call on a ref that render step immediately truncates into "+N
+   * more" anyway. Now capped to the newest `MAX_LINES_PER_SECTION` (by
+   * boot stamp) BEFORE any `compareAhead` call runs at all -- the older
+   * ones are never looked up, never land in `liveWipRefs` either.
+   */
+  it("compareAhead is only ever called for the newest MAX_LINES_PER_SECTION wip refs, never the older overflow", async () => {
+    // 10 member wip refs, boot stamps strictly increasing by one minute.
+    const stamps = Array.from({ length: 10 }, (_, i) => `202610040000${String(10 + i).padStart(2, "0")}`);
+    const refs = stamps.map((s) => `fleet/rescue/${STUDIO}/wip/${s}-wt-agent-a1b2`);
+    const compareAhead = vi.fn(async (_branch: string) => ({ aheadBy: 1, lastCommitAt: "2026-09-25T11:00:00.000Z" }));
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => refs, compareAhead }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    // Only the newest 8 (highest boot stamp) were ever queried.
+    const queried = compareAhead.mock.calls.map((c) => c[0]);
+    expect(queried).toHaveLength(8);
+    const newest8 = refs.slice(2); // the last 8 of the ascending list
+    for (const r of newest8) expect(queried).toContain(r);
+    for (const r of refs.slice(0, 2)) expect(queried).not.toContain(r);
+    expect((input.liveWipRefs as { ok: true; value: unknown[] }).value).toHaveLength(8);
+  });
+
+  /**
+   * Maestro review round 2 on PR #245 (issue #241), problem 3 -- MINOR 4
+   * above caps the CANDIDATE list to `MAX_LINES_PER_SECTION` BEFORE
+   * `compareAhead` ever runs, so `liveWipRefs` itself never carries more
+   * than 8 entries. `composeSurvivalBrief`'s own "+N more" overflow line
+   * (same pattern `unclaimedRescueLine`'s section already uses) computed
+   * its count from `liveWipRefs.value.length` alone, which can now never
+   * exceed the cap -- a studio with MORE than 8 live wip refs silently lost
+   * its "+N more" line entirely, even though real refs beyond the cap
+   * still exist and are simply never checked. The true pre-cap count must
+   * survive alongside the capped list so the render step can report the
+   * real overflow.
+   */
+  it("more than MAX_LINES_PER_SECTION wip refs: compareAhead still only called 8 times, and the brief still shows an accurate +N more", async () => {
+    // 10 member wip refs, boot stamps strictly increasing by one minute.
+    const stamps = Array.from({ length: 10 }, (_, i) => `202610040000${String(10 + i).padStart(2, "0")}`);
+    const refs = stamps.map((s) => `fleet/rescue/${STUDIO}/wip/${s}-wt-agent-a1b2`);
+    const compareAhead = vi.fn(async (_branch: string) => ({ aheadBy: 1, lastCommitAt: "2026-09-25T11:00:00.000Z" }));
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => refs, compareAhead }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    // MINOR 4 stays fixed: still only the newest 8 ever get a compareAhead call.
+    expect(compareAhead).toHaveBeenCalledTimes(8);
+
+    const brief = composeSurvivalBrief(input);
+    // The 2 oldest refs (never looked up at all) are still the real overflow.
+    expect(brief).toContain("- +2 more");
+  });
+
+  /**
+   * Problem 3's own fix (095c4aa) computes the overflow as
+   * `liveWipRefsTotalCount - shown.length` -- `shown.length` is the count
+   * of refs that are BOTH inside the lookup cap AND still live after the
+   * staleness filter (the loop in `resolveSurvivalInput` above drops a
+   * capped ref outright when its real `compareAhead` age is over the
+   * cutoff, same "genuinely gone" reasoning MAJOR 2's own doc comment
+   * gives for the 404 case). When some of the newest
+   * `MAX_LINES_PER_SECTION` candidates turn out stale, `shown.length`
+   * shrinks for a reason that has NOTHING to do with the display cap --
+   * those refs were checked and found not live, not hidden by truncation.
+   * Subtracting `shown.length` from the pre-cap total double-counts them:
+   * they inflate "+N more" even though they are not sitting unseen beyond
+   * the cap, they are simply gone. The overflow must only ever count
+   * candidates that were never looked up at all (beyond the lookup cap),
+   * never a capped-and-checked-but-stale one.
+   */
+  it("some of the capped refs are stale (checked, filtered): +N more counts only the never-looked-up overflow, not the stale ones too", async () => {
+    // 10 member wip refs, boot stamps strictly increasing by one minute --
+    // same shape as the MINOR 4 / problem 3 tests above.
+    const stamps = Array.from({ length: 10 }, (_, i) => `202610040000${String(10 + i).padStart(2, "0")}`);
+    const refs = stamps.map((s) => `fleet/rescue/${STUDIO}/wip/${s}-wt-agent-a1b2`);
+    const cappedRefs = refs.slice(2); // the newest 8 -- same ones MINOR 4's own cap selects
+    // The 2 OLDEST of the capped 8 are stale (way past the 14-day cutoff from NOW);
+    // the other 6 are fresh.
+    const staleCapped = new Set(cappedRefs.slice(0, 2));
+    const compareAhead = vi.fn(async (branch: string) => ({
+      aheadBy: 1,
+      lastCommitAt: staleCapped.has(branch) ? "2026-01-01T00:00:00.000Z" : "2026-09-25T11:00:00.000Z",
+    }));
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => refs, compareAhead }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    // Still only the newest 8 get a compareAhead call -- MINOR 4 stays fixed.
+    expect(compareAhead).toHaveBeenCalledTimes(8);
+    // The 2 stale ones were checked and dropped -- only 6 remain live.
+    expect((input.liveWipRefs as { ok: true; value: unknown[] }).value).toHaveLength(6);
+
+    const brief = composeSurvivalBrief(input);
+    // Only the 2 refs beyond the lookup cap were ever truly unseen -- the 2
+    // stale ones are gone for a real reason, not hidden by the cap.
+    expect(brief).toContain("- +2 more");
+    expect(brief).not.toContain("- +4 more");
+  });
+
+  it("a failed rescue-branch fetch also fails liveWipRefs, symmetric with unclaimedRescueBranches", async () => {
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => { throw new Error("rescue-branch fetch failed (502)"); } }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    expect(input.liveWipRefs).toEqual({ ok: false, reason: "rescue-branch fetch failed (502)" });
+  });
+
+  it("a failed task lookup also fails liveWipRefs, symmetric with unclaimedRescueBranches/openPrs", async () => {
+    const input = await resolveSurvivalInput(
+      sources(), { ok: false, reason: "board read failed (503): upstream" }, null, NOW,
+    );
+    expect(input.liveWipRefs).toEqual({ ok: false, reason: "board read failed (503): upstream" });
   });
 
   it("ahead_by 0 renders EMPTY — a CHECKED zero, never dropped and never fabricated", async () => {
@@ -1375,6 +1651,7 @@ describe("deliverSurvivalBriefOnBringup — lastSessionAside clears once actuall
       tasks: { ok: true, value: [] },
       openPrs: { ok: true, value: [] },
       unclaimedRescueBranches: { ok: true, value: [] },
+      liveWipRefs: { ok: true, value: [] },
       session: session(),
       now: "2026-09-25T12:00:00.000Z",
       lastSessionAside: afterDelivery?.lastSessionAside ?? null,

@@ -99,13 +99,21 @@ describe("fleet inspect — WIP line(s)", () => {
  * clean Xm ago" from "last attempt FAILED Xm ago" -- `wipSyncedAt` alone
  * could never tell those apart (a clean tick never advances it at all, and
  * a failed tick looks identical to "nothing has run in a while").
+ *
+ * Issue #241 item 5: `wipLastCheck` is now PER-TARGET (keyed by the
+ * target's own ref name), never one blended value -- `rowWithCheck` below
+ * builds a one-entry map under a single `target` key (default "main"), the
+ * single-target shape every test in THIS describe block still exercises
+ * unchanged; the multi-target rollup gets its own describe block below.
  */
 describe("WIP cell — wipLastCheck (minor (a))", () => {
-  function rowWithCheck(result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed", at: string): StudioStatus {
+  function rowWithCheck(
+    result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed", at: string, target = "main",
+  ): StudioStatus {
     return {
       id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
       lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-      observed: { ...emptyObserved(), wipLastCheck: { at, result } },
+      observed: { ...emptyObserved(), wipLastCheck: { [target]: { at, result } } },
     };
   }
 
@@ -125,7 +133,7 @@ describe("WIP cell — wipLastCheck (minor (a))", () => {
     const s: StudioStatus = {
       id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
       lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-      observed: { ...emptyObserved(), wipSyncedAt: ago(90), wipLastCheck: { at: ago(2), result: "failed" } },
+      observed: { ...emptyObserved(), wipSyncedAt: ago(90), wipLastCheck: { main: { at: ago(2), result: "failed" } } },
     };
     expect(formatWipCell(s, NOW)).toBe("2m!");
   });
@@ -133,22 +141,137 @@ describe("WIP cell — wipLastCheck (minor (a))", () => {
   test("absent wipLastCheck (a row from before this field existed) falls back to wipSyncedAt unchanged", () => {
     expect(formatWipCell(row(ago(4)), NOW)).toBe("4m");
   });
+
+  test("empty wipLastCheck map (no target has ever been named) falls back to wipSyncedAt unchanged", () => {
+    const s: StudioStatus = {
+      id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      observed: { ...emptyObserved(), wipSyncedAt: ago(4), wipLastCheck: {} },
+    };
+    expect(formatWipCell(s, NOW)).toBe("4m");
+  });
+});
+
+/**
+ * Issue #241 item 5 — the bug this item fixes: main pushes, a member fails,
+ * SAME tick -- the single-line WIP column must NEVER read "pushed" (no
+ * trailing '!') while a member's own safety net is silently broken. Floor
+ * requirement: roll up to the WORST status across every named target.
+ */
+describe("WIP cell — multi-target rollup (#241 item 5)", () => {
+  test("main pushed, a member failed, same tick: the cell reads the FAILED entry's age with '!', never 'pushed'", () => {
+    const s: StudioStatus = {
+      id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      observed: {
+        ...emptyObserved(),
+        wipLastCheck: {
+          main: { at: ago(1), result: "pushed" },
+          "member-a": { at: ago(3), result: "failed" },
+        },
+      },
+    };
+    expect(formatWipCell(s, NOW)).toBe("3m!");
+  });
+
+  test("every target healthy (pushed + clean, no failures): rolls up to the pushed entry's own age", () => {
+    const s: StudioStatus = {
+      id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      observed: {
+        ...emptyObserved(),
+        wipLastCheck: {
+          main: { at: ago(5), result: "pushed" },
+          "member-a": { at: ago(2), result: "clean" },
+        },
+      },
+    };
+    expect(formatWipCell(s, NOW)).toBe("5m");
+  });
+});
+
+/**
+ * Maestro review round 1 on PR #245 (issue #241), MAJOR 1 -- fixture test
+ * "both directions": (a) here -- NEW code reading an OLD-shape stored
+ * record (the pre-#241-item5 flat `{at,result}` object, byte-identical to
+ * what a Worker running before this field became a map would have
+ * written). The rollup must still correctly surface a failure, never
+ * silently read as "pushed" or "-" because a bare string got iterated as
+ * an "entry". See test/studio.session.test.ts's own
+ * "recordWipLastCheck — old-CLI back-compat" describe block for direction
+ * (b) -- an old reader seeing a record written by the NEW code.
+ */
+describe("WIP cell/inspect — legacy single-value back-compat (#241 review round 1, MAJOR 1)", () => {
+  /** Exactly the pre-#241-item5 shape: `wipLastCheck` itself IS `{at,result}`,
+   *  never a map. */
+  function rowWithLegacyWipLastCheck(result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed", at: string): StudioStatus {
+    return {
+      id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      observed: { ...emptyObserved(), wipLastCheck: { at, result } },
+    };
+  }
+
+  test("formatWipCell: a legacy flat FAILED record still reads the age with a trailing '!', never hidden", () => {
+    expect(formatWipCell(rowWithLegacyWipLastCheck("failed", ago(2)), NOW)).toBe("2m!");
+  });
+
+  test("formatWipCell: a legacy flat 'pushed' record reads the plain age, no '!'", () => {
+    expect(formatWipCell(rowWithLegacyWipLastCheck("pushed", ago(2)), NOW)).toBe("2m");
+  });
+
+  test("formatWipInspectLines: a legacy flat FAILED record still appends its own FAILED line", () => {
+    const observed = { ...emptyObserved(), wipSyncedAt: ago(90), wipLastCheck: { at: ago(2), result: "failed" as const } };
+    const lines = formatWipInspectLines("acmeclient--lead", observed, NOW);
+    expect(lines).toEqual([
+      `wip sync:     ${wipSyncRefEcho("acmeclient--lead")}, last synced 90m ago`,
+      "wip sync:     last attempt FAILED for (legacy) 2m ago",
+    ]);
+  });
+
+  test("formatWipInspectLines: a legacy flat successful record appends no FAILED line", () => {
+    const observed = { ...emptyObserved(), wipSyncedAt: ago(2), wipLastCheck: { at: ago(2), result: "pushed" as const } };
+    const lines = formatWipInspectLines("acmeclient--lead", observed, NOW);
+    expect(lines).toEqual([`wip sync:     ${wipSyncRefEcho("acmeclient--lead")}, last synced 2m ago`]);
+  });
+
+  // The NEW hybrid shape (real per-target map PLUS the legacy at/result
+  // decoration recordWipLastCheck now also stamps) must still roll up to
+  // the real per-target entries, never be mistaken for the legacy shape --
+  // decoration is ignored whenever even one real target entry exists.
+  test("formatWipCell: a hybrid record (map + legacy decoration) rolls up the REAL per-target entries, ignoring the decoration", () => {
+    const s: StudioStatus = {
+      id: "acmeclient--lead", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+      observed: {
+        ...emptyObserved(),
+        wipLastCheck: {
+          main: { at: ago(1), result: "pushed" },
+          "member-a": { at: ago(3), result: "failed" },
+          // Legacy decoration -- would read as "pushed" if a reader
+          // mistakenly treated these two keys as the whole value.
+          at: ago(1), result: "pushed",
+        } as unknown as NonNullable<StudioStatus["observed"]>["wipLastCheck"],
+      },
+    };
+    expect(formatWipCell(s, NOW)).toBe("3m!");
+  });
 });
 
 describe("fleet inspect — last-FAILED-attempt line (minor (a))", () => {
   test("appends a second line naming how long ago the last attempt failed", () => {
     const lines = formatWipInspectLines("acmeclient--lead", {
-      ...emptyObserved(), wipSyncedAt: ago(90), wipLastCheck: { at: ago(2), result: "failed" },
+      ...emptyObserved(), wipSyncedAt: ago(90), wipLastCheck: { main: { at: ago(2), result: "failed" } },
     }, NOW);
     expect(lines).toEqual([
       `wip sync:     ${wipSyncRefEcho("acmeclient--lead")}, last synced 90m ago`,
-      "wip sync:     last attempt FAILED 2m ago",
+      "wip sync:     last attempt FAILED for main 2m ago",
     ]);
   });
 
   test("a successful last check adds no second line", () => {
     const lines = formatWipInspectLines("acmeclient--lead", {
-      ...emptyObserved(), wipSyncedAt: ago(2), wipLastCheck: { at: ago(2), result: "pushed" },
+      ...emptyObserved(), wipSyncedAt: ago(2), wipLastCheck: { main: { at: ago(2), result: "pushed" } },
     }, NOW);
     expect(lines).toEqual([`wip sync:     ${wipSyncRefEcho("acmeclient--lead")}, last synced 2m ago`]);
   });
@@ -158,5 +281,25 @@ describe("fleet inspect — last-FAILED-attempt line (minor (a))", () => {
       ...emptyObserved(), wipSyncedAt: ago(2), wipBootStamp: "20261004000000",
     }, NOW);
     expect(lines).toEqual([`wip sync:     ${wipSyncRef("acmeclient--lead", "20261004000000")}, last synced 2m ago`]);
+  });
+
+  // Issue #241 item 5: more than one target can be failed in the SAME tick
+  // (the exact bug-report scenario) -- every failed target gets its OWN
+  // line, sorted by key for determinism, never collapsing to one.
+  test("two failed targets in the same tick: two distinct FAILED lines, one per target", () => {
+    const lines = formatWipInspectLines("acmeclient--lead", {
+      ...emptyObserved(),
+      wipSyncedAt: ago(90),
+      wipLastCheck: {
+        main: { at: ago(2), result: "pushed" },
+        "member-z": { at: ago(5), result: "failed" },
+        "member-a": { at: ago(3), result: "failed" },
+      },
+    }, NOW);
+    expect(lines).toEqual([
+      `wip sync:     ${wipSyncRefEcho("acmeclient--lead")}, last synced 90m ago`,
+      "wip sync:     last attempt FAILED for member-a 3m ago",
+      "wip sync:     last attempt FAILED for member-z 5m ago",
+    ]);
   });
 });

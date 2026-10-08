@@ -67,6 +67,22 @@ export interface SurvivalTaskBranch {
   ambiguousBranches?: string[];
 }
 
+/**
+ * Maestro review round 1 on PR #245 (issue #241), MAJOR 2 + MINOR 3 — one
+ * live wip-sync ref, paired with the last-commit time `survival-delivery.ts`
+ * managed to resolve for it via `compareAhead`, or `null` when it could not
+ * (a thrown error, or a `compareAhead` 404 -- the "parentless snapshot"
+ * case neither of which means the ref is gone; see that file's own
+ * age-filter loop). `branch`'s own embedded boot stamp is still read for
+ * SORTING (newest boot first, `composeSurvivalBrief`'s own section) -- a
+ * weaker, display-ordering-only use that stays fine even though the boot
+ * stamp is no longer trusted for the age/staleness DECISION itself.
+ */
+export interface SurvivalWipRef {
+  branch: string;
+  lastCommitAt: string | null;
+}
+
 export interface SurvivalOpenPr {
   number: number;
   title: string;
@@ -107,6 +123,49 @@ export interface SurvivalInput {
    * were genuinely zero refs.
    */
   unclaimedRescueBranches: Checked<string[]>;
+  /**
+   * Issue #241, item 1 — SOURCE 3's own wip-sync refs (`survival-delivery.ts`'s
+   * `isWipRescueRef`: main checkout's `wip/<14digits>`, member worktree's
+   * `wip/<14digits>-wt-<id>`), partitioned OUT of `unclaimedRescueBranches`
+   * and out of `attributeRescueBranch`'s candidate pool entirely, before
+   * either ever runs. A wip ref is a LIVE, periodically-refreshed safety
+   * net, not an abandoned teardown rescue -- attributing one to a task is
+   * nonsense (item 3's own fix, a direct consequence of this exclusion), and
+   * labeling it "unclaimed" implies an abandonment it doesn't have. Rendered
+   * as its own "Live wip snapshot" line (see `liveWipSnapshotLine` below),
+   * worded distinctly from `unclaimedRescueLine` so neither section is ever
+   * mistaken for the other. Same `Checked<T>` discipline as
+   * `unclaimedRescueBranches` -- a failed rescue-branch fetch, or a failed
+   * task lookup, fails this section too, symmetrically.
+   *
+   * Maestro review round 1 on PR #245 (issue #241), MAJOR 2 + MINOR 3 —
+   * widened from a bare `string[]` to `SurvivalWipRef[]`: a wip ref's own
+   * embedded boot stamp can no longer be trusted as "the ref is gone" on a
+   * `compareAhead` 404 (see `survival-delivery.ts`'s own age-filter loop's
+   * doc comment for the full "parentless snapshot" reasoning) -- callers
+   * now KEEP a ref whose age could not be confirmed, and need somewhere to
+   * carry "age unknown" through to the render side (`liveWipSnapshotLine`
+   * below) rather than just a bare name.
+   */
+  liveWipRefs: Checked<SurvivalWipRef[]>;
+  /**
+   * Maestro review round 2 on PR #245 (issue #241), problem 3 -- MINOR 4
+   * (`survival-delivery.ts`'s own age-filter loop doc comment) now caps
+   * `liveWipRefs` ITSELF to the newest `MAX_LINES_PER_SECTION` entries
+   * BEFORE any `compareAhead` call runs, so `liveWipRefs.value.length` can
+   * never exceed the display cap any more -- the render step's own "+N
+   * more" overflow line below, computed from that same length, could then
+   * never fire, even for a studio with far more than 8 live wip refs. This
+   * carries the TRUE, pre-cap candidate count alongside the already-capped
+   * list, so the overflow line can report the real number of refs beyond
+   * what was shown (and beyond what ever got `compareAhead`-checked at
+   * all) rather than silently dropping the "+N more" indicator. OPTIONAL,
+   * defaulting to `liveWipRefs.value.length` when absent (a direct
+   * `SurvivalInput` fixture that predates this field, or one with 8 or
+   * fewer refs where no capping ever happened) -- same "absent means as
+   * before" discipline `branchLookupTruncated` above already follows.
+   */
+  liveWipRefsTotalCount?: number;
   /** PR1's (#85) own bring-up verdict record, passed through as-is -- null
    *  before any bring-up has completed under that feature. Replaces the
    *  bare `lastSnapshotAgeS: number | null` this field used to be: PR1's
@@ -215,8 +274,13 @@ export interface SurvivalInput {
 }
 
 /** Lines per section before the rest collapses to a single "+N more". Keeps
- *  a re-brief with a busy fleet readable and its size predictable. */
-const MAX_LINES_PER_SECTION = 8;
+ *  a re-brief with a busy fleet readable and its size predictable.
+ *  Exported (maestro review round 1 on PR #245, issue #241, MINOR 4) so
+ *  `survival-delivery.ts`'s own wip-ref `compareAhead` cap reuses this exact
+ *  number rather than inventing a second display-cap constant that could
+ *  drift from it -- there is no point looking up a ref's age that this
+ *  section's own cap would immediately truncate into "+N more" anyway. */
+export const MAX_LINES_PER_SECTION = 8;
 
 /** Free text (task/PR titles, failure reasons) never enters the pane
  *  unfiltered: C0/C1 controls, collapsed whitespace, a stripped word-leading
@@ -342,6 +406,28 @@ function prLine(pr: SurvivalOpenPr): string {
  *  nothing here should assume that holds for every ref ever pushed). */
 function unclaimedRescueLine(ref: string): string {
   return `- Unclaimed rescue ref: ${sanitizeBranch(ref)} (not attributed to any task)`;
+}
+
+/**
+ * Issue #241, item 1 — one line per LIVE wip-sync ref (`liveWipRefs`),
+ * worded distinctly from `unclaimedRescueLine` above: "unclaimed" implies
+ * an abandonment a continuously-refreshed safety net doesn't have. Same
+ * `sanitizeBranch` treatment as every other ref this composer renders.
+ *
+ * Maestro review round 1 on PR #245 (issue #241), MAJOR 2 — now takes the
+ * full `SurvivalWipRef`, not a bare ref name, so an unresolved `lastCommitAt`
+ * (a thrown `compareAhead`, or its own 404 -- see `survival-delivery.ts`'s
+ * age-filter loop) renders "age unknown" explicitly, same "unknown" word
+ * `taskLine` above already uses for the identical "we checked and could not
+ * tell" situation, rather than silently omitting any age at all.
+ */
+function liveWipSnapshotLine(ref: SurvivalWipRef, now: string): string {
+  const age = ref.lastCommitAt === null ? null : ageFrom(ref.lastCommitAt, now);
+  const lastCommit = age === null ? "age unknown" : `last commit ${formatSurvivalAge(age)} ago`;
+  return (
+    `- Live wip snapshot: ${sanitizeBranch(ref.branch)} ` +
+    `(refreshed periodically while the studio was running, not attributed to any task, ${lastCommit})`
+  );
 }
 
 /** Review fix (#107 re-review): the restore outcome's own word, shown
@@ -655,6 +741,9 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
     // whole brief, which drops the one line ("could not check") this fix
     // exists to add.
     input.unclaimedRescueBranches.ok && input.unclaimedRescueBranches.value.length === 0 &&
+    // Issue #241, item 1 -- same "a FAILED check is never genuinely nothing
+    // to report" discipline as `unclaimedRescueBranches` just above.
+    input.liveWipRefs.ok && input.liveWipRefs.value.length === 0 &&
     input.session === null;
   if (genuinelyEmpty) return "";
 
@@ -708,6 +797,51 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
     }
     if (sorted.length > MAX_LINES_PER_SECTION) {
       lines.push(`- +${sorted.length - MAX_LINES_PER_SECTION} more`);
+    }
+  }
+
+  // Issue #241, item 1 -- same Checked-section rendering discipline as
+  // unclaimedRescueBranches just above, right next to it (both are SOURCE
+  // 3's own output), but worded distinctly: a live wip snapshot is not an
+  // "unclaimed" rescue ref.
+  if (!input.liveWipRefs.ok) {
+    lines.push(`- Live wip snapshots: could not check (${sanitizeText(input.liveWipRefs.reason)})`);
+  } else if (input.liveWipRefs.value.length > 0) {
+    // Maestro review round 1 on PR #245 (issue #241), MINOR 3 — DESCENDING
+    // (newest boot stamp first), not the plain ascending `.sort()` this used
+    // to be: an ascending sort put the OLDEST refs first, so the newest one
+    // -- the one most worth a reader's attention -- was exactly the one that
+    // fell into "+N more" once the list ran past the cap. `localeCompare`
+    // reversed (`b` before `a`) sorts on the full ref NAME, which embeds the
+    // boot stamp at a fixed position for every wip shape (`SurvivalWipRef`'s
+    // own doc comment) -- a weaker, display-only use of that stamp that
+    // stays fine even though it is no longer trusted for the age DECISION.
+    const sorted = input.liveWipRefs.value.slice().sort((a, b) => b.branch.localeCompare(a.branch));
+    const shown = sorted.slice(0, MAX_LINES_PER_SECTION);
+    for (const ref of shown) {
+      lines.push(liveWipSnapshotLine(ref, input.now));
+    }
+    // Problem 3 (review round 2 on PR #245) -- `liveWipRefsTotalCount` is
+    // the TRUE pre-cap count when the caller capped `liveWipRefs` itself
+    // before this composer ever saw it (MINOR 4); absent/equal to
+    // `sorted.length` falls back to the plain cap-overflow check this used
+    // to be.
+    //
+    // Mutation found during round-2's own self-review follow-up -- the
+    // overflow must be measured against how many candidates were ever
+    // CHECKED (`min(total, MAX_LINES_PER_SECTION)`), never against
+    // `shown.length`. `resolveSurvivalInput`'s own compareAhead loop can
+    // drop a CAPPED-AND-CHECKED ref outright once it turns out stale (the
+    // same "genuinely gone" reasoning MAJOR 2's doc comment gives for the
+    // 404 case) -- that shrinks `shown.length` for a reason that has
+    // nothing to do with the display cap. Subtracting `shown.length`
+    // directly double-counts a stale-but-checked ref as if it were an
+    // unseen overflow one, inflating "+N more" past the real count of
+    // candidates that were never looked up at all.
+    const total = input.liveWipRefsTotalCount ?? sorted.length;
+    const checked = Math.min(total, MAX_LINES_PER_SECTION);
+    if (total > checked) {
+      lines.push(`- +${total - checked} more`);
     }
   }
 

@@ -3943,3 +3943,97 @@ describe("#233 — a worktree already covered by origin's default branch never a
     });
   }
 });
+
+/**
+ * Issue #241 item 4 — the main checkout always went first, members always
+ * walked in the SAME fixed `worktree list --porcelain` order. `wip_budget_ok`
+ * gates each target's push attempt against the exec's own remaining
+ * server-deadline budget; a slow early target that burns most of it starves
+ * every LATER target in the fixed order, every single tick, forever. Fix:
+ * `wipSyncCmd` gains a `rotationIndex` param -- the generated bash builds ONE
+ * flat target array (main first, then every member worktree, same discovery
+ * order as before) and walks it starting from `rotationIndex % count`,
+ * wrapping around, instead of always starting at index 0.
+ */
+describe("#241 item 4 — wipSyncCmd rotates its target walk's starting point", () => {
+  const BOOT_STAMP = "20261006000000";
+  const mainRef = wipSyncRef(STUDIO, BOOT_STAMP);
+  const memberRefA = `fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-a1b2`;
+  const memberRefZ = `fleet/rescue/${STUDIO}/wip/${BOOT_STAMP}-wt-agent-zz`;
+
+  function addSecondMember(): void {
+    sh(`cd ${checkout} && git worktree add -q .claude/worktrees/agent-zz -b agent-zz`);
+  }
+
+  /** First RESCUE_PUSHED target name in stdout, in the order lines appear --
+   *  i.e. which target's own `wip_sync_one` call ran (and pushed) first. */
+  function firstPushedTarget(out: string): string | undefined {
+    const m = out.match(new RegExp(`^${RESCUE_PUSHED_PREFIX} (\\S+) `, "m"));
+    return m?.[1];
+  }
+
+  test("3 targets (main + 2 members), rotationIndex 0: main pushes first -- unchanged default order", () => {
+    addSecondMember();
+    writeFileSync(join(checkout, "main.md"), "main wip\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "a.md"), "a wip\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-zz", "z.md"), "z wip\n");
+
+    const out = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root, undefined, undefined, undefined, undefined, undefined, undefined, 0)).out;
+
+    expect(firstPushedTarget(out)).toBe(mainRef);
+    expect(out).toContain(memberRefA);
+    expect(out).toContain(memberRefZ);
+  });
+
+  test("the SAME 3 targets, rotationIndex 1: a DIFFERENT target pushes first -- the walk starts one target later", () => {
+    addSecondMember();
+    writeFileSync(join(checkout, "main.md"), "main wip\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "a.md"), "a wip\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-zz", "z.md"), "z wip\n");
+
+    const out = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root, undefined, undefined, undefined, undefined, undefined, undefined, 1)).out;
+
+    expect(firstPushedTarget(out)).not.toBe(mainRef);
+    expect(firstPushedTarget(out)).toBeDefined();
+  });
+
+  test("rotationIndex 7 against 3 targets (7 % 3 = 1): same starting target as rotationIndex 1 -- real modulo, not a guess or clamp", () => {
+    addSecondMember();
+    writeFileSync(join(checkout, "main.md"), "main wip\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "a.md"), "a wip\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-zz", "z.md"), "z wip\n");
+
+    const out1 = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root, undefined, undefined, undefined, undefined, undefined, undefined, 1)).out;
+    const first1 = firstPushedTarget(out1);
+
+    // Fresh fixture content for the second run (the first run's own force-push
+    // already landed, so re-running with identical content would still push
+    // -- new content just keeps the two runs' own evidence independent).
+    writeFileSync(join(checkout, "main.md"), "main wip, run 2\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "a.md"), "a wip, run 2\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-zz", "z.md"), "z wip, run 2\n");
+    const out7 = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root, undefined, undefined, undefined, undefined, undefined, undefined, 7)).out;
+
+    expect(firstPushedTarget(out7)).toBe(first1);
+  });
+
+  test("main-checkout-only (no member worktrees, count=1): any rotationIndex still runs main first -- 1 % 1 is always 0", () => {
+    sh(`cd ${checkout} && git worktree remove --force .claude/worktrees/agent-a1b2 && rm -rf .claude`);
+    writeFileSync(join(checkout, "main.md"), "main wip\n");
+
+    const out = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root, undefined, undefined, undefined, undefined, undefined, undefined, 5)).out;
+
+    expect(firstPushedTarget(out)).toBe(mainRef);
+  });
+
+  test("existing call sites omitting rotationIndex keep today's fixed order unchanged (default 0)", () => {
+    addSecondMember();
+    writeFileSync(join(checkout, "main.md"), "main wip\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-a1b2", "a.md"), "a wip\n");
+    writeFileSync(join(checkout, ".claude/worktrees/agent-zz", "z.md"), "z wip\n");
+
+    const out = sh(wipSyncCmd(REPO, STUDIO, BOOT_STAMP, root)).out;
+
+    expect(firstPushedTarget(out)).toBe(mainRef);
+  });
+});
