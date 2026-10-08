@@ -27,6 +27,7 @@ import type { WakeOutcome } from "../studio/wake";
 // excerpt (board issue #158) are collapsed to one line and capped the exact
 // same way, and typing the regex a second time is how the two drift apart.
 import { oneLine, COMMENT_EXCERPT, sameRepoSlug } from "../github/wake-events";
+import { wakeStudioFor } from "./wake-gate";
 
 /** The two things this edge needs from the rest of the Worker. */
 export interface AssignWakeDeps {
@@ -145,7 +146,7 @@ export function assignDigest(task: { number: number; title: string }, why?: stri
  * OLD name still matches a task filed against its current one after a
  * rename or ownership transfer.
  */
-/** The reason text both `repoMismatchReason`'s "different" case and
+/** The reason text both `wakeOnAssign`'s mismatch refusal and
  *  `checkAssignRepo`'s "different" case report — pulled into one place so
  *  the write-gate and the wake-gate never drift onto two different wordings
  *  for the identical verdict. */
@@ -155,22 +156,8 @@ function repoMismatchMessage(studioId: string, repoSlug: string, taskRepo: strin
     `${taskRepo} instead.`;
 }
 
-async function repoMismatchReason(
-  deps: Pick<AssignWakeDeps, "resolveCanonicalRepo">, studioId: string, repoSlug: string | null, taskRepo: string,
-): Promise<string | null> {
-  if (repoSlug === null) return null;
-  const match = await sameRepoSlug(repoSlug, taskRepo, deps.resolveCanonicalRepo);
-  if (match === "same") return null;
-  const reason = repoMismatchMessage(studioId, repoSlug, taskRepo);
-  // Issue #295 bug 2: "unknown" (a canonical lookup failed and left no
-  // confirmed match) refuses the WAKE exactly like a genuine "different" —
-  // the wake-gate fails closed always. Only the write-gate below
-  // (`checkAssignRepo`) treats "unknown" differently.
-  return match === "unknown" ? `${reason} (canonical-name lookup failed — refusing the wake to be safe)` : reason;
-}
-
 /**
- * Issue #284 round 2: the repo-mismatch half of `wakeOnAssign`'s gate below,
+ * Issue #284 round 2: the repo-mismatch half of `wakeOnAssign`'s gate,
  * split out so `routes.ts` can run it BEFORE `createTask`/`assignTask` write
  * a single label — see this function's one caller (`routes.ts`'s
  * `assignRepoPreflight`) for the failure this closes: a mismatched assign
@@ -191,9 +178,9 @@ async function repoMismatchReason(
  * treatment as the registry read above, and for the same reason — blocking a
  * label write on a transient token/network hiccup is strictly worse than the
  * false-409 it would prevent. This is where the write-gate and the wake-gate
- * (`repoMismatchReason`, `wakeOnAssign`, `wakeOnComment` — all fail CLOSED on
- * `"unknown"`) deliberately part ways. Because "wrote anyway despite an
- * undetermined repo" is not nothing, the ok branch carries an optional
+ * (board/wake-gate.ts's `wakeStudioFor`, behind both `wakeOnAssign` and
+ * `wakeOnComment` — fails CLOSED on `"unknown"`) deliberately part ways.
+ * Because "wrote anyway despite an undetermined repo" is not nothing, the ok branch carries an optional
  * `warning` — a return value rather than a bare `console.warn` in here, so
  * this stays provable without mocking a global; `routes.ts`'s
  * `assignRepoPreflight` is the one place that turns it into a logged line.
@@ -223,36 +210,15 @@ export async function wakeOnAssign(
   deps: AssignWakeDeps, studioId: string, task: { number: number; title: string; repo: string },
   why: string | null = null,
 ): Promise<AssignWakeReport> {
-  let studio: { state: string; repoSlug: string | null } | null;
-  try {
-    studio = await deps.studioState(studioId);
-  } catch (err) {
-    return { woke: false, reason: err instanceof Error ? err.message : String(err) };
-  }
-  if (studio === null) {
-    return {
-      woke: false,
-      reason: `${studioId} is not in the fleet registry — nothing to wake. ` +
+  return wakeStudioFor(deps, studioId, {
+    repo: task.repo,
+    digest: assignDigest(task, why),
+    refuse: {
+      unregistered: `${studioId} is not in the fleet registry — nothing to wake. ` +
         `Spawn it (ff <role> ${task.number}) and it boots on this task.`,
-    };
-  }
-  if (studio.state === "stopped") {
-    return {
-      woke: false,
-      reason: `${studioId} is stopped — no wake was sent, because starting its container costs money ` +
+      stopped: `${studioId} is stopped — no wake was sent, because starting its container costs money ` +
         `silently. Provision it and the task is delivered on bring-up.`,
-    };
-  }
-  const mismatch = await repoMismatchReason(deps, studioId, studio.repoSlug, task.repo);
-  if (mismatch !== null) return { woke: false, reason: mismatch };
-
-  const digest = assignDigest(task, why);
-  let outcome: WakeOutcome;
-  try {
-    outcome = await deps.wake(studioId, digest);
-  } catch (err) {
-    return { woke: false, reason: err instanceof Error ? err.message : String(err) };
-  }
-  if (!outcome.ok) return { woke: false, reason: outcome.error ?? "wake failed for an unstated reason" };
-  return { woke: true, digest };
+      repoMismatch: (repoSlug) => repoMismatchMessage(studioId, repoSlug, task.repo),
+    },
+  });
 }
