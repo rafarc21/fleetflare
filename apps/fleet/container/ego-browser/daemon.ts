@@ -82,6 +82,16 @@ function getBrowser(): Promise<Browser> {
         browserPid = findDirectChildPid(process.pid, { chromiumBinaryName: basename(CHROMIUM_PATH) });
         log(`browser launched, pid ${browserPid ?? "unknown"}`);
         return browser;
+      })
+      .catch((err) => {
+        // Board #276: a rejected Promise is still truthy, so leaving
+        // browserPromise set to it would wedge `if (!browserPromise)` shut
+        // forever -- every later call would replay THIS SAME rejection,
+        // with no new launch ever attempted again. Resetting it here lets
+        // the NEXT call (not this one -- `throw err` still rejects the
+        // promise this specific caller is awaiting) get a fresh attempt.
+        browserPromise = undefined;
+        throw err;
       });
   }
   return browserPromise;
