@@ -25,7 +25,7 @@ import {
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   closeIssue as closeIssueApi, getDefaultBranch, getPullRequest, commitReachableFromBranch,
   getIssueCloser, type IssueCloser, pullClaimsIssue,
-  listMatchingBranches, commitDate, compareFiles, deleteBranch, resolveCanonicalRepoName,
+  listMatchingBranches, commitDate, compareFiles, deleteBranch,
   repoIsPrivate, fetchRepoFile, listOpenPullFiles,
 } from "../github/api";
 import {
@@ -40,6 +40,7 @@ import {
 } from "./board";
 import { recordJuniorAuthorization, revokeJuniorAuthorization, sweepJuniorAuthorizations } from "../junior/authz";
 import { wakeOnAssign, checkAssignRepo, type AssignWakeDeps, type AssignWakeReport } from "./assign-wake";
+import { realWakeDeps } from "./wake-deps";
 import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify";
 import { openTasksWithLatestPr } from "./pr-landed";
 import { closeTaskOnPromote } from "./close-action";
@@ -451,52 +452,6 @@ function respond<T>(result: BoardResult<T>): Response {
 // deliveries. This is a second, independent edge for a different trigger.
 
 /**
- * The real ports the wake edge needs, wired to D1 and to the Durable Object
- * namespace.
- *
- * `studioState` reads the registry FIRST and the DO only after — board
- * #40/#49's lesson: `idFromName` on a name nothing else uses mints a fresh,
- * empty Durable Object and the call succeeds, so a wake aimed at a studio
- * that does not exist lands on a phantom and reports nothing. The id is never
- * composed here; it arrives as written on the task's own `studio:` label,
- * which the operator CLI folded through `repoIdSegment` (src/studio/repo.ts)
- * before it was ever an assignee. Re-deriving that fold is exactly the bug
- * #49 fixed.
- *
- * `wake` calls `wakeStudioOnAssignment`, NOT `wakeStudio`: the DO-side method
- * that runs the stopped and pane gates (src/studio/wake.ts's runGatedWake)
- * before a single keystroke reaches the container.
- *
- * `repoSlug` (issue #278) rides along from the SAME `listStudios(env)` row —
- * it is already a field on the registry, just not read here before this fix.
- * `wakeOnAssign` uses it to refuse a wake into a studio provisioned for a
- * different repo than the task's own.
- */
-function realAssignWake(env: Env): AssignWakeDeps {
-  const mint = repoTokenMinter(env);
-  return {
-    studioState: async (studioId) => {
-      const row = (await listStudios(env)).find((s) => s.id === studioId);
-      // `?? null`: a registry row written before `repoSlug` existed (or by a
-      // test fixture that omits it) has NO such key in its stored JSON at
-      // all, so `row.repoSlug` reads `undefined`, not `null` — and
-      // `undefined !== null` is true, which would run the repo compare on
-      // `undefined.toLowerCase()` instead of failing open the way a genuine
-      // `null` does. Normalized at this one read boundary rather than in
-      // assign-wake.ts's own check, the same posture StudioStatus.repoSlug's
-      // own doc comment already documents for this exact ambiguity.
-      return row ? { state: row.state, repoSlug: row.repoSlug ?? null } : null;
-    },
-    wake: async (studioId, prompt) => (await getStudioStub(env, studioId)).wakeStudioOnAssignment(prompt),
-    // Issue #284 round 2 (issue #268's own fix, reused): GitHub's canonical
-    // owner/name for a possibly-stale `repoSlug` — see assign-wake.ts's
-    // `AssignWakeDeps.resolveCanonicalRepo` for why a live lookup, not a
-    // lexical trick, is what a rename or ownership transfer needs.
-    resolveCanonicalRepo: async (slug) => resolveCanonicalRepoName(await mint(slug), slug),
-  };
-}
-
-/**
  * Runs an assigning call and folds whatever the wake did into its response.
  *
  * The `wake` field is present whenever `onAssigned` fired at all — a real
@@ -677,7 +632,7 @@ export async function handleBoard(
   // Board issue #41, half one. Same seam shape as `api`/`reach`/`reapPort`
   // above: the real one reads D1 and talks to a Durable Object, and no test
   // in this file needs either.
-  assignWake: AssignWakeDeps = realAssignWake(env),
+  assignWake: AssignWakeDeps = realWakeDeps(env),
   rescueGcPort: RescueGcPort = realRescueGcPort(env),
 ): Promise<Response> {
   const authFailure = await verifyAccess(req, env);
@@ -948,7 +903,7 @@ export async function handleFleetBoard(
   rows: StudioRowFetch = () => listStudios(env),
   // Issue #59: the two ports the directing verbs (create, assign) need.
   policy: PolicyFetch = realPolicyFetch(env),
-  assignWake: AssignWakeDeps = realAssignWake(env),
+  assignWake: AssignWakeDeps = realWakeDeps(env),
 ): Promise<Response> {
   const url = new URL(req.url);
   const m = FLEET_BOARD_ROUTE_RE.exec(url.pathname);

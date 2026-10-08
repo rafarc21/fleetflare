@@ -17,23 +17,21 @@
 // unchanged information delivered twice").
 //
 // Pure over one port (`AssignWakeDeps`, reused by TYPE ONLY from
-// src/board/assign-wake.ts -- no runtime import, no coupling to that
-// module's own gating code), exactly the discipline that module already
+// src/board/assign-wake.ts), exactly the discipline that module already
 // keeps: no Env, no binding, every rule here proven with no Durable Object,
-// no D1 row and no container.
+// no D1 row and no container. The gate itself (registry, stopped, repo
+// match, RPC) is board/wake-gate.ts's `wakeStudioFor`, shared with
+// `wakeOnAssign` since issue #263 -- this file supplies only the digest and
+// its own refusal wording.
 
 import type { AssignWakeDeps, AssignWakeReport } from "./assign-wake";
+import { wakeStudioFor } from "./wake-gate";
 import { parseEnvelopeComment } from "./envelope";
 import type { TaskState } from "./types";
 // The one flatten fold, imported rather than re-typed -- see assign-wake.ts's
 // own `assignDigest`, which flattens a task title the identical way for the
 // identical reason (issue #159 already exports this from wake-events.ts).
-// `sameRepoSlug` (issue #268's own canonical-nameWithOwner match, generalized
-// for a bare repo-slug compare) is the SAME repo check assign-wake.ts's own
-// `wakeOnAssign` uses -- issue #284 round 2 adds it here too, see
-// `wakeOnComment`'s own doc comment for why a comment trigger needs it now
-// when it deliberately did not before.
-import { oneLine, sameRepoSlug } from "../github/wake-events";
+import { oneLine } from "../github/wake-events";
 
 /**
  * The explicit wake request a comment can carry regardless of the task's own
@@ -201,48 +199,15 @@ export function commentDigest(
 export async function wakeOnComment(
   deps: AssignWakeDeps, studioId: string, task: { number: number; title: string; repo: string }, commentUrl: string,
 ): Promise<AssignWakeReport> {
-  let studio: { state: string; repoSlug: string | null } | null;
-  try {
-    studio = await deps.studioState(studioId);
-  } catch (err) {
-    return { woke: false, reason: err instanceof Error ? err.message : String(err) };
-  }
-  if (studio === null) {
-    return {
-      woke: false,
-      reason: `${studioId} is not in the fleet registry — nothing to wake for the comment on task #${task.number}.`,
-    };
-  }
-  if (studio.state === "stopped") {
-    return {
-      woke: false,
-      reason: `${studioId} is stopped — no wake was sent for the comment on task #${task.number}, ` +
+  return wakeStudioFor(deps, studioId, {
+    repo: task.repo,
+    digest: commentDigest(task, commentUrl),
+    refuse: {
+      unregistered: `${studioId} is not in the fleet registry — nothing to wake for the comment on task #${task.number}.`,
+      stopped: `${studioId} is stopped — no wake was sent for the comment on task #${task.number}, ` +
         "because starting its container costs money silently.",
-    };
-  }
-  if (studio.repoSlug !== null) {
-    const match = await sameRepoSlug(studio.repoSlug, task.repo, deps.resolveCanonicalRepo);
-    // Issue #295 bug 2: "unknown" (a canonical lookup failed, no confirmed
-    // match either way) refuses the wake exactly like "different" — this is
-    // the wake-gate, which fails closed always. Only the write-gate
-    // (assign-wake.ts's `checkAssignRepo`) fails open on "unknown".
-    if (match !== "same") {
-      const suffix = match === "unknown" ? " (canonical-name lookup failed — refusing the wake to be safe)" : "";
-      return {
-        woke: false,
-        reason: `${studioId} is provisioned for ${studio.repoSlug}, not ${task.repo} — a comment on a task from a ` +
-          `different repo would wake a lead that cannot see it. This task's assignee looks stale or hand-edited.${suffix}`,
-      };
-    }
-  }
-
-  const digest = commentDigest(task, commentUrl);
-  let outcome;
-  try {
-    outcome = await deps.wake(studioId, digest);
-  } catch (err) {
-    return { woke: false, reason: err instanceof Error ? err.message : String(err) };
-  }
-  if (!outcome.ok) return { woke: false, reason: outcome.error ?? "wake failed for an unstated reason" };
-  return { woke: true, digest };
+      repoMismatch: (repoSlug) => `${studioId} is provisioned for ${repoSlug}, not ${task.repo} — a comment on a ` +
+        "task from a different repo would wake a lead that cannot see it. This task's assignee looks stale or hand-edited.",
+    },
+  });
 }

@@ -13,7 +13,7 @@ import { getStudioStub } from "../studio/profile";
 import { repoTokenMinter } from "./auth";
 import {
   getDefaultBranch, listPullsForCommit, closingIssuesForPull, listPullCommits, getPullRequest,
-  pullsWithClosingIssuesForCommits, resolveCanonicalRepoName,
+  pullsWithClosingIssuesForCommits,
 } from "./api";
 import {
   resolveIssuesForPushCommits, resolveIssuesFromEnvelopeArtifacts, type ClosableIssue, type PromoteCloseApi,
@@ -27,7 +27,7 @@ import { makeTimeBudget, budgetExceeded, AUTO_CLOSE_BUDGET_MS, type TimeBudget }
 import { getFlag, setFlag } from "../state";
 import { taskAssignees, taskStates, type TaskState } from "../board/types";
 import { qualifiesForCommentWake, wakeOnComment } from "../board/comment-wake";
-import type { AssignWakeDeps } from "../board/assign-wake";
+import { realWakeDeps } from "../board/wake-deps";
 
 const WATCHED = new Set(["refs/heads/staging", "refs/heads/main"]);
 const WINDOW_MS = 30 * 60 * 1000;
@@ -255,20 +255,8 @@ async function wakeTaskOnComment(env: Env, body: string): Promise<void> {
     // function cannot use" check above.
     if (repo === undefined) return;
 
-    const mint = repoTokenMinter(env);
-    const deps: AssignWakeDeps = {
-      studioState: async (id) => {
-        const row = (await listStudios(env)).find((s) => s.id === id);
-        // `?? null`: see board/routes.ts's `realAssignWake` for why a row
-        // missing this key entirely (predates the field, or a test fixture
-        // that omits it) must normalize to `null`, not `undefined`.
-        return row ? { state: row.state, repoSlug: row.repoSlug ?? null } : null;
-      },
-      wake: async (id, prompt) => (await getStudioStub(env, id)).wakeStudioOnAssignment(prompt),
-      resolveCanonicalRepo: async (slug) => resolveCanonicalRepoName(await mint(slug), slug),
-    };
     const task = { number: issue.number, title: issue.title, repo };
-    const report = await wakeOnComment(deps, studioId, task, commentUrl);
+    const report = await wakeOnComment(realWakeDeps(env), studioId, task, commentUrl);
     if (!report.woke) console.error(`task comment wake (${studioId}) on #${task.number} — ${report.reason}`);
   } catch (err) {
     console.error("task comment wake threw", err);
