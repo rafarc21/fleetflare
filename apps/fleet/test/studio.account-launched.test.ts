@@ -190,8 +190,27 @@ describe("StudioDO wiring (source) — #292 r2", () => {
 
   // Issue #249: the NEW half of the same gate — a glm-lead studio takes the
   // `if` branch instead, and never reaches `launchAccountOrRefuse` at all.
-  // See test/studio.do.glm-admission.test.ts for the dedicated, per-call-site
-  // coverage of this guard (all 4 sites, not just these 2).
+  // There is no dedicated `studio.do.glm-admission.test.ts` file — that
+  // never existed on this branch. The real per-call-site coverage of this
+  // guard is split across:
+  //  - THIS test, right below: pins the guard's presence (as the textual
+  //    `if (leadType === "glm") {`) at provisionUngated's and
+  //    restartUngated's own call sites, plus recycle's post-destroy
+  //    closure — 3 of the 4 `launchAccountOrRefuse` sites.
+  //  - the "StudioDO.recycle wiring — envAccount re-derived fresh..." block
+  //    further down in this file ("the closure guards the claude path
+  //    behind leadType === \"glm\"..." and its ordering sibling): the
+  //    recycle closure's glm-skip specifically, with ordering against its
+  //    own claude-path `launchAccountOrRefuse` call.
+  //  - recycle's 4th, ENTRY-time call (the inverse `leadType !== "glm"`
+  //    guard, do.ts) has no equivalently dedicated glm-skip pin today — the
+  //    "#134 review round 1" describe blocks above exercise that call
+  //    without ever varying leadType. test/studio.provision.test.ts covers
+  //    leadType seeding/stickiness (runProvision), and
+  //    test/board.routes.test.ts covers the board-level security-label
+  //    refusal onto a glm-lead studio end to end — neither exercises this
+  //    specific call site's bypass directly. A follow-up pin for it, mirroring
+  //    the closure's, would close that gap.
   it("provisionUngated and restartUngated both guard the gate on leadType === \"glm\"", () => {
     const guard = "if (leadType === \"glm\") {";
     const sites = doSrc.split("\n").filter((l) => l.trim() === guard);
