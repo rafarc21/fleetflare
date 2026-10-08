@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   createTask, transitionTask, commentEnvelope, listTasks, showTask, resolveBoardRepo,
   requireAssignedTask, showStudioTask, commentStudioEnvelope, resolveBriefPrompt, resolveLatestAssignedBrief,
-  assignTask, transitionStudioTask, openAssignedTasks, findLiveAssignedTask,
+  assignTask, transitionStudioTask, openAssignedTasks, findLiveAssignedTask, revokeGlmLeadOnSecurityLabel,
   closeTerminalTasks, TERMINAL_CLOSE_PAGE, autoStartSubmittedTasks, LEAD_TASK_STATES,
   openTasksNeedingRebrief, REBRIEF_TASK_STATES,
   type BoardApi,
@@ -925,6 +925,129 @@ describe("assignTask — adoption and reassignment (P5 §3)", () => {
       expect(res.ok).toBe(true);
       expect(api.addLabels).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+// Maestro review round 1 MINOR (#249, #255): createTask/assignTask both
+// refuse a security-labelled task going ONTO a glm-lead studio, but neither
+// watches for the label arriving AFTER the fact -- a task already
+// live-assigned to a glm-lead studio, relabelled `security` later (GitHub
+// UI, a hand-run `gh issue edit --add-label security`, anything other than
+// this Worker's own createTask/assignTask write), stayed silently owned by
+// that studio with nothing to catch it. revokeGlmLeadOnSecurityLabel is the
+// fix: called in reaction to that exact event (webhook.ts's own issues-event
+// handler wires it, same `labeled` trigger junior/authz.ts's
+// revokeJuniorOnIssueEvent already answers for issue #35), it unassigns any
+// CURRENT owner whose leadType resolves to "glm" -- same "revoke only, never
+// grant" posture junior/authz.ts's own header argues for its reopened-task
+// case: once a glm-lead studio's claim on a security task is gone here,
+// nothing (a later unlabel, a relabel) brings it back on its own; a human
+// has to reassign it, through assignTask, which already refuses to hand it
+// BACK to a glm-lead studio (the describe block just above).
+describe("revokeGlmLeadOnSecurityLabel — a security label added AFTER assignment unassigns a glm-lead owner (#249 maestro r1)", () => {
+  const WEB = "websites--web-studio";
+  const CLAUDE_STUDIO = "websites--claude-studio";
+
+  it("a task already working, owned by a glm-lead studio, now carries `security` -> unassigned and reset to backlog", async () => {
+    const api = fakeApi({
+      getIssue: vi.fn(async () => task({
+        number: 42, labels: ["working", studioLabel(WEB), "security"], state: "working", assignee: WEB,
+      })),
+    });
+    const getLeadType = vi.fn(async () => "glm" as const);
+    const res = await revokeGlmLeadOnSecurityLabel(api, "o/r", 42, getLeadType);
+
+    expect(res.revoked).toEqual([WEB]);
+    expect(api.removeLabel).toHaveBeenCalledWith("o/r", 42, studioLabel(WEB));
+    expect(api.removeLabel).toHaveBeenCalledWith("o/r", 42, "working");
+    expect(api.addLabels).toHaveBeenCalledWith("o/r", 42, ["submitted"]);
+    expect(api.createComment).toHaveBeenCalledTimes(1);
+    const [, , comment] = vi.mocked(api.createComment).mock.calls[0];
+    expect(comment).toContain(WEB);
+    expect(comment).toContain("security");
+  });
+
+  it("already in backlog (submitted) when the label lands -> owner removed, state left alone (no duplicate submitted write)", async () => {
+    const api = fakeApi({
+      getIssue: vi.fn(async () => task({
+        number: 42, labels: ["submitted", studioLabel(WEB), "security"], state: "submitted", assignee: WEB,
+      })),
+    });
+    const getLeadType = vi.fn(async () => "glm" as const);
+    const res = await revokeGlmLeadOnSecurityLabel(api, "o/r", 42, getLeadType);
+
+    expect(res.revoked).toEqual([WEB]);
+    expect(api.removeLabel).toHaveBeenCalledWith("o/r", 42, studioLabel(WEB));
+    expect(api.removeLabel).not.toHaveBeenCalledWith("o/r", 42, "submitted");
+    expect(api.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("the owner is a claude-lead studio -> nothing written, nothing revoked (identical label, wrong lead type)", async () => {
+    const api = fakeApi({
+      getIssue: vi.fn(async () => task({
+        number: 42, labels: ["working", studioLabel(CLAUDE_STUDIO), "security"], state: "working", assignee: CLAUDE_STUDIO,
+      })),
+    });
+    const getLeadType = vi.fn(async () => "claude" as const);
+    const res = await revokeGlmLeadOnSecurityLabel(api, "o/r", 42, getLeadType);
+
+    expect(res.revoked).toEqual([]);
+    expect(api.removeLabel).not.toHaveBeenCalled();
+    expect(api.addLabels).not.toHaveBeenCalled();
+    expect(api.createComment).not.toHaveBeenCalled();
+  });
+
+  it("the task does not carry `security` at all -> nothing written (not every relabel is this one)", async () => {
+    const api = fakeApi({
+      getIssue: vi.fn(async () => task({
+        number: 42, labels: ["working", studioLabel(WEB)], state: "working", assignee: WEB,
+      })),
+    });
+    const getLeadType = vi.fn(async () => "glm" as const);
+    const res = await revokeGlmLeadOnSecurityLabel(api, "o/r", 42, getLeadType);
+
+    expect(res.revoked).toEqual([]);
+    expect(api.removeLabel).not.toHaveBeenCalled();
+    expect(getLeadType).not.toHaveBeenCalled();
+  });
+
+  it("unassigned backlog task, somehow already carrying `security` -> no owner to revoke, nothing written", async () => {
+    const api = fakeApi({
+      getIssue: vi.fn(async () => task({ number: 42, labels: ["submitted", "security"], state: "submitted", assignee: null })),
+    });
+    const getLeadType = vi.fn(async () => "glm" as const);
+    const res = await revokeGlmLeadOnSecurityLabel(api, "o/r", 42, getLeadType);
+
+    expect(res.revoked).toEqual([]);
+    expect(api.removeLabel).not.toHaveBeenCalled();
+  });
+
+  it("end to end: revoke, then the IDENTICAL re-adoption that would have succeeded before the label landed now refuses", async () => {
+    // Before: a plain working task, owned by WEB, no security label --
+    // assignTask would happily re-adopt/nudge it (round-1's own tests prove
+    // that path). Then the label lands; revoke runs. The task this function
+    // hands back is the SAME shape assignTask's own getIssue would now see.
+    const afterLabel = task({ number: 42, labels: ["submitted", "security"], state: "submitted", assignee: null });
+    const api = fakeApi({
+      getIssue: vi.fn(async () => task({
+        number: 42, labels: ["working", studioLabel(WEB), "security"], state: "working", assignee: WEB,
+      })),
+    });
+    const getLeadType = vi.fn(async () => "glm" as const);
+    const revoked = await revokeGlmLeadOnSecurityLabel(api, "o/r", 42, getLeadType);
+    expect(revoked.revoked).toEqual([WEB]);
+
+    // The next call against this task's own assignment: re-adopting WEB.
+    // Before the label landed this is exactly the "nudge the studio that
+    // already owns it" shape (board #158) and would have succeeded; now the
+    // task's own fresh labels (read inside assignTask, not trusted from the
+    // caller) carry `security` against a glm-lead target, so it refuses.
+    const apiAfter = fakeApi({ getIssue: vi.fn(async () => afterLabel) });
+    const res = await assignTask(apiAfter, "o/r", 42, { assignee: WEB }, { mode: "adopt" as const, getLeadType });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(400);
+    expect(apiAfter.addLabels).not.toHaveBeenCalled();
   });
 });
 
