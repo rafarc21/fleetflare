@@ -9,6 +9,19 @@ how it gets built.
 Branch: `feat-259-deep-modules-skills` off `origin/main`. Docs/skills only —
 no app code, no tests beyond what already exists for skill-file structure.
 
+**Correction (2026-10-08, operator):** the two new skills below are NOT
+written from scratch. They are vendored (copied) from
+https://github.com/mattpocock/skills, pinned at commit `b0618bc436ad`, MIT
+License — `skills/engineering/codebase-design/` for deep-modules,
+`skills/engineering/pr/` for pr-body. Sections 1 and 2 below, as originally
+planned, described from-scratch authorship; superseded by the vendored
+content plus a small, clearly-marked "Fleetflare addendum" appended to each
+vendored `SKILL.md`. The addendum is everything this plan's original
+sections 1/2 described (vocabulary overlap noted rather than duplicated,
+detection checklist, refactor recipes, when-not-to-deepen, superpowers
+hook, template-unification note) — see `skills/VENDORED.md` for the exact
+file-by-file vendored-vs-local breakdown.
+
 ## Goal
 
 Ship four things, per the spec's own Part A:
@@ -30,12 +43,14 @@ the deep-modules checklist against one real, substantial fleetflare module
 (findings go to a new GitHub issue, drafted here, filed by the lead — not
 fixed in this PR).
 
-## 1. `skills/deep-modules/SKILL.md` (new)
+## 1. `skills/deep-modules/SKILL.md` (vendored + local addendum)
 
-Frontmatter matches `delivery-standards`/`maestro-playbook`'s shape exactly
-(`name:`, one-paragraph `description:` written for skill-selection matching).
-
-Sections, in order:
+Superseded by the correction above: `SKILL.md` body (plus `DEEPENING.md`,
+`DESIGN-IT-TWICE.md`) is Pocock's `codebase-design` skill, vendored
+verbatim except the `name:` frontmatter field. What follows was the
+original from-scratch plan for this section; it now describes the local
+addendum appended to the end of the vendored file instead — same content,
+different provenance:
 - **Vocabulary** — module, interface, implementation, depth (functionality ÷
   interface size), information hiding, seam, pass-through method, shallow
   module, temporal decomposition, change amplification, cognitive load,
@@ -59,10 +74,14 @@ Sections, in order:
   review` (should read this checklist), by name only — those are a separate
   installed plugin this repo doesn't own, so nothing there gets edited.
 
-## 2. `skills/pr-body/SKILL.md` (new)
+## 2. `skills/pr-body/SKILL.md` (vendored + local addendum)
 
-Frontmatter `description` says explicitly: reach for this on every PR, not
-just when asked.
+Superseded by the correction above: `SKILL.md` body is Pocock's `pr` skill,
+vendored verbatim except the `name:` frontmatter field (`metadata.credits`
+preserved unchanged — his own upstream attribution to `show-me`). What
+follows was the original from-scratch plan for this section; it now
+describes the local addendum appended to the end of the vendored file
+instead:
 
 Opens by naming `.github/pull_request_template.md` as *the* template — this
 skill documents and extends it, not a second source of truth. Each of the
@@ -149,8 +168,11 @@ either way: if the module holds up against the checklist, say so.
 
 - `docs/superpowers/specs/2026-10-08-deep-modules-maintainability-design.md` — step 0, issue body verbatim.
 - `docs/superpowers/plans/2026-10-08-deep-modules-skills-259.md` — this file.
-- `skills/deep-modules/SKILL.md` — new.
-- `skills/pr-body/SKILL.md` — new.
+- `skills/deep-modules/SKILL.md` — vendored (mattpocock/skills@b0618bc436ad) + local addendum.
+- `skills/deep-modules/DEEPENING.md`, `skills/deep-modules/DESIGN-IT-TWICE.md` — vendored, companion files SKILL.md links to.
+- `skills/pr-body/SKILL.md` — vendored (mattpocock/skills@b0618bc436ad) + local addendum.
+- `skills/VENDORED.md` — new, vendored-vs-local manifest.
+- `skills/THIRD-PARTY-LICENSES.md` — new, upstream MIT license text.
 - `fleet/blueprint/studios/web-studio/members/backend-developer.md` — one sentence removed.
 - `fleet/blueprint/studios/web-studio/members/frontend-developer.md` — one sentence removed.
 - `fleet/blueprint/studios/web-studio/members/code-reviewer.md` — one sentence added to the Standards axis paragraph.
