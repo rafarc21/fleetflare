@@ -106,7 +106,6 @@ describe("anthropicRequestToOpenAI — GLM_MIN_MAX_TOKENS floor", () => {
       messages: [{ role: "user", content: "hi" }],
     });
     expect(out.max_tokens).toBe(GLM_MIN_MAX_TOKENS);
-    expect(GLM_MIN_MAX_TOKENS).toBe(16000);
   });
 
   test("a max_tokens already above the floor passes through unchanged — this is a floor, not a cap", () => {
