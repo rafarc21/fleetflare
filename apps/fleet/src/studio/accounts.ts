@@ -31,7 +31,7 @@
  * D1, no `Env`), so pulling one pure function out of it costs this file
  * nothing it doesn't already pay for its own pure helpers.
  */
-import { usageMaxPct } from "./claude-swap";
+import { usageMaxPct, DEFAULT_LIMIT_THRESHOLD_PCT } from "./claude-swap";
 
 /** Just the part of the Worker environment this module reads. `Env`
  *  (src/env.ts) satisfies it structurally, with no cast at any call site. */
@@ -235,6 +235,24 @@ const UNKNOWN_PROMOTION_CEILING_PCT = 80;
  *   6. Otherwise (rest non-empty, best-fresh's pct at or below the ceiling)
  *      -> that best-fresh candidate wins, same as rule 4.
  */
+/**
+ * Issue #251 — the NaN-safe "is this usage row fresh enough to trust"
+ * check `selectByHeadroom` already had inline, factored out so
+ * `freshUnderThresholdAccount` (below, the admission fallback) shares the
+ * IDENTICAL staleness rule rather than carrying a second, driftable copy.
+ * Maestro review round 2, MINOR 5 (on the original inline version):
+ * `Date.parse` on a malformed `seenAt` returns NaN, and `NaN >= freshnessMs`
+ * is `false` in JS, so a row with a genuinely unparseable `seenAt` would
+ * otherwise survive the filter as if it were fresh — `Number.isFinite(age)`
+ * closes that.
+ */
+function isFreshUsage(
+  u: AccountUsageMap[string] | undefined, now: Date, freshnessMs: number,
+): u is AccountUsageMap[string] {
+  const age = u ? now.getTime() - Date.parse(u.seenAt) : NaN;
+  return !!u && Number.isFinite(age) && age < freshnessMs;
+}
+
 export function selectByHeadroom(
   candidates: ClaudeAccount[], usage: AccountUsageMap, now: Date, freshnessMs: number = USAGE_ORDERING_FRESHNESS_MS,
 ): ClaudeAccount | null {
@@ -242,13 +260,7 @@ export function selectByHeadroom(
   let hasRest = false;
   for (const c of candidates) {
     const u = usage[c.name];
-    // Maestro review round 2, MINOR 5: `Date.parse` on a malformed `seenAt`
-    // returns NaN, and `NaN >= freshnessMs` is `false` in JS, so a row with a
-    // genuinely unparseable `seenAt` would otherwise survive this filter as
-    // if it were fresh. A non-finite age must count as stale, same final
-    // effect as before for a REAL age, but correct for the right reason now.
-    const age = u ? now.getTime() - Date.parse(u.seenAt) : NaN;
-    if (u && Number.isFinite(age) && age < freshnessMs) {
+    if (isFreshUsage(u, now, freshnessMs)) {
       fresh.push({ account: c, pct: usageMaxPct(u) });
     } else {
       hasRest = true;
@@ -559,6 +571,81 @@ export function earliestAccountReset(
   return earliest;
 }
 
+/**
+ * Issue #251 — the same scan as `earliestAccountReset` above, but carrying
+ * the NAME of the account that reset belongs to as well. A separate
+ * function rather than widening that one's own return shape: failover.ts's
+ * own caller (`earliestReset`, around its own `parkedOn`/`exhaustedMessage`)
+ * only ever wants the bare string, and this file's header rule is "never a
+ * second, drifting copy of a formula" — not "never a second caller of the
+ * same scan with a different return shape" — so this stays its own small
+ * function rather than forcing an unrelated caller to carry a name it would
+ * just discard. Used only by `launchAccountOrReroute`'s own refusal message
+ * below, so an operator reading "every account limited" knows WHICH account
+ * to watch, not just when.
+ */
+function accountWithEarliestReset(
+  accounts: ClaudeAccount[], limits: AccountLimits, now: Date,
+): { name: string; until: string } | null {
+  let best: { name: string; until: string } | null = null;
+  for (const a of accounts) {
+    if (!(a.name in limits)) continue;
+    const { until } = limits[a.name];
+    if (until === null || Date.parse(until) <= now.getTime()) continue;
+    if (best === null || Date.parse(until) < Date.parse(best.until)) best = { name: a.name, until };
+  }
+  return best;
+}
+
+/**
+ * Issue #251 — the admission-time rescue for a stale `account-limit` row: a
+ * fresh (<USAGE_ORDERING_FRESHNESS_MS) `account-usage` reading that already
+ * disagrees with a D1 limit row this studio's own tiers 1-3 (selectFreeAccount,
+ * nextBorrowedAccount) just read as still limited. A 5h-window reset clears
+ * the ACCOUNT before any studio's `fleet accounts sync` corrects the row
+ * that recorded it — the bug this whole fix exists for (#251: `fleet
+ * provision`/`fleet recycle` answered "409 every account limited" while
+ * `fleet accounts` already showed the mapped slot at 14%).
+ *
+ * Only called once every ordinary tier has already missed — see
+ * `launchAccountOrReroute`'s own call site, immediately before it would
+ * build the "every account limited" refusal — so this never second-guesses
+ * an account `accountIsFree` already calls free (that path already works
+ * unchanged); it only rescues one D1 STILL calls limited when a fresher
+ * reading already knows better. Admits for THIS decision only — nothing is
+ * written back to D1, `fleet accounts sync` remains the thing that corrects
+ * the stale row itself; this just stops admission from trusting a row sync's
+ * own last reading already disagrees with.
+ *
+ * Qualifies: not already free (`accountIsFree` — nothing to rescue
+ * otherwise), not `reserved` (same exclusion every other selection function
+ * in this file already respects), a fresh usage entry (`isFreshUsage`, the
+ * IDENTICAL staleness rule `selectByHeadroom` uses — one copy, not two that
+ * could drift), and `usageMaxPct` strictly below `DEFAULT_LIMIT_THRESHOLD_PCT`
+ * (claude-swap.ts, 95 — the same number `decideAccountSync` itself uses to
+ * call an account limited vs clear, imported rather than re-hardcoded).
+ *
+ * Among qualifying candidates the lowest `usageMaxPct` wins (ties: first in
+ * `accounts`' own order) — same tie-breaking spirit as `selectByHeadroom`.
+ * `null` when nothing qualifies, the caller's own cue to fall through to the
+ * ordinary refusal exactly as before this fix.
+ */
+export function freshUnderThresholdAccount(
+  accounts: ClaudeAccount[], limits: AccountLimits, usage: AccountUsageMap, now: Date, reserved: Set<string>,
+): ClaudeAccount | null {
+  let best: { account: ClaudeAccount; pct: number } | null = null;
+  for (const a of accounts) {
+    if (reserved.has(a.name)) continue;
+    if (accountIsFree(a, limits, now)) continue;
+    const u = usage[a.name];
+    if (!isFreshUsage(u, now, USAGE_ORDERING_FRESHNESS_MS)) continue;
+    const pct = usageMaxPct(u);
+    if (pct >= DEFAULT_LIMIT_THRESHOLD_PCT) continue;
+    if (best === null || pct < best.pct) best = { account: a, pct };
+  }
+  return best?.account ?? null;
+}
+
 /** Every account this studio has been on, in order, up to and including the
  *  one it is on now — what the degraded message and the operator alert name.
  *  An unknown current account (secret deleted) is reported as itself, so the
@@ -842,10 +929,17 @@ export async function launchAccountOrReroute(
   if (free !== null) return { ok: true, name: free.name, token: free.token };
   const borrowed = nextBorrowedAccount(accounts, reserved, limits, await readBurn(), now);
   if (borrowed !== null) return { ok: true, name: borrowed.name, token: borrowed.token };
-  const resetAt = earliestAccountReset(accounts, limits, now);
+  // Issue #251 — the last chance before refusing: a fresh account-usage
+  // reading that already contradicts a stale D1 account-limit row. See
+  // `freshUnderThresholdAccount`'s own doc comment for the full rule.
+  const rescue = freshUnderThresholdAccount(accounts, limits, usage, now, reserved);
+  if (rescue !== null) return { ok: true, name: rescue.name, token: rescue.token };
+  const earliest = accountWithEarliestReset(accounts, limits, now);
   return {
     ok: false,
-    error: `claude account: every account limited; earliest reset ${resetAt ?? "unknown"}`,
+    error: earliest === null
+      ? `claude account: every account limited; earliest reset unknown -- try 'fleet accounts sync' first`
+      : `claude account: every account limited; earliest reset ${earliest.until} (${earliest.name}) -- try 'fleet accounts sync' first`,
   };
 }
 
