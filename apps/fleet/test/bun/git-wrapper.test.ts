@@ -2199,4 +2199,47 @@ LANE("the fleet git wrapper runs the leak gate on every push (issue #1)", () => 
     const r = git(f, ["push", "origin", f.def]);
     expect(r.code, r.stderr).toBe(0);
   });
+
+  /**
+   * Issue #281: a studio clone is `--depth 1` (guardedCloneCmd). Once the
+   * remote's default branch moves past that shallow base, its new tip is not
+   * local, the `--not` skip list comes out empty, and the scan walks the
+   * grafted base — already public — whose author matches a pattern. Every
+   * new-branch push was refused until something fetched.
+   */
+  function shallowBehindMovedDefault(): Fixture {
+    const f = setup();
+    writeGate(f, { patterns: ["fleet-harmless-999999999", TERM] });
+    const seed = join(f.root, "seed");
+    // The public base: already on the remote, its author carries the term.
+    writeFileSync(join(seed, "base.txt"), "base\n");
+    realGit(f, ["add", "-A"], seed);
+    realGit(f, ["commit", "-q", "-m", "base", `--author=Someone <someone@${TERM}.example>`], seed);
+    realGit(f, ["push", "-q", "origin", f.def], seed);
+    // The studio's checkout, exactly as provisioned: one commit deep.
+    rmSync(f.clone, { recursive: true, force: true });
+    realGit(f, ["clone", "-q", "--depth", "1", `file://${f.origin}`, f.clone], f.root);
+    realGit(f, ["remote", "set-head", "origin", f.def]);
+    expect(existsSync(join(f.clone, ".git", "shallow"))).toBe(true);
+    // The remote's default branch then moves on without the studio.
+    writeFileSync(join(seed, "later.txt"), "later\n");
+    realGit(f, ["add", "-A"], seed);
+    realGit(f, ["commit", "-q", "-m", "later"], seed);
+    realGit(f, ["push", "-q", "origin", f.def], seed);
+    realGit(f, ["checkout", "-q", "-b", "feature"]);
+    return f;
+  }
+
+  test("#281: shallow clone, default moved on — a clean new-branch push lands (mutant: grafted public base rescanned)", () => {
+    const f = shallowBehindMovedDefault();
+    commitWith(f, "a.txt", "clean\n", "clean message");
+    expectLanded(f, pushFeature(f));
+  });
+
+  test("#281: shallow clone, default moved on — a term in a NEW commit is still refused", () => {
+    const f = shallowBehindMovedDefault();
+    commitWith(f, "a.txt", `notes about ${TERM}\n`, "clean message");
+    const before = originState(f);
+    expectLeakRefused(f, pushFeature(f), before);
+  });
 });
