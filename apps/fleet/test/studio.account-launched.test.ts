@@ -703,6 +703,62 @@ describe("StudioDO.recycle wiring — the entry-time launchAccountOrRefuse call 
   });
 });
 
+// Issue #249: the gap the "StudioDO wiring (source)" block's own doc comment
+// above flags explicitly — recycle's 4th `launchAccountOrRefuse` call site,
+// the ENTRY-time refusal-check right above (issue #271's "refuse before
+// destroy" call, the one this describe block's sibling just above already
+// pins as the sole `false)` call before `recycleWithSync(`), had no dedicated
+// glm-skip pin of its own. provisionUngated/restartUngated and recycle's own
+// post-destroy closure each already have one; this closes the 4th. Same
+// source-pin convention as every block above (the DO cannot be constructed
+// under vitest-pool-workers) — proven on the literal guarded statement, not
+// by re-deriving a parallel boolean.
+describe("StudioDO.recycle wiring — the entry-time call skips the gate for a glm-lead studio (#249)", () => {
+  const doSrc: string = (testEnv as unknown as { TEST_STUDIO_DO_SRC: string }).TEST_STUDIO_DO_SRC;
+  const body = (sig: string): string => {
+    const start = doSrc.indexOf(sig);
+    if (start === -1) throw new Error(`not found: ${sig}`);
+    return doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
+  };
+  const recycleBody = body("async recycle(cfg: ProvisionConfig, discardUnsynced = false): Promise<StudioStatus> {");
+  // Same slice the sibling block above uses to isolate the entry-time call
+  // from the post-destroy closure's own, separate `launchAccountOrRefuse`
+  // call (which lives inside `recycleWithSync(`'s arguments, further down).
+  const entrySlice = recycleBody.slice(0, recycleBody.indexOf("recycleWithSync("));
+
+  it("a glm-lead studio: the entry-time launchAccountOrRefuse call is wrapped in the inverse `leadType !== \"glm\"` guard, so it never runs", () => {
+    // The full three-line guarded statement, verbatim: proves the call is
+    // not merely preceded by the guard somewhere above it (which an
+    // unrelated `if` could also satisfy) but is its ONLY, direct body —
+    // false for `leadType === "glm"` skips this call entirely, structurally,
+    // the same way provisionUngated/restartUngated's own `if (leadType ===
+    // "glm")` branches skip theirs.
+    expect(entrySlice).toContain(
+      "if (leadType !== \"glm\") {\n      await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);\n    }",
+    );
+  });
+
+  it("a normal (claude, or no leadType row yet) studio: the entry-time call still runs — nothing else blocks it (#249 regression)", () => {
+    // Ask #249 is specifically: don't let a future edit widen the skip (or
+    // swap the guard's polarity) so a normal studio silently stops making
+    // this refuse-before-destroy call too. Checked here as "no OTHER `if`
+    // sits between the guard opening and the call" — i.e. the inverse
+    // `leadType !== "glm"` guard above is the only thing standing between
+    // entry and this call, so any `leadType` other than the literal string
+    // "glm" (claude, or resolveLeadType's own "claude" default for a fresh
+    // row) reaches it.
+    const guard = "if (leadType !== \"glm\") {";
+    const guardIdx = entrySlice.indexOf(guard);
+    const callIdx = entrySlice.indexOf(
+      "await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);",
+    );
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(callIdx).toBeGreaterThan(guardIdx);
+    const between = entrySlice.slice(guardIdx + guard.length, callIdx);
+    expect(between).not.toMatch(/\bif\s*\(/);
+  });
+});
+
 // Issue #134 review round 2: `provisionUngated`/`restartUngated` are BOTH
 // idempotent (studio.routes.test.ts's "provision idempotent" coverage;
 // restartStudio is likewise callable on a live container) and, on an
