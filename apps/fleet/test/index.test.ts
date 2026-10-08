@@ -207,6 +207,45 @@ describe("fleet board mount", () => {
   });
 });
 
+// Maestro review round 1, PR #255 BLOCKER: handleFleetAnthropicMessages
+// (issue #249's GLM-led translation route) was never wired into this file's
+// own router, so every request to it fell through to the /fleet/ catch-all
+// (handleFleetSpawn) and 404'd — the SAME 404 that path would 404 with
+// anyway (handleFleetSpawn answers 404 to any path but /fleet/spawn,
+// regardless of method). A GET is what makes the two distinguishable:
+// handleFleetSpawn's own method check runs AFTER its path check, so it
+// still 404s a GET to this path; handleFleetAnthropicMessages's method
+// check runs after its OWN path/flag/AI-binding checks and answers 405 —
+// 405, not 404, is only possible if this route is genuinely mounted ahead
+// of the catch-all.
+describe("fleet anthropic (GLM lead) mount — issue #249", () => {
+  it("routes /fleet/llm/anthropic/v1/messages to the anthropic handler, not the /fleet/ catch-all", async () => {
+    const fakeEnv = { ...env, FLEET_JUNIOR: "on", AI: { run: vi.fn() } } as unknown as Env;
+    const res = await worker.fetch(
+      new Request("https://x/fleet/llm/anthropic/v1/messages"), fakeEnv, {} as any,
+    );
+    expect(res.status).toBe(405);
+    expect(await res.text()).toBe("method not allowed");
+  });
+
+  it("carries no Access gate — spawn-token authenticated, same surface as /fleet/junior and /fleet/tasks", async () => {
+    const fakeEnv = { ...env, FLEET_JUNIOR: "on", AI: { run: vi.fn() } } as unknown as Env;
+    const res = await worker.fetch(
+      new Request("https://x/fleet/llm/anthropic/v1/messages", { method: "POST", body: "{}" }),
+      fakeEnv, {} as any,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("still 404s when FLEET_JUNIOR is off — the route is mounted but gated, not unconditionally open", async () => {
+    const fakeEnv = { ...env, FLEET_JUNIOR: undefined, AI: { run: vi.fn() } } as unknown as Env;
+    const res = await worker.fetch(
+      new Request("https://x/fleet/llm/anthropic/v1/messages"), fakeEnv, {} as any,
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
 // Issue #95: the minute cron also fans the stopped-but-running detector out,
 // every 5th minute, to each STOPPED studio's own DO — `watchContainer` reads
 // the runtime's container flag, never an exec.
