@@ -253,6 +253,30 @@ function isFreshUsage(
   return !!u && Number.isFinite(age) && age < freshnessMs;
 }
 
+/**
+ * Issue #251 (maestro review) — a usage row can sit inside its own absolute
+ * `isFreshUsage` window and STILL predate a newer, more authoritative
+ * `account-limit` sighting for the same account: a sync wrote a reading 8
+ * minutes ago showing headroom, then 2 minutes ago a live detector wrote a
+ * NEWER limit row for that same account. The usage reading is stale RELATIVE
+ * TO that newer sighting even though it is still "fresh" on its own clock —
+ * same hazard class as #237 finding 6 (a stale-relative-to-a-newer-sighting
+ * comparison, not just an absolute staleness check). `freshUnderThresholdAccount`
+ * must never rescue onto an account whose newest known signal is the LIMIT,
+ * not the usage reading.
+ *
+ * Same NaN-safe convention `isFreshUsage` above already established: an
+ * unparseable `seenAt` on EITHER side (`Date.parse` returning `NaN`) never
+ * counts as "newer" — ambiguous data never overrides a limit, the identical
+ * "non-finite counts as the unsafe outcome" rule #238's own staleness fix
+ * used.
+ */
+function isUsageNewerThanLimit(usageSeenAt: string, limitSeenAt: string): boolean {
+  const usage = Date.parse(usageSeenAt);
+  const limit = Date.parse(limitSeenAt);
+  return Number.isFinite(usage) && Number.isFinite(limit) && usage > limit;
+}
+
 export function selectByHeadroom(
   candidates: ClaudeAccount[], usage: AccountUsageMap, now: Date, freshnessMs: number = USAGE_ORDERING_FRESHNESS_MS,
 ): ClaudeAccount | null {
@@ -624,10 +648,13 @@ function accountWithEarliestReset(
  * nothing to rescue otherwise), not `reserved` (same exclusion every other
  * selection function in this file already respects), a fresh usage entry
  * (`isFreshUsage`, the IDENTICAL staleness rule `selectByHeadroom` uses —
- * one copy, not two that could drift), and `usageMaxPct` strictly below
- * `DEFAULT_LIMIT_THRESHOLD_PCT` (claude-swap.ts, 95 — the same number
- * `decideAccountSync` itself uses to call an account limited vs clear,
- * imported rather than re-hardcoded).
+ * one copy, not two that could drift), STRICTLY NEWER than the limit row's
+ * own `seenAt` for that same account (`isUsageNewerThanLimit` — maestro
+ * review: a usage reading fresh on its own absolute clock can still predate
+ * a newer, more authoritative limit sighting, same hazard class as #237
+ * finding 6), and `usageMaxPct` strictly below `DEFAULT_LIMIT_THRESHOLD_PCT`
+ * (claude-swap.ts, 95 — the same number `decideAccountSync` itself uses to
+ * call an account limited vs clear, imported rather than re-hardcoded).
  *
  * Among qualifying candidates the lowest `usageMaxPct` wins (ties: first in
  * `accounts`' own order) — same tie-breaking spirit as `selectByHeadroom`.
@@ -650,6 +677,11 @@ export function freshUnderThresholdAccount(
     if (accountIsFree(a, limits, now)) continue;
     const u = usage[a.name];
     if (!isFreshUsage(u, now, USAGE_ORDERING_FRESHNESS_MS)) continue;
+    // Issue #251 (maestro review) — fresh on its own clock is not enough: the
+    // usage reading must also be NEWER than the limit sighting it is about to
+    // override, or it is stale relative to that newer, more authoritative
+    // signal. See `isUsageNewerThanLimit`'s own doc comment.
+    if (!isUsageNewerThanLimit(u.seenAt, limits[a.name].seenAt)) continue;
     const pct = usageMaxPct(u);
     if (pct >= DEFAULT_LIMIT_THRESHOLD_PCT) continue;
     if (best === null || pct < best.pct) best = { account: a, pct };
