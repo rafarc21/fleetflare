@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import {
   parseAccountMap, launchAccount, accountDisplay, autoFailoverOn, resolveClaudeAccounts,
-  launchAccountOrReroute, primaryIsMapped, otherRepoPrimaries, type AccountLimits,
+  launchAccountOrReroute, primaryIsMapped, otherRepoPrimaries, type AccountLimits, type AccountUsageMap,
+  USAGE_ORDERING_FRESHNESS_MS,
 } from "../src/studio/accounts";
 import {
   studioEnvVars, launchAccountOrRefuse, LaunchRefusedError, decideAccountClears, applyAccountClears,
@@ -383,6 +384,117 @@ describe("launchAccountOrReroute — issue #209: the fleet-wide limit check laun
     // 7th `borrowedAccount` argument).
     await expect(launchAccountOrReroute(env, "demosite-life", "CLAUDE_CODE_OAUTH_TOKEN", limits, new Set(), NOW))
       .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #251 -- after a 5h window reset, `fleet provision`/`fleet recycle`
+// answered "409 every account limited" while `fleet accounts` (a sync's own
+// fresh D1 account-usage reading) showed the mapped slot free. Admission read
+// a stale `account-limit:<slot>` row written before the reset.
+//
+// The first bullet of the fix ("a limit row whose `until` has passed is free
+// -- re-check before refusing") is already correct, already tested at the
+// lower-level cascade functions (accountIsFree, studio.account-failover.test.ts)
+// -- the first `it` below is a CONFIRMING regression test at the exact
+// admission entry point (launchAccountOrReroute), not a new fix.
+//
+// The real gap: a fresh (<10 min) account-usage reading for an account D1
+// still calls limited was never consulted at the refusal point -- only used
+// to ORDER already-free candidates (selectByHeadroom). The rest of the `it`s
+// below exercise the new fallback this fix adds.
+// ---------------------------------------------------------------------------
+describe("launchAccountOrReroute — issue #251: a stale account-limit row must not out-rank a fresh account-usage reading", () => {
+  const three = {
+    CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2, CLAUDE_CODE_OAUTH_TOKEN_3: TOKEN_3,
+    CLAUDE_ACCOUNT_BY_REPO: '{"demosite-life":2}',
+  };
+  const NOW = new Date("2026-10-08T12:00:00.000Z");
+  const SEEN_AT = "2026-10-08T00:00:00.000Z"; // well before NOW
+  const RESET_SOON = "2026-10-08T18:00:00.000Z"; // after NOW -- still limited
+  const RESET_PAST = "2026-10-08T11:00:00.000Z"; // before NOW -- reset already passed
+
+  function freshUsage(pct: number, ageMs: number): AccountUsageMap[string] {
+    return { fiveHourPct: pct, sevenDayPct: 0, scopedMaxPct: null, seenAt: new Date(NOW.getTime() - ageMs).toISOString() };
+  }
+
+  it("CONFIRMING (already works): a D1 limit row whose until has already passed is free again at this exact entry point -- admitted, not refused", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    // The mapped slot's own recorded limit reset 1h before NOW.
+    const limits: AccountLimits = { CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_PAST, seenAt: SEEN_AT } };
+    await expect(launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: TOKEN_2 });
+  });
+
+  it("every account D1-limited, but one has a fresh (<10 min) usage row well under threshold: admitted onto that account rather than refused", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: SEEN_AT },
+    };
+    const usage: AccountUsageMap = { CLAUDE_CODE_OAUTH_TOKEN_3: freshUsage(14, 5 * 60 * 1000) }; // 14%, 5 min old
+    await expect(launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW, null, undefined, usage))
+      .resolves.toEqual({ ok: true, name: "CLAUDE_CODE_OAUTH_TOKEN_3", token: TOKEN_3 });
+  });
+
+  it("same setup, but the usage row is STALE (>10 min old): still refused -- the fallback only trusts fresh data", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: SEEN_AT },
+    };
+    const usage: AccountUsageMap = { CLAUDE_CODE_OAUTH_TOKEN_3: freshUsage(14, USAGE_ORDERING_FRESHNESS_MS + 1000) }; // stale
+    const result = await launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW, null, undefined, usage);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("every account limited");
+  });
+
+  it("a fresh usage row at or over the 95% threshold: still refused -- the fallback respects the same threshold the sync decision itself uses", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: SEEN_AT },
+    };
+    const usage: AccountUsageMap = { CLAUDE_CODE_OAUTH_TOKEN_3: freshUsage(95, 5 * 60 * 1000) }; // exactly at the threshold
+    const result = await launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW, null, undefined, usage);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("every account limited");
+  });
+
+  it("a fresh, under-threshold usage row on a RESERVED account: still refused -- the fallback never admits onto a reserved account either", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: SEEN_AT },
+    };
+    // CLAUDE_CODE_OAUTH_TOKEN_3 is some OTHER repo's own mapped primary.
+    const reserved = new Set(["CLAUDE_CODE_OAUTH_TOKEN_3"]);
+    const usage: AccountUsageMap = { CLAUDE_CODE_OAUTH_TOKEN_3: freshUsage(14, 5 * 60 * 1000) };
+    const result = await launchAccountOrReroute(env, "demosite-life", null, limits, reserved, NOW, null, undefined, usage);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("every account limited");
+  });
+
+  it("the refusal message names the earliest-reset account and suggests 'fleet accounts sync'", async () => {
+    const env = envWith({ ...three, FLEET_AUTO_FAILOVER: "on" });
+    const limits: AccountLimits = {
+      CLAUDE_CODE_OAUTH_TOKEN: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_2: { until: RESET_SOON, seenAt: SEEN_AT },
+      CLAUDE_CODE_OAUTH_TOKEN_3: { until: RESET_SOON, seenAt: SEEN_AT },
+    };
+    const result = await launchAccountOrReroute(env, "demosite-life", null, limits, new Set(), NOW);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain(`earliest reset ${RESET_SOON}`);
+    expect(result.error).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(result.error).toContain("fleet accounts sync");
   });
 });
 
