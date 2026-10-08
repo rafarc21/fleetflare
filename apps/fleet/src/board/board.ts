@@ -130,6 +130,60 @@ function securityGlmRefusalMessage(studioId: string): string {
   return `task is labelled "${SECURITY_LABEL}" — cannot assign to ${studioId}, a lead:glm studio never runs security-class work`;
 }
 
+/**
+ * Maestro review round 1 MINOR (#249, #255): createTask/assignTask above
+ * both refuse `SECURITY_LABEL` going IN, at creation or (re)assignment time
+ * — but neither one is watching for the label arriving AFTER a task is
+ * already live-assigned to a glm-lead studio (the GitHub UI, a hand-run `gh
+ * issue edit --add-label security`, anything other than this Worker's own
+ * write). Without this, that studio stays silently owned by work it should
+ * never have been handed.
+ *
+ * Meant to be called in reaction to exactly that event — webhook.ts's own
+ * issues-event handler wires it off the same `labeled` trigger
+ * junior/authz.ts's revokeJuniorOnIssueEvent already answers for issue #35
+ * (see that file's header for the shape this follows: "revoking only, never
+ * granting"). A fresh `api.getIssue` read, not whatever label list the
+ * caller's own webhook payload happened to carry: this function behaves
+ * identically reached from a live delivery or any other caller that only
+ * knows the task number, the same defensive posture assignTask's own
+ * `api.getIssue` call already takes.
+ *
+ * Unassigns every CURRENT owner whose leadType resolves to "glm" (removes
+ * their studio label, and resets backlog state the same way a real
+ * reassignment does when nothing else claims the task) and posts one
+ * comment naming why. Once revoked here, nothing brings the assignment back
+ * on its own — a later unlabel or relabel is not a grant, same rule
+ * junior/authz.ts's own revoke enforces; a human has to reassign the task,
+ * through assignTask, which already refuses to hand a security task BACK to
+ * a glm-lead studio.
+ */
+export async function revokeGlmLeadOnSecurityLabel(
+  api: BoardApi, repo: string, number: number, getLeadType: GetLeadType,
+): Promise<{ revoked: string[] }> {
+  const task = await api.getIssue(repo, number);
+  if (!task.labels.includes(SECURITY_LABEL)) return { revoked: [] };
+  const owners = taskAssignees(task.labels);
+  const revoked: string[] = [];
+  for (const owner of owners) {
+    if ((await getLeadType(owner)) === "glm") revoked.push(owner);
+  }
+  if (revoked.length === 0) return { revoked: [] };
+
+  for (const owner of revoked) await api.removeLabel(repo, number, studioLabel(owner));
+  const state = taskStates(task.labels)[0] ?? null;
+  if (state !== null && state !== ENTRY_STATE) {
+    await api.removeLabel(repo, number, state);
+    await api.addLabels(repo, number, [ENTRY_STATE]);
+  }
+  await api.createComment(
+    repo, number,
+    `board: unassigned ${revoked.join(", ")} — the \`${SECURITY_LABEL}\` label was added after assignment; ` +
+      "a lead:glm studio never runs security-class work, so this revokes the assignment rather than leaving it in place.",
+  );
+  return { revoked };
+}
+
 /** Board issue #41, half one. Never lets a hook failure escape into the
  *  assign path — see `OnAssigned`. */
 async function fireOnAssigned(
