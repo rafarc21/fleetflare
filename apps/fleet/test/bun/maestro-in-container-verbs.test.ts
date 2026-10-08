@@ -2,38 +2,40 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// Issue #59: a cloud maestro's brief assumed the operator's Mac verbs
-// (`provision --fresh-session`, `destroy`, `task new --studio` with a junior
-// flag). Its container has the studio binary instead. The rulebook must say
-// which verbs exist there, and what the envelope does NOT do.
+// Issue #59 (superseded by #250, scope add 1): a cloud maestro's brief used
+// to assume the operator's Mac verbs (`provision --fresh-session`, `destroy`,
+// `task new --studio` with a junior flag) while actually running in a
+// container with the limited `fleet` studio binary instead, and this file
+// used to pin the rulebook text that told it which verbs it actually had.
+//
+// Board issue #250 (operator ruling, 2026-10-06): maestro is ALWAYS LOCAL —
+// a cloud studio is never a valid substrate for this role at all, so the
+// whole "which in-container verbs does a cloud maestro have" question is
+// moot. `fleet/blueprint/studios/maestro/studio.md` is now a stub: any cloud
+// studio provisioned with this role stops before touching any verb and
+// escalates to the operator instead. This file now pins THAT shape — the
+// rulebook no longer promises any in-container verb at all.
 
 const MAESTRO = readFileSync(join(import.meta.dir, "../../../../fleet/blueprint/studios/maestro/studio.md"), "utf8");
-const BIN = readFileSync(join(import.meta.dir, "../../container/studio-fleet"), "utf8");
 
-test("maestro rulebook names the in-container verbs it actually has", () => {
-  expect(MAESTRO).toContain("### Your `fleet` is not the operator's `fleet`");
+test("the stub promises no in-container verb a cloud studio would need to operate", () => {
   for (const verb of ["fleet task new --studio", "fleet task assign", "fleet resume", "fleet spawn"]) {
-    expect(MAESTRO).toContain(verb);
+    expect(MAESTRO).not.toContain(verb);
   }
 });
 
-test("every verb the rulebook promises is a verb the binary parses", () => {
-  expect(BIN).toContain('if (sub === "new") {');
-  expect(BIN).toContain('if (sub === "assign") {');
-  expect(BIN).toContain('argv[0] !== "resume"');
+test("the stub never claims to spawn, gate, merge, or deploy", () => {
+  expect(MAESTRO).toContain("Do not dispatch, spawn, gate, merge, or deploy anything");
 });
 
-test("the rulebook says filing spawns nothing, and nothing acts on a request envelope", () => {
-  expect(MAESTRO).toContain("Filing a task spawns nothing.");
-  expect(MAESTRO).not.toContain("Worker spawns the studio from the filed task");
-  expect(MAESTRO).toContain("Nothing reads that envelope for you and acts on it");
+test("the stub's only action is the escalation envelope, then stop", () => {
+  expect(MAESTRO).toContain("fleet task report");
+  expect(MAESTRO).toContain("intent: escalate");
+  expect(MAESTRO).toContain("status: blocked");
+  expect(MAESTRO).toContain("Stop. Do not retry");
 });
 
-test("review round 1: the rulebook says resume needs a parked studio, and never to retry one", () => {
-  expect(MAESTRO).toContain("`fleet destroy --park`");
-  expect(MAESTRO).toContain("Never retry a resume");
-});
-
-test("the rulebook says the in-container task new refuses a junior", () => {
-  expect(MAESTRO).toContain("The in-container `fleet task new` refuses `junior: true`");
+test("the stub points the operator at the local maestro instead", () => {
+  expect(MAESTRO).toContain("docs/setup.md");
+  expect(MAESTRO).toContain("local maestro session");
 });
