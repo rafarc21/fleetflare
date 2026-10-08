@@ -106,7 +106,10 @@ The objective lists issues by number. The rules block:
   every worker rediscovers the same blocker independently.
 - **PR body refs `#N` only.** Never a closing keyword — the host acts on
   "closes #N" / "fixes #N" / "resolves #N" even inside a sentence that tries
-  to hedge the condition away.
+  to hedge the condition away. See the `skills/pr-body` skill for how to fill
+  the existing Summary/Evidence/Merge-Danger template well, and
+  `skills/deep-modules` for the maintainability checklist a reviewer applies
+  to the diff itself.
 - **Never `git add -A`, never force-push, never commit secrets or config.**
 - **Security-sensitive work landing in a junior task** → stop, comment, skip
   it rather than letting the junior tier touch it.
