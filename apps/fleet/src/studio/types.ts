@@ -35,6 +35,36 @@ export type StudioReadiness =
 export interface StudioStatus {
   id: string;
   state: StudioState;
+  /**
+   * Issue #249: which lead this studio boots. STUDIO-level, sticky for the
+   * studio's whole life, NOT a per-task flag (unlike `--junior`'s own
+   * per-request JUNIOR_LABEL check) — a studio's container env is assembled
+   * once at boot and frozen into tmux for the container's whole life
+   * (`studioEnvVars`'s own doc comment: "`claude` reads this variable from
+   * its own process environment at startup and tmux captures the server
+   * environment once"), and a studio can be provisioned with no task
+   * assigned at all, so this cannot be derived from whatever task happens to
+   * be live. Absent means `"claude"` — every studio that predates this field,
+   * and every existing `StudioStatus` literal across this codebase's own
+   * tests, keeps compiling and behaving exactly as it does today.
+   *
+   * Set once, at the studio's first-ever provision, from
+   * `ProvisionConfig.leadType` (threaded from `fleet spawn --lead glm`'s
+   * request body — see spawn.ts's `runSpawn`); every later provision/
+   * restart/recycle of the SAME studio reads it back off this row rather
+   * than re-deriving it, the same "written once, read back forever" rule
+   * `doClass` (just below) already follows for the identical reason: a
+   * later request that forgot to repeat the flag must never silently flip
+   * an existing studio back to `"claude"`.
+   *
+   * `"glm"`: no `CLAUDE_CODE_OAUTH_TOKEN` ever reaches this studio's
+   * container, and provision/restart/recycle skip `launchAccountOrRefuse`
+   * (and so the Claude-account gate, D1 limits/usage/burn reads, and the
+   * `LaunchRefusedError` throw path) entirely — see do.ts's 4 call sites.
+   * `studioEnvVars` sets `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` instead,
+   * pointing at this fleet's own `/fleet/llm/anthropic/v1/messages` route.
+   */
+  leadType?: "claude" | "glm";
   tailscaleHost: string | null;
   lastRefresh: string | null;
   error: string | null;
@@ -738,6 +768,19 @@ export interface ProvisionConfig {
    * posture as every other override on this type.
    */
   forceMappedAccount?: true;
+  /**
+   * Issue #249: `fleet spawn --lead glm`. Read by `runProvision` ONLY to
+   * seed `StudioStatus.leadType` on a studio's FIRST-ever provision (that
+   * row's own doc comment) — absent on every later call (restart, recycle,
+   * re-provision) still leaves the already-recorded value alone, same
+   * "existing wins" spread order `runProvision` already applies to every
+   * other sticky field on this type. Only ever set from spawn.ts's
+   * `runSpawn` (threaded from the `/studio/spawn` or `/fleet/spawn` request
+   * body's own `leadType` field, validated there) — never read from a
+   * request body anywhere else, same "resolved by the Worker" posture every
+   * other override on this type follows.
+   */
+  leadType?: "claude" | "glm";
   /**
    * Dynamic repo selection (P4a): the full `owner/repo` of the WORK repo to
    * clone. Absent means "whatever this studio is already bound to, else the

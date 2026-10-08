@@ -63,6 +63,11 @@ import {
   accountBurnStateKey, encodeAccountBurnState, decodeAccountBurnState,
 } from "./rate-limit";
 import type { ClaudeAccount } from "./accounts";
+// Issue #249: the route a glm-lead studio's ANTHROPIC_BASE_URL points at —
+// imported, not re-typed, so the two files can never drift. See
+// glmAnthropicBaseUrl's own doc comment (below, near studioEnvVars) for why
+// this is sliced, not used verbatim.
+import { ANTHROPIC_MESSAGES_PATH } from "../llm/anthropic-route";
 // Issue #217: the launch-refusal prefix lives in accounts.ts, not here, for
 // the identical reason RECYCLE_REFUSED_PREFIX lives in recycle-cost.ts (see
 // that constant's own doc comment, and LAUNCH_REFUSED_PREFIX's) — so
@@ -4304,9 +4309,51 @@ export async function launchAccountOrRefuse(
   throw new LaunchRefusedError(launch.error);
 }
 
+/**
+ * Issue #249: the Worker route a `leadType: "glm"` studio's `ANTHROPIC_BASE_URL`
+ * points at. `ANTHROPIC_MESSAGES_PATH` (llm/anthropic-route.ts) is the
+ * route's own FULL path, `.../fleet/llm/anthropic/v1/messages` — but that is
+ * NOT what this env var carries. Verified live, 2026-10-08: a local echo
+ * server stood in for the route (`ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`,
+ * no path), and the real `claude` binary (claude-cli 2.1.224) requested
+ * `POST /v1/messages?beta=true` — the Anthropic SDK inside claude appends
+ * `/v1/messages` to whatever `ANTHROPIC_BASE_URL` names, itself. Handing it
+ * the full route path verbatim would make the SDK's own append double it to
+ * `.../v1/messages/v1/messages`, a 404 against the real route. This function
+ * is the one place that slices the known `/v1/messages` suffix back off, so
+ * the two files can only ever agree or both fail loudly (the `replace` is a
+ * no-op, never a silent truncation, when the suffix is exactly what it
+ * expects).
+ */
+export function glmAnthropicBaseUrl(env: Env): string {
+  return env.WORKER_PUBLIC_URL + ANTHROPIC_MESSAGES_PATH.replace(/\/v1\/messages$/, "");
+}
+
 export function studioEnvVars(
   env: Env, studioId: string, spawnToken: string, claudeAccount?: string | null,
+  leadType?: "claude" | "glm",
 ): Record<string, string> {
+  // Issue #249: a glm-led studio runs no Claude account at all. No
+  // CLAUDE_CODE_OAUTH_TOKEN reaches its container (the house rule this
+  // whole feature exists to keep: no Cloudflare/Anthropic credential of
+  // its own inside the box) — `claude` instead points at this fleet's own
+  // translation route, authenticated with the studio's own spawn token
+  // (same token FLEET_SPAWN_TOKEN already carries, reused rather than
+  // minting a second one — the route's own auth, spawn.ts's
+  // isSpawnTokenShaped/resolveSpawnParent, validates it identically either
+  // way). Every other var below is identical to the claude-lead shape.
+  if (leadType === "glm") {
+    return {
+      ANTHROPIC_AUTH_TOKEN: spawnToken,
+      ANTHROPIC_BASE_URL: glmAnthropicBaseUrl(env),
+      TS_AUTHKEY: env.TS_AUTHKEY ?? "",
+      STUDIO_ID: studioId,
+      FLEET_SPAWN_TOKEN: spawnToken,
+      FLEET_WORKER_URL: env.WORKER_PUBLIC_URL,
+      FLEET_BOT_NAME: env.FLEET_BOT_NAME ?? "",
+      FLEET_BOT_EMAIL: env.FLEET_BOT_EMAIL ?? "",
+    };
+  }
   return {
     // Issue #53: the token of the account this studio is RECORDED on
     // (StudioStatus.claudeAccount), not unconditionally the first secret.
