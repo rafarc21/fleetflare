@@ -464,3 +464,49 @@ per MINOR 3).
 - `apps/fleet/src/studio/survival-delivery.ts` — captures the pre-cap wip
   ref count and threads it through `resolveSurvivalInput`'s return value.
 - This file.
+
+## Round 3 fixes (lead-dispatched finish, before the maestro's final merge review)
+
+### Problem 4 — round 2's own "+N more" fix over-counted a stale-but-checked ref as overflow
+
+`bun run check` and `bun run test-lies-check` were both already clean at
+this round's start (round 2's problems 1-2 were genuinely fixed). Reviewing
+problem 3's own fix against the age-filter loop it sits next to surfaced a
+second, narrower bug in that same fix.
+
+Bug: problem 3's render formula was
+`(liveWipRefsTotalCount ?? sorted.length) - shown.length`. `shown.length`
+is the count of refs that are BOTH inside the lookup cap AND still live
+after the staleness filter — `resolveSurvivalInput`'s own `compareAhead`
+loop drops a capped ref outright once its real age is over the 14-day
+cutoff (same "genuinely gone" reasoning MAJOR 2's doc comment gives for the
+404 case), which shrinks `shown.length` for a reason that has nothing to
+do with the display cap. Subtracting `shown.length` from the pre-cap total
+double-counts a stale-but-checked ref as if it were an unseen overflow
+one: e.g. 10 candidates, the newest 8 checked, 2 of those 8 turn out
+stale and get dropped (6 remain live and shown) — the real overflow is the
+2 never-looked-up candidates beyond the cap, but the old formula computed
+`10 - 6 = 4`.
+
+Fix: compute the overflow against how many candidates were ever CHECKED
+(`Math.min(total, MAX_LINES_PER_SECTION)`), never against `shown.length`.
+A capped-and-checked ref that turns out stale now correctly disappears
+from the count entirely (it is gone for a real reason, not hidden by
+truncation); only candidates beyond the lookup cap — genuinely never
+looked at — count as "+N more".
+
+New test (TDD, RED first): `test/studio.survival-delivery.test.ts` — "some
+of the capped refs are stale (checked, filtered): +N more counts only the
+never-looked-up overflow, not the stale ones too" — 10 member wip refs, 2
+of the newest-8 (capped) set are stale; asserts `compareAhead` still
+called exactly 8 times (MINOR 4 stays fixed), `liveWipRefs.value` has
+length 6 (the 2 stale ones dropped), and the rendered brief shows
+`"- +2 more"` (the real overflow), never `"- +4 more"`.
+
+### Tests touched (round 3 fixes)
+
+- `apps/fleet/test/studio.survival-delivery.test.ts` — new problem-4
+  stale-vs-overflow test.
+- `apps/fleet/src/studio/survival-brief.ts` — "+N more" overflow now
+  measured against the checked count, not `shown.length`.
+- This file.

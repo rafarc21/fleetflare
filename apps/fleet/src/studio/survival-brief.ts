@@ -826,9 +826,22 @@ export function composeSurvivalBrief(input: SurvivalInput): string {
     // before this composer ever saw it (MINOR 4); absent/equal to
     // `sorted.length` falls back to the plain cap-overflow check this used
     // to be.
+    //
+    // Mutation found during round-2's own self-review follow-up -- the
+    // overflow must be measured against how many candidates were ever
+    // CHECKED (`min(total, MAX_LINES_PER_SECTION)`), never against
+    // `shown.length`. `resolveSurvivalInput`'s own compareAhead loop can
+    // drop a CAPPED-AND-CHECKED ref outright once it turns out stale (the
+    // same "genuinely gone" reasoning MAJOR 2's doc comment gives for the
+    // 404 case) -- that shrinks `shown.length` for a reason that has
+    // nothing to do with the display cap. Subtracting `shown.length`
+    // directly double-counts a stale-but-checked ref as if it were an
+    // unseen overflow one, inflating "+N more" past the real count of
+    // candidates that were never looked up at all.
     const total = input.liveWipRefsTotalCount ?? sorted.length;
-    if (total > shown.length) {
-      lines.push(`- +${total - shown.length} more`);
+    const checked = Math.min(total, MAX_LINES_PER_SECTION);
+    if (total > checked) {
+      lines.push(`- +${total - checked} more`);
     }
   }
 

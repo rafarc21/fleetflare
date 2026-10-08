@@ -862,6 +862,53 @@ describe("resolveSurvivalInput — the GitHub-compare wiring", () => {
     expect(brief).toContain("- +2 more");
   });
 
+  /**
+   * Problem 3's own fix (095c4aa) computes the overflow as
+   * `liveWipRefsTotalCount - shown.length` -- `shown.length` is the count
+   * of refs that are BOTH inside the lookup cap AND still live after the
+   * staleness filter (the loop in `resolveSurvivalInput` above drops a
+   * capped ref outright when its real `compareAhead` age is over the
+   * cutoff, same "genuinely gone" reasoning MAJOR 2's own doc comment
+   * gives for the 404 case). When some of the newest
+   * `MAX_LINES_PER_SECTION` candidates turn out stale, `shown.length`
+   * shrinks for a reason that has NOTHING to do with the display cap --
+   * those refs were checked and found not live, not hidden by truncation.
+   * Subtracting `shown.length` from the pre-cap total double-counts them:
+   * they inflate "+N more" even though they are not sitting unseen beyond
+   * the cap, they are simply gone. The overflow must only ever count
+   * candidates that were never looked up at all (beyond the lookup cap),
+   * never a capped-and-checked-but-stale one.
+   */
+  it("some of the capped refs are stale (checked, filtered): +N more counts only the never-looked-up overflow, not the stale ones too", async () => {
+    // 10 member wip refs, boot stamps strictly increasing by one minute --
+    // same shape as the MINOR 4 / problem 3 tests above.
+    const stamps = Array.from({ length: 10 }, (_, i) => `202610040000${String(10 + i).padStart(2, "0")}`);
+    const refs = stamps.map((s) => `fleet/rescue/${STUDIO}/wip/${s}-wt-agent-a1b2`);
+    const cappedRefs = refs.slice(2); // the newest 8 -- same ones MINOR 4's own cap selects
+    // The 2 OLDEST of the capped 8 are stale (way past the 14-day cutoff from NOW);
+    // the other 6 are fresh.
+    const staleCapped = new Set(cappedRefs.slice(0, 2));
+    const compareAhead = vi.fn(async (branch: string) => ({
+      aheadBy: 1,
+      lastCommitAt: staleCapped.has(branch) ? "2026-01-01T00:00:00.000Z" : "2026-09-25T11:00:00.000Z",
+    }));
+    const input = await resolveSurvivalInput(
+      sources({ rescueBranches: async () => refs, compareAhead }),
+      { ok: true, value: [] },
+      null, NOW,
+    );
+    // Still only the newest 8 get a compareAhead call -- MINOR 4 stays fixed.
+    expect(compareAhead).toHaveBeenCalledTimes(8);
+    // The 2 stale ones were checked and dropped -- only 6 remain live.
+    expect((input.liveWipRefs as { ok: true; value: unknown[] }).value).toHaveLength(6);
+
+    const brief = composeSurvivalBrief(input);
+    // Only the 2 refs beyond the lookup cap were ever truly unseen -- the 2
+    // stale ones are gone for a real reason, not hidden by the cap.
+    expect(brief).toContain("- +2 more");
+    expect(brief).not.toContain("- +4 more");
+  });
+
   it("a failed rescue-branch fetch also fails liveWipRefs, symmetric with unclaimedRescueBranches", async () => {
     const input = await resolveSurvivalInput(
       sources({ rescueBranches: async () => { throw new Error("rescue-branch fetch failed (502)"); } }),
