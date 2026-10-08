@@ -6,7 +6,7 @@ import * as authModule from "../src/studio/auth";
 import { handleStudio, handleFleetSpawn, spawnDeps, type BlueprintFetch } from "../src/studio/routes";
 import {
   resolveSpawnParent, isSpawnTokenShaped, resolveSpawnPolicy, runSpawn,
-  resolveMaxStudios, DEFAULT_MAX_STUDIOS, readInstanceRequest,
+  resolveMaxStudios, DEFAULT_MAX_STUDIOS, readInstanceRequest, readLeadTypeRequest,
   SPAWN_TOKEN_HEADER, OPERATOR_ID as OPERATOR_PARENT_ID, type SpawnDeps, type SpawnParent,
 } from "../src/studio/spawn";
 import {
@@ -1365,6 +1365,79 @@ describe("runSpawn — {task} (P4a-2 brief pickup)", () => {
     };
     expect((await runSpawn(deps, PARENT, { role: "release", task: 71 })).status).toBe(403);
     expect(resolveBrief).not.toHaveBeenCalled();
+  });
+});
+
+describe("readLeadTypeRequest", () => {
+  it("absent/null -> undefined (today's only behaviour, no leadType field at all)", () => {
+    expect(readLeadTypeRequest({})).toBeUndefined();
+    expect(readLeadTypeRequest({ role: "pilot" })).toBeUndefined();
+    expect(readLeadTypeRequest({ leadType: null })).toBeUndefined();
+    expect(readLeadTypeRequest(null)).toBeUndefined();
+    expect(readLeadTypeRequest(undefined)).toBeUndefined();
+  });
+
+  it("\"glm\" and \"claude\" pass through verbatim", () => {
+    expect(readLeadTypeRequest({ leadType: "glm" })).toBe("glm");
+    expect(readLeadTypeRequest({ leadType: "claude" })).toBe("claude");
+  });
+
+  it("anything else is malformed -> null (a 400, never coerced or silently dropped)", () => {
+    for (const bad of ["gpt4", "GLM", "", 1, true, {}, []]) {
+      expect(readLeadTypeRequest({ leadType: bad }), JSON.stringify(bad)).toBeNull();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #249: `fleet spawn --lead glm` / POST body `{leadType: "glm"}` — the
+// studio-creation path `leadType`'s own doc comment (types.ts) names as the
+// one legitimate way to set it. Same shape the `{task}` describe block above
+// already uses (taskDeps/PARENT), reused rather than re-typed.
+// ---------------------------------------------------------------------------
+describe("runSpawn — {leadType} (#249)", () => {
+  const PARENT: SpawnParent = { id: PARENT_ID, repo: "websites", role: "pilot", repoSlug: REPO_SLUG };
+
+  function leadDeps(provisionChild: SpawnDeps["provisionChild"]): SpawnDeps {
+    return {
+      listStudios: async () => [],
+      fetchPolicy: async () => ({ org: { edges: { pilot: ["release"] }, gates: {} }, roles: ["pilot", "release"] }),
+      provisionChild,
+      resolveBrief: async () => ({ ok: true, value: "brief" }),
+      notifyMaestro: async () => {},
+      maxStudios: DEFAULT_MAX_STUDIOS,
+      claimStudioId: memoryClaim(),
+    };
+  }
+
+  it("leadType: \"glm\" in the request body reaches provisionChild's cfg.leadType", async () => {
+    let seen: ProvisionConfig | null = null;
+    const deps = leadDeps(async (childId: string, cfg: ProvisionConfig) => { seen = cfg; return status({ id: childId }); });
+    const res = await runSpawn(deps, PARENT, { role: "release", leadType: "glm" });
+    expect(res.status).toBe(200);
+    expect(seen!.leadType).toBe("glm");
+  });
+
+  it("no leadType in the request body: cfg carries no leadType field at all (today's byte-identical request)", async () => {
+    let seen: ProvisionConfig | null = null;
+    const deps = leadDeps(async (childId: string, cfg: ProvisionConfig) => { seen = cfg; return status({ id: childId }); });
+    const res = await runSpawn(deps, PARENT, { role: "release" });
+    expect(res.status).toBe(200);
+    expect(seen!.leadType).toBeUndefined();
+  });
+
+  it("an unrecognised leadType 400s, before any org.json fetch, and provisions nothing", async () => {
+    const fetchPolicy = vi.fn(async () => ({ org: { edges: { pilot: ["release"] }, gates: {} }, roles: ["pilot", "release"] }));
+    let provisioned = false;
+    const deps: SpawnDeps = {
+      ...leadDeps(async (childId: string) => { provisioned = true; return status({ id: childId }); }),
+      fetchPolicy,
+    };
+    const res = await runSpawn(deps, PARENT, { role: "release", leadType: "gpt4" });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("leadType");
+    expect(fetchPolicy).not.toHaveBeenCalled();
+    expect(provisioned).toBe(false);
   });
 });
 
