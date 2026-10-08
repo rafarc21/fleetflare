@@ -102,6 +102,99 @@ documents for itself).
   terminal; dropped with a code comment rather than guessed at.
 - Admission gate / container env / `lead: glm` field — next dispatch.
 
+## Dispatch 2 (2026-10-08, same branch): admission/lifecycle half
+
+HEAD at start: f367c01. 5 commits, pushed after each.
+
+### leadType field (studio-level, sticky)
+
+`StudioStatus.leadType?: "claude"|"glm"` + `ProvisionConfig.leadType?: same`
+(types.ts). Absent=claude, zero existing-test breakage. `resolveLeadType
+(existing, cfgLeadType)` (do.ts): existing row wins, cfg only fills a first-
+ever-provision gap (same shape ensureSpawnToken already uses for doClass).
+`runProvision` (provision.ts) seeds it into the status spread with the
+identical "existing wins" guard.
+
+### ANTHROPIC_BASE_URL — verified live, NOT what the brief said
+
+Maestro brief said `ANTHROPIC_BASE_URL = WORKER_PUBLIC_URL +
+ANTHROPIC_MESSAGES_PATH` (the full `/v1/messages` path). Ran the REAL claude
+binary (claude-cli 2.1.224) against a local echo server with
+`ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` — it requested
+`POST /v1/messages?beta=true`. The Anthropic SDK inside claude appends
+`/v1/messages` to the base URL ITSELF. Handing it the full route path would
+double it to `.../v1/messages/v1/messages` — a 404. Fix: `glmAnthropicBaseUrl
+(env)` (do.ts) = `WORKER_PUBLIC_URL + ANTHROPIC_MESSAGES_PATH.replace(/\/v1\
+/messages$/, "")` — slices the known suffix off the IMPORTED constant (no
+re-typed literal, no drift possible). Auth header confirmed too:
+`Authorization: Bearer <token>` — matches what the prior dispatch already
+built, no change needed there.
+
+### studioEnvVars / launchFields — glm branch
+
+Both gain a `leadType?: "claude"|"glm"` 5th param. glm: no
+CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_AUTH_TOKEN=spawnToken,
+ANTHROPIC_BASE_URL=glmAnthropicBaseUrl(env). launchFields's glm branch
+ignores `name` (no claude account to derive one from), envAccount undefined.
+
+### 4 admission-bypass call sites (do.ts)
+
+provisionUngated (~6962), restartUngated (~7230), recycle's entry call
+(discard-only, ~7418) and recycle's post-destroy closure (~7557) — each now
+branches on `resolveLeadType(...)` BEFORE calling launchAccountOrRefuse at
+all (not a no-op inside it — the call itself never happens for a glm
+studio, confirmed by making the call textually absent from that branch, not
+by a spy — DO can't be constructed under vitest-pool-workers, so the
+existing convention here is source-pinning, same as every other
+untestable-class test in studio.account-launched.test.ts).
+
+Updated that file's own pinned source-grep tests to match the new branch
+shape (6-space indent inside `else`, glm siblings beside each claude-path
+call) — same invariants (ordering, pairing counts), new structure. Did NOT
+relax any assertion to dodge the new shape.
+
+### CLI/creation-path threading (design decision 3, resolved)
+
+Chose `fleet spawn <role> [--new] [--lead claude|glm]` — spawn is THE studio-
+creation verb (both `/studio/spawn` operator body and `/fleet/spawn` machine
+body share one `runSpawn` core in spawn.ts, so one wire field covers both
+callers). `readLeadTypeRequest(body)`: absent->undefined, "claude"/"glm"
+pass through, anything else->null (400, before any org.json fetch). Threaded
+into `provisionChild`'s cfg, omitted when absent (byte-identical request for
+every pre-#249 caller). `fleet provision <id>` was NOT given the flag — it
+re-provisions an EXISTING id, and leadType is sticky from creation, so there
+is no legitimate "I forgot the flag, flip it now" use case. `ff`'s own spawn
+wrapper also untouched (same reasoning, out of scope — `fleet spawn --lead
+glm` covers the real creation path).
+
+### Security-label refusal (maestro spec point 5)
+
+`SECURITY_LABEL="security"` (board/types.ts) + `TaskBrief.security?:boolean`
+(brief.ts, same boolean-only shape `junior` already has). createTask/
+assignTask (board.ts) both gain an optional `GetLeadType` port; refuse (400,
+before any write) exactly when the task carries SECURITY_LABEL AND the
+target studio's own leadType resolves to "glm". Wired in routes.ts via
+`AssignWakeDeps.studioState` (now also answers `leadType` — same D1 read
+every create/assign call already makes, zero extra query) through a new
+`getLeadTypeFrom()` adapter, at all 4 create/assign call sites (operator
+`/studio/board/tasks` + studio-directed `/fleet/tasks`, create AND
+assign/adopt each).
+
+Did NOT add a `--security` CLI flag to `fleet task new` — not in the
+required-changes list (unlike the leadType CLI flag), and the Worker API
+already accepts `security: true` in the POST body today. Flagged as a cheap
+follow-up if an operator-facing flag is wanted later.
+
+### Verification discipline
+
+Mutation-killed the createTask security refusal (removed the check, ran the
+new test, confirmed it failed for the right reason, restored, reran green)
+before trusting the suite — same rigor as every RED-first step, applied
+retroactively to the one piece written ahead of its test.
+
+Ran ONLY the touched test files + tsc throughout (never the full bun-test/
+check gate — reserved for the lead's own final verification).
+
 ## Process
 
 RED (bun:test for translate.ts) -> GREEN -> RED (vitest for the route) ->
