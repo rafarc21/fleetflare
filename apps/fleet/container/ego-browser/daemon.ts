@@ -83,6 +83,7 @@ function getBrowser(): Promise<Browser> {
     // second real attempt ever happened. See
     // ego-browser-launch-self-heal.test.ts.
     log("getBrowser: attempting chromium launch");
+    const launchTimeoutMessage = `ego-browser: chromium failed to start within ${LAUNCH_TIMEOUT_MS}ms -- likely container resource/memory pressure, check ${paths.logFile} and the studio's available memory`;
     browserPromise = raceWithTimeoutOrReject(
       chromium.launch({
         executablePath: CHROMIUM_PATH,
@@ -94,7 +95,7 @@ function getBrowser(): Promise<Browser> {
         args: ["--no-sandbox"],
       }),
       LAUNCH_TIMEOUT_MS,
-      `ego-browser: chromium failed to start within ${LAUNCH_TIMEOUT_MS}ms -- likely container resource/memory pressure, check ${paths.logFile} and the studio's available memory`,
+      launchTimeoutMessage,
     )
       .then((browser) => {
         browserPid = findDirectChildPid(process.pid, { chromiumBinaryName: basename(CHROMIUM_PATH) });
@@ -109,6 +110,39 @@ function getBrowser(): Promise<Browser> {
         // the NEXT call (not this one -- `throw err` still rejects the
         // promise this specific caller is awaiting) get a fresh attempt.
         browserPromise = undefined;
+
+        // Follow-up review finding on the #276 fix above: a genuine
+        // TIMEOUT (distinguished from a plain launch rejection by its
+        // message -- raceWithTimeoutOrReject() rejects with exactly
+        // launchTimeoutMessage when ITS OWN timer fires, never when
+        // chromium.launch() itself rejects) abandons the JS promise but
+        // has no way to cancel the real OS process -- "there is no such
+        // thing as cancelling a plain Promise" (process-reap.ts's own doc
+        // comment). A plain launch rejection needs no such cleanup here:
+        // Playwright itself already knows that process failed/exited and
+        // has presumably cleaned up after it. Only a timeout can abandon a
+        // process that is still genuinely alive, stuck mid-handshake --
+        // reusing the exact same findDirectChildPid() + SIGKILL mechanism
+        // shutdown()'s own backstop uses for this identical problem. Must
+        // run before too much time passes (a long-dead zombie is still
+        // findable, but no reason to add delay); findDirectChildPid()
+        // already returns undefined gracefully when nothing spawned yet
+        // (e.g. the executable path itself was bad), so this is a no-op in
+        // that case.
+        if (err instanceof Error && err.message === launchTimeoutMessage) {
+          const hungPid = findDirectChildPid(process.pid, { chromiumBinaryName: basename(CHROMIUM_PATH) });
+          if (hungPid !== undefined) {
+            log(`getBrowser: launch timed out, killing orphaned chromium pid ${hungPid}`);
+            try {
+              process.kill(hungPid, "SIGKILL");
+            } catch {
+              // Already gone on its own between the timeout firing and
+              // this kill attempt -- fine, this is the expected case (same
+              // reasoning as shutdown()'s own SIGKILL backstop).
+            }
+          }
+        }
+
         throw err;
       });
   }
