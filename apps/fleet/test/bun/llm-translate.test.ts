@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   GLM_LEAD_MODEL,
+  GLM_MIN_MAX_TOKENS,
   anthropicRequestToOpenAI,
   openAIResponseToAnthropic,
   classifyAiError,
@@ -87,6 +88,31 @@ describe("anthropicRequestToOpenAI — text", () => {
       messages: [{ role: "user", content: "hi" }],
     });
     expect(out.stream_options).toBeUndefined();
+  });
+});
+
+// STATUS comment on PR #255, measured live 2026-10-08T08:40:12Z (Workers AI,
+// @cf/zai-org/glm-5.3, chat completions): GLM spends most of max_tokens on
+// reasoning_content before producing any visible content. At max_tokens 3000
+// -> content "" (all 3000 went to reasoning). At 12000 -> 6861 completion
+// tokens, good content. Claude Code's own requested max_tokens is sized for
+// Claude, not for a backend that burns budget on reasoning first.
+describe("anthropicRequestToOpenAI — GLM_MIN_MAX_TOKENS floor", () => {
+  test("a Claude-sized max_tokens below the floor is raised to GLM_MIN_MAX_TOKENS (16000)", () => {
+    const out = anthropicRequestToOpenAI({
+      model: "x", max_tokens: 3000,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(out.max_tokens).toBe(GLM_MIN_MAX_TOKENS);
+    expect(GLM_MIN_MAX_TOKENS).toBe(16000);
+  });
+
+  test("a max_tokens already above the floor passes through unchanged — this is a floor, not a cap", () => {
+    const out = anthropicRequestToOpenAI({
+      model: "x", max_tokens: 20000,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(out.max_tokens).toBe(20000);
   });
 });
 
@@ -218,6 +244,35 @@ describe("openAIResponseToAnthropic — text", () => {
       usage: { prompt_tokens: 1, completion_tokens: 1 },
     }, { model: "m" });
     expect(out.stop_reason).toBe(expected);
+  });
+
+  // STATUS comment on PR #255, measured live 2026-10-08T08:40:12Z: the exact
+  // measured failure shape — GLM spent the whole max_tokens budget on
+  // reasoning_content, content comes back "", and this backend reported it
+  // under finish_reason: "stop", NOT "length". finish_reason alone would
+  // have told Claude Code this was a normal completed turn with nothing to
+  // say; forcing max_tokens here instead tells it to retry/compact.
+  test("empty content + no tool_calls forces stop_reason max_tokens, even when finish_reason says 'stop'", () => {
+    const out = openAIResponseToAnthropic({
+      choices: [{ message: { role: "assistant", content: "" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 50, completion_tokens: 3000 },
+    }, { model: "m" });
+    expect(out.content).toEqual([]);
+    expect(out.stop_reason).toBe("max_tokens");
+  });
+
+  // STATUS comment on PR #255, measured live 2026-10-08T08:40:12Z: GLM's
+  // usage object may report completion_tokens_details.reasoning_tokens as a
+  // breakdown alongside completion_tokens. The measured numbers ("6861
+  // completion tokens, ~24k chars reasoning") read as two distinct figures,
+  // so this is added on top rather than assumed already included — see the
+  // implementation's own comment on the flagged risk either way.
+  test("completion_tokens_details.reasoning_tokens is added to output_tokens", () => {
+    const out = openAIResponseToAnthropic({
+      choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 500, completion_tokens: 6861, completion_tokens_details: { reasoning_tokens: 9000 } },
+    }, { model: "m" });
+    expect(out.usage).toEqual({ input_tokens: 500, output_tokens: 15861 });
   });
 });
 
@@ -492,5 +547,38 @@ describe("streaming: prelude + chunk application + close", () => {
     // stream without ever sending one.
     const [delta] = closeStream(state).filter((f) => f.includes("message_delta")).map(parseFrame);
     expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("tool_use");
+  });
+
+  // STATUS comment on PR #255, measured live 2026-10-08T08:40:12Z: the
+  // streaming equivalent of the empty-content failure — this stream never
+  // opened ANY content block at all (the measured failure mode: the whole
+  // max_tokens budget went to reasoning, nothing visible ever streamed).
+  // `state.nextIndex === 0` is the "never opened a block" signal (it only
+  // increments when a block opens) — forced to max_tokens regardless of
+  // finish_reason, same reasoning as the non-streaming guard above.
+  test("closeStream reports stop_reason: max_tokens when no content block was ever opened, even if finish_reason said 'stop'", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] });
+    const [delta] = closeStream(state).filter((f) => f.includes("message_delta")).map(parseFrame);
+    expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("max_tokens");
+  });
+
+  test("closeStream reports stop_reason: max_tokens when applyOpenAIStreamChunk was never even called", () => {
+    const state = createStreamState();
+    const [delta] = closeStream(state).filter((f) => f.includes("message_delta")).map(parseFrame);
+    expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("max_tokens");
+  });
+
+  // STATUS comment on PR #255, measured live 2026-10-08T08:40:12Z: same
+  // reasoning-tokens handling as the non-streaming path above, applied to
+  // the usage-bearing chunk's completion_tokens_details field.
+  test("completion_tokens_details.reasoning_tokens on the usage chunk is added to state.outputTokens", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });
+    applyOpenAIStreamChunk(state, {
+      choices: [{ delta: {}, finish_reason: "stop" }],
+      usage: { prompt_tokens: 500, completion_tokens: 6861, completion_tokens_details: { reasoning_tokens: 9000 } },
+    });
+    expect(state.outputTokens).toBe(15861);
   });
 });
