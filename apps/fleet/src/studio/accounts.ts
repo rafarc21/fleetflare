@@ -617,13 +617,17 @@ function accountWithEarliestReset(
  * the stale row itself; this just stops admission from trusting a row sync's
  * own last reading already disagrees with.
  *
- * Qualifies: not already free (`accountIsFree` — nothing to rescue
- * otherwise), not `reserved` (same exclusion every other selection function
- * in this file already respects), a fresh usage entry (`isFreshUsage`, the
- * IDENTICAL staleness rule `selectByHeadroom` uses — one copy, not two that
- * could drift), and `usageMaxPct` strictly below `DEFAULT_LIMIT_THRESHOLD_PCT`
- * (claude-swap.ts, 95 — the same number `decideAccountSync` itself uses to
- * call an account limited vs clear, imported rather than re-hardcoded).
+ * Qualifies: never `dead` (issue #141 — a permanently dead account has no
+ * working subscription at all; a fresh, under-threshold usage reading can
+ * never speak to that, so this exclusion is unconditional and checked before
+ * `accountIsFree`, not folded into it), not already free (`accountIsFree` —
+ * nothing to rescue otherwise), not `reserved` (same exclusion every other
+ * selection function in this file already respects), a fresh usage entry
+ * (`isFreshUsage`, the IDENTICAL staleness rule `selectByHeadroom` uses —
+ * one copy, not two that could drift), and `usageMaxPct` strictly below
+ * `DEFAULT_LIMIT_THRESHOLD_PCT` (claude-swap.ts, 95 — the same number
+ * `decideAccountSync` itself uses to call an account limited vs clear,
+ * imported rather than re-hardcoded).
  *
  * Among qualifying candidates the lowest `usageMaxPct` wins (ties: first in
  * `accounts`' own order) — same tie-breaking spirit as `selectByHeadroom`.
@@ -636,6 +640,13 @@ export function freshUnderThresholdAccount(
   let best: { account: ClaudeAccount; pct: number } | null = null;
   for (const a of accounts) {
     if (reserved.has(a.name)) continue;
+    // Issue #251 review — `accountIsFree` returning false folds two different
+    // reasons into one boolean: genuinely rate-limited (this rescue's whole
+    // point) and `dead` (issue #141: a permanently dead account, no working
+    // subscription at all). A fresh, under-threshold usage reading says
+    // nothing about a dead account's actual problem, so `dead` must be
+    // excluded unconditionally, before ever reaching the free/limited check.
+    if (limits[a.name]?.dead) continue;
     if (accountIsFree(a, limits, now)) continue;
     const u = usage[a.name];
     if (!isFreshUsage(u, now, USAGE_ORDERING_FRESHNESS_MS)) continue;
