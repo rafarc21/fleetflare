@@ -100,6 +100,36 @@ D1 row by hand — nothing does this automatically:
 — `fleet ls`'s "dead account:" line names it). The account is eligible for
 failover again on the very next tick that reads the fleet-wide limit map.
 
+## Studio test credentials
+
+Issue #279. A studio fetches one staging test login with `fleet creds get
+<name>`. The Worker holds an Infisical machine identity (Universal Auth),
+logs in, reads that one secret and returns it to the asking studio only.
+No studio ever holds an Infisical credential.
+
+Setup:
+
+1. Create an Infisical machine identity with Universal Auth. Give it read
+   access to the staging/dev environment's `/test-accounts` folder only.
+2. `wrangler secret put INFISICAL_CLIENT_ID` and `wrangler secret put
+   INFISICAL_CLIENT_SECRET`.
+3. Set the `TEST_CREDS_BY_REPO` var (JSON; locations, never values):
+
+       {"owner/repo": {"viewer": {"workspaceId": "<project id>",
+         "environment": "staging", "secretPath": "/test-accounts",
+         "key": "VIEWER_PASSWORD"}}}
+
+4. Optional: `INFISICAL_API_URL` for a self-hosted instance (https only).
+
+The guard refuses the WHOLE config, and the route answers 503, if any entry
+uses an environment other than staging/dev/development/test, a secretPath
+outside `/test-accounts`, or an admin-looking name, key or path. Any of the
+three settings absent: 503 "test creds not configured". A name not listed
+under the calling studio's own repo: 403.
+
+Every call writes one `{"event":"fleet_creds", studio, name, outcome, at}`
+line to the Worker logs. The value is never logged.
+
 ## CI
 
 GitHub Actions runs natively on this repository — three workflows:

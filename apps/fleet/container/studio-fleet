@@ -76,6 +76,7 @@ const HELP = `usage: fleet spawn <role>[--<n>] [--instance <n>|next]
        fleet task state <n> <working|input_required|awaiting_merge|failed>
        fleet task new [--studio <id>] | fleet task assign <n> <studio-id> [--why <text>]
        fleet memory ls | fleet memory compact
+       fleet creds get <name>
 
   fleet spawn <role>    Spawn a peer studio under THIS studio's org-chart
                         edges (fleet/blueprint/org.json, enforced server-side
@@ -185,6 +186,21 @@ const HELP = `usage: fleet spawn <role>[--<n>] [--instance <n>|next]
                         greppable. The Worker refuses any merge that would drop
                         a number, command, date or path the sources carried.
 
+  fleet creds get <name>
+                        Print ONE staging test login (e.g. a non-admin
+                        account) to stdout, nothing else. Only names the
+                        operator allowlisted for THIS studio's repo; the
+                        Worker reads it from its own secret store, so this
+                        container never holds a store credential. Use it
+                        inline so it never lands in a file or your history:
+
+                          PASSWORD="$(fleet creds get viewer)"
+
+                        Never paste the value into a PR, issue, comment,
+                        commit, log, memory file or screenshot. 403 = not
+                        allowlisted for your repo; 503 = not configured
+                        (ask the operator, do not work around it).
+
   fleet --help          Show this message.
 
 The Worker is the single writer of the board. You ask, it writes: every verb
@@ -219,6 +235,8 @@ export type Command =
   // P5 §9's memory pass, at sprint close. Release Studio's verb.
   | { kind: "memory-ls" }
   | { kind: "memory-compact" }
+  // Issue #279: one allowlisted staging test login.
+  | { kind: "creds-get"; name: string }
   | { kind: "usage-error"; message: string };
 
 /** Pure — no env, no I/O. */
@@ -226,8 +244,9 @@ export function parseArgs(argv: string[]): Command {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") return { kind: "help" };
   if (argv[0] === "task") return parseTaskArgs(argv.slice(1));
   if (argv[0] === "memory") return parseMemoryArgs(argv.slice(1));
+  if (argv[0] === "creds") return parseCredsArgs(argv.slice(1));
   if (argv[0] !== "spawn" && argv[0] !== "resume") {
-    return { kind: "usage-error", message: `unknown command "${argv[0]}" — expected "spawn", "resume", "task" or "memory"` };
+    return { kind: "usage-error", message: `unknown command "${argv[0]}" — expected "spawn", "resume", "task", "memory" or "creds"` };
   }
   const verb = argv[0];
   const role = argv[1];
@@ -335,6 +354,17 @@ export function parseMemoryArgs(argv: string[]): Command {
   if (sub === undefined || sub === "ls") return { kind: "memory-ls" };
   if (sub === "compact") return { kind: "memory-compact" };
   return { kind: "usage-error", message: `unknown memory command "${sub}" — expected ls or compact` };
+}
+
+/** `creds get <name>`. Same name shape src/creds/test-creds.ts enforces —
+ *  this copy only turns a typo into a usage error instead of a 400. */
+export function parseCredsArgs(argv: string[]): Command {
+  if (argv[0] !== "get") return { kind: "usage-error", message: `unknown creds command "${argv[0] ?? ""}" — expected get` };
+  if (argv.length !== 2) return { kind: "usage-error", message: "creds get: expected exactly one <name>" };
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(argv[1])) {
+    return { kind: "usage-error", message: `creds get: "${argv[1]}" is not a credential name ([a-z0-9_-])` };
+  }
+  return { kind: "creds-get", name: argv[1] };
 }
 
 /**
@@ -709,6 +739,24 @@ async function buildRequest(
         // discipline src/studio/task-state.ts keeps on the operator side.
         const moved = json as { state?: string | null };
         return `task ${cmd.number} is now ${moved.state ?? "?"}`;
+      },
+    };
+  }
+  if (cmd.kind === "creds-get") {
+    // Issue #279. Same one header, GET, no body. The value goes to stdout
+    // ALONE so `$(fleet creds get x)` captures exactly it; nothing else in
+    // this script ever prints or logs it.
+    return {
+      what: "creds get",
+      url: new URL(`/fleet/creds/${cmd.name}`, env.workerUrl).toString(),
+      init: { method: "GET", headers: { [SPAWN_TOKEN_HEADER]: env.token } },
+      render: (json) => {
+        const value = (json as { value?: unknown }).value;
+        if (typeof value !== "string") {
+          console.error("studio-fleet: creds get: the Worker answered 200 with no value");
+          process.exit(1);
+        }
+        return value;
       },
     };
   }

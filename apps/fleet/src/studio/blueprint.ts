@@ -618,6 +618,21 @@ export const HOUSE_RULES = [
   "this container. A studio's job after a deploy happens is verification:",
   "check the deployed URL yourself, in a browser, not deploy it.",
   "",
+  // Issue #279: permission/role PRs were merged verified only as admin, and
+  // admin bypasses row filters, so the check proved nothing. The Worker now
+  // serves allowlisted staging test logins (src/creds/test-creds.ts).
+  "## House rules — test credentials",
+  "",
+  "For a staging test login (e.g. a non-admin account), run",
+  "`fleet creds get <name>`. It prints the one value to stdout, and only for",
+  "names the operator allowlisted for your repo. Use it inline, e.g.",
+  "`PASSWORD=\"$(fleet creds get viewer)\"`, so it never lands in a file.",
+  "403 = not allowlisted; 503 = not configured. Ask the operator; never hunt",
+  "for another copy of the credential.",
+  "Never paste a credential value into a PR, issue, comment, commit, log,",
+  "memory file or screenshot. Never verify a permission or role change only",
+  "as an admin: admin bypasses the checks you are trying to prove.",
+  "",
   // Board issue #253, measured 2026-09-25 06:02Z: a fleetflare--web-studio
   // member committed onto a local `main` in a worktree, and that branch
   // carried `origin/main` as its upstream (branch.autoSetupMerge, git's own
