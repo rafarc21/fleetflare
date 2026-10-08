@@ -463,12 +463,25 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
  *  at most one — every earlier block was already closed, sequentially, by
  *  `closeOpenBlock` the moment the next one opened; see that function's own
  *  doc comment), then emits `message_delta` (stop_reason + usage) and
- *  `message_stop` once. Anthropic's documented `message_delta.usage` shape
- *  carries only `output_tokens` (input doesn't change mid-stream) — not
- *  fully certain this backend's own wire format matches that exactly, so
- *  this is the one field in this file flagged as "best effort against the
- *  documented contract", same spirit as mapFinishReason's content_filter
- *  case above. */
+ *  `message_stop` once.
+ *
+ * Fresh-context review finding 1: Anthropic's real, documented
+ * `message_delta.usage` shape carries only `output_tokens` — input doesn't
+ * change mid-stream, so the real API reports it up front, on
+ * `message_start`, instead (known before generation even begins, since the
+ * full prompt is already tokenized). This backend genuinely cannot do that:
+ * `streamPrelude` fires before any upstream chunk has even been read, and
+ * this OpenAI-compatible backend only ever reports `usage.prompt_tokens` on
+ * the FINAL chunk (see anthropicRequestToOpenAI's `stream_options.
+ * include_usage` comment) — so by the time `message_delta` runs, that is
+ * the only client-visible frame left with a real number to put it in. This
+ * is a deliberate, flagged deviation from the strict wire contract (a real
+ * Anthropic `message_delta.usage` object never has `input_tokens`), chosen
+ * because the alternative is what this finding reported: Claude Code seeing
+ * `input_tokens: 0` on every single streamed turn, forever. An extra key on
+ * a JSON object `message_delta` already carries is not a shape Claude
+ * Code's own SSE parsing has any reason to reject.
+ */
 export function closeStream(state: StreamState): string[] {
   const events: string[] = [];
   closeOpenBlock(state, events);
@@ -480,7 +493,7 @@ export function closeStream(state: StreamState): string[] {
   events.push(sseEvent("message_delta", {
     type: "message_delta",
     delta: { stop_reason: stopReason, stop_sequence: null },
-    usage: { output_tokens: state.outputTokens },
+    usage: { input_tokens: state.inputTokens, output_tokens: state.outputTokens },
   }));
   events.push(sseEvent("message_stop", { type: "message_stop" }));
   return events;

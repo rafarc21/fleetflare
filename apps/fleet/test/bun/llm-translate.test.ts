@@ -450,9 +450,9 @@ describe("streaming: prelude + chunk application + close", () => {
 
   // MAJOR 4 (maestro review round 1): the same final usage-bearing chunk
   // also carries the real prompt_tokens — tracked on the state for the
-  // ROUTE to read back after the stream ends (for the usage-log row), since
-  // Anthropic's own message_delta event has no input_tokens field to carry
-  // it in (closeStream's own doc comment).
+  // ROUTE to read back after the stream ends (for the usage-log row), AND
+  // (fresh-context review finding 1, test above) for closeStream's own
+  // message_delta frame to carry to the client.
   test("usage from the final OpenAI chunk also reaches state.inputTokens", () => {
     const state = createStreamState();
     applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });
