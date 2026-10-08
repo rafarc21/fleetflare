@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import {
   provisionWithStorage, restartWithStorage, resolveBringupEnv, resolveWorkRepoSlug, ROLE_ENV_KEY, BRINGUP_CMD,
-  discoverRescueRefsCmd, DESTROYING_KEY, OPS_HOUSE_RULES_PATH, STATUS_KEY,
+  discoverRescueRefsCmd, DESTROYING_KEY, OPS_HOUSE_RULES_PATH, STATUS_KEY, runProvision,
   type ProvisionDeps, type StudioStorage, type RoleEnv, type StudioEnv,
   type HealAttempt,
   type OperationInFlight,
@@ -2092,5 +2092,91 @@ describe("installLeakGatePort — do.ts's installLeakGate body (issue #1)", () =
   it("non-zero exit or a throw -> ok:false, never throws", async () => {
     expect((await installLeakGatePort(vi.fn(async () => ({ code: 1, stdout: "", stderr: "boom" })))).ok).toBe(false);
     expect((await installLeakGatePort(vi.fn(async () => { throw new Error("gone"); }))).ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #249 — runProvision seeds StudioStatus.leadType from
+// ProvisionConfig.leadType, but ONLY on a studio's first-ever provision
+// (existing === null, or an existing row that has never carried the field) —
+// never overriding an already-recorded value on a later re-provision, same
+// "existing wins, cfg only fills a genuine gap" rule doClass's own
+// ensureSpawnToken write already follows (do.ts).
+// ---------------------------------------------------------------------------
+describe("runProvision — seeds StudioStatus.leadType from cfg, first-ever provision only (#249)", () => {
+  function minimalDeps(): ProvisionDeps {
+    return {
+      sbExec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+      recordStudio: async () => {},
+      now: () => "2026-10-08T00:00:00.000Z",
+      // Same generic-role-body shape test/studio.worktree-session.test.ts's
+      // own scratchBlueprint() uses: fleet.json/org.json answered directly,
+      // every other path (the role file) answered with one generic scratch
+      // role, studio-dir paths refused with the same "(404)" shape
+      // isNotFoundError greps for — these tests only care about the
+      // resulting StudioStatus, not the role's own content.
+      fetchBlueprintFile: vi.fn(async (_repo: string, path: string, ref: string) => {
+        if (path === "fleet.json") {
+          return JSON.stringify({ blueprint: { repo: "rafarc21/fleetflare", ref: "main" }, roles: ["scratch"], instance_type: "standard-2" });
+        }
+        if (path === "fleet/blueprint/org.json") return JSON.stringify({ edges: {}, gates: {} });
+        if (path.startsWith("fleet/blueprint/studios/")) throw new Error(`fetch ${path}@${ref} failed (404): Not Found`);
+        return "---\nname: scratch\nskills: []\nallowedTools: Bash(git *)\nmay_spawn: []\nreports_to: operator\ngates: []\n---\nhi\n";
+      }),
+    };
+  }
+
+  it("a brand-new studio (existing: null), cfg.leadType: \"glm\" -> the fresh row carries leadType: \"glm\"", async () => {
+    const { status } = await runProvision(
+      minimalDeps(), { repo: "fleetflare", role: "scratch", leadType: "glm" }, "rafarc21/fleetflare", null,
+    );
+    expect(status.leadType).toBe("glm");
+  });
+
+  it("a brand-new studio, no cfg.leadType at all -> leadType stays absent (today's only behaviour)", async () => {
+    const { status } = await runProvision(
+      minimalDeps(), { repo: "fleetflare", role: "scratch" }, "rafarc21/fleetflare", null,
+    );
+    expect(status.leadType).toBeUndefined();
+  });
+
+  it("an EXISTING row already carrying leadType: \"glm\" -> a later re-provision with NO cfg.leadType keeps it (sticky)", async () => {
+    const existing: StudioStatus = {
+      id: "fleetflare--scratch", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: "rafarc21/fleetflare",
+      leadType: "glm",
+    };
+    const { status } = await runProvision(minimalDeps(), { repo: "fleetflare", role: "scratch" }, "rafarc21/fleetflare", existing);
+    expect(status.leadType).toBe("glm");
+  });
+
+  it("an EXISTING row already \"glm\" -> a re-provision that forgot to repeat the flag never flips it back to claude", async () => {
+    // Same case as above, restated as the exact regression the maestro's own
+    // spec text warns against: a later call that omits the flag must not
+    // silently read as "claude" again.
+    const existing: StudioStatus = {
+      id: "fleetflare--scratch", state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: "rafarc21/fleetflare",
+      leadType: "glm",
+    };
+    const { status } = await runProvision(
+      minimalDeps(), { repo: "fleetflare", role: "scratch", leadType: undefined }, "rafarc21/fleetflare", existing,
+    );
+    expect(status.leadType).toBe("glm");
+  });
+
+  it("an EXISTING row already \"claude\" (explicit) -> cfg.leadType: \"glm\" on a LATER call does NOT override it", async () => {
+    // Explicit, not merely absent: existing wins over cfg unconditionally
+    // once a row exists, per resolveLeadType's own doc comment (do.ts) and
+    // this field's own "written once, read back forever" rule.
+    const existing: StudioStatus = {
+      id: "fleetflare--scratch", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: "rafarc21/fleetflare",
+      leadType: "claude",
+    };
+    const { status } = await runProvision(
+      minimalDeps(), { repo: "fleetflare", role: "scratch", leadType: "glm" }, "rafarc21/fleetflare", existing,
+    );
+    expect(status.leadType).toBe("claude");
   });
 });

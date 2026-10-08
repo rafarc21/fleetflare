@@ -2512,6 +2512,14 @@ export async function runProvision(
     ...(existing ?? freshStatus(id)),
     state: "provisioning",
     ...(cfg.spawnedBy ? { spawnedBy: cfg.spawnedBy } : {}),
+    // Issue #249: seeded from cfg ONLY on a studio's first-ever provision
+    // (no existing row, or an existing row that has never carried this
+    // field) — same "existing wins, cfg only fills a genuine gap" shape
+    // do.ts's ensureSpawnToken already uses for doClass. A later
+    // provision/restart/recycle that omits cfg.leadType (the ordinary case
+    // — it is set once, at creation, never re-sent) must never read as a
+    // silent flip back to "claude".
+    ...(cfg.leadType !== undefined && existing?.leadType === undefined ? { leadType: cfg.leadType } : {}),
     // Bound on every provision, not only the first: this is the record of
     // which repo the container was actually pointed at, and it has to stay
     // true across a re-provision that moved it.
