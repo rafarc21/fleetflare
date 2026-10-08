@@ -110,3 +110,99 @@ image change; the maestro batches the rollout window.
 Per the maestro's own dispatch on issue #276: TDD (RED test proving the
 stale-replay bug first, then green), narrow `bun test` runs only while
 iterating, full suite + gate left to the lead.
+
+## Addendum (fresh-context review round, same day): two blocking findings
+
+A fresh-context review of the two fixes above found one blocking issue per
+axis (Standards, Spec). Both are now fixed on this same branch.
+
+### Fix 3: launch-timeout branch now kills the real OS process it abandons
+
+Fix 2 above bounds `chromium.launch()` with a timeout, but on a genuine
+TIMEOUT (not a plain launch rejection), `raceWithTimeoutOrReject()` only
+abandons the JS *promise* — it has no way to touch the real OS process,
+since (per its own doc comment) "there is no such thing as cancelling a
+plain Promise." `browserPid` (the variable `shutdown()`'s own SIGKILL
+backstop reads) was only ever assigned inside the launch chain's SUCCESS
+`.then()`, so on a timeout it stayed `undefined` forever for that attempt —
+even though the real Chrome process likely *did* spawn, just stuck
+mid-handshake (this issue's own root-cause framing). Confirmed live: after
+a launch-timeout test run against the unfixed code, the fixture's `sleep
+infinity` process (what `hang-forever-chromium.sh` `exec`s into) was still
+running in `ps`, long after the RPC call had already rejected cleanly.
+
+Since fix 1 (the self-heal reset) now makes every later call retry
+automatically, repeated timeouts under real container memory pressure (the
+exact scenario issue #276 is about) would leak a fresh orphaned ~536 MB
+Chromium process tree on *every* retry, unbounded — reintroducing the "must
+not wedge the lead" problem this whole issue exists to close, through the
+timeout path instead of the original hang.
+
+Fixed in `daemon.ts`'s launch `.catch()`: on the TIMEOUT branch specifically
+(distinguished from a plain launch rejection by comparing the error message
+against the exact timeout message `raceWithTimeoutOrReject()` constructs —
+a plain rejection means Playwright itself already knows the process
+failed/exited and has presumably cleaned up after it), reuse the exact same
+`findDirectChildPid(process.pid, { chromiumBinaryName: ... })` +
+try/catch-wrapped `process.kill(pid, "SIGKILL")` mechanism `shutdown()`'s
+own backstop already uses for this identical problem. Handles "nothing
+spawned yet" gracefully (`findDirectChildPid` already returns `undefined`
+for that case — no-op).
+
+Regression test: `test/bun/ego-browser-launch-timeout.test.ts` now reads
+the daemon's own pidfile after the timeout fires, scans its real direct
+children via `findDirectChildPid()`, and asserts the process is genuinely
+dead (fully reaped, or a zombie holding zero file descriptors — same
+distinction `ego-browser-idle-shutdown-container.test.ts` already makes).
+Confirmed RED against the unfixed code (the process stayed alive the whole
+3s poll window, `ps` showing a live `sleep infinity` process after the test
+run) and GREEN after the fix, with a live `ps` check after the targeted
+test run showing zero leaked `sleep infinity` processes.
+
+**Memory re-measurement:** the ~536 MB combined-RSS figure in the "Memory
+measured" section above still describes one steady-state browser+task-space
+tree; it was never wrong on its own. What this fix closes is the *compounding*
+risk the original plan doc didn't yet know to re-measure: before this fix,
+every retried timeout under memory pressure left its own ~536 MB orphaned
+tree behind, stacking without bound across retries. That leak path is now
+closed by the SIGKILL fix above — a repeated-timeout scenario now costs at
+most one in-flight ~536 MB attempt at a time, the same as the already-measured
+single-browser figure, not a multiple of it. No new steady-state measurement
+was needed since the fix changes cleanup behavior, not what a single browser
+costs while running.
+
+### Fix 4: `skills/ego-browser/SKILL.md` DID make the inaccurate "fallback"
+claim — correcting this plan doc's own earlier, wrong conclusion
+
+The "Out of scope" section above concluded, from an earlier grep pass, that
+no "Playwright MCP fallback"-shaped claim existed anywhere in this repo.
+That conclusion was wrong — a more careful read of `SKILL.md` itself (not
+just a grep for the literal phrase "fallback") found it directly: the
+Install section asserted `ego-browser` is "backed by `playwright-core` and
+the same Chrome-for-Testing binary at `/usr/local/bin/chromium` the
+Playwright MCP server **already uses**" — an unconditional claim that a
+Playwright MCP server is already registered and actively using that same
+binary.
+
+Checked `Dockerfile.studio` (~lines 200-238) and `studio-bringup.sh` for how
+the Playwright MCP server is actually wired: it is genuinely conditional,
+gated behind `STUDIO_MCP` (`studio-bringup.sh`'s known-server map wires up
+`STUDIO_MCP="playwright"` → `bunx @playwright/mcp@latest`; `studio-bringup.sh`
+reads `STUDIO_MCP` from the environment and only registers servers named in
+it) — not always-registered. `SKILL.md`'s "already uses" phrasing claims a
+coordination/shared-usage guarantee that does not hold whenever a studio's
+`STUDIO_MCP` doesn't include `"playwright"`.
+
+**Fix**: reworded that one sentence so it states the real, verified fact —
+`ego-browser` uses its own Chrome-for-Testing binary directly, independent
+of whether a Playwright MCP server happens to also be configured. Re-reading
+the whole file afterward found one more sentence with the same shape, in the
+`page.snapshot()` bullet ("since the MCP server (`bunx @playwright/mcp@latest`)
+is already installed and produces this exact shape") — also reworded, since
+`daemon.ts`'s `pageSnapshot()` calls playwright-core's own public
+`page.ariaSnapshot()` directly and has no runtime dependency on an MCP server
+being installed at all; it only happens to produce the same shape (same
+underlying accessibility-tree serializer). Docs-only change, no test — verified
+by re-reading the full file afterward (no other unconditional "already
+uses"/"already installed" claim remains) and by `scripts/english-check.ts`
+(which scans `SKILL.md` too) staying clean.
