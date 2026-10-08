@@ -110,9 +110,24 @@ function pct(n: number | null): string {
 
 /** The current row's own state in one phrase. `dead` wins over a plain
  *  `until` — a dead row can also carry a stale `until`, and `dead` is the
- *  louder fact an operator needs to see first. Neither set reads "free". */
-export function describeCurrentState(s: AccountCurrentState): string {
+ *  louder fact an operator needs to see first, unconditionally: a dead row's
+ *  own `until` never un-deads it, even once it's passed (same precedence
+ *  `src/studio/accounts.ts`'s `accountIsFree` gives `dead` over everything
+ *  else). Issue #253 — a `until` already in the past self-frees, same
+ *  convention `accountIsFree` already uses (`until !== null && Date.parse(
+ *  until) <= now`): without this, a stale D1 row read "limited until
+ *  <stale date>" forever instead of "free", the half of the "ROW STATE says
+ *  free, WOULD says limited" disagreement that was a real bug (as opposed to
+ *  the other half — ROW STATE vs a live WOULD read disagreeing because
+ *  nobody has synced since a threshold was crossed — which is an intentional
+ *  distinction, not a bug; see this module's header on `AccountCurrentState`
+ *  for why the two columns are kept separate). `now` is the caller's own
+ *  snapshot `now` (cli/accounts.ts's `fetchedAt`/`usageFetchedAt`), reused
+ *  rather than a fresh `new Date()` here, so this stays a pure function and
+ *  every row in one table render is judged against the exact same instant. */
+export function describeCurrentState(s: AccountCurrentState, now: Date): string {
   if (s.dead) return "dead";
+  if (s.until !== null && Date.parse(s.until) <= now.getTime()) return "free";
   if (s.until !== null) return `limited until ${s.until}`;
   return "free";
 }
@@ -135,9 +150,9 @@ function describeOutcome(decision: SyncDecision): string {
  * POST /studio/accounts/sync's doc comment), so neither ever counts as a
  * change regardless of current state.
  */
-export function wouldChange(current: AccountCurrentState, decision: SyncDecision): boolean {
+export function wouldChange(current: AccountCurrentState, decision: SyncDecision, now: Date): boolean {
   if (decision.action === "unmanaged" || decision.action === "no-data") return false;
-  return describeCurrentState(current) !== describeOutcome(decision);
+  return describeCurrentState(current, now) !== describeOutcome(decision);
 }
 
 /**
@@ -153,10 +168,28 @@ export function wouldChange(current: AccountCurrentState, decision: SyncDecision
  * collapsing both to "-" would hide that an operator-visible cswap problem
  * (relogin required, a frozen reading) exists for this slot.
  */
-export function describeWould(row: AccountSnapshotRow): string {
+export function describeWould(row: AccountSnapshotRow, now: Date): string {
   if (row.decision.action === "no-data") return `no data (${row.decision.reason})`;
-  return wouldChange(row.current, row.decision) ? describeOutcome(row.decision) : "-";
+  return wouldChange(row.current, row.decision, now) ? describeOutcome(row.decision) : "-";
 }
+
+/**
+ * Issue #253: every timestamp this table prints (`seenAt`/`until`/RESETS) is
+ * already a full UTC instant with an explicit `Z` suffix — proven bit-for-
+ * bit correct end to end (see this module's test file's own round-trip
+ * regression guard). The reported "2 hours early" symptom was traced to an
+ * operator comparing this table against `cswap list`'s own separate CLI
+ * output, which likely renders the SAME instant in local wall-clock time —
+ * not a data defect, but an easy cross-tool misread with real safety stakes
+ * (a coordinator spawning into a still-limited account because it read an
+ * early time as later). This one-line, purely-additive footer removes that
+ * ambiguity without touching a single cell's own text — printed once per
+ * table, never per row, and only in human-readable mode: `--json` output
+ * already carries raw ISO instants and needs no prose (cli/accounts.ts's
+ * `printSnapshot` never calls `formatAccountsTable` on the `--json` path, so
+ * this note can never end up inside the JSON object).
+ */
+export const ACCOUNTS_TABLE_UTC_NOTE = "(reset times shown in UTC)";
 
 /**
  * `fleet accounts`'s table. Columns: SLOT, LABEL, MATCH, 5H%, 7D%, RESETS,
@@ -171,9 +204,11 @@ export function describeWould(row: AccountSnapshotRow): string {
  *
  * Same column-table house style as cli/task-format.ts's formatTaskTable:
  * header + one row per slot, widths from the longest cell per column, two
- * spaces between columns, right edge never padded.
+ * spaces between columns, right edge never padded. One blank line, then
+ * `ACCOUNTS_TABLE_UTC_NOTE`, always closes the table (see that constant's
+ * own doc comment for why).
  */
-export function formatAccountsTable(rows: AccountSnapshotRow[]): string {
+export function formatAccountsTable(rows: AccountSnapshotRow[], now: Date): string {
   if (rows.length === 0) return "(no accounts configured)";
   const headers = ["SLOT", "LABEL", "MATCH", "5H%", "7D%", "RESETS", "ROW STATE", "WOULD"];
   const body = rows.map((r) => [
@@ -183,13 +218,13 @@ export function formatAccountsTable(rows: AccountSnapshotRow[]): string {
     pct(r.fiveHourPct),
     pct(r.sevenDayPct),
     r.decision.action === "limit" ? r.decision.until ?? "-" : "-",
-    describeCurrentState(r.current),
-    describeWould(r),
+    describeCurrentState(r.current, now),
+    describeWould(r, now),
   ]);
   const widths = headers.map((h, i) => Math.max(h.length, ...body.map((row) => row[i].length)));
   const last = headers.length - 1;
   const line = (cols: string[]) => cols.map((c, i) => (i === last ? c : c.padEnd(widths[i]))).join("  ");
-  return [line(headers), ...body.map(line)].join("\n");
+  return [line(headers), ...body.map(line), "", ACCOUNTS_TABLE_UTC_NOTE].join("\n");
 }
 
 /**

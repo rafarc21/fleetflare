@@ -157,6 +157,8 @@ describe("fleet accounts", () => {
     expect(r.out).toContain("free"); // ROW STATE: D1 currently holds nothing
     expect(r.out).toContain(OVER_FIVE_HOUR.usage!.fiveHour.resetsAt!); // WOULD: limit until this
     expect(r.out).toContain("label"); // MATCH column: matched by label===email
+    // Issue #253 — the plain-text table always closes with this UTC note.
+    expect(r.out).toContain("(reset times shown in UTC)");
     expect(syncCalls.length).toBe(0);
   });
 
@@ -170,6 +172,10 @@ describe("fleet accounts", () => {
     server.stop(true);
 
     expect(r.code).toBe(0);
+    // Issue #253 — the plain-text-only UTC footer must never leak into
+    // `--json` output: parsing would already fail if it had (the note isn't
+    // valid JSON on its own line), but assert it explicitly too.
+    expect(r.out).not.toContain("(reset times shown in UTC)");
     const rows = JSON.parse(r.out) as { name: string; matchSource: string; decision: { action: string } }[];
     expect(rows).toHaveLength(3);
     const byName = Object.fromEntries(rows.map((row) => [row.name, row]));

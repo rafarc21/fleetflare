@@ -212,11 +212,19 @@ export async function buildAccountsSnapshot(creds: Credentials, fetchedAt: Date 
  * operator piping `--json` into `jq` must keep getting a bare array even on
  * a cswap-unavailable run); a human watching either mode's stdout still sees
  * it on the same terminal, immediately after the table/JSON is printed.
+ *
+ * Issue #253: `now` must be the SAME instant `rows`' own `decision`s were
+ * computed against (the snapshot's `fetchedAt`/`usageFetchedAt`), never a
+ * fresh `new Date()` taken here — `formatAccountsTable`'s self-free check
+ * (cli/accounts-format.ts's `describeCurrentState`) has to judge every row
+ * in one render against the same clock reading, not one that ticked forward
+ * mid-print.
  */
 function printSnapshot(
   rows: AccountSnapshotRow[],
   flags: Pick<AccountsFlags, "json" | "writeLabels">,
   cswapUnavailableReason: string | null,
+  now: Date,
 ): void {
   const note = formatCswapUnavailableNote(cswapUnavailableReason);
   if (note !== null) console.error(note);
@@ -226,7 +234,7 @@ function printSnapshot(
       console.log(JSON.stringify({ accounts: rows, labelSuggestions }, null, 2));
       return;
     }
-    console.log(formatAccountsTable(rows));
+    console.log(formatAccountsTable(rows, now));
     if (labelSuggestions.length > 0) {
       console.log("");
       for (const line of labelSuggestions) console.log(line);
@@ -239,7 +247,7 @@ function printSnapshot(
     console.log(JSON.stringify(rows, null, 2));
     return;
   }
-  console.log(formatAccountsTable(rows));
+  console.log(formatAccountsTable(rows, now));
 }
 
 /**
@@ -276,6 +284,10 @@ interface SyncResult {
   rejected: { name: string; reason: string }[];
   skipped: { name: string; reason: string }[];
   cswapUnavailableReason: string | null;
+  /** Issue #253: the snapshot's own `fetchedAt`, ISO — `printSnapshot`'s
+   *  callers reuse this as the `now` the post-sync table renders against,
+   *  rather than a fresh `new Date()` taken after the POST round-trip. */
+  usageFetchedAt: string;
 }
 
 /**
@@ -310,7 +322,7 @@ async function doSync(creds: Credentials, fetchedAt: Date = new Date()): Promise
     rejected: { name: string; reason: string }[];
     skipped: { name: string; reason: string }[];
   };
-  return { rows: applyLocally(rows, applied), applied, rejected, skipped: skipped ?? [], cswapUnavailableReason };
+  return { rows: applyLocally(rows, applied), applied, rejected, skipped: skipped ?? [], cswapUnavailableReason, usageFetchedAt };
 }
 
 /** `applied`/`rejected` as before, plus a `skipped` line per entry — distinct
@@ -361,17 +373,20 @@ async function watchAccounts(creds: Credentials, flags: AccountsFlags, sync: boo
     try {
       let rows: AccountSnapshotRow[];
       let cswapUnavailableReason: string | null;
+      let now: Date;
       if (sync) {
         const result = await doSync(creds);
         reportSyncOutcome(result.applied, result.rejected, result.skipped);
         rows = result.rows;
         cswapUnavailableReason = result.cswapUnavailableReason;
+        now = new Date(result.usageFetchedAt);
       } else {
         const snapshot = await buildAccountsSnapshot(creds);
         rows = snapshot.rows;
         cswapUnavailableReason = snapshot.cswapUnavailableReason;
+        now = new Date(snapshot.usageFetchedAt);
       }
-      if (prev === null || !snapshotsEqual(prev, rows)) printSnapshot(rows, flags, cswapUnavailableReason);
+      if (prev === null || !snapshotsEqual(prev, rows)) printSnapshot(rows, flags, cswapUnavailableReason, now);
       else console.error(`fleet accounts: no change (${new Date().toISOString()})`);
       prev = rows;
     } catch (err) {
@@ -387,8 +402,8 @@ async function watchAccounts(creds: Credentials, flags: AccountsFlags, sync: boo
 export async function cmdAccounts(creds: Credentials, flags: AccountsFlags): Promise<void> {
   if (flags.watch) return watchAccounts(creds, flags, false);
   try {
-    const { rows, cswapUnavailableReason } = await buildAccountsSnapshot(creds);
-    printSnapshot(rows, flags, cswapUnavailableReason);
+    const { rows, usageFetchedAt, cswapUnavailableReason } = await buildAccountsSnapshot(creds);
+    printSnapshot(rows, flags, cswapUnavailableReason, new Date(usageFetchedAt));
   } catch (err) {
     console.error(errText(err));
     process.exit(1);
@@ -403,9 +418,9 @@ export async function cmdAccounts(creds: Credentials, flags: AccountsFlags): Pro
 export async function cmdAccountsSync(creds: Credentials, flags: AccountsFlags): Promise<void> {
   if (flags.watch) return watchAccounts(creds, flags, true);
   try {
-    const { rows, applied, rejected, skipped, cswapUnavailableReason } = await doSync(creds);
+    const { rows, applied, rejected, skipped, cswapUnavailableReason, usageFetchedAt } = await doSync(creds);
     reportSyncOutcome(applied, rejected, skipped);
-    printSnapshot(rows, flags, cswapUnavailableReason);
+    printSnapshot(rows, flags, cswapUnavailableReason, new Date(usageFetchedAt));
   } catch (err) {
     console.error(errText(err));
     process.exit(1);
