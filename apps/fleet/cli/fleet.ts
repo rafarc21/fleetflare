@@ -1042,7 +1042,9 @@ function reportRepo(cmd: string, detected: DetectedRepo): void {
  * in-container spawn goes through, just authenticated by Access instead of a
  * spawn token, and with the parent fixed to the literal "operator" role).
  */
-async function cmdSpawn(creds: Credentials, role: string, newInstance: boolean): Promise<void> {
+async function cmdSpawn(
+  creds: Credentials, role: string, newInstance: boolean, leadType?: "claude" | "glm",
+): Promise<void> {
   // Dynamic repo selection (P4a): the detected repo rides along as `repo`.
   // Omitted entirely when this folder names none — the Worker's own default
   // is then the single source of that fallback, rather than this CLI
@@ -1059,9 +1061,14 @@ async function cmdSpawn(creds: Credentials, role: string, newInstance: boolean):
     // — so it spends one round trip instead of two and reads the number it got
     // off the row it prints. Omitted without the flag, which leaves that
     // request byte-identical to the pre-#269 one.
+    //
+    // Issue #249: `--lead glm` sends `leadType: "glm"` the SAME way — omitted
+    // without the flag, so a bare `fleet spawn <role>` stays byte-identical
+    // to every request sent before this feature existed.
     body: JSON.stringify({
       role, ...(detected.slug ? { repo: detected.slug } : {}),
       ...(newInstance ? { instance: "next" } : {}),
+      ...(leadType === undefined ? {} : { leadType }),
     }),
   });
   if (!res.ok) {
@@ -2654,7 +2661,7 @@ async function main(): Promise<void> {
     case "paste":
       return cmdPaste(creds, parsed.id);
     case "spawn":
-      return cmdSpawn(creds, parsed.role, parsed.newInstance);
+      return cmdSpawn(creds, parsed.role, parsed.newInstance, parsed.leadType);
     case "provision":
       return cmdProvision(creds, parsed.id, parsed.freshSession, parsed.cancelFreshSession, parsed.discardSession);
     case "recycle":

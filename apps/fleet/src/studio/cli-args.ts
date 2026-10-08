@@ -68,7 +68,13 @@ export type CliCommand =
   // instance 1, which is what a bare `fleet spawn <role>` still means (409 when
   // it already exists, exactly as before). Same bespoke "no value, just
   // presence" shape `destroy --force` and `recycle --discard-unsynced` use.
-  | { cmd: "spawn"; role: string; newInstance: boolean }
+  //
+  // Issue #249: `--lead glm` — the studio-creation path for
+  // `StudioStatus.leadType` (that field's own doc comment: studio-level,
+  // sticky, set once at the studio's first-ever provision, never a per-task
+  // flag like `--junior`). Optional, absent means `"claude"` — every spawn
+  // call that predates this flag keeps sending the byte-identical request.
+  | { cmd: "spawn"; role: string; newInstance: boolean; leadType?: "claude" | "glm" }
   // Issue #115: `cancelFreshSession` — `--no-fresh-session`, mutually
   // exclusive with `freshSession` above.
   // Issue #231: `discardSession` — `--discard-session`, the operator's
@@ -302,8 +308,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Upload the Mac clipboard image into the studio and print the in-container path. ctrl-v does this inline while attached.",
   },
   spawn: {
-    args: "<role> [--new]",
-    summary: "Create a studio for <role> in the repo you are standing in (maestro, web-studio, release-studio, pilot, scratch). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them.",
+    args: "<role> [--new] [--lead claude|glm]",
+    summary: "Create a studio for <role> in the repo you are standing in (maestro, web-studio, release-studio, pilot, scratch). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them. Issue #249: `--lead glm` boots this studio's lead on this fleet's own GLM-translation route instead of a Claude account — no Claude quota spent, sticky for the studio's whole life (set once, here, never re-asked on a later provision/restart/recycle). `--lead claude` is the explicit, redundant spelling of today's default.",
   },
   provision: {
     args: "<id> [--fresh-session [--discard-session]|--no-fresh-session]",
@@ -779,9 +785,26 @@ export function parseCliArgs(argv: string[]): CliCommand {
     case "spawn": {
       if (!arg || arg === "--new") return { cmd: "usage", message: CLI_USAGE };
       const rest = argv.slice(2);
-      if (rest.length === 0) return { cmd: "spawn", role: arg, newInstance: false };
-      if (rest.length === 1 && rest[0] === "--new") return { cmd: "spawn", role: arg, newInstance: true };
-      return usage(`unexpected ${JSON.stringify(rest[0])}`);
+      // Issue #249: `--lead glm` rides alongside `--new`, either order — a
+      // small token walk rather than the fixed-shape checks above, since
+      // there are now two independent flags instead of one bare boolean.
+      let newInstance = false;
+      let leadType: "claude" | "glm" | undefined;
+      for (let i = 0; i < rest.length; i++) {
+        const token = rest[i];
+        if (token === "--new" && !newInstance) { newInstance = true; continue; }
+        if (token === "--lead" && leadType === undefined) {
+          const value = rest[i + 1];
+          if (value !== "claude" && value !== "glm") {
+            return usage(`--lead needs "claude" or "glm", got ${JSON.stringify(value)}`);
+          }
+          leadType = value;
+          i += 1;
+          continue;
+        }
+        return usage(`unexpected ${JSON.stringify(token)}`);
+      }
+      return { cmd: "spawn", role: arg, newInstance, ...(leadType === undefined ? {} : { leadType }) };
     }
     // Issue #28: `--fresh-session`, same bespoke flag shape as recycle's own.
     // Issue #115: plus `--no-fresh-session` — same "each at most once,
