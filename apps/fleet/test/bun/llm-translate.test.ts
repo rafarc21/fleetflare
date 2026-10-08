@@ -295,7 +295,14 @@ describe("streaming: prelude + chunk application + close", () => {
     expect(events[6].data).toEqual({ type: "message_stop" });
   });
 
-  test("a streamed tool call opens its own content block, separate index from text, closed in open order", () => {
+  // Anthropic's real Messages API SSE contract closes each content block
+  // (`content_block_stop`) BEFORE the next one's `content_block_start` ever
+  // fires — never two blocks open at once. This pins that: the text block
+  // (index 0) is closed the moment the first tool_calls delta arrives,
+  // strictly before the tool_use block (index 1) opens — not deferred to
+  // the end of the whole stream (see closeOpenBlock's own doc comment in
+  // translate.ts).
+  test("a streamed tool call opens its own content block, separate index from text, each closed before the next opens", () => {
     const state = createStreamState();
     const frames: string[] = [];
     frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "ok, " } }] }));
@@ -307,17 +314,19 @@ describe("streaming: prelude + chunk application + close", () => {
 
     const events = frames.map(parseFrame);
     expect(events.map((e) => e.event)).toEqual([
-      "content_block_start", "content_block_delta", // text
-      "content_block_start", // tool_use open
+      "content_block_start", "content_block_delta", // text (index 0) opens and streams
+      "content_block_stop", // text (index 0) closes — BEFORE the tool block ever opens
+      "content_block_start", // tool_use (index 1) opens
       "content_block_delta", "content_block_delta", // arg deltas
-      "content_block_stop", "content_block_stop", // close text (index 0) then tool (index 1)
+      "content_block_stop", // tool_use (index 1) closes, at stream end
       "message_delta", "message_stop",
     ]);
     expect(events[0].data).toEqual({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
-    expect(events[2].data).toEqual({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "call_1", name: "get_weather", input: {} } });
-    expect(events[3].data).toEqual({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"city":' } });
-    expect(events[4].data).toEqual({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '"nyc"}' } });
-    expect(events[5].data).toEqual({ type: "content_block_stop", index: 0 });
+    expect(events[1].data).toEqual({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok, " } });
+    expect(events[2].data).toEqual({ type: "content_block_stop", index: 0 });
+    expect(events[3].data).toEqual({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "call_1", name: "get_weather", input: {} } });
+    expect(events[4].data).toEqual({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"city":' } });
+    expect(events[5].data).toEqual({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '"nyc"}' } });
     expect(events[6].data).toEqual({ type: "content_block_stop", index: 1 });
     expect(events[7].data).toMatchObject({ type: "message_delta", delta: { stop_reason: "tool_use" } });
   });

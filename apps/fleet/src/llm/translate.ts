@@ -265,23 +265,55 @@ export interface StreamState {
   /** Index of the next NEW content block this stream will open. */
   nextIndex: number;
   /** Anthropic content-block index currently holding the running text block,
-   *  or null if no text delta has arrived yet. */
+   *  or null if no text block is open right now (either none has arrived
+   *  yet, or the one that did has already been closed — see `openKind`). */
   textIndex: number | null;
   /** OpenAI `tool_calls[].index` -> the Anthropic content-block index opened
    *  for it. A GLM tool call can stream its name/id on the first delta and
    *  its arguments across many more; this is what lets every later delta for
    *  the same call find its already-open block. */
   toolIndexByOpenAiIndex: Map<number, number>;
-  /** Every content-block index opened so far, in open order — closeStream
-   *  emits `content_block_stop` in this same order (text and tool blocks
-   *  interleave however the model actually opened them). */
-  openedInOrder: number[];
+  /** The content-block index Anthropic's real contract considers open right
+   *  now (a `content_block_start` already sent, no `content_block_stop`
+   *  yet) — at most one, ever. `null` when nothing is open. See
+   *  `closeOpenBlock`'s own doc comment for why this is tracked explicitly
+   *  rather than deferring every close to the end of the stream. */
+  openIndex: number | null;
+  /** What's open at `openIndex`: `"text"`, or the OpenAI `tool_calls[].index`
+   *  of the tool call being streamed there. Only used to tell whether an
+   *  incoming delta continues the open block (same kind) or must close it
+   *  first (a different kind, or none open yet). */
+  openKind: "text" | number | null;
   finishReason: unknown;
   outputTokens: number;
 }
 
 export function createStreamState(): StreamState {
-  return { nextIndex: 0, textIndex: null, toolIndexByOpenAiIndex: new Map(), openedInOrder: [], finishReason: null, outputTokens: 0 };
+  return {
+    nextIndex: 0, textIndex: null, toolIndexByOpenAiIndex: new Map(),
+    openIndex: null, openKind: null, finishReason: null, outputTokens: 0,
+  };
+}
+
+/** Closes whatever content block is currently open (if any) — the one place
+ *  this file emits `content_block_stop` from. Called right before a new
+ *  block is about to open, so block N's `content_block_stop` always lands
+ *  before block N+1's `content_block_start`, matching Anthropic's real,
+ *  strictly-sequential SSE contract (never two blocks open at once) rather
+ *  than batching every close to the end of the whole stream (the shape this
+ *  function replaced — see this function's own call sites below for why a
+ *  plain OpenAI-chat-completions delta stream gives an unambiguous, early
+ *  enough signal to do this correctly: a provider never interleaves two
+ *  logical units' deltas — content accumulates as one contiguous run, then
+ *  tool_calls begin and stream to completion one index at a time — so the
+ *  first delta that belongs to a NEW block is exactly the signal that the
+ *  previous one is done). */
+function closeOpenBlock(state: StreamState, events: string[]): void {
+  if (state.openIndex === null) return;
+  events.push(sseEvent("content_block_stop", { type: "content_block_stop", index: state.openIndex }));
+  if (state.openKind === "text") state.textIndex = null;
+  state.openIndex = null;
+  state.openKind = null;
 }
 
 /** The one-time `message_start` event. Always first, before any chunk is
@@ -308,25 +340,49 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
   if (choice.finish_reason !== undefined && choice.finish_reason !== null) state.finishReason = choice.finish_reason;
 
   if (typeof delta.content === "string" && delta.content.length > 0) {
-    if (state.textIndex === null) {
+    if (state.openKind !== "text") {
+      // Either nothing is open yet, or a tool call's block is — close it
+      // (a no-op if nothing is open) before this text run opens its own.
+      closeOpenBlock(state, events);
       state.textIndex = state.nextIndex++;
-      state.openedInOrder.push(state.textIndex);
+      state.openIndex = state.textIndex;
+      state.openKind = "text";
       events.push(sseEvent("content_block_start", { type: "content_block_start", index: state.textIndex, content_block: { type: "text", text: "" } }));
     }
-    events.push(sseEvent("content_block_delta", { type: "content_block_delta", index: state.textIndex, delta: { type: "text_delta", text: delta.content } }));
+    events.push(sseEvent("content_block_delta", { type: "content_block_delta", index: state.textIndex!, delta: { type: "text_delta", text: delta.content } }));
   }
 
   for (const tc of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
     const openAiIndex = tc.index ?? 0;
     let anthropicIndex = state.toolIndexByOpenAiIndex.get(openAiIndex);
     if (anthropicIndex === undefined) {
+      // A genuinely new tool call — close whatever is open first (the
+      // running text block, or a previous tool call's block that finished
+      // streaming its arguments), same sequential rule as the text branch.
+      closeOpenBlock(state, events);
       anthropicIndex = state.nextIndex++;
       state.toolIndexByOpenAiIndex.set(openAiIndex, anthropicIndex);
-      state.openedInOrder.push(anthropicIndex);
+      state.openIndex = anthropicIndex;
+      state.openKind = openAiIndex;
       events.push(sseEvent("content_block_start", {
         type: "content_block_start", index: anthropicIndex,
         content_block: { type: "tool_use", id: tc.id, name: tc.function?.name, input: {} },
       }));
+    } else if (state.openKind !== openAiIndex) {
+      // A delta for an openAiIndex this stream has already seen (and
+      // therefore already has a permanent anthropicIndex for), arriving
+      // while a DIFFERENT block is open. Real OpenAI-compatible tool-calling
+      // streams never actually do this — each tool call streams its
+      // arguments to completion, in order, before the next one starts — so
+      // this is defensive rather than an observed/tested shape: it reuses
+      // the same anthropicIndex without re-emitting `content_block_start`,
+      // which would be wrong if this tool's block had already been closed
+      // by a later block opening in between. Flagged here rather than
+      // silently assumed correct, same spirit as mapFinishReason's
+      // content_filter case and message_delta's usage shape below.
+      closeOpenBlock(state, events);
+      state.openIndex = anthropicIndex;
+      state.openKind = openAiIndex;
     }
     const argsDelta = tc.function?.arguments;
     if (typeof argsDelta === "string" && argsDelta.length > 0) {
@@ -337,18 +393,19 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
   return events;
 }
 
-/** Closes every open content block (in the order they were opened), then
- *  emits `message_delta` (stop_reason + usage) and `message_stop` once.
- *  Anthropic's documented `message_delta.usage` shape carries only
- *  `output_tokens` (input doesn't change mid-stream) — not fully certain
- *  this backend's own wire format matches that exactly, so this is the one
- *  field in this file flagged as "best effort against the documented
- *  contract", same spirit as mapFinishReason's content_filter case above. */
+/** Closes whichever content block is still open at end of stream (there is
+ *  at most one — every earlier block was already closed, sequentially, by
+ *  `closeOpenBlock` the moment the next one opened; see that function's own
+ *  doc comment), then emits `message_delta` (stop_reason + usage) and
+ *  `message_stop` once. Anthropic's documented `message_delta.usage` shape
+ *  carries only `output_tokens` (input doesn't change mid-stream) — not
+ *  fully certain this backend's own wire format matches that exactly, so
+ *  this is the one field in this file flagged as "best effort against the
+ *  documented contract", same spirit as mapFinishReason's content_filter
+ *  case above. */
 export function closeStream(state: StreamState): string[] {
   const events: string[] = [];
-  for (const index of state.openedInOrder) {
-    events.push(sseEvent("content_block_stop", { type: "content_block_stop", index }));
-  }
+  closeOpenBlock(state, events);
   events.push(sseEvent("message_delta", {
     type: "message_delta",
     delta: { stop_reason: mapFinishReason(state.finishReason), stop_sequence: null },
