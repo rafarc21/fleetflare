@@ -9,7 +9,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import { handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH, ANTHROPIC_BODY_CAP } from "../src/llm/anthropic-route";
-import { GLM_LEAD_MODEL } from "../src/llm/translate";
+import { GLM_LEAD_MODEL, GLM_MIN_MAX_TOKENS } from "../src/llm/translate";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -222,7 +222,7 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     const { token, rows, e, run } = await setup();
     const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(r.status).toBe(200);
-    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: 100 });
+    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS });
     const body = await r.json();
     expect(body).toMatchObject({ type: "message", role: "assistant", model: good.model, content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 3, output_tokens: 2 } });
   });
@@ -247,7 +247,7 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
         { role: "assistant", content: null, tool_calls: [{ id: "toolu_1", type: "function", function: { name: "get_weather", arguments: '{"city":"nyc"}' } }] },
         { role: "tool", tool_call_id: "toolu_1", content: "sunny" },
       ],
-      max_tokens: 100,
+      max_tokens: GLM_MIN_MAX_TOKENS,
     });
     const replyBody = (await r.json()) as { content: unknown };
     expect(replyBody.content).toEqual([{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "nyc" } }]);
