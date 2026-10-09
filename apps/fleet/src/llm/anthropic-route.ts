@@ -19,7 +19,7 @@ import { readCappedBody } from "../http/capped-body";
 import { isSpawnTokenShaped, resolveSpawnParent, type SpawnParent } from "../studio/spawn";
 import { listStudios } from "../studio/registry";
 import type { StudioStatus } from "../studio/types";
-import { checkAndConsumeJuniorRateLimit } from "../junior/ratelimit";
+import { checkAndConsumeLeadRateLimit } from "./ratelimit";
 import { insertJuniorUsage } from "../junior/usage";
 import {
   GLM_LEAD_MODEL, anthropicRequestToOpenAI, openAIResponseToAnthropic, classifyAiError,
@@ -202,11 +202,17 @@ export async function handleFleetAnthropicMessages(
 
   // F1 (junior/route.ts's own naming): only an authorized, flag-enabled,
   // correctly-led call consumes rate budget — checked after every refusal
-  // above, before any body work or the AI call itself. Reuses junior's own
-  // D1-backed per-minute/daily counters (ratelimit.ts) keyed by studio id —
-  // the SAME caps a junior delegation call already spends against, since
-  // both routes spend out of the same Workers AI budget.
-  const rate = await checkAndConsumeJuniorRateLimit(env.DB, env, studio.id, Date.now());
+  // above, before any body work or the AI call itself.
+  //
+  // Board issue #284, MAJOR 1: this used to reuse junior's own 5/min, 50/day
+  // D1 counters directly — sized for occasional delegation calls, not a
+  // full Claude Code agentic session making many Messages-API round trips
+  // per minute, so a glm-lead studio got 429'd into uselessness almost
+  // immediately. This route now has its OWN D1-backed per-minute/daily
+  // counters (llm/ratelimit.ts), keyed by studio id but under distinct key
+  // prefixes — genuinely separate budget from junior's, even though both
+  // routes still spend out of the same underlying Workers AI quota.
+  const rate = await checkAndConsumeLeadRateLimit(env.DB, env, studio.id, Date.now());
   if (!rate.ok) {
     return text(
       rate.limit === "per-minute"
