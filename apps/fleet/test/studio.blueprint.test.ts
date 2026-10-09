@@ -55,6 +55,7 @@ describe("parseRoleFile", () => {
       reports_to: "operator",
       gates: [],
       keep_alive: true,
+      mcp: [],
       prompt: "You are pilot. Work carefully. Small commits.",
     });
   });
@@ -451,6 +452,32 @@ describe("roleBringupEnv — ROLE_EFFORT (Fleet CTO effort default, operator dir
   });
 });
 
+// Issue #276: roles honor `mcp:` the same way studios do. Optional on a role
+// (absent -> []), same "[] or [a, b]" syntax, carried to bring-up as ROLE_MCP.
+describe("optional role field: mcp (issue #276)", () => {
+  it("mcp absent -> [] and ROLE_MCP is empty", () => {
+    const role = parseRoleFile(VALID_ROLE_MD);
+    expect(role.mcp).toEqual([]);
+    expect(roleBringupEnv(role).ROLE_MCP).toBe("");
+  });
+
+  it("mcp: [playwright] -> parsed, and ROLE_MCP carries it comma-joined like STUDIO_MCP", () => {
+    const role = parseRoleFile(VALID_ROLE_MD.replace("gates: []", "gates: []\nmcp: [playwright, other]"));
+    expect(role.mcp).toEqual(["playwright", "other"]);
+    expect(roleBringupEnv(role).ROLE_MCP).toBe("playwright,other");
+  });
+
+  it("malformed mcp -> BlueprintError naming the field", () => {
+    expect(() => parseRoleFile(VALID_ROLE_MD.replace("gates: []", "gates: []\nmcp: playwright")))
+      .toThrow(expect.objectContaining({ field: "mcp" }));
+  });
+
+  it("the real pilot.md and scratch.md declare the playwright MCP", () => {
+    expect(parseRoleFile(env.TEST_PILOT_ROLE_MD).mcp).toEqual(["playwright"]);
+    expect(parseRoleFile(env.TEST_SCRATCH_ROLE_MD).mcp).toEqual(["playwright"]);
+  });
+});
+
 // Proves the ACTUAL files this task ships (repo root fleet.json,
 // fleet/blueprint/roles/pilot.md, fleet/blueprint/org.json) are valid
 // against this same parser — not just the synthetic fixtures above.
@@ -602,7 +629,7 @@ describe("appendBrief / roleBringupEnv — brief injection (P4a-2)", () => {
     expect(decoded.startsWith("You are scratch.")).toBe(true);
     expect(decoded).toContain("## Your task — board issue #71");
     expect(Object.keys(roleBringupEnv(ROLE, "x")))
-      .toEqual(["ROLE_PROMPT_B64", "ROLE_ALLOWED_TOOLS", "ROLE_EFFORT"]);
+      .toEqual(["ROLE_PROMPT_B64", "ROLE_ALLOWED_TOOLS", "ROLE_EFFORT", "ROLE_MCP"]);
   });
 
   it("a multi-byte brief round-trips losslessly, same as the prompt itself", () => {

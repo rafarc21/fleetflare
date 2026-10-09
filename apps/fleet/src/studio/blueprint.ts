@@ -80,6 +80,12 @@ export interface Role {
    *  `boolean | undefined` — same reasoning as may_spawn's own `string[]`
    *  (never `string[] | undefined`) below. */
   keep_alive: boolean;
+  /** Issue #276: MCP server names, same meaning and syntax as a studio's
+   *  `mcp:` (studio-blueprint.ts) — carried to bring-up as ROLE_MCP, resolved
+   *  against studio-bringup.sh's known-server map. Optional, default `[]`.
+   *  Optional on the TYPE only so hand-built Role literals need not spell it
+   *  out; parseRoleFile always sets it. */
+  mcp?: string[];
   /** The role file's body (everything after the closing `---`), trimmed —
    *  this IS the Claude Code system prompt handed to `--append-system-prompt`
    *  (via roleBringupEnv below). Never empty — see parseRoleFile's own
@@ -254,6 +260,8 @@ export function parseRoleFile(md: string): Role {
     effort: fields.effort,
     // Optional, default true — see Role's own doc comment.
     keep_alive: fields.keep_alive !== undefined ? parseBoolean(fields.keep_alive, "keep_alive") : true,
+    // Issue #276: optional, default [] — same absent/present split as may_spawn.
+    mcp: fields.mcp !== undefined ? parseSimpleArray(fields.mcp, "mcp") : [],
     prompt,
   };
 }
@@ -746,12 +754,14 @@ export function appendHouseRules(prompt: string, operatorHouseRules?: string | n
 
 export function roleBringupEnv(
   role: Role, briefPrompt?: string, memoryIndex?: string | null, operatorHouseRules?: string | null,
-): { ROLE_PROMPT_B64: string; ROLE_ALLOWED_TOOLS: string; ROLE_EFFORT: string } {
+): { ROLE_PROMPT_B64: string; ROLE_ALLOWED_TOOLS: string; ROLE_EFFORT: string; ROLE_MCP: string } {
   return {
     ROLE_PROMPT_B64: base64EncodeUtf8(
       appendBrief(appendMemoryIndex(appendHouseRules(role.prompt, operatorHouseRules), memoryIndex), briefPrompt),
     ),
     ROLE_ALLOWED_TOOLS: role.allowedTools,
     ROLE_EFFORT: role.effort ?? (role.name === "cto" ? "max" : ""),
+    // Issue #276: same comma-joined shape as studioBringupEnv's STUDIO_MCP.
+    ROLE_MCP: (role.mcp ?? []).join(","),
   };
 }

@@ -2860,21 +2860,24 @@ describe("container/studio-bringup.sh — the gates' `cp` blocks warn and contin
   });
 });
 
-describe("container/studio-bringup.sh — .mcp.json lands in claude's own cwd (fix wave, Important #3)", () => {
+// Issue #276 superseded fix wave Important #3: the pane-cwd .mcp.json was
+// still invisible once claude_launch_line cd'd claude into the checkout.
+// Behavior is exercised in test/bun/bringup-mcp-config.test.ts; these pins
+// keep the dead mechanism from coming back.
+describe("container/studio-bringup.sh — MCP config reaches claude via --mcp-config (issue #276)", () => {
   const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
-  it("asks tmux for the claude pane's real cwd instead of hardcoding /workspace", () => {
-    expect(src()).toContain(`mcp_dir="$(tmux display-message -p -t studio:claude '#{pane_current_path}' 2>/dev/null || true)"`);
-    expect(src()).toContain('MCP_PATH="$mcp_dir/.mcp.json" python3 -c');
-    expect(src()).toContain('with open(os.environ["MCP_PATH"], "w") as f:');
-  });
-
-  it("no longer writes the dead /workspace/.mcp.json", () => {
+  it("writes no project .mcp.json anywhere — claude reads one only from its own cwd", () => {
+    expect(src()).not.toContain("/.mcp.json\"");
     expect(src()).not.toContain("/workspace/.mcp.json");
   });
 
-  it("approves the project's own MCP servers — nothing in a headless pane answers the approval prompt", () => {
-    expect(src()).toContain('cfg["enableAllProjectMcpServers"] = True');
+  it("hands claude the one config file at launch", () => {
+    expect(src()).toContain('claude_args+=(--mcp-config "${FLEET_MCP_CONFIG:-$HOME/.claude/fleet-mcp.json}")');
+  });
+
+  it("feeds the writer from studios AND roles", () => {
+    expect(src()).toContain('"${STUDIO_MCP:-${ROLE_MCP:-}}"');
   });
 });
 

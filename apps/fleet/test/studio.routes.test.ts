@@ -3144,7 +3144,7 @@ describe("provision — {task} brief injection", () => {
     expect(prompt.startsWith(FAKE_ROLE_PROMPT)).toBe(true);
     expect(prompt).toContain(BRIEF);
     expect(Object.keys(bringupEnvCalls[0] ?? {}))
-      .toEqual(["ROLE_PROMPT_B64", "ROLE_ALLOWED_TOOLS", "ROLE_EFFORT"]);
+      .toEqual(["ROLE_PROMPT_B64", "ROLE_ALLOWED_TOOLS", "ROLE_EFFORT", "ROLE_MCP"]);
   });
 
   it("a bodyless provision reads no board and leaves the prompt untouched", async () => {

@@ -235,11 +235,12 @@ You are the Maestro. Solo. No members, nothing to dispatch.
     expect(status.state).toBe("running");
     const stored = await storage.get(ROLE_ENV_KEY);
     // Exactly the pre-Task-7 triple — no STUDIO_* key leaked in, nothing missing.
-    expect(Object.keys(stored ?? {}).sort()).toEqual(["ROLE_ALLOWED_TOOLS", "ROLE_EFFORT", "ROLE_PROMPT_B64"]);
+    expect(Object.keys(stored ?? {}).sort()).toEqual(["ROLE_ALLOWED_TOOLS", "ROLE_EFFORT", "ROLE_MCP", "ROLE_PROMPT_B64"]);
     expect(stored).toEqual({
       ROLE_PROMPT_B64: base64EncodeUtf8(appendHouseRules(FAKE_ROLE_PROMPT)),
       ROLE_ALLOWED_TOOLS: "Bash(git *) Bash(gh *) Bash(bun *) Bash(fleet *) Edit Write",
       ROLE_EFFORT: "",
+      ROLE_MCP: "",
     });
   });
 
@@ -347,7 +348,7 @@ describe("resolveBringupEnv — throws directly on a member validation failure (
     };
 
     const { bringupEnv } = await resolveBringupEnv(deps, { repo: "websites", role: "scratch" }, REPO_SLUG, REPO_SLUG);
-    expect(Object.keys(bringupEnv).sort()).toEqual(["ROLE_ALLOWED_TOOLS", "ROLE_EFFORT", "ROLE_PROMPT_B64"]);
+    expect(Object.keys(bringupEnv).sort()).toEqual(["ROLE_ALLOWED_TOOLS", "ROLE_EFFORT", "ROLE_MCP", "ROLE_PROMPT_B64"]);
   });
 });
 
@@ -418,6 +419,7 @@ describe("resolveBringupEnv — adopted-task brief delivery via deps.resolveAssi
       ROLE_PROMPT_B64: base64EncodeUtf8(appendHouseRules(FAKE_ROLE_PROMPT)),
       ROLE_ALLOWED_TOOLS: "Bash(git *) Bash(gh *) Bash(bun *) Bash(fleet *) Edit Write",
       ROLE_EFFORT: "",
+      ROLE_MCP: "",
     });
   });
 
