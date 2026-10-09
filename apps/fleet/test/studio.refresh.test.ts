@@ -3,6 +3,7 @@ import { env } from "cloudflare:test";
 import {
   runRefreshCredential, runRefreshToken, refreshWithStorage,
   credentialWriteCmd, credentialClearCmd, tokenEnv, FLEET_TOKEN_ENV, REFRESH_SECONDS, studioEnvVars, readTailscaleHost, type RefreshDeps,
+  refreshCredentialExec, gitIdentityCmd, gitIdentityEnv, STUDIO_GIT_IDENTITY,
   ensureSpawnToken, loadOrMintSpawnToken, SPAWN_TOKEN_KEY, type SpawnTokenStorage,
 } from "../src/studio/do";
 import { hashSpawnToken } from "../src/studio/org";
@@ -194,7 +195,28 @@ describe("runRefreshCredential", () => {
     expect(result).toEqual({ ok: true, lastRefresh: NOW_ISO });
     expect(calls).toHaveLength(1);
     expect(calls[0]).not.toContain("ghs_capturedtoken");
-    expect(deps.sbExec).toHaveBeenCalledWith(credentialWriteCmd(), tokenEnv("ghs_capturedtoken"));
+    const exec = refreshCredentialExec("ghs_capturedtoken", STUDIO_GIT_IDENTITY);
+    expect(deps.sbExec).toHaveBeenCalledWith(exec.cmd, exec.env);
+  });
+
+  // Issue #283: every credential write (provision + each refresh, so every
+  // incarnation) also pins the studio's git identity — the image and
+  // bring-up set none, so agents used to improvise one, sometimes the
+  // operator's private App bot.
+  it("sets the studio git identity in the same exec, identity riding env like the token", async () => {
+    const deps = fakeRefreshDeps({ mintToken: vi.fn(async () => "ghs_capturedtoken") });
+    expect((await runRefreshCredential(deps)).ok).toBe(true);
+    expect(deps.sbExec).toHaveBeenCalledWith(
+      `${gitIdentityCmd()} && ${credentialWriteCmd()}`,
+      { ...gitIdentityEnv(STUDIO_GIT_IDENTITY), ...tokenEnv("ghs_capturedtoken") },
+    );
+  });
+
+  it("uses the operator-configured identity when deps carry one", async () => {
+    const id = { name: "acme-dev", email: "dev@acme.example" };
+    const deps = fakeRefreshDeps({ gitIdentity: id, mintToken: vi.fn(async () => null) });
+    expect((await runRefreshCredential(deps)).ok).toBe(true);
+    expect(deps.sbExec).toHaveBeenCalledWith(`${gitIdentityCmd()} && ${credentialClearCmd()}`, gitIdentityEnv(id));
   });
 
   // Issue #7: proxy mode with no read token. The write credential must not
@@ -203,7 +225,8 @@ describe("runRefreshCredential", () => {
     const deps = fakeRefreshDeps({ mintToken: vi.fn(async () => null) });
     const result = await runRefreshCredential(deps);
     expect(result).toEqual({ ok: true, lastRefresh: NOW_ISO });
-    expect(deps.sbExec).toHaveBeenCalledWith(credentialClearCmd());
+    const exec = refreshCredentialExec(null, STUDIO_GIT_IDENTITY);
+    expect(deps.sbExec).toHaveBeenCalledWith(exec.cmd, exec.env);
   });
 
   // #13 review, HIGH: the credential refresh (every 50 min) must never leave
@@ -221,7 +244,7 @@ describe("runRefreshCredential", () => {
         sbExec: vi.fn(async (cmd: string) => { calls.push(cmd); return { code: 0, stdout: "", stderr: "" }; }),
       });
       expect((await runRefreshCredential(deps)).ok).toBe(true);
-      expect(calls).toEqual([writeProxyConfigCmd("proxy", URL), credentialWriteCmd()]);
+      expect(calls).toEqual([writeProxyConfigCmd("proxy", URL), refreshCredentialExec("ghs_read", STUDIO_GIT_IDENTITY).cmd]);
       expect(deps.mintToken).toHaveBeenCalledWith("proxy");
     });
 
@@ -248,7 +271,7 @@ describe("runRefreshCredential", () => {
         sbExec: vi.fn(async (cmd: string) => { calls.push(cmd); return { code: 0, stdout: "", stderr: "" }; }),
       });
       expect((await runRefreshCredential(deps)).ok).toBe(true);
-      expect(calls).toEqual([writeProxyConfigCmd("direct", URL), credentialWriteCmd()]);
+      expect(calls).toEqual([writeProxyConfigCmd("direct", URL), refreshCredentialExec("ghs_freshtoken000", STUDIO_GIT_IDENTITY).cmd]);
       expect(deps.mintToken).toHaveBeenCalledWith("direct");
     });
   });
@@ -554,7 +577,7 @@ describe("refreshWithStorage", () => {
 
     // #110 review: the token reaches the container in the exec's env only.
     expect(capturedCmds[0]).not.toContain("ghs_realregistrytoken");
-    expect(capturedEnvs[0]).toEqual(tokenEnv("ghs_realregistrytoken"));
+    expect(capturedEnvs[0]).toEqual(refreshCredentialExec("ghs_realregistrytoken", STUDIO_GIT_IDENTITY).env);
 
     const row = await env.DB
       .prepare(`SELECT value FROM fleet_state WHERE key = ?`)
@@ -654,7 +677,8 @@ describe("provision + credential (do.ts's real provision() shape)", () => {
     expect(calls).toHaveLength(7);
     // #110 review: the token rides the exec's env, never the command.
     expect(calls[0]).not.toContain("ghs_provisiontoken999");
-    expect(sbExecFake.mock.calls[0]).toEqual([credentialWriteCmd(), tokenEnv("ghs_provisiontoken999")]);
+    const exec = refreshCredentialExec("ghs_provisiontoken999", STUDIO_GIT_IDENTITY);
+    expect(sbExecFake.mock.calls[0]).toEqual([exec.cmd, exec.env]);
     expect(calls[0]).toContain("/workspace/.git-credentials");
     expect(calls[0]).toContain("store --file=/workspace/.git-credentials"); // C1
     expect(calls[1]).toContain(".ts-host"); // Task 6: readTailscaleHost, its own separate exec
@@ -910,22 +934,19 @@ describe("studioEnvVars", () => {
       STUDIO_ID: STUDIO_ID,
       FLEET_SPAWN_TOKEN: SPAWN_TOKEN,
       FLEET_WORKER_URL: "https://example-org.demosite.workers.dev",
-      // Issue #335: absent env.FLEET_BOT_NAME/_EMAIL becomes "" here (same
-      // "empty and unset identically" shape as TS_AUTHKEY above) — the
-      // container-side fallback to the neutral default is server.ts's own
-      // job, not this function's.
-      FLEET_BOT_NAME: "",
-      FLEET_BOT_EMAIL: "",
     });
   });
 
-  it("threads FLEET_BOT_NAME/_EMAIL through when set, issue #335", () => {
-    const vars = studioEnvVars(
-      { ...base, FLEET_BOT_NAME: "acme-bot[bot]", FLEET_BOT_EMAIL: "acme-bot[bot]@users.noreply.github.com" } as Env,
-      STUDIO_ID, SPAWN_TOKEN,
-    );
-    expect(vars.FLEET_BOT_NAME).toBe("acme-bot[bot]");
-    expect(vars.FLEET_BOT_EMAIL).toBe("acme-bot[bot]@users.noreply.github.com");
+  // Issue #283: the App bot identity is operator-private. Handed to a studio's
+  // env, an agent with no git identity adopted it and every public push was
+  // leak-refused. The studio's identity is set by the credential write instead.
+  it("never hands the App bot identity to a studio, claude- or glm-led", () => {
+    const withBot = { ...base, FLEET_BOT_NAME: "acme-bot[bot]", FLEET_BOT_EMAIL: "acme-bot[bot]@users.noreply.github.com" } as Env;
+    for (const vars of [studioEnvVars(withBot, STUDIO_ID, SPAWN_TOKEN), studioEnvVars(withBot, STUDIO_ID, SPAWN_TOKEN, null, "glm")]) {
+      expect(vars).not.toHaveProperty("FLEET_BOT_NAME");
+      expect(vars).not.toHaveProperty("FLEET_BOT_EMAIL");
+      expect(JSON.stringify(vars)).not.toContain("acme-bot");
+    }
   });
 
   it("an unset TS_AUTHKEY becomes an empty string, which the bring-up guard reads as absent", () => {
@@ -989,7 +1010,7 @@ describe("studioEnvVars", () => {
       expect(vars.ANTHROPIC_BASE_URL).toBe("https://example-org.demosite.workers.dev/fleet/llm/anthropic");
     });
 
-    it("every other env var (tailscale, studio id, fleet spawn token/bot identity) is unaffected", () => {
+    it("every other env var (tailscale, studio id, fleet spawn token) is unaffected", () => {
       const vars = studioEnvVars(base, STUDIO_ID, SPAWN_TOKEN, null, "glm");
       expect(vars.TS_AUTHKEY).toBe("tskey-auth-kEXAMPLE-realish");
       expect(vars.STUDIO_ID).toBe(STUDIO_ID);

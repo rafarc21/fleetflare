@@ -109,14 +109,22 @@ export interface Env {
   /** Issue #271, optional: auto-failover runs only when this is exactly "on". */
   FLEET_AUTO_FAILOVER?: string;
   /**
-   * Issue #335 (public-release scrub): the git identity a rescue commit
-   * (rescue.ts's rescuePushCmd/rescueSnapshotCmd) is authored as. Absent
-   * means their own neutral default ("fleetflare[bot]"/matching noreply
-   * email) — config, not code, so the real operator's own bot identity
-   * never has to ship in this repo's public source.
+   * Issue #335 (public-release scrub): the TASK container's git identity
+   * (container/server.ts). Usually the operator's App bot (`<slug>[bot]`) —
+   * private, on the leak denylist. Issue #283: never reaches a studio, and
+   * never becomes a studio's identity (see FLEET_STUDIO_GIT_NAME).
    */
   FLEET_BOT_NAME?: string;
   FLEET_BOT_EMAIL?: string;
+  /**
+   * Issue #283, optional, NOT a secret: the git identity every studio (and its
+   * rescue commits) is authored as, set by the Worker on each credential
+   * write. Both or neither; a `[bot]` value or one equal to FLEET_BOT_* is
+   * ignored. Absent = `fleet-studio <fleet-studio@users.noreply.github.com>`.
+   * See credentials.ts's studioGitIdentity.
+   */
+  FLEET_STUDIO_GIT_NAME?: string;
+  FLEET_STUDIO_GIT_EMAIL?: string;
   /**
    * Issue #1 piece 5, optional, NOT a secret: `owner/name` of a PRIVATE repo
    * rescue pushes (rescue.ts) go to instead of `origin`, only for studios
