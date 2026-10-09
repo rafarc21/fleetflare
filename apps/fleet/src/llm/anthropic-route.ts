@@ -179,6 +179,66 @@ async function pumpAnthropicStream(
   return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: closed.ok };
 }
 
+/** Shared gate both `/fleet/llm/anthropic/v1/messages` handlers in this file
+ *  enforce before either one's OWN logic runs — extracted here (board issue
+ *  #284 review follow-up) after `handleFleetAnthropicMessages` and
+ *  `handleFleetAnthropicCountTokens` were found to duplicate this ~20-line
+ *  block verbatim, down to the error strings: path check, the
+ *  `FLEET_JUNIOR`/`env.AI` feature flag, method check, declared-Content-
+ *  Length cap, spawn-token extraction/validation
+ *  (`extractPresentedToken`/`isSpawnTokenShaped`/`resolveSpawnParent`), and
+ *  the `leadType === "glm"` gate. See `handleFleetAnthropicMessages`'s own
+ *  (now-removed) inline comments for why each individual check exists —
+ *  this function only collects them into one place so both routes keep
+ *  enforcing the exact same thing. The per-minute/daily rate limit is
+ *  deliberately NOT part of this shared gate: `handleFleetAnthropicMessages`
+ *  applies it (it spends Workers AI budget), `handleFleetAnthropicCountTokens`
+ *  does not (see that function's own doc comment for why).
+ *
+ *  Returns either an early refusal `Response` (any one of the checks above
+ *  failing) or the resolved `studio`/`allRows` the caller needs to proceed —
+ *  a caller only has work left to do once it gets the latter back.
+ */
+async function authenticateGlmLeadRequest(
+  req: Request, expectedPath: string, env: Env, rows: () => Promise<StudioStatus[]>,
+): Promise<{ response: Response } | { studio: SpawnParent; allRows: StudioStatus[] }> {
+  if (new URL(req.url).pathname !== expectedPath) return { response: text("not found", 404) };
+  // MAJOR 2: reuses junior's OWN feature flag (same env.FLEET_JUNIOR !== "on"
+  // check junior/route.ts:101 already applies) rather than inventing a
+  // second, parallel on/off switch for a second Workers-AI-spending route —
+  // one flag, one place an operator has to remember to flip.
+  if (env.FLEET_JUNIOR !== "on" || !env.AI) return { response: text("not found", 404) };
+  if (req.method !== "POST") return { response: text("method not allowed", 405) };
+
+  // Cheapest possible refusal first, same order /fleet/junior already
+  // applies (PR #9 review, F3): a declared Content-Length over the cap needs
+  // no token check and no byte of the body ever read.
+  const declaredLength = req.headers.get("content-length");
+  if (declaredLength !== null) {
+    const declared = Number(declaredLength);
+    if (Number.isFinite(declared) && declared > ANTHROPIC_BODY_CAP) return { response: text("payload too large", 413) };
+  }
+
+  const presented = extractPresentedToken(req);
+  if (!isSpawnTokenShaped(presented)) return { response: text("unauthorized", 401) };
+  const allRows = await rows();
+  const studio: SpawnParent | null = await resolveSpawnParent(allRows, presented);
+  if (!studio) return { response: text("unauthorized", 401) };
+  // MAJOR 2 (BLOCKER-adjacent): spawn-token validity alone used to be the
+  // entire gate — ANY studio's token, any leadType, could spend Workers AI
+  // budget here with zero spend controls. `SpawnParent` (spawn.ts) carries
+  // no `leadType` (it is a registry-row field, not part of the parent-
+  // resolution shape every OTHER route needs), so the full `StudioStatus`
+  // row is looked up here, by the same id resolveSpawnParent just verified
+  // owns this token — the one field this route actually needs that
+  // `SpawnParent` does not carry.
+  const studioRow = allRows.find((r) => r.id === studio.id);
+  if (studioRow?.leadType !== "glm") {
+    return { response: text("this route serves glm-led studios only", 403) };
+  }
+  return { studio, allRows };
+}
+
 // MAJOR 2 (maestro review round 1): this route's own usage-log `mode` value
 // — junior_usage_log's `mode` column otherwise only ever carries "edit"/
 // "text" (junior/route.ts's JUNIOR_MODES), neither of which describes a lead
@@ -208,40 +268,9 @@ export async function handleFleetAnthropicMessages(
   req: Request, env: Env, ctx: ExecutionContext,
   rows: () => Promise<StudioStatus[]> = () => listStudios(env),
 ): Promise<Response> {
-  if (new URL(req.url).pathname !== ANTHROPIC_MESSAGES_PATH) return text("not found", 404);
-  // MAJOR 2: reuses junior's OWN feature flag (same env.FLEET_JUNIOR !== "on"
-  // check junior/route.ts:101 already applies) rather than inventing a
-  // second, parallel on/off switch for a second Workers-AI-spending route —
-  // one flag, one place an operator has to remember to flip.
-  if (env.FLEET_JUNIOR !== "on" || !env.AI) return text("not found", 404);
-  if (req.method !== "POST") return text("method not allowed", 405);
-
-  // Cheapest possible refusal first, same order /fleet/junior already
-  // applies (PR #9 review, F3): a declared Content-Length over the cap needs
-  // no token check and no byte of the body ever read.
-  const declaredLength = req.headers.get("content-length");
-  if (declaredLength !== null) {
-    const declared = Number(declaredLength);
-    if (Number.isFinite(declared) && declared > ANTHROPIC_BODY_CAP) return text("payload too large", 413);
-  }
-
-  const presented = extractPresentedToken(req);
-  if (!isSpawnTokenShaped(presented)) return text("unauthorized", 401);
-  const allRows = await rows();
-  const studio: SpawnParent | null = await resolveSpawnParent(allRows, presented);
-  if (!studio) return text("unauthorized", 401);
-  // MAJOR 2 (BLOCKER-adjacent): spawn-token validity alone used to be the
-  // entire gate — ANY studio's token, any leadType, could spend Workers AI
-  // budget here with zero spend controls. `SpawnParent` (spawn.ts) carries
-  // no `leadType` (it is a registry-row field, not part of the parent-
-  // resolution shape every OTHER route needs), so the full `StudioStatus`
-  // row is looked up here, by the same id resolveSpawnParent just verified
-  // owns this token — the one field this route actually needs that
-  // `SpawnParent` does not carry.
-  const studioRow = allRows.find((r) => r.id === studio.id);
-  if (studioRow?.leadType !== "glm") {
-    return text("this route serves glm-led studios only", 403);
-  }
+  const gate = await authenticateGlmLeadRequest(req, ANTHROPIC_MESSAGES_PATH, env, rows);
+  if ("response" in gate) return gate.response;
+  const { studio } = gate;
 
   // F1 (junior/route.ts's own naming): only an authorized, flag-enabled,
   // correctly-led call consumes rate budget — checked after every refusal
@@ -382,25 +411,8 @@ export async function handleFleetAnthropicCountTokens(
   req: Request, env: Env, ctx: ExecutionContext,
   rows: () => Promise<StudioStatus[]> = () => listStudios(env),
 ): Promise<Response> {
-  if (new URL(req.url).pathname !== ANTHROPIC_COUNT_TOKENS_PATH) return text("not found", 404);
-  if (env.FLEET_JUNIOR !== "on" || !env.AI) return text("not found", 404);
-  if (req.method !== "POST") return text("method not allowed", 405);
-
-  const declaredLength = req.headers.get("content-length");
-  if (declaredLength !== null) {
-    const declared = Number(declaredLength);
-    if (Number.isFinite(declared) && declared > ANTHROPIC_BODY_CAP) return text("payload too large", 413);
-  }
-
-  const presented = extractPresentedToken(req);
-  if (!isSpawnTokenShaped(presented)) return text("unauthorized", 401);
-  const allRows = await rows();
-  const studio: SpawnParent | null = await resolveSpawnParent(allRows, presented);
-  if (!studio) return text("unauthorized", 401);
-  const studioRow = allRows.find((r) => r.id === studio.id);
-  if (studioRow?.leadType !== "glm") {
-    return text("this route serves glm-led studios only", 403);
-  }
+  const gate = await authenticateGlmLeadRequest(req, ANTHROPIC_COUNT_TOKENS_PATH, env, rows);
+  if ("response" in gate) return gate.response;
 
   const raw = await readCappedBody(req, ANTHROPIC_BODY_CAP);
   if (raw === null) return text("payload too large", 413);
