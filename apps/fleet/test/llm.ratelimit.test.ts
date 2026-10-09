@@ -40,12 +40,24 @@ describe("checkAndConsumeLeadRateLimit — defaults", () => {
     expect(await checkAndConsumeLeadRateLimit(env.DB, {}, STUDIO, DEFAULT_LEAD_RATE_PER_MINUTE)).toEqual({ ok: false, limit: "per-minute" });
   });
 
-  it("DEFAULT_LEAD_RATE_PER_MINUTE is exactly 60", () => {
-    expect(DEFAULT_LEAD_RATE_PER_MINUTE).toBe(60);
-  });
+  // The 60/min default is already driven through real behavior above (a
+  // burst of exactly DEFAULT_LEAD_RATE_PER_MINUTE calls all succeed, then
+  // the next one is blocked) — but nothing else in this file actually
+  // exercises the *daily* default's real value, only compares it against
+  // the per-minute default (the "sane" check just below). Seed the daily
+  // bucket's D1 row directly to just below the real DEFAULT_LEAD_DAILY_CAP
+  // (rather than looping 2000 real calls) so the call that pushes it to
+  // exactly 2000 still succeeds and the next one — still within the same
+  // UTC day — is genuinely blocked by the real default, not a stand-in.
+  it("blocks the (DEFAULT_LEAD_DAILY_CAP + 1)th call within the same UTC day", async () => {
+    const dayBucket = Math.floor(0 / 86_400_000);
+    await env.DB.prepare(
+      `INSERT INTO fleet_state (key, value, ts) VALUES (?, ?, 0)`,
+    ).bind(`lead-daily:${STUDIO}:${dayBucket}`, String(DEFAULT_LEAD_DAILY_CAP - 1)).run();
 
-  it("DEFAULT_LEAD_DAILY_CAP is exactly 2000", () => {
-    expect(DEFAULT_LEAD_DAILY_CAP).toBe(2000);
+    // Distinct minute buckets so the per-minute cap never factors in.
+    expect(await checkAndConsumeLeadRateLimit(env.DB, {}, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, {}, STUDIO, MINUTE)).toEqual({ ok: false, limit: "daily" });
   });
 
   it("defaults are sane: both positive, daily >= per-minute", () => {
