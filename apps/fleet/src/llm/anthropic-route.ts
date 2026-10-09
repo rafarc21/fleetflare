@@ -29,6 +29,14 @@ import {
 
 export const ANTHROPIC_MESSAGES_PATH = "/fleet/llm/anthropic/v1/messages";
 
+/** Board issue #284, MINOR 4(b): the sibling Anthropic Messages API
+ *  endpoint — some Anthropic SDK client configurations probe or call it to
+ *  decide whether to compact context before sending a real request (Claude
+ *  Code's own SDK may be one of them). Not mounted before this fix, so any
+ *  request here fell through to the generic `/fleet/` catch-all and 404'd —
+ *  see `handleFleetAnthropicCountTokens`'s own doc comment for the rest. */
+export const ANTHROPIC_COUNT_TOKENS_PATH = "/fleet/llm/anthropic/v1/messages/count_tokens";
+
 // deno-lint-ignore no-explicit-any
 type Json = any;
 
@@ -327,4 +335,79 @@ export async function handleFleetAnthropicMessages(
   const anthropic = openAIResponseToAnthropic(result, { model: requestedModel });
   logUsage(env, ctx, studio.id, anthropic.usage.input_tokens, anthropic.usage.output_tokens, true);
   return json(anthropic, 200);
+}
+
+/** ESTIMATE ONLY, not a real count — this backend has no tokenizer exposed
+ *  to it at all (no Anthropic tokenizer, no access to GLM's own vocab), so
+ *  there is no way to answer this honestly with an exact number. Heuristic:
+ *  total character count of every flattened OpenAI-shape message's content
+ *  (text and/or tool-call name+arguments), divided by ~4 — the commonly
+ *  cited rough chars-per-token ratio for English text. Flagged here rather
+ *  than guessed at silently, same "say so in a comment instead of guessing"
+ *  convention classifyAiError's own doc comment (translate.ts) already
+ *  established for this file. `Math.max(1, ...)` only to avoid reporting 0
+ *  for a technically-non-empty request — not a claim that 1 is ever the
+ *  real count. */
+function estimateInputTokens(messages: Json[]): number {
+  let chars = 0;
+  for (const m of messages) {
+    if (typeof m.content === "string") chars += m.content.length;
+    for (const tc of Array.isArray(m.tool_calls) ? m.tool_calls : []) {
+      chars += String(tc.function?.name ?? "").length + String(tc.function?.arguments ?? "").length;
+    }
+  }
+  return Math.max(1, Math.round(chars / 4));
+}
+
+/**
+ * Board issue #284, MINOR 4(b): `POST /v1/messages/count_tokens`, the
+ * sibling Anthropic Messages API endpoint. The real Anthropic endpoint
+ * returns `{"input_tokens": <count>}` without generating anything — this
+ * route follows the same shape, but see `estimateInputTokens`'s own doc
+ * comment for why the number itself is an ESTIMATE, not a real count.
+ *
+ * Same trust boundary as `handleFleetAnthropicMessages` above — auth
+ * (`extractPresentedToken`/`isSpawnTokenShaped`/`resolveSpawnParent`), the
+ * `FLEET_JUNIOR`/`env.AI` feature flag, and the `leadType === "glm"` gate
+ * are all still enforced here even though this route never actually calls
+ * `env.AI.run` — none of those checks exist BECAUSE of the AI call; they
+ * exist because this is still a spawn-token-authenticated glm-lead-only
+ * surface, same as every other check in this file. The per-minute/daily
+ * rate limit (`checkAndConsumeLeadRateLimit`) is deliberately NOT applied
+ * here — unlike the real message-generation route, this one spends no
+ * Workers AI budget at all, so there is nothing for that limiter to
+ * protect.
+ */
+export async function handleFleetAnthropicCountTokens(
+  req: Request, env: Env, ctx: ExecutionContext,
+  rows: () => Promise<StudioStatus[]> = () => listStudios(env),
+): Promise<Response> {
+  if (new URL(req.url).pathname !== ANTHROPIC_COUNT_TOKENS_PATH) return text("not found", 404);
+  if (env.FLEET_JUNIOR !== "on" || !env.AI) return text("not found", 404);
+  if (req.method !== "POST") return text("method not allowed", 405);
+
+  const declaredLength = req.headers.get("content-length");
+  if (declaredLength !== null) {
+    const declared = Number(declaredLength);
+    if (Number.isFinite(declared) && declared > ANTHROPIC_BODY_CAP) return text("payload too large", 413);
+  }
+
+  const presented = extractPresentedToken(req);
+  if (!isSpawnTokenShaped(presented)) return text("unauthorized", 401);
+  const allRows = await rows();
+  const studio: SpawnParent | null = await resolveSpawnParent(allRows, presented);
+  if (!studio) return text("unauthorized", 401);
+  const studioRow = allRows.find((r) => r.id === studio.id);
+  if (studioRow?.leadType !== "glm") {
+    return text("this route serves glm-led studios only", 403);
+  }
+
+  const raw = await readCappedBody(req, ANTHROPIC_BODY_CAP);
+  if (raw === null) return text("payload too large", 413);
+  let body: Json;
+  try { body = JSON.parse(raw); } catch { return text("bad json", 400); }
+  if (!Array.isArray(body?.messages) || body.messages.length === 0) return text("messages required", 400);
+
+  const openaiBody = anthropicRequestToOpenAI(body);
+  return json({ input_tokens: estimateInputTokens(openaiBody.messages) }, 200);
 }
