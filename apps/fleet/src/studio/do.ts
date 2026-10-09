@@ -142,9 +142,11 @@ import {
   credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV,
   readReposCredentialWriteCmd, readReposCredentialClearCmd,
 } from "./credentials";
+import { refreshCredentialExec, studioGitIdentity, gitIdentityCmd, gitIdentityEnv, STUDIO_GIT_IDENTITY, type GitIdentity } from "./credentials";
 import { studioReadReposCredential } from "../github/read-repos";
 import { leakGateInstallCmd } from "./gh-wrapper";
 export { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV };
+export { refreshCredentialExec, studioGitIdentity, gitIdentityCmd, gitIdentityEnv, STUDIO_GIT_IDENTITY, type GitIdentity };
 
 import { mintSpawnToken, hashSpawnToken } from "./org";
 import { mintRepoToken, repoTokenMinter } from "../github/auth";
@@ -256,6 +258,9 @@ export interface RefreshDeps {
   readRepos?: () => Promise<{ token: string; repos: string[] } | null>;
   // `env`: the credential write's token rides here (#110 review), never in `cmd`.
   sbExec: (cmd: string, env?: Record<string, string>) => Promise<{ code: number; stdout: string; stderr: string }>;
+  /** Issue #283: the studio's git identity, set on every credential write.
+   *  Absent = STUDIO_GIT_IDENTITY (credentials.ts). */
+  gitIdentity?: GitIdentity;
   recordStudio: (status: StudioStatus) => Promise<void>;
   /** Telegram alert. do.ts's real instance plugs in sendCard against
    *  OPERATOR_ID — see the import comment above for why that recipient. */
@@ -299,9 +304,9 @@ export async function runRefreshCredential(
       }
     }
     const token = await deps.mintToken(mode);
-    const res = token === null
-      ? await deps.sbExec(credentialClearCmd())
-      : await deps.sbExec(credentialWriteCmd(), tokenEnv(token));
+    // Issue #283: the same exec also pins the studio's git identity.
+    const exec = refreshCredentialExec(token, deps.gitIdentity ?? STUDIO_GIT_IDENTITY);
+    const res = await deps.sbExec(exec.cmd, exec.env);
     if (res.code !== 0) {
       throw new Error(`credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
     }
@@ -4408,8 +4413,6 @@ export function studioEnvVars(
       STUDIO_ID: studioId,
       FLEET_SPAWN_TOKEN: spawnToken,
       FLEET_WORKER_URL: env.WORKER_PUBLIC_URL,
-      FLEET_BOT_NAME: env.FLEET_BOT_NAME ?? "",
-      FLEET_BOT_EMAIL: env.FLEET_BOT_EMAIL ?? "",
     };
   }
   return {
@@ -4444,11 +4447,11 @@ export function studioEnvVars(
     STUDIO_ID: studioId,
     FLEET_SPAWN_TOKEN: spawnToken,
     FLEET_WORKER_URL: env.WORKER_PUBLIC_URL,
-    // Issue #335: same "empty and unset identically" shape as TS_AUTHKEY
-    // above — server.ts's own read treats "" as absent (falsy check, not
-    // `??`) and falls back to its own neutral default.
-    FLEET_BOT_NAME: env.FLEET_BOT_NAME ?? "",
-    FLEET_BOT_EMAIL: env.FLEET_BOT_EMAIL ?? "",
+    // Issue #283: no FLEET_BOT_NAME/_EMAIL. That is the operator's private App
+    // bot identity; nothing in the studio image reads it (server.ts, its only
+    // reader, runs in the other container), and an agent with no git identity
+    // adopted it, so public pushes were leak-refused. The studio's identity is
+    // set by runRefreshCredential instead (credentials.ts's studioGitIdentity).
   };
 }
 
@@ -6611,6 +6614,7 @@ export class StudioDO extends Sandbox<Env> {
         getTask: (repo, number) => githubBoardApi(this.env).getIssue(repo, number),
       }),
       sbExec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.refresh, env }),
+      gitIdentity: studioGitIdentity(this.env),
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
       notify: async (message: string) => {
         const tg = telegramConfig(this.env);
@@ -6678,11 +6682,11 @@ export class StudioDO extends Sandbox<Env> {
       burnAlertThresholdTokens: Number(this.env.BURN_ALERT_OUTPUT_TOKENS_5H ?? "0"),
       // Issue #361: completion records' teardown archive.
       doneRecords: this.doneRecordPorts(),
-      // Issue #335 (public-release scrub): the real operator's own bot
-      // identity, config not code — absent means rescuePushCmd/
-      // rescueSnapshotCmd's own neutral defaults apply.
-      botName: this.env.FLEET_BOT_NAME,
-      botEmail: this.env.FLEET_BOT_EMAIL,
+      // Issue #283: a rescue commit lands on a studio branch the next
+      // incarnation adopts and pushes, so it carries the studio's own git
+      // identity, never the App bot's (operator-private, leak-denylisted).
+      botName: studioGitIdentity(this.env).name,
+      botEmail: studioGitIdentity(this.env).email,
       // Issue #1 piece 5: FLEET_RESCUE_REMOTE + a contents:write token scoped
       // to it; unset or a failed mint → origin, leak-gated, loudly (rescue.ts).
       // Issue #24: only for a PUBLIC work repo; private or unknown → origin.

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import {
-  runRefreshCredential, credentialWriteCmd, tokenEnv, type RefreshDeps,
+  runRefreshCredential, refreshCredentialExec, STUDIO_GIT_IDENTITY, tokenEnv, type RefreshDeps,
 } from "../src/studio/do";
 import { readReposCredentialClearCmd, readReposCredentialWriteCmd } from "../src/studio/credentials";
 
@@ -10,6 +10,7 @@ import { readReposCredentialClearCmd, readReposCredentialWriteCmd } from "../src
 // through it. No opt-in -> the read helper is cleared, nothing minted.
 
 const NOW = "2026-10-09T00:00:00.000Z";
+const PRIMARY = refreshCredentialExec("ghs_primary", STUDIO_GIT_IDENTITY);
 
 function deps(overrides: Partial<RefreshDeps> = {}): RefreshDeps {
   return {
@@ -27,7 +28,7 @@ describe("runRefreshCredential — read-repos (issue #291)", () => {
     const d = deps({ readRepos: vi.fn(async () => null) });
     expect(await runRefreshCredential(d)).toEqual({ ok: true, lastRefresh: NOW });
     expect(vi.mocked(d.sbExec).mock.calls).toEqual([
-      [credentialWriteCmd(), tokenEnv("ghs_primary")],
+      [PRIMARY.cmd, PRIMARY.env],
       [readReposCredentialClearCmd()],
     ]);
   });
@@ -37,11 +38,11 @@ describe("runRefreshCredential — read-repos (issue #291)", () => {
     expect((await runRefreshCredential(d)).ok).toBe(true);
     const calls = vi.mocked(d.sbExec).mock.calls;
     expect(calls).toEqual([
-      [credentialWriteCmd(), tokenEnv("ghs_primary")],
+      [PRIMARY.cmd, PRIMARY.env],
       [readReposCredentialWriteCmd(["acme-org/alpha"]), tokenEnv("ghs_read")],
     ]);
     // The primary (push) credential is never fed the read token.
-    expect(calls.filter(([cmd]) => cmd === credentialWriteCmd()).every(([, e]) => e?.FLEET_TOKEN === "ghs_primary")).toBe(true);
+    expect(calls.filter(([cmd]) => cmd === PRIMARY.cmd).every(([, e]) => e?.FLEET_TOKEN === "ghs_primary")).toBe(true);
   });
 
   it("a read mint failure clears the read helper and fails the refresh, token-free", async () => {
@@ -55,7 +56,7 @@ describe("runRefreshCredential — read-repos (issue #291)", () => {
   it("without the port (legacy callers) nothing about the read helper runs", async () => {
     const d = deps();
     expect((await runRefreshCredential(d)).ok).toBe(true);
-    expect(vi.mocked(d.sbExec).mock.calls).toEqual([[credentialWriteCmd(), tokenEnv("ghs_primary")]]);
+    expect(vi.mocked(d.sbExec).mock.calls).toEqual([[PRIMARY.cmd, PRIMARY.env]]);
   });
 
   it("do.ts wires the port into refreshDeps (source pin: StudioDO cannot be constructed under test)", () => {

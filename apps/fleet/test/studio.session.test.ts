@@ -3182,9 +3182,9 @@ describe("rescuePushCmd — the shell shape rescue-push commits and pushes with"
   // no special case left to prove, detached or not.
 
   it("commits under a fixed fleet identity by default — Dockerfile.studio configures no git user.name/user.email of its own", () => {
-    // Issue #335: the real identity is env-configured now (do.ts's
-    // syncDeps() reads FLEET_BOT_NAME/_EMAIL); with no override this
-    // neutral default is what every existing caller/test still gets.
+    // Issue #335/#283: do.ts's syncDeps() passes the studio's own identity
+    // (credentials.ts's studioGitIdentity); with no override this neutral
+    // default is what every existing caller/test still gets.
     const cmd = rescuePushCmd("websites", STUDIO_ID);
     expect(cmd).toContain('user.name="fleetflare[bot]"');
     expect(cmd).toContain('user.email="fleetflare[bot]@users.noreply.github.com"');
