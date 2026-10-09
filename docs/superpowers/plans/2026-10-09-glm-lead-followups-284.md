@@ -24,40 +24,63 @@ re-derived:
 > 5. 16000 max_tokens floor not pinned by a test.
 
 Dispatch instruction (2026-10-09, second reassignment): both MAJORs first,
-then MINOR 3 if cheap.
+then MINOR 3 if cheap. (This doc originally shipped as the first commit on
+the branch, when only MAJOR 1 was done; it has since been updated in place
+to record final disposition, because every other item also landed on this
+same branch in later commits — see below.)
 
-## Full issue scope (for context) vs. this dispatch's actual work
+## Full issue scope: final disposition (all items now resolved)
 
-The issue itself asks for both MAJORs plus 5 MINORs. **This specific
-dispatch implements MAJOR 1 only** (TDD, RED/GREEN, below) — the rest are
-listed here so the scope and the reasoning for deferring each is on record,
-not because this dispatch builds them:
+The issue asks for both MAJORs plus 5 MINORs. All seven items have now been
+addressed on this branch, either by a code change or by a recorded
+assessment. Final disposition, item by item:
 
-- **MAJOR 1** — GLM-lead's own rate limit, separate from junior's. Done in
-  this dispatch. See "MAJOR 1" section below for the design.
+- **MAJOR 1** — GLM-lead's own rate limit, separate from junior's. **Done.**
+  60/min + 2000/day defaults. See "MAJOR 1" section below for the design.
 - **MAJOR 2** — silent stream truncation (upstream ends with no finish
   reason, or sends an `{"error":...}` chunk) must become a real Anthropic
-  `event: error`, never a faked `end_turn`/`message_stop`. NOT done in this
-  dispatch — left for a follow-up dispatch on this same branch/issue.
+  `event: error`, never a faked `end_turn`/`message_stop`. **Done**
+  (commits 75a105f/9a49c22) — `src/llm/translate.ts` now emits `event:
+  error` for both failure shapes: the stream ending with no `finish_reason`
+  ever set, and an explicit upstream `{"error":...}` chunk. RED test per
+  shape, per the issue's own instruction.
+- **MINOR 1** — no `ping` events during long GLM reasoning (idle-timeout
+  risk). **Assessed, not done.** Implementing this correctly requires
+  racing a periodic timer against `pumpAnthropicStream`'s blocking
+  `reader.read()` call inside its read loop (`src/llm/anthropic-route.ts`)
+  — a real control-flow change (e.g. `Promise.race` between the read and a
+  timeout, re-entering the loop on timeout without consuming the pending
+  read), not a small bolt-on. Judged not "cheap" per the issue's own
+  qualifier ("MINOR — fix if cheap"). Worth a dedicated follow-up task, not
+  bundled into this one.
+- **MINOR 2** — `message_start` usage always 0. **Assessed, not further
+  fixable.** This is an inherent backend limitation, not a bug this
+  translation layer can correct: Workers AI's OpenAI-compatible stream only
+  ever reports `usage.prompt_tokens` on the FINAL chunk (see `translate.ts`'s
+  own existing doc comment on `closeStream`'s `message_delta.usage
+  .input_tokens` deviation, added for #249) — there is no way to know the
+  real input token count at `message_start` time, before any upstream chunk
+  has even been read. This was already the best-available mitigation from
+  #249: the real count is deliberately surfaced on `message_delta` instead
+  (a documented, flagged deviation from Anthropic's exact wire contract),
+  rather than left at 0 everywhere. No further action possible without a
+  real upstream tokenizer exposed ahead of generation, which this backend
+  does not offer.
 - **MINOR 3** — refuse a `--lead glm` spawn while `FLEET_JUNIOR` is off
-  (today it silently boots a lead studio with no model behind it at all).
-  NOT done in this dispatch — left for a follow-up dispatch.
-- **MINOR 1, 2, 4** — assessed only for cheapness, not implemented here:
-  (1) no `ping` events during long GLM reasoning (idle-timeout risk) —
-  genuinely cheap (a periodic SSE comment frame in the stream pump), but
-  touches the same streaming code path as MAJOR 2 and is better landed
-  alongside it rather than as an isolated patch that risks merge churn with
-  that fix. (2) `message_start` usage always 0 — per the prior dispatch's
-  own plan doc (2026-10-08, "Finding 1"), this is **by design**, not a bug:
-  `message_start` fires before any upstream chunk is read, and the real
-  number already reaches the client via `message_delta`'s usage field — no
-  further work warranted. (4) stream loop not in `ctx.waitUntil`, and
-  `/v1/messages/count_tokens` 404s — both plausibly cheap but unrelated to
-  the rate-limit work this dispatch was asked to prioritize; left alongside
-  MAJOR 2/MINOR 3 for the follow-up dispatch rather than scope-creeping this
-  one.
+  (today it would otherwise silently boot a lead studio with no model
+  behind it at all). **Done** (commits a1ac826/5090f1a) — a refusal gate
+  added at all three `leadType === "glm"` branches in `src/studio/do.ts`
+  that spawn/restart/recycle a lead (provision, restart, recycle).
+- **MINOR 4a** — stream loop not in `ctx.waitUntil`. **Done** (commits
+  126d986/a19e858) — the stream-pump chain in `src/llm/anthropic-route.ts`
+  is now handed to `ctx.waitUntil`, matching the existing pattern already
+  used for the usage-insert call in the same file.
+- **MINOR 4b** — `/v1/messages/count_tokens` 404s. **Done** (commits
+  4755e08/7f516a3) — new estimate-only route
+  (`ANTHROPIC_COUNT_TOKENS_PATH`, `src/llm/anthropic-route.ts`) added;
+  returns a token estimate without making a real upstream AI call.
 - **MINOR 5** (16000 `max_tokens` floor not pinned by a test) — **already
-  satisfied by prior work, no further action needed here.** Confirmed: the
+  satisfied by prior work, no further action needed.** Confirmed: the
   `GLM_MIN_MAX_TOKENS` floor test already exists in
   `apps/fleet/test/bun/llm-translate.test.ts` lines 102-110 (added in the
   2026-10-08 STATUS-comment-fixes round, see
@@ -127,9 +150,13 @@ Both commits pushed immediately.
 
 ## Process
 
-Plan doc (this file) is the first commit on the branch. RED -> GREEN for
-MAJOR 1 — the only code change in this dispatch. MAJOR 2 and MINOR 3 are
-explicitly deferred (see above) to a follow-up dispatch on this same
-issue/branch. Scoped verification only throughout (touched test files +
-targeted `tsc`, not the full suite/`bun run check` gate — that budget is
-reserved, per fleet-wide guidance on shared heavy gates).
+Plan doc (this file) is the first commit on the branch, written when only
+MAJOR 1 was done. Every remaining issue item (MAJOR 2, MINOR 3, MINOR 4a,
+MINOR 4b) was then also implemented on this same branch in later dispatches
+— each as its own RED -> GREEN commit pair, pushed immediately — leaving
+only MINOR 1 and MINOR 2 as assessed-but-not-implemented (see dispositions
+above for why), and MINOR 5 as already satisfied by prior work. This doc
+was updated in place afterward to record that final state. Scoped
+verification throughout each dispatch (touched test files + targeted
+`tsc`), not the full suite/`bun run check` gate each time — that budget is
+reserved, per fleet-wide guidance on shared heavy gates.
