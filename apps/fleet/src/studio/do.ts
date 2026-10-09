@@ -4401,7 +4401,11 @@ export async function launchAccountOrRefuse(
   // never throw this gate into refusing a launch tiers 1+2 could otherwise
   // have served in plain order.
   let usage: Awaited<ReturnType<typeof readFleetAccountUsage>> = {};
-  if (autoFailoverOn(env)) {
+  // PR #307 review round 1: an unmapped repo's fallback skips limited
+  // accounts with failover off too (accounts.ts's unmappedFallbackAccount),
+  // so limits are read for it either way. A mapped repo, failover off, still
+  // pays no read: nothing can move it off its primary.
+  if (autoFailoverOn(env) || !primaryIsMapped(env, repo)) {
     try {
       limits = await readFleetAccountLimits(env.DB, resolveClaudeAccounts(env));
     } catch (err) {
@@ -4442,7 +4446,7 @@ export async function launchAccountOrRefuse(
     // Issue #305: an unmapped repo's fallback is visible in a tail, not only
     // as a limit modal on the lead's pane.
     if (!primaryIsMapped(env, repo)) {
-      console.warn(`studio ${id}: claude account ${launch.name} — ${accountResolution(env, repo, launch.name)}`);
+      console.warn(`studio ${id}: claude account ${launch.name} — ${accountResolution(env, repo, launch.name, limits)}`);
     }
     // #273 r2: flag off, an earlier failover's recorded account is stale — this
     // launch is on the mapped one, so the row stops naming the old one.

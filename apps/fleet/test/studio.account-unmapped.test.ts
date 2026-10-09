@@ -1,11 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import {
   launchAccount, launchAccountOrReroute, accountResolution, unmappedFallbackAccount, resolveClaudeAccounts,
-  type AccountUsageMap,
+  type AccountUsageMap, type AccountLimits,
 } from "../src/studio/accounts";
 import { launchAccountOrRefuse, launchFields, LaunchRefusedError, startAccountRefusal } from "../src/studio/do";
 import { writeFleetAccountUsage } from "../src/studio/account-usage-store";
+import { writeFleetAccountLimit, readFleetAccountLimits, clearFleetAccountLimit } from "../src/studio/account-limits-store";
 import { withAccountResolution } from "../src/studio/registry";
 import { formatAccountResolution } from "../cli/accounts-format";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
@@ -82,15 +83,15 @@ describe("accountResolution (#305 ask 1: say which account and why)", () => {
 });
 
 describe("withAccountResolution (#305: stamped on the spawn/provision response, never stored)", () => {
-  it("stamps the reason from the row's launchedAccount", () => {
+  it("stamps the reason from the row's launchedAccount", async () => {
     const env = envWith(ALL);
-    expect(withAccountResolution(env, row({ launchedAccount: SLOT_1 })).accountResolution)
+    expect((await withAccountResolution(env, row({ launchedAccount: SLOT_1 }))).accountResolution)
       .toContain("UNMAPPED, fell back to slot 1");
   });
 
-  it("leaves a row with no launched account unchanged", () => {
+  it("leaves a row with no launched account unchanged", async () => {
     const r = row({ launchedAccount: null });
-    expect(withAccountResolution(envWith(ALL), r)).toEqual(r);
+    expect(await withAccountResolution(envWith(ALL), r)).toEqual(r);
   });
 });
 
@@ -240,5 +241,171 @@ describe("startAccountRefusal — the container-start gate under strict mode (#3
   it("a mapped repo starts", () => {
     const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: '{"newrepo":2}', FLEET_REQUIRE_ACCOUNT_MAP: "on" });
     expect(startAccountRefusal(env, "newrepo--lead", row())).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #307 review round 1 (MAJOR): the unmapped fallback ranked by usage only,
+// and launchAccountOrRefuse read account-limit rows only with failover on. So
+// with failover off, slot 1 limited and usage missing or stale, an unmapped
+// repo still launched on slot 1 -- the exact #305 incident.
+// ---------------------------------------------------------------------------
+
+const HOUR = 60 * 60 * 1000;
+const at = (ms: number) => new Date(NOW.getTime() + ms).toISOString();
+const clearLimits = async () => { for (const s of [SLOT_1, SLOT_2, SLOT_3]) await clearFleetAccountLimit(testEnv.DB, s); };
+
+describe("unmappedFallbackAccount skips limited accounts (PR #307 round 1)", () => {
+  const accounts = resolveClaudeAccounts(envWith(ALL));
+
+  it("an {until:null} limit row on slot 1, no usage: not slot 1", () => {
+    const limits: AccountLimits = { [SLOT_1]: { until: null, seenAt: at(-HOUR) } };
+    expect(unmappedFallbackAccount(accounts, new Set(), {}, NOW, limits)?.name).toBe(SLOT_2);
+  });
+
+  it("a future-until limit row on slot 1, no usage: not slot 1", () => {
+    const limits: AccountLimits = { [SLOT_1]: { until: at(3 * HOUR), seenAt: at(-HOUR) } };
+    expect(unmappedFallbackAccount(accounts, new Set(), {}, NOW, limits)?.name).toBe(SLOT_2);
+  });
+
+  it("a limited account loses even with the best (stale-looking) usage: headroom over the free ones", () => {
+    const usage = { [SLOT_1]: fresh(5), [SLOT_2]: fresh(60), [SLOT_3]: fresh(30) };
+    const limits: AccountLimits = { [SLOT_1]: { until: at(3 * HOUR), seenAt: at(-HOUR) } };
+    expect(unmappedFallbackAccount(accounts, new Set(), usage, NOW, limits)?.name).toBe(SLOT_3);
+  });
+
+  it("a passed until is free again", () => {
+    const limits: AccountLimits = { [SLOT_1]: { until: at(-HOUR), seenAt: at(-2 * HOUR) } };
+    expect(unmappedFallbackAccount(accounts, new Set(), {}, NOW, limits)?.name).toBe(SLOT_1);
+  });
+
+  it("free accounts all reserved: a free reserved one beats a limited unreserved one", () => {
+    const limits: AccountLimits = { [SLOT_1]: { until: at(3 * HOUR), seenAt: at(-HOUR) } };
+    expect(unmappedFallbackAccount(accounts, new Set([SLOT_2, SLOT_3]), {}, NOW, limits)?.name).toBe(SLOT_2);
+  });
+
+  it("every account limited: the soonest reset (a null until resets at seenAt + 24h; dead never)", () => {
+    const limits: AccountLimits = {
+      [SLOT_1]: { until: at(5 * HOUR), seenAt: at(-HOUR) },
+      [SLOT_2]: { until: null, seenAt: at(-22 * HOUR) }, // resets in 2h
+      [SLOT_3]: { until: at(1 * HOUR), seenAt: at(-HOUR), dead: true },
+    };
+    expect(unmappedFallbackAccount(accounts, new Set(), {}, NOW, limits)?.name).toBe(SLOT_2);
+  });
+});
+
+describe("launchAccountOrReroute, unmapped repo, failover OFF, honours limit rows (PR #307 round 1)", () => {
+  it("{until:null} row on slot 1: lands on slot 2", async () => {
+    const limits: AccountLimits = { [SLOT_1]: { until: null, seenAt: at(-HOUR) } };
+    expect(await launchAccountOrReroute(envWith(ALL), "newrepo", null, limits, new Set(), NOW))
+      .toEqual({ ok: true, name: SLOT_2, token: TOKEN_2 });
+  });
+
+  it("future-until row on slot 1: lands on slot 2", async () => {
+    const limits: AccountLimits = { [SLOT_1]: { until: at(3 * HOUR), seenAt: at(-HOUR) } };
+    expect(await launchAccountOrReroute(envWith(ALL), "newrepo", null, limits, new Set(), NOW))
+      .toEqual({ ok: true, name: SLOT_2, token: TOKEN_2 });
+  });
+
+  it("a MAPPED repo is still untouched by limit rows with failover off (unchanged)", async () => {
+    const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: '{"fleetflare":1}' });
+    const limits: AccountLimits = { [SLOT_1]: { until: at(3 * HOUR), seenAt: at(-HOUR) } };
+    expect(await launchAccountOrReroute(env, "fleetflare", null, limits, new Set(), NOW))
+      .toEqual({ ok: true, name: SLOT_1, token: TOKEN_1 });
+  });
+});
+
+describe("launchAccountOrRefuse reads account-limit rows for an unmapped repo with failover off (PR #307 round 1)", () => {
+  // D1 is shared across this file: put fresh usage that ranks slot 1 FIRST,
+  // so only a honoured limit row can move the pick off it.
+  beforeEach(async () => {
+    await clearLimits();
+    const seenAt = new Date(Date.now() - 60_000).toISOString();
+    await writeFleetAccountUsage(testEnv.DB, SLOT_1, { fiveHourPct: 5, sevenDayPct: 5, scopedMaxPct: null, seenAt });
+    await writeFleetAccountUsage(testEnv.DB, SLOT_2, { fiveHourPct: 40, sevenDayPct: 40, scopedMaxPct: null, seenAt });
+    await writeFleetAccountUsage(testEnv.DB, SLOT_3, { fiveHourPct: 70, sevenDayPct: 70, scopedMaxPct: null, seenAt });
+  });
+
+  it("{until:null} row on slot 1 in D1, slot 1 best by usage: lands on slot 2", async () => {
+    await writeFleetAccountLimit(testEnv.DB, SLOT_1, null, new Date(Date.now() - HOUR).toISOString());
+    const launch = await launchAccountOrRefuse(envWith(ALL), fakeStorage(row()), "newrepo--lead", async () => {}, false);
+    expect(launch.name).toBe(SLOT_2);
+  });
+
+  it("future-until row on slot 1 in D1, slot 1 best by usage: lands on slot 2", async () => {
+    const now = Date.now();
+    await writeFleetAccountLimit(testEnv.DB, SLOT_1, new Date(now + 3 * HOUR).toISOString(), new Date(now - HOUR).toISOString());
+    const launch = await launchAccountOrRefuse(envWith(ALL), fakeStorage(row()), "newrepo--lead", async () => {}, false);
+    expect(launch.name).toBe(SLOT_2);
+  });
+
+  it("every account limited: launches on the soonest reset, and does not refuse", async () => {
+    const now = Date.now();
+    const seenAt = new Date(now - HOUR).toISOString();
+    await writeFleetAccountLimit(testEnv.DB, SLOT_1, new Date(now + 5 * HOUR).toISOString(), seenAt);
+    await writeFleetAccountLimit(testEnv.DB, SLOT_2, new Date(now + 4 * HOUR).toISOString(), seenAt);
+    await writeFleetAccountLimit(testEnv.DB, SLOT_3, new Date(now + 1 * HOUR).toISOString(), seenAt);
+    const launch = await launchAccountOrRefuse(envWith(ALL), fakeStorage(row()), "newrepo--lead", async () => {}, false);
+    expect(launch.name).toBe(SLOT_3);
+  });
+});
+
+describe("accountResolution says so when every account is limited (PR #307 round 1)", () => {
+  beforeEach(clearLimits);
+
+  it("unmapped, launched account limited: names the soonest reset", () => {
+    const until = at(1 * HOUR);
+    const limits: AccountLimits = {
+      [SLOT_1]: { until: at(5 * HOUR), seenAt: at(-HOUR) },
+      [SLOT_2]: { until: at(4 * HOUR), seenAt: at(-HOUR) },
+      [SLOT_3]: { until, seenAt: at(-HOUR) },
+    };
+    const why = accountResolution(envWith(ALL), "newrepo", SLOT_3, limits, NOW);
+    expect(why).toContain("UNMAPPED, fell back to slot 3");
+    expect(why).toContain(`every account limited; soonest reset ${until}`);
+  });
+
+  it("launched account limited but another is free (rows changed since launch): names only that slot", () => {
+    const limits: AccountLimits = { [SLOT_1]: { until: at(3 * HOUR), seenAt: at(-HOUR) } };
+    const why = accountResolution(envWith(ALL), "newrepo", SLOT_1, limits, NOW);
+    expect(why).toContain("slot 1 is limited");
+    expect(why).not.toContain("every account limited");
+  });
+
+  it("launched account free: no limited note", () => {
+    const limits: AccountLimits = { [SLOT_1]: { until: at(3 * HOUR), seenAt: at(-HOUR) } };
+    expect(accountResolution(envWith(ALL), "newrepo", SLOT_2, limits, NOW)).not.toContain("limited");
+  });
+
+  it("withAccountResolution reads the limit rows itself (unmapped repo)", async () => {
+    const now = Date.now();
+    const until = new Date(now + HOUR).toISOString();
+    const seenAt = new Date(now - HOUR).toISOString();
+    for (const slot of [SLOT_1, SLOT_2, SLOT_3]) await writeFleetAccountLimit(testEnv.DB, slot, until, seenAt);
+    expect(await readFleetAccountLimits(testEnv.DB, resolveClaudeAccounts(envWith(ALL)))).toHaveProperty(SLOT_1);
+    const out = await withAccountResolution(envWith(ALL), row({ launchedAccount: SLOT_1 }));
+    expect(out.accountResolution).toContain("every account limited");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #307 round 1 MINORs, pinned as tests (and documented in docs/setup.md).
+// ---------------------------------------------------------------------------
+
+describe("PR #307 round 1 MINORs (documented behaviour)", () => {
+  it("failover ON: a recorded claudeAccount wins over strict mode (a studio already launched keeps its account)", () => {
+    const env = envWith({ ...ALL, FLEET_AUTO_FAILOVER: "on", FLEET_REQUIRE_ACCOUNT_MAP: "on" });
+    expect(launchAccount(env, "newrepo", SLOT_2)).toEqual({ ok: true, name: SLOT_2, token: TOKEN_2 });
+    expect(launchAccount(env, "newrepo", null).ok).toBe(false);
+  });
+
+  it("failover OFF: an unmapped studio may hop accounts between launches as headroom moves", async () => {
+    const env = envWith(ALL);
+    const first = await launchAccountOrReroute(env, "newrepo", null, {}, new Set(), NOW, null, undefined,
+      { [SLOT_1]: fresh(10), [SLOT_2]: fresh(50) });
+    const second = await launchAccountOrReroute(env, "newrepo", SLOT_1, {}, new Set(), NOW, null, undefined,
+      { [SLOT_1]: fresh(90), [SLOT_2]: fresh(20) });
+    expect(first.ok && first.name).toBe(SLOT_1);
+    expect(second.ok && second.name).toBe(SLOT_2);
   });
 });
