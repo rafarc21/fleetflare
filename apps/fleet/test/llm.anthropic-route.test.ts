@@ -41,8 +41,8 @@ let ctx: ReturnType<typeof fakeCtx>;
 
 async function usageRows() {
   const res = await env.DB.prepare(
-    "SELECT studio_id AS studioId, mode, model, input_tokens AS inputTokens, output_tokens AS outputTokens, ok FROM junior_usage_log ORDER BY ts ASC",
-  ).all<{ studioId: string; mode: string; model: string; inputTokens: number; outputTokens: number; ok: number }>();
+    "SELECT studio_id AS studioId, mode, model, input_tokens AS inputTokens, output_tokens AS outputTokens, ok, error FROM junior_usage_log ORDER BY ts ASC",
+  ).all<{ studioId: string; mode: string; model: string; inputTokens: number; outputTokens: number; ok: number; error: string | null }>();
   return res.results ?? [];
 }
 
@@ -484,7 +484,178 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     await ctx.drain();
     const rowsLogged = await usageRows();
     expect(rowsLogged).toHaveLength(1);
-    expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1 });
+    expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1, error: null });
+  });
+});
+
+// Issue #302: a live GLM-lead run hit an ~8-min upstream stall. The pump sat
+// in `reader.read()` the whole time, Claude Code waited out its own 600s
+// client timeout, and the two `ok: 0` rows it left carried no reason at all.
+describe("handleFleetAnthropicMessages — stream idle timeout and failure reasons (issue #302)", () => {
+  function streamSetup(upstream: ReadableStream<Uint8Array>, envOverrides: Partial<Env> = {}) {
+    return (async () => {
+      const run = vi.fn(async () => upstream);
+      const token = mintSpawnToken();
+      const rows = async () => [row(ME, await hashSpawnToken(token))];
+      const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...envOverrides } as unknown as Env;
+      return { token, rows, e };
+    })();
+  }
+  const partial = () => new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`);
+
+  it("an upstream that stalls past LEAD_STREAM_IDLE_MS emits event: error and cancels the upstream read", async () => {
+    let cancelled = false;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(partial()); },
+      pull() { return new Promise<void>(() => { /* stalls forever */ }); },
+      cancel() { cancelled = true; },
+    });
+    const { token, rows, e } = await streamSetup(upstream, { LEAD_STREAM_IDLE_MS: "40" } as Partial<Env>);
+
+    const started = Date.now();
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await r.text();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toEqual({
+      type: "error", error: { type: "api_error", message: "upstream stream idle timeout: no data for 40ms" },
+    });
+
+    await ctx.drain();
+    expect(cancelled).toBe(true);
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 0, error: "idle_timeout after 40ms" });
+  });
+
+  it("a garbage LEAD_STREAM_IDLE_MS falls back to the default instead of disabling the timeout", async () => {
+    const { LEAD_STREAM_IDLE_MS_DEFAULT, leadStreamIdleMs } = await import("../src/llm/anthropic-route");
+    expect(LEAD_STREAM_IDLE_MS_DEFAULT).toBe(90_000);
+    expect(leadStreamIdleMs({})).toBe(90_000);
+    expect(leadStreamIdleMs({ LEAD_STREAM_IDLE_MS: "nope" })).toBe(90_000);
+    expect(leadStreamIdleMs({ LEAD_STREAM_IDLE_MS: "0" })).toBe(90_000);
+    expect(leadStreamIdleMs({ LEAD_STREAM_IDLE_MS: "120000" })).toBe(120_000);
+  });
+
+  it("a mid-stream read throw records upstream_read_error with the classified type", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(partial()); },
+      pull() { throw new Error("AiError: capacity exceeded mid-stream"); },
+    });
+    const { token, rows, e } = await streamSetup(upstream);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    await r.text();
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({
+      ok: 0, error: "upstream_read_error overloaded_error: AiError: capacity exceeded mid-stream",
+    });
+  });
+
+  it("an explicit upstream {error} chunk records upstream_error_chunk", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(partial());
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ error: { message: "upstream blew up" } })}\n\n`));
+        controller.close();
+      },
+    });
+    const { token, rows, e } = await streamSetup(upstream);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    await r.text();
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "upstream_error_chunk api_error: upstream blew up" });
+  });
+
+  it("a stream that ends without a finish_reason records no_finish_reason", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(partial()); controller.close(); },
+    });
+    const { token, rows, e } = await streamSetup(upstream);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    await r.text();
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "no_finish_reason" });
+  });
+
+  it("the client dropping the stream records client_abort and cancels the upstream", async () => {
+    let cancelled = false;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(partial()); },
+      pull() { return new Promise<void>(() => {}); },
+      cancel() { cancelled = true; },
+    });
+    const { token, rows, e } = await streamSetup(upstream, { LEAD_STREAM_IDLE_MS: "5000" } as Partial<Env>);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const reader = r.body!.getReader();
+    await reader.read();
+    await reader.cancel("client went away");
+    await ctx.drain();
+    expect(cancelled).toBe(true);
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 0, error: "client_abort" });
+  });
+
+  it("a non-streaming env.AI.run throw records ai_run_error with the status it mapped to", async () => {
+    const { token, rows, e } = await setup();
+    (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => { throw new Error("AiError: capacity exceeded"); });
+    await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "ai_run_error 529 overloaded_error: AiError: capacity exceeded" });
+  });
+
+  it("a streaming env.AI.run throw records ai_run_error too", async () => {
+    const { token, rows, e } = await setup();
+    (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => { throw new Error("upstream timeout"); });
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(504);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "ai_run_error 504 api_error: upstream timeout" });
+  });
+
+  it("a failure writes exactly one console.error line naming studio + reason, never prompt content", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const upstream = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(partial()); controller.close(); },
+      });
+      const { token, rows, e } = await streamSetup(upstream);
+      const body = { ...good, stream: true, messages: [{ role: "user", content: "TOP-SECRET-PROMPT-TEXT" }] };
+      const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+      await r.text();
+      await ctx.drain();
+      expect(spy).toHaveBeenCalledTimes(1);
+      const line = spy.mock.calls[0].map(String).join(" ");
+      expect(line).toBe(`[glm-lead] call failed studio=${ME} stream=true in=0 out=0 reason=no_finish_reason`);
+      expect(line).not.toContain("TOP-SECRET-PROMPT-TEXT");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a successful call writes no console.error line and a null error column", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { token, rows, e } = await setup();
+      await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+      await ctx.drain();
+      expect(spy).not.toHaveBeenCalled();
+      expect((await usageRows())[0]).toMatchObject({ ok: 1, error: null });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a very long upstream message is truncated in the stored reason", async () => {
+    const { token, rows, e } = await setup();
+    (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => { throw new Error("x".repeat(5000)); });
+    await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    await ctx.drain();
+    const stored = (await usageRows())[0].error!;
+    expect(stored.length).toBeLessThanOrEqual(300);
+    expect(stored.startsWith("ai_run_error 500 api_error: xxx")).toBe(true);
   });
 });
 

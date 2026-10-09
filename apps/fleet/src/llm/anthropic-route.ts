@@ -20,6 +20,7 @@ import { isSpawnTokenShaped, resolveSpawnParent, type SpawnParent } from "../stu
 import { listStudios } from "../studio/registry";
 import type { StudioStatus } from "../studio/types";
 import { checkAndConsumeLeadRateLimit } from "./ratelimit";
+import { parsePositiveInt } from "../ratelimit";
 import { insertJuniorUsage } from "../junior/usage";
 import {
   GLM_LEAD_MODEL, anthropicRequestToOpenAI, openAIResponseToAnthropic, classifyAiError,
@@ -84,8 +85,52 @@ function extractPresentedToken(req: Request): string | null {
  *  signal here, from this caller's own point of view: MAJOR 3's mid-stream
  *  `reader.read()` throw, and board issue #284's two silent-truncation
  *  shapes — (a) the stream ending without ever confirming a `finish_reason`
- *  and (b) an explicit upstream `{"error":...}` chunk mid-stream. */
-interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean }
+ *  and (b) an explicit upstream `{"error":...}` chunk mid-stream.
+ *
+ *  Issue #302: `failure` names WHICH abnormal end it was (see
+ *  `failureReason`), so the usage row and the console line can tell an idle
+ *  stall from an upstream error from a client that hung up. */
+interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean; failure?: string }
+
+/** Issue #302: how long `pumpAnthropicStream` waits on one `reader.read()`
+ *  before giving up on the upstream. A live GLM-lead run stalled ~8 minutes
+ *  mid-stream; Claude Code only gives up after its own 600s client timeout,
+ *  so the whole session sat idle. 90s clears GLM's normal ~60s calls (and the
+ *  gaps between chunks inside one) with margin, and an `event: error` that
+ *  early lets Claude Code retry within seconds. */
+export const LEAD_STREAM_IDLE_MS_DEFAULT = 90_000;
+
+/** `LEAD_STREAM_IDLE_MS` (env.ts), garbage-in -> default, same
+ *  parsePositiveInt rule the lead rate limits use: a typo never disables the
+ *  timeout. */
+export function leadStreamIdleMs(env: { LEAD_STREAM_IDLE_MS?: string }): number {
+  return parsePositiveInt(env.LEAD_STREAM_IDLE_MS, LEAD_STREAM_IDLE_MS_DEFAULT);
+}
+
+const IDLE = Symbol("idle");
+
+/** One `reader.read()`, raced against an idle timer. Resolves `IDLE` when the
+ *  timer wins; the losing read stays pending until the caller cancels the
+ *  reader (which settles it), so nothing dangles. */
+function readWithIdleTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>, idleMs: number,
+): Promise<ReadableStreamReadResult<Uint8Array> | typeof IDLE> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const idle = new Promise<typeof IDLE>((resolve) => { timer = setTimeout(() => resolve(IDLE), idleMs); });
+  return Promise.race([reader.read(), idle]).finally(() => clearTimeout(timer));
+}
+
+/** Thrown by `pumpAnthropicStream`'s own `write` when the client side of the
+ *  TransformStream is gone — the one failure that is not the upstream's. */
+class ClientAbort extends Error {}
+
+/** Issue #302: `<class> <anthropic error type>: <upstream message>` — the
+ *  class says where it broke, the type is classifyAiError's own mapping of
+ *  the upstream message. Messages come from the upstream/runtime, never from
+ *  the request body. */
+function failureReason(kind: string, message: string): string {
+  return `${kind} ${classifyAiError(message).type}: ${message}`;
+}
 
 /** Builds the Anthropic SSE byte stream for one request: the prelude,
  *  then every chunk the upstream OpenAI-compatible stream yields, translated
@@ -122,61 +167,95 @@ interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean }
  *       of reaching the client at all.
  * Both report `ok: false` to this function's own caller, same "stream ended
  * abnormally" signal MAJOR 3's mid-stream-throw case already reports.
+ *
+ * Issue #302: two more abnormal ends, same discipline —
+ *   (c) the upstream goes quiet: no chunk for `idleMs`. `reader.read()` is
+ *       raced against an idle timer (readWithIdleTimeout); on timeout the
+ *       upstream read is cancelled and an `event: error` goes out, so Claude
+ *       Code retries now instead of after its own 600s client timeout.
+ *   (d) the client hangs up: a `writer.write` rejects. The upstream read is
+ *       cancelled (no point paying for tokens nobody reads) and the call is
+ *       reported as `client_abort`, not an upstream failure.
+ * Every abnormal end now also carries `failure` (see PumpResult).
  */
 async function pumpAnthropicStream(
   upstream: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<Uint8Array>,
-  id: string, model: string,
+  id: string, model: string, idleMs: number,
 ): Promise<PumpResult> {
   const enc = new TextEncoder();
-  const write = async (frames: string[]) => { for (const f of frames) await writer.write(enc.encode(f)); };
-
-  await write(streamPrelude(id, model));
+  const write = async (frames: string[]) => {
+    for (const f of frames) {
+      try { await writer.write(enc.encode(f)); } catch { throw new ClientAbort(); }
+    }
+  };
   const state = createStreamState();
   const reader = upstream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let done = false;
-  while (!done) {
-    let step: { done: boolean; value?: Uint8Array };
-    try {
-      step = await reader.read();
-    } catch (e) {
-      // The upstream failed after message_start (and possibly a content
-      // block) already reached the client — a genuine mid-stream error, not
-      // a normal end. See this function's own doc comment, MAJOR 3.
-      const message = e instanceof Error ? e.message : String(e);
-      await write([streamErrorFrame(message)]);
-      return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: false };
-    }
-    const { done: readerDone, value } = step;
-    if (readerDone) { done = true; buffer += decoder.decode(); } else { buffer += decoder.decode(value, { stream: true }); }
-    // SSE frames are blank-line delimited; a frame can carry more than one
-    // `data:` line (rare for this backend, but parseSseDataLine is run per
-    // LINE regardless, same as the spec requires).
-    const frames = buffer.split("\n\n");
-    buffer = done ? "" : (frames.pop() ?? "");
-    for (const frame of frames) {
-      for (const line of frame.split("\n")) {
-        const parsed = parseSseDataLine(line);
-        if (parsed === "DONE" || parsed === null) continue;
-        // Board issue #284 (b): an explicit upstream error chunk — checked
-        // BEFORE applyOpenAIStreamChunk, which would otherwise see no
-        // `choices[0]` on a chunk shaped like this and silently no-op.
-        const errorMessage = parseStreamErrorChunk(parsed);
-        if (errorMessage !== null) {
-          await write([streamErrorFrame(errorMessage)]);
-          return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: false };
+  const cancelUpstream = () => { reader.cancel().catch(() => {}); };
+  const end = (ok: boolean, failure?: string): PumpResult => ({
+    inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok, ...(failure === undefined ? {} : { failure }),
+  });
+
+  try {
+    await write(streamPrelude(id, model));
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let done = false;
+    while (!done) {
+      let step: ReadableStreamReadResult<Uint8Array> | typeof IDLE;
+      try {
+        step = await readWithIdleTimeout(reader, idleMs);
+      } catch (e) {
+        // The upstream failed after message_start (and possibly a content
+        // block) already reached the client — a genuine mid-stream error, not
+        // a normal end. See this function's own doc comment, MAJOR 3.
+        const message = e instanceof Error ? e.message : String(e);
+        await write([streamErrorFrame(message)]);
+        return end(false, failureReason("upstream_read_error", message));
+      }
+      if (step === IDLE) {
+        // Issue #302 (c): cancel first, so the upstream is released even if
+        // the error frame can no longer be written. A client that also left
+        // meanwhile does not hide the stall: the reason stays idle_timeout.
+        cancelUpstream();
+        await write([streamErrorFrame(`upstream stream idle timeout: no data for ${idleMs}ms`)]).catch(() => {});
+        return end(false, `idle_timeout after ${idleMs}ms`);
+      }
+      const { done: readerDone, value } = step;
+      if (readerDone) { done = true; buffer += decoder.decode(); } else { buffer += decoder.decode(value, { stream: true }); }
+      // SSE frames are blank-line delimited; a frame can carry more than one
+      // `data:` line (rare for this backend, but parseSseDataLine is run per
+      // LINE regardless, same as the spec requires).
+      const frames = buffer.split("\n\n");
+      buffer = done ? "" : (frames.pop() ?? "");
+      for (const frame of frames) {
+        for (const line of frame.split("\n")) {
+          const parsed = parseSseDataLine(line);
+          if (parsed === "DONE" || parsed === null) continue;
+          // Board issue #284 (b): an explicit upstream error chunk — checked
+          // BEFORE applyOpenAIStreamChunk, which would otherwise see no
+          // `choices[0]` on a chunk shaped like this and silently no-op.
+          const errorMessage = parseStreamErrorChunk(parsed);
+          if (errorMessage !== null) {
+            cancelUpstream();
+            await write([streamErrorFrame(errorMessage)]);
+            return end(false, failureReason("upstream_error_chunk", errorMessage));
+          }
+          await write(applyOpenAIStreamChunk(state, parsed));
         }
-        await write(applyOpenAIStreamChunk(state, parsed));
       }
     }
+    // Board issue #284 (a): closeStreamOrError (translate.ts) checks whether
+    // the stream ever confirmed a finish_reason before emitting closeStream's
+    // normal frames — see that function's own doc comment.
+    const closed = closeStreamOrError(state);
+    await write(closed.frames);
+    return end(closed.ok, closed.ok ? undefined : "no_finish_reason");
+  } catch (e) {
+    if (!(e instanceof ClientAbort)) throw e;
+    // Issue #302 (d).
+    cancelUpstream();
+    return end(false, "client_abort");
   }
-  // Board issue #284 (a): closeStreamOrError (translate.ts) checks whether
-  // the stream ever confirmed a finish_reason before emitting closeStream's
-  // normal frames — see that function's own doc comment.
-  const closed = closeStreamOrError(state);
-  await write(closed.frames);
-  return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: closed.ok };
 }
 
 /** Shared gate both `/fleet/llm/anthropic/v1/messages` handlers in this file
@@ -254,15 +333,35 @@ const USAGE_MODE = "lead";
  *  response is returned/closes). Never throws into the caller — the
  *  `.catch(() => {})` matches insertJuniorUsage's own doc comment: a
  *  logging failure must never affect a response already on its way to the
- *  studio. */
+ *  studio.
+ *
+ *  Issue #302: a failed call also records its `failure` reason (capped at
+ *  FAILURE_REASON_CAP, whitespace collapsed to one line) in the row's `error`
+ *  column and writes ONE console.error line for `wrangler tail` — ids,
+ *  counts and the reason only, never prompt or response text. Before this,
+ *  an upstream stall left `ok=0` rows with no reason and empty tail logs. */
 function logUsage(
-  env: Env, ctx: ExecutionContext, studioId: string, inputTokens: number, outputTokens: number, ok: boolean,
+  env: Env, ctx: ExecutionContext, studioId: string,
+  call: { stream: boolean; inputTokens: number; outputTokens: number; ok: boolean; failure?: string },
 ): void {
+  const { stream, inputTokens, outputTokens, ok } = call;
+  const error = ok || call.failure === undefined
+    ? undefined
+    : call.failure.replace(/\s+/g, " ").slice(0, FAILURE_REASON_CAP);
+  if (!ok) {
+    console.error(
+      `[glm-lead] call failed studio=${studioId} stream=${stream} in=${inputTokens} out=${outputTokens} reason=${error ?? "unknown"}`,
+    );
+  }
   ctx.waitUntil(insertJuniorUsage(env.DB, {
     id: crypto.randomUUID(), ts: Date.now(), studioId, mode: USAGE_MODE, model: GLM_LEAD_MODEL,
-    inputTokens, outputTokens, ok,
+    inputTokens, outputTokens, ok, ...(error === undefined ? {} : { error }),
   }).catch(() => {}));
 }
+
+/** Issue #302: an upstream error message can be arbitrarily long (a stack, an
+ *  HTML error page); the reason column only needs enough to classify it. */
+const FAILURE_REASON_CAP = 300;
 
 export async function handleFleetAnthropicMessages(
   req: Request, env: Env, ctx: ExecutionContext,
@@ -317,7 +416,7 @@ export async function handleFleetAnthropicMessages(
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       const { status, type, message: overrideMessage } = classifyAiError(message);
-      logUsage(env, ctx, studio.id, 0, 0, false);
+      logUsage(env, ctx, studio.id, { stream: true, inputTokens: 0, outputTokens: 0, ok: false, failure: `ai_run_error ${status} ${type}: ${message}` });
       return json(anthropicErrorBody(type, overrideMessage ?? message), status);
     }
     if (!(upstream instanceof ReadableStream)) {
@@ -329,7 +428,7 @@ export async function handleFleetAnthropicMessages(
       // anyway is translated through the non-streaming path rather than
       // crashing on `.getReader()`.
       const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel });
-      logUsage(env, ctx, studio.id, anthropic.usage.input_tokens, anthropic.usage.output_tokens, true);
+      logUsage(env, ctx, studio.id, { stream: true, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true });
       return json(anthropic, 200);
     }
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -348,10 +447,17 @@ export async function handleFleetAnthropicMessages(
     // whether the stream ended cleanly — MAJOR 3) only exist once
     // pumpAnthropicStream resolves, so the usage row is logged from its own
     // `.then()`, not alongside the other two call sites above.
+    //
+    // Issue #302: a client hang-up is now a `client_abort` PumpResult, not a
+    // rejection; what still rejects here is a bug inside the pump itself,
+    // logged as `pump_error` rather than dropped without a row.
     ctx.waitUntil(
-      pumpAnthropicStream(upstream, writer, id, requestedModel)
-        .then((result) => logUsage(env, ctx, studio.id, result.inputTokens, result.outputTokens, result.ok))
-        .catch(() => { /* client disconnected before the stream could even start writing — nothing to log or deliver */ })
+      pumpAnthropicStream(upstream, writer, id, requestedModel, leadStreamIdleMs(env))
+        .then((result) => logUsage(env, ctx, studio.id, { stream: true, ...result }))
+        .catch((e) => logUsage(env, ctx, studio.id, {
+          stream: true, inputTokens: 0, outputTokens: 0, ok: false,
+          failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`,
+        }))
         .finally(() => { writer.close().catch(() => {}); }),
     );
     return new Response(readable, { status: 200, headers: { "content-type": "text/event-stream" } });
@@ -363,11 +469,11 @@ export async function handleFleetAnthropicMessages(
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     const { status, type, message: overrideMessage } = classifyAiError(message);
-    logUsage(env, ctx, studio.id, 0, 0, false);
+    logUsage(env, ctx, studio.id, { stream: false, inputTokens: 0, outputTokens: 0, ok: false, failure: `ai_run_error ${status} ${type}: ${message}` });
     return json(anthropicErrorBody(type, overrideMessage ?? message), status);
   }
   const anthropic = openAIResponseToAnthropic(result, { model: requestedModel });
-  logUsage(env, ctx, studio.id, anthropic.usage.input_tokens, anthropic.usage.output_tokens, true);
+  logUsage(env, ctx, studio.id, { stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true });
   return json(anthropic, 200);
 }
 

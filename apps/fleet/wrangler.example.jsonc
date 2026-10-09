@@ -114,6 +114,9 @@
     // (defaults: 60/minute, 2000/day — both optional, uncomment to change).
     // "LEAD_RATE_PER_MINUTE": "60",
     // "LEAD_DAILY_CAP": "2000",
+    // Issue #302: glm-lead stream idle timeout (ms without an upstream chunk
+    // before the route sends the client `event: error`). Default 90000.
+    // "LEAD_STREAM_IDLE_MS": "90000",
     // Issue #335: must match r2_buckets[0].bucket_name below exactly
     // (install-cache.ts's presignR2 signs URLs against this value). Not a
     // secret — a bucket name isn't a credential.

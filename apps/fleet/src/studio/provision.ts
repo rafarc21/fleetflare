@@ -62,6 +62,7 @@ import {
   mergeObserved, bringupLeftLeadUntouched, resolveSnapshotAge,
 } from "./observed";
 import { JUNIOR_HOUSE_RULE } from "../junior/gate";
+import { GLM_LEAD_HOUSE_RULE } from "../llm/lead-rule";
 import { rescuePushPrelude, formatRescueStamp, type RescuePushOptions, type RescueTarget } from "./rescue";
 
 /**
@@ -1990,12 +1991,17 @@ export function composePromptBlocks(
  */
 export async function resolveBringupEnv(
   deps: ProvisionDeps, cfg: ProvisionConfig, fleetRepoSlug: string, workRepoSlug: string,
+  leadType?: "claude" | "glm",
 ): Promise<{ bringupEnv: RoleEnv | StudioEnv; keepAlive: boolean; houseRulesOverlayNote: string | null }> {
   const fleetJsonText = await deps.fetchBlueprintFile(fleetRepoSlug, FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF);
   const fleet = parseFleetJson(fleetJsonText);
   const ref = cfg.blueprintRef ?? fleet.blueprint.ref;
 
   const briefPrompt = cfg.briefPrompt ?? await deps.resolveAssignedBrief?.(buildStudioId(cfg), workRepoSlug);
+  // Issue #302: glm-led leads get brief-discipline guidance (llm/lead-rule.ts).
+  // `leadType` is the studio row's own (runProvision passes `status.leadType`),
+  // not `cfg.leadType` — cfg only carries it on a first-ever provision.
+  const glmRule = leadType === "glm" ? GLM_LEAD_HOUSE_RULE : undefined;
 
   // Issue #330 round 2: resolved ONCE per call, off deps.opsRepo (do.ts's
   // deps() wires it from resolveOpsRepo(this.env)) — NOT from
@@ -2042,7 +2048,10 @@ export async function resolveBringupEnv(
         ...studioBringupEnv(
           { ...studio, skills: finalSkills },
           members,
-          composePromptBlocks(composePromptBlocks(junior ? JUNIOR_HOUSE_RULE : undefined, cfg.projectCard), briefPrompt),
+          composePromptBlocks(
+            composePromptBlocks(composePromptBlocks(glmRule, junior ? JUNIOR_HOUSE_RULE : undefined), cfg.projectCard),
+            briefPrompt,
+          ),
           await resolveMemoryIndex(deps),
           opsOverlay.text,
         ),
@@ -2064,7 +2073,7 @@ export async function resolveBringupEnv(
   return {
     houseRulesOverlayNote: opsOverlay.note,
     bringupEnv: roleBringupEnv(
-      role, composePromptBlocks(cfg.projectCard, briefPrompt),
+      role, composePromptBlocks(composePromptBlocks(glmRule, cfg.projectCard), briefPrompt),
       await resolveMemoryIndex(deps),
       opsOverlay.text,
     ),
@@ -2574,7 +2583,7 @@ export async function runProvision(
   let freshSessionConfirmed = false;
 
   try {
-    const resolved = await resolveBringupEnv(deps, cfg, fleetRepoSlug, workRepoSlug);
+    const resolved = await resolveBringupEnv(deps, cfg, fleetRepoSlug, workRepoSlug, status.leadType);
     roleEnv = resolved.bringupEnv;
     keepAlive = resolved.keepAlive;
     houseRulesOverlayNote = resolved.houseRulesOverlayNote;
