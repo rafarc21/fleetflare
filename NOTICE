@@ -12,3 +12,13 @@ skills/frontend-design
 
 skills/i-have-adhd
   Declares the MIT License in its own front matter.
+
+skills/deep-modules
+  Vendored from mattpocock/skills (https://github.com/mattpocock/skills,
+  commit b0618bc436ad), licensed under the MIT License. See
+  skills/VENDORED.md and skills/THIRD-PARTY-LICENSES.md for details.
+
+skills/pr-body
+  Vendored from mattpocock/skills (https://github.com/mattpocock/skills,
+  commit b0618bc436ad), licensed under the MIT License. See
+  skills/VENDORED.md and skills/THIRD-PARTY-LICENSES.md for details.

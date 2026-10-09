@@ -96,3 +96,29 @@ then get connection refused for reasons that look like anything but that.
 Kill your dev server when you are done. Do not start a second while the first is up.
 Remove throwaway worktrees, containers and artefacts. In a fleet, memory and disk are
 shared and nobody else can tell which server is yours.
+
+## Review → fix loop
+
+A reviewer that fixes what it finds stops being independent — its own next
+finding is now graded against its own last fix. Keep the two apart: a
+fresh-context reviewer reports, read-only, never touching code; a SEPARATE
+fresh-context fixer — never the original implementer, never the reviewer
+itself — applies the fix and commits it directly, before the PR opens. This
+closes the loop (findings become landed code, not just comments) without
+ever letting the reviewer mark its own homework.
+
+This is not a new process — it is this fleet's existing, already-correct
+practice, written down for the first time. See
+`fleet/blueprint/studios/web-studio/studio.md` for the live version: Code
+Reviewer reports Spec axis and Standards axis separately; Standards-axis
+findings go to a fresh-context Developer for a refactor step that commits
+the fixes directly, same push discipline and same one-heavy-gate-at-a-time
+rule as any other implementation step; Spec-axis findings (and anything the
+refactor step can't resolve mechanically) go back as a comment to the
+original Developer instead, never silently reworked by the fixer. If this
+section and `studio.md` ever read as contradicting each other, `studio.md`
+is the live source — fix this section to match, don't let the two drift.
+
+A Standards-axis finding now includes shallow-module findings, not only the
+Fowler baseline — see `skills/deep-modules/SKILL.md`'s detection checklist
+for what that looks like.

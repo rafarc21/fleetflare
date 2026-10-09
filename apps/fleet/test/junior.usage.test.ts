@@ -70,6 +70,28 @@ describe("insertJuniorUsage + aggregateJuniorUsage", () => {
     expect(agg.totals).toEqual({ calls: 3, inputTokens: 16, outputTokens: 29 });
   });
 
+  // Fresh-context review finding 2: anthropic-route.ts's glm-lead route
+  // writes into this SAME table, tagged mode: "lead" (USAGE_MODE in that
+  // file) — a studio's entire lead-inference volume, not an occasional
+  // junior delegation. This table's own header doc comment states its
+  // purpose is specifically "measure GLM (junior) adoption vs Claude", so a
+  // lead-mode row must never count toward that number — it is real usage/
+  // billing data (still inserted, still readable by a raw query), just not
+  // junior-adoption data.
+  it("excludes mode: \"lead\" rows from the junior-adoption aggregate (fresh-context review finding 2)", async () => {
+    await insertJuniorUsage(env.DB, { id: "u1", ts: 100, studioId: ME, mode: "edit", model: "m", inputTokens: 10, outputTokens: 20, ok: true });
+    await insertJuniorUsage(env.DB, { id: "u2", ts: 200, studioId: ME, mode: "lead", model: "m", inputTokens: 1000, outputTokens: 2000, ok: true });
+
+    const agg = await aggregateJuniorUsage(env.DB, 0);
+    expect(agg.rows).toEqual([{ studioId: ME, calls: 1, inputTokens: 10, outputTokens: 20 }]);
+    expect(agg.totals).toEqual({ calls: 1, inputTokens: 10, outputTokens: 20 });
+
+    // The lead-mode row is still really there — this is "excluded from the
+    // adoption aggregate", not "never written"/"deleted".
+    const raw = await env.DB.prepare("SELECT mode FROM junior_usage_log WHERE mode = 'lead'").all();
+    expect(raw.results).toHaveLength(1);
+  });
+
   it("`since` excludes rows older than the cutoff", async () => {
     await insertJuniorUsage(env.DB, { id: "u1", ts: 100, studioId: ME, mode: "edit", model: "m", inputTokens: 10, outputTokens: 20, ok: true });
     await insertJuniorUsage(env.DB, { id: "u2", ts: 5000, studioId: ME, mode: "edit", model: "m", inputTokens: 1, outputTokens: 1, ok: true });

@@ -149,6 +149,24 @@ describe("parseBrief — junior (Task 5: maestro authorization)", () => {
   });
 });
 
+// Issue #249 (maestro spec point 5): security-class work's own marker —
+// same boolean shape `junior` already uses, becomes SECURITY_LABEL
+// (board/types.ts) on the issue. The REFUSAL half (never routed to a
+// `leadType: "glm"` studio) lives in board.ts's createTask/assignTask, not
+// here — this file only proves the brief ACCEPTS and carries the flag.
+describe("parseBrief — security (#249)", () => {
+  it("security: true accepted, absent/false means not set, anything else is a 400", () => {
+    const base = { title: "t", objective: "o", outputFormat: "f", boundaries: "b" };
+    const ok = parseBrief({ ...base, security: true });
+    expect(ok.ok && ok.brief.security).toBe(true);
+    const off = parseBrief({ ...base, security: false });
+    expect(off.ok && off.brief.security).toBeUndefined();
+    const absent = parseBrief(base);
+    expect(absent.ok && absent.brief.security).toBeUndefined();
+    expect(parseBrief({ ...base, security: "yes" })).toEqual({ ok: false, message: "security must be a boolean" });
+  });
+});
+
 describe("renderBriefPrompt — what a lead boots holding", () => {
   const task = {
     number: 71, url: "https://github.com/o/r/issues/71",

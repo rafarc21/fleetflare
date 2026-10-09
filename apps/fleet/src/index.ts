@@ -14,6 +14,7 @@ import { handleBoard, handleFleetBoard } from "./board/routes";
 import { handleMemory } from "./memory/routes";
 import { handleFleetJunior } from "./junior/route";
 import { handleJuniorUsageStats } from "./junior/usage";
+import { handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH } from "./llm/anthropic-route";
 import { handleFleetGh } from "./write-proxy/gh-route";
 import { handleFleetGit } from "./write-proxy/git-worker";
 import { recordWorkerException } from "./exceptions";
@@ -120,6 +121,14 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, url: U
   // FLEET_JUNIOR is on for the calling studio's repo; 403 unless the
   // studio's live task carries the maestro's `junior` label.
   if (url.pathname === "/fleet/junior") return handleFleetJunior(req, env, ctx);
+  // Maestro review round 1, PR #255 BLOCKER: the GLM-led translation route
+  // (issue #249) — a `leadType: "glm"` studio's `ANTHROPIC_BASE_URL` points
+  // here instead of the real Anthropic API. Spawn-token authenticated, same
+  // Access-less `/fleet/` prefix as every route in this block, mounted
+  // before the `/fleet/` catch-all for the identical reason `/fleet/junior`
+  // just above is — left unmounted, every request here used to fall through
+  // to handleFleetSpawn's own 404.
+  if (url.pathname === ANTHROPIC_MESSAGES_PATH) return handleFleetAnthropicMessages(req, env, ctx);
   // Issue #7: the write proxy -- a public-repo studio's only push and gh
   // write path.
   // Spawn-token authenticated, before the /fleet/ catch-all.

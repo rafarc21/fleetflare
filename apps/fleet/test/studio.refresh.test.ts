@@ -968,6 +968,46 @@ describe("studioEnvVars", () => {
     expect(first.FLEET_SPAWN_TOKEN).not.toBe(second.FLEET_SPAWN_TOKEN);
   });
 
+  // Issue #249 — `leadType: "glm"`: no Claude account at all, no
+  // CLAUDE_CODE_OAUTH_TOKEN, and the container's claude binary points at
+  // this fleet's own GLM-translation route instead, authenticated with the
+  // studio's own spawn token (verified live, 2026-10-08: a local echo
+  // server under ANTHROPIC_BASE_URL=http://host:port, claude-cli 2.1.224
+  // requested POST /v1/messages — the SDK appends "/v1/messages" to
+  // ANTHROPIC_BASE_URL itself, so the env var here carries the route's
+  // PARENT path, not ANTHROPIC_MESSAGES_PATH verbatim, or the SDK's own
+  // append would double it).
+  describe("leadType: glm", () => {
+    it("omits CLAUDE_CODE_OAUTH_TOKEN and sets ANTHROPIC_AUTH_TOKEN to the studio's own spawn token", () => {
+      const vars = studioEnvVars(base, STUDIO_ID, SPAWN_TOKEN, null, "glm");
+      expect(vars.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+      expect(vars.ANTHROPIC_AUTH_TOKEN).toBe(SPAWN_TOKEN);
+    });
+
+    it("ANTHROPIC_BASE_URL is env.WORKER_PUBLIC_URL + the route's parent path (never the full /v1/messages path)", () => {
+      const vars = studioEnvVars(base, STUDIO_ID, SPAWN_TOKEN, null, "glm");
+      expect(vars.ANTHROPIC_BASE_URL).toBe("https://example-org.demosite.workers.dev/fleet/llm/anthropic");
+    });
+
+    it("every other env var (tailscale, studio id, fleet spawn token/bot identity) is unaffected", () => {
+      const vars = studioEnvVars(base, STUDIO_ID, SPAWN_TOKEN, null, "glm");
+      expect(vars.TS_AUTHKEY).toBe("tskey-auth-kEXAMPLE-realish");
+      expect(vars.STUDIO_ID).toBe(STUDIO_ID);
+      expect(vars.FLEET_SPAWN_TOKEN).toBe(SPAWN_TOKEN);
+    });
+
+    it("absent/undefined leadType (the default) keeps today's Claude-only shape — no ANTHROPIC_* vars at all", () => {
+      const vars = studioEnvVars(base, STUDIO_ID, SPAWN_TOKEN);
+      expect(vars.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+      expect(vars.ANTHROPIC_BASE_URL).toBeUndefined();
+      expect(vars.CLAUDE_CODE_OAUTH_TOKEN).toBe("oat_abc123");
+    });
+
+    it("leadType: \"claude\" (explicit) is byte-identical to omitting it", () => {
+      expect(studioEnvVars(base, STUDIO_ID, SPAWN_TOKEN, null, "claude")).toEqual(studioEnvVars(base, STUDIO_ID, SPAWN_TOKEN, null));
+    });
+  });
+
   // Issue #53: a studio that failed over to a second account must come back up
   // on THAT account after a recycle. The container's env comes from the Worker
   // secret, which is precisely why the manual in-container `/login` an

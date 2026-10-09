@@ -138,6 +138,32 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["spawn", "pilot", "--new", "extra"]).cmd).toBe("usage");
   });
 
+  // Issue #249: `fleet spawn <role> --lead glm` — the studio-creation path's
+  // CLI surface for `StudioStatus.leadType`.
+  it("spawn takes --lead glm, alone or combined with --new, in either order", () => {
+    expect(parseCliArgs(["spawn", "pilot", "--lead", "glm"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, leadType: "glm" });
+    expect(parseCliArgs(["spawn", "pilot", "--new", "--lead", "glm"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: true, leadType: "glm" });
+    expect(parseCliArgs(["spawn", "pilot", "--lead", "glm", "--new"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: true, leadType: "glm" });
+    // "claude" is accepted too — an explicit, redundant statement of today's
+    // default, never silently coerced away.
+    expect(parseCliArgs(["spawn", "pilot", "--lead", "claude"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, leadType: "claude" });
+  });
+
+  it("spawn --lead rejects anything other than claude/glm, and a bare --lead with no value", () => {
+    expect(parseCliArgs(["spawn", "pilot", "--lead", "gpt4"]).cmd).toBe("usage");
+    expect(parseCliArgs(["spawn", "pilot", "--lead"]).cmd).toBe("usage");
+    expect(parseCliArgs(["spawn", "pilot", "--lead", "--new"]).cmd).toBe("usage");
+  });
+
+  it("no --lead at all: the returned command carries no leadType key (byte-identical to pre-#249)", () => {
+    const cmd = parseCliArgs(["spawn", "pilot"]);
+    expect(cmd.cmd === "spawn" && "leadType" in cmd).toBe(false);
+  });
+
   it("provision requires an id", () => {
     expect(parseCliArgs(["provision", "websites--scratch"])).toEqual({
       cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false, discardSession: false,

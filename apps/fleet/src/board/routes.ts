@@ -25,7 +25,7 @@ import {
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   closeIssue as closeIssueApi, getDefaultBranch, getPullRequest, commitReachableFromBranch,
   getIssueCloser, type IssueCloser, pullClaimsIssue,
-  listMatchingBranches, commitDate, compareFiles, deleteBranch, resolveCanonicalRepoName,
+  listMatchingBranches, commitDate, compareFiles, deleteBranch,
   repoIsPrivate, fetchRepoFile, listOpenPullFiles,
 } from "../github/api";
 import {
@@ -36,17 +36,17 @@ import {
   createTask, transitionTask, commentEnvelope, listTasks, showTask, resolveBoardRepo, assignTask,
   commentStudioEnvelope, showStudioTask, transitionStudioTask, resolveBriefPrompt, resolveLatestAssignedBrief,
   openAssignedTasks, closeTerminalTasks,
-  type BoardApi, type BoardResult, type ListTasksQuery, type OnAssigned,
+  type BoardApi, type BoardResult, type ListTasksQuery, type OnAssigned, type GetLeadType,
 } from "./board";
 import { recordJuniorAuthorization, revokeJuniorAuthorization, sweepJuniorAuthorizations } from "../junior/authz";
 import { wakeOnAssign, checkAssignRepo, type AssignWakeDeps, type AssignWakeReport } from "./assign-wake";
+import { realWakeDeps } from "./wake-deps";
 import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify";
 import { openTasksWithLatestPr } from "./pr-landed";
 import { closeTaskOnPromote } from "./close-action";
 import { runTaskReap, type ReapDeps, type LandedCheck } from "../studio/task-reap";
 import { runRescueGc, type RescueBranch } from "../studio/rescue-gc";
 import { listStudios } from "../studio/registry";
-import { getStudioStub } from "../studio/profile";
 import {
   isSpawnTokenShaped, resolveSpawnParent, resolveSpawnPolicy, mayDirect, SPAWN_TOKEN_HEADER,
   type SpawnParent, type SpawnPolicy,
@@ -451,49 +451,21 @@ function respond<T>(result: BoardResult<T>): Response {
 // deliveries. This is a second, independent edge for a different trigger.
 
 /**
- * The real ports the wake edge needs, wired to D1 and to the Durable Object
- * namespace.
+ * Issue #249 (maestro spec point 5): board.ts's `GetLeadType` port, adapted
+ * from whichever `AssignWakeDeps` the caller already has in hand — no extra
+ * D1 read, since `studioState` already answers `leadType` alongside
+ * `state`/`repoSlug`. Threaded into every createTask/assignTask call this
+ * file makes (both board surfaces, create AND assign/adopt alike), so a
+ * security-labelled task is refused the same way no matter which route it
+ * came through.
  *
- * `studioState` reads the registry FIRST and the DO only after — board
- * #40/#49's lesson: `idFromName` on a name nothing else uses mints a fresh,
- * empty Durable Object and the call succeeds, so a wake aimed at a studio
- * that does not exist lands on a phantom and reports nothing. The id is never
- * composed here; it arrives as written on the task's own `studio:` label,
- * which the operator CLI folded through `repoIdSegment` (src/studio/repo.ts)
- * before it was ever an assignee. Re-deriving that fold is exactly the bug
- * #49 fixed.
- *
- * `wake` calls `wakeStudioOnAssignment`, NOT `wakeStudio`: the DO-side method
- * that runs the stopped and pane gates (src/studio/wake.ts's runGatedWake)
- * before a single keystroke reaches the container.
- *
- * `repoSlug` (issue #278) rides along from the SAME `listStudios(env)` row —
- * it is already a field on the registry, just not read here before this fix.
- * `wakeOnAssign` uses it to refuse a wake into a studio provisioned for a
- * different repo than the task's own.
+ * Issue #263: the real wiring this adapts from — `realAssignWake` here —
+ * moved to `src/board/wake-deps.ts`'s `realWakeDeps`, shared verbatim with
+ * github/webhook.ts's comment wake. `leadType` rides along on that same
+ * `studioState` row; see that file's own doc comment for the fix.
  */
-function realAssignWake(env: Env): AssignWakeDeps {
-  const mint = repoTokenMinter(env);
-  return {
-    studioState: async (studioId) => {
-      const row = (await listStudios(env)).find((s) => s.id === studioId);
-      // `?? null`: a registry row written before `repoSlug` existed (or by a
-      // test fixture that omits it) has NO such key in its stored JSON at
-      // all, so `row.repoSlug` reads `undefined`, not `null` — and
-      // `undefined !== null` is true, which would run the repo compare on
-      // `undefined.toLowerCase()` instead of failing open the way a genuine
-      // `null` does. Normalized at this one read boundary rather than in
-      // assign-wake.ts's own check, the same posture StudioStatus.repoSlug's
-      // own doc comment already documents for this exact ambiguity.
-      return row ? { state: row.state, repoSlug: row.repoSlug ?? null } : null;
-    },
-    wake: async (studioId, prompt) => (await getStudioStub(env, studioId)).wakeStudioOnAssignment(prompt),
-    // Issue #284 round 2 (issue #268's own fix, reused): GitHub's canonical
-    // owner/name for a possibly-stale `repoSlug` — see assign-wake.ts's
-    // `AssignWakeDeps.resolveCanonicalRepo` for why a live lookup, not a
-    // lexical trick, is what a rename or ownership transfer needs.
-    resolveCanonicalRepo: async (slug) => resolveCanonicalRepoName(await mint(slug), slug),
-  };
+function getLeadTypeFrom(deps: AssignWakeDeps): GetLeadType {
+  return async (studioId) => (await deps.studioState(studioId))?.leadType;
 }
 
 /**
@@ -677,7 +649,7 @@ export async function handleBoard(
   // Board issue #41, half one. Same seam shape as `api`/`reach`/`reapPort`
   // above: the real one reads D1 and talks to a Durable Object, and no test
   // in this file needs either.
-  assignWake: AssignWakeDeps = realAssignWake(env),
+  assignWake: AssignWakeDeps = realWakeDeps(env),
   rescueGcPort: RescueGcPort = realRescueGcPort(env),
 ): Promise<Response> {
   const authFailure = await verifyAccess(req, env);
@@ -748,7 +720,7 @@ export async function handleBoard(
         const createPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee, body.pendingSpawn !== true);
         if (createPreflight) return createPreflight;
         return await withAssignWake(assignWake, repo.value, async (onAssigned) => {
-          const result = await createTask(api, repo.value, body, onAssigned);
+          const result = await createTask(api, repo.value, body, onAssigned, getLeadTypeFrom(assignWake));
           await recordJuniorAuthorizationIfNeeded(env, repo.value, result);
           return result;
         });
@@ -791,7 +763,7 @@ export async function handleBoard(
       const assignPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee, action === "assign");
       if (assignPreflight) return assignPreflight;
       return await withAssignWake(assignWake, repo.value, (onAssigned) =>
-        assignTask(api, repo.value, number, body, { mode, onAssigned }));
+        assignTask(api, repo.value, number, body, { mode, onAssigned, getLeadType: getLeadTypeFrom(assignWake) }));
     }
     // Task #119: read-only in the sense that it never moves task state, but
     // it makes outbound fetches and posts a comment — so it is matched as
@@ -948,7 +920,7 @@ export async function handleFleetBoard(
   rows: StudioRowFetch = () => listStudios(env),
   // Issue #59: the two ports the directing verbs (create, assign) need.
   policy: PolicyFetch = realPolicyFetch(env),
-  assignWake: AssignWakeDeps = realAssignWake(env),
+  assignWake: AssignWakeDeps = realWakeDeps(env),
 ): Promise<Response> {
   const url = new URL(req.url);
   const m = FLEET_BOARD_ROUTE_RE.exec(url.pathname);
@@ -998,7 +970,8 @@ export async function handleFleetBoard(
       // filed for a studio outside the caller's edges included — and fires
       // the assign wake on it. A studio's create is never a replay.
       const { idempotencyKey: _dropped, ...brief } = body;
-      return await withAssignWake(assignWake, repo.value, (onAssigned) => createTask(api, repo.value, brief, onAssigned));
+      return await withAssignWake(assignWake, repo.value, (onAssigned) =>
+        createTask(api, repo.value, brief, onAssigned, getLeadTypeFrom(assignWake)));
     }
     // Issue #59: hand a task to a studio the caller directs. The task may be
     // taken only from nobody, the caller, or another studio the caller
@@ -1037,7 +1010,7 @@ export async function handleFleetBoard(
       const preflight = await assignRepoPreflight(assignWake, repo.value, to, true);
       if (preflight) return preflight;
       return await withAssignWake(assignWake, repo.value, (onAssigned) =>
-        assignTask(api, repo.value, number, body, { mode: "reassign", onAssigned }));
+        assignTask(api, repo.value, number, body, { mode: "reassign", onAssigned, getLeadType: getLeadTypeFrom(assignWake) }));
     }
     if (number === null) {
       const query: ListTasksQuery = { assignedTo: studio.id };
