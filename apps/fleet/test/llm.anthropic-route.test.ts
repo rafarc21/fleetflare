@@ -417,6 +417,46 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     expect(rowsLogged[0].ok).toBe(0);
   });
 
+  // Board issue #284, MINOR 4(a): mirrors #218's own finding
+  // (junior.usage.test.ts) applied to the stream-pump chain itself — the
+  // Workers runtime is free to tear down this execution context the instant
+  // the Response (already returned above, carrying `readable`) is
+  // considered "done" from ITS own point of view, before a bare
+  // `void`-prefixed promise chain has actually finished writing/closing the
+  // stream. Checked BEFORE reading any byte of the body: ctx.waitUntil must
+  // be called synchronously, the instant this function kicks the pump off —
+  // not merely as an incidental side effect of the client eventually reading
+  // the stream to completion (which the real runtime gives no such guarantee
+  // about, timing-wise). The upstream stream here deliberately is never
+  // read by this test before the assertion, so if the pump chain is only
+  // reachable via a bare `void` (no ctx.waitUntil wrapping it directly),
+  // backpressure on the unread TransformStream keeps it pending and
+  // ctx.waitUntil never fires at all by this point.
+  it("the stream-pump chain itself is handed to ctx.waitUntil, not a bare fire-and-forget (board issue #284 MINOR 4a)", async () => {
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ];
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    expect(ctx.waitUntil).toHaveBeenCalled();
+    await r.text();
+    await ctx.drain();
+  });
+
   it("a successful stream logs a usage row with the real tokens from the final usage-bearing chunk (MAJOR 4)", async () => {
     const enc = new TextEncoder();
     const chunks = [
