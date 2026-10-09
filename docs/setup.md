@@ -653,19 +653,29 @@ keyed by the repo part of a studio id (`<repo>--<role>`):
   as it appears before `--` in `fleet ls` (`acme-app` for studio
   `acme-app--lead`). Never `owner/repo`: such a key can never match and is
   dropped with a warning in the Worker log.
-- Unmapped repos launch on the account with the most headroom, by fresh
-  `fleet accounts sync` usage rows, kept off other repos' mapped slots while
-  any other account is set. With no fresh usage, the first account that is
-  set, in slot order (normally `CLAUDE_CODE_OAUTH_TOKEN`).
+- Unmapped repos skip any account the fleet has recorded as limited, with
+  auto-failover on or off. Among the free ones, other repos' mapped slots come
+  last, and fresh `fleet accounts sync` usage rows pick the one with the most
+  headroom. With no fresh usage, the first free account in slot order (normally
+  `CLAUDE_CODE_OAUTH_TOKEN`). If every account is limited, the one that resets
+  soonest, and the report below says so.
+- That choice is made again at every launch, so an unmapped studio can move
+  to another account on its next provision, restart or recycle. Map the repo
+  to keep it on one account.
 - `fleet spawn` and `fleet provision` print the account a studio launched on
   and why, on stderr after the table: `mapped (...)`, or
   `UNMAPPED, fell back to slot N — add "<repo>": <slot> to
-  CLAUDE_ACCOUNT_BY_REPO`.
+  CLAUDE_ACCOUNT_BY_REPO`. The Worker log carries the same line. `fleet ls`
+  shows the account, not the reason.
 - **Strict mode:** `FLEET_REQUIRE_ACCOUNT_MAP=on` refuses to launch a studio
   whose repo has no key, with the reason (and the exact key to add) on its
   `fleet ls` row. It applies to every launch, so map existing repos first:
   an unmapped studio's next provision, restart, recycle or container start
-  is refused too.
+  is refused too. One exception: with `FLEET_AUTO_FAILOVER=on`, a studio an
+  earlier failover recorded on an account keeps launching on it (strict mode
+  gates the map, not a failover's choice). `fleet recycle <id> --account
+  mapped` clears that record. glm-lead studios use no Claude account and are
+  never refused by it.
 - A repo mapped to a slot whose secret is not set **refuses to launch**, with
   the reason on its `fleet ls` row. It never falls back to another account.
 - Optional labels tell accounts apart in `fleet ls` and alert cards:

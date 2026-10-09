@@ -240,7 +240,7 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
       // fixes — consistency, not a behavior change for this call site alone.
       const stub = getStudioStubForRow(env, { id: childId, doClass: realDoClassForRole(env, cfg.role) });
       // Issue #305: the response says which account the child launched on and why.
-      return withAccountResolution(env, await stub.provision(projectCard === null ? cfg : { ...cfg, projectCard }));
+      return await withAccountResolution(env, await stub.provision(projectCard === null ? cfg : { ...cfg, projectCard }));
     },
     resolveBrief,
     // Phase 2, task 4: the "studio spawned" re-arm. Same DO-stub shape
@@ -1154,7 +1154,7 @@ export async function handleStudio(
     };
     try {
       // Issue #305: plus which account it launched on and why.
-      return Response.json(burnView(withAccountResolution(env, await stub.provision(cfg))));
+      return Response.json(burnView(await withAccountResolution(env, await stub.provision(cfg))));
     } catch (err) {
       // Issue #231: recognised by its message prefix FIRST, same "a decision,
       // not a failure" posture the recycle route's own RECYCLE_REFUSED_PREFIX

@@ -835,18 +835,29 @@ export function requireAccountMapOn(env: ClaudeAccountEnv): boolean {
 /**
  * Issue #305: where an UNMAPPED repo lands. Was always `accounts[0]`, so a
  * new repo inherited slot 1 even when slot 1 was at its weekly limit, and the
- * only symptom was the limit modal on the lead's pane. Now the account with
- * the most headroom by fresh `account-usage` rows (`selectByHeadroom`, the
- * same rule failover uses), kept off other repos' mapped primaries
- * (`reserved`) while any unreserved account exists. No fresh usage: the first
- * set account, exactly as before.
+ * only symptom was the limit modal on the lead's pane.
+ *
+ * Free accounts only (`accountIsFree` over the fleet-wide `limits` rows, the
+ * rule failover uses), unreserved before reserved (other repos' mapped
+ * primaries), then the most headroom by fresh `account-usage` rows
+ * (`selectByHeadroom`), else list order. Review round 1: usage alone was not
+ * enough — with no fresh usage it fell back to slot 1 even when a limit row
+ * already called slot 1 limited. Every account limited: the soonest readable
+ * reset, else the first not `dead`, else the first; `accountResolution` says
+ * so. No limits and no fresh usage: the first set account, as before.
  */
 export function unmappedFallbackAccount(
   accounts: ClaudeAccount[], reserved: Set<string>, usage: AccountUsageMap, now: Date,
+  limits: AccountLimits = {},
 ): ClaudeAccount | null {
   if (accounts.length === 0) return null;
-  const open = accounts.filter((a) => !reserved.has(a.name));
-  return selectByHeadroom(open.length > 0 ? open : accounts, usage, now) ?? accounts[0];
+  const free = accounts.filter((a) => accountIsFree(a, limits, now));
+  const open = free.filter((a) => !reserved.has(a.name));
+  const pool = open.length > 0 ? open : free;
+  if (pool.length > 0) return selectByHeadroom(pool, usage, now) ?? pool[0];
+  const soonest = accountWithEarliestReset(accounts, limits, now);
+  if (soonest !== null) return accounts.find((a) => a.name === soonest.name) ?? accounts[0];
+  return accounts.find((a) => !limits[a.name]?.dead) ?? accounts[0];
 }
 
 /**
@@ -857,6 +868,7 @@ export function unmappedFallbackAccount(
  */
 export function accountResolution(
   env: ClaudeAccountEnv, repo: string | null, launched: string | null | undefined,
+  limits: AccountLimits = {}, now: Date = new Date(),
 ): string | null {
   if (launched == null) return null;
   const slot = slotOf(launched);
@@ -867,7 +879,13 @@ export function accountResolution(
       : `mapped to slot ${mapped}, launched on slot ${slot ?? "?"} (failover/reroute)`;
   }
   const key = JSON.stringify(repo ?? "<repo>");
-  return `UNMAPPED, fell back to slot ${slot ?? "?"} — add ${key}: <slot> to CLAUDE_ACCOUNT_BY_REPO ` +
+  // Review round 1: an unmapped launch lands on a limited slot only when
+  // every slot is limited (unmappedFallbackAccount) — say so.
+  const on = resolveClaudeAccounts(env).find((a) => a.name === launched);
+  const limited = on !== undefined && !accountIsFree(on, limits, now)
+    ? `; every account limited, soonest reset ${accountWithEarliestReset(resolveClaudeAccounts(env), limits, now)?.until ?? "unknown"}`
+    : "";
+  return `UNMAPPED, fell back to slot ${slot ?? "?"}${limited} — add ${key}: <slot> to CLAUDE_ACCOUNT_BY_REPO ` +
     "(key is the studio-id repo prefix, bare repo name, not owner/repo)";
 }
 
@@ -1026,7 +1044,7 @@ export async function launchAccountOrReroute(
   // not a failover. A recorded account honoured above (flag on) stays put.
   const honouredRecorded = autoFailoverOn(env) && recorded != null && accounts.some((a) => a.name === recorded);
   if (launch.ok && !primaryIsMapped(env, repo) && !honouredRecorded) {
-    const pick = unmappedFallbackAccount(accounts, reserved, usage, now);
+    const pick = unmappedFallbackAccount(accounts, reserved, usage, now, limits);
     if (pick !== null) launch = { ok: true, name: pick.name, token: pick.token };
   }
   if (!launch.ok || !autoFailoverOn(env)) return launch;
