@@ -577,6 +577,13 @@ Recovered only by `recycle --discard-unsynced`, losing 22 min of
 conversation; the 20 pushed commits survived on origin. A one-line diff is
 not a cheap task — price the verification.
 
+## Maintainability and PR-body skills
+
+See `skills/deep-modules` for the shallow-module detection checklist a
+reviewer or sweep applies to a diff, and `skills/pr-body` for how to fill
+`.github/pull_request_template.md`'s Summary/Evidence/Merge-Danger sections
+well — both apply fleet-wide, not just on `fleetflare`.
+
 ## Repository language
 
 All repository content is English — code, comments, docs, board issues, PR

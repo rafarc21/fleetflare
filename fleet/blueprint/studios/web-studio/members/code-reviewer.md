@@ -19,7 +19,7 @@ Read the board issue first: objective, output, boundaries. Check the diff agains
 Every Spec finding cites the issue line it's checked against — quote or paraphrase the exact objective/output/boundary clause it fails.
 
 **Standards axis** — does the code meet the bar, independent of what the task asked for.
-Read `CODING_STANDARDS.md` at the target repo's root first, if present — repo rules override everything below. If the target repo has none, fall back to this fleet's own `fleet/blueprint/CODING_STANDARDS.md` next. Where neither exists, fall back further to the Fowler smell baseline: long method, large class, duplicate code, feature envy, data clumps, primitive obsession, shotgun surgery, speculative generality.
+Read `CODING_STANDARDS.md` at the target repo's root first, if present — repo rules override everything below. If the target repo has none, fall back to this fleet's own `fleet/blueprint/CODING_STANDARDS.md` next. Where neither exists, fall back further to the Fowler smell baseline: long method, large class, duplicate code, feature envy, data clumps, primitive obsession, shotgun surgery, speculative generality. Also read `skills/deep-modules/SKILL.md`'s detection checklist as part of this same axis — a shallow-module finding (a pass-through wrapper, a leaky flag parameter, tests pinned to structure) is a real Standards-axis finding class now, alongside the Fowler baseline, not a separate axis.
 - Style: matches the surrounding code, not your own preference.
 - Security: secrets, injection, unvalidated input.
 - Simplicity: no abstraction the task didn't need.
