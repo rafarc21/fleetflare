@@ -14,7 +14,10 @@ import { handleBoard, handleFleetBoard } from "./board/routes";
 import { handleMemory } from "./memory/routes";
 import { handleFleetJunior } from "./junior/route";
 import { handleJuniorUsageStats } from "./junior/usage";
-import { handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH } from "./llm/anthropic-route";
+import {
+  handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH,
+  handleFleetAnthropicCountTokens, ANTHROPIC_COUNT_TOKENS_PATH,
+} from "./llm/anthropic-route";
 import { handleFleetGh } from "./write-proxy/gh-route";
 import { handleFleetGit } from "./write-proxy/git-worker";
 import { recordWorkerException } from "./exceptions";
@@ -130,6 +133,13 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, url: U
   // just above is — left unmounted, every request here used to fall through
   // to handleFleetSpawn's own 404.
   if (url.pathname === ANTHROPIC_MESSAGES_PATH) return handleFleetAnthropicMessages(req, env, ctx);
+  // Board issue #284, MINOR 4(b): the sibling Anthropic Messages API
+  // endpoint — some Anthropic SDK client configurations probe or call it
+  // before a real request. Never implemented at all until this fix, so any
+  // request here used to fall through to the same `/fleet/` catch-all as
+  // above, same unmounted-route failure shape, mounted the same way,
+  // same reason.
+  if (url.pathname === ANTHROPIC_COUNT_TOKENS_PATH) return handleFleetAnthropicCountTokens(req, env, ctx);
   // Issue #7: the write proxy -- a public-repo studio's only push and gh
   // write path.
   // Spawn-token authenticated, before the /fleet/ catch-all.

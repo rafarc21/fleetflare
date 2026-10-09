@@ -19,15 +19,23 @@ import { readCappedBody } from "../http/capped-body";
 import { isSpawnTokenShaped, resolveSpawnParent, type SpawnParent } from "../studio/spawn";
 import { listStudios } from "../studio/registry";
 import type { StudioStatus } from "../studio/types";
-import { checkAndConsumeJuniorRateLimit } from "../junior/ratelimit";
+import { checkAndConsumeLeadRateLimit } from "./ratelimit";
 import { insertJuniorUsage } from "../junior/usage";
 import {
   GLM_LEAD_MODEL, anthropicRequestToOpenAI, openAIResponseToAnthropic, classifyAiError,
-  createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStream, parseSseDataLine,
-  streamErrorFrame,
+  createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStreamOrError, parseSseDataLine,
+  parseStreamErrorChunk, streamErrorFrame,
 } from "./translate";
 
 export const ANTHROPIC_MESSAGES_PATH = "/fleet/llm/anthropic/v1/messages";
+
+/** Board issue #284, MINOR 4(b): the sibling Anthropic Messages API
+ *  endpoint — some Anthropic SDK client configurations probe or call it to
+ *  decide whether to compact context before sending a real request (Claude
+ *  Code's own SDK may be one of them). Not mounted before this fix, so any
+ *  request here fell through to the generic `/fleet/` catch-all and 404'd —
+ *  see `handleFleetAnthropicCountTokens`'s own doc comment for the rest. */
+export const ANTHROPIC_COUNT_TOKENS_PATH = "/fleet/llm/anthropic/v1/messages/count_tokens";
 
 // deno-lint-ignore no-explicit-any
 type Json = any;
@@ -72,7 +80,11 @@ function extractPresentedToken(req: Request): string | null {
  *  through `insertJuniorUsage` (MAJOR 2/4), and whether the stream reached a
  *  genuine end (`ok: true`, `closeStream`'s normal frames were sent) or was
  *  cut short by an upstream failure (`ok: false`, a `streamErrorFrame` was
- *  sent instead — see MAJOR 3). */
+ *  sent instead). Three distinct shapes all collapse to the same `ok: false`
+ *  signal here, from this caller's own point of view: MAJOR 3's mid-stream
+ *  `reader.read()` throw, and board issue #284's two silent-truncation
+ *  shapes — (a) the stream ending without ever confirming a `finish_reason`
+ *  and (b) an explicit upstream `{"error":...}` chunk mid-stream. */
 interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean }
 
 /** Builds the Anthropic SSE byte stream for one request: the prelude,
@@ -91,6 +103,25 @@ interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean }
  * by catching the read failure explicitly, INSIDE the loop, and branching:
  * a mid-stream error emits `streamErrorFrame` instead of `closeStream`'s
  * frames, never both.
+ *
+ * Board issue #284: two more silent-truncation shapes, same "never fake a
+ * normal end" discipline as MAJOR 3 above —
+ *   (a) the upstream stream ends (reader naturally completes) WITHOUT ever
+ *       sending a chunk that carries a `finish_reason` at all. Checked via
+ *       `closeStreamOrError` (translate.ts) once the read loop ends, instead
+ *       of calling `closeStream` directly — see that function's own doc
+ *       comment for why the check lives there, layered on top of
+ *       `closeStream`, rather than inside it.
+ *   (b) the upstream sends an explicit `{"error": {...}}` chunk mid-stream
+ *       (some OpenAI-compatible backends use this shape instead of, or
+ *       interleaved with, a normal `{choices: [...]}` chunk). Checked via
+ *       `parseStreamErrorChunk` BEFORE handing the parsed chunk to
+ *       `applyOpenAIStreamChunk` — that function's own `chunk?.choices?.[0]`
+ *       is `undefined` for a chunk shaped like this, so without this check
+ *       the real upstream error message would be silently discarded instead
+ *       of reaching the client at all.
+ * Both report `ok: false` to this function's own caller, same "stream ended
+ * abnormally" signal MAJOR 3's mid-stream-throw case already reports.
  */
 async function pumpAnthropicStream(
   upstream: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<Uint8Array>,
@@ -128,12 +159,84 @@ async function pumpAnthropicStream(
       for (const line of frame.split("\n")) {
         const parsed = parseSseDataLine(line);
         if (parsed === "DONE" || parsed === null) continue;
+        // Board issue #284 (b): an explicit upstream error chunk — checked
+        // BEFORE applyOpenAIStreamChunk, which would otherwise see no
+        // `choices[0]` on a chunk shaped like this and silently no-op.
+        const errorMessage = parseStreamErrorChunk(parsed);
+        if (errorMessage !== null) {
+          await write([streamErrorFrame(errorMessage)]);
+          return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: false };
+        }
         await write(applyOpenAIStreamChunk(state, parsed));
       }
     }
   }
-  await write(closeStream(state));
-  return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: true };
+  // Board issue #284 (a): closeStreamOrError (translate.ts) checks whether
+  // the stream ever confirmed a finish_reason before emitting closeStream's
+  // normal frames — see that function's own doc comment.
+  const closed = closeStreamOrError(state);
+  await write(closed.frames);
+  return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: closed.ok };
+}
+
+/** Shared gate both `/fleet/llm/anthropic/v1/messages` handlers in this file
+ *  enforce before either one's OWN logic runs — extracted here (board issue
+ *  #284 review follow-up) after `handleFleetAnthropicMessages` and
+ *  `handleFleetAnthropicCountTokens` were found to duplicate this ~20-line
+ *  block verbatim, down to the error strings: path check, the
+ *  `FLEET_JUNIOR`/`env.AI` feature flag, method check, declared-Content-
+ *  Length cap, spawn-token extraction/validation
+ *  (`extractPresentedToken`/`isSpawnTokenShaped`/`resolveSpawnParent`), and
+ *  the `leadType === "glm"` gate. See `handleFleetAnthropicMessages`'s own
+ *  (now-removed) inline comments for why each individual check exists —
+ *  this function only collects them into one place so both routes keep
+ *  enforcing the exact same thing. The per-minute/daily rate limit is
+ *  deliberately NOT part of this shared gate: `handleFleetAnthropicMessages`
+ *  applies it (it spends Workers AI budget), `handleFleetAnthropicCountTokens`
+ *  does not (see that function's own doc comment for why).
+ *
+ *  Returns either an early refusal `Response` (any one of the checks above
+ *  failing) or the resolved `studio`/`allRows` the caller needs to proceed —
+ *  a caller only has work left to do once it gets the latter back.
+ */
+async function authenticateGlmLeadRequest(
+  req: Request, expectedPath: string, env: Env, rows: () => Promise<StudioStatus[]>,
+): Promise<{ response: Response } | { studio: SpawnParent; allRows: StudioStatus[] }> {
+  if (new URL(req.url).pathname !== expectedPath) return { response: text("not found", 404) };
+  // MAJOR 2: reuses junior's OWN feature flag (same env.FLEET_JUNIOR !== "on"
+  // check junior/route.ts:101 already applies) rather than inventing a
+  // second, parallel on/off switch for a second Workers-AI-spending route —
+  // one flag, one place an operator has to remember to flip.
+  if (env.FLEET_JUNIOR !== "on" || !env.AI) return { response: text("not found", 404) };
+  if (req.method !== "POST") return { response: text("method not allowed", 405) };
+
+  // Cheapest possible refusal first, same order /fleet/junior already
+  // applies (PR #9 review, F3): a declared Content-Length over the cap needs
+  // no token check and no byte of the body ever read.
+  const declaredLength = req.headers.get("content-length");
+  if (declaredLength !== null) {
+    const declared = Number(declaredLength);
+    if (Number.isFinite(declared) && declared > ANTHROPIC_BODY_CAP) return { response: text("payload too large", 413) };
+  }
+
+  const presented = extractPresentedToken(req);
+  if (!isSpawnTokenShaped(presented)) return { response: text("unauthorized", 401) };
+  const allRows = await rows();
+  const studio: SpawnParent | null = await resolveSpawnParent(allRows, presented);
+  if (!studio) return { response: text("unauthorized", 401) };
+  // MAJOR 2 (BLOCKER-adjacent): spawn-token validity alone used to be the
+  // entire gate — ANY studio's token, any leadType, could spend Workers AI
+  // budget here with zero spend controls. `SpawnParent` (spawn.ts) carries
+  // no `leadType` (it is a registry-row field, not part of the parent-
+  // resolution shape every OTHER route needs), so the full `StudioStatus`
+  // row is looked up here, by the same id resolveSpawnParent just verified
+  // owns this token — the one field this route actually needs that
+  // `SpawnParent` does not carry.
+  const studioRow = allRows.find((r) => r.id === studio.id);
+  if (studioRow?.leadType !== "glm") {
+    return { response: text("this route serves glm-led studios only", 403) };
+  }
+  return { studio, allRows };
 }
 
 // MAJOR 2 (maestro review round 1): this route's own usage-log `mode` value
@@ -165,48 +268,23 @@ export async function handleFleetAnthropicMessages(
   req: Request, env: Env, ctx: ExecutionContext,
   rows: () => Promise<StudioStatus[]> = () => listStudios(env),
 ): Promise<Response> {
-  if (new URL(req.url).pathname !== ANTHROPIC_MESSAGES_PATH) return text("not found", 404);
-  // MAJOR 2: reuses junior's OWN feature flag (same env.FLEET_JUNIOR !== "on"
-  // check junior/route.ts:101 already applies) rather than inventing a
-  // second, parallel on/off switch for a second Workers-AI-spending route —
-  // one flag, one place an operator has to remember to flip.
-  if (env.FLEET_JUNIOR !== "on" || !env.AI) return text("not found", 404);
-  if (req.method !== "POST") return text("method not allowed", 405);
-
-  // Cheapest possible refusal first, same order /fleet/junior already
-  // applies (PR #9 review, F3): a declared Content-Length over the cap needs
-  // no token check and no byte of the body ever read.
-  const declaredLength = req.headers.get("content-length");
-  if (declaredLength !== null) {
-    const declared = Number(declaredLength);
-    if (Number.isFinite(declared) && declared > ANTHROPIC_BODY_CAP) return text("payload too large", 413);
-  }
-
-  const presented = extractPresentedToken(req);
-  if (!isSpawnTokenShaped(presented)) return text("unauthorized", 401);
-  const allRows = await rows();
-  const studio: SpawnParent | null = await resolveSpawnParent(allRows, presented);
-  if (!studio) return text("unauthorized", 401);
-  // MAJOR 2 (BLOCKER-adjacent): spawn-token validity alone used to be the
-  // entire gate — ANY studio's token, any leadType, could spend Workers AI
-  // budget here with zero spend controls. `SpawnParent` (spawn.ts) carries
-  // no `leadType` (it is a registry-row field, not part of the parent-
-  // resolution shape every OTHER route needs), so the full `StudioStatus`
-  // row is looked up here, by the same id resolveSpawnParent just verified
-  // owns this token — the one field this route actually needs that
-  // `SpawnParent` does not carry.
-  const studioRow = allRows.find((r) => r.id === studio.id);
-  if (studioRow?.leadType !== "glm") {
-    return text("this route serves glm-led studios only", 403);
-  }
+  const gate = await authenticateGlmLeadRequest(req, ANTHROPIC_MESSAGES_PATH, env, rows);
+  if ("response" in gate) return gate.response;
+  const { studio } = gate;
 
   // F1 (junior/route.ts's own naming): only an authorized, flag-enabled,
   // correctly-led call consumes rate budget — checked after every refusal
-  // above, before any body work or the AI call itself. Reuses junior's own
-  // D1-backed per-minute/daily counters (ratelimit.ts) keyed by studio id —
-  // the SAME caps a junior delegation call already spends against, since
-  // both routes spend out of the same Workers AI budget.
-  const rate = await checkAndConsumeJuniorRateLimit(env.DB, env, studio.id, Date.now());
+  // above, before any body work or the AI call itself.
+  //
+  // Board issue #284, MAJOR 1: this used to reuse junior's own 5/min, 50/day
+  // D1 counters directly — sized for occasional delegation calls, not a
+  // full Claude Code agentic session making many Messages-API round trips
+  // per minute, so a glm-lead studio got 429'd into uselessness almost
+  // immediately. This route now has its OWN D1-backed per-minute/daily
+  // counters (llm/ratelimit.ts), keyed by studio id but under distinct key
+  // prefixes — genuinely separate budget from junior's, even though both
+  // routes still spend out of the same underlying Workers AI quota.
+  const rate = await checkAndConsumeLeadRateLimit(env.DB, env, studio.id, Date.now());
   if (!rate.ok) {
     return text(
       rate.limit === "per-minute"
@@ -226,6 +304,11 @@ export async function handleFleetAnthropicMessages(
   const requestedModel = typeof body.model === "string" && body.model.length > 0 ? body.model : GLM_LEAD_MODEL;
   const openaiBody = anthropicRequestToOpenAI(body);
   const ai = env.AI;
+  // Defensive: `authenticateGlmLeadRequest` already refused with 404 above
+  // when `!env.AI`, so this is unreachable at runtime — kept only because
+  // TypeScript cannot carry that function's narrowing of `env.AI` across
+  // the call boundary into this one.
+  if (!ai) return text("not found", 404);
 
   if (body.stream === true) {
     let upstream: Json;
@@ -252,16 +335,25 @@ export async function handleFleetAnthropicMessages(
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
     const id = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
     const writer = writable.getWriter();
-    // Detached, same fire-and-await-elsewhere shape /fleet/junior's own
-    // heartbeat IIFE uses — the Response below returns `readable`
-    // immediately; this is what actually fills it. MAJOR 2/4: the real
-    // token counts (and whether the stream ended cleanly — MAJOR 3) only
-    // exist once pumpAnthropicStream resolves, so the usage row is logged
-    // from its own `.then()`, not alongside the other two call sites above.
-    void pumpAnthropicStream(upstream, writer, id, requestedModel)
-      .then((result) => logUsage(env, ctx, studio.id, result.inputTokens, result.outputTokens, result.ok))
-      .catch(() => { /* client disconnected before the stream could even start writing — nothing to log or deliver */ })
-      .finally(() => { writer.close().catch(() => {}); });
+    // Board issue #284, MINOR 4(a): the Response below returns `readable`
+    // immediately — the Workers runtime is free to tear down this
+    // execution context the instant that Response is considered "done"
+    // from ITS own point of view, which can happen before this detached
+    // promise chain has actually finished writing/closing the stream. Same
+    // reasoning as `logUsage`'s own doc comment above (and the
+    // `insertJuniorUsage` call site it describes) for why this is
+    // `ctx.waitUntil`, not a bare `void`: only `ctx.waitUntil` keeps a
+    // promise alive past the point the runtime would otherwise consider
+    // this request's work finished. MAJOR 2/4: the real token counts (and
+    // whether the stream ended cleanly — MAJOR 3) only exist once
+    // pumpAnthropicStream resolves, so the usage row is logged from its own
+    // `.then()`, not alongside the other two call sites above.
+    ctx.waitUntil(
+      pumpAnthropicStream(upstream, writer, id, requestedModel)
+        .then((result) => logUsage(env, ctx, studio.id, result.inputTokens, result.outputTokens, result.ok))
+        .catch(() => { /* client disconnected before the stream could even start writing — nothing to log or deliver */ })
+        .finally(() => { writer.close().catch(() => {}); }),
+    );
     return new Response(readable, { status: 200, headers: { "content-type": "text/event-stream" } });
   }
 
@@ -277,4 +369,62 @@ export async function handleFleetAnthropicMessages(
   const anthropic = openAIResponseToAnthropic(result, { model: requestedModel });
   logUsage(env, ctx, studio.id, anthropic.usage.input_tokens, anthropic.usage.output_tokens, true);
   return json(anthropic, 200);
+}
+
+/** ESTIMATE ONLY, not a real count — this backend has no tokenizer exposed
+ *  to it at all (no Anthropic tokenizer, no access to GLM's own vocab), so
+ *  there is no way to answer this honestly with an exact number. Heuristic:
+ *  total character count of every flattened OpenAI-shape message's content
+ *  (text and/or tool-call name+arguments), divided by ~4 — the commonly
+ *  cited rough chars-per-token ratio for English text. Flagged here rather
+ *  than guessed at silently, same "say so in a comment instead of guessing"
+ *  convention classifyAiError's own doc comment (translate.ts) already
+ *  established for this file. `Math.max(1, ...)` only to avoid reporting 0
+ *  for a technically-non-empty request — not a claim that 1 is ever the
+ *  real count. */
+function estimateInputTokens(messages: Json[]): number {
+  let chars = 0;
+  for (const m of messages) {
+    if (typeof m.content === "string") chars += m.content.length;
+    for (const tc of Array.isArray(m.tool_calls) ? m.tool_calls : []) {
+      chars += String(tc.function?.name ?? "").length + String(tc.function?.arguments ?? "").length;
+    }
+  }
+  return Math.max(1, Math.round(chars / 4));
+}
+
+/**
+ * Board issue #284, MINOR 4(b): `POST /v1/messages/count_tokens`, the
+ * sibling Anthropic Messages API endpoint. The real Anthropic endpoint
+ * returns `{"input_tokens": <count>}` without generating anything — this
+ * route follows the same shape, but see `estimateInputTokens`'s own doc
+ * comment for why the number itself is an ESTIMATE, not a real count.
+ *
+ * Same trust boundary as `handleFleetAnthropicMessages` above — auth
+ * (`extractPresentedToken`/`isSpawnTokenShaped`/`resolveSpawnParent`), the
+ * `FLEET_JUNIOR`/`env.AI` feature flag, and the `leadType === "glm"` gate
+ * are all still enforced here even though this route never actually calls
+ * `env.AI.run` — none of those checks exist BECAUSE of the AI call; they
+ * exist because this is still a spawn-token-authenticated glm-lead-only
+ * surface, same as every other check in this file. The per-minute/daily
+ * rate limit (`checkAndConsumeLeadRateLimit`) is deliberately NOT applied
+ * here — unlike the real message-generation route, this one spends no
+ * Workers AI budget at all, so there is nothing for that limiter to
+ * protect.
+ */
+export async function handleFleetAnthropicCountTokens(
+  req: Request, env: Env, ctx: ExecutionContext,
+  rows: () => Promise<StudioStatus[]> = () => listStudios(env),
+): Promise<Response> {
+  const gate = await authenticateGlmLeadRequest(req, ANTHROPIC_COUNT_TOKENS_PATH, env, rows);
+  if ("response" in gate) return gate.response;
+
+  const raw = await readCappedBody(req, ANTHROPIC_BODY_CAP);
+  if (raw === null) return text("payload too large", 413);
+  let body: Json;
+  try { body = JSON.parse(raw); } catch { return text("bad json", 400); }
+  if (!Array.isArray(body?.messages) || body.messages.length === 0) return text("messages required", 400);
+
+  const openaiBody = anthropicRequestToOpenAI(body);
+  return json({ input_tokens: estimateInputTokens(openaiBody.messages) }, 200);
 }

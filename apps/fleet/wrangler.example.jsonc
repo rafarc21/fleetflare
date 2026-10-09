@@ -107,6 +107,13 @@
     // "JUNIOR_REPOS": "<your-org>/<your-repo>",
     // "JUNIOR_RATE_PER_MINUTE": "5",
     // "JUNIOR_DAILY_CAP": "50",
+    // Board issue #284, MAJOR 1: the glm-lead route
+    // (/fleet/llm/anthropic/v1/messages) has its OWN, separate throttle —
+    // a glm-led studio is a full agentic session, not an occasional junior
+    // delegation call, so it needs a much higher per-minute budget
+    // (defaults: 60/minute, 2000/day — both optional, uncomment to change).
+    // "LEAD_RATE_PER_MINUTE": "60",
+    // "LEAD_DAILY_CAP": "2000",
     // Issue #335: must match r2_buckets[0].bucket_name below exactly
     // (install-cache.ts's presignR2 signs URLs against this value). Not a
     // secret — a bucket name isn't a credential.

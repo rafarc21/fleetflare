@@ -76,6 +76,20 @@ export interface Env {
    */
   JUNIOR_RATE_PER_MINUTE?: string;
   JUNIOR_DAILY_CAP?: string;
+  /**
+   * Board issue #284, MAJOR 1: per-studio throttles on the glm-lead route
+   * (`POST /fleet/llm/anthropic/v1/messages`), D1-backed (src/llm/ratelimit.ts)
+   * but genuinely separate from `JUNIOR_RATE_PER_MINUTE`/`JUNIOR_DAILY_CAP`
+   * above — a glm-led studio is a full Claude Code agentic session making
+   * many calls per minute, not an occasional junior delegation call.
+   * `LEAD_RATE_PER_MINUTE` caps calls in any rolling 60s bucket per studio
+   * (default 60); `LEAD_DAILY_CAP` caps calls per UTC day per studio
+   * (default 2000). Both optional, and garbage input (absent, non-numeric,
+   * zero, negative) falls back to the default rather than disabling the
+   * limit — see ratelimit.ts's parsePositiveInt.
+   */
+  LEAD_RATE_PER_MINUTE?: string;
+  LEAD_DAILY_CAP?: string;
   /** Workers AI binding (`"ai": { "binding": "AI" }`). Only junior uses it. */
   AI?: { run(model: string, input: unknown): Promise<unknown> };
   /**

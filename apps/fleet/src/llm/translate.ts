@@ -570,3 +570,70 @@ export function streamErrorFrame(message: string): string {
   const { type } = classifyAiError(message);
   return sseEvent("error", { type: "error", error: { type, message } });
 }
+
+/**
+ * Board issue #284 (b): some OpenAI-compatible backends emit a chunk shaped
+ * `{"error": {...}}` (or, less commonly, `{"error": "plain string"}`)
+ * instead of (or interleaved with) the normal `{choices: [...]}` shape when
+ * something goes wrong server-side mid-generation. Before this function
+ * existed, such a chunk reached `applyOpenAIStreamChunk` same as any other —
+ * that function's own `chunk?.choices?.[0]` is `undefined` for a chunk
+ * shaped like this, so it silently returned `[]` (no frames at all),
+ * discarding the one upstream signal that actually explained the failure.
+ * Returns the error's own message when recognized (an `{error: {message:
+ * string}}` or bare `{error: string}` shape — the two most common
+ * OpenAI-compatible conventions), `null` for anything else — a normal
+ * `{choices: ...}` chunk, a usage-only trailing chunk, or any unrecognized
+ * shape never guessed at, same posture as every other "flag the
+ * uncertainty" comment in this file.
+ */
+export function parseStreamErrorChunk(chunk: Json): string | null {
+  const err = chunk?.error;
+  if (err === undefined || err === null) return null;
+  if (typeof err === "string" && err.length > 0) return err;
+  if (err && typeof err.message === "string" && err.message.length > 0) return err.message;
+  return null;
+}
+
+/**
+ * Board issue #284 (a): `closeStream` alone cannot tell the difference
+ * between a stream that reached a genuine, upstream-confirmed end (ANY
+ * `finish_reason` chunk arrived, even `"stop"`) and one that simply stopped
+ * delivering bytes without ever confirming why — EOF, a dropped connection,
+ * a `[DONE]` sentinel with no preceding `finish_reason` chunk, or
+ * `reader.read()`'s own natural completion with nothing more to read.
+ * `state.finishReason` stays `null` in every one of those cases (it is only
+ * ever set inside `applyOpenAIStreamChunk`, and only when a chunk's own
+ * `choice.finish_reason` is present) — the one authoritative signal of
+ * "upstream never told us how this ended" left standing once every other
+ * shape this file already guards against is ruled out:
+ *   - NOT the same as the PR #255 empty-content guard inside `closeStream`
+ *     itself (`state.nextIndex === 0` forcing `stop_reason: "max_tokens"`):
+ *     that guard fires on turns where the upstream DID confirm an end
+ *     (`finish_reason` present, often `"stop"`) but produced no visible
+ *     content — `state.finishReason` is non-null there, so this check never
+ *     fires for it.
+ *   - NOT the same as MAJOR 3's mid-stream `reader.read()` throw (caught by
+ *     the caller, `pumpAnthropicStream`, before this function is ever even
+ *     reached): that is an upstream transport failure WHILE still trying to
+ *     read; this is the upstream appearing to finish cleanly while never
+ *     having said why.
+ * Kept as its own function layered ON TOP of `closeStream`, rather than
+ * folded into it, so `closeStream`'s own unit tests (several of which
+ * deliberately call it directly with `state.finishReason === null`, e.g.
+ * the max_tokens-floor-exhaustion-with-no-chunks-ever-applied case) keep
+ * exercising its real, narrower contract unchanged — only
+ * `pumpAnthropicStream`'s own stream-ending call site needs this broader
+ * check.
+ */
+export interface StreamCloseResult {
+  frames: string[];
+  ok: boolean;
+}
+
+export function closeStreamOrError(state: StreamState): StreamCloseResult {
+  if (state.finishReason === null) {
+    return { frames: [streamErrorFrame("upstream stream ended without a finish reason")], ok: false };
+  }
+  return { frames: closeStream(state), ok: true };
+}
