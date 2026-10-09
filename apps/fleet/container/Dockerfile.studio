@@ -223,16 +223,12 @@ RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
 # apt-get install under the hood and leaves the same stale list files behind
 # if uncleaned (measured: 76M/26 files before this line was added).
 #
-# Caveat worth flagging, not fixed here (would mean editing studio-
-# bringup.sh, out of this task's file scope): this resolves whatever
-# `playwright` package is newest AT BUILD TIME, while the MCP server
-# resolves whatever `@playwright/mcp@latest` is newest AT STUDIO RUNTIME —
-# two independently-moving "latest"s. Playwright pins its browser launch to
-# an exact bundled revision, not a semver range, so a wide enough drift
-# between the two could in principle produce a "browser not found, run
-# playwright install" error from the MCP server despite this layer having
-# run. No evidence this has actually happened; noting the mechanism so it
-# is diagnosable if it ever does.
+# Keep in lockstep with studio-bringup.sh's fleet_mcp_config: it pins
+# @playwright/mcp to a release whose bundled playwright uses the SAME
+# chromium revision as the playwright version installed here, and points
+# the MCP server at /usr/local/bin/chromium with --browser chromium (issue
+# #293: unflagged, the server looked for Google Chrome, which this image
+# never ships). Bump the two pins together.
 RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
     && bun x playwright@1.63.0 install chromium --with-deps \
     && ln -sf /root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome /usr/local/bin/chromium \

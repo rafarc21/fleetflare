@@ -1245,6 +1245,19 @@ fi
 # command is "bun", not "bunx": this base image's bun (1.3.12) ships no
 # `bunx` binary, only the `bun x` subcommand. MCP spawns command+args
 # directly, no shell in between, so the subcommand is its own argv element.
+#
+# playwright (issue #293): with no browser flags @playwright/mcp picks the
+# branded `chrome` channel and every tool call fails with "Chromium
+# distribution 'chrome' is not found at /opt/google/chrome/chrome" -- the
+# image ships Playwright's own chromium (Dockerfile.studio), not Google
+# Chrome. So: --browser chromium, --headless (no display in a container),
+# --isolated (in-memory profile: two claude sessions never fight over one
+# profile lock), and --executable-path at the image's /usr/local/bin/chromium
+# symlink when it resolves to something executable -- that bypasses the
+# revision lookup entirely. Pinned, never @latest: 0.0.80 depends on
+# playwright 1.63.0-alpha-2026-08-31, same chromium revision (1243) as the
+# playwright@1.63.0 the image installs; 0.0.81+ moved to 1.64. Bump this pin
+# together with Dockerfile.studio's playwright version.
 fleet_mcp_config() {
   local file="$1" names="$2"
   if [ -z "$names" ]; then
@@ -1254,7 +1267,11 @@ fleet_mcp_config() {
   mkdir -p "${file%/*}" || return 1
   MCP_PATH="$file" MCP_NAMES="$names" python3 -c '
 import json, os, sys
-known = {"playwright": {"command": "bun", "args": ["x", "@playwright/mcp@latest"]}}
+playwright = ["x", "@playwright/mcp@0.0.80", "--browser", "chromium", "--headless", "--isolated"]
+chromium = os.environ.get("FLEET_MCP_CHROMIUM", "/usr/local/bin/chromium")
+if os.path.isfile(chromium) and os.access(chromium, os.X_OK):
+    playwright += ["--executable-path", chromium]
+known = {"playwright": {"command": "bun", "args": playwright}}
 servers = {}
 for n in [n for n in os.environ["MCP_NAMES"].split(",") if n]:
     if n in known:
