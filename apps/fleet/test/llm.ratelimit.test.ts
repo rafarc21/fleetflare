@@ -130,13 +130,28 @@ describe("checkAndConsumeLeadRateLimit — genuinely separate from junior's", ()
   });
 
   it("the two limits write to distinct, non-colliding D1 key prefixes in fleet_state", async () => {
+    const keysOf = async () => {
+      const rows = await env.DB.prepare("SELECT key FROM fleet_state ORDER BY key").all<{ key: string }>();
+      return (rows.results ?? []).map((r) => r.key);
+    };
+
     await checkAndConsumeJuniorRateLimit(env.DB, {}, STUDIO, 0);
+    const afterJunior = await keysOf();
+    expect(afterJunior.some((k) => k.startsWith("junior-rate:"))).toBe(true);
+
     await checkAndConsumeLeadRateLimit(env.DB, {}, STUDIO, 0);
-    const rows = await env.DB.prepare("SELECT key FROM fleet_state ORDER BY key").all<{ key: string }>();
-    const keys = (rows.results ?? []).map((r) => r.key);
-    expect(keys.some((k) => k.startsWith("junior-rate:"))).toBe(true);
-    expect(keys.some((k) => k.startsWith("lead-rate:"))).toBe(true);
-    // Genuinely distinct prefixes — neither key list overlaps the other.
-    expect(keys.filter((k) => k.startsWith("junior-rate:")).some((k) => k.startsWith("lead-rate:"))).toBe(false);
+    const afterBoth = await keysOf();
+    expect(afterBoth.some((k) => k.startsWith("lead-rate:"))).toBe(true);
+
+    // Genuinely non-tautological "no collision" check (unlike a filter-
+    // then-filter check against two already-mutually-exclusive prefixes,
+    // which is vacuously true regardless of real behavior): the lead call,
+    // same studio and same instant as junior's call just above, must have
+    // written at least one BRAND NEW row to fleet_state rather than merely
+    // re-incrementing a row junior's own call already created. A brand new
+    // row is exactly what would NOT happen (zero new keys below) if the two
+    // limiters ever shared a key prefix for the same studio/bucket.
+    const newKeys = afterBoth.filter((k) => !afterJunior.includes(k));
+    expect(newKeys.length).toBeGreaterThan(0);
   });
 });
