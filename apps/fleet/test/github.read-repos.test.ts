@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { mintReadReposToken } from "../src/github/auth";
+import { MintTokenError } from "../src/github/mint-token-error";
 import {
   READ_REPOS_MAX, READ_REPOS_PERMISSIONS, parseReadRepos, recordReadReposGrant, revokeReadReposGrant,
   readReposGrantsForStudio, studioReadReposCredential, swapStoredReadToken, revokeInstallationToken,
@@ -239,11 +240,40 @@ describe("studioReadReposCredential — mint failure is non-fatal", () => {
     expect(comment.mock.calls[0]![0]).toBe(TASK_REPO);
     expect(comment.mock.calls[0]![1]).toBe(7);
     expect(String(comment.mock.calls[0]![2])).toMatch(/read-repos/);
-    expect(String(comment.mock.calls[0]![2])).toMatch(/422/);
     expect(await readReposGrantsForStudio(env.DB, STUDIO)).toHaveLength(1);
     mint.mockImplementationOnce(async () => { throw new Error("a different failure"); });
     await studioReadReposCredential(appEnv(), STUDIO, deps);
     expect(comment).toHaveBeenCalledTimes(2);
+  });
+
+  // PR #292 review round 2 (MAJOR): the task issue may be PUBLIC. The
+  // comment names no sibling repo and quotes no GitHub error text — only
+  // the repo count and the HTTP status.
+  it("the task comment is generic: repo count + HTTP status, no repo names, no GitHub text", async () => {
+    await recordReadReposGrant(env.DB, TASK_REPO, 7, STUDIO, ["acme-org/secret-alpha", "acme-org/secret-beta"], 1000);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const comment = vi.fn(async (_repo: string, _n: number, _body: string) => {});
+    const mint = vi.fn(async () => {
+      throw new MintTokenError(422, "installation token failed (422): {\"message\":\"acme-org/secret-alpha not accessible\"}");
+    });
+    await studioReadReposCredential(appEnv(), STUDIO, { getTask: async () => liveTask(), mint, comment });
+    const body = String(comment.mock.calls[0]![2]);
+    expect(body).not.toContain("secret-alpha");
+    expect(body).not.toContain("secret-beta");
+    expect(body).not.toContain("not accessible");
+    expect(body).toContain("2 repos");
+    expect(body).toContain("HTTP 422");
+  });
+
+  it("a non-HTTP failure says so without its message", async () => {
+    await recordReadReposGrant(env.DB, TASK_REPO, 7, STUDIO, ["acme-org/secret-alpha"], 1000);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const comment = vi.fn(async (_repo: string, _n: number, _body: string) => {});
+    const mint = vi.fn(async () => { throw new Error("read-repos: 16 repos, over the limit of 15 (acme-org/secret-alpha)"); });
+    await studioReadReposCredential(appEnv(), STUDIO, { getTask: async () => liveTask(), mint, comment });
+    const body = String(comment.mock.calls[0]![2]);
+    expect(body).not.toContain("secret-alpha");
+    expect(body).toContain("1 repo");
   });
 
   it("a later success re-arms the comment for the next failure", async () => {

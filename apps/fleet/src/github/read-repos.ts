@@ -23,6 +23,7 @@ import { deleteFlag, getFlag, setFlag } from "../state";
 import { USER_AGENT } from "./app";
 import { getStudioStub } from "../studio/profile";
 import { GitHubError } from "../board/api";
+import { MintTokenError } from "./mint-token-error";
 import { TERMINAL_TASK_STATES, type BoardTask } from "../board/types";
 import type { Env } from "../env";
 
@@ -184,6 +185,16 @@ function grantStillLive(task: BoardTask, studioId: string): boolean {
   return task.assignee === studioId;
 }
 
+/** The board comment for a failed read mint. Posted on the task issue,
+ *  which may be PUBLIC while the sibling repos are private: only the repo
+ *  count and the HTTP status, never a repo name or GitHub's error text. */
+export function readReposFailureComment(studioId: string, repoCount: number, err: unknown): string {
+  const cause = err instanceof MintTokenError ? `GitHub answered HTTP ${err.status}` : "the grant was refused before reaching GitHub";
+  return `read-repos: the read-only token for ${studioId} (${repoCount} ${repoCount === 1 ? "repo" : "repos"}) ` +
+    `could not be minted (${cause}), so this studio has no sibling-repo access right now. ` +
+    "Its main credential is unaffected. Details are in the Worker log.";
+}
+
 export interface StudioReadReposDeps {
   getTask: (repo: string, issueNumber: number) => Promise<BoardTask>;
   mint?: typeof mintReadReposToken;
@@ -260,10 +271,9 @@ export async function studioReadReposCredential(
     for (const g of sameOwner) {
       try {
         if ((await getFlag(db, errorKey(g.repo, g.number))) === message) continue;
-        await deps.comment?.(g.repo, g.number,
-          `read-repos: the read-only token for ${studioId} (repos ${granted.join(", ")}) could not be minted, ` +
-          `so this studio has no sibling-repo access right now. Its main credential is unaffected. ` +
-          `GitHub said: ${message}`);
+        // PR #292 review round 2: the task issue may be public. No repo
+        // name and no GitHub text — those stay in the Worker log above.
+        await deps.comment?.(g.repo, g.number, readReposFailureComment(studioId, granted.length, err));
         await setFlag(db, errorKey(g.repo, g.number), message, Date.now());
       } catch (commentErr) {
         console.error(`read-repos: could not comment on ${g.repo}#${g.number}`,
