@@ -173,13 +173,32 @@ describe("handleFleetAnthropicMessages — spend controls (MAJOR 2)", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("429 once the per-minute rate limit is exceeded — reuses junior's own D1 counters", async () => {
-    const { token, rows, e } = await setup(undefined, { JUNIOR_RATE_PER_MINUTE: "1" });
+  // Board issue #284, MAJOR 1: this route has its OWN rate limit now
+  // (LEAD_RATE_PER_MINUTE, src/llm/ratelimit.ts) — junior's own
+  // JUNIOR_RATE_PER_MINUTE no longer has any effect here.
+  it("429 once the per-minute rate limit is exceeded — uses its OWN LEAD_RATE_PER_MINUTE, not junior's", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_RATE_PER_MINUTE: "1" });
     const first = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(first.status).toBe(200);
     const second = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(second.status).toBe(429);
     expect(await second.text()).toContain("too many glm-lead calls this minute");
+  });
+
+  it("junior's own JUNIOR_RATE_PER_MINUTE has no effect on this route — the two limits are separate", async () => {
+    const { token, rows, e } = await setup(undefined, { JUNIOR_RATE_PER_MINUTE: "1" });
+    const first = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(first.status).toBe(200);
+    const second = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(second.status).toBe(200);
+  });
+
+  it("a burst of 10 rapid calls succeeds under the default LEAD_RATE_PER_MINUTE (60) — would 429 at junior's old default of 5", async () => {
+    const { token, rows, e } = await setup();
+    for (let i = 0; i < 10; i++) {
+      const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+      expect(r.status).toBe(200);
+    }
   });
 
   it("a successful non-streaming call logs a junior_usage_log row with the REAL input/output tokens (MAJOR 4)", async () => {
