@@ -8,6 +8,50 @@ import { closesIssueByKeyword } from "./promote-close";
 const USER_AGENT = "fleetflare";
 
 /**
+ * The standard header set every GitHub REST call in this module sends
+ * (#265): bearer token, GitHub's own JSON media type, the client name, and
+ * a JSON content type. The few sites whose set deliberately differs keep
+ * their own explicit literals rather than this factory — fetchRepoFile's
+ * raw media type below, and the bodyless GETs that never carried a
+ * content-type at all — exact preservation, no header added or dropped.
+ */
+const GH_HEADERS = (token: string) => ({
+  authorization: `Bearer ${token}`,
+  accept: "application/vnd.github+json",
+  "user-agent": USER_AGENT,
+  "content-type": "application/json",
+});
+
+/**
+ * One GitHub REST request through the standard header set (#265): fetch
+ * with GH_HEADERS, nothing more. It hides the header convention and
+ * nothing else — no status parsing, no body reading, since callers differ
+ * there (404 -> false vs. throw vs. parse-and-return). `init` carries the
+ * method and body; headers always come from GH_HEADERS, which is why every
+ * site with a deviant header set keeps its own explicit literal instead of
+ * calling this.
+ */
+async function ghRequest(token: string, url: string, init: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, headers: GH_HEADERS(token) });
+}
+
+/**
+ * One existence check (#265): 404 is `false`, 2xx is `true`, everything else
+ * throws GitHub's own words — the convention the six exported *Exists
+ * functions below all carried as six copy-pasted bodies. `what` is each
+ * fn's own error prefix (e.g. `read ${repo}#${number}`), so every thrown
+ * message stays bit-for-bit what it was before those bodies collapsed into
+ * this one; the token never appears in it.
+ */
+async function exists(token: string, url: string, what: string): Promise<boolean> {
+  const res = await ghRequest(token, url, { method: "GET" });
+  const text = await res.text();
+  if (res.status === 404) return false;
+  if (!res.ok) throw new Error(`${what} failed (${res.status}): ${text.slice(0, 300)}`);
+  return true;
+}
+
+/**
  * Merges an already-approved pull request using a short-lived installation
  * token minted by the caller (src/github/app.ts — this module never mints
  * its own). `mergeMethod` is the caller's call, not this module's: squash is
@@ -23,14 +67,8 @@ export async function mergePullRequest(
   token: string, repo: string, pr: string, commitTitle: string,
   mergeMethod: "merge" | "squash",
 ): Promise<string> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${pr}/merge`, {
+  const res = await ghRequest(token, `https://api.github.com/repos/${repo}/pulls/${pr}/merge`, {
     method: "PUT",
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: "application/vnd.github+json",
-      "user-agent": USER_AGENT,
-      "content-type": "application/json",
-    },
     body: JSON.stringify({ commit_title: commitTitle, merge_method: mergeMethod }),
   });
   const text = await res.text();
@@ -169,14 +207,8 @@ export async function createRepoFile(
   /** The existing file's blob sha, to replace it (#363). Absent = create. */
   sha?: string,
 ): Promise<{ path: string; sha: string }> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/contents/${path}`, {
+  const res = await ghRequest(token, `https://api.github.com/repos/${repo}/contents/${path}`, {
     method: "PUT",
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: "application/vnd.github+json",
-      "user-agent": USER_AGENT,
-      "content-type": "application/json",
-    },
     body: JSON.stringify({ message, content: base64EncodeUtf8(content), ...(sha === undefined ? {} : { sha }) }),
   });
   const text = await res.text();
@@ -277,13 +309,6 @@ export async function listInstallationRepos(token: string): Promise<string[]> {
 // fact exists twice or not at all. Through a single tree it is ONE commit that
 // is either wholly there or wholly absent, which is the only shape that can
 // honestly claim "nothing was deleted" — a reviewer sees the move as a move.
-
-const GH_HEADERS = (token: string) => ({
-  authorization: `Bearer ${token}`,
-  accept: "application/vnd.github+json",
-  "user-agent": USER_AGENT,
-  "content-type": "application/json",
-});
 
 /** GitHub's own words on any non-2xx, same convention as every other function
  *  in this module; the token never appears in the message. */
@@ -512,13 +537,7 @@ export async function repoIsWritable(token: string, repo: string): Promise<boole
  * repo the fleet cannot see anyway.
  */
 export async function pullRequestExists(token: string, repo: string, number: number): Promise<boolean> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
-    method: "GET", headers: GH_HEADERS(token),
-  });
-  const text = await res.text();
-  if (res.status === 404) return false;
-  if (!res.ok) throw new Error(`read ${repo}#${number} failed (${res.status}): ${text.slice(0, 300)}`);
-  return true;
+  return exists(token, `https://api.github.com/repos/${repo}/pulls/${number}`, `read ${repo}#${number}`);
 }
 
 /**
@@ -581,13 +600,7 @@ export async function listOpenPullFiles(token: string, repo: string): Promise<{ 
  * see src/board/verify.ts's attemptVerification, the only caller.
  */
 export async function branchExists(token: string, repo: string, branch: string): Promise<boolean> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}`, {
-    method: "GET", headers: GH_HEADERS(token),
-  });
-  const text = await res.text();
-  if (res.status === 404) return false;
-  if (!res.ok) throw new Error(`read ${repo}@${branch} failed (${res.status}): ${text.slice(0, 300)}`);
-  return true;
+  return exists(token, `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}`, `read ${repo}@${branch}`);
 }
 
 /**
@@ -599,13 +612,7 @@ export async function branchExists(token: string, repo: string, branch: string):
  * branch-shaped.
  */
 export async function commitExists(token: string, repo: string, sha: string): Promise<boolean> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/commits/${encodeURIComponent(sha)}`, {
-    method: "GET", headers: GH_HEADERS(token),
-  });
-  const text = await res.text();
-  if (res.status === 404) return false;
-  if (!res.ok) throw new Error(`read ${repo}@${sha} failed (${res.status}): ${text.slice(0, 300)}`);
-  return true;
+  return exists(token, `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(sha)}`, `read ${repo}@${sha}`);
 }
 
 /**
@@ -622,13 +629,7 @@ export async function commitExists(token: string, repo: string, sha: string): Pr
  * an anonymous fetch that 404s on every private repo.
  */
 export async function issueExists(token: string, repo: string, number: number): Promise<boolean> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}`, {
-    method: "GET", headers: GH_HEADERS(token),
-  });
-  const text = await res.text();
-  if (res.status === 404) return false;
-  if (!res.ok) throw new Error(`read ${repo}#${number} failed (${res.status}): ${text.slice(0, 300)}`);
-  return true;
+  return exists(token, `https://api.github.com/repos/${repo}/issues/${number}`, `read ${repo}#${number}`);
 }
 
 /**
@@ -640,13 +641,11 @@ export async function issueExists(token: string, repo: string, number: number): 
  * 404/2xx/throw convention as commitExists above.
  */
 export async function pathExists(token: string, repo: string, path: string, ref: string): Promise<boolean> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`, {
-    method: "GET", headers: GH_HEADERS(token),
-  });
-  const text = await res.text();
-  if (res.status === 404) return false;
-  if (!res.ok) throw new Error(`read ${repo}:${path}@${ref} failed (${res.status}): ${text.slice(0, 300)}`);
-  return true;
+  return exists(
+    token,
+    `https://api.github.com/repos/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`,
+    `read ${repo}:${path}@${ref}`,
+  );
 }
 
 /**
@@ -657,14 +656,11 @@ export async function pathExists(token: string, repo: string, path: string, ref:
  * module; the token never appears in a thrown message.
  */
 export async function compareExists(token: string, repo: string, base: string, head: string): Promise<boolean> {
-  const res = await fetch(
+  return exists(
+    token,
     `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    `read ${repo} compare ${base}...${head}`,
   );
-  const text = await res.text();
-  if (res.status === 404) return false;
-  if (!res.ok) throw new Error(`read ${repo} compare ${base}...${head} failed (${res.status}): ${text.slice(0, 300)}`);
-  return true;
 }
 
 // --- board issue #8: auto-close on promote -----------------------------
