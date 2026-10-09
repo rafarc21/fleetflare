@@ -293,16 +293,25 @@ export async function handleFleetAnthropicMessages(
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
     const id = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
     const writer = writable.getWriter();
-    // Detached, same fire-and-await-elsewhere shape /fleet/junior's own
-    // heartbeat IIFE uses — the Response below returns `readable`
-    // immediately; this is what actually fills it. MAJOR 2/4: the real
-    // token counts (and whether the stream ended cleanly — MAJOR 3) only
-    // exist once pumpAnthropicStream resolves, so the usage row is logged
-    // from its own `.then()`, not alongside the other two call sites above.
-    void pumpAnthropicStream(upstream, writer, id, requestedModel)
-      .then((result) => logUsage(env, ctx, studio.id, result.inputTokens, result.outputTokens, result.ok))
-      .catch(() => { /* client disconnected before the stream could even start writing — nothing to log or deliver */ })
-      .finally(() => { writer.close().catch(() => {}); });
+    // Board issue #284, MINOR 4(a): the Response below returns `readable`
+    // immediately — the Workers runtime is free to tear down this
+    // execution context the instant that Response is considered "done"
+    // from ITS own point of view, which can happen before this detached
+    // promise chain has actually finished writing/closing the stream. Same
+    // reasoning as `logUsage`'s own doc comment above (and the
+    // `insertJuniorUsage` call site it describes) for why this is
+    // `ctx.waitUntil`, not a bare `void`: only `ctx.waitUntil` keeps a
+    // promise alive past the point the runtime would otherwise consider
+    // this request's work finished. MAJOR 2/4: the real token counts (and
+    // whether the stream ended cleanly — MAJOR 3) only exist once
+    // pumpAnthropicStream resolves, so the usage row is logged from its own
+    // `.then()`, not alongside the other two call sites above.
+    ctx.waitUntil(
+      pumpAnthropicStream(upstream, writer, id, requestedModel)
+        .then((result) => logUsage(env, ctx, studio.id, result.inputTokens, result.outputTokens, result.ok))
+        .catch(() => { /* client disconnected before the stream could even start writing — nothing to log or deliver */ })
+        .finally(() => { writer.close().catch(() => {}); }),
+    );
     return new Response(readable, { status: 200, headers: { "content-type": "text/event-stream" } });
   }
 
