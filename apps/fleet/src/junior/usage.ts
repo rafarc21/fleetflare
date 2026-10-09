@@ -25,20 +25,44 @@ export interface JuniorUsageRow {
   inputTokens: number;
   outputTokens: number;
   ok: boolean;
+  /** Issue #302: why a failed call failed — an error class plus upstream
+   *  status/message (anthropic-route.ts's `failureReason`), never prompt or
+   *  response text. Absent on ok rows. */
+  error?: string;
 }
 
 /** Single INSERT, one row per /fleet/junior call. Never throws on its own —
  *  route.ts's call site wraps this in its own `.catch(() => {})`, since a
  *  usage-logging failure must never affect the response already streamed to
- *  the studio. */
+ *  the studio.
+ *
+ *  Issue #302: a row WITH an `error` writes migration 0005's `error` column;
+ *  a row without one keeps the original column list, so ok rows never depend
+ *  on that migration. If the column is missing anyway (Worker deployed before
+ *  `migrate:remote` ran), the failure row is retried without it — the call
+ *  is still counted, only its reason is lost. */
 export async function insertJuniorUsage(db: D1Database, row: JuniorUsageRow): Promise<void> {
-  await db
+  const base = [row.id, row.ts, row.studioId, row.mode, row.model, row.inputTokens, row.outputTokens, row.ok ? 1 : 0];
+  const legacy = () => db
     .prepare(
       `INSERT INTO junior_usage_log (id, ts, studio_id, mode, model, input_tokens, output_tokens, ok)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .bind(row.id, row.ts, row.studioId, row.mode, row.model, row.inputTokens, row.outputTokens, row.ok ? 1 : 0)
+    .bind(...base)
     .run();
+  if (row.error === undefined) { await legacy(); return; }
+  try {
+    await db
+      .prepare(
+        `INSERT INTO junior_usage_log (id, ts, studio_id, mode, model, input_tokens, output_tokens, ok, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(...base, row.error)
+      .run();
+  } catch (e) {
+    if (!/no such column|has no column/i.test(e instanceof Error ? e.message : String(e))) throw e;
+    await legacy();
+  }
 }
 
 export interface JuniorUsageAggregateRow {

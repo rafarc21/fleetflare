@@ -90,6 +90,14 @@ export interface Env {
    */
   LEAD_RATE_PER_MINUTE?: string;
   LEAD_DAILY_CAP?: string;
+  /**
+   * Issue #302: ms the glm-lead route waits for the next upstream stream
+   * chunk before it cancels the upstream and sends the client an SSE
+   * `event: error` (default 90000 — llm/anthropic-route.ts's
+   * LEAD_STREAM_IDLE_MS_DEFAULT). Garbage input falls back to the default,
+   * never disables the timeout.
+   */
+  LEAD_STREAM_IDLE_MS?: string;
   /** Workers AI binding (`"ai": { "binding": "AI" }`). Only junior uses it. */
   AI?: { run(model: string, input: unknown): Promise<unknown> };
   /**

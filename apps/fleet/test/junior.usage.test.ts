@@ -44,6 +44,43 @@ beforeEach(async () => {
   ctx = fakeCtx();
 });
 
+describe("insertJuniorUsage — failure reason (issue #302)", () => {
+  it("stores the error reason on a failed row, NULL on an ok row", async () => {
+    await insertJuniorUsage(env.DB, { id: "f1", ts: 1, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: false, error: "idle_timeout after 90000ms" });
+    await insertJuniorUsage(env.DB, { id: "s1", ts: 2, studioId: ME, mode: "lead", model: "m", inputTokens: 1, outputTokens: 1, ok: true });
+    const res = await env.DB.prepare("SELECT id, error FROM junior_usage_log ORDER BY ts").all<{ id: string; error: string | null }>();
+    expect(res.results).toEqual([{ id: "f1", error: "idle_timeout after 90000ms" }, { id: "s1", error: null }]);
+  });
+
+  it("before migration 0005 lands, a failure row is still counted (retried without the error column)", async () => {
+    const sqls: string[] = [];
+    const db = {
+      prepare(sql: string) {
+        sqls.push(sql);
+        return {
+          bind: () => ({
+            run: async () => {
+              if (sql.includes("error)")) throw new Error("D1_ERROR: table junior_usage_log has no column named error: SQLITE_ERROR");
+              return {};
+            },
+          }),
+        };
+      },
+    } as unknown as D1Database;
+    await insertJuniorUsage(db, { id: "f1", ts: 1, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: false, error: "no_finish_reason" });
+    expect(sqls).toHaveLength(2);
+    expect(sqls[1]).not.toContain("error");
+  });
+
+  it("an unrelated insert failure is not swallowed by that fallback", async () => {
+    const db = {
+      prepare: () => ({ bind: () => ({ run: async () => { throw new Error("D1_ERROR: UNIQUE constraint failed"); } }) }),
+    } as unknown as D1Database;
+    await expect(insertJuniorUsage(db, { id: "f1", ts: 1, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: false, error: "x" }))
+      .rejects.toThrow(/UNIQUE/);
+  });
+});
+
 describe("insertJuniorUsage + aggregateJuniorUsage", () => {
   it("round-trips a single row", async () => {
     await insertJuniorUsage(env.DB, {
