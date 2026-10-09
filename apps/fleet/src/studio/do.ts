@@ -4667,6 +4667,25 @@ export async function ensureSpawnToken(
   idFallback: string,
   recordStudioFn: (status: StudioStatus) => Promise<void>,
   doClass?: StudioDOClass,
+  // Issue #300: this call is the one write path that can land a FRESH row
+  // with a now-resolved leadType never recorded on it at all —
+  // `provisionUngated`'s own `resolveLeadType` call runs moments AFTER this
+  // function returns, computing the right launch-time value, but that
+  // value was never threaded back into the write this function already
+  // made. Seeded below by `existing?.leadType === undefined &&
+  // leadType !== undefined` — deliberately NOT the same `existing ===
+  // undefined` (truly-fresh-row-only) guard `doClass` uses just above: this
+  // mirrors `resolveLeadType`'s OWN existing fallback shape
+  // (`existing?.leadType ?? cfgLeadType ?? "claude"`, already used today for
+  // the actual launch decision), so the persisted row cannot disagree with
+  // what that function already decided for this exact call. A `leadType`
+  // already recorded on `existing` is never touched — same "written once,
+  // read back forever" rule `doClass`/`StudioStatus.leadType`'s own doc
+  // comment states. Optional, defaulting to "don't stamp," so every
+  // pre-existing caller (test fixtures and `restartUngated`'s own call,
+  // which has no `ProvisionConfig` to repair FROM) keeps compiling and
+  // keeps the same behavior it always had.
+  leadType?: "claude" | "glm",
 ): Promise<string> {
   const token = await loadOrMintSpawnToken(storage);
   const existing = await storage.get(STATUS_KEY);
@@ -4675,6 +4694,7 @@ export async function ensureSpawnToken(
   const status: StudioStatus = {
     ...(existing ?? freshStatus(idFallback)),
     ...(existing === undefined && doClass !== undefined ? { doClass } : {}),
+    ...(existing?.leadType === undefined && leadType !== undefined ? { leadType } : {}),
     spawnTokenHash: tokenHash,
   };
   await storage.put(STATUS_KEY, status);
@@ -7208,10 +7228,14 @@ export class StudioDO extends Sandbox<Env> {
     // deliberately Env-blind) — see realDoClassForRole's own doc comment for
     // why a role-only guess is unsafe to persist.
     const doClass = realDoClassForRole(this.env, cfg.role);
+    // Issue #300: `cfg.leadType` threaded through so a fresh (or
+    // previously-broken, never-seeded) row's write below actually carries
+    // the same leadType `resolveLeadType` is about to resolve for THIS
+    // call — see ensureSpawnToken's own doc comment on its new parameter.
     const spawnToken = await ensureSpawnToken(
       this.ctx.storage, id,
       async (s: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, s)),
-      doClass,
+      doClass, cfg.leadType,
     );
     // Issue #249: which lead THIS studio boots — resolved once, before the
     // Claude-account gate below, so a glm-lead studio never calls it at
