@@ -23,8 +23,8 @@ import { checkAndConsumeLeadRateLimit } from "./ratelimit";
 import { insertJuniorUsage } from "../junior/usage";
 import {
   GLM_LEAD_MODEL, anthropicRequestToOpenAI, openAIResponseToAnthropic, classifyAiError,
-  createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStream, parseSseDataLine,
-  streamErrorFrame,
+  createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStreamOrError, parseSseDataLine,
+  parseStreamErrorChunk, streamErrorFrame,
 } from "./translate";
 
 export const ANTHROPIC_MESSAGES_PATH = "/fleet/llm/anthropic/v1/messages";
@@ -72,7 +72,11 @@ function extractPresentedToken(req: Request): string | null {
  *  through `insertJuniorUsage` (MAJOR 2/4), and whether the stream reached a
  *  genuine end (`ok: true`, `closeStream`'s normal frames were sent) or was
  *  cut short by an upstream failure (`ok: false`, a `streamErrorFrame` was
- *  sent instead — see MAJOR 3). */
+ *  sent instead). Three distinct shapes all collapse to the same `ok: false`
+ *  signal here, from this caller's own point of view: MAJOR 3's mid-stream
+ *  `reader.read()` throw, and board issue #284's two silent-truncation
+ *  shapes — (a) the stream ending without ever confirming a `finish_reason`
+ *  and (b) an explicit upstream `{"error":...}` chunk mid-stream. */
 interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean }
 
 /** Builds the Anthropic SSE byte stream for one request: the prelude,
@@ -91,6 +95,25 @@ interface PumpResult { inputTokens: number; outputTokens: number; ok: boolean }
  * by catching the read failure explicitly, INSIDE the loop, and branching:
  * a mid-stream error emits `streamErrorFrame` instead of `closeStream`'s
  * frames, never both.
+ *
+ * Board issue #284: two more silent-truncation shapes, same "never fake a
+ * normal end" discipline as MAJOR 3 above —
+ *   (a) the upstream stream ends (reader naturally completes) WITHOUT ever
+ *       sending a chunk that carries a `finish_reason` at all. Checked via
+ *       `closeStreamOrError` (translate.ts) once the read loop ends, instead
+ *       of calling `closeStream` directly — see that function's own doc
+ *       comment for why the check lives there, layered on top of
+ *       `closeStream`, rather than inside it.
+ *   (b) the upstream sends an explicit `{"error": {...}}` chunk mid-stream
+ *       (some OpenAI-compatible backends use this shape instead of, or
+ *       interleaved with, a normal `{choices: [...]}` chunk). Checked via
+ *       `parseStreamErrorChunk` BEFORE handing the parsed chunk to
+ *       `applyOpenAIStreamChunk` — that function's own `chunk?.choices?.[0]`
+ *       is `undefined` for a chunk shaped like this, so without this check
+ *       the real upstream error message would be silently discarded instead
+ *       of reaching the client at all.
+ * Both report `ok: false` to this function's own caller, same "stream ended
+ * abnormally" signal MAJOR 3's mid-stream-throw case already reports.
  */
 async function pumpAnthropicStream(
   upstream: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<Uint8Array>,
@@ -128,12 +151,24 @@ async function pumpAnthropicStream(
       for (const line of frame.split("\n")) {
         const parsed = parseSseDataLine(line);
         if (parsed === "DONE" || parsed === null) continue;
+        // Board issue #284 (b): an explicit upstream error chunk — checked
+        // BEFORE applyOpenAIStreamChunk, which would otherwise see no
+        // `choices[0]` on a chunk shaped like this and silently no-op.
+        const errorMessage = parseStreamErrorChunk(parsed);
+        if (errorMessage !== null) {
+          await write([streamErrorFrame(errorMessage)]);
+          return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: false };
+        }
         await write(applyOpenAIStreamChunk(state, parsed));
       }
     }
   }
-  await write(closeStream(state));
-  return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: true };
+  // Board issue #284 (a): closeStreamOrError (translate.ts) checks whether
+  // the stream ever confirmed a finish_reason before emitting closeStream's
+  // normal frames — see that function's own doc comment.
+  const closed = closeStreamOrError(state);
+  await write(closed.frames);
+  return { inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok: closed.ok };
 }
 
 // MAJOR 2 (maestro review round 1): this route's own usage-log `mode` value
