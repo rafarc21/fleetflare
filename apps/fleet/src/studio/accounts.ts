@@ -41,6 +41,8 @@ export interface ClaudeAccountEnv {
   CLAUDE_ACCOUNT_BY_REPO?: string;
   /** Issue #271: auto-failover runs only when this is exactly "on". */
   FLEET_AUTO_FAILOVER?: string;
+  /** Issue #305: an unmapped repo refuses to launch only when this is exactly "on". */
+  FLEET_REQUIRE_ACCOUNT_MAP?: string;
 }
 
 /** One account: the SECRET'S NAME, and the token it holds. The name is the
@@ -825,6 +827,50 @@ export function autoFailoverOn(env: ClaudeAccountEnv): boolean {
   return env.FLEET_AUTO_FAILOVER === "on";
 }
 
+/** Issue #305: strict mode is OFF unless FLEET_REQUIRE_ACCOUNT_MAP is exactly "on". */
+export function requireAccountMapOn(env: ClaudeAccountEnv): boolean {
+  return env.FLEET_REQUIRE_ACCOUNT_MAP === "on";
+}
+
+/**
+ * Issue #305: where an UNMAPPED repo lands. Was always `accounts[0]`, so a
+ * new repo inherited slot 1 even when slot 1 was at its weekly limit, and the
+ * only symptom was the limit modal on the lead's pane. Now the account with
+ * the most headroom by fresh `account-usage` rows (`selectByHeadroom`, the
+ * same rule failover uses), kept off other repos' mapped primaries
+ * (`reserved`) while any unreserved account exists. No fresh usage: the first
+ * set account, exactly as before.
+ */
+export function unmappedFallbackAccount(
+  accounts: ClaudeAccount[], reserved: Set<string>, usage: AccountUsageMap, now: Date,
+): ClaudeAccount | null {
+  if (accounts.length === 0) return null;
+  const open = accounts.filter((a) => !reserved.has(a.name));
+  return selectByHeadroom(open.length > 0 ? open : accounts, usage, now) ?? accounts[0];
+}
+
+/**
+ * Issue #305: one line saying which account a studio launched on and WHY —
+ * what `fleet spawn`/`fleet provision` print. `null` when no account is
+ * known (refused launch, glm lead, or a start whose account was not read
+ * back). Names slots and keys only, never a token.
+ */
+export function accountResolution(
+  env: ClaudeAccountEnv, repo: string | null, launched: string | null | undefined,
+): string | null {
+  if (launched == null) return null;
+  const slot = slotOf(launched);
+  const mapped = repo === null ? undefined : parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO)[repo];
+  if (mapped !== undefined) {
+    return mapped === slot
+      ? `mapped (CLAUDE_ACCOUNT_BY_REPO ${JSON.stringify(repo)}: ${mapped})`
+      : `mapped to slot ${mapped}, launched on slot ${slot ?? "?"} (failover/reroute)`;
+  }
+  const key = JSON.stringify(repo ?? "<repo>");
+  return `UNMAPPED, fell back to slot ${slot ?? "?"} — add ${key}: <slot> to CLAUDE_ACCOUNT_BY_REPO ` +
+    "(key is the studio-id repo prefix, bare repo name, not owner/repo)";
+}
+
 export type LaunchAccount = { ok: true; name: string; token: string } | { ok: false; error: string };
 
 /** Issue #217: every `LaunchAccount` refusal (`{ ok: false, error }`) above
@@ -855,6 +901,10 @@ export const LAUNCH_REFUSED_PREFIX = "launch refused: ";
  *     1 would silently carry the other repo's load, the starvation the map
  *     exists to stop.
  *   - Unmapped with no account at all: token "" — today's behaviour.
+ *   - Issue #305: unmapped with FLEET_REQUIRE_ACCOUNT_MAP=on REFUSES, naming
+ *     the key to add. The first-set fallback here is only the pure, sync
+ *     answer; the launch gate (`launchAccountOrReroute`) swaps it for the
+ *     most-headroom account when usage rows are fresh.
  */
 export function launchAccount(env: ClaudeAccountEnv, repo: string | null, recorded: string | null | undefined): LaunchAccount {
   const accounts = resolveClaudeAccounts(env);
@@ -863,6 +913,15 @@ export function launchAccount(env: ClaudeAccountEnv, repo: string | null, record
     if (on) return { ok: true, name: on.name, token: on.token };
   }
   const slot = repo === null ? undefined : parseAccountMap(env.CLAUDE_ACCOUNT_BY_REPO)[repo];
+  if (slot === undefined && repo !== null && requireAccountMapOn(env)) {
+    return {
+      ok: false,
+      error:
+        `claude account: ${repo} has no CLAUDE_ACCOUNT_BY_REPO entry and FLEET_REQUIRE_ACCOUNT_MAP=on — refusing to launch. ` +
+        `Add the key ${JSON.stringify(repo)} (the studio-id repo prefix, bare repo name, not owner/repo): ` +
+        `CLAUDE_ACCOUNT_BY_REPO={..., ${JSON.stringify(repo)}: <slot>}`,
+    };
+  }
   if (slot === undefined) {
     const first = accounts[0];
     return first ? { ok: true, name: first.name, token: first.token } : { ok: true, name: claudeAccountVarName(1), token: "" };
@@ -960,9 +1019,17 @@ export async function launchAccountOrReroute(
   readBurn: () => Promise<Record<string, { window5hOutput: number }>> = async () => ({}),
   usage: AccountUsageMap = {},
 ): Promise<LaunchAccount> {
-  const launch = launchAccount(env, repo, recorded);
-  if (!launch.ok || !autoFailoverOn(env)) return launch;
+  let launch = launchAccount(env, repo, recorded);
   const accounts = resolveClaudeAccounts(env);
+  // Issue #305: an unmapped repo's plain first-set fallback becomes the
+  // most-headroom account — with failover off too, since that fallback is
+  // not a failover. A recorded account honoured above (flag on) stays put.
+  const honouredRecorded = autoFailoverOn(env) && recorded != null && accounts.some((a) => a.name === recorded);
+  if (launch.ok && !primaryIsMapped(env, repo) && !honouredRecorded) {
+    const pick = unmappedFallbackAccount(accounts, reserved, usage, now);
+    if (pick !== null) launch = { ok: true, name: pick.name, token: pick.token };
+  }
+  if (!launch.ok || !autoFailoverOn(env)) return launch;
   const resolved = accounts.find((a) => a.name === launch.name);
   if (resolved === undefined || accountIsFree(resolved, limits, now)) return launch;
   const primary = launchAccount(env, repo, null);

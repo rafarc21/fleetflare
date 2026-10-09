@@ -304,7 +304,7 @@ flags) lives in `wrangler.jsonc`'s `vars` — see `AGENT_REPO`,
 `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`/`GITHUB_INSTALLATION_ID_<OWNER>`,
 `GITHUB_REPO_AUTH`, `WORKER_PUBLIC_URL`, `AGENT_BASE_REF`,
 `MAX_TASK_SECONDS`, `BURN_ALERT_OUTPUT_TOKENS_5H`, `MAX_STUDIOS`,
-`CLAUDE_ACCOUNT_BY_REPO`, `FLEET_AUTO_FAILOVER`, `AGENT_MODEL`,
+`CLAUDE_ACCOUNT_BY_REPO`, `FLEET_AUTO_FAILOVER`, `FLEET_REQUIRE_ACCOUNT_MAP`, `AGENT_MODEL`,
 `DIRECTUS_URL` in `env.ts`. Actual credentials never go in `wrangler.jsonc` —
 they are set with `scripts/deploy.sh secret put <NAME>`, which prompts on
 stdin (never pass a secret as a CLI argument). Use `scripts/deploy.sh`, never
@@ -649,8 +649,23 @@ keyed by the repo part of a studio id (`<repo>--<role>`):
 "CLAUDE_ACCOUNT_BY_REPO": "{\"acme-app\": 2}"
 ```
 
-- Unmapped repos launch on the first account that is set, in slot order
-  (normally `CLAUDE_CODE_OAUTH_TOKEN`).
+- **Key format:** the studio-id repo prefix — the bare repo name, lower case,
+  as it appears before `--` in `fleet ls` (`acme-app` for studio
+  `acme-app--lead`). Never `owner/repo`: such a key can never match and is
+  dropped with a warning in the Worker log.
+- Unmapped repos launch on the account with the most headroom, by fresh
+  `fleet accounts sync` usage rows, kept off other repos' mapped slots while
+  any other account is set. With no fresh usage, the first account that is
+  set, in slot order (normally `CLAUDE_CODE_OAUTH_TOKEN`).
+- `fleet spawn` and `fleet provision` print the account a studio launched on
+  and why, on stderr after the table: `mapped (...)`, or
+  `UNMAPPED, fell back to slot N — add "<repo>": <slot> to
+  CLAUDE_ACCOUNT_BY_REPO`.
+- **Strict mode:** `FLEET_REQUIRE_ACCOUNT_MAP=on` refuses to launch a studio
+  whose repo has no key, with the reason (and the exact key to add) on its
+  `fleet ls` row. It applies to every launch, so map existing repos first:
+  an unmapped studio's next provision, restart, recycle or container start
+  is refused too.
 - A repo mapped to a slot whose secret is not set **refuses to launch**, with
   the reason on its `fleet ls` row. It never falls back to another account.
 - Optional labels tell accounts apart in `fleet ls` and alert cards:

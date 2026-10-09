@@ -545,7 +545,11 @@ Run one by hand on the Mac: `apps/fleet/scripts/localci/localci.sh <pr>`.
 
 - **One account per repo, fixed.** `CLAUDE_ACCOUNT_BY_REPO` (Worker var, JSON,
   e.g. `{"demosite-life": 2}`) sends a repo's studios to
-  `CLAUDE_CODE_OAUTH_TOKEN_<n>`. Unmapped repos use the first SET account in slot order. ACCOUNT in
+  `CLAUDE_CODE_OAUTH_TOKEN_<n>`. Key = bare repo name (studio-id prefix), never
+  `owner/repo`. Unmapped repos use the most-headroom account (fresh usage rows),
+  else the first SET account; `fleet spawn`/`provision` print
+  `UNMAPPED, fell back to slot N`. `FLEET_REQUIRE_ACCOUNT_MAP=on` refuses
+  unmapped repos instead (#305). ACCOUNT in
   `fleet ls` shows the secret NAME, with `CLAUDE_ACCOUNT_<n>_LABEL` in front
   when set: `second@example.com (CLAUDE_CODE_OAUTH_TOKEN_2)`.
 - **Adding account 2 is the operator's step, in his terminal:** `claude setup-token`,

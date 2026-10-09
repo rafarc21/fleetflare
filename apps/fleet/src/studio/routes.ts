@@ -16,7 +16,7 @@ import { getStudioStub, getStudioStubForRow, realDoClassForRole } from "./profil
 import type { ProvisionConfig, StudioStatus } from "./types";
 import { TERMINAL_PATH } from "./terminal";
 import { PASTE_MIME_EXT, PASTE_MAX_BYTES } from "./paste";
-import { listStudios, expireBurnWindow, claimStudioRow, claimStoppedRow } from "./registry";
+import { listStudios, expireBurnWindow, claimStudioRow, claimStoppedRow, withAccountResolution } from "./registry";
 import { renderTerminalPage } from "./page";
 import { renderGridPage, scrubPreview, type GridCard } from "./grid";
 import {
@@ -239,7 +239,8 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
       // footgun pattern that caused the other two write-site bugs this round
       // fixes — consistency, not a behavior change for this call site alone.
       const stub = getStudioStubForRow(env, { id: childId, doClass: realDoClassForRole(env, cfg.role) });
-      return stub.provision(projectCard === null ? cfg : { ...cfg, projectCard });
+      // Issue #305: the response says which account the child launched on and why.
+      return withAccountResolution(env, await stub.provision(projectCard === null ? cfg : { ...cfg, projectCard }));
     },
     resolveBrief,
     // Phase 2, task 4: the "studio spawned" re-arm. Same DO-stub shape
@@ -1152,7 +1153,8 @@ export async function handleStudio(
       ...(wantsDiscardSession ? { discardSession: true } : {}),
     };
     try {
-      return Response.json(burnView(await stub.provision(cfg)));
+      // Issue #305: plus which account it launched on and why.
+      return Response.json(burnView(withAccountResolution(env, await stub.provision(cfg))));
     } catch (err) {
       // Issue #231: recognised by its message prefix FIRST, same "a decision,
       // not a failure" posture the recycle route's own RECYCLE_REFUSED_PREFIX

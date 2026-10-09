@@ -10,7 +10,7 @@ import type { Observed } from "./observed";
 import { BURN_WINDOW_MS } from "./archive";
 import {
   launchAccountOrReroute, accountLabel, autoFailoverOn, otherRepoPrimaries, resolveClaudeAccounts,
-  type AccountLimits,
+  accountResolution, type AccountLimits,
 } from "./accounts";
 import { readFleetAccountLimits } from "./account-limits-store";
 import { parseStudioId } from "./ids";
@@ -329,6 +329,18 @@ export async function withAccountDisplay(
   // the mapped account here was the #289 lie for every studio still running
   // after a Worker-only deploy.)
   return { ...row, claudeAccount: "?", claudeAccountNext: next.name };
+}
+
+/**
+ * Issue #305: the spawn/provision response's `accountResolution` — which
+ * account the studio launched on and why ("mapped" / "UNMAPPED, fell back to
+ * slot N"). Stamped on the response only, never stored: a map edit must not
+ * leave a stale reason on the row. A row with no launched account comes back
+ * unchanged.
+ */
+export function withAccountResolution(env: Env, row: StudioStatus): StudioStatus {
+  const why = accountResolution(env, parseStudioId(row.id)?.repo ?? null, row.launchedAccount);
+  return why === null ? row : { ...row, accountResolution: why };
 }
 
 /**

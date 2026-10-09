@@ -272,3 +272,16 @@ export function snapshotsEqual(a: AccountSnapshotRow[], b: AccountSnapshotRow[])
   if (a.length !== b.length) return false;
   return a.every((row, i) => JSON.stringify(row) === JSON.stringify(b[i]));
 }
+
+/**
+ * Issue #305: the stderr line `fleet spawn`/`fleet provision` print after the
+ * table — which account the studio launched on and why, from the Worker's
+ * response-only `accountResolution`. `null` (print nothing) when the Worker
+ * sent none: an older Worker, a glm lead, or a launch with no known account.
+ */
+export function formatAccountResolution(
+  cmd: string, studio: { launchedAccount?: string | null; accountResolution?: string },
+): string | null {
+  if (typeof studio.accountResolution !== "string" || typeof studio.launchedAccount !== "string") return null;
+  return `${cmd}: claude account ${studio.launchedAccount} — ${studio.accountResolution}`;
+}

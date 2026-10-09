@@ -31,6 +31,7 @@ import { parseGitRemote, repoIdSegment, studioIdForTarget, studioIdIn } from "..
 import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior, cmdJuniorStats } from "./junior";
 import { cmdAccounts, cmdAccountsSync } from "./accounts";
+import { formatAccountResolution } from "./accounts-format";
 import { sweepAllPages, type SweepPage } from "./junior-sweep";
 import { reapTerminalAll, type TerminalPage } from "./reap-terminal";
 import { runTaskStateTransition, type TaskStateFetchResult } from "../src/studio/task-state";
@@ -1077,6 +1078,9 @@ async function cmdSpawn(
   }
   const spawned = (await res.json()) as StudioStatus;
   console.log(formatTable([spawned]));
+  // Issue #305: stderr, like reportRepo — stdout stays the table.
+  const spawnAccount = formatAccountResolution("fleet spawn", spawned);
+  if (spawnAccount !== null) console.error(spawnAccount);
   // the operator's rule, enforced here rather than remembered: a studio that is now
   // burning tokens in the cloud gets a row in Orca's sidebar. After the table,
   // deliberately — stdout is the machine-readable result and must not wait on
@@ -1135,6 +1139,9 @@ async function cmdProvision(
   }
   const studio = (await res.json()) as StudioStatus;
   console.log(formatTable([studio]));
+  // Issue #305: stderr, like reportRepo — stdout stays the table.
+  const provisionAccount = formatAccountResolution("fleet provision", studio);
+  if (provisionAccount !== null) console.error(provisionAccount);
   // Same rule as `fleet spawn`: this path also leaves a studio running, so it
   // also owes that studio a visible row in Orca's sidebar. Idempotent, so a
   // studio that already has one is not given a second.

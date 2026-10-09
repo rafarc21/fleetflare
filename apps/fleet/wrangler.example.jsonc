@@ -69,10 +69,14 @@
     // subdomain, or `wrangler deploy` prints the full URL the first time).
     "WORKER_PUBLIC_URL": "https://<YOUR_WORKER_NAME>.<YOUR_WORKERS_DEV_SUBDOMAIN>.workers.dev",
     // Issue #271, optional: per-repo primary Claude account, JSON string
-    // (repo part of <repo>--<role> -> account slot). Unmapped repos use the
-    // first set account. Omitted here since it's fleet-specific; example
-    // shape if you want it:
+    // (repo part of <repo>--<role> -> account slot; the bare repo name, never
+    // owner/repo). Unmapped repos use the account with the most headroom by
+    // fresh usage rows, else the first set account. Omitted here since it's
+    // fleet-specific; example shape if you want it:
     // "CLAUDE_ACCOUNT_BY_REPO": "{\"<your-repo-name>\":2}"
+    // Issue #305, optional: "on" refuses to launch an unmapped repo instead
+    // of falling back, naming the key to add:
+    // "FLEET_REQUIRE_ACCOUNT_MAP": "on"
     //
     // Board #350, optional: per-repo install cache, comma-separated
     // "owner/repo" list — opt in ONLY a repo whose cold `bun install` is

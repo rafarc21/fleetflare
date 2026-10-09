@@ -416,6 +416,13 @@ export interface StudioStatus {
    */
   claudeAccountNext?: string;
   /**
+   * Issue #305: response-only, never stored -- which account the studio
+   * launched on and why ("mapped ..." / "UNMAPPED, fell back to slot N ...").
+   * Stamped by registry.ts's withAccountResolution on the spawn/provision
+   * response; `fleet spawn`/`fleet provision` print it.
+   */
+  accountResolution?: string;
+  /**
    * Issue #271: the operator's NON-SECRET label for that account
    * (CLAUDE_ACCOUNT_<n>_LABEL), stamped at read time by listStudios — never
    * stored. `fleet ls` shows `<label> (<secret name>)`; absent, the name.
