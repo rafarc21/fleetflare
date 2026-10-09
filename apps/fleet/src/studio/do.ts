@@ -4672,19 +4672,30 @@ export async function ensureSpawnToken(
   // `provisionUngated`'s own `resolveLeadType` call runs moments AFTER this
   // function returns, computing the right launch-time value, but that
   // value was never threaded back into the write this function already
-  // made. Seeded below by `existing?.leadType === undefined &&
-  // leadType !== undefined` — deliberately NOT the same `existing ===
-  // undefined` (truly-fresh-row-only) guard `doClass` uses just above: this
-  // mirrors `resolveLeadType`'s OWN existing fallback shape
-  // (`existing?.leadType ?? cfgLeadType ?? "claude"`, already used today for
-  // the actual launch decision), so the persisted row cannot disagree with
-  // what that function already decided for this exact call. A `leadType`
-  // already recorded on `existing` is never touched — same "written once,
-  // read back forever" rule `doClass`/`StudioStatus.leadType`'s own doc
-  // comment states. Optional, defaulting to "don't stamp," so every
-  // pre-existing caller (test fixtures and `restartUngated`'s own call,
-  // which has no `ProvisionConfig` to repair FROM) keeps compiling and
-  // keeps the same behavior it always had.
+  // made. Seeded below by the SAME strict `existing === undefined &&
+  // leadType !== undefined` guard `doClass` uses just above, NOT
+  // `existing?.leadType === undefined` (an earlier draft of this fix used
+  // that shape, by analogy to `resolveLeadType`'s own transient,
+  // non-persisting fallback — but a fresh-context review on #300 caught
+  // that the analogy doesn't hold for a PERSISTED write: that looser
+  // condition is ALSO true for an already-provisioned, already-running
+  // studio whose row simply never carried the field, which is exactly the
+  // bug `provision.ts`'s `existing === null` guard (see its own comment at
+  // the `cfg.leadType` seed, issue #249 maestro review round 1 MINOR) was
+  // already fixed to avoid for this identical field. Reinstating the loose
+  // shape here would silently backfill `leadType` onto a pre-#249 or
+  // buggy-build row the moment anything re-threads a non-undefined hint
+  // through this parameter — which `StudioStatus.leadType`'s own doc
+  // comment forbids ("set once, at the studio's first-ever provision").
+  // A `leadType` already recorded on `existing` — or an `existing` row
+  // that simply predates the field — is never touched either way: same
+  // "written once, read back forever" rule `doClass`/`StudioStatus.
+  // leadType`'s own doc comment states, and the same precedent
+  // `provision.ts` already established for this exact field. Optional,
+  // defaulting to "don't stamp," so every pre-existing caller (test
+  // fixtures and `restartUngated`'s own call, which has no
+  // `ProvisionConfig` to repair FROM) keeps compiling and keeps the same
+  // behavior it always had.
   leadType?: "claude" | "glm",
 ): Promise<string> {
   const token = await loadOrMintSpawnToken(storage);
@@ -4694,7 +4705,7 @@ export async function ensureSpawnToken(
   const status: StudioStatus = {
     ...(existing ?? freshStatus(idFallback)),
     ...(existing === undefined && doClass !== undefined ? { doClass } : {}),
-    ...(existing?.leadType === undefined && leadType !== undefined ? { leadType } : {}),
+    ...(existing === undefined && leadType !== undefined ? { leadType } : {}),
     spawnTokenHash: tokenHash,
   };
   await storage.put(STATUS_KEY, status);
