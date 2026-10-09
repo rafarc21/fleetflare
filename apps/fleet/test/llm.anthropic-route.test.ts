@@ -8,7 +8,10 @@
 // responds through) the translated shapes.
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
-import { handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH, ANTHROPIC_BODY_CAP } from "../src/llm/anthropic-route";
+import {
+  handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH, ANTHROPIC_BODY_CAP,
+  handleFleetAnthropicCountTokens, ANTHROPIC_COUNT_TOKENS_PATH,
+} from "../src/llm/anthropic-route";
 import { GLM_LEAD_MODEL, GLM_MIN_MAX_TOKENS } from "../src/llm/translate";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
@@ -482,5 +485,72 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     const rowsLogged = await usageRows();
     expect(rowsLogged).toHaveLength(1);
     expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1 });
+  });
+});
+
+// Board issue #284, MINOR 4(b): POST /v1/messages/count_tokens, the sibling
+// Anthropic Messages API endpoint some SDK client configurations probe or
+// call before a real request (Claude Code's own SDK may call it to decide
+// whether to compact context first). Before this fix the route didn't exist
+// at all — any request here fell through to the generic /fleet/ catch-all
+// and 404'd, the same failure mode issue #249's own BLOCKER (route never
+// mounted) looked like, except this gap is real: the endpoint genuinely
+// isn't implemented. Same auth/feature-flag/leadType trust boundary as
+// handleFleetAnthropicMessages above — none of those checks may be skipped
+// just because this route never calls env.AI.run.
+describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () => {
+  it("404 on the wrong path", async () => {
+    const { token, rows, e } = await setup();
+    const r = await handleFleetAnthropicCountTokens(
+      req({ token, path: "/fleet/llm/anthropic/v1/other" }), e, ctx, rows,
+    );
+    expect(r.status).toBe(404);
+  });
+
+  it("404 when FLEET_JUNIOR is not 'on' — reuses the same feature flag as the messages route", async () => {
+    const { token, rows, e } = await setup(undefined, { FLEET_JUNIOR: undefined });
+    const r = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(r.status).toBe(404);
+  });
+
+  it("401 with no token at all", async () => {
+    const { rows, e } = await setup();
+    const r = await handleFleetAnthropicCountTokens(req({ path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(r.status).toBe(401);
+  });
+
+  it("401 with a well-shaped but unknown token", async () => {
+    const { rows, e } = await setup();
+    const r = await handleFleetAnthropicCountTokens(
+      req({ token: mintSpawnToken(), path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
+    );
+    expect(r.status).toBe(401);
+  });
+
+  it("403 when the calling studio's own leadType is not 'glm'", async () => {
+    const { token, rows, e } = await setup(undefined, {}, "claude");
+    const r = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(r.status).toBe(403);
+  });
+
+  it("400 when messages is missing or empty", async () => {
+    const { token, rows, e } = await setup();
+    const r = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH, body: { ...good, messages: [] } }), e, ctx, rows,
+    );
+    expect(r.status).toBe(400);
+  });
+
+  it("200: returns a plausible non-zero input_tokens ESTIMATE for non-trivial message content, without ever calling env.AI.run", async () => {
+    const { token, rows, e, run } = await setup();
+    const body = {
+      model: "claude-opus-4-5",
+      messages: [{ role: "user", content: "This is a reasonably long message, long enough that a rough 4-chars-per-token estimate should clearly exceed a handful of tokens." }],
+    };
+    const r = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH, body }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    expect(run).not.toHaveBeenCalled();
+    const json = (await r.json()) as { input_tokens: number };
+    expect(json.input_tokens).toBeGreaterThan(10);
   });
 });
