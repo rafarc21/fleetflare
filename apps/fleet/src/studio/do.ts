@@ -4176,6 +4176,55 @@ export async function refuseUnlessMappedAccountLaunchable(
 }
 
 /**
+ * Board issue #284: the gate a glm-lead studio takes INSTEAD of #271's
+ * Claude-account gate above (`leadType === "glm"` skips that one entirely —
+ * see `launchFields`'s own doc comment) — but which, before this fix, ran no
+ * gate of its own: a glm-lead studio's `ANTHROPIC_BASE_URL` points at
+ * llm/anthropic-route.ts's `handleFleetAnthropicMessages`, which 404s on
+ * every single call while FLEET_JUNIOR is off for this repo (globally, or
+ * narrowed out via JUNIOR_REPOS — the exact same `juniorEnabled` the
+ * `/fleet/junior` route itself reads, junior/gate.ts). Provisioning one
+ * anyway used to boot a studio that LOOKED healthy (container up, lead
+ * running) and was completely non-functional — every lead request failed,
+ * discovered only later by a dead studio, never at spawn time.
+ *
+ * Same refusal shape as `refuseUnlessMappedAccountLaunchable` right above:
+ * the row goes `degraded` with the reason BEFORE any container touch (so
+ * `fleet ls` shows why), then throws — reusing `LaunchRefusedError`/
+ * `LAUNCH_REFUSED_PREFIX` rather than minting a parallel class+prefix pair,
+ * since this IS the same kind of refusal (a pre-container-touch launch
+ * veto) crossing the identical Worker->DO RPC boundary that prefix exists
+ * for — `launchOrStartRefusalResponse` (rpc-failure.ts) already recognises
+ * it with no new wiring on either of its two callers (routes.ts's
+ * provision/restart/recycle routes, spawn.ts's runSpawn/runResume).
+ *
+ * `workRepoSlug` is the caller's own already-resolved value (do.ts's
+ * `workRepoSlug()`, the same `cfg.repoSlug ?? existing.repoSlug ??
+ * env.AGENT_REPO` precedence runProvision itself uses) — not re-derived
+ * here, so this can never disagree with what the studio is actually bound
+ * to, and the one call this makes (`juniorEnabled`) stays synchronous.
+ */
+export async function refuseUnlessJuniorEnabled(
+  env: Env, id: string, workRepoSlug: string, storage: StudioStorage,
+  recordStudioFn: (status: StudioStatus) => Promise<void>,
+): Promise<void> {
+  if (juniorEnabled(env, workRepoSlug)) return;
+  const existing = (await storage.get(STATUS_KEY)) ?? null;
+  const base = existing ?? {
+    id, tailscaleHost: null, lastRefresh: null, lastRefreshError: null, burn: null,
+    spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+  };
+  const message =
+    `glm lead: FLEET_JUNIOR is off for ${workRepoSlug} (or JUNIOR_REPOS narrows it out) — refusing to boot a ` +
+    "lead with no model. Set FLEET_JUNIOR=on (and include this repo in JUNIOR_REPOS, if set) before spawning " +
+    'leadType: "glm".';
+  const refused: StudioStatus = { ...base, id, state: "degraded", error: message, launchedAccount: null };
+  await storage.put(STATUS_KEY, refused);
+  await recordStudioFn(refused);
+  throw new LaunchRefusedError(message);
+}
+
+/**
  * Issue #249: which lead a studio boots — the one check every one of
  * `launchAccountOrRefuse`'s 4 call sites (do.ts's provisionUngated,
  * restartUngated, and recycle's own two) runs FIRST, to decide whether to
@@ -7087,6 +7136,10 @@ export class StudioDO extends Sandbox<Env> {
     // cfg-fallback rule).
     const leadType = resolveLeadType(await this.ctx.storage.get<StudioStatus>(STATUS_KEY), cfg.leadType);
     if (leadType === "glm") {
+      // Issue #284: the gate a glm-lead studio takes INSTEAD of the
+      // Claude-account gate below — see refuseUnlessJuniorEnabled's own doc
+      // comment. Before any container touch, same as #271's own placement.
+      await refuseUnlessJuniorEnabled(this.env, id, await this.workRepoSlug(cfg), this.ctx.storage, this.recordFn());
       // No Claude account, no launchAccountOrRefuse call, no D1 limits/
       // usage/burn read, no account-clear bookkeeping — none of it applies
       // to a studio that never runs on a Claude account at all.
@@ -7370,6 +7423,9 @@ export class StudioDO extends Sandbox<Env> {
     // written by the provision that came before any restart.
     const leadType = resolveLeadType(await this.ctx.storage.get<StudioStatus>(STATUS_KEY));
     if (leadType === "glm") {
+      // Issue #284: see provisionUngated's identical comment above its own
+      // call.
+      await refuseUnlessJuniorEnabled(this.env, id, await this.workRepoSlug(null), this.ctx.storage, this.recordFn());
       ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, "", "glm"));
       if (!this.ctx.container?.running) await sbAwaitReady(this);
     } else {
@@ -7564,8 +7620,16 @@ export class StudioDO extends Sandbox<Env> {
     // only one that commits either clear.
     // Issue #249: a glm-lead studio has no Claude account to refuse on —
     // skip the gate entirely rather than call it only to discard an `ok`.
+    //
+    // Issue #284: ... and takes the OTHER gate instead, for the same
+    // "refuse BEFORE recycle's destroy" reason the comment above states —
+    // see refuseUnlessJuniorEnabled's own doc comment.
     if (leadType !== "glm") {
       await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false);
+    } else {
+      await refuseUnlessJuniorEnabled(
+        this.env, this.selfId(), await this.workRepoSlug(cfg), this.ctx.storage, this.recordFn(),
+      );
     }
     const { resolveMemoryRepo, commitFile } = this.memoryDeps();
     // Issue #123: an explicit start — the post-destroy sbAwaitReady runs
@@ -7694,6 +7758,14 @@ export class StudioDO extends Sandbox<Env> {
         // (never re-read: see that assignment's own doc comment for why a
         // stale snapshot is safe here, unlike claudeAccount).
         if (leadType === "glm") {
+          // Issue #284: no SECOND refuseUnlessJuniorEnabled call here, unlike
+          // the account gate's own `launchAccountOrRefuse` just below (which
+          // re-resolves because D1-backed account state can race a
+          // concurrent failover during the pre-destroy phase above). env and
+          // workRepoSlug are both fixed for this call's whole lifetime, so
+          // juniorEnabled's answer cannot have changed since the entry-time
+          // call already refused on it — re-checking here would only ever
+          // repeat that same answer, never catch anything new.
           ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, this.selfId(), spawnToken, "", "glm"));
           await sbAwaitReady(this);
         } else {
