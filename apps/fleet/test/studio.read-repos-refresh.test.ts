@@ -45,12 +45,41 @@ describe("runRefreshCredential — read-repos (issue #291)", () => {
     expect(calls.filter(([cmd]) => cmd === PRIMARY.cmd).every(([, e]) => e?.FLEET_TOKEN === "ghs_primary")).toBe(true);
   });
 
-  it("a read mint failure clears the read helper and fails the refresh, token-free", async () => {
-    const d = deps({ readRepos: vi.fn(async () => { throw new Error("installation token failed (422)"); }) });
-    const r = await runRefreshCredential(d);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toMatch(/read-repos/);
-    expect(vi.mocked(d.sbExec).mock.calls.at(-1)).toEqual([readReposCredentialClearCmd()]);
+  // PR #292 review item 1: a read-token failure must never degrade the
+  // studio — the primary credential is what keeps it working.
+  it("a read mint failure does NOT fail the refresh: helper cleared, old token revoked, logged", async () => {
+    const swapReadToken = vi.fn(async () => {});
+    const errors: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { errors.push(a.map(String).join(" ")); });
+    const d = deps({ readRepos: vi.fn(async () => { throw new Error("installation token failed (422)"); }), swapReadToken });
+    expect(await runRefreshCredential(d)).toEqual({ ok: true, lastRefresh: NOW });
+    expect(vi.mocked(d.sbExec).mock.calls).toEqual([[PRIMARY.cmd, PRIMARY.env], [readReposCredentialClearCmd()]]);
+    expect(swapReadToken).toHaveBeenCalledWith(null);
+    expect(errors.join("\n")).toMatch(/read-repos/);
+    vi.restoreAllMocks();
+  });
+
+  it("a failed read helper WRITE does not fail the refresh either, and the unwritten token is not kept", async () => {
+    const swapReadToken = vi.fn(async () => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const sbExec = vi.fn(async (cmd: string) => cmd === PRIMARY.cmd
+      ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "boom" });
+    const d = deps({ sbExec, swapReadToken, readRepos: vi.fn(async () => ({ token: "ghs_read", repos: ["acme-org/alpha"] })) });
+    expect((await runRefreshCredential(d)).ok).toBe(true);
+    expect(swapReadToken).toHaveBeenCalledWith(null);
+    vi.restoreAllMocks();
+  });
+
+  // PR #292 review item 2: the previous read token dies now, not in <=1h.
+  it("swapReadToken gets the NEW token only after its write succeeded, and null after a clear", async () => {
+    const order: string[] = [];
+    const sbExec = vi.fn(async (cmd: string) => { order.push(cmd === PRIMARY.cmd ? "primary" : "read-exec"); return { code: 0, stdout: "", stderr: "" }; });
+    const swapReadToken = vi.fn(async (t: string | null) => { order.push(`swap:${t}`); });
+    await runRefreshCredential(deps({ sbExec, swapReadToken, readRepos: vi.fn(async () => ({ token: "ghs_read", repos: ["acme-org/alpha"] })) }));
+    expect(order).toEqual(["primary", "read-exec", "swap:ghs_read"]);
+    order.length = 0;
+    await runRefreshCredential(deps({ sbExec, swapReadToken, readRepos: vi.fn(async () => null) }));
+    expect(order).toEqual(["primary", "read-exec", "swap:null"]);
   });
 
   it("without the port (legacy callers) nothing about the read helper runs", async () => {
@@ -64,5 +93,7 @@ describe("runRefreshCredential — read-repos (issue #291)", () => {
     const refresh = src.slice(src.indexOf("private refreshDeps("), src.indexOf("private shipDeps("));
     expect(refresh).toContain("readRepos:");
     expect(refresh).toContain("studioReadReposCredential(");
+    expect(refresh).toContain("swapReadToken:");
+    expect(src).toContain("async revokeReadRepos(");
   });
 });

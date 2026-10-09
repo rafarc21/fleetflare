@@ -613,7 +613,10 @@ CI enforces it (`apps/fleet/scripts/english-check.ts`).
   only). In the studio, `git clone https://github.com/owner/a` just works;
   `gh` reads with `GH_TOKEN=$(cat /workspace/.fleet-read-token) gh api ...`.
   It lands on the next credential refresh (`fleet provision <id>` = now),
-  ends with the task, and never grants write. Operator surface only.
+  ends with the task (token revoked at once), and never grants write.
+  Clone with the lowercase or GitHub's own casing of the name; git's
+  credential match is case-sensitive. A failed mint is a comment on the
+  task, never a degraded studio. Operator surface only.
 - Do not spawn a studio to do something you could do in 30 seconds here.
 - Do not report a studio as working from `fleet ls` alone. Check the screen.
 - Do not churn a provisioning studio. Five minutes.

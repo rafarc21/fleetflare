@@ -39,7 +39,10 @@ import {
   type BoardApi, type BoardResult, type ListTasksQuery, type OnAssigned, type GetLeadType,
 } from "./board";
 import { recordJuniorAuthorization, revokeJuniorAuthorization, sweepJuniorAuthorizations } from "../junior/authz";
-import { parseReadRepos, readReposProviderRefusal, recordReadReposGrant, revokeReadReposGrant } from "../github/read-repos";
+import {
+  parseReadRepos, readReposGrantsForStudio, readReposProviderRefusal, recordReadReposGrant, revokeReadReposGrant,
+  revokeStudioReadToken,
+} from "../github/read-repos";
 import { wakeOnAssign, checkAssignRepo, type AssignWakeDeps, type AssignWakeReport } from "./assign-wake";
 import { realWakeDeps } from "./wake-deps";
 import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify";
@@ -556,11 +559,29 @@ async function revokeTaskGrantsIfTerminal(
   }
   // Issue #291: the read-repos grant ends with the task too.
   try {
-    await revokeReadReposGrant(env.DB, repo, result.value.number);
+    await kickReadTokenRevoke(env, await revokeReadReposGrant(env.DB, repo, result.value.number), null);
   } catch (err) {
     console.error(`board: read-repos revoke failed for #${result.value.number} in ${repo}`, err);
   }
   return result;
+}
+
+/**
+ * PR #292 review item 2: after an un-grant, the studio that held it revokes
+ * its live read token now instead of at expiry — unless it still holds
+ * another live grant (its next refresh re-mints the narrower list) or it is
+ * the studio the grant just moved to. Best effort: logged, never fails the
+ * board write that already happened.
+ */
+async function kickReadTokenRevoke(env: Env, prevStudio: string | null, keep: string | null): Promise<void> {
+  if (prevStudio === null || prevStudio === keep) return;
+  try {
+    if ((await readReposGrantsForStudio(env.DB, prevStudio)).length > 0) return;
+    await revokeStudioReadToken(env, prevStudio);
+  } catch (err) {
+    console.error(`board: read-repos token revoke for ${prevStudio} failed; it expires within the hour`,
+      err instanceof Error ? err.message : String(err));
+  }
 }
 
 function hasText(v: unknown): boolean {
@@ -583,11 +604,13 @@ async function syncReadReposGrant(
   if (!result.ok) return;
   const { number, assignee } = result.value;
   try {
+    const prev = await revokeReadReposGrant(env.DB, repo, number);
     if (repos.length > 0 && assignee !== null) {
       await recordReadReposGrant(env.DB, repo, number, assignee, repos, Date.now());
       console.log(`board: read-repos grant ${repo}#${number} -> ${assignee}: ${repos.join(", ")}`);
+      await kickReadTokenRevoke(env, prev, assignee);
     } else {
-      await revokeReadReposGrant(env.DB, repo, number);
+      await kickReadTokenRevoke(env, prev, null);
     }
   } catch (err) {
     console.error(`board: read-repos grant write failed for #${number} in ${repo}`, err);

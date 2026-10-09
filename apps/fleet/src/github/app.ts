@@ -142,6 +142,14 @@ function repoShortName(repo: string): string {
 export async function mintInstallationToken(
   env: Env, owner: string, repo: string, opts: MintTokenOpts = {},
 ): Promise<string> {
+  return (await mintInstallationTokenDetail(env, owner, repo, opts)).token;
+}
+
+/** Same mint, plus the `full_name` of each repo GitHub scoped it to — in
+ *  GitHub's own casing (issue #291: the read helper's URL keys need it). */
+export async function mintInstallationTokenDetail(
+  env: Env, owner: string, repo: string, opts: MintTokenOpts = {},
+): Promise<{ token: string; repositories: string[] }> {
   const own = (env as unknown as DynamicEnv)[installationEnvName(owner)];
   const installationId = typeof own === "string" && own !== "" ? own : env.GITHUB_INSTALLATION_ID;
   if (!env.GITHUB_APP_PRIVATE_KEY || !env.GITHUB_APP_ID || !installationId) {
@@ -188,5 +196,9 @@ export async function mintInstallationToken(
     // JWT and any token are not — neither is logged or included here.
     throw new MintTokenError(res.status, `installation token failed (${res.status}): ${text.slice(0, 300)}`);
   }
-  return (JSON.parse(text) as { token: string }).token;
+  const parsed = JSON.parse(text) as { token: string; repositories?: { full_name?: unknown }[] };
+  const repositories = (parsed.repositories ?? [])
+    .map((r) => r.full_name)
+    .filter((n): n is string => typeof n === "string");
+  return { token: parsed.token, repositories };
 }

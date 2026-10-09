@@ -69,6 +69,13 @@ describe("readReposCredentialWriteCmd, asked of git", () => {
     }
   }));
 
+  // PR #292 review item 3: git matches the credential URL path
+  // case-sensitively, so GitHub's canonical casing is registered too.
+  test("canonical-case URL gets the read token when its casing is listed", () => withSetup((env) => {
+    expect(passwordFor("https://github.com/Acme-Org/Alpha.git", env)).toBe(READ_TOKEN);
+    expect(passwordFor("https://github.com/acme-org/alpha.git", env)).toBe(READ_TOKEN);
+  }, ["acme-org/alpha", "Acme-Org/Alpha"]));
+
   test("an UNLISTED sibling never gets the read token", () => withSetup((env) => {
     expect(passwordFor("https://github.com/acme-org/secret.git", env)).not.toBe(READ_TOKEN);
     expect(passwordFor("https://github.com/acme-org/secret", env)).not.toBe(READ_TOKEN);

@@ -55,7 +55,7 @@
 // commit, not rarer.
 
 import type { Env } from "../env";
-import { installationEnvName, mintInstallationToken, MintTokenError, type MintTokenOpts } from "./app";
+import { installationEnvName, mintInstallationToken, mintInstallationTokenDetail, MintTokenError, type MintTokenOpts } from "./app";
 import { listInstallationRepos, repoIsWritable, resolveCanonicalRepoName } from "./api";
 import type { RepoReach } from "./reach";
 
@@ -403,7 +403,9 @@ export function checkReadRepos(
  * Every guard runs before the JWT is even signed: an empty list, a foreign
  * owner, over the cap. `taskRepo` decides the owner, never the list itself.
  */
-export async function mintReadReposToken(env: Env, taskRepo: string, repos: readonly string[]): Promise<string> {
+export async function mintReadReposToken(
+  env: Env, taskRepo: string, repos: readonly string[],
+): Promise<{ token: string; canonical: string[] }> {
   if (repos.length === 0) throw new Error("read-repos: no repos to grant — no opt-in mints nothing");
   const checked = checkReadRepos(repos, taskRepo);
   if (!checked.ok) throw new Error(checked.message);
@@ -413,10 +415,14 @@ export async function mintReadReposToken(env: Env, taskRepo: string, repos: read
       `read-repos needs the GitHub App provider for "${owner}" — a fine-grained PAT cannot be narrowed to read-only`,
     );
   }
-  return mintInstallationToken(env, owner, taskRepo, {
+  // PR #292 review: `canonical` = GitHub's own casing of each granted repo.
+  // git matches a credential URL's path case-sensitively, so the helper is
+  // keyed on these as well as on the lowercase grant.
+  const minted = await mintInstallationTokenDetail(env, owner, taskRepo, {
     repositories: checked.repos,
     permissions: { ...READ_REPOS_PERMISSIONS },
   });
+  return { token: minted.token, canonical: minted.repositories };
 }
 
 /**

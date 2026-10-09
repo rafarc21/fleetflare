@@ -6,6 +6,7 @@ import type { RepoReach } from "../src/github/reach";
 import type { BoardApi } from "../src/board/board";
 import type { AssignWakeDeps } from "../src/board/assign-wake";
 import { studioLabel, type BoardTask } from "../src/board/types";
+import * as readReposModule from "../src/github/read-repos";
 import { readReposGrantsForStudio, recordReadReposGrant } from "../src/github/read-repos";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
@@ -72,6 +73,9 @@ const board = (r: Request, api: BoardApi) =>
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
   vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
+  // StudioDO cannot be constructed under vitest-pool-workers; the kick is
+  // asserted per test below, never sent to a real Durable Object.
+  vi.spyOn(readReposModule, "revokeStudioReadToken").mockResolvedValue(undefined);
 });
 afterEach(() => { vi.restoreAllMocks(); });
 
@@ -155,6 +159,42 @@ describe("operator board: terminal state revokes the grant", () => {
     const res = await board(req("/studio/board/tasks/12/state", { from: "working", to: "completed" }), api);
     expect(res.status).toBe(200);
     expect(await readReposGrantsForStudio(env.DB, STUDIO)).toEqual([]);
+  });
+});
+
+// PR #292 review item 2: an un-grant asks the studio to revoke its live read
+// token NOW (DELETE /installation/token), not when it expires.
+describe("operator board: un-grant revokes the studio's live read token now", () => {
+  it("terminal state -> revoke kicked for the studio that held the grant", async () => {
+    const kick = vi.spyOn(readReposModule, "revokeStudioReadToken").mockResolvedValue(undefined);
+    await recordReadReposGrant(env.DB, REPO, 12, STUDIO, ["acme-org/alpha"], 1);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working", studioLabel(STUDIO)] })) });
+    await board(req("/studio/board/tasks/12/state", { from: "working", to: "completed" }), api);
+    expect(kick).toHaveBeenCalledWith(expect.anything(), STUDIO);
+  });
+
+  it("assign without readRepos -> revoke kicked for the previous holder", async () => {
+    const kick = vi.spyOn(readReposModule, "revokeStudioReadToken").mockResolvedValue(undefined);
+    await recordReadReposGrant(env.DB, REPO, 12, "websites--old-studio", ["acme-org/alpha"], 1);
+    await board(req("/studio/board/tasks/12/assign", { assignee: STUDIO }), fakeApi());
+    expect(kick).toHaveBeenCalledWith(expect.anything(), "websites--old-studio");
+  });
+
+  it("no kick while the studio still holds another live grant (next refresh narrows it)", async () => {
+    const kick = vi.spyOn(readReposModule, "revokeStudioReadToken").mockResolvedValue(undefined);
+    await recordReadReposGrant(env.DB, REPO, 12, STUDIO, ["acme-org/alpha"], 1);
+    await recordReadReposGrant(env.DB, REPO, 13, STUDIO, ["acme-org/beta"], 1);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working", studioLabel(STUDIO)] })) });
+    await board(req("/studio/board/tasks/12/state", { from: "working", to: "completed" }), api);
+    expect(kick).not.toHaveBeenCalled();
+  });
+
+  it("a kick failure never fails the board write", async () => {
+    vi.spyOn(readReposModule, "revokeStudioReadToken").mockRejectedValue(new Error("DO down"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await recordReadReposGrant(env.DB, REPO, 12, STUDIO, ["acme-org/alpha"], 1);
+    const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working", studioLabel(STUDIO)] })) });
+    expect((await board(req("/studio/board/tasks/12/state", { from: "working", to: "completed" }), api)).status).toBe(200);
   });
 });
 

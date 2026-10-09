@@ -19,7 +19,9 @@
 // studio is deleted instead of minted — covering the paths (webhook close,
 // a merge auto-completing the task) that never pass the route.
 import { checkReadRepos, mintReadReposToken, resolveRepoAuthKind, READ_REPOS_MAX, READ_REPOS_PERMISSIONS } from "./auth";
-import { deleteFlag, setFlag } from "../state";
+import { deleteFlag, getFlag, setFlag } from "../state";
+import { USER_AGENT } from "./app";
+import { getStudioStub } from "../studio/profile";
 import { GitHubError } from "../board/api";
 import { TERMINAL_TASK_STATES, type BoardTask } from "../board/types";
 import type { Env } from "../env";
@@ -30,6 +32,13 @@ const KEY_PREFIX = "read-repos:";
 
 function grantKey(repo: string, issueNumber: number): string {
   return `${KEY_PREFIX}${repo.toLowerCase()}:${issueNumber}`;
+}
+
+/** PR #292 review item 1: the last mint error already commented on this
+ *  grant's task. Its own key (outside the `read-repos:` LIKE prefix), so a
+ *  grant row's shape never changes. */
+function errorKey(repo: string, issueNumber: number): string {
+  return `read-repos-err:${repo.toLowerCase()}:${issueNumber}`;
 }
 
 /** The wire field, as the board route receives it. Absent/null/[] = no
@@ -74,8 +83,73 @@ export async function recordReadReposGrant(
   await setFlag(db, grantKey(repo, issueNumber), JSON.stringify({ studioId, repos }), now);
 }
 
-export async function revokeReadReposGrant(db: D1Database, repo: string, issueNumber: number): Promise<void> {
+/** Deletes the grant; returns the studio that held it (null = none), so the
+ *  caller can revoke that studio's live token right away. */
+export async function revokeReadReposGrant(db: D1Database, repo: string, issueNumber: number): Promise<string | null> {
+  const raw = await getFlag(db, grantKey(repo, issueNumber));
   await deleteFlag(db, grantKey(repo, issueNumber));
+  await deleteFlag(db, errorKey(repo, issueNumber));
+  if (raw === null) return null;
+  try {
+    const parsed = JSON.parse(raw) as { studioId?: unknown };
+    return typeof parsed.studioId === "string" ? parsed.studioId : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * PR #292 review item 2: `DELETE /installation/token`, authenticated AS the
+ * token being revoked — GitHub's own way to end an installation token before
+ * its hour is up. 204 = revoked; 401 = already dead, which is the goal too.
+ */
+export async function revokeInstallationToken(token: string): Promise<void> {
+  const res = await fetch("https://api.github.com/installation/token", {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": USER_AGENT },
+  });
+  if (!res.ok && res.status !== 401) throw new Error(`installation token revoke failed (${res.status})`);
+}
+
+/** Where a studio keeps its last minted read token: its own Durable Object
+ *  storage (Worker-side), never the container, which the studio controls. */
+export interface ReadTokenStore {
+  get(): Promise<string | undefined>;
+  put(token: string): Promise<void>;
+  delete(): Promise<void>;
+}
+
+/**
+ * Record the token now in the container (`next`, or null when none) and
+ * revoke the one it replaced. Called only AFTER the container write/clear
+ * succeeded, so a revoked token is never one the studio still depends on.
+ * A revoke failure is logged (never the token) and swallowed: the token
+ * still dies at its hour.
+ */
+export async function swapStoredReadToken(
+  store: ReadTokenStore, next: string | null, revoke: (token: string) => Promise<void> = revokeInstallationToken,
+): Promise<void> {
+  const prev = await store.get();
+  if (next === null) await store.delete();
+  else await store.put(next);
+  if (prev === undefined || prev === next) return;
+  try {
+    await revoke(prev);
+  } catch (err) {
+    console.error("read-repos: revoking the previous read token failed; it expires within the hour",
+      err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
+ * PR #292 review item 2, route side: an un-grant tells the studio's Durable
+ * Object to revoke its stored read token now. No container exec (a stopped
+ * studio is not booted for this); the dead token's helper/file are cleared
+ * on its next refresh. Callers kick only when the studio holds no other
+ * live grant — otherwise its next refresh re-mints the narrower list.
+ */
+export async function revokeStudioReadToken(env: Env, studioId: string): Promise<void> {
+  await (await getStudioStub(env, studioId)).revokeReadRepos();
 }
 
 /** Every grant held for `studioId`. A row that does not parse, or whose
@@ -113,7 +187,19 @@ function grantStillLive(task: BoardTask, studioId: string): boolean {
 export interface StudioReadReposDeps {
   getTask: (repo: string, issueNumber: number) => Promise<BoardTask>;
   mint?: typeof mintReadReposToken;
+  /** PR #292 review item 1: tell the granting task the read token failed.
+   *  Absent = log only. */
+  comment?: (repo: string, issueNumber: number, body: string) => Promise<unknown>;
   db?: D1Database;
+}
+
+/** GitHub's canonical casing, kept only when it is the same owner and a
+ *  plain owner/name (defense in depth: it reaches a shell command). */
+function canonicalFor(canonical: string[], taskRepo: string): string[] {
+  return canonical.filter((name) => {
+    const c = checkReadRepos([name], taskRepo);
+    return c.ok;
+  });
 }
 
 /**
@@ -160,11 +246,35 @@ export async function studioReadReposCredential(
   if (live.length === 0) return null;
   const owner = live[0]!.repo.split("/")[0];
   const sameOwner = live.filter((g) => g.repo.split("/")[0] === owner);
-  const repos = [...new Set(sameOwner.flatMap((g) => g.repos))].sort();
-  const token = await mint(env, sameOwner[0]!.repo, repos);
-  console.log(
-    `read-repos: minted read-only token for ${studioId} ` +
-    `(tasks ${sameOwner.map((g) => `${g.repo}#${g.number}`).join(", ")}) repos ${repos.join(", ")}`,
-  );
-  return { token, repos };
+  const granted = [...new Set(sameOwner.flatMap((g) => g.repos))].sort();
+  const tasks = sameOwner.map((g) => `${g.repo}#${g.number}`).join(", ");
+  let minted: { token: string; canonical: string[] };
+  try {
+    minted = await mint(env, sameOwner[0]!.repo, granted);
+  } catch (err) {
+    // PR #292 review item 1: never fatal. The caller clears the helper and
+    // the primary credential is untouched; the task hears about it once per
+    // distinct error, not on every 50-minute refresh.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`read-repos: read-only token for ${studioId} (tasks ${tasks}) not minted, skipped: ${message}`);
+    for (const g of sameOwner) {
+      try {
+        if ((await getFlag(db, errorKey(g.repo, g.number))) === message) continue;
+        await deps.comment?.(g.repo, g.number,
+          `read-repos: the read-only token for ${studioId} (repos ${granted.join(", ")}) could not be minted, ` +
+          `so this studio has no sibling-repo access right now. Its main credential is unaffected. ` +
+          `GitHub said: ${message}`);
+        await setFlag(db, errorKey(g.repo, g.number), message, Date.now());
+      } catch (commentErr) {
+        console.error(`read-repos: could not comment on ${g.repo}#${g.number}`,
+          commentErr instanceof Error ? commentErr.message : String(commentErr));
+      }
+    }
+    return null;
+  }
+  for (const g of sameOwner) await deleteFlag(db, errorKey(g.repo, g.number));
+  const repos = [...new Set([...granted, ...canonicalFor(minted.canonical, sameOwner[0]!.repo)])]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  console.log(`read-repos: minted read-only token for ${studioId} (tasks ${tasks}) repos ${repos.join(", ")}`);
+  return { token: minted.token, repos };
 }

@@ -3,7 +3,7 @@ import { env } from "cloudflare:test";
 import { mintReadReposToken } from "../src/github/auth";
 import {
   READ_REPOS_MAX, READ_REPOS_PERMISSIONS, parseReadRepos, recordReadReposGrant, revokeReadReposGrant,
-  readReposGrantsForStudio, studioReadReposCredential,
+  readReposGrantsForStudio, studioReadReposCredential, swapStoredReadToken, revokeInstallationToken,
 } from "../src/github/read-repos";
 import type { BoardTask } from "../src/board/types";
 import type { Env } from "../src/env";
@@ -19,6 +19,8 @@ const OTHER = "websites--release-studio";
 let pem: string;
 let calls: { url: string; method: string; body: string | undefined }[] = [];
 let realFetch: typeof globalThis.fetch;
+/** What the stub answers; the mint POST by default echoes GitHub's shape. */
+let answer: (url: string, method: string) => Response;
 
 beforeAll(async () => {
   const kp = (await crypto.subtle.generateKey(
@@ -40,12 +42,14 @@ const READ_TOKEN = "ghs_READONLYsiblingtoken";
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
+  answer = () => Response.json({ token: READ_TOKEN });
   calls = [];
   realFetch = globalThis.fetch;
   globalThis.fetch = (async (input: any, init: any) => {
     const url = typeof input === "string" ? input : input.url;
-    calls.push({ url, method: init?.method ?? "GET", body: init?.body as string | undefined });
-    return Response.json({ token: READ_TOKEN });
+    const method = init?.method ?? "GET";
+    calls.push({ url, method, body: init?.body as string | undefined });
+    return answer(url, method);
   }) as typeof globalThis.fetch;
 });
 afterEach(() => { globalThis.fetch = realFetch; vi.restoreAllMocks(); });
@@ -100,14 +104,22 @@ describe("parseReadRepos", () => {
 
 describe("mintReadReposToken", () => {
   it("asks GitHub for exactly the read-only permissions, scoped to exactly the listed repos", async () => {
-    const token = await mintReadReposToken(appEnv(), TASK_REPO, ["acme-org/alpha", "acme-org/beta"]);
-    expect(token).toBe(READ_TOKEN);
+    const minted = await mintReadReposToken(appEnv(), TASK_REPO, ["acme-org/alpha", "acme-org/beta"]);
+    expect(minted.token).toBe(READ_TOKEN);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toContain("/app/installations/2222222/access_tokens");
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       repositories: ["alpha", "beta"],
       permissions: { contents: "read", metadata: "read" },
     });
+  });
+
+  // PR #292 review item 3: git's credential URL match is case-sensitive on
+  // the path, so the helper needs GitHub's canonical casing, not only ours.
+  it("returns GitHub's canonical full names from the mint response", async () => {
+    answer = () => Response.json({ token: READ_TOKEN, repositories: [{ full_name: "Acme-Org/Alpha" }, { full_name: "acme-org/beta" }] });
+    const minted = await mintReadReposToken(appEnv(), TASK_REPO, ["acme-org/alpha", "acme-org/beta"]);
+    expect(minted).toEqual({ token: READ_TOKEN, canonical: ["Acme-Org/Alpha", "acme-org/beta"] });
   });
 
   it("refuses a cross-owner repo before any GitHub call", async () => {
@@ -176,8 +188,10 @@ describe("studioReadReposCredential (the refresh cycle's port)", () => {
     await recordReadReposGrant(env.DB, TASK_REPO, 7, STUDIO, ["acme-org/alpha"], 1000);
     await recordReadReposGrant(env.DB, TASK_REPO, 8, STUDIO, ["acme-org/beta", "acme-org/alpha"], 1000);
     const getTask = vi.fn(async (_r: string, n: number) => liveTask({ number: n }));
+    answer = () => Response.json({ token: READ_TOKEN, repositories: [{ full_name: "Acme-Org/Alpha" }, { full_name: "acme-org/beta" }] });
     const got = await studioReadReposCredential(appEnv(), STUDIO, { getTask });
-    expect(got).toEqual({ token: READ_TOKEN, repos: ["acme-org/alpha", "acme-org/beta"] });
+    // Lowercase (what was granted) plus GitHub's canonical casing.
+    expect(got).toEqual({ token: READ_TOKEN, repos: ["Acme-Org/Alpha", "acme-org/alpha", "acme-org/beta"] });
     expect(JSON.parse(calls[0]!.body!).permissions).toEqual({ contents: "read", metadata: "read" });
   });
 
@@ -207,5 +221,83 @@ describe("studioReadReposCredential (the refresh cycle's port)", () => {
     expect(all).toContain(`${TASK_REPO}#7`);
     expect(all).toContain("acme-org/alpha");
     expect(all).not.toContain(READ_TOKEN);
+  });
+});
+
+// PR #292 review item 1: a mint failure (App not installed on a sibling ->
+// 422, union over 15) skips the read token; the task hears about it once.
+describe("studioReadReposCredential — mint failure is non-fatal", () => {
+  it("returns null, keeps the grant, comments on the granting task ONCE per distinct error", async () => {
+    await recordReadReposGrant(env.DB, TASK_REPO, 7, STUDIO, ["acme-org/alpha"], 1000);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const comment = vi.fn(async (_repo: string, _n: number, _body: string) => {});
+    const mint = vi.fn(async () => { throw new Error("installation token failed (422): not installed"); });
+    const deps = { getTask: async () => liveTask(), mint, comment };
+    expect(await studioReadReposCredential(appEnv(), STUDIO, deps)).toBeNull();
+    expect(await studioReadReposCredential(appEnv(), STUDIO, deps)).toBeNull();
+    expect(comment).toHaveBeenCalledTimes(1);
+    expect(comment.mock.calls[0]![0]).toBe(TASK_REPO);
+    expect(comment.mock.calls[0]![1]).toBe(7);
+    expect(String(comment.mock.calls[0]![2])).toMatch(/read-repos/);
+    expect(String(comment.mock.calls[0]![2])).toMatch(/422/);
+    expect(await readReposGrantsForStudio(env.DB, STUDIO)).toHaveLength(1);
+    mint.mockImplementationOnce(async () => { throw new Error("a different failure"); });
+    await studioReadReposCredential(appEnv(), STUDIO, deps);
+    expect(comment).toHaveBeenCalledTimes(2);
+  });
+
+  it("a later success re-arms the comment for the next failure", async () => {
+    await recordReadReposGrant(env.DB, TASK_REPO, 7, STUDIO, ["acme-org/alpha"], 1000);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const comment = vi.fn(async (_repo: string, _n: number, _body: string) => {});
+    const fail = async () => { throw new Error("boom 422"); };
+    const ok = async () => ({ token: READ_TOKEN, canonical: [] as string[] });
+    const mint = vi.fn(fail);
+    const deps = { getTask: async () => liveTask(), mint, comment };
+    await studioReadReposCredential(appEnv(), STUDIO, deps);
+    mint.mockImplementationOnce(ok as never);
+    expect(await studioReadReposCredential(appEnv(), STUDIO, deps)).not.toBeNull();
+    await studioReadReposCredential(appEnv(), STUDIO, deps);
+    expect(comment).toHaveBeenCalledTimes(2);
+  });
+});
+
+// PR #292 review item 2: un-grant and rotation revoke the old token now.
+describe("swapStoredReadToken / revokeInstallationToken", () => {
+  function store(initial?: string) {
+    let v = initial;
+    return { get: async () => v, put: async (t: string) => { v = t; }, delete: async () => { v = undefined; }, peek: () => v };
+  }
+
+  it("revokeInstallationToken sends DELETE /installation/token as that token", async () => {
+    answer = () => new Response(null, { status: 204 });
+    await revokeInstallationToken("ghs_old");
+    expect(calls).toEqual([{ url: "https://api.github.com/installation/token", method: "DELETE", body: undefined }]);
+  });
+
+  it("rotation stores the new token and revokes the previous one", async () => {
+    const s = store("ghs_old");
+    const revoke = vi.fn(async () => {});
+    await swapStoredReadToken(s, "ghs_new", revoke);
+    expect(s.peek()).toBe("ghs_new");
+    expect(revoke).toHaveBeenCalledWith("ghs_old");
+  });
+
+  it("un-grant (null) revokes and forgets", async () => {
+    const s = store("ghs_old");
+    const revoke = vi.fn(async () => {});
+    await swapStoredReadToken(s, null, revoke);
+    expect(s.peek()).toBeUndefined();
+    expect(revoke).toHaveBeenCalledWith("ghs_old");
+  });
+
+  it("nothing stored -> nothing revoked; a revoke failure is logged, never thrown, never logs the token", async () => {
+    const revoke = vi.fn(async () => { throw new Error("401"); });
+    await swapStoredReadToken(store(), null, revoke);
+    expect(revoke).not.toHaveBeenCalled();
+    const logs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
+    await expect(swapStoredReadToken(store("ghs_secretold"), null, revoke)).resolves.toBeUndefined();
+    expect(logs.join("\n")).not.toContain("ghs_secretold");
   });
 });
