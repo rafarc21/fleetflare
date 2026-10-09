@@ -133,6 +133,75 @@ export function credentialWriteCmd(): string {
 }
 
 /**
+ * Issue #283: the git identity a studio commits as.
+ *
+ * Neither container/Dockerfile.studio nor studio-bringup.sh ever set one, so
+ * each incarnation's agent improvised its own -- sometimes the operator's App
+ * bot (`<app-slug>[bot]`, handed to the container as FLEET_BOT_NAME). That
+ * slug is operator-private and on the leak denylist, so every push from such
+ * a studio to a public repo was refused. Now the Worker sets it on every
+ * credential write (refreshCredentialExec below: provision and each refresh,
+ * so every incarnation) from FLEET_STUDIO_GIT_NAME/_EMAIL, defaulting to a
+ * generic public-safe identity.
+ */
+export interface GitIdentity { name: string; email: string }
+
+export const STUDIO_GIT_IDENTITY: GitIdentity = {
+  name: "fleet-studio",
+  email: "fleet-studio@users.noreply.github.com",
+};
+
+type IdentityEnv = {
+  FLEET_STUDIO_GIT_NAME?: string; FLEET_STUDIO_GIT_EMAIL?: string;
+  FLEET_BOT_NAME?: string; FLEET_BOT_EMAIL?: string;
+};
+
+/**
+ * Operator config when it is a whole, plain identity; the default otherwise,
+ * as a pair (never a configured name with the default email). Refused: a
+ * `[bot]` shape (an App identity, the thing this issue keeps out) and any
+ * value equal to FLEET_BOT_NAME/_EMAIL. Never reads the bot vars as a source.
+ */
+export function studioGitIdentity(env: IdentityEnv): GitIdentity {
+  const name = env.FLEET_STUDIO_GIT_NAME?.trim() ?? "";
+  const email = env.FLEET_STUDIO_GIT_EMAIL?.trim() ?? "";
+  const bot = [env.FLEET_BOT_NAME, env.FLEET_BOT_EMAIL].map((v) => v?.trim().toLowerCase()).filter(Boolean);
+  const bad = (v: string) =>
+    v === "" || /[\r\n\0]/.test(v) || /\[bot\]/i.test(v) || bot.includes(v.toLowerCase());
+  if (bad(name) || bad(email) || !email.includes("@")) return STUDIO_GIT_IDENTITY;
+  return { name, email };
+}
+
+/** The identity rides the exec's env, like the token: no quoting to get
+ *  wrong, nothing operator-specific in the command text. */
+export const GIT_NAME_ENV = "FLEET_GIT_NAME";
+export const GIT_EMAIL_ENV = "FLEET_GIT_EMAIL";
+
+export function gitIdentityEnv(id: GitIdentity): Record<string, string> {
+  return { [GIT_NAME_ENV]: id.name, [GIT_EMAIL_ENV]: id.email };
+}
+
+export function gitIdentityCmd(): string {
+  return (
+    `git config --global user.name "$${GIT_NAME_ENV}" && ` +
+    `git config --global user.email "$${GIT_EMAIL_ENV}"`
+  );
+}
+
+/**
+ * The one exec runRefreshCredential (do.ts) sends: identity first, then the
+ * credential write, or the clear when there is no token (issue #7). Chained
+ * with `&&`, so a failed identity write fails the refresh loudly.
+ */
+export function refreshCredentialExec(
+  token: string | null, id: GitIdentity,
+): { cmd: string; env: Record<string, string> } {
+  return token === null
+    ? { cmd: `${gitIdentityCmd()} && ${credentialClearCmd()}`, env: gitIdentityEnv(id) }
+    : { cmd: `${gitIdentityCmd()} && ${credentialWriteCmd()}`, env: { ...gitIdentityEnv(id), ...tokenEnv(token) } };
+}
+
+/**
  * Issue #7: proxy mode with no read token to hand out. The container keeps NO
  * GitHub credential -- a stale write token from before the switch must not
  * linger -- and reads its public work repo anonymously. The helper line stays

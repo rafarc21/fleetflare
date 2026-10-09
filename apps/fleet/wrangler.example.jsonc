@@ -111,10 +111,15 @@
     // (install-cache.ts's presignR2 signs URLs against this value). Not a
     // secret — a bucket name isn't a credential.
     "R2_BUCKET_NAME": "<YOUR_R2_BUCKET_NAME>",
-    // Issue #335: the git identity a rescue commit is authored as. Optional
-    // — absent uses a neutral built-in default ("fleetflare[bot]").
+    // Issue #335: the task container's git identity. Optional — absent uses
+    // a neutral built-in default ("fleetflare[bot]"). Never used by studios.
     "FLEET_BOT_NAME": "<YOUR_BOT_NAME>",
     "FLEET_BOT_EMAIL": "<YOUR_BOT_EMAIL>"
+    // Issue #283: studios' git identity (commits and rescue commits).
+    // Optional, both or neither; must be public-safe, never an App `[bot]`.
+    // Absent uses "fleet-studio <fleet-studio@users.noreply.github.com>".
+    // "FLEET_STUDIO_GIT_NAME": "<YOUR_STUDIO_GIT_NAME>",
+    // "FLEET_STUDIO_GIT_EMAIL": "<YOUR_STUDIO_GIT_EMAIL>"
     //
     // ACCESS_TEAM_DOMAIN / ACCESS_AUD (Access JWT verification for /studio/*,
     // P1 auth.ts) intentionally NOT here. Set both with

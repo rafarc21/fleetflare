@@ -212,7 +212,8 @@ export interface SessionSyncDeps {
   doneRecords?: DoneRecordPorts;
   /**
    * Issue #335 (public-release scrub): the rescue commit's git identity,
-   * read from env by do.ts's real syncDeps() (FLEET_BOT_NAME/_EMAIL) and
+   * set by do.ts's real syncDeps() (issue #283: the studio's own identity,
+   * credentials.ts's studioGitIdentity, never FLEET_BOT_NAME/_EMAIL) and
    * passed straight to rescuePushCmd/rescueSnapshotCmd. Absent means those
    * functions' own neutral defaults apply — every existing caller/test that
    * never heard of this keeps today's behavior unchanged.
