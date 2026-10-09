@@ -38,7 +38,7 @@ import {
 // schedule, nothing more.
 import {
   resolveClaudeAccounts, claudeAccountToken, launchAccount, launchAccountOrReroute, autoFailoverOn, accountDisplay,
-  otherRepoPrimaries, repoForAccount, primaryIsMapped, type LaunchAccount,
+  otherRepoPrimaries, repoForAccount, primaryIsMapped, accountResolution, type LaunchAccount,
 } from "./accounts";
 import {
   runAccountFailover, paneCaptureCmd, evaluateDegradedRecovery, healDegradedRowAndWake, retryPendingHealWake,
@@ -3911,6 +3911,18 @@ export function launchFields(
   // (launchAccount over the same inputs) — not `name` verbatim: with
   // auto-failover off, launchAccount serves the mapped primary whatever
   // `name` says, and the account recorded must be the one whose token boots.
+  //
+  // Issue #305: except for an UNMAPPED repo — launchAccount's sync answer is
+  // the first set account, while the gate picked by headroom
+  // (launchAccountOrReroute). With failover off the gate's `name` IS what
+  // launchAccount would serve unless that pick moved it, so honouring a set
+  // `name` here changes nothing else.
+  if (!primaryIsMapped(env, parseStudioId(studioId)?.repo ?? null)) {
+    const on = resolveClaudeAccounts(env).find((a) => a.name === name);
+    if (on !== undefined) {
+      return { envVars: { ...studioEnvVars(env, studioId, spawnToken, name), CLAUDE_CODE_OAUTH_TOKEN: on.token }, envAccount: on.name };
+    }
+  }
   return {
     envVars: studioEnvVars(env, studioId, spawnToken, name),
     envAccount: launchAccountName(env, studioId, name) ?? undefined,
@@ -4280,6 +4292,19 @@ export async function refuseUnlessJuniorEnabled(
 }
 
 /**
+ * #273 r2's start gate, as a pure function: the reason a container start is
+ * refused for its Claude account, or null. Issue #305: a glm-lead studio is
+ * never refused here -- it runs on no Claude account, and strict mode
+ * (FLEET_REQUIRE_ACCOUNT_MAP) would otherwise refuse every wake of an
+ * unmapped glm studio whose provision never ran this gate at all.
+ */
+export function startAccountRefusal(env: Env, id: string, row: StudioStatus | null | undefined): string | null {
+  if (resolveLeadType(row) === "glm") return null;
+  const launch = launchAccount(env, parseStudioId(id)?.repo ?? null, row?.claudeAccount ?? null);
+  return launch.ok ? null : launch.error;
+}
+
+/**
  * Issue #249: which lead a studio boots — the one check every one of
  * `launchAccountOrRefuse`'s 4 call sites (do.ts's provisionUngated,
  * restartUngated, and recycle's own two) runs FIRST, to decide whether to
@@ -4376,12 +4401,20 @@ export async function launchAccountOrRefuse(
   // never throw this gate into refusing a launch tiers 1+2 could otherwise
   // have served in plain order.
   let usage: Awaited<ReturnType<typeof readFleetAccountUsage>> = {};
-  if (autoFailoverOn(env)) {
+  // Issue #305 review round 1: an unmapped repo's fallback must skip limited
+  // slots with failover off too (accounts.ts's unmappedFallbackAccount), so
+  // limits are read for it either way. Mapped repos with failover off still
+  // skip the read: nothing reroutes them.
+  if (autoFailoverOn(env) || !primaryIsMapped(env, repo)) {
     try {
       limits = await readFleetAccountLimits(env.DB, resolveClaudeAccounts(env));
     } catch (err) {
       console.warn(`studio ${id}: readFleetAccountLimits failed, launching as if nothing were fleet-wide limited (fail open)`, err);
     }
+  }
+  // Issue #305: same for usage — the fallback ranks free slots by headroom.
+  // Same fail-open: no usage means list order.
+  if (autoFailoverOn(env) || !primaryIsMapped(env, repo)) {
     try {
       usage = await readFleetAccountUsage(env.DB, resolveClaudeAccounts(env));
     } catch (err) {
@@ -4409,6 +4442,11 @@ export async function launchAccountOrRefuse(
     usage,
   );
   if (launch.ok) {
+    // Issue #305: an unmapped repo's fallback is visible in a tail, not only
+    // as a limit modal on the lead's pane.
+    if (!primaryIsMapped(env, repo)) {
+      console.warn(`studio ${id}: claude account ${launch.name} — ${accountResolution(env, repo, launch.name, limits)}`);
+    }
     // #273 r2: flag off, an earlier failover's recorded account is stale — this
     // launch is on the mapped one, so the row stops naming the old one.
     // Review round 2 (maestro review of PR #135), finding 2: `borrowedAccount`/
@@ -5918,8 +5956,7 @@ export class StudioDO extends Sandbox<Env> {
    * reason from launchAccountOrRefuse; this refuses the start the same way.
    */
   private async accountRefusal(): Promise<string | null> {
-    const launch = launchAccount(this.env, parseStudioId(this.selfId())?.repo ?? null, await this.claudeAccountName());
-    return launch.ok ? null : launch.error;
+    return startAccountRefusal(this.env, this.selfId(), await this.ctx.storage.get<StudioStatus>(STATUS_KEY));
   }
 
   /**
@@ -7034,14 +7071,6 @@ export class StudioDO extends Sandbox<Env> {
    *  so the formula has exactly one implementation. */
   private primaryIsMapped(): boolean {
     return primaryIsMapped(this.env, parseStudioId(this.selfId())?.repo ?? null);
-  }
-
-  /** The account this studio is recorded on (StudioStatus.claudeAccount), for
-   *  the container's start config. `null` for a studio that never switched,
-   *  which accounts.ts resolves to the first account — what every studio that
-   *  predates issue #53 was on by construction. */
-  private async claudeAccountName(): Promise<string | null> {
-    return (await this.ctx.storage.get<StudioStatus>(STATUS_KEY))?.claudeAccount ?? null;
   }
 
   /** recordStudio with the observed block merged — the writer every op path here uses. */

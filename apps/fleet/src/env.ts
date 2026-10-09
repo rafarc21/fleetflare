@@ -130,6 +130,9 @@ export interface Env {
   CLAUDE_ACCOUNT_BY_REPO?: string;
   /** Issue #271, optional: auto-failover runs only when this is exactly "on". */
   FLEET_AUTO_FAILOVER?: string;
+  /** Issue #305, optional: exactly "on" refuses to launch a studio whose repo
+   *  has no CLAUDE_ACCOUNT_BY_REPO entry, instead of falling back. */
+  FLEET_REQUIRE_ACCOUNT_MAP?: string;
   /**
    * Issue #335 (public-release scrub): the TASK container's git identity
    * (container/server.ts). Usually the operator's App bot (`<slug>[bot]`) —
