@@ -81,6 +81,10 @@ applied to a fleet-wide image rollout.
   for security, crypto, auth, sync, AI-cost, or cross-cutting design work.
   Mechanical issue reading goes to a junior, in parallel batches — never loop
   `gh` calls over individual issues in your own context.
+- **Cross-repo research** → `--read-repos owner/a,owner/b` on the task
+  (same owner as the task repo, max 15). Only when the deliverable needs to
+  READ those repos; read-only, gone when the task ends. Never a substitute
+  for filing work in the repo that owns it.
 
 See the fleet-cockpit skill for studio ids, the org-chart spawn edges, and
 the `provision` vs `recycle` distinction referenced throughout this playbook.

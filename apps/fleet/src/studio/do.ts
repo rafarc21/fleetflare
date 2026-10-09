@@ -138,8 +138,12 @@ import { juniorEnabled } from "../junior/gate";
 // sandbox-free module so the bun:test lane can ask real git which
 // credential it picks — see credentials.ts's own header. Re-exported
 // here so every existing `from "./do"` importer is unchanged.
-import { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV } from "./credentials";
+import {
+  credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV,
+  readReposCredentialWriteCmd, readReposCredentialClearCmd,
+} from "./credentials";
 import { refreshCredentialExec, studioGitIdentity, gitIdentityCmd, gitIdentityEnv, STUDIO_GIT_IDENTITY, type GitIdentity } from "./credentials";
+import { studioReadReposCredential, swapStoredReadToken, type ReadTokenStore } from "../github/read-repos";
 import { leakGateInstallCmd } from "./gh-wrapper";
 export { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV };
 export { refreshCredentialExec, studioGitIdentity, gitIdentityCmd, gitIdentityEnv, STUDIO_GIT_IDENTITY, type GitIdentity };
@@ -229,6 +233,9 @@ import type { DoneRecordPorts } from "./session-sync";
  *  allowance, one file over. */
 export const REFRESH_SECONDS = 3000;
 
+/** PR #292 review item 2: DO storage key for the last minted read token. */
+const READ_REPOS_TOKEN_KEY = "readReposToken";
+
 /**
  * P2 plane 1 (transcript durability): how often the `shipTranscript`
  * schedule below fires. Design spec's own number ("StudioDO schedule
@@ -248,6 +255,13 @@ export interface RefreshDeps {
   /** Issue #7 (#13 review): the write mode, resolved once per refresh, and
    *  the Worker URL its git config points at. Absent = no proxy step. */
   writeProxy?: { workerUrl: string; mode: () => Promise<WriteMode> };
+  /** Issue #291: the read-only sibling-repo token, or null = no live grant
+   *  (the read helper is cleared). Absent = this caller predates the feature
+   *  and nothing about the read helper runs. */
+  readRepos?: () => Promise<{ token: string; repos: string[] } | null>;
+  /** PR #292 review item 2: record the read token now in the container
+   *  (null = none) and revoke the one it replaced. */
+  swapReadToken?: (token: string | null) => Promise<void>;
   // `env`: the credential write's token rides here (#110 review), never in `cmd`.
   sbExec: (cmd: string, env?: Record<string, string>) => Promise<{ code: number; stdout: string; stderr: string }>;
   /** Issue #283: the studio's git identity, set on every credential write.
@@ -302,9 +316,50 @@ export async function runRefreshCredential(
     if (res.code !== 0) {
       throw new Error(`credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
     }
+    // Issue #291: the read-only sibling token, AFTER the primary and through
+    // its own command — never the push credential's file or helper. PR #292
+    // review item 1: NEVER fatal. The primary credential above is what keeps
+    // the studio working; a read-token failure (App not installed on a
+    // sibling, over the cap, a failed write) clears the read helper, revokes
+    // the old read token, logs, and the refresh still succeeds. The task
+    // itself is told by studioReadReposCredential's board comment.
+    if (deps.readRepos) await refreshReadRepos(deps, deps.readRepos);
     return { ok: true, lastRefresh: deps.now() };
   } catch (err) {
     return { ok: false, error: redactSecrets(err instanceof Error ? err.message : String(err)) };
+  }
+}
+
+/** The read-repos half of runRefreshCredential. Total: logs and swallows
+ *  everything (redacted), so it can never fail the refresh it rides. */
+async function refreshReadRepos(
+  deps: RefreshDeps, readRepos: NonNullable<RefreshDeps["readRepos"]>,
+): Promise<void> {
+  const fail = (what: string, err: unknown) =>
+    console.error(`read-repos: ${what} — skipped, main credential unaffected:`,
+      redactSecrets(err instanceof Error ? err.message : String(err)));
+  let grant: { token: string; repos: string[] } | null = null;
+  try {
+    grant = await readRepos();
+  } catch (err) {
+    fail("read-only token unavailable", err);
+  }
+  try {
+    if (grant !== null) {
+      const read = await deps.sbExec(readReposCredentialWriteCmd(grant.repos), tokenEnv(grant.token));
+      if (read.code === 0) {
+        await deps.swapReadToken?.(grant.token);
+        return;
+      }
+      fail(`read helper write failed (${read.code})`, read.stderr.slice(0, 500));
+    }
+    const clear = await deps.sbExec(readReposCredentialClearCmd());
+    if (clear.code !== 0) fail(`read helper clear failed (${clear.code})`, clear.stderr.slice(0, 500));
+    // The just-minted token never reached the container: revoke it too.
+    if (grant !== null) await deps.swapReadToken?.(grant.token);
+    await deps.swapReadToken?.(null);
+  } catch (err) {
+    fail("read helper exec failed", err);
   }
 }
 
@@ -6581,6 +6636,13 @@ export class StudioDO extends Sandbox<Env> {
         mode: () => resolveWriteMode(this.env, workRepoSlug,
           async (repo) => repoIsPrivate(await mintRepoToken(this.env, repo, { permissions: { contents: "read" } }), repo)),
       },
+      // Issue #291: the read-only sibling-repo token, from this studio's own
+      // Worker-held grants (github/read-repos.ts). No grant = no mint.
+      readRepos: () => studioReadReposCredential(this.env, this.selfId(), {
+        getTask: (repo, number) => githubBoardApi(this.env).getIssue(repo, number),
+        comment: (repo, number, body) => githubBoardApi(this.env).createComment(repo, number, body),
+      }),
+      swapReadToken: (token) => swapStoredReadToken(this.readTokenStore(), token),
       sbExec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.refresh, env }),
       gitIdentity: studioGitIdentity(this.env),
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
@@ -6905,6 +6967,27 @@ export class StudioDO extends Sandbox<Env> {
   /** recordStudio with the observed block merged — the writer every op path here uses. */
   private recordFn(): (s: StudioStatus) => Promise<void> {
     return async (s: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, s));
+  }
+
+  /** PR #292 review item 2: the last read-only token handed to this
+   *  studio's container, kept Worker-side so it can be revoked. */
+  private readTokenStore(): ReadTokenStore {
+    const storage = this.ctx.storage;
+    return {
+      get: () => storage.get<string>(READ_REPOS_TOKEN_KEY),
+      put: (token) => storage.put(READ_REPOS_TOKEN_KEY, token),
+      delete: async () => { await storage.delete(READ_REPOS_TOKEN_KEY); },
+    };
+  }
+
+  /**
+   * PR #292 review item 2: the board route's un-grant revokes this studio's
+   * live read token NOW (github/read-repos.ts's revokeStudioReadToken). No
+   * container exec, so a stopped studio is not started; the dead token's
+   * helper and file are cleared on the next refresh.
+   */
+  async revokeReadRepos(): Promise<void> {
+    await swapStoredReadToken(this.readTokenStore(), null);
   }
 
   private selfId(): string {

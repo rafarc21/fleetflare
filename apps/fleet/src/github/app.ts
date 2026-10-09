@@ -88,6 +88,11 @@ export interface MintTokenOpts {
    *  container root can reach, and the safe behaviour has to be the
    *  default, not something every call site has to remember to opt into. */
   unscoped?: boolean;
+  /** Issue #291: scope to THESE repos (owner/name or short names, all under
+   *  `owner`) instead of the single `repo` argument. Only the read-only
+   *  sibling-repo token uses it (auth.ts's mintReadReposToken). Ignored when
+   *  `unscoped` is true. */
+  repositories?: string[];
 }
 
 /** The name half of `owner/name`, or the whole string when there is no
@@ -137,6 +142,14 @@ function repoShortName(repo: string): string {
 export async function mintInstallationToken(
   env: Env, owner: string, repo: string, opts: MintTokenOpts = {},
 ): Promise<string> {
+  return (await mintInstallationTokenDetail(env, owner, repo, opts)).token;
+}
+
+/** Same mint, plus the `full_name` of each repo GitHub scoped it to — in
+ *  GitHub's own casing (issue #291: the read helper's URL keys need it). */
+export async function mintInstallationTokenDetail(
+  env: Env, owner: string, repo: string, opts: MintTokenOpts = {},
+): Promise<{ token: string; repositories: string[] }> {
   const own = (env as unknown as DynamicEnv)[installationEnvName(owner)];
   const installationId = typeof own === "string" && own !== "" ? own : env.GITHUB_INSTALLATION_ID;
   if (!env.GITHUB_APP_PRIVATE_KEY || !env.GITHUB_APP_ID || !installationId) {
@@ -161,7 +174,7 @@ export async function mintInstallationToken(
   // with). An empty object (only reachable via `unscoped: true`) sends NO
   // body at all, byte-identical to the pre-#331 request.
   const body: Record<string, unknown> = {};
-  if (opts.unscoped !== true) body.repositories = [repoShortName(repo)];
+  if (opts.unscoped !== true) body.repositories = (opts.repositories ?? [repo]).map(repoShortName);
   if (opts.permissions) body.permissions = opts.permissions;
   const hasBody = Object.keys(body).length > 0;
   const res = await fetch(
@@ -183,5 +196,9 @@ export async function mintInstallationToken(
     // JWT and any token are not — neither is logged or included here.
     throw new MintTokenError(res.status, `installation token failed (${res.status}): ${text.slice(0, 300)}`);
   }
-  return (JSON.parse(text) as { token: string }).token;
+  const parsed = JSON.parse(text) as { token: string; repositories?: { full_name?: unknown }[] };
+  const repositories = (parsed.repositories ?? [])
+    .map((r) => r.full_name)
+    .filter((n): n is string => typeof n === "string");
+  return { token: parsed.token, repositories };
 }

@@ -55,7 +55,7 @@
 // commit, not rarer.
 
 import type { Env } from "../env";
-import { installationEnvName, mintInstallationToken, MintTokenError, type MintTokenOpts } from "./app";
+import { installationEnvName, mintInstallationToken, mintInstallationTokenDetail, MintTokenError, type MintTokenOpts } from "./app";
 import { listInstallationRepos, repoIsWritable, resolveCanonicalRepoName } from "./api";
 import type { RepoReach } from "./reach";
 
@@ -339,6 +339,90 @@ export async function mintRepoToken(env: Env, repo: string, opts?: MintTokenOpts
     console.error(`mintRepoToken: ${repo} appears renamed to ${canonical}; retrying the scoped mint`);
     return mintInstallationToken(env, repoOwner(canonical), canonical, opts);
   }
+}
+
+/** Issue #291: most repos one read-only sibling token may cover. */
+export const READ_REPOS_MAX = 15;
+
+/** Issue #291: the ONLY permissions the sibling-repo token is ever minted
+ *  with. Frozen: nothing downstream may widen it. */
+export const READ_REPOS_PERMISSIONS: Readonly<Record<string, string>> = Object.freeze({
+  contents: "read", metadata: "read",
+});
+
+/** `owner/name` and nothing else: GitHub's owner grammar, a repo name of
+ *  word chars, dots and dashes. The value lands in a git config KEY inside a
+ *  single-quoted shell word (studio/credentials.ts), so no quote, space or
+ *  slash beyond the one separator may pass. A name of dots only (`.`, `..`)
+ *  is a path segment, not a repo. */
+const READ_REPO_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
+
+/**
+ * Issue #291's guards, one function for both the board route (refuse before
+ * any write) and the mint (refuse before any GitHub call). Returns the list
+ * lowercased and de-duplicated, or the reason it is refused.
+ *
+ * Same owner as the task repo is the boundary: one owner = one App
+ * installation, which is all this token can ever be minted from — and a
+ * maestro filing a task for one org must not reach into another's repos.
+ */
+export function checkReadRepos(
+  repos: readonly string[], taskRepo: string,
+): { ok: true; repos: string[] } | { ok: false; message: string } {
+  const owner = repoOwner(taskRepo);
+  const out: string[] = [];
+  for (const raw of repos) {
+    const repo = raw.trim().toLowerCase();
+    if (!READ_REPO_NAME.test(repo) || /\/\.+$/.test(repo)) {
+      return { ok: false, message: `read-repos: ${JSON.stringify(raw)} is not an owner/name repo` };
+    }
+    if (repoOwner(repo) !== owner) {
+      return {
+        ok: false,
+        message: `read-repos: ${repo} is not owned by ${owner} — a task may only read repos of its own repo's owner (${taskRepo})`,
+      };
+    }
+    if (!out.includes(repo)) out.push(repo);
+  }
+  if (out.length > READ_REPOS_MAX) {
+    return { ok: false, message: `read-repos: ${out.length} repos, over the limit of ${READ_REPOS_MAX}` };
+  }
+  return { ok: true, repos: out };
+}
+
+/**
+ * Issue #291 — a SECOND installation token for a studio, read-only, scoped to
+ * the sibling repos its task's maestro listed. The primary write token
+ * (mintRepoToken, one repo) is untouched by this; the two are never the same
+ * credential and never written to the same place.
+ *
+ * App provider only. A fine-grained PAT's permissions are fixed when it is
+ * issued — nothing sent here could make it read-only, so handing the PAT out
+ * as a "read" token would hand out write. Refused instead.
+ *
+ * Every guard runs before the JWT is even signed: an empty list, a foreign
+ * owner, over the cap. `taskRepo` decides the owner, never the list itself.
+ */
+export async function mintReadReposToken(
+  env: Env, taskRepo: string, repos: readonly string[],
+): Promise<{ token: string; canonical: string[] }> {
+  if (repos.length === 0) throw new Error("read-repos: no repos to grant — no opt-in mints nothing");
+  const checked = checkReadRepos(repos, taskRepo);
+  if (!checked.ok) throw new Error(checked.message);
+  const owner = repoOwner(taskRepo);
+  if (resolveRepoAuthKind(env, taskRepo) !== "app") {
+    throw new Error(
+      `read-repos needs the GitHub App provider for "${owner}" — a fine-grained PAT cannot be narrowed to read-only`,
+    );
+  }
+  // PR #292 review: `canonical` = GitHub's own casing of each granted repo.
+  // git matches a credential URL's path case-sensitively, so the helper is
+  // keyed on these as well as on the lowercase grant.
+  const minted = await mintInstallationTokenDetail(env, owner, taskRepo, {
+    repositories: checked.repos,
+    permissions: { ...READ_REPOS_PERMISSIONS },
+  });
+  return { token: minted.token, canonical: minted.repositories };
 }
 
 /**

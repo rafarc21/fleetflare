@@ -168,7 +168,8 @@ export type CliCommand =
   // parseStudioTarget, via repo.ts's studioIdForTarget at the call site) so a
   // target that names no studio is a local refusal listing all three forms,
   // never a round trip that labels a task for a studio nobody runs.
-  | { cmd: "task-assign"; number: number; target: string; why?: string }
+  // Issue #291: `readRepos` = `--read-repos a,b`, the read-only sibling grant.
+  | { cmd: "task-assign"; number: number; target: string; why?: string; readRepos?: string[] }
   // Board task #131: the one CLI verb that moves a task OUT of `submitted`
   // — wraps the existing `transitionTask` route (board.ts:140), which is
   // already a compare-and-swap keyed on the state the caller believes the
@@ -265,6 +266,10 @@ export interface TaskBriefArgs {
   /** Task 5: maestro's `--junior` authorization for this task. Absent = the
    *  ordinary, unauthorized default. See src/board/brief.ts's TaskBrief.junior. */
   junior?: true;
+  /** Issue #291: `--read-repos owner/a,owner/b`. Read-only access to sibling
+   *  repos of the task repo's owner, for the assigned studio, while the task
+   *  is live. Validated Worker-side (src/github/read-repos.ts). */
+  readRepos?: string[];
 }
 
 /**
@@ -336,8 +341,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A rescue-push that fails or cannot confirm the work was saved (killed exec, dead shell, deadline) refuses the same way, naming why. A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it. --park stops it RESUMABLE: a studio whose org-chart edges reach it may `fleet resume` it from its container (after a cooldown). Without --park, only you can start it again.",
   },
   "task-new": {
-    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior] [--provision [--fresh-session]] [--template retro]",
-    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required, UNLESS --template retro is given (issue #165): it fills the whole brief with the weekly retro's fixed sections (skills/retro-ritual/SKILL.md), and any of --title/--objective/--output/--boundaries given alongside it still overrides just that one field. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given. --provision (issue #113) files the task and then provisions its assigned studio in the same call, so a task filed against a STOPPED studio no longer needs a separate `fleet provision`; needs --studio or --continues to know which studio, and refuses otherwise. " + FRESH_SESSION_HELP,
+    args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior] [--read-repos owner/a,owner/b] [--provision [--fresh-session]] [--template retro]",
+    summary: "File one board task (a GitHub issue) for the repo you are standing in, or for --repo <owner/name> when given (issue #278) — overrides CWD detection, so a wrong-directory run or an assignment to a studio on another repo can name the right repo explicitly instead of filing (or dispatching) into the wrong one. All four brief sections are required, UNLESS --template retro is given (issue #165): it fills the whole brief with the weekly retro's fixed sections (skills/retro-ritual/SKILL.md), and any of --title/--objective/--output/--boundaries given alongside it still overrides just that one field. --continues N files a follow-up to task N: assigned to N's studio unless --studio is given, with 'Continues #N.' heading the objective (issue #54: a merge auto-completes N, and follow-up typed into the lead is invisible to the board, so that studio would otherwise hold no open task and be destroyable mid-work). --junior lets the assigned studio delegate mechanical parts to the junior skill (Workers AI) while this task is live — the maestro's call, off unless given. --read-repos owner/a,owner/b (issue #291) gives the assigned studio a SECOND, read-only GitHub token (contents+metadata read) for those sibling repos while this task is live: same owner as the task repo, at most 15, App installs only; git clone/fetch of those URLs just works, and gh reads it from /workspace/.fleet-read-token. Off unless given; never grants write. --provision (issue #113) files the task and then provisions its assigned studio in the same call, so a task filed against a STOPPED studio no longer needs a separate `fleet provision`; needs --studio or --continues to know which studio, and refuses otherwise. " + FRESH_SESSION_HELP,
   },
   "task-ls": {
     args: `ls [--sprint S] [--state ${TASK_STATES.join("|")}] [--studio ID] [--repo owner/name]`,
@@ -360,8 +365,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Run the compaction pass. Proposal JSON on STDIN (empty = rebuild the index only). Opens a PR against the blueprint repo; merges INDEX LINES and MOVES files to archive/ — never deletes one.",
   },
   "task-assign": {
-    args: "assign <n> <role | role--k | studio-id> [--why R]",
-    summary: "Move task <n> to another studio: old studio label off, new one on, state back to submitted, lineage commented (from, to, when, why). Earlier comments stay — they are what the previous studio did. A bare role means that role's FIRST instance in the repo you are standing in; issue #269 also accepts `pilot--2` (that role's instance 2, same repo) and a full studio id (`websites--pilot`, `websites--pilot--2`), which needs no repo context at all.",
+    args: "assign <n> <role | role--k | studio-id> [--why R] [--read-repos owner/a,owner/b]",
+    summary: "Move task <n> to another studio: old studio label off, new one on, state back to submitted, lineage commented (from, to, when, why). Earlier comments stay — they are what the previous studio did. A bare role means that role's FIRST instance in the repo you are standing in; issue #269 also accepts `pilot--2` (that role's instance 2, same repo) and a full studio id (`websites--pilot`, `websites--pilot--2`), which needs no repo context at all. --read-repos (issue #291) grants the new studio read-only access to those sibling repos, exactly as on task new; an assign WITHOUT it drops any earlier grant on the task.",
   },
   "task-state": {
     args: `state <n> <to: ${TASK_STATES.join("|")}> [--from-none]`,
@@ -488,9 +493,9 @@ const TASK_FLAGS: Record<string, readonly string[]> = {
   // it belongs here, through the ordinary parseFlags path — NOT in the
   // bare-boolean extraction loop below (--junior/--provision/--fresh-session),
   // which exists only because those three take no value.
-  new: ["title", "objective", "output", "boundaries", "sprint", "studio", "repo", "continues", "template"],
+  new: ["title", "objective", "output", "boundaries", "sprint", "studio", "repo", "continues", "template", "read-repos"],
   ls: ["sprint", "state", "studio", "repo"],
-  assign: ["why"],
+  assign: ["why", "read-repos"],
 };
 
 /**
@@ -517,6 +522,13 @@ function parseFlags(argv: string[], allowed: readonly string[]): Record<string, 
     flags[key] = value;
   }
   return flags;
+}
+
+/** Issue #291: `a, b` -> ["a", "b"]. Grammar, owner and count are the
+ *  Worker's call; null = nothing named, a usage error. */
+function splitReadRepos(raw: string): string[] | null {
+  const repos = raw.split(",").map((r) => r.trim()).filter((r) => r !== "");
+  return repos.length === 0 ? null : repos;
 }
 
 function usage(message: string): CliCommand {
@@ -557,6 +569,11 @@ function parseTask(argv: string[]): CliCommand {
     if ("bad" in flags) return usage(`unexpected ${JSON.stringify(flags.bad)}`);
     const assign: CliCommand = { cmd: "task-assign", number: Number(rawNumber), target };
     if (flags.why !== undefined) assign.why = flags.why;
+    if (flags["read-repos"] !== undefined) {
+      const readRepos = splitReadRepos(flags["read-repos"]);
+      if (readRepos === null) return usage("--read-repos needs at least one owner/name");
+      assign.readRepos = readRepos;
+    }
     return assign;
   }
   if (sub === "state") {
@@ -702,6 +719,11 @@ function parseTask(argv: string[]): CliCommand {
     brief.continues = Number(parsed.continues);
   }
   if (junior) brief.junior = true;
+  if (parsed["read-repos"] !== undefined) {
+    const readRepos = splitReadRepos(parsed["read-repos"]);
+    if (readRepos === null) return usage("--read-repos needs at least one owner/name");
+    brief.readRepos = readRepos;
+  }
   // Issue #113 ask 9: --fresh-session only means something as a provision
   // modifier — exactly as it does for `fleet provision`/`fleet recycle` —
   // so it is refused standalone rather than silently ignored.
