@@ -8,6 +8,7 @@ import {
   closingIssuesForPull, getPullRequest, commitReachableFromBranch, getIssueCloser,
   pullsWithClosingIssuesForCommits, pullClaimsIssue, upsertRepoFile,
   listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES,
+  pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
 } from "../src/github/api";
 import { doneRecordPutter } from "../src/studio/do";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
@@ -676,6 +677,167 @@ describe("commitReachableFromBranch", () => {
   it("throws GitHub's own words on any other non-2xx", async () => {
     respond = () => new Response("boom", { status: 503 });
     await expect(commitReachableFromBranch("tok", "o/r", "main", "abc")).rejects.toThrow(/503/);
+  });
+});
+
+// Board issue #265, characterization: the six existence checks — 404 is
+// `false`, 2xx is `true`, everything else throws GitHub's own words, each
+// with its own exact `what` prefix. These pin CURRENT behavior ahead of the
+// one-ghRequest-plus-exists consolidation and must pass UNMODIFIED against
+// the refactored module — if the refactor "requires" editing one of these,
+// it changed behavior.
+const GH_STD_HEADERS = {
+  authorization: "Bearer tok",
+  accept: "application/vnd.github+json",
+  "user-agent": "fleetflare",
+  "content-type": "application/json",
+};
+
+describe("pullRequestExists", () => {
+  it("200: true, GETs the pulls endpoint with the standard header set", async () => {
+    expect(await pullRequestExists("tok", "o/r", 4242)).toBe(true);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/pulls/4242");
+    expect(calls[0].headers).toEqual(GH_STD_HEADERS);
+  });
+
+  it("404: false, not a throw", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    expect(await pullRequestExists("tok", "o/r", 4242)).toBe(false);
+  });
+
+  it("500: throws GitHub's own words with this fn's exact message", async () => {
+    respond = () => new Response("boom", { status: 500 });
+    try {
+      await pullRequestExists("tok", "o/r", 4242);
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("read o/r#4242 failed (500): boom");
+    }
+  });
+});
+
+describe("branchExists", () => {
+  it("200: true, GETs the branches endpoint with the branch URL-encoded", async () => {
+    expect(await branchExists("tok", "o/r", "release/1.0")).toBe(true);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches/release%2F1.0");
+    expect(calls[0].headers).toEqual(GH_STD_HEADERS);
+  });
+
+  it("404: false, not a throw", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    expect(await branchExists("tok", "o/r", "release/1.0")).toBe(false);
+  });
+
+  it("500: throws GitHub's own words with this fn's exact message", async () => {
+    respond = () => new Response("boom", { status: 500 });
+    try {
+      await branchExists("tok", "o/r", "release/1.0");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("read o/r@release/1.0 failed (500): boom");
+    }
+  });
+});
+
+describe("commitExists", () => {
+  it("200: true, GETs the commits endpoint", async () => {
+    expect(await commitExists("tok", "o/r", "abc123")).toBe(true);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/commits/abc123");
+    expect(calls[0].headers).toEqual(GH_STD_HEADERS);
+  });
+
+  it("404: false, not a throw", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    expect(await commitExists("tok", "o/r", "abc123")).toBe(false);
+  });
+
+  it("500: throws GitHub's own words with this fn's exact message", async () => {
+    respond = () => new Response("boom", { status: 500 });
+    try {
+      await commitExists("tok", "o/r", "abc123");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("read o/r@abc123 failed (500): boom");
+    }
+  });
+});
+
+describe("issueExists", () => {
+  it("200: true, GETs the issues endpoint with the standard header set", async () => {
+    expect(await issueExists("tok", "o/r", 126)).toBe(true);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/issues/126");
+    expect(calls[0].headers).toEqual(GH_STD_HEADERS);
+  });
+
+  it("404: false, not a throw", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    expect(await issueExists("tok", "o/r", 126)).toBe(false);
+  });
+
+  it("500: throws GitHub's own words with this fn's exact message", async () => {
+    respond = () => new Response("boom", { status: 500 });
+    try {
+      await issueExists("tok", "o/r", 126);
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("read o/r#126 failed (500): boom");
+    }
+  });
+});
+
+describe("pathExists", () => {
+  it("200: true, GETs the Contents API with the path raw and the ref URL-encoded", async () => {
+    expect(await pathExists("tok", "o/r", "fleet/blueprint/roles/pilot.md", "v1/x")).toBe(true);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/contents/fleet/blueprint/roles/pilot.md?ref=v1%2Fx");
+    expect(calls[0].headers).toEqual(GH_STD_HEADERS);
+  });
+
+  it("404: false, not a throw", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    expect(await pathExists("tok", "o/r", "fleet/blueprint/roles/pilot.md", "v1/x")).toBe(false);
+  });
+
+  it("500: throws GitHub's own words with this fn's exact message", async () => {
+    respond = () => new Response("boom", { status: 500 });
+    try {
+      await pathExists("tok", "o/r", "fleet/blueprint/roles/pilot.md", "v1/x");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe(
+        "read o/r:fleet/blueprint/roles/pilot.md@v1/x failed (500): boom",
+      );
+    }
+  });
+});
+
+describe("compareExists", () => {
+  it("200: true, GETs the compare endpoint with each side URL-encoded", async () => {
+    expect(await compareExists("tok", "o/r", "release/1.0", "feat/ship")).toBe(true);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/compare/release%2F1.0...feat%2Fship");
+    expect(calls[0].headers).toEqual(GH_STD_HEADERS);
+  });
+
+  it("404: false, not a throw", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    expect(await compareExists("tok", "o/r", "release/1.0", "feat/ship")).toBe(false);
+  });
+
+  it("500: throws GitHub's own words with this fn's exact message", async () => {
+    respond = () => new Response("boom", { status: 500 });
+    try {
+      await compareExists("tok", "o/r", "release/1.0", "feat/ship");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe(
+        "read o/r compare release/1.0...feat/ship failed (500): boom",
+      );
+    }
   });
 });
 
