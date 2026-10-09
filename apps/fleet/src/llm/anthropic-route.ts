@@ -304,6 +304,11 @@ export async function handleFleetAnthropicMessages(
   const requestedModel = typeof body.model === "string" && body.model.length > 0 ? body.model : GLM_LEAD_MODEL;
   const openaiBody = anthropicRequestToOpenAI(body);
   const ai = env.AI;
+  // Defensive: `authenticateGlmLeadRequest` already refused with 404 above
+  // when `!env.AI`, so this is unreachable at runtime — kept only because
+  // TypeScript cannot carry that function's narrowing of `env.AI` across
+  // the call boundary into this one.
+  if (!ai) return text("not found", 404);
 
   if (body.stream === true) {
     let upstream: Json;
