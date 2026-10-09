@@ -39,6 +39,7 @@ import {
   type BoardApi, type BoardResult, type ListTasksQuery, type OnAssigned, type GetLeadType,
 } from "./board";
 import { recordJuniorAuthorization, revokeJuniorAuthorization, sweepJuniorAuthorizations } from "../junior/authz";
+import { parseReadRepos, readReposProviderRefusal, recordReadReposGrant, revokeReadReposGrant } from "../github/read-repos";
 import { wakeOnAssign, checkAssignRepo, type AssignWakeDeps, type AssignWakeReport } from "./assign-wake";
 import { realWakeDeps } from "./wake-deps";
 import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify";
@@ -539,11 +540,12 @@ async function recordJuniorAuthorizationIfNeeded(
 
 /**
  * Issue #10: a transition into a terminal state ends the task the maestro
- * authorized, so its junior record goes too. Without this a lead could set
+ * authorized, so its junior record goes too (issue #291: and its read-repos
+ * grant). Without this a lead could set
  * `failed` then `working` and keep junior. Same failure posture as the record
  * write above: logged and swallowed, the transition already happened.
  */
-async function revokeJuniorAuthorizationIfTerminal(
+async function revokeTaskGrantsIfTerminal(
   env: Env, repo: string, result: BoardResult<BoardTask>,
 ): Promise<BoardResult<BoardTask>> {
   if (!result.ok || result.value.state === null || !TERMINAL_TASK_STATES.includes(result.value.state)) return result;
@@ -552,7 +554,44 @@ async function revokeJuniorAuthorizationIfTerminal(
   } catch (err) {
     console.error(`board: junior authorization revoke failed for #${result.value.number} in ${repo}`, err);
   }
+  // Issue #291: the read-repos grant ends with the task too.
+  try {
+    await revokeReadReposGrant(env.DB, repo, result.value.number);
+  } catch (err) {
+    console.error(`board: read-repos revoke failed for #${result.value.number} in ${repo}`, err);
+  }
   return result;
+}
+
+function hasText(v: unknown): boolean {
+  return typeof v === "string" && v.trim() !== "";
+}
+
+/**
+ * Issue #291: the ONE writer of a read-repos grant, reachable only from
+ * `handleBoard` (Cloudflare Access — the operator's surface). After a
+ * successful create/assign: a non-empty list records it for the task's
+ * resolved assignee; an empty one deletes any earlier grant on that task, so
+ * the opt-in is always the latest assignment's. Same failure posture as the
+ * junior record: logged and swallowed, and the safe side of a failed write
+ * is "no grant". The studio picks it up on its next credential refresh
+ * (provision, restart, or the 50-minute cycle).
+ */
+async function syncReadReposGrant(
+  env: Env, repo: string, result: BoardResult<BoardTask>, repos: string[],
+): Promise<void> {
+  if (!result.ok) return;
+  const { number, assignee } = result.value;
+  try {
+    if (repos.length > 0 && assignee !== null) {
+      await recordReadReposGrant(env.DB, repo, number, assignee, repos, Date.now());
+      console.log(`board: read-repos grant ${repo}#${number} -> ${assignee}: ${repos.join(", ")}`);
+    } else {
+      await revokeReadReposGrant(env.DB, repo, number);
+    }
+  } catch (err) {
+    console.error(`board: read-repos grant write failed for #${number} in ${repo}`, err);
+  }
 }
 
 /**
@@ -717,11 +756,21 @@ export async function handleBoard(
         // promise's rejection skips the catch below and escapes as a Worker
         // exception (edge 500) instead of upstreamFailure's 502 (PR #142).
         // Issue #81: ff files BEFORE it spawns (cli/ff.ts fileTask), marked pendingSpawn.
+        // Issue #291: validated before anything is written, and only for a
+        // task that will have a studio to hold the grant.
+        const readRepos = parseReadRepos(body.readRepos, repo.value);
+        if (!readRepos.ok) return new Response(readRepos.message, { status: 400 });
+        const createProvider = readRepos.repos.length > 0 ? readReposProviderRefusal(env, repo.value) : null;
+        if (createProvider) return new Response(createProvider, { status: 400 });
+        if (readRepos.repos.length > 0 && !hasText(body.assignee) && body.continues === undefined) {
+          return new Response("read-repos needs a studio to grant it to — pass --studio or --continues", { status: 400 });
+        }
         const createPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee, body.pendingSpawn !== true);
         if (createPreflight) return createPreflight;
         return await withAssignWake(assignWake, repo.value, async (onAssigned) => {
           const result = await createTask(api, repo.value, body, onAssigned, getLeadTypeFrom(assignWake));
           await recordJuniorAuthorizationIfNeeded(env, repo.value, result);
+          await syncReadReposGrant(env, repo.value, result, readRepos.repos);
           return result;
         });
       }
@@ -739,7 +788,7 @@ export async function handleBoard(
     }
     if (action === undefined) return respond(await showTask(api, repo.value, number));
     if (action === "state") {
-      return respond(await revokeJuniorAuthorizationIfTerminal(env, repo.value, await transitionTask(api, repo.value, number, body)));
+      return respond(await revokeTaskGrantsIfTerminal(env, repo.value, await transitionTask(api, repo.value, number, body)));
     }
     // P5 §3's two assignment verbs. Both are on the OPERATOR surface and on
     // no other: the studio surface below has no route for either, so "an
@@ -760,10 +809,19 @@ export async function handleBoard(
       // Issue #284 round 2: same pre-write repo-mismatch gate as the create
       // path above — see `assignRepoPreflight`'s own doc comment.
       // Issue #81: reassign needs a real studio; adopt is ff's, which spawns next.
+      // Issue #291: the grant follows the explicit assignment — refused before
+      // any write when malformed; an assign without it drops an earlier one.
+      const readRepos = parseReadRepos(body.readRepos, repo.value);
+      if (!readRepos.ok) return new Response(readRepos.message, { status: 400 });
+      const assignProvider = readRepos.repos.length > 0 ? readReposProviderRefusal(env, repo.value) : null;
+      if (assignProvider) return new Response(assignProvider, { status: 400 });
       const assignPreflight = await assignRepoPreflight(assignWake, repo.value, body.assignee, action === "assign");
       if (assignPreflight) return assignPreflight;
-      return await withAssignWake(assignWake, repo.value, (onAssigned) =>
-        assignTask(api, repo.value, number, body, { mode, onAssigned, getLeadType: getLeadTypeFrom(assignWake) }));
+      return await withAssignWake(assignWake, repo.value, async (onAssigned) => {
+        const result = await assignTask(api, repo.value, number, body, { mode, onAssigned, getLeadType: getLeadTypeFrom(assignWake) });
+        await syncReadReposGrant(env, repo.value, result, readRepos.repos);
+        return result;
+      });
     }
     // Task #119: read-only in the sense that it never moves task state, but
     // it makes outbound fetches and posts a comment — so it is matched as
@@ -851,6 +909,11 @@ const FLEET_BOARD_ROUTE_RE = /^\/fleet\/tasks(?:\/(\d+)(?:\/(envelope|state|assi
  * both through org.ts's caches. Throwing is a 503, never an allow.
  */
 export type PolicyFetch = () => Promise<SpawnPolicy>;
+
+/** Issue #291: refused, not dropped — a maestro that asked must learn it did
+ *  not get it. Only the operator's Access-gated board writes a grant. */
+const READ_REPOS_STUDIO_REFUSAL =
+  "a studio cannot grant read-repos — ask the operator to file or assign it with --read-repos";
 
 /** Review round 1: the longest `why` a studio may attach to an assign. */
 const STUDIO_WHY_MAX = 500;
@@ -958,6 +1021,9 @@ export async function handleFleetBoard(
       if (body.junior === true) {
         return new Response("a studio cannot grant a junior — ask the operator to file it with --junior", { status: 403 });
       }
+      if (body.readRepos !== undefined && body.readRepos !== null) {
+        return new Response(READ_REPOS_STUDIO_REFUSAL, { status: 403 });
+      }
       if (typeof body.assignee !== "string" || body.assignee.trim() === "") {
         return new Response('a studio files a task only for a studio it directs — "assignee" is required', { status: 400 });
       }
@@ -981,6 +1047,9 @@ export async function handleFleetBoard(
         return new Response('assignment needs "assignee" — the studio id this task moves to', { status: 400 });
       }
       const to = body.assignee.trim();
+      if (body.readRepos !== undefined && body.readRepos !== null) {
+        return new Response(READ_REPOS_STUDIO_REFUSAL, { status: 403 });
+      }
       // Review round 1, hardening 4: `why` is quoted into the lineage comment
       // on one `- why:` line. A newline would let a studio write extra
       // lineage lines or headings of its own. Operator path unchanged.
@@ -1027,7 +1096,7 @@ export async function handleFleetBoard(
     // follows, and what makes "a lead moves only ITS OWN task" a fact about
     // this Worker rather than a claim the caller makes about itself.
     if (action === "state") {
-      return respond(await revokeJuniorAuthorizationIfTerminal(
+      return respond(await revokeTaskGrantsIfTerminal(
         env, repo.value, await transitionStudioTask(api, repo.value, number, body, studio.id)));
     }
     // Same stamp as handleBoard's own envelope branch: `msg_id` minted here,

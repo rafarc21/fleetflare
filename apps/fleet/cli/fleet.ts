@@ -1342,6 +1342,7 @@ async function cmdTaskNew(
   console.log(formatTaskTable([task]));
   reportAssignWake(task);
   reportPathWarnings(task);
+  if (brief.readRepos && task.assignee !== null) reportReadRepos("fleet task new", task.assignee, brief.readRepos);
   // Issue #113 ask 9: --provision boots or heals the assigned studio in the
   // same call, instead of leaving a filed task's "NO WAKE" (task-format.ts)
   // to a second, separate `fleet provision <id>` run. cli-args.ts's own
@@ -1397,6 +1398,7 @@ async function cmdTaskLs(
  */
 async function cmdTaskAssign(
   creds: Credentials, number: number, target: string, why: string | undefined,
+  readRepos?: string[],
 ): Promise<void> {
   const detected = await detectRepo();
   reportRepo("fleet task assign", detected);
@@ -1414,11 +1416,22 @@ async function cmdTaskAssign(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       assignee: studio.id, ...(why === undefined ? {} : { why }),
+      ...(readRepos === undefined ? {} : { readRepos }),
       ...(detected.slug ? { repo: detected.slug } : {}),
     }),
   })) as AssignedTask;
   console.log(formatTaskTable([task]));
   reportAssignWake(task);
+  if (readRepos && task.assignee !== null) reportReadRepos("fleet task assign", task.assignee, readRepos);
+}
+
+/** Issue #291: the grant lands on the studio's next credential refresh —
+ *  provision/restart, or the 50-minute cycle — not instantly. */
+function reportReadRepos(cmd: string, studio: string, repos: string[]): void {
+  console.error(
+    `${cmd}: read-only access for ${studio}: ${repos.join(", ")} — applies on its next credential refresh ` +
+    `(\`fleet provision ${studio}\` applies it now)`,
+  );
 }
 
 async function cmdTaskShow(creds: Credentials, number: number): Promise<void> {
@@ -2677,7 +2690,7 @@ async function main(): Promise<void> {
     case "task-verify":
       return cmdTaskVerify(creds, parsed.number);
     case "task-assign":
-      return cmdTaskAssign(creds, parsed.number, parsed.target, parsed.why);
+      return cmdTaskAssign(creds, parsed.number, parsed.target, parsed.why, parsed.readRepos);
     case "task-state":
       return cmdTaskState(creds, parsed.number, parsed.to, parsed.fromNone === true);
     case "task-reap":

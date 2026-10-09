@@ -88,6 +88,11 @@ export interface MintTokenOpts {
    *  container root can reach, and the safe behaviour has to be the
    *  default, not something every call site has to remember to opt into. */
   unscoped?: boolean;
+  /** Issue #291: scope to THESE repos (owner/name or short names, all under
+   *  `owner`) instead of the single `repo` argument. Only the read-only
+   *  sibling-repo token uses it (auth.ts's mintReadReposToken). Ignored when
+   *  `unscoped` is true. */
+  repositories?: string[];
 }
 
 /** The name half of `owner/name`, or the whole string when there is no
@@ -161,7 +166,7 @@ export async function mintInstallationToken(
   // with). An empty object (only reachable via `unscoped: true`) sends NO
   // body at all, byte-identical to the pre-#331 request.
   const body: Record<string, unknown> = {};
-  if (opts.unscoped !== true) body.repositories = [repoShortName(repo)];
+  if (opts.unscoped !== true) body.repositories = (opts.repositories ?? [repo]).map(repoShortName);
   if (opts.permissions) body.permissions = opts.permissions;
   const hasBody = Object.keys(body).length > 0;
   const res = await fetch(

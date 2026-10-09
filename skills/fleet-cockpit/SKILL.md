@@ -606,6 +606,14 @@ CI enforces it (`apps/fleet/scripts/english-check.ts`).
   `fleet task assign <n> <role>` (e.g. `fleet task assign 42 web-studio`).
   That sets `submitted`, labels the studio and wakes it. `ff <role> <n>`
   adopts and attaches in one step.
+- A studio's GitHub token covers its one work repo; sibling repos 404. A
+  task that must READ siblings of the same owner gets
+  `--read-repos owner/a,owner/b` on `task new` or `task assign`: a second,
+  read-only token (contents + metadata read, max 15 repos, App installs
+  only). In the studio, `git clone https://github.com/owner/a` just works;
+  `gh` reads with `GH_TOKEN=$(cat /workspace/.fleet-read-token) gh api ...`.
+  It lands on the next credential refresh (`fleet provision <id>` = now),
+  ends with the task, and never grants write. Operator surface only.
 - Do not spawn a studio to do something you could do in 30 seconds here.
 - Do not report a studio as working from `fleet ls` alone. Check the screen.
 - Do not churn a provisioning studio. Five minutes.

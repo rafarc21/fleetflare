@@ -229,6 +229,71 @@ export function blueprintCredentialWriteCmd(blueprintRepo: string): string {
   );
 }
 
+/** Issue #291: the read-only sibling token's git-credential-store file. Its
+ *  own file, for the reason blueprintCredentialWriteCmd gives: two matching
+ *  lines in one store file have no documented precedence. */
+export const READ_REPOS_CREDENTIAL_PATH = "/workspace/.git-credentials-read";
+
+/** Issue #291: the same read-only token as a bare 0600 file, for `gh` and
+ *  API calls (`GH_TOKEN=$(cat /workspace/.fleet-read-token) gh api
+ *  repos/<owner>/<sibling>/...`). A file, not an env var: the token expires
+ *  hourly and a running container's env cannot be refreshed, and no fleet
+ *  token is ever a plain container env var (github/auth.ts's mintRepoToken). */
+export const READ_REPOS_TOKEN_PATH = "/workspace/.fleet-read-token";
+
+/** Same grammar github/auth.ts's checkReadRepos enforces. Checked again here
+ *  because the name lands inside a single-quoted shell word: this builder
+ *  must refuse a breakout on its own, whatever its caller checked. */
+const SAFE_REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
+
+/** Unsets every `credential.<url>.helper` key whose value names the read
+ *  store — the read helper's keys and nothing else (the work-repo bare
+ *  helper and the blueprint key name other files). `--unset-all` drops the
+ *  key's `''` reset value with it. Repo names carry no whitespace, so the
+ *  word split over key names is exact. */
+const DROP_READ_KEYS =
+  `{ for k in $(git config --global --name-only --get-regexp '^credential\\..*\\.helper$' ` +
+  `'git-credentials-read$' 2>/dev/null | sort -u); do git config --global --unset-all "$k" || exit 1; done; }`;
+
+/**
+ * Issue #291 — the read-only sibling-repo credential. Answers ONLY for the
+ * listed repos' URLs; every other github.com URL still reaches the bare
+ * work-repo helper credentialWriteCmd registers.
+ *
+ * Same two measured rules as blueprintCredentialWriteCmd: a URL-scoped key
+ * per repo, `''` first to reset the inherited helper list, then the store.
+ * Two keys per repo — `<repo>.git` and `<repo>` — because git matches the
+ * request path exactly and clones arrive both ways. Every earlier read key is
+ * dropped first, so a refresh with a shorter list un-grants the rest.
+ *
+ * The token rides `$FLEET_TOKEN` (tokenEnv), expanded only by printf, never
+ * in argv or this string. Files are written under umask 077.
+ */
+export function readReposCredentialWriteCmd(repos: readonly string[]): string {
+  for (const repo of repos) {
+    if (!SAFE_REPO.test(repo)) throw new Error(`read-repos: unsafe repo name ${JSON.stringify(repo)}`);
+  }
+  const keys = repos.flatMap((repo) => [
+    `credential.https://github.com/${repo}.git.helper`,
+    `credential.https://github.com/${repo}.helper`,
+  ]);
+  return [
+    `( umask 077 && printf '%s\\n' "https://x-access-token:$${FLEET_TOKEN_ENV}@github.com" > ${READ_REPOS_CREDENTIAL_PATH} ` +
+      `&& printf '%s' "$${FLEET_TOKEN_ENV}" > ${READ_REPOS_TOKEN_PATH} )`,
+    DROP_READ_KEYS,
+    ...keys.flatMap((key) => [
+      `git config --global --add '${key}' ''`,
+      `git config --global --add '${key}' 'store --file=${READ_REPOS_CREDENTIAL_PATH}'`,
+    ]),
+  ].join(" && ");
+}
+
+/** Issue #291: no live grant — drop every read key and both token files.
+ *  Safe to run when nothing was ever granted. */
+export function readReposCredentialClearCmd(): string {
+  return `${DROP_READ_KEYS} && rm -f ${READ_REPOS_CREDENTIAL_PATH} ${READ_REPOS_TOKEN_PATH}`;
+}
+
 /**
  * Issue #253 — 2026-09-25 06:02Z: a `fleetflare--web-studio` member
  * committed straight onto a local `main` in a worktree whose branch carried

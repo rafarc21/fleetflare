@@ -138,7 +138,11 @@ import { juniorEnabled } from "../junior/gate";
 // sandbox-free module so the bun:test lane can ask real git which
 // credential it picks — see credentials.ts's own header. Re-exported
 // here so every existing `from "./do"` importer is unchanged.
-import { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV } from "./credentials";
+import {
+  credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV,
+  readReposCredentialWriteCmd, readReposCredentialClearCmd,
+} from "./credentials";
+import { studioReadReposCredential } from "../github/read-repos";
 import { leakGateInstallCmd } from "./gh-wrapper";
 export { credentialWriteCmd, credentialClearCmd, blueprintCredentialWriteCmd, studioGitSafetyCmd, tokenEnv, FLEET_TOKEN_ENV };
 
@@ -246,6 +250,10 @@ export interface RefreshDeps {
   /** Issue #7 (#13 review): the write mode, resolved once per refresh, and
    *  the Worker URL its git config points at. Absent = no proxy step. */
   writeProxy?: { workerUrl: string; mode: () => Promise<WriteMode> };
+  /** Issue #291: the read-only sibling-repo token, or null = no live grant
+   *  (the read helper is cleared). Absent = this caller predates the feature
+   *  and nothing about the read helper runs. */
+  readRepos?: () => Promise<{ token: string; repos: string[] } | null>;
   // `env`: the credential write's token rides here (#110 review), never in `cmd`.
   sbExec: (cmd: string, env?: Record<string, string>) => Promise<{ code: number; stdout: string; stderr: string }>;
   recordStudio: (status: StudioStatus) => Promise<void>;
@@ -296,6 +304,25 @@ export async function runRefreshCredential(
       : await deps.sbExec(credentialWriteCmd(), tokenEnv(token));
     if (res.code !== 0) {
       throw new Error(`credential write failed (${res.code}): ${res.stderr.slice(0, 500)}`);
+    }
+    // Issue #291: the read-only sibling token, AFTER the primary and through
+    // its own command — never the push credential's file or helper. A failed
+    // mint clears whatever an earlier cycle wrote, then fails the refresh so
+    // the operator hears about it.
+    if (deps.readRepos) {
+      let grant: { token: string; repos: string[] } | null;
+      try {
+        grant = await deps.readRepos();
+      } catch (err) {
+        await deps.sbExec(readReposCredentialClearCmd());
+        throw new Error(`read-repos token failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const read = grant === null
+        ? await deps.sbExec(readReposCredentialClearCmd())
+        : await deps.sbExec(readReposCredentialWriteCmd(grant.repos), tokenEnv(grant.token));
+      if (read.code !== 0) {
+        throw new Error(`read-repos credential write failed (${read.code}): ${read.stderr.slice(0, 500)}`);
+      }
     }
     return { ok: true, lastRefresh: deps.now() };
   } catch (err) {
@@ -6578,6 +6605,11 @@ export class StudioDO extends Sandbox<Env> {
         mode: () => resolveWriteMode(this.env, workRepoSlug,
           async (repo) => repoIsPrivate(await mintRepoToken(this.env, repo, { permissions: { contents: "read" } }), repo)),
       },
+      // Issue #291: the read-only sibling-repo token, from this studio's own
+      // Worker-held grants (github/read-repos.ts). No grant = no mint.
+      readRepos: () => studioReadReposCredential(this.env, this.selfId(), {
+        getTask: (repo, number) => githubBoardApi(this.env).getIssue(repo, number),
+      }),
       sbExec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.refresh, env }),
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
       notify: async (message: string) => {
