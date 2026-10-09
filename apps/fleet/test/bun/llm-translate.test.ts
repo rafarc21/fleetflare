@@ -14,7 +14,9 @@ import {
   streamPrelude,
   applyOpenAIStreamChunk,
   closeStream,
+  closeStreamOrError,
   parseSseDataLine,
+  parseStreamErrorChunk,
   streamErrorFrame,
 } from "../../src/llm/translate";
 
@@ -585,5 +587,99 @@ describe("streaming: prelude + chunk application + close", () => {
       usage: { prompt_tokens: 500, completion_tokens: 6861, completion_tokens_details: { reasoning_tokens: 9000 } },
     });
     expect(state.outputTokens).toBe(6861);
+  });
+});
+
+// Board issue #284 (a): a stream that ends WITHOUT ever setting a
+// finish_reason (reader hits natural EOF, [DONE] with no preceding
+// finish_reason chunk, a dropped connection — anything that never carries a
+// chunk with `choice.finish_reason` set) used to fall through to
+// `closeStream`'s own unconditional `message_delta`/`message_stop` pair,
+// with `mapFinishReason(null)` silently mapping to `"end_turn"` — a client
+// sees a normal successful turn when the upstream connection never actually
+// confirmed it finished at all. `closeStreamOrError` is the new, narrower
+// check layered ON TOP of `closeStream` (not folded into it — see that
+// function's own doc comment in translate.ts for why `closeStream`'s own
+// unit tests above, several of which deliberately call it directly with
+// `state.finishReason === null`, must keep passing unchanged).
+describe("closeStreamOrError — board issue #284 (a): stream ends without ever confirming finish_reason", () => {
+  test("finishReason still null at stream end -> event: error, not a faked end_turn message_delta/message_stop", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "partial, then the connection just stopped" } }] });
+    // No finish_reason chunk ever arrives — the upstream stream simply ends.
+    const result = closeStreamOrError(state);
+    expect(result.ok).toBe(false);
+    expect(result.frames).toHaveLength(1);
+    const { event, data } = parseFrame(result.frames[0]);
+    expect(event).toBe("error");
+    expect(data).toMatchObject({ type: "error", error: { message: "upstream stream ended without a finish reason" } });
+  });
+
+  test("finishReason set (even to a mapped-to-end_turn value like 'stop') -> normal closeStream frames, ok: true", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] });
+    const result = closeStreamOrError(state);
+    expect(result.ok).toBe(true);
+    const events = result.frames.map(parseFrame);
+    expect(events.map((e) => e.event)).toEqual(["content_block_stop", "message_delta", "message_stop"]);
+    expect(events[1].data).toMatchObject({ type: "message_delta", delta: { stop_reason: "end_turn" } });
+  });
+
+  // Must NOT regress the PR #255 empty-content/max_tokens-floor guard: that
+  // failure shape's finish_reason IS present (often "stop", never null) —
+  // only a genuinely null finishReason should ever trigger the new error
+  // path, never this different, already-handled shape.
+  test("the max_tokens-floor empty-content guard (finish_reason present, no content opened) still closes normally, not as an error", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] });
+    const result = closeStreamOrError(state);
+    expect(result.ok).toBe(true);
+    const [delta] = result.frames.filter((f) => f.includes("message_delta")).map(parseFrame);
+    expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("max_tokens");
+  });
+
+  // Must NOT regress the tool_use case either — finish_reason is non-null
+  // there too (even when the upstream's own self-reported value disagrees,
+  // see anyToolUseBlocks' own doc comment above).
+  test("a completed tool_use stream (finish_reason set) still closes normally, not as an error", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, {
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "f", arguments: "{}" } }] } }],
+    });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "tool_calls" }] });
+    const result = closeStreamOrError(state);
+    expect(result.ok).toBe(true);
+    const [delta] = result.frames.filter((f) => f.includes("message_delta")).map(parseFrame);
+    expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("tool_use");
+  });
+});
+
+// Board issue #284 (b): some OpenAI-compatible backends emit a chunk shaped
+// `{"error": {...}}` instead of (or interleaved with) the normal
+// `{choices: [...]}` shape when something goes wrong server-side
+// mid-generation. Before this fix, `applyOpenAIStreamChunk`'s own
+// `chunk?.choices?.[0]` would be `undefined` for a chunk like this, and the
+// function would silently return `[]` — no frames, no signal, the one chunk
+// that actually explained the failure discarded.
+describe("parseStreamErrorChunk — board issue #284 (b): an explicit upstream {error:...} chunk", () => {
+  test("a chunk shaped {error: {message}} returns the message", () => {
+    expect(parseStreamErrorChunk({ error: { message: "backend exploded mid-generation" } })).toBe("backend exploded mid-generation");
+  });
+
+  test("a chunk shaped {error: 'plain string'} returns the string", () => {
+    expect(parseStreamErrorChunk({ error: "backend exploded mid-generation" })).toBe("backend exploded mid-generation");
+  });
+
+  test("a normal {choices:...} chunk returns null", () => {
+    expect(parseStreamErrorChunk({ choices: [{ delta: { content: "hi" } }] })).toBeNull();
+  });
+
+  test("a usage-only trailing chunk (no error, no choices) returns null", () => {
+    expect(parseStreamErrorChunk({ usage: { prompt_tokens: 1, completion_tokens: 1 } })).toBeNull();
+  });
+
+  test("an empty object returns null", () => {
+    expect(parseStreamErrorChunk({})).toBeNull();
   });
 });

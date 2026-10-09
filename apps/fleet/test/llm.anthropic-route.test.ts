@@ -347,6 +347,76 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     expect(rowsLogged[0].ok).toBe(0);
   });
 
+  // Board issue #284 (a): the stream simply ends — reader hits EOF, no
+  // finish_reason chunk ever arrived, no [DONE], no error chunk either.
+  // Before this fix, this silently closed as a normal end_turn/message_stop
+  // pair; now it must emit event: error instead.
+  it("a stream that ends without ever sending a finish_reason chunk emits event: error, not a faked end_turn/message_stop (board issue #284a)", async () => {
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`));
+        // The stream just ends here — no finish_reason chunk, no [DONE].
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    expect(eventTypes).not.toContain("message_stop");
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toMatchObject({
+      type: "error", error: { message: "upstream stream ended without a finish reason" },
+    });
+
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].ok).toBe(0);
+  });
+
+  // Board issue #284 (b): an explicit upstream {"error":...} chunk arriving
+  // mid-stream — the real failure reason is already right there in the
+  // chunk, so it must flow straight into event: error, never be silently
+  // swallowed by applyOpenAIStreamChunk's own "no choices[0]" no-op path.
+  it("an explicit upstream {error:...} chunk mid-stream emits event: error with its own message, not a swallowed/silent continuation (board issue #284b)", async () => {
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: "upstream blew up mid-generation" } })}\n\n`));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    expect(eventTypes).not.toContain("message_stop");
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toEqual({
+      type: "error", error: { type: "api_error", message: "upstream blew up mid-generation" },
+    });
+
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].ok).toBe(0);
+  });
+
   it("a successful stream logs a usage row with the real tokens from the final usage-bearing chunk (MAJOR 4)", async () => {
     const enc = new TextEncoder();
     const chunks = [
