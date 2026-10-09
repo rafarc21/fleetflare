@@ -546,9 +546,9 @@ Run one by hand on the Mac: `apps/fleet/scripts/localci/localci.sh <pr>`.
 - **One account per repo, fixed.** `CLAUDE_ACCOUNT_BY_REPO` (Worker var, JSON,
   e.g. `{"demosite-life": 2}`) sends a repo's studios to
   `CLAUDE_CODE_OAUTH_TOKEN_<n>`. Key = bare repo name (studio-id prefix), never
-  `owner/repo`. Unmapped repos skip limited accounts (limit rows, failover on
-  or off), then use the most-headroom one (fresh usage rows), else the first
-  free SET account; all limited = soonest reset. `fleet spawn`/`provision`
+  `owner/repo`. Unmapped repos skip limited accounts, then use the
+  most-headroom account (fresh usage rows), else the first free SET account;
+  all limited = soonest reset; re-picked each launch. `fleet spawn`/`provision`
   print `UNMAPPED, fell back to slot N` (`fleet ls` does not). `FLEET_REQUIRE_ACCOUNT_MAP=on` refuses
   unmapped repos instead (#305). ACCOUNT in
   `fleet ls` shows the secret NAME, with `CLAUDE_ACCOUNT_<n>_LABEL` in front

@@ -4401,10 +4401,10 @@ export async function launchAccountOrRefuse(
   // never throw this gate into refusing a launch tiers 1+2 could otherwise
   // have served in plain order.
   let usage: Awaited<ReturnType<typeof readFleetAccountUsage>> = {};
-  // PR #307 review round 1: an unmapped repo's fallback skips limited
-  // accounts with failover off too (accounts.ts's unmappedFallbackAccount),
-  // so limits are read for it either way. A mapped repo, failover off, still
-  // pays no read: nothing can move it off its primary.
+  // Issue #305 review round 1: an unmapped repo's fallback must skip limited
+  // slots with failover off too (accounts.ts's unmappedFallbackAccount), so
+  // limits are read for it either way. Mapped repos with failover off still
+  // skip the read: nothing reroutes them.
   if (autoFailoverOn(env) || !primaryIsMapped(env, repo)) {
     try {
       limits = await readFleetAccountLimits(env.DB, resolveClaudeAccounts(env));
@@ -4412,9 +4412,8 @@ export async function launchAccountOrRefuse(
       console.warn(`studio ${id}: readFleetAccountLimits failed, launching as if nothing were fleet-wide limited (fail open)`, err);
     }
   }
-  // Issue #305: an unmapped repo's fallback picks by headroom with failover
-  // off too (accounts.ts's unmappedFallbackAccount), so usage is read for it
-  // either way. Same fail-open: no usage means the first set account.
+  // Issue #305: same for usage — the fallback ranks free slots by headroom.
+  // Same fail-open: no usage means list order.
   if (autoFailoverOn(env) || !primaryIsMapped(env, repo)) {
     try {
       usage = await readFleetAccountUsage(env.DB, resolveClaudeAccounts(env));

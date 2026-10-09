@@ -912,8 +912,8 @@ export function accountResolution(
   if (accounts.some((a) => accountIsFree(a, limits, now))) return `${why}; slot ${slot ?? "?"} is limited`;
   const soonest = soonestResetAccount(accounts.filter((a) => !accountIsFree(a, limits, now)), limits);
   return soonest === null
-    ? `${why}; every account limited, reset unknown`
-    : `${why}; every account limited; soonest reset ${new Date(soonest.resetAt).toISOString()} (slot ${slotOf(soonest.account.name) ?? "?"})`;
+    ? `${why}; every account limited, soonest reset unknown`
+    : `${why}; every account limited, soonest reset ${new Date(soonest.resetAt).toISOString()} (slot ${slotOf(soonest.account.name) ?? "?"})`;
 }
 
 export type LaunchAccount = { ok: true; name: string; token: string } | { ok: false; error: string };

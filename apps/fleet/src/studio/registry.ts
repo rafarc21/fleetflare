@@ -336,20 +336,19 @@ export async function withAccountDisplay(
  * account the studio launched on and why ("mapped" / "UNMAPPED, fell back to
  * slot N"). Stamped on the response only, never stored: a map edit must not
  * leave a stale reason on the row. A row with no launched account comes back
- * unchanged.
- *
- * PR #307 review round 1: for an unmapped repo the account-limit rows are
- * read too, so a launch that landed on a limited account (every account
- * limited) says so, with the soonest reset. Fails open: no rows, no note.
+ * unchanged. Review round 1: an unmapped row reads the fleet-wide limit rows
+ * too, so a launch onto a limited slot says every account was limited; a
+ * failed read fails open to "no limits known", like the launch gate.
  */
 export async function withAccountResolution(env: Env, row: StudioStatus): Promise<StudioStatus> {
+  if (typeof row.launchedAccount !== "string") return row;
   const repo = parseStudioId(row.id)?.repo ?? null;
   let limits: AccountLimits = {};
-  if (row.launchedAccount != null && !primaryIsMapped(env, repo)) {
+  if (!primaryIsMapped(env, repo)) {
     try {
       limits = await readFleetAccountLimits(env.DB, resolveClaudeAccounts(env));
     } catch (err) {
-      console.warn(`studio ${row.id}: readFleetAccountLimits failed, account resolution without limits (fail open)`, err);
+      console.warn(`studio ${row.id}: readFleetAccountLimits failed, reporting the account without limits`, err);
     }
   }
   const why = accountResolution(env, repo, row.launchedAccount, limits);
