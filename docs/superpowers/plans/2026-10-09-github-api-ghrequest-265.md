@@ -107,9 +107,10 @@ Inside `src/github/api.ts` ONLY:
    shrink. CD deletion test: after this, six 9-line bodies collapse into
    one `exists` plus six one-line calls; the duplication is deleted, not
    re-expressed.
-4. **The six inline header sites adopt `GH_HEADERS(token)`** (or `ghRequest`),
-   preserving each call's exact method/body/headers — four deliberate
-   deviations that must survive verbatim. The first is a genuinely different
+4. **The six inline header sites route through the standard header set
+   where the swap is exact; four keep their own literals**, preserving
+   each call's exact method/body/headers — the deliberate deviations must
+   survive verbatim. The first is a genuinely different
    header value; the other three are the same shape — bodyless GETs whose
    headers carry NO content-type today, which a naive `GH_HEADERS` swap
    would ADD one to. If `ghRequest` is used at any of those three, its
@@ -226,6 +227,8 @@ recorder that pushes `{url, method, headers, body}` into `calls`, with
 - `apps/fleet/src/github/api.ts` — refactor only, zero behavior change.
 - `apps/fleet/test/github.api.test.ts` — six new existence-fn test blocks
   (characterization).
+- `docs/superpowers/evidence/2026-10-09-github-api-mutation-check-265.md` —
+  the mutation check's RED/GREEN record, which Verification requires.
 - This plan doc.
 
 ## Review plan
