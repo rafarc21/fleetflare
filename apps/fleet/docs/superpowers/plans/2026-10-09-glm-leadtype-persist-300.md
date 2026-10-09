@@ -43,15 +43,16 @@ only`.
 
 1. `ensureSpawnToken` (`do.ts`) gains a new optional `leadType?: "claude"
    | "glm"` parameter, positioned alongside `doClass`. Its write block now
-   also seeds `leadType`, guarded by `existing?.leadType === undefined &&
-   leadType !== undefined` — one condition that covers BOTH a brand-new
-   row (`existing` itself undefined, a special case of "no leadType") and
-   an already-existing row that is missing the field, without ever
-   overwriting a `leadType` already recorded. This mirrors
-   `resolveLeadType`'s own existing `existing?.leadType ?? cfgLeadType ??
-   "claude"` fallback shape (used today for the LAUNCH decision) — this
-   fix just makes the PERSISTED row agree with what that function already
-   decides, rather than introducing a new rule.
+   also seeds `leadType`, guarded by the SAME strict `existing ===
+   undefined && leadType !== undefined` condition `doClass` already uses
+   just above it — fires ONLY on a brand-new row, never on an
+   already-existing row that simply happens to be missing the field.
+   (An earlier draft of this fix used the looser `existing?.leadType ===
+   undefined && leadType !== undefined`, by analogy to `resolveLeadType`'s
+   own transient, non-persisting fallback shape — a fresh-context review
+   caught that the analogy doesn't hold for a PERSISTED write: see
+   "Backfill repair — deliberately not implemented" below for why that
+   shape was rejected.)
 2. `provisionUngated`'s call site (`do.ts:7211`) threads `cfg.leadType`
    through as the new argument — `cfg` is in scope there.
 3. `restartUngated`'s call site (`do.ts:7498`) is left unchanged (no 5th
@@ -84,6 +85,55 @@ because the route never forwards `leadType` into recycle's `cfg`. Fixing
 that is a separate, out-of-scope change (not requested by #300, and not
 attempted here).
 
+## Backfill repair — deliberately not implemented
+
+The issue's own text (#300) asks for a "set-once backfill... repairs
+studios spawned on the buggy build" behavior: a studio that was already
+spawned before this fix landed (so its row has no `leadType` at all),
+self-repairing the next time it is re-provisioned/restarted/recycled with
+a `leadType` hint available.
+
+This fix does NOT deliver that, by design:
+
+- The only guard shape that could make a repair like that fire —
+  `existing?.leadType === undefined && leadType !== undefined` — is also
+  true for an already-provisioned, already-running studio whose row
+  simply never carried the field (every studio from before #249 shipped,
+  or spawned on a buggy build in between). That is NOT a narrow
+  "repair-only" condition; it is indistinguishable, at this call site,
+  from "any existing row missing the field," and would silently flip
+  `leadType` on a studio that has been running as `"claude"` the whole
+  time the instant anything threads a non-undefined hint through this
+  parameter.
+- This codebase already found and fixed exactly this hazard, for this
+  exact field, in a different write path: `provision.ts`'s own seed guard
+  (lines 2520-2535) used to be keyed off `existing?.leadType === undefined`
+  and was changed to the strict `existing === null` specifically because,
+  per that fix's own comment, "a later re-provision/restart/recycle of
+  THAT studio must never read cfg.leadType at all, no matter what value it
+  happens to carry." Reinstating the loose shape here, in a sibling write
+  path for the identical field, would reintroduce the same already-fixed
+  bug one function over.
+- It is also currently unreachable safely: the only real-world call site
+  that could drive a repair is `fleet recycle`, and (per "`recycle()` —
+  traced, not assumed" above) `routes.ts`'s `recycle` POST handler never
+  puts `leadType` on the `cfg: ProvisionConfig` it builds, so
+  `cfg.leadType` is always `undefined` there today regardless of which
+  guard shape `ensureSpawnToken` uses. There is no currently-wired caller
+  that both (a) targets an existing, already-broken row and (b) supplies
+  a real `leadType` hint — so the loose guard would buy no actual repair
+  capability today, only the hazard above.
+
+Repairing an already-broken, already-running studio (one spawned before
+#249, or on a buggy build in between) requires a destroy + respawn with
+`--lead glm` today, not a recycle — until/unless a future task adds safe,
+explicit `--lead` plumbing to the recycle path (threading a real
+`leadType` through `routes.ts`'s recycle handler into `cfg`), at which
+point the strict guard here is exactly what that future recycle call would
+rely on: it still only fires for a truly fresh row, so that future work
+would need its own, deliberate, narrowly-scoped repair path — not a loosening
+of this guard.
+
 ## `provision.ts:2535`'s own seed guard — confirmed genuinely a no-op now
 
 By the time `runProvision` reads `existing` off storage, `ensureSpawnToken`
@@ -115,6 +165,12 @@ missing `leadType`, and the route 403s. GREEN: same test, after the fix.
   `cfg.leadType` through.
 - `apps/fleet/test/studio.glm-leadtype-persist-do.test.ts` — new
   end-to-end DO test (RED then GREEN).
+- `apps/fleet/test/studio.refresh.test.ts` — added "an EXISTING row with
+  no leadType (a pre-#249/buggy-build row) is never backfilled by a later
+  leadType hint," mirroring the sibling `doClass` test ("an EXISTING row's
+  doClass is never overwritten by a later doClass hint") — proves the
+  strict guard holds and the field is never silently backfilled onto an
+  existing row even when a non-undefined hint is offered.
 
 ## Review
 
