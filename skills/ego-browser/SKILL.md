@@ -15,9 +15,12 @@ for everything Tier 1 covers.
 ## Install
 
 Nothing to do. `ego-browser` is already on PATH in this image
-(`container/Dockerfile.studio`), backed by `playwright-core` and the same
-Chrome-for-Testing binary at `/usr/local/bin/chromium` the Playwright MCP
-server already uses. No DMG, no GUI onboarding, no login — confirm with:
+(`container/Dockerfile.studio`), backed by `playwright-core` and its own
+Chrome-for-Testing binary at `/usr/local/bin/chromium` — installed and used
+directly by this shim, independent of whether a Playwright MCP server also
+happens to be configured for this studio (that's opt-in, gated behind
+`STUDIO_MCP`, not guaranteed to be registered). No DMG, no GUI onboarding,
+no login — confirm with:
 
 ```bash
 which ego-browser
@@ -120,10 +123,11 @@ daemon-side on the first real action taken against it (`goto`, `url()`,
 - `await page.waitForTimeout(ms)`
 - `await page.close()`
 - `await page.snapshot(opts?)` — semantic snapshot with refs, the one piece
-  of Tier 1 with no direct Playwright equivalent; built on top of
-  `@playwright/mcp`'s own snapshot machinery rather than reinventing it,
-  since the MCP server (`bunx @playwright/mcp@latest`) is already installed
-  and produces this exact shape.
+  of Tier 1 with no direct Playwright equivalent; reuses playwright-core's
+  own public `page.ariaSnapshot()` directly (no dependency on a Playwright
+  MCP server being installed or configured), which produces the same
+  ref-annotated shape `@playwright/mcp`'s own snapshot tool does — same
+  underlying accessibility-tree serializer, not a shared runtime.
 
 ## NOT implemented — never will be, and fails loudly if you call it
 

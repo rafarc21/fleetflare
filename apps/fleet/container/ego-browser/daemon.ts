@@ -8,7 +8,7 @@
  */
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page as PwPage } from "playwright-core";
+import { chromium, errors, type Browser, type BrowserContext, type Page as PwPage } from "playwright-core";
 import { resolvePaths } from "./paths";
 import { encodeMessage, MessageFramer, type RpcRequest } from "./rpc";
 import { Registry, type FinishKeep, type TaskSpaceRecord } from "./registry";
@@ -52,6 +52,17 @@ process.on("unhandledRejection", (err) => log(`unhandledRejection: ${err instanc
 // same-generation crashpad handler.
 const CHROMIUM_PATH = process.env.EGO_BROWSER_CHROMIUM_PATH?.trim() || "/usr/local/bin/chromium";
 
+// Board #276 hardening: bound chromium.launch() explicitly instead of
+// relying on Playwright's default launch timeout (180000ms -- 3 minutes of a
+// wedged getBrowser() and every RPC queued behind it). Passed straight to
+// launch()'s own `timeout` option, so on expiry Playwright kills the whole
+// Chromium process group itself (zygote/renderer/crashpad included) -- no
+// separate race or pid hunt here. Overridable via
+// EGO_BROWSER_LAUNCH_TIMEOUT_MS, same override-via-env convention as
+// EGO_BROWSER_CHROMIUM_PATH, so a test can use a short bound (see
+// ego-browser-launch-timeout.test.ts).
+const LAUNCH_TIMEOUT_MS = Number(process.env.EGO_BROWSER_LAUNCH_TIMEOUT_MS?.trim()) || 30000;
+
 let browserPromise: Promise<Browser> | undefined;
 /** The real Chromium OS pid, once known -- see process-reap.ts's
  * findDirectChildPid(). Read by shutdown()'s SIGKILL backstop and logged
@@ -60,6 +71,14 @@ let browserPromise: Promise<Browser> | undefined;
 let browserPid: number | undefined;
 function getBrowser(): Promise<Browser> {
   if (!browserPromise) {
+    // Logged once per actual re-entry into this branch (never on a cache
+    // hit) -- board #276's own repro signal: a launch failure's error
+    // message is textually identical whether it comes from a genuinely
+    // fresh attempt or a stale replayed rejection (same bad path, same
+    // ENOENT), so this log line is the only externally-observable proof a
+    // second real attempt ever happened. See
+    // ego-browser-launch-self-heal.test.ts.
+    log("getBrowser: attempting chromium launch");
     browserPromise = chromium
       .launch({
         executablePath: CHROMIUM_PATH,
@@ -69,11 +88,30 @@ function getBrowser(): Promise<Browser> {
         // reasoning Dockerfile.studio documents for the Playwright MCP
         // server's own chromium install).
         args: ["--no-sandbox"],
+        timeout: LAUNCH_TIMEOUT_MS,
       })
       .then((browser) => {
         browserPid = findDirectChildPid(process.pid, { chromiumBinaryName: basename(CHROMIUM_PATH) });
         log(`browser launched, pid ${browserPid ?? "unknown"}`);
         return browser;
+      })
+      .catch((err) => {
+        // Board #276: a rejected Promise is still truthy, so leaving
+        // browserPromise set to it would wedge `if (!browserPromise)` shut
+        // forever -- every later call would replay THIS SAME rejection,
+        // with no new launch ever attempted again. Resetting it here lets
+        // the NEXT call (not this one -- the throw below still rejects the
+        // promise this specific caller is awaiting) get a fresh attempt.
+        browserPromise = undefined;
+        if (err instanceof errors.TimeoutError) {
+          // Playwright already killed the process group; just make the
+          // error actionable for whoever is staring at a wedged studio.
+          throw new Error(
+            `ego-browser: chromium failed to start within ${LAUNCH_TIMEOUT_MS}ms -- likely container resource/memory pressure, check ${paths.logFile} and the studio's available memory`,
+            { cause: err },
+          );
+        }
+        throw err;
       });
   }
   return browserPromise;
