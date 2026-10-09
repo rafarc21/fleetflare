@@ -1,7 +1,6 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { findDirectChildPid } from "../../container/ego-browser/process-reap";
 import { cleanupEgoBrowserHome, makeEgoBrowserHome, runEgoBrowser } from "./ego-browser-cli-helpers";
 
 // Board issue #276's own acceptance criterion: "No hang ever: bounded
@@ -29,19 +28,25 @@ const CHROMIUM_FIXTURE = join(import.meta.dir, "../fixtures/ego-browser/hang-for
 // EGO_BROWSER_CHROMIUM_PATH itself.
 const LAUNCH_TIMEOUT_MS = 500;
 
-// Post-review finding (same branch, same issue): a TIMEOUT abandons the JS
-// promise but has no way to cancel the real OS process ("there is no such
-// thing as cancelling a plain Promise" -- process-reap.ts's own doc comment
-// on raceWithTimeoutOrReject). The fixture above `exec`s into `sleep
-// infinity`, which keeps running as a real, genuinely-alive OS process even
-// after getBrowser()'s promise rejects on the timeout -- unless daemon.ts's
-// timeout branch goes and kills it itself. This is the regression test for
-// exactly that: proof the real process is gone, not just that the RPC call
-// rejected (the original bug let the call "pass" -- i.e. reject cleanly --
-// while silently leaking the process).
+// A TIMEOUT must kill the whole hung process tree, not just the direct
+// child: real Chromium forks zygote/renderer/crashpad children, and killing
+// only the top pid orphans them. The fixture forks a background `sleep
+// infinity` grandchild (same process group, no job control in a
+// non-interactive sh) and then `exec`s into another `sleep infinity`; it
+// writes both pids to EGO_BROWSER_TEST_HANG_PIDFILE. Both must be dead
+// after the launch timeout fires. Playwright's own launch() `timeout`
+// kills the process group (`kill(-pid)`), which covers both -- but only
+// after first sending Browser.close over the pipe and waiting up to its
+// 30000ms DEFAULT_PLAYWRIGHT_TIMEOUT for a graceful exit the hung fixture
+// never makes. Hence the long wait below.
+const TREE_KILL_WAIT_MS = 40000;
+//
+// Linux-only: the fixture relies on `sleep infinity` (GNU coreutils) and
+// the liveness check reads /proc.
+const IS_LINUX = process.platform === "linux";
 
-function readDaemonPid(home: string): number {
-  return Number(readFileSync(join(home, "daemon.pid"), "utf8").trim());
+function readHangPids(pidfile: string): number[] {
+  return readFileSync(pidfile, "utf8").trim().split(/\s+/).map(Number);
 }
 
 interface ProcSignal {
@@ -89,10 +94,11 @@ async function waitFor(predicate: () => boolean, timeoutMs: number, intervalMs =
 }
 
 describe("ego-browser daemon: getBrowser() against a genuinely-hung chromium launch", () => {
-  test(
+  test.skipIf(!IS_LINUX)(
     "fails with a bounded, actionable error instead of hanging past EGO_BROWSER_LAUNCH_TIMEOUT_MS",
     async () => {
       const home = makeEgoBrowserHome();
+      const pidfile = join(home, "hang-pids");
       try {
         const start = Date.now();
         const result = await runEgoBrowser({
@@ -101,6 +107,7 @@ describe("ego-browser daemon: getBrowser() against a genuinely-hung chromium lau
           env: {
             EGO_BROWSER_CHROMIUM_PATH: CHROMIUM_FIXTURE,
             EGO_BROWSER_LAUNCH_TIMEOUT_MS: String(LAUNCH_TIMEOUT_MS),
+            EGO_BROWSER_TEST_HANG_PIDFILE: pidfile,
           },
           code: `
             try {
@@ -126,25 +133,27 @@ describe("ego-browser daemon: getBrowser() against a genuinely-hung chromium lau
         // is OUR bound firing, not the external timeoutMs backstop.
         expect(elapsed).toBeLessThan(5000);
 
-        // The real regression test: the fixture's underlying `sleep
-        // infinity` process (the OS process `hang-forever-chromium.sh`
-        // `exec`s into) must actually be dead now, not merely abandoned.
-        // The persistent daemon (a separate OS process from the `ego-
-        // browser nodejs` CLI invocation above, by design -- it outlives
-        // every individual invocation) is still alive at this point (its
-        // own idle window is the real 60000ms default, nowhere close to
-        // firing yet), so its pidfile is the one reliable way to find the
-        // real parent pid to scan from -- same mechanism daemon.ts's own
-        // shutdown() SIGKILL backstop and findDirectChildPid() rely on.
-        const daemonPid = readDaemonPid(home);
-        const hungPid = findDirectChildPid(daemonPid);
-        const terminated =
-          hungPid === undefined ? true : await waitFor(() => isGenuinelyTerminated(hungPid), 3000);
-        expect(terminated).toBe(true);
+        // The whole hung tree must be dead, not merely abandoned: both the
+        // exec'd leader and its forked grandchild.
+        expect(existsSync(pidfile)).toBe(true);
+        const hungPids = readHangPids(pidfile);
+        expect(hungPids).toHaveLength(2);
+        const allDead = await waitFor(() => hungPids.every(isGenuinelyTerminated), TREE_KILL_WAIT_MS, 250);
+        expect(allDead).toBe(true);
       } finally {
+        // Never leak the fixture's sleeps, even when the assertions fail.
+        if (existsSync(pidfile)) {
+          for (const pid of readHangPids(pidfile)) {
+            try {
+              process.kill(pid, "SIGKILL");
+            } catch {
+              // already gone
+            }
+          }
+        }
         cleanupEgoBrowserHome(home);
       }
     },
-    20000,
+    60000,
   );
 });

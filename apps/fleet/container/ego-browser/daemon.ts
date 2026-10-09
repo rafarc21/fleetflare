@@ -8,12 +8,12 @@
  */
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page as PwPage } from "playwright-core";
+import { chromium, errors, type Browser, type BrowserContext, type Page as PwPage } from "playwright-core";
 import { resolvePaths } from "./paths";
 import { encodeMessage, MessageFramer, type RpcRequest } from "./rpc";
 import { Registry, type FinishKeep, type TaskSpaceRecord } from "./registry";
 import { IdleShutdown, resolveIdleMs } from "./idle-shutdown";
-import { findDirectChildPid, raceWithTimeout, raceWithTimeoutOrReject } from "./process-reap";
+import { findDirectChildPid, raceWithTimeout } from "./process-reap";
 import type { FnOrStringWire, SnapshotOpts, UrlMatcherWire } from "./wire";
 
 const paths = resolvePaths();
@@ -52,19 +52,15 @@ process.on("unhandledRejection", (err) => log(`unhandledRejection: ${err instanc
 // same-generation crashpad handler.
 const CHROMIUM_PATH = process.env.EGO_BROWSER_CHROMIUM_PATH?.trim() || "/usr/local/bin/chromium";
 
-// Board #276: chromium.launch() itself had no bound, unlike its sibling
-// browser.close() call in shutdown() (CLOSE_TIMEOUT_MS below). A Chrome
-// process that starts but never completes its CDP handshake -- a real-world
-// failure mode under container resource/memory pressure -- hung
-// getBrowser() indefinitely, with every later call (and the whole daemon's
-// RPC dispatch for that call) stuck behind it forever. 30000ms matches
-// playwright-core's own documented default launch timeout (same order of
-// magnitude as CLOSE_TIMEOUT_MS below, scaled up for how much slower a real
-// browser launch is than a close()) -- this is a backstop in front of
-// whatever Playwright does internally, not a replacement for it. Overridable
-// via EGO_BROWSER_LAUNCH_TIMEOUT_MS, same override-via-env convention as
-// EGO_BROWSER_CHROMIUM_PATH, so a test can use a short bound instead of
-// waiting out 30+ real seconds (see ego-browser-launch-timeout.test.ts).
+// Board #276 hardening: bound chromium.launch() explicitly instead of
+// relying on Playwright's default launch timeout (180000ms -- 3 minutes of a
+// wedged getBrowser() and every RPC queued behind it). Passed straight to
+// launch()'s own `timeout` option, so on expiry Playwright kills the whole
+// Chromium process group itself (zygote/renderer/crashpad included) -- no
+// separate race or pid hunt here. Overridable via
+// EGO_BROWSER_LAUNCH_TIMEOUT_MS, same override-via-env convention as
+// EGO_BROWSER_CHROMIUM_PATH, so a test can use a short bound (see
+// ego-browser-launch-timeout.test.ts).
 const LAUNCH_TIMEOUT_MS = Number(process.env.EGO_BROWSER_LAUNCH_TIMEOUT_MS?.trim()) || 30000;
 
 let browserPromise: Promise<Browser> | undefined;
@@ -83,9 +79,8 @@ function getBrowser(): Promise<Browser> {
     // second real attempt ever happened. See
     // ego-browser-launch-self-heal.test.ts.
     log("getBrowser: attempting chromium launch");
-    const launchTimeoutMessage = `ego-browser: chromium failed to start within ${LAUNCH_TIMEOUT_MS}ms -- likely container resource/memory pressure, check ${paths.logFile} and the studio's available memory`;
-    browserPromise = raceWithTimeoutOrReject(
-      chromium.launch({
+    browserPromise = chromium
+      .launch({
         executablePath: CHROMIUM_PATH,
         headless: true,
         // Running as root in a container with no chrome-sandbox setuid
@@ -93,10 +88,8 @@ function getBrowser(): Promise<Browser> {
         // reasoning Dockerfile.studio documents for the Playwright MCP
         // server's own chromium install).
         args: ["--no-sandbox"],
-      }),
-      LAUNCH_TIMEOUT_MS,
-      launchTimeoutMessage,
-    )
+        timeout: LAUNCH_TIMEOUT_MS,
+      })
       .then((browser) => {
         browserPid = findDirectChildPid(process.pid, { chromiumBinaryName: basename(CHROMIUM_PATH) });
         log(`browser launched, pid ${browserPid ?? "unknown"}`);
@@ -107,42 +100,17 @@ function getBrowser(): Promise<Browser> {
         // browserPromise set to it would wedge `if (!browserPromise)` shut
         // forever -- every later call would replay THIS SAME rejection,
         // with no new launch ever attempted again. Resetting it here lets
-        // the NEXT call (not this one -- `throw err` still rejects the
+        // the NEXT call (not this one -- the throw below still rejects the
         // promise this specific caller is awaiting) get a fresh attempt.
         browserPromise = undefined;
-
-        // Follow-up review finding on the #276 fix above: a genuine
-        // TIMEOUT (distinguished from a plain launch rejection by its
-        // message -- raceWithTimeoutOrReject() rejects with exactly
-        // launchTimeoutMessage when ITS OWN timer fires, never when
-        // chromium.launch() itself rejects) abandons the JS promise but
-        // has no way to cancel the real OS process -- "there is no such
-        // thing as cancelling a plain Promise" (process-reap.ts's own doc
-        // comment). A plain launch rejection needs no such cleanup here:
-        // Playwright itself already knows that process failed/exited and
-        // has presumably cleaned up after it. Only a timeout can abandon a
-        // process that is still genuinely alive, stuck mid-handshake --
-        // reusing the exact same findDirectChildPid() + SIGKILL mechanism
-        // shutdown()'s own backstop uses for this identical problem. Must
-        // run before too much time passes (a long-dead zombie is still
-        // findable, but no reason to add delay); findDirectChildPid()
-        // already returns undefined gracefully when nothing spawned yet
-        // (e.g. the executable path itself was bad), so this is a no-op in
-        // that case.
-        if (err instanceof Error && err.message === launchTimeoutMessage) {
-          const hungPid = findDirectChildPid(process.pid, { chromiumBinaryName: basename(CHROMIUM_PATH) });
-          if (hungPid !== undefined) {
-            log(`getBrowser: launch timed out, killing orphaned chromium pid ${hungPid}`);
-            try {
-              process.kill(hungPid, "SIGKILL");
-            } catch {
-              // Already gone on its own between the timeout firing and
-              // this kill attempt -- fine, this is the expected case (same
-              // reasoning as shutdown()'s own SIGKILL backstop).
-            }
-          }
+        if (err instanceof errors.TimeoutError) {
+          // Playwright already killed the process group; just make the
+          // error actionable for whoever is staring at a wedged studio.
+          throw new Error(
+            `ego-browser: chromium failed to start within ${LAUNCH_TIMEOUT_MS}ms -- likely container resource/memory pressure, check ${paths.logFile} and the studio's available memory`,
+            { cause: err },
+          );
         }
-
         throw err;
       });
   }

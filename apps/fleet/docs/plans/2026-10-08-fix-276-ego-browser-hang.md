@@ -206,3 +206,14 @@ underlying accessibility-tree serializer). Docs-only change, no test — verifie
 by re-reading the full file afterward (no other unconditional "already
 uses"/"already installed" claim remains) and by `scripts/english-check.ts`
 (which scans `SKILL.md` too) staying clean.
+
+## Addendum (PR #285 round 1 review): drop custom race, use Playwright `timeout`
+
+Supersedes `raceWithTimeoutOrReject()` + `findDirectChildPid()` + `process.kill(pid)` above.
+
+- Review: custom kill hit only top pid -> orphans zygote/renderer. Also prior comment wrong: Playwright default launch timeout = 180000ms, not 30000.
+- Now: `chromium.launch({ timeout: LAUNCH_TIMEOUT_MS })`. On timeout Playwright sends `Browser.close`, waits up to `DEFAULT_PLAYWRIGHT_TIMEOUT` (30000ms) for exit, then `kill(-pid, SIGKILL)` = whole process group. Caller sees rejection at LAUNCH_TIMEOUT_MS; tree gone ~30s later.
+- `errors.TimeoutError` rewrapped to same actionable message. Stale-promise reset kept.
+- `raceWithTimeoutOrReject()` removed; `process-reap.ts` back to main.
+- Test: fixture forks grandchild `sleep` then `exec sleep`, writes both pids. Test asserts both dead (40s wait). RED on old code (grandchild never dies), GREEN now. Linux-only -> `test.skipIf`.
+- No root-cause claim for #276: shim works in QA studio; "no connected profile" error not in shim. This PR = launch hardening only.
