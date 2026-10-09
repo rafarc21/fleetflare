@@ -457,3 +457,15 @@ describe("HOUSE_RULES — public repositories (issue #1)", () => {
     expect(rules).toMatch(/Rewrite the text; never route around the gate/);
   });
 });
+
+// Issue #279: how a studio gets a staging test login, and the one thing it
+// must never do with it.
+describe("HOUSE_RULES — test credentials (issue #279)", () => {
+  it("names the verb, the allowlist and the never-paste rule", () => {
+    const rules = collapseWs(HOUSE_RULES);
+    expect(rules).toMatch(/fleet creds get <name>/);
+    expect(rules).toMatch(/allowlisted for your repo/);
+    expect(rules).toMatch(/Never paste a credential value into a PR, issue, comment, commit, log, memory file or screenshot/);
+    expect(rules).toMatch(/Never verify a permission or role change only as an admin/);
+  });
+});

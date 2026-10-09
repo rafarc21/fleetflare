@@ -18,6 +18,7 @@ import { handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH } from "./llm/ant
 import { handleFleetGh } from "./write-proxy/gh-route";
 import { handleFleetGit } from "./write-proxy/git-worker";
 import { recordWorkerException } from "./exceptions";
+import { CREDS_PREFIX, handleFleetCreds } from "./creds/test-creds";
 
 export { AgentDO } from "./agents/do";
 // A container class declared in wrangler.jsonc without a matching export
@@ -135,6 +136,10 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, url: U
   if (url.pathname === "/fleet/gh") return handleFleetGh(req, env);
   if (url.pathname.startsWith("/fleet/git/")) return handleFleetGit(req, env);
   if (url.pathname.startsWith("/fleet/tasks")) return handleFleetBoard(req, env);
+  // Issue #279: one allowlisted staging test login, read by the Worker's own
+  // Infisical machine identity. Spawn-token authenticated, before the
+  // /fleet/ catch-all (which would 405 its GET).
+  if (url.pathname.startsWith(CREDS_PREFIX)) return handleFleetCreds(req, env);
   // Fleet Spawn P3, R-P3-7: the machine surface, deliberately OUTSIDE the
   // `/studio` prefix the Cloudflare Access app is scoped to — a container
   // holds a spawn token, not an Access service token. Distinct prefixes, so

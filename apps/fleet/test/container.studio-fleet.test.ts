@@ -55,9 +55,11 @@ describe("container/studio-fleet — source assertions", () => {
     );
   });
 
-  it("only \"spawn\", \"resume\", \"task\" and \"memory\" are recognised commands; anything else is a usage error naming what it expected", () => {
+  it("only \"spawn\", \"resume\", \"task\", \"memory\" and \"creds\" are recognised commands; anything else is a usage error naming what it expected", () => {
     expect(src()).toContain('if (argv[0] !== "spawn" && argv[0] !== "resume") {');
-    expect(src()).toContain('expected "spawn", "resume", "task" or "memory"');
+    expect(src()).toContain('expected "spawn", "resume", "task", "memory" or "creds"');
+    // Issue #279: one allowlisted staging test login, value to stdout only.
+    expect(src()).toContain('if (argv[0] === "creds") return parseCredsArgs(argv.slice(1));');
     // P5 §9: the Release Studio runs the compaction pass from inside its own
     // container at sprint close, so the verb has to exist on THIS binary.
     expect(src()).toContain('if (argv[0] === "memory") return parseMemoryArgs(argv.slice(1));');

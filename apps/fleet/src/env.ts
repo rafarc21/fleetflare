@@ -368,4 +368,19 @@ export interface Env {
   R2_ACCOUNT_ID?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
+  /**
+   * Issue #279: studio test credentials (src/creds/test-creds.ts). The
+   * Worker's Infisical machine identity (Universal Auth) — Worker secrets set
+   * with `wrangler secret put`, never vars, never in a container. Any of the
+   * three below absent -> `/fleet/creds/*` answers 503 "test creds not
+   * configured".
+   */
+  INFISICAL_CLIENT_ID?: string;
+  INFISICAL_CLIENT_SECRET?: string;
+  /** JSON var: `{"owner/repo": {"<name>": {workspaceId, environment, secretPath,
+   *  key}}}`. Staging/dev/test environments and /test-accounts paths only;
+   *  any other entry refuses the whole config. Holds locations, not values. */
+  TEST_CREDS_BY_REPO?: string;
+  /** Optional Infisical API origin (self-hosted). Default https://app.infisical.com. https only. */
+  INFISICAL_API_URL?: string;
 }
