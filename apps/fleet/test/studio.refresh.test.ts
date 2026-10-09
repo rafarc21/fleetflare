@@ -1452,6 +1452,33 @@ describe("ensureSpawnToken", () => {
       expect((await storage.get(STATUS_KEY))?.doClass).toBe("STUDIO");
     });
   });
+
+  // Issue #300, fresh-context review fix: ensureSpawnToken's 5th `leadType`
+  // parameter must use the SAME strict `existing === undefined` guard
+  // `doClass` (above) uses — not `existing?.leadType === undefined`, which
+  // is also true for an already-provisioned row that simply predates the
+  // field (every studio from before #249 shipped, or spawned on a buggy
+  // build). Mirrors "an EXISTING row's doClass is never overwritten by a
+  // later doClass hint" above, for the sibling field.
+  describe("leadType hint (5th param) — the same strict existing-row guard doClass uses", () => {
+    const PRE_249_ID = "acme--pre-249-studio";
+
+    it("an EXISTING row with no leadType (a pre-#249/buggy-build row) is never backfilled by a later leadType hint", async () => {
+      const storage = fakeStorage();
+      // Simulates a studio provisioned before #249, or on a buggy build:
+      // an already-running row that genuinely has no leadType field at all.
+      await storage.put(STATUS_KEY, status({ id: PRE_249_ID }));
+      expect((await storage.get(STATUS_KEY))?.leadType).toBeUndefined();
+
+      // A later call (e.g. a restart/recycle after cfg.leadType: "glm" is
+      // threaded through) passes a non-undefined hint -- the already-
+      // existing row must not be silently backfilled. The existing row's
+      // spawnTokenHash is null, so the write path below genuinely runs
+      // (this isn't the early-return "nothing changed" branch).
+      await ensureSpawnToken(storage, PRE_249_ID, async () => {}, undefined, "glm");
+      expect((await storage.get(STATUS_KEY))?.leadType).toBeUndefined();
+    });
+  });
 });
 
 describe("spawnTokenHash plumbing (the hash the registry matches on survives every later write)", () => {

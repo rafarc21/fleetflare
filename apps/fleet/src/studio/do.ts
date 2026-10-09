@@ -4667,6 +4667,36 @@ export async function ensureSpawnToken(
   idFallback: string,
   recordStudioFn: (status: StudioStatus) => Promise<void>,
   doClass?: StudioDOClass,
+  // Issue #300: this call is the one write path that can land a FRESH row
+  // with a now-resolved leadType never recorded on it at all —
+  // `provisionUngated`'s own `resolveLeadType` call runs moments AFTER this
+  // function returns, computing the right launch-time value, but that
+  // value was never threaded back into the write this function already
+  // made. Seeded below by the SAME strict `existing === undefined &&
+  // leadType !== undefined` guard `doClass` uses just above, NOT
+  // `existing?.leadType === undefined` (an earlier draft of this fix used
+  // that shape, by analogy to `resolveLeadType`'s own transient,
+  // non-persisting fallback — but a fresh-context review on #300 caught
+  // that the analogy doesn't hold for a PERSISTED write: that looser
+  // condition is ALSO true for an already-provisioned, already-running
+  // studio whose row simply never carried the field, which is exactly the
+  // bug `provision.ts`'s `existing === null` guard (see its own comment at
+  // the `cfg.leadType` seed, issue #249 maestro review round 1 MINOR) was
+  // already fixed to avoid for this identical field. Reinstating the loose
+  // shape here would silently backfill `leadType` onto a pre-#249 or
+  // buggy-build row the moment anything re-threads a non-undefined hint
+  // through this parameter — which `StudioStatus.leadType`'s own doc
+  // comment forbids ("set once, at the studio's first-ever provision").
+  // A `leadType` already recorded on `existing` — or an `existing` row
+  // that simply predates the field — is never touched either way: same
+  // "written once, read back forever" rule `doClass`/`StudioStatus.
+  // leadType`'s own doc comment states, and the same precedent
+  // `provision.ts` already established for this exact field. Optional,
+  // defaulting to "don't stamp," so every pre-existing caller (test
+  // fixtures and `restartUngated`'s own call, which has no
+  // `ProvisionConfig` to repair FROM) keeps compiling and keeps the same
+  // behavior it always had.
+  leadType?: "claude" | "glm",
 ): Promise<string> {
   const token = await loadOrMintSpawnToken(storage);
   const existing = await storage.get(STATUS_KEY);
@@ -4675,6 +4705,7 @@ export async function ensureSpawnToken(
   const status: StudioStatus = {
     ...(existing ?? freshStatus(idFallback)),
     ...(existing === undefined && doClass !== undefined ? { doClass } : {}),
+    ...(existing === undefined && leadType !== undefined ? { leadType } : {}),
     spawnTokenHash: tokenHash,
   };
   await storage.put(STATUS_KEY, status);
@@ -7208,10 +7239,14 @@ export class StudioDO extends Sandbox<Env> {
     // deliberately Env-blind) — see realDoClassForRole's own doc comment for
     // why a role-only guess is unsafe to persist.
     const doClass = realDoClassForRole(this.env, cfg.role);
+    // Issue #300: `cfg.leadType` threaded through so a fresh (or
+    // previously-broken, never-seeded) row's write below actually carries
+    // the same leadType `resolveLeadType` is about to resolve for THIS
+    // call — see ensureSpawnToken's own doc comment on its new parameter.
     const spawnToken = await ensureSpawnToken(
       this.ctx.storage, id,
       async (s: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, s)),
-      doClass,
+      doClass, cfg.leadType,
     );
     // Issue #249: which lead THIS studio boots — resolved once, before the
     // Claude-account gate below, so a glm-lead studio never calls it at
