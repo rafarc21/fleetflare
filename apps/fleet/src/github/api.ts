@@ -641,7 +641,11 @@ export async function issueExists(token: string, repo: string, number: number): 
  * 404/2xx/throw convention as commitExists above.
  */
 export async function pathExists(token: string, repo: string, path: string, ref: string): Promise<boolean> {
-  return exists(token, `https://api.github.com/repos/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`, `read ${repo}:${path}@${ref}`);
+  return exists(
+    token,
+    `https://api.github.com/repos/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`,
+    `read ${repo}:${path}@${ref}`,
+  );
 }
 
 /**

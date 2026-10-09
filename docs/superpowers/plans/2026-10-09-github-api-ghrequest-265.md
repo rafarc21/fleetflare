@@ -108,19 +108,26 @@ Inside `src/github/api.ts` ONLY:
    one `exists` plus six one-line calls; the duplication is deleted, not
    re-expressed.
 4. **The six inline header sites adopt `GH_HEADERS(token)`** (or `ghRequest`),
-   preserving each call's exact method/body/headers — two deliberate
-   deviations that must survive verbatim:
+   preserving each call's exact method/body/headers — four deliberate
+   deviations that must survive verbatim. The first is a genuinely different
+   header value; the other three are the same shape — bodyless GETs whose
+   headers carry NO content-type today, which a naive `GH_HEADERS` swap
+   would ADD one to. If `ghRequest` is used at any of those three, its
+   header set must allow that shape (e.g. content-type only when a
+   body/init says so), or the site keeps a narrow override. Adding a
+   content-type header to a GitHub GET is harmless in practice, but this
+   PR's own rule is exact header preservation — no header added or dropped
+   anywhere. (Correction, review round 1: this list originally enumerated
+   only `fetchRepoFile` and `listAllBranchNames`; the source has FOUR
+   no-content-type GET sites, and the implementation correctly kept all
+   four explicit rather than swapping any of them for `GH_HEADERS`.)
    - `fetchRepoFile`'s raw accept media type `application/vnd.github.raw+json`
      (`:95`) — different from the standard one; it OVERRIDES, it is not
      dropped. `github.api.test.ts:78` pins this header today and keeps
      passing, unmodified.
-   - `listAllBranchNames`'s headers (`:1027`) carry NO content-type today
-     (a GET with no body) — a naive `GH_HEADERS` swap would ADD one. If
-     `ghRequest` is used there, its header set must allow that shape
-     (e.g. content-type only when a body/init says so), or the site keeps
-     a narrow override. Adding a content-type header to a GitHub GET is
-     harmless in practice, but this PR's own rule is exact preservation —
-     no header added or dropped anywhere.
+   - `upsertRepoFile`'s sha-lookup GET (`:199`) — no content-type today.
+   - `listInstallationRepos`'s paged GETs (`:247`) — no content-type today.
+   - `listAllBranchNames`'s paged GETs (`:1027`) — no content-type today.
 
 **Do NOT delete or merge `ghJson` (`:290-295`) / `ghGraphQL` (`:753-769`)** —
 those are already-deep helpers for the JSON/GraphQL halves; this PR only
