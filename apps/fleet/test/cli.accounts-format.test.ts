@@ -68,6 +68,25 @@ describe("describeCurrentState", () => {
     const deadWithPastUntil: AccountCurrentState = { dead: true, until: "2026-10-05T10:00:00Z", seenAt: "2026-10-05T08:00:00Z" };
     expect(describeCurrentState(deadWithPastUntil, NOW)).toBe("dead");
   });
+
+  // Issue #306 — a null-until row (a sighting with no readable reset, e.g.
+  // `account-limit:_5 {until:null}`) blocks launches for 24h after seenAt
+  // (accountIsFree's NULL_UNTIL_CEILING_MS), yet read "free" here.
+  it("null until, seen within the 24h ceiling: limited, in describeOutcome's own words", () => {
+    const nullUntil: AccountCurrentState = { dead: false, until: null, seenAt: "2026-10-05T12:00:00Z" };
+    expect(describeCurrentState(nullUntil, NOW)).toBe("limited");
+  });
+
+  it("null until, seen past the 24h ceiling: free, same as accountIsFree", () => {
+    const stale: AccountCurrentState = { dead: false, until: null, seenAt: "2026-10-04T12:59:59Z" };
+    expect(describeCurrentState(stale, NOW)).toBe("free");
+  });
+
+  it("a null-until row a sync would limit again is not a change", () => {
+    const nullUntil: AccountCurrentState = { dead: false, until: null, seenAt: "2026-10-05T12:00:00Z" };
+    const limitNoReset: SyncDecision = { ...LIMIT_DECISION, until: null } as SyncDecision;
+    expect(wouldChange(nullUntil, limitNoReset, NOW)).toBe(false);
+  });
 });
 
 describe("wouldChange / describeWould", () => {

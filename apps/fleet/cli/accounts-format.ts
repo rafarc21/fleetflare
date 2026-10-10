@@ -2,11 +2,13 @@
 // `fleet accounts sync`. No I/O: the cswap subprocess read and the Worker
 // fetch both live in cli/accounts.ts (bun-only, see that file's own header
 // for why it stays separate); this module imports only
-// src/studio/claude-swap.ts's types, so it is directly unit-testable the
+// src/studio/claude-swap.ts's types and accounts.ts's pure
+// NULL_UNTIL_CEILING_MS (#306), so it is directly unit-testable the
 // same way cli/task-format.ts and cli/restart-format.ts already are (see
 // cli/burn-format.ts's own header for the general "pure sibling of an impure
 // cli/ file" convention this follows).
 import type { CswapAccount, SlotJoin, SyncDecision } from "../src/studio/claude-swap";
+import { NULL_UNTIL_CEILING_MS } from "../src/studio/accounts";
 
 /**
  * Issue #240 fix: real `cswap list --json` prints an ENVELOPE object
@@ -129,6 +131,10 @@ export function describeCurrentState(s: AccountCurrentState, now: Date): string 
   if (s.dead) return "dead";
   if (s.until !== null && Date.parse(s.until) <= now.getTime()) return "free";
   if (s.until !== null) return `limited until ${s.until}`;
+  // Issue #306: a null-until row (a sighting with no readable reset) still
+  // blocks launches until NULL_UNTIL_CEILING_MS past its seenAt — the same
+  // rule accountIsFree applies. No row at all reads seenAt null: free.
+  if (s.seenAt !== null && now.getTime() - Date.parse(s.seenAt) <= NULL_UNTIL_CEILING_MS) return "limited";
   return "free";
 }
 
