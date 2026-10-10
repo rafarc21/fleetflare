@@ -18,6 +18,8 @@ import {
   type WorkspaceRegistry,
   orcaPresent,
   ensureStudioWorkspace,
+  openStudioRow,
+  closeStudioRow,
   reconcileStudioWorkspaces,
   previewStudioWorkspace,
   planStudioWorkspaces,
@@ -2085,6 +2087,101 @@ test("#135: a surviving studio folder is named with its by-path removal command"
   expect(lines).not.toContain("no Orca worktree found");
   expect(lines).toContain(path);
   expect(lines).toContain(`orca worktree rm --worktree "path:${path}"`);
+});
+
+// ---------------------------------------------------------------------------
+// Board #322: the pair functions. Every single-studio caller used to sequence
+// `studioWorkspaceTitle` + `ensureStudioWorkspace` (or
+// `removeStudioWorkspace` + `describeWorkspaceRemoval`) itself; `openStudioRow`
+// and `closeStudioRow` are those pairs. These characterization tests pin what
+// each pair produces THROUGH the new interface — the exact title derived from
+// tasks, the outcome, and the printed lines — with the same fakes every suite
+// above already uses.
+
+describe("openStudioRow", () => {
+  test("a working task: the derived `repo · #N <title>` is what reaches Orca, and the outcome flows through", async () => {
+    const tasks = [
+      boardTask({ number: 2554, title: "retire is_platform", state: "working", assignee: "acme-os--release-studio" }),
+    ];
+    const f = fake({
+      "worktree list": worktrees(),
+      "repo list": REPOS,
+      "worktree create": ok(JSON.stringify({
+        result: { worktree: { id: "wt-acme-release", displayName: "studio-acme-os--release-studio" } },
+      })),
+      "terminal list": terminals(),
+      "terminal create": TERM_CREATED,
+    });
+    const outcome = await openStudioRow("acme-os--release-studio", tasks, f.deps);
+
+    expect(outcome.kind).toBe("created");
+    const set = f.calls.find((c) => c[0] === "worktree" && c[1] === "set");
+    expect(set).toBeDefined();
+    expect(set).toContain("--display-name");
+    expect(set).toContain("acme-os · #2554 retire is_platform");
+  });
+
+  test("idle (no tasks): the `repo · role (idle)` title reaches Orca the same way", async () => {
+    const f = fake({
+      "worktree list": worktrees(),
+      "repo list": REPOS,
+      "worktree create": CREATED,
+      "terminal list": terminals(),
+      "terminal create": TERM_CREATED,
+    });
+    const outcome = await openStudioRow("websites--maestro", [], f.deps);
+
+    expect(outcome.kind).toBe("created");
+    const set = f.calls.find((c) => c[0] === "worktree" && c[1] === "set");
+    expect(set).toContain("websites · maestro (idle)");
+  });
+
+  test("not running under Orca: skipped, zero orca calls", async () => {
+    const f = fake({}, { hasBinary: () => null });
+    const outcome = await openStudioRow("websites--maestro", [], f.deps);
+    expect(f.calls).toEqual([]);
+    expect(outcome).toEqual({ kind: "skipped", why: "not running under Orca" });
+  });
+});
+
+describe("closeStudioRow", () => {
+  test("removed: the same lines describeWorkspaceRemoval prints, salvage line included when .context/ had files", async () => {
+    const wt = tmpWorktree({ ".context/shot.png": "PNGDATA" }, "studio-websites--maestro");
+    const f = fake({
+      "worktree list": worktreesWithPath({ displayName: "studio-websites--maestro", path: wt }),
+      "terminal list": terminals(),
+    });
+    const lines = await closeStudioRow("websites--maestro", f.deps);
+    expect(lines[0]).toBe("websites--maestro: Orca worktree and attach terminal removed");
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("salvaged .context/");
+  });
+
+  test("absent: the single teardown-complete line, byte-identical to describeWorkspaceRemoval's", async () => {
+    const f = fake({
+      "worktree list": worktrees("staging"),
+      "terminal list": ok(JSON.stringify({ ok: true, result: { terminals: [] } })),
+    });
+    const lines = await closeStudioRow("websites--maestro", f.deps);
+    expect(lines).toEqual([
+      "websites--maestro: no Orca worktree or attach terminal found — teardown complete",
+    ]);
+  });
+
+  test("skipped (no Orca): no lines, no orca calls", async () => {
+    const f = fake({}, { env: { TERM_PROGRAM: "Apple_Terminal" } });
+    const lines = await closeStudioRow("websites--maestro", f.deps);
+    expect(lines).toEqual([]);
+    expect(f.calls).toEqual([]);
+  });
+
+  test("unverified (orca lookup fails): the could-not-verify line, never a confident one", async () => {
+    const f = fake({ "worktree list": { ok: false, stdout: "", stderr: "orca wedged", timedOut: false } });
+    const lines = await closeStudioRow("websites--maestro", f.deps);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("could not verify teardown: orca wedged");
+    expect(lines.join("\n")).not.toContain("teardown complete");
+  });
 });
 
 // ---------------------------------------------------------------------------
