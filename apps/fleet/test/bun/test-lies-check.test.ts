@@ -456,7 +456,7 @@ describe("the CLI exit code (#174) — Phase 2's real failing-gate contract", ()
           "",
         ].join("\n"),
       );
-      // git ls-files (listTestFiles) needs these tracked in the index — no
+      // git ls-files (the runner's listing) needs these tracked in the index — no
       // commit required, `git add` alone is enough.
       Bun.spawnSync(["git", "init", "-q"], { cwd: root });
       Bun.spawnSync(["git", "add", "-A"], { cwd: root });

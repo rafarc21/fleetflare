@@ -40,14 +40,14 @@ export interface RepoCheckOpts<F> {
    *  same `fileCount` value `cleanLine` receives — test-lies-check's count
    *  line prints on both the findings and the clean path, and needs the
    *  file count on both. */
-  failSummary: (findings: Array<F & { path: string }>, fileCount: number | string | undefined) => string;
+  failSummary: (findings: Array<F & { path: string }>, fileCount: number | undefined) => string;
   /** Printed to stdout only when there are no findings — always stdout (see header). */
-  cleanLine: (fileCount: number | string | undefined) => string;
+  cleanLine: (fileCount: number | undefined) => string;
   cleanExit: number;
   /** test-lies-check's "across N test files" count, derived from the
    *  runner's own single listing (drops the second `git ls-files` its
    *  main ran only to count). */
-  fileCount?: (listed: string[]) => number | string;
+  fileCount?: (listed: string[]) => number;
 }
 
 /** The one listing+collect pass both exports share, so the dance exists

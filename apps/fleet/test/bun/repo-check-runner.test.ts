@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { runRepoCheck } from "../../scripts/repo-check";
 
 /**
@@ -18,7 +18,7 @@ import { runRepoCheck } from "../../scripts/repo-check";
  */
 
 /** A throwaway git repo with the real script copied to apps/fleet/scripts/
- *  so its import.meta.dir-derived REPO_ROOT resolves here. `track` git-adds
+ *  so its import.meta.dir-derived REPO_ROOT resolves here. `write` git-adds
  *  everything written (git ls-files reads the index; no commit needed). */
 function scriptRepo(script: "english-check" | "test-lies-check"): {
   root: string;
@@ -37,7 +37,7 @@ function scriptRepo(script: "english-check" | "test-lies-check"): {
   return {
     root,
     write: (rel, bytes) => {
-      mkdirSync(join(root, dirnameOf(rel)), { recursive: true });
+      mkdirSync(join(root, dirname(rel)), { recursive: true });
       writeFileSync(join(root, rel), bytes);
       Bun.spawnSync(["git", "add", "-A"], { cwd: root });
     },
@@ -46,12 +46,6 @@ function scriptRepo(script: "english-check" | "test-lies-check"): {
       return { out: p.stdout.toString(), err: p.stderr.toString(), code: p.exitCode };
     },
   };
-}
-
-/** dirname("a/b") = "a"; dirname("f") = "." — mkdirSync of "." is a no-op. */
-function dirnameOf(rel: string): string {
-  const i = rel.lastIndexOf("/");
-  return i === -1 ? "." : rel.slice(0, i);
 }
 
 describe("repo-check runner — characterization pins of both check CLIs (board issue #321)", () => {

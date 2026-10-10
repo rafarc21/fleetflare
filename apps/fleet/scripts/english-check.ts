@@ -46,6 +46,10 @@ const ALLOW_ESCAPE = "english-check: allow";
 /** Agent-written records: rewriting them changes evidence (#66), so never scanned. */
 const EXCLUDED_PREFIXES = ["fleet/memory/", ".fleet/"];
 
+/** The select predicate both the scanRepo export and the main wiring share:
+ *  every tracked file except the excluded prefixes. */
+const isScannable = (p: string): boolean => !EXCLUDED_PREFIXES.some((x) => p.startsWith(x));
+
 /** Files that hold Portuguese on purpose. Each entry says why. */
 export const ALLOWLIST: Record<string, string> = {
   "apps/fleet/scripts/english-check.ts": "the marker list itself is Portuguese by definition",
@@ -96,13 +100,13 @@ export function scanFile(path: string, text: string): Hit[] {
  *  listing + read pass (see ./repo-check.ts), kept exported because
  *  test/bun/english-only.test.ts imports it. */
 export async function scanRepo(root = REPO_ROOT): Promise<Finding[]> {
-  return collectRepoCheck(root, (p) => !EXCLUDED_PREFIXES.some((x) => p.startsWith(x)), scanFile, ALLOWLIST);
+  return collectRepoCheck(root, isScannable, scanFile, ALLOWLIST);
 }
 
 if (import.meta.main) {
   process.exit(await runRepoCheck({
     root: REPO_ROOT,
-    select: (p) => !EXCLUDED_PREFIXES.some((x) => p.startsWith(x)),
+    select: isScannable,
     scanFile,
     allowlist: ALLOWLIST,
     format: formatFinding,
