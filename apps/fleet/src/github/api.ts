@@ -10,11 +10,11 @@ const USER_AGENT = "fleetflare";
 /**
  * The standard header set every GitHub REST call in this module sends
  * (#265): bearer token, GitHub's own JSON media type, the client name, and
- * a JSON content type. #309: every call routes through ghRequest below,
- * which merges these under any caller-provided keys; the only sets that
- * differ are GH_HEADERS_GET (the bodyless GETs, no content-type) and
- * fetchRepoFile's own raw media type — exact preservation, no header added
- * or dropped anywhere.
+ * a JSON content type. #309: every call but fetchRepoFile's (below) routes
+ * through ghRequest below, which merges these under any caller-provided
+ * keys; the only sets that differ are GH_HEADERS_GET (the bodyless GETs,
+ * no content-type) and fetchRepoFile's own raw media type — exact
+ * preservation, no header added or dropped anywhere.
  */
 const GH_HEADERS = (token: string) => ({
   authorization: `Bearer ${token}`,

@@ -549,6 +549,7 @@ describe("listAllBranchNames", () => {
     const result = await listAllBranchNames("tok", "o/r");
     expect(calls).toHaveLength(2);
     expect(calls[1].url).toBe("https://api.github.com/repos/o/r/branches?per_page=100&page=2");
+    expect(calls[1].headers).toStrictEqual(GH_GET_HEADERS);
     expect(result.names).toContain("fix-999-tail");
     expect(result.names).toHaveLength(BRANCH_NAMES_PAGE_SIZE + 1);
     expect(result.truncated).toBe(false);
