@@ -49,6 +49,7 @@ const EXCLUDED_PREFIXES = ["fleet/memory/", ".fleet/"];
 export const ALLOWLIST: Record<string, string> = {
   "apps/fleet/scripts/english-check.ts": "the marker list itself is Portuguese by definition",
   "apps/fleet/test/bun/english-only.test.ts": "the check's own test needs Portuguese samples to prove it flags them",
+  "apps/fleet/test/bun/repo-check-runner.test.ts": "pins english-check's CLI bytes with Portuguese samples it must flag",
   "apps/fleet/test/fixtures/rate-limit-panes.ts": "captured real tmux panes, verbatim; the failover tests need the exact bytes",
 };
 
