@@ -96,6 +96,13 @@ export function githubBoardApi(env: Env, leakDeps: Partial<LeakGuardDeps> = {}):
     commitExists: async (repo, sha) => commitExists(await token(repo), repo, sha),
     closeIssue: async (repo, number, reason) => closeIssueApi(await token(repo), repo, number, reason),
     listOpenPullFiles: async (repo) => listOpenPullFiles(await token(repo), repo),
+    // Board issue #332: the narrowed port member — one GitHub call, the same
+    // getPullRequest the reap port above already reaches for, mapping to
+    // just the four fields the unmerged-PR warning prints.
+    getPullRequest: async (repo, number) => {
+      const pr = await getPullRequest(await token(repo), repo, number);
+      return { number: pr.number, merged: pr.merged, open: pr.open, title: pr.title };
+    },
   }, leakGuard({ ...realLeakDeps(env, token), ...leakDeps }));
 }
 

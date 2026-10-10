@@ -885,11 +885,18 @@ export interface PullRequestInfo {
   /** Issue #265: GitHub's canonical owner/name for the PR's repo — differs
    *  from the caller's slug after a rename/transfer. */
   repoFullName: string;
+  /** Board issue #332: GitHub's own open/closed — `state === "open"` on the
+   *  same single GET everything above already reads, so no second call. The
+   *  park/destroy unmerged-PR warning (src/board/open-prs.ts) needs it to
+   *  exclude a CLOSED-unmerged PR: it can never merge, so warning about it
+   *  would nag forever. */
+  open: boolean;
 }
 
 export async function getPullRequest(token: string, repo: string, number: number): Promise<PullRequestInfo> {
   const raw = await ghJson<{
     number: number; merged?: boolean; merge_commit_sha?: string | null;
+    state?: string;
     base: { ref: string; repo?: { full_name?: string } }; head: { ref: string }; title?: string; body?: string | null;
   }>(
     `https://api.github.com/repos/${repo}/pulls/${number}`,
@@ -905,6 +912,7 @@ export async function getPullRequest(token: string, repo: string, number: number
     title: raw.title ?? "",
     body: raw.body ?? "",
     repoFullName: raw.base.repo?.full_name ?? repo,
+    open: raw.state === "open",
   };
 }
 

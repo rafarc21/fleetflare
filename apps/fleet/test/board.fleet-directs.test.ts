@@ -48,6 +48,7 @@ function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
     commitExists: vi.fn(async () => true),
     closeIssue: vi.fn(async () => {}),
     listOpenPullFiles: vi.fn(async () => []),
+    getPullRequest: vi.fn(async () => ({ number: 0, merged: false, open: true, title: "" })),
     ...overrides,
   };
 }

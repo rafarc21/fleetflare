@@ -632,11 +632,11 @@ describe("getPullRequest", () => {
   it("reads merged state, merge commit sha, and base/head refs", async () => {
     respond = () => Response.json({
       number: 7, merged: true, merge_commit_sha: "deadbeef", base: { ref: "staging", repo: { full_name: "O/R" } }, head: { ref: "feat/x" },
-      title: "feat: x", body: "Closes #3",
+      title: "feat: x", body: "Closes #3", state: "open",
     });
     expect(await getPullRequest("tok", "o/r", 7)).toEqual({
       number: 7, merged: true, mergeCommitSha: "deadbeef", baseRef: "staging", headRef: "feat/x",
-      title: "feat: x", body: "Closes #3", repoFullName: "O/R",
+      title: "feat: x", body: "Closes #3", repoFullName: "O/R", open: true,
     });
   });
 
@@ -649,6 +649,20 @@ describe("getPullRequest", () => {
     expect(pr.mergeCommitSha).toBeNull();
     // #248: GitHub sends body: null for an empty description.
     expect(pr.body).toBe("");
+  });
+
+  // Board issue #332: `open` comes off the same single GET's raw `state`
+  // field — the park/destroy unmerged-PR warning excludes a closed-unmerged
+  // PR with it (src/board/open-prs.ts, the one caller that reads it).
+  it("reads GitHub's own state as open: true/false (issue #332)", async () => {
+    respond = () => Response.json({
+      number: 7, merged: false, state: "closed", base: { ref: "staging" }, head: { ref: "feat/x" },
+    });
+    expect((await getPullRequest("tok", "o/r", 7)).open).toBe(false);
+    respond = () => Response.json({
+      number: 8, merged: false, state: "open", base: { ref: "staging" }, head: { ref: "feat/y" },
+    });
+    expect((await getPullRequest("tok", "o/r", 8)).open).toBe(true);
   });
 });
 

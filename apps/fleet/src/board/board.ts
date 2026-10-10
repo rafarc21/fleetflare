@@ -62,6 +62,11 @@ export interface BoardApi {
   // Board issue #112 / #70 ask 8: every open PR's changed files, for the
   // path-claim overlap check. See pathClaimWarnings below, the one caller.
   listOpenPullFiles: (repo: string) => Promise<{ number: number; files: string[] }[]>;
+  // Board issue #332: one PR's live state — merged, open-or-closed, title —
+  // for the park/destroy unmerged-PR warning (src/board/open-prs.ts, the one
+  // caller). Narrowed from github/api.ts's PullRequestInfo: this port only
+  // needs what the warning prints.
+  getPullRequest: (repo: string, number: number) => Promise<{ number: number; merged: boolean; open: boolean; title: string }>;
 }
 
 /** Same shape src/studio/repo.ts's WorkRepoResult uses: a status and a
