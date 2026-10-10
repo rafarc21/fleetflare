@@ -1225,7 +1225,7 @@ async function cmdRecycle(
  * used to tell operators never to delete that worktree, with no exception
  * for one already destroyed, which is exactly how two coordinators produced
  * stale rows by following the docs correctly. So a destroy that stopped the
- * container now ALSO calls `removeStudioWorkspace` — same injected `OrcaDeps`
+ * container now ALSO calls `closeStudioRow` — same injected `OrcaDeps`
  * `ensureStudioWorkspace` already uses, same best-effort posture: cleanup
  * runs only after the container is confirmed stopped, and any Orca-side
  * failure there degrades to one stderr line, never a non-zero exit for a
