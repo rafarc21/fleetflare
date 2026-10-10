@@ -32,6 +32,7 @@
  * nothing it doesn't already pay for its own pure helpers.
  */
 import { usageMaxPct, DEFAULT_LIMIT_THRESHOLD_PCT } from "./claude-swap";
+import type { AccountLimitKind } from "./rate-limit";
 
 /** Just the part of the Worker environment this module reads. `Env`
  *  (src/env.ts) satisfies it structurally, with no cast at any call site. */
@@ -140,6 +141,9 @@ export interface AccountLimitEntry {
    *  subscription access); never expires, unlike a null `until`'s
    *  NULL_UNTIL_CEILING_MS grace below. */
   dead?: true;
+  /** Issue #336 — rate-limit.ts's AccountLimitKind: a spend cap or an
+   *  operator hold. A null `until` then means "until cleared" — no grace. */
+  kind?: AccountLimitKind;
 }
 export type AccountLimits = Record<string, AccountLimitEntry>;
 
@@ -390,12 +394,15 @@ export function nextClaudeAccount(
  */
 export function accountIsFree(a: ClaudeAccount, limits: AccountLimits, now: Date): boolean {
   if (!(a.name in limits)) return true;
-  const { until, seenAt, dead } = limits[a.name];
+  const { until, seenAt, dead, kind } = limits[a.name];
   // Issue #141 — dead wins over everything else, unconditionally, regardless
   // of `seenAt` age: a dead account never gets NULL_UNTIL_CEILING_MS's
   // re-probe grace, since nothing about it clears on its own.
   if (dead) return false;
   if (until !== null) return Date.parse(until) <= now.getTime();
+  // Issue #336 — a spend cap / operator hold with no until holds until an
+  // operator clears it: never the null-until grace below.
+  if (kind) return false;
   // Review round 1 (#102 review, 2026-09-30) — see NULL_UNTIL_CEILING_MS's
   // own doc comment: a `null` until must not blacklist an account forever.
   return now.getTime() - Date.parse(seenAt) > NULL_UNTIL_CEILING_MS;

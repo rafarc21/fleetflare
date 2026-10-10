@@ -38,6 +38,9 @@ interface AccountsApiRow {
   dead: boolean;
   until: string | null;
   seenAt: string | null;
+  /** Issue #336 — absent from an older Worker; read as null. */
+  kind?: "spend_cap" | "hold" | null;
+  reason?: string | null;
 }
 
 /**
@@ -174,7 +177,7 @@ export async function buildAccountsSnapshot(creds: Credentials, fetchedAt: Date 
         fiveHourPct: usage ? usage.fiveHour.pct : null,
         sevenDayPct: usage ? usage.sevenDay.pct : null,
         decision,
-        current: { dead: r.dead, until: r.until, seenAt: r.seenAt },
+        current: { dead: r.dead, until: r.until, seenAt: r.seenAt, kind: r.kind ?? null, reason: r.reason ?? null },
       };
     } catch (err) {
       return {
@@ -185,7 +188,7 @@ export async function buildAccountsSnapshot(creds: Credentials, fetchedAt: Date 
         fiveHourPct: null,
         sevenDayPct: null,
         decision: { name: r.name, action: "no-data", reason: `fleet accounts: ${errText(err)}` },
-        current: { dead: r.dead, until: r.until, seenAt: r.seenAt },
+        current: { dead: r.dead, until: r.until, seenAt: r.seenAt, kind: r.kind ?? null, reason: r.reason ?? null },
       };
     }
   });
@@ -421,6 +424,49 @@ export async function cmdAccountsSync(creds: Credentials, flags: AccountsFlags):
     const { rows, applied, rejected, skipped, cswapUnavailableReason, usageFetchedAt } = await doSync(creds);
     reportSyncOutcome(applied, rejected, skipped);
     printSnapshot(rows, flags, cswapUnavailableReason, new Date(usageFetchedAt));
+  } catch (err) {
+    console.error(errText(err));
+    process.exit(1);
+  }
+}
+
+/**
+ * Issue #336 — `fleet accounts hold <slot> [--until ISO] [--reason TEXT]` and
+ * `fleet accounts clear <slot>`: one POST each to /studio/accounts/hold|clear
+ * (routes.ts validates the slot and until, and audits the change). One-shot:
+ * a failed fetch/non-2xx exits loudly, same as `cmdAccounts`.
+ */
+async function postAccountsVerb(creds: Credentials, verb: "hold" | "clear", body: object): Promise<unknown> {
+  let res: Response;
+  try {
+    res = await fetch(new URL(`/studio/accounts/${verb}`, creds.workerUrl), {
+      method: "POST",
+      headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new Error(`fleet accounts ${verb}: could not reach ${creds.workerUrl}: ${errText(err)}`);
+  }
+  if (!res.ok) throw new Error(`fleet accounts ${verb}: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  return res.json();
+}
+
+export async function cmdAccountsHold(
+  creds: Credentials, name: string, until: string | null, reason: string | null,
+): Promise<void> {
+  try {
+    await postAccountsVerb(creds, "hold", { name, ...(until ? { until } : {}), ...(reason ? { reason } : {}) });
+    console.log(`fleet accounts hold: ${name} held until ${until ?? "cleared"}${reason ? ` (${reason})` : ""}`);
+  } catch (err) {
+    console.error(errText(err));
+    process.exit(1);
+  }
+}
+
+export async function cmdAccountsClear(creds: Credentials, name: string): Promise<void> {
+  try {
+    const out = (await postAccountsVerb(creds, "clear", { name })) as { cleared: boolean; was: string };
+    console.log(`fleet accounts clear: ${name} ${out.cleared ? `cleared (was ${out.was})` : "had no row (already free)"}`);
   } catch (err) {
     console.error(errText(err));
     process.exit(1);

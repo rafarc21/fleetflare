@@ -309,7 +309,9 @@ describe("issue #210, ask 2 — a periodic tick wakes the row the moment ANY acc
   });
 
   it("a select-exhausted row: once its own account reads free, fires exactly ONE wake — never a second, double-firing #109's own independent hourly retry on the SAME tick", async () => {
-    const h = harness({ accounts: ONE_ACCOUNT, pane: MODAL_PANE });
+    // Issue #336: a WINDOW select modal — MODAL_PANE's org headline is a
+    // spend cap now, whose earliest reset (next month start) is not due.
+    const h = harness({ accounts: ONE_ACCOUNT, pane: MODAL_PANE.replace("org's monthly spend limit", "usage limit              ") });
     const first = await h.run();
     // #109's own immediate first attempt already fires as a side effect of
     // THIS tick's fresh-degrade write (unrelated to this feature) — the
@@ -332,6 +334,24 @@ describe("issue #210, ask 2 — a periodic tick wakes the row the moment ANY acc
     const execsThisTick = h.execs.slice(beforeTick2);
     expect(execsThisTick.filter((c) => c === dismissModalCmd())).toHaveLength(1);
     expect(execsThisTick.filter((c) => c === wakeCmd(AUTO_CONTINUE_PROMPT))).toHaveLength(1);
+  });
+
+  it("issue #336: an org spend-cap row never fires #109's immediate dismiss+wake — the cap holds until month start or an operator clear", async () => {
+    const h = harness({ accounts: ONE_ACCOUNT, pane: MODAL_PANE });
+    const first = await h.run();
+    expect(first.kind).toBe("exhausted");
+    expect(h.execs.filter((c) => c === dismissModalCmd())).toEqual([]);
+    expect(h.accountLimits.get(ONE_ACCOUNT[0].name)).toMatchObject({ until: "2026-11-01T00:00:00.000Z" });
+
+    // An operator's `fleet accounts clear` deletes the row: the account reads
+    // free. The parked message names the earliest reset, so the first tick
+    // after the clear refreshes that message (no reset left to name); the
+    // tick after wakes the parked row — the existing #210 cadence.
+    h.accountLimits.delete(ONE_ACCOUNT[0].name);
+    h.setNow(new Date(NOW.getTime() + 2 * HOUR_MS));
+    expect((await h.run()).kind).toBe("exhausted");
+    h.setNow(new Date(NOW.getTime() + 2 * HOUR_MS + 5 * 60_000));
+    expect(await h.run()).toEqual({ kind: "free-account-wake", wake: "ok" });
   });
 
   it("nothing free at all (own account, spare, borrow all miss): neither ask-2 check fires, the row stays exactly as today", async () => {

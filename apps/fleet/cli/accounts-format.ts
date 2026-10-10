@@ -9,6 +9,7 @@
 // cli/ file" convention this follows).
 import type { CswapAccount, SlotJoin, SyncDecision } from "../src/studio/claude-swap";
 import { NULL_UNTIL_CEILING_MS } from "../src/studio/accounts";
+import { accountHoldActive, type AccountLimitKind } from "../src/studio/rate-limit";
 
 /**
  * Issue #240 fix: real `cswap list --json` prints an ENVELOPE object
@@ -79,6 +80,18 @@ export interface AccountCurrentState {
   dead: boolean;
   until: string | null;
   seenAt: string | null;
+  /** Issue #336 — rate-limit.ts's AccountLimitKind (spend_cap / hold), null
+   *  or absent for an ordinary window row. */
+  kind?: AccountLimitKind | null;
+  /** Issue #336 — an operator hold's reason. */
+  reason?: string | null;
+}
+
+/** Issue #336 — the row's active hold kind, or null (accountHoldActive on
+ *  this table's own row shape). */
+function heldKind(s: AccountCurrentState, now: Date): AccountLimitKind | null {
+  if (!s.kind || s.seenAt === null) return null;
+  return accountHoldActive({ until: s.until, seenAt: s.seenAt, kind: s.kind }, now);
 }
 
 /** One table row: a fleet account slot, its cswap usage (`null` fields when
@@ -129,6 +142,8 @@ function pct(n: number | null): string {
  *  every row in one table render is judged against the exact same instant. */
 export function describeCurrentState(s: AccountCurrentState, now: Date): string {
   if (s.dead) return "dead";
+  const held = heldKind(s, now);
+  if (held) return `${held} until ${s.until ?? "cleared"}${s.reason ? ` (${s.reason})` : ""}`;
   if (s.until !== null && Date.parse(s.until) <= now.getTime()) return "free";
   if (s.until !== null) return `limited until ${s.until}`;
   // Issue #306: a null-until row (a sighting with no readable reset) still
@@ -176,6 +191,9 @@ export function wouldChange(current: AccountCurrentState, decision: SyncDecision
  */
 export function describeWould(row: AccountSnapshotRow, now: Date): string {
   if (row.decision.action === "no-data") return `no data (${row.decision.reason})`;
+  // Issue #336: the sync route skips a held row on limit AND clear.
+  const held = heldKind(row.current, now);
+  if (held && (row.decision.action === "limit" || row.decision.action === "clear")) return `skip (held: ${held})`;
   return wouldChange(row.current, row.decision, now) ? describeOutcome(row.decision) : "-";
 }
 
@@ -198,7 +216,7 @@ export function describeWould(row: AccountSnapshotRow, now: Date): string {
 export const ACCOUNTS_TABLE_UTC_NOTE = "(reset times shown in UTC)";
 
 /**
- * `fleet accounts`'s table. Columns: SLOT, LABEL, MATCH, 5H%, 7D%, RESETS,
+ * `fleet accounts`'s table. Columns: SLOT, LABEL, MATCH, KIND, 5H%, 7D%, RESETS,
  * ROW STATE (what D1 holds now), WOULD (what sync would change it to, "-"
  * when nothing would change, "no data (...)" when cswap's own reading can't
  * be trusted right now). RESETS shows the specific window's `resetsAt` that
@@ -207,6 +225,8 @@ export const ACCOUNTS_TABLE_UTC_NOTE = "(reset times shown in UTC)";
  * join's own verdict (claude-swap.ts's `SlotJoin.matchSource`) — label,
  * inferred (reset-time match, no label needed), unmapped, or cswap-missing
  * — so an operator can tell how (or whether) this slot was identified.
+ * KIND (issue #336) is window for an ordinary 5h/7d row, spend_cap or hold
+ * for a held one — whose 5H%/7D% then say nothing about when it frees.
  *
  * Same column-table house style as cli/task-format.ts's formatTaskTable:
  * header + one row per slot, widths from the longest cell per column, two
@@ -216,11 +236,12 @@ export const ACCOUNTS_TABLE_UTC_NOTE = "(reset times shown in UTC)";
  */
 export function formatAccountsTable(rows: AccountSnapshotRow[], now: Date): string {
   if (rows.length === 0) return "(no accounts configured)";
-  const headers = ["SLOT", "LABEL", "MATCH", "5H%", "7D%", "RESETS", "ROW STATE", "WOULD"];
+  const headers = ["SLOT", "LABEL", "MATCH", "KIND", "5H%", "7D%", "RESETS", "ROW STATE", "WOULD"];
   const body = rows.map((r) => [
     r.name,
     r.label ?? "-",
     r.matchSource,
+    heldKind(r.current, now) ?? "window",
     pct(r.fiveHourPct),
     pct(r.sevenDayPct),
     r.decision.action === "limit" ? r.decision.until ?? "-" : "-",

@@ -146,8 +146,9 @@ describe("issue #109 — auto-continue due-ness", () => {
         // Matches what THIS tick's own capture would compute — keeps
         // limitChanged false, so the pre-existing "a changed limit is still
         // written" path (unrelated to this feature) does not also fire and
-        // obscure the "no write at all" claim this test is pinning.
-        rateLimited: { until: null, seenAt: NOW.toISOString(), select: true },
+        // obscure the "no write at all" claim this test is pinning. Issue
+        // #336: MODAL_PANE's org headline is a spend cap, so spendCap too.
+        rateLimited: { until: null, seenAt: NOW.toISOString(), select: true, spendCap: true },
       }),
     });
 

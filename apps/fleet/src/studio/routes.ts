@@ -38,8 +38,11 @@ import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
 import { FRESH_SESSION_REFUSED_PREFIX } from "./provision";
 import { resolveClaudeAccounts, accountLabel } from "./accounts";
 import {
-  readFleetAccountLimits, writeFleetAccountLimit, clearFleetAccountLimit, readOneAccountLimit,
+  writeFleetAccountLimit, clearFleetAccountLimit, readOneAccountLimit, writeAccountHold,
 } from "./account-limits-store";
+import { accountHoldActive } from "./rate-limit";
+import { appendEvent } from "../events/log";
+import { makeEvent } from "../events/schema";
 import { writeFleetAccountUsage, readOneAccountUsage } from "./account-usage-store";
 import { countWorkerExceptions } from "../exceptions";
 
@@ -449,14 +452,80 @@ export async function handleStudio(
    */
   if (url.pathname === "/studio/accounts" && req.method === "GET") {
     const accounts = resolveClaudeAccounts(env);
-    const limits = await readFleetAccountLimits(env.DB, accounts);
-    return Response.json(accounts.map((a) => ({
+    // Issue #336: one row read per account (not readFleetAccountLimits) so
+    // the hold's `reason` comes back with its `kind`.
+    const rows = await Promise.all(accounts.map((a) => readOneAccountLimit(env.DB, a.name)));
+    return Response.json(accounts.map((a, i) => ({
       name: a.name,
       label: accountLabel(env, a.name),
-      dead: limits[a.name]?.dead === true,
-      until: limits[a.name]?.until ?? null,
-      seenAt: limits[a.name]?.seenAt ?? null,
+      dead: rows[i]?.dead === true,
+      until: rows[i]?.until ?? null,
+      seenAt: rows[i]?.seenAt ?? null,
+      kind: rows[i]?.kind ?? null,
+      reason: rows[i]?.reason ?? null,
     })));
+  }
+
+  /**
+   * Issue #336 — the operator's manual slot hold and clear (`fleet accounts
+   * hold <slot> [--until ISO] [--reason TEXT]`, `fleet accounts clear
+   * <slot>`). Same Access-gated lane as /studio/accounts/sync.
+   *
+   *   - hold: writes a `kind: "hold"` row — limited fleet-wide until `until`
+   *     (a future ISO instant) or, absent, until cleared. The usage sync never
+   *     clears or overwrites it (accountHoldActive).
+   *   - clear: deletes the slot's row whatever it holds (window, spend_cap,
+   *     hold, dead) — the one way to free an org spend cap before the month
+   *     rolls over, once an admin has raised it.
+   *
+   * Both are audited: one `events` row (from "operator", to "accounts", kind
+   * "decision", ref = slot) naming what changed.
+   */
+  if (url.pathname === "/studio/accounts/hold" || url.pathname === "/studio/accounts/clear") {
+    if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+    let body: Record<string, unknown>;
+    try {
+      const parsed: unknown = await req.json();
+      if (parsed === null || typeof parsed !== "object") throw new Error("not an object");
+      body = parsed as Record<string, unknown>;
+    } catch {
+      return new Response("bad json body", { status: 400 });
+    }
+    const name = body.name;
+    if (typeof name !== "string" || !resolveClaudeAccounts(env).some((a) => a.name === name)) {
+      return new Response("\"name\" must be a configured account slot", { status: 400 });
+    }
+    const now = new Date();
+    const audit = (text: string) => appendEvent(env.DB, makeEvent(
+      { from: "operator", to: "accounts", kind: "decision", project: "fleet", ref: name, body: text },
+      now.getTime(), crypto.randomUUID().slice(0, 8),
+    ));
+    if (url.pathname === "/studio/accounts/clear") {
+      const current = await readOneAccountLimit(env.DB, name);
+      await clearFleetAccountLimit(env.DB, name);
+      const was = current ? (current.kind ?? (current.dead ? "dead" : "window")) : "free";
+      await audit(`clear ${name} (was ${was})`);
+      return Response.json({ name, cleared: current !== null, was });
+    }
+    const until = body.until;
+    if (until !== undefined && until !== null) {
+      if (typeof until !== "string" || !Number.isFinite(Date.parse(until))) {
+        return new Response("\"until\" must be an ISO timestamp", { status: 400 });
+      }
+      if (Date.parse(until) <= now.getTime()) {
+        return new Response("\"until\" must be in the future", { status: 400 });
+      }
+    }
+    const reason = body.reason;
+    if (reason !== undefined && typeof reason !== "string") {
+      return new Response("\"reason\" must be a string", { status: 400 });
+    }
+    const untilIso = typeof until === "string" ? new Date(until).toISOString() : null;
+    await writeAccountHold(env.DB, name, {
+      until: untilIso, seenAt: now.toISOString(), kind: "hold", ...(reason ? { reason } : {}),
+    });
+    await audit(`hold ${name} until ${untilIso ?? "cleared"}${reason ? `: ${reason}` : ""}`);
+    return Response.json({ name, kind: "hold", until: untilIso, reason: reason ?? null });
   }
 
   /**
@@ -526,6 +595,12 @@ export async function handleStudio(
    * (not an object, or a non-string `name`) is rejected with no property
    * access that could throw — same partial-success posture as an unknown
    * name, never a 500.
+   *
+   * Issue #336: a row that HOLDS (rate-limit.ts's accountHoldActive — the
+   * org monthly spend cap, or an operator's `fleet accounts hold`) is never
+   * written or cleared here, on "limit" or "clear": a low pct after the 5h
+   * reset says nothing about a monthly cap. Reported in `skipped` with
+   * reason "held (<kind>)"; the usage pct row is still recorded.
    *
    * `action: "unmanaged"` and the new `action: "no-data"` both make no D1
    * write at all — purely informational, echoed back in `applied` alongside
@@ -708,7 +783,12 @@ export async function handleStudio(
         // MAJOR 5: a usage sighting must never un-dead an account — read the
         // row's current state first and preserve `dead: true` if it's set.
         const current = await readOneAccountLimit(env.DB, name);
-        await writeFleetAccountLimit(env.DB, name, until, seenAt, current?.dead ? true : undefined, "usage");
+        // Issue #336: nor shorten an active spend cap / operator hold to a
+        // window reset. The usage pct below is still recorded.
+        const heldLimit = accountHoldActive(current, new Date());
+        if (!heldLimit) {
+          await writeFleetAccountLimit(env.DB, name, until, seenAt, current?.dead ? true : undefined, "usage");
+        }
         if (rawUsage !== undefined) {
           // Issue #246: the account-usage:<slot> row has its OWN freshness
           // race, independent of the account-limit row's own skip/apply
@@ -729,7 +809,8 @@ export async function handleStudio(
             });
           }
         }
-        applied.push(name);
+        if (heldLimit) skipped.push({ name, reason: `held (${heldLimit})` });
+        else applied.push(name);
         return;
       }
 
@@ -785,6 +866,14 @@ export async function handleStudio(
               seenAt: new Date(dataTimeMs).toISOString(),
             });
           }
+        }
+        // Issue #336: a low pct after the 5h reset says nothing about an
+        // org's monthly spend cap or an operator hold — only `fleet accounts
+        // clear` or the hold's own until frees it.
+        const heldClear = accountHoldActive(current, new Date());
+        if (heldClear) {
+          skipped.push({ name, reason: `held (${heldClear})` });
+          return;
         }
         if (current && Date.parse(current.seenAt) >= dataTimeMs) {
           skipped.push({ name, reason: "newer row exists" });
