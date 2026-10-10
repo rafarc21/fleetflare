@@ -33,7 +33,7 @@ import { parseMemguardKillLines, type MemguardKillLogEntry } from "./memguard-lo
 /** Where container/studio-bringup.sh's guarded pipe-pane step writes claude's
  *  pane bytes — ANSI included, raw (that script's own comment: "it is the
  *  truth of the terminal"). */
-export const TRANSCRIPT_LOG_PATH = "/workspace/.transcript/claude.log";
+const TRANSCRIPT_LOG_PATH = "/workspace/.transcript/claude.log";
 
 /**
  * Fix round (Critical): where container/studio-bringup.sh's guarded
@@ -48,7 +48,7 @@ export const TRANSCRIPT_LOG_PATH = "/workspace/.transcript/claude.log";
  * the one the stored manifest's `offset` was measured against — see
  * `bootIdChanged` and its use in `shipTranscriptTick`.
  */
-export const TRANSCRIPT_BOOT_ID_PATH = "/workspace/.transcript/boot-id";
+const TRANSCRIPT_BOOT_ID_PATH = "/workspace/.transcript/boot-id";
 
 /**
  * Dependency seam `shipTranscriptTick` runs over. `exec` is the same
@@ -135,11 +135,11 @@ export interface ShipResult {
  * (StudioStorage) and `shipTranscriptTick` (TranscriptStorage) with no
  * conflict.
  */
-export const TRANSCRIPT_MANIFEST_KEY = "transcriptManifest";
-export const TRANSCRIPT_TAIL_KEY = "transcriptTail";
+const TRANSCRIPT_MANIFEST_KEY = "transcriptManifest";
+const TRANSCRIPT_TAIL_KEY = "transcriptTail";
 /** Fix round (Critical): the generation marker — last boot-id this DO has
  *  observed at `TRANSCRIPT_BOOT_ID_PATH`. See `bootIdChanged`. */
-export const TRANSCRIPT_BOOT_ID_KEY = "transcriptBootId";
+const TRANSCRIPT_BOOT_ID_KEY = "transcriptBootId";
 
 export interface TranscriptStorage {
   get(key: typeof TRANSCRIPT_MANIFEST_KEY): Promise<TranscriptManifest | undefined>;
@@ -242,8 +242,8 @@ function bootIdChanged(stored: string | undefined, fresh: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Shell command builders — exported for direct string assertions, the same
-// pattern do.ts's credentialWriteCmd uses.
+// Shell command builders — module-private; their wire format is pinned by
+// test/studio.transcript.test.ts's literal asserts, not by exporting them.
 // ---------------------------------------------------------------------------
 
 /**
@@ -263,21 +263,21 @@ function bootIdChanged(stored: string | undefined, fresh: string): boolean {
  * search, as defense in depth against a hypothetically different base64
  * variant ever being substituted in.
  */
-export const SECTION_BOOTID = "---FLEET-BOOTID---";
-export const SECTION_STAT = "---FLEET-STAT---";
+const SECTION_BOOTID = "---FLEET-BOOTID---";
+const SECTION_STAT = "---FLEET-STAT---";
 /** Issue #85 — the incarnation token section, read unconditionally between
  *  STAT and the file-exists guard. Same hyphen-safe alphabet argument as its
  *  siblings above. */
-export const SECTION_INCARNATION = "---FLEET-INCARNATION---";
-export const SECTION_CHUNK = "---FLEET-CHUNK---";
-export const SECTION_TAIL = "---FLEET-TAIL---";
+const SECTION_INCARNATION = "---FLEET-INCARNATION---";
+const SECTION_CHUNK = "---FLEET-CHUNK---";
+const SECTION_TAIL = "---FLEET-TAIL---";
 /** Issue #221 (PR3a, Task 3) — the pane-frame section: one `capture-pane -p`
  *  frame, base64'd like SECTION_CHUNK/SECTION_TAIL, folded into the SAME
  *  exec right after the incarnation read (and after the adoption probe
  *  fragment, when one runs) so its own content ends exactly where the
  *  next known marker begins — see `shipTickCmd`'s own doc comment. Same
  *  hyphen-safe alphabet argument as its siblings above. */
-export const SECTION_PANE = "---FLEET-PANE---";
+const SECTION_PANE = "---FLEET-PANE---";
 /** Issue #221 (PR3b) — the hook-heartbeat section: the container's own
  *  `/workspace/.fleet/activity.json`, catted and base64'd like every other
  *  section here. Placed as the very LAST thing `shipTickCmd` emits (after
@@ -286,17 +286,17 @@ export const SECTION_PANE = "---FLEET-PANE---";
  *  needed only two boundary fixes (`parsePaneSection`, `parseMemguardSection`,
  *  `parseShipTickSections`'s `tailB64`) instead of a parser rewrite. Same
  *  hyphen-safe alphabet argument as its siblings above. */
-export const SECTION_ACTIVITY_HOOK = "---FLEET-ACTIVITY-HOOK---";
+const SECTION_ACTIVITY_HOOK = "---FLEET-ACTIVITY-HOOK---";
 /** Where `gates/activity-heartbeat.sh`'s atomic tmp-then-mv write lands.
  *  Kept in lockstep with that script's own hardcoded path BY CONVENTION —
  *  the same duplication `TRANSCRIPT_LOG_PATH` already accepts against
  *  `container/studio-bringup.sh`'s pipe-pane write: container and Worker are
  *  different runtimes, and neither can import the other's constant. */
-export const ACTIVITY_HOOK_PATH = "/workspace/.fleet/activity.json";
+const ACTIVITY_HOOK_PATH = "/workspace/.fleet/activity.json";
 /** Issue #311 — memguard's own kill log, tailed on the SAME exec right
  *  after SECTION_PANE. Same hyphen-safe alphabet argument as its siblings
  *  above. See `shipTickCmd`'s own doc comment for placement. */
-export const SECTION_MEMGUARD = "---FLEET-MEMGUARD---";
+const SECTION_MEMGUARD = "---FLEET-MEMGUARD---";
 
 /** Where container/memguard.ts (issue #169) already writes one line per
  *  kill (`formatLogLine`, memguard.ts:508-516) — matches that file's own
@@ -387,7 +387,7 @@ function shellSingleQuote(s: string): string {
  * echo ''` piped straight into this command's own stdout, which is exactly
  * what glued a no-trailing-newline token onto the next section marker.
  */
-export function shipTickCmd(
+function shipTickCmd(
   manifestOffset: number, storedBootId: string | undefined, adoptionToken?: string,
 ): string {
   const storedBootIdLiteral = shellSingleQuote(storedBootId ?? "");
@@ -509,7 +509,7 @@ const SKIPPED_MARKER = "SKIPPED";
  * failure message (`shipTranscriptTick`'s `transcript rotation failed`) is
  * now accurate for everything that could actually make THIS exec fail.
  */
-export function rotateCmd(shippedSize: number): string {
+function rotateCmd(shippedSize: number): string {
   return (
     `if [ "$(stat -c %s ${TRANSCRIPT_LOG_PATH} 2>/dev/null || echo -1)" -le ${shippedSize} ]; then ` +
     `truncate -s 0 ${TRANSCRIPT_LOG_PATH} && echo ${ROTATED_MARKER}; else echo ${SKIPPED_MARKER}; fi`
@@ -638,11 +638,10 @@ function trimPartialLeadingUtf8(bytes: Uint8Array): Uint8Array {
   return bytes.subarray(i);
 }
 
-/** Decode + trim, exported as one step so it is directly testable without
- *  routing a whole shipTranscriptTick through it — see
- *  trimPartialLeadingUtf8's own doc comment for the "why" this exists at
- *  all. */
-export function decodeTailPreview(bytes: Uint8Array): string {
+/** Decode + trim, tested end-to-end through the tick's stored hot tail —
+ *  see trimPartialLeadingUtf8's own doc comment for the "why" this exists
+ *  at all. */
+function decodeTailPreview(bytes: Uint8Array): string {
   return new TextDecoder().decode(trimPartialLeadingUtf8(bytes));
 }
 
@@ -661,7 +660,7 @@ export function decodeTailPreview(bytes: Uint8Array): string {
  * never a throw. An EMPTY string is a real, meaningful result (tmux gone —
  * see `readShipTickActivity` below), distinct from `undefined`.
  */
-export function parsePaneSection(stdout: string): string | undefined {
+function parsePaneSection(stdout: string): string | undefined {
   const lines = stdout.split("\n");
   const paneIdx = lines.indexOf(SECTION_PANE);
   if (paneIdx === -1) return undefined;
@@ -705,7 +704,7 @@ export function parsePaneSection(stdout: string): string | undefined {
  * wording, which describes a DIFFERENT thing (a real, non-empty frame whose
  * footer is not at the bottom).
  */
-export function readShipTickActivity(stdout: string): FrameVerdict | undefined {
+function readShipTickActivity(stdout: string): FrameVerdict | undefined {
   const frame = parsePaneSection(stdout);
   if (frame === undefined) return undefined;
   if (frame.trim() === "") return { kind: "unknown", reason: "pane empty" };
@@ -724,7 +723,7 @@ export function readShipTickActivity(stdout: string): FrameVerdict | undefined {
  * file does not exist yet, or exists but is empty), distinct from
  * `undefined`, same convention `parsePaneSection` already uses.
  */
-export function parseMemguardSection(stdout: string): string | undefined {
+function parseMemguardSection(stdout: string): string | undefined {
   const lines = stdout.split("\n");
   const idx = lines.indexOf(SECTION_MEMGUARD);
   if (idx === -1) return undefined;
@@ -755,7 +754,7 @@ export function parseMemguardSection(stdout: string): string | undefined {
  * verdict here: an empty/no-kills memguard tail is simply zero alerts,
  * never itself a statement about the studio.
  */
-export function readShipTickMemguardKills(stdout: string): MemguardKillLogEntry[] | undefined {
+function readShipTickMemguardKills(stdout: string): MemguardKillLogEntry[] | undefined {
   const text = parseMemguardSection(stdout);
   if (text === undefined) return undefined;
   if (text.trim() === "") return [];
@@ -778,7 +777,7 @@ export function readShipTickMemguardKills(stdout: string): MemguardKillLogEntry[
  * (no heartbeat file yet — a fresh studio the hooks have never fired in),
  * distinct from `undefined`.
  */
-export function parseActivityHookSection(stdout: string): string | undefined {
+function parseActivityHookSection(stdout: string): string | undefined {
   const lines = stdout.split("\n");
   const idx = lines.indexOf(SECTION_ACTIVITY_HOOK);
   if (idx === -1) return undefined;
@@ -804,7 +803,7 @@ export function parseActivityHookSection(stdout: string): string | undefined {
  * content fails `parseHookHeartbeat`'s own validation — "no hook evidence
  * this tick", never a throw.
  */
-export function readShipTickHookHeartbeat(stdout: string): HookHeartbeat | null | undefined {
+function readShipTickHookHeartbeat(stdout: string): HookHeartbeat | null | undefined {
   const raw = parseActivityHookSection(stdout);
   if (raw === undefined) return undefined;
   return parseHookHeartbeat(raw);

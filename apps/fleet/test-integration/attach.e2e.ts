@@ -24,11 +24,15 @@ import {
   killStudioContainers, waitForContainersGone,
   forceTick, readRawTail, r2List, r2Get,
 } from "./harness";
-// Plain constant, no side effects — same "import the real value instead of
-// duplicating the literal" precedent as cli/fleet.ts's own `../src/studio/*`
-// imports (frames.ts, types.ts).
-import { TRANSCRIPT_LOG_PATH } from "../src/studio/transcript";
+// Wire-format literal (issue #275): transcript.ts's TRANSCRIPT_LOG_PATH went
+// module-private when the 22 test-only exports were un-exported, so this
+// e2e now pins the container↔Worker script-agreed path as a local literal —
+// the same convention test/studio.transcript.test.ts's wire-format block
+// established, and the same path container/studio-bringup.sh's pipe-pane
+// step writes by its own hardcoded convention.
 import type { StudioStatus } from "../src/studio/types";
+
+const TRANSCRIPT_LOG_PATH = "/workspace/.transcript/claude.log";
 
 // ---------------------------------------------------------------------------
 // terminal client
