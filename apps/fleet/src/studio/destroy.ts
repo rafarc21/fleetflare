@@ -377,6 +377,11 @@ async function destroyAndRecord(
     // belt (a stop always clears it outright, whether or not a later resume
     // ever re-exhausts), never relied on alone.
     parkedAt: null,
+    // #331: a stopped studio has no meaningful readiness — a verdict taken
+    // before the destroy (the live incident: the readiness exec's own
+    // start-refusal text) reads in fleet ls forever, since nothing ever
+    // re-checks a stopped studio.
+    readiness: null,
   };
   await storage.put(STATUS_KEY, status);
   // Issue #152: the SECOND bump, right after the stopped row lands and still
