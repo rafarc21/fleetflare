@@ -7,6 +7,8 @@
 // backend (same ANTHROPIC_BASE_URL), so every open-ended brief and every
 // extra parallel member multiplies that cost.
 //
+// Issue #347: brevity rules — verbosity is GLM's top review finding.
+//
 // Appended to the lead prompt by provision.ts's resolveBringupEnv, glm-led
 // studios only — same composePromptBlocks channel as junior's
 // JUNIOR_HOUSE_RULE, so it sits before the task brief.
@@ -24,4 +26,8 @@ export const GLM_LEAD_HOUSE_RULE = [
   "  result before briefing the next.",
   "- A member still going after a handful of calls on a small step: stop it and",
   "  re-brief narrower.",
+  "- Code comments: 1-2 lines of WHY only — never history, never plan or task",
+  "  numbers.",
+  "- Plan doc at most 40 lines. The PR body carries the evidence; no evidence",
+  "  files.",
 ].join("\n");
