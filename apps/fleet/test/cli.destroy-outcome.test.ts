@@ -181,7 +181,7 @@ describe("the destroy request's own budget", () => {
 });
 
 // The teardown gate, pinned in cli/fleet.ts's own source: the ONLY caller of
-// removeStudioWorkspace on the destroy path is behind `report.teardown`,
+// closeStudioRow on the destroy path is behind `report.teardown`,
 // which only a confirmed `stopped` row ever sets.
 describe("cli/fleet.ts's destroy flow", () => {
   it("runs the Orca teardown only when the report says the studio is confirmed stopped", () => {
@@ -189,8 +189,8 @@ describe("cli/fleet.ts's destroy flow", () => {
     const from = src.indexOf("async function cmdDestroy(");
     const body = src.slice(from, src.indexOf("\n}", from));
     expect(body).toContain("await requestDestroy(");
-    expect(body).toMatch(/if \(report\.teardown\)[\s\S]*?removeStudioWorkspace\(/);
+    expect(body).toMatch(/if \(report\.teardown\)[\s\S]*?closeStudioRow\(/);
     // No second, ungated call anywhere in that body.
-    expect(body.match(/removeStudioWorkspace\(/g)).toHaveLength(1);
+    expect(body.match(/closeStudioRow\(/g)).toHaveLength(1);
   });
 });

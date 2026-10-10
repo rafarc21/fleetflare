@@ -428,8 +428,8 @@ describe("cli/fleet.ts's recycle flow", () => {
     const from = src.indexOf("async function cmdRecycle(");
     const body = src.slice(from, src.indexOf("\n}", from));
     expect(body).toContain("await requestRecycle(");
-    expect(body).toMatch(/if \(report\.kind === "ok" \|\| report\.kind === "timeout-provisioned"\)[\s\S]*?ensureStudioWorkspace\(/);
+    expect(body).toMatch(/if \(report\.kind === "ok" \|\| report\.kind === "timeout-provisioned"\)[\s\S]*?openStudioRow\(/);
     // No second, ungated call anywhere in that body.
-    expect(body.match(/ensureStudioWorkspace\(/g)).toHaveLength(1);
+    expect(body.match(/openStudioRow\(/g)).toHaveLength(1);
   });
 });

@@ -63,8 +63,8 @@ import { formatTaskTable, formatTaskShow, formatAssignWake } from "./task-format
 import type { AssignWakeReport } from "../src/board/assign-wake";
 import { formatMemoryTable, MEMORY_LEGEND, type MemoryFileRow } from "./memory-format";
 import {
-  ensureStudioWorkspace, reconcileStudioWorkspaces, planStudioWorkspaces, defaultOrcaDeps, studioWorkspaceTitle,
-  removeStudioWorkspace, describeWorkspaceRemoval, readStudioRows, findAttachHandle,
+  openStudioRow, closeStudioRow, reconcileStudioWorkspaces, planStudioWorkspaces, defaultOrcaDeps,
+  studioWorkspaceTitle, readStudioRows, findAttachHandle,
   type OrcaDeps, type TabsReport, type TabsPlanEntry,
 } from "./orca-workspace";
 import type { StudioStatus } from "../src/studio/types";
@@ -1086,7 +1086,7 @@ async function cmdSpawn(
   // deliberately — stdout is the machine-readable result and must not wait on
   // a GUI, and this can never fail the spawn that already succeeded.
   const spawnTasks = await listStudioTasks(creds, spawned.id);
-  await ensureStudioWorkspace(spawned.id, studioWorkspaceTitle(spawned.id, spawnTasks), defaultOrcaDeps());
+  await openStudioRow(spawned.id, spawnTasks, defaultOrcaDeps());
 }
 
 /**
@@ -1146,7 +1146,7 @@ async function cmdProvision(
   // also owes that studio a visible row in Orca's sidebar. Idempotent, so a
   // studio that already has one is not given a second.
   const rowTasks = await listStudioTasks(creds, studio.id);
-  await ensureStudioWorkspace(studio.id, studioWorkspaceTitle(studio.id, rowTasks), defaultOrcaDeps());
+  await openStudioRow(studio.id, rowTasks, defaultOrcaDeps());
 }
 
 /**
@@ -1198,7 +1198,7 @@ async function cmdRecycle(
     // it also owes that studio a visible row in Orca's sidebar. Idempotent,
     // so a studio that already has one is not given a second.
     const rowTasks = await listStudioTasks(creds, studio.id);
-    await ensureStudioWorkspace(studio.id, studioWorkspaceTitle(studio.id, rowTasks), defaultOrcaDeps());
+    await openStudioRow(studio.id, rowTasks, defaultOrcaDeps());
   }
   if (report.exitCode !== 0) process.exit(report.exitCode);
 }
@@ -1248,8 +1248,7 @@ async function cmdDestroy(creds: Credentials, id: string, force: boolean, discar
   // could not read must never print a teardown line — an operator who reads
   // "Orca worktree and attach terminal removed" stops looking.
   if (report.teardown) {
-    const removal = await removeStudioWorkspace(id, defaultOrcaDeps());
-    for (const line of describeWorkspaceRemoval(id, removal)) console.error(`fleet: ${line}`);
+    for (const line of await closeStudioRow(id, defaultOrcaDeps())) console.error(`fleet: ${line}`);
   }
   if (report.exitCode !== 0) process.exit(report.exitCode);
 }
@@ -2133,8 +2132,7 @@ export function reapDeps(
       }
       if (race === null) for (const line of report.lines) log(`  ${id}  ${line}`);
       if (report.teardown || race === "already-stopped") {
-        const removal = await removeStudioWorkspace(id, orcaDeps);
-        for (const line of describeWorkspaceRemoval(id, removal)) log(`  ${id}  ${line}`);
+        for (const line of await closeStudioRow(id, orcaDeps)) log(`  ${id}  ${line}`);
       }
       if (report.status?.state === "stopped") return { outcome: "destroyed" };
       if (race !== null) return { outcome: race };

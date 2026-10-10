@@ -41,7 +41,7 @@ import {
   loadCredentials, accessHeaders, studioUrl, boardUrl, detectRepo, cmdAttach, type Credentials,
   listStudioTasks,
 } from "./fleet";
-import { ensureStudioWorkspace, defaultOrcaDeps, studioWorkspaceTitle } from "./orca-workspace";
+import { openStudioRow, defaultOrcaDeps } from "./orca-workspace";
 import { repoIdSegment } from "../src/studio/repo";
 import {
   parseFfArgs, ffDecision, ffTaskBrief, parseVerdict, verdictOutcome, ffTimeoutLines, ffAttachGate,
@@ -387,11 +387,11 @@ async function waitProvisioned(creds: Credentials, id: string, startedAt: number
  * that is up owes the sidebar a row — is about the studio, not about this
  * process: the row is what survives a detach, and a run with no terminal is
  * the run most likely to leave nothing else behind. On a container, where
- * there is no Orca binary, ensureStudioWorkspace is already a no-op.
+ * there is no Orca binary, openStudioRow is already a no-op.
  */
 async function attachOrHandOff(creds: Credentials, id: string, task: number | null): Promise<void> {
   const rowTasks = await listStudioTasks(creds, id);
-  await ensureStudioWorkspace(id, studioWorkspaceTitle(id, rowTasks), defaultOrcaDeps());
+  await openStudioRow(id, rowTasks, defaultOrcaDeps());
   const gate = ffAttachGate(
     { stdin: process.stdin.isTTY === true, stdout: process.stdout.isTTY === true }, id, task,
   );

@@ -556,6 +556,16 @@ export async function ensureStudioWorkspace(id: string, title: string, deps: Orc
   }
 }
 
+/**
+ * Title-from-tasks + ensure, as one call — the only shape every single-studio
+ * caller (spawn/provision/recycle/ff) ever used. The pair is the interface;
+ * callers that already hold a title (reconcile's resolver) still call
+ * `ensureStudioWorkspace` directly.
+ */
+export async function openStudioRow(id: string, tasks: BoardTask[], deps: OrcaDeps): Promise<WorkspaceOutcome> {
+  return ensureStudioWorkspace(id, studioWorkspaceTitle(id, tasks), deps);
+}
+
 type OrcaWorktree = NonNullable<NonNullable<OrcaEnvelope["result"]>["worktrees"]>[number];
 
 /**
@@ -926,6 +936,16 @@ export function describeWorkspaceRemoval(id: string, outcome: WorkspaceRemovalOu
 
 function couldNotVerify(id: string, why: string): string {
   return `could not verify teardown: ${why}; close any attach terminal for ${id} by hand — a live attach restarts the container`;
+}
+
+/**
+ * Remove + describe, as one call — the only shape every teardown caller
+ * (destroy, reap) ever used. Returns the lines so the caller just prints them;
+ * `removeStudioWorkspace`'s default salvage destination flows through
+ * unchanged, since no caller passes one.
+ */
+export async function closeStudioRow(id: string, deps: OrcaDeps): Promise<string[]> {
+  return describeWorkspaceRemoval(id, await removeStudioWorkspace(id, deps));
 }
 
 // ---------------------------------------------------------------------------
