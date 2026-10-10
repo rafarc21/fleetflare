@@ -34,6 +34,7 @@
  */
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { collectRepoCheck, runRepoCheck } from "./repo-check";
 
 export const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 
@@ -519,39 +520,48 @@ export function scanFile(path: string, text: string, repoRoot: string = REPO_ROO
   return hits.filter((h) => !(lines[h.line - 1] ?? "").includes(ALLOW_ESCAPE));
 }
 
-function listTestFiles(root: string): string[] {
-  const ls = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: root });
-  if (ls.exitCode !== 0) throw new Error(`git ls-files failed: ${ls.stderr.toString()}`);
-  return ls.stdout.toString().split("\0").filter(Boolean).filter((p) => /\.test\.tsx?$/.test(p));
-}
+/** The test-file universe: the same `\.test\.tsx?$` predicate the old
+ *  listTestFiles used (now inlined here and in the main wiring below). */
+const isTestFile = (path: string): boolean => /\.test\.tsx?$/.test(path);
 
+/** The findings only, no printing or exiting — the runner's own single
+ *  listing + read pass (see ./repo-check.ts), kept exported because
+ *  test/bun/test-lies-check.test.ts imports it. `scanFile` takes the repo
+ *  root as its 3rd argument, so it is wrapped to the runner's 2-arg shape. */
 export async function scanRepo(root: string = REPO_ROOT): Promise<Finding[]> {
-  const paths = listTestFiles(root).filter((p) => !(p in ALLOWLIST));
-  const findings: Finding[] = [];
-  for (const path of paths) {
-    const file = Bun.file(join(root, path));
-    if (!(await file.exists())) continue;
-    const text = await file.text();
-    for (const hit of scanFile(path, text, root)) findings.push({ path, ...hit });
-  }
-  return findings;
+  return collectRepoCheck(root, isTestFile, (path, text) => scanFile(path, text, root), ALLOWLIST);
 }
 
 if (import.meta.main) {
-  const findings = await scanRepo();
-  const counts: Record<HitKind, number> = { tautological: 0, "source-reading": 0, "own-module-mock": 0 };
-  for (const f of findings) {
-    counts[f.kind]++;
-    console.log(formatFinding(f.path, f));
-  }
-  const fileCount = listTestFiles(REPO_ROOT).filter((p) => !(p in ALLOWLIST)).length;
-  console.log(
-    `\ntest-lies-check: ${counts.tautological} tautological, ` +
-    `${counts["source-reading"]} source-reading, ${counts["own-module-mock"]} own-module-mock ` +
-    `across ${fileCount} test files`,
-  );
+  // The count line, identical on both paths: it prints when clean (0s)
+  // and after any findings, so it is supplied as both `cleanLine` and
+  // `failSummary`. Counts derive from the findings list itself — the same
+  // numbers the old main tallied in its own loop — and the file count is
+  // the runner's own single listing (`listed` = the post-select,
+  // post-allowlist test files), which drops the second `git ls-files`
+  // run only to count them.
+  const countLine = (findings: Finding[], fileCount: number | string | undefined): string => {
+    const counts: Record<HitKind, number> = { tautological: 0, "source-reading": 0, "own-module-mock": 0 };
+    for (const f of findings) counts[f.kind]++;
+    return (
+      `\ntest-lies-check: ${counts.tautological} tautological, ` +
+      `${counts["source-reading"]} source-reading, ${counts["own-module-mock"]} own-module-mock ` +
+      `across ${fileCount} test files`
+    );
+  };
   // Phase 2 (#174): report-only period is over — this is now a real failing gate.
   // Phase 1 (#164) left this at process.exit(0) regardless of findings while the
   // backlog of real findings was cleared; now that the count is 0, any new finding fails CI.
-  process.exit(findings.length > 0 ? 1 : 0);
+  process.exit(await runRepoCheck({
+    root: REPO_ROOT,
+    select: isTestFile,
+    scanFile: (path, text) => scanFile(path, text, REPO_ROOT),
+    allowlist: ALLOWLIST,
+    format: formatFinding,
+    stream: "stdout",
+    failSummary: countLine,
+    cleanLine: (fileCount) => countLine([], fileCount),
+    cleanExit: 0,
+    fileCount: (listed) => listed.length,
+  }));
 }
