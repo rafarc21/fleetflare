@@ -249,7 +249,12 @@ the kill-vs-hibernate framing this maps onto (`destroy --park` is this
 fleet's resumable "hibernate", not its irreversible "kill"). Never probe a
 stopped studio with an exec just to check on it — the probe itself starts
 billing; read `fleet ls` instead. Never type into a spend-limit or upgrade
-modal in an agent terminal — Enter there can mean "buy the upgrade".
+modal in an agent terminal —
+Enter there can mean "buy the upgrade". To dismiss one remotely, send Esc
+as a raw byte, never an Enter: `orca terminal send` has no `--key` flag, so
+`orca terminal send --terminal <handle> --text $'\033'` (no `--enter` —
+that appends the newline that is the confirm key) is the safe dismissal; see
+the fleet-cockpit skill's limit-modal note for the full procedure.
 
 ## 4. Workers never message the coordinator
 
