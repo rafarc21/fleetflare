@@ -1,6 +1,8 @@
 // apps/fleet/test/glm-lead.provision.test.ts
 // Issue #302: a glm-led studio's lead prompt carries a short brief-discipline
 // rule (concrete member briefs, small fan-out); a claude-led one never does.
+// Issue #347: the rule also caps verbosity (1-2-line comments, 40-line plan
+// docs) — GLM's #1 review finding.
 import { describe, it, expect, vi } from "vitest";
 import { resolveBringupEnv, type ProvisionDeps } from "../src/studio/provision";
 import { GLM_LEAD_HOUSE_RULE } from "../src/llm/lead-rule";
@@ -31,11 +33,17 @@ function deps(): ProvisionDeps {
 }
 
 describe("glm-lead brief rule at provision (issue #302)", () => {
-  it("the rule asks for concrete verbatim briefs and a small fan-out", () => {
+  it("the rule asks for concrete verbatim briefs, a small fan-out, and brevity", () => {
     expect(GLM_LEAD_HOUSE_RULE).toMatch(/^## House rules — GLM lead/);
     expect(GLM_LEAD_HOUSE_RULE).toMatch(/verbatim/);
     expect(GLM_LEAD_HOUSE_RULE).toMatch(/research/);
     expect(GLM_LEAD_HOUSE_RULE).toMatch(/one member at a time|at most/i);
+    // Issue #347 — the brevity rules (verbosity was GLM's #1 review finding)
+    expect(GLM_LEAD_HOUSE_RULE).toMatch(/1-2 lines/);
+    expect(GLM_LEAD_HOUSE_RULE).toMatch(/why/i);
+    expect(GLM_LEAD_HOUSE_RULE).toMatch(/never plan or task numbers|never history/);
+    expect(GLM_LEAD_HOUSE_RULE).toMatch(/40/);
+    expect(GLM_LEAD_HOUSE_RULE).toMatch(/PR body carries the evidence/i);
   });
 
   it("studio path: leadType glm renders the rule", async () => {
