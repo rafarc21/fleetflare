@@ -438,6 +438,12 @@ describe("the CLI exit code (#174) — Phase 2's real failing-gate contract", ()
       mkdirSync(srcDir, { recursive: true });
       const copy = join(scriptsDir, "test-lies-check.ts");
       writeFileSync(copy, readFileSync(SCRIPT, "utf8"));
+      // The script imports the shared runner from "./repo-check" — the copy
+      // must carry it too, or the CLI dies at module resolution in the throwaway.
+      writeFileSync(
+        join(scriptsDir, "repo-check.ts"),
+        readFileSync(join(import.meta.dir, "../../scripts/repo-check.ts"), "utf8"),
+      );
       writeFileSync(join(srcDir, "bad.ts"), "export const BAD_CONST = 42;\n");
       writeFileSync(
         join(testDir, "bad.test.ts"),
