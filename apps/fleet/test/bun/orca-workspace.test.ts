@@ -2159,7 +2159,10 @@ test("closeStudioRow: removed — the same lines describeWorkspaceRemoval prints
   // or after the first call changes nothing). The working redirect is
   // `mock.module` of the node:os system boundary — captured real exports
   // spread back in `finally`, because an unrestored mock.module leaks to every
-  // LATER test and file in the same bun process (measured too).
+  // LATER test and file in the same bun process (measured too). The spread is
+  // the REAL os only because nothing else mocks node:os before this file
+  // loads — this is the repo's only node:os mock (a second one would have
+  // to capture before that one).
   const tmpHome = mkdtempSync(join(tmpdir(), "orca-salvage-home-"));
   const realOs = { ...nodeOs }; // copied at capture, so the mock cannot rewrite it
   await mock.module("node:os", () => ({ ...realOs, homedir: () => tmpHome }));
