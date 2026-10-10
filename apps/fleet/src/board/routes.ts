@@ -397,7 +397,7 @@ async function handleTaskReapRoute(
       findCloser: (taskNumber) => reapPort.findCloser(repo, taskNumber),
       prClaims: (prNumber, taskNumber) => reapPort.prClaims(repo, prNumber, taskNumber),
       close: async (taskNumber, sha) => {
-        const result = await closeTaskOnPromote(env, api, repo, taskNumber, { sha, branch: defaultBranch });
+        const result = await closeTaskOnPromote(env.DB, api, repo, taskNumber, { sha, branch: defaultBranch });
         return { ok: true, outcome: result.outcome };
       },
     };

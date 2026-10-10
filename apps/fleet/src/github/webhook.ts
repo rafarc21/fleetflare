@@ -409,7 +409,7 @@ async function closeEach(env: Env, setup: AutoCloseSetup, closable: ClosableIssu
     // every later issue in the SAME push uncovered until the next push (or
     // a manual `fleet task reap`).
     try {
-      await closeTaskOnPromote(env, setup.api, setup.repo, c.issue, { sha: c.sha, branch: setup.defaultBranch }, now);
+      await closeTaskOnPromote(env.DB, setup.api, setup.repo, c.issue, { sha: c.sha, branch: setup.defaultBranch }, now);
     } catch (err) {
       console.error(`promote-close: closing #${c.issue} in ${setup.repo} failed`, err);
     }

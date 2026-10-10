@@ -15,12 +15,12 @@
 // network.
 
 import type { IssueCloser } from "../github/api";
-// Board issue #157: imported from close-outcome.ts, NOT close-action.ts —
-// see that leaf file's own header for why (a plain `import type` from
-// close-action.ts itself would still drag its runtime imports, and through
-// them the whole Durable Object graph, into cli/'s and test-integration/'s
-// non-Workers tsconfig projects that also reach this pure orchestrator).
-import type { CloseOutcome } from "../board/close-outcome";
+// The board issue #157 constraint is gone: the type lives at home in
+// close-action.ts, and that file's import graph no longer carries any
+// workers-types-only global name (its one offender, events/log.ts, now
+// takes a structural D1Port), so the non-Workers tsconfig projects
+// (cli/, test-integration/, test/bun) import it directly.
+import type { CloseOutcome } from "../board/close-action";
 import type { TaskState } from "../board/types";
 
 /** One open board task, and the PR its latest §6 result envelope names —
