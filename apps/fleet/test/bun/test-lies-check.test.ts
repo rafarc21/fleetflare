@@ -572,6 +572,22 @@ describe("quote/escape/bracket-depth walking (characterization, #323)", () => {
     expect(hits[0].detail).toContain("src/${join(base, name)}.ts");
   });
 
+  test("a comma inside a template literal is not a top-level argument separator", () => {
+    // Discriminating companion to the two template-literal cases above: with
+    // the backtick arm of the quote machine deleted, the template contents
+    // count as code and the in-template comma splits the first argument —
+    // 0 hits on that mutant, 1 hit on the real code. Without a case like
+    // this, the backtick flavor of the quote walk is unpinned: all other
+    // template cases keep passing on a backtick-blind core.
+    const text = [
+      'const t = readFileSync(`src/a, b.ts`, "utf8");',
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].detail).toContain("src/a, b.ts");
+  });
+
   test("a string containing ) inside nested call args does not close the call early", () => {
     // `readFileSync(join(a, "src/x(1).ts"), "utf8")` — the ( and ) inside
     // the literal must not perturb the paren-depth walk closing the nested
