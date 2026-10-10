@@ -17,8 +17,9 @@
 import type { IssueCloser } from "../github/api";
 // The board issue #157 constraint is gone: the type lives at home in
 // close-action.ts, and that file's import graph no longer carries any
-// workers-types-only global name (its one offender, events/log.ts, now
-// takes a structural D1Port), so the non-Workers tsconfig projects
+// workers-types-only global name (both offenders are handled: it no
+// longer takes `Env`, and events/log.ts, its runtime import, now takes a
+// structural D1Port), so the non-Workers tsconfig projects
 // (cli/, test-integration/, test/bun) import it directly.
 import type { CloseOutcome } from "../board/close-action";
 import type { TaskState } from "../board/types";

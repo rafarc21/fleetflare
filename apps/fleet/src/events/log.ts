@@ -39,7 +39,7 @@ function toEvent(r: Row): FleetEvent {
 export interface D1PortStatement {
   bind(...values: unknown[]): D1PortStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
-  run<T = Record<string, unknown>>(): Promise<{ meta: { changes: number } }>;
+  run(): Promise<{ meta: { changes: number } }>;
   all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
 }
 

@@ -14,9 +14,11 @@ import { makeEvent } from "../events/schema";
 
 // Board issue #157's build constraint is closed by this file itself:
 // `CloseOutcome` lives HERE now (the old close-outcome.ts leaf shim is
-// deleted), because the only thing that ever forced it out — this file's
-// `Env` parameter, whose type reached Durable Object classes no
-// non-Workers tsconfig project can name — is gone. `closeTaskOnPromote`
+// deleted), because both things that ever forced it out are gone — this
+// file's `Env` parameter, whose type reached Durable Object classes no
+// non-Workers tsconfig project can name, and `events/log.ts`'s named
+// `D1Database` signatures, which this file's runtime import would have
+// dragged in anyway. `closeTaskOnPromote`
 // takes a structural `D1Port` (from events/log.ts, which this file already
 // imported at runtime) instead of `Env`, so no workers-types-only global
 // name reaches the non-Workers tsconfig projects (cli/, test-integration/,
