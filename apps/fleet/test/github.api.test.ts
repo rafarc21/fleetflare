@@ -9,7 +9,7 @@ import {
   pullsWithClosingIssuesForCommits, pullClaimsIssue, upsertRepoFile,
   listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES,
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
-  repoIsWritable, deleteBranch, compareAhead,
+  repoIsWritable, deleteBranch, compareAhead, ghRequest,
 } from "../src/github/api";
 import { doneRecordPutter } from "../src/studio/do";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
@@ -1361,5 +1361,37 @@ describe("the 300-char error cut (#309 finding 4)", () => {
       expect(msg.endsWith(cut)).toBe(true);
       expect(msg).not.toContain(cut + "x"); // char 301 must not be in it
     }
+  });
+});
+
+// #311 finding 3: no production caller sends a header value differing
+// from the standard set (GH_HEADERS_GET's only difference is the undefined
+// deletion marker), so nothing else in this file can tell caller-wins from
+// base-wins. ghRequest is exported as the test seam precisely for this pin.
+describe("ghRequest's merge order (#311 finding 3)", () => {
+  it("a caller's header beats the standard set; a custom key rides alongside the rest", async () => {
+    await ghRequest("tok", "https://api.github.com/repos/o/r", {
+      method: "GET",
+      headers: { accept: "application/vnd.github.raw+json", "x-test": "1" },
+    }, "read o/r");
+    expect(calls[0].headers.accept).toBe("application/vnd.github.raw+json");
+    expect(calls[0].headers["x-test"]).toBe("1");
+    // The untouched standard keys all survive alongside the overridden one.
+    expect(calls[0].headers).toEqual({
+      authorization: "Bearer tok",
+      accept: "application/vnd.github.raw+json",
+      "user-agent": "fleetflare",
+      "content-type": "application/json",
+      "x-test": "1",
+    });
+  });
+
+  it("a caller's undefined deletes that standard key before fetch sees the headers", async () => {
+    await ghRequest("tok", "https://api.github.com/repos/o/r", {
+      method: "GET",
+      headers: { "content-type": undefined },
+    }, "read o/r");
+    expect(calls[0].headers["content-type"]).toBeUndefined();
+    expect(Object.hasOwn(calls[0].headers, "content-type")).toBe(false);
   });
 });

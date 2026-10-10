@@ -44,26 +44,11 @@ const GH_HEADERS_GET = (token: string): Record<string, string | undefined> => ({
  *  module ever sends, and the one ghRequest's merge is defined over. */
 type GhInit = Omit<RequestInit, "headers"> & { headers?: Record<string, string | undefined> };
 
-/**
- * #309: the ONE request path for every GitHub call in this module except
- * fetchRepoFile (below). Three responsibilities, in order:
- *
- * 1. Headers: the standard GH_HEADERS set, MERGED under any keys
- *    `init.headers` carries (a caller's key wins over the standard one);
- *    a caller value of `undefined` DELETES that key — the mechanism the
- *    bodyless GET sites use to keep their exact 3-key sets.
- * 2. Body: `text` is ALWAYS read — every routed caller either parses it or
- *    could never read the Response twice anyway (a body reads once), so
- *    upsertRepoFile parses this returned text instead of res.json().
- * 3. Status: on `!res.ok` UNLESS `res.status` is in `okStatuses`, throw
- *    `` `${what} failed (${res.status}): ${text.slice(0, 300)}` `` —
- *    GitHub's own words, cut at 300 chars, plain Error, the token never in
- *    it. A status in `okStatuses` is the caller's own to interpret (404 ->
- *    false, 404 -> null, ...), which is why `res` comes back alongside
- *    `text`: the caller still reads `res.status` and, for
- *    listAllBranchNames, `res.headers`.
- */
-async function ghRequest(
+/** The one request path for every GitHub call in this module except
+ *  fetchRepoFile. Exported as the test seam: no production caller sends a
+ *  header value differing from the standard set, so only a direct call can
+ *  pin the merge order. */
+export async function ghRequest(
   token: string, url: string, init: GhInit, what: string, okStatuses: readonly number[] = [],
 ): Promise<{ res: Response; text: string }> {
   const headers: Record<string, string> = { ...GH_HEADERS(token) };
