@@ -30,7 +30,7 @@ import { parseStudioId } from "../src/studio/ids";
 import { parseGitRemote, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
 import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior, cmdJuniorStats } from "./junior";
-import { cmdAccounts, cmdAccountsSync } from "./accounts";
+import { cmdAccounts, cmdAccountsSync, cmdAccountsHold, cmdAccountsClear } from "./accounts";
 import { formatAccountResolution } from "./accounts-format";
 import { sweepAllPages, type SweepPage } from "./junior-sweep";
 import { reapTerminalAll, type TerminalPage } from "./reap-terminal";
@@ -2722,6 +2722,10 @@ async function main(): Promise<void> {
       return parsed.sync
         ? cmdAccountsSync(creds, { watch: parsed.watch, json: parsed.json, writeLabels: parsed.writeLabels })
         : cmdAccounts(creds, { watch: parsed.watch, json: parsed.json, writeLabels: parsed.writeLabels });
+    case "accounts-hold":
+      return cmdAccountsHold(creds, parsed.name, parsed.until, parsed.reason);
+    case "accounts-clear":
+      return cmdAccountsClear(creds, parsed.name);
   }
 }
 

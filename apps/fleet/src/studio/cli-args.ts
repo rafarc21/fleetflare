@@ -238,6 +238,11 @@ export type CliCommand =
   // suggestion per slot resolved by reset-time inference — independent of
   // every other flag here, combinable with any of them.
   | { cmd: "accounts"; sync: boolean; watch: boolean; json: boolean; writeLabels: boolean }
+  // Issue #336: `fleet accounts hold <slot> [--until ISO] [--reason TEXT]`
+  // (null until = held until cleared) and `fleet accounts clear <slot>` —
+  // POST /studio/accounts/hold|clear, both audited Worker-side.
+  | { cmd: "accounts-hold"; name: string; until: string | null; reason: string | null }
+  | { cmd: "accounts-clear"; name: string }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -398,7 +403,15 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   },
   accounts: {
     args: "[sync] [--watch] [--json] [--write-labels]",
-    summary: "Issue #232: join each configured Claude account slot to a LOCAL `cswap list --json` read (claude-swap, operator's own machine — docs/setup.md's \"Proactive account-limit sync\") — first by label===email, then (no label, or no match) by matching the slot's own recorded reset time against an unclaimed cswap account's reset time, within +/-5min, only when exactly one candidate qualifies — and show what a sync would do: SLOT, LABEL, MATCH (label/inferred/unmapped/cswap-missing), 5h%/7d% usage, the reset time that would trip a limit, ROW STATE (what D1 holds now), WOULD (what sync would change it to, '-' if nothing, 'no data (...)' when cswap's own reading for a known account is stale or failed — distinct from unmapped). Bare `fleet accounts` is READ-ONLY — it never calls the Worker's write route. `sync` POSTs every limit/clear decision to /studio/accounts/sync: pct >= 95 on any window marks that slot limited until that window's own reset; everything under 95 clears it, including a stale dead row (a fresh low reading right after re-login IS the proof it's alive again); reports applied/rejected/skipped (skipped = a fresher sighting already recorded, correct no-op). --watch reruns every 60s, printing only when something changed; --json prints the raw snapshot instead of the table. --write-labels prints a pasteable CLAUDE_ACCOUNT_<n>_LABEL=<email> line per inferred match (folded into the JSON object under labelSuggestions when combined with --json, never a bare line that would corrupt it) — this command never writes any config file itself. cswap missing/erroring never crashes this — every slot just reads matchSource cswap-missing.",
+    summary: "Issue #232: join each configured Claude account slot to a LOCAL `cswap list --json` read (claude-swap, operator's own machine — docs/setup.md's \"Proactive account-limit sync\") — first by label===email, then (no label, or no match) by matching the slot's own recorded reset time against an unclaimed cswap account's reset time, within +/-5min, only when exactly one candidate qualifies — and show what a sync would do: SLOT, LABEL, MATCH (label/inferred/unmapped/cswap-missing), 5h%/7d% usage, the reset time that would trip a limit, ROW STATE (what D1 holds now), WOULD (what sync would change it to, '-' if nothing, 'no data (...)' when cswap's own reading for a known account is stale or failed — distinct from unmapped). Bare `fleet accounts` is READ-ONLY — it never calls the Worker's write route. `sync` POSTs every limit/clear decision to /studio/accounts/sync: pct >= 95 on any window marks that slot limited until that window's own reset; everything under 95 clears it, including a stale dead row (a fresh low reading right after re-login IS the proof it's alive again) — except a HELD row (issue #336: KIND spend_cap, the org's monthly spend cap the failover saw, held until the next UTC month start; or KIND hold, an operator's), which sync never clears or shortens; reports applied/rejected/skipped (skipped = a fresher sighting already recorded, correct no-op). --watch reruns every 60s, printing only when something changed; --json prints the raw snapshot instead of the table. --write-labels prints a pasteable CLAUDE_ACCOUNT_<n>_LABEL=<email> line per inferred match (folded into the JSON object under labelSuggestions when combined with --json, never a bare line that would corrupt it) — this command never writes any config file itself. cswap missing/erroring never crashes this — every slot just reads matchSource cswap-missing. KIND says what the row is: window (5h/7d quota), spend_cap, or hold.",
+  },
+  "accounts-hold": {
+    args: "hold <slot> [--until <ISO>] [--reason <text>]",
+    summary: "Issue #336: mark one account slot limited fleet-wide (KIND hold) until --until, or until `fleet accounts clear`. No studio launches or fails over onto it meanwhile; `fleet accounts sync` never clears or shortens it. Audited in the events log.",
+  },
+  "accounts-clear": {
+    args: "clear <slot>",
+    summary: "Issue #336: delete one slot's limit row, whatever it holds (window, spend_cap, hold, dead) — the way to free an org monthly spend cap once an admin has raised it. Audited in the events log.",
   },
 };
 
@@ -414,7 +427,8 @@ export function parseIdleDuration(raw: string): number | null {
 
 /** `fleet ls`, `fleet task show <n>` — the command line for one verb. */
 function verbLine(cmd: string, help: VerbHelp): string {
-  const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory" : cmd;
+  const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory"
+    : cmd.startsWith("accounts-") ? "accounts" : cmd;
   return `fleet ${name}${help.args ? " " + help.args : ""}`;
 }
 
@@ -1033,6 +1047,25 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // spelled out explicitly rather than inferred from a flag combination.
     case "accounts": {
       const rest = argv.slice(1);
+      if (rest[0] === "clear") {
+        if (rest.length !== 2 || rest[1].startsWith("--")) return usage("usage: fleet accounts clear <slot>");
+        return { cmd: "accounts-clear", name: rest[1] };
+      }
+      if (rest[0] === "hold") {
+        const holdUsage = "usage: fleet accounts hold <slot> [--until <ISO>] [--reason <text>]";
+        const name = rest[1];
+        if (name === undefined || name.startsWith("--")) return usage(holdUsage);
+        let until: string | null = null;
+        let reason: string | null = null;
+        for (let i = 2; i < rest.length; i += 2) {
+          const value = rest[i + 1];
+          if (value === undefined) return usage(holdUsage);
+          if (rest[i] === "--until" && Number.isFinite(Date.parse(value))) { until = value; continue; }
+          if (rest[i] === "--reason") { reason = value; continue; }
+          return usage(holdUsage);
+        }
+        return { cmd: "accounts-hold", name, until, reason };
+      }
       const sync = rest[0] === "sync";
       const flags = rest.slice(sync ? 1 : 0);
       let watch = false;

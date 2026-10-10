@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import {
   writeFleetAccountLimit, readFleetAccountLimits, clearFleetAccountLimit, readOneAccountLimit,
+  writeAccountHold, writeObservedAccountLimit,
 } from "../src/studio/account-limits-store";
 
 const ACCOUNT = { name: "CLAUDE_CODE_OAUTH_TOKEN_2", token: "sk-ant-oat01-" + "a".repeat(40) };
@@ -57,5 +58,59 @@ describe("readOneAccountLimit", () => {
     await writeFleetAccountLimit(env.DB, ACCOUNT.name, "2026-10-05T05:00:00.000Z", seenAt);
     const state = await readOneAccountLimit(env.DB, ACCOUNT.name);
     expect(state?.source).toBeUndefined();
+  });
+});
+
+// Issue #336 — the org monthly spend cap and the operator hold. Both carry a
+// `kind`; while one is active, a plain window sighting from a studio's pane
+// must not shorten it.
+describe("issue #336 — held rows (spend_cap / hold)", () => {
+  const NOW = new Date("2026-10-10T10:28:00.000Z");
+  const seenAt = NOW.toISOString();
+
+  it("readFleetAccountLimits carries kind through", async () => {
+    await writeAccountHold(env.DB, ACCOUNT.name, { until: "2026-11-01T00:00:00.000Z", seenAt, kind: "spend_cap" });
+    const limits = await readFleetAccountLimits(env.DB, [ACCOUNT]);
+    expect(limits[ACCOUNT.name]).toEqual({ until: "2026-11-01T00:00:00.000Z", seenAt, kind: "spend_cap" });
+  });
+
+  it("writeAccountHold round-trips an operator hold with its reason and no until", async () => {
+    await writeAccountHold(env.DB, ACCOUNT.name, { until: null, seenAt, kind: "hold", reason: "org cap, admin asked" });
+    expect(await readOneAccountLimit(env.DB, ACCOUNT.name)).toEqual({
+      until: null, seenAt, kind: "hold", reason: "org cap, admin asked",
+    });
+  });
+
+  it("writeObservedAccountLimit: a window sighting never shortens an active hold", async () => {
+    await writeAccountHold(env.DB, ACCOUNT.name, { until: "2026-11-01T00:00:00.000Z", seenAt, kind: "spend_cap" });
+    const wrote = await writeObservedAccountLimit(env.DB, ACCOUNT.name, "2026-10-10T12:00:00.000Z", seenAt, undefined, undefined, NOW);
+    expect(wrote).toBe(false);
+    expect((await readOneAccountLimit(env.DB, ACCOUNT.name))?.kind).toBe("spend_cap");
+  });
+
+  it("writeObservedAccountLimit: a spend_cap sighting is written over a plain window row", async () => {
+    await writeFleetAccountLimit(env.DB, ACCOUNT.name, "2026-10-10T12:00:00.000Z", seenAt);
+    const wrote = await writeObservedAccountLimit(env.DB, ACCOUNT.name, "2026-11-01T00:00:00.000Z", seenAt, undefined, "spend_cap", NOW);
+    expect(wrote).toBe(true);
+    expect(await readOneAccountLimit(env.DB, ACCOUNT.name)).toEqual({
+      until: "2026-11-01T00:00:00.000Z", seenAt, kind: "spend_cap",
+    });
+  });
+
+  it("writeObservedAccountLimit: a spend_cap sighting never shortens a longer or open-ended operator hold", async () => {
+    await writeAccountHold(env.DB, ACCOUNT.name, { until: null, seenAt, kind: "hold", reason: "r" });
+    expect(await writeObservedAccountLimit(env.DB, ACCOUNT.name, "2026-11-01T00:00:00.000Z", seenAt, undefined, "spend_cap", NOW)).toBe(false);
+    expect(await readOneAccountLimit(env.DB, ACCOUNT.name)).toEqual({ until: null, seenAt, kind: "hold", reason: "r" });
+
+    await writeAccountHold(env.DB, ACCOUNT.name, { until: "2026-10-20T00:00:00.000Z", seenAt, kind: "hold" });
+    expect(await writeObservedAccountLimit(env.DB, ACCOUNT.name, "2026-11-01T00:00:00.000Z", seenAt, undefined, "spend_cap", NOW)).toBe(true);
+    expect((await readOneAccountLimit(env.DB, ACCOUNT.name))?.kind).toBe("spend_cap");
+  });
+
+  it("writeObservedAccountLimit: a window sighting is written once the hold has expired", async () => {
+    await writeAccountHold(env.DB, ACCOUNT.name, { until: "2026-10-01T00:00:00.000Z", seenAt, kind: "spend_cap" });
+    const wrote = await writeObservedAccountLimit(env.DB, ACCOUNT.name, "2026-10-10T12:00:00.000Z", seenAt, undefined, undefined, NOW);
+    expect(wrote).toBe(true);
+    expect(await readOneAccountLimit(env.DB, ACCOUNT.name)).toEqual({ until: "2026-10-10T12:00:00.000Z", seenAt });
   });
 });

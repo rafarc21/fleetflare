@@ -59,7 +59,7 @@ import {
   type Activity, type ActivityStorage, type FrameVerdict, type HookHeartbeat,
 } from "./activity";
 import {
-  LIMIT_SIGHTING_KEY, type LimitSighting,
+  LIMIT_SIGHTING_KEY, type LimitSighting, type AccountLimitKind,
   accountBurnStateKey, encodeAccountBurnState, decodeAccountBurnState,
 } from "./rate-limit";
 import type { ClaudeAccount } from "./accounts";
@@ -89,7 +89,7 @@ import { getFlag, setFlag } from "../state";
 // Issue #141 — the D1 read/write half moved to its own module so
 // src/studio/routes.ts can reach it without pulling in do.ts's own
 // "@cloudflare/sandbox" import (see account-limits-store.ts's own header).
-import { readFleetAccountLimits, writeFleetAccountLimit } from "./account-limits-store";
+import { readFleetAccountLimits, writeObservedAccountLimit } from "./account-limits-store";
 // Issue #238 (step 3) — the D1 read half of fleet-wide headroom usage, same
 // sandbox-free-module boundary as account-limits-store.ts just above.
 import { readFleetAccountUsage } from "./account-usage-store";
@@ -6979,8 +6979,11 @@ export class StudioDO extends Sandbox<Env> {
       // header), wired here where `this.env.DB` already lives.
       accountLimits: {
         read: () => readFleetAccountLimits(this.env.DB, resolveClaudeAccounts(this.env)),
-        write: (name: string, until: string | null, seenAt: string, dead?: true) =>
-          writeFleetAccountLimit(this.env.DB, name, until, seenAt, dead),
+        // Issue #336: a spend-cap sighting writes a held row; a window
+        // sighting never shortens an active hold.
+        write: async (name: string, until: string | null, seenAt: string, dead?: true, kind?: AccountLimitKind) => {
+          await writeObservedAccountLimit(this.env.DB, name, until, seenAt, dead, kind, new Date());
+        },
       },
       // Issue #131 (Stage B): fleet-wide per-account 5h burn, same D1-backed
       // shape/reasoning as accountLimits just above, read only on the borrow

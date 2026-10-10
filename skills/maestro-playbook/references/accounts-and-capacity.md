@@ -23,6 +23,12 @@
   standing in for that external tool's output must be captured from the REAL
   tool, never hand-invented — three bugs in a row traced back to one invented
   fixture shape that didn't match what the real tool actually emits.
+- **An org monthly spend cap is not a window.** "You've hit your org's
+  monthly spend limit" does not reset at the 5h/7d mark. Failover marks the
+  slot KIND `spend_cap`, held until the next UTC month start; `fleet accounts
+  sync` never clears it. Once an admin raises the cap, free it with `fleet
+  accounts clear <slot>`. Hold a slot by hand with `fleet accounts hold <slot>
+  [--until ISO] [--reason TEXT]`. Both verbs are audited.
 - **`--fresh-session` is for NEW tasks on parked studios only.** After an
   involuntary account replacement, `--fresh-session` discards a potentially
   large session; a plain provision resumes it instead. Reach for
