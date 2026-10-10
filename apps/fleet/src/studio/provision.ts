@@ -89,6 +89,16 @@ import { rescuePushPrelude, formatRescueStamp, type RescuePushOptions, type Resc
 // nothing about the existing field changes.
 export interface ProvisionDeps extends InstallCacheRestoreDeps {
   sbExec: (cmd: string, env?: Record<string, string>) => Promise<{ code: number; stdout: string; stderr: string }>;
+  /**
+   * Issue #333: laid over the role env on every BRINGUP_CMD exec, never
+   * persisted with it -- `CLAUDE_CODE_OAUTH_TOKEN` of the account the row
+   * records as launched (do.ts recordedLaunchEnv). Bring-up pins the tmux
+   * session to it, so the lead runs on the account limits are charged to,
+   * whatever token an earlier failover left in a reused session. Read at
+   * exec time: a cold start records its account before bring-up runs.
+   * Absent, or `{}`: the container's own env decides, as before.
+   */
+  launchEnv?: () => Promise<Record<string, string>>;
   recordStudio: (status: StudioStatus) => Promise<void>;
   now: () => string;
   /**
@@ -2675,7 +2685,8 @@ export async function runProvision(
     let adoption = cfg.freshSession ? null : await adoptBeforeBringup(deps, cfg.repo);
 
     const bringupRes = await deps.sbExec(
-      BRINGUP_CMD, cfg.freshSession ? { ...resolved.bringupEnv, FLEET_FRESH_SESSION: "1" } : resolved.bringupEnv,
+      BRINGUP_CMD,
+      { ...resolved.bringupEnv, ...(cfg.freshSession ? { FLEET_FRESH_SESSION: "1" } : {}), ...(await deps.launchEnv?.()) },
     );
     if (bringupRes.code !== 0) {
       throw new Error(`bring-up failed (${bringupRes.code}): ${bringupRes.stderr.slice(0, 500)}`);
@@ -3088,7 +3099,7 @@ async function bringUpAndVerify(
   deps: ProvisionDeps, roleEnv: RoleEnv | StudioEnv, repo: string | null, isStudio: boolean,
   onAdoption: (a: SessionAdoption) => void = () => {},
 ): Promise<void> {
-  const bringupRes = await deps.sbExec(BRINGUP_CMD, roleEnv);
+  const bringupRes = await deps.sbExec(BRINGUP_CMD, { ...roleEnv, ...(await deps.launchEnv?.()) });
   // Issue #146: reported BEFORE the exit check and the verify, so an attempt
   // that adopted and then failed (non-zero exit, or verification) still
   // counts — the retry's own adopt sees the copy and says "root" (#185 review).
@@ -3342,9 +3353,13 @@ function adoptionRecord(a: SessionAdoption | null): StudioStatus["sessionAdoptio
  * lambda handing `env` over AS the bag still type-checks and silently drops
  * it: claude relaunches with an empty system prompt and tool policy (PR #120
  * review). test/studio.worktree-session.test.ts pins that line.
+ *
+ * `launchEnv` (#333): the switched account's token, laid over the role env.
+ * Bring-up pins the tmux session to the token it is handed, so a relaunch
+ * without it would put the lead back on the account the switch just left.
  */
 export async function relaunchBringup(
-  exec: ExecFn, roleEnv: RoleEnv | StudioEnv, studioId: string,
+  exec: ExecFn, roleEnv: RoleEnv | StudioEnv, studioId: string, launchEnv: Record<string, string> = {},
 ): Promise<ExecResult> {
   const repo = parseStudioId(studioId)?.repo ?? null;
   if (repo !== null) {
@@ -3353,7 +3368,7 @@ export async function relaunchBringup(
       console.log(`studio ${studioId}: failover relaunch adopted worktree session ${adoption.sessionId} from ${adoption.fromKey}`);
     }
   }
-  return exec(BRINGUP_CMD, roleEnv);
+  return exec(BRINGUP_CMD, { ...roleEnv, ...launchEnv });
 }
 
 /**

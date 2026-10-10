@@ -36,7 +36,7 @@ import {
 } from "./rpc-failure";
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
 import { FRESH_SESSION_REFUSED_PREFIX } from "./provision";
-import { resolveClaudeAccounts, accountLabel } from "./accounts";
+import { resolveClaudeAccounts, accountLabel, claudeAccountVarName, MAX_CLAUDE_ACCOUNTS } from "./accounts";
 import {
   writeFleetAccountLimit, clearFleetAccountLimit, readOneAccountLimit, writeAccountHold,
 } from "./account-limits-store";
@@ -479,7 +479,8 @@ export async function handleStudio(
    *     rolls over, once an admin has raised it.
    *
    * Both are audited: one `events` row (from "operator", to "accounts", kind
-   * "decision", ref = slot) naming what changed.
+   * "decision", ref = slot) naming what changed. `name` is the secret name
+   * or a bare slot number (issue #333).
    */
   if (url.pathname === "/studio/accounts/hold" || url.pathname === "/studio/accounts/clear") {
     if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
@@ -491,7 +492,10 @@ export async function handleStudio(
     } catch {
       return new Response("bad json body", { status: 400 });
     }
-    const name = body.name;
+    // Issue #333: a bare slot number ("4") names CLAUDE_CODE_OAUTH_TOKEN_4;
+    // "1" names the unsuffixed CLAUDE_CODE_OAUTH_TOKEN.
+    const name = typeof body.name === "string" && /^[1-9]$/.test(body.name)
+      && Number(body.name) <= MAX_CLAUDE_ACCOUNTS ? claudeAccountVarName(Number(body.name)) : body.name;
     if (typeof name !== "string" || !resolveClaudeAccounts(env).some((a) => a.name === name)) {
       return new Response("\"name\" must be a configured account slot", { status: 400 });
     }

@@ -882,6 +882,16 @@ export function detectLimitOnScreen(screen: string, now?: Date, sighting?: Limit
 // ---------------------------------------------------------------------------
 
 /**
+ * Issue #333: the env a relaunch hands bring-up -- the switched account's
+ * token under the name claude reads. Bring-up pins the tmux session to it
+ * (container/studio-bringup.sh's claude-launch step), so the relaunched lead
+ * runs on the account the row records. Env, never argv or typed text.
+ */
+export function launchTokenEnv(token: string): Record<string, string> {
+  return { CLAUDE_CODE_OAUTH_TOKEN: token };
+}
+
+/**
  * Move the studio to the next account (its token in `$FLEET_TOKEN`) WITHOUT ever answering the modal.
  *
  * NOTHING HERE TOUCHES THE DIALOG. Issue #53 is explicit about why: the
@@ -1088,7 +1098,12 @@ export interface FailoverDeps {
    * for the launch cwd", the exact failure mode ("No conversation found to
    * continue", claude exits) a resume flag would otherwise inherit here.
    */
-  relaunch(): Promise<{ code: number; stdout: string; stderr: string }>;
+  /**
+   * `launchEnv` (#333): `launchTokenEnv(token)` of the account just switched
+   * to. Bring-up pins the tmux session token to the one in ITS env -- without
+   * this, the container's own, i.e. the account the switch just left.
+   */
+  relaunch(launchEnv?: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }>;
   notify(message: string): Promise<void>;
   /** Issue #354: called once after a COMPLETED switch is recorded, with the
    *  new account — the DO re-derives its in-memory start config from it, so
@@ -1716,7 +1731,7 @@ async function handBack(
   const from = existing.borrowedAccount ?? null;
   const switchRes = await deps.exec(accountSwitchCmd(), tokenEnv(ownPrimary.token));
   const relaunchRes = switchRes.code === 0
-    ? await deps.relaunch()
+    ? await deps.relaunch(launchTokenEnv(ownPrimary.token))
     : { code: switchRes.code, stdout: "", stderr: switchRes.stderr };
   const failed = switchRes.code !== 0 || relaunchRes.code !== 0;
   const show = deps.display ?? ((name: string) => name);
@@ -2983,7 +2998,7 @@ export async function runAccountFailover(
   // exit code and stderr (container output, scrubbed) are.
   const switchRes = await deps.exec(accountSwitchCmd(), tokenEnv(next.token));
   const relaunchRes = switchRes.code === 0
-    ? await deps.relaunch()
+    ? await deps.relaunch(launchTokenEnv(next.token))
     : { code: switchRes.code, stdout: "", stderr: switchRes.stderr };
   // Issue #123: same rule across the switch execs. A destroy that landed
   // meanwhile refused them; recording that as a failed switch would put

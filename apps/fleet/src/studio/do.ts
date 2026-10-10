@@ -3816,6 +3816,20 @@ export async function recordLaunchedAccount(
 }
 
 /**
+ * Issue #333: the env every bring-up is handed (ProvisionDeps.launchEnv) --
+ * the RECORDED launched account's token, the same readback constructorLaunch
+ * makes. Bring-up pins the tmux session to it, so the lead runs on the
+ * account the failover tick charges limits to. Not `envVars`: provision
+ * re-derives those from TODAY's map even over a running container. No
+ * record, or its secret is gone: `{}`, and the container's own env decides.
+ */
+export function recordedLaunchEnv(env: Env, row: StudioStatus | undefined): Record<string, string> {
+  const recorded = typeof row?.launchedAccount === "string" ? row.launchedAccount : null;
+  const on = recorded === null ? undefined : resolveClaudeAccounts(env).find((a) => a.name === recorded);
+  return on === undefined ? {} : { CLAUDE_CODE_OAUTH_TOKEN: on.token };
+}
+
+/**
  * #292 r2: the StudioDO constructor's start config. A DO can restart while
  * its container keeps running, and onStart can then fire again: re-deriving
  * the account from TODAY's map would record the map, not what runs. So the
@@ -6012,6 +6026,8 @@ export class StudioDO extends Sandbox<Env> {
     const opsRepo = resolveOpsRepo(this.env);
     return {
       sbExec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env }),
+      // Issue #333: bring-up pins the tmux session to the recorded account.
+      launchEnv: async () => recordedLaunchEnv(this.env, await this.ctx.storage.get<StudioStatus>(STATUS_KEY)),
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
       now: () => new Date().toISOString(),
       fetchBlueprintFile: async (repo: string, path: string, ref: string) =>
@@ -7015,11 +7031,11 @@ export class StudioDO extends Sandbox<Env> {
         const spawnToken = await loadOrMintSpawnToken(this.ctx.storage);
         ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, this.selfId(), spawnToken, name));
       },
-      relaunch: async () => {
+      relaunch: async (launchEnv?: Record<string, string>) => {
         const roleEnv = (await this.ctx.storage.get<RoleEnv | StudioEnv>(ROLE_ENV_KEY)) ?? null;
         if (!roleEnv) return { code: 1, stdout: "", stderr: NO_ROLE_ENV_ERROR };
         // Issue #116: adopt a worktree-keyed session first, then BRINGUP_CMD.
-        return relaunchBringup((cmd, env) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env }), roleEnv, this.selfId());
+        return relaunchBringup((cmd, env) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env }), roleEnv, this.selfId(), launchEnv);
       },
       // Issue #210, ask 3 — the exact "operator ran `fleet destroy --park`"
       // verb (routes.ts's own `destroy` route, `park=true`), rescue-first

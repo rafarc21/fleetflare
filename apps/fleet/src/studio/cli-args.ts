@@ -407,11 +407,11 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   },
   "accounts-hold": {
     args: "hold <slot> [--until <ISO>] [--reason <text>]",
-    summary: "Issue #336: mark one account slot limited fleet-wide (KIND hold) until --until, or until `fleet accounts clear`. No studio launches or fails over onto it meanwhile; `fleet accounts sync` never clears or shortens it. Audited in the events log.",
+    summary: "Issue #336: mark one account slot limited fleet-wide (KIND hold) until --until, or until `fleet accounts clear`. <slot> is a slot number (4) or secret name (CLAUDE_CODE_OAUTH_TOKEN_4); slot 1 is CLAUDE_CODE_OAUTH_TOKEN. No studio launches or fails over onto it meanwhile; `fleet accounts sync` never clears or shortens it. Audited in the events log.",
   },
   "accounts-clear": {
     args: "clear <slot>",
-    summary: "Issue #336: delete one slot's limit row, whatever it holds (window, spend_cap, hold, dead) — the way to free an org monthly spend cap once an admin has raised it. Audited in the events log.",
+    summary: "Issue #336: delete one slot's limit row, whatever it holds (window, spend_cap, hold, dead) — the way to free an org monthly spend cap once an admin has raised it, or a limit charged to the wrong slot (issue #333: `sync` skips that freshest row). <slot> is a slot number (4) or secret name. Audited in the events log.",
   },
 };
 

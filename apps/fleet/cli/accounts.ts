@@ -455,8 +455,10 @@ export async function cmdAccountsHold(
   creds: Credentials, name: string, until: string | null, reason: string | null,
 ): Promise<void> {
   try {
-    await postAccountsVerb(creds, "hold", { name, ...(until ? { until } : {}), ...(reason ? { reason } : {}) });
-    console.log(`fleet accounts hold: ${name} held until ${until ?? "cleared"}${reason ? ` (${reason})` : ""}`);
+    const out = (await postAccountsVerb(
+      creds, "hold", { name, ...(until ? { until } : {}), ...(reason ? { reason } : {}) },
+    )) as { name: string };
+    console.log(`fleet accounts hold: ${out.name} held until ${until ?? "cleared"}${reason ? ` (${reason})` : ""}`);
   } catch (err) {
     console.error(errText(err));
     process.exit(1);
@@ -465,8 +467,8 @@ export async function cmdAccountsHold(
 
 export async function cmdAccountsClear(creds: Credentials, name: string): Promise<void> {
   try {
-    const out = (await postAccountsVerb(creds, "clear", { name })) as { cleared: boolean; was: string };
-    console.log(`fleet accounts clear: ${name} ${out.cleared ? `cleared (was ${out.was})` : "had no row (already free)"}`);
+    const out = (await postAccountsVerb(creds, "clear", { name })) as { name: string; cleared: boolean; was: string };
+    console.log(`fleet accounts clear: ${out.name} ${out.cleared ? `cleared (was ${out.was})` : "had no row (already free)"}`);
   } catch (err) {
     console.error(errText(err));
     process.exit(1);

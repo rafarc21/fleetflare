@@ -1094,6 +1094,13 @@ describe("fleet accounts hold|clear", () => {
       .toEqual({ cmd: "accounts-clear", name: "CLAUDE_CODE_OAUTH_TOKEN_2" });
   });
 
+  // Issue #333: a bare slot number passes through; the Worker resolves it.
+  it("hold and clear pass a bare slot number through unchanged", () => {
+    expect(parseCliArgs(["accounts", "hold", "4"]))
+      .toEqual({ cmd: "accounts-hold", name: "4", until: null, reason: null });
+    expect(parseCliArgs(["accounts", "clear", "1"])).toEqual({ cmd: "accounts-clear", name: "1" });
+  });
+
   it("clear refuses a missing slot or extra tokens", () => {
     expect(parseCliArgs(["accounts", "clear"]).cmd).toBe("usage");
     expect(parseCliArgs(["accounts", "clear", "S", "T"]).cmd).toBe("usage");
