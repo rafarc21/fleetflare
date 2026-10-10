@@ -72,25 +72,46 @@ function normalizeExpr(s: string): string {
   return s.replace(/\s+/g, "");
 }
 
-/** True when `s` contains a comma outside any bracket/paren/brace/string —
- *  the shape a `export const A = 1, B = 2;` multi-declaration's captured
- *  value text would have. Used to skip that ambiguous case entirely. */
-function hasTopLevelComma(s: string): boolean {
-  let depth = 0;
+/** The single copy of the quote-walking logic, shared by hasTopLevelComma,
+ *  extractBalanced and firstArgText. Walks `text` from `from`: enters quote
+ *  state on `"`, `'` and `` ` `` (the whole backtick span — including any
+ *  `${...}` substitution inside it — is walked as opaque string content;
+ *  not tracking substitutions is a known, characterized limitation, not a
+ *  bug to fix here), and inside quotes skips the char after a backslash.
+ *  Every other char is handed to `onChar`, which owns its own bracket-depth
+ *  policy and returns an index to stop the walk there (that index becomes
+ *  the return value), or nothing to keep walking. Returns null when the
+ *  walk never stopped. */
+function walkTopLevel(
+  text: string,
+  from: number,
+  onChar: (c: string, i: number) => number | void,
+): number | null {
   let quote: string | null = null;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
     if (quote) {
       if (c === "\\") { i++; continue; }
       if (c === quote) quote = null;
       continue;
     }
     if (c === '"' || c === "'" || c === "`") { quote = c; continue; }
+    const stop = onChar(c, i);
+    if (stop !== undefined) return stop;
+  }
+  return null;
+}
+
+/** True when `s` contains a comma outside any bracket/paren/brace/string —
+ *  the shape a `export const A = 1, B = 2;` multi-declaration's captured
+ *  value text would have. Used to skip that ambiguous case entirely. */
+function hasTopLevelComma(s: string): boolean {
+  let depth = 0;
+  return walkTopLevel(s, 0, (c, i) => {
     if (c === "(" || c === "[" || c === "{") depth++;
     else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (c === "," && depth === 0) return true;
-  }
-  return false;
+    else if (c === "," && depth === 0) return i;
+  }) !== null;
 }
 
 /**
@@ -102,22 +123,11 @@ function hasTopLevelComma(s: string): boolean {
  */
 function extractBalanced(text: string, start: number): { argText: string; endIndex: number } | null {
   let depth = 1;
-  let quote: string | null = null;
-  for (let i = start; i < text.length; i++) {
-    const c = text[i];
-    if (quote) {
-      if (c === "\\") { i++; continue; }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") { quote = c; continue; }
+  const endIndex = walkTopLevel(text, start, (c, i) => {
     if (c === "(") depth++;
-    else if (c === ")") {
-      depth--;
-      if (depth === 0) return { argText: text.slice(start, i), endIndex: i };
-    }
-  }
-  return null;
+    else if (c === ")" && --depth === 0) return i;
+  });
+  return endIndex === null ? null : { argText: text.slice(start, endIndex), endIndex };
 }
 
 interface CallMatch {
@@ -128,26 +138,70 @@ interface CallMatch {
   line: number;
 }
 
+/** The one copy of the line-number calc (`text.slice(0, index).split("\n")`
+ *  .length — the count of lines up to and including `index`), so every
+ *  finder reports lines through the same idiom. */
+function lineOf(text: string, index: number): number {
+  return text.slice(0, index).split("\n").length;
+}
+
+/** How one detector's calls look to `scanCalls`: `open` is the global regex
+ *  whose match ends right after the candidate call's opening `(`;
+ *  `name(m)` reports the CallMatch's name for a kept candidate; `accept`,
+ *  when present, sees each candidate's balanced-arg result and either
+ *  returns the one field `scanCalls` honors — the call's own closing-paren
+ *  index, possibly extended, e.g. past a `.text()` suffix — or null to
+ *  silently skip the candidate, the same conservative
+ *  skip-as-ambiguity-avoidance rule every detector here follows. A skipped
+ *  candidate is still scanned PAST (lastIndex moves on to its closing
+ *  paren): its argument text must not be re-matched, e.g. a `Bun.file(`
+ *  sitting inside a skipped candidate's own string literal. */
+interface CallMatcher {
+  open: RegExp;
+  name: (m: RegExpExecArray) => string;
+  accept?: (m: RegExpExecArray, bal: { argText: string; endIndex: number }) => { end: number } | null;
+}
+
+/** The single scanning core behind every call finder here (findCalls,
+ *  findExpectToBeCalls, findBunFileTextCalls) — the one place the
+ *  quote-walking logic (walkTopLevel, via extractBalanced) and the
+ *  line-number calc (lineOf) get applied to call finding. Per candidate:
+ *  one regex-exec loop, one quote-aware balanced-arg extraction, and
+ *  `lastIndex` advanced past the kept call's `end` so a kept call's own
+ *  text is never rescanned. Unbalanced text (extractBalanced null) is a
+ *  silent conservative skip — never a throw, never a flag. */
+function scanCalls(text: string, matcher: CallMatcher): CallMatch[] {
+  const results: CallMatch[] = [];
+  const re = matcher.open;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const bal = extractBalanced(text, m.index + m[0].length);
+    if (!bal) continue;
+    const kept: Partial<CallMatch> | null = matcher.accept ? matcher.accept(m, bal) : {};
+    if (kept === null) {
+      re.lastIndex = bal.endIndex + 1;
+      continue;
+    }
+    const end = kept.end ?? bal.endIndex;
+    results.push({
+      name: matcher.name(m),
+      argText: bal.argText,
+      start: m.index,
+      end,
+      line: lineOf(text, m.index),
+    });
+    re.lastIndex = end + 1;
+  }
+  return results;
+}
+
 /** Finds every call to one of `names` (word-boundary before the name),
  *  extracting its paren-depth-balanced argument text. */
 function findCalls(text: string, names: string[]): CallMatch[] {
-  const results: CallMatch[] = [];
-  const re = new RegExp(`\\b(${names.map(escapeRegex).join("|")})\\(`, "g");
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    const argStart = m.index + m[0].length;
-    const bal = extractBalanced(text, argStart);
-    if (!bal) continue;
-    results.push({
-      name: m[1],
-      argText: bal.argText,
-      start: m.index,
-      end: bal.endIndex,
-      line: text.slice(0, m.index).split("\n").length,
-    });
-    re.lastIndex = bal.endIndex + 1;
-  }
-  return results;
+  return scanCalls(text, {
+    open: new RegExp(`\\b(${names.map(escapeRegex).join("|")})\\(`, "g"),
+    name: (m) => m[1],
+  });
 }
 
 /**
@@ -204,17 +258,10 @@ function parseImports(text: string): Map<string, { modulePath: string; exportedN
 }
 
 function findExpectToBeCalls(text: string): Array<{ line: number; ident: string; argText: string }> {
-  const results: Array<{ line: number; ident: string; argText: string }> = [];
-  const re = /\bexpect\(\s*([A-Za-z_$][\w$]*)\s*\)\.toBe\(/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    const argStart = m.index + m[0].length;
-    const bal = extractBalanced(text, argStart);
-    if (!bal) continue;
-    results.push({ line: text.slice(0, m.index).split("\n").length, ident: m[1], argText: bal.argText });
-    re.lastIndex = bal.endIndex + 1;
-  }
-  return results;
+  return scanCalls(text, {
+    open: /\bexpect\(\s*([A-Za-z_$][\w$]*)\s*\)\.toBe\(/g,
+    name: (m) => m[1],
+  }).map((cm) => ({ line: cm.line, ident: cm.name, argText: cm.argText }));
 }
 
 /** The declared RHS text of `export const <exportedName> = ...;` in
@@ -262,20 +309,12 @@ export function findTautologies(
  *  don't get mistaken for the outer call's argument separator). */
 function firstArgText(argText: string): string {
   let depth = 0;
-  let quote: string | null = null;
-  for (let i = 0; i < argText.length; i++) {
-    const c = argText[i];
-    if (quote) {
-      if (c === "\\") { i++; continue; }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") { quote = c; continue; }
+  const comma = walkTopLevel(argText, 0, (c, i) => {
     if (c === "(" || c === "[" || c === "{") depth++;
     else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (c === "," && depth === 0) return argText.slice(0, i);
-  }
-  return argText;
+    else if (c === "," && depth === 0) return i;
+  });
+  return comma === null ? argText : argText.slice(0, comma);
 }
 
 /** The effective `src/`-segment path literal fed to a read call's first
@@ -421,31 +460,22 @@ export function findSourceReading(text: string): Hit[] {
 }
 
 /** `Bun.file(path).text()` — a distinct chained-call shape from the plain
- *  `readFileSync`/`readFile` calls `findCalls` already handles. */
+ *  `readFileSync`/`readFile` calls `findCalls` already handles. The
+ *  `.text()` lookahead lives in the matcher's accept hook: a candidate
+ *  without `.text()` within the 10 chars after its close paren is skipped
+ *  (but still scanned past, via its own `end`), and a kept one's `end` is
+ *  extended over the `.text()` suffix so the match covers the whole idiom. */
 function findBunFileTextCalls(text: string): CallMatch[] {
-  const results: CallMatch[] = [];
-  const re = /\bBun\.file\(/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    const argStart = m.index + m[0].length;
-    const bal = extractBalanced(text, argStart);
-    if (!bal) continue;
-    const after = text.slice(bal.endIndex + 1, bal.endIndex + 1 + 10);
-    const textCall = after.match(/^\s*\.text\(\)/);
-    if (textCall) {
-      results.push({
-        name: "Bun.file",
-        argText: bal.argText,
-        start: m.index,
-        end: bal.endIndex + 1 + textCall[0].length - 1,
-        line: text.slice(0, m.index).split("\n").length,
-      });
-      re.lastIndex = bal.endIndex + 1 + textCall[0].length;
-    } else {
-      re.lastIndex = bal.endIndex + 1;
-    }
-  }
-  return results;
+  return scanCalls(text, {
+    open: /\bBun\.file\(/g,
+    name: () => "Bun.file",
+    accept: (_m, bal) => {
+      const after = text.slice(bal.endIndex + 1, bal.endIndex + 1 + 10);
+      const textCall = after.match(/^\s*\.text\(\)/);
+      if (!textCall) return null;
+      return { end: bal.endIndex + 1 + textCall[0].length - 1 };
+    },
+  });
 }
 
 /** Detector 3: `vi.mock`/`jest.mock`/`mock.module` pointed at one of this
@@ -461,7 +491,7 @@ export function findOwnModuleMocks(
   while ((m = re.exec(text))) {
     const spec = m[1];
     if (!spec.startsWith(".")) continue; // bare specifier — a system boundary, never flagged
-    const line = text.slice(0, m.index).split("\n").length;
+    const line = lineOf(text, m.index);
     const resolved = resolveRelative(testDir, spec, cache);
     if (!resolved) continue;
     if (!/\/src\//.test(resolved.path.replace(/\\/g, "/"))) continue;

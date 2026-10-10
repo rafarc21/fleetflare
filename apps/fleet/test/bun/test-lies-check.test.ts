@@ -464,3 +464,194 @@ describe("the CLI exit code (#174) — Phase 2's real failing-gate contract", ()
     }
   });
 });
+
+// #323 — characterization of the quote/escape/bracket-depth walking that
+// findCalls/findExpectToBeCalls/extractBalanced/firstArgText do inline today,
+// BEFORE it is merged behind one scanCalls core. These pin CURRENT behavior
+// (including its known limitations), not ideal behavior: the refactor must
+// keep every one of these passing. All through public detectors — the walkers
+// are private, and the public interface is the test surface (deep-modules).
+//
+// Some cases come in pairs: the shape named by the plan (often the real
+// join(...)/template-literal repo idiom) plus a "discriminator" companion
+// whose in-string , ( ) \ sits where a quote-blind walk would actually
+// mis-balance and change the output — verified against a quote-handling-
+// stripped copy of the script (kept in /tmp, never the repo file): the
+// companion shapes produce 0 hits there but 1 hit on the real code, so they
+// are the ones that make the quote walk load-bearing.
+describe("quote/escape/bracket-depth walking (characterization, #323)", () => {
+  test("escaped quote inside a read path string does not break arg extraction", () => {
+    // `readFileSync('src/f\'oo.ts', 'utf8')` — the escape-skip must keep the
+    // string open past the inner quote so the args still balance.
+    const text = [
+      "const t = readFileSync('src/f\\'oo.ts', 'utf8');",
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    // Pins current behavior: the WALK keeps the string whole (hence the
+    // hit), but pathLiteralOf's quote-class literal regex cuts the reported
+    // path at the escaped quote — the detail carries "src/f\", not the full
+    // "src/f\'oo.ts" the case might naively expect.
+    expect(hits[0].detail).toContain("src/f\\");
+  });
+
+  test("an escaped ) in a path string does not close the call's args early (escape-skip discriminator)", () => {
+    // `readFileSync('src/x\)', 'utf8')` — without the escape-skip the walk
+    // sees a raw ) one char in, extractBalanced returns a truncated arg text
+    // that pathLiteralOf cannot read a path out of, and the read is
+    // silently dropped (conservative skip, 0 hits). The escape-skip is what
+    // keeps the args balanced up to the call's real closing paren.
+    const text = [
+      "const t = readFileSync('src/x\\)', 'utf8');",
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("src/x\\)");
+  });
+
+  test("commas and brackets inside a string in a join(...) first arg are not argument separators", () => {
+    // The joined literal "../../src/a,[b.ts" carries both a comma and an
+    // unbalanced [ — neither may be seen by the bracket-depth walk.
+    const text = [
+      'const t = readFileSync(join(import.meta.dir, "../../src/a,[b.ts"), "utf8");',
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("../../src/a,[b.ts");
+  });
+
+  test("a bare path literal with a comma and bracket inside is not cut at the string's comma (firstArgText discriminator)", () => {
+    // `readFileSync("src/a,[b.ts", "utf8")` — if firstArgText saw the comma
+    // inside the string, the first argument would end mid-literal at
+    // `"src/a` with no closing quote, pathLiteralOf would find no path, and
+    // the hit would vanish. The string-skipping in the walk is what keeps
+    // the whole literal as one argument.
+    const text = [
+      'const t = readFileSync("src/a,[b.ts", "utf8");',
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("src/a,[b.ts");
+  });
+
+  test("template-literal read path with ${} keeps its full text", () => {
+    // The whole backtick span is walked as opaque string content — the ${}
+    // inside is never entered, so the call's args still close on the real
+    // paren. This is the documented walker limitation #323 must preserve.
+    const text = [
+      'const t = readFileSync(`src/${name}.ts`, "utf8");',
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("src/${name}.ts");
+  });
+
+  test("a ( inside a template literal's ${} is skipped like any other quote content", () => {
+    // `src/${join(base, name)}.ts` — the plan's documented limitation: the
+    // quote machine does NOT track ${} inside template literals, so the
+    // parens and comma of the nested call inside ${} are opaque string
+    // content; the read call's args still close on the real paren and the
+    // full literal text (parens and all) is kept.
+    const text = [
+      'const t = readFileSync(`src/${join(base, name)}.ts`, "utf8");',
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("src/${join(base, name)}.ts");
+  });
+
+  test("a comma inside a template literal is not a top-level argument separator", () => {
+    // Discriminating companion to the two template-literal cases above: with
+    // the backtick arm of the quote machine deleted, the template contents
+    // count as code and the in-template comma splits the first argument —
+    // 0 hits on that mutant, 1 hit on the real code. Without a case like
+    // this, the backtick flavor of the quote walk is unpinned: all other
+    // template cases keep passing on a backtick-blind core.
+    const text = [
+      'const t = readFileSync(`src/a, b.ts`, "utf8");',
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].detail).toContain("src/a, b.ts");
+  });
+
+  test("a string containing ) inside nested call args does not close the call early", () => {
+    // `readFileSync(join(a, "src/x(1).ts"), "utf8")` — the ( and ) inside
+    // the literal must not perturb the paren-depth walk closing the nested
+    // join and the outer readFileSync on their real parens.
+    const text = [
+      'const t = readFileSync(join(a, "src/x(1).ts"), "utf8");',
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("src/x(1).ts");
+  });
+
+  test("a bare first-arg string containing ) does not close the call early (extractBalanced discriminator)", () => {
+    // `readFileSync("src/x).ts", "utf8")` — if extractBalanced saw the )
+    // inside the string, the call would "close" mid-literal, the arg text
+    // would end at `"src/x` with no closing quote, no path could be
+    // extracted, and the hit would vanish. Quote-awareness is what keeps
+    // the args balanced up to the real closing paren.
+    const text = [
+      'const t = readFileSync("src/x).ts", "utf8");',
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("src/x).ts");
+  });
+
+  test("multi-line call args: hit line number is the call's opening line", () => {
+    // The line is computed from the call NAME's index, not from where the
+    // args happen to close — the read opens on line 1, its literal sits on
+    // line 2, and the hit must report the opening line.
+    const text = [
+      "const t = readFileSync(",
+      '  "src/foo.ts",',
+      '  "utf8");',
+      'expect(t).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+  });
+
+  test("expect(...).toBe with a ) inside the asserted string does not end the args early", () => {
+    // `S` declared as "a)b" and asserted as "a)b" IS the restated-value
+    // tautology shape: extractBalanced must keep the string whole so the
+    // asserted arg text is seen in full and the hit lands on the expect
+    // line — a quote-blind walk closes the args at `"a` and the mismatch
+    // silently drops the finding.
+    const fx = new Fixture();
+    try {
+      fx.writeModule("src/s.ts", 'export const S = "a)b";\n');
+      const testText = [
+        'import { S } from "../src/s";',
+        'expect(S).toBe("a)b");',
+      ].join("\n");
+      const hits = findTautologies(testText, fx.testDir);
+      expect(hits).toHaveLength(1);
+      expect(hits[0].kind).toBe("tautological");
+      expect(hits[0].line).toBe(2);
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
