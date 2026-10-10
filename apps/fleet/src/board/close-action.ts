@@ -8,13 +8,22 @@
 // Since issue #55 the terminal transition does the close; this function
 // closes directly only when no transition can run.
 
-import type { Env } from "../env";
 import { transitionTask, type BoardApi } from "./board";
-import { appendEvent } from "../events/log";
+import { appendEvent, type D1Port } from "../events/log";
 import { makeEvent } from "../events/schema";
-import type { CloseOutcome } from "./close-outcome";
 
-export type { CloseOutcome } from "./close-outcome";
+// Board issue #157's build constraint is closed by this file itself:
+// `CloseOutcome` lives HERE now (the old close-outcome.ts leaf shim is
+// deleted), because both things that ever forced it out are gone — this
+// file's `Env` parameter, whose type reached Durable Object classes no
+// non-Workers tsconfig project can name, and `events/log.ts`'s named
+// `D1Database` signatures, which this file's runtime import would have
+// dragged in anyway. `closeTaskOnPromote`
+// takes a structural `D1Port` (from events/log.ts, which this file already
+// imported at runtime) instead of `Env`, so no workers-types-only global
+// name reaches the non-Workers tsconfig projects (cli/, test-integration/,
+// test/bun) that import this module's types through src/studio/task-reap.ts.
+export type CloseOutcome = "closed" | "already-closed" | "no-op";
 
 export interface CloseEvidence {
   /** The commit that proves this task's work landed on the default branch —
@@ -108,10 +117,10 @@ export interface CloseOnPromoteResult {
  *    nothing was falsely marked done, and the caller sees the real failure.
  */
 export async function closeTaskOnPromote(
-  env: Env, api: BoardApi, repo: string, issueNumber: number, evidence: CloseEvidence, now: number = Date.now(),
+  db: D1Port, api: BoardApi, repo: string, issueNumber: number, evidence: CloseEvidence, now: number = Date.now(),
 ): Promise<CloseOnPromoteResult> {
   const eventId = `gh_close_${repo}_${issueNumber}_${evidence.sha}`;
-  const already = await env.DB.prepare(`SELECT 1 FROM events WHERE id = ?`).bind(eventId).first();
+  const already = await db.prepare(`SELECT 1 FROM events WHERE id = ?`).bind(eventId).first();
   if (already) {
     // This evidence was already processed -- but a dedup record existing
     // does NOT prove GitHub's own issue ever closed (see this function's
@@ -175,6 +184,6 @@ export async function closeTaskOnPromote(
     now, crypto.randomUUID().slice(0, 8),
   );
   marker.id = eventId;
-  await appendEvent(env.DB, marker);
+  await appendEvent(db, marker);
   return { ok: true, outcome };
 }
