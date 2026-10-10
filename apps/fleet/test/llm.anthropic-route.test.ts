@@ -41,10 +41,14 @@ let ctx: ReturnType<typeof fakeCtx>;
 
 async function usageRows() {
   const res = await env.DB.prepare(
-    "SELECT studio_id AS studioId, mode, model, input_tokens AS inputTokens, output_tokens AS outputTokens, ok, error FROM junior_usage_log ORDER BY ts ASC",
-  ).all<{ studioId: string; mode: string; model: string; inputTokens: number; outputTokens: number; ok: number; error: string | null }>();
+    "SELECT studio_id AS studioId, mode, model, input_tokens AS inputTokens, output_tokens AS outputTokens, ok, error, duration_ms AS durationMs, attempts FROM junior_usage_log ORDER BY ts ASC",
+  ).all<{ studioId: string; mode: string; model: string; inputTokens: number; outputTokens: number; ok: number; error: string | null; durationMs: number | null; attempts: number | null }>();
   return res.results ?? [];
 }
+
+// Issue #335: every fixture env retries with a 1ms backoff base, so a test
+// whose env.AI.run always throws a retryable error stays fast.
+const FAST_RETRY = { LEAD_AI_RETRY_BASE_MS: "1" } as Partial<Env>;
 
 async function setup(
   aiResult: unknown = { choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } },
@@ -54,7 +58,7 @@ async function setup(
   const token = mintSpawnToken();
   const rows = async () => [row(ME, await hashSpawnToken(token), leadType)];
   const run = vi.fn(async () => aiResult);
-  const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...envOverrides } as unknown as Env;
+  const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...FAST_RETRY, ...envOverrides } as unknown as Env;
   return { token, rows, run, e };
 }
 
@@ -497,8 +501,8 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
       const run = vi.fn(async () => upstream);
       const token = mintSpawnToken();
       const rows = async () => [row(ME, await hashSpawnToken(token))];
-      const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...envOverrides } as unknown as Env;
-      return { token, rows, e };
+      const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...FAST_RETRY, ...envOverrides } as unknown as Env;
+      return { token, rows, e, run };
     })();
   }
   const partial = () => new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`);
@@ -656,6 +660,161 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
     const stored = (await usageRows())[0].error!;
     expect(stored.length).toBeLessThanOrEqual(300);
     expect(stored.startsWith("ai_run_error 500 api_error: xxx")).toBe(true);
+  });
+});
+
+describe("handleFleetAnthropicMessages — pre-stream retry and call duration (issue #335)", () => {
+  // The live shape: Workers AI throws this from inside env.AI.run, before any
+  // stream exists.
+  const TIMEOUT_504 = "AiError: 3046: Request timeout";
+  const okReply = { choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } };
+  function failThen(messages: string[], then: unknown) {
+    let n = 0;
+    return vi.fn(async () => {
+      if (n < messages.length) throw new Error(messages[n++]);
+      return then;
+    });
+  }
+
+  it("a 504 (3046 Request timeout) is retried and the second attempt's reply is returned", async () => {
+    const { token, rows, e } = await setup();
+    const run = failThen([TIMEOUT_504], okReply);
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    expect(run).toHaveBeenCalledTimes(2);
+    await ctx.drain();
+    const logged = await usageRows();
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({ ok: 1, error: null, attempts: 2 });
+  });
+
+  it("a 529 overloaded (capacity) error is retried too", async () => {
+    const { token, rows, e } = await setup();
+    const run = failThen(["AiError: capacity exceeded"], okReply);
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up after 2 retries (3 attempts) and returns the last 504, recording attempts=3", async () => {
+    const { token, rows, e } = await setup();
+    const run = vi.fn(async () => { throw new Error(TIMEOUT_504); });
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(504);
+    expect(run).toHaveBeenCalledTimes(3);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, attempts: 3, error: `ai_run_error 504 api_error: ${TIMEOUT_504}` });
+  });
+
+  it("a 4xx-mapped error is never retried (context overflow 400, rate limit 429)", async () => {
+    for (const message of ["This model's maximum context length is 32768 tokens", "AiError: rate limit reached"]) {
+      const { token, rows, e } = await setup();
+      const run = vi.fn(async () => { throw new Error(message); });
+      (e.AI as { run: unknown }).run = run;
+      const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+      expect(r.status).toBeLessThan(500);
+      expect(run).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("a generic 500 is not retried — only 504/529 are", async () => {
+    const { token, rows, e } = await setup();
+    const run = vi.fn(async () => { throw new Error("AiError: something else broke"); });
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(500);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("streaming: a pre-stream 504 is retried, then the stream is served normally", async () => {
+    const chunk = (c: unknown) => `data: ${JSON.stringify(c)}\n\n`;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          chunk({ choices: [{ delta: { content: "hi" } }] }) +
+          chunk({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 1 } }) +
+          "data: [DONE]\n\n",
+        ));
+        controller.close();
+      },
+    });
+    const { token, rows, e } = await setup();
+    const run = failThen([TIMEOUT_504], upstream);
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    expect(text).toContain("event: message_stop");
+    expect(run).toHaveBeenCalledTimes(2);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 1, attempts: 2, inputTokens: 5, outputTokens: 1 });
+  });
+
+  it("streaming: a failure after the first byte is never retried", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`)); },
+      pull() { throw new Error(TIMEOUT_504); },
+    });
+    const { token, rows, e } = await setup();
+    const run = vi.fn(async () => upstream);
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await r.text();
+    expect(text).toContain("event: error");
+    expect(run).toHaveBeenCalledTimes(1);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, attempts: 1 });
+  });
+
+  it("records call duration (ms) and attempts=1 on a first-try success, streaming and not", async () => {
+    const { token, rows, e } = await setup();
+    await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    await ctx.drain();
+    const [row0] = await usageRows();
+    expect(row0.attempts).toBe(1);
+    expect(Number.isInteger(row0.durationMs)).toBe(true);
+    expect(row0.durationMs!).toBeGreaterThanOrEqual(0);
+  });
+
+  it("duration covers the backoff between attempts", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_AI_RETRY_BASE_MS: "40" } as Partial<Env>);
+    (e.AI as { run: unknown }).run = failThen([TIMEOUT_504], okReply);
+    await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    await ctx.drain();
+    // Jitter keeps the first delay within [base/2, base] = [20, 40] ms.
+    expect((await usageRows())[0].durationMs!).toBeGreaterThanOrEqual(20);
+  });
+});
+
+describe("runAiWithRetry / leadAiRetryBaseMs (issue #335)", () => {
+  it("delays are jittered exponential backoff within [base*2^n/2, base*2^n]", async () => {
+    const { runAiWithRetry } = await import("../src/llm/anthropic-route");
+    const delays: number[] = [];
+    const run = vi.fn(async () => { throw new Error("AiError: 3046: Request timeout"); });
+    for (const random of [0, 0.999]) {
+      delays.length = 0;
+      await expect(runAiWithRetry(run, { baseMs: 100, random: () => random, sleep: async (ms) => { delays.push(ms); } }))
+        .rejects.toMatchObject({ attempts: 3 });
+      if (random === 0) expect(delays).toEqual([50, 100]);
+      else expect(delays.map(Math.round)).toEqual([100, 200]);
+    }
+  });
+
+  it("returns the value and attempt count on success", async () => {
+    const { runAiWithRetry } = await import("../src/llm/anthropic-route");
+    const result = await runAiWithRetry(async () => "ok", { baseMs: 1, sleep: async () => {} });
+    expect(result).toEqual({ value: "ok", attempts: 1 });
+  });
+
+  it("a garbage LEAD_AI_RETRY_BASE_MS falls back to the default", async () => {
+    const { leadAiRetryBaseMs, LEAD_AI_RETRY_BASE_MS_DEFAULT } = await import("../src/llm/anthropic-route");
+    expect(LEAD_AI_RETRY_BASE_MS_DEFAULT).toBe(500);
+    expect(leadAiRetryBaseMs({})).toBe(500);
+    expect(leadAiRetryBaseMs({ LEAD_AI_RETRY_BASE_MS: "nope" })).toBe(500);
+    expect(leadAiRetryBaseMs({ LEAD_AI_RETRY_BASE_MS: "250" })).toBe(250);
   });
 });
 

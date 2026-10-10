@@ -29,6 +29,10 @@ export interface JuniorUsageRow {
    *  status/message (anthropic-route.ts's `failureReason`), never prompt or
    *  response text. Absent on ok rows. */
   error?: string;
+  /** Issue #335: wall time of the call in ms (glm-lead route only). */
+  durationMs?: number;
+  /** Issue #335: env.AI.run attempts the call took, 1 = no retry. */
+  attempts?: number;
 }
 
 /** Single INSERT, one row per /fleet/junior call. Never throws on its own —
@@ -40,28 +44,39 @@ export interface JuniorUsageRow {
  *  a row without one keeps the original column list, so ok rows never depend
  *  on that migration. If the column is missing anyway (Worker deployed before
  *  `migrate:remote` ran), the failure row is retried without it — the call
- *  is still counted, only its reason is lost. */
+ *  is still counted, only its reason is lost.
+ *
+ *  Issue #335: same rule for migration 0006's `duration_ms`/`attempts`. The
+ *  fallbacks drop the newest migration's columns first, so a database that
+ *  has 0005 but not 0006 still keeps the error reason. */
 export async function insertJuniorUsage(db: D1Database, row: JuniorUsageRow): Promise<void> {
-  const base = [row.id, row.ts, row.studioId, row.mode, row.model, row.inputTokens, row.outputTokens, row.ok ? 1 : 0];
-  const legacy = () => db
-    .prepare(
-      `INSERT INTO junior_usage_log (id, ts, studio_id, mode, model, input_tokens, output_tokens, ok)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(...base)
-    .run();
-  if (row.error === undefined) { await legacy(); return; }
-  try {
-    await db
-      .prepare(
-        `INSERT INTO junior_usage_log (id, ts, studio_id, mode, model, input_tokens, output_tokens, ok, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(...base, row.error)
-      .run();
-  } catch (e) {
-    if (!/no such column|has no column/i.test(e instanceof Error ? e.message : String(e))) throw e;
-    await legacy();
+  const base: [string, unknown][] = [
+    ["id", row.id], ["ts", row.ts], ["studio_id", row.studioId], ["mode", row.mode], ["model", row.model],
+    ["input_tokens", row.inputTokens], ["output_tokens", row.outputTokens], ["ok", row.ok ? 1 : 0],
+  ];
+  const v0005: [string, unknown][] = row.error === undefined ? [] : [["error", row.error]];
+  const v0006: [string, unknown][] = [
+    ...(row.durationMs === undefined ? [] : [["duration_ms", row.durationMs] as [string, unknown]]),
+    ...(row.attempts === undefined ? [] : [["attempts", row.attempts] as [string, unknown]]),
+  ];
+  // Newest schema first; each fallback is tried only if it differs.
+  const shapes = [[...base, ...v0005, ...v0006], [...base, ...v0005], base]
+    .filter((cols, i, all) => i === 0 || cols.length !== all[i - 1].length);
+  for (let i = 0; i < shapes.length; i++) {
+    const cols = shapes[i];
+    try {
+      await db
+        .prepare(
+          `INSERT INTO junior_usage_log (${cols.map(([c]) => c).join(", ")})
+           VALUES (${cols.map(() => "?").join(", ")})`,
+        )
+        .bind(...cols.map(([, v]) => v))
+        .run();
+      return;
+    } catch (e) {
+      const missingColumn = /no such column|has no column/i.test(e instanceof Error ? e.message : String(e));
+      if (!missingColumn || i === shapes.length - 1) throw e;
+    }
   }
 }
 

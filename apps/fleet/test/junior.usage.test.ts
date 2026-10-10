@@ -81,6 +81,56 @@ describe("insertJuniorUsage — failure reason (issue #302)", () => {
   });
 });
 
+describe("insertJuniorUsage — call duration and attempts (issue #335)", () => {
+  it("stores duration_ms and attempts; both NULL when absent", async () => {
+    await insertJuniorUsage(env.DB, { id: "d1", ts: 1, studioId: ME, mode: "lead", model: "m", inputTokens: 1, outputTokens: 1, ok: true, durationMs: 1234, attempts: 2 });
+    await insertJuniorUsage(env.DB, { id: "d2", ts: 2, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: false, error: "x", durationMs: 9, attempts: 3 });
+    await insertJuniorUsage(env.DB, { id: "d3", ts: 3, studioId: ME, mode: "edit", model: "m", inputTokens: 1, outputTokens: 1, ok: true });
+    const res = await env.DB.prepare("SELECT id, error, duration_ms AS durationMs, attempts FROM junior_usage_log ORDER BY ts")
+      .all<{ id: string; error: string | null; durationMs: number | null; attempts: number | null }>();
+    expect(res.results).toEqual([
+      { id: "d1", error: null, durationMs: 1234, attempts: 2 },
+      { id: "d2", error: "x", durationMs: 9, attempts: 3 },
+      { id: "d3", error: null, durationMs: null, attempts: null },
+    ]);
+  });
+
+  function missingColumnDb(missing: string[]) {
+    const sqls: string[] = [];
+    const db = {
+      prepare(sql: string) {
+        sqls.push(sql);
+        return {
+          bind: () => ({
+            run: async () => {
+              const cols = sql.slice(sql.indexOf("(") + 1, sql.indexOf(")"));
+              const gone = missing.find((c) => cols.split(/\s*,\s*/).includes(c));
+              if (gone) throw new Error(`D1_ERROR: table junior_usage_log has no column named ${gone}: SQLITE_ERROR`);
+              return {};
+            },
+          }),
+        };
+      },
+    } as unknown as D1Database;
+    return { db, sqls };
+  }
+
+  it("before migration 0006 lands, the row keeps its error reason (drops only the new columns)", async () => {
+    const { db, sqls } = missingColumnDb(["duration_ms", "attempts"]);
+    await insertJuniorUsage(db, { id: "f1", ts: 1, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: false, error: "no_finish_reason", durationMs: 5, attempts: 1 });
+    expect(sqls).toHaveLength(2);
+    expect(sqls[1]).toContain("error");
+    expect(sqls[1]).not.toContain("duration_ms");
+  });
+
+  it("before migrations 0005 and 0006 land, the call is still counted (legacy columns only)", async () => {
+    const { db, sqls } = missingColumnDb(["error", "duration_ms", "attempts"]);
+    await insertJuniorUsage(db, { id: "f1", ts: 1, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: false, error: "x", durationMs: 5, attempts: 1 });
+    expect(sqls).toHaveLength(3);
+    expect(sqls[2]).not.toMatch(/error|duration_ms|attempts/);
+  });
+});
+
 describe("insertJuniorUsage + aggregateJuniorUsage", () => {
   it("round-trips a single row", async () => {
     await insertJuniorUsage(env.DB, {
