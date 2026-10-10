@@ -11,13 +11,21 @@ import { describe, it, expect, vi } from "vitest";
 import { runShipTickWithObservation, withObserved } from "../src/studio/do";
 import { emptyObserved, OBSERVED_KEY, type BringupVia, type Observed, type ObservedStorage } from "../src/studio/observed";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
-import {
-  SECTION_BOOTID, SECTION_STAT, SECTION_INCARNATION, SECTION_CHUNK, SECTION_TAIL,
-  TRANSCRIPT_BOOT_ID_KEY, TRANSCRIPT_MANIFEST_KEY, type TranscriptStorage,
-} from "../src/studio/transcript";
+import type { TranscriptStorage } from "../src/studio/transcript";
 import { RESTARTS_KEY, recordRestart, restartsInWindow, RESTART_WINDOW_MS, type RestartLog } from "../src/studio/restarts";
 import type { StudioStatus } from "../src/studio/types";
 import { formatRestartCell } from "../cli/restart-format";
+
+// Wire-format literals (markers/paths/keys are the container↔Worker protocol,
+// pinned here as literals so these asserts fail when the builder drifts —
+// same convention test/studio.observation-tick.test.ts:33-34 established).
+const SECTION_BOOTID = "---FLEET-BOOTID---";
+const SECTION_STAT = "---FLEET-STAT---";
+const SECTION_INCARNATION = "---FLEET-INCARNATION---";
+const SECTION_CHUNK = "---FLEET-CHUNK---";
+const SECTION_TAIL = "---FLEET-TAIL---";
+const TRANSCRIPT_BOOT_ID_KEY = "transcriptBootId";
+const TRANSCRIPT_MANIFEST_KEY = "transcriptManifest";
 
 const TOK = "11111111-2222-3333-4444-555555555555";
 const T0 = "2026-09-29T10:00:00.000Z";

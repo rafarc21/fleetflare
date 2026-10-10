@@ -14,7 +14,7 @@ import {
 } from "../src/studio/do";
 import { emptyObserved, getObserved, isUnreachable, OBSERVED_KEY, type Observed, type ObservedStorage } from "../src/studio/observed";
 import { STATUS_KEY, OPERATION_KEY, type OperationInFlight, type StudioStorage } from "../src/studio/provision";
-import { SECTION_ACTIVITY_HOOK, type TranscriptStorage, type ShipDeps } from "../src/studio/transcript";
+import type { TranscriptStorage, ShipDeps } from "../src/studio/transcript";
 import type { StudioStatus } from "../src/studio/types";
 import { SessionBusyError } from "../src/studio/sandbox-api";
 import { readyOverride } from "../cli/readiness-format";
@@ -32,6 +32,7 @@ function b64Utf8(s: string): string {
 
 const SECTION_PANE_MARKER = "---FLEET-PANE---";
 const SECTION_MEMGUARD_MARKER = "---FLEET-MEMGUARD---";
+const SECTION_ACTIVITY_HOOK = "---FLEET-ACTIVITY-HOOK---";
 
 /** A minimal idle pane: no `✻` status line, straight into the idle input box. */
 const IDLE_PANE = ["⏺ Done.", "", "─".repeat(68), "❯ ", "─".repeat(68), "  ⏵⏵ bypass permissions on (shift+tab to cycle)"].join("\n");

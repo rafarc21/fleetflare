@@ -9,7 +9,12 @@ import type { SyncResult } from "../src/studio/session-sync";
 import { ACTIVITY_KEY, type Activity } from "../src/studio/activity";
 import { MEMBER_ALERTS_KEY, type MemberAlert } from "../src/studio/member-alerts";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
-import { SECTION_PANE, type TranscriptStorage, type ShipDeps } from "../src/studio/transcript";
+import type { TranscriptStorage, ShipDeps } from "../src/studio/transcript";
+
+// Wire-format literal (marker is container↔Worker protocol, pinned here so
+// this assert fails when the builder drifts — same convention
+// test/studio.observation-tick.test.ts:33-34 established).
+const SECTION_PANE = "---FLEET-PANE---";
 
 // Issue #85, maestro correction #1. `withObserved` is the seam every
 // StudioStatus leaving a StudioDO passes through on its way to D1
