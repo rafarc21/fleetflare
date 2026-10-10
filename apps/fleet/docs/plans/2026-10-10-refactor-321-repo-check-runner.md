@@ -45,10 +45,11 @@ export interface RepoCheckOpts<F> {
   scanFile: (path: string, text: string) => F[];   // per-file hits
   allowlist: Record<string, string>;                // whole-file exemptions
   format: (path: string, hit: F) => string;        // one finding's line
-  stream: "stdout" | "stderr";                     // findings + summary stream
-  summarize: (findings: Array<F & { path: string }>) => string; // final line(s)
+  stream: "stdout" | "stderr";                     // findings + failSummary stream
+  failSummary: (findings: Array<F & { path: string }>) => string; // printed to stream when findings exist
+  cleanLine: (fileCount: number | string | undefined) => string;  // printed to stdout when none
   cleanExit: number;                               // exit code with no findings
-  fileCount?: (root: string) => number | string;   // test-lies-check's "across N test files"
+  fileCount?: (listed: string[]) => number | string; // test-lies-check's "across N test files"
 }
 export async function runRepoCheck<F>(opts: RepoCheckOpts<F>): Promise<number>;
 ```
@@ -57,10 +58,14 @@ export async function runRepoCheck<F>(opts: RepoCheckOpts<F>): Promise<number>;
 listTestFiles call test-lies-check's main used for counting), reads each
 selected non-allowlisted file, skips binaries (NUL byte) for text-decoding
 safety in both scripts, calls `scanFile`, prints each
-`format(path, hit)` to `opts.stream`, then on findings prints
-`summarize(findings)` and returns the exit code; zero findings prints
-nothing extra beyond what `summarize([])` yields and returns
-`opts.cleanExit`. The `import.meta.main` block of each script becomes:
+`format(path, hit)` to `opts.stream`; on findings it also prints
+`failSummary(findings)` to `opts.stream` and returns 1, with zero
+findings it prints `cleanLine(fileCount)` to stdout (always stdout —
+both scripts' clean/summary output is stdout; english-check's findings
+are stderr but its clean line is stdout; test-lies-check's count line
+prints on both paths, so it supplies it as both `cleanLine` and
+`failSummary`) and returns `opts.cleanExit`. The `import.meta.main`
+block of each script becomes:
 
 ```ts
 process.exit(await runRepoCheck({ ...scriptOpts }));
