@@ -139,8 +139,8 @@ interface CallMatch {
 }
 
 /** The one copy of the line-number calc (`text.slice(0, index).split("\n")`
- *  .length — the count of lines up to and including `index`), which every
- *  finder used to recompute inline before the scanCalls merge. */
+ *  .length — the count of lines up to and including `index`), so every
+ *  finder reports lines through the same idiom. */
 function lineOf(text: string, index: number): number {
   return text.slice(0, index).split("\n").length;
 }
