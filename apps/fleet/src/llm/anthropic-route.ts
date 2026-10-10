@@ -12,8 +12,8 @@
 // Scope of THIS file: route + translation only (see translate.ts for every
 // actual shape conversion). The admission-gate bypass, container env wiring
 // (`lead: glm`, no CLAUDE_CODE_OAUTH_TOKEN) and burn/usage accounting are a
-// separate, later change on top of this one — this route does not read or
-// write any D1 usage row yet.
+// separate, later change on top of this one. (Since then: usage rows via
+// logUsage below, and issue #335's pre-stream retry via runAiWithRetry.)
 import type { Env } from "../env";
 import { readCappedBody } from "../http/capped-body";
 import { isSpawnTokenShaped, resolveSpawnParent, type SpawnParent } from "../studio/spawn";
@@ -105,6 +105,55 @@ export const LEAD_STREAM_IDLE_MS_DEFAULT = 90_000;
  *  timeout. */
 export function leadStreamIdleMs(env: { LEAD_STREAM_IDLE_MS?: string }): number {
   return parsePositiveInt(env.LEAD_STREAM_IDLE_MS, LEAD_STREAM_IDLE_MS_DEFAULT);
+}
+
+/** Issue #335: Workers AI throws `504 3046 Request timeout` (and the 529
+ *  capacity shape) from inside env.AI.run, BEFORE any stream exists — the
+ *  idle timer above never arms. Measured 2026-10-10 at up to 17% of calls.
+ *  Those two statuses are retried up to LEAD_AI_MAX_RETRIES times; every
+ *  other status (4xx, generic 500) goes back to the client unchanged. A
+ *  retry only ever re-runs env.AI.run itself, so nothing is retried once a
+ *  byte has gone to the client. */
+export const LEAD_AI_MAX_RETRIES = 2;
+const RETRYABLE_STATUSES = new Set([504, 529]);
+
+/** Base backoff before retry n (0-based): `base * 2^n`, jittered down to
+ *  half — 500ms gives [250,500] then [500,1000], at most 1.5s added to a
+ *  call that would otherwise cost Claude Code a whole failed turn. */
+export const LEAD_AI_RETRY_BASE_MS_DEFAULT = 500;
+
+/** `LEAD_AI_RETRY_BASE_MS` (env.ts), same parsePositiveInt rule as
+ *  leadStreamIdleMs. */
+export function leadAiRetryBaseMs(env: { LEAD_AI_RETRY_BASE_MS?: string }): number {
+  return parsePositiveInt(env.LEAD_AI_RETRY_BASE_MS, LEAD_AI_RETRY_BASE_MS_DEFAULT);
+}
+
+/** The last env.AI.run failure, plus how many attempts were spent. */
+export class AiRunError extends Error {
+  constructor(message: string, readonly attempts: number) { super(message); }
+}
+
+/** env.AI.run with issue #335's pre-stream retry. Resolves to the first
+ *  successful value and the attempt count; rejects with AiRunError carrying
+ *  the last upstream message. `sleep`/`random` are injectable for tests. */
+export async function runAiWithRetry<T>(
+  run: () => Promise<T>,
+  opts: { baseMs: number; sleep?: (ms: number) => Promise<void>; random?: () => number },
+): Promise<{ value: T; attempts: number }> {
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const random = opts.random ?? Math.random;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return { value: await run(), attempts: attempt };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (attempt > LEAD_AI_MAX_RETRIES || !RETRYABLE_STATUSES.has(classifyAiError(message).status)) {
+        throw new AiRunError(message, attempt);
+      }
+      const ceiling = opts.baseMs * 2 ** (attempt - 1);
+      await sleep(ceiling / 2 + random() * (ceiling / 2));
+    }
+  }
 }
 
 const IDLE = Symbol("idle");
@@ -339,12 +388,16 @@ const USAGE_MODE = "lead";
  *  FAILURE_REASON_CAP, whitespace collapsed to one line) in the row's `error`
  *  column and writes ONE console.error line for `wrangler tail` — ids,
  *  counts and the reason only, never prompt or response text. Before this,
- *  an upstream stall left `ok=0` rows with no reason and empty tail logs. */
+ *  an upstream stall left `ok=0` rows with no reason and empty tail logs.
+ *
+ *  Issue #335: every row also carries the call's wall time (`startedAt` to
+ *  now, retry backoff included) and its env.AI.run attempt count. */
 function logUsage(
   env: Env, ctx: ExecutionContext, studioId: string,
-  call: { stream: boolean; inputTokens: number; outputTokens: number; ok: boolean; failure?: string },
+  call: { stream: boolean; inputTokens: number; outputTokens: number; ok: boolean; failure?: string; startedAt: number; attempts: number },
 ): void {
-  const { stream, inputTokens, outputTokens, ok } = call;
+  const { stream, inputTokens, outputTokens, ok, attempts } = call;
+  const durationMs = Math.max(0, Math.round(Date.now() - call.startedAt));
   const error = ok || call.failure === undefined
     ? undefined
     : call.failure.replace(/\s+/g, " ").slice(0, FAILURE_REASON_CAP);
@@ -355,7 +408,7 @@ function logUsage(
   }
   ctx.waitUntil(insertJuniorUsage(env.DB, {
     id: crypto.randomUUID(), ts: Date.now(), studioId, mode: USAGE_MODE, model: GLM_LEAD_MODEL,
-    inputTokens, outputTokens, ok, ...(error === undefined ? {} : { error }),
+    inputTokens, outputTokens, ok, ...(error === undefined ? {} : { error }), durationMs, attempts,
   }).catch(() => {}));
 }
 
@@ -409,16 +462,26 @@ export async function handleFleetAnthropicMessages(
   // the call boundary into this one.
   if (!ai) return text("not found", 404);
 
-  if (body.stream === true) {
-    let upstream: Json;
-    try {
-      upstream = await ai.run(GLM_LEAD_MODEL, openaiBody);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      const { status, type, message: overrideMessage } = classifyAiError(message);
-      logUsage(env, ctx, studio.id, { stream: true, inputTokens: 0, outputTokens: 0, ok: false, failure: `ai_run_error ${status} ${type}: ${message}` });
-      return json(anthropicErrorBody(type, overrideMessage ?? message), status);
-    }
+  // Issue #335: one clock and one attempt count per call, for both branches.
+  const startedAt = Date.now();
+  const stream = body.stream === true;
+  let upstream: Json;
+  let attempts: number;
+  try {
+    ({ value: upstream, attempts } = await runAiWithRetry(
+      () => ai.run(GLM_LEAD_MODEL, openaiBody), { baseMs: leadAiRetryBaseMs(env) },
+    ));
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    const { status, type, message: overrideMessage } = classifyAiError(message);
+    logUsage(env, ctx, studio.id, {
+      stream, inputTokens: 0, outputTokens: 0, ok: false, failure: `ai_run_error ${status} ${type}: ${message}`,
+      startedAt, attempts: e instanceof AiRunError ? e.attempts : 1,
+    });
+    return json(anthropicErrorBody(type, overrideMessage ?? message), status);
+  }
+
+  if (stream) {
     if (!(upstream instanceof ReadableStream)) {
       // Defensive: the untyped fallback overload's return type is
       // `Promise<Record<string, unknown>>` for a non-streaming call, but
@@ -428,7 +491,7 @@ export async function handleFleetAnthropicMessages(
       // anyway is translated through the non-streaming path rather than
       // crashing on `.getReader()`.
       const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel });
-      logUsage(env, ctx, studio.id, { stream: true, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true });
+      logUsage(env, ctx, studio.id, { stream: true, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
       return json(anthropic, 200);
     }
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -453,27 +516,18 @@ export async function handleFleetAnthropicMessages(
     // logged as `pump_error` rather than dropped without a row.
     ctx.waitUntil(
       pumpAnthropicStream(upstream, writer, id, requestedModel, leadStreamIdleMs(env))
-        .then((result) => logUsage(env, ctx, studio.id, { stream: true, ...result }))
+        .then((result) => logUsage(env, ctx, studio.id, { stream: true, ...result, startedAt, attempts }))
         .catch((e) => logUsage(env, ctx, studio.id, {
           stream: true, inputTokens: 0, outputTokens: 0, ok: false,
-          failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`,
+          failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`, startedAt, attempts,
         }))
         .finally(() => { writer.close().catch(() => {}); }),
     );
     return new Response(readable, { status: 200, headers: { "content-type": "text/event-stream" } });
   }
 
-  let result: Json;
-  try {
-    result = await ai.run(GLM_LEAD_MODEL, openaiBody);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    const { status, type, message: overrideMessage } = classifyAiError(message);
-    logUsage(env, ctx, studio.id, { stream: false, inputTokens: 0, outputTokens: 0, ok: false, failure: `ai_run_error ${status} ${type}: ${message}` });
-    return json(anthropicErrorBody(type, overrideMessage ?? message), status);
-  }
-  const anthropic = openAIResponseToAnthropic(result, { model: requestedModel });
-  logUsage(env, ctx, studio.id, { stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true });
+  const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel });
+  logUsage(env, ctx, studio.id, { stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
   return json(anthropic, 200);
 }
 

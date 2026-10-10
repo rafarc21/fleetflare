@@ -24,7 +24,8 @@ import {
 import { STATUS_KEY, OPERATION_KEY, watchForDestroy, operationLockFresh, type StudioStorage } from "./provision";
 import { redactSecrets } from "./redact";
 import {
-  RESETS, isResetStale, parseResetUtc, LIMIT_SIGHTING_KEY, type LimitSighting, type RateLimitObservation,
+  RESETS, isResetStale, parseResetUtc, LIMIT_SIGHTING_KEY, startOfNextMonthUtc,
+  type LimitSighting, type RateLimitObservation, type AccountLimitKind,
 } from "./rate-limit";
 import { FLEET_TOKEN_ENV, tokenEnv } from "./credentials";
 import type { StudioStatus, DestroyOutcome } from "./types";
@@ -390,7 +391,12 @@ export type PaneVerdict =
   // options include a spend path, and never carries it.
   // `dead` (issue #141): the org-disabled-subscription message — permanent,
   // never a select modal, never a reset.
-  | { kind: "modal"; headline: string | null; marker: string; resets?: string; inline?: true; dead?: true }
+  // `spendCap` (issue #336): the org's MONTHLY spend cap headline — no
+  // 5h/7d reset ends it (SPEND_CAP_HEADLINE_LINE).
+  | {
+    kind: "modal"; headline: string | null; marker: string; resets?: string; inline?: true; dead?: true;
+    spendCap?: true;
+  }
   // `repainted`: the two captures differed. A static pane with no limit is
   // evidence the limit is gone; a repainting one is evidence of nothing.
   // `stale` (PR #144 review): the inline block at the bottom WOULD have matched
@@ -645,9 +651,22 @@ function anyLiveLimitLineOnScreen(screen: string, now: Date, sighting: LimitSigh
  * be a RATE_LIMIT_MODAL_MARKERS line. Prose quoting the headline has prose
  * under it; a list quoting its options has no frame.
  */
+// Issue #336: the headline may carry a ` · <advice>` tail on its own row
+// (measured 2026-10-10: "· ask your admin to raise it").
 const ORG_HEADLINE_LINE = new RegExp(
-  `^\\s*(│\\s*)?(${RATE_LIMIT_HEADLINES.map(escapeRegExp).join("|")})\\s*│?\\s*$`,
+  `^\\s*(│\\s*)?(${RATE_LIMIT_HEADLINES.map(escapeRegExp).join("|")})(?: · [^│]*?)?\\s*│?\\s*$`,
 );
+/**
+ * Issue #336 — the org MONTHLY SPEND cap headline, start-anchored on its own
+ * row (boxed or not, with or without its ` · <advice>` tail). Not a 5h/7d
+ * window: it carries no reset clause and nothing on the fleet's clock ends
+ * it. The personal "You've hit your monthly spend limit · raise it at …"
+ * inline block is NOT this: it names the session/weekly reset that ends it.
+ */
+const SPEND_CAP_HEADLINE_LINE = /^\s*│?\s*You've hit your org's monthly spend limit(?: · [^│]*?)?\s*│?\s*$/;
+/** How far above a headline-less modal's block start the spend-cap headline
+ *  may sit and still belong to that modal (a blank row and the ▔ rule). */
+const SPEND_CAP_ABOVE_BLOCK_LINES = 3;
 const RATE_LIMIT_OPTIONS_LINE = /^\s*│?\s*(?:Run )?\/rate-limit-options\b/;
 
 function orgLimitModal(lines: string[]): PaneVerdict | null {
@@ -668,7 +687,7 @@ function orgLimitModal(lines: string[]): PaneVerdict | null {
   }
   if (!marker) return null;
   if (!boxed && !after.some((l) => MODAL_FOOTER_LINE.test(l))) return null;
-  return { kind: "modal", headline, marker };
+  return { kind: "modal", headline, marker, ...(SPEND_CAP_HEADLINE_LINE.test(lines[at]) ? { spendCap: true as const } : {}) };
 }
 
 /** The headline-less limit modal at the bottom of the pane, or null. */
@@ -680,11 +699,15 @@ function bottomLimitModal(lines: string[]): PaneVerdict | null {
   const options = lines.slice(start + 1, footer)
     .map((l) => l.match(MODAL_OPTION_LINE)?.[1])
     .filter((o): o is string => o !== undefined);
+  // Issue #336: the spend-cap headline drawn inside this modal's own frame,
+  // just above its question.
+  const spendCap = lines.slice(Math.max(0, start - SPEND_CAP_ABOVE_BLOCK_LINES), footer)
+    .some((l) => SPEND_CAP_HEADLINE_LINE.test(l)) ? { spendCap: true as const } : {};
   if (options.includes(STOP_FOR_LIMIT_OPTION)) {
-    return { kind: "modal", headline: null, marker: STOP_FOR_LIMIT_OPTION };
+    return { kind: "modal", headline: null, marker: STOP_FOR_LIMIT_OPTION, ...spendCap };
   }
   const paid = options.find((o) => o.startsWith("Add funds") || o.startsWith("Upgrade"));
-  if (options.includes("Stop and wait") && paid) return { kind: "modal", headline: null, marker: paid };
+  if (options.includes("Stop and wait") && paid) return { kind: "modal", headline: null, marker: paid, ...spendCap };
   return null;
 }
 
@@ -1198,8 +1221,10 @@ export interface FailoverDeps {
   accountLimits?: {
     read(): Promise<AccountLimits>;
     /** `dead` (issue #141): true only for the org-disabled-subscription
-     *  observation — see rate-limit.ts's RateLimitObservation.dead. */
-    write(name: string, until: string | null, seenAt: string, dead?: true): Promise<void>;
+     *  observation — see rate-limit.ts's RateLimitObservation.dead.
+     *  `kind` (issue #336): "spend_cap" for the org monthly spend cap, whose
+     *  `until` is then the next UTC month start, not the row's printed reset. */
+    write(name: string, until: string | null, seenAt: string, dead?: true, kind?: AccountLimitKind): Promise<void>;
   };
   /**
    * Issue #131 (Stage B) — fleet-wide per-account 5h-window burn, mirrored the
@@ -1576,10 +1601,14 @@ function limitObservation(
   const select = !verdict.inline;
   const until = sighting ? sighting.until : verdict.resets ? parseResetUtc(verdict.resets, now) : null;
   const dead = verdict.dead === true;
-  if (prior && prior.until === until && !!prior.select === select && !!prior.dead === dead) return prior;
+  const spendCap = verdict.spendCap === true;
+  if (
+    prior && prior.until === until && !!prior.select === select && !!prior.dead === dead && !!prior.spendCap === spendCap
+  ) return prior;
   return {
     until, seenAt: sighting?.seenAt ?? now.toISOString(),
     ...(select ? { select: true as const } : {}), ...(dead ? { dead: true as const } : {}),
+    ...(spendCap ? { spendCap: true as const } : {}),
   };
 }
 
@@ -2567,8 +2596,15 @@ export async function runAccountFailover(
   // sighting) whenever the observation actually changed. `from` resolves a
   // never-switched studio's `null` to the real first-account name; an empty
   // fleet (no accounts at all) has no name to mark.
+  // Issue #336: an org MONTHLY spend cap holds the account until the next
+  // UTC month start (or an operator clear) — never the 24h null-until grace,
+  // and never cleared by the usage sync at the next 5h reset.
   if (deps.accountLimits && from !== null && limitChanged) {
-    await deps.accountLimits.write(from, seen.until, seen.seenAt, seen.dead);
+    if (seen.spendCap) {
+      await deps.accountLimits.write(from, startOfNextMonthUtc(deps.now()), seen.seenAt, seen.dead, "spend_cap");
+    } else {
+      await deps.accountLimits.write(from, seen.until, seen.seenAt, seen.dead);
+    }
   }
   // Issue #271: a studio starts at its mapped primary, so accounts before it
   // were never its to try — computed once, reused below for both the

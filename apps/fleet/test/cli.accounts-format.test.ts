@@ -147,10 +147,11 @@ describe("formatAccountsTable", () => {
     expect(formatAccountsTable([], NOW)).toBe("(no accounts configured)");
   });
 
-  it("renders SLOT, LABEL, MATCH, 5H%, 7D%, RESETS, ROW STATE, WOULD", () => {
+  it("renders SLOT, LABEL, MATCH, KIND, 5H%, 7D%, RESETS, ROW STATE, WOULD", () => {
     const out = formatAccountsTable([row({ current: FREE, decision: LIMIT_DECISION, fiveHourPct: 97, sevenDayPct: 40 })], NOW);
     const [header, body] = out.split("\n");
-    expect(header.split(/\s{2,}/)).toEqual(["SLOT", "LABEL", "MATCH", "5H%", "7D%", "RESETS", "ROW STATE", "WOULD"]);
+    expect(header.split(/\s{2,}/)).toEqual(["SLOT", "LABEL", "MATCH", "KIND", "5H%", "7D%", "RESETS", "ROW STATE", "WOULD"]);
+    expect(body).toContain("window");
     expect(body).toContain("CLAUDE_CODE_OAUTH_TOKEN");
     expect(body).toContain("primary@example.com");
     expect(body).toContain("label");
@@ -175,8 +176,8 @@ describe("formatAccountsTable", () => {
     );
     const [, body] = out.split("\n");
     const cells = body!.trim().split(/\s{2,}/);
-    const resets = cells[5]!;
-    const would = cells[7]!;
+    const resets = cells[6]!;
+    const would = cells[8]!;
     expect(resets).toBe(until);
     expect(would).toBe(`limited until ${until}`);
     expect(resets.endsWith("Z")).toBe(true);
@@ -193,7 +194,7 @@ describe("formatAccountsTable", () => {
     const body = out.split("\n")[1]!;
     expect(body).toContain("CLAUDE_CODE_OAUTH_TOKEN_2");
     expect(body).toContain("cswap-missing");
-    expect(body).toMatch(/-\s+cswap-missing\s+-\s+-/); // label "-", MATCH, 5H% "-", 7D% "-"
+    expect(body).toMatch(/-\s+cswap-missing\s+window\s+-\s+-/); // label "-", MATCH, KIND, 5H% "-", 7D% "-"
     expect(body).toContain("free");
     expect(body).toContain("-"); // WOULD: unmanaged never changes anything
   });
@@ -369,5 +370,37 @@ describe("formatCswapUnavailableNote", () => {
 
   it("a reason prints as one 'cswap: <reason>' line", () => {
     expect(formatCswapUnavailableNote("binary not found on PATH")).toBe("cswap: binary not found on PATH");
+  });
+});
+
+// Issue #336 — a held row (org monthly spend cap, operator hold) says so in
+// KIND and ROW STATE, so its % columns never read like a normal window quota,
+// and WOULD says the sync leaves it alone.
+describe("issue #336 — held rows in the accounts table", () => {
+  const SPEND_CAP: AccountCurrentState = {
+    dead: false, until: "2026-11-01T00:00:00.000Z", seenAt: "2026-10-05T10:00:00Z", kind: "spend_cap", reason: null,
+  };
+  const HOLD: AccountCurrentState = { dead: false, until: null, seenAt: "2026-10-05T10:00:00Z", kind: "hold", reason: "admin asked" };
+
+  it("ROW STATE names the hold and its end", () => {
+    expect(describeCurrentState(SPEND_CAP, NOW)).toBe("spend_cap until 2026-11-01T00:00:00.000Z");
+    expect(describeCurrentState(HOLD, NOW)).toBe("hold until cleared (admin asked)");
+  });
+
+  it("an expired spend_cap row reads free, like any passed until", () => {
+    expect(describeCurrentState(SPEND_CAP, new Date("2026-11-01T00:00:01Z"))).toBe("free");
+  });
+
+  it("WOULD says a sync skips a held row, whatever the pct says", () => {
+    expect(describeWould(row({ current: SPEND_CAP, decision: CLEAR_DECISION }), NOW)).toBe("skip (held: spend_cap)");
+    expect(describeWould(row({ current: HOLD, decision: LIMIT_DECISION }), NOW)).toBe("skip (held: hold)");
+  });
+
+  it("KIND reads spend_cap / hold for held rows, window otherwise", () => {
+    const out = formatAccountsTable([
+      row({ current: SPEND_CAP }), row({ name: "CLAUDE_CODE_OAUTH_TOKEN_2", current: HOLD }), row({ name: "CLAUDE_CODE_OAUTH_TOKEN_3" }),
+    ], NOW);
+    const kinds = out.split("\n").slice(1, 4).map((l) => l.split(/\s{2,}/)[3]);
+    expect(kinds).toEqual(["spend_cap", "hold", "window"]);
   });
 });

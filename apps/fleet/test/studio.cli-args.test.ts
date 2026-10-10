@@ -916,7 +916,8 @@ describe("fleet help", () => {
 
   it("derives the short usage from the same table, so the two can never disagree", () => {
     for (const [cmd, help] of Object.entries(VERBS)) {
-      const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory" : cmd.startsWith("accounts-") ? "accounts" : cmd;
+      const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory"
+        : cmd.startsWith("accounts-") ? "accounts" : cmd;
       expect(CLI_USAGE).toContain(`fleet ${name}${help.args ? " " + help.args : ""}`);
     }
     expect(CLI_USAGE).toContain("fleet help");
@@ -1061,18 +1062,47 @@ describe("fleet accounts", () => {
     expect(parseCliArgs(["accounts", "sync", "--write-labels", "--watch"])).toEqual({ cmd: "accounts", sync: true, watch: true, json: false, writeLabels: true });
   });
 
-  // Issue #333: the operator's escape hatch for a wrongly attributed limit row.
-  it("accounts clear <slot> takes exactly one slot", () => {
-    expect(parseCliArgs(["accounts", "clear", "4"])).toEqual({ cmd: "accounts-clear", slot: "4" });
-    expect(parseCliArgs(["accounts", "clear", "CLAUDE_CODE_OAUTH_TOKEN_2"])).toEqual({ cmd: "accounts-clear", slot: "CLAUDE_CODE_OAUTH_TOKEN_2" });
-    expect(parseCliArgs(["accounts", "clear"]).cmd).toBe("usage");
-    expect(parseCliArgs(["accounts", "clear", "4", "5"]).cmd).toBe("usage");
-    expect(parseCliArgs(["accounts", "clear", "--json"]).cmd).toBe("usage");
-  });
-
   it("an unrecognised token is a usage error, not silently ignored", () => {
     expect(parseCliArgs(["accounts", "--fresh"]).cmd).toBe("usage");
     expect(parseCliArgs(["accounts", "sync", "--force"]).cmd).toBe("usage");
     expect(parseCliArgs(["accounts", "nuke"]).cmd).toBe("usage");
+  });
+});
+
+// Issue #336: the operator's manual slot hold and its clear.
+describe("fleet accounts hold|clear", () => {
+  it("hold <slot> alone holds until cleared", () => {
+    expect(parseCliArgs(["accounts", "hold", "CLAUDE_CODE_OAUTH_TOKEN_2"]))
+      .toEqual({ cmd: "accounts-hold", name: "CLAUDE_CODE_OAUTH_TOKEN_2", until: null, reason: null });
+  });
+
+  it("hold takes --until ISO and --reason TEXT, in any order", () => {
+    expect(parseCliArgs(["accounts", "hold", "CLAUDE_CODE_OAUTH_TOKEN_2", "--reason", "org cap", "--until", "2026-11-01T00:00:00Z"]))
+      .toEqual({ cmd: "accounts-hold", name: "CLAUDE_CODE_OAUTH_TOKEN_2", until: "2026-11-01T00:00:00Z", reason: "org cap" });
+  });
+
+  it("hold refuses a missing slot, an unparseable --until, a flag with no value, an unknown flag", () => {
+    expect(parseCliArgs(["accounts", "hold"]).cmd).toBe("usage");
+    expect(parseCliArgs(["accounts", "hold", "--until", "2026-11-01T00:00:00Z"]).cmd).toBe("usage");
+    expect(parseCliArgs(["accounts", "hold", "S", "--until", "tomorrow"]).cmd).toBe("usage");
+    expect(parseCliArgs(["accounts", "hold", "S", "--reason"]).cmd).toBe("usage");
+    expect(parseCliArgs(["accounts", "hold", "S", "--force"]).cmd).toBe("usage");
+  });
+
+  it("clear <slot>", () => {
+    expect(parseCliArgs(["accounts", "clear", "CLAUDE_CODE_OAUTH_TOKEN_2"]))
+      .toEqual({ cmd: "accounts-clear", name: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+  });
+
+  // Issue #333: a bare slot number passes through; the Worker resolves it.
+  it("hold and clear pass a bare slot number through unchanged", () => {
+    expect(parseCliArgs(["accounts", "hold", "4"]))
+      .toEqual({ cmd: "accounts-hold", name: "4", until: null, reason: null });
+    expect(parseCliArgs(["accounts", "clear", "1"])).toEqual({ cmd: "accounts-clear", name: "1" });
+  });
+
+  it("clear refuses a missing slot or extra tokens", () => {
+    expect(parseCliArgs(["accounts", "clear"]).cmd).toBe("usage");
+    expect(parseCliArgs(["accounts", "clear", "S", "T"]).cmd).toBe("usage");
   });
 });

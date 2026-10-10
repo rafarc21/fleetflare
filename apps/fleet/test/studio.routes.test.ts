@@ -29,7 +29,9 @@ import type { SessionSyncDeps, SessionSyncStorage } from "../src/studio/session-
 import { emptyObserved, type Observed } from "../src/studio/observed";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
-import { writeFleetAccountLimit, readFleetAccountLimits, readOneAccountLimit } from "../src/studio/account-limits-store";
+import {
+  writeFleetAccountLimit, readFleetAccountLimits, readOneAccountLimit, writeAccountHold,
+} from "../src/studio/account-limits-store";
 import { readFleetAccountUsage, writeFleetAccountUsage } from "../src/studio/account-usage-store";
 import { resolveClaudeAccounts, selectByHeadroom } from "../src/studio/accounts";
 
@@ -2208,7 +2210,7 @@ describe("GET /studio/accounts", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { name: string; label: string | null; dead: boolean; until: string | null; seenAt: string | null }[];
     expect(body).toEqual([
-      { name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: null, seenAt: null },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: null, seenAt: null, kind: null, reason: null },
     ]);
   });
 
@@ -2223,88 +2225,9 @@ describe("GET /studio/accounts", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { name: string; label: string | null; dead: boolean; until: string | null; seenAt: string | null }[];
     expect(body).toEqual([
-      { name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: null, seenAt: null },
-      { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: null, dead: true, until: null, seenAt },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, until: null, seenAt: null, kind: null, reason: null },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: null, dead: true, until: null, seenAt, kind: null, reason: null },
     ]);
-  });
-});
-
-// Issue #333 — the operator's escape hatch for a limit row charged to the
-// wrong slot. Sync cannot clear it: the wrongly attributed sighting is the
-// FRESHEST row, so sync's own "newer row exists" guard keeps it.
-describe("POST /studio/accounts/clear", () => {
-  const clearReq = (body: unknown) => authorizedReq(
-    "/studio/accounts/clear", { method: "POST", body: JSON.stringify(body) },
-  );
-  const twoAccounts = () => {
-    const { testEnv: base } = envWithFakeStudio();
-    return { ...base, CLAUDE_CODE_OAUTH_TOKEN_2: "test-oauth-2" } as unknown as Env;
-  };
-
-  it("401 without an Access header", async () => {
-    const testEnv = twoAccounts();
-    const res = await handleStudio(
-      new Request("https://x/studio/accounts/clear", { method: "POST", body: JSON.stringify({ slot: "2" }) }),
-      testEnv,
-    );
-    expect(res.status).toBe(401);
-  });
-
-  it("GET is 405", async () => {
-    authorized();
-    const res = await handleStudio(authorizedReq("/studio/accounts/clear"), twoAccounts());
-    expect(res.status).toBe(405);
-  });
-
-  it("clears a FRESH limit row by slot number -- the row sync's newer-row guard would keep", async () => {
-    authorized();
-    const testEnv = twoAccounts();
-    const seenAt = new Date().toISOString();
-    const until = "2026-10-17T00:00:00.000Z";
-    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", until, seenAt);
-
-    const res = await handleStudio(clearReq({ slot: "2" }), testEnv);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ name: "CLAUDE_CODE_OAUTH_TOKEN_2", previous: { until, seenAt } });
-    expect(await readOneAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN_2")).toBeNull();
-  });
-
-  it("accepts the secret name too, and reports previous: null when nothing was recorded", async () => {
-    authorized();
-    const res = await handleStudio(clearReq({ slot: "CLAUDE_CODE_OAUTH_TOKEN" }), twoAccounts());
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ name: "CLAUDE_CODE_OAUTH_TOKEN", previous: null });
-  });
-
-  it("audits every clear: one JSON line naming the slot and what was there, never a token", async () => {
-    authorized();
-    const testEnv = twoAccounts();
-    const seenAt = "2026-10-10T09:00:00.000Z";
-    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", null, seenAt, true);
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    try {
-      await handleStudio(clearReq({ slot: "2" }), testEnv);
-      const lines = log.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("fleet_accounts_clear"));
-      expect(lines).toHaveLength(1);
-      const rec = JSON.parse(lines[0]!);
-      expect(rec).toMatchObject({
-        event: "fleet_accounts_clear", name: "CLAUDE_CODE_OAUTH_TOKEN_2",
-        previous: { until: null, seenAt, dead: true },
-      });
-      expect(typeof rec.at).toBe("string");
-      expect(lines[0]).not.toContain("test-oauth-2");
-    } finally {
-      log.mockRestore();
-    }
-  });
-
-  it("404s an unconfigured slot and 400s a missing one, writing nothing", async () => {
-    authorized();
-    const testEnv = twoAccounts();
-    expect((await handleStudio(clearReq({ slot: "7" }), testEnv)).status).toBe(404);
-    expect((await handleStudio(clearReq({ slot: "CLAUDE_CODE_OAUTH_TOKEN_7" }), testEnv)).status).toBe(404);
-    expect((await handleStudio(clearReq({}), testEnv)).status).toBe(400);
-    expect((await handleStudio(authorizedReq("/studio/accounts/clear", { method: "POST", body: "nope" }), testEnv)).status).toBe(400);
   });
 });
 
@@ -3146,6 +3069,167 @@ describe("POST /studio/accounts/sync", () => {
 
     const usageRows = await readFleetAccountUsage(testEnv.DB, resolveClaudeAccounts(testEnv));
     expect(usageRows["CLAUDE_CODE_OAUTH_TOKEN"]).toEqual({ ...newerUsage, seenAt: usageFetchedAt });
+  });
+});
+
+// Issue #336 — an org MONTHLY spend cap, and the operator's manual hold. A
+// held row (kind spend_cap/hold) is never cleared or shortened by the usage
+// sync; only `fleet accounts clear` (POST /studio/accounts/clear) or the
+// hold's own until ends it. Both operator verbs are audited in `events`.
+describe("issue #336 — held account rows", () => {
+  const USAGE_FETCHED_AT = "2026-10-05T00:00:00.000Z";
+  const FAR = "2099-01-01T00:00:00.000Z";
+  const NAME = "CLAUDE_CODE_OAUTH_TOKEN";
+  type SyncBody = { applied: string[]; rejected: { name: string; reason: string }[]; skipped: { name: string; reason: string }[] };
+  const syncReq = (decisions: unknown[]) => authorizedReq(
+    "/studio/accounts/sync",
+    { method: "POST", body: JSON.stringify({ decisions, usageFetchedAt: USAGE_FETCHED_AT }) },
+  );
+  const post = (path: string, body: unknown) => authorizedReq(path, { method: "POST", body: JSON.stringify(body) });
+  const auditRows = async (db: D1Database) =>
+    (await db.prepare("SELECT from_agent, to_agent, kind, ref, body FROM events WHERE to_agent = 'accounts' ORDER BY ts").all<{
+      from_agent: string; to_agent: string; kind: string; ref: string; body: string;
+    }>()).results ?? [];
+
+  beforeEach(async () => {
+    await env.DB.prepare("DELETE FROM events").run();
+  });
+
+  it("sync clear on an active spend_cap row is skipped — the row survives the 5h reset's low pct", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    await writeAccountHold(testEnv.DB, NAME, { until: FAR, seenAt: "2026-10-01T00:00:00.000Z", kind: "spend_cap" });
+    const res = await handleStudio(syncReq([{ name: NAME, action: "clear", seenAt: USAGE_FETCHED_AT }]), testEnv);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: [], rejected: [], skipped: [{ name: NAME, reason: "held (spend_cap)" }] } satisfies SyncBody);
+    expect((await readOneAccountLimit(testEnv.DB, NAME))?.kind).toBe("spend_cap");
+  });
+
+  it("sync limit on an active operator hold is skipped — never shortened to a window reset", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    await writeAccountHold(testEnv.DB, NAME, { until: null, seenAt: "2026-10-01T00:00:00.000Z", kind: "hold", reason: "r" });
+    const res = await handleStudio(
+      syncReq([{ name: NAME, action: "limit", until: "2026-10-05T05:00:00.000Z", seenAt: USAGE_FETCHED_AT }]), testEnv,
+    );
+    expect(await res.json()).toEqual({ applied: [], rejected: [], skipped: [{ name: NAME, reason: "held (hold)" }] });
+    expect(await readOneAccountLimit(testEnv.DB, NAME)).toEqual({
+      until: null, seenAt: "2026-10-01T00:00:00.000Z", kind: "hold", reason: "r",
+    });
+  });
+
+  it("sync clear on an EXPIRED spend_cap row clears it as before", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    await writeAccountHold(testEnv.DB, NAME, { until: "2026-10-01T00:00:00.000Z", seenAt: "2026-09-20T00:00:00.000Z", kind: "spend_cap" });
+    const res = await handleStudio(syncReq([{ name: NAME, action: "clear", seenAt: USAGE_FETCHED_AT }]), testEnv);
+    expect(await res.json()).toEqual({ applied: [NAME], rejected: [], skipped: [] });
+    expect(await readOneAccountLimit(testEnv.DB, NAME)).toBeNull();
+  });
+
+  it("POST /studio/accounts/hold writes an operator hold (until + reason) and audits it", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(post("/studio/accounts/hold", { name: NAME, until: FAR, reason: "org cap" }), testEnv);
+    expect(res.status).toBe(200);
+    const row = await readOneAccountLimit(testEnv.DB, NAME);
+    expect(row).toMatchObject({ until: FAR, kind: "hold", reason: "org cap" });
+    expect(await auditRows(testEnv.DB)).toEqual([
+      { from_agent: "operator", to_agent: "accounts", kind: "decision", ref: NAME, body: `hold ${NAME} until ${FAR}: org cap` },
+    ]);
+  });
+
+  it("POST /studio/accounts/hold with no until holds until cleared", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    const res = await handleStudio(post("/studio/accounts/hold", { name: NAME }), testEnv);
+    expect(res.status).toBe(200);
+    expect(await readOneAccountLimit(testEnv.DB, NAME)).toMatchObject({ until: null, kind: "hold" });
+    expect((await auditRows(testEnv.DB))[0]?.body).toBe(`hold ${NAME} until cleared`);
+  });
+
+  it("POST /studio/accounts/hold rejects an unknown slot, a bad until, a past until, a non-string reason", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    for (const body of [
+      { name: "CLAUDE_CODE_OAUTH_TOKEN_9" },
+      { name: NAME, until: "not-a-date" },
+      { name: NAME, until: "2020-01-01T00:00:00.000Z" },
+      { name: NAME, reason: 5 },
+    ]) {
+      const res = await handleStudio(post("/studio/accounts/hold", body), testEnv);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+    expect(await readOneAccountLimit(testEnv.DB, NAME)).toBeNull();
+    expect(await auditRows(testEnv.DB)).toEqual([]);
+  });
+
+  it("POST /studio/accounts/clear deletes a spend_cap row and audits it", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    await writeAccountHold(testEnv.DB, NAME, { until: FAR, seenAt: "2026-10-01T00:00:00.000Z", kind: "spend_cap" });
+    const res = await handleStudio(post("/studio/accounts/clear", { name: NAME }), testEnv);
+    expect(res.status).toBe(200);
+    expect(await readOneAccountLimit(testEnv.DB, NAME)).toBeNull();
+    expect(await auditRows(testEnv.DB)).toEqual([
+      { from_agent: "operator", to_agent: "accounts", kind: "decision", ref: NAME, body: `clear ${NAME} (was spend_cap)` },
+    ]);
+  });
+
+  it("POST /studio/accounts/clear rejects an unknown slot; GET on either verb is 405", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    expect((await handleStudio(post("/studio/accounts/clear", { name: "nope" }), testEnv)).status).toBe(400);
+    expect((await handleStudio(authorizedReq("/studio/accounts/clear"), testEnv)).status).toBe(405);
+    expect((await handleStudio(authorizedReq("/studio/accounts/hold"), testEnv)).status).toBe(405);
+  });
+
+  // Issue #333: a bare slot number ("4") names the same slot as its secret
+  // name; slot 1 is the unsuffixed CLAUDE_CODE_OAUTH_TOKEN.
+  const withSlot4 = () => {
+    const { testEnv } = envWithFakeStudio();
+    return { ...testEnv, CLAUDE_CODE_OAUTH_TOKEN_4: "test-oauth-4" } as unknown as Env;
+  };
+
+  it("POST /studio/accounts/hold accepts a bare slot number and audits the full secret name", async () => {
+    authorized();
+    const testEnv = withSlot4();
+    const res = await handleStudio(post("/studio/accounts/hold", { name: "4", until: FAR }), testEnv);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ name: "CLAUDE_CODE_OAUTH_TOKEN_4", kind: "hold", until: FAR, reason: null });
+    expect(await readOneAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN_4")).toMatchObject({ until: FAR, kind: "hold" });
+    expect(await readOneAccountLimit(testEnv.DB, "4")).toBeNull();
+    expect((await auditRows(testEnv.DB))[0]?.ref).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+  });
+
+  it("POST /studio/accounts/clear accepts slot 1 as the unsuffixed secret name", async () => {
+    authorized();
+    const testEnv = withSlot4();
+    await writeAccountHold(testEnv.DB, NAME, { until: FAR, seenAt: "2026-10-01T00:00:00.000Z", kind: "spend_cap" });
+    const res = await handleStudio(post("/studio/accounts/clear", { name: "1" }), testEnv);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ name: NAME, cleared: true, was: "spend_cap" });
+    expect(await readOneAccountLimit(testEnv.DB, NAME)).toBeNull();
+  });
+
+  it("a bare slot number that is unconfigured or out of range is a 400, writing nothing", async () => {
+    authorized();
+    const testEnv = withSlot4();
+    for (const name of ["2", "0", "10", "04", "-1"]) {
+      expect((await handleStudio(post("/studio/accounts/hold", { name }), testEnv)).status, name).toBe(400);
+      expect((await handleStudio(post("/studio/accounts/clear", { name }), testEnv)).status, name).toBe(400);
+    }
+    expect(await auditRows(testEnv.DB)).toEqual([]);
+  });
+
+  it("GET /studio/accounts reports each row's kind and reason", async () => {
+    authorized();
+    const { testEnv } = envWithFakeStudio();
+    await writeAccountHold(testEnv.DB, NAME, { until: FAR, seenAt: "2026-10-01T00:00:00.000Z", kind: "spend_cap" });
+    const res = await handleStudio(authorizedReq("/studio/accounts"), testEnv);
+    expect(await res.json()).toEqual([
+      { name: NAME, label: null, dead: false, until: FAR, seenAt: "2026-10-01T00:00:00.000Z", kind: "spend_cap", reason: null },
+    ]);
   });
 });
 

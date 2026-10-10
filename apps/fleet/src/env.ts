@@ -98,6 +98,12 @@ export interface Env {
    * never disables the timeout.
    */
   LEAD_STREAM_IDLE_MS?: string;
+  /**
+   * Issue #335: base backoff (ms) before the glm-lead route retries a
+   * pre-stream Workers AI 504/529 (default 500 — llm/anthropic-route.ts's
+   * LEAD_AI_RETRY_BASE_MS_DEFAULT). Garbage input falls back to the default.
+   */
+  LEAD_AI_RETRY_BASE_MS?: string;
   /** Workers AI binding (`"ai": { "binding": "AI" }`). Only junior uses it. */
   AI?: { run(model: string, input: unknown): Promise<unknown> };
   /**

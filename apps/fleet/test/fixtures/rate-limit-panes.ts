@@ -286,6 +286,45 @@ export const USAGE_LIMIT_REACHED_PANE = ORG_SPEND_LIMIT_PANE.replace(
   "You've hit your org's monthly spend limit", "Claude usage limit reached               ",
 );
 
+/**
+ * Issue #336, 2026-10-10: the org's MONTHLY SPEND cap. Lead screens showed
+ * "You've hit your org's monthly spend limit · ask your admin to raise it",
+ * then the same /rate-limit-options select. REBUILT, not verbatim-captured:
+ * the headline is the measured text; the frame is ORG_SPEND_LIMIT_PANE's.
+ * No reset clause — nothing but an admin (or the month rolling over) ends it.
+ */
+export const ORG_SPEND_CAP_TAIL_PANE = [
+  "⏺ Read(docs/release.md)",
+  "  ⎿  Read 42 lines",
+  "",
+  "╭──────────────────────────────────────────────────────────────────────────╮",
+  "│ You've hit your org's monthly spend limit · ask your admin to raise it   │",
+  "│                                                                          │",
+  "│ Run /rate-limit-options to see what you can do.                          │",
+  "│                                                                          │",
+  "│ ❯ 1. Upgrade your plan                                                   │",
+  "│   2. Not now                                                             │",
+  "╰──────────────────────────────────────────────────────────────────────────╯",
+].join("\n");
+
+/** Issue #336: the same measured headline drawn in V1's ▔-ruled select frame
+ *  (claude 2.1.281's builder shape) — no /rate-limit-options row, so only
+ *  bottomLimitModal sees the modal; the headline above it still marks it a
+ *  spend cap. REBUILT. */
+export const ORG_SPEND_CAP_RULED_PANE = [
+  "⏺ Running the migration dry-run before the release.",
+  "",
+  "▔".repeat(120),
+  "   You've hit your org's monthly spend limit · ask your admin to raise it",
+  "",
+  "   What do you want to do?",
+  "",
+  "   ❯ 1. Stop and wait for limit to reset",
+  "     2. Upgrade your plan",
+  "",
+  "   Enter to confirm · Esc to cancel",
+].join("\n");
+
 // --- must NOT be detected ---------------------------------------------------
 // Letters match the PR #102 review brief. Each is an IDLE lead (static pane)
 // whose own output talks about the limit.

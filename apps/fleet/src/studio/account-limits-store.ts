@@ -8,8 +8,8 @@
  * no do.ts" boundary accounts.ts's own header states for itself.
  */
 import { getFlag, setFlag, deleteFlag } from "../state";
-import { accountLimitStateKey, encodeAccountLimitState, decodeAccountLimitState } from "./rate-limit";
-import type { AccountLimitState } from "./rate-limit";
+import { accountLimitStateKey, encodeAccountLimitState, decodeAccountLimitState, accountHoldActive } from "./rate-limit";
+import type { AccountLimitState, AccountLimitKind } from "./rate-limit";
 import type { AccountLimits, ClaudeAccount } from "./accounts";
 
 /**
@@ -28,7 +28,14 @@ export async function readFleetAccountLimits(db: D1Database, accounts: ClaudeAcc
     // just `until` — accounts.ts's `isFree` needs it for a `null`-until
     // entry's staleness ceiling (NULL_UNTIL_CEILING_MS). Issue #141: `dead`
     // rides along too, and is NEVER subject to that ceiling.
-    if (state) limits[a.name] = { until: state.until, seenAt: state.seenAt, ...(state.dead ? { dead: true as const } : {}) };
+    // Issue #336: `kind` rides along too — a spend cap / hold with a null
+    // until must never get that ceiling either.
+    if (state) {
+      limits[a.name] = {
+        until: state.until, seenAt: state.seenAt,
+        ...(state.dead ? { dead: true as const } : {}), ...(state.kind ? { kind: state.kind } : {}),
+      };
+    }
   }));
   return limits;
 }
@@ -88,4 +95,50 @@ export async function readOneAccountLimit(db: D1Database, name: string): Promise
  */
 export async function clearFleetAccountLimit(db: D1Database, name: string): Promise<void> {
   await deleteFlag(db, accountLimitStateKey(name));
+}
+
+/**
+ * Issue #336 — writes a HELD row whole: failover.ts's org monthly spend cap
+ * (`kind: "spend_cap"`) or an operator's `fleet accounts hold` (`kind:
+ * "hold"`, optional reason, null until = until cleared).
+ */
+export async function writeAccountHold(
+  db: D1Database, name: string,
+  hold: { until: string | null; seenAt: string; kind: AccountLimitKind; reason?: string },
+): Promise<void> {
+  await setFlag(
+    db, accountLimitStateKey(name),
+    encodeAccountLimitState({
+      until: hold.until, seenAt: hold.seenAt, kind: hold.kind,
+      ...(hold.reason !== undefined ? { reason: hold.reason } : {}),
+    }),
+    Date.parse(hold.seenAt),
+  );
+}
+
+/**
+ * Issue #336 — failover.ts's own pane-sighting write (FailoverDeps.
+ * accountLimits.write, wired in do.ts). A `kind` sighting (the spend cap) is
+ * written as a held row. A plain window sighting is skipped while the row
+ * holds (accountHoldActive): a session limit seen on a held account must not
+ * shorten the hold to its 5h reset. Nor does a spend-cap sighting shorten
+ * an active hold that already runs as long or longer (null = until cleared).
+ * Returns whether it wrote.
+ */
+export async function writeObservedAccountLimit(
+  db: D1Database, name: string, until: string | null, seenAt: string,
+  dead: true | undefined, kind: AccountLimitKind | undefined, now: Date,
+): Promise<boolean> {
+  const current = await readOneAccountLimit(db, name);
+  if (accountHoldActive(current, now)) {
+    if (!kind) return false;
+    const outlasts = current!.until === null || (until !== null && Date.parse(current!.until) >= Date.parse(until));
+    if (outlasts) return false;
+  }
+  if (kind) {
+    await writeAccountHold(db, name, { until, seenAt, kind });
+    return true;
+  }
+  await writeFleetAccountLimit(db, name, until, seenAt, dead);
+  return true;
 }

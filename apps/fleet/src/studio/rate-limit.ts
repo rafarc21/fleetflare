@@ -21,6 +21,10 @@ export interface RateLimitObservation {
   /** Issue #141 — a dead account (org disabled subscription access): permanent,
    *  no clock ends it. */
   dead?: true;
+  /** Issue #336 — the org's MONTHLY spend cap. Not a 5h/7d window: the
+   *  account stays limited fleet-wide until the month rolls over (UTC) or an
+   *  operator clears it. `until` stays what the pane printed (null). */
+  spendCap?: true;
 }
 
 /**
@@ -198,6 +202,36 @@ export interface AccountLimitState {
    *  and so always reads `undefined` here — an optional field a caller never
    *  sets is simply absent, same as before this field existed. */
   source?: "usage";
+  /** Issue #336 — see AccountLimitKind. Absent: an ordinary window row. */
+  kind?: AccountLimitKind;
+  /** Issue #336 — the operator's free-text reason for a hold (or the
+   *  detector's note for a spend cap), shown by `fleet accounts`. */
+  reason?: string;
+}
+
+/**
+ * Issue #336 — WHY a row is limited, when it is not an ordinary 5h/7d window
+ * (absent): `spend_cap` (the org's monthly spend cap, failover.ts's detector)
+ * or `hold` (an operator's `fleet accounts hold`). Either one is a HOLD: the
+ * usage sync never clears or overwrites it while it is active (see
+ * accountHoldActive), and a null `until` means "until cleared", never the
+ * 24h NULL_UNTIL_CEILING_MS grace.
+ */
+export type AccountLimitKind = "spend_cap" | "hold";
+
+/** First instant of the NEXT UTC month — when an org's monthly spend cap
+ *  resets. Always strictly after `now`. */
+export function startOfNextMonthUtc(now: Date): string {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+}
+
+/** Issue #336 — the row's hold kind while it holds: a kind set, and its
+ *  `until` null (until cleared) or still ahead. `null` for no row, a plain
+ *  window row, or a hold whose until has passed. */
+export function accountHoldActive(state: AccountLimitState | null, now: Date): AccountLimitKind | null {
+  if (!state?.kind) return null;
+  if (state.until !== null && Date.parse(state.until) <= now.getTime()) return null;
+  return state.kind;
 }
 
 export function encodeAccountLimitState(state: AccountLimitState): string {
@@ -221,6 +255,8 @@ export function decodeAccountLimitState(raw: string | null): AccountLimitState |
     || !("until" in parsed) || !(typeof (parsed as { until: unknown }).until === "string" || (parsed as { until: unknown }).until === null)
     || ("dead" in parsed && (parsed as { dead: unknown }).dead !== true)
     || ("source" in parsed && (parsed as { source: unknown }).source !== "usage")
+    || ("kind" in parsed && (parsed as { kind: unknown }).kind !== "spend_cap" && (parsed as { kind: unknown }).kind !== "hold")
+    || ("reason" in parsed && typeof (parsed as { reason: unknown }).reason !== "string")
   ) {
     return null;
   }
@@ -229,6 +265,8 @@ export function decodeAccountLimitState(raw: string | null): AccountLimitState |
     until: p.until, seenAt: p.seenAt,
     ...(p.dead ? { dead: true as const } : {}),
     ...(p.source ? { source: p.source } : {}),
+    ...(p.kind ? { kind: p.kind } : {}),
+    ...(p.reason !== undefined ? { reason: p.reason } : {}),
   };
 }
 
@@ -354,6 +392,8 @@ export function decodeAccountUsageSnapshot(raw: string | null): AccountUsageSnap
  * The row's words while the limit holds:
  *   - "claude account dead — org disabled subscription access (ff <id>)" —
  *     issue #141: permanent, no clock ever ends it;
+ *   - "org monthly spend cap hit — held until month end (ff <id>)" — issue
+ *     #336: the org's monthly cap, which no 5h/7d reset ends;
  *   - "rate-limited until 13:30Z" — a readable reset still ahead;
  *   - "limit modal open — Esc to dismiss (ff <id>)" — a select modal, which
  *     no clock ends;
@@ -367,6 +407,7 @@ export function formatRateLimited(
 ): string | null {
   if (!rl) return null;
   if (rl.dead) return `claude account dead — org disabled subscription access (ff ${studioId})`;
+  if (rl.spendCap) return `org monthly spend cap hit — held until month end (ff ${studioId})`;
   if (rl.select) return `limit modal open — Esc to dismiss (ff ${studioId})`;
   const until = rl.until === null ? NaN : new Date(rl.until).getTime();
   if (Number.isNaN(until)) return "rate-limited (reset time not shown)";

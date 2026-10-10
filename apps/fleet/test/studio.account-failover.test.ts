@@ -25,7 +25,9 @@ import { STUDIO_TMUX } from "../src/studio/tmux";
 // opposed to this file's own MODAL_PANE, a select-style modal) — reused from
 // the shared fixture set rather than a second, drifting copy of the same
 // pane shape.
-import { SESSION_LIMIT_LOGIN_HINT_PANE as INLINE_LIMIT_PANE, WEEKLY_LIMIT_PANE, ORG_DISABLED_PANE } from "./fixtures/rate-limit-panes";
+import {
+  SESSION_LIMIT_LOGIN_HINT_PANE as INLINE_LIMIT_PANE, WEEKLY_LIMIT_PANE, ORG_DISABLED_PANE, ORG_SPEND_CAP_TAIL_PANE,
+} from "./fixtures/rate-limit-panes";
 
 // ---------------------------------------------------------------------------
 // Issue #53 — fail over to a second account when one is exhausted.
@@ -749,7 +751,7 @@ interface Harness {
    *  can seed another account as ALREADY limited (fleet-wide, from some other
    *  studio's own sighting) before running this one. Issue #141: `dead` rides
    *  along too, so a test can seed/observe a permanently-dead entry. */
-  accountLimits: Map<string, { until: string | null; seenAt: string; dead?: true }>;
+  accountLimits: Map<string, { until: string | null; seenAt: string; dead?: true; kind?: "spend_cap" | "hold" }>;
   /** Issue #131 (Stage B): how many times `deps.accountBurn.read` was called
    *  — the mutation-style proof that the borrow second pass is never even
    *  consulted when the first pass already found somewhere to go. */
@@ -800,7 +802,7 @@ function harness(opts: {
   let relaunches = 0;
   let accountBurnReads = 0;
   const storage = fakeStorage(opts.initial ?? status()) as StudioStorage & ObservedStorage;
-  const accountLimits = new Map<string, { until: string | null; seenAt: string; dead?: true }>(
+  const accountLimits = new Map<string, { until: string | null; seenAt: string; dead?: true; kind?: "spend_cap" | "hold" }>(
     Object.entries(opts.accountLimits ?? {}).map(([name, until]) => [name, { until, seenAt: NOW.toISOString() }]),
   );
   const h: Harness = {
@@ -824,8 +826,8 @@ function harness(opts: {
       now: () => opts.now ?? NOW,
       accountLimits: {
         read: async () => Object.fromEntries(accountLimits),
-        write: async (name: string, until: string | null, seenAt: string, dead?: true) => {
-          accountLimits.set(name, { until, seenAt, ...(dead ? { dead: true as const } : {}) });
+        write: async (name: string, until: string | null, seenAt: string, dead?: true, kind?: "spend_cap" | "hold") => {
+          accountLimits.set(name, { until, seenAt, ...(dead ? { dead: true as const } : {}), ...(kind ? { kind } : {}) });
         },
       },
       accountBurn: {
@@ -1008,6 +1010,31 @@ describe("runAccountFailover — issue #238 step 3: deps.accountUsage reorders t
     h.deps.accountUsage = { read: async () => { throw new Error("D1 hiccup"); } };
     const out = await run(h);
     expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #336 — the org MONTHLY spend cap holds the FROM account until the next
+// UTC month start (kind spend_cap), not the 24h null-until grace a plain
+// select modal gets — so the usage sync and the next 5h reset cannot free it.
+// ---------------------------------------------------------------------------
+describe("runAccountFailover — issue #336: an org monthly spend cap holds the account until month end", () => {
+  it("switches off it and marks the FROM account spend_cap until the next UTC month start", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(ORG_SPEND_CAP_TAIL_PANE) });
+    const out = await run(h);
+
+    expect(out).toEqual({ kind: "switched", from: "CLAUDE_CODE_OAUTH_TOKEN", to: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    expect(h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN")).toEqual({
+      until: "2026-10-01T00:00:00.000Z", seenAt: NOW.toISOString(), kind: "spend_cap",
+    });
+  });
+
+  it("a plain window select modal still writes the old null-until row, no kind", async () => {
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE.replace("org's monthly spend limit", "usage limit")) });
+    await run(h);
+    const row = h.accountLimits.get("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(row?.until).toBeNull();
+    expect(row?.kind).toBeUndefined();
   });
 });
 
@@ -1984,9 +2011,17 @@ describe("runAccountFailover — auto-failover OFF (#271)", () => {
   });
 
   it("a single account behaves exactly as today (exhausted, same message)", async () => {
-    const h = harness({ accounts: [TWO_ACCOUNTS[0]], pane: captured(MODAL_PANE), autoFailover: false });
+    // Issue #336: a window modal — MODAL_PANE's org headline is a spend cap now.
+    const windowPane = MODAL_PANE.replace("org's monthly spend limit", "usage limit              ");
+    const h = harness({ accounts: [TWO_ACCOUNTS[0]], pane: captured(windowPane), autoFailover: false });
     expect(await run(h)).toEqual({ kind: "exhausted", tried: ["CLAUDE_CODE_OAUTH_TOKEN"] });
     expect(h.notices[0]).toBe(exhaustedMessage(STUDIO_ID, ["CLAUDE_CODE_OAUTH_TOKEN"]));
+  });
+
+  it("issue #336: a single account on the org spend cap names the month-start reset", async () => {
+    const h = harness({ accounts: [TWO_ACCOUNTS[0]], pane: captured(MODAL_PANE), autoFailover: false });
+    expect(await run(h)).toEqual({ kind: "exhausted", tried: ["CLAUDE_CODE_OAUTH_TOKEN"] });
+    expect(h.notices[0]).toBe(exhaustedMessage(STUDIO_ID, ["CLAUDE_CODE_OAUTH_TOKEN"], "2026-10-01T00:00:00.000Z"));
   });
 });
 
