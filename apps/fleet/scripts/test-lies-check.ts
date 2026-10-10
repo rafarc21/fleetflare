@@ -72,17 +72,16 @@ function normalizeExpr(s: string): string {
   return s.replace(/\s+/g, "");
 }
 
-/** The ONE quote/escape state machine in this file — the single copy of the
- *  quote-walking logic that used to exist three times, inline in
- *  hasTopLevelComma, extractBalanced and firstArgText. Walks `text` from
- *  `from`: enters quote state on `"`, `'` and `` ` `` (the whole backtick
- *  span — including any `${...}` substitution inside it — is walked as
- *  opaque string content; not tracking substitutions is a known,
- *  characterized limitation, not a bug to fix here), and inside quotes
- *  skips the char after a backslash. Every other char is handed to
- *  `onChar`, which owns its own bracket-depth policy and returns an index
- *  to stop the walk there (that index becomes the return value), or nothing
- *  to keep walking. Returns null when the walk never stopped. */
+/** The single copy of the quote-walking logic, shared by hasTopLevelComma,
+ *  extractBalanced and firstArgText. Walks `text` from `from`: enters quote
+ *  state on `"`, `'` and `` ` `` (the whole backtick span — including any
+ *  `${...}` substitution inside it — is walked as opaque string content;
+ *  not tracking substitutions is a known, characterized limitation, not a
+ *  bug to fix here), and inside quotes skips the char after a backslash.
+ *  Every other char is handed to `onChar`, which owns its own bracket-depth
+ *  policy and returns an index to stop the walk there (that index becomes
+ *  the return value), or nothing to keep walking. Returns null when the
+ *  walk never stopped. */
 function walkTopLevel(
   text: string,
   from: number,
@@ -150,30 +149,27 @@ function lineOf(text: string, index: number): number {
  *  whose match ends right after the candidate call's opening `(`;
  *  `name(m)` reports the CallMatch's name for a kept candidate; `accept`,
  *  when present, sees each candidate's balanced-arg result and either
- *  returns fields to override (e.g. an `end` extended past the closing paren
- *  over a `.text()` suffix) or null to silently skip the candidate — the
- *  same conservative skip-as-ambiguity-avoidance rule every detector here
- *  follows. A skipped candidate is still scanned PAST (lastIndex moves on
- *  to its closing paren): its argument text must not be re-matched, e.g. a
- *  `Bun.file(` sitting inside a skipped candidate's own string literal. */
+ *  returns the one field `scanCalls` honors — the call's own closing-paren
+ *  index, possibly extended, e.g. past a `.text()` suffix — or null to
+ *  silently skip the candidate, the same conservative
+ *  skip-as-ambiguity-avoidance rule every detector here follows. A skipped
+ *  candidate is still scanned PAST (lastIndex moves on to its closing
+ *  paren): its argument text must not be re-matched, e.g. a `Bun.file(`
+ *  sitting inside a skipped candidate's own string literal. */
 interface CallMatcher {
   open: RegExp;
   name: (m: RegExpExecArray) => string;
-  accept?: (m: RegExpExecArray, bal: { argText: string; endIndex: number }) => Partial<CallMatch> | null;
+  accept?: (m: RegExpExecArray, bal: { argText: string; endIndex: number }) => { end: number } | null;
 }
 
 /** The single scanning core behind every call finder here (findCalls,
  *  findExpectToBeCalls, findBunFileTextCalls) — the one place the
  *  quote-walking logic (walkTopLevel, via extractBalanced) and the
- *  line-number calc (lineOf) get applied to call finding. Before #323 the
- *  quote/escape/bracket-depth machine was written out inline three times
- *  (hasTopLevelComma, extractBalanced, firstArgText each carried its own
- *  copy); now it exists exactly once, in walkTopLevel, shared by this core
- *  and the two thin walkers over it. Per candidate: one regex-exec loop,
- *  one quote-aware balanced-arg extraction, and `lastIndex` advanced past
- *  the kept call's `end` so a kept call's own text is never rescanned.
- *  Unbalanced text (extractBalanced null) is a silent conservative skip —
- *  never a throw, never a flag. */
+ *  line-number calc (lineOf) get applied to call finding. Per candidate:
+ *  one regex-exec loop, one quote-aware balanced-arg extraction, and
+ *  `lastIndex` advanced past the kept call's `end` so a kept call's own
+ *  text is never rescanned. Unbalanced text (extractBalanced null) is a
+ *  silent conservative skip — never a throw, never a flag. */
 function scanCalls(text: string, matcher: CallMatcher): CallMatch[] {
   const results: CallMatch[] = [];
   const re = matcher.open;
