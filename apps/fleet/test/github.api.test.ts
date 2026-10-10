@@ -219,7 +219,11 @@ describe("upsertRepoFile", () => {
     let n = 0;
     respond = () => (n++ === 0 ? Response.json({ sha: "old111" }) : Response.json({ content: { sha: "new222" } }));
     await upsertRepoFile("tok", "o/ops", "done/a-b/316.json", "{}", "msg");
-    expect(calls[0].headers).toEqual(GH_GET_HEADERS);
+    // toStrictEqual, not toEqual: the stripped set must be EXACTLY 3 keys —
+    // toEqual ignores an undefined-valued key, so it cannot see the strip
+    // (#309 round 2 review: deleting ghRequest's undefined-strip passed
+    // all 130 tests under toEqual).
+    expect(calls[0].headers).toStrictEqual(GH_GET_HEADERS);
   });
 
   it("the failed-lookup throw carries this fn's own exact message shape (#309)", async () => {
@@ -360,7 +364,9 @@ describe("listInstallationRepos", () => {
   it("GETs each page with the 3-key bodyless set (no content-type) — #309 deviant set", async () => {
     respond = () => pageOf(["acme-org/websites"], 1);
     await listInstallationRepos("tok");
-    expect(calls[0].headers).toEqual(GH_GET_HEADERS);
+    // toStrictEqual for the same reason as upsertRepoFile's pin above: an
+    // undefined-valued content-type key must fail here, not be ignored.
+    expect(calls[0].headers).toStrictEqual(GH_GET_HEADERS);
   });
 });
 
@@ -510,7 +516,8 @@ describe("listAllBranchNames", () => {
     expect(calls[0].headers.authorization).toBe("Bearer tok");
     // #309: the third bodyless-GET site — its 3-key set (no content-type)
     // pinned bit-for-bit, and page 2 (a later `calls` slot) keeps it too.
-    expect(calls[0].headers).toEqual(GH_GET_HEADERS);
+    // toStrictEqual, matching the other two deviant-set pins.
+    expect(calls[0].headers).toStrictEqual(GH_GET_HEADERS);
   });
 
   it("throws GitHub's own words on a non-2xx, token never in the message", async () => {
