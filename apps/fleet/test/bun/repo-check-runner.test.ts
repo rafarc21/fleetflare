@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runRepoCheck } from "../../scripts/repo-check";
 
 /**
  * Board issue #321 — characterization pins of both check CLIs
@@ -29,6 +30,9 @@ function scriptRepo(script: "english-check" | "test-lies-check"): {
   mkdirSync(dir, { recursive: true });
   const copy = join(dir, `${script}.ts`);
   writeFileSync(copy, readFileSync(join(import.meta.dir, `../../scripts/${script}.ts`), "utf8"));
+  // Both scripts import the shared runner from "./repo-check" — the copy must
+  // carry it too, or the first used import fails to resolve in the throwaway.
+  writeFileSync(join(dir, "repo-check.ts"), readFileSync(join(import.meta.dir, "../../scripts/repo-check.ts"), "utf8"));
   Bun.spawnSync(["git", "init", "-q"], { cwd: root });
   return {
     root,
@@ -151,6 +155,63 @@ describe("repo-check runner — characterization pins of both check CLIs (board 
       expect(out).toContain("0 tautological, 0 source-reading, 0 own-module-mock across 1 test files");
     } finally {
       rmSync(repo.root, { recursive: true, force: true });
+    }
+  });
+
+  // Task 3's runner gap: test-lies-check's count line prints on BOTH the clean
+  // and the findings path, and needs the file count in both. That pins the
+  // runner contract directly: `failSummary` receives the file count as its 2nd
+  // argument (the same `fileCount(listed)` value `cleanLine` gets), so the
+  // findings path never has to count `git ls-files` a second time.
+  test("runRepoCheck: failSummary receives (findings, fileCount), cleanLine receives fileCount", async () => {
+    const root = mkdtempSync(join(tmpdir(), "repo-check-runner-gap-"));
+    try {
+      Bun.spawnSync(["git", "init", "-q"], { cwd: root });
+      writeFileSync(join(root, "a.test.ts"), "export const a = 1;\n");
+      writeFileSync(join(root, "b.test.ts"), "export const b = 2;\n");
+      Bun.spawnSync(["git", "add", "-A"], { cwd: root });
+
+      const saw: string[] = [];
+      const failCode = await runRepoCheck({
+        root,
+        select: (p) => /\.test\.tsx?$/.test(p),
+        scanFile: () => [{ line: 1, marker: "x" }],
+        allowlist: {},
+        format: () => "",
+        stream: "stdout",
+        failSummary: (findings, fileCount) => {
+          saw.push(`fail:${findings.length}:${fileCount}`);
+          return "";
+        },
+        cleanLine: (fileCount) => {
+          saw.push(`clean:${fileCount}`);
+          return "";
+        },
+        cleanExit: 0,
+        fileCount: (listed) => listed.length,
+      });
+      expect(failCode).toBe(1);
+      expect(saw).toEqual(["fail:2:2"]);
+
+      const cleanCode = await runRepoCheck({
+        root,
+        select: (p) => /\.test\.tsx?$/.test(p),
+        scanFile: () => [],
+        allowlist: {},
+        format: () => "",
+        stream: "stdout",
+        failSummary: () => "never",
+        cleanLine: (fileCount) => {
+          saw.push(`clean:${fileCount}`);
+          return "";
+        },
+        cleanExit: 0,
+        fileCount: (listed) => listed.length,
+      });
+      expect(cleanCode).toBe(0);
+      expect(saw).toEqual(["fail:2:2", "clean:2"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

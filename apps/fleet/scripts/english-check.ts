@@ -25,6 +25,7 @@
  *   bun run scripts/english-check.ts
  */
 import { join } from "node:path";
+import { collectRepoCheck, runRepoCheck } from "./repo-check";
 
 export const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 
@@ -91,28 +92,23 @@ export function scanFile(path: string, text: string): Hit[] {
   return findPortuguese(text).filter((h) => !known.has(h.text));
 }
 
+/** The findings only, no printing or exiting — the runner's own single
+ *  listing + read pass (see ./repo-check.ts), kept exported because
+ *  test/bun/english-only.test.ts imports it. */
 export async function scanRepo(root = REPO_ROOT): Promise<Finding[]> {
-  const ls = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: root });
-  if (ls.exitCode !== 0) throw new Error(`git ls-files failed: ${ls.stderr.toString()}`);
-  const paths = ls.stdout.toString().split("\0").filter(Boolean)
-    .filter((p) => !EXCLUDED_PREFIXES.some((x) => p.startsWith(x)) && !(p in ALLOWLIST));
-  const findings: Finding[] = [];
-  for (const path of paths) {
-    const file = Bun.file(join(root, path));
-    if (!(await file.exists())) continue;
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    if (bytes.includes(0)) continue; // binary
-    for (const hit of scanFile(path, new TextDecoder().decode(bytes))) findings.push({ path, ...hit });
-  }
-  return findings;
+  return collectRepoCheck(root, (p) => !EXCLUDED_PREFIXES.some((x) => p.startsWith(x)), scanFile, ALLOWLIST);
 }
 
 if (import.meta.main) {
-  const findings = await scanRepo();
-  for (const f of findings) console.error(formatFinding(f.path, f));
-  if (findings.length) {
-    console.error(`\n${findings.length} line(s) of Portuguese. Translate them, or allowlist a deliberate fixture in scripts/english-check.ts with its reason.`);
-    process.exit(1);
-  }
-  console.log("english-check: clean");
+  process.exit(await runRepoCheck({
+    root: REPO_ROOT,
+    select: (p) => !EXCLUDED_PREFIXES.some((x) => p.startsWith(x)),
+    scanFile,
+    allowlist: ALLOWLIST,
+    format: formatFinding,
+    stream: "stderr",
+    failSummary: (findings) => `\n${findings.length} line(s) of Portuguese. Translate them, or allowlist a deliberate fixture in scripts/english-check.ts with its reason.`,
+    cleanLine: () => "english-check: clean",
+    cleanExit: 0,
+  }));
 }

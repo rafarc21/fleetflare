@@ -46,12 +46,13 @@ export interface RepoCheckOpts<F> {
   allowlist: Record<string, string>;                // whole-file exemptions
   format: (path: string, hit: F) => string;        // one finding's line
   stream: "stdout" | "stderr";                     // findings + failSummary stream
-  failSummary: (findings: Array<F & { path: string }>) => string; // printed to stream when findings exist
+  failSummary: (findings: Array<F & { path: string }>, fileCount: number | string | undefined) => string; // printed to stream when findings exist; 2nd arg = the same fileCount cleanLine gets (test-lies-check's count line prints on both paths)
   cleanLine: (fileCount: number | string | undefined) => string;  // printed to stdout when none
   cleanExit: number;                               // exit code with no findings
   fileCount?: (listed: string[]) => number | string; // test-lies-check's "across N test files"
 }
-export async function runRepoCheck<F>(opts: RepoCheckOpts<F>): Promise<number>;
+export async function runRepoCheck<F extends object>(opts: RepoCheckOpts<F>): Promise<number>;
+export async function collectRepoCheck<F extends object>(root: string, select: (path: string) => boolean, scanFile: (path: string, text: string) => F[], allowlist: Record<string, string>): Promise<Array<F & { path: string }>>;
 ```
 
 `runRepoCheck` runs `git ls-files -z` once (drops the second
