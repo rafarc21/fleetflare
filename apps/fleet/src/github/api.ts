@@ -7,15 +7,8 @@ import { closesIssueByKeyword } from "./promote-close";
 // src/github/app.ts and src/board/api.ts send.
 const USER_AGENT = "fleetflare";
 
-/**
- * The standard header set every GitHub REST call in this module sends
- * (#265): bearer token, GitHub's own JSON media type, the client name, and
- * a JSON content type. #309: every call but fetchRepoFile's (below) routes
- * through ghRequest below, which merges these under any caller-provided
- * keys; the only sets that differ are GH_HEADERS_GET (the bodyless GETs,
- * no content-type) and fetchRepoFile's own raw media type — exact
- * preservation, no header added or dropped anywhere.
- */
+/** The standard header set every GitHub call in this module sends; ghRequest
+ *  merges it under any caller-provided keys. */
 const GH_HEADERS = (token: string) => ({
   authorization: `Bearer ${token}`,
   accept: "application/vnd.github+json",
@@ -23,16 +16,9 @@ const GH_HEADERS = (token: string) => ({
   "content-type": "application/json",
 });
 
-/**
- * #309: the bodyless GET set — GH_HEADERS minus content-type, the exact
- * 3-key set upsertRepoFile's sha lookup, listInstallationRepos and
- * listAllBranchNames have always sent. ghRequest merges over the 4-key
- * standard set, and a merge can never DROP a key, so the explicit
- * `undefined` here marks content-type for deletion (ghRequest strips
- * undefined values before fetch — it must never hand one over, since a
- * literal `content-type: undefined` goes on the wire; verified against both
- * workerd and Bun fetch, 2026-10-09).
- */
+/** The 3-key bodyless-GET set (no content-type) — a merge cannot drop a key,
+ *  so the `undefined` marks content-type for deletion in ghRequest, which
+ *  must never hand a literal undefined value to fetch. */
 const GH_HEADERS_GET = (token: string): Record<string, string | undefined> => ({
   authorization: `Bearer ${token}`,
   accept: "application/vnd.github+json",
@@ -45,25 +31,19 @@ const GH_HEADERS_GET = (token: string): Record<string, string | undefined> => ({
 type GhInit = Omit<RequestInit, "headers"> & { headers?: Record<string, string | undefined> };
 
 /**
- * #309: the ONE request path for every GitHub call in this module except
- * fetchRepoFile (below). Three responsibilities, in order:
- *
- * 1. Headers: the standard GH_HEADERS set, MERGED under any keys
- *    `init.headers` carries (a caller's key wins over the standard one);
- *    a caller value of `undefined` DELETES that key — the mechanism the
- *    bodyless GET sites use to keep their exact 3-key sets.
- * 2. Body: `text` is ALWAYS read — every routed caller either parses it or
- *    could never read the Response twice anyway (a body reads once), so
- *    upsertRepoFile parses this returned text instead of res.json().
- * 3. Status: on `!res.ok` UNLESS `res.status` is in `okStatuses`, throw
- *    `` `${what} failed (${res.status}): ${text.slice(0, 300)}` `` —
- *    GitHub's own words, cut at 300 chars, plain Error, the token never in
- *    it. A status in `okStatuses` is the caller's own to interpret (404 ->
- *    false, 404 -> null, ...), which is why `res` comes back alongside
- *    `text`: the caller still reads `res.status` and, for
- *    listAllBranchNames, `res.headers`.
+ * The one request path for every GitHub call in this module except
+ * fetchRepoFile. Caller-provided header keys win over the standard set;
+ * an `undefined` value deletes that key (a literal undefined must never
+ * reach fetch). The response text is always read once — callers parse the
+ * returned `text`, never `res.json()` (a body reads once). On `!res.ok`
+ * unless the status is in `okStatuses`, throws `` `${what} failed
+ * (${res.status}): ${text.slice(0, 300)}` `` — GitHub's own words, the
+ * token never in it. `res` comes back so callers read status/headers
+ * themselves. Exported as the test seam: no production caller sends a
+ * header value differing from the standard set, so only a direct call can
+ * pin the merge order.
  */
-async function ghRequest(
+export async function ghRequest(
   token: string, url: string, init: GhInit, what: string, okStatuses: readonly number[] = [],
 ): Promise<{ res: Response; text: string }> {
   const headers: Record<string, string> = { ...GH_HEADERS(token) };
@@ -81,15 +61,9 @@ async function ghRequest(
   return { res, text };
 }
 
-/**
- * One existence check (#265): 404 is `false`, 2xx is `true`, everything else
- * throws GitHub's own words — the convention the six exported *Exists
- * functions below all carried as six copy-pasted bodies. `what` is each
- * fn's own error prefix (e.g. `read ${repo}#${number}`), so every thrown
- * message stays bit-for-bit what it was before those bodies collapsed into
- * this one; the token never appears in it. ghRequest does the throwing for
- * every status outside okStatuses; only the 404 read survives here.
- */
+/** One existence check shared by the *Exists functions: 404 is `false`, 2xx
+ *  is `true`, everything else throws via ghRequest. `what` is the calling
+ *  fn's own error prefix; the token never appears in the message. */
 async function exists(token: string, url: string, what: string): Promise<boolean> {
   const { res } = await ghRequest(token, url, { method: "GET" }, what, [404]);
   if (res.status === 404) return false;
@@ -168,13 +142,9 @@ export const BLUEPRINT_FILE_MAX_BYTES = 262_144; // 256KB
 export async function fetchRepoFile(
   token: string, repo: string, path: string, ref: string,
 ): Promise<string> {
-  // #309: the ONE raw fetch left in this module, deliberately NOT routed
-  // through ghRequest. ghRequest always reads the response text; this fn's
-  // Content-Length guard must reject an honestly-oversized DECLARED response
-  // WITHOUT ever buffering the body (the size-cap tests pin "before ever
-  // reading the body"), and reading the body first would defeat the guard.
-  // The 3-key raw-accept header set below is pinned bit-for-bit by the
-  // tests, same as every set ghRequest merges.
+  // Deliberately NOT routed through ghRequest: its Content-Length guard must
+  // reject an oversized DECLARED response before the body is ever buffered,
+  // and ghRequest always reads the text first.
   const res = await fetch(
     `https://api.github.com/repos/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`,
     {
@@ -280,9 +250,9 @@ export async function upsertRepoFile(
 ): Promise<{ path: string; sha: string }> {
   // 404 = new file (fine, PUT with no sha); ghRequest throws on everything
   // else not-ok with the exact `upsert ${path}: sha lookup failed` shape.
-  // The GET keeps the bodyless 3-key set it has always sent (GH_HEADERS_GET).
-  // The body is parsed from ghRequest's returned text, since a Response
-  // body reads once and ghRequest already read it.
+  // The GET keeps the bodyless 3-key set (GH_HEADERS_GET, no content-type),
+  // and the body parses from ghRequest's returned text since a Response
+  // body reads once.
   const { res, text } = await ghRequest(
     token,
     `https://api.github.com/repos/${repo}/contents/${path}`,
@@ -360,12 +330,8 @@ export async function listInstallationRepos(token: string): Promise<string[]> {
 // is either wholly there or wholly absent, which is the only shape that can
 // honestly claim "nothing was deleted" — a reviewer sees the move as a move.
 
-/** GitHub's own words on any non-2xx, same convention as every other function
- *  in this module; the token never appears in the message. #309: routes
- *  through ghRequest (the one request path), so every caller's
- *  standard-set call keeps its exact headers and its exact thrown message —
- *  ghJson adds only the JSON.parse. Token threaded here (#309): it is
- *  module-private, so its own signature is not part of the frozen surface. */
+/** ghRequest plus the JSON.parse — ghJson adds only the parsing; the thrown
+ *  message (GitHub's own words, token never in it) comes from ghRequest. */
 async function ghJson<T>(token: string, url: string, init: GhInit, what: string): Promise<T> {
   const { text } = await ghRequest(token, url, init, what);
   return JSON.parse(text) as T;
@@ -382,7 +348,7 @@ export async function getDefaultBranch(token: string, repo: string): Promise<str
   const body = await ghJson<{ default_branch?: string }>(
     token,
     `https://api.github.com/repos/${repo}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `read ${repo}`,
   );
   if (typeof body.default_branch !== "string" || body.default_branch === "") {
@@ -397,7 +363,7 @@ export async function repoIsPrivate(token: string, repo: string): Promise<boolea
   const body = await ghJson<{ private?: unknown }>(
     token,
     `https://api.github.com/repos/${repo}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `read ${repo}`,
   );
   return body.private === true;
@@ -434,12 +400,11 @@ export async function commitFilesOnNewBranch(
   changes: RepoFileChange[],
 ): Promise<string> {
   if (changes.length === 0) throw new Error("commit refused: no changes");
-  const headers = GH_HEADERS(token);
 
   const ref = await ghJson<{ object: { sha: string } }>(
     token,
     `https://api.github.com/repos/${repo}/git/ref/heads/${base}`,
-    { method: "GET", headers },
+    { method: "GET" },
     `read ${base}`,
   );
   const baseCommit = ref.object.sha;
@@ -447,7 +412,7 @@ export async function commitFilesOnNewBranch(
   const commit = await ghJson<{ tree: { sha: string } }>(
     token,
     `https://api.github.com/repos/${repo}/git/commits/${baseCommit}`,
-    { method: "GET", headers },
+    { method: "GET" },
     `read commit ${baseCommit}`,
   );
 
@@ -455,7 +420,7 @@ export async function commitFilesOnNewBranch(
     token,
     `https://api.github.com/repos/${repo}/git/trees`,
     {
-      method: "POST", headers,
+      method: "POST",
       body: JSON.stringify({
         base_tree: commit.tree.sha,
         tree: changes.map((c) =>
@@ -470,14 +435,14 @@ export async function commitFilesOnNewBranch(
   const newCommit = await ghJson<{ sha: string }>(
     token,
     `https://api.github.com/repos/${repo}/git/commits`,
-    { method: "POST", headers, body: JSON.stringify({ message, tree: tree.sha, parents: [baseCommit] }) },
+    { method: "POST", body: JSON.stringify({ message, tree: tree.sha, parents: [baseCommit] }) },
     "create commit",
   );
 
   await ghJson<unknown>(
     token,
     `https://api.github.com/repos/${repo}/git/refs`,
-    { method: "POST", headers, body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: newCommit.sha }) },
+    { method: "POST", body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: newCommit.sha }) },
     `create branch ${branch}`,
   );
 
@@ -498,7 +463,7 @@ export async function listRepoTree(token: string, repo: string, ref: string): Pr
   const body = await ghJson<{ tree?: { path: string; type: string }[]; truncated?: boolean }>(
     token,
     `https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `read tree ${ref}`,
   );
   if (body.truncated === true) {
@@ -523,7 +488,7 @@ export async function openPullRequest(
   const pr = await ghJson<{ number: number; html_url: string }>(
     token,
     `https://api.github.com/repos/${repo}/pulls`,
-    { method: "POST", headers: GH_HEADERS(token), body: JSON.stringify({ title, body, head, base }) },
+    { method: "POST", body: JSON.stringify({ title, body, head, base }) },
     "open pull request",
   );
   return { number: pr.number, url: pr.html_url };
@@ -579,7 +544,7 @@ export async function repoIsWritable(token: string, repo: string): Promise<boole
   const { res, text } = await ghRequest(
     token,
     `https://api.github.com/repos/${repo}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `read ${repo}`,
     [403, 404],
   );
@@ -618,7 +583,7 @@ export async function listOpenPullNumbers(token: string, repo: string): Promise<
   const raw = await ghJson<{ number: number }[]>(
     token,
     `https://api.github.com/repos/${repo}/pulls?${params.toString()}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `list open pulls for ${repo}`,
   );
   return raw.map((p) => p.number);
@@ -646,7 +611,7 @@ export async function listOpenPullFiles(token: string, repo: string): Promise<{ 
     const raw = await ghJson<{ filename: string }[]>(
       token,
       `https://api.github.com/repos/${repo}/pulls/${number}/files?per_page=100`,
-      { method: "GET", headers: GH_HEADERS(token) },
+      { method: "GET" },
       `list files for pull ${repo}#${number}`,
     );
     return { number, files: raw.map((f) => f.filename) };
@@ -755,7 +720,7 @@ export async function listPullsForCommit(token: string, repo: string, sha: strin
   const raw = await ghJson<{ number: number; base: { ref: string }; head: { ref: string } }[]>(
     token,
     `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(sha)}/pulls`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `list pulls for commit ${sha}`,
   );
   return raw.map((p) => ({ number: p.number, base: p.base.ref, head: p.head.ref }));
@@ -773,7 +738,7 @@ export async function listPullCommits(token: string, repo: string, pullNumber: n
   const raw = await ghJson<{ sha: string }[]>(
     token,
     `https://api.github.com/repos/${repo}/pulls/${pullNumber}/commits?per_page=100`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `list commits for pull ${repo}#${pullNumber}`,
   );
   return raw.map((c) => c.sha);
@@ -796,7 +761,7 @@ export async function closeIssue(
   await ghJson<unknown>(
     token,
     `https://api.github.com/repos/${repo}/issues/${number}`,
-    { method: "PATCH", headers: GH_HEADERS(token), body: JSON.stringify({ state: "closed", state_reason: reason }) },
+    { method: "PATCH", body: JSON.stringify({ state: "closed", state_reason: reason }) },
     `close issue ${repo}#${number}`,
   );
 }
@@ -804,16 +769,13 @@ export async function closeIssue(
 const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 
 /**
- * The one GraphQL client in this codebase (closingIssuesForPull and
- * getIssueCloser use it) — everything else here is REST. Same auth header shape
- * (`GH_HEADERS`, bearer token) as every REST call in this module, just a
- * different endpoint and a POST body shaped `{query, variables}` instead of
- * a path. A 200 transport response carrying a top-level `errors[]` array is
+ * The one GraphQL client in this codebase — everything else here is REST.
+ * A 200 transport response carrying a top-level `errors[]` array is
  * GraphQL's OWN way of reporting a failure (a bad PR number, a scope this
  * token lacks) — checked and thrown on explicitly, since `res.ok` alone
- * would read that as success. #309: routes through ghRequest (the one
- * request path) for the transport-status throw; the errors[] and no-data
- * checks stay here, GraphQL's own layer above transport status.
+ * would read that as success. Transport-status throwing comes from
+ * ghRequest; the errors[] and no-data checks are GraphQL's own layer
+ * above it.
  */
 async function ghGraphQL<T>(
   token: string, query: string, variables: Record<string, unknown>, what: string,
@@ -821,7 +783,7 @@ async function ghGraphQL<T>(
   const { text } = await ghRequest(
     token,
     GITHUB_GRAPHQL_URL,
-    { method: "POST", headers: GH_HEADERS(token), body: JSON.stringify({ query, variables }) },
+    { method: "POST", body: JSON.stringify({ query, variables }) },
     what,
   );
   const body = JSON.parse(text) as { data?: T; errors?: { message: string }[] };
@@ -962,7 +924,7 @@ export async function getPullRequest(token: string, repo: string, number: number
   }>(
     token,
     `https://api.github.com/repos/${repo}/pulls/${number}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `read pull ${repo}#${number}`,
   );
   return {
@@ -1015,7 +977,7 @@ export async function commitReachableFromBranch(
   const { res, text } = await ghRequest(
     token,
     `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(sha)}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `compare ${repo} ${branch}...${sha}`,
     [404],
   );
@@ -1031,7 +993,7 @@ export async function listMatchingBranches(token: string, repo: string, prefix: 
   const refs = await ghJson<{ ref: string; object: { sha: string } }[]>(
     token,
     `https://api.github.com/repos/${repo}/git/matching-refs/heads/${prefix}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `list ${repo} refs/heads/${prefix}*`,
   );
   return refs.map((r) => ({ name: r.ref.replace(/^refs\/heads\//, ""), sha: r.object.sha }));
@@ -1109,7 +1071,7 @@ export async function commitDate(token: string, repo: string, sha: string): Prom
   const c = await ghJson<{ commit: { committer: { date: string } } }>(
     token,
     `https://api.github.com/repos/${repo}/commits/${sha}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `read ${repo} commit ${sha}`,
   );
   return c.commit.committer.date;
@@ -1122,7 +1084,7 @@ export async function compareFiles(
   const c = await ghJson<{ ahead_by: number; files?: { filename: string }[] }>(
     token,
     `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `read ${repo} compare ${base}...${head}`,
   );
   return { aheadBy: c.ahead_by, files: (c.files ?? []).map((f) => f.filename) };
@@ -1166,7 +1128,7 @@ export async function compareAhead(
   const { res, text } = await ghRequest(
     token,
     `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
-    { method: "GET", headers: GH_HEADERS(token) },
+    { method: "GET" },
     `compare ${repo} ${base}...${head}`,
     [404],
   );
@@ -1192,7 +1154,7 @@ export async function deleteBranch(token: string, repo: string, branch: string):
   await ghRequest(
     token,
     `https://api.github.com/repos/${repo}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`,
-    { method: "DELETE", headers: GH_HEADERS(token) },
+    { method: "DELETE" },
     `delete ${repo} branch ${branch}`,
   );
 }
