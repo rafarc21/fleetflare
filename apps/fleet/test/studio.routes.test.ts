@@ -2229,6 +2229,85 @@ describe("GET /studio/accounts", () => {
   });
 });
 
+// Issue #333 — the operator's escape hatch for a limit row charged to the
+// wrong slot. Sync cannot clear it: the wrongly attributed sighting is the
+// FRESHEST row, so sync's own "newer row exists" guard keeps it.
+describe("POST /studio/accounts/clear", () => {
+  const clearReq = (body: unknown) => authorizedReq(
+    "/studio/accounts/clear", { method: "POST", body: JSON.stringify(body) },
+  );
+  const twoAccounts = () => {
+    const { testEnv: base } = envWithFakeStudio();
+    return { ...base, CLAUDE_CODE_OAUTH_TOKEN_2: "test-oauth-2" } as unknown as Env;
+  };
+
+  it("401 without an Access header", async () => {
+    const testEnv = twoAccounts();
+    const res = await handleStudio(
+      new Request("https://x/studio/accounts/clear", { method: "POST", body: JSON.stringify({ slot: "2" }) }),
+      testEnv,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("GET is 405", async () => {
+    authorized();
+    const res = await handleStudio(authorizedReq("/studio/accounts/clear"), twoAccounts());
+    expect(res.status).toBe(405);
+  });
+
+  it("clears a FRESH limit row by slot number -- the row sync's newer-row guard would keep", async () => {
+    authorized();
+    const testEnv = twoAccounts();
+    const seenAt = new Date().toISOString();
+    const until = "2026-10-17T00:00:00.000Z";
+    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", until, seenAt);
+
+    const res = await handleStudio(clearReq({ slot: "2" }), testEnv);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ name: "CLAUDE_CODE_OAUTH_TOKEN_2", previous: { until, seenAt } });
+    expect(await readOneAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN_2")).toBeNull();
+  });
+
+  it("accepts the secret name too, and reports previous: null when nothing was recorded", async () => {
+    authorized();
+    const res = await handleStudio(clearReq({ slot: "CLAUDE_CODE_OAUTH_TOKEN" }), twoAccounts());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ name: "CLAUDE_CODE_OAUTH_TOKEN", previous: null });
+  });
+
+  it("audits every clear: one JSON line naming the slot and what was there, never a token", async () => {
+    authorized();
+    const testEnv = twoAccounts();
+    const seenAt = "2026-10-10T09:00:00.000Z";
+    await writeFleetAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN_2", null, seenAt, true);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await handleStudio(clearReq({ slot: "2" }), testEnv);
+      const lines = log.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("fleet_accounts_clear"));
+      expect(lines).toHaveLength(1);
+      const rec = JSON.parse(lines[0]!);
+      expect(rec).toMatchObject({
+        event: "fleet_accounts_clear", name: "CLAUDE_CODE_OAUTH_TOKEN_2",
+        previous: { until: null, seenAt, dead: true },
+      });
+      expect(typeof rec.at).toBe("string");
+      expect(lines[0]).not.toContain("test-oauth-2");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("404s an unconfigured slot and 400s a missing one, writing nothing", async () => {
+    authorized();
+    const testEnv = twoAccounts();
+    expect((await handleStudio(clearReq({ slot: "7" }), testEnv)).status).toBe(404);
+    expect((await handleStudio(clearReq({ slot: "CLAUDE_CODE_OAUTH_TOKEN_7" }), testEnv)).status).toBe(404);
+    expect((await handleStudio(clearReq({}), testEnv)).status).toBe(400);
+    expect((await handleStudio(authorizedReq("/studio/accounts/clear", { method: "POST", body: "nope" }), testEnv)).status).toBe(400);
+  });
+});
+
 // Issue #232, step 2 — the dumb, validated persistence endpoint the step-3
 // CLI (`fleet accounts sync`) posts its locally-computed SyncDecision[] to.
 // This route never calls cswap or decideAccountSync itself; it only applies

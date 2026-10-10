@@ -901,7 +901,7 @@ describe("fleet help", () => {
   it("documents every verb the CLI dispatches, by name — no verb can be missing", () => {
     const help = renderHelp();
     for (const cmd of Object.keys(VERBS)) {
-      const two = ["task-", "memory-"].find((prefix) => cmd.startsWith(prefix));
+      const two = ["task-", "memory-", "accounts-"].find((prefix) => cmd.startsWith(prefix));
       const word = two ? `fleet ${two.slice(0, -1)} ${cmd.slice(two.length)}` : `fleet ${cmd}`;
       expect(help).toContain(word);
     }
@@ -916,7 +916,7 @@ describe("fleet help", () => {
 
   it("derives the short usage from the same table, so the two can never disagree", () => {
     for (const [cmd, help] of Object.entries(VERBS)) {
-      const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory" : cmd;
+      const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory" : cmd.startsWith("accounts-") ? "accounts" : cmd;
       expect(CLI_USAGE).toContain(`fleet ${name}${help.args ? " " + help.args : ""}`);
     }
     expect(CLI_USAGE).toContain("fleet help");
@@ -1059,6 +1059,15 @@ describe("fleet accounts", () => {
     expect(parseCliArgs(["accounts", "--write-labels"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: false, writeLabels: true });
     expect(parseCliArgs(["accounts", "--json", "--write-labels"])).toEqual({ cmd: "accounts", sync: false, watch: false, json: true, writeLabels: true });
     expect(parseCliArgs(["accounts", "sync", "--write-labels", "--watch"])).toEqual({ cmd: "accounts", sync: true, watch: true, json: false, writeLabels: true });
+  });
+
+  // Issue #333: the operator's escape hatch for a wrongly attributed limit row.
+  it("accounts clear <slot> takes exactly one slot", () => {
+    expect(parseCliArgs(["accounts", "clear", "4"])).toEqual({ cmd: "accounts-clear", slot: "4" });
+    expect(parseCliArgs(["accounts", "clear", "CLAUDE_CODE_OAUTH_TOKEN_2"])).toEqual({ cmd: "accounts-clear", slot: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+    expect(parseCliArgs(["accounts", "clear"]).cmd).toBe("usage");
+    expect(parseCliArgs(["accounts", "clear", "4", "5"]).cmd).toBe("usage");
+    expect(parseCliArgs(["accounts", "clear", "--json"]).cmd).toBe("usage");
   });
 
   it("an unrecognised token is a usage error, not silently ignored", () => {

@@ -153,6 +153,40 @@ describe("provisionWithStorage — studio-first resolution (P4a-1 T7)", () => {
     expect(bringupEnvCalls[0]).toEqual(stored);
   });
 
+  it("(a0) issue #333: bring-up is handed the recorded launch token, and the persisted role env never holds it", async () => {
+    // Bring-up pins the tmux session token to the one in its env: the
+    // account the row records as launched (a failover's included), so a
+    // reused session can no longer keep a different one.
+    const bringupEnvCalls: (Record<string, string> | undefined)[] = [];
+    const sbExecFake = vi.fn(async (cmd: string, execEnv?: Record<string, string>) => {
+      if (cmd === BRINGUP_CMD) bringupEnvCalls.push(execEnv);
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const fetchBlueprintFile = vi.fn(async (_repo: string, path: string, ref: string) => {
+      if (path === "fleet.json") return FAKE_FLEET_JSON;
+      if (path === "fleet/blueprint/studios/web-studio/studio.md") return FAKE_STUDIO_MD;
+      if (path === "fleet/blueprint/studios/web-studio/members") return FAKE_MEMBERS_LISTING;
+      if (path === "fleet/blueprint/studios/web-studio/members/frontend-developer.md") return FAKE_MEMBER_FRONTEND_MD;
+      if (path === "fleet/blueprint/studios/web-studio/members/qa-engineer.md") return FAKE_MEMBER_QA_MD;
+      throw notFound(path, ref);
+    });
+    const storage = fakeStorage();
+    const deps: ProvisionDeps = {
+      sbExec: sbExecFake,
+      recordStudio: (status: StudioStatus) => recordStudio(env as unknown as Env, status),
+      now: () => "2026-08-19T00:00:00.000Z",
+      fetchBlueprintFile,
+      launchEnv: async () => ({ CLAUDE_CODE_OAUTH_TOKEN: "tok-launched" }),
+    };
+
+    await provisionWithStorage(deps, storage, { repo: "websites", role: "web-studio" }, REPO_SLUG);
+
+    const stored = (await storage.get(ROLE_ENV_KEY)) as StudioEnv;
+    expect(bringupEnvCalls).toHaveLength(1);
+    expect(bringupEnvCalls[0]).toEqual({ ...stored, CLAUDE_CODE_OAUTH_TOKEN: "tok-launched" });
+    expect(JSON.stringify(stored)).not.toContain("tok-launched");
+  });
+
   it("(a1) issue #11: an explicit blueprintRef reaches bring-up as BLUEPRINT_REF, over fleet.json's ref", async () => {
     const fetchBlueprintFile = vi.fn(async (_repo: string, path: string, ref: string) => {
       if (path === "fleet.json") return FAKE_FLEET_JSON;

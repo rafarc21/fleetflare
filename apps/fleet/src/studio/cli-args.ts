@@ -238,6 +238,9 @@ export type CliCommand =
   // suggestion per slot resolved by reset-time inference — independent of
   // every other flag here, combinable with any of them.
   | { cmd: "accounts"; sync: boolean; watch: boolean; json: boolean; writeLabels: boolean }
+  // Issue #333: `fleet accounts clear <slot>` -- the audited escape hatch for
+  // a limit row charged to the wrong slot.
+  | { cmd: "accounts-clear"; slot: string }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -400,6 +403,10 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     args: "[sync] [--watch] [--json] [--write-labels]",
     summary: "Issue #232: join each configured Claude account slot to a LOCAL `cswap list --json` read (claude-swap, operator's own machine — docs/setup.md's \"Proactive account-limit sync\") — first by label===email, then (no label, or no match) by matching the slot's own recorded reset time against an unclaimed cswap account's reset time, within +/-5min, only when exactly one candidate qualifies — and show what a sync would do: SLOT, LABEL, MATCH (label/inferred/unmapped/cswap-missing), 5h%/7d% usage, the reset time that would trip a limit, ROW STATE (what D1 holds now), WOULD (what sync would change it to, '-' if nothing, 'no data (...)' when cswap's own reading for a known account is stale or failed — distinct from unmapped). Bare `fleet accounts` is READ-ONLY — it never calls the Worker's write route. `sync` POSTs every limit/clear decision to /studio/accounts/sync: pct >= 95 on any window marks that slot limited until that window's own reset; everything under 95 clears it, including a stale dead row (a fresh low reading right after re-login IS the proof it's alive again); reports applied/rejected/skipped (skipped = a fresher sighting already recorded, correct no-op). --watch reruns every 60s, printing only when something changed; --json prints the raw snapshot instead of the table. --write-labels prints a pasteable CLAUDE_ACCOUNT_<n>_LABEL=<email> line per inferred match (folded into the JSON object under labelSuggestions when combined with --json, never a bare line that would corrupt it) — this command never writes any config file itself. cswap missing/erroring never crashes this — every slot just reads matchSource cswap-missing.",
   },
+  "accounts-clear": {
+    args: "clear <slot>",
+    summary: "Issue #333: delete one account's fleet-wide limit row (dead flag included), by slot number (4) or secret name (CLAUDE_CODE_OAUTH_TOKEN_4) -- for a limit charged to the wrong slot, which `sync` cannot clear because the wrong sighting is the freshest row. Audited: the Worker logs one fleet_accounts_clear line naming the slot and the row it removed. Unconfigured slot: 404, nothing written.",
+  },
 };
 
 /** Issue #53: "90s" | "5m" | "2h" -> ms; anything else (bare numbers, zero,
@@ -414,7 +421,7 @@ export function parseIdleDuration(raw: string): number | null {
 
 /** `fleet ls`, `fleet task show <n>` — the command line for one verb. */
 function verbLine(cmd: string, help: VerbHelp): string {
-  const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory" : cmd;
+  const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory" : cmd.startsWith("accounts-") ? "accounts" : cmd;
   return `fleet ${name}${help.args ? " " + help.args : ""}`;
 }
 
@@ -1033,6 +1040,13 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // spelled out explicitly rather than inferred from a flag combination.
     case "accounts": {
       const rest = argv.slice(1);
+      if (rest[0] === "clear") {
+        const slot = rest[1];
+        if (rest.length !== 2 || slot === undefined || slot === "" || slot.startsWith("-")) {
+          return usage("usage: fleet accounts clear <slot>");
+        }
+        return { cmd: "accounts-clear", slot };
+      }
       const sync = rest[0] === "sync";
       const flags = rest.slice(sync ? 1 : 0);
       let watch = false;

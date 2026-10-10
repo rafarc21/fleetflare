@@ -426,3 +426,36 @@ export async function cmdAccountsSync(creds: Credentials, flags: AccountsFlags):
     process.exit(1);
   }
 }
+
+/** `fleet accounts clear <slot>` (issue #333) — deletes one slot's limit row
+ *  via POST /studio/accounts/clear, which audits it Worker-side. For a limit
+ *  charged to the wrong slot: `sync` cannot clear that one (the wrong
+ *  sighting is the freshest row). Prints what was removed. One-shot: a
+ *  failed fetch or non-2xx exits loudly. */
+export async function cmdAccountsClear(creds: Credentials, slot: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(new URL("/studio/accounts/clear", creds.workerUrl), {
+      method: "POST",
+      headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
+      body: JSON.stringify({ slot }),
+    });
+  } catch (err) {
+    console.error(`fleet accounts clear: could not reach ${creds.workerUrl}: ${errText(err)}`);
+    process.exit(1);
+  }
+  if (!res.ok) {
+    console.error(`fleet accounts clear: ${res.status} ${(await res.text()).slice(0, 300)}`);
+    process.exit(1);
+  }
+  const { name, previous } = (await res.json()) as {
+    name: string;
+    previous: { until: string | null; seenAt: string; dead?: true } | null;
+  };
+  if (previous === null) {
+    console.log(`fleet accounts clear: ${name} had no limit row; nothing to clear`);
+    return;
+  }
+  const was = previous.dead ? "dead" : `limited until ${previous.until ?? "unknown"}`;
+  console.log(`fleet accounts clear: cleared ${name} (was ${was}, seen ${previous.seenAt})`);
+}

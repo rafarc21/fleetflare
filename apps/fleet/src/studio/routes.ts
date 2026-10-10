@@ -36,7 +36,7 @@ import {
 } from "./rpc-failure";
 import { RECYCLE_REFUSED_PREFIX } from "./recycle-cost";
 import { FRESH_SESSION_REFUSED_PREFIX } from "./provision";
-import { resolveClaudeAccounts, accountLabel } from "./accounts";
+import { resolveClaudeAccounts, accountLabel, claudeAccountVarName, MAX_CLAUDE_ACCOUNTS } from "./accounts";
 import {
   readFleetAccountLimits, writeFleetAccountLimit, clearFleetAccountLimit, readOneAccountLimit,
 } from "./account-limits-store";
@@ -457,6 +457,40 @@ export async function handleStudio(
       until: limits[a.name]?.until ?? null,
       seenAt: limits[a.name]?.seenAt ?? null,
     })));
+  }
+
+  /**
+   * Issue #333 — `fleet accounts clear <slot>`: the operator's escape hatch
+   * for a limit row charged to the wrong slot. Sync cannot clear one: the
+   * wrongly attributed sighting is the FRESHEST row, and sync's own MAJOR 6
+   * guard skips it as "newer row exists". This route deletes the row
+   * unconditionally (dead flag included) and AUDITS it: one JSON line naming
+   * the slot and the row it removed. Built from resolved fields only -- there
+   * is no token in scope to leak. `slot` is a position ("4") or the secret
+   * name; either must be a configured account, else 404, nothing written.
+   * Same Access-gated lane as every other /studio/* route.
+   */
+  if (url.pathname === "/studio/accounts/clear") {
+    if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return new Response("bad json body", { status: 400 });
+    }
+    const slot = (body as { slot?: unknown } | null)?.slot;
+    if (typeof slot !== "string" || slot === "") {
+      return new Response("\"slot\" must be a slot number or account secret name", { status: 400 });
+    }
+    const position = /^[1-9]$/.test(slot) && Number(slot) <= MAX_CLAUDE_ACCOUNTS ? Number(slot) : null;
+    const name = position !== null ? claudeAccountVarName(position) : slot;
+    if (!resolveClaudeAccounts(env).some((a) => a.name === name)) {
+      return new Response(`no configured account ${JSON.stringify(slot)}`, { status: 404 });
+    }
+    const previous = await readOneAccountLimit(env.DB, name);
+    await clearFleetAccountLimit(env.DB, name);
+    console.log(JSON.stringify({ event: "fleet_accounts_clear", name, previous, at: new Date().toISOString() }));
+    return Response.json({ name, previous });
   }
 
   /**

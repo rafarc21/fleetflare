@@ -12,12 +12,14 @@
 # GH_TOKEN either: the GitHub token is minted and written Worker-side, never
 # handed to this container as an env var.
 #
-# CLAUDE_CODE_OAUTH_TOKEN is never referenced by name below — `claude` reads
-# it straight from its process environment (the same assumption
-# container/server.ts's bare `Bun.spawn(["claude", ...])` makes). This script
-# is the first thing to ever run `tmux new-session` in a fresh container, so
-# the tmux SERVER's captured environment IS this script's own environment;
-# every pane tmux creates afterward inherits it automatically.
+# CLAUDE_CODE_OAUTH_TOKEN — `claude` reads it straight from its process
+# environment (the same assumption container/server.ts's bare
+# `Bun.spawn(["claude", ...])` makes). This script is the first thing to ever
+# run `tmux new-session` in a fresh container, so the tmux SERVER's captured
+# environment IS this script's own environment. A REUSED session is not: a
+# failover switch rewrites its token, so the claude-launch step pins it back
+# to this run's own before launching (issue #333). Its value is never typed
+# into a pane and never put in an argv.
 set -euo pipefail
 
 # --- the studio's own tmux server (issue #117) ------------------------------
@@ -1655,9 +1657,19 @@ claude_launch() {
 # anything else. Stripped here, the lead and every gate or test it spawns
 # reach the DEFAULT server; the studio's is reachable only by name. `env`
 # execs claude, so the pane still reads `claude`.
+#
+# The token adopt prefix (issue #333): the pane's bash may still export a
+# token an earlier failover switch put there (failover.ts accountSwitchCmd's
+# own adopt line), and claude inherits THAT SHELL's env. So the typed line
+# first re-reads the token from the session env -- which the claude-launch
+# region below has just pinned to this bring-up's own -- and exports it. The
+# line READS the secret, never carries it: everything typed here is echoed and
+# mirrored into the transcript. Plain `tmux`: in the pane $TMUX names the
+# studio's server.
 claude_launch_line() {
   local prompt="$1" dir="$2" line
   local file="${FLEET_WORKSPACE:-/workspace}/.fleet/role-prompt.md"
+  local adopt='__ff_t=$(tmux show-environment -t studio CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null | sed -n s/^CLAUDE_CODE_OAUTH_TOKEN=//p); [ -n "$__ff_t" ] && export CLAUDE_CODE_OAUTH_TOKEN="$__ff_t"; unset __ff_t; '
   shift 2
   if { mkdir -p "${file%/*}" && printf '%s' "$prompt" > "$file"; } 2>/dev/null; then
     line="$(printf '%q ' env -u TMUX -u TMUX_PANE claude "$@")--append-system-prompt \"\$(cat $(printf '%q' "$file"))\""
@@ -1676,7 +1688,7 @@ claude_launch_line() {
   # Guarded: a missing checkout (clone failed, bare container) falls back to
   # the pane's own directory, so the studio still comes up attachable.
   [ -n "$dir" ] && [ -d "$dir" ] && line="cd $(printf '%q' "$dir") && $line"
-  printf '%s' "$line"
+  printf '%s' "$adopt$line"
 }
 
 # How many processes on this container match `claude` right now, logged on
@@ -1786,6 +1798,19 @@ if claude_launch_needed; then
   # Issue #6: the typed line's size, on record in the bring-up log. It no
   # longer grows with the brief; a large number here means it leaked back.
   echo "studio-bringup: launch line is $(printf '%s' "$cmd_str" | wc -c | tr -d ' ') bytes (role prompt $(printf '%s' "$role_prompt" | wc -c | tr -d ' ') bytes)" >&2
+  # Issue #333: pin the session's token to the one THIS bring-up was handed.
+  # A reused session keeps whatever an earlier failover switch wrote there,
+  # and the Worker records this bring-up's account as the launched one -- so
+  # without this the lead ran on one account while limits were charged to
+  # another. A failover relaunch hands bring-up the switched token, so this
+  # pins the switch rather than undoing it. Read back by the launch line's
+  # adopt prefix (claude_launch_line). printf is a builtin piped into
+  # `source-file -`: the token is in no argv (failover.ts accountSwitchCmd's
+  # #110 shape). No token handed over: the session is left as it is.
+  if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    printf "set-environment -t studio CLAUDE_CODE_OAUTH_TOKEN '%s'\n" "$CLAUDE_CODE_OAUTH_TOKEN" | tmux source-file - \
+      || echo "studio-bringup: could not pin CLAUDE_CODE_OAUTH_TOKEN in the tmux session env -- the lead may run on a token an earlier failover left there (issue #333)" >&2
+  fi
   # Issue #54: claude_launch observes what the keystrokes actually did.
   # Recorded, not acted on here — the transcript pipe-pane below is the only
   # record of WHY claude exited and the shell window is the operator's way
