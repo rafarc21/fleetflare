@@ -9,6 +9,7 @@ import {
   pullsWithClosingIssuesForCommits, pullClaimsIssue, upsertRepoFile,
   listAllBranchNames, BRANCH_NAMES_PAGE_SIZE, BRANCH_NAMES_MAX_PAGES,
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
+  repoIsWritable, deleteBranch, compareAhead,
 } from "../src/github/api";
 import { doneRecordPutter } from "../src/studio/do";
 import { PATH1_BATCH_MAX } from "../src/github/promote-close";
@@ -66,6 +67,14 @@ describe("mergePullRequest", () => {
     await expect(mergePullRequest("tok", "o/r", "7", "t", "squash"))
       .rejects.toThrow(/Base branch was modified/);
   });
+
+  // #309 finding 2: the PUT sites carried no full-header pin — stripping
+  // their headers to auth-only passed all of #308's tests. This pins the
+  // whole 4-key standard set, so that strip now fails.
+  it("PUTs with the full standard header set (#309 finding 2)", async () => {
+    await mergePullRequest("tok", "o/r", "7", "t", "squash");
+    expect(calls[0].headers).toEqual(GH_STD_HEADERS);
+  });
 });
 
 describe("fetchRepoFile", () => {
@@ -77,6 +86,16 @@ describe("fetchRepoFile", () => {
     expect(calls[0].url).toBe("https://api.github.com/repos/o/r/contents/fleet/blueprint/roles/pilot.md?ref=v1.2.3");
     expect(calls[0].headers.authorization).toBe("Bearer tok");
     expect(calls[0].headers.accept).toBe("application/vnd.github.raw+json");
+    // #309: the raw-media-type deviation pinned as a full object — the 3-key
+    // set with the RAW accept and no content-type. This site stays a raw
+    // fetch under ghRequest (its Content-Length guard must reject before the
+    // body is ever buffered), so this pin guards against anyone "helpfully"
+    // routing it later without noticing the set differs.
+    expect(calls[0].headers).toEqual({
+      authorization: "Bearer tok",
+      accept: "application/vnd.github.raw+json",
+      "user-agent": "fleetflare",
+    });
   });
 
   it("URL-encodes the ref", async () => {
@@ -191,6 +210,31 @@ describe("upsertRepoFile", () => {
     await expect(upsertRepoFile("tok", "o/ops", "p.json", "{}", "msg")).rejects.toThrow(/500/);
     expect(calls).toHaveLength(1);
   });
+
+  // #309: the GET carries this module's only 3-key bodyless set (no
+  // content-type) — pinned bit-for-bit so routing it through the merged
+  // header set must still drop that key exactly, and the DIFFERENT
+  // `upsert ${path}: sha lookup failed` message shape must survive.
+  it("GETs with the 3-key bodyless set (no content-type) — #309 deviant set", async () => {
+    let n = 0;
+    respond = () => (n++ === 0 ? Response.json({ sha: "old111" }) : Response.json({ content: { sha: "new222" } }));
+    await upsertRepoFile("tok", "o/ops", "done/a-b/316.json", "{}", "msg");
+    // toStrictEqual, not toEqual: the stripped set must be EXACTLY 3 keys —
+    // toEqual ignores an undefined-valued key, so it cannot see the strip
+    // (#309 round 2 review: deleting ghRequest's undefined-strip passed
+    // all 130 tests under toEqual).
+    expect(calls[0].headers).toStrictEqual(GH_GET_HEADERS);
+  });
+
+  it("the failed-lookup throw carries this fn's own exact message shape (#309)", async () => {
+    respond = () => new Response("boom", { status: 500 });
+    try {
+      await upsertRepoFile("tok", "o/ops", "p.json", "{}", "msg");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("upsert p.json: sha lookup failed (500): boom");
+    }
+  });
 });
 
 // #363 round 3: the Worker's putOpsFile port must UPSERT (sha lookup, then
@@ -256,6 +300,14 @@ describe("createRepoFile", () => {
       expect((err as Error).message).not.toContain("super-secret-token");
     }
   });
+
+  // #309 finding 2: the second PUT site with no full-header pin. Same pin
+  // as mergePullRequest's — stripping to auth-only must fail HERE too.
+  it("PUTs with the full standard header set (#309 finding 2)", async () => {
+    respond = () => Response.json({ content: { sha: "def7890123" } });
+    await createRepoFile("tok", "o/r", "fleet/memory/s/x.md", "fact", "msg");
+    expect(calls[0].headers).toEqual(GH_STD_HEADERS);
+  });
 });
 
 // Dynamic repo selection (P4a): the installation's repository list is the
@@ -305,6 +357,16 @@ describe("listInstallationRepos", () => {
   it("throws GitHub's own words on a non-2xx, and never the token", async () => {
     respond = () => new Response("Bad credentials", { status: 401 });
     await expect(listInstallationRepos("tok")).rejects.toThrow(/401.*Bad credentials/);
+  });
+
+  // #309: this is one of the three bodyless-GET sites whose 3-key set (no
+  // content-type) is a deviant the merged header convention must preserve.
+  it("GETs each page with the 3-key bodyless set (no content-type) — #309 deviant set", async () => {
+    respond = () => pageOf(["acme-org/websites"], 1);
+    await listInstallationRepos("tok");
+    // toStrictEqual for the same reason as upsertRepoFile's pin above: an
+    // undefined-valued content-type key must fail here, not be ignored.
+    expect(calls[0].headers).toStrictEqual(GH_GET_HEADERS);
   });
 });
 
@@ -452,6 +514,10 @@ describe("listAllBranchNames", () => {
     expect(calls[0].method).toBe("GET");
     expect(calls[0].url).toBe("https://api.github.com/repos/o/r/branches?per_page=100");
     expect(calls[0].headers.authorization).toBe("Bearer tok");
+    // #309: the third bodyless-GET site — its 3-key set (no content-type)
+    // pinned bit-for-bit, and page 2 (a later `calls` slot) keeps it too.
+    // toStrictEqual, matching the other two deviant-set pins.
+    expect(calls[0].headers).toStrictEqual(GH_GET_HEADERS);
   });
 
   it("throws GitHub's own words on a non-2xx, token never in the message", async () => {
@@ -483,6 +549,7 @@ describe("listAllBranchNames", () => {
     const result = await listAllBranchNames("tok", "o/r");
     expect(calls).toHaveLength(2);
     expect(calls[1].url).toBe("https://api.github.com/repos/o/r/branches?per_page=100&page=2");
+    expect(calls[1].headers).toStrictEqual(GH_GET_HEADERS);
     expect(result.names).toContain("fix-999-tail");
     expect(result.names).toHaveLength(BRANCH_NAMES_PAGE_SIZE + 1);
     expect(result.truncated).toBe(false);
@@ -691,6 +758,15 @@ const GH_STD_HEADERS = {
   accept: "application/vnd.github+json",
   "user-agent": "fleetflare",
   "content-type": "application/json",
+};
+
+// #309: the deviant 3-key bodyless-GET set three call sites carry (no
+// content-type) — pinned separately so the one-request-path refactor must
+// reproduce it bit-for-bit at each of them.
+const GH_GET_HEADERS = {
+  authorization: "Bearer tok",
+  accept: "application/vnd.github+json",
+  "user-agent": "fleetflare",
 };
 
 describe("pullRequestExists", () => {
@@ -1148,5 +1224,142 @@ describe("pullClaimsIssue", () => {
       title: "feat: x", body: "Closes other/repo#1635",
     }));
     expect(await pullClaimsIssue("tok", "old/name", 150, 1635)).toBe(false);
+  });
+});
+
+// --- #309, round 2: previously untested sites + the 300-char cut ----------
+//
+// Characterization ahead of the ghRequest fold: these pin CURRENT behavior,
+// so the refactor must pass them UNMODIFIED. repoIsWritable, deleteBranch
+// and compareAhead had ZERO direct tests in this file before #309 — only
+// callers' fakes exercised them.
+
+describe("repoIsWritable", () => {
+  it("200 with permissions.push answers true", async () => {
+    respond = () => Response.json({ permissions: { push: true } });
+    expect(await repoIsWritable("tok", "o/r")).toBe(true);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r");
+  });
+
+  it("200 without a permissions object fails closed: false", async () => {
+    respond = () => Response.json({});
+    expect(await repoIsWritable("tok", "o/r")).toBe(false);
+  });
+
+  it("403 is false, not a throw — an answer, not a permission question", async () => {
+    respond = () => new Response('{"message":"Resource not accessible by integration"}', { status: 403 });
+    expect(await repoIsWritable("tok", "o/r")).toBe(false);
+  });
+
+  it("404 is false, not a throw — a PAT's refusal to confirm a repo exists", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    expect(await repoIsWritable("tok", "o/r")).toBe(false);
+  });
+
+  it("500 throws this fn's exact message, GitHub's own words in it", async () => {
+    respond = () => new Response("boom", { status: 500 });
+    try {
+      await repoIsWritable("tok", "o/r");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("read o/r failed (500): boom");
+    }
+  });
+});
+
+describe("deleteBranch", () => {
+  it("DELETEs the ref with the standard header set and swallows a 2xx's body", async () => {
+    respond = () => new Response(null, { status: 204 });
+    await deleteBranch("tok", "o/r", "fleet/rescue/9");
+    expect(calls[0].method).toBe("DELETE");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/git/refs/heads/fleet/rescue/9");
+    expect(calls[0].headers).toEqual(GH_STD_HEADERS);
+    expect(calls[0].body).toBeUndefined();
+  });
+
+  it("a name with no slash still URL-encodes nothing away", async () => {
+    respond = () => new Response(null, { status: 204 });
+    await deleteBranch("tok", "o/r", "plain");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/git/refs/heads/plain");
+  });
+
+  it("500 throws this fn's exact message", async () => {
+    respond = () => new Response("boom", { status: 500 });
+    try {
+      await deleteBranch("tok", "o/r", "b");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("delete o/r branch b failed (500): boom");
+    }
+  });
+
+  it("never leaks the token into the thrown error message", async () => {
+    respond = () => new Response("unauthorized", { status: 401 });
+    try {
+      await deleteBranch("super-secret-token", "o/r", "b");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).not.toContain("super-secret-token");
+    }
+  });
+});
+
+describe("compareAhead", () => {
+  it("reads ahead_by and the LAST commit's committer date (GitHub sends commits oldest-first)", async () => {
+    respond = () => Response.json({
+      ahead_by: 3,
+      commits: [
+        { commit: { committer: { date: "2026-10-01T10:00:00Z" } } },
+        { commit: { committer: { date: "2026-10-05T10:00:00Z" } } },
+      ],
+    });
+    expect(await compareAhead("tok", "o/r", "main", "feat/x")).toEqual({
+      aheadBy: 3, lastCommitAt: "2026-10-05T10:00:00Z",
+    });
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/r/compare/main...feat%2Fx");
+  });
+
+  it("a compare with no commits still answers, last commit unknown", async () => {
+    respond = () => Response.json({ ahead_by: 0, commits: [] });
+    expect(await compareAhead("tok", "o/r", "main", "feat/x")).toEqual({ aheadBy: 0, lastCommitAt: null });
+  });
+
+  it("a 404 is null — the ref cannot be resolved, never a fabricated zero", async () => {
+    respond = () => new Response('{"message":"Not Found"}', { status: 404 });
+    expect(await compareAhead("tok", "o/r", "main", "gone")).toBeNull();
+  });
+
+  it("500 throws this fn's exact message", async () => {
+    respond = () => new Response("boom", { status: 500 });
+    try {
+      await compareAhead("tok", "o/r", "main", "feat/x");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("compare o/r main...feat/x failed (500): boom");
+    }
+  });
+
+  it("a missing ahead_by throws rather than answering a guess", async () => {
+    respond = () => Response.json({ commits: [] });
+    await expect(compareAhead("tok", "o/r", "main", "feat/x")).rejects.toThrow(/named no ahead_by/);
+  });
+});
+
+// #309 finding 4: the error cut is 300 chars, exactly. A 1000-char body
+// must surface its first 300 chars and NOT one character more.
+describe("the 300-char error cut (#309 finding 4)", () => {
+  it("carries exactly the first 300 chars of a 1000-char GitHub error body, no more", async () => {
+    const longBody = "x".repeat(1000);
+    respond = () => new Response(longBody, { status: 500 });
+    try {
+      await pullRequestExists("tok", "o/r", 4242);
+      expect.unreachable();
+    } catch (err) {
+      const msg = (err as Error).message;
+      const cut = longBody.slice(0, 300);
+      expect(msg.endsWith(cut)).toBe(true);
+      expect(msg).not.toContain(cut + "x"); // char 301 must not be in it
+    }
   });
 });
