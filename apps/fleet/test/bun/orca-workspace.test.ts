@@ -8,9 +8,10 @@
 // invocation is INJECTED, so no test here ever shells out to real Orca — the
 // one test that does spawn a process (`never fails its caller`) runs a bun
 // script that injects a throwing runner.
-import { test, expect } from "bun:test";
+import { test, expect, mock } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
+import * as nodeOs from "node:os";
 import { dirname, join } from "node:path";
 import {
   studioWorkspaceName,
@@ -18,6 +19,8 @@ import {
   type WorkspaceRegistry,
   orcaPresent,
   ensureStudioWorkspace,
+  openStudioRow,
+  closeStudioRow,
   reconcileStudioWorkspaces,
   previewStudioWorkspace,
   planStudioWorkspaces,
@@ -2085,6 +2088,122 @@ test("#135: a surviving studio folder is named with its by-path removal command"
   expect(lines).not.toContain("no Orca worktree found");
   expect(lines).toContain(path);
   expect(lines).toContain(`orca worktree rm --worktree "path:${path}"`);
+});
+
+// ---------------------------------------------------------------------------
+// Board #322: the pair functions. Every single-studio caller used to sequence
+// `studioWorkspaceTitle` + `ensureStudioWorkspace` (or
+// `removeStudioWorkspace` + `describeWorkspaceRemoval`) itself; `openStudioRow`
+// and `closeStudioRow` are those pairs. These characterization tests pin what
+// each pair produces THROUGH the new interface — the exact title derived from
+// tasks, the outcome, and the printed lines — with the same fakes every suite
+// above already uses.
+
+test("openStudioRow: a working task — the derived `repo · #N <title>` is what reaches Orca, and the outcome flows through", async () => {
+  const tasks = [
+    boardTask({ number: 2554, title: "retire is_platform", state: "working", assignee: "acme-os--release-studio" }),
+  ];
+  const f = fake({
+    "worktree list": worktrees(),
+    "repo list": REPOS,
+    "worktree create": ok(JSON.stringify({
+      result: { worktree: { id: "wt-acme-release", displayName: "studio-acme-os--release-studio" } },
+    })),
+    "terminal list": terminals(),
+    "terminal create": TERM_CREATED,
+  });
+  const outcome = await openStudioRow("acme-os--release-studio", tasks, f.deps);
+
+  expect(outcome.kind).toBe("created");
+  const set = f.calls.find((c) => c[0] === "worktree" && c[1] === "set");
+  expect(set).toBeDefined();
+  expect(set).toContain("--display-name");
+  expect(set).toContain("acme-os · #2554 retire is_platform");
+});
+
+test("openStudioRow: idle (no tasks) — the `repo · role (idle)` title reaches Orca the same way", async () => {
+  const f = fake({
+    "worktree list": worktrees(),
+    "repo list": REPOS,
+    "worktree create": CREATED,
+    "terminal list": terminals(),
+    "terminal create": TERM_CREATED,
+  });
+  const outcome = await openStudioRow("websites--maestro", [], f.deps);
+
+  expect(outcome.kind).toBe("created");
+  const set = f.calls.find((c) => c[0] === "worktree" && c[1] === "set");
+  expect(set).toContain("websites · maestro (idle)");
+});
+
+test("openStudioRow: not running under Orca — skipped, zero orca calls", async () => {
+  const f = fake({}, { hasBinary: () => null });
+  const outcome = await openStudioRow("websites--maestro", [], f.deps);
+  expect(f.calls).toEqual([]);
+  expect(outcome).toEqual({ kind: "skipped", why: "not running under Orca" });
+});
+
+test("closeStudioRow: removed — the same lines describeWorkspaceRemoval prints, salvage line included when .context/ had files", async () => {
+  const wt = tmpWorktree({ ".context/shot.png": "PNGDATA" }, "studio-websites--maestro");
+  const f = fake({
+    "worktree list": worktreesWithPath({ displayName: "studio-websites--maestro", path: wt }),
+    "terminal list": terminals(),
+  });
+  // The 2-param call IS the production shape: the DEFAULT salvage destination
+  // — `join(homedir(), "fleet-teardown-salvage")` — is what flows through, so
+  // left alone this test would mkdir+cp the fixture into the operator's REAL
+  // home on every run (2026-10-10: nine stray fixture dirs found in
+  // /root/fleet-teardown-salvage from exactly that). Redirecting it cannot be
+  // `process.env.HOME = ...`: Bun's `os.homedir()` snapshots $HOME at process
+  // LAUNCH, so a runtime mutation is a no-op here (measured: mutating before
+  // or after the first call changes nothing). The working redirect is
+  // `mock.module` of the node:os system boundary — captured real exports
+  // spread back in `finally`, because an unrestored mock.module leaks to every
+  // LATER test and file in the same bun process (measured too). The spread is
+  // the REAL os only because nothing else mocks node:os before this file
+  // loads — this is the repo's only node:os mock (a second one would have
+  // to capture before that one).
+  const tmpHome = mkdtempSync(join(tmpdir(), "orca-salvage-home-"));
+  const realOs = { ...nodeOs }; // copied at capture, so the mock cannot rewrite it
+  await mock.module("node:os", () => ({ ...realOs, homedir: () => tmpHome }));
+  try {
+    const lines = await closeStudioRow("websites--maestro", f.deps);
+    expect(lines[0]).toBe("websites--maestro: Orca worktree and attach terminal removed");
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("salvaged .context/");
+    // The redirect held: the destination the operator would be told to look in
+    // is under the temp HOME, never the real one.
+    expect(lines[1]).toContain(join(tmpHome, "fleet-teardown-salvage"));
+  } finally {
+    await mock.module("node:os", () => ({ ...realOs }));
+    rmSync(tmpHome, { recursive: true, force: true });
+  }
+});
+
+test("closeStudioRow: absent — the single teardown-complete line, byte-identical to describeWorkspaceRemoval's", async () => {
+  const f = fake({
+    "worktree list": worktrees("staging"),
+    "terminal list": ok(JSON.stringify({ ok: true, result: { terminals: [] } })),
+  });
+  const lines = await closeStudioRow("websites--maestro", f.deps);
+  expect(lines).toEqual([
+    "websites--maestro: no Orca worktree or attach terminal found — teardown complete",
+  ]);
+});
+
+test("closeStudioRow: skipped (no Orca) — no lines, no orca calls", async () => {
+  const f = fake({}, { env: { TERM_PROGRAM: "Apple_Terminal" } });
+  const lines = await closeStudioRow("websites--maestro", f.deps);
+  expect(lines).toEqual([]);
+  expect(f.calls).toEqual([]);
+});
+
+test("closeStudioRow: unverified (orca lookup fails) — the could-not-verify line, never a confident one", async () => {
+  const f = fake({ "worktree list": { ok: false, stdout: "", stderr: "orca wedged", timedOut: false } });
+  const lines = await closeStudioRow("websites--maestro", f.deps);
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("could not verify teardown: orca worktree list failed: orca wedged");
+  expect(lines.join("\n")).not.toContain("teardown complete");
 });
 
 // ---------------------------------------------------------------------------
