@@ -244,6 +244,75 @@ describe("checkAndRecordReadiness (do.ts)", () => {
 
     expect(await checkAndRecordReadiness(deps, fakeStorage(), STUDIO_ID, async () => {})).toBeNull();
   });
+
+  // Board issue #331 — a verdict must never land on a row that reads
+  // `stopped` at write time. Two landing points, one invariant:
+  //
+  // (1) BELOW, the residual window: a destroy that runs start-to-finish
+  //     BETWEEN this function's own entry read and `watchForDestroy`'s
+  //     snapshot. `wasStopped` then snapshots true, the marker is already
+  //     cleared by destroyWithSync's own `finally`, and the tick passes no
+  //     OpCtx — so both of `destroyLanded()`'s branches read false and the
+  //     write stamps the verdict ONTO the stopped row. Exactly the blind
+  //     spot provision.ts's own DESTROY_EPOCH_KEY doc names: "a destroy
+  //     runs start-to-finish inside the window between the snapshot and the
+  //     check it feeds".
+  // (2) FURTHER BELOW, the already-caught side, pinned so a mutant deleting
+  //     the destroyLanded guard still dies: a destroy completing DURING the
+  //     check's own exec (row not stopped at snapshot, stopped by the
+  //     post-exec check) is what `destroyLanded()`'s row branch exists for.
+  it("a readiness verdict never lands on a row that reads stopped at write time — a destroy that fully completed before the snapshot (#331)", async () => {
+    const runningRow = status();
+    const stoppedRow = status({ state: "stopped", readiness: null });
+    const map = new Map<string, unknown>([[STATUS_KEY, runningRow]]);
+    let statusReads = 0;
+    const storage: StudioStorage = {
+      get: (async (key: string) => {
+        if (key === STATUS_KEY && ++statusReads === 2) {
+          // The 2nd read IS watchForDestroy's own snapshot; the destroy has
+          // already landed its stopped-row write and cleared its marker by
+          // then. No DESTROYING_KEY, no epoch bump — the tick has no ctx.
+          map.set(STATUS_KEY, stoppedRow);
+        }
+        return map.get(key);
+      }) as StudioStorage["get"],
+      put: (async (key: string, value: unknown) => { map.set(key, value); }) as StudioStorage["put"],
+    };
+    const deps = fakeSyncDeps(async () => ({ code: 0, stdout: PROVISIONED_OK, stderr: "" }));
+    const recorded: StudioStatus[] = [];
+
+    const returned = await checkAndRecordReadiness(deps, storage, STUDIO_ID, async (s) => { recorded.push(s); });
+
+    // The fresh stopped row comes back as-is — never the stamped one.
+    expect(returned).toEqual(stoppedRow);
+    // No verdict landed on it, and nothing was recorded to the registry.
+    expect((await storage.get(STATUS_KEY))?.readiness ?? null).toBeNull();
+    expect(recorded).toHaveLength(0);
+  });
+
+  it("a readiness verdict never lands on a row that reads stopped at write time — a destroy completing DURING the exec is caught before the write too (#331)", async () => {
+    const runningRow = status();
+    const stoppedRow = status({ state: "stopped", readiness: null });
+    const map = new Map<string, unknown>([[STATUS_KEY, runningRow]]);
+    const storage: StudioStorage = {
+      get: (async (key: string) => map.get(key)) as StudioStorage["get"],
+      put: (async (key: string, value: unknown) => { map.set(key, value); }) as StudioStorage["put"],
+    };
+    const deps = fakeSyncDeps(async () => {
+      // No marker, no epoch bump: destroyWithSync's own `finally` has
+      // already cleared DESTROYING_KEY, so only the row transition is left
+      // for the post-exec guard to see.
+      map.set(STATUS_KEY, stoppedRow);
+      return { code: 0, stdout: PROVISIONED_OK, stderr: "" };
+    });
+    const recorded: StudioStatus[] = [];
+
+    const returned = await checkAndRecordReadiness(deps, storage, STUDIO_ID, async (s) => { recorded.push(s); });
+
+    expect(returned).toEqual(stoppedRow);
+    expect((await storage.get(STATUS_KEY))?.readiness ?? null).toBeNull();
+    expect(recorded).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
