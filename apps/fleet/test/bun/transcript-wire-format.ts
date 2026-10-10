@@ -1,9 +1,10 @@
 // Wire-format contract copy (issue #275): the real builders are now private
 // to src/studio/transcript.ts. This local copy is the bash -n safety net's
-// owned spec of the wire format — test/studio.transcript.test.ts pins the
-// REAL builder byte-for-byte via literal asserts on the command the tick
-// sends (its command-shape describe), so a drift between these two copies
-// fails there, not here. Issue #85's BLOCKER 1 lesson stands: the command
+// owned spec of the wire format — a drift between these two copies fails in
+// test/bun/transcript-wire-equivalence.test.ts, which drives the real
+// (still-exported) shipTranscriptTick through a capturing fake exec and
+// asserts the command it sends equals this copy byte-for-byte (and the
+// rotate exec likewise). Issue #85's BLOCKER 1 lesson stands: the command
 // string MUST be bash -n'd; keeping that net is worth one owned copy.
 import { TRANSCRIPT_PULL_MAX, HOT_TAIL_BYTES } from "../../src/studio/archive";
 import { INCARNATION_PATH, paneLeadProbeCmd } from "../../src/studio/observed";

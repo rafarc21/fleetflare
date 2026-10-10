@@ -26,10 +26,10 @@ import {
   freePort, applyMigrations, resetStudioRows, resetPersistedRunState, requireDocker, startWrangler, api,
   killStudioContainers, waitForContainersGone, forceTick, r2Get,
 } from "./harness";
-// The exact strings the CLI prints, imported rather than re-typed — same
-// "import the real value instead of duplicating the literal" precedent
-// attach.e2e.ts keeps for TRANSCRIPT_LOG_PATH. cli/fleet.ts guards its own
-// entry point behind `import.meta.main`, so importing it runs no CLI.
+// The exact strings the CLI prints, imported rather than re-typed — the
+// "import the real value instead of duplicating the literal" rule. cli/fleet.ts
+// guards its own entry point behind `import.meta.main`, so importing it runs
+// no CLI.
 import { BURN_LEGEND } from "../cli/fleet";
 
 const devLog: string[] = [];

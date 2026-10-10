@@ -20,8 +20,9 @@ import {
 } from "../../src/studio/observed";
 // shipTickCmd/rotateCmd aliases: the real builders are private now (issue
 // #275) — these names bind to the test-owned wire-format copies in
-// ./transcript-wire-format.ts (see that file's header for the drift
-// contract), so the bash -n test bodies below stay unchanged.
+// ./transcript-wire-format.ts, kept equal to the real builder byte-for-byte
+// by test/bun/transcript-wire-equivalence.test.ts (see that file's header
+// for the drift contract), so the bash -n test bodies below stay unchanged.
 import { shipTickCmdWire as shipTickCmd, rotateCmdWire as rotateCmd } from "./transcript-wire-format";
 import { inspectCmd } from "../../src/studio/inspect";
 
