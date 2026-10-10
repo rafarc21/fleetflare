@@ -1361,7 +1361,10 @@ describe("StudioDO start config — one derivation everywhere, failover included
     // closure] x [claude branch, glm branch] (2 each) = 1 + 3*2 = 7. Issue
     // #249 doubled the 3 call-site uses — each now carries its own glm
     // sibling right beside the claude-path one this test already pinned.
-    expect(uses).toBe(7);
+    // Issue #306: + recycle's pre-destroy pin (destroyPinningLaunch), one
+    // assignment for both lead types = 8.
+    expect(uses).toBe(8);
+    expect(doSrc).toContain(`${ASSIGN}this.env, this.selfId(), spawnToken, name, leadType))`);
     expect(doSrc.split(`${ASSIGN}this.env, id, spawnToken, launch.name))`).length - 1).toBe(2);
     expect(doSrc).toContain(`${ASSIGN}this.env, this.selfId(), spawnToken, launch.name))`);
     // Issue #249: the glm stand-in — same 3 call sites, `"", "glm"` in place

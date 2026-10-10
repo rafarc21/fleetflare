@@ -164,7 +164,7 @@ export type AccountLimits = Record<string, AccountLimitEntry>;
  * "how long a select-modal limit typically lasts" exists anywhere else in this
  * codebase.
  */
-const NULL_UNTIL_CEILING_MS = 24 * 60 * 60 * 1000;
+export const NULL_UNTIL_CEILING_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Issue #238 (step 3) — the live-failover-cascade half of headroom ordering.

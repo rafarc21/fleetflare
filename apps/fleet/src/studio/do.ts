@@ -7795,7 +7795,9 @@ export class StudioDO extends Sandbox<Env> {
       // #37, REPORTS) its own post-provision readiness check, so going
       // through the public provision() would exec the identical check a
       // second time for an answer this function immediately overwrites.
-      () => this.destroy(),
+      // Issue #306: pins TODAY's launch into envVars/envAccount first — see
+      // destroyPinningLaunch's own doc comment.
+      () => this.destroyPinningLaunch(leadType),
       // Issue #328: THIS call is what actually starts the fresh post-destroy
       // container — sbAwaitReady (sandbox-api.ts) wraps startAndWaitForPorts,
       // which (per the pinned @cloudflare/containers compiled source) runs
@@ -7961,6 +7963,37 @@ export class StudioDO extends Sandbox<Env> {
       () => this.deliverBringupWakes(cfg, ctx),
     ));
     return withObserved(this.ctx.storage, result);
+  }
+
+  /**
+   * Issue #306: recycle's destroy step. The in-memory start config
+   * (`envVars`/`envAccount`) still holds the PREVIOUS launch (constructorLaunch
+   * read it back from the row), and recycle's awaitReady closure reassigns it
+   * only after its own launchAccountOrRefuse awaits. A start landing between
+   * destroy() and that assignment (an open `fleet attach` socket reconnecting)
+   * is admitted by startRefusal — recycle holds the explicit allowance — and
+   * booted the stale token; onStart then recorded the old account again. So
+   * the launch is resolved fresh and pinned HERE, before the kill: any start
+   * in that window boots today's account. Fresh, not recycle()'s entry-time
+   * result, for #328's reason (a failover can switch accounts during the
+   * pre-destroy phase). The closure still re-resolves and stays authoritative.
+   *
+   * Best-effort: a refusal or read failure leaves the config as it was and
+   * proceeds to destroy — the closure's own call refuses after destroy exactly
+   * as before; refusing here would land in recycleWithSync's destroy catch and
+   * mark a still-running studio degraded.
+   */
+  private async destroyPinningLaunch(leadType: "claude" | "glm"): Promise<void> {
+    try {
+      const spawnToken = await loadOrMintSpawnToken(this.ctx.storage);
+      const name = leadType === "glm"
+        ? ""
+        : (await launchAccountOrRefuse(this.env, this.ctx.storage, this.selfId(), this.recordFn(), false)).name;
+      ({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, this.selfId(), spawnToken, name, leadType));
+    } catch (err) {
+      console.error(`studio ${this.selfId()}: could not pin the launch before recycle's destroy, continuing`, err);
+    }
+    await this.destroy();
   }
 
   /**
