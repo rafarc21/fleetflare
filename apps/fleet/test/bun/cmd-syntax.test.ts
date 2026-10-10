@@ -18,7 +18,12 @@ import { describe, expect, test } from "bun:test";
 import {
   writeIncarnationCmd, readFileLineCmd, paneLeadProbeCmd, bringupObservationCmd,
 } from "../../src/studio/observed";
-import { shipTickCmd, rotateCmd } from "../../src/studio/transcript";
+// shipTickCmd/rotateCmd aliases: the real builders are private now (issue
+// #275) — these names bind to the test-owned wire-format copies in
+// ./transcript-wire-format.ts, kept equal to the real builder byte-for-byte
+// by test/bun/transcript-wire-equivalence.test.ts (see that file's header
+// for the drift contract), so the bash -n test bodies below stay unchanged.
+import { shipTickCmdWire as shipTickCmd, rotateCmdWire as rotateCmd } from "./transcript-wire-format";
 import { inspectCmd } from "../../src/studio/inspect";
 
 /** `bash -n` parses `cmd` and exits 0 iff it is syntactically valid — it

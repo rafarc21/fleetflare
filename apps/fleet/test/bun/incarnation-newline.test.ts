@@ -12,7 +12,12 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeIncarnationCmd } from "../../src/studio/observed";
-import { shipTickCmd, SECTION_INCARNATION, SECTION_CHUNK } from "../../src/studio/transcript";
+// Wire-format contract (issue #275): the real builder is private now, so the
+// real-shell round trip below runs the test-owned wire-format copy — same
+// command text, pinned against the real one byte-for-byte by
+// test/bun/transcript-wire-equivalence.test.ts (see
+// transcript-wire-format.ts's header for the drift contract).
+import { shipTickCmdWire as shipTickCmd, SECTION_INCARNATION, SECTION_CHUNK } from "./transcript-wire-format";
 
 /** Same isolation this repo's own real-tmux suites (test/bun/pane-probe.ts,
  *  test/bun/wake-cmd.test.ts) already establish: `TMUX_TMPDIR` alone is NOT

@@ -1,21 +1,31 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  shipTranscriptTick, shipTickCmd, rotateCmd, decodeTailPreview,
-  SECTION_BOOTID, SECTION_STAT, SECTION_CHUNK, SECTION_TAIL, SECTION_INCARNATION,
-  TRANSCRIPT_LOG_PATH, TRANSCRIPT_BOOT_ID_PATH,
-  TRANSCRIPT_MANIFEST_KEY, TRANSCRIPT_TAIL_KEY, TRANSCRIPT_BOOT_ID_KEY,
+  shipTranscriptTick, getTranscriptTailWithStorage,
   type ShipDeps, type TranscriptStorage,
 } from "../src/studio/transcript";
 import { chunkKey, TRANSCRIPT_PULL_MAX, HOT_TAIL_BYTES, type TranscriptManifest } from "../src/studio/archive";
 import {
   INCARNATION_PATH, SESSION_FOUND_SECTION, SESSION_CONTINUE_SECTION, SESSION_CWD_SECTION,
 } from "../src/studio/observed";
-import {
-  SECTION_PANE, parsePaneSection, readShipTickActivity,
-  SECTION_ACTIVITY_HOOK, parseActivityHookSection, readShipTickHookHeartbeat,
-  SECTION_MEMGUARD, parseMemguardSection, readShipTickMemguardKills,
-} from "../src/studio/transcript";
 import { REAL_PILOT_PANE } from "./fixtures/rate-limit-panes";
+
+// Wire-format literals — the container↔Worker delimited-stdout protocol, same
+// convention test/studio.observation-tick.test.ts:33-34 already established:
+// markers/paths/keys are protocol, not implementation, and pinning them as
+// literals is what lets these asserts fail when the builder drifts.
+const SECTION_BOOTID = "---FLEET-BOOTID---";
+const SECTION_STAT = "---FLEET-STAT---";
+const SECTION_INCARNATION = "---FLEET-INCARNATION---";
+const SECTION_CHUNK = "---FLEET-CHUNK---";
+const SECTION_TAIL = "---FLEET-TAIL---";
+const SECTION_PANE = "---FLEET-PANE---";
+const SECTION_ACTIVITY_HOOK = "---FLEET-ACTIVITY-HOOK---";
+const SECTION_MEMGUARD = "---FLEET-MEMGUARD---";
+const TRANSCRIPT_LOG_PATH = "/workspace/.transcript/claude.log";
+const TRANSCRIPT_BOOT_ID_PATH = "/workspace/.transcript/boot-id";
+const TRANSCRIPT_MANIFEST_KEY = "transcriptManifest";
+const TRANSCRIPT_TAIL_KEY = "transcriptTail";
+const TRANSCRIPT_BOOT_ID_KEY = "transcriptBootId";
 
 // A live StudioDO cannot be constructed under vitest-pool-workers (see
 // src/studio/do.ts's own header) — do.ts's real shipTranscript() is a thin
@@ -186,52 +196,97 @@ function fakeDeps(opts: {
 
 // ---------------------------------------------------------------------------
 
-describe("shipTickCmd / rotateCmd — exact shell shapes", () => {
-  it("shipTickCmd reads boot-id then stat, both delimited, always attempted", () => {
-    const cmd = shipTickCmd(0, undefined);
-    expect(cmd).toContain(`cat ${TRANSCRIPT_BOOT_ID_PATH} 2>/dev/null || echo ''`);
+describe("shipTranscriptTick — command shape (wire format)", () => {
+  /** Runs one tick with the given storage seed and returns the command it sent. */
+  async function sentCmd(seed?: { manifest?: TranscriptManifest; bootId?: string }, adoptionToken?: string): Promise<string> {
+    const deps = fakeDeps({ stat: "-1" });
+    const storage = fakeStorage(seed);
+    await shipTranscriptTick(deps, storage, STUDIO_ID, adoptionToken);
+    expect(deps.execCalls).toHaveLength(1);
+    return deps.execCalls[0];
+  }
+
+  it("reads boot-id then stats the log, both delimited, always attempted", async () => {
+    const cmd = await sentCmd();
+    expect(cmd.startsWith(`FLEET_FRESH_BOOT_ID=$(cat ${TRANSCRIPT_BOOT_ID_PATH} 2>/dev/null || echo ''); `)).toBe(true);
     expect(cmd).toContain(`stat -c %s ${TRANSCRIPT_LOG_PATH} 2>/dev/null || echo -1`);
     expect(cmd).toContain(`echo '${SECTION_BOOTID}'`);
     expect(cmd).toContain(`echo '${SECTION_STAT}'`);
-    // Ordering: boot-id read before stat, both before the conditional body.
-    expect(cmd.indexOf(SECTION_BOOTID)).toBeLessThan(cmd.indexOf(SECTION_STAT));
-    expect(cmd.indexOf(SECTION_STAT)).toBeLessThan(cmd.indexOf(SECTION_CHUNK));
-    expect(cmd.indexOf(SECTION_CHUNK)).toBeLessThan(cmd.indexOf(SECTION_TAIL));
   });
 
-  it("embeds the given manifest offset literally, and reads the chunk 1-indexed (offset+1) capped at TRANSCRIPT_PULL_MAX", () => {
-    expect(shipTickCmd(0, undefined)).toContain("FLEET_EFF=0");
-    expect(shipTickCmd(500, undefined)).toContain("FLEET_EFF=500");
-    expect(shipTickCmd(0, undefined)).toContain(
-      `tail -c +$((FLEET_EFF+1)) ${TRANSCRIPT_LOG_PATH} | head -c ${TRANSCRIPT_PULL_MAX} | base64`,
-    );
+  it("emits every marker, in emission order: BOOTID, STAT, INCARNATION, PANE, MEMGUARD, CHUNK, TAIL, ACTIVITY_HOOK", async () => {
+    const cmd = await sentCmd();
+    const order = [SECTION_BOOTID, SECTION_STAT, SECTION_INCARNATION, SECTION_PANE, SECTION_MEMGUARD, SECTION_CHUNK, SECTION_TAIL, SECTION_ACTIVITY_HOOK];
+    for (const marker of order) expect(cmd).toContain(`echo '${marker}'`);
+    for (let i = 1; i < order.length; i++) {
+      expect(cmd.indexOf(`echo '${order[i - 1]}'`)).toBeLessThan(cmd.indexOf(`echo '${order[i]}'`));
+    }
   });
 
-  it("embeds a stored boot-id (single-quoted) for the shell's own comparison; omits one when undefined", () => {
-    expect(shipTickCmd(0, "abc-123")).toContain("FLEET_STORED_BOOT_ID='abc-123'");
-    expect(shipTickCmd(0, undefined)).toContain("FLEET_STORED_BOOT_ID=''");
+  it("embeds the manifest offset in the else FLEET_EFF branch (boundary-pinned), and reads the chunk 1-indexed capped at TRANSCRIPT_PULL_MAX", async () => {
+    const zero = await sentCmd();
+    const seeded = await sentCmd({ manifest: { seq: 0, offset: 500, date: TODAY } });
+    // `else FLEET_EFF=<N>; fi` — NOT bare `FLEET_EFF=N`: the belt clause
+    // (`then FLEET_EFF=0; fi`) puts FLEET_EFF=0 in every command regardless
+    // of offset, so only the else-branch form pins the embedded offset.
+    expect(zero).toContain("else FLEET_EFF=0; fi");
+    expect(seeded).toContain("else FLEET_EFF=500; fi");
+    expect(seeded).not.toContain("else FLEET_EFF=0; fi");
+    expect(zero).toContain(`tail -c +$((FLEET_EFF+1)) ${TRANSCRIPT_LOG_PATH} | head -c ${TRANSCRIPT_PULL_MAX} | base64`);
   });
 
-  it("reads HOT_TAIL_BYTES for the tail section, plain base64, no truncate", () => {
-    const cmd = shipTickCmd(0, undefined);
-    expect(cmd).toContain(`tail -c ${HOT_TAIL_BYTES} ${TRANSCRIPT_LOG_PATH} | base64`);
-    expect(cmd).not.toContain("truncate");
+  it("embeds a stored boot-id (single-quoted) for the shell's own comparison; omits one when undefined", async () => {
+    expect(await sentCmd({ bootId: "abc-123" })).toContain("FLEET_STORED_BOOT_ID='abc-123'");
+    expect(await sentCmd()).toContain("FLEET_STORED_BOOT_ID=''");
   });
 
-  it("rotateCmd re-stats and gates the truncate on <= shippedSize, printing a marker either way — no hot-tail read at all", () => {
-    const cmd = rotateCmd(999);
-    expect(cmd).toBe(
-      `if [ "$(stat -c %s ${TRANSCRIPT_LOG_PATH} 2>/dev/null || echo -1)" -le 999 ]; then ` +
-      `truncate -s 0 ${TRANSCRIPT_LOG_PATH} && echo ROTATED; else echo SKIPPED; fi`,
-    );
-    expect(cmd).not.toContain("tail -c");
-    expect(cmd).not.toContain("base64");
+  it("reads HOT_TAIL_BYTES for the tail section, plain base64; steady-state never truncates or sleeps, exactly one capture-pane", async () => {
+    for (const cmd of [await sentCmd(), await sentCmd(undefined, "adopt-tok-1234")]) {
+      expect(cmd).toContain(`tail -c ${HOT_TAIL_BYTES} ${TRANSCRIPT_LOG_PATH} | base64`);
+      expect(cmd).not.toContain("truncate");
+      expect(cmd).not.toContain("sleep");
+      expect(cmd.match(/capture-pane/g)).toHaveLength(1);
+      expect(cmd).toMatch(/capture-pane -p -t studio:claude[^|]*\| base64/);
+    }
+  });
+
+  it("adoption ticks carry the token write + pane-lead probe; steady-state ticks carry neither", async () => {
+    const steady = await sentCmd();
+    const adopting = await sentCmd(undefined, "adopt-tok-1234");
+    expect(steady).not.toContain(SESSION_FOUND_SECTION);
+    expect(adopting).toContain("adopt-tok-1234");
+    expect(adopting).toContain(`if [ -z "$FLEET_INC" ]`);
+    expect(adopting).toContain("mv");
+    expect(adopting).toContain(SESSION_FOUND_SECTION);
+  });
+
+  it("incarnation read sits before the file-exists guard, captured into a shell variable, never a bare cat piped into stdout", async () => {
+    const cmd = await sentCmd();
+    const incarnationIdx = cmd.indexOf(INCARNATION_PATH);
+    const guardIdx = cmd.indexOf(`if [ "$FLEET_SIZE" -ge 0 ]`);
+    expect(incarnationIdx).toBeGreaterThan(0);
+    expect(incarnationIdx).toBeLessThan(guardIdx);
+    expect(cmd).not.toMatch(new RegExp(`cat ${INCARNATION_PATH}[^)]*\\|\\| echo`));
+  });
+
+  it("memguard fragment: tails the memguard log (MEMGUARD_LOG override honoured), guarded, after SECTION_PANE, before the file-exists guard", async () => {
+    const cmd = await sentCmd();
+    expect(cmd).toContain(`echo '${SECTION_MEMGUARD}'`);
+    expect(cmd).toContain("tail -n 20");
+    expect(cmd).toContain("${MEMGUARD_LOG:-${FLEET_WORKSPACE:-/workspace}/.fleet/memguard.log}");
+    expect(cmd).toMatch(/tail -n \d+ .*memguard\.log.* 2>\/dev\/null \| base64/);
+    const paneIdx = cmd.indexOf(`echo '${SECTION_PANE}'`);
+    const memguardIdx = cmd.indexOf(`echo '${SECTION_MEMGUARD}'`);
+    expect(memguardIdx).toBeGreaterThan(paneIdx);
+    expect(memguardIdx).toBeLessThan(cmd.indexOf(`if [ "$FLEET_SIZE" -ge 0 ]`));
+  });
+
+  it("the activity-hook read trails the file-exists if/fi block, unconditionally", async () => {
+    const cmd = await sentCmd();
+    expect(cmd.indexOf(`if [ "$FLEET_SIZE" -ge 0 ]`)).toBeLessThan(cmd.indexOf(`echo '${SECTION_ACTIVITY_HOOK}'`));
   });
 
   it("base64's alphabet never contains '-' — the FLEET-*-marker collision this file's parser relies on being impossible", () => {
-    // Exhaustive: every byte value, in every rotation of a base64 group (so
-    // every possible output CHARACTER position is exercised, not just byte
-    // 0), never produces a '-'.
     for (let n = 0; n < 256; n++) {
       for (let pad = 0; pad < 3; pad++) {
         const bytes = pad === 0 ? [n] : pad === 1 ? [n, 0] : [n, 0, 0];
@@ -239,10 +294,9 @@ describe("shipTickCmd / rotateCmd — exact shell shapes", () => {
         expect(encoded).not.toContain("-");
       }
     }
-    expect(SECTION_BOOTID).toContain("-");
-    expect(SECTION_STAT).toContain("-");
-    expect(SECTION_CHUNK).toContain("-");
-    expect(SECTION_TAIL).toContain("-");
+    for (const marker of [SECTION_BOOTID, SECTION_STAT, SECTION_CHUNK, SECTION_TAIL]) {
+      expect(marker).toContain("-");
+    }
   });
 });
 
@@ -260,7 +314,7 @@ describe("shipTranscriptTick — no-file skip", () => {
     const result = await shipTranscriptTick(deps, storage, STUDIO_ID);
     expect(result).toEqual({ shipped: 0, rotated: false, incarnationToken: "", skipped: "no-file" });
     expect(deps.execCalls).toHaveLength(1);
-    expect(deps.execCalls[0]).toBe(shipTickCmd(0, undefined));
+    expect(deps.execCalls[0]).toContain("else FLEET_EFF=0; fi"); // fresh-manifest offset 0 was embedded
     expect(storage.putKeys).toHaveLength(0); // no manifest/tail/boot-id write at all
   });
 
@@ -291,7 +345,7 @@ describe("shipTranscriptTick — offset math across two ticks", () => {
     expect(r1.shipped).toBe(100);
     expect(r1.rotated).toBe(false);
     expect(deps1.execCalls).toHaveLength(1);
-    expect(deps1.execCalls[0]).toBe(shipTickCmd(0, undefined)); // offset 0 -> FLEET_EFF=0
+    expect(deps1.execCalls[0]).toContain("else FLEET_EFF=0; fi"); // offset 0 -> FLEET_EFF=0
     expect(deps1.puts).toHaveLength(1);
     expect(deps1.puts[0].key).toBe(chunkKey(STUDIO_ID, TODAY, 0)); // first chunk of a fresh manifest is seq 0
     expect(deps1.puts[0].bytes).toEqual(new Uint8Array(bytes1));
@@ -305,7 +359,7 @@ describe("shipTranscriptTick — offset math across two ticks", () => {
     const r2 = await shipTranscriptTick(deps2, storage, STUDIO_ID);
 
     expect(r2.shipped).toBe(150);
-    expect(deps2.execCalls[0]).toBe(shipTickCmd(100, undefined)); // resumes from the PERSISTED offset
+    expect(deps2.execCalls[0]).toContain("else FLEET_EFF=100; fi"); // resumes from the PERSISTED offset
     expect(deps2.puts[0].key).toBe(chunkKey(STUDIO_ID, TODAY, 1)); // seq advances within the same day
     expect(deps2.puts[0].bytes).toEqual(new Uint8Array(bytes2));
 
@@ -331,7 +385,7 @@ describe("shipTranscriptTick — offset math across two ticks", () => {
     expect(result.shipped).toBe(0);
     expect(deps.puts).toHaveLength(0);
     expect(deps.execCalls).toHaveLength(1);
-    expect(deps.execCalls[0]).toBe(shipTickCmd(500, undefined));
+    expect(deps.execCalls[0]).toContain("else FLEET_EFF=500; fi"); // the persisted 500 was embedded
     expect(await storage.get(TRANSCRIPT_MANIFEST_KEY)).toEqual({ seq: 3, offset: 500, date: TODAY });
     expect(await storage.get(TRANSCRIPT_TAIL_KEY)).toBe(String.fromCharCode(1, 2, 3));
   });
@@ -384,8 +438,16 @@ describe("shipTranscriptTick — rotation only when fully shipped", () => {
 
     expect(result.rotated).toBe(true);
     expect(deps.execCalls).toHaveLength(2);
-    expect(deps.execCalls[0]).toBe(shipTickCmd(startOffset, undefined));
-    expect(deps.execCalls[1]).toBe(rotateCmd(startOffset + 64)); // gated on THIS tick's confirmed-shipped size
+    expect(deps.execCalls[0]).toContain(`else FLEET_EFF=${startOffset}; fi`);
+    // The rotate exec's own exact wire shape — hardcoded literal (never
+    // built with the builder under test): re-stat gated on THIS tick's
+    // confirmed-shipped size, truncate+ROTATED vs SKIPPED, nothing else.
+    expect(deps.execCalls[1]).toBe(
+      `if [ "$(stat -c %s ${TRANSCRIPT_LOG_PATH} 2>/dev/null || echo -1)" -le ${startOffset + 64} ]; then ` +
+      `truncate -s 0 ${TRANSCRIPT_LOG_PATH} && echo ROTATED; else echo SKIPPED; fi`,
+    );
+    expect(deps.execCalls[1]).not.toContain("tail -c"); // no hot-tail read rides the rotate exec
+    expect(deps.execCalls[1]).not.toContain("base64");
 
     const finalManifest = await storage.get(TRANSCRIPT_MANIFEST_KEY);
     expect(finalManifest).toEqual({ seq: 6, offset: 0, date: TODAY }); // seq/date preserved, offset reset
@@ -413,7 +475,15 @@ describe("shipTranscriptTick — rotation TOCTOU (re-stat immediately before tru
 
     expect(result.rotated).toBe(false); // rotation was ATTEMPTED (over threshold + fully shipped) but did not happen
     expect(deps.execCalls).toHaveLength(2);
-    expect(deps.execCalls[1]).toBe(rotateCmd(startOffset + 64)); // gated on this tick's own confirmed-shipped size
+    // Same hardcoded rotate wire shape as the rotation describe — the
+    // TOCTOU re-stat gate is pinned on this tick's own confirmed-shipped
+    // size, never on a stale earlier stat.
+    expect(deps.execCalls[1]).toBe(
+      `if [ "$(stat -c %s ${TRANSCRIPT_LOG_PATH} 2>/dev/null || echo -1)" -le ${startOffset + 64} ]; then ` +
+      `truncate -s 0 ${TRANSCRIPT_LOG_PATH} && echo ROTATED; else echo SKIPPED; fi`,
+    );
+    expect(deps.execCalls[1]).not.toContain("tail -c");
+    expect(deps.execCalls[1]).not.toContain("base64");
 
     // The ship itself (seq 5->6, offset caught up) is still fully persisted —
     // only the offset-reset-to-0 that a REAL rotation would add is missing,
@@ -464,20 +534,32 @@ describe("shipTranscriptTick — hot tail stored", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Fleet Spawn P3, Task 5: U+FFFD boundary trim. decodeTailPreview is tested
-// directly (pure function) plus once through the full tick, below.
+// Fleet Spawn P3, Task 5: U+FFFD boundary trim, characterized through the
+// tick — every case drives a real SECTION_TAIL (fakeDeps `tail:`) through
+// shipTranscriptTick and asserts what the grid-facing hot-tail preview
+// actually holds in storage afterwards (TRANSCRIPT_TAIL_KEY, the one place
+// decodeTailPreview's output ever lands). No direct helper imports remain.
 // ---------------------------------------------------------------------------
-describe("decodeTailPreview — U+FFFD boundary trim", () => {
-  it("a clean boundary (starts on a real character) is left untouched", () => {
-    const bytes = new TextEncoder().encode("hello € world"); // "€" mid-string, no cut
-    expect(decodeTailPreview(bytes)).toBe("hello € world");
+describe("shipTranscriptTick — U+FFFD boundary trim on the stored hot tail", () => {
+  /** One tick with the given raw SECTION_TAIL bytes; returns the stored preview. */
+  async function storedTail(bytes: Uint8Array | number[]): Promise<string | undefined> {
+    const tail = bytes instanceof Uint8Array ? b64(Array.from(bytes)) : b64(bytes);
+    const storage = fakeStorage();
+    const deps = fakeDeps({ stat: "0", read: b64([]), tail });
+    await shipTranscriptTick(deps, storage, STUDIO_ID);
+    return await storage.get(TRANSCRIPT_TAIL_KEY);
+  }
+
+  it("a clean boundary (starts on a real character) is stored verbatim, no U+FFFD", async () => {
+    const clean = new TextEncoder().encode("hello € world"); // "€" mid-string, no cut
+    expect(await storedTail(clean)).toBe("hello € world");
   });
 
-  it("trims a single orphaned continuation byte (the tail of a 2-byte sequence)", () => {
+  it("trims a single orphaned continuation byte (the tail of a 2-byte sequence) before storing", async () => {
     // "é" = 0xC3 0xA9 — keep only the trailing continuation byte 0xA9.
-    const bytes = new Uint8Array([0xa9, 0x68, 0x69]); // orphan + "hi"
-    expect(decodeTailPreview(bytes)).toBe("hi");
-    expect(decodeTailPreview(bytes)).not.toContain("�");
+    const preview = await storedTail(new Uint8Array([0xa9, 0x68, 0x69])); // orphan + "hi"
+    expect(preview).toBe("hi");
+    expect(preview).not.toContain("�");
   });
 
   // Fleet Spawn P3, Task 6 fold: the middle of the three orphan counts. The
@@ -486,22 +568,23 @@ describe("decodeTailPreview — U+FFFD boundary trim", () => {
   // arithmetic the bracket does not pin — and it is the common one in
   // practice, since 3-byte sequences cover the whole BMP above Latin-1 (box
   // drawing, CJK, the arrows a TUI paints its panes with).
-  it("trims 2 orphaned continuation bytes (a 3-byte sequence cut after its lead byte)", () => {
+  it("trims 2 orphaned continuation bytes (a 3-byte sequence cut after its lead byte) before storing", async () => {
     // "€" = E2 82 AC — keep only the two trailing continuation bytes.
     const euro = new TextEncoder().encode("€");
     expect(euro).toHaveLength(3);
     const bytes = new Uint8Array([...euro.subarray(1), ...new TextEncoder().encode("rest")]);
-    expect(decodeTailPreview(bytes)).toBe("rest");
-    expect(decodeTailPreview(bytes)).not.toContain("�");
+    const preview = await storedTail(bytes);
+    expect(preview).toBe("rest");
+    expect(preview).not.toContain("�");
   });
 
-  it("trims up to 3 orphaned continuation bytes (worst case: a 4-byte sequence missing its lead byte)", () => {
-    const bytes = new Uint8Array([0x80, 0x80, 0x80, ...new TextEncoder().encode("clean")]);
-    expect(decodeTailPreview(bytes)).toBe("clean");
-    expect(decodeTailPreview(bytes)).not.toContain("�");
+  it("trims up to 3 orphaned continuation bytes (worst case: a 4-byte sequence missing its lead byte) before storing", async () => {
+    const preview = await storedTail(new Uint8Array([0x80, 0x80, 0x80, ...new TextEncoder().encode("clean")]));
+    expect(preview).toBe("clean");
+    expect(preview).not.toContain("�");
   });
 
-  it("HOT_TAIL_BYTES-sized slice, split exactly at the 8192 boundary mid-character, decodes with no U+FFFD", () => {
+  it("HOT_TAIL_BYTES-sized slice, split exactly at the 8192 boundary mid-character, stores with no U+FFFD", async () => {
     // "\u{1F600}" (grinning face) = F0 9F 98 80, 4 bytes. Simulate: only the
     // LAST 2 bytes survived a `tail -c HOT_TAIL_BYTES` cut landing exactly
     // inside it (its lead byte + first continuation byte belong to the
@@ -520,10 +603,10 @@ describe("decodeTailPreview — U+FFFD boundary trim", () => {
     bytes.set(rest, orphan.length + filler.length);
     expect(bytes.length).toBe(HOT_TAIL_BYTES);
 
-    const decoded = decodeTailPreview(bytes);
-    expect(decoded).not.toContain("�");
-    expect(decoded.startsWith(".")).toBe(true); // orphan trimmed, lands right on the filler
-    expect(decoded.endsWith(" the rest of the pane\n")).toBe(true);
+    const preview = await storedTail(bytes);
+    expect(preview).not.toContain("�");
+    expect(preview?.startsWith(".")).toBe(true); // orphan trimmed, lands right on the filler
+    expect(preview?.endsWith(" the rest of the pane\n")).toBe(true);
   });
 
   it("wired through a full tick: a tail section whose bytes orphan-split a character produces no U+FFFD in storage", async () => {
@@ -561,7 +644,10 @@ describe("shipTranscriptTick — container-recycle offset staleness (generation 
 
     const result = await shipTranscriptTick(deps, storage, STUDIO_ID);
 
-    expect(deps.execCalls[0]).toBe(shipTickCmd(1000, "old-boot-uuid")); // the literals actually sent
+    // The literals actually sent, pinned as wire text (never built with the
+    // builder under test): the stale 1000 offset and the stored old boot-id.
+    expect(deps.execCalls[0]).toContain("else FLEET_EFF=1000; fi");
+    expect(deps.execCalls[0]).toContain("FLEET_STORED_BOOT_ID='old-boot-uuid'");
     expect(result.shipped).toBe(5);
     // seq CONTINUES (5 -> 6) rather than resetting to 0: a reused seq could
     // silently overwrite an R2 chunk that still holds pre-recycle content.
@@ -574,7 +660,8 @@ describe("shipTranscriptTick — container-recycle offset staleness (generation 
     const storage = fakeStorage({ manifest: { seq: 5, offset: 500, date: TODAY }, bootId: "same-boot-uuid" });
     const deps = fakeDeps({ stat: "600", bootId: "same-boot-uuid", read: b64(Array(100).fill(9)) });
     await shipTranscriptTick(deps, storage, STUDIO_ID);
-    expect(deps.execCalls[0]).toBe(shipTickCmd(500, "same-boot-uuid"));
+    expect(deps.execCalls[0]).toContain("else FLEET_EFF=500; fi");
+    expect(deps.execCalls[0]).toContain("FLEET_STORED_BOOT_ID='same-boot-uuid'");
     expect(storage.putKeys).not.toContain(TRANSCRIPT_BOOT_ID_KEY); // unchanged value -> no rewrite
   });
 
@@ -587,7 +674,8 @@ describe("shipTranscriptTick — container-recycle offset staleness (generation 
     const storage = fakeStorage({ manifest: { seq: 2, offset: 500_000, date: TODAY }, bootId: "old-uuid" });
     const deps = fakeDeps({ stat: "600000", bootId: "new-uuid", read: b64([7, 7, 7]) });
     const result = await shipTranscriptTick(deps, storage, STUDIO_ID);
-    expect(deps.execCalls[0]).toBe(shipTickCmd(500_000, "old-uuid"));
+    expect(deps.execCalls[0]).toContain("else FLEET_EFF=500000; fi");
+    expect(deps.execCalls[0]).toContain("FLEET_STORED_BOOT_ID='old-uuid'");
     expect(result.shipped).toBe(3); // ships the fake's canned bytes, read from the corrected (0) offset
     expect(deps.puts[0].key).toBe(chunkKey(STUDIO_ID, TODAY, 3));
   });
@@ -596,7 +684,7 @@ describe("shipTranscriptTick — container-recycle offset staleness (generation 
     const storage = fakeStorage({ manifest: { seq: 1, offset: 900, date: TODAY } }); // no bootId seeded at all
     const deps = fakeDeps({ stat: "50", read: b64([1, 2]) }); // file is now smaller than the stored offset
     const result = await shipTranscriptTick(deps, storage, STUDIO_ID);
-    expect(deps.execCalls[0]).toBe(shipTickCmd(900, undefined));
+    expect(deps.execCalls[0]).toContain("else FLEET_EFF=900; fi");
     expect(result.shipped).toBe(2);
     expect(await storage.get(TRANSCRIPT_MANIFEST_KEY)).toEqual({ seq: 2, offset: 2, date: TODAY });
   });
@@ -645,7 +733,11 @@ describe("shipTranscriptTick — container-recycle offset staleness (generation 
     const r2 = await shipTranscriptTick(deps2, storage, STUDIO_ID);
 
     expect(r2.shipped).toBe(500);
-    expect(deps2.execCalls[0]).toBe(shipTickCmd(0, "new-uuid")); // NOT shipTickCmd(1_000_000, ...) — nothing was skipped
+    // NOT the stale else FLEET_EFF=1000000 — the reset was persisted, so
+    // nothing was skipped. Boundary-pinned via the else-branch literal.
+    expect(deps2.execCalls[0]).toContain("else FLEET_EFF=0; fi");
+    expect(deps2.execCalls[0]).not.toContain("else FLEET_EFF=1000000; fi");
+    expect(deps2.execCalls[0]).toContain("FLEET_STORED_BOOT_ID='new-uuid'");
     expect(deps2.puts[0].bytes).toEqual(new Uint8Array(freshBytes));
   });
 
@@ -667,7 +759,10 @@ describe("shipTranscriptTick — container-recycle offset staleness (generation 
       const r1 = await shipTranscriptTick(deps1, storage, STUDIO_ID);
 
       expect(r1.shipped).toBe(100);
-      expect(deps1.execCalls[0]).toBe(shipTickCmd(200, "known-uuid")); // continues from the KNOWN offset, not reset to 0
+      // continues from the KNOWN offset, not reset to 0 — pinned via the
+      // else-branch literal (never built with the builder under test).
+      expect(deps1.execCalls[0]).toContain("else FLEET_EFF=200; fi");
+      expect(deps1.execCalls[0]).toContain("FLEET_STORED_BOOT_ID='known-uuid'");
       expect(await storage.get(TRANSCRIPT_BOOT_ID_KEY)).toBe("known-uuid"); // untouched — never overwritten with ""
       expect(warnSpy).toHaveBeenCalledTimes(1);
       expect(warnSpy.mock.calls[0][0]).toContain(STUDIO_ID);
@@ -680,7 +775,8 @@ describe("shipTranscriptTick — container-recycle offset staleness (generation 
       const r2 = await shipTranscriptTick(deps2, storage, STUDIO_ID);
 
       expect(r2.shipped).toBe(100);
-      expect(deps2.execCalls[0]).toBe(shipTickCmd(300, "known-uuid")); // continues from tick 1's real advance, not 0 again
+      expect(deps2.execCalls[0]).toContain("else FLEET_EFF=300; fi"); // continues from tick 1's real advance, not 0 again
+      expect(deps2.execCalls[0]).toContain("FLEET_STORED_BOOT_ID='known-uuid'");
       expect(warnSpy).toHaveBeenCalledTimes(2); // once per affected tick, no more
     } finally {
       warnSpy.mockRestore();
@@ -877,24 +973,11 @@ describe("shipTranscriptTick — manifest-write failure is retry-safe (overwrite
 // Issue #85 — the incarnation section: read unconditionally, newline-safe,
 // carries the folded-in adoption write.
 // ---------------------------------------------------------------------------
-describe("shipTickCmd / shipTranscriptTick — incarnation section (issue #85)", () => {
-  it("shipTickCmd's command reads the incarnation file unconditionally, before the file-exists guard, via a captured-then-echoed read (maestro correction #2)", () => {
-    const cmd = shipTickCmd(0, undefined);
-    const incarnationIdx = cmd.indexOf(INCARNATION_PATH);
-    const guardIdx = cmd.indexOf(`if [ "$FLEET_SIZE" -ge 0 ]`);
-    expect(incarnationIdx).toBeGreaterThan(0);
-    expect(incarnationIdx).toBeLessThan(guardIdx);
-    // Never a bare `cat FILE || echo ''` glued straight into stdout — always
-    // captured into a shell variable first.
-    expect(cmd).not.toMatch(new RegExp(`cat ${INCARNATION_PATH}[^)]*\\|\\| echo`));
-  });
-
-  it("shipTickCmd, given an adoption token, conditionally writes it only when the file is empty, in the SAME command (maestro correction #6)", () => {
-    const cmd = shipTickCmd(0, undefined, "adopt-tok-1234");
-    expect(cmd).toContain("adopt-tok-1234");
-    expect(cmd).toContain("if [ -z \"$FLEET_INC\" ]");
-    expect(cmd).toContain("mv");
-  });
+describe("shipTranscriptTick — incarnation section (issue #85)", () => {
+  // The two OLD direct shipTickCmd its (captured-then-echoed read before the
+  // file-exists guard; conditional adoption write in the SAME command) moved
+  // to the "command shape (wire format)" describe at the top of this file —
+  // same invariants, asserted on the command the tick actually sent.
 
   it("shipTranscriptTick returns the container's incarnation token, present case", async () => {
     const exec = vi.fn(async () => ({
@@ -921,7 +1004,7 @@ describe("shipTickCmd / shipTranscriptTick — incarnation section (issue #85)",
     expect(result.incarnationToken).toBe("");
   });
 
-  it("shipTranscriptTick passes the adoption token through to shipTickCmd", async () => {
+  it("shipTranscriptTick passes the adoption token through to the command it sends", async () => {
     const execCalls: string[] = [];
     const exec = vi.fn(async (cmd: string) => {
       execCalls.push(cmd);
@@ -933,14 +1016,12 @@ describe("shipTickCmd / shipTranscriptTick — incarnation section (issue #85)",
     });
     const storage = fakeStorage({});
     await shipTranscriptTick({ exec, r2Put: vi.fn(), now: fixedNow("2026-09-24T10:00:00.000Z") }, storage, STUDIO_ID, "adopt-xyz");
-    expect(execCalls[0]).toBe(shipTickCmd(0, undefined, "adopt-xyz"));
-  });
-
-  it("shipTickCmd folds the pane-lead probe into the SAME command only when adopting (maestro correction #7)", () => {
-    const steadyState = shipTickCmd(0, undefined);
-    const adopting = shipTickCmd(0, undefined, "adopt-tok-1234");
-    expect(steadyState).not.toContain(SESSION_FOUND_SECTION);
-    expect(adopting).toContain(SESSION_FOUND_SECTION);
+    // Boundary-pinned contains (never built with the builder under test):
+    // the token write is conditional-in-the-same-command (maestro #6), the
+    // pane-lead probe folded in only when adopting (maestro #7).
+    expect(execCalls[0]).toContain("adopt-xyz");
+    expect(execCalls[0]).toContain(`if [ -z "$FLEET_INC" ]`);
+    expect(execCalls[0]).toContain(SESSION_FOUND_SECTION);
   });
 
   it("shipTranscriptTick parses adoptionProbe from the combined stdout only when adopting", async () => {
@@ -973,83 +1054,106 @@ describe("shipTickCmd / shipTranscriptTick — incarnation section (issue #85)",
 
 // ---------------------------------------------------------------------------
 // Issue #221, Task 3 — SECTION_PANE on the ship tick (PR3a's B1 leg: one
-// pane frame folded into the EXISTING shipTickCmd exec, no sleep, no second
-// exec). See docs/superpowers/specs/2026-09-24-row-tells-truth-design.md.
+// pane frame folded into the EXISTING tick exec, no sleep, no second exec).
+// The old direct parsePaneSection/readShipTickActivity/shipTickCmd describes
+// are now ONE tick-through describe: result.paneFrame/result.paneVerdict are
+// the production read path (do.ts consumes the ShipResult fields), so every
+// posture below pins the same invariants at the interface.
 // ---------------------------------------------------------------------------
-describe("shipTickCmd — SECTION_PANE (issue #221)", () => {
-  it("emits exactly one capture-pane invocation, no sleep, on both steady-state and adoption ticks", () => {
-    for (const cmd of [shipTickCmd(0, undefined), shipTickCmd(0, undefined, "adopt-tok-1234")]) {
-      expect(cmd.match(/capture-pane/g)).toHaveLength(1);
-      expect(cmd).not.toContain("sleep");
-      expect(cmd).toContain(`echo '${SECTION_PANE}'`);
-    }
-  });
+describe("shipTranscriptTick — pane section (issue #221)", () => {
+  /** One tick over raw stdout; returns its result. */
+  async function tickWith(raw: string) {
+    const deps = fakeDeps({ rawTickStdout: raw });
+    const storage = fakeStorage();
+    const result = await shipTranscriptTick(deps, storage, STUDIO_ID);
+    expect(deps.execCalls).toHaveLength(1);
+    return result;
+  }
 
-  it("pipes the capture straight to base64, addressed by name, never selecting/attaching", () => {
-    const cmd = shipTickCmd(0, undefined);
-    expect(cmd).toMatch(/capture-pane -p -t studio:claude[^|]*\| base64/);
-  });
-});
-
-describe("parsePaneSection (issue #221)", () => {
-  it("round-trips a real fixture pane through base64", () => {
-    const b64 = b64Utf8(REAL_PILOT_PANE);
-    const stdout = [
+  it("round-trips a real fixture pane through base64 into result.paneFrame, and the SAME frame drives the verdict", async () => {
+    const result = await tickWith([
       SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
-      SECTION_PANE, b64,
-    ].join("\n");
-    expect(parsePaneSection(stdout)).toBe(REAL_PILOT_PANE);
+      SECTION_PANE, b64Utf8(REAL_PILOT_PANE),
+    ].join("\n"));
+    expect(result.paneFrame).toBe(REAL_PILOT_PANE);
+    expect(result.paneVerdict).toBeDefined();
   });
 
-  it("returns undefined when SECTION_PANE is absent — a pre-feature container (old image), never a throw", () => {
-    const stdout = [SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, ""].join("\n");
-    expect(() => parsePaneSection(stdout)).not.toThrow();
-    expect(parsePaneSection(stdout)).toBeUndefined();
+  it("absent SECTION_PANE (old image): both paneFrame and paneVerdict undefined, never a throw", async () => {
+    const result = await tickWith([SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, ""].join("\n"));
+    expect(result.paneFrame).toBeUndefined();
+    expect(result.paneVerdict).toBeUndefined();
   });
 
-  it("returns an empty string when the section is present but empty (tmux gone)", () => {
-    const stdout = [SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "", SECTION_PANE, ""].join("\n");
-    expect(parsePaneSection(stdout)).toBe("");
+  it("present-but-empty section (tmux gone): paneFrame '' is a real result, verdict unknown/'pane empty'", async () => {
+    const result = await tickWith([
+      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
+      SECTION_PANE, "",
+    ].join("\n"));
+    expect(result.paneFrame).toBe("");
+    expect(result.paneVerdict).toEqual({ kind: "unknown", reason: "pane empty" });
   });
 
-  it("still parses correctly ahead of the CHUNK/TAIL sections on a file-present tick", () => {
-    const b64 = btoa("hello pane");
-    const stdout = [
-      SECTION_BOOTID, "", SECTION_STAT, "0", SECTION_INCARNATION, "",
-      SECTION_PANE, b64, SECTION_CHUNK, "", SECTION_TAIL, "",
-    ].join("\n");
-    expect(parsePaneSection(stdout)).toBe("hello pane");
-  });
-});
-
-describe("readShipTickActivity (issue #221)", () => {
-  it("absent SECTION_PANE yields undefined, never a throw", () => {
-    const stdout = [SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, ""].join("\n");
-    expect(() => readShipTickActivity(stdout)).not.toThrow();
-    expect(readShipTickActivity(stdout)).toBeUndefined();
-  });
-
-  it("an empty pane section yields unknown, reason 'pane empty'", () => {
-    const stdout = [SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "", SECTION_PANE, ""].join("\n");
-    expect(readShipTickActivity(stdout)).toEqual({ kind: "unknown", reason: "pane empty" });
-  });
-
-  it("a torn/malformed pane section (invalid base64) never throws — degrades to the same 'pane empty' verdict", () => {
-    const stdout = [
+  it("a torn/malformed pane section (invalid base64) never throws — paneFrame degrades to '', verdict to the same 'pane empty' posture", async () => {
+    const result = await tickWith([
       SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
       SECTION_PANE, "not valid base64!!! ***",
-    ].join("\n");
-    expect(() => readShipTickActivity(stdout)).not.toThrow();
-    expect(readShipTickActivity(stdout)).toEqual({ kind: "unknown", reason: "pane empty" });
+    ].join("\n"));
+    expect(result.paneFrame).toBe("");
+    expect(result.paneVerdict).toEqual({ kind: "unknown", reason: "pane empty" });
   });
 
-  it("a real frame delegates to readActivityFrame", () => {
+  it("a real working frame reaches the verdict through the tick: {kind:'working'}", async () => {
     const workingPane = REAL_PILOT_PANE.replace("✻ Cogitated for 0s", "✻ Cogitating… (3s · esc to interrupt)");
-    const stdout = [
+    const result = await tickWith([
       SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
       SECTION_PANE, b64Utf8(workingPane),
-    ].join("\n");
-    expect(readShipTickActivity(stdout)).toEqual({ kind: "working" });
+    ].join("\n"));
+    expect(result.paneVerdict).toEqual({ kind: "working" });
+  });
+
+  it("still parses correctly ahead of the CHUNK/TAIL sections on a file-present tick", async () => {
+    const result = await tickWith([
+      SECTION_BOOTID, "", SECTION_STAT, "0", SECTION_INCARNATION, "",
+      SECTION_PANE, btoa("hello pane"), SECTION_CHUNK, "", SECTION_TAIL, "",
+    ].join("\n"));
+    expect(result.paneFrame).toBe("hello pane");
+  });
+
+  // Issue #311 — SECTION_MEMGUARD now sits between PANE and CHUNK/TAIL; the
+  // pane slice must end there, never swallowing the memguard bytes.
+  it("ends the pane slice at SECTION_MEMGUARD when present (issue #311 boundary)", async () => {
+    const result = await tickWith([
+      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
+      SECTION_PANE, b64Utf8(REAL_PILOT_PANE), SECTION_MEMGUARD, "",
+    ].join("\n"));
+    expect(result.paneFrame).toBe(REAL_PILOT_PANE);
+  });
+
+  it("still round-trips when SECTION_MEMGUARD is absent (old-shaped stdout, unchanged behavior)", async () => {
+    const result = await tickWith([
+      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
+      SECTION_PANE, b64Utf8(REAL_PILOT_PANE),
+    ].join("\n"));
+    expect(result.paneFrame).toBe(REAL_PILOT_PANE);
+  });
+
+  it("ends at SECTION_ACTIVITY_HOOK when CHUNK/TAIL are absent (no-file tick)", async () => {
+    const result = await tickWith([
+      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
+      SECTION_PANE, b64Utf8(REAL_PILOT_PANE),
+      SECTION_ACTIVITY_HOOK, btoa(JSON.stringify({ state: "idle", at: "2026-09-25T12:00:00.000Z" })),
+    ].join("\n"));
+    expect(result.paneFrame).toBe(REAL_PILOT_PANE);
+  });
+
+  it("still ends at SECTION_CHUNK with the activity-hook trailing after TAIL (file-present tick)", async () => {
+    const result = await tickWith([
+      SECTION_BOOTID, "", SECTION_STAT, "0", SECTION_INCARNATION, "",
+      SECTION_PANE, btoa("hello pane"), SECTION_CHUNK, "", SECTION_TAIL, "",
+      SECTION_ACTIVITY_HOOK, btoa(JSON.stringify({ state: "working", at: "2026-09-25T12:00:00.000Z" })),
+    ].join("\n"));
+    expect(result.paneFrame).toBe("hello pane");
   });
 });
 
@@ -1084,106 +1188,61 @@ describe("shipTranscriptTick — pane verdict wiring (issue #221)", () => {
 
 // ---------------------------------------------------------------------------
 // Issue #221 (PR3b), Task 2 — SECTION_ACTIVITY_HOOK, appended as the very
-// LAST section shipTickCmd emits (after the existing if/fi block), so
-// parsePaneSection's/parseShipTickSections' own "next known marker, or end
-// of stdout" boundary logic needs exactly two surgical fixes rather than a
-// rewrite — see this file's own header and the plan doc
-// (docs/superpowers/plans/2026-09-25-pr3b-hook-heartbeat.md, Task 2) for why.
+// LAST section the tick's command emits (after the existing if/fi block).
+// The old direct parseActivityHookSection/readShipTickHookHeartbeat and
+// shipTickCmd-placement describes are now ONE tick-through describe over
+// result.hookHeartbeat — do.ts consumes that ShipResult field, so every
+// posture below pins the same invariants at the interface. (Placement of the
+// hook echo itself is pinned in the command-shape describe at the top.)
 // ---------------------------------------------------------------------------
-describe("shipTickCmd — SECTION_ACTIVITY_HOOK (issue #221, PR3b)", () => {
-  it("emits SECTION_ACTIVITY_HOOK exactly once, no sleep, no second exec, on both steady-state and adoption ticks", () => {
-    for (const cmd of [shipTickCmd(0, undefined), shipTickCmd(0, undefined, "adopt-tok-1234")]) {
-      expect(cmd.match(new RegExp(SECTION_ACTIVITY_HOOK, "g"))).toHaveLength(1);
-      expect(cmd).not.toContain("sleep");
-    }
+describe("shipTranscriptTick — hook heartbeat section (issue #221, PR3b)", () => {
+  /** One tick over raw stdout; returns its result. */
+  async function tickWith(raw: string) {
+    const deps = fakeDeps({ rawTickStdout: raw });
+    const storage = fakeStorage();
+    const result = await shipTranscriptTick(deps, storage, STUDIO_ID);
+    expect(deps.execCalls).toHaveLength(1);
+    return result;
+  }
+
+  it("absent section (old image) -> hookHeartbeat undefined, never a throw", async () => {
+    const result = await tickWith([SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, ""].join("\n"));
+    expect(result.hookHeartbeat).toBeUndefined();
   });
 
-  it("the activity-hook section comes AFTER the file-exists if/fi block, unconditionally", () => {
-    const cmd = shipTickCmd(0, undefined);
-    const ifIdx = cmd.indexOf('if [ "$FLEET_SIZE" -ge 0 ]');
-    const hookIdx = cmd.indexOf(`echo '${SECTION_ACTIVITY_HOOK}'`);
-    expect(ifIdx).toBeGreaterThan(-1);
-    expect(hookIdx).toBeGreaterThan(ifIdx);
-  });
-});
-
-describe("parsePaneSection / parseShipTickSections — regression: still correct now that SECTION_ACTIVITY_HOOK follows them (issue #221, PR3b)", () => {
-  it("parsePaneSection still ends at SECTION_CHUNK when the file exists, activity-hook trailing after TAIL", () => {
-    const b64 = btoa("hello pane");
-    const stdout = [
-      SECTION_BOOTID, "", SECTION_STAT, "0", SECTION_INCARNATION, "",
-      SECTION_PANE, b64, SECTION_CHUNK, "", SECTION_TAIL, "",
-      SECTION_ACTIVITY_HOOK, btoa(JSON.stringify({ state: "working", at: "2026-09-25T12:00:00.000Z" })),
-    ].join("\n");
-    expect(parsePaneSection(stdout)).toBe("hello pane");
-  });
-
-  it("parsePaneSection ends at SECTION_ACTIVITY_HOOK when CHUNK/TAIL are absent (no-file tick)", () => {
-    const b64 = b64Utf8(REAL_PILOT_PANE);
-    const stdout = [
-      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
-      SECTION_PANE, b64,
-      SECTION_ACTIVITY_HOOK, btoa(JSON.stringify({ state: "idle", at: "2026-09-25T12:00:00.000Z" })),
-    ].join("\n");
-    expect(parsePaneSection(stdout)).toBe(REAL_PILOT_PANE);
-  });
-});
-
-describe("parseActivityHookSection (issue #221, PR3b)", () => {
-  it("round-trips a real heartbeat JSON through base64", () => {
-    const raw = JSON.stringify({ state: "working", at: "2026-09-25T12:00:00.000Z" });
-    const stdout = [
-      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
-      SECTION_PANE, "", SECTION_ACTIVITY_HOOK, btoa(raw),
-    ].join("\n");
-    expect(parseActivityHookSection(stdout)).toBe(raw);
-  });
-
-  it("returns undefined when the marker itself is absent — a pre-feature container, never a throw", () => {
-    const stdout = [SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, ""].join("\n");
-    expect(() => parseActivityHookSection(stdout)).not.toThrow();
-    expect(parseActivityHookSection(stdout)).toBeUndefined();
-  });
-
-  it("returns an empty string when the section is present but empty (no heartbeat file yet)", () => {
-    const stdout = [
+  it("empty section (no heartbeat file yet) -> null: no evidence this tick, not a throw", async () => {
+    const result = await tickWith([
       SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
       SECTION_PANE, "", SECTION_ACTIVITY_HOOK, "",
-    ].join("\n");
-    expect(parseActivityHookSection(stdout)).toBe("");
-  });
-});
-
-describe("readShipTickHookHeartbeat (issue #221, PR3b)", () => {
-  it("absent section -> undefined", () => {
-    const stdout = [SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, ""].join("\n");
-    expect(readShipTickHookHeartbeat(stdout)).toBeUndefined();
+    ].join("\n"));
+    expect(result.hookHeartbeat).toBeNull();
   });
 
-  it("empty section -> null (no evidence this tick, not a throw)", () => {
-    const stdout = [
-      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
-      SECTION_PANE, "", SECTION_ACTIVITY_HOOK, "",
-    ].join("\n");
-    expect(readShipTickHookHeartbeat(stdout)).toBeNull();
-  });
-
-  it("malformed JSON in the section -> null, never a throw", () => {
-    const stdout = [
+  it("malformed JSON in the section -> null, never a throw", async () => {
+    const result = await tickWith([
       SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
       SECTION_PANE, "", SECTION_ACTIVITY_HOOK, btoa("not json"),
-    ].join("\n");
-    expect(() => readShipTickHookHeartbeat(stdout)).not.toThrow();
-    expect(readShipTickHookHeartbeat(stdout)).toBeNull();
+    ].join("\n"));
+    expect(result.hookHeartbeat).toBeNull();
   });
 
-  it("a valid heartbeat parses through", () => {
+  it("a valid heartbeat parses through", async () => {
     const raw = JSON.stringify({ state: "idle", at: "2026-09-25T12:00:00.000Z" });
-    const stdout = [
+    const result = await tickWith([
       SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
       SECTION_PANE, "", SECTION_ACTIVITY_HOOK, btoa(raw),
-    ].join("\n");
-    expect(readShipTickHookHeartbeat(stdout)).toEqual({ state: "idle", at: "2026-09-25T12:00:00.000Z" });
+    ].join("\n"));
+    expect(result.hookHeartbeat).toEqual({ state: "idle", at: "2026-09-25T12:00:00.000Z" });
+  });
+
+  it("raw heartbeat JSON text round-trips through the base64 section — hookHeartbeat reads its own fields back", async () => {
+    const raw = JSON.stringify({ state: "working", at: "2026-09-25T12:00:00.000Z" });
+    const result = await tickWith([
+      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
+      SECTION_PANE, "", SECTION_ACTIVITY_HOOK, btoa(raw),
+    ].join("\n"));
+    expect(result.hookHeartbeat?.state).toBe("working");
+    expect(result.hookHeartbeat?.at).toBe("2026-09-25T12:00:00.000Z");
   });
 });
 
@@ -1224,121 +1283,58 @@ describe("shipTranscriptTick — hook heartbeat wiring (issue #221, PR3b)", () =
 // now reading container/memguard.ts's already-shipped kill log
 // (`${MEMGUARD_LOG:-${FLEET_WORKSPACE:-/workspace}/.fleet/memguard.log}` —
 // PR #336 round 2, item 3: honours a studio that overrides MEMGUARD_LOG
-// directly, not only one that overrides FLEET_WORKSPACE). See docs/
-// superpowers/specs/2026-09-24-row-tells-truth-design.md, "PR3 addendum
-// (issue #311)".
+// directly, not only one that overrides FLEET_WORKSPACE). The command-side
+// placement/guard/override asserts live in the "command shape (wire format)"
+// describe at the top of this file; everything here pins result.memguardKills
+// through the tick — the production read path (do.ts consumes that
+// ShipResult field).
 // ---------------------------------------------------------------------------
-describe("shipTickCmd — SECTION_MEMGUARD (issue #311)", () => {
-  it("tails the memguard log, base64'd, guarded so a missing file cannot fail the tick", () => {
-    for (const cmd of [shipTickCmd(0, undefined), shipTickCmd(0, undefined, "adopt-tok-1234")]) {
-      expect(cmd).toContain(`echo '${SECTION_MEMGUARD}'`);
-      expect(cmd).toMatch(/tail -n \d+ .*memguard\.log.* 2>\/dev\/null \| base64/);
-    }
+describe("shipTranscriptTick — memguard section (issue #311)", () => {
+  /** One tick over raw stdout; returns its result. */
+  async function tickWith(raw: string) {
+    const deps = fakeDeps({ rawTickStdout: raw });
+    const storage = fakeStorage();
+    const result = await shipTranscriptTick(deps, storage, STUDIO_ID);
+    expect(deps.execCalls).toHaveLength(1);
+    return result;
+  }
+
+  it("absent SECTION_MEMGUARD (pre-#311 Worker build) yields undefined, never a throw", async () => {
+    const result = await tickWith([SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, ""].join("\n"));
+    expect(result.memguardKills).toBeUndefined();
   });
 
-  // PR #336 round 2, item 3 — round 1 only honoured FLEET_WORKSPACE; a
-  // studio that overrides MEMGUARD_LOG directly (container/memguard.ts's own
-  // FIRST-priority env var, memguard.ts:537) would have this section
-  // silently tail the wrong file. MUTANT: reverting to the FLEET_WORKSPACE-
-  // only path turns this red.
-  it("honours a MEMGUARD_LOG override, not only FLEET_WORKSPACE", () => {
-    const cmd = shipTickCmd(0, undefined);
-    expect(cmd).toContain("${MEMGUARD_LOG:-${FLEET_WORKSPACE:-/workspace}/.fleet/memguard.log}");
-  });
-
-  it("issues no new exec — the memguard fragment rides the SAME chained command as SECTION_PANE", () => {
-    // Reuses cmd-syntax.test.ts's own bash -n coverage indirectly (that file
-    // asserts every builder here stays syntactically valid); this test pins
-    // that SECTION_MEMGUARD is textually inside the ONE string shipTickCmd
-    // returns, never a second command a caller would have to exec separately.
-    const cmd = shipTickCmd(0, undefined);
-    const paneIdx = cmd.indexOf(`echo '${SECTION_PANE}'`);
-    const memguardIdx = cmd.indexOf(`echo '${SECTION_MEMGUARD}'`);
-    expect(paneIdx).toBeGreaterThan(-1);
-    expect(memguardIdx).toBeGreaterThan(paneIdx);
-  });
-});
-
-describe("parsePaneSection — unaffected by the new SECTION_MEMGUARD marker (issue #311)", () => {
-  it("still ends the pane slice at SECTION_MEMGUARD when present", () => {
-    const b64 = b64Utf8(REAL_PILOT_PANE);
-    const stdout = [
-      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
-      SECTION_PANE, b64, SECTION_MEMGUARD, "",
-    ].join("\n");
-    expect(parsePaneSection(stdout)).toBe(REAL_PILOT_PANE);
-  });
-
-  it("still round-trips when SECTION_MEMGUARD is absent (old-shaped stdout, unchanged behavior)", () => {
-    const b64 = b64Utf8(REAL_PILOT_PANE);
-    const stdout = [
-      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
-      SECTION_PANE, b64,
-    ].join("\n");
-    expect(parsePaneSection(stdout)).toBe(REAL_PILOT_PANE);
-  });
-});
-
-describe("parseMemguardSection (issue #311)", () => {
-  it("round-trips a real memguard.ts-shaped kill line through base64", () => {
-    const line =
-      "2026-09-25T09:12:03.500Z SIGKILL pid=42 comm=vitest rss_mib=612 avail_mib=88 total_mib=11930 source=cgroup cmd=vitest run";
-    const stdout = [
-      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
-      SECTION_PANE, b64Utf8(""), SECTION_MEMGUARD, b64Utf8(line),
-    ].join("\n");
-    expect(parseMemguardSection(stdout)).toBe(line);
-  });
-
-  it("returns undefined when SECTION_MEMGUARD is absent — a pre-feature Worker build, never a throw", () => {
-    const stdout = [SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, ""].join("\n");
-    expect(() => parseMemguardSection(stdout)).not.toThrow();
-    expect(parseMemguardSection(stdout)).toBeUndefined();
-  });
-
-  it("returns an empty string when the log file does not exist yet — present marker, no bytes", () => {
-    const stdout = [
+  it("an empty memguard section (log file does not exist yet — present marker, no bytes) yields an empty array, not undefined", async () => {
+    const result = await tickWith([
       SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
       SECTION_PANE, b64Utf8(""), SECTION_MEMGUARD, "",
-    ].join("\n");
-    expect(parseMemguardSection(stdout)).toBe("");
+    ].join("\n"));
+    expect(result.memguardKills).toEqual([]);
   });
 
-  it("still parses correctly ahead of CHUNK/TAIL on a file-present tick", () => {
+  it("a real kill line in the section parses into a full MemguardKillLogEntry", async () => {
+    const line =
+      "2026-09-25T09:12:03.500Z SIGKILL pid=42 comm=vitest rss_mib=612 avail_mib=88 total_mib=11930 source=cgroup cmd=vitest run";
+    const result = await tickWith([
+      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
+      SECTION_PANE, b64Utf8(""), SECTION_MEMGUARD, b64Utf8(line),
+    ].join("\n"));
+    expect(result.memguardKills).toEqual([{
+      at: "2026-09-25T09:12:03.500Z", signal: "SIGKILL", pid: 42, comm: "vitest",
+      rssMib: 612, availMib: 88, totalMib: 11930, source: "cgroup", cmd: "vitest run",
+    }]);
+  });
+
+  it("still parses correctly ahead of CHUNK/TAIL on a file-present tick", async () => {
     const line = "2026-09-25T09:00:00.000Z SIGTERM pid=1 comm=a rss_mib=1 avail_mib=1 total_mib=1 source=meminfo cmd=a";
-    const stdout = [
+    const result = await tickWith([
       SECTION_BOOTID, "", SECTION_STAT, "0", SECTION_INCARNATION, "",
       SECTION_PANE, b64Utf8(""), SECTION_MEMGUARD, b64Utf8(line), SECTION_CHUNK, "", SECTION_TAIL, "",
-    ].join("\n");
-    expect(parseMemguardSection(stdout)).toBe(line);
-  });
-});
-
-describe("readShipTickMemguardKills (issue #311) — mutant proof (a): a real kill must always surface", () => {
-  it("absent SECTION_MEMGUARD yields undefined, never a throw", () => {
-    const stdout = [SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, ""].join("\n");
-    expect(() => readShipTickMemguardKills(stdout)).not.toThrow();
-    expect(readShipTickMemguardKills(stdout)).toBeUndefined();
-  });
-
-  it("an empty memguard section yields an empty array, not undefined", () => {
-    const stdout = [
-      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
-      SECTION_PANE, b64Utf8(""), SECTION_MEMGUARD, "",
-    ].join("\n");
-    expect(readShipTickMemguardKills(stdout)).toEqual([]);
-  });
-
-  it("a real kill line in the section parses into a MemguardKillLogEntry", () => {
-    const line =
-      "2026-09-25T09:12:03.500Z SIGKILL pid=42 comm=vitest rss_mib=612 avail_mib=88 total_mib=11930 source=cgroup cmd=vitest run";
-    const stdout = [
-      SECTION_BOOTID, "", SECTION_STAT, "-1", SECTION_INCARNATION, "",
-      SECTION_PANE, b64Utf8(""), SECTION_MEMGUARD, b64Utf8(line),
-    ].join("\n");
-    const kills = readShipTickMemguardKills(stdout);
-    expect(kills).toHaveLength(1);
-    expect(kills?.[0]).toMatchObject({ signal: "SIGKILL", pid: 42, comm: "vitest" });
+    ].join("\n"));
+    expect(result.memguardKills).toEqual([{
+      at: "2026-09-25T09:00:00.000Z", signal: "SIGTERM", pid: 1, comm: "a",
+      rssMib: 1, availMib: 1, totalMib: 1, source: "meminfo", cmd: "a",
+    }]);
   });
 });
 
@@ -1370,5 +1366,29 @@ describe("shipTranscriptTick — memguard kill wiring (issue #311)", () => {
     const storage = fakeStorage({});
     const result = await shipTranscriptTick({ exec, r2Put: vi.fn(), now: fixedNow("2026-09-24T10:00:00.000Z") }, storage, STUDIO_ID);
     expect(result.memguardKills).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The grid-facing storage read — the OTHER exported member of the
+// production interface. Deliberately duplicated from test/studio.grid.test.ts
+// (which keeps its own copy): this file pins the whole module interface, and
+// both files exercise the same function.
+// ---------------------------------------------------------------------------
+describe("getTranscriptTailWithStorage", () => {
+  // TranscriptStorage's `get` is an overloaded signature (one per key); a
+  // plain single-purpose implementation is cast through, not naturally
+  // assignable — same `as X["get"]` idiom test/studio.grid.test.ts's own
+  // fakeStorage() (and this file's, above) already use.
+  function fakeGet(value: string | undefined): Pick<TranscriptStorage, "get"> {
+    return { get: (async () => value) as TranscriptStorage["get"] };
+  }
+
+  it("returns '' (never undefined) when nothing has been stored yet", async () => {
+    expect(await getTranscriptTailWithStorage(fakeGet(undefined))).toBe("");
+  });
+
+  it("returns the stored value verbatim, unscrubbed (scrubbing is the caller's job)", async () => {
+    expect(await getTranscriptTailWithStorage(fakeGet("raw tail\n— not scrubbed"))).toBe("raw tail\n— not scrubbed");
   });
 });

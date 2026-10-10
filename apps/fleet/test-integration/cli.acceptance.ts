@@ -26,10 +26,10 @@ import {
   freePort, applyMigrations, resetStudioRows, resetPersistedRunState, requireDocker, startWrangler, api,
   killStudioContainers, waitForContainersGone, forceTick, r2Get,
 } from "./harness";
-// The exact strings the CLI prints, imported rather than re-typed — same
-// "import the real value instead of duplicating the literal" precedent
-// attach.e2e.ts keeps for TRANSCRIPT_LOG_PATH. cli/fleet.ts guards its own
-// entry point behind `import.meta.main`, so importing it runs no CLI.
+// The exact strings the CLI prints, imported rather than re-typed — the
+// "import the real value instead of duplicating the literal" rule. cli/fleet.ts
+// guards its own entry point behind `import.meta.main`, so importing it runs
+// no CLI.
 import { BURN_LEGEND } from "../cli/fleet";
 
 const devLog: string[] = [];
@@ -271,9 +271,8 @@ async function main(): Promise<void> {
     // Fleet Spawn P3, Task 6 (carried break): the legend line T3 added is
     // asserted here, alongside the columns it explains — the same output,
     // one parse. Imported, not re-typed: cli/fleet.ts exports the exact
-    // string it prints (same "import the real value instead of duplicating
-    // the literal" rule attach.e2e.ts already follows for
-    // TRANSCRIPT_LOG_PATH), so a reworded legend cannot drift past this.
+    // string it prints (the "import the real value instead of duplicating
+    // the literal" rule), so a reworded legend cannot drift past this.
     assert(
       out.split("\n").some((l) => l.trim() === BURN_LEGEND),
       `BURN legend line missing from fleet ls output: ${out.slice(0, 500)}`,
