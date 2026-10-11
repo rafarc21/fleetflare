@@ -140,6 +140,14 @@ export class Page {
   async snapshot(opts?: SnapshotOpts): Promise<unknown> {
     return this.call("page.snapshot", { spaceId: this.spaceId, label: this.label, opts });
   }
+
+  async setViewportSize(viewportSize: { width: number; height: number }): Promise<void> {
+    await this.call("page.setViewportSize", { spaceId: this.spaceId, label: this.label, viewportSize });
+  }
+
+  async cdp(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    return this.call("page.cdp", { spaceId: this.spaceId, label: this.label, method, params });
+  }
 }
 
 export class TaskSpace {

@@ -106,6 +106,11 @@ daemon-side on the first real action taken against it (`goto`, `url()`,
 - `await page.title()`
 - `await page.info()`
 - `await page.screenshot(opts?)` — `{ path?, fullPage?, clip?, scale?, raw? }`
+- `await page.setViewportSize({ width, height })` — resize the viewport
+  (e.g. `{ width: 390, height: 844 }` for mobile shots)
+- `await page.cdp(method, params?)` — raw Chrome DevTools Protocol call on a
+  persistent per-page session (Chromium-only), e.g.
+  `Emulation.setDeviceMetricsOverride`
 - `await page.evaluate(fnOrString, arg?)`
 - `await page.click(selector, opts?)`
 - `await page.dblclick(selector, opts?)`
@@ -162,7 +167,7 @@ workaround for the missing method.
 ## NOT implemented yet — could be added later (Tier 2)
 
 Separate from the list above, this is just unbuilt, not ruled out:
-`page.mouse.*`, `page.keyboard.*`, `page.cdp`, `page.fetch`, `page.events`,
+`page.mouse.*`, `page.keyboard.*`, `page.fetch`, `page.events`,
 `page.acceptDialog`/`page.dismissDialog`, `page.waitForEvent`,
 `page.dragAndDrop`, `page.waitForFileChooser`, `Download`, `FileChooser`,
 `task.tabs()`, `task.cdp`. If a script needs one of these today, it isn't
