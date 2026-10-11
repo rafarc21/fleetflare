@@ -345,7 +345,7 @@ function reportSyncOutcome(
  *  between --watch snapshots. Clamped here rather than left to whatever a
  *  future flag might pass, so a 5s hammering loop stays impossible even if
  *  one is added later without updating this constant. */
-export const WATCH_INTERVAL_MS = 60_000;
+const WATCH_INTERVAL_MS = 60_000;
 
 /**
  * `--watch`'s loop: same bounded poll-loop shape as cli/ff.ts's
