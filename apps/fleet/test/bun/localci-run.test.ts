@@ -27,7 +27,7 @@ let calls: string;
 // Local wrapper keeps the original semantics (cwd defaults to repo, TMUX
 // scrubbed, throws on failure, stdout-only return) — zero call-site edits.
 function sh(cmd: string, cwd = repo) {
-  const r = shShared(cmd, { cwd, env: { TMUX: "" }, throwOnError: true });
+  const r = shShared(cmd, { cwd, env: { TMUX: "" }, git: false, throwOnError: true });
   return r.out;
 }
 

@@ -1,10 +1,7 @@
-import { join } from "node:path";
-
 export type ShResult = { code: number; out: string; err: string };
 
-/** Bun-lane shared `sh()` — the three suites whose copies were
- *  byte-identical modulo defaults (sweep-3 S3-F5). Divergent shapes
- *  (runSnippet-based, async-array, Node spawnSync+maxBuffer) stay local. */
+/** Bun-lane shared `sh()` for suites whose copies were identical modulo
+ *  defaults. Git identity env is injected unless `git: false` is passed. */
 export function sh(
   cmd: string,
   opts: { cwd?: string; env?: Record<string, string>; git?: boolean; throwOnError?: boolean } = {},
