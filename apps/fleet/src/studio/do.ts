@@ -2973,10 +2973,11 @@ export async function checkAndRecordReadiness(
   // point-in-time `destroyLanded` snapshot.
   if ((await destroyLanded()) || (await ctx.moved())) return (await storage.get(STATUS_KEY)) ?? null;
   const fresh = (await storage.get(STATUS_KEY)) ?? status;
-  // #331: a verdict taken against a container a destroy already stopped
-  // must not land on the stopped row — watchForDestroy's snapshot goes blind
-  // when the destroy ran start-to-finish inside it (see DESTROY_EPOCH_KEY's
-  // own doc), and the tick has no OpCtx to catch it from the other side.
+  // #331: a verdict must not land on a stopped row — the blind window for
+  // THIS caller is between the entry read above and watchForDestroy's
+  // snapshot: a destroy completing there makes `wasStopped` snapshot true
+  // (row branch off) with the marker already cleared by destroyWithSync's
+  // own `finally`; the tick has no OpCtx to catch it from the other side.
   if (fresh.state === "stopped") return fresh;
   const updated: StudioStatus = { ...fresh, readiness };
   await storage.put(STATUS_KEY, updated);

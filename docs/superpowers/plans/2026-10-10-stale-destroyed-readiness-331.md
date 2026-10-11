@@ -34,10 +34,16 @@ gap still takes the stamp.
    `inconclusive` verdict; destroyWithSync runs; result AND stored row read
    `readiness: null`. RED today (the spread keeps it).
 2. test/studio.readiness.test.ts (checkAndRecordReadiness's own home): a
-   storage whose STATUS_KEY flips to a stopped row DURING the check's exec
-   (the exec callback flips the map), no destroy marker, no epoch bump;
-   the returned status is the stopped row, readiness unstamped, no
-   recordStudioFn call. RED today.
+   storage whose STATUS_KEY flips to a stopped row on the SECOND read —
+   the watchForDestroy snapshot, i.e. the residual window between this
+   function's entry read and that snapshot (a destroy ran start-to-finish
+   there: `wasStopped` snapshots true, so the row branch stands down, and
+   destroyWithSync's `finally` has already cleared the marker; the tick
+   passes no OpCtx either) — no marker, no epoch bump; the returned status
+   is the stopped row, readiness unstamped, no recordStudioFn call. RED
+   today. The during-exec variant of the flip is NOT red — destroyLanded's
+   row branch already catches that shape — so it stays green as a
+   mutant-pin of the existing guard.
 3. Green: the two source edits; existing tests must pass unmodified.
 
 ## Verification
