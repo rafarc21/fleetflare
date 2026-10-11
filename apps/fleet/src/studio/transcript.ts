@@ -589,7 +589,7 @@ function parseShipTickSections(
 
 // ---------------------------------------------------------------------------
 // base64 decode — container -> Worker. The reverse direction of
-// sandbox-api.ts's bytesToBase64 (Worker -> container), needed here because
+// src/base64.ts's bytesToBase64 (Worker -> container), needed here because
 // exec's stdout is text-only and pipe-pane's captured bytes are NOT
 // guaranteed printable (claude's own screen can carry arbitrary control
 // bytes) — base64 is what survives that round trip intact.

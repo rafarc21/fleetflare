@@ -11,6 +11,7 @@
 // `[]` array syntax for the three list-shaped fields (skills/may_spawn/
 // gates). No nested structures, no multi-line values — the blueprint's role
 // files are meant to stay this simple.
+import { base64EncodeUtf8 } from "../base64";
 
 export class BlueprintError extends Error {
   readonly field: string;
@@ -335,21 +336,6 @@ export function assertRoleInFleet(fleet: FleetConfig, role: string): void {
   if (!fleet.roles.includes(role)) {
     throw new BlueprintError("role", `role "${role}" is not declared in fleet.json roles [${fleet.roles.join(", ")}]`);
   }
-}
-
-// Chunked (0x8000/chunk) the same way sandbox-api.ts's bytesToBase64 is —
-// avoids a call-stack blowup on a long prompt, and goes through
-// TextEncoder first so multi-byte UTF-8 round-trips losslessly (a bare
-// btoa(prompt) throws outright on any character outside Latin1).
-const B64_CHUNK = 0x8000;
-
-export function base64EncodeUtf8(s: string): string {
-  const bytes = new TextEncoder().encode(s);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += B64_CHUNK) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + B64_CHUNK));
-  }
-  return btoa(bin);
 }
 
 /**

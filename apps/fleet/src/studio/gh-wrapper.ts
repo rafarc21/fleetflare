@@ -1,5 +1,6 @@
 import { LEAK_DENYLIST_PATH, LEAK_SCAN_PATH, leakScanScript } from "../leak-gate";
 import { GH_PROXY_CLIENT, WRITE_PROXY_MARKER } from "../write-proxy/container-config";
+import { base64EncodeUtf8 } from "../base64";
 
 /**
  * Issue #1: the container `gh` wrapper. Installed at STUDIO_GH_WRAPPER_PATH,
@@ -153,13 +154,6 @@ export function studioGhWrapperScript(
   ].join("\n") + "\n";
 }
 
-function b64(s: string): string {
-  const bytes = new TextEncoder().encode(s);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(bin);
-}
-
 function dirOf(p: string): string {
   return p.slice(0, p.lastIndexOf("/")) || "/";
 }
@@ -168,7 +162,7 @@ function installStep(path: string, script: string): string {
   const tmp = `${path}.fleet-install`;
   return (
     `mkdir -p '${dirOf(path)}' && ` +
-    `printf '%s' '${b64(script)}' | base64 -d > '${tmp}' && ` +
+    `printf '%s' '${base64EncodeUtf8(script)}' | base64 -d > '${tmp}' && ` +
     `chmod 0755 '${tmp}' && ` +
     `mv -f '${tmp}' '${path}'`
   );
