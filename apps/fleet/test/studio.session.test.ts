@@ -63,7 +63,7 @@ function b64(bytes: number[]): string {
 
 /** Chunked base64 encode for large (multi-MiB) byte arrays — a plain
  *  `String.fromCharCode(...bytes)` spread blows the call stack past a few
- *  hundred KiB (same reason src/studio/sandbox-api.ts's own bytesToBase64
+ *  hundred KiB (same reason src/base64.ts's bytesToBase64
  *  chunks). Needed here (unlike b64 above) because I1's post-concat length
  *  check now requires every syncSessionTick test's DECODED byte count to
  *  genuinely match its declared stat size — a boundary test anchored to the
