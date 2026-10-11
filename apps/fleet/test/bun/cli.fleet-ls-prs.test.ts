@@ -91,11 +91,11 @@ describe("openPrsByStudio — the map behind the column (#332)", () => {
   function recorder(
     answers: Record<string, Record<string, ReturnType<typeof pr>[]>>,
     failures: string[] = [],
-  ): { fetchImpl: typeof fetch; seen: { url: string; headers: Record<string, string> }[] } {
-    const seen: { url: string; headers: Record<string, string> }[] = [];
+  ): { fetchImpl: typeof fetch; seen: { url: string; headers: Record<string, string>; init?: RequestInit }[] } {
+    const seen: { url: string; headers: Record<string, string>; init?: RequestInit }[] = [];
     const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
-      seen.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
+      seen.push({ url, headers: (init?.headers ?? {}) as Record<string, string>, init });
       const repo = new URL(url).searchParams.get("repo");
       const key = repo ?? "(default)";
       if (failures.includes(key)) return new Response("route unavailable", { status: 404 });
@@ -109,28 +109,30 @@ describe("openPrsByStudio — the map behind the column (#332)", () => {
       "acme-org/websites": { "websites--web-studio": [pr(9), pr(10)], "websites--pilot": [] },
       "acme-org/beta": { "beta--pilot": [pr(31)] },
     });
-    const map = await openPrsByStudio(CREDS, [
+    const { counts, unknown } = await openPrsByStudio(CREDS, [
       row({ id: "websites--web-studio", repoSlug: "acme-org/websites" }),
       row({ id: "websites--pilot", repoSlug: "acme-org/websites" }),
       row({ id: "beta--pilot", repoSlug: "acme-org/beta" }),
     ], fetchImpl);
 
-    expect(map.get("websites--web-studio")).toBe(2);
-    expect(map.get("websites--pilot")).toBe(0);
-    expect(map.get("beta--pilot")).toBe(1);
+    expect(counts.get("websites--web-studio")).toBe(2);
+    expect(counts.get("websites--pilot")).toBe(0);
+    expect(counts.get("beta--pilot")).toBe(1);
     // Two repos, two studios sharing one of them: exactly two fetches — the
     // route answers every studio of a repo at once, never per studio.
     expect(seen.map((s) => s.url).sort()).toEqual([
       "https://worker.test/studio/board/open-prs?repo=acme-org%2Fbeta",
       "https://worker.test/studio/board/open-prs?repo=acme-org%2Fwebsites",
     ]);
+    // A clean scan never reports unknowns.
+    expect(unknown).toEqual([]);
   });
 
   test("a null repoSlug (pre-P4a studio, cloned from the fleet default) fetches with NO repo param", async () => {
     const { fetchImpl, seen } = recorder({ "(default)": { "websites--legacy": [] } });
-    const map = await openPrsByStudio(CREDS, [row({ id: "websites--legacy", repoSlug: null })], fetchImpl);
+    const { counts } = await openPrsByStudio(CREDS, [row({ id: "websites--legacy", repoSlug: null })], fetchImpl);
     expect(seen.map((s) => s.url)).toEqual(["https://worker.test/studio/board/open-prs"]);
-    expect(map.get("websites--legacy")).toBe(0);
+    expect(counts.get("websites--legacy")).toBe(0);
   });
 
   test("null and non-null repoSlug rows never share a fetch — mixed pre/post-P4a fleets read their own repos", async () => {
@@ -138,12 +140,12 @@ describe("openPrsByStudio — the map behind the column (#332)", () => {
       "acme-org/websites": { "websites--web-studio": [pr(9)] },
       "(default)": { "websites--legacy": [] },
     });
-    const map = await openPrsByStudio(CREDS, [
+    const { counts } = await openPrsByStudio(CREDS, [
       row({ id: "websites--web-studio", repoSlug: "acme-org/websites" }),
       row({ id: "websites--legacy", repoSlug: null }),
     ], fetchImpl);
-    expect(map.get("websites--web-studio")).toBe(1);
-    expect(map.get("websites--legacy")).toBe(0);
+    expect(counts.get("websites--web-studio")).toBe(1);
+    expect(counts.get("websites--legacy")).toBe(0);
     expect(seen.length).toBe(2);
   });
 
@@ -152,14 +154,17 @@ describe("openPrsByStudio — the map behind the column (#332)", () => {
       { "acme-org/websites": { "websites--web-studio": [pr(9)] }, "(default)": { "fleet--maestro": [] } },
       ["acme-org/websites"],
     );
-    const map = await openPrsByStudio(CREDS, [
+    const { counts, unknown } = await openPrsByStudio(CREDS, [
       row({ id: "websites--web-studio", repoSlug: "acme-org/websites" }),
       row({ id: "fleet--maestro", repoSlug: null }),
     ], fetchImpl);
     // The failed repo's studio is ABSENT from the map (cell '-'), the other
     // repo's answer survives intact.
-    expect(map.has("websites--web-studio")).toBe(false);
-    expect(map.get("fleet--maestro")).toBe(0);
+    expect(counts.has("websites--web-studio")).toBe(false);
+    expect(counts.get("fleet--maestro")).toBe(0);
+    // An unavailable ROUTE is not a failed SCAN: a 404 is an old Worker,
+    // not a studio the route tried and failed to answer.
+    expect(unknown).toEqual([]);
   });
 
   test("a fetch that throws (a transport blip) is the same as unavailable: absent, others intact", async () => {
@@ -170,19 +175,47 @@ describe("openPrsByStudio — the map behind the column (#332)", () => {
       if (url.includes("websites")) throw new Error("connection reset");
       return Response.json({ repo: "acme-org/beta", prs: { "beta--pilot": [pr(3)] } });
     }) as unknown as typeof fetch;
-    const map = await openPrsByStudio(CREDS, [
+    const { counts } = await openPrsByStudio(CREDS, [
       row({ id: "websites--web-studio", repoSlug: "acme-org/websites" }),
       row({ id: "beta--pilot", repoSlug: "acme-org/beta" }),
     ], fetchImpl);
-    expect(map.has("websites--web-studio")).toBe(false);
-    expect(map.get("beta--pilot")).toBe(1);
+    expect(counts.has("websites--web-studio")).toBe(false);
+    expect(counts.get("beta--pilot")).toBe(1);
     expect(seen.length).toBe(2);
   });
 
   test("a 200 whose map does not cover a studio is absence, never a silent 0", async () => {
     const fetchImpl = (async () => Response.json({ repo: "acme-org/websites", prs: {} })) as unknown as typeof fetch;
-    const map = await openPrsByStudio(CREDS, [row({ id: "websites--web-studio", repoSlug: "acme-org/websites" })], fetchImpl);
-    expect(map.has("websites--web-studio")).toBe(false);
+    const { counts, unknown } = await openPrsByStudio(CREDS, [row({ id: "websites--web-studio", repoSlug: "acme-org/websites" })], fetchImpl);
+    expect(counts.has("websites--web-studio")).toBe(false);
+    // Old route shape (no `unknown` key): nothing reported as unknown —
+    // absence stays plain absence, never a scan-failed claim.
+    expect(unknown).toEqual([]);
+  });
+
+  // #332 review H2: a failed per-studio scan must never read as a confident
+  // zero. The route reports it as `unknown: [<studioIds>]`, the map omits
+  // the studio (its cell renders '-'), and the caller can warn.
+  test("a 200 whose body carries unknown: [<id>] while covering another studio — the covered one counts, the failed one is reported unknown", async () => {
+    const fetchImpl = (async () => Response.json({
+      repo: "acme-org/websites",
+      prs: { "websites--pilot": [pr(5)] },
+      unknown: ["websites--web-studio"],
+    })) as unknown as typeof fetch;
+    const { counts, unknown } = await openPrsByStudio(CREDS, [
+      row({ id: "websites--web-studio", repoSlug: "acme-org/websites" }),
+      row({ id: "websites--pilot", repoSlug: "acme-org/websites" }),
+    ], fetchImpl);
+    expect(counts.get("websites--pilot")).toBe(1);
+    expect(counts.has("websites--web-studio")).toBe(false);
+    expect(unknown).toEqual(["websites--web-studio"]);
+    // The map's own absence is what renders the cell '-' in formatTable —
+    // "could not look", never a clean zero.
+    const [header, line] = tableLines(formatTable([
+      row({ id: "websites--web-studio" }),
+      row({ id: "websites--pilot" }),
+    ], NOW, null, counts));
+    expect(prsCell(header, line)).toBe("-");
   });
 
   test("every request carries the Access service-token headers and an explicit JSON Accept", async () => {
@@ -194,11 +227,22 @@ describe("openPrsByStudio — the map behind the column (#332)", () => {
     expect(headers["Accept"]).toBe("application/json");
   });
 
+  // #332 review H1: every open-prs client fetch carries its own deadline —
+  // `fleet ls` must never sit waiting on a slow scan. The recorder captures
+  // the whole init, the same shape the headers test above reads from.
+  test("every request carries an AbortSignal — a 10s deadline bounds the wait", async () => {
+    const { fetchImpl, seen } = recorder({ "acme-org/websites": {} });
+    await openPrsByStudio(CREDS, [row({ repoSlug: "acme-org/websites" })], fetchImpl);
+    expect(seen.length).toBe(1);
+    expect(seen[0].init?.signal instanceof AbortSignal).toBe(true);
+  });
+
   test("an empty listing fetches nothing", async () => {
     const { fetchImpl, seen } = recorder({});
-    const map = await openPrsByStudio(CREDS, [], fetchImpl);
+    const { counts, unknown } = await openPrsByStudio(CREDS, [], fetchImpl);
     expect(seen.length).toBe(0);
-    expect(map.size).toBe(0);
+    expect(counts.size).toBe(0);
+    expect(unknown).toEqual([]);
   });
 });
 
@@ -206,13 +250,17 @@ describe("cmdLs — the wiring (#332)", () => {
   const STUDIO: StudioStatus = row({ id: "websites--web-studio", repoSlug: "acme-org/websites" });
   let openPrsAnswer: Response;
   let server: ReturnType<typeof Bun.serve>;
+  let openPrsCalls = 0;
   beforeAll(() => {
     server = Bun.serve({
       port: 0,
       fetch: (req) => {
         const u = new URL(req.url);
         if (u.pathname === "/studio/") return Response.json([STUDIO]);
-        if (u.pathname === "/studio/board/open-prs") return openPrsAnswer;
+        if (u.pathname === "/studio/board/open-prs") {
+          openPrsCalls += 1;
+          return openPrsAnswer;
+        }
         // /studio/accounts and everything else: a route this stand-in does
         // not serve 404s — best-effort callers must sail past that.
         return new Response("not found", { status: 404 });
@@ -231,26 +279,36 @@ describe("cmdLs — the wiring (#332)", () => {
     lock: (_id, fn) => fn(),
   };
 
-  async function lsTable(): Promise<string[]> {
+  /** Captures stdout lines (the table/json) AND stderr lines (the warnings),
+   *  so a test can assert on both halves of one run. */
+  async function ls(prs: boolean, json = false): Promise<{ out: string[]; err: string[] }> {
     const out: string[] = [];
+    const err: string[] = [];
     const realLog = console.log;
+    const realError = console.error;
     console.log = (...args: unknown[]) => { out.push(args.join(" ")); };
+    console.error = (...args: unknown[]) => { err.push(args.join(" ")); };
     try {
-      await cmdLs({ workerUrl: server.url.toString(), accessClientId: "", accessClientSecret: "" }, false, NOT_UNDER_ORCA);
+      await cmdLs({ workerUrl: server.url.toString(), accessClientId: "", accessClientSecret: "" }, false, NOT_UNDER_ORCA, json, prs);
     } finally {
       console.log = realLog;
+      console.error = realError;
     }
     // Each printed chunk can be a whole multi-line block (the table is ONE
     // console.log) — flatten to lines so header/row matching is per line.
-    return out.flatMap((l) => l.split("\n"));
+    return { out: out.flatMap((l) => l.split("\n")), err };
   }
 
-  test("renders the route's count in the PRS cell", async () => {
+  async function lsTable(prs: boolean): Promise<string[]> {
+    return (await ls(prs)).out;
+  }
+
+  test("--prs renders the route's count in the PRS cell", async () => {
     openPrsAnswer = Response.json({
       repo: "acme-org/websites",
       prs: { "websites--web-studio": [pr(9), pr(10)] },
     });
-    const out = await lsTable();
+    const out = await lsTable(true);
     const header = out.find((l) => l.split(/\s{2,}/).includes("PRS"));
     const table = out.find((l) => l.includes("websites--web-studio"));
     expect(header).toBeDefined();
@@ -258,9 +316,18 @@ describe("cmdLs — the wiring (#332)", () => {
     expect(prsCell(header!, table!)).toBe("2");
   });
 
-  test("a route that 404s keeps ls instant: the cell reads '-', the command still prints the table", async () => {
-    openPrsAnswer = new Response("not found", { status: 404 });
-    const out = await lsTable();
+  // #332 review H1: the PRS column is OPT-IN. Bare `fleet ls` never asks the
+  // open-prs route anything — a 30s monitor polling ls was burning ~27k live
+  // GitHub calls/hr through the Worker's per-studio scans. Bare ls stays one
+  // registry read (issue #37's ruling), and the column reads '-'.
+  test("bare ls fetches NO open-prs read — the column reads '-', nothing spent", async () => {
+    openPrsAnswer = Response.json({
+      repo: "acme-org/websites",
+      prs: { "websites--web-studio": [pr(9), pr(10)] },
+    });
+    const callsBefore = openPrsCalls;
+    const out = await lsTable(false);
+    expect(openPrsCalls).toBe(callsBefore);
     const header = out.find((l) => l.split(/\s{2,}/).includes("PRS"));
     const table = out.find((l) => l.includes("websites--web-studio"));
     expect(header).toBeDefined();
@@ -268,31 +335,43 @@ describe("cmdLs — the wiring (#332)", () => {
     expect(prsCell(header!, table!)).toBe("-");
   });
 
-  test("--json carries openPrs per row when the route answered", async () => {
+  test("--prs on a route that 404s keeps ls instant: the cell reads '-', the command still prints the table", async () => {
+    openPrsAnswer = new Response("not found", { status: 404 });
+    const out = await lsTable(true);
+    const header = out.find((l) => l.split(/\s{2,}/).includes("PRS"));
+    const table = out.find((l) => l.includes("websites--web-studio"));
+    expect(header).toBeDefined();
+    expect(table).toBeDefined();
+    expect(prsCell(header!, table!)).toBe("-");
+  });
+
+  // #332 review H2: a failed per-studio scan reads as '-' PLUS a degrade
+  // warning on stderr — "could not look" must not read as "looked and found
+  // none", and stdout stays machine-clean (the warning is console.error).
+  test("--prs on a body carrying unknown: [<id>] — the cell reads '-' and one stderr line names the studio", async () => {
+    openPrsAnswer = Response.json({
+      repo: "acme-org/websites",
+      prs: {},
+      unknown: ["websites--web-studio"],
+    });
+    const { out, err } = await ls(true);
+    const header = out.find((l) => l.split(/\s{2,}/).includes("PRS"));
+    const table = out.find((l) => l.includes("websites--web-studio"));
+    expect(prsCell(header!, table!)).toBe("-");
+    expect(err).toContain("fleet ls: unmerged-PR status unknown for websites--web-studio (scan failed)");
+  });
+
+  test("--prs --json carries openPrs per row when the route answered", async () => {
     openPrsAnswer = Response.json({ repo: "acme-org/websites", prs: { "websites--web-studio": [pr(9)] } });
-    const out: string[] = [];
-    const realLog = console.log;
-    console.log = (...args: unknown[]) => { out.push(args.join(" ")); };
-    try {
-      await cmdLs({ workerUrl: server.url.toString(), accessClientId: "", accessClientSecret: "" }, false, NOT_UNDER_ORCA, true);
-    } finally {
-      console.log = realLog;
-    }
+    const { out } = await ls(true, true);
     const parsed = JSON.parse(out.join("")) as Array<{ id: string; openPrs?: number }>;
     expect(parsed[0].id).toBe("websites--web-studio");
     expect(parsed[0].openPrs).toBe(1);
   });
 
-  test("--json omits openPrs entirely when the route 404ed — 'no data' must not read as 0", async () => {
+  test("--prs --json omits openPrs entirely when the route 404ed — 'no data' must not read as 0", async () => {
     openPrsAnswer = new Response("not found", { status: 404 });
-    const out: string[] = [];
-    const realLog = console.log;
-    console.log = (...args: unknown[]) => { out.push(args.join(" ")); };
-    try {
-      await cmdLs({ workerUrl: server.url.toString(), accessClientId: "", accessClientSecret: "" }, false, NOT_UNDER_ORCA, true);
-    } finally {
-      console.log = realLog;
-    }
+    const { out } = await ls(true, true);
     const parsed = JSON.parse(out.join("")) as Array<{ id: string; openPrs?: number }>;
     expect(parsed[0].id).toBe("websites--web-studio");
     expect(Object.hasOwn(parsed[0], "openPrs")).toBe(false);

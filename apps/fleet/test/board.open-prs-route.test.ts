@@ -140,7 +140,7 @@ describe("GET /studio/board/open-prs", () => {
     const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
 
     expect(res.status).toBe(200);
-    const body = await res.json() as { repo: string; prs: Record<string, unknown[]> };
+    const body = await res.json() as { repo: string; prs: Record<string, unknown[]>; unknown: string[] };
     expect(body.repo).toBe("acme-org/websites");
     // web-studio's lane carries the real OpenPr; release-studio's empty one
     // stays present (its lane exists — an empty list, never absence).
@@ -151,6 +151,8 @@ describe("GET /studio/board/open-prs", () => {
       }],
       "websites--release-studio": [],
     });
+    // A clean scan reports no unknowns — the additive field is pinned.
+    expect(body.unknown).toEqual([]);
     // One scan per studio — the studio label is a server-side GitHub filter,
     // so `listIssues` is called once per matching studio, never per task.
     expect(api.listIssues).toHaveBeenCalledTimes(2);
@@ -200,13 +202,17 @@ describe("GET /studio/board/open-prs", () => {
     expect((await excluded.json() as { prs: Record<string, unknown[]> }).prs).toEqual({});
   });
 
-  it("one studioOpenPrs failure degrades to an empty list for THAT studio — the others intact, still 200", async () => {
+  // #332 review H2: a failed scan is no longer a confident zero. The failed
+  // studio lands in the top-level `unknown` array (the CLI renders '-' and
+  // warns; strict refuses on it), `prs` omits it — the others keep their real
+  // answers, and the route still never 5xxes for one studio's trouble.
+  it("one studioOpenPrs failure lands in `unknown`, absent from `prs` — the others intact, still 200", async () => {
     authorized();
     await seedStudio("websites--web-studio", "acme-org/websites");
     await seedStudio("websites--release-studio", "acme-org/websites");
     // release-studio's board read fails (an upstream GitHub 500); web-studio's
-    // succeeds. The plan's ruling: one studio's board trouble must not blank
-    // the parker's view of every other lane, and never a 5xx for the route.
+    // succeeds. One studio's board trouble must not blank the parker's view of
+    // every other lane, and never a 5xx for the route.
     const api = fakeApi({
       listIssues: vi.fn(async (_repo: string, query: { labels?: string[] }) => {
         if (query.labels?.includes("studio:websites--release-studio")) {
@@ -219,14 +225,16 @@ describe("GET /studio/board/open-prs", () => {
     const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
 
     expect(res.status).toBe(200);
-    const body = await res.json() as { prs: Record<string, unknown[]> };
-    // The failed studio reads as an empty list — never absent (its lane
-    // exists), never a 5xx.
-    expect(body.prs).toEqual({ "websites--web-studio": [], "websites--release-studio": [] });
+    const body = await res.json() as { prs: Record<string, unknown[]>; unknown: string[] };
+    // The failed studio reads as UNKNOWN — absent from prs (its cell renders
+    // '-' via the map's absence), named in `unknown` — never a 5xx, never a
+    // false zero.
+    expect(body.prs).toEqual({ "websites--web-studio": [] });
+    expect(body.unknown).toEqual(["websites--release-studio"]);
     expect(errors).toHaveBeenCalled();
   });
 
-  it("a `{ok:false}` studioOpenPrs answer also degrades to an empty list — the studio and message land in the Worker log", async () => {
+  it("a `{ok:false}` studioOpenPrs answer also lands in `unknown` — the studio and message stay in the Worker log", async () => {
     authorized();
     await seedStudio("websites--web-studio", "acme-org/websites");
     await seedStudio("websites--release-studio", "acme-org/websites");
@@ -243,14 +251,28 @@ describe("GET /studio/board/open-prs", () => {
     const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, fakeApi(), reach);
 
     expect(res.status).toBe(200);
-    const body = await res.json() as { prs: Record<string, unknown[]> };
-    expect(body.prs).toEqual({ "websites--web-studio": [], "websites--release-studio": [] });
+    const body = await res.json() as { prs: Record<string, unknown[]>; unknown: string[] };
+    expect(body.prs).toEqual({ "websites--web-studio": [] });
+    expect(body.unknown).toEqual(["websites--release-studio"]);
     // The log names the studio AND carries the message verbatim — the
-    // operator's only trail that the empty list is "could not look", not
+    // operator's only trail that the '-' cell is "could not look", not
     // "looked and found nothing".
     const logged = errors.mock.calls.map((c) => c.join(" ")).join("\n");
     expect(logged).toContain("websites--release-studio");
     expect(logged).toContain("board upstream failed");
+  });
+
+  // #332 review (maestro's ask): an auth failure must never cost a scan —
+  // the gate at the top of handleBoard runs before the route reads a single
+  // GitHub lane. Real verifyAccess (no spy — the same shape board.routes
+  // .test.ts's own unauthenticated cases use), a request with no Access
+  // header, and the assertion that the port was never touched.
+  it("401s without an Access header — an auth failure never costs a scan", async () => {
+    await seedStudio("websites--web-studio", "acme-org/websites");
+    const api = fakeApi();
+    const res = await handleBoard(new Request("https://x/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    expect(res.status).toBe(401);
+    expect(api.listIssues).toHaveBeenCalledTimes(0);
   });
 
   it("POST (or any non-GET verb) is 405", async () => {
@@ -276,14 +298,14 @@ describe("GET /studio/board/open-prs", () => {
     expect(api.listIssues).not.toHaveBeenCalled();
   });
 
-  it("zero matching studios answers { repo, prs: {} }", async () => {
+  it("zero matching studios answers { repo, prs: {}, unknown: [] }", async () => {
     authorized();
     await seedStudio("beta--web-studio", "acme-org/beta");
     const api = fakeApi();
     const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ repo: "acme-org/websites", prs: {} });
+    expect(await res.json()).toEqual({ repo: "acme-org/websites", prs: {}, unknown: [] });
     // No studio of that repo, no board read at all.
     expect(api.listIssues).not.toHaveBeenCalled();
   });

@@ -13,15 +13,28 @@ describe("parseCliArgs", () => {
   // operator reaches for when something looks wrong, and fanning an exec out
   // to every studio there is how it becomes the slowest.
   it("ls takes no argument and is NOT fresh by default", () => {
-    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false });
+    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
   });
 
   it("ls --fresh asks for a live check per studio", () => {
-    expect(parseCliArgs(["ls", "--fresh"])).toEqual({ cmd: "ls", fresh: true, json: false });
+    expect(parseCliArgs(["ls", "--fresh"])).toEqual({ cmd: "ls", fresh: true, json: false, prs: false });
+  });
+
+  // #332 review H1: the PRS column is OPT-IN — bare `fleet ls` never makes
+  // live GitHub reads (a 30s monitor polling ls was burning ~27k calls/hr
+  // through the Worker's per-studio scans). Same "no value, just presence"
+  // shape --fresh already takes, read from anywhere after the verb.
+  it("ls --prs asks for the PRS column's live open-prs read (opt-in, never the default)", () => {
+    expect(parseCliArgs(["ls", "--prs"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: true });
+  });
+
+  it("ls --prs composes with --fresh and --json, in any order", () => {
+    expect(parseCliArgs(["ls", "--fresh", "--prs", "--json"])).toEqual({ cmd: "ls", fresh: true, json: true, prs: true });
+    expect(parseCliArgs(["ls", "--json", "--prs", "--fresh"])).toEqual({ cmd: "ls", fresh: true, json: true, prs: true });
   });
 
   it("ls ignores a stray extra token (only the first two argv slots are read)", () => {
-    expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false, json: false });
+    expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
   });
 
   // Issue #37's second half: there was no way to ask for the truth NOW. The
@@ -742,9 +755,9 @@ describe("fleet task new --continues — issue #54", () => {
 
 describe("fleet ls --json — issue #70", () => {
   it("--json sets json; combines with --fresh", () => {
-    expect(parseCliArgs(["ls", "--json"])).toEqual({ cmd: "ls", fresh: false, json: true });
-    expect(parseCliArgs(["ls", "--fresh", "--json"])).toEqual({ cmd: "ls", fresh: true, json: true });
-    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false });
+    expect(parseCliArgs(["ls", "--json"])).toEqual({ cmd: "ls", fresh: false, json: true, prs: false });
+    expect(parseCliArgs(["ls", "--fresh", "--json"])).toEqual({ cmd: "ls", fresh: true, json: true, prs: false });
+    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
   });
 });
 

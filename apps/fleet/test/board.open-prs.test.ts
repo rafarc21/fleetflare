@@ -212,7 +212,13 @@ describe("studioOpenPrs", () => {
     expect(errors).toHaveBeenCalled();
   });
 
-  it("one task's getPullRequest throwing degrades to nothing for THAT task — the others still reported", async () => {
+  // #332 review H2 (operator-ordered): a PR whose live state cannot be read
+  // means this module cannot answer the question it exists for — dropping it
+  // would report a false zero to --strict-unmerged. The whole scan reads as
+  // failed (the route's `unknown`), never as clean. Deliberately DIFFERENT
+  // from the showTask-degrade contract below: openTasksWithLatestPr owns
+  // that posture and it is unchanged.
+  it("one task's getPullRequest throwing fails the whole scan — {ok:false}, never a false zero", async () => {
     const docA = envelopeDoc({ artifacts: [{ kind: "pr", pr: "9" }] }, 12);
     const docB = envelopeDoc({ artifacts: [{ kind: "pr", pr: "11" }] }, 13);
     const api = tasksApi(
@@ -228,8 +234,9 @@ describe("studioOpenPrs", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const result = await studioOpenPrs(api, REPO, MINE);
     expect(result).toEqual({
-      ok: true,
-      value: [{ taskNumber: 13, prNumber: 11, title: "feat: the thing", url: `https://github.com/${REPO}/pull/11` }],
+      ok: false,
+      status: 502,
+      message: expect.stringContaining("#9"),
     });
     expect(errors).toHaveBeenCalled();
   });

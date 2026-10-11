@@ -7,7 +7,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   fetchStudioOpenPrs, parkWarningLines, strictRefusalLines,
-  STRICT_UNMERGED_UNKNOWN_PROCEEDING, PARK_WARNING_UNAVAILABLE,
+  STRICT_UNMERGED_UNKNOWN_PROCEEDING, STRICT_UNMERGED_UNKNOWN_SCAN,
+  PARK_WARNING_UNAVAILABLE, PARK_WARNING_UNKNOWN_SCAN,
   type Credentials,
 } from "../../cli/fleet";
 
@@ -68,6 +69,23 @@ describe("the fixed one-line notes (#332)", () => {
     expect(PARK_WARNING_UNAVAILABLE).toContain("could not check unmerged PRs");
     expect(PARK_WARNING_UNAVAILABLE).toContain("route unavailable");
   });
+
+  // #332 review H2: a scan the route REPORTS as failed is a different fact
+  // from an unavailable route — the check ran and could not answer, so
+  // strict refuses on it. The exact strings, pinned: these two lines are
+  // what cmdDestroy picks between, and an operator-facing line whose text
+  // changed silently is exactly the regression these pins exist to catch.
+  test("the strict-side unknown-SCAN refusal line, exact string", () => {
+    expect(STRICT_UNMERGED_UNKNOWN_SCAN).toBe( // test-lies-check: allow — an exact-string pin on an operator-facing refusal line; the line text IS the contract, and a silent rewording is the regression this pin exists to catch
+      "fleet destroy: refusing: unmerged-PR status unknown (the scan failed for this studio) — cannot confirm zero PRs (--strict-unmerged); re-run, or drop the flag to proceed",
+    );
+  });
+
+  test("the park warning's unknown-SCAN line, exact string", () => {
+    expect(PARK_WARNING_UNKNOWN_SCAN).toBe( // test-lies-check: allow — an exact-string pin on an operator-facing warning line; the line text IS the contract, and a silent rewording is the regression this pin exists to catch
+      "park warning: could not check unmerged PRs (the scan failed for this studio)",
+    );
+  });
 });
 
 describe("fetchStudioOpenPrs — one studio's live answer (#332)", () => {
@@ -106,6 +124,30 @@ describe("fetchStudioOpenPrs — one studio's live answer (#332)", () => {
     expect(await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl)).toEqual({ ok: false });
   });
 
+  // #332 review H2: a 200 whose body names THIS studio in `unknown` — the
+  // scan ran and failed for it. A different fact from a 404 (route not
+  // there) and from an uncovered map (mismatched answer): strict refuses on
+  // this one, so it carries `unknown: true`.
+  test("a 200 whose body carries unknown: [<this id>] is {ok:false, unknown:true} — scan-failed, not route-missing", async () => {
+    const fetchImpl = (async () => Response.json({
+      repo: "acme-org/websites",
+      prs: {},
+      unknown: ["websites--web-studio"],
+    })) as unknown as typeof fetch;
+    expect(await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl))
+      .toEqual({ ok: false, unknown: true });
+  });
+
+  test("a 200 whose body carries unknown: [someone else] is plain {ok:false} for this studio", async () => {
+    const fetchImpl = (async () => Response.json({
+      repo: "acme-org/websites",
+      prs: { "websites--web-studio": [] },
+      unknown: ["websites--release-studio"],
+    })) as unknown as typeof fetch;
+    expect(await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl))
+      .toEqual({ ok: true, prs: [] });
+  });
+
   test("carries the Access service-token headers and an explicit JSON Accept", async () => {
     let headers: Record<string, string> = {};
     const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
@@ -116,5 +158,18 @@ describe("fetchStudioOpenPrs — one studio's live answer (#332)", () => {
     expect(headers["CF-Access-Client-Id"]).toBe("cid");
     expect(headers["CF-Access-Client-Secret"]).toBe("csecret");
     expect(headers["Accept"]).toBe("application/json");
+  });
+
+  // #332 review H1: the destroy path's one open-prs read carries its own
+  // deadline too — same recorder shape as the headers test just above, the
+  // same 10s bound openPrsByStudio's own tests pin.
+  test("carries an AbortSignal — the read never hangs the destroy on a slow scan", async () => {
+    let init: RequestInit | undefined;
+    const fetchImpl = (async (_input: string | URL | Request, i?: RequestInit) => {
+      init = i;
+      return Response.json({ repo: "acme-org/websites", prs: { "websites--web-studio": [] } });
+    }) as unknown as typeof fetch;
+    await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl);
+    expect(init?.signal instanceof AbortSignal).toBe(true);
   });
 });
