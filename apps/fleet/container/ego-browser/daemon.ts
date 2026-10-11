@@ -10,7 +10,7 @@ import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import { chromium, errors, type Browser, type BrowserContext, type Page as PwPage } from "playwright-core";
 import { resolvePaths } from "./paths";
-import { encodeMessage, MessageFramer, type RpcRequest } from "./rpc";
+import { decodeChunk, serveRpc, type RpcRequest, type RpcTransport } from "./rpc";
 import { Registry, type FinishKeep, type TaskSpaceRecord } from "./registry";
 import { IdleShutdown, resolveIdleMs } from "./idle-shutdown";
 import { findDirectChildPid, raceWithTimeout } from "./process-reap";
@@ -515,48 +515,72 @@ const methods: Record<string, Handler> = {
 // ---------------------------------------------------------------------------
 rmSync(paths.sockFile, { force: true });
 
-const framers = new WeakMap<Bun.Socket, MessageFramer<RpcRequest>>();
-
-async function handleRequest(socket: Bun.Socket, req: RpcRequest): Promise<void> {
-  inFlightRequests += 1;
-  try {
-    const handler = methods[req.method];
-    if (!handler) throw new Error(`ego-browser: unknown RPC method "${req.method}"`);
-    const result = await handler(req.params);
-    socket.write(encodeMessage({ id: req.id, result: result ?? null }));
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log(`method ${req.method} failed: ${message}`);
-    socket.write(encodeMessage({ id: req.id, error: { message } }));
-  } finally {
-    // Any request can be the one that took the space count to zero
-    // (space.finish) or away from zero (taskSpace) -- every request needs
-    // to re-arm/clear the idle timer, whether it resolved or threw.
-    inFlightRequests -= 1;
-    scheduleIdleCheck();
-  }
+/**
+ * Per-accepted-socket adapter: Bun registers `data`/`close`/`error`
+ * handlers ONCE at Bun.listen time, so each handler routes through this
+ * late-bound callback pair (filled in by serveRpc inside `open`, where the
+ * socket exists) instead of any file-level map. Lives on `socket.data`,
+ * Bun's own per-socket context slot -- the store the framers WeakMap used
+ * to be.
+ */
+interface SocketAdapter {
+  transport: RpcTransport;
+  onData: (chunk: string) => void;
+  onClose: (err?: Error) => void;
 }
 
-Bun.listen({
+Bun.listen<SocketAdapter>({
   unix: paths.sockFile,
   socket: {
     open(socket) {
-      framers.set(socket, new MessageFramer<RpcRequest>());
+      const adapter: SocketAdapter = {
+        transport: {
+          write: (data: string) => {
+            socket.write(data);
+          },
+          onData: (cb: (chunk: string) => void) => {
+            adapter.onData = cb;
+          },
+          onClose: (cb: (err?: Error) => void) => {
+            adapter.onClose = cb;
+          },
+        },
+        // Placeholder until serveRpc registers its callbacks: dropping a
+        // chunk or a close before registration would be worse than the
+        // no-op it replaces (registration is synchronous inside this open
+        // handler, before any data can arrive on a socket that just
+        // opened).
+        onData: () => {},
+        onClose: () => {},
+      };
+      socket.data = adapter;
+      serveRpc(adapter.transport, methods, {
+        onDispatch() {
+          inFlightRequests += 1;
+        },
+        onSettled() {
+          // Any request can be the one that took the space count to zero
+          // (space.finish) or away from zero (taskSpace) -- every request
+          // needs to re-arm/clear the idle timer, whether it resolved or
+          // threw. serveRpc fires this in a finally, so the increment
+          // above can never be skipped by a throw.
+          inFlightRequests -= 1;
+          scheduleIdleCheck();
+        },
+        onError(req: RpcRequest, message: string) {
+          log(`method ${req.method} failed: ${message}`);
+        },
+      });
     },
     data(socket, data) {
-      const framer = framers.get(socket);
-      if (!framer) return;
-      const text = Buffer.isBuffer(data) ? data.toString("utf8") : Buffer.from(data).toString("utf8");
-      for (const req of framer.push(text)) {
-        void handleRequest(socket, req);
-      }
+      socket.data.onData(decodeChunk(data));
     },
     close(socket) {
-      framers.delete(socket);
+      socket.data.onClose();
     },
     error(socket, err) {
       log(`socket error: ${err instanceof Error ? err.stack : err}`);
-      framers.delete(socket);
+      socket.data.onClose(err);
     },
   },
 });

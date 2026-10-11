@@ -40,6 +40,14 @@ export function encodeMessage(msg: RpcRequest | RpcResponse): string {
   return `${JSON.stringify(msg)}\n`;
 }
 
+/** One decode for both ends of the wire: Bun's `data` handler hands over a
+ * Buffer by default (a Uint8Array if binaryType is changed) -- either way
+ * the bytes are utf8 text. Lives here once so the client and daemon socket
+ * adapters share it instead of each carrying their own copy. */
+export function decodeChunk(chunk: Buffer | Uint8Array): string {
+  return Buffer.isBuffer(chunk) ? chunk.toString("utf8") : Buffer.from(chunk).toString("utf8");
+}
+
 /**
  * Incremental line-splitter. Feed it raw chunks of text as they arrive; it
  * returns zero or more complete, parsed messages per chunk and buffers any
