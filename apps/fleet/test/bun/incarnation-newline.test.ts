@@ -33,10 +33,8 @@ function isolatedTmuxEnv(dir: string): Record<string, string | undefined> {
   return { ...rest, TMUX_TMPDIR: dir };
 }
 
-// Issue #349: tests 1 and 3 execute shipTickCmd's real `stat -c %s` size
-// probe — GNU-only, so a BSD-stat host (macOS) reads the -1 sentinel and
-// the CHUNK section never emits: a false red on the tool, not the code.
-// Same probe-skip guard as test/bun/session-tar-budget.test.ts.
+// Issue #349: tests 1+3 run shipTickCmd's GNU-only `stat -c %s` probe —
+// BSD stat reads the -1 sentinel and CHUNK never emits: false red, skip.
 function gnuStat(): boolean {
   const stat = spawnSync("stat", ["-c", "%s", "/"], { encoding: "utf8" });
   return stat.status === 0 && /^\d+$/.test((stat.stdout ?? "").trim());
