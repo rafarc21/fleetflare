@@ -11,6 +11,7 @@
 import { JUNIOR_LABEL, STUDIO_LABEL_PREFIX, taskStates, type BoardTask, type EnvelopeDoc } from "../src/board/types";
 import type { TaskComment } from "../src/board/board";
 import type { AssignWakeReport } from "../src/board/assign-wake";
+import { formatColumns } from "./columns";
 
 /**
  * Board issue #41, half one, and board issue #158: what an assigning command
@@ -88,12 +89,7 @@ export function formatTaskTable(tasks: (BoardTask & { stale?: boolean })[]): str
     truncate(`${t.labels.includes(JUNIOR_LABEL) ? "[junior] " : ""}${t.title.replace(/\s+/g, " ")}`, TITLE_WIDTH),
     t.url,
   ]);
-  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
-  // The last column is never padded — trailing spaces after a url make it
-  // harder to select, and nothing follows it.
-  const line = (cols: string[]) =>
-    cols.map((c, i) => (i === cols.length - 1 ? c : c.padEnd(widths[i]))).join("  ");
-  return [line(headers), ...rows.map(line)].join("\n");
+  return formatColumns(headers, rows);
 }
 
 /** One envelope as prose, rebuilt from the struct rather than echoed from the

@@ -2,14 +2,18 @@
 // `fleet accounts sync`. No I/O: the cswap subprocess read and the Worker
 // fetch both live in cli/accounts.ts (bun-only, see that file's own header
 // for why it stays separate); this module imports only
-// src/studio/claude-swap.ts's types and accounts.ts's pure
-// NULL_UNTIL_CEILING_MS (#306), so it is directly unit-testable the
+// src/studio/claude-swap.ts's types, accounts.ts's pure
+// NULL_UNTIL_CEILING_MS (#306), rate-limit.ts's pure accountHoldActive
+// (#340 — that module's own header declares it pure, no Env, no imports),
+// and cli/columns.ts's formatColumns (#399 — pure, imports nothing), so it
+// is directly unit-testable the
 // same way cli/task-format.ts and cli/restart-format.ts already are (see
 // cli/burn-format.ts's own header for the general "pure sibling of an impure
 // cli/ file" convention this follows).
 import type { CswapAccount, SlotJoin, SyncDecision } from "../src/studio/claude-swap";
 import { NULL_UNTIL_CEILING_MS } from "../src/studio/accounts";
 import { accountHoldActive, type AccountLimitKind } from "../src/studio/rate-limit";
+import { formatColumns } from "./columns";
 
 /**
  * Issue #240 fix: real `cswap list --json` prints an ENVELOPE object
@@ -248,10 +252,7 @@ export function formatAccountsTable(rows: AccountSnapshotRow[], now: Date): stri
     describeCurrentState(r.current, now),
     describeWould(r, now),
   ]);
-  const widths = headers.map((h, i) => Math.max(h.length, ...body.map((row) => row[i].length)));
-  const last = headers.length - 1;
-  const line = (cols: string[]) => cols.map((c, i) => (i === last ? c : c.padEnd(widths[i]))).join("  ");
-  return [line(headers), ...body.map(line), "", ACCOUNTS_TABLE_UTC_NOTE].join("\n");
+  return [formatColumns(headers, body), "", ACCOUNTS_TABLE_UTC_NOTE].join("\n");
 }
 
 /**
