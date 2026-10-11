@@ -50,6 +50,6 @@ the target; WeakMap entry dies with the PwPage key.
 
 - container/ego-browser/daemon.ts (2 new methods)
 - container/ego-browser/api.ts (2 new Page methods)
-- skills/ego-browser/SKILL.md (move cdp+setViewportSize from Tier 2 to Tier 1)
+- skills/ego-browser/SKILL.md (move cdp from Tier 2 to Tier 1; document setViewportSize (previously absent))
 - test/bun/ego-browser-viewport-cdp.test.ts (new)
 - this plan doc

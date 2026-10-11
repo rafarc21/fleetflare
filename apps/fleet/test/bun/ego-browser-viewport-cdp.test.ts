@@ -68,9 +68,18 @@ describe("viewport + cdp against the real daemon (real chromium)", () => {
           console.log("AFTER:" + JSON.stringify(info.viewport));
           const evalResult = await p1.cdp("Runtime.evaluate", { expression: "2+3", returnByValue: true });
           console.log("CDP:" + evalResult.result.value);
+          const widthOf = async (expr) =>
+            (await p1.cdp("Runtime.evaluate", { expression: expr, returnByValue: true })).result.value;
+          const baseWidth = await widthOf("window.innerWidth");
           await p1.cdp("Emulation.setDeviceMetricsOverride", { width: 320, height: 568, deviceScaleFactor: 1, mobile: true });
+          const mobileWidth = await widthOf("window.innerWidth");
           await p1.cdp("Emulation.clearDeviceMetricsOverride");
-          console.log("CHAINED:ok");
+          // Settle before reading: the clear is a resize, and an immediate
+          // read can observe the mid-transition value (measured raw against
+          // this stack: 320 before double-rAF, stable after it).
+          await p1.evaluate("new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))");
+          const clearedWidth = await widthOf("window.innerWidth");
+          console.log("W:" + baseWidth + "," + mobileWidth + "," + clearedWidth);
           await t.finish({ keep: [] });
         `,
       });
@@ -80,10 +89,28 @@ describe("viewport + cdp against the real daemon (real chromium)", () => {
       expect(after).toBeDefined();
       expect(JSON.parse(after!.slice("AFTER:".length))).toEqual({ width: 390, height: 844 });
       expect(result.stdout).toContain("CDP:5");
-      expect(result.stdout).toContain("CHAINED:ok");
+      const wLine = result.stdout.split("\n").find((l) => l.startsWith("W:"));
+      expect(wLine).toBeDefined();
+      const [baseWidth, mobileWidth, clearedWidth] = wLine!.slice(2).split(",").map(Number);
+      // Discriminating pair: the override must observably change the
+      // page (per-call sessions could fake "both calls resolve"), and a
+      // same-session clear must take effect -- per-call sessions would
+      // leave the override stranded (cross-session clear silently
+      // no-ops, clearedWidth still the mobile value). NOTE the clear
+      // does NOT return to baseWidth on this stack: Playwright's own
+      // viewport rides the same Emulation domain (its _updateViewport
+      // sends Emulation.setDeviceMetricsOverride), so clearing also
+      // drops the 390 viewport and innerWidth falls back to the raw
+      // window (measured: base 390 -> mobile 980 -> cleared 1280; the
+      // mobile value is a CSS-layout width, not the 320 pixel width --
+      // 980 is the overflow-visible layout viewport of mobile mode).
+      // The clear-took-effect signal is clearedWidth !== mobileWidth,
+      // which is exactly the relation per-call sessions would fail.
+      expect(mobileWidth).not.toBe(baseWidth);
+      expect(clearedWidth).not.toBe(mobileWidth);
     } finally {
       server.stop(true);
       cleanupEgoBrowserHome(home);
     }
-  });
+  }, 45000);
 });

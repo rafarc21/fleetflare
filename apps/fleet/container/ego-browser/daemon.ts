@@ -293,17 +293,27 @@ async function pageSnapshot(pwPage: PwPage, opts: SnapshotOpts = {}): Promise<{ 
 }
 
 // One persistent CDPSession per real Page, created lazily on first
-// page.cdp call. Persistent — not per-call — because chained CDP state
+// page.cdp call. Persistent -- not per-call -- because chained CDP state
 // (Emulation.setDeviceMetricsOverride then clearDeviceMetricsOverride)
-// must land on the same session, and per-call creation would race
-// concurrent callers. WeakMap: session dies with its Page target.
-const cdpSessions = new WeakMap<PwPage, CDPSession>();
+// must land on the same session: override state is session-scoped, so a
+// clear sent over a different session silently no-ops and strands the
+// page in the wrong metrics. Creation is single-flighted by memoizing
+// the creation PROMISE synchronously (registry.ts resolveTarget's own
+// pattern): concurrent cold-start callers converge on one session
+// instead of racing to create two. WeakMap: entry dies with its Page.
+const cdpSessions = new WeakMap<PwPage, Promise<CDPSession>>();
 
 async function cdpSessionFor(pwPage: PwPage): Promise<CDPSession> {
   let session = cdpSessions.get(pwPage);
   if (!session) {
-    session = await pwPage.context().newCDPSession(pwPage);
+    session = pwPage.context().newCDPSession(pwPage);
     cdpSessions.set(pwPage, session);
+    // Rejected creation resets the entry (same shape as #276's
+    // rejected-promise reset) so a later call retries fresh; guarded so
+    // a stale rejection can never evict a newer creation.
+    session.catch(() => {
+      if (cdpSessions.get(pwPage) === session) cdpSessions.delete(pwPage);
+    });
   }
   return session;
 }
