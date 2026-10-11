@@ -137,6 +137,20 @@ function tapRequests(transport: RpcTransport): RpcRequest[] {
   return requests;
 }
 
+/**
+ * Taps server->client delivery the same way tapRequests taps the other
+ * direction, so tests can assert the exact response BYTES the daemon puts
+ * on the wire, not just what the client does with them.
+ */
+function tapResponses(transport: RpcTransport): RpcResponse[] {
+  const responses: RpcResponse[] = [];
+  const framer = new MessageFramer<RpcResponse>();
+  transport.onData((chunk) => {
+    for (const res of framer.push(chunk)) responses.push(res);
+  });
+  return responses;
+}
+
 describe("createRpcClient + serveRpc over an in-memory pair", () => {
   test("responses arriving out of order resolve to their own requests", async () => {
     const pair = makeSocketPair();
@@ -153,6 +167,9 @@ describe("createRpcClient + serveRpc over an in-memory pair", () => {
     const p1 = client.call("slowAdd", { n: 1 });
     const p2 = client.call("slowAdd", { n: 2 });
     expect(requests.length).toBe(2);
+    // Ids start at 1 and increment per call -- pinning them keeps the wire
+    // bytes byte-identical when client.ts rewires onto createRpcClient.
+    expect(requests.map((r) => r.id)).toEqual([1, 2]);
 
     // Answer in REVERSE order -- a correct client correlates by id, never
     // by arrival order.
@@ -282,5 +299,22 @@ describe("createRpcClient + serveRpc over an in-memory pair", () => {
     await expect(pending).resolves.toBe(42);
     // Exactly one dispatch, with the full params -- never one per chunk.
     expect(seen).toEqual([{ params: { n: 42 } }]);
+  });
+
+  test("a handler returning nothing encodes null on the wire, byte-for-byte", async () => {
+    // The daemon's existing contract encodes null, never undefined or a
+    // missing key -- `JSON.stringify({result: undefined})` would DROP the
+    // key entirely, changing the wire bytes every existing client sees.
+    const pair = makeSocketPair();
+    const client = createRpcClient(pair.clientTransport);
+    const responses = tapResponses(pair.clientTransport);
+    serveRpc(pair.serverTransport, {
+      finish(_params: unknown): unknown {
+        return undefined;
+      },
+    });
+
+    await expect(client.call("finish")).resolves.toBeNull();
+    expect(responses).toEqual([{ id: 1, result: null }]);
   });
 });
