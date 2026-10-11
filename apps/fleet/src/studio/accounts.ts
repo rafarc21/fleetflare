@@ -29,9 +29,12 @@
  * Issue #238 (step 3): the ONE exception is `./claude-swap`, imported below
  * for `usageMaxPct` — that module itself imports nothing at all (no do.ts, no
  * D1, no `Env`), so pulling one pure function out of it costs this file
- * nothing it doesn't already pay for its own pure helpers.
+ * nothing it doesn't already pay for its own pure helpers. Issue #405 extends
+ * that same exception to `./account-slot`, imported below for the slot-name
+ * grammar — that module imports nothing at all either.
  */
 import { usageMaxPct, DEFAULT_LIMIT_THRESHOLD_PCT } from "./claude-swap";
+import { slotSecretName, slotNumberOf } from "./account-slot";
 import type { AccountLimitKind } from "./rate-limit";
 
 /** Just the part of the Worker environment this module reads. `Env`
@@ -68,9 +71,13 @@ export const MAX_CLAUDE_ACCOUNTS = 9;
 /** The secret name for the nth account, 1-based. The first account keeps the
  *  unsuffixed name the fleet has always used — renaming it would have made
  *  this feature a redeploy-and-re-secret migration for every existing studio,
- *  which is exactly the "code change" the requirement rules out. */
+ *  which is exactly the "code change" the requirement rules out.
+ *
+ *  Issue #405: now a thin re-export of account-slot.ts's `slotSecretName`, kept
+ *  under its old name so existing callers (test/studio.account-failover.test.ts)
+ *  are untouched. */
 export function claudeAccountVarName(position: number): string {
-  return position === 1 ? "CLAUDE_CODE_OAUTH_TOKEN" : `CLAUDE_CODE_OAUTH_TOKEN_${position}`;
+  return slotSecretName(position);
 }
 
 /**
@@ -1106,12 +1113,16 @@ export async function launchAccountOrReroute(
   };
 }
 
-/** The slot a secret name holds, or null for a name outside the list. */
+/** The slot a secret name holds, or null for a name outside the list. Issue
+ *  #405: delegates the parse to account-slot.ts's `slotNumberOf` (which parses
+ *  any _<n>), then re-imposes the 1..MAX_CLAUDE_ACCOUNTS window HERE — the
+ *  window policy stays next to the constant because account-slot.ts is
+ *  import-free. Byte-identical to the old scan: the loop only ever matched
+ *  positions 1..MAX, so a name like CLAUDE_CODE_OAUTH_TOKEN_10 still reads
+ *  null (cli's side gets the 10 directly from slotNumberOf). */
 function slotOf(name: string): number | null {
-  for (let position = 1; position <= MAX_CLAUDE_ACCOUNTS; position++) {
-    if (claudeAccountVarName(position) === name) return position;
-  }
-  return null;
+  const n = slotNumberOf(name);
+  return n !== null && n >= 1 && n <= MAX_CLAUDE_ACCOUNTS ? n : null;
 }
 
 /**
