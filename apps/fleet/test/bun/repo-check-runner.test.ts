@@ -181,7 +181,6 @@ describe("repo-check runner — characterization pins of both check CLIs (board 
           saw.push(`clean:${fileCount}`);
           return "";
         },
-        cleanExit: 0,
         fileCount: (listed) => listed.length,
       });
       expect(failCode).toBe(1);
@@ -199,7 +198,6 @@ describe("repo-check runner — characterization pins of both check CLIs (board 
           saw.push(`clean:${fileCount}`);
           return "";
         },
-        cleanExit: 0,
         fileCount: (listed) => listed.length,
       });
       expect(cleanCode).toBe(0);

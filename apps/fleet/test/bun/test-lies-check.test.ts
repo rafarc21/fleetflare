@@ -639,6 +639,41 @@ describe("quote/escape/bracket-depth walking (characterization, #323)", () => {
     expect(hits[0].line).toBe(1);
   });
 
+  test("a skipped Bun.file candidate is scanned past, its argument text not rescanned", () => {
+    // The first Bun.file( has no .text() in its 10-char window (it is followed
+    // by .json()), so scanCalls's accept hook returns null and the candidate
+    // is skipped — but its ARG text still contains a second, real
+    // Bun.file("src/inner.ts").text() call. The skip must advance lastIndex
+    // past the skipped candidate's own closing paren (the
+    // `re.lastIndex = bal.endIndex + 1` in scanCalls's kept-null branch): a
+    // bare `continue` would leave lastIndex inside the skipped candidate's
+    // args and re-match the nested Bun.file(, attributing src/inner.ts to
+    // line 1 on top of the real line-2 hit. No other test in this file
+    // protects that line — deleting it passes every one of them.
+    //
+    // The nested call must sit in expect(...).toContain(...) position inside
+    // the skipped candidate's arg text: findSourceReading drops a candidate
+    // that has no assertion or var-capture around it, so a plainly-concatenated
+    // nested call would be silently dropped on the mutant too and the test
+    // could not see the difference. In the inline-assert position the mutant's
+    // rescanned candidate survives the detector's gates and misreports —
+    // verified against a /tmp copy of the script with the skip-advance line
+    // deleted (never the repo file): real code reports exactly this one hit;
+    // the mutant reports a second, line-1 hit for src/inner.ts.
+    const text = [
+      'const q = Bun.file("outer " + expect(Bun.file("src/inner.ts").text()).toContain("hi")).json();',
+      'const inner = await Bun.file("src/real.ts").text();',
+      'expect(inner).toContain("hi");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    // Pin current behavior (measured): exactly the real line-2 read is
+    // flagged — nothing attributed to the skipped line-1 candidate, and the
+    // nested src/inner.ts inside its arg text is never double-counted.
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(2);
+    expect(hits[0].detail).toContain("src/real.ts");
+  });
+
   test("expect(...).toBe with a ) inside the asserted string does not end the args early", () => {
     // `S` declared as "a)b" and asserted as "a)b" IS the restated-value
     // tautology shape: extractBalanced must keep the string whole so the
