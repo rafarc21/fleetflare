@@ -446,6 +446,40 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     expect(rowsLogged[0].ok).toBe(0);
   });
 
+  // #298-4: the overflow-shaped sibling of the test above — Claude Code's
+  // client recognizes "prompt is too long" to trigger auto-compact mid-
+  // session, so the raw upstream overflow text must not pass through.
+  it("an overflow-shaped upstream {error:...} chunk mid-stream emits event: error carrying the fixed 'prompt is too long' message, not the raw upstream text (#298-4)", async () => {
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: "This model's maximum context length is 32768 tokens" } })}\n\n`));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    expect(eventTypes).not.toContain("message_stop");
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toEqual({
+      type: "error", error: { type: "invalid_request_error", message: "prompt is too long" },
+    });
+
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].ok).toBe(0);
+  });
+
   // Board issue #284, MINOR 4(a): mirrors #218's own finding
   // (junior.usage.test.ts) applied to the stream-pump chain itself — the
   // Workers runtime is free to tear down this execution context the instant
