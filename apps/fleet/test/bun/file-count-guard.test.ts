@@ -1,8 +1,7 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { existsSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { readFileSync } from "node:fs";
 
 /** True when `p` exists and is a directory — NOT existsSync(p, { isDirectory:
  * true }): this Bun build (1.3.12) answers that overload true for plain
@@ -43,9 +42,9 @@ function isDir(p: string): boolean {
  *    the guard runs the same invocation with `-t "issue-341-never-matches"`
  *    — a pattern no test name matches, so bun loads and registers every
  *    in-scope file (the footer proves it: all files counted) but executes
- *    zero tests, keeping the spawn at well under a second (measured
- *    ~0.4 s). The footer's M must equal the number of .test.ts files git
- *    lists on disk for that SAME argv-derived scope — the pin that catches
+ *    zero tests, keeping the spawn at about a second. The footer's M must
+ *    equal the number of .test.ts files git lists on disk for that SAME
+ *    argv-derived scope — the pin that catches
  *    a file silently dropped RELATIVE TO THE LANE: renamed out of the
  *    .test.ts pattern while still on disk, misnamed so the directory glob
  *    misses it, or present-but-untracked-but-listed and deleted since.
@@ -60,10 +59,10 @@ function isDir(p: string): boolean {
  *    `# Unhandled error between tests`, so that class is covered by the
  *    lane's exit code, not this count.)
  *
- * The `Searched N files` early-exit line is parsed too: when every test in
- * scope is filterable (none skipped at registration time) bun exits early
- * with `error: regex ... matched 0 tests. Searched N files (skipping N
- * tests)` instead of a standard footer — N there is the same file count.
+ * The `Searched N files` early-exit line is parsed too: when bun exits
+ * through its early-exit path it prints `error: regex ... matched 0
+ * tests. Searched N files (skipping N tests)` instead of a standard
+ * footer — N there is the same file count.
  */
 // The lane spawn loads every in-scope file's module graph under whatever
 // load the host carries; the mechanism pin is a handful of small spawns.
@@ -104,11 +103,10 @@ function footerFiles(dir: string, args: string[] = []): number {
   // The bun-test lane runs with TMUX/TMUX_PANE unset (localci.sh, its
   // `env -u TMUX -u TMUX_PANE`) — CI's shape, not this host's. The guard's
   // spawn must mirror that or it counts a different run than CI does:
-  // several in-scope files branch on $TMUX (describe.skip gates that
-  // register nothing, constructors that throw), so a TMUX-carrying host
-  // environment would load and register a different set of tests than the
-  // lane ever sees, and footer M would be an artifact of the caller's
-  // environment rather than of the file set.
+  // several in-scope files branch on $TMUX, so with $TMUX set in-scope
+  // files register different describe/test gates (measured: 235
+  // registrations vs 2), and the guard's -t run must see the same file
+  // set CI's lane does.
   delete env.TMUX;
   delete env.TMUX_PANE;
   const p = Bun.spawnSync([process.execPath, "test", ...args], { cwd: dir, env });
