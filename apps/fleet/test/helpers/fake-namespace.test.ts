@@ -35,6 +35,11 @@ describe("nsWith", () => {
     expect(envLike.STUDIO.get).toBeTypeOf("function");
     expect(envLike.STUDIO.idFromName).toBeTypeOf("function");
   });
+
+  it("does NOT spread object-stub members onto the namespace surface — get() is the only window onto a stub", () => {
+    const ns = nsWith({ marker: "hidden" }) as unknown as Record<string, unknown>;
+    expect(ns.marker).toBeUndefined();
+  });
 });
 
 describe("envWithNs", () => {
@@ -43,6 +48,7 @@ describe("envWithNs", () => {
     const env = envWithNs({ marker: "stub" }, base as never);
     expect((env as unknown as Record<string, unknown>).URL).toBe("https://x");
     expect((env as unknown as Record<string, unknown>).DB).toBe("kept");
-    expect(((env as unknown as Record<string, unknown>).STUDIO as Record<string, unknown>).marker).toBe("stub");
+    const stub = ((env as unknown as Record<string, unknown>).STUDIO as { get: (id: string) => Record<string, unknown> }).get("ignored");
+    expect(stub.marker).toBe("stub");
   });
 });
