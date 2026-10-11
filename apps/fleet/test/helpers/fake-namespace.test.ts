@@ -13,7 +13,7 @@ import { nsWith, envWithNs } from "./fake-namespace";
 describe("nsWith", () => {
   it("returns the object stub from get for every id, and the name verbatim from idFromName", () => {
     const ns = nsWith({ getStatusDetail: async () => ({ id: "x" }) });
-    expect((ns.idFromName as (n: string) => string)("acme--web-studio")).toBe("acme--web-studio");
+    expect((ns.idFromName as unknown as (n: string) => string)("acme--web-studio")).toBe("acme--web-studio");
     const stub = ns.get("ignored" as never) as unknown as { getStatusDetail: () => Promise<{ id: string }> };
     expect(stub.getStatusDetail()).resolves.toEqual({ id: "x" });
     expect(ns.get("other" as never)).toBe(stub as never);
@@ -41,8 +41,8 @@ describe("envWithNs", () => {
   it("spreads the base env and swaps STUDIO for the fake namespace", () => {
     const base = { URL: "https://x", STUDIO: { real: true }, DB: "kept" } as unknown as Record<string, unknown>;
     const env = envWithNs({ marker: "stub" }, base as never);
-    expect((env as Record<string, unknown>).URL).toBe("https://x");
-    expect((env as Record<string, unknown>).DB).toBe("kept");
-    expect(((env as Record<string, unknown>).STUDIO as Record<string, unknown>).marker).toBe("stub");
+    expect((env as unknown as Record<string, unknown>).URL).toBe("https://x");
+    expect((env as unknown as Record<string, unknown>).DB).toBe("kept");
+    expect(((env as unknown as Record<string, unknown>).STUDIO as Record<string, unknown>).marker).toBe("stub");
   });
 });
