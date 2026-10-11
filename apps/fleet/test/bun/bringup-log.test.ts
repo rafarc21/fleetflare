@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSnippet } from "./exec-snippet";
+import { bringupSrc, expectBrings, expectBringsNot } from "./bringup-pins";
 import { redactSecrets } from "../../src/studio/redact";
 import { bringupLogAppendCmd, bringupLogTailCmd, BRINGUP_LOG_PATH } from "../../src/studio/provision";
 
@@ -22,7 +23,7 @@ import { bringupLogAppendCmd, bringupLogTailCmd, BRINGUP_LOG_PATH } from "../../
 // These tests run the REAL function bodies a studio container executes,
 // extracted verbatim out of container/studio-bringup.sh, so what is exercised
 // here is the shipped code and not a re-typed copy of it.
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
+const BRINGUP = bringupSrc();
 
 /**
  * Pull one `name() { ... }` body out of shell source, brace-matched from the
@@ -298,11 +299,11 @@ describe("studio-bringup.sh bringup_finish — the run's own stderr is mirrored 
 
 describe("studio-bringup.sh wiring — the log region is armed before any step runs (issue #38 part 1)", () => {
   test("the log path defaults to /workspace/.fleet/bringup.log, under FLEET_WORKSPACE like working-set.md", () => {
-    expect(BRINGUP).toContain('FLEET_BRINGUP_LOG="${FLEET_BRINGUP_LOG:-${FLEET_WORKSPACE:-/workspace}/.fleet/bringup.log}"');
+    expectBrings('FLEET_BRINGUP_LOG="${FLEET_BRINGUP_LOG:-${FLEET_WORKSPACE:-/workspace}/.fleet/bringup.log}"');
   });
 
   test("the EXIT trap is installed, so a step that aborts the script still records where it got to", () => {
-    expect(BRINGUP).toContain("trap bringup_finish EXIT");
+    expectBrings("trap bringup_finish EXIT");
   });
 
   test("the log region is armed BEFORE the tailscaled step — the first step is already inside the run", () => {
@@ -323,12 +324,12 @@ describe("studio-bringup.sh wiring — the log region is armed before any step r
       "claude-launch",
       "transcript-pipe",
     ]) {
-      expect(BRINGUP).toContain(`bringup_step ${step}`);
+      expectBrings(`bringup_step ${step}`);
     }
   });
 
   test("the log is trimmed so appending forever cannot fill the container disk", () => {
-    expect(BRINGUP).toContain("FLEET_BRINGUP_LOG_MAX_LINES");
+    expectBrings("FLEET_BRINGUP_LOG_MAX_LINES");
   });
 
   // The tmux SERVER outlives this script and every pane under it inherits its
@@ -338,7 +339,7 @@ describe("studio-bringup.sh wiring — the log region is armed before any step r
   // the real stderr, so the server keeps exactly what it had before this
   // feature existed.
   test("the tmux server gets the REAL stderr, never the run's buffered one", () => {
-    expect(BRINGUP).toContain("tmux new-session -d -s studio -n claude 2>&9");
+    expectBrings("tmux new-session -d -s studio -n claude 2>&9");
     // fd 9 is opened unconditionally, so that redirect can never dangle.
     const fd9 = BRINGUP.indexOf("exec 9>&2");
     const newSession = BRINGUP.indexOf("tmux new-session -d -s studio -n claude 2>&9");
@@ -346,11 +347,11 @@ describe("studio-bringup.sh wiring — the log region is armed before any step r
     expect(newSession).toBeGreaterThan(fd9);
     // Opened OUTSIDE the writable-buffer branch: the `if` that arms buffering
     // must not be what decides whether fd 9 exists.
-    expect(BRINGUP).toContain('exec 9>&2\n# Only take stderr over if the buffer is genuinely writable.');
+    expectBrings('exec 9>&2\n# Only take stderr over if the buffer is genuinely writable.');
   });
 
   test("the buffered stderr file is removed at the end of the run, never left behind", () => {
-    expect(BRINGUP).toContain('rm -f "$FLEET_BRINGUP_STDERR_TMP"');
+    expectBrings('rm -f "$FLEET_BRINGUP_STDERR_TMP"');
   });
 });
 
