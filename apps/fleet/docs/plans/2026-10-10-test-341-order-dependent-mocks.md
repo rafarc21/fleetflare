@@ -13,7 +13,7 @@ test files on disk.
 - `mock.module` is used in exactly ONE real place: `test/bun/orca-workspace.test.ts:2168-2178` — mocks `node:os` INSIDE a test body, restores in `finally` with a captured spread. `test-lies-check.test.ts` mentions it only inside string fixtures (detectors, not calls).
 - vitest's 13 `vi.mock` files run in vitest-pool-workers; vitest isolates per file by default (each file gets fresh module registry) — verify empirically in the sweep, don't assume.
 - No `.only` markers anywhere.
-- `bun run bun-test` = `bun test test/bun test/studio.files.test.ts test/studio.studio-blueprint.test.ts` (130 + 2 files). Vitest = `test/**/*.test.ts` minus bun dir (178 files).
+- `bun run bun-test` = `bun test test/bun test/studio.files.test.ts test/studio.studio-blueprint.test.ts` (129 + 2 files). Vitest = `test/**/*.test.ts` minus bun dir (176 files; vitest.config.ts excludes the two studio files).
 - test-lies-check.ts:517-521 counts `*.test.ts` files via its own `git ls-files` (minus ALLOWLIST) for the 'across M test files' line.
 - Container: tmux 3.2a, chromium at /usr/local/bin/chromium, NO docker, node_modules installed, tsc 5.9.3 available.
 
@@ -21,8 +21,8 @@ test files on disk.
 
 ### Task 1 — solo-run sweep (the audit, evidence only)
 Sequential per-file runs, no parallelism, one heavy-gate budget shared:
-- bun lane: `bun test <file>` for each of the 130 `test/bun/*.test.ts` + `test/studio.files.test.ts` + `test/studio.studio-blueprint.test.ts`, from apps/fleet. Record per-file exit code. Known-solo-issue (pre-verified, expected, NOT a finding): files needing TMUX unset (`env -u TMUX -u TMUX_PANE`), and any test that spawns docker-dependent suites already skips itself.
-- vitest lane: `bun x vitest run <file>` per file across the 178 non-bun test files. Some workerd/D1 tests may be slow solo; per-file timeout 120s, record exit + first error line.
+- bun lane: `bun test <file>` for each of the 129 `test/bun/*.test.ts` + `test/studio.files.test.ts` + `test/studio.studio-blueprint.test.ts`, from apps/fleet. Record per-file exit code. Known-solo-issue (pre-verified, expected, NOT a finding): files needing TMUX unset (`env -u TMUX -u TMUX_PANE`), and any test that spawns docker-dependent suites already skips itself.
+- vitest lane: `bun x vitest run <file>` per file across the 176 non-bun test files (vitest.config.ts excludes the two studio files). Some workerd/D1 tests may be slow solo; per-file timeout 120s, record exit + first error line.
 Compare solo exit vs in-suite: a file passing in suite but failing solo is a CANDIDATE. Triage candidates: mock-related failure (module import wins over mock registration, 'Unhandled error between tests') = real finding; env/docker skip = expected, not a finding.
 
 ### Task 2 — fix any real order-dependent file
