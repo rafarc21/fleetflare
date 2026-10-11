@@ -6,8 +6,9 @@ import { nextPageLink } from "../src/github/next-link";
 // board/api.ts and github/api.ts. Golden table — every case answers for
 // BOTH old copies (characterized 2026-10-11), except the empty-URL case,
 // where the old board copy returned "" and github's returned null; the
-// shared module unifies on null (fail closed — following an empty next
-// URL would refetch the same page forever).
+// shared module unifies on null (fail closed — an empty next URL
+// is a link that cannot be followed, so the walk ends, same posture
+// as the board caller's off-host check).
 
 describe("nextPageLink", () => {
   it("returns null for a null header (no Link header at all)", () => {
@@ -50,7 +51,7 @@ describe("nextPageLink", () => {
     expect(nextPageLink('<https://api.github.com/x?page=1>; rel="prev"')).toBe(null);
   });
 
-  it("returns null for an empty URL in the next entry — fail closed, never refetch the same page forever", () => {
+  it("returns null for an empty URL in the next entry — fail closed, a link that cannot be followed is never followed", () => {
     expect(nextPageLink('<>; rel="next"')).toBe(null);
   });
 
