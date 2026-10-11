@@ -42,6 +42,7 @@ import {
   listStudioTasks,
 } from "./fleet";
 import { openStudioRow, defaultOrcaDeps } from "./orca-workspace";
+import { poll, ticker } from "./poll";
 import { repoIdSegment } from "../src/studio/repo";
 import {
   parseFfArgs, ffDecision, ffTaskBrief, parseVerdict, verdictOutcome, ffTimeoutLines, ffAttachGate,
@@ -82,19 +83,6 @@ function fail(line: string): never {
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** Elapsed seconds, for a progress line. */
-function secs(sinceMs: number): number {
-  return Math.round((Date.now() - sinceMs) / 1000);
-}
-
-/** Heartbeat for a long blocking call. Returns its own stopper — the interval
- *  must be cleared or it keeps the process alive after the work is done. */
-function ticker(what: string): () => void {
-  const started = Date.now();
-  const timer = setInterval(() => say(`${what}... (${secs(started)}s)`), TICK_MS);
-  return () => clearInterval(timer);
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +161,7 @@ async function spawnStudio(
   creds: Credentials, role: string, repoSlug: string | null, knownId: string | null,
   task: number | null, instance: number | "next" | undefined,
 ): Promise<string> {
-  const stop = ticker(`spawning ${knownId ?? role}`);
+  const stop = ticker(`spawning ${knownId ?? role}`, TICK_MS, say);
   try {
     const res = await fetch(new URL("/studio/spawn", creds.workerUrl), {
       method: "POST",
@@ -227,7 +215,7 @@ async function spawnStudio(
 async function provisionStudio(
   creds: Credentials, id: string, repoSlug: string | null, task: number | null,
 ): Promise<void> {
-  const stop = ticker(`provisioning ${id}`);
+  const stop = ticker(`provisioning ${id}`, TICK_MS, say);
   try {
     const res = await fetch(studioUrl(creds, id, "/provision"), {
       method: "POST",
@@ -349,25 +337,30 @@ async function adoptTask(
  * already-slow one.
  */
 async function waitProvisioned(creds: Credentials, id: string, startedAt: number): Promise<boolean> {
+  // The note from the last read that did not attach: the waiting line each
+  // iteration prints and the timeout lines if the budget runs out. poll's tick
+  // only receives elapsed secs, so the note rides in this closure var.
   let lastNote = "no check has run yet";
-  for (;;) {
-    const outcome = await readOutcome(creds, id);
-    // "unverified" proceeds deliberately: the check could not reach a verdict
-    // AND the registry says running+clean. Waiting out the full budget on a
-    // check that is itself broken would make `ff` unusable — a strictly worse
-    // failure than the one the check prevents — so it goes, and says why.
-    if (outcome.kind === "provisioned" || outcome.kind === "unverified") {
-      say(`${id}: ${outcome.note} — attaching`);
-      return true;
-    }
-    lastNote = outcome.note;
-    if (Date.now() - startedAt >= WAIT_TIMEOUT_MS) {
-      for (const line of ffTimeoutLines(id, lastNote, secs(startedAt))) say(line);
-      return false;
-    }
-    say(`${id}: ${outcome.note} — waiting (${secs(startedAt)}s)`);
-    await Bun.sleep(POLL_MS);
-  }
+  const res = await poll({
+    at: startedAt, budgetMs: WAIT_TIMEOUT_MS, sleepMs: POLL_MS,
+    read: async () => {
+      const outcome = await readOutcome(creds, id);
+      // "unverified" proceeds deliberately: the check could not reach a verdict
+      // AND the registry says running+clean. Waiting out the full budget on a
+      // check that is itself broken would make `ff` unusable — a strictly worse
+      // failure than the one the check prevents — so it goes, and says why.
+      if (outcome.kind === "provisioned" || outcome.kind === "unverified") {
+        say(`${id}: ${outcome.note} — attaching`);
+        return { done: true as const };
+      }
+      lastNote = outcome.note;
+      return null;
+    },
+    tick: (secs) => say(`${id}: ${lastNote} — waiting (${secs}s)`),
+  });
+  if (!("timedOut" in res)) return true;
+  for (const line of ffTimeoutLines(id, lastNote, res.elapsedSecs)) say(line);
+  return false;
 }
 
 // ---------------------------------------------------------------------------
