@@ -16,6 +16,7 @@
 // this scale cannot reach would be machinery with no failing case to test.
 
 import { taskAssignees, taskStates, type BoardTask } from "./types";
+import { nextPageLink } from "../github/next-link";
 
 const GITHUB_API = "https://api.github.com";
 // Issue #331: a neutral product name, not the App's own bot slug
@@ -94,17 +95,6 @@ async function ghJsonWithHeaders<T>(token: string, method: string, url: string):
   const text = await res.text();
   if (!res.ok) throw new GitHubError(res.status, `${method} ${url} failed (${res.status}): ${text.slice(0, 300)}`);
   return { body: (text === "" ? undefined : JSON.parse(text)) as T, res };
-}
-
-/** Pulls the `rel="next"` URL out of a GitHub `Link` response header
- *  (`<url>; rel="next", <url>; rel="last"`), or null on the last page. */
-function nextPageUrl(linkHeader: string | null): string | null {
-  if (linkHeader === null) return null;
-  for (const part of linkHeader.split(",")) {
-    const match = part.match(/<([^>]*)>\s*;\s*rel="next"/);
-    if (match) return match[1];
-  }
-  return null;
 }
 
 /** GitHub's issue shape, only the fields the board reads. `pull_request` is
@@ -228,7 +218,7 @@ export async function listIssues(token: string, repo: string, query: ListIssuesQ
     const { body, res } = await ghJsonWithHeaders<RawIssue[]>(token, "GET", next);
     raw.push(...body);
     pages++;
-    next = nextPageUrl(res.headers.get("link"));
+    next = nextPageLink(res.headers.get("link"));
     // The bearer token must never leave the GitHub host it was minted for —
     // a `next` URL pointing anywhere else is treated as "no more pages"
     // (fail open, same posture as the truncation report below) rather than
