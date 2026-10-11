@@ -8,6 +8,7 @@ import { formatTable, formatLsHead } from "../../cli/fleet";
 import { formatWipCell, formatWipInspectLines, WIP_LEGEND, wipSyncRefEcho } from "../../cli/wip-format";
 import { emptyObserved } from "../../src/studio/observed";
 import { wipSyncRef } from "../../src/studio/rescue";
+import { runningRow } from "../helpers/studio-row";
 import type { StudioStatus } from "../../src/studio/types";
 
 const NOW = new Date("2026-10-03T12:00:00.000Z");
@@ -15,11 +16,10 @@ const MIN = 60_000;
 const ago = (m: number) => new Date(NOW.getTime() - m * MIN).toISOString();
 
 function row(wipSyncedAt?: string | null, id = "acmeclient--lead"): StudioStatus {
-  return {
-    id, state: "running", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
-    burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+  return runningRow({
+    id,
     ...(wipSyncedAt === undefined ? {} : { observed: { ...emptyObserved(), wipSyncedAt } }),
-  };
+  });
 }
 
 /** Exactly what deployed main (pre-#208) writes: `observed` with no

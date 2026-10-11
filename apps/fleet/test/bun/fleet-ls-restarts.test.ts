@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { formatTable } from "../../cli/fleet";
 import { formatRestartCell, formatRestartChurn, RESTART_CHURN_24H, RESTART_LEGEND } from "../../cli/restart-format";
 import { emptyObserved } from "../../src/studio/observed";
+import { runningRow } from "../helpers/studio-row";
 import type { RestartLog } from "../../src/studio/restarts";
 import type { StudioStatus } from "../../src/studio/types";
 
@@ -13,12 +14,11 @@ const HOUR = 3_600_000;
 const ago = (h: number) => new Date(NOW.getTime() - h * HOUR).toISOString();
 
 function row(restarts?: RestartLog | null, id = "acmeclient--lead"): StudioStatus {
-  return {
-    id, state: "running", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
-    burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+  return runningRow({
+    id,
     // `null` is never stored (hand-edited row only) — cast to exercise it.
     ...(restarts === undefined ? {} : { observed: { ...emptyObserved(), restarts: restarts as RestartLog } }),
-  };
+  });
 }
 
 /** Exactly what deployed main writes: `observed` with no `restarts` key. */

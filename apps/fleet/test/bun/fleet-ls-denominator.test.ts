@@ -1,19 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { BURN_LEGEND, formatLsHead, formatStudioCount, formatTable, fullErrorLine } from "../../cli/fleet";
-import type { StudioStatus } from "../../src/studio/types";
-
 // Issue #205: 2026-09-24 21:12Z the BETA maestro ran `fleet ls 2>&1 | head -20`.
 // Rows sort by id, so the 5 demosite-life--* rows sorted last and `head` cut
 // exactly them: "zero studios" while 3 idle studios billed. And one 3,382-char
 // ERROR padded every line to ~3,600 chars (87 KB), so Claude Code persisted
 // the output to a file whose 2 KB preview showed no rows at all.
-function row(overrides: Partial<StudioStatus>): StudioStatus {
-  return {
-    id: "acme-os--maestro", state: "running", tailscaleHost: null, lastRefresh: null,
-    error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null,
-    repoSlug: null, ...overrides,
-  };
-}
+import { runningRow as row } from "../helpers/studio-row";
+import type { StudioStatus } from "../../src/studio/types";
 
 const FLEET: StudioStatus[] = [
   row({ id: "acme-os--maestro", state: "running" }),
