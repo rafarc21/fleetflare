@@ -5,14 +5,10 @@ import {
   type SweepDeps, type SweepStorage,
 } from "../src/studio/sweep";
 import type { QuiescenceDeps } from "../src/studio/quiescence";
+import { fakeStorage as doStorage } from "./helpers/do-storage";
 
 function fakeStorage(): SweepStorage & { map: Map<string, unknown> } {
-  const map = new Map<string, unknown>();
-  return {
-    map,
-    get: async <T>(k: string) => map.get(k) as T | undefined,
-    put: async (k: string, v: unknown) => { map.set(k, v); },
-  };
+  return doStorage() as unknown as SweepStorage & { map: Map<string, unknown> };
 }
 
 const clearFleet: QuiescenceDeps = {

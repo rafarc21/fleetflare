@@ -9,6 +9,7 @@ import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import { studioLabel, type BoardTask } from "../src/board/types";
 import type { BoardApi } from "../src/board/board";
+import { runningRow } from "./helpers/studio-row";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 
@@ -203,12 +204,8 @@ describe("repoIsPrivate", () => {
 
 describe("envelope route -- end to end", () => {
   const MINE = "websites--web-studio";
-  function row(hash: string): StudioStatus {
-    return {
-      id: MINE, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
-      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: hash, repoSlug: REPO,
-    };
-  }
+  const row = (hash: string): StudioStatus =>
+    runningRow({ id: MINE, spawnTokenHash: hash, repoSlug: REPO });
 
   it("surfaces a leak refusal to the lead as 422 with the index, never 502", async () => {
     const token = mintSpawnToken();

@@ -138,12 +138,10 @@ function formatAgeFloor(seconds: number): string {
  */
 export function formatCheckedAt(readiness: StudioStatus["readiness"], now: Date): string {
   if (readiness == null) return "never";
-  const at = Date.parse(readiness.checkedAt);
-  if (Number.isNaN(at)) return readiness.checkedAt;
+  if (Number.isNaN(Date.parse(readiness.checkedAt))) return readiness.checkedAt;
   // Clock skew (the Worker stamps checkedAt, the Mac renders it) must never
   // print a negative age — floored at 0, which reads as "just now" and is.
-  const seconds = Math.max(0, Math.floor((now.getTime() - at) / 1000));
-  return `${formatAgeFloor(seconds)} ago`;
+  return `${formatAgeFloor(ageSeconds(readiness.checkedAt, now))} ago`;
 }
 
 /** How stale a readiness verdict must be before the CLI itself calls it
@@ -151,7 +149,7 @@ export function formatCheckedAt(readiness: StudioStatus["readiness"], now: Date)
  *  from SYNC_SESSION_SECONDS, never a bare 660. */
 const UNVERIFIED_AFTER_SECONDS = 2 * SYNC_SESSION_SECONDS + 60;
 
-function ageSeconds(iso: string, now: Date): number {
+export function ageSeconds(iso: string, now: Date): number {
   const at = Date.parse(iso);
   return Number.isNaN(at) ? 0 : Math.max(0, Math.floor((now.getTime() - at) / 1000));
 }

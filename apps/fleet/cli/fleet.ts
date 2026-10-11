@@ -27,7 +27,7 @@ import { grabClipboardPng } from "./paste-mac";
 import { classifyInput, CTRL_V } from "./input";
 import { parseCliArgs, renderHelp } from "../src/studio/cli-args";
 import { parseStudioId } from "../src/studio/ids";
-import { parseGitRemote, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
+import { parseGitRemote, refuseBadSegment, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
 import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior, cmdJuniorStats } from "./junior";
 import { cmdAccounts, cmdAccountsSync, cmdAccountsHold, cmdAccountsClear } from "./accounts";
@@ -41,6 +41,7 @@ import type { RescueGcOutcome } from "../src/studio/rescue-gc";
 import type { RepoReach } from "../src/github/reach";
 import { fleetTotals, formatFleetTotalsLine } from "./fleet-totals";
 import { formatBurn, BURN_LEGEND } from "./burn-format";
+import { formatColumns } from "./columns";
 import { formatRestartCell, formatRestartChurn, RESTART_LEGEND } from "./restart-format";
 import { formatWipCell, formatWipInspectLines, WIP_LEGEND } from "./wip-format";
 import { requestInspect, renderInspect, formatSessionForceArmedLine, type InspectBody } from "./inspect-request";
@@ -461,12 +462,7 @@ export function formatTable(
     s.lastRefresh ?? "-",
     capErrorCell(s.error),
   ]);
-  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
-  // Issue #205: the LAST column is never padded -- trailing blanks on every
-  // line are pure bytes, and they turned one long ERROR into 87 KB of output.
-  const last = headers.length - 1;
-  const line = (cols: string[]) => cols.map((c, i) => (i === last ? c : c.padEnd(widths[i]))).join("  ");
-  return [line(headers), ...rows.map(line)].join("\n");
+  return formatColumns(headers, rows);
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,8 +1019,7 @@ async function resolveTabsScope(
   // comparison in this codebase goes through, never a raw slug/id compare.
   const badSegment = (slug: string): { ok: false; message: string } => ({
     ok: false,
-    message: `fleet tabs: repo "${slug}" cannot name a studio: not a valid id segment ` +
-      "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)",
+    message: `fleet tabs: ${refuseBadSegment(slug, slug.split("/")[1] ?? "")}`,
   });
 
   if (flags.repo !== null) {
@@ -3013,7 +3008,11 @@ async function main(): Promise<void> {
     case "junior":
       // Only "stats" reaches here — enable/disable/status already returned
       // above, before loadCredentials(), per #218's early-dispatch guard.
-      return cmdJuniorStats(creds, parsed.since);
+      // Return code wired like cmdJunior's branch above, not `return`ed:
+      // main() is Promise<void>, and the default exit dep already called
+      // process.exit(1) on any usage error before a number gets here.
+      process.exitCode = await cmdJuniorStats(creds, parsed.since);
+      return;
     case "accounts":
       return parsed.sync
         ? cmdAccountsSync(creds, { watch: parsed.watch, json: parsed.json, writeLabels: parsed.writeLabels })

@@ -1,19 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { BURN_LEGEND, formatLsHead, formatStudioCount, formatTable, fullErrorLine } from "../../cli/fleet";
-import type { StudioStatus } from "../../src/studio/types";
-
 // Issue #205: 2026-09-24 21:12Z the BETA maestro ran `fleet ls 2>&1 | head -20`.
 // Rows sort by id, so the 5 demosite-life--* rows sorted last and `head` cut
 // exactly them: "zero studios" while 3 idle studios billed. And one 3,382-char
 // ERROR padded every line to ~3,600 chars (87 KB), so Claude Code persisted
 // the output to a file whose 2 KB preview showed no rows at all.
-function row(overrides: Partial<StudioStatus>): StudioStatus {
-  return {
-    id: "acme-os--maestro", state: "running", tailscaleHost: null, lastRefresh: null,
-    error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null,
-    repoSlug: null, ...overrides,
-  };
-}
+import { runningRow as row } from "../helpers/studio-row";
+import type { StudioStatus } from "../../src/studio/types";
 
 const FLEET: StudioStatus[] = [
   row({ id: "acme-os--maestro", state: "running" }),
@@ -69,6 +62,20 @@ describe("formatTable — no trailing pad, capped ERROR (#205)", () => {
     const t = formatTable([row({ error: "clone failed: 403" })]);
     expect(t).toContain("clone failed: 403");
     expect(t).not.toContain("…");
+  });
+
+  // Issue #399 (sweep-5 F1): one full-row exact-bytes pin of formatTable,
+  // written BEFORE the formatColumns fold. The base row carries null
+  // readiness/observed/burn (helpers/studio-row's defaults), so every cell
+  // renders a clock-free constant (? / "-" / "never") and the whole
+  // single-row table is byte-pinnable. This transcribes the table's own
+  // output for that fixed input — the before-snapshot the fold must keep.
+  test("a base row's whole single-row table, every byte (#399)", () => {
+    const t = formatTable([row()]);
+    expect(t).toBe(
+      "ID                REPO     STATE    RST  WIP  READY  SESSION     ACTIVITY  CHECKED  ROW  ACCOUNT                  HOST  BURN  REFRESHED  ERROR\n" +
+      "acme-os--maestro  acme-os  running  -    -    ?      ? · snap ?  ?         never    -    CLAUDE_CODE_OAUTH_TOKEN  -     -     -          -",
+    );
   });
 });
 

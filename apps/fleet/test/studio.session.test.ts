@@ -39,6 +39,8 @@ import {
 } from "../src/studio/failover";
 import type { ClaudeAccount } from "../src/studio/accounts";
 import { ORG_SPEND_LIMIT_PANE } from "./fixtures/rate-limit-panes";
+import { fixedNow, b64 } from "./helpers/datetime";
+import { bringupSrc, expectBrings, expectBringsNot } from "./helpers/bringup-pins";
 
 // A live StudioDO cannot be constructed under vitest-pool-workers (see
 // src/studio/do.ts's own header) — this file targets the exported pure
@@ -52,14 +54,6 @@ const TODAY = "2026-08-16";
  *  this file reports as the start of its tar — the value a tick may adopt as
  *  the burn watermark, but only once its own burn parse has succeeded. */
 const TAR_STARTED_AT = 1_758_067_200;
-
-function fixedNow(iso: string): () => Date {
-  return () => new Date(iso);
-}
-
-function b64(bytes: number[]): string {
-  return btoa(String.fromCharCode(...bytes));
-}
 
 /** Chunked base64 encode for large (multi-MiB) byte arrays — a plain
  *  `String.fromCharCode(...bytes)` spread blows the call stack past a few
@@ -2266,78 +2260,77 @@ describe("container/studio-bringup.sh — C2 verification-gate source assertions
   // exercise a real bring-up run); these pin the LOAD-BEARING fragments so a
   // future edit that silently weakens the verification gate fails a test
   // here, not just a manual re-check nobody remembers to redo.
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   it("guards on the manifest's mere presence (not parts alone) AND the container still being fresh", () => {
-    expect(src()).toContain('MANIFEST="$RESTORE_DIR/manifest.json"');
-    expect(src()).toContain('if [ -f "$MANIFEST" ] && [ ! -d ~/.claude/projects ]; then');
+    expectBrings('MANIFEST="$RESTORE_DIR/manifest.json"');
+    expectBrings('if [ -f "$MANIFEST" ] && [ ! -d ~/.claude/projects ]; then');
   });
 
   it("re-derives partCount/totalBytes/sha256 from the manifest via sed (no jq dependency) and re-verifies all three against the actual files on disk", () => {
-    expect(src()).toContain(`sed -n 's/.*"partCount":\\([0-9]*\\).*/\\1/p' "$MANIFEST"`);
-    expect(src()).toContain(`sed -n 's/.*"totalBytes":\\([0-9]*\\).*/\\1/p' "$MANIFEST"`);
-    expect(src()).toContain(`sed -n 's/.*"sha256":"\\([a-f0-9]*\\)".*/\\1/p' "$MANIFEST"`);
-    expect(src()).toContain("sha256sum");
-    expect(src()).toContain('[ "$actual_part_count" != "$manifest_part_count" ]');
-    expect(src()).toContain('[ "$actual_total_bytes" != "$manifest_total_bytes" ]');
-    expect(src()).toContain('[ "$actual_sha256" != "$manifest_sha256" ]');
+    expectBrings(`sed -n 's/.*"partCount":\\([0-9]*\\).*/\\1/p' "$MANIFEST"`);
+    expectBrings(`sed -n 's/.*"totalBytes":\\([0-9]*\\).*/\\1/p' "$MANIFEST"`);
+    expectBrings(`sed -n 's/.*"sha256":"\\([a-f0-9]*\\)".*/\\1/p' "$MANIFEST"`);
+    expectBrings("sha256sum");
+    expectBrings('[ "$actual_part_count" != "$manifest_part_count" ]');
+    expectBrings('[ "$actual_total_bytes" != "$manifest_total_bytes" ]');
+    expectBrings('[ "$actual_sha256" != "$manifest_sha256" ]');
   });
 
   it("untars into a scratch temp dir first, only mv-ing into ~/.claude/projects on a fully successful extraction — atomic by construction, never a partial ~/.claude", () => {
-    expect(src()).toContain('TMP_RESTORE="${HOME:-/root}/.claude-restore-tmp"');
-    expect(src()).toContain('cat "$RESTORE_DIR"/part-* | tar -xzf - -C "$TMP_RESTORE"');
-    expect(src()).toContain('mv "$TMP_RESTORE/.claude/projects" ~/.claude/projects');
+    expectBrings('TMP_RESTORE="${HOME:-/root}/.claude-restore-tmp"');
+    expectBrings('cat "$RESTORE_DIR"/part-* | tar -xzf - -C "$TMP_RESTORE"');
+    expectBrings('mv "$TMP_RESTORE/.claude/projects" ~/.claude/projects');
     // Nothing else in this file ever writes to ~/.claude/projects directly —
     // this mv is the ONLY path a restore takes into the real location.
-    expect(src().match(/~\/\.claude\/projects/g)?.length).toBeGreaterThanOrEqual(1);
+    expect(bringupSrc().match(/~\/\.claude\/projects/g)?.length).toBeGreaterThanOrEqual(1);
   });
 
   it("fix round 2 (Important): moves .claude.json BEFORE projects — projects is the freshness guard's own key, so it must be the LAST placement step. A kill/failure between the two self-heals via retry (guard still reads 'fresh') instead of permanently orphaning .claude.json in $TMP_RESTORE (which the OLD ordering could do: projects landing first flips the guard to 'warm', so the block never runs again to notice .claude.json never made it)", () => {
-    const claudeJsonMvIdx = src().indexOf('mv "$TMP_RESTORE/.claude.json" ~/.claude.json');
-    const projectsMvIdx = src().indexOf('mv "$TMP_RESTORE/.claude/projects" ~/.claude/projects');
+    const claudeJsonMvIdx = bringupSrc().indexOf('mv "$TMP_RESTORE/.claude.json" ~/.claude.json');
+    const projectsMvIdx = bringupSrc().indexOf('mv "$TMP_RESTORE/.claude/projects" ~/.claude/projects');
     expect(claudeJsonMvIdx).toBeGreaterThan(-1);
     expect(projectsMvIdx).toBeGreaterThan(-1);
     expect(claudeJsonMvIdx).toBeLessThan(projectsMvIdx);
   });
 
   it("fix round 2 (Minor): exit-checks every placement step (mkdir + both mvs) and gates the success message on the WHOLE chain succeeding — a failed placement falls through to the same 'continuing fresh' logging every other gate in this block uses, never a false 'verified'", () => {
-    expect(src()).toContain("placement_ok=1");
-    expect(src()).toContain("mkdir -p ~/.claude || placement_ok=0");
-    expect(src()).toContain('mv "$TMP_RESTORE/.claude.json" ~/.claude.json || placement_ok=0');
-    expect(src()).toContain('mv "$TMP_RESTORE/.claude/projects" ~/.claude/projects || placement_ok=0');
+    expectBrings("placement_ok=1");
+    expectBrings("mkdir -p ~/.claude || placement_ok=0");
+    expectBrings('mv "$TMP_RESTORE/.claude.json" ~/.claude.json || placement_ok=0');
+    expectBrings('mv "$TMP_RESTORE/.claude/projects" ~/.claude/projects || placement_ok=0');
 
     // The success echo must be reached ONLY through a placement_ok gate —
     // never unconditionally right after the mv calls (the exact bug: an
     // unchecked mv could fail while this line still printed "verified").
-    const successMsgIdx = src().indexOf("session restored from R2 snapshot (verified)");
+    const successMsgIdx = bringupSrc().indexOf("session restored from R2 snapshot (verified)");
     expect(successMsgIdx).toBeGreaterThan(-1);
-    const nearestGateBeforeSuccess = src().lastIndexOf('[ "$placement_ok" = "1" ]', successMsgIdx);
+    const nearestGateBeforeSuccess = bringupSrc().lastIndexOf('[ "$placement_ok" = "1" ]', successMsgIdx);
     expect(nearestGateBeforeSuccess).toBeGreaterThan(-1);
     expect(nearestGateBeforeSuccess).toBeLessThan(successMsgIdx);
 
-    expect(src()).toContain("session restore placement failed after untar, continuing fresh");
+    expectBrings("session restore placement failed after untar, continuing fresh");
   });
 
   it("wraps the entire block in its own `set +e` subshell — a corrupt/torn restore can never abort the rest of bring-up under this script's outer `set -euo pipefail`", () => {
-    expect(src()).toContain('RESTORE_DIR="${FLEET_WORKSPACE:-/workspace}/.session-restore"');
-    const restoreBlockStart = src().indexOf('RESTORE_DIR="${FLEET_WORKSPACE:-/workspace}/.session-restore"');
-    const nearby = src().slice(restoreBlockStart, restoreBlockStart + 400);
+    expectBrings('RESTORE_DIR="${FLEET_WORKSPACE:-/workspace}/.session-restore"');
+    const restoreBlockStart = bringupSrc().indexOf('RESTORE_DIR="${FLEET_WORKSPACE:-/workspace}/.session-restore"');
+    const nearby = bringupSrc().slice(restoreBlockStart, restoreBlockStart + 400);
     expect(nearby).toMatch(/\(\s*\n\s*set \+e/);
   });
 
   it("cleans up both parts and the manifest unconditionally at the end — idempotent double-run regardless of which outcome (restored/failed-verify/failed-untar) occurred", () => {
-    expect(src()).toContain('rm -f "$RESTORE_DIR"/part-* "$MANIFEST"');
+    expectBrings('rm -f "$RESTORE_DIR"/part-* "$MANIFEST"');
   });
 
   it("the restore-untar step still runs after tmux-session and before the claude-launch block's own --continue check", () => {
-    const tmuxSessionIdx = src().indexOf('tmux new-session -d -s studio -n claude');
-    const restoreIdx = src().indexOf('RESTORE_DIR="${FLEET_WORKSPACE:-/workspace}/.session-restore"');
-    const continueCheckIdx = src().indexOf("claude_args+=(--continue)");
+    const tmuxSessionIdx = bringupSrc().indexOf('tmux new-session -d -s studio -n claude');
+    const restoreIdx = bringupSrc().indexOf('RESTORE_DIR="${FLEET_WORKSPACE:-/workspace}/.session-restore"');
+    const continueCheckIdx = bringupSrc().indexOf("claude_args+=(--continue)");
     expect(tmuxSessionIdx).toBeGreaterThan(-1);
     expect(restoreIdx).toBeGreaterThan(tmuxSessionIdx);
     expect(continueCheckIdx).toBeGreaterThan(restoreIdx);
     // Issue #146: the adopt runs between them — after the untar, before the guard.
-    const adoptIdx = src().indexOf("bringup_step session-adopt");
+    const adoptIdx = bringupSrc().indexOf("bringup_step session-adopt");
     expect(adoptIdx).toBeGreaterThan(restoreIdx);
     expect(continueCheckIdx).toBeGreaterThan(adoptIdx);
   });
@@ -2348,31 +2341,30 @@ describe("container/studio-bringup.sh — C2 verification-gate source assertions
 // ---------------------------------------------------------------------------
 
 describe("container/studio-bringup.sh — tailscaleHost writer (Task 6, P2 ride-along)", () => {
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   it("guards the whole block on a non-empty `tailscale status --json` result — `|| true` keeps a missing/failed tailscale from tripping this script's own set -euo pipefail", () => {
-    expect(src()).toContain('ts_status_json="$(tailscale status --json 2>/dev/null || true)"');
-    expect(src()).toContain('if [ -n "$ts_status_json" ]; then');
+    expectBrings('ts_status_json="$(tailscale status --json 2>/dev/null || true)"');
+    expectBrings('if [ -n "$ts_status_json" ]; then');
   });
 
   it("scopes the DNSName extraction to Self only — truncates at the Peer marker before extracting, so a peer's own DNSName can never be picked up (no jq in this image)", () => {
-    expect(src()).toContain(`PEER_MARKER='"Peer"'`);
-    expect(src()).toContain('ts_self_json="${ts_status_json%%$PEER_MARKER*}"');
-    expect(src()).toContain(`sed -n 's/.*"DNSName": *"\\([^"]*\\)".*/\\1/p'`);
+    expectBrings(`PEER_MARKER='"Peer"'`);
+    expectBrings('ts_self_json="${ts_status_json%%$PEER_MARKER*}"');
+    expectBrings(`sed -n 's/.*"DNSName": *"\\([^"]*\\)".*/\\1/p'`);
   });
 
   it("strips a trailing dot (tailscale's own FQDN form) before writing", () => {
-    expect(src()).toContain('ts_dns_name="${ts_dns_name%.}"');
+    expectBrings('ts_dns_name="${ts_dns_name%.}"');
   });
 
   it("only writes /workspace/.ts-host when a DNSName was actually found — absent/empty just skips, leaving the file itself absent for the reader to treat as null", () => {
-    expect(src()).toContain('if [ -n "$ts_dns_name" ]; then');
-    expect(src()).toContain('printf \'%s\\n\' "$ts_dns_name" > /workspace/.ts-host');
+    expectBrings('if [ -n "$ts_dns_name" ]; then');
+    expectBrings('printf \'%s\\n\' "$ts_dns_name" > /workspace/.ts-host');
   });
 
   it("runs AFTER `tailscale up`, not before — DNSName is only populated once tailscale is actually logged in", () => {
-    const tailscaleUpIdx = src().indexOf('tailscale up --ssh --authkey=');
-    const writerIdx = src().indexOf('ts_status_json="$(tailscale status --json');
+    const tailscaleUpIdx = bringupSrc().indexOf('tailscale up --ssh --authkey=');
+    const writerIdx = bringupSrc().indexOf('ts_status_json="$(tailscale status --json');
     expect(tailscaleUpIdx).toBeGreaterThan(-1);
     expect(writerIdx).toBeGreaterThan(tailscaleUpIdx);
   });
@@ -2384,34 +2376,33 @@ describe("container/studio-bringup.sh — tailscaleHost writer (Task 6, P2 ride-
 // ---------------------------------------------------------------------------
 
 describe("container/studio-bringup.sh — claude launch: skip-permissions + effort (operator directive 2026-08-19)", () => {
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   it("passes --dangerously-skip-permissions unconditionally", () => {
-    expect(src()).toContain("claude_args+=(--dangerously-skip-permissions)");
+    expectBrings("claude_args+=(--dangerously-skip-permissions)");
   });
 
   it("passes --effort only when ROLE_EFFORT is set (empty -> claude's own default)", () => {
-    expect(src()).toContain('[ -n "${ROLE_EFFORT:-}" ] && claude_args+=(--effort "$ROLE_EFFORT")');
+    expectBrings('[ -n "${ROLE_EFFORT:-}" ] && claude_args+=(--effort "$ROLE_EFFORT")');
   });
 
   it("the --allowedTools line survives alongside both additions (belt and braces, not a replacement)", () => {
-    expect(src()).toContain('claude_args+=(--allowedTools "${ROLE_ALLOWED_TOOLS:-}")');
+    expectBrings('claude_args+=(--allowedTools "${ROLE_ALLOWED_TOOLS:-}")');
   });
 
   // Issue #6: the prompt inlined into claude_args rode the send-keys line and
   // overflowed tmux. claude_launch_line passes it by file; its behaviour runs
   // in test/bun/bringup-launch-line.test.ts.
   it("the role prompt never joins claude_args — it goes to claude_launch_line, which passes it by file", () => {
-    expect(src()).not.toContain('claude_args+=(--append-system-prompt "$role_prompt"');
-    expect(src()).toContain('cmd_str="$(claude_launch_line "$role_prompt" "${repo_dir:-}" "${claude_args[@]}")"');
+    expectBringsNot('claude_args+=(--append-system-prompt "$role_prompt"');
+    expectBrings('cmd_str="$(claude_launch_line "$role_prompt" "${repo_dir:-}" "${claude_args[@]}")"');
   });
 
   it("skip-permissions lands before the --continue guard, --effort lands after --allowedTools, and both are assembled into cmd_str with everything else in claude_args", () => {
-    const skipIdx = src().indexOf("claude_args+=(--dangerously-skip-permissions)");
-    const continueGuardIdx = src().indexOf('if claude_has_conversation "${repo_dir:-$PWD}"; then');
-    const allowedToolsIdx = src().indexOf('--allowedTools "${ROLE_ALLOWED_TOOLS:-}")');
-    const effortIdx = src().indexOf('claude_args+=(--effort "$ROLE_EFFORT")');
-    const cmdStrIdx = src().indexOf('cmd_str="$(claude_launch_line');
+    const skipIdx = bringupSrc().indexOf("claude_args+=(--dangerously-skip-permissions)");
+    const continueGuardIdx = bringupSrc().indexOf('if claude_has_conversation "${repo_dir:-$PWD}"; then');
+    const allowedToolsIdx = bringupSrc().indexOf('--allowedTools "${ROLE_ALLOWED_TOOLS:-}")');
+    const effortIdx = bringupSrc().indexOf('claude_args+=(--effort "$ROLE_EFFORT")');
+    const cmdStrIdx = bringupSrc().indexOf('cmd_str="$(claude_launch_line');
     expect(skipIdx).toBeGreaterThan(-1);
     expect(continueGuardIdx).toBeGreaterThan(skipIdx);
     expect(allowedToolsIdx).toBeGreaterThan(continueGuardIdx);
@@ -2426,13 +2417,13 @@ describe("container/studio-bringup.sh — claude launch: skip-permissions + effo
   // session existed for that cwd, claude exited "No conversation found to
   // continue", and the studio came up as a bare bash pane.
   it("the --continue guard is scoped to the launch cwd's own project dir, never to the projects dir as a whole", () => {
-    expect(src()).not.toContain("[ -d ~/.claude/projects ] && claude_args+=(--continue)");
-    expect(src()).toContain("claude_project_dir() {");
-    expect(src()).toContain('printf \'%s\' ~/.claude/projects/"$(printf \'%s\' "$1" | tr -c \'a-zA-Z0-9\' \'-\')"');
+    expectBringsNot("[ -d ~/.claude/projects ] && claude_args+=(--continue)");
+    expectBrings("claude_project_dir() {");
+    expectBrings('printf \'%s\' ~/.claude/projects/"$(printf \'%s\' "$1" | tr -c \'a-zA-Z0-9\' \'-\')"');
     // repo_dir must be resolved BEFORE the guard reads it, or the guard tests
     // one directory while claude starts in another.
-    expect(src().indexOf('repo_dir="/workspace/${STUDIO_ID%%--*}"')).toBeLessThan(
-      src().indexOf('if claude_has_conversation "${repo_dir:-$PWD}"; then'),
+    expect(bringupSrc().indexOf('repo_dir="/workspace/${STUDIO_ID%%--*}"')).toBeLessThan(
+      bringupSrc().indexOf('if claude_has_conversation "${repo_dir:-$PWD}"; then'),
     );
   });
 
@@ -2444,12 +2435,12 @@ describe("container/studio-bringup.sh — claude launch: skip-permissions + effo
   // test/bun/bringup-claude-launch.test.ts (real function bodies, real
   // filesystem); this pins the source shape workerd can see.
   it("the --continue guard tests for a session file, never for the project DIRECTORY", () => {
-    expect(src()).not.toContain('[ -d "$claude_proj_dir" ] && claude_args+=(--continue)');
-    expect(src()).toContain("claude_has_conversation() {");
+    expectBringsNot('[ -d "$claude_proj_dir" ] && claude_args+=(--continue)');
+    expectBrings("claude_has_conversation() {");
     // -maxdepth 1 is what keeps `memory/` (restored independently of any
     // conversation, and full of files claude never resumes from) out of the
     // answer.
-    expect(src()).toContain("-maxdepth 1 -type f -name '*.jsonl'");
+    expectBrings("-maxdepth 1 -type f -name '*.jsonl'");
   });
 });
 
@@ -2467,18 +2458,17 @@ describe("container/studio-bringup.sh — claude launch: skip-permissions + effo
 // reaches the Worker as a non-zero exit.
 
 describe("container/studio-bringup.sh — claude launch liveness (issue #54)", () => {
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   it("verifies the launch landed immediately after send-keys, and records the failure instead of aborting mid-script", () => {
     // Issue #90 moved the keystrokes into claude_launch (C-c, launch, verify,
     // one retry); its behaviour runs in test/bun/bringup-claude-relaunch.test.ts.
-    const fnStart = src().indexOf("\nclaude_launch() {");
-    const fn = src().slice(fnStart, src().indexOf("\n}\n", fnStart));
+    const fnStart = bringupSrc().indexOf("\nclaude_launch() {");
+    const fn = bringupSrc().slice(fnStart, bringupSrc().indexOf("\n}\n", fnStart));
     const sendKeysIdx = fn.indexOf('tmux send-keys -t studio:claude -- " $1" Enter');
     expect(fnStart).toBeGreaterThan(-1);
     expect(sendKeysIdx).toBeGreaterThan(-1);
     expect(fn.indexOf("claude_launch_landed")).toBeGreaterThan(sendKeysIdx);
-    expect(src()).toContain('claude_launch "$cmd_str" || claude_launch_failed=1');
+    expectBrings('claude_launch "$cmd_str" || claude_launch_failed=1');
   });
 
   // The transcript pipe-pane is the only record of WHY claude exited, and the
@@ -2486,15 +2476,15 @@ describe("container/studio-bringup.sh — claude launch liveness (issue #54)", (
   // needs both more than a healthy one does, so the non-zero exit waits until
   // every other bring-up step has run.
   it("exits non-zero only at the very end, after the transcript pipe-pane and the shell window", () => {
-    const pipeIdx = src().indexOf("tmux pipe-pane -t studio:claude");
+    const pipeIdx = bringupSrc().indexOf("tmux pipe-pane -t studio:claude");
     // #314: -d, so the shell window is never made current.
-    const shellIdx = src().indexOf("tmux new-window -d -t studio -n shell");
-    const exitIdx = src().indexOf('if [ "${claude_launch_failed:-0}" = 1 ]; then');
+    const shellIdx = bringupSrc().indexOf("tmux new-window -d -t studio -n shell");
+    const exitIdx = bringupSrc().indexOf('if [ "${claude_launch_failed:-0}" = 1 ]; then');
     expect(pipeIdx).toBeGreaterThan(-1);
     expect(shellIdx).toBeGreaterThan(-1);
     expect(exitIdx).toBeGreaterThan(pipeIdx);
     expect(exitIdx).toBeGreaterThan(shellIdx);
-    expect(src().trimEnd().endsWith("fi")).toBe(true);
+    expect(bringupSrc().trimEnd().endsWith("fi")).toBe(true);
   });
 
   // Issue #67 moved the tmux call one level down, into `claude_pane_field`,
@@ -2504,13 +2494,13 @@ describe("container/studio-bringup.sh — claude launch liveness (issue #54)", (
   // is still asserted, one indirection lower: the probe names the pane in
   // `-t`, and nothing anywhere in the script selects, switches or attaches.
   it("the liveness probe reads the pane BY NAME — never selects, switches or attaches a window", () => {
-    const fieldFn = src().slice(src().indexOf("claude_pane_field() {"));
+    const fieldFn = bringupSrc().slice(bringupSrc().indexOf("claude_pane_field() {"));
     const fieldBody = fieldFn.slice(0, fieldFn.indexOf("\n}"));
     expect(fieldBody).toContain('tmux display-message -p -t studio:claude "#{session_name}:#{window_name} $1"');
     // An answer that is not about studio:claude is discarded, not believed.
     expect(fieldBody).toContain('"studio:claude "*)');
 
-    const fn = src().slice(src().indexOf("claude_pane_command() {"));
+    const fn = bringupSrc().slice(bringupSrc().indexOf("claude_pane_command() {"));
     const body = fn.slice(0, fn.indexOf("\n}"));
     expect(body).toContain("claude_pane_field '#{pane_current_command}'");
 
@@ -2518,8 +2508,8 @@ describe("container/studio-bringup.sh — claude launch liveness (issue #54)", (
     // (studio:claude) -- the shell-window region returns a session left on
     // shell to claude. Selecting any OTHER window stays forbidden: that is
     // what made operators read a healthy studio as dead.
-    expect(src().match(/tmux select-window[^\n]*/g) ?? []).toEqual(["tmux select-window -t studio:claude"]);
-    expect(src()).not.toContain("tmux switch-client");
+    expect(bringupSrc().match(/tmux select-window[^\n]*/g) ?? []).toEqual(["tmux select-window -t studio:claude"]);
+    expectBringsNot("tmux switch-client");
   });
 });
 
@@ -2553,9 +2543,8 @@ describe("container/studio-bringup.sh — lead gate covers Bash (fix wave, Criti
     // The ONE test in this block that targets studio-bringup.sh's own
     // settings.json merge python (the matcher literal), not gates/lead-gate.sh
     // — that block's own settings-registration half never moved.
-    const bringupSrc = env.TEST_STUDIO_BRINGUP_SRC;
-    expect(bringupSrc).toContain('"matcher": ".*",');
-    expect(bringupSrc).not.toContain('"matcher": "Edit|Write|NotebookEdit|Bash"');
+    expectBrings('"matcher": ".*",');
+    expectBringsNot('"matcher": "Edit|Write|NotebookEdit|Bash"');
   });
 
   it("members stay exempt for EVERY tool — agent_id/agent_type presence short-circuits before any tool check", () => {
@@ -2753,16 +2742,15 @@ describe("container/studio-bringup.sh — lead gate covers Bash (fix wave, Criti
 });
 
 describe("container/studio-bringup.sh — lead gate fails CLOSED (fix wave, Important #5)", () => {
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   it("the settings.json command guards on an EXECUTABLE script and exits 2 itself when it is absent — a deleted/chmod-stripped hook can no longer fail open", () => {
-    expect(src()).toContain('"[ -x \\"$S\\" ] || { echo \\"lead-gate hook absent or not executable -- refusing (decision 11)\\" >&2; exit 2; }; "');
+    expectBrings('"[ -x \\"$S\\" ] || { echo \\"lead-gate hook absent or not executable -- refusing (decision 11)\\" >&2; exit 2; }; "');
   });
 
   it("resolves $HOME at claude runtime instead of baking the bring-up-time /root into the command", () => {
-    expect(src()).toContain('"S=\\"$HOME/.claude/hooks/lead-gate.sh\\"; "');
+    expectBrings('"S=\\"$HOME/.claude/hooks/lead-gate.sh\\"; "');
     // The old baked form is gone: expanduser must not build the hook command.
-    expect(src()).not.toContain('"command": os.path.expanduser("~/.claude/hooks/lead-gate.sh")');
+    expectBringsNot('"command": os.path.expanduser("~/.claude/hooks/lead-gate.sh")');
   });
 
   it("an unreadable payload and a missing python3 both refuse rather than permit", () => {
@@ -2775,29 +2763,27 @@ describe("container/studio-bringup.sh — lead gate fails CLOSED (fix wave, Impo
   });
 
   it("drops any prior lead-gate entry before appending — a re-brought-up live container cannot keep the old fail-open entry beside the new one", () => {
-    expect(src()).toContain('pre[:] = [e for e in pre if "lead-gate.sh" not in json.dumps(e)]');
+    expectBrings('pre[:] = [e for e in pre if "lead-gate.sh" not in json.dumps(e)]');
   });
 });
 
 describe("container/studio-bringup.sh — declared-but-absent skills are loud (fix wave, Critical #2)", () => {
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   it("warns by name when a declared skill resolves to nothing", () => {
-    expect(src()).toContain('resolves to NOTHING');
-    expect(src()).toContain('studio boots without it');
+    expectBrings('resolves to NOTHING');
+    expectBrings('studio boots without it');
   });
 
   it("checks the baked plugin cache before warning — every Tier-0 superpowers skill legitimately has no blueprint dir and must not produce a false alarm", () => {
-    expect(src()).toContain('elif ! ls -d ~/.claude/plugins/cache/*/*/*/skills/"$s" >/dev/null 2>&1; then');
+    expectBrings('elif ! ls -d ~/.claude/plugins/cache/*/*/*/skills/"$s" >/dev/null 2>&1; then');
   });
 
   it("still symlinks from the blueprint clone when the dir IS there", () => {
-    expect(src()).toContain('ln -sfn "/opt/blueprint/skills/$s" ~/.claude/skills/"$s"');
+    expectBrings('ln -sfn "/opt/blueprint/skills/$s" ~/.claude/skills/"$s"');
   });
 });
 
 describe("container/studio-bringup.sh — the gates' `cp` blocks warn and continue, never abort, when /opt/blueprint/gates/*.sh is missing (board issue #2)", () => {
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   // Same single-source-of-truth shape as the skills-symlink block above,
   // repeated three times (lead-gate, session-reemit, completion-gate): `cp`
@@ -2807,12 +2793,12 @@ describe("container/studio-bringup.sh — the gates' `cp` blocks warn and contin
   // down through its own `chmod ... || true` so an assertion about ONE gate
   // can never accidentally pass by matching another gate's text.
   const gateCpBlock = (name: string) => {
-    const ifIdx = src().indexOf(`if [ -f /opt/blueprint/gates/${name}.sh ]; then`);
+    const ifIdx = bringupSrc().indexOf(`if [ -f /opt/blueprint/gates/${name}.sh ]; then`);
     expect(ifIdx).toBeGreaterThan(-1);
     const chmodLine = `chmod 0755 ~/.claude/hooks/${name}.sh`;
-    const chmodIdx = src().indexOf(chmodLine, ifIdx);
+    const chmodIdx = bringupSrc().indexOf(chmodLine, ifIdx);
     expect(chmodIdx).toBeGreaterThan(ifIdx);
-    return src().slice(ifIdx, chmodIdx + chmodLine.length);
+    return bringupSrc().slice(ifIdx, chmodIdx + chmodLine.length);
   };
 
   it("lead-gate: copies from the blueprint clone when present", () => {
@@ -2867,19 +2853,18 @@ describe("container/studio-bringup.sh — the gates' `cp` blocks warn and contin
 // Behavior is exercised in test/bun/bringup-mcp-config.test.ts; these pins
 // keep the dead mechanism from coming back.
 describe("container/studio-bringup.sh — MCP config reaches claude via --mcp-config (issue #276)", () => {
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   it("writes no project .mcp.json anywhere — claude reads one only from its own cwd", () => {
-    expect(src()).not.toContain("/.mcp.json\"");
-    expect(src()).not.toContain("/workspace/.mcp.json");
+    expectBringsNot("/.mcp.json\"");
+    expectBringsNot("/workspace/.mcp.json");
   });
 
   it("hands claude the one config file at launch", () => {
-    expect(src()).toContain('claude_args+=(--mcp-config "${FLEET_MCP_CONFIG:-$HOME/.claude/fleet-mcp.json}")');
+    expectBrings('claude_args+=(--mcp-config "${FLEET_MCP_CONFIG:-$HOME/.claude/fleet-mcp.json}")');
   });
 
   it("feeds the writer from studios AND roles", () => {
-    expect(src()).toContain('"${STUDIO_MCP:-${ROLE_MCP:-}}"');
+    expectBrings('"${STUDIO_MCP:-${ROLE_MCP:-}}"');
   });
 });
 
@@ -4987,19 +4972,18 @@ describe("recycleWithSync — the verdict it measured is the verdict it returns"
 // ---------------------------------------------------------------------------
 
 describe("container/studio-bringup.sh — a studio with no gate refuses to boot", () => {
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   it("verifies the hook it just installed instead of assuming the write landed", () => {
-    expect(src()).toContain("if [ ! -x ~/.claude/hooks/lead-gate.sh ]; then");
-    expect(src()).toContain("refusing to boot an UNGATED lead (decision 11)");
+    expectBrings("if [ ! -x ~/.claude/hooks/lead-gate.sh ]; then");
+    expectBrings("refusing to boot an UNGATED lead (decision 11)");
   });
 
   it("also refuses when settings.json does not reference the hook — the file alone runs nothing", () => {
-    expect(src()).toContain("if ! grep -q lead-gate.sh ~/.claude/settings.json 2>/dev/null; then");
+    expectBrings("if ! grep -q lead-gate.sh ~/.claude/settings.json 2>/dev/null; then");
   });
 
   it("exits rather than warning — an ungated lead holding Edit/Write is what decision 11 exists to prevent", () => {
-    const guard = src().slice(src().indexOf("--- fail closed on the gate ---"));
+    const guard = bringupSrc().slice(bringupSrc().indexOf("--- fail closed on the gate ---"));
     expect(guard.slice(0, guard.indexOf("printf '%s' \"$STUDIO_NAME\""))).toContain("exit 1");
   });
 
@@ -5007,15 +4991,15 @@ describe("container/studio-bringup.sh — a studio with no gate refuses to boot"
     // STUDIO_NAME lives in the per-exec env, so an env-less bring-up cannot
     // tell by itself that this container was ever a studio. The marker is the
     // only thing on disk that remembers.
-    expect(src()).toContain("printf '%s' \"$STUDIO_NAME\" > ~/.claude/.fleet-studio");
-    expect(src()).toContain('if [ -z "${STUDIO_NAME:-}" ] && [ -f ~/.claude/.fleet-studio ]; then');
-    expect(src()).toContain("refusing rather than relaunching an UNGATED lead");
+    expectBrings("printf '%s' \"$STUDIO_NAME\" > ~/.claude/.fleet-studio");
+    expectBrings('if [ -z "${STUDIO_NAME:-}" ] && [ -f ~/.claude/.fleet-studio ]; then');
+    expectBrings("refusing rather than relaunching an UNGATED lead");
   });
 
   it("puts the refusal BEFORE the claude launch — a gate checked after the fact protects nothing", () => {
-    expect(src().indexOf("refusing to boot an UNGATED lead")).toBeLessThan(src().indexOf("tmux send-keys -t studio:claude"));
-    expect(src().indexOf("refusing rather than relaunching an UNGATED lead")).toBeLessThan(
-      src().indexOf("tmux send-keys -t studio:claude"),
+    expect(bringupSrc().indexOf("refusing to boot an UNGATED lead")).toBeLessThan(bringupSrc().indexOf("tmux send-keys -t studio:claude"));
+    expect(bringupSrc().indexOf("refusing rather than relaunching an UNGATED lead")).toBeLessThan(
+      bringupSrc().indexOf("tmux send-keys -t studio:claude"),
     );
   });
 });
@@ -5030,16 +5014,15 @@ describe("container/studio-bringup.sh — Tier-0 completion gate (spec §4)", ()
   it("installs only for a studio whose roster writes code — never for the maestro", () => {
     // Bring-up's own gate on the whole install block, not gates/completion-gate.sh
     // itself — this half never moved.
-    expect(env.TEST_STUDIO_BRINGUP_SRC).toContain('if [ -n "${STUDIO_COMPLETION_GATE:-}" ]; then');
+    expectBrings('if [ -n "${STUDIO_COMPLETION_GATE:-}" ]; then');
   });
 
   it("registers as a Stop hook, fail-closed, dropping any prior entry", () => {
     // Bring-up's own settings.json merge python, not gates/completion-gate.sh
     // itself — same "registration half never moved" reasoning as above.
-    const bringupSrc = env.TEST_STUDIO_BRINGUP_SRC;
-    expect(bringupSrc).toContain('stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])');
-    expect(bringupSrc).toContain('completion-gate hook absent or not executable -- refusing (Tier 0)');
-    expect(bringupSrc).toContain('stop[:] = [e for e in stop if "completion-gate.sh" not in json.dumps(e)]');
+    expectBrings('stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])');
+    expectBrings('completion-gate hook absent or not executable -- refusing (Tier 0)');
+    expectBrings('stop[:] = [e for e in stop if "completion-gate.sh" not in json.dumps(e)]');
   });
 
   it("demands a COMMITTED plan doc — git log, not mere existence on disk", () => {
@@ -5099,24 +5082,23 @@ describe("container/studio-bringup.sh — Tier-0 completion gate (spec §4)", ()
 // ---------------------------------------------------------------------------
 
 describe("container/studio-bringup.sh — C2: session-reemit hook is actually wired in (Task 6)", () => {
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   it("registers the SessionStart hook in the SAME settings.json write as the lead gate — one bring-up installs both hooks or neither", () => {
-    const preToolUseIdx = src().indexOf('pre = cfg.setdefault("hooks", {}).setdefault("PreToolUse", [])');
+    const preToolUseIdx = bringupSrc().indexOf('pre = cfg.setdefault("hooks", {}).setdefault("PreToolUse", [])');
     expect(preToolUseIdx).toBeGreaterThan(-1);
-    const ssSetdefaultIdx = src().indexOf(
+    const ssSetdefaultIdx = bringupSrc().indexOf(
       'ss = cfg.setdefault("hooks", {}).setdefault("SessionStart", [])',
       preToolUseIdx,
     );
-    const ssDedupIdx = src().indexOf(
+    const ssDedupIdx = bringupSrc().indexOf(
       'ss[:] = [e for e in ss if "session-reemit.sh" not in json.dumps(e)]',
       preToolUseIdx,
     );
-    const ssAppendIdx = src().indexOf(
+    const ssAppendIdx = bringupSrc().indexOf(
       'ss.append({"hooks": [{"type": "command", "command": "$HOME/.claude/hooks/session-reemit.sh"}]})',
       preToolUseIdx,
     );
-    const dumpIdx = src().indexOf("json.dump(cfg, f, indent=2)", preToolUseIdx);
+    const dumpIdx = bringupSrc().indexOf("json.dump(cfg, f, indent=2)", preToolUseIdx);
     expect(ssSetdefaultIdx).toBeGreaterThan(preToolUseIdx);
     expect(ssDedupIdx).toBeGreaterThan(ssSetdefaultIdx);
     expect(ssAppendIdx).toBeGreaterThan(ssDedupIdx);
@@ -5126,8 +5108,8 @@ describe("container/studio-bringup.sh — C2: session-reemit hook is actually wi
   });
 
   it("persists the working set to disk before claude launches — mkdir then printf, both guarded so an unwritable FLEET_WORKSPACE cannot abort bring-up", () => {
-    expect(src()).toContain('mkdir -p "${FLEET_WORKSPACE:-/workspace}/.fleet"');
-    expect(src()).toContain(
+    expectBrings('mkdir -p "${FLEET_WORKSPACE:-/workspace}/.fleet"');
+    expectBrings(
       'printf \'%s\\n\' "$role_prompt" > "${FLEET_WORKSPACE:-/workspace}/.fleet/working-set.md"',
     );
   });
@@ -5144,7 +5126,7 @@ describe("container/studio-bringup.sh — C2: session-reemit hook is actually wi
     // issue #2 moved the reader out of the REEMITEOF heredoc into that
     // standalone file) — same two-literal comparison as before, new source
     // for the second half only.
-    const writeMatch = src().match(/printf '%s\\n' "\$role_prompt" > "([^"]+)"/);
+    const writeMatch = bringupSrc().match(/printf '%s\\n' "\$role_prompt" > "([^"]+)"/);
     const readMatch = env.TEST_SESSION_REEMIT_SRC.match(/ws="([^"]+)"/);
     expect(writeMatch?.[1]).toBeTruthy();
     expect(readMatch?.[1]).toBeTruthy();
@@ -5178,7 +5160,6 @@ describe("container/studio-bringup.sh — window-size staleness investigation (b
   // scenario itself should now be rare going forward too. No `window-size`
   // or `client-detached` code change lands here; this block is a regression
   // guard plus a pin of the Ctrl-b-collision documentation note (item 2).
-  const src = () => env.TEST_STUDIO_BRINGUP_SRC;
 
   // SUPERSEDED BY MEASUREMENT (issue #43, 2026-09-23). The guard that stood
   // here pinned `window-size latest` and forbade `largest` outright. Both
@@ -5205,8 +5186,8 @@ describe("container/studio-bringup.sh — window-size staleness investigation (b
   // extracts the region rather than reading the file around it: ORDERING.
 
   it("writes the tmux config BEFORE creating the session — the ordering that makes the pane be born with the full history, and the exact bug the old `set -g history-limit` line had", () => {
-    const confIdx = src().indexOf('cat > "$tmux_conf" <<');
-    const sessionIdx = src().indexOf("tmux new-session -d -s studio -n claude");
+    const confIdx = bringupSrc().indexOf('cat > "$tmux_conf" <<');
+    const sessionIdx = bringupSrc().indexOf("tmux new-session -d -s studio -n claude");
     expect(confIdx).toBeGreaterThan(-1);
     expect(sessionIdx).toBeGreaterThan(-1);
     // tmux allocates a pane's history AT PANE CREATION and reads ~/.tmux.conf
@@ -5218,8 +5199,8 @@ describe("container/studio-bringup.sh — window-size staleness investigation (b
   });
 
   it("brackets the region with the markers the executable lane extracts, so that suite can never silently stop testing the real script", () => {
-    expect(src()).toContain("# >>> tmux-render-options >>>");
-    expect(src()).toContain("# <<< tmux-render-options <<<");
+    expectBrings("# >>> tmux-render-options >>>");
+    expectBrings("# <<< tmux-render-options <<<");
   });
 
   it("leaves no executable `mouse on` and no executable `window-size latest` behind anywhere in the file", () => {
@@ -5234,7 +5215,7 @@ describe("container/studio-bringup.sh — window-size staleness investigation (b
     // without keeping the measurement that justified it is how a fleet
     // re-learns the same thing twice. Only lines tmux would actually execute
     // are searched.
-    const code = src()
+    const code = bringupSrc()
       .split("\n")
       .filter((line) => !line.trimStart().startsWith("#"));
     for (const line of code) {
@@ -5245,16 +5226,16 @@ describe("container/studio-bringup.sh — window-size staleness investigation (b
   });
 
   it("documents the tmux prefix staying `C-b` (the operator's explicit call, board issue #4) right after the rendering region — no prefix rebind anywhere in the file", () => {
-    const mouseIdx = src().indexOf("set -g mouse off");
+    const mouseIdx = bringupSrc().indexOf("set -g mouse off");
     expect(mouseIdx).toBeGreaterThan(-1);
-    const prefixNoteIdx = src().indexOf("The prefix stays `C-b`");
+    const prefixNoteIdx = bringupSrc().indexOf("The prefix stays `C-b`");
     expect(prefixNoteIdx).toBeGreaterThan(mouseIdx);
-    const nearby = src().slice(mouseIdx, prefixNoteIdx + 800);
+    const nearby = bringupSrc().slice(mouseIdx, prefixNoteIdx + 800);
     expect(nearby).toContain("Ctrl-b Ctrl-b");
     expect(nearby).toContain("board issue #4");
     // No rebind: tmux's prefix is set via `set -g prefix`, never present here.
-    expect(src()).not.toContain("set -g prefix");
-    expect(src()).not.toContain("set-option -g prefix");
+    expectBringsNot("set -g prefix");
+    expectBringsNot("set-option -g prefix");
   });
 });
 

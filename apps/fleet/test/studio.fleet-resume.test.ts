@@ -11,6 +11,7 @@ import { recordStudio } from "../src/studio/registry";
 import { LaunchRefusedError, StartRefusedError } from "../src/studio/do";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
+import { nsWith } from "./helpers/fake-namespace";
 
 // Issue #59: a studio resumes a STOPPED instance under its own org-chart
 // edges. Same gate as spawn (maySpawn over ROLES), same provision path
@@ -147,14 +148,13 @@ const fetchFile: BlueprintFetch = async (_repo, path) => (path.endsWith("fleet.j
 function fakeNamespace() {
   const provisioned: { id: string; cfg: ProvisionConfig }[] = [];
   return {
-    idFromName: (name: string) => name as unknown as DurableObjectId,
-    get: (id: DurableObjectId) => ({
+    ...nsWith((id: string) => ({
       provision: async (cfg: ProvisionConfig) => {
-        provisioned.push({ id: id as unknown as string, cfg });
-        return status({ id: id as unknown as string, state: "running" });
+        provisioned.push({ id, cfg });
+        return status({ id, state: "running" });
       },
       wakeStudio: async () => ({ woke: false }),
-    }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
+    })),
     provisioned,
   };
 }
@@ -230,16 +230,13 @@ describe("POST /fleet/spawn {resume: true} — one resume at a time", () => {
     const provisioned: string[] = [];
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
-    const ns = {
-      idFromName: (name: string) => name as unknown as DurableObjectId,
-      get: (id: DurableObjectId) => ({
-        provision: async () => {
-          provisioned.push(id as unknown as string);
-          await gate;
-          return status({ id: id as unknown as string, state: "running" });
-        },
-      }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
-    };
+    const ns = nsWith((id: string) => ({
+      provision: async () => {
+        provisioned.push(id);
+        await gate;
+        return status({ id, state: "running" });
+      },
+    }));
     const testEnv = { ...env, STUDIO: ns, AGENT_REPO: REPO_SLUG } as unknown as Env;
     const body = { role: "web-studio", instance: 5, resume: true };
     const first = handleFleetSpawn(post(body, token), testEnv, fetchFile);
@@ -255,10 +252,7 @@ describe("POST /fleet/spawn {resume: true} — one resume at a time", () => {
   it("a provision that throws releases the claim: the studio reads stopped again", async () => {
     const token = await register("websites--maestro");
     await recordStudio(env, status());
-    const ns = {
-      idFromName: (name: string) => name as unknown as DurableObjectId,
-      get: () => ({ provision: async () => { throw new Error("container refused"); } }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
-    };
+    const ns = nsWith({ provision: async () => { throw new Error("container refused"); } });
     const testEnv = { ...env, STUDIO: ns, AGENT_REPO: REPO_SLUG } as unknown as Env;
     await expect(handleFleetSpawn(post({ role: "web-studio", instance: 5, resume: true }, token), testEnv, fetchFile))
       .rejects.toThrow("container refused");
@@ -283,14 +277,11 @@ describe("POST /fleet/spawn {resume: true} — one resume at a time", () => {
   it("a LaunchRefusedError is a 409, not an uncaught throw — and the claim is released (studio resumable again)", async () => {
     const token = await register("websites--maestro");
     await recordStudio(env, status());
-    const ns = {
-      idFromName: (name: string) => name as unknown as DurableObjectId,
-      get: () => ({
-        provision: async () => {
-          throw Object.assign(new Error(new LaunchRefusedError("every account fleet-wide limited").message), { remote: true });
-        },
-      }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
-    };
+    const ns = nsWith({
+      provision: async () => {
+        throw Object.assign(new Error(new LaunchRefusedError("every account fleet-wide limited").message), { remote: true });
+      },
+    });
     const testEnv = { ...env, STUDIO: ns, AGENT_REPO: REPO_SLUG } as unknown as Env;
     const res = await handleFleetSpawn(post({ role: "web-studio", instance: 5, resume: true }, token), testEnv, fetchFile);
     expect(res.status).toBe(409);
@@ -304,14 +295,11 @@ describe("POST /fleet/spawn {resume: true} — one resume at a time", () => {
   it("a StartRefusedError is also a 409, not an uncaught throw — and the claim is released", async () => {
     const token = await register("websites--maestro");
     await recordStudio(env, status());
-    const ns = {
-      idFromName: (name: string) => name as unknown as DurableObjectId,
-      get: () => ({
-        provision: async () => {
-          throw Object.assign(new Error(new StartRefusedError("studio websites--web-studio--5 is stopped").message), { remote: true });
-        },
-      }) as unknown as ReturnType<Env["STUDIO"]["get"]>,
-    };
+    const ns = nsWith({
+      provision: async () => {
+        throw Object.assign(new Error(new StartRefusedError("studio websites--web-studio--5 is stopped").message), { remote: true });
+      },
+    });
     const testEnv = { ...env, STUDIO: ns, AGENT_REPO: REPO_SLUG } as unknown as Env;
     const res = await handleFleetSpawn(post({ role: "web-studio", instance: 5, resume: true }, token), testEnv, fetchFile);
     expect(res.status).toBe(409);

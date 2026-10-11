@@ -1211,6 +1211,33 @@ export async function resolveBriefPrompt(
 }
 
 /**
+ * The one fail-open board read behind the two bring-up-path walkers below
+ * (`resolveLatestAssignedBrief`, `openTasksNeedingRebrief`): every OPEN task
+ * in a `states` state, newest-updated first. `null` means the lookup itself
+ * FAILED (logged, `who` naming the walker — the two log lines differ on
+ * purpose), never confused with `[]` ("looked, found none"). `destroy`'s
+ * `openAssignedTasks` deliberately fails CLOSED and is NOT built on this.
+ */
+async function assignedOpenTasks(
+  api: BoardApi, repo: string, studioId: string, states: readonly TaskState[],
+  who: "assigned-task" | "open-tasks-needing-rebrief",
+): Promise<BoardTaskView[] | null> {
+  let result: BoardResult<BoardTaskView[]>;
+  try {
+    result = await listTasks(api, repo, { assignedTo: studioId });
+  } catch (err) {
+    console.error(`board: ${who} lookup failed for ${studioId}@${repo}`, err);
+    return null;
+  }
+  if (!result.ok) {
+    console.error(`board: ${who} lookup failed for ${studioId}@${repo} (${result.status}): ${result.message}`);
+    return null;
+  }
+  const open = result.value.filter((t) => t.open && t.state !== null && states.includes(t.state));
+  return [...open].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+/**
  * The brief for whichever OPEN task currently carries `studioId`'s label —
  * the sibling `resolveBriefPrompt` above does not answer, because it needs a
  * task NUMBER a caller may not have. Two real callers have no number to give
@@ -1248,24 +1275,11 @@ export async function resolveBriefPrompt(
 export async function resolveLatestAssignedBrief(
   api: BoardApi, repo: string, studioId: string,
 ): Promise<{ prompt: string; taskNumber: number; title: string } | null> {
-  let result: BoardResult<BoardTaskView[]>;
-  try {
-    result = await listTasks(api, repo, { assignedTo: studioId });
-  } catch (err) {
-    console.error(`board: assigned-task lookup failed for ${studioId}@${repo}`, err);
-    return null;
-  }
-  if (!result.ok) {
-    console.error(`board: assigned-task lookup failed for ${studioId}@${repo} (${result.status}): ${result.message}`);
-    return null;
-  }
-
   // #124 review: board state, not issue open — a terminal state leaves the
   // issue open, and a re-provisioned studio was handed a COMPLETED brief.
-  const open = result.value.filter((t) => t.open && t.state !== null && LIVE_TASK_STATES.includes(t.state));
-  if (open.length === 0) return null;
+  const sorted = await assignedOpenTasks(api, repo, studioId, LIVE_TASK_STATES, "assigned-task");
+  if (sorted === null || sorted.length === 0) return null;
 
-  const sorted = [...open].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   const [newest, ...others] = sorted;
   let prompt = renderBriefPrompt(newest, studioId);
   if (others.length > 0) {
@@ -1305,11 +1319,10 @@ export const REBRIEF_TASK_STATES: readonly TaskState[] = LIVE_TASK_STATES;
  * genuinely in flight", because a container replacement leaves a fresh pane
  * with zero memory of ANY of them, not only the most recent one.
  *
- * Same `listTasks(api, repo, {assignedTo: studioId})` call
- * `resolveLatestAssignedBrief` makes, and the same fail-open-to-`[]` posture
- * on a thrown error or `{ok:false}` (logged, then answered `[]`) — a board
- * hiccup at bring-up must never block provisioning, exactly as that
- * function's own doc comment argues.
+ * Same fail-open-to-`[]` posture `resolveLatestAssignedBrief` takes (the
+ * shared `assignedOpenTasks` core logs the failure) — a board hiccup at
+ * bring-up must never block provisioning, exactly as that function's own
+ * doc comment argues.
  *
  * Sorted newest-updated-first, same `updatedAt` proxy
  * `resolveLatestAssignedBrief` uses — every entry here gets delivered, so the
@@ -1318,19 +1331,8 @@ export const REBRIEF_TASK_STATES: readonly TaskState[] = LIVE_TASK_STATES;
 export async function openTasksNeedingRebrief(
   api: BoardApi, repo: string, studioId: string,
 ): Promise<{ taskNumber: number; title: string }[]> {
-  let result: BoardResult<BoardTaskView[]>;
-  try {
-    result = await listTasks(api, repo, { assignedTo: studioId });
-  } catch (err) {
-    console.error(`board: open-tasks-needing-rebrief lookup failed for ${studioId}@${repo}`, err);
-    return [];
-  }
-  if (!result.ok) {
-    console.error(`board: open-tasks-needing-rebrief lookup failed for ${studioId}@${repo} (${result.status}): ${result.message}`);
-    return [];
-  }
-  const open = result.value.filter((t) => t.open && t.state !== null && REBRIEF_TASK_STATES.includes(t.state));
-  const sorted = [...open].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  const sorted = await assignedOpenTasks(api, repo, studioId, REBRIEF_TASK_STATES, "open-tasks-needing-rebrief");
+  if (sorted === null) return [];
   return sorted.map((t) => ({ taskNumber: t.number, title: t.title }));
 }
 

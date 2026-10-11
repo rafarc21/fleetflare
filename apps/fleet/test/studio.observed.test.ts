@@ -8,20 +8,12 @@ import {
   type Observed, type ObservedStorage, type PaneProbeResult,
 } from "../src/studio/observed";
 import { redactSecrets } from "../src/studio/redact";
+import { fakeStorage as doStorage } from "./helpers/do-storage";
 
-// Same Map-backed fake every narrow-port suite in this feature defines
-// locally (transcript.ts's TranscriptStorage, session-sync.ts's
-// SessionSyncStorage) — a real `this.ctx.storage` satisfies this
-// structurally, no cast.
+// Map-backed fake via the shared test/helpers/do-storage builder — a real
+// this.ctx.storage satisfies ObservedStorage structurally, no cast at the port.
 function fakeStorage(seed?: Observed): ObservedStorage {
-  const map = new Map<string, unknown>();
-  if (seed) map.set(OBSERVED_KEY, seed);
-  return {
-    get: (async (key: string) => map.get(key)) as ObservedStorage["get"],
-    put: (async (key: string, value: unknown) => {
-      map.set(key, value);
-    }) as ObservedStorage["put"],
-  };
+  return doStorage(seed ? { [OBSERVED_KEY]: seed } : undefined) as unknown as ObservedStorage;
 }
 
 describe("observed.ts", () => {
