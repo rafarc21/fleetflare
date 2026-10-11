@@ -5,6 +5,7 @@ import {
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
 import type { SessionSyncDeps } from "../src/studio/session-sync";
 import type { StudioStatus, StudioState } from "../src/studio/types";
+import { fakeStorage as doStorage } from "./helpers/do-storage";
 
 // ---------------------------------------------------------------------------
 // A stopped studio stays stopped.
@@ -31,15 +32,8 @@ function status(state: StudioState): StudioStatus {
 }
 
 function fakeStorage(seed?: StudioStatus) {
-  const map = new Map<string, unknown>();
-  if (seed) map.set(STATUS_KEY, seed);
-  return {
-    map,
-    get: (async (key: string) => map.get(key)) as StudioStorage["get"],
-    put: async (key: string, value: unknown) => {
-      map.set(key, value);
-    },
-  };
+  const s = doStorage(seed ? { [STATUS_KEY]: seed } : undefined);
+  return s as unknown as StudioStorage & { map: Map<string, unknown> };
 }
 
 function execDeps() {
