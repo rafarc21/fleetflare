@@ -9,7 +9,7 @@
 // pure (no node:*/Bun imports) means a test can import it directly.
 import type { StudioStatus } from "../src/studio/types";
 import { SYNC_SESSION_SECONDS } from "../src/studio/session-sync";
-import { formatRateLimited } from "../src/studio/rate-limit";
+import { formatRateLimited, type RateLimitObservation } from "../src/studio/rate-limit";
 import { isUnreachable, type Observed } from "../src/studio/observed";
 import type { Activity } from "../src/studio/activity";
 import type { MemberAlert } from "../src/studio/member-alerts";
@@ -370,30 +370,73 @@ function formatMemberAlertLines(alerts: MemberAlert[] | null, now: Date): string
   return alerts.map((a) => formatMemberAlert(a, now));
 }
 
-export function formatActivity(status: StudioStatus, now: Date, staleAfterSeconds: number = ACTIVITY_MIRROR_STALE_SECONDS): string {
-  const live = status.state === "running" || status.state === "degraded";
-  if (!live) return "—";
+/** Issue #403 — the ONE lead-state precedence chain, factored out of
+ *  `formatActivity` and `lsJsonRows` below, which were the same chain
+ *  written twice and drifted together once already (#192 had to be gated in
+ *  both). First match wins, identical order in both renderers before this
+ *  fold: a live row (`running`/`degraded`) is required for any lead state
+ *  at all; `rl.dead` (org disabled, #141) and `rl.select` (a modal, #53)
+ *  outrank the clock; then the limit while its reset is null or still in
+ *  the future; then a not-yet-confirmed replacement (#192) which must not
+ *  report a leftover verdict; then the stored activity verdict.
+ *
+ *  `rl` rides the result so each renderer keeps ONLY its own rendering:
+ *  `formatActivity` needs `until` for its clock string, `lsJsonRows` needs
+ *  `seenAt`/`until` for `leadSince`/`limitResetsAt`. */
+type LeadGate =
+  | { kind: "stopped"; rl: null }
+  | { kind: "dead" | "modal"; rl: RateLimitObservation }
+  | { kind: "limit"; rl: RateLimitObservation }
+  | { kind: "replaced"; rl: null }
+  | { kind: "activity"; rl: null };
+
+function leadGate(status: StudioStatus, now: Date): LeadGate {
+  if (status.state !== "running" && status.state !== "degraded") return { kind: "stopped", rl: null };
   const rl = status.rateLimited;
+  if (rl?.dead) return { kind: "dead", rl };
+  if (rl?.select) return { kind: "modal", rl };
+  const until = rl?.until ?? null;
+  if (rl && (until === null || (!Number.isNaN(Date.parse(until)) && Date.parse(until) > now.getTime()))) {
+    return { kind: "limit", rl };
+  }
+  // Issue #192 — a rollout can replace a running studio's container without
+  // a clean onStop first, so the DO's `activity` key can still hold a word
+  // left over from BEFORE the replacement; both renderers say "no lead"
+  // rather than contradict readyOverride's "replaced … not brought up".
+  if (status.observed?.replacedAt != null) return { kind: "replaced", rl: null };
+  return { kind: "activity", rl: null };
+}
+
+export function formatActivity(status: StudioStatus, now: Date, staleAfterSeconds: number = ACTIVITY_MIRROR_STALE_SECONDS): string {
+  // Issue #403 — the precedence chain lives in leadGate above; this keeps
+  // only the ACTIVITY column's own rendering of each kind.
+  const gate = leadGate(status, now);
   let base: string;
-  if (rl?.dead) {
-    base = "DEAD · org disabled subscription access";
-  } else if (rl?.select) {
-    base = `LIMIT · modal — Esc (ff ${status.id})`;
-  } else if (rl && rl.until !== null && !Number.isNaN(Date.parse(rl.until)) && Date.parse(rl.until) > now.getTime()) {
-    base = `LIMIT · resets ${formatResetUtcClock(new Date(Date.parse(rl.until)))}`;
-  } else if (rl && rl.until === null) {
-    base = "LIMIT";
-  } else if (status.observed?.replacedAt != null) {
-    // Issue #192 — a rollout can replace a running studio's container
-    // without a clean onStop first, so the DO's `activity` key can still
-    // hold a word left over from BEFORE the replacement (clearActivityState,
-    // activity.ts, only fires on a graceful stop or a completed bring-up).
-    // `readyOverride` (this same file) already renders "replaced <age> ago
-    // — not brought up" for this exact state; the column must not
-    // contradict it with a stale WORKING/WAITING-MEMBERS verdict.
-    base = "—";
-  } else {
-    base = formatActivityVerdict(status.observed?.activity ?? null, now, staleAfterSeconds);
+  switch (gate.kind) {
+    // Review round 1 (S1): the pre-fold code returned "—" for a non-live
+    // row BEFORE the member-alert suffix below ran, so a stopped row never
+    // carried an alert note; the early return here keeps that exact shape.
+    case "stopped":
+      return "—";
+    case "replaced":
+      base = "—";
+      break;
+    case "dead":
+      base = "DEAD · org disabled subscription access";
+      break;
+    case "modal":
+      base = `LIMIT · modal — Esc (ff ${status.id})`;
+      break;
+    case "limit":
+      base = gate.rl.until !== null && !Number.isNaN(Date.parse(gate.rl.until)) && Date.parse(gate.rl.until) > now.getTime()
+        ? `LIMIT · resets ${formatResetUtcClock(new Date(Date.parse(gate.rl.until)))}`
+        : "LIMIT";
+      break;
+    // No `default:` — an explicit case lets tsc enforce that every future
+    // LeadGate kind gains a rendering here (the repo's no-default switch
+    // convention, e.g. src/studio/survival-delivery.ts).
+    case "activity":
+      base = formatActivityVerdict(status.observed?.activity ?? null, now, staleAfterSeconds);
   }
   // Issue #311 — the freshest current alert (buildMemberAlerts's own push
   // order: memguard-kill, then member-gone, then poll-loop — already a
@@ -435,24 +478,35 @@ export function lsJsonRows(
       id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds),
       lastLine: s.observed?.lastMessageLine ?? null,
     };
-    if (s.state !== "running" && s.state !== "degraded") return { ...base, lead: "stopped", leadSince: null, limitResetsAt: null };
-    const rl = s.rateLimited;
-    if (rl?.dead) return { ...base, lead: "dead", leadSince: rl.seenAt, limitResetsAt: null };
-    if (rl?.select) return { ...base, lead: "modal", leadSince: rl.seenAt, limitResetsAt: rl.until ?? null };
-    const until = rl?.until ?? null;
-    if (rl && (until === null || (!Number.isNaN(Date.parse(until)) && Date.parse(until) > now.getTime()))) {
-      return { ...base, lead: "limit", leadSince: rl.seenAt, limitResetsAt: until };
+    // Issue #403 — the precedence chain lives in leadGate above; this keeps
+    // only the JSON row's own field mapping per kind.
+    const gate = leadGate(s, now);
+    switch (gate.kind) {
+      case "stopped":
+        return { ...base, lead: "stopped", leadSince: null, limitResetsAt: null };
+      case "dead":
+        return { ...base, lead: "dead", leadSince: gate.rl.seenAt, limitResetsAt: null };
+      case "modal":
+        return { ...base, lead: "modal", leadSince: gate.rl.seenAt, limitResetsAt: gate.rl.until ?? null };
+      case "limit": {
+        // `until === null` (no readable reset printed) and a reset still in
+        // the future are BOTH "limit" here; the `limitResetsAt` field carries
+        // the clock either way, null when there was none.
+        const until = gate.rl.until ?? null;
+        return { ...base, lead: "limit", leadSince: gate.rl.seenAt, limitResetsAt: until };
+      }
+      case "replaced":
+        return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
+      // No `default:` — explicit case for tsc exhaustiveness over LeadGate.
+      case "activity": {
+        const a = s.observed?.activity ?? null;
+        if (!a || ageSeconds(a.observedAt, now) > staleAfterSeconds || a.state === "unknown") {
+          return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
+        }
+        if (a.state === "limit") return { ...base, lead: "limit", leadSince: a.since, limitResetsAt: null };
+        return { ...base, lead: a.state, leadSince: a.since, limitResetsAt: null };
+      }
     }
-    // Issue #192 — same gate as formatActivity above: a replaced-but-not-
-    // yet-confirmed studio reports no lead at all, never a leftover
-    // pre-replacement verdict.
-    if (s.observed?.replacedAt != null) return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
-    const a = s.observed?.activity ?? null;
-    if (!a || ageSeconds(a.observedAt, now) > staleAfterSeconds || a.state === "unknown") {
-      return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
-    }
-    if (a.state === "limit") return { ...base, lead: "limit", leadSince: a.since, limitResetsAt: null };
-    return { ...base, lead: a.state, leadSince: a.since, limitResetsAt: null };
   });
 }
 
