@@ -3,15 +3,16 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { memoryCloneCmd } from "../../src/memory/store";
+import { sh as shShared } from "./helpers/shell";
 
 // Issue #341: memoryCloneCmd EXECUTED against real git -- a local bare repo
 // stands in for github.com via the `base` seam; the clone lands in a temp dir
 // via the `dir` seam. Same builder the Worker execs at provision.
 let root: string;
+// Local wrapper keeps this file's original defaults (cwd pinned to root,
+// env-overridable) — zero call-site edits; git identity comes from the helper.
 function sh(cmd: string, env: Record<string, string> = {}) {
-  const r = Bun.spawnSync({ cmd: ["bash", "-c", cmd], cwd: root, stdout: "pipe", stderr: "pipe",
-    env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", ...env } });
-  return { code: r.exitCode ?? -1, out: r.stdout.toString().trim(), err: r.stderr.toString().trim() };
+  return shShared(cmd, { cwd: root, env });
 }
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "fleet-memclone-"));
