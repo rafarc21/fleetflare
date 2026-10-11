@@ -4,7 +4,7 @@ import {
   healDiedInRollout, ROLLOUT_EXIT_MARKER,
 } from "../src/studio/do";
 import {
-  STATUS_KEY, ROLE_ENV_KEY, HEAL_ATTEMPT_KEY, OPERATION_KEY, OPERATION_STALE_MS,
+  STATUS_KEY, HEAL_ATTEMPT_KEY, OPERATION_KEY, OPERATION_STALE_MS,
   type RoleEnv, type StudioEnv, type HealAttempt,
   type OperationInFlight,
 } from "../src/studio/provision";
