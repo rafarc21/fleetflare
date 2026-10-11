@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Registry } from "../../container/ego-browser/registry";
+import { Registry, type TaskCloser } from "../../container/ego-browser/registry";
 
 // Pure bookkeeping only -- no Playwright, no daemon, no child process. Fast
 // and deterministic, per the plan doc's test-plan item 1. The fake target/
@@ -10,6 +10,24 @@ type FakeContext = { closed: boolean };
 
 function makeRegistry() {
   return new Registry<FakeTarget, FakeContext>();
+}
+
+// The fake plug for registry.ts's TaskCloser port (daemon.ts's real one is
+// `{ closeTarget: (p) => p.close(), closeContext: (c) => c.close() }).
+// Records every close it was asked to perform, so tests assert on OBSERVED
+// closes and removals -- never on the record's internals.
+function makeRecordingCloser() {
+  const closedTargets: string[] = [];
+  let contextCloses = 0;
+  const closer: TaskCloser<FakeTarget, FakeContext> = {
+    async closeTarget(target) {
+      closedTargets.push(target.id);
+    },
+    async closeContext() {
+      contextCloses += 1;
+    },
+  };
+  return { closer, closedTargets, contextCloses: () => contextCloses };
 }
 
 describe("Registry.resolve", () => {
@@ -224,15 +242,25 @@ describe("TaskSpaceRecord label bookkeeping", () => {
   });
 });
 
-describe("TaskSpaceRecord.finish", () => {
-  test('keep: "all" retains every label and closes none', async () => {
+// Task-space close is now the record's own behavior (injected closer, same
+// shape daemon.ts plugs real Playwright into), so these tests characterize
+// the whole ordering the daemon used to sequence itself: per-label target
+// close (swallowed errors), label removal, context close only when the
+// whole space is done. Receipt fields asserted identically to the old
+// pure-receipt tests.
+describe("TaskSpaceRecord.finish(keep, closer)", () => {
+  test('keep: "all" retains every label and closes nothing', async () => {
     const registry = makeRegistry();
     const space = await registry.resolve("finish-all", () => ({ closed: false }));
     space.setTarget(space.nextAutoLabel(), { id: "p2-page" }); // p2
-    const receipt = space.finish("all");
+    const { closer, closedTargets, contextCloses } = makeRecordingCloser();
+    const receipt = await space.finish("all", closer);
     expect(receipt.retained.sort()).toEqual(["p1", "p2"]);
     expect(receipt.closed).toEqual([]);
     expect(receipt.spaceClosed).toBe(false);
+    expect(closedTargets).toEqual([]);
+    expect(contextCloses()).toBe(0);
+    expect(space.listLabels().map((l) => l.label).sort()).toEqual(["p1", "p2"]);
   });
 
   test("keep: an array retains only those labels, closing the rest", async () => {
@@ -240,19 +268,151 @@ describe("TaskSpaceRecord.finish", () => {
     const space = await registry.resolve("finish-some", () => ({ closed: false }));
     const p2 = space.nextAutoLabel();
     space.ensureLabel(p2);
-    const receipt = space.finish(["p1"]);
+    const p3 = space.nextAutoLabel();
+    space.setTarget(p3, { id: "p3-page" });
+    const { closer, closedTargets, contextCloses } = makeRecordingCloser();
+    const receipt = await space.finish(["p1"], closer);
     expect(receipt.retained).toEqual(["p1"]);
-    expect(receipt.closed).toEqual([p2]);
+    expect(receipt.closed).toEqual([p2, p3]);
     expect(receipt.spaceClosed).toBe(false);
+    // Only the CLOSED labels' targets were closed, in receipt order.
+    expect(closedTargets).toEqual(["p3-page"]);
+    expect(contextCloses()).toBe(0);
+    // The kept label survived; the closed labels are gone from the record.
+    expect(space.listLabels().map((l) => l.label)).toEqual(["p1"]);
   });
 
-  test("keep: [] closes the whole space when nothing protected remains", async () => {
+  test("keep: [] closes the whole space -- every target, every label, the context", async () => {
     const registry = makeRegistry();
     const space = await registry.resolve("finish-empty", () => ({ closed: false }));
-    const receipt = space.finish([]);
+    space.setTarget("p1", { id: "p1-page" });
+    const p2 = space.nextAutoLabel();
+    space.setTarget(p2, { id: "p2-page" });
+    const { closer, closedTargets, contextCloses } = makeRecordingCloser();
+    const receipt = await space.finish([], closer);
     expect(receipt.retained).toEqual([]);
-    expect(receipt.closed).toEqual(["p1"]);
+    expect(receipt.closed).toEqual(["p1", p2]);
     expect(receipt.spaceClosed).toBe(true);
+    expect(closedTargets).toEqual(["p1-page", "p2-page"]);
+    expect(contextCloses()).toBe(1);
+    expect(space.listLabels()).toEqual([]);
+  });
+
+  test("a lazy label (no target materialized) is removed WITHOUT a closeTarget call", async () => {
+    const registry = makeRegistry();
+    const space = await registry.resolve("finish-lazy", () => ({ closed: false }));
+    // p1 stays lazy: registered, but nothing ever materialized it.
+    const { closer, closedTargets, contextCloses } = makeRecordingCloser();
+    const receipt = await space.finish([], closer);
+    expect(receipt.closed).toEqual(["p1"]);
+    expect(closedTargets).toEqual([]);
+    expect(contextCloses()).toBe(1);
+    expect(space.listLabels()).toEqual([]);
+  });
+
+  test("a closer.closeTarget that REJECTS is swallowed: receipt still returned, all labels still removed, context still closed", async () => {
+    const registry = makeRegistry();
+    const space = await registry.resolve("finish-swallow", () => ({ closed: false }));
+    space.setTarget("p1", { id: "p1-page" });
+    const contextCloses: FakeContext[] = [];
+    const closer: TaskCloser<FakeTarget, FakeContext> = {
+      async closeTarget() {
+        throw new Error("page already gone");
+      },
+      async closeContext(context) {
+        contextCloses.push(context);
+      },
+    };
+    const receipt = await space.finish([], closer);
+    expect(receipt).toEqual({ retained: [], closed: ["p1"], spaceClosed: true });
+    expect(space.listLabels()).toEqual([]);
+    expect(contextCloses).toEqual([space.context]);
+  });
+});
+
+describe("TaskSpaceRecord.closeLabel(label, closer)", () => {
+  test("closes the label's target and removes the label", async () => {
+    const registry = makeRegistry();
+    const space = await registry.resolve("close-label", () => ({ closed: false }));
+    space.setTarget("p1", { id: "p1-page" });
+    const { closer, closedTargets, contextCloses } = makeRecordingCloser();
+    await space.closeLabel("p1", closer);
+    expect(closedTargets).toEqual(["p1-page"]);
+    expect(space.hasLabel("p1")).toBe(false);
+    expect(contextCloses()).toBe(0); // closeLabel never touches the context.
+  });
+
+  test("a label with no materialized target is just removed -- no closer call, no throw", async () => {
+    const registry = makeRegistry();
+    const space = await registry.resolve("close-lazy-label", () => ({ closed: false }));
+    const { closer, closedTargets } = makeRecordingCloser();
+    await space.closeLabel("p1", closer);
+    expect(closedTargets).toEqual([]);
+    expect(space.hasLabel("p1")).toBe(false);
+  });
+
+  test("an unknown label is a no-op -- no closer call, no throw", async () => {
+    const registry = makeRegistry();
+    const space = await registry.resolve("close-unknown-label", () => ({ closed: false }));
+    const { closer, closedTargets } = makeRecordingCloser();
+    await space.closeLabel("never-registered", closer);
+    expect(closedTargets).toEqual([]);
+  });
+
+  test("a rejecting closeTarget PROPAGATES and the label is NOT removed -- the failure must be heard", async () => {
+    const registry = makeRegistry();
+    const space = await registry.resolve("close-label-throws", () => ({ closed: false }));
+    space.setTarget("p1", { id: "p1-page" });
+    const closer: TaskCloser<FakeTarget, FakeContext> = {
+      async closeTarget() {
+        throw new Error("close refused");
+      },
+      async closeContext() {},
+    };
+    await expect(space.closeLabel("p1", closer)).rejects.toThrow(/close refused/);
+    // daemon.ts's old page.close order: `if (target) await target.close();`
+    // then `removeLabel` -- a throw means removal never runs.
+    expect(space.hasLabel("p1")).toBe(true);
+    expect(space.getTarget("p1")).toEqual({ id: "p1-page" });
+  });
+});
+
+describe("Registry.finish(spaceId, keep, closer)", () => {
+  test("unknown spaceId throws the same message daemon's resolveSpace throws", async () => {
+    const registry = makeRegistry();
+    const { closer } = makeRecordingCloser();
+    await expect(registry.finish(777, [], closer)).rejects.toThrow(
+      /ego-browser: no task space 777 \(finished, or never created\)/,
+    );
+  });
+
+  test("spaceClosed: the space is removed from the registry, not just closed", async () => {
+    const registry = makeRegistry();
+    const space = await registry.resolve("registry-finish-gone", () => ({ closed: false }));
+    space.setTarget("p1", { id: "p1-page" });
+    const { closer, contextCloses } = makeRecordingCloser();
+    const receipt = await registry.finish(space.spaceId, [], closer);
+    expect(receipt).toEqual({ retained: [], closed: ["p1"], spaceClosed: true });
+    expect(contextCloses()).toBe(1);
+    expect(registry.get(space.spaceId)).toBeUndefined();
+    // Removal cleared the name mapping too: resolving the same name again
+    // is a genuinely NEW space, never the finished one.
+    const recreated = await registry.resolve("registry-finish-gone", () => ({ closed: false }));
+    expect(recreated.spaceId).not.toBe(space.spaceId);
+  });
+
+  test("not spaceClosed: the space stays registered with exactly the kept labels", async () => {
+    const registry = makeRegistry();
+    const space = await registry.resolve("registry-finish-partial", () => ({ closed: false }));
+    const p2 = space.nextAutoLabel();
+    space.setTarget(p2, { id: "p2-page" });
+    const { closer, closedTargets, contextCloses } = makeRecordingCloser();
+    const receipt = await registry.finish(space.spaceId, ["p1"], closer);
+    expect(receipt).toEqual({ retained: ["p1"], closed: [p2], spaceClosed: false });
+    expect(closedTargets).toEqual(["p2-page"]);
+    expect(contextCloses()).toBe(0);
+    expect(registry.get(space.spaceId)).toBe(space);
+    expect(space.listLabels().map((l) => l.label)).toEqual(["p1"]);
   });
 });
 
