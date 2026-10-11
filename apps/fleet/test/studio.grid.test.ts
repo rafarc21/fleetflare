@@ -8,6 +8,7 @@ import { getTranscriptTailWithStorage, type TranscriptStorage } from "../src/stu
 import type { StudioStatus } from "../src/studio/types";
 import type { Burn } from "../src/studio/burn";
 import type { Env } from "../src/env";
+import { authorizedReq } from "./helpers/http";
 // Text-module import of the checked-in build artifact — same mechanism
 // src/studio/grid.ts itself uses (see html.d.ts). Read directly here so the
 // "no external requests / no stray source-map comment / placeholder intact"
@@ -70,13 +71,6 @@ function fakeStudioNamespace(tails: Record<string, string | Error> = {}): Env["S
 
 function envWithFakeStudio(tails: Record<string, string | Error> = {}): Env {
   return { ...env, STUDIO: fakeStudioNamespace(tails) } as unknown as Env;
-}
-
-function authorizedReq(path: string, init: RequestInit = {}) {
-  return new Request(`https://x${path}`, {
-    ...init,
-    headers: { "Cf-Access-Jwt-Assertion": "test-jwt", ...(init.headers ?? {}) },
-  });
 }
 
 function authorized() {
