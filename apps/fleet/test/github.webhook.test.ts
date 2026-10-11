@@ -1702,7 +1702,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
 // token) is seen here. Any terminal label added OR removed, or a close,
 // revokes the task's junior record: revoking only, never granting, so a
 // relabel terminal -> live can no longer bring junior back.
-describe("issues webhook — revoking a member's access also revokes its junior token", () => {
+describe("issues webhook — a terminal label or close also revokes the task's junior authorization", () => {
   const STUDIO = "websites--web-studio";
   const issues = (action: string, extra: Record<string, unknown> = {}, repo = "acme-org/websites") => JSON.stringify({
     action, issue: { number: 7 }, repository: { full_name: repo }, sender: { login: "someone" }, ...extra,

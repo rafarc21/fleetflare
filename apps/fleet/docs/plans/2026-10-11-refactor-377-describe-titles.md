@@ -16,9 +16,9 @@ load-bearing (they record the measured failure that motivated the test).
 
 ONLY these files, ONLY the `describe("...")` first-string-literal argument:
 
-- apps/fleet/test/github.webhook.test.ts (6 titles)
+- apps/fleet/test/github.webhook.test.ts (5 titles)
 - apps/fleet/test/studio.observation-tick.test.ts (15 titles)
-- apps/fleet/test/cli.fleet.test.ts (6 titles)
+- apps/fleet/test/cli.fleet.test.ts (7 titles)
 
 OUT: studio.session.test.ts, rescue-push.test.ts,
 studio.account-failover.test.ts, bun/git-wrapper.test.ts (Claude lane). No
