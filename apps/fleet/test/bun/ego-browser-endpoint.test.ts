@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DaemonEndpoint } from "../../container/ego-browser/endpoint";
@@ -9,8 +9,16 @@ import { resolvePaths } from "../../container/ego-browser/paths";
 // characterization tests pin it against the real filesystem, each in its own
 // isolated EGO_BROWSER_HOME-style temp home. No daemon, no browser -- fast.
 
+const homes: string[] = [];
+
+afterEach(() => {
+  for (const home of homes) rmSync(home, { recursive: true, force: true });
+  homes.length = 0;
+});
+
 function makeHome() {
   const home = mkdtempSync(join(tmpdir(), "ego-endpoint-"));
+  homes.push(home);
   return resolvePaths({ EGO_BROWSER_HOME: home });
 }
 

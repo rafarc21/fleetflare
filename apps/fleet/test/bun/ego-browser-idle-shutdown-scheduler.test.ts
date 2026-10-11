@@ -143,13 +143,13 @@ describe("IdleShutdown.schedule", () => {
   // Board #36 investigation: live reproduction (see the plan doc) found the
   // real daemon self-destructing well within its own configured idleMs,
   // BEFORE the very client that caused it to spawn had sent its first
-  // byte -- daemon.ts's startup call (`scheduleIdleCheck()` right after
-  // `Bun.listen()`) arms the SAME idleMs a short-window test/config uses,
+  // byte -- daemon.ts's startup `schedule()` call right after `Bun.listen()`
+  // arms the SAME idleMs a short-window test/config uses,
   // even though "nobody has connected yet" at boot is not evidence nobody
   // is ABOUT to: ensureDaemonAlive always spawns a daemon and then
   // immediately starts connecting to it. schedule(overrideMs) lets the one
   // startup call site use a more generous grace duration while every other
-  // call (post-request, from handleRequest's finally) keeps using the real,
+  // call (post-request, from track()'s finally) keeps using the real,
   // steady-state idleMs unchanged.
   test("schedule(overrideMs) arms with overrideMs instead of the configured idleMs", () => {
     const clock = makeFakeClock();
