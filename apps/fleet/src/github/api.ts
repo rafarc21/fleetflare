@@ -798,14 +798,19 @@ export async function resolveCanonicalRepoName(token: string, repo: string): Pro
 
 type ClosingIssueNode = { number: number; repository: { nameWithOwner: string } };
 
-/** Issue #252: GitHub resolves "Fixes other/repo#12" into
- *  closingIssuesReferences too. Only this repo's issues are ours to close.
- *  #265: "this repo" is the caller's slug OR GitHub's canonical name for it —
- *  after a rename/transfer the slug is stale and GitHub names the issue by
- *  its new home (the getIssueCloser pattern, #149). Any case. */
+/** "This repo" for a name from GitHub: the caller's slug OR GitHub's
+ *  canonical owner/name (#265) — after a rename/transfer the slug is stale and
+ *  GitHub names the issue by its new home (the getIssueCloser pattern,
+ *  #149). Any case. A name that is absent (undefined) is never this
+ *  repo: getIssueCloser's PR-closer path reads that as foreign (#367).
+ *  Issue #252: GitHub resolves "Fixes other/repo#12" into
+ *  closingIssuesReferences too. Only this repo's issues are ours to close. */
+function sameRepoName(known: readonly string[], name: string | undefined): boolean {
+  return name !== undefined && known.map((r) => r.toLowerCase()).includes(name.toLowerCase());
+}
+
 function sameRepoIssues(nodes: ClosingIssueNode[], names: readonly string[]): number[] {
-  const known = names.map((r) => r.toLowerCase());
-  return nodes.filter((n) => known.includes(n.repository.nameWithOwner.toLowerCase())).map((n) => n.number);
+  return nodes.filter((n) => sameRepoName(names, n.repository.nameWithOwner)).map((n) => n.number);
 }
 
 /**
@@ -865,17 +870,14 @@ export async function getIssueCloser(token: string, repo: string, number: number
     };
   }>(token, query, { owner, repo: name, number }, `closer of ${repo}#${number}`);
   const issue = data.repository?.issue;
-  // `repo` is the board's lowercased slug; GitHub answers canonical case, and
-  // after a rename/transfer the new name. Same repo = either, ignoring case.
-  const known = [repo, data.repository?.nameWithOwner ?? repo].map((r) => r.toLowerCase());
-  const sameRepo = (r: string | undefined) => r !== undefined && known.includes(r.toLowerCase());
+  const names = [repo, data.repository?.nameWithOwner ?? repo];
   const raw = issue?.timelineItems?.nodes?.at(-1)?.closer ?? null;
   let closer: IssueCloser["closer"] = null;
   if (raw?.__typename === "PullRequest" && typeof raw.number === "number") {
     const prRepo = raw.repository?.nameWithOwner;
-    closer = { kind: "pr", number: raw.number, merged: raw.merged === true, repo: sameRepo(prRepo) ? repo : prRepo ?? "" };
+    closer = { kind: "pr", number: raw.number, merged: raw.merged === true, repo: sameRepoName(names, prRepo) ? repo : prRepo ?? "" };
   } else if (raw?.__typename === "Commit" && typeof raw.oid === "string") {
-    const pr = raw.associatedPullRequests?.nodes?.find((n) => n.merged === true && sameRepo(n.repository?.nameWithOwner));
+    const pr = raw.associatedPullRequests?.nodes?.find((n) => n.merged === true && sameRepoName(names, n.repository?.nameWithOwner));
     closer = pr ? { kind: "pr", number: pr.number, merged: true, repo } : { kind: "commit", sha: raw.oid };
   }
   return { stateReason: issue?.stateReason ?? null, closer };

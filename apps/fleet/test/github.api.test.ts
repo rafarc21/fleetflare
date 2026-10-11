@@ -1019,6 +1019,16 @@ describe("getIssueCloser", () => {
     });
   });
 
+  // #367: the fold's undefined-name guard is load-bearing — a closer whose
+  // repository field is absent must read as foreign (repo: ""), never as
+  // this repo, whatever known names it is matched against.
+  it("a PR closer with no repository field stays foreign (repo: empty string)", async () => {
+    respond = () => closed("COMPLETED", { __typename: "PullRequest", number: 7, merged: true });
+    expect(await getIssueCloser("tok", "o/r", 39)).toEqual({
+      stateReason: "COMPLETED", closer: { kind: "pr", number: 7, merged: true, repo: "" },
+    });
+  });
+
   it("a foreign closer is still foreign when the canonical name is known", async () => {
     respond = () => canonical("O/R", { __typename: "PullRequest", number: 5, merged: true, repository: { nameWithOwner: "other/x" } });
     expect(await getIssueCloser("tok", "o/r", 39)).toEqual({
