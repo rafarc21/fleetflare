@@ -4,7 +4,18 @@
 // fetch port as an argument, the same injected-dependency posture
 // openPrsByStudio (test/bun/cli.fleet-ls-prs.test.ts) and TabsDeps already
 // document — no network, no live Worker, no mocks of this repo's own modules.
-import { describe, expect, test } from "bun:test";
+//
+// The unknown-SCAN refusal branch (cmdDestroy's `answer.unknown` leg) is the
+// one piece the in-process halves above cannot reach: cmdDestroy is not
+// exported (cli/fleet.ts runs its CLI on import), so its behavioral test
+// drives the REAL CLI as a subprocess against a real local Bun.serve Worker
+// stand-in — the same harness family test/bun/accounts-cli.test.ts documents
+// (a real `Bun.spawn` of cli/fleet.ts, a temp HOME with a synthetic
+// credentials file pointing at the stand-in).
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   fetchStudioOpenPrs, parkWarningLines, strictRefusalLines,
   STRICT_UNMERGED_UNKNOWN_PROCEEDING, STRICT_UNMERGED_UNKNOWN_SCAN,
@@ -171,5 +182,93 @@ describe("fetchStudioOpenPrs — one studio's live answer (#332)", () => {
     }) as unknown as typeof fetch;
     await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl);
     expect(init?.signal instanceof AbortSignal).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The unknown-SCAN refusal, driven through the REAL CLI (a subprocess) —
+// accounts-cli.test.ts's harness: a temp HOME whose ~/.fleet/credentials
+// points at a local Bun.serve Worker stand-in. cmdDestroy is not exported,
+// so this is the only lane that can observe the whole edge: parse → status
+// read → open-prs read → `unknown` refusal → exit 1, with the stand-in
+// recording every request so "the destroy never fired" is an assertion, not
+// an inference from a source pin (cli-destroy-flags.test.ts's ordering pin
+// above carries the structural half).
+describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 review H2)", () => {
+  const FLEET_CLI = join(import.meta.dir, "../../cli/fleet.ts");
+  const ID = "websites--web-studio";
+
+  const tempDirs: string[] = [];
+  afterEach(() => {
+    while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  });
+
+  /** A temp HOME with a credentials file naming this Worker stand-in —
+   *  accounts-cli.test.ts's writeCredentials, same 0600 the real one wants. */
+  function tmpHomeWithCredentials(workerUrl: string): string {
+    const home = mkdtempSync(join(tmpdir(), "destroy-strict-home-"));
+    tempDirs.push(home);
+    mkdirSync(join(home, ".fleet"), { recursive: true });
+    const path = join(home, ".fleet", "credentials");
+    writeFileSync(path, JSON.stringify({ workerUrl, accessClientId: "cid", accessClientSecret: "csecret" }));
+    chmodSync(path, 0o600);
+    return home;
+  }
+
+  /** The Worker stand-in: GET /studio/<id>/status answers a minimal status
+   *  row (repoSlug included — the one field the strict pre-check reads the
+   *  row for), GET /studio/board/open-prs answers the scripted body, and
+   *  EVERY request path is recorded so a test can assert what was and was
+   *  never asked for. */
+  function startWorker(openPrsBody: unknown) {
+    const requests: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const u = new URL(req.url);
+        requests.push(`${req.method} ${u.pathname}`);
+        if (u.pathname === `/studio/${ID}/status` && req.method === "GET") {
+          return Response.json({ id: ID, state: "running", repoSlug: "acme-org/websites" });
+        }
+        if (u.pathname === "/studio/board/open-prs" && req.method === "GET") {
+          return Response.json(openPrsBody);
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    return { server, requests };
+  }
+
+  async function run(args: string[], home: string) {
+    const proc = Bun.spawn({
+      cmd: [process.execPath, FLEET_CLI, ...args],
+      env: { PATH: process.env.PATH!, HOME: home },
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    const [out, err, code] = await Promise.all([
+      new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+    ]);
+    return { out, err, code };
+  }
+
+  test("a scan the route reports FAILED (unknown: [<id>]) refuses: the line, exit 1, and NO destroy request", async () => {
+    const { server, requests } = startWorker({ repo: "acme-org/websites", prs: {}, unknown: [ID] });
+    const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
+    try {
+      const r = await run(["destroy", ID, "--strict-unmerged"], home);
+      // The refusal line itself — the exact contract the strict flag is:
+      // uncertainty about zero is a refusal, never a silent proceed.
+      expect(r.err).toContain(STRICT_UNMERGED_UNKNOWN_SCAN);
+      // The refusal is a real exit, not a warning on a successful destroy.
+      expect(r.code).toBe(1);
+      // The read sequence proves the branch: the status row was read, the
+      // open-prs route was asked — and no /destroy request ever fired, the
+      // refusal must happen BEFORE anything is destroyed.
+      expect(requests).toContain(`GET /studio/${ID}/status`);
+      expect(requests).toContain("GET /studio/board/open-prs");
+      expect(requests.some((p) => p.endsWith("/destroy"))).toBe(false);
+    } finally {
+      server.stop(true);
+    }
   });
 });

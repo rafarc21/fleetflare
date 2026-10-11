@@ -70,11 +70,14 @@ describe("formatTable — no trailing pad, capped ERROR (#205)", () => {
   // renders a clock-free constant (? / "-" / "never") and the whole
   // single-row table is byte-pinnable. This transcribes the table's own
   // output for that fixed input — the before-snapshot the fold must keep.
+  // Board issue #332: the pin now carries the PRS column (between WIP and
+  // READY); a no-data row renders "-" in it, re-transcribed from the
+  // table's own output.
   test("a base row's whole single-row table, every byte (#399)", () => {
     const t = formatTable([row()]);
     expect(t).toBe(
-      "ID                REPO     STATE    RST  WIP  READY  SESSION     ACTIVITY  CHECKED  ROW  ACCOUNT                  HOST  BURN  REFRESHED  ERROR\n" +
-      "acme-os--maestro  acme-os  running  -    -    ?      ? · snap ?  ?         never    -    CLAUDE_CODE_OAUTH_TOKEN  -     -     -          -",
+      "ID                REPO     STATE    RST  WIP  PRS  READY  SESSION     ACTIVITY  CHECKED  ROW  ACCOUNT                  HOST  BURN  REFRESHED  ERROR\n" +
+      "acme-os--maestro  acme-os  running  -    -    -    ?      ? · snap ?  ?         never    -    CLAUDE_CODE_OAUTH_TOKEN  -     -     -          -",
     );
   });
 });
