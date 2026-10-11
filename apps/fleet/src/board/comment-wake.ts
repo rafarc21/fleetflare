@@ -46,11 +46,20 @@ import { oneLine } from "../github/wake-events";
  */
 const WAKE_MARKER = "/wake";
 
+/** The comment's first line, trimmed — the marker surface every predicate
+ *  below reads. One fold, not one per predicate: a fourth marker would
+ *  otherwise re-type the split+trim and drift on \r handling (issue #363).
+ *  NOT `oneLine`: that flattens every newline, while the marker rule is
+ *  first-line only — see hasWakeMarker's own mid-comment spoof pin. */
+function firstLine(body: string): string {
+  return (body.split(/\r?\n/)[0] ?? "").trim();
+}
+
 /** True when this comment's first line is the explicit wake marker.
  *  See `WAKE_MARKER`'s own doc comment for the exact matching rule. */
 export function hasWakeMarker(body: string): boolean {
-  const firstLine = (body.split(/\r?\n/)[0] ?? "").trim();
-  return firstLine === WAKE_MARKER || firstLine.startsWith(`${WAKE_MARKER} `);
+  const line = firstLine(body);
+  return line === WAKE_MARKER || line.startsWith(`${WAKE_MARKER} `);
 }
 
 /**
@@ -64,7 +73,7 @@ export const DONE_RECORD_COMMENT_MARKER = "<!-- fleet:done-record -->";
 
 /** True when this comment is a completion record. ABSOLUTE, like an envelope. */
 export function isDoneRecordComment(body: string): boolean {
-  return (body.split(/\r?\n/)[0] ?? "").trim() === DONE_RECORD_COMMENT_MARKER;
+  return firstLine(body) === DONE_RECORD_COMMENT_MARKER;
 }
 
 /**
