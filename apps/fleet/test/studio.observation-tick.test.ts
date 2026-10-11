@@ -125,7 +125,7 @@ function fakeStorage(seed?: {
   return storage;
 }
 
-describe("incarnationPatch — pure decision table (issue #85, maestro correction #3 rewrite)", () => {
+describe("incarnationPatch — pure decision table", () => {
   const NOW = "2026-09-24T10:00:00.000Z";
 
   it("missing token, DO has a stored incarnation: sets replacedAt once, KEEPS the token", () => {
@@ -184,7 +184,7 @@ describe("incarnationPatch — pure decision table (issue #85, maestro correctio
   });
 });
 
-describe("runShipTickWithObservation — adoption folded into one exec (issue #85, maestro correction #6)", () => {
+describe("runShipTickWithObservation — adoption folded into one exec", () => {
   it("T1b: adoption writes a token via the SAME exec as the tick itself — never a second exec", async () => {
     let execCount = 0;
     const deps = {
@@ -210,7 +210,7 @@ describe("runShipTickWithObservation — adoption folded into one exec (issue #8
   });
 });
 
-describe("runShipTickWithObservation — op-lock guard (issue #85, maestro correction #4)", () => {
+describe("runShipTickWithObservation — op-lock guard", () => {
   it("T10: a fresh operation lock suppresses a replaced/adoption verdict even though the container reports no token (the REAL op-lock proof — see Task 8's own T10 note)", async () => {
     const deps = {
       exec: vi.fn(async () => ({
@@ -285,7 +285,7 @@ describe("runShipTickWithObservation — op-lock guard (issue #85, maestro corre
   });
 });
 
-describe("runShipTickWithObservation — immediate D1 write on a transition (issue #85, maestro correction #1)", () => {
+describe("runShipTickWithObservation — immediate D1 write on a transition", () => {
   it("a replaced transition calls recordStudioFn with the status carrying the new observed", async () => {
     const deps = {
       exec: vi.fn(async () => ({
@@ -407,7 +407,7 @@ describe("runShipTickWithObservation — immediate D1 write on a transition (iss
 // path (not just the pure nextActivity function Task 1 already covers) —
 // proves the wiring, not just the merge logic in isolation.
 // ---------------------------------------------------------------------------
-describe("runShipTickWithObservation — hook heartbeat merge (issue #221, PR3b)", () => {
+describe("runShipTickWithObservation — hook heartbeat merge", () => {
   const NOW = new Date("2026-09-25T12:00:00.000Z");
   const FRESHER = "2026-09-25T12:00:00.500Z";
 
@@ -622,7 +622,7 @@ describe("runShipTickWithObservation — hook heartbeat merge (issue #221, PR3b)
   });
 });
 
-describe("runShipTickWithObservation — reachability (issue #85)", () => {
+describe("runShipTickWithObservation — reachability", () => {
   const SHORT_DEADLINE_MS = 50; // maestro correction #14 — never the real 15s in a test
 
   function hangingDeps(): ShipDeps {
@@ -851,7 +851,7 @@ describe("runShipTickWithObservation — reachability (issue #85)", () => {
   });
 });
 
-describe("runShipTickWithObservation — adoption session verdict (issue #85, maestro correction #7)", () => {
+describe("runShipTickWithObservation — adoption session verdict", () => {
   it("an adoption records a session verdict via: \"adopted\" (maestro correction #7)", async () => {
     const deps = {
       exec: vi.fn(async (_cmd: string) => ({
@@ -972,7 +972,7 @@ describe("runShipTickWithObservation — adoption session verdict (issue #85, ma
 // #14), which test different things and stay exactly as they are. The whole
 // point here is proving the ACTUAL production timing lands where the fix
 // intends.
-describe("runShipTickWithObservation — time-based unreachable rule (board issue #183)", () => {
+describe("runShipTickWithObservation — time-based unreachable rule", () => {
   function successStdout(token: string): { code: number; stdout: string; stderr: string } {
     return {
       code: 0,
@@ -1297,7 +1297,7 @@ describe("runShipTickWithObservation — time-based unreachable rule (board issu
 // treat a resolved-but-degraded response exactly like a clean success for
 // reachability purposes — reset `execFailures`/`unreachableSince` and stamp
 // `lastShipOkAt` to the moment it answered.
-describe("runShipTickWithObservation — SHOULD-FIX 5: a resolved-but-degraded response resets reachability like a clean success (board issue #183 review round 2)", () => {
+describe("runShipTickWithObservation — a resolved-but-degraded response resets reachability like a clean success", () => {
   function successStdout(token: string): { code: number; stdout: string; stderr: string } {
     return {
       code: 0,
@@ -1427,7 +1427,7 @@ describe("runShipTickWithObservation — SHOULD-FIX 5: a resolved-but-degraded r
 // the incarnation/reachability branches above; the D1 mirror (recordStudioFn)
 // fires immediately only on a STATE change, never merely because a tick ran.
 // ---------------------------------------------------------------------------
-describe("runShipTickWithObservation — activity (issue #221)", () => {
+describe("runShipTickWithObservation — activity", () => {
   function deps(stdout: string, now = "2026-09-25T12:00:00.000Z") {
     return {
       exec: vi.fn(async () => ({ code: 0, stdout, stderr: "" })),
@@ -1538,7 +1538,7 @@ describe("runShipTickWithObservation — activity (issue #221)", () => {
 // successful tick that carries a pane frame, same gating (live state, no
 // fresh op lock) applyActivityVerdict already uses.
 // ---------------------------------------------------------------------------
-describe("runShipTickWithObservation — member alerts (issue #311)", () => {
+describe("runShipTickWithObservation — member alerts", () => {
   function deps(stdout: string, now = "2026-09-25T12:00:00.000Z") {
     return {
       exec: vi.fn(async () => ({ code: 0, stdout, stderr: "" })),
@@ -1711,7 +1711,7 @@ describe("runShipTickWithObservation — member alerts (issue #311)", () => {
 // with a genuinely failing `exec` — never constructing an `Activity` object
 // directly.
 // ---------------------------------------------------------------------------
-describe("runShipTickWithObservation — Fix 5: '? probe failed' through the REAL exec-failure path", () => {
+describe("runShipTickWithObservation — '? probe failed' through the REAL exec-failure path", () => {
   const SHORT_DEADLINE_MS = 50;
 
   it("a genuinely unreachable exec (never answers) writes ACTIVITY_KEY as unknown/'probe failed', not stale silence", async () => {
@@ -1801,7 +1801,7 @@ describe("runShipTickWithObservation — Fix 5: '? probe failed' through the REA
 // archives, closing that window to one tick interval, given a `doneRecords`
 // port and a `resolveOpsRepo` the same shape the teardown call site already
 // uses.
-describe("runShipTickWithObservation — completion-record archive on the periodic tick (issue #367)", () => {
+describe("runShipTickWithObservation — completion-record archive on the periodic tick", () => {
   it("archives a completion record during a normal tick, not only at teardown", async () => {
     const listCmd = doneRecordsListCmd();
     const record = { plan: "docs/p.md", verification: [] };
@@ -2006,7 +2006,7 @@ describe("runShipTickWithObservation — completion-record archive on the period
 
 // Issue #86 item 4: the lead's first observed working turn moves its
 // submitted task to working (the DO wires `onLeadWorking` to the board).
-describe("runShipTickWithObservation — onLeadWorking (issue #86)", () => {
+describe("runShipTickWithObservation — onLeadWorking", () => {
   const NOW = new Date("2026-09-30T12:00:00.000Z");
   const deps = (pane: string): ShipDeps => ({
     exec: vi.fn(async () => ({ code: 0, stdout: stdoutWithPane(pane), stderr: "" })),
@@ -2068,7 +2068,7 @@ describe("runShipTickWithObservation — onLeadWorking (issue #86)", () => {
 // own paneFrame is absent (old image, or a exec that never reached the pane
 // section) — same "absent means don't touch it" discipline paneVerdict/
 // hookHeartbeat already follow in this file.
-describe("runShipTickWithObservation — lastMessageLine (issue #108)", () => {
+describe("runShipTickWithObservation — lastMessageLine", () => {
   function deps(stdout: string, now = "2026-09-25T12:00:00.000Z") {
     return {
       exec: vi.fn(async () => ({ code: 0, stdout, stderr: "" })),

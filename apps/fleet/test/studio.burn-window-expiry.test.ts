@@ -27,6 +27,7 @@ import type { SessionSyncDeps } from "../src/studio/session-sync";
 import type { StudioStatus } from "../src/studio/types";
 import type { Burn } from "../src/studio/burn";
 import type { Env } from "../src/env";
+import { envWithNs } from "./helpers/fake-namespace";
 import { authorizedReq } from "./helpers/http";
 
 const STOPPED_ID = "acme-os--maestro";
@@ -65,17 +66,10 @@ function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
   };
 }
 
-// Narrow fake, copied from test/studio.grid.test.ts: the grid render path
-// (routes.ts's renderStudioGrid) only ever call getTranscriptTail().
+// Narrow fake: the grid render path (routes.ts's renderStudioGrid) only
+// ever call getTranscriptTail().
 function envWithFakeStudio(): Env {
-  const get = (() => ({ getTranscriptTail: async () => "" })) as unknown as Env["STUDIO"]["get"];
-  return {
-    ...env,
-    STUDIO: {
-      idFromName: ((name: string) => name) as unknown as Env["STUDIO"]["idFromName"],
-      get,
-    } as unknown as Env["STUDIO"],
-  } as unknown as Env;
+  return envWithNs({ getTranscriptTail: async () => "" }, env);
 }
 
 // ---------------------------------------------------------------------------
@@ -114,28 +108,14 @@ function checkDeps() {
 
 /** env whose STUDIO stub answer the REAL checkAndRecordReadiness over `storage`. */
 function envWithCheckStub(storage: ReturnType<typeof fakeDoStorage>, deps: SessionSyncDeps): Env {
-  const get = (() => ({
+  return envWithNs({
     checkNow: () => checkAndRecordReadiness(deps, storage as never, STOPPED_ID, async () => {}),
-  })) as unknown as Env["STUDIO"]["get"];
-  return {
-    ...env,
-    STUDIO: {
-      idFromName: ((name: string) => name) as unknown as Env["STUDIO"]["idFromName"],
-      get,
-    } as unknown as Env["STUDIO"],
-  } as unknown as Env;
+  }, env);
 }
 
 /** env whose STUDIO stub answer one fixed row out of getStatusDetail. */
 function envWithStatusStub(row: StudioStatus): Env {
-  const get = (() => ({ getStatusDetail: async () => row })) as unknown as Env["STUDIO"]["get"];
-  return {
-    ...env,
-    STUDIO: {
-      idFromName: ((name: string) => name) as unknown as Env["STUDIO"]["idFromName"],
-      get,
-    } as unknown as Env["STUDIO"],
-  } as unknown as Env;
+  return envWithNs({ getStatusDetail: async () => row }, env);
 }
 
 beforeEach(async () => {

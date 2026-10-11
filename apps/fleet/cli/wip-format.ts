@@ -6,7 +6,7 @@
 // Sibling to restart-format.ts — that file's own RST column is the exact
 // model this one follows: a pure formatter reading one `Observed` field, plus
 // a short column legend, same convention.
-import { formatAge } from "./readiness-format";
+import { ageSeconds, formatAge } from "./readiness-format";
 import type { Observed } from "../src/studio/observed";
 import type { StudioStatus } from "../src/studio/types";
 
@@ -156,19 +156,15 @@ export function formatWipCell(s: StudioStatus, now: Date): string {
   const checks = s.observed?.wipLastCheck;
   const check = checks != null ? worstWipCheck(checks) : null;
   if (check != null) {
-    const ms = Date.parse(check.at);
-    if (!Number.isNaN(ms)) {
-      const seconds = Math.max(0, Math.floor((now.getTime() - ms) / 1000));
-      const age = formatAge(seconds);
+    if (!Number.isNaN(Date.parse(check.at))) {
+      const age = formatAge(ageSeconds(check.at, now));
       return check.result === "failed" ? `${age}!` : age;
     }
   }
   const at = s.observed?.wipSyncedAt;
   if (at == null) return "-";
-  const ms = Date.parse(at);
-  if (Number.isNaN(ms)) return "-";
-  const seconds = Math.max(0, Math.floor((now.getTime() - ms) / 1000));
-  return formatAge(seconds);
+  if (Number.isNaN(Date.parse(at))) return "-";
+  return formatAge(ageSeconds(at, now));
 }
 
 /**
@@ -221,10 +217,8 @@ export function formatWipInspectLines(studioId: string, observed: Observed | und
     at == null
       ? [`wip sync:     ${ref} — never synced`]
       : (() => {
-          const ms = Date.parse(at);
-          if (Number.isNaN(ms)) return [`wip sync:     ${ref} — synced at ${at}`];
-          const seconds = Math.max(0, Math.floor((now.getTime() - ms) / 1000));
-          return [`wip sync:     ${ref}, last synced ${formatAge(seconds)} ago`];
+          if (Number.isNaN(Date.parse(at))) return [`wip sync:     ${ref} — synced at ${at}`];
+          return [`wip sync:     ${ref}, last synced ${formatAge(ageSeconds(at, now))} ago`];
         })();
   const checks = observed.wipLastCheck;
   if (checks != null) {
@@ -236,10 +230,8 @@ export function formatWipInspectLines(studioId: string, observed: Observed | und
     for (const target of Object.keys(normalized).sort()) {
       const check = normalized[target]!;
       if (check.result !== "failed") continue;
-      const ms = Date.parse(check.at);
-      if (Number.isNaN(ms)) continue;
-      const seconds = Math.max(0, Math.floor((now.getTime() - ms) / 1000));
-      lines.push(`wip sync:     last attempt FAILED for ${target} ${formatAge(seconds)} ago`);
+      if (Number.isNaN(Date.parse(check.at))) continue;
+      lines.push(`wip sync:     last attempt FAILED for ${target} ${formatAge(ageSeconds(check.at, now))} ago`);
     }
   }
   return lines;

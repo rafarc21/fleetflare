@@ -123,6 +123,15 @@ export function repoIdSegment(repo: string): string | null {
   return isIdSegment(folded) ? folded : null;
 }
 
+/** The canonical refusal wording every repo-cannot-name-a-studio site builds
+ *  from (studioIdIn, resolveWorkRepo, cli/ff.ts, cli/fleet.ts tabs). The fold
+ *  rule text lives ONLY here — a site supplies the slug and its short half,
+ *  and owns its own policy (400 vs 500 vs CLI exit) and prefix. */
+export function refuseBadSegment(slug: string, short: string): string {
+  return `repo "${slug}" cannot name a studio: "${short}" is not a valid id segment ` +
+    "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)";
+}
+
 export type StudioIdResult = { ok: true; id: string } | { ok: false; message: string };
 
 /**
@@ -158,8 +167,7 @@ export function studioIdIn(slug: string | null, role: string, instance = 1): Stu
   if (segment === null) {
     return {
       ok: false,
-      message: `repo "${slug}" cannot name a studio: "${short}" is not a valid id segment ` +
-        "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)",
+      message: refuseBadSegment(slug, short),
     };
   }
   if (!isIdSegment(role)) {
@@ -312,8 +320,7 @@ export async function resolveWorkRepo(
     }
     return {
       ok: false, status: 400,
-      message: `repo "${slug}" cannot name a studio: "${short}" is not a valid id segment ` +
-        "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)",
+      message: refuseBadSegment(slug, short),
     };
   }
 

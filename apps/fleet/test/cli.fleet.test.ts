@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fleetTotals } from "../cli/fleet-totals";
 import {
+  ageSeconds,
   formatReady, formatCheckedAt, formatAge, readyOverride, formatSession, formatState, formatSessionGuards,
   formatObservedLines, formatSurvivalBriefs, formatActivity, ACTIVITY_DO_STALE_SECONDS, lsJsonRows,
   formatDeadAccounts,
@@ -157,6 +158,25 @@ describe("formatCheckedAt (cli/readiness-format.ts)", () => {
     const at = (iso: string) => formatCheckedAt({ kind: "provisioned", checkedAt: iso }, NOW);
     // NOW is 2026-08-28T12:00:00.000Z; 484 minutes earlier is 03:56:00.000Z.
     expect(at("2026-08-28T03:56:00.000Z")).toBe("8h ago");
+  });
+});
+
+describe("ageSeconds (cli/readiness-format.ts)", () => {
+  const NOW = new Date("2026-08-28T12:00:00.000Z");
+
+  it("valid ISO: whole seconds since, floored", () => {
+    expect(ageSeconds("2026-08-28T11:59:53.000Z", NOW)).toBe(7);
+    expect(ageSeconds("2026-08-28T09:00:00.000Z", NOW)).toBe(3 * 3600);
+    // 7.75s elapsed: floor 7, round 8 — pins Math.floor against a round regression.
+    expect(ageSeconds("2026-08-28T11:59:52.250Z", NOW)).toBe(7);
+  });
+
+  it("unparseable string reads 0, never NaN", () => {
+    expect(ageSeconds("not-a-date", NOW)).toBe(0);
+  });
+
+  it("future timestamp (clock skew) reads 0, never negative", () => {
+    expect(ageSeconds("2026-08-28T12:00:30.000Z", NOW)).toBe(0);
   });
 });
 
@@ -338,7 +358,7 @@ describe("readyOverride (cli/readiness-format.ts)", () => {
   });
 });
 
-describe("formatSession (cli/readiness-format.ts) — maestro correction #8: never a bare \"?\" or literal \"unknown\" when a snapshot age is known", () => {
+describe("formatSession (cli/readiness-format.ts) — never a bare \"?\" or literal \"unknown\" when a snapshot age is known", () => {
   const NOW = new Date("2026-09-24T12:00:00.000Z");
 
   it("no observed at all, no snapshot known: \"?\" alone is the honest floor", () => {
@@ -527,7 +547,7 @@ describe("formatState (cli/readiness-format.ts)", () => {
   });
 });
 
-describe("formatSessionGuards (cli/readiness-format.ts) — issue #94", () => {
+describe("formatSessionGuards (cli/readiness-format.ts)", () => {
   const row = (id: string, sessionGuard?: StudioStatus["sessionGuard"]) => ({ id, sessionGuard }) as StudioStatus;
 
   // PR #46 review (#37): an aside session not reaching R2 is on `fleet ls`.
@@ -658,7 +678,7 @@ describe("formatSessionGuards (cli/readiness-format.ts) — issue #94", () => {
 // before this feature landed, talking to a NEWER CLI. `formatObservedLines`
 // is the pure formatter `cmdInspect` now calls, extracted so these 4 body
 // shapes are provable without any CLI I/O.
-describe("formatObservedLines (cli/readiness-format.ts) — issue #85 review BLOCKER 2", () => {
+describe("formatObservedLines (cli/readiness-format.ts)", () => {
   it("case 1: full observed, a session verdict present", () => {
     const observed = {
       ...emptyObserved(),
@@ -991,7 +1011,7 @@ describe("formatObservedLines (cli/readiness-format.ts) — issue #85 review BLO
 // never told what survived and nothing anywhere saying so.
 // ---------------------------------------------------------------------------
 
-describe("formatSurvivalBriefs (cli/readiness-format.ts) — issue #249 round 2", () => {
+describe("formatSurvivalBriefs (cli/readiness-format.ts)", () => {
   const pending = (over: Partial<SurvivalBriefPending> = {}): SurvivalBriefPending => ({
     incarnation: "inc-aaaaaaaa", via: "recycle", replacementDetected: false,
     session: {
@@ -1031,7 +1051,7 @@ describe("formatSurvivalBriefs (cli/readiness-format.ts) — issue #249 round 2"
   });
 });
 
-describe("formatDeadAccounts (cli/readiness-format.ts) — issue #141 review, item 4", () => {
+describe("formatDeadAccounts (cli/readiness-format.ts)", () => {
   it("no dead accounts at all: silent", () => {
     expect(formatDeadAccounts([])).toEqual([]);
     expect(formatDeadAccounts([{ name: "CLAUDE_CODE_OAUTH_TOKEN", label: null, dead: false, seenAt: null }])).toEqual([]);
@@ -1244,7 +1264,7 @@ describe("formatActivity (cli/readiness-format.ts)", () => {
   // one in this describe block never seeds memberAlerts and still asserts
   // an EXACT string with no suffix — that is this addition's own
   // regression guard.
-  describe("member alert suffix (issue #311)", () => {
+  describe("member alert suffix", () => {
     it("appends the freshest alert's own formatted note", () => {
       const at = activity({ state: "idle", since: "2026-09-25T11:15:00.000Z" });
       const alerts: MemberAlert[] = [
@@ -1294,7 +1314,7 @@ describe("formatActivity (cli/readiness-format.ts)", () => {
 // Issue #70 ask 4: coordinators scraped the table (and blank attach tabs) to
 // learn what each lead was doing. `fleet ls --json`: one machine-readable
 // lead state per studio, from the same data the ACTIVITY column renders.
-describe("lsJsonRows (issue #70)", () => {
+describe("lsJsonRows", () => {
   const NOW = new Date("2026-09-25T12:02:00.000Z");
   const act = (o: Partial<Activity>): Activity => ({
     state: "idle", since: "2026-09-25T12:00:00.000Z", anchored: true,

@@ -8,6 +8,7 @@ import { getTranscriptTailWithStorage, type TranscriptStorage } from "../src/stu
 import type { StudioStatus } from "../src/studio/types";
 import type { Burn } from "../src/studio/burn";
 import type { Env } from "../src/env";
+import { envWithNs } from "./helpers/fake-namespace";
 import { authorizedReq } from "./helpers/http";
 // Text-module import of the checked-in build artifact — same mechanism
 // src/studio/grid.ts itself uses (see html.d.ts). Read directly here so the
@@ -47,30 +48,17 @@ function burn(overrides: Partial<Burn> = {}): Burn {
 // (routes.ts's renderStudioGrid) only ever calls getTranscriptTail() on a
 // stub — it never calls getStatus/provision/restartStudio for the render
 // itself — so only that one member is implemented here.
-//
-// `tails` keys by studio id; a value that is an `Error` makes THAT studio's
-// own tail read throw, for the "one broken studio must not break the whole
-// grid" coverage below. A missing key defaults to "" (no ship tick yet),
-// matching getTranscriptTailWithStorage's own real default.
-function fakeStudioNamespace(tails: Record<string, string | Error> = {}): Env["STUDIO"] {
-  const get = ((id: unknown) => {
-    const studioId = id as string;
-    return {
-      getTranscriptTail: async () => {
-        const v = tails[studioId];
-        if (v instanceof Error) throw v;
-        return v ?? "";
-      },
-    };
-  }) as unknown as Env["STUDIO"]["get"];
-  return {
-    idFromName: ((name: string) => name) as unknown as Env["STUDIO"]["idFromName"],
-    get,
-  } as unknown as Env["STUDIO"];
-}
-
 function envWithFakeStudio(tails: Record<string, string | Error> = {}): Env {
-  return { ...env, STUDIO: fakeStudioNamespace(tails) } as unknown as Env;
+  // Per-id stub, unchanged from its own local shape: `tails` keys by studio
+  // id; an Error value makes THAT studio's tail read throw; a missing key
+  // defaults to "" (getTranscriptTailWithStorage's own real default).
+  return envWithNs((id: string) => ({
+    getTranscriptTail: async () => {
+      const v = tails[id];
+      if (v instanceof Error) throw v;
+      return v ?? "";
+    },
+  }), env);
 }
 
 function authorized() {
