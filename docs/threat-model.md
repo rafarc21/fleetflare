@@ -128,8 +128,8 @@ the wrapper as their only guard.
 search of `apps/fleet/src` finds no `enableInternet` setting, and the
 `@cloudflare/containers` class (0.0.20, `apps/fleet/package.json:35`) defaults
 it to `true` (`dist/lib/container.js:174` in that package). Studios
-depend on it: they fetch `@playwright/mcp@latest` at runtime
-(`apps/fleet/container/studio-bringup.sh:804`) and talk to GitHub.
+depend on it: they fetch a pinned `@playwright/mcp` at runtime
+(`apps/fleet/container/studio-bringup.sh`, `fleet_mcp_config`) and talk to GitHub.
 
 **Tailscale.** Bring-up runs `tailscaled` in userspace networking mode and
 `tailscale up --ssh` with the auth key

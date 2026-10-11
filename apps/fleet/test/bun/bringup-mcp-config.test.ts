@@ -54,7 +54,9 @@ function fakeHome(): string {
 function bringUp(env: Record<string, string>, home = fakeHome()) {
   const r = runSnippet({
     shell: "bash",
-    env: { HOME: home, STUDIO_MCP: "", ROLE_MCP: "", ...env },
+    // FLEET_MCP_CHROMIUM -> a path that never exists, so the runner's own
+    // /usr/local/bin/chromium (CI links one) cannot leak into these asserts.
+    env: { HOME: home, STUDIO_MCP: "", ROLE_MCP: "", FLEET_MCP_CHROMIUM: join(home, "no-chromium"), ...env },
     script:
       "set -euo pipefail\n" +
       `${extractShellFunc(BRINGUP, "fleet_mcp_config")}\n` +
@@ -75,7 +77,12 @@ function bringUp(env: Record<string, string>, home = fakeHome()) {
   };
 }
 
-const PLAYWRIGHT = { command: "bun", args: ["x", "@playwright/mcp@latest"] };
+/** Issue #293: no browser flags -> @playwright/mcp picked the branded `chrome`
+ *  channel (/opt/google/chrome/chrome), which the image never ships. */
+const PLAYWRIGHT = {
+  command: "bun",
+  args: ["x", "@playwright/mcp@0.0.80", "--browser", "chromium", "--headless", "--isolated"],
+};
 
 describe("bring-up MCP config — roles honor mcp: (issue #276)", () => {
   for (const role of ["pilot", "scratch"]) {
@@ -123,5 +130,36 @@ describe("bring-up MCP config — roles honor mcp: (issue #276)", () => {
     const out = bringUp({ ROLE_MCP: "playwright" }, home);
     expect(out.args).toEqual([]);
     expect(out.stderr).toContain("studio-bringup:");
+  });
+});
+
+describe("bring-up MCP config — playwright drives the image's chromium (issue #293)", () => {
+  test("installed chromium -> --executable-path points at it", () => {
+    const home = fakeHome();
+    const chromium = join(home, "chromium");
+    writeFileSync(chromium, "#!/bin/sh\n", { mode: 0o755 });
+    const out = bringUp({ ROLE_MCP: "playwright", FLEET_MCP_CHROMIUM: chromium }, home);
+    expect(out.config?.mcpServers.playwright).toEqual({
+      command: "bun",
+      args: [...PLAYWRIGHT.args, "--executable-path", chromium],
+    });
+  });
+
+  test("dangling/non-executable chromium -> no --executable-path, still the chromium browser (never `chrome`)", () => {
+    const home = fakeHome();
+    const chromium = join(home, "chromium");
+    writeFileSync(chromium, "", { mode: 0o644 });
+    const out = bringUp({ ROLE_MCP: "playwright", FLEET_MCP_CHROMIUM: chromium }, home);
+    expect(out.config?.mcpServers.playwright).toEqual(PLAYWRIGHT);
+  });
+
+  test("default chromium path is the image's /usr/local/bin/chromium symlink (Dockerfile.studio)", () => {
+    expect(BRINGUP).toContain('os.environ.get("FLEET_MCP_CHROMIUM", "/usr/local/bin/chromium")');
+    const dockerfile = readFileSync(join(import.meta.dir, "../../container/Dockerfile.studio"), "utf8");
+    expect(dockerfile).toContain("/usr/local/bin/chromium");
+  });
+
+  test("@playwright/mcp is pinned, never @latest (runtime drift vs the image's chromium revision)", () => {
+    expect(BRINGUP).not.toContain("@playwright/mcp@latest");
   });
 });
