@@ -13,7 +13,7 @@ Sweeps 1-2 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-de
 | 1 | junior/llm request-gate preamble → one shared `aiRouteGate` | CLAUDE-ONLY (auth) |
 | 2 | GitHub Link `rel="next"` parser → one shared `nextPageLink` | GLM-OK |
 | 3 | comment-wake first-line predicates → one `firstLine()` | GLM-OK |
-| 4 | 4th base64EncodeUtf8 copy → one shared bytes module | GLM-OK |
+| 4 | 4th chunked-base64 copy → one shared bytes module | GLM-OK |
 | 5 | fleet_state keyed-prefix scan → one `scanStateKeys` | GLM-OK |
 | 6 | junior stats fetch → `FleetClient`-style tagged-result read | GLM-OK |
 | 7 | same-repo-nameWithOwner fold in github/api.ts GraphQL readers | GLM-OK |
@@ -38,20 +38,20 @@ Sweeps 1-2 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-de
 ### F3. Deepen comment-wake predicates: one `firstLine()` under `hasWakeMarker`/`isDoneRecordComment` — GLM-OK
 
 - **Files:** `src/board/comment-wake.ts:51-53` (`hasWakeMarker`), `:63-68` (`isDoneRecordComment`), each opening with its own `(body.split(/\r?\n/)[0] ?? "").trim()`; `src/github/wake-events.ts:246` applies `oneLine().slice()` to the same comment body three lines later.
-- **Problem:** the "comment's first line is the marker surface" rule is re-typed per predicate; a fourth marker (the file's own header says the shape is expected to grow) repeats the split+trim again and can drift on `\r` handling.
+- **Problem:** the "comment's first line is the marker surface" rule is re-typed per predicate; a fourth marker repeats the split+trim again and can drift on `\r` handling.
 - **Proposed change:** one private `firstLine(body)` in comment-wake.ts (or reuse `oneLine` where semantics agree); the two predicates become single-line comparisons. Pure module, no interface change to its callers (`qualifiesForCommentWake` stays the exported surface).
-- **Characterization first:** `test/github.webhook.test.ts`'s #236 describe block + `test/board.comment-wake.test.ts` marker cases (CRLF body, marker mid-comment, `/wakeup` non-match) pass unchanged.
+- **Characterization first:** `test/github.webhook.test.ts`'s #236 describe block (marker mid-comment, `/wakeup` non-match) + `test/board.comment-wake.test.ts`'s refusal cases pass unchanged; add one CRLF-body marker case at the fold.
 
-### F4. Delete the 4th `base64EncodeUtf8` copy: one shared chunked encoder — GLM-OK
+### F4. Delete the 4th copy of the chunked base64 encoder: one shared module — GLM-OK
 
-- **Files:** `src/github/api.ts:195-204` (B64_CHUNK 0x8000, TextEncoder-first, chunked `String.fromCharCode`) — the 4th copy; `src/studio/blueprint.ts:344-350`, `src/studio/sandbox-api.ts:241-246`, `src/studio/gh-wrapper.ts:159` already carry the identical 5-line body. Each copy's comment justifies the duplication as module independence, but the first three sit in studio/, mutually unreachable from github/'s perspective anyway.
+- **Files:** the same chunked-encode algorithm in four shapes: `src/github/api.ts:195-204` (`base64EncodeUtf8`, TextEncoder-first), `src/studio/blueprint.ts:344-350` (`base64EncodeUtf8`, byte-identical body), `src/studio/sandbox-api.ts:241-246` (`bytesToBase64`, takes `Uint8Array`, no TextEncoder line), `src/studio/gh-wrapper.ts:156-161` (`b64`, one-line loop body). Each copy's comment justifies the duplication as module independence, but the other three sit in studio/, mutually unreachable from github/'s perspective anyway.
 - **Problem:** one encoding rule (UTF-8-safe, chunked to avoid call-stack blowup) maintained four times; a bug in the chunk bound must land four times. Sweeps 1-2 noted the pattern but never filed it.
 - **Proposed change:** one `bytesToBase64(s)` in a dependency-free shared module (e.g. `src/base64.ts`, imports nothing — same tsconfig-reachability discipline `github/mint-token-error.ts` and `github/reach.ts` already document); all four call sites import it. The studio/ copies move in the same PR or a follow-up; the github/api.ts copy is the GLM-OK slice.
 - **Characterization first:** round-trip table (ASCII, Latin-1, CJK, 100k-char string → no throw, correct decode) on the shared module; `test/bun/cmd-syntax`-style callers unaffected.
 
 ### F5. Deepen fleet_state keyed scans: one `scanStateKeys(db, prefix)` behind junior authz sweep and read-repos grants — GLM-OK
 
-- **Files:** `src/junior/authz.ts:116-129` — `SELECT key FROM fleet_state WHERE key LIKE ?` with `${prefix}%`, then `startsWith(prefix)` re-check (LIKE's `_` wildcard) + `/^\d+$/` numeric-suffix parse + sort; `src/github/read-repos.ts:158-179` — same LIKE scan, same `lastIndexOf(":")` split, same numeric-suffix test, same sort. Two more keyed readers (`leak-gate`, `events`) use the same `LIKE prefix%` shape.
+- **Files:** `src/junior/authz.ts:116-129` — `SELECT key FROM fleet_state WHERE key LIKE ?` with `${prefix}%`, then `startsWith(prefix)` re-check (LIKE's `_` wildcard) + `/^\d+$/` numeric-suffix parse + sort; `src/github/read-repos.ts:158-179` — same LIKE scan, same `lastIndexOf(":")` split, same numeric-suffix test, same sort. The same keyed `LIKE prefix%` scan shape also appears in `src/studio/registry.ts`'s registry-row scan (~:408) and in `src/ratelimit.ts`'s two prune `DELETE`s (:73-75).
 - **Problem:** the "a fleet_state key is `<prefix><repo>:<number>`" grammar is written twice with hand-rolled parse-back; a malformed-key rule change (e.g. repo names containing `_`) must land in both. The junior copy's own comment already documents the LIKE-wildcard trap that a shared module would own once.
 - **Proposed change:** one `scanStateTaskKeys(db, prefix)` → `{repo, number}[]` (or per-key parse fn) in `src/state.ts` (already the fleet_state module) or a small sibling; both callers keep their own verbs on top. Pure read, no write-path change.
 - **Characterization first:** `test/junior.authz.test.ts` sweep pagination cases + `test/github.read-repos.test.ts` grant listing cases pass unchanged; add a shared-module case for `_` in a repo name (the trap the comment names).
@@ -95,7 +95,7 @@ Sweeps 1-2 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-de
 
 - `cli/fleet.ts`'s `boardRequest` exit-on-fail vs task-state's tagged-result fetchers — deliberate per doc comments; the full `FleetClient` unification is already sweep-2 F1 (CLAUDE-ONLY), open as a filed issue.
 - `src/github/webhook.ts`'s `stoppedWakeSkipKey` episode-flag dance (`getFlag`/`setFlag` "1"/"0" at :189-205) — mirrors watchdog.ts's rearm pattern; one shared episode-flag module would serve both, but watchdog.ts is outside this sweep's scope.
-- `src/board/routes.ts`'s three `mint` closures (`githubBoardApi`, `realLeakDeps`, `realPolicyFetch`, `realReapPort`, `realRescueGcPort`) — five per-handler `repoTokenMinter(env)` instantiations; a deliberate "credential never held across requests" rule (each handler's own doc comment says so), not duplication to remove.
+- `src/board/routes.ts`'s five per-handler `mint` closures (`githubBoardApi`, `realLeakDeps`, `realPolicyFetch`, `realReapPort`, `realRescueGcPort`); a deliberate "credential never held across requests" rule (each handler's own doc comment says so), not duplication to remove.
 - `src/llm/translate.ts` streaming state machine — already deep (sweep landed #298 follow-ups); the file's comment blocks narrating PR #255/maestro-review history are the sweep-1 "comment narrates history" shape but each carries a live measured fact; a comment-tightening pass would churn a hot, freshly-reviewed file for little gain.
 
 ## Counts
