@@ -108,13 +108,13 @@ interface RemoteUsageAggregate {
  * `--since` at all means "all time" (0). A string neither shape can parse
  * is reported as `{error}`, never silently treated as "all time".
  */
-export function parseSinceArg(since: string | undefined): number | { error: string } {
+export function parseSinceArg(since: string | undefined, now: () => number = Date.now): number | { error: string } {
   if (since === undefined) return 0;
   const dur = /^(\d+)([hd])$/.exec(since);
   if (dur) {
     const n = Number(dur[1]);
     const unitMs = dur[2] === "h" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-    return Date.now() - n * unitMs;
+    return now() - n * unitMs;
   }
   const t = new Date(since).getTime();
   if (!Number.isFinite(t)) return { error: `bad --since value ${JSON.stringify(since)} (expected e.g. 24h, 7d, or an ISO date)` };
@@ -125,8 +125,8 @@ export function parseSinceArg(since: string | undefined): number | { error: stri
  *  no local calls ever made is the ordinary, not an error, case), filters to
  *  `ts >= sinceMs`, and aggregates per `id` (normally just one: this
  *  machine's own hostname — recordUsageLocal's only writer). */
-function readLocalUsage(sinceMs: number): JuniorStatsRow[] {
-  const path = juniorUsageLogPath(process.env.HOME || homedir());
+function readLocalUsage(sinceMs: number, home: string = process.env.HOME || homedir()): JuniorStatsRow[] {
+  const path = juniorUsageLogPath(home);
   if (!existsSync(path)) return [];
   const byId = new Map<string, JuniorStatsRow>();
   for (const line of readFileSync(path, "utf8").split("\n")) {
@@ -161,34 +161,86 @@ export function formatJuniorStats(rows: JuniorStatsRow[]): string {
   return [line(headers), ...allRows.map(line)].join("\n");
 }
 
+/** Issue #366: one HTTP round trip's answer, in the same tagged shape
+ *  cli/fleet.ts's task-state fetchers already established — never thrown,
+ *  never exiting, so the command edge below stays the only place with a
+ *  failure policy. status 0 = fetch itself threw (network down, DNS, …). */
+export type JuniorUsageResult =
+  | { ok: true; rows: JuniorStatsRow[] }
+  | { ok: false; status: number; message: string };
+
+/** The fetch seam: URL + RequestInit in, Response out. The global fetch is
+ *  the production adapter; tests inject a scripted fake. */
+export type JuniorUsageFetch = (url: string, init: RequestInit) => Promise<Response>;
+
+/** Issue #366: the Worker read behind `fleet junior stats`, as one tagged
+ *  result. The URL, the Access headers and the !res.ok handling that
+ *  cmdJuniorStats used to hand-roll live here now — the full FleetClient
+ *  unification stays with sweep-2 F1, which owns every other read. */
+export async function fetchJuniorUsage(
+  creds: Credentials, sinceMs: number, doFetch: JuniorUsageFetch = fetch,
+): Promise<JuniorUsageResult> {
+  try {
+    const res = await doFetch(juniorUrl(creds, `/usage?since=${encodeURIComponent(String(sinceMs))}`), {
+      headers: accessHeaders(creds),
+    });
+    if (!res.ok) {
+      return { ok: false, status: res.status, message: `HTTP ${res.status}: ${(await res.text()).slice(0, 200)}` };
+    }
+    const body = (await res.json()) as RemoteUsageAggregate;
+    return {
+      ok: true,
+      rows: body.rows.map((r) => ({ id: r.studioId, calls: r.calls, inputTokens: r.inputTokens, outputTokens: r.outputTokens })),
+    };
+  } catch (e) {
+    return { ok: false, status: 0, message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export interface JuniorStatsDeps {
+  doFetch?: JuniorUsageFetch;
+  stdout?: (line: string) => void;
+  stderr?: (line: string) => void;
+  exit?: (code: number) => void;
+  now?: () => number;
+  /** HOME override so readLocalUsage reads a fixture instead of the real
+   *  machine's log. Falls back to process.env.HOME, same as cmdJunior. */
+  home?: string;
+}
+
 /**
  * `fleet junior stats [--since <dur|date>]`. Fetches the Worker's aggregate
  * (one row per studio) and merges it with this machine's own local rows
  * (laptop/direct-transport calls, never recorded server-side). A Worker
  * failure (network error, non-ok response) is reported to stderr but does
  * NOT fail the command — this is a read/reporting verb, and local data is
- * still worth printing when the Worker cannot be reached.
+ * still worth printing when the Worker cannot be reached. Deps are the
+ * test seam; every one defaults to the CLI's real behavior.
  */
-export async function cmdJuniorStats(creds: Credentials, since?: string): Promise<void> {
-  const sinceResult = parseSinceArg(since);
+export async function cmdJuniorStats(
+  creds: Credentials, since: string | undefined, deps: JuniorStatsDeps = {},
+): Promise<number> {
+  const log = deps.stdout ?? ((l: string) => console.log(l));
+  const warn = deps.stderr ?? ((l: string) => console.error(l));
+  const exit = deps.exit ?? ((c: number) => process.exit(c));
+  const sinceResult = parseSinceArg(since, deps.now ?? (() => Date.now()));
   if (typeof sinceResult !== "number") {
-    console.error(`fleet junior stats: ${sinceResult.error}`);
-    process.exit(1);
+    warn(`fleet junior stats: ${sinceResult.error}`);
+    exit(1);
+    return 1;
   }
-  const sinceMs = sinceResult;
-  const localRows = readLocalUsage(sinceMs);
+  const localRows = readLocalUsage(sinceResult, deps.home);
 
+  const remote = await fetchJuniorUsage(creds, sinceResult, deps.doFetch);
   let remoteRows: JuniorStatsRow[] = [];
-  try {
-    const res = await fetch(juniorUrl(creds, `/usage?since=${encodeURIComponent(String(sinceMs))}`), {
-      headers: accessHeaders(creds),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const body = (await res.json()) as RemoteUsageAggregate;
-    remoteRows = body.rows.map((r) => ({ id: r.studioId, calls: r.calls, inputTokens: r.inputTokens, outputTokens: r.outputTokens }));
-  } catch (e) {
-    console.error(`fleet junior stats: fleet-wide stats unavailable (${e instanceof Error ? e.message : String(e)}) — showing local-only`);
+  if (!remote.ok) {
+    warn(
+      `fleet junior stats: fleet-wide stats unavailable (${remote.message}) — showing local-only`,
+    );
+  } else {
+    remoteRows = remote.rows;
   }
 
-  console.log(formatJuniorStats([...remoteRows, ...localRows]));
+  log(formatJuniorStats([...remoteRows, ...localRows]));
+  return 0;
 }
