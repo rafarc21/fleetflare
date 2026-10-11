@@ -15,6 +15,6 @@
 - Two-way door: code-only, revertable.
 
 ## Steps
-1. Pin the undefined-repository guard with one RED test in test/github.api.test.ts (getIssueCloser describe block): PR closer with NO repository field stays foreign (repo: "").
+1. Pin the undefined-repository guard with one test in test/github.api.test.ts (getIssueCloser describe block): PR closer with NO repository field stays foreign (repo: "").
 2. GREEN: add private `sameRepoName(known, name)` in api.ts; rewrite `sameRepoIssues` as a two-line filter over it; replace getIssueCloser's closure with `known` list + `sameRepoName` calls; keep the three doc-comment blocks merged to one home on the new predicate.
 3. Full targeted verification: vitest run test/github.api.test.ts, then flock-gated check.

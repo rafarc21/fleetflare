@@ -816,7 +816,7 @@ export async function resolveCanonicalRepoName(token: string, repo: string): Pro
 type ClosingIssueNode = { number: number; repository: { nameWithOwner: string } };
 
 /** "This repo" for a name from GitHub: the caller's slug OR GitHub's
- *  canonical owner/name — after a rename/transfer the slug is stale and
+ *  canonical owner/name (#265) — after a rename/transfer the slug is stale and
  *  GitHub names the issue by its new home (the getIssueCloser pattern,
  *  #149). Any case. A name that is absent (undefined) is never this
  *  repo: getIssueCloser's PR-closer path reads that as foreign (#367).
