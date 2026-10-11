@@ -31,7 +31,7 @@ Sweeps 1-2 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-de
 ### F2. Deepen GitHub pagination: two `rel="next"` Link-header parsers → one — GLM-OK
 
 - **Files:** `src/board/api.ts:101-108` (`nextPageUrl`) and `src/github/api.ts:1031-1038` (`parseNextLink`) — same regex `/<([^>]*)>\s*;\s*rel="next"/` (one captures `[^>]*`, the other `[^>]+`), same comma-split loop, same null-on-last-page.
-- **Problem:** RFC 8288 Link parsing written twice; a fix to one (e.g. handling quoted or multi-param rel entries) must be remembered in both. Both files' own comments cite each other's pagination problems.
+- **Problem:** RFC 8288 Link parsing written twice; a fix to one (e.g. handling quoted or multi-param rel entries) must be remembered in both. Each file's own comments record a pagination bug it hit (board/api.ts:190 #148; github/api.ts:1012-1019 PR #239).
 - **Proposed change:** one shared `nextPageLink(header: string | null): string | null` (pure, no Env — place in `src/github/` or a new tiny shared module both tsconfig projects can reach); both callers import it. Behavior-preserving: identical matches on every real GitHub Link header.
 - **Characterization first:** golden table: single next entry, multiple entries with next last, no next, no header → same result both before and after.
 
@@ -45,7 +45,7 @@ Sweeps 1-2 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-de
 ### F4. Delete the 4th copy of the chunked base64 encoder: one shared module — GLM-OK
 
 - **Files:** the same chunked-encode algorithm in four shapes: `src/github/api.ts:195-204` (`base64EncodeUtf8`, TextEncoder-first), `src/studio/blueprint.ts:344-350` (`base64EncodeUtf8`, byte-identical body), `src/studio/sandbox-api.ts:241-246` (`bytesToBase64`, takes `Uint8Array`, no TextEncoder line), `src/studio/gh-wrapper.ts:156-161` (`b64`, one-line loop body). Each copy's comment justifies the duplication as module independence, but the other three sit in studio/, mutually unreachable from github/'s perspective anyway.
-- **Problem:** one encoding rule (UTF-8-safe, chunked to avoid call-stack blowup) maintained four times; a bug in the chunk bound must land four times. Sweeps 1-2 noted the pattern but never filed it.
+- **Problem:** one encoding rule (UTF-8-safe, chunked to avoid call-stack blowup) maintained four times; a bug in the chunk bound must land four times. Sweeps 1-2 never surfaced it.
 - **Proposed change:** one `bytesToBase64(s)` in a dependency-free shared module (e.g. `src/base64.ts`, imports nothing — same tsconfig-reachability discipline `github/mint-token-error.ts` and `github/reach.ts` already document); all four call sites import it. The studio/ copies move in the same PR or a follow-up; the github/api.ts copy is the GLM-OK slice.
 - **Characterization first:** round-trip table (ASCII, Latin-1, CJK, 100k-char string → no throw, correct decode) on the shared module; `test/bun/cmd-syntax`-style callers unaffected.
 
@@ -59,7 +59,7 @@ Sweeps 1-2 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-de
 ### F6. Deepen `fleet junior stats`'s Worker read: tagged-result fetch instead of inline try/catch — GLM-OK
 
 - **Files:** `cli/junior.ts:181-191` — hand-rolled `fetch(juniorUrl(...))` + `accessHeaders` + `!res.ok` throw + `res.json()` cast, wrapped in a soft-fail try/catch. The board verbs' `boardRequest` (`cli/fleet.ts:1263-1273`) and the task-state fetchers (`cli/fleet.ts:1492-1529`) each re-implement the same dance with different failure policies — sweep-2 F1 already owns the unified `FleetClient`; this is the one remaining CLI read in this sweep's scope outside it.
-- **Problem:** junior.ts's copy is reachable from the root test pool (`cli/junior.ts` deliberately avoids bun-only globals), so it cannot reuse `boardRequest`'s `process.exit` shape — but it also doesn't share anything with the other non-exiting fetchers.
+- **Problem:** this fetch cannot reuse `boardRequest`'s `process.exit` shape — its soft-fail posture (Worker down → local-only line, exit 0) needs a non-exiting tagged result — but it also doesn't share anything with the other non-exiting fetchers.
 - **Proposed change (this slice):** give `cmdJuniorStats` a tiny `fetchUsage(creds, sinceMs) → {ok, rows} | {ok:false, error}` helper (injectable for tests), same tagged-result shape `taskStateFetchCurrent` already established; the print/soft-fail policy stays at the command edge. Full `FleetClient` migration stays sweep-2 F1's PR.
 - **Characterization first:** `test/bun/junior-stats-cli.test.ts` behavior (Worker ok → merged table; Worker down → local-only line, exit 0) identical.
 
@@ -73,7 +73,7 @@ Sweeps 1-2 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-de
 ### F8. Deepen ratelimit kind-wrappers: one `makeRateLimitKind` factory — GLM-OK
 
 - **Files:** `src/junior/ratelimit.ts:22-40` and `src/llm/ratelimit.ts:21-69` — three wrappers (`checkAndConsumeJuniorRateLimit`, `checkAndConsumeLeadRateLimit`, `checkAndConsumeLeadCountTokensRateLimit`), each the same 4-line `parsePositiveInt` × N + `checkAndConsumeRateLimit(...)` body over `../ratelimit.ts`'s shared core, differing only in prefixes, env names, defaults, and the count_tokens `MAX_SAFE_INTEGER` daily trick.
-- **Problem:** the core is already deep (sweep landed #284's hoist); the three wrappers are pass-throughs over it — a 4th kind (issue #335's retry lane, a future webhook lane) copies the wrapper again. The count_tokens wrapper's `MAX_SAFE_INTEGER` inert-daily comment records the one shape the core's contract doesn't express.
+- **Problem:** the core is already deep (sweep landed #284's hoist); the three wrappers are pass-throughs over it — a future retry or webhook lane copies the wrapper again. The count_tokens wrapper's `MAX_SAFE_INTEGER` inert-daily comment records the one shape the core's contract doesn't express.
 - **Proposed change:** a `makeRateLimitKind({ kind, env, perMinuteEnv, perMinuteDefault, dailyCapEnv?, dailyCapDefault? })` in `src/ratelimit.ts`; the three public functions keep their names and signatures (callers unchanged) and become one-line factory calls. Optionally an explicit `daily: false` option replacing the MAX_SAFE_INTEGER trick — behavior-identical either way, chosen in the issue.
 - **Characterization first:** `test/junior.ratelimit.test.ts` + `test/llm.ratelimit.test.ts` (bucketing, refusal retryAfterMs, pruning) pass unchanged; add one case per kind via the factory.
 
@@ -88,7 +88,7 @@ Sweeps 1-2 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-de
 
 - **Files:** `src/github/webhook.ts:106-124` (`revokeJuniorOnIssueEvent`) and `:142-160` (`revokeGlmLeadOnSecurityLabelEvent`) — two `JSON.parse(body)` try/catches each reading `action`/`label?.name`/`issue?.number`/`repository?.full_name` off the same webhook payload shape, both TOTAL-swallow, both feeding a revoke verb.
 - **Problem:** one payload grammar parsed twice; a GitHub payload-shape change (or a third revoke trigger) repeats the field extraction and its type guards.
-- **Proposed change:** one private `issueEventFields(body): {repo, number, action, label} | null` in webhook.ts; both handlers keep their own policies (which actions/labels revoke). CLAUDE-ONLY: both handlers revoke junior authorizations — the junior-authz security property (studio can never grant/revoke itself) sits on this path.
+- **Proposed change:** one private `issueEventFields(body): {repo, number, action, label} | null` in webhook.ts; both handlers keep their own policies (which actions/labels revoke). CLAUDE-ONLY: both handlers revoke authorizations — one the junior D1 record, one a glm-lead assignment — the junior-authz security property (studio can never grant/revoke itself) sits on this path.
 - **Characterization first:** `test/github.webhook.test.ts`'s #35 revoke cases (labeled terminal, closed, unrelated label → no revoke) pass unchanged.
 
 ## Not filed (deferred / noted)
