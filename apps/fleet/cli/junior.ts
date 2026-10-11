@@ -158,8 +158,8 @@ export function formatJuniorStats(rows: JuniorStatsRow[]): string {
   const totalRow = ["TOTAL", String(totals.calls), String(totals.inputTokens), String(totals.outputTokens)];
   // formatColumns's own #205 default (last column never padded) replaces the
   // old pad-every-column-then-trimEnd pair: identical bytes — the pin in
-  // test/bun/junior-stats-unit.test.ts proves the trimEnd was always a
-  // no-op on the already-width-aligned last column.
+  // test/bun/junior-stats-unit.test.ts proves pad-every-column-then-trimEnd
+  // produces the same bytes as never padding the last column.
   return formatColumns(headers, [...body, totalRow]);
 }
 

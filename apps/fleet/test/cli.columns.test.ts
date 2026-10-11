@@ -60,7 +60,8 @@ const CLEAR_DECISION: SyncDecision = {
 };
 
 // Same row-building shape as cli.accounts-format.test.ts's own `row`, kept
-// inline here (a test file never imports another test file).
+// inline here deliberately: each pin stays self-contained and never rides
+// the evolution of a shared fixture.
 function acct(overrides: Partial<AccountSnapshotRow> = {}): AccountSnapshotRow {
   return {
     name: "CLAUDE_CODE_OAUTH_TOKEN", label: "primary@example.com", matchSource: "label",

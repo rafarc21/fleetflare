@@ -2,8 +2,9 @@
 // `fleet accounts sync`. No I/O: the cswap subprocess read and the Worker
 // fetch both live in cli/accounts.ts (bun-only, see that file's own header
 // for why it stays separate); this module imports only
-// src/studio/claude-swap.ts's types and accounts.ts's pure
-// NULL_UNTIL_CEILING_MS (#306), so it is directly unit-testable the
+// src/studio/claude-swap.ts's types, accounts.ts's pure
+// NULL_UNTIL_CEILING_MS (#306), and cli/columns.ts's formatColumns (#399 —
+// pure, imports nothing), so it is directly unit-testable the
 // same way cli/task-format.ts and cli/restart-format.ts already are (see
 // cli/burn-format.ts's own header for the general "pure sibling of an impure
 // cli/ file" convention this follows).

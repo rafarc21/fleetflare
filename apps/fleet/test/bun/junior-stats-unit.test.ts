@@ -202,12 +202,12 @@ describe("formatJuniorStats — exact bytes (#399)", () => {
     );
   });
 
-  // The drift this fold cites: the current implementation pads EVERY column
-  // then trimEnds each line, so the #205 rule lives in the trimEnd, not in
-  // the table. These bytes prove trimEnd is a no-op on an already-unpadded
-  // last column — the fold (default: last column never padded) must keep
-  // every line identical.
-  test("no line ends in whitespace (trimEnd on an already-unpadded last column is a no-op)", () => {
+  // The drift this fold cites: pre-fold code padded EVERY column then
+  // trimEnded each line, so the #205 rule lived in the trimEnd, not in the
+  // table. These bytes prove the equivalence: pad-every-column-then-trimEnd
+  // leaves the same bytes as never padding the last column — the fold
+  // (default: last column never padded) must keep every line identical.
+  test("no line ends in whitespace (pad-every-column-then-trimEnd produces the same bytes as never padding the last column)", () => {
     for (const line of formatJuniorStats(ROWS).split("\n")) {
       expect(line).toBe(line.trimEnd());
     }

@@ -15,6 +15,8 @@
  *
  * The LAST column is never padded — issue #205: trailing blanks on every
  * line are pure bytes, and they turned one long ERROR into 87 KB of output.
+ * Also, trailing spaces after a url make it harder to select, and nothing
+ * follows it (the second, independent rationale task-format.ts carried).
  * Callers wanting the old padded-right-edge shape (what junior's per-line
  * trimEnd used to mask) can opt back in with `padLast: true`; no current
  * caller does.
