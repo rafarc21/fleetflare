@@ -8,6 +8,7 @@ import {
 } from "../src/studio/paste";
 import type { Env } from "../src/env";
 import { nsWith } from "./helpers/fake-namespace";
+import { authorizedReq } from "./helpers/http";
 
 // Same fake-DO-namespace approach as test/studio.routes.test.ts's
 // fakeStudioNamespace: a live StudioDO cannot be constructed under
@@ -44,13 +45,6 @@ function fakeStudioNamespace(writeFile: PasteDeps["writeFile"]) {
 function envWithFakeStudio(writeFile: PasteDeps["writeFile"] = vi.fn(async () => {})) {
   const fakeNs = fakeStudioNamespace(writeFile);
   return { testEnv: { ...env, STUDIO: fakeNs } as unknown as Env, fakeNs };
-}
-
-function authorizedReq(path: string, init: RequestInit = {}) {
-  return new Request(`https://x${path}`, {
-    ...init,
-    headers: { "Cf-Access-Jwt-Assertion": "test-jwt", ...(init.headers ?? {}) },
-  });
 }
 
 function pasteReq(id: string, contentType: string, body: Uint8Array, extraHeaders: Record<string, string> = {}) {

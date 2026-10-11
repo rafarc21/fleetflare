@@ -15,6 +15,7 @@ import type { TranscriptStorage } from "../src/studio/transcript";
 import { RESTARTS_KEY, recordRestart, restartsInWindow, RESTART_WINDOW_MS, type RestartLog } from "../src/studio/restarts";
 import type { StudioStatus } from "../src/studio/types";
 import { formatRestartCell } from "../cli/restart-format";
+import { fakeStorage as doStorage } from "./helpers/do-storage";
 
 // Wire-format literals (markers/paths/keys are the container↔Worker protocol,
 // pinned here as literals so these asserts fail when the builder drifts —
@@ -33,9 +34,9 @@ const T0 = "2026-09-29T10:00:00.000Z";
 type Store = TranscriptStorage & ObservedStorage & StudioStorage & { map: Map<string, unknown> };
 
 function fakeStorage(seed: { bootId?: string; via?: BringupVia; restarts?: RestartLog } = {}): Store {
-  const map = new Map<string, unknown>();
-  if (seed.bootId !== undefined) map.set(TRANSCRIPT_BOOT_ID_KEY, seed.bootId);
-  if (seed.restarts !== undefined) map.set(RESTARTS_KEY, seed.restarts);
+  const initial: Record<string, unknown> = {};
+  if (seed.bootId !== undefined) initial[TRANSCRIPT_BOOT_ID_KEY] = seed.bootId;
+  if (seed.restarts !== undefined) initial[RESTARTS_KEY] = seed.restarts;
   const observed: Observed = { ...emptyObserved(), incarnation: TOK };
   if (seed.via) {
     observed.session = {
@@ -43,16 +44,17 @@ function fakeStorage(seed: { bootId?: string; via?: BringupVia; restarts?: Resta
       snapshotAgeS: null, turnsBefore: 0, reason: null,
     };
   }
-  map.set(OBSERVED_KEY, observed);
+  initial[OBSERVED_KEY] = observed;
+  const s = doStorage(initial);
   return {
-    map,
-    get: (async (key: string) => map.get(key)) as unknown as Store["get"],
+    map: s.map,
+    get: s.get as unknown as Store["get"],
     put: (async (keyOrEntries: unknown, value?: unknown) => {
       if (typeof keyOrEntries === "object" && keyOrEntries !== null) {
-        for (const [k, v] of Object.entries(keyOrEntries as Record<string, unknown>)) map.set(k, v);
+        for (const [k, v] of Object.entries(keyOrEntries as Record<string, unknown>)) s.map.set(k, v);
         return;
       }
-      map.set(keyOrEntries as string, value);
+      s.map.set(keyOrEntries as string, value);
     }) as unknown as Store["put"],
   } as Store;
 }

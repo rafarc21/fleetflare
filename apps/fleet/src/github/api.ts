@@ -1,4 +1,5 @@
 import { closesIssueByKeyword } from "./promote-close";
+import { nextPageLink } from "./next-link";
 import { base64EncodeUtf8 } from "../base64";
 
 // Issue #331: a neutral product name, not the App's own bot slug
@@ -1010,18 +1011,6 @@ export async function listMatchingBranches(token: string, repo: string, prefix: 
 export const BRANCH_NAMES_PAGE_SIZE = 100;
 export const BRANCH_NAMES_MAX_PAGES = 10;
 
-/** Picks the `rel="next"` target out of a `Link` response header
- *  (RFC 8288, comma-joined `<url>; rel="..."` entries) — `null` when there is
- *  no such header or no `next` entry in it, i.e. "no more pages". */
-function parseNextLink(linkHeader: string | null): string | null {
-  if (linkHeader === null) return null;
-  for (const part of linkHeader.split(",")) {
-    const match = part.match(/<([^>]+)>\s*;\s*rel="next"/);
-    if (match) return match[1]!;
-  }
-  return null;
-}
-
 /**
  * `truncated: true` means the page cap (`BRANCH_NAMES_MAX_PAGES`) was hit
  * while GitHub still had a `next` link to offer — the result is a genuine
@@ -1046,7 +1035,7 @@ export async function listAllBranchNames(
       `list branches for ${repo}`,
     );
     for (const b of JSON.parse(text) as { name: string }[]) names.push(b.name);
-    url = parseNextLink(res.headers.get("link"));
+    url = nextPageLink(res.headers.get("link"));
   }
   return { names, truncated: url !== null };
 }
