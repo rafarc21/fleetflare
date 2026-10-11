@@ -1364,5 +1364,23 @@ describe("lsJsonRows (issue #70)", () => {
     expect(r.leadSince).toBeNull();
     expect(r.limitResetsAt).toBeNull();
   });
+
+  // Board issue #332: `openPrs` per row — this studio's unmerged-PR count,
+  // present ONLY when the open-prs route answered for its repo (fleet ls
+  // passes the map openPrsByStudio built). Absence means "no data" (a route
+  // that 404ed, an old Worker), never a silent 0 — the exact false-clean
+  // reading this whole issue exists to prevent.
+  it("#332: openPrs rides along only when the route answered for the studio", () => {
+    const counted = lsJsonRows([status({ id: "websites--web-studio" })], NOW, undefined, new Map([["websites--web-studio", 2]]))[0];
+    expect(counted.openPrs).toBe(2);
+    const zero = lsJsonRows([status({ id: "websites--pilot" })], NOW, undefined, new Map([["websites--pilot", 0]]))[0];
+    expect(zero.openPrs).toBe(0);
+    // No map entry for this studio: NO openPrs key at all.
+    const absent = lsJsonRows([status({ id: "beta--pilot" })], NOW, undefined, new Map([["websites--pilot", 1]]))[0];
+    expect(Object.hasOwn(absent, "openPrs")).toBe(false);
+    // No map passed (a caller predating this feature): unchanged shape.
+    const noMap = lsJsonRows([status({ id: "websites--pilot" })], NOW)[0];
+    expect(Object.hasOwn(noMap, "openPrs")).toBe(false);
+  });
 });
 

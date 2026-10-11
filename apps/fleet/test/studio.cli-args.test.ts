@@ -344,6 +344,45 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["destroy", "--force"])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });
 
+  // Board issue #332: --strict-unmerged — the same bespoke "no value, just
+  // presence" shape as --force/--discard-unsynced/--park, refused with every
+  // other trailing token and when slid into the id slot.
+  it("destroy --strict-unmerged parses, alone or beside every other flag, in any order (#332)", () => {
+    expect(parseCliArgs(["destroy", "websites--scratch", "--strict-unmerged"])).toEqual({
+      cmd: "destroy", id: "websites--scratch", force: false, discardUnsynced: false, strictUnmerged: true,
+    });
+    for (const rest of [
+      ["--force", "--park", "--strict-unmerged"],
+      ["--strict-unmerged", "--force", "--park"],
+      ["--discard-unsynced", "--strict-unmerged"],
+    ]) {
+      expect(parseCliArgs(["destroy", "websites--scratch", ...rest])).toEqual({
+        cmd: "destroy", id: "websites--scratch", force: rest.includes("--force"),
+        discardUnsynced: rest.includes("--discard-unsynced"), park: true, strictUnmerged: true,
+      });
+    }
+  });
+
+  it("plain destroy (no --strict-unmerged) keeps its exact shape — no strictUnmerged key (#332 regression pin)", () => {
+    const res = parseCliArgs(["destroy", "websites--scratch"]);
+    expect(res).toEqual({ cmd: "destroy", id: "websites--scratch", force: false, discardUnsynced: false });
+    expect(Object.keys(res)).not.toContain("strictUnmerged");
+  });
+
+  it("destroy --strict-unmerged twice, or sliding into the id slot, or beside an unknown flag, is a usage error", () => {
+    expect(parseCliArgs(["destroy", "websites--scratch", "--strict-unmerged", "--strict-unmerged"]).cmd).toBe("usage");
+    expect(parseCliArgs(["destroy", "--strict-unmerged"])).toEqual({ cmd: "usage", message: CLI_USAGE });
+    // A typo'd prefix (--strict) is an unknown token, never silently ignored.
+    expect(parseCliArgs(["destroy", "websites--scratch", "--strict"]).cmd).toBe("usage");
+    expect(parseCliArgs(["destroy", "websites--scratch", "--strict-unmerged", "--verbose"]).cmd).toBe("usage");
+  });
+
+  it("destroy's help names --strict-unmerged (#332)", () => {
+    expect(VERBS.destroy.args).toContain("--strict-unmerged");
+    expect(VERBS.destroy.summary).toContain("--strict-unmerged");
+    expect(VERBS.destroy.summary).toContain("park warning");
+  });
+
   it("an unrecognised command is a usage error, not a crash", () => {
     expect(parseCliArgs(["nonsense"])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });

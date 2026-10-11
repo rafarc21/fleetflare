@@ -15,11 +15,37 @@ function body(sig: string): string {
 }
 
 describe("fleet destroy — every flag reaches the route", () => {
-  test("cmdDestroy builds its path from every flag (issue #59 adds --park)", () => {
-    expect(body("async function cmdDestroy(")).toContain("destroyPath(force, discardUnsynced, park)");
+  test("cmdDestroy builds its path from every flag (issue #59 adds --park, #332 adds --strict-unmerged)", () => {
+    expect(body("async function cmdDestroy(")).toContain("destroyPath(force, discardUnsynced, park, strictUnmerged)");
   });
 
-  test("the dispatcher hands cmdDestroy the parsed discard and park flags", () => {
-    expect(src).toContain("cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced, parsed.park === true)");
+  test("the dispatcher hands cmdDestroy the parsed discard, park and strict-unmerged flags", () => {
+    expect(src).toContain(
+      "cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced, parsed.park === true, parsed.strictUnmerged === true)",
+    );
+  });
+
+  // Board issue #332: the strict refusal must fire CLIENT-side, BEFORE any
+  // destroy request — a refusal that let the destroy through would not be a
+  // refusal. Pinned by position within cmdDestroy's own body, the same
+  // source-pin technique this file's own header documents.
+  test("#332: the strict refusal prints and exits BEFORE requestDestroy fires", () => {
+    const fn = body("async function cmdDestroy(");
+    const refusal = fn.indexOf("strictRefusalLines(");
+    const destroy = fn.indexOf("requestDestroy(");
+    expect(refusal).toBeGreaterThan(-1);
+    expect(destroy).toBeGreaterThan(-1);
+    expect(refusal).toBeLessThan(destroy);
+  });
+
+  // #332: the non-blocking warning belongs to the CONFIRMED-stopped path
+  // only — printing a "still has N unmerged PRs" line for a destroy whose
+  // outcome is unknown would be a claim this side cannot make.
+  test("#332: the park warning prints only inside the confirmed teardown block", () => {
+    const fn = body("async function cmdDestroy(");
+    const teardown = fn.indexOf("if (report.teardown)");
+    const warning = fn.indexOf("parkWarningLines(");
+    expect(teardown).toBeGreaterThan(-1);
+    expect(warning).toBeGreaterThan(teardown);
   });
 });
