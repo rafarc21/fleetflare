@@ -39,6 +39,7 @@ import {
 } from "../src/studio/failover";
 import type { ClaudeAccount } from "../src/studio/accounts";
 import { ORG_SPEND_LIMIT_PANE } from "./fixtures/rate-limit-panes";
+import { fixedNow, b64 } from "./helpers/datetime";
 
 // A live StudioDO cannot be constructed under vitest-pool-workers (see
 // src/studio/do.ts's own header) — this file targets the exported pure
@@ -52,14 +53,6 @@ const TODAY = "2026-08-16";
  *  this file reports as the start of its tar — the value a tick may adopt as
  *  the burn watermark, but only once its own burn parse has succeeded. */
 const TAR_STARTED_AT = 1_758_067_200;
-
-function fixedNow(iso: string): () => Date {
-  return () => new Date(iso);
-}
-
-function b64(bytes: number[]): string {
-  return btoa(String.fromCharCode(...bytes));
-}
 
 /** Chunked base64 encode for large (multi-MiB) byte arrays — a plain
  *  `String.fromCharCode(...bytes)` spread blows the call stack past a few

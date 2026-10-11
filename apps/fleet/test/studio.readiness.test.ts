@@ -6,6 +6,7 @@ import {
 import type { SessionSyncDeps } from "../src/studio/session-sync";
 import { STUDIO_TMUX, withStudioTmux } from "../src/studio/tmux";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
+import { fixedNow } from "./helpers/datetime";
 
 // Fleet ls readiness fix ("a dead studio looks alive" — P5a Task 5's Finding
 // 2, live-measured: 3 of 4 studios bare, `fleet ls` showed every one
@@ -21,10 +22,6 @@ import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 
 const STUDIO_ID = "websites--pilot";
 const NOW_ISO = "2026-08-28T12:00:00.000Z";
-
-function fixedNow(iso: string): () => Date {
-  return () => new Date(iso);
-}
 
 function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
   return {

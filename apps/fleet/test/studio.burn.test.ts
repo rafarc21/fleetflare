@@ -19,6 +19,7 @@ import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
 import { recordStudio } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
+import { fixedNow } from "./helpers/datetime";
 
 // P2 plane 4 (token monitor) — docs/superpowers/specs/2026-08-16-studio-memory-p2-design.md,
 // ruling R-P2-4. Fixture jsonl shape below is SYNTHESIZED, not copied: derived
@@ -714,10 +715,6 @@ const STUDIO_ID = "websites--pilot";
 /** Review round 3 (#202): the container epoch the fake tar/stat command below
  *  reports as the start of its tar. */
 const TAR_STARTED_AT = 1_758_067_200;
-
-function fixedNow(iso: string): () => Date {
-  return () => new Date(iso);
-}
 
 /** Same in-memory Map-backed fake pattern test/studio.session.test.ts's own
  *  fakeSessionStorage uses, widened for this task's three new keys — kept

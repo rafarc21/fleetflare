@@ -8,6 +8,7 @@ import {
   INCARNATION_PATH, SESSION_FOUND_SECTION, SESSION_CONTINUE_SECTION, SESSION_CWD_SECTION,
 } from "../src/studio/observed";
 import { REAL_PILOT_PANE } from "./fixtures/rate-limit-panes";
+import { fixedNow, b64 } from "./helpers/datetime";
 
 // Wire-format literals — the container↔Worker delimited-stdout protocol, same
 // convention test/studio.observation-tick.test.ts:33-34 already established:
@@ -47,10 +48,6 @@ const TRANSCRIPT_BOOT_ID_KEY = "transcriptBootId";
 
 const STUDIO_ID = "websites--pilot";
 const TODAY = "2026-08-16";
-
-function fixedNow(iso: string): () => Date {
-  return () => new Date(iso);
-}
 
 /**
  * Same shape as provision.ts's own StudioStorage fake in
@@ -107,10 +104,6 @@ function fakeStorage(
     }) as TranscriptStorage["put"],
   };
   return storage;
-}
-
-function b64(bytes: number[]): string {
-  return btoa(String.fromCharCode(...bytes));
 }
 
 /** UTF-8 aware, for fixtures with real text (terminal output is not
