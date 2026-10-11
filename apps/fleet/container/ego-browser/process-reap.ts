@@ -1,12 +1,15 @@
 /**
- * Pure OS-process-identification and bounded-wait helpers for daemon.ts's
- * shutdown() backstop (board #36, and the follow-up review findings on the
- * original #36 fix -- see
- * docs/plans/2026-09-23-ego-browser-idle-shutdown-container.md). Deliberately
- * has no Bun/playwright-core import and does no unconditional real I/O --
- * same spirit as idle-shutdown.ts/registry.ts: fast, deterministic,
- * unit-testable via injected fakes. daemon.ts is the only module that plugs
- * the real /proc filesystem and real timers in here.
+ * Browser-process ownership for daemon.ts: the BrowserProcess lifecycle
+ * (lazy launch -> pid discovery -> bounded close -> SIGKILL backstop; board
+ * #326, deep-modules sweep 2 F11) plus the OS-process-identification and
+ * bounded-wait helpers it is built from (board #36 and the follow-up
+ * review findings on that fix; board #276 -- see
+ * docs/plans/2026-09-23-ego-browser-idle-shutdown-container.md and
+ * docs/plans/2026-10-08-fix-276-ego-browser-hang.md). No playwright-core
+ * import and no unconditional real I/O: every real thing (launcher, /proc,
+ * kill, timers) is injected, so the whole module is fast, deterministic and
+ * unit-testable -- same spirit as idle-shutdown.ts and registry.ts.
+ * daemon.ts is the only module that plugs the real implementations in.
  */
 import { readdirSync, readFileSync } from "node:fs";
 
@@ -132,4 +135,103 @@ export function raceWithTimeout(promise: Promise<unknown>, timeoutMs: number, se
     setTimeoutFn(finish, timeoutMs);
     promise.then(finish, finish);
   });
+}
+
+// ---------------------------------------------------------------------------
+// BrowserProcess (board #326): owns the daemon's whole browser-process
+// lifecycle so daemon.ts only wires real implementations and Playwright
+// specifics. Every behavioral guarantee below is load-bearing and covered
+// by test/bun/ego-browser-process.test.ts with injected fakes.
+// ---------------------------------------------------------------------------
+
+/** The only Browser member this sequence relies on; playwright-core's real
+ * Browser satisfies it structurally. */
+export interface BrowserLike {
+  close(): Promise<void>;
+}
+
+export interface BrowserProcessDeps<T extends BrowserLike = BrowserLike> {
+  launch(): Promise<T>;
+  log(line: string): void;
+  /** Real daemon uses findDirectChildPid() -- pid discovery has no public
+   * API on playwright-core's Browser (see findDirectChildPid's comment). */
+  findPid(parentPid: number, opts: { chromiumBinaryName?: string }): number | undefined;
+  /** Real daemon uses process.kill; injected so tests assert the backstop. */
+  killFn(pid: number, signal: string): void;
+  /** Optional fake clock for raceWithTimeout in close(). */
+  setTimeoutFn?: typeof setTimeout;
+}
+
+export interface BrowserProcess<T extends BrowserLike = BrowserLike> {
+  get(): Promise<T>;
+  close(budgetMs: number): Promise<void>;
+}
+
+export function createBrowserProcess<T extends BrowserLike>(
+  chromiumBinaryName: string,
+  deps: BrowserProcessDeps<T>,
+): BrowserProcess<T> {
+  let browserPromise: Promise<T> | undefined;
+  // Real Chromium OS pid, once a launch succeeded -- the SIGKILL backstop's
+  // target. Stays undefined on the launch-failure path, so close() no-ops
+  // its kill there.
+  let browserPid: number | undefined;
+
+  return {
+    get() {
+      if (!browserPromise) {
+        // Once per REAL attempt, never on a cache hit -- a fresh failure's
+        // message is textually identical to a stale replay, so this log
+        // line is the only externally-observable proof a retry happened
+        // (board #276; ego-browser-launch-self-heal.test.ts greps it).
+        deps.log("getBrowser: attempting chromium launch");
+        browserPromise = deps
+          .launch()
+          .then((browser) => {
+            browserPid = deps.findPid(process.pid, { chromiumBinaryName });
+            deps.log(`browser launched, pid ${browserPid ?? "unknown"}`);
+            return browser;
+          })
+          .catch((err) => {
+            // A rejected Promise is still truthy: without this reset every
+            // later get() would replay the same stale rejection forever
+            // (board #276's permanent wedge). The throw still rejects THIS
+            // caller's await; the NEXT get() gets a fresh launch.
+            browserPromise = undefined;
+            throw err;
+          });
+      }
+      return browserPromise;
+    },
+
+    close(budgetMs: number) {
+      // Never launched -> nothing to close, nothing recorded to kill.
+      // (browserPid is only ever set after a launch resolved, so
+      // browserPromise undefined implies browserPid undefined.)
+      if (!browserPromise) return Promise.resolve();
+      // `.catch(() => {})` swallows either a launch failure or a close
+      // failure, so shutdown's caller never throws out of this path (a
+      // bare await of a permanently-rejected launch was board #32's
+      // resident-forever bug, closed by #44). raceWithTimeout bounds a
+      // hung close() so the backstop below still runs -- the follow-up
+      // review finding on the original #36 fix.
+      const closeWait = browserPromise.then((b) => b.close()).then(
+        () => undefined,
+        () => undefined,
+      );
+      return raceWithTimeout(closeWait, budgetMs, deps.setTimeoutFn).then(() => {
+        // Unconditional backstop: raceWithTimeout only bounds the WAIT --
+        // it does not claim the process died -- so always check-and-kill
+        // for real. kill(2) on an already-exited-but-unreaped zombie is a
+        // no-op; ESRCH (fully reaped) throws, which is the expected case.
+        if (browserPid !== undefined) {
+          try {
+            deps.killFn(browserPid, "SIGKILL");
+          } catch {
+            // Already gone -- fine.
+          }
+        }
+      });
+    },
+  };
 }

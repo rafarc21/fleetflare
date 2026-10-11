@@ -13,7 +13,7 @@ import { resolvePaths } from "./paths";
 import { encodeMessage, MessageFramer, type RpcRequest } from "./rpc";
 import { Registry, type FinishKeep, type TaskSpaceRecord } from "./registry";
 import { IdleShutdown, resolveIdleMs } from "./idle-shutdown";
-import { findDirectChildPid, raceWithTimeout } from "./process-reap";
+import { createBrowserProcess, findDirectChildPid } from "./process-reap";
 import type { FnOrStringWire, SnapshotOpts, UrlMatcherWire } from "./wire";
 
 const paths = resolvePaths();
@@ -30,12 +30,8 @@ function log(line: string): void {
 process.on("uncaughtException", (err) => log(`uncaughtException: ${err instanceof Error ? err.stack : err}`));
 process.on("unhandledRejection", (err) => log(`unhandledRejection: ${err instanceof Error ? err.stack : err}`));
 
-// findDirectChildPid() (board #36, and the crashpad-identity-check
-// follow-up finding on the original fix) now lives in process-reap.ts --
-// see its own doc comment there for the full reasoning. Kept out of
-// daemon.ts so it (and shutdown()'s bounded-wait helper, raceWithTimeout())
-// are unit-testable on their own with injected fakes, same spirit as
-// idle-shutdown.ts/registry.ts.
+// findDirectChildPid() and the whole BrowserProcess lifecycle live in
+// process-reap.ts -- see its own doc comments there for the full reasoning.
 
 // ---------------------------------------------------------------------------
 // Browser: launched once, lazily, on the first call that actually needs it
@@ -63,58 +59,43 @@ const CHROMIUM_PATH = process.env.EGO_BROWSER_CHROMIUM_PATH?.trim() || "/usr/loc
 // ego-browser-launch-timeout.test.ts).
 const LAUNCH_TIMEOUT_MS = Number(process.env.EGO_BROWSER_LAUNCH_TIMEOUT_MS?.trim()) || 30000;
 
-let browserPromise: Promise<Browser> | undefined;
-/** The real Chromium OS pid, once known -- see process-reap.ts's
- * findDirectChildPid(). Read by shutdown()'s SIGKILL backstop and logged
- * for ego-browser-idle-shutdown-container.test.ts (board #36) to check the
- * honest zombie-vs-alive signal against post-shutdown. */
-let browserPid: number | undefined;
-function getBrowser(): Promise<Browser> {
-  if (!browserPromise) {
-    // Logged once per actual re-entry into this branch (never on a cache
-    // hit) -- board #276's own repro signal: a launch failure's error
-    // message is textually identical whether it comes from a genuinely
-    // fresh attempt or a stale replayed rejection (same bad path, same
-    // ENOENT), so this log line is the only externally-observable proof a
-    // second real attempt ever happened. See
-    // ego-browser-launch-self-heal.test.ts.
-    log("getBrowser: attempting chromium launch");
-    browserPromise = chromium
+// Browser-process ownership lives in process-reap.ts's BrowserProcess
+// (board #326): lazy single-flight launch, rejected-launch reset (#276),
+// pid discovery (#36), bounded close + unconditional SIGKILL backstop.
+// daemon.ts only wires the real implementations and owns the Playwright
+// specifics below.
+const browserProcess = createBrowserProcess<Browser>(basename(CHROMIUM_PATH), {
+  // Bounded explicitly (board #276) instead of Playwright's 3-minute
+  // default launch timeout -- on expiry Playwright kills the whole Chromium
+  // process group itself, and the catch remaps the TimeoutError into the
+  // actionable message a wedged studio's operator needs.
+  launch: () =>
+    chromium
       .launch({
         executablePath: CHROMIUM_PATH,
         headless: true,
         // Running as root in a container with no chrome-sandbox setuid
         // helper configured -- standard for exactly this situation (same
-        // reasoning Dockerfile.studio documents for the Playwright MCP
-        // server's own chromium install).
+        // reasoning Dockerfile.studio documents).
         args: ["--no-sandbox"],
         timeout: LAUNCH_TIMEOUT_MS,
       })
-      .then((browser) => {
-        browserPid = findDirectChildPid(process.pid, { chromiumBinaryName: basename(CHROMIUM_PATH) });
-        log(`browser launched, pid ${browserPid ?? "unknown"}`);
-        return browser;
-      })
       .catch((err) => {
-        // Board #276: a rejected Promise is still truthy, so leaving
-        // browserPromise set to it would wedge `if (!browserPromise)` shut
-        // forever -- every later call would replay THIS SAME rejection,
-        // with no new launch ever attempted again. Resetting it here lets
-        // the NEXT call (not this one -- the throw below still rejects the
-        // promise this specific caller is awaiting) get a fresh attempt.
-        browserPromise = undefined;
         if (err instanceof errors.TimeoutError) {
-          // Playwright already killed the process group; just make the
-          // error actionable for whoever is staring at a wedged studio.
           throw new Error(
             `ego-browser: chromium failed to start within ${LAUNCH_TIMEOUT_MS}ms -- likely container resource/memory pressure, check ${paths.logFile} and the studio's available memory`,
             { cause: err },
           );
         }
         throw err;
-      });
-  }
-  return browserPromise;
+      }),
+  log,
+  findPid: (parentPid, opts) => findDirectChildPid(parentPid, opts),
+  killFn: (pid, signal) => process.kill(pid, signal as never),
+});
+
+function getBrowser(): Promise<Browser> {
+  return browserProcess.get();
 }
 
 const registry = new Registry<PwPage, BrowserContext>();
@@ -151,60 +132,17 @@ const STARTUP_GRACE_MS = 5000;
 // still reads empty but not yet past the point it isn't. See the plan doc.
 let inFlightRequests = 0;
 
-// Follow-up review finding on the original #36 fix: the old shutdown() had
-// no actual timeout on browser.close() -- `.finally()` (which gated the
-// SIGKILL backstop AND the rmSync/process.exit cleanup below it) only ran
-// once close()'s promise SETTLED. A hung close() (unresponsive CDP
-// connection, wedged renderer -- anything short of an outright rejection)
-// meant that `await` never returned, so `.finally()` never ran, the SIGKILL
-// backstop never fired, and process.exit() never ran either: the daemon
-// sat resident forever, reproducing board #32/#36's original bug via the
-// fix meant to close it. CLOSE_TIMEOUT_MS bounds that wait unconditionally
-// via raceWithTimeout() (see process-reap.ts) -- 5000ms is comfortably
-// above any close() observed live in this container (well under 1s) and
-// still fast enough that even the timeout-firing path is a prompt shutdown
-// from a caller's perspective.
+// Bounds shutdown()'s wait on browser.close(); the bounded-wait mechanics
+// and why they are needed live in process-reap.ts (raceWithTimeout).
 const CLOSE_TIMEOUT_MS = 5000;
 
 async function shutdown(reason: string): Promise<void> {
   log(`shutting down: ${reason}`);
-  if (browserPromise) {
-    // `.then(...)` only runs on a successful launch -- the `.catch(() =>
-    // {})` swallows either a launch failure OR a close failure, so this
-    // never throws out of shutdown(). raceWithTimeout() then guarantees
-    // this resolves within CLOSE_TIMEOUT_MS regardless of whether that
-    // inner promise ever actually settles -- see its own comment in
-    // process-reap.ts. Plain `await browserPromise` (no timeout at all)
-    // would also throw straight out of this async function on a
-    // permanently-rejected browserPromise (e.g. chromium.launch() failed
-    // once, earlier in the daemon's life) -- an unhandled rejection nobody
-    // awaits (onIdle calls this as `void this.onIdle()`), which left the
-    // daemon resident forever: the original board issue #32 bug, reproduced
-    // in the one launch-failure edge case the original fix (#35) missed
-    // and #44 closed.
-    await raceWithTimeout(
-      browserPromise.then((b) => b.close()).catch(() => {}),
-      CLOSE_TIMEOUT_MS,
-    );
-  }
-  // Runs UNCONDITIONALLY -- regardless of whether browserPromise was ever
-  // created, close() settled cleanly, or CLOSE_TIMEOUT_MS fired instead
-  // because close() never returned. raceWithTimeout() only bounds the
-  // WAIT; it does not know or claim the browser process actually died, so
-  // this backstop still checks/kills for real every time. browserPid stays
-  // undefined on the launch-failure path (no process ever spawned), so
-  // this is a no-op there.
-  if (browserPid !== undefined) {
-    try {
-      process.kill(browserPid, "SIGKILL");
-    } catch {
-      // Already gone -- fine, this is the expected case. Note this does
-      // NOT mean "already exited" throws ESRCH: a zombie (exited but not
-      // yet reaped by its parent) still occupies a valid PID table entry,
-      // so kill(2) on a zombie succeeds as a no-op. ESRCH is only thrown
-      // once the pid is fully reaped and its slot recycled.
-    }
-  }
+  // Bounded close (CLOSE_TIMEOUT_MS) then unconditional SIGKILL backstop
+  // to the recorded pid -- the whole sequence, including why each step is
+  // safe on a hung/rejected/never-launched browser, lives inside
+  // browserProcess.close() (see process-reap.ts).
+  await browserProcess.close(CLOSE_TIMEOUT_MS);
   rmSync(paths.pidFile, { force: true });
   rmSync(paths.sockFile, { force: true });
   process.exit(0);
