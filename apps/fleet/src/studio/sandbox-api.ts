@@ -31,6 +31,7 @@
 
 import { proxyTerminal } from "@cloudflare/sandbox";
 import { withKillDeadline, KILL_GRACE_SECONDS } from "./exec-deadline";
+import { bytesToBase64 } from "../base64";
 
 export { withKillDeadline, KILL_GRACE_SECONDS, isDeadlineExit } from "./exec-deadline";
 
@@ -238,15 +239,6 @@ export async function sbExec(
 // raw Uint8Array option) — base64-encode and pass `encoding: "base64"`,
 // simpler and safer than constructing a ReadableStream for what's always a
 // single already-in-memory buffer (paste images, capped at 10 MB by Task 6).
-const B64_CHUNK = 0x8000; // chunked spread avoids a call-stack blowup on large buffers
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += B64_CHUNK) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + B64_CHUNK));
-  }
-  return btoa(bin);
-}
 
 // Task 6 carry-over from Task 4 review: this used to await sb.writeFile and
 // discard its {success} result. A failed write resolved silently, so a

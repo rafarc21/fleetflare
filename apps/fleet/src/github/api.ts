@@ -1,5 +1,6 @@
 import { closesIssueByKeyword } from "./promote-close";
 import { nextPageLink } from "./next-link";
+import { base64EncodeUtf8 } from "../base64";
 
 // Issue #331: a neutral product name, not the App's own bot slug
 // (the operator's own App slug) — GitHub asks the User-Agent identify the calling
@@ -184,24 +185,6 @@ export async function fetchRepoFile(
   }
 
   return text;
-}
-
-// Chunked (0x8000/chunk), TextEncoder first — same shape and same reason
-// src/studio/blueprint.ts's base64EncodeUtf8 already documents (a bare
-// btoa(content) throws outright on any character outside Latin1, and a
-// single un-chunked spread call risks a call-stack blowup on a long
-// learning). Duplicated locally rather than imported: this module stays a
-// generic GitHub REST helper with no dependency on a studio-specific file,
-// same as sandbox-api.ts's own bytesToBase64 duplicates it too.
-const B64_CHUNK = 0x8000;
-
-function base64EncodeUtf8(s: string): string {
-  const bytes = new TextEncoder().encode(s);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += B64_CHUNK) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + B64_CHUNK));
-  }
-  return btoa(bin);
 }
 
 /**
