@@ -110,11 +110,6 @@ function makeSocketPair(opts?: { fragmentClientWrites?: boolean }) {
   return {
     clientTransport: clientEnd.transport,
     serverTransport: serverEnd.transport,
-    /** The client process exits: the server end sees its onClose fire. */
-    closeClient() {
-      clientOpen = false;
-      for (const cb of serverEnd.closeCbs) cb();
-    },
     /** The daemon hangs up: the client end sees its onClose fire. */
     closeServer() {
       serverOpen = false;

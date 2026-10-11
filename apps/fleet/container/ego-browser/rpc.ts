@@ -91,7 +91,7 @@ export interface RpcClient {
   onClosed(cb: () => void): void;
 }
 
-const DEFAULT_CALL_TIMEOUT_MS = 60000;
+export const DEFAULT_CALL_TIMEOUT_MS = 60000;
 
 interface PendingCall {
   resolve: (value: unknown) => void;

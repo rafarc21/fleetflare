@@ -3,13 +3,18 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type EgoBrowserPaths, resolvePaths } from "./paths";
-import { createRpcClient, decodeChunk, type RpcClient, type RpcTransport } from "./rpc";
+import {
+  createRpcClient,
+  decodeChunk,
+  DEFAULT_CALL_TIMEOUT_MS,
+  type RpcClient,
+  type RpcTransport,
+} from "./rpc";
 
 const DAEMON_PATH = join(dirname(fileURLToPath(import.meta.url)), "daemon.ts");
 
 const DAEMON_STARTUP_TIMEOUT_MS = 20000;
 const DAEMON_POLL_INTERVAL_MS = 100;
-const DEFAULT_CALL_TIMEOUT_MS = 60000;
 
 function processAlive(pid: number): boolean {
   try {

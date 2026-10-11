@@ -1,4 +1,3 @@
----
 # Deepen: ego-browser RPC — framing, id correlation, timeout, fail-on-close, dispatch behind rpc.ts (board issue #319)
 
 Issue: https://github.com/rafarc21/fleetflare/issues/319. Tier **GLM-OK**:
