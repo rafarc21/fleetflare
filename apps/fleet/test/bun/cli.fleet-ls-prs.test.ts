@@ -93,14 +93,14 @@ describe("openPrsByStudio — the map behind the column (#332)", () => {
     failures: string[] = [],
   ): { fetchImpl: typeof fetch; seen: { url: string; headers: Record<string, string> }[] } {
     const seen: { url: string; headers: Record<string, string> }[] = [];
-    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       seen.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
       const repo = new URL(url).searchParams.get("repo");
       const key = repo ?? "(default)";
       if (failures.includes(key)) return new Response("route unavailable", { status: 404 });
       return Response.json({ repo: repo ?? "acme-org/fleet", prs: answers[key] ?? {} });
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     return { fetchImpl, seen };
   }
 
@@ -164,12 +164,12 @@ describe("openPrsByStudio — the map behind the column (#332)", () => {
 
   test("a fetch that throws (a transport blip) is the same as unavailable: absent, others intact", async () => {
     const seen: string[] = [];
-    const fetchImpl = (async (input: RequestInfo | URL) => {
+    const fetchImpl = (async (input: string | URL | Request) => {
       const url = String(input);
       seen.push(url);
       if (url.includes("websites")) throw new Error("connection reset");
       return Response.json({ repo: "acme-org/beta", prs: { "beta--pilot": [pr(3)] } });
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     const map = await openPrsByStudio(CREDS, [
       row({ id: "websites--web-studio", repoSlug: "acme-org/websites" }),
       row({ id: "beta--pilot", repoSlug: "acme-org/beta" }),
@@ -180,7 +180,7 @@ describe("openPrsByStudio — the map behind the column (#332)", () => {
   });
 
   test("a 200 whose map does not cover a studio is absence, never a silent 0", async () => {
-    const fetchImpl = (async () => Response.json({ repo: "acme-org/websites", prs: {} })) as typeof fetch;
+    const fetchImpl = (async () => Response.json({ repo: "acme-org/websites", prs: {} })) as unknown as typeof fetch;
     const map = await openPrsByStudio(CREDS, [row({ id: "websites--web-studio", repoSlug: "acme-org/websites" })], fetchImpl);
     expect(map.has("websites--web-studio")).toBe(false);
   });

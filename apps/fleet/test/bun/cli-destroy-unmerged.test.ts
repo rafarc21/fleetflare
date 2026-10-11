@@ -75,43 +75,43 @@ describe("fetchStudioOpenPrs — one studio's live answer (#332)", () => {
     const fetchImpl = (async () => Response.json({
       repo: "acme-org/websites",
       prs: { "websites--web-studio": TWO },
-    })) as typeof fetch;
+    })) as unknown as typeof fetch;
     const out = await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl);
     expect(out).toEqual({ ok: true, prs: TWO });
   });
 
   test("repoParam null asks the route's default repo — no ?repo= at all", async () => {
     const seen: string[] = [];
-    const fetchImpl = (async (input: RequestInfo | URL) => {
+    const fetchImpl = (async (input: string | URL | Request) => {
       seen.push(String(input));
       return Response.json({ repo: "acme-org/fleet", prs: { "websites--legacy-studio": [] } });
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     const out = await fetchStudioOpenPrs(CREDS, null, "websites--legacy-studio", fetchImpl);
     expect(seen).toEqual(["https://worker.test/studio/board/open-prs"]);
     expect(out).toEqual({ ok: true, prs: [] });
   });
 
   test("a 404 (an old Worker, or a repo the route refuses) is {ok:false} — never a thrown error", async () => {
-    const fetchImpl = (async () => new Response("not found", { status: 404 })) as typeof fetch;
+    const fetchImpl = (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch;
     expect(await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl)).toEqual({ ok: false });
   });
 
   test("a 200 whose map does not cover this studio is {ok:false} — absence is unknown, never zero", async () => {
-    const fetchImpl = (async () => Response.json({ repo: "acme-org/beta", prs: {} })) as typeof fetch;
+    const fetchImpl = (async () => Response.json({ repo: "acme-org/beta", prs: {} })) as unknown as typeof fetch;
     expect(await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl)).toEqual({ ok: false });
   });
 
   test("a fetch that throws (a transport blip) is {ok:false}, never a rejection", async () => {
-    const fetchImpl = (async () => { throw new Error("connection reset"); }) as typeof fetch;
+    const fetchImpl = (async () => { throw new Error("connection reset"); }) as unknown as typeof fetch;
     expect(await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl)).toEqual({ ok: false });
   });
 
   test("carries the Access service-token headers and an explicit JSON Accept", async () => {
     let headers: Record<string, string> = {};
-    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
       headers = (init?.headers ?? {}) as Record<string, string>;
       return Response.json({ repo: "acme-org/websites", prs: { "websites--web-studio": [] } });
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     await fetchStudioOpenPrs(CREDS, "acme-org/websites", "websites--web-studio", fetchImpl);
     expect(headers["CF-Access-Client-Id"]).toBe("cid");
     expect(headers["CF-Access-Client-Secret"]).toBe("csecret");
