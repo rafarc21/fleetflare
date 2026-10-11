@@ -13,28 +13,29 @@
 // a few seconds" from "come back tomorrow".
 //
 // Board issue #284, MAJOR 1: the real logic (atomic increment-then-check,
-// bucketing, stale-row pruning) now lives in ../ratelimit.ts, shared with
-// the glm-lead route's OWN separate limit (llm/ratelimit.ts) — this module
-// is a thin wrapper supplying junior's own key prefixes, env var names, and
-// defaults. Public exports and behavior are unchanged.
-import { checkAndConsumeRateLimit, parsePositiveInt, type RateLimitKind, type RateLimitResult } from "../ratelimit";
+// bucketing, stale-row pruning) lives in ../ratelimit.ts. Issue #368 (sweep-4
+// finding F8): the parse-env-then-consume wrapper is makeRateLimitKind's too —
+// this module supplies junior's own key prefixes, env var names, and defaults
+// as ONE spec object. Public exports and behavior are unchanged.
+import { makeRateLimitKind, type RateLimitResult } from "../ratelimit";
 
 export const DEFAULT_JUNIOR_RATE_PER_MINUTE = 5;
 export const DEFAULT_JUNIOR_DAILY_CAP = 50;
 
-const JUNIOR_KIND: RateLimitKind = { ratePrefix: "junior-rate:", dailyPrefix: "junior-daily:" };
-
-export interface JuniorRateLimitEnv {
+// A type alias, not an interface: it must satisfy the factory's generic
+// `E extends Record<string, string | undefined>` constraint, and only type
+// aliases get implicit index signatures.
+export type JuniorRateLimitEnv = {
   JUNIOR_RATE_PER_MINUTE?: string;
   JUNIOR_DAILY_CAP?: string;
-}
+};
 
 export type JuniorRateLimitResult = RateLimitResult;
 
-export async function checkAndConsumeJuniorRateLimit(
-  db: D1Database, env: JuniorRateLimitEnv, studioId: string, now: number,
-): Promise<JuniorRateLimitResult> {
-  const perMinute = parsePositiveInt(env.JUNIOR_RATE_PER_MINUTE, DEFAULT_JUNIOR_RATE_PER_MINUTE);
-  const dailyCap = parsePositiveInt(env.JUNIOR_DAILY_CAP, DEFAULT_JUNIOR_DAILY_CAP);
-  return checkAndConsumeRateLimit(db, studioId, now, perMinute, dailyCap, JUNIOR_KIND);
-}
+export const checkAndConsumeJuniorRateLimit = makeRateLimitKind<JuniorRateLimitEnv>({
+  kind: { ratePrefix: "junior-rate:", dailyPrefix: "junior-daily:" },
+  perMinuteEnv: "JUNIOR_RATE_PER_MINUTE",
+  perMinuteDefault: DEFAULT_JUNIOR_RATE_PER_MINUTE,
+  dailyCapEnv: "JUNIOR_DAILY_CAP",
+  dailyCapDefault: DEFAULT_JUNIOR_DAILY_CAP,
+});

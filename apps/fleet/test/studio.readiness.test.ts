@@ -7,6 +7,7 @@ import type { SessionSyncDeps } from "../src/studio/session-sync";
 import { STUDIO_TMUX, withStudioTmux } from "../src/studio/tmux";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import { fixedNow } from "./helpers/datetime";
+import { fakeStorage as doStorage } from "./helpers/do-storage";
 
 // Fleet ls readiness fix ("a dead studio looks alive" — P5a Task 5's Finding
 // 2, live-measured: 3 of 4 studios bare, `fleet ls` showed every one
@@ -31,18 +32,10 @@ function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
   };
 }
 
-/** Same in-memory Map-backed StudioStorage fake studio.refresh.test.ts's own
- *  fakeStorage uses — kept local rather than imported, matching this
- *  feature's established convention of redefining fakes per file. */
+/** Map-backed StudioStorage via the shared test/helpers/do-storage builder
+ *  (issue #371) — one delegator per suite keeps the local seed shape. */
 function fakeStorage(seed?: { status?: StudioStatus }): StudioStorage {
-  const map = new Map<string, unknown>();
-  if (seed?.status) map.set(STATUS_KEY, seed.status);
-  return {
-    get: (async (key: string) => map.get(key)) as StudioStorage["get"],
-    put: (async (key: string, value: unknown) => {
-      map.set(key, value);
-    }) as StudioStorage["put"],
-  };
+  return doStorage(seed?.status ? { [STATUS_KEY]: seed.status } : undefined) as unknown as StudioStorage;
 }
 
 /** `exec` is the one behavior each test varies; everything else is a fixed,
