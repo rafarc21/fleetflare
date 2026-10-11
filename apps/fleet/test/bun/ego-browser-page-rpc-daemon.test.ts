@@ -267,9 +267,13 @@ describe("page.* handlers route client params to the resolved page", () => {
   test("the remaining click-family and wait-family methods forward their params", async () => {
     // One pin per method: the Playwright method name plus the args the
     // handler forwarded. The client side is already deeply pinned; this
-    // proves routing + envelope strip + resolvePage for the rest. opts is
-    // undefined (not absent) on the wire after JSON, so it must arrive as an
-    // explicit undefined argument, exactly as the forwarder sent it.
+    // proves routing + envelope strip + resolvePage for the rest. An
+    // undefined opts never crosses the wire at all (JSON.stringify drops
+    // undefined keys); the explicit undefined argument the fake page
+    // receives comes from the handler's own call -- which is exactly why
+    // these pins need toStrictEqual: toEqual scores an absent trailing
+    // argument as equal to an explicit undefined one, so it could never
+    // catch a handler that dropped the opts argument entirely.
     const cases: Array<[string, unknown, [string, unknown[]]]> = [
       ["page.click", { spaceId: 1, label: "p1", selector: "#s", opts: { timeout: 9 } }, ["click", ["#s", { timeout: 9 }]]],
       ["page.dblclick", { spaceId: 1, label: "p1", selector: "#s" }, ["dblclick", ["#s", undefined]]],
@@ -284,7 +288,7 @@ describe("page.* handlers route client params to the resolved page", () => {
     ];
     for (const [method, params, expected] of cases) {
       const m = await seeded();
-      expect(await one(m, method, params)).toEqual(expected);
+      expect(await one(m, method, params)).toStrictEqual(expected);
     }
   });
 });
@@ -434,7 +438,7 @@ describe("wire symmetry: client forwarder output drives daemon handlers", () => 
     const { method, params } = calls[0]!;
     expect(method).toBe("page.fill");
     await dispatch(m.methods, method, params);
-    expect(m.page.calls).toEqual([["fill", ["#s", "v", undefined]]]);
+    expect(m.page.calls).toStrictEqual([["fill", ["#s", "v", undefined]]]);
   });
 
   test("client page.waitForURL params drive the waitForURL handler", async () => {
@@ -445,6 +449,6 @@ describe("wire symmetry: client forwarder output drives daemon handlers", () => 
     const { method, params } = calls[0]!;
     expect(method).toBe("page.waitForURL");
     await dispatch(m.methods, method, params);
-    expect(m.page.calls).toEqual([["waitForURL", ["https://x.test/done", undefined]]]);
+    expect(m.page.calls).toStrictEqual([["waitForURL", ["https://x.test/done", undefined]]]);
   });
 });

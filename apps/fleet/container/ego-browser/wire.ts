@@ -26,9 +26,13 @@ export interface SnapshotOpts {
 }
 
 /** The one place an RPC method's wire name, params shape, and result shape
- * are declared. api.ts's forwarder types each call from this map; the
- * daemon's dispatcher types each handler from the same map -- a name or
- * param drift on either side is a type error here, not a silent wire bug. */
+ * are declared. api.ts's forwarder types every page.* call from this map;
+ * the daemon's dispatcher types each handler from the same map -- a name
+ * or param drift on either side is a type error here, not a silent wire
+ * bug. The five remaining non-page client calls (TaskSpace's pages/
+ * newPage/finish and buildGlobals' taskSpace/listTaskSpaces) still
+ * hand-write their name+result casts, so they are pinned by the
+ * characterization tests, not this map's types. */
 export interface PageEnvelope {
   spaceId: number;
   label: string;

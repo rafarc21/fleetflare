@@ -32,10 +32,14 @@ export type MethodDispatch = Record<string, ((params: any) => Promise<unknown> |
 
 /**
  * Structural stand-in for playwright-core's Page: exactly the surface the
- * handlers call, with loose argument types. The real PwPage satisfies it;
- * tests build a recording fake and cast it here. handlers.ts itself always
- * type-checks against the REAL playwright types -- this type exists so a
- * test fake needs no playwright import of its own.
+ * handlers call, with loose argument types. The real PwPage does NOT
+ * satisfy it: url() and viewportSize() are deliberately widened to
+ * Promise-returning here because the handlers await them, while real
+ * playwright declares both sync -- so the real Page is not assignable to
+ * this interface. The recording fakes in the tests satisfy it;
+ * handlers.ts itself always type-checks against the REAL playwright
+ * types (the imported PwPage) -- this type exists so a test fake needs no
+ * playwright import of its own.
  */
 export interface PwPageLike {
   goto(url: string, opts?: unknown): Promise<unknown>;

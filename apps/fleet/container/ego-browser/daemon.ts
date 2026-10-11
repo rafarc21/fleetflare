@@ -122,7 +122,7 @@ function getBrowser(): Promise<Browser> {
 
 const registry = new Registry<PwPage, BrowserContext>();
 
-// The RPC method table (its 25 handlers) lives in handlers.ts, extracted so
+// The RPC method table (its 27 handlers) lives in handlers.ts, extracted so
 // tests can drive it with injected fakes -- same spirit as the
 // registry.ts / idle-shutdown.ts / process-reap.ts extractions. The table's
 // real type is the strictly keyed map; handleRequest indexes it by the raw
