@@ -4,6 +4,7 @@ import {
   type WorkRepoDeps,
 } from "../src/studio/repo";
 import type { RepoReach } from "../src/github/reach";
+import { runningRow } from "./helpers/studio-row";
 import type { StudioStatus } from "../src/studio/types";
 
 // Dynamic repo selection (P4a): the operator runs `fleet spawn <role>` from a
@@ -15,13 +16,8 @@ import type { StudioStatus } from "../src/studio/types";
 
 const DEFAULT_SLUG = "acme-org/websites";
 
-function row(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: "websites--pilot", state: "running", tailscaleHost: null, lastRefresh: null,
-    error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null,
-    repoSlug: null, ...overrides,
-  };
-}
+const row = (o: Partial<StudioStatus> = {}): StudioStatus =>
+  runningRow({ id: "websites--pilot", ...o });
 
 /** The reachability port (P6a). Throwing is a meaningful outcome (503, never
  *  a silent allow) — the same posture SpawnDeps.fetchPolicy takes. Given a
