@@ -226,3 +226,124 @@ describe("IdleShutdown.schedule", () => {
     expect(idleFired).toBe(0);
   });
 });
+
+describe("IdleShutdown.track", () => {
+  // track() owns the in-flight count itself: a request still open inside
+  // the idle window suppresses shutdown, and every settled request re-arms it.
+
+  test("a request in flight blocks shutdown when the timer fires", () => {
+    const clock = makeFakeClock();
+    let idleFired = 0;
+    const idle = new IdleShutdown({
+      idleMs: 1000,
+      spacesEmpty: () => true,
+      onIdle: () => {
+        idleFired += 1;
+      },
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    idle.schedule();
+    expect(clock.pendingCount()).toBe(1);
+    // Never settles, never awaited: the request stays in flight across the
+    // fire, and only the explicit schedule() above ever armed a timer.
+    const inFlight = idle.track(() => new Promise<never>(() => {}));
+    clock.fireAll();
+    expect(idleFired).toBe(0);
+    void inFlight;
+  });
+
+  test("idle after the last request settles fires exactly once", async () => {
+    const clock = makeFakeClock();
+    let idleFired = 0;
+    const idle = new IdleShutdown({
+      idleMs: 400,
+      spacesEmpty: () => true,
+      onIdle: () => {
+        idleFired += 1;
+      },
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    await idle.track(async () => {});
+    expect(clock.pendingDelays()).toEqual([400]);
+    clock.fireAll();
+    expect(idleFired).toBe(1);
+    expect(clock.pendingCount()).toBe(0);
+    // Nothing re-armed after the fire -- a second fire must not double-fire.
+    clock.fireAll();
+    expect(idleFired).toBe(1);
+  });
+
+  test("a throwing request still releases the in-flight slot and re-arms", async () => {
+    const clock = makeFakeClock();
+    let idleFired = 0;
+    const idle = new IdleShutdown({
+      idleMs: 400,
+      spacesEmpty: () => true,
+      onIdle: () => {
+        idleFired += 1;
+      },
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    await expect(idle.track(async () => { throw new Error("x"); })).rejects.toThrow("x");
+    // The finally re-armed despite the throw, and the slot is free again --
+    // the armed window can now actually fire.
+    expect(clock.pendingCount()).toBe(1);
+    clock.fireAll();
+    expect(idleFired).toBe(1);
+  });
+
+  test("concurrent requests: idle fires only after both settle", async () => {
+    const clock = makeFakeClock();
+    let idleFired = 0;
+    const idle = new IdleShutdown({
+      idleMs: 400,
+      spacesEmpty: () => true,
+      onIdle: () => {
+        idleFired += 1;
+      },
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    // Both requests share one gate, so the idle window sees in-flight > 0
+    // until the second one settles; only then can shutdown fire.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const p1 = idle.track(() => gate);
+    const p2 = idle.track(() => gate);
+
+    idle.schedule();
+    clock.fireAll();
+    expect(idleFired).toBe(0);
+    release();
+    await p1;
+    await p2;
+    expect(clock.pendingCount()).toBe(1);
+    clock.fireAll();
+    expect(idleFired).toBe(1);
+  });
+
+  test("track never uses an override duration -- steady-state re-arm is plain idleMs", async () => {
+    const clock = makeFakeClock();
+    const idle = new IdleShutdown({
+      idleMs: 400,
+      spacesEmpty: () => true,
+      onIdle: () => {},
+      setTimeoutFn: clock.setTimeoutFn,
+      clearTimeoutFn: clock.clearTimeoutFn,
+    });
+
+    idle.schedule(5000);
+    expect(clock.pendingDelays()).toEqual([5000]);
+    // The steady-state re-arm after a request always uses the configured
+    // idleMs, never any override a previous schedule() call passed.
+    await idle.track(async () => {});
+    expect(clock.pendingDelays()).toEqual([400]);
+  });
+});
