@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { sh as shShared } from "./helpers/shell";
 
 /**
  * Issue #267 — localci.sh end to end, against a throwaway origin and PATH
@@ -23,10 +24,12 @@ let root: string;
 let repo: string;
 let calls: string;
 
+// Local wrapper keeps this file's original semantics (cwd param, repo when
+// omitted; TMUX scrubbed; throws on failure; stdout-only return) — zero
+// call-site edits.
 function sh(cmd: string, cwd = repo) {
-  const p = Bun.spawnSync(["bash", "-c", cmd], { cwd, env: { ...process.env, TMUX: "" } });
-  if (p.exitCode !== 0) throw new Error(`${cmd}: ${p.stderr.toString()}`);
-  return p.stdout.toString().trim();
+  const r = shShared(cmd, { cwd, env: { TMUX: "" }, throwOnError: true });
+  return r.out;
 }
 
 function stub(name: string, body: string) {
