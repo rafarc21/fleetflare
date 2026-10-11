@@ -358,7 +358,9 @@ describe("parseCliArgs", () => {
     ]) {
       expect(parseCliArgs(["destroy", "websites--scratch", ...rest])).toEqual({
         cmd: "destroy", id: "websites--scratch", force: rest.includes("--force"),
-        discardUnsynced: rest.includes("--discard-unsynced"), park: true, strictUnmerged: true,
+        discardUnsynced: rest.includes("--discard-unsynced"),
+        ...(rest.includes("--park") ? { park: true } : {}),
+        strictUnmerged: true,
       });
     }
   });

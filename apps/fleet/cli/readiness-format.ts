@@ -426,35 +426,55 @@ export interface LsJsonRow {
   /** The lead's last visible, non-chrome message line — redacted, bounded;
    *  issue #108 (#70 ask 4 remainder). */
   lastLine: string | null;
+  /** Board issue #332: how many unmerged, still-open PRs this studio's
+   *  assigned tasks name, per the board's open-prs route. Present ONLY when
+   *  the route answered for the studio's repo (`fleet ls` passes the map
+   *  openPrsByStudio built); absent means "no data" (an old Worker whose
+   *  route 404s), never a silent 0 — the same "-"-vs-count split the PRS
+   *  table column renders. */
+  openPrs?: number;
 }
 
 /** The same data the ACTIVITY column renders, as a lead state per studio. */
 export function lsJsonRows(
   studios: StudioStatus[], now: Date, staleAfterSeconds: number = ACTIVITY_MIRROR_STALE_SECONDS,
+  openPrs?: Map<string, number>,
 ): LsJsonRow[] {
   return studios.map((s) => {
-    const base = {
-      id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds),
-      lastLine: s.observed?.lastMessageLine ?? null,
+    // The original row builder, verbatim — a nested function only so the
+    // #332 decoration below can wrap every one of its early returns in one
+    // place instead of editing seven return sites.
+    const leadRow = (): LsJsonRow => {
+      const base = {
+        id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds),
+        lastLine: s.observed?.lastMessageLine ?? null,
+      };
+      if (s.state !== "running" && s.state !== "degraded") return { ...base, lead: "stopped", leadSince: null, limitResetsAt: null };
+      const rl = s.rateLimited;
+      if (rl?.dead) return { ...base, lead: "dead", leadSince: rl.seenAt, limitResetsAt: null };
+      if (rl?.select) return { ...base, lead: "modal", leadSince: rl.seenAt, limitResetsAt: rl.until ?? null };
+      const until = rl?.until ?? null;
+      if (rl && (until === null || (!Number.isNaN(Date.parse(until)) && Date.parse(until) > now.getTime()))) {
+        return { ...base, lead: "limit", leadSince: rl.seenAt, limitResetsAt: until };
+      }
+      // Issue #192 — same gate as formatActivity above: a replaced-but-not-
+      // yet-confirmed studio reports no lead at all, never a leftover
+      // pre-replacement verdict.
+      if (s.observed?.replacedAt != null) return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
+      const a = s.observed?.activity ?? null;
+      if (!a || ageSeconds(a.observedAt, now) > staleAfterSeconds || a.state === "unknown") {
+        return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
+      }
+      if (a.state === "limit") return { ...base, lead: "limit", leadSince: a.since, limitResetsAt: null };
+      return { ...base, lead: a.state, leadSince: a.since, limitResetsAt: null };
     };
-    if (s.state !== "running" && s.state !== "degraded") return { ...base, lead: "stopped", leadSince: null, limitResetsAt: null };
-    const rl = s.rateLimited;
-    if (rl?.dead) return { ...base, lead: "dead", leadSince: rl.seenAt, limitResetsAt: null };
-    if (rl?.select) return { ...base, lead: "modal", leadSince: rl.seenAt, limitResetsAt: rl.until ?? null };
-    const until = rl?.until ?? null;
-    if (rl && (until === null || (!Number.isNaN(Date.parse(until)) && Date.parse(until) > now.getTime()))) {
-      return { ...base, lead: "limit", leadSince: rl.seenAt, limitResetsAt: until };
-    }
-    // Issue #192 — same gate as formatActivity above: a replaced-but-not-
-    // yet-confirmed studio reports no lead at all, never a leftover
-    // pre-replacement verdict.
-    if (s.observed?.replacedAt != null) return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
-    const a = s.observed?.activity ?? null;
-    if (!a || ageSeconds(a.observedAt, now) > staleAfterSeconds || a.state === "unknown") {
-      return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
-    }
-    if (a.state === "limit") return { ...base, lead: "limit", leadSince: a.since, limitResetsAt: null };
-    return { ...base, lead: a.state, leadSince: a.since, limitResetsAt: null };
+    const row = leadRow();
+    // Board issue #332: an entry (0 included) is a counted answer; ABSENCE
+    // is "no data", so the key is omitted entirely rather than written as 0 —
+    // a reader scraping this JSON must never mistake "could not look" for
+    // "looked and found none".
+    const count = openPrs?.get(s.id);
+    return count === undefined ? row : { ...row, openPrs: count };
   });
 }
 

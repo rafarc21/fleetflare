@@ -134,7 +134,12 @@ export type CliCommand =
   // which every other flag-taking verb here still goes through unchanged)
   // — it overrides the refusal that fires when this studio still carries an
   // open assigned board task.
-  | { cmd: "destroy"; id: string; force: boolean; discardUnsynced: boolean; park?: true }
+  // Board issue #332: `strictUnmerged` turns destroy's non-blocking
+  // unmerged-PR warning into a CLIENT-side refusal that fires BEFORE any
+  // destroy request (cmdDestroy fetches the board's open-prs route first).
+  // Present ONLY when true, same "no key when absent" discipline `park`
+  // (#59) already established.
+  | { cmd: "destroy"; id: string; force: boolean; discardUnsynced: boolean; park?: true; strictUnmerged?: true }
   // P4 §5's board. Two words rather than one, because `task` is a noun with
   // three operations on it; flags rather than positionals, because a brief is
   // four fields and no positional order survives that.
@@ -342,8 +347,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Destroy the container and reprovision on the CURRENT image, then verify and report THAT verdict. The only way an image change reaches a running studio. Loses the container filesystem; the session is rescued first. If the container cannot answer, nothing can be rescued: recycle REFUSES (409) and names the age of the last synced snapshot it would restore. It also refuses when rescue-push fails or cannot confirm the work was saved (killed exec, dead shell, deadline), naming why. --discard-unsynced proceeds anyway, discarding everything since. " + FRESH_SESSION_HELP + " " + LIVENESS_RULE + " Board task #131: with FLEET_AUTO_FAILOVER=on, a studio that ever failed over relaunches on its RECORDED account forever after, never the map — a later CLAUDE_ACCOUNT_BY_REPO change never reaches it. --account mapped clears that recorded account (and its moved-audit trail) before the container is touched, so this recycle relaunches on the repo's plain mapped slot instead (rescue still runs first, same as any recycle). The only value accepted is the literal \"mapped\".",
   },
   destroy: {
-    args: "<id> [--force] [--discard-unsynced] [--park]",
-    summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A rescue-push that fails or cannot confirm the work was saved (killed exec, dead shell, deadline) refuses the same way, naming why. A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it. --park stops it RESUMABLE: a studio whose org-chart edges reach it may `fleet resume` it from its container (after a cooldown). Without --park, only you can start it again.",
+    args: "<id> [--force] [--discard-unsynced] [--park] [--strict-unmerged]",
+    summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A rescue-push that fails or cannot confirm the work was saved (killed exec, dead shell, deadline) refuses the same way, naming why. A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it. --park stops it RESUMABLE: a studio whose org-chart edges reach it may `fleet resume` it from its container (after a cooldown). Without --park, only you can start it again. Board issue #332: after a confirmed stop, destroy also prints a NON-BLOCKING `park warning` naming every unmerged PR the studio's tasks still have open (an unmerged, bounced PR needs this lane's history alive; check the PRS column in `fleet ls` before parking) — the warning costs nothing and never blocks, for plain destroy exactly as for --park. --strict-unmerged turns that same check into a REFUSAL before anything is destroyed, naming each PR; a check that cannot answer (an old Worker, a route blip) degrades to one warning line and proceeds — never blocks on a Worker upgrade race.",
   },
   "task-new": {
     args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior] [--read-repos owner/a,owner/b] [--provision [--fresh-session]] [--template retro]",
@@ -906,14 +911,14 @@ export function parseCliArgs(argv: string[]): CliCommand {
       return arg ? { cmd: "clear-session-guard", id: arg } : { cmd: "usage", message: CLI_USAGE };
     case "inspect":
       return arg ? { cmd: "inspect", id: arg } : { cmd: "usage", message: CLI_USAGE };
-    // Board task #124: `fleet destroy <id> [--force]`. Only `arg` (the id)
-    // and an optional trailing `--force` are read; anything else after the
+    // Board task #124: `fleet destroy <id> [--force]`. The id plus a small
+    // fixed set of no-value trailing flags are read; anything else after the
     // id is a usage error, the same "an unknown flag is never silently
     // ignored" posture parseFlags' own doc comment states for the flag-table
     // verbs. A bespoke check rather than routing through parseFlags: that
     // function only knows value-taking `--k v`/`--k=v` flags, and `--force`
-    // takes no value — extending it for this one boolean flag would cost
-    // more than the four lines below.
+    // takes no value — extending it for these boolean flags would cost
+    // more than the lines below.
     //
     // Code review round: `arg === "--force"` (the id was OMITTED and
     // `--force` slid into its slot, e.g. bare `fleet destroy --force`) is
@@ -924,19 +929,23 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // own comment already says must never be silently ignored, just at the
     // position 0 (id) instead of position 1 (rest[0]).
     case "destroy": {
-      if (!arg || arg === "--force" || arg === "--discard-unsynced" || arg === "--park") {
+      if (!arg || arg === "--force" || arg === "--discard-unsynced" || arg === "--park" || arg === "--strict-unmerged") {
         return { cmd: "usage", message: CLI_USAGE };
       }
       const rest = argv.slice(2);
       const flags = new Set(rest);
-      const unknown = rest.find((t) => t !== "--force" && t !== "--discard-unsynced" && t !== "--park");
+      const unknown = rest.find(
+        (t) => t !== "--force" && t !== "--discard-unsynced" && t !== "--park" && t !== "--strict-unmerged",
+      );
       if (unknown !== undefined) return usage(`unexpected ${JSON.stringify(unknown)}`);
       if (flags.size !== rest.length) return usage("a flag was given twice");
       // Issue #59 review round 1: `park` only when given, so every existing
-      // destroy parses to the same shape it always did.
+      // destroy parses to the same shape it always did. Board issue #332:
+      // `strictUnmerged` rides the same way — present only when true.
       return {
         cmd: "destroy", id: arg, force: flags.has("--force"), discardUnsynced: flags.has("--discard-unsynced"),
         ...(flags.has("--park") ? { park: true } : {}),
+        ...(flags.has("--strict-unmerged") ? { strictUnmerged: true } : {}),
       };
     }
     // Issue #217.

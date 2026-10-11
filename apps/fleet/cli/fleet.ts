@@ -61,6 +61,9 @@ import {
 } from "./readiness-format";
 import { formatTaskTable, formatTaskShow, formatAssignWake } from "./task-format";
 import type { AssignWakeReport } from "../src/board/assign-wake";
+// Board issue #332: the open-prs route's answer shape — a type-only import,
+// so none of src/board's runtime graph rides into this CLI binary.
+import type { OpenPr } from "../src/board/open-prs";
 import { formatMemoryTable, MEMORY_LEGEND, type MemoryFileRow } from "./memory-format";
 import {
   openStudioRow, closeStudioRow, reconcileStudioWorkspaces, planStudioWorkspaces, defaultOrcaDeps,
@@ -363,8 +366,21 @@ export function fullErrorLine(s: StudioStatus): string | null {
  * `now` is a parameter with a default rather than a clock read inside, so the
  * whole table renders against ONE instant (every row's age is comparable)
  * and a caller that needs determinism can supply it.
+ *
+ * PRS column (board issue #332): how many unmerged, still-open PRs this
+ * studio's assigned tasks name — the live answer behind "is this lane safe
+ * to park/destroy", which the open-task gate can never give (awaiting_merge
+ * is not a board state, #110). Placed between WIP and READY because
+ * park-readiness is read beside the work-age columns. `openPrs` (studio id
+ * -> count) comes from cmdLs's one batched GET /studio/board/open-prs per
+ * distinct repo; see the cell's own comment for the "-"/count/0 contract.
+ * Every single-studio call site passes no map and renders "-" — "no data" is
+ * the honest reading for a view that never asked the board.
  */
-export function formatTable(studios: StudioStatus[], now: Date = new Date(), orcaRows?: Map<string, string> | null): string {
+export function formatTable(
+  studios: StudioStatus[], now: Date = new Date(), orcaRows?: Map<string, string> | null,
+  openPrs?: Map<string, number>,
+): string {
   if (studios.length === 0) return "(no studios provisioned)";
   // REPO column (operator request 2026-08-20): a studio id is
   // `<repo>--<role>`, so the repo is already in `id` — but `fleet ls` is
@@ -374,7 +390,7 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
   // of truth, and a malformed id keeps rendering rather than crashing the
   // table.
   const headers = [
-    "ID", "REPO", "STATE", "RST", "WIP", "READY", "SESSION", "ACTIVITY", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
+    "ID", "REPO", "STATE", "RST", "WIP", "PRS", "READY", "SESSION", "ACTIVITY", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
   ];
   const rows = studios.map((s) => [
     s.id,
@@ -392,6 +408,14 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
     // platform-side container replacement (no pre-replacement rescue hook)
     // could have cost, without opening a container.
     formatWipCell(s, now),
+    // PRS cell (board issue #332): a map ENTRY (0 included) is a counted
+    // answer from the board's open-prs route; ABSENCE is "no data" — the
+    // route was unavailable for this studio's repo (an old Worker answering
+    // 404) — rendered "-", never a silent 0: "could not look" must not read
+    // as "looked and found none", the exact false-clean shape #332 exists
+    // to prevent (a bounced security-adjacent PR parked 5x in a day while
+    // nothing anywhere said so).
+    String(openPrs?.get(s.id) ?? "-"),
     // Issue #85: `readyOverride` reads the DO's own Observed evidence
     // (replaced/unreachable/unverified) FIRST — that evidence contradicts or
     // supersedes the last container-side check `formatReady` renders, and
@@ -443,6 +467,157 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
   const line = (cols: string[]) => cols.map((c, i) => (i === last ? c : c.padEnd(widths[i]))).join("  ");
   return [line(headers), ...rows.map(line)].join("\n");
 }
+
+// ---------------------------------------------------------------------------
+// Board issue #332: the open-prs read behind the PRS column and the destroy
+// warning. One route — GET /studio/board/open-prs?repo=<owner/name>
+// (src/board/routes.ts, this issue's steps 1-2) — answers EVERY studio of one
+// repo at once, so the GitHub reads happen inside the Worker, once per repo
+// the caller names: exactly the batched shape issue #37's "never fan out a
+// live check per studio on the listing path" ruling demands. Every helper
+// here is best-effort the same way the route itself is: a 404 from a Worker
+// deployed before this feature, a 5xx, or a transport blip contributes NO
+// data and never fails the command that asked.
+
+/** The route path for one repo — an ABSENT `repo` param is the fleet
+ *  default, the same reading the route itself gives a null repoSlug. */
+function openPrsPath(repoParam: string | null): string {
+  return repoParam === null ? "/open-prs" : `/open-prs?repo=${encodeURIComponent(repoParam)}`;
+}
+
+/** One open-prs request's headers: the Access service-token pair plus the
+ *  explicit JSON Accept every CLI read of a content-negotiating route
+ *  already sends (cmdLs's own /studio/ read established this discipline). */
+function openPrsHeaders(creds: Credentials): Record<string, string> {
+  return { ...accessHeaders(creds), Accept: "application/json" };
+}
+
+/**
+ * The per-studio PRS counts for a whole listing (#332): one fetch per
+ * DISTINCT repo, merged into a single studio-id -> count map for formatTable
+ * and `fleet ls --json` (readiness-format.ts's lsJsonRows).
+ *
+ * WHICH value names a "distinct repo": the row's own `repoSlug` — the full
+ * `owner/name` the Worker resolved and wrote (StudioStatus.repoSlug), not
+ * the id's folded repo segment, because the segment is not something the
+ * route can accept (resolveBoardRepo's grammar is owner/name) and because
+ * the route filters its own studio set by that very field. A NULL repoSlug
+ * (a studio provisioned before P4a) means the fleet default by construction
+ * — those rows share ONE fetch with an absent `repo` param, the route's own
+ * reading of that null, so a fleet mid-upgrade (some rows null, some not,
+ * same repo) reads every studio from the right map.
+ *
+ * `fetchImpl` is a parameter for the same reason TabsDeps exists: the real
+ * caller passes the global fetch; a test passes a fake and needs no network.
+ * Never throws and never rejects — every failure reads as "that repo's
+ * studios have no data this run".
+ */
+export async function openPrsByStudio(
+  creds: Credentials, studios: StudioStatus[], fetchImpl: typeof fetch = fetch,
+): Promise<Map<string, number>> {
+  // Keyed by the value that decides the FETCH (repoSlug, with every null
+  // row folded onto the default-repo group), so two rows of one repo always
+  // share one request and a mixed null/non-null fleet never reads one
+  // studio's PRs out of another repo's map.
+  const groups = new Map<string, { param: string | null; ids: string[] }>();
+  for (const s of studios) {
+    const key = s.repoSlug ?? "(default)";
+    const group = groups.get(key) ?? { param: s.repoSlug, ids: [] };
+    group.ids.push(s.id);
+    groups.set(key, group);
+  }
+  const counts = new Map<string, number>();
+  for (const group of groups.values()) {
+    try {
+      const res = await fetchImpl(boardUrl(creds, openPrsPath(group.param)), { headers: openPrsHeaders(creds) });
+      // !ok — a 404 from a Worker that predates this route above all — is
+      // NO data for this repo's studios, never a failed ls: their cells read
+      // "-", and every other repo keeps its real answer.
+      if (!res.ok) continue;
+      const body = (await res.json()) as { prs: Record<string, OpenPr[]> };
+      for (const id of group.ids) {
+        const prs = body.prs?.[id];
+        // The route answers every studio of the repo, so an ABSENT id is a
+        // mismatched answer, not an empty lane — recorded as absence, never
+        // a silent 0.
+        if (Array.isArray(prs)) counts.set(id, prs.length);
+      }
+    } catch {
+      // A transport blip on one repo's read is the same as the route being
+      // unavailable: absence for that group, real answers for the rest.
+    }
+  }
+  return counts;
+}
+
+/**
+ * ONE studio's live unmerged PRs (#332) — the destroy path's half of the
+ * route. `{ ok: false }` means "could not look" (a non-ok answer, a throw,
+ * or a 200 whose map does not cover this studio) and is the ONLY failure
+ * shape: this helper never throws and never invents an empty list, because
+ * the strict refusal must treat "unknown" and "zero" as different facts.
+ */
+export async function fetchStudioOpenPrs(
+  creds: Credentials, repoParam: string | null, studioId: string, fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: true; prs: OpenPr[] } | { ok: false }> {
+  try {
+    const res = await fetchImpl(boardUrl(creds, openPrsPath(repoParam)), { headers: openPrsHeaders(creds) });
+    if (!res.ok) return { ok: false };
+    const body = (await res.json()) as { prs: Record<string, OpenPr[]> };
+    const prs = body.prs?.[studioId];
+    return Array.isArray(prs) ? { ok: true, prs } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** #332: one PR's own line in a refusal or warning — `#<n> <title> <url>`,
+ *  indented, the URL last so a phone tap works. */
+function openPrLine(pr: OpenPr): string {
+  return `  #${pr.prNumber} ${pr.title} ${pr.url}`;
+}
+
+/**
+ * `--strict-unmerged`'s REFUSAL lines (#332): the count and the flag lead
+ * (the operator must see WHY in the first line), then every PR, one per
+ * line. Pure — cmdDestroy prints these and exits 1 before any destroy
+ * request fires.
+ */
+export function strictRefusalLines(prs: OpenPr[]): string[] {
+  return [
+    `fleet destroy: refusing: ${prs.length} unmerged PR(s) still open (--strict-unmerged) — ` +
+      "merge or close them first, or re-run without the flag",
+    ...prs.map(openPrLine),
+  ];
+}
+
+/**
+ * The post-destroy NON-BLOCKING warning (#332), printed after a confirmed
+ * stop — for a plain destroy exactly as much as for --park, because an
+ * unmerged PR needs its lane's history alive either way. Never affects the
+ * exit code. The header's "PR(s)" shape is fixed for every count: a machine
+ * grepping it must not need to know the pluralization rules.
+ */
+export function parkWarningLines(id: string, prs: OpenPr[]): string[] {
+  return [
+    `park warning: ${id} still has ${prs.length} unmerged PR(s):`,
+    ...prs.map(openPrLine),
+  ];
+}
+
+/**
+ * The strict pre-check's degradation line (plan ruling): a 404 or any other
+ * unavailable answer is NOT evidence of zero PRs, and blocking a destroy on
+ * a Worker upgrade race is worse than proceeding without the check — so
+ * strict says so, loudly, and proceeds.
+ */
+export const STRICT_UNMERGED_UNKNOWN_PROCEEDING =
+  "fleet destroy: unmerged-PR status unknown (open-prs route unavailable) — proceeding";
+
+/** The post-destroy warning's own degradation line: same honesty, one line,
+ *  nothing claimed the check could not back. */
+export const PARK_WARNING_UNAVAILABLE =
+  "park warning: could not check unmerged PRs (route unavailable)";
 
 /**
  * Issue #37: one studio, checked LIVE — POST /studio/:id/check (routes.ts).
@@ -657,14 +832,20 @@ export async function cmdLs(
   // printed; bare `fleet ls` prints what the registry already has, and the
   // CHECKED column says how old each of those verdicts is.
   const studios = fresh ? await refreshAll(creds, recorded) : recorded;
+  // Board issue #332: the PRS column's data — launched now so the batched
+  // open-prs fetch (one per distinct repo, inside the Worker) overlaps the
+  // Orca read below instead of stacking on it. Best-effort and never
+  // rejects: a Worker that predates the route only costs this await.
+  const openPrs = openPrsByStudio(creds, studios);
   // Issue #70 ask 4: machine-readable lead state, nothing else on stdout.
+  // #332: openPrs rides each row when the route answered for its repo.
   if (json) {
-    console.log(JSON.stringify(lsJsonRows(studios, new Date()), null, 2));
+    console.log(JSON.stringify(lsJsonRows(studios, new Date(), undefined, await openPrs), null, 2));
     return;
   }
   for (const line of formatLsHead(studios)) console.log(line);
   const orca = await readStudioRows(studios, orcaDeps);
-  console.log(formatTable(studios, new Date(), orca.rows));
+  console.log(formatTable(studios, new Date(), orca.rows, await openPrs));
   // #299: stdout, not stderr — survives `fleet ls 2>&1 | grep`-style reads.
   if (orca.footer && studios.length > 0) console.log(orca.footer);
   // Issue #53: idle studios bill with zero events; say so above the caveat.
@@ -1231,7 +1412,39 @@ async function cmdRecycle(
  * failure there degrades to one stderr line, never a non-zero exit for a
  * destroy that otherwise succeeded.
  */
-async function cmdDestroy(creds: Credentials, id: string, force: boolean, discardUnsynced: boolean, park = false): Promise<void> {
+async function cmdDestroy(
+  creds: Credentials, id: string, force: boolean, discardUnsynced: boolean, park = false, strictUnmerged = false,
+): Promise<void> {
+  // Board issue #332: --strict-unmerged refuses CLIENT-side, BEFORE any
+  // destroy request fires — a refusal that let the destroy through would
+  // not be a refusal. The check asks the board's open-prs route for this
+  // studio's unmerged PRs; a studio id that does not even parse is skipped
+  // entirely (a malformed id never blocks a destroy — the route call below
+  // refuses it its own way).
+  if (strictUnmerged && parseStudioId(id) !== null) {
+    // The route needs the studio's repo as `owner/name`, which the id's own
+    // repo HALF cannot name (parseStudioId's segment is a folded id
+    // segment, not a slug) — so the row is read bounded, the same status
+    // read requestDestroy's own poll path already makes, and repoSlug is
+    // the only client-side source of the full slug. A row that cannot be
+    // read still asks the DEFAULT repo (a null repoParam below): a
+    // default-repo studio keeps a real answer, any other reads as unknown.
+    const row = await readStatus(
+      studioUrl(creds, id, "/status"), accessHeaders(creds), fetch, DESTROY_STATUS_TIMEOUT_MS,
+    );
+    const answer = await fetchStudioOpenPrs(
+      creds, row.ok ? row.status.repoSlug : null, id,
+    );
+    if (!answer.ok) {
+      // Plan ruling: a 404/unavailable route is NOT evidence of zero PRs,
+      // and blocking a destroy on a Worker upgrade race is worse than the
+      // warning — strict degrades to proceeding, loudly.
+      console.error(STRICT_UNMERGED_UNKNOWN_PROCEEDING);
+    } else if (answer.prs.length > 0) {
+      for (const line of strictRefusalLines(answer.prs)) console.error(line);
+      process.exit(1);
+    }
+  }
   // Board task #203: the request is `requestDestroy`'s, not a bare fetch —
   // it carries a deadline and, when that deadline (or any other transport
   // failure) hits, it polls GET /studio/:id/status and reports the TRUE
@@ -1239,7 +1452,7 @@ async function cmdDestroy(creds: Credentials, id: string, force: boolean, discar
   // out." for a destroy that had SUCCEEDED, and skipped the Orca teardown
   // below. See cli/destroy-outcome.ts's header.
   const report = await requestDestroy(
-    { destroy: studioUrl(creds, id, destroyPath(force, discardUnsynced, park)), status: studioUrl(creds, id, "/status") },
+    { destroy: studioUrl(creds, id, destroyPath(force, discardUnsynced, park, strictUnmerged)), status: studioUrl(creds, id, "/status") },
     accessHeaders(creds), id,
   );
   for (const line of report.lines) console.error(line);
@@ -1249,6 +1462,22 @@ async function cmdDestroy(creds: Credentials, id: string, force: boolean, discar
   // "Orca worktree and attach terminal removed" stops looking.
   if (report.teardown) {
     for (const line of await closeStudioRow(id, defaultOrcaDeps())) console.error(`fleet: ${line}`);
+    // Board issue #332: after a confirmed stop, the NON-BLOCKING warning —
+    // the studio's unmerged PRs outlive its lane, and the registry row
+    // still exists, so the route still answers for it. For a plain destroy
+    // exactly as much as for --park: an unmerged, bounced PR needs this
+    // lane's history alive either way. Never affects the exit code; a
+    // malformed id skips the warning entirely (never blocked anything
+    // either). The repo comes from the confirmed row this side already
+    // holds — no extra round trip.
+    if (parseStudioId(id) !== null) {
+      const answer = await fetchStudioOpenPrs(creds, report.status?.repoSlug ?? null, id);
+      if (!answer.ok) {
+        console.error(PARK_WARNING_UNAVAILABLE);
+      } else if (answer.prs.length > 0) {
+        for (const line of parkWarningLines(id, answer.prs)) console.error(line);
+      }
+    }
   }
   if (report.exitCode !== 0) process.exit(report.exitCode);
 }
@@ -2685,7 +2914,7 @@ async function main(): Promise<void> {
     case "recycle":
       return cmdRecycle(creds, parsed.id, parsed.discardUnsynced, parsed.freshSession, parsed.forceMappedAccount === true);
     case "destroy":
-      return cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced, parsed.park === true);
+      return cmdDestroy(creds, parsed.id, parsed.force, parsed.discardUnsynced, parsed.park === true, parsed.strictUnmerged === true);
     case "task-new":
       return cmdTaskNew(creds, parsed.brief, parsed.provision === true, parsed.freshSession === true);
     case "task-ls":

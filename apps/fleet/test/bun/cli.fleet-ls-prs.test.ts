@@ -149,7 +149,7 @@ describe("openPrsByStudio — the map behind the column (#332)", () => {
 
   test("a route that 404s (an old Worker) contributes NO data for that repo — never a failed ls", async () => {
     const { fetchImpl } = recorder(
-      { "acme-org/websites": { "websites--web-studio": [pr(9)] }, "(default)": {} },
+      { "acme-org/websites": { "websites--web-studio": [pr(9)] }, "(default)": { "fleet--maestro": [] } },
       ["acme-org/websites"],
     );
     const map = await openPrsByStudio(CREDS, [
@@ -240,7 +240,9 @@ describe("cmdLs — the wiring (#332)", () => {
     } finally {
       console.log = realLog;
     }
-    return out;
+    // Each printed chunk can be a whole multi-line block (the table is ONE
+    // console.log) — flatten to lines so header/row matching is per line.
+    return out.flatMap((l) => l.split("\n"));
   }
 
   test("renders the route's count in the PRS cell", async () => {

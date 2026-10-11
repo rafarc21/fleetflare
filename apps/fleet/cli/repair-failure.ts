@@ -41,9 +41,21 @@ export function repairFailureLine(
   return `${label}: ${status} ${text.trim().slice(0, MAX_CHARS)}`;
 }
 
-/** `fleet destroy`'s route path — the flags ride recycle's own query names. */
-export function destroyPath(force: boolean, discardUnsynced: boolean, park = false): string {
-  const query = [force && "force=true", discardUnsynced && "discard-unsynced=true", park && "park=true"]
+/**
+ * `fleet destroy`'s route path — the flags ride recycle's own query names.
+ *
+ * Board issue #332: `strictUnmerged` (the 4th flag, `--strict-unmerged`) is
+ * the one flag here the route itself does not read today — the strict
+ * REFUSAL happens client-side in cmdDestroy, BEFORE this request ever fires
+ * (a refusal that let the destroy through would not be a refusal). It still
+ * rides the query as an explicit marker of the operator's ask, the same
+ * convention every other flag here follows.
+ */
+export function destroyPath(force: boolean, discardUnsynced: boolean, park = false, strictUnmerged = false): string {
+  const query = [
+    force && "force=true", discardUnsynced && "discard-unsynced=true", park && "park=true",
+    strictUnmerged && "strict-unmerged=true",
+  ]
     .filter(Boolean).join("&");
   return query ? `/destroy?${query}` : "/destroy";
 }

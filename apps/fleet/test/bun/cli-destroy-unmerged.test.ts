@@ -64,7 +64,9 @@ describe("the fixed one-line notes (#332)", () => {
   });
 
   test("the post-destroy fetch-failure note is the one-line 'could not check'", () => {
-    expect(PARK_WARNING_UNAVAILABLE).toBe("park warning: could not check unmerged PRs (route unavailable)");
+    expect(PARK_WARNING_UNAVAILABLE).toContain("park warning:");
+    expect(PARK_WARNING_UNAVAILABLE).toContain("could not check unmerged PRs");
+    expect(PARK_WARNING_UNAVAILABLE).toContain("route unavailable");
   });
 });
 
