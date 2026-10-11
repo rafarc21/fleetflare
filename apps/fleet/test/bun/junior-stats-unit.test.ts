@@ -82,10 +82,13 @@ describe("cmdJuniorStats (injected fetch)", () => {
     const dir = join(home, ".local", "share", "fleet");
     mkdirSync(dir, { recursive: true });
     const ts = Date.now();
-    writeFileSync(
-      join(dir, "junior-usage.jsonl"),
-      `${JSON.stringify({ ts, id: "laptop-a", mode: "edit", model: "glm", input_tokens: inputTokens, output_tokens: outputTokens, ok: true })}\n`,
-    );
+    // One line per call (readLocalUsage counts lines, never a `calls` field),
+    // so the tokens are split to sum to the totals — same aggregate shape as
+    // the characterization lane's 10/20 + 5/5 pair.
+    const share = (total: number, i: number) => Math.floor(total / calls) + (i < total % calls ? 1 : 0);
+    const lines = Array.from({ length: calls }, (_, i) =>
+      JSON.stringify({ ts, id: "laptop-a", mode: "edit", model: "glm", input_tokens: share(inputTokens, i), output_tokens: share(outputTokens, i), ok: true }));
+    writeFileSync(join(dir, "junior-usage.jsonl"), `${lines.join("\n")}\n`);
     return { home, path: juniorUsageLogPath(home) };
   }
 
