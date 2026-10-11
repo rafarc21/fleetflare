@@ -119,7 +119,10 @@ describe("BrowserProcess.close()", () => {
   test("a hung browser.close() is bounded by the budget, then the recorded pid gets SIGKILL", async () => {
     const hungBrowser: FakeBrowser = {
       closeCalls: 0,
-      close: () => new Promise<void>(() => {}),
+      close() {
+        this.closeCalls += 1;
+        return new Promise<void>(() => {});
+      },
     };
     const { state, deps } = harness(() => Promise.resolve(hungBrowser));
     let fireTimeout: (() => void) | undefined;
