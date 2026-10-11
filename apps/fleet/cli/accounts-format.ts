@@ -10,6 +10,7 @@
 import type { CswapAccount, SlotJoin, SyncDecision } from "../src/studio/claude-swap";
 import { NULL_UNTIL_CEILING_MS } from "../src/studio/accounts";
 import { accountHoldActive, type AccountLimitKind } from "../src/studio/rate-limit";
+import { formatColumns } from "./columns";
 
 /**
  * Issue #240 fix: real `cswap list --json` prints an ENVELOPE object
@@ -248,10 +249,7 @@ export function formatAccountsTable(rows: AccountSnapshotRow[], now: Date): stri
     describeCurrentState(r.current, now),
     describeWould(r, now),
   ]);
-  const widths = headers.map((h, i) => Math.max(h.length, ...body.map((row) => row[i].length)));
-  const last = headers.length - 1;
-  const line = (cols: string[]) => cols.map((c, i) => (i === last ? c : c.padEnd(widths[i]))).join("  ");
-  return [line(headers), ...body.map(line), "", ACCOUNTS_TABLE_UTC_NOTE].join("\n");
+  return [formatColumns(headers, body), "", ACCOUNTS_TABLE_UTC_NOTE].join("\n");
 }
 
 /**

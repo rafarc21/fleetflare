@@ -41,6 +41,7 @@ import type { RescueGcOutcome } from "../src/studio/rescue-gc";
 import type { RepoReach } from "../src/github/reach";
 import { fleetTotals, formatFleetTotalsLine } from "./fleet-totals";
 import { formatBurn, BURN_LEGEND } from "./burn-format";
+import { formatColumns } from "./columns";
 import { formatRestartCell, formatRestartChurn, RESTART_LEGEND } from "./restart-format";
 import { formatWipCell, formatWipInspectLines, WIP_LEGEND } from "./wip-format";
 import { requestInspect, renderInspect, formatSessionForceArmedLine, type InspectBody } from "./inspect-request";
@@ -436,12 +437,7 @@ export function formatTable(studios: StudioStatus[], now: Date = new Date(), orc
     s.lastRefresh ?? "-",
     capErrorCell(s.error),
   ]);
-  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
-  // Issue #205: the LAST column is never padded -- trailing blanks on every
-  // line are pure bytes, and they turned one long ERROR into 87 KB of output.
-  const last = headers.length - 1;
-  const line = (cols: string[]) => cols.map((c, i) => (i === last ? c : c.padEnd(widths[i]))).join("  ");
-  return [line(headers), ...rows.map(line)].join("\n");
+  return formatColumns(headers, rows);
 }
 
 /**

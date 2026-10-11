@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { accessHeaders, juniorUrl, type Credentials } from "./fleet";
 import { juniorUsageLogPath } from "../../../skills/junior/src/usage";
+import { formatColumns } from "./columns";
 
 export interface JuniorPaths { skillLink: string; config: string; skillSrc: string }
 type Out = { ok: boolean; lines: string[] };
@@ -155,10 +156,11 @@ export function formatJuniorStats(rows: JuniorStatsRow[]): string {
   const headers = ["ID", "CALLS", "INPUT TOKENS", "OUTPUT TOKENS"];
   const body = rows.map((r) => [r.id, String(r.calls), String(r.inputTokens), String(r.outputTokens)]);
   const totalRow = ["TOTAL", String(totals.calls), String(totals.inputTokens), String(totals.outputTokens)];
-  const allRows = [...body, totalRow];
-  const widths = headers.map((h, i) => Math.max(h.length, ...allRows.map((r) => r[i].length)));
-  const line = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i])).join("  ").trimEnd();
-  return [line(headers), ...allRows.map(line)].join("\n");
+  // formatColumns's own #205 default (last column never padded) replaces the
+  // old pad-every-column-then-trimEnd pair: identical bytes — the pin in
+  // test/bun/junior-stats-unit.test.ts proves the trimEnd was always a
+  // no-op on the already-width-aligned last column.
+  return formatColumns(headers, [...body, totalRow]);
 }
 
 /** Issue #366: one HTTP round trip's answer, in the same tagged shape

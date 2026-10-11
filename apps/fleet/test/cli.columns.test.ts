@@ -98,7 +98,7 @@ describe("formatColumns — the shared builder's own contract (#399)", () => {
     expect(out).toBe(
       "HEAD" + " ".repeat(9) + "H\n" +
       "short" + " ".repeat(8) + "c\n" +
-      "longer-cell cell",
+      "longer-cell  cell",
     );
     for (const line of out.split("\n")) expect(line).toBe(line.trimEnd());
   });
