@@ -25,7 +25,7 @@
  *   bun run scripts/english-check.ts
  */
 import { join } from "node:path";
-import { collectRepoCheck, runRepoCheck } from "./repo-check";
+import { runRepoCheck, scanRepoFiles } from "./repo-check";
 
 export const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 
@@ -100,7 +100,7 @@ export function scanFile(path: string, text: string): Hit[] {
  *  listing + read pass (see ./repo-check.ts), kept exported because
  *  test/bun/english-only.test.ts imports it. */
 export async function scanRepo(root = REPO_ROOT): Promise<Finding[]> {
-  return collectRepoCheck(root, isScannable, scanFile, ALLOWLIST);
+  return (await scanRepoFiles(root, isScannable, scanFile, ALLOWLIST)).findings;
 }
 
 if (import.meta.main) {
@@ -113,6 +113,5 @@ if (import.meta.main) {
     stream: "stderr",
     failSummary: (findings) => `\n${findings.length} line(s) of Portuguese. Translate them, or allowlist a deliberate fixture in scripts/english-check.ts with its reason.`,
     cleanLine: () => "english-check: clean",
-    cleanExit: 0,
   }));
 }

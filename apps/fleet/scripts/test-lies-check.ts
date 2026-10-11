@@ -34,7 +34,7 @@
  */
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { collectRepoCheck, runRepoCheck } from "./repo-check";
+import { runRepoCheck, scanRepoFiles } from "./repo-check";
 
 export const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 
@@ -529,7 +529,7 @@ const isTestFile = (path: string): boolean => /\.test\.tsx?$/.test(path);
  *  test/bun/test-lies-check.test.ts imports it. `scanFile` takes the repo
  *  root as its 3rd argument, so it is wrapped to the runner's 2-arg shape. */
 export async function scanRepo(root: string = REPO_ROOT): Promise<Finding[]> {
-  return collectRepoCheck(root, isTestFile, (path, text) => scanFile(path, text, root), ALLOWLIST);
+  return (await scanRepoFiles(root, isTestFile, (path, text) => scanFile(path, text, root), ALLOWLIST)).findings;
 }
 
 if (import.meta.main) {
@@ -561,7 +561,6 @@ if (import.meta.main) {
     stream: "stdout",
     failSummary: countLine,
     cleanLine: (fileCount) => countLine([], fileCount),
-    cleanExit: 0,
     fileCount: (listed) => listed.length,
   }));
 }
