@@ -5,11 +5,12 @@ import {
 } from "../src/studio/do";
 import {
   STATUS_KEY, ROLE_ENV_KEY, HEAL_ATTEMPT_KEY, OPERATION_KEY, OPERATION_STALE_MS,
-  type StudioStorage, type RoleEnv, type StudioEnv, type HealAttempt,
+  type RoleEnv, type StudioEnv, type HealAttempt,
   type OperationInFlight,
 } from "../src/studio/provision";
 import type { SessionSyncDeps } from "../src/studio/session-sync";
 import type { StudioStatus, StudioReadiness, StudioState } from "../src/studio/types";
+import { fakeStorage as doStorage } from "./helpers/do-storage";
 
 // ---------------------------------------------------------------------------
 // Issue #71 — a bare container heals itself, once.
@@ -110,27 +111,15 @@ describe("decideHeal — the four constraints, each one a measured incident", ()
   });
 });
 
-/** Storage with just the two keys this path reads and writes. */
+/** Storage with just the three keys this path reads and writes. `get` returns
+ *  EXACTLY what was put — a stored null never becomes undefined (#103). */
 function fakeStorage(seed: { status?: StudioStatus; marker?: HealAttempt; inFlight?: OperationInFlight } = {}) {
-  const map = new Map<string, StudioStatus | RoleEnv | StudioEnv | boolean | HealAttempt | OperationInFlight | null>();
-  if (seed.status) map.set(STATUS_KEY, seed.status);
-  if (seed.marker) map.set(HEAL_ATTEMPT_KEY, seed.marker);
-  if (seed.inFlight) map.set(OPERATION_KEY, seed.inFlight);
-  return {
-    map,
-    // Returns EXACTLY what was put. Issue #103: this used to read
-    // `map.get(key) ?? undefined`, which turned a stored null into undefined
-    // -- the one conversion real DO storage never makes. Every provision and
-    // restart clears its lock with put(OPERATION_KEY, null), so the fake hid
-    // the only lock shape a live studio ever holds between operations.
-    get: (async (key: string) => map.get(key)) as StudioStorage["get"],
-    put: async (
-      key: string,
-      value: StudioStatus | RoleEnv | StudioEnv | boolean | HealAttempt | OperationInFlight | null,
-    ) => {
-      map.set(key, value);
-    },
-  };
+  const initial: Record<string, unknown> = {};
+  if (seed.status) initial[STATUS_KEY] = seed.status;
+  if (seed.marker) initial[HEAL_ATTEMPT_KEY] = seed.marker;
+  if (seed.inFlight) initial[OPERATION_KEY] = seed.inFlight;
+  const s = doStorage(initial);
+  return { map: s.map as Map<string, StudioStatus | RoleEnv | StudioEnv | boolean | HealAttempt | OperationInFlight | null>, get: s.get, put: s.put };
 }
 
 describe("healBareContainer — once per episode, and armed BEFORE it runs", () => {
