@@ -23,11 +23,14 @@ is ops-watch, skipped per maestro. Tier: bounded fix, no brainstorm.
 
 ## Tests
 
-TDD per fix, RED then GREEN: llm.anthropic-route.test.ts (429 header+body,
-daily-cap 429, count_tokens tools/array/rate-limit, mid-stream overflow
-chunk), junior.ratelimit.test.ts (retryAfterMs), bun llm-translate.test.ts
-(streamErrorFrame override). Targeted lanes only: check, the two vitest
-files, bun-test llm-translate, english-check, test-lies-check.
+TDD, RED then GREEN where a RED run exists: llm.anthropic-route.test.ts
+(429 header+body, daily-cap 429, count_tokens tools + rate-limiter,
+mid-stream overflow chunk), junior.ratelimit.test.ts (retryAfterMs), bun
+llm-translate.test.ts (streamErrorFrame override). The array-content
+count_tokens case was already handled pre-fix — translation flattens
+arrays before the estimate runs — so its test guards the requirement
+end-to-end; no RED run possible. Targeted lanes only: check, the two
+vitest files, bun-test llm-translate, english-check, test-lies-check.
 
 ## Boundaries
 

@@ -69,6 +69,19 @@ function rateLimitRefusal(message: string, retryAfterMs: number): Response {
   });
 }
 
+/** Consume one unit of the lead rate budget; null = ok, a 429 Response =
+ *  refused. Both glm-lead routes share the same refusal text and window
+ *  math, so they share the branch too. */
+async function consumeLeadRate(env: Env, studioId: string): Promise<Response | null> {
+  const rate = await checkAndConsumeLeadRateLimit(env.DB, env, studioId, Date.now());
+  return rate.ok ? null : rateLimitRefusal(
+    rate.limit === "per-minute"
+      ? "rate limit exceeded: too many glm-lead calls this minute"
+      : "rate limit exceeded: daily glm-lead cap reached",
+    rate.retryAfterMs,
+  );
+}
+
 /**
  * Claude Code, run with `ANTHROPIC_AUTH_TOKEN` set, sends it as `Authorization:
  * Bearer <token>` (maestro decision, #249 STATUS 2026-10-08T02:29Z). The
@@ -448,15 +461,8 @@ export async function handleFleetAnthropicMessages(
   // counters (llm/ratelimit.ts), keyed by studio id but under distinct key
   // prefixes — genuinely separate budget from junior's, even though both
   // routes still spend out of the same underlying Workers AI quota.
-  const rate = await checkAndConsumeLeadRateLimit(env.DB, env, studio.id, Date.now());
-  if (!rate.ok) {
-    return rateLimitRefusal(
-      rate.limit === "per-minute"
-        ? "rate limit exceeded: too many glm-lead calls this minute"
-        : "rate limit exceeded: daily glm-lead cap reached",
-      rate.retryAfterMs,
-    );
-  }
+  const refusal = await consumeLeadRate(env, studio.id);
+  if (refusal) return refusal;
 
   const raw = await readCappedBody(req, ANTHROPIC_BODY_CAP);
   if (raw === null) return text("payload too large", 413);
@@ -546,10 +552,13 @@ export async function handleFleetAnthropicMessages(
 /** ESTIMATE ONLY, not a real count — this backend has no tokenizer exposed
  *  to it at all (no Anthropic tokenizer, no access to GLM's own vocab), so
  *  there is no way to answer this honestly with an exact number. Heuristic:
- *  total character count of every message's content (string or per-block
- *  JSON), its tool_calls, and the request's tools JSON (their schemas are
- *  real prompt material the backend re-receives every call), divided by
- *  ~4 — the commonly cited rough chars-per-token ratio for English text.
+ *  total character count of every message's string content, its tool_calls
+ *  (name + arguments), and the request's tools JSON (their schemas are real
+ *  prompt material the backend re-receives every call), divided by ~4 —
+ *  the commonly cited rough chars-per-token ratio for English text. Runs
+ *  on POST-translation messages, where anthropicRequestToOpenAI has
+ *  already flattened any Anthropic content array into string content, so
+ *  a message whose content is not a string contributes nothing here.
  *  Flagged here rather than guessed at silently, same "say so in a comment
  *  instead of guessing" convention classifyAiError's own doc comment
  *  (translate.ts) already established for this file.
@@ -558,11 +567,7 @@ export async function handleFleetAnthropicMessages(
 function estimateInputTokens(messages: Json[], tools: Json[] | undefined): number {
   let chars = 0;
   for (const m of messages) {
-    if (typeof m.content === "string") {
-      chars += m.content.length;
-    } else if (Array.isArray(m.content)) {
-      for (const b of m.content) chars += JSON.stringify(b ?? {}).length;
-    }
+    if (typeof m.content === "string") chars += m.content.length;
     for (const tc of Array.isArray(m.tool_calls) ? m.tool_calls : []) {
       chars += String(tc.function?.name ?? "").length + String(tc.function?.arguments ?? "").length;
     }
@@ -599,15 +604,10 @@ export async function handleFleetAnthropicCountTokens(
   if ("response" in gate) return gate.response;
   const { studio } = gate;
 
-  const rate = await checkAndConsumeLeadRateLimit(env.DB, env, studio.id, Date.now());
-  if (!rate.ok) {
-    return rateLimitRefusal(
-      rate.limit === "per-minute"
-        ? "rate limit exceeded: too many glm-lead calls this minute"
-        : "rate limit exceeded: daily glm-lead cap reached",
-      rate.retryAfterMs,
-    );
-  }
+  // Same limiter, same position, same refusal as the messages route —
+  // see consumeLeadRate's own doc comment.
+  const refusal = await consumeLeadRate(env, studio.id);
+  if (refusal) return refusal;
 
   const raw = await readCappedBody(req, ANTHROPIC_BODY_CAP);
   if (raw === null) return text("payload too large", 413);
