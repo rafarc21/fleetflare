@@ -223,6 +223,7 @@ function scheduleIdleCheck(overrideMs?: number): void {
 
 async function resolveSpace(spaceId: number): Promise<TaskSpaceRecord<PwPage, BrowserContext>> {
   const space = registry.get(spaceId);
+  // byte-locked twin: registry.ts Registry.finish's own throw -- reword both or none.
   if (!space) throw new Error(`ego-browser: no task space ${spaceId} (finished, or never created)`);
   return space;
 }
@@ -497,7 +498,7 @@ const methods: Record<string, Handler> = {
   },
 
   // Close errors PROPAGATE here (the record's closeLabel keeps them) -- a
-  // caller closing a page still holds a handle to must hear the failure.
+  // caller closing a page it still holds a handle to must hear the failure.
   async "page.close"(params: { spaceId: number; label: string }) {
     const space = await resolveSpace(params.spaceId);
     await space.closeLabel(params.label, realCloser);

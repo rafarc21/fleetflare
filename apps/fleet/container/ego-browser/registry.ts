@@ -125,25 +125,16 @@ export class TaskSpaceRecord<TTarget, TContext> {
     return state?.target;
   }
 
-  /**
-   * Closes ONE label's target and forgets the label. Unlike finish(),
-   * errors PROPAGATE and the label is NOT removed when the close throws --
-   * a caller closing a page it still points at needs to hear the failure
-   * (this is page.close's semantics; finish is best-effort sweep).
-   */
+  /** Closes one label's target and forgets the label -- a close that throws
+   * propagates and the label is NOT removed (page.close's semantics). */
   async closeLabel(label: string, closer: TaskCloser<TTarget, TContext>): Promise<void> {
     const target = this.getTarget(label);
     if (target) await closer.closeTarget(target);
     this.removeLabel(label);
   }
 
-  /**
-   * task.finish({keep}): computes the same retained/closed/spaceClosed
-   * receipt as always, then performs the close itself via the injected
-   * `closer`. Best-effort teardown, deliberately: a target/context close
-   * that rejects is swallowed (an already-dying page must never abort the
-   * sweep) and the label/context still get removed.
-   */
+  /** task.finish({keep}) -- best-effort sweep: close errors are swallowed and
+   * the label/context still get removed. */
   async finish(keep: FinishKeep, closer: TaskCloser<TTarget, TContext>): Promise<FinishReceipt> {
     const allLabels = [...this.labels.keys()];
     const retained = keep === "all" ? allLabels : allLabels.filter((l) => keep.includes(l));
@@ -256,15 +247,11 @@ export class Registry<TTarget, TContext> {
     return this.spaces.get(spaceId);
   }
 
-  /**
-   * task.finish({keep}) at the registry level: the whole close -- target
-   * closes, label removals, context close, and the space's own removal
-   * from this registry -- behind one call, so no caller can get the
-   * ordering wrong. Throws the same "no task space" error the daemon's
-   * per-space lookups throw for an unknown/already-finished id.
-   */
+  /** The whole close -- record finish, plus registry removal when spaceClosed.
+   * Unknown id throws daemon.ts resolveSpace's "no task space" error. */
   async finish(spaceId: number, keep: FinishKeep, closer: TaskCloser<TTarget, TContext>): Promise<FinishReceipt> {
     const space = this.spaces.get(spaceId);
+    // byte-locked twin: daemon.ts resolveSpace's own throw -- reword both or none.
     if (!space) throw new Error(`ego-browser: no task space ${spaceId} (finished, or never created)`);
     const receipt = await space.finish(keep, closer);
     if (receipt.spaceClosed) this.remove(space.spaceId);
