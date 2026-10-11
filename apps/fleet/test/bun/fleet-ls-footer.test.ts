@@ -5,12 +5,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { cmdLs } from "../../cli/fleet";
 import type { OrcaDeps } from "../../cli/orca-workspace";
+import { runningRow } from "../helpers/studio-row";
 import type { StudioStatus } from "../../src/studio/types";
 
-const STUDIO: StudioStatus = {
-  id: "websites--pilot", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
-  lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-};
+const STUDIO: StudioStatus = runningRow({ id: "websites--pilot" });
 
 let server: ReturnType<typeof Bun.serve>;
 beforeAll(() => {
