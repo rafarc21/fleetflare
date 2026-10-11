@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fleetTotals } from "../cli/fleet-totals";
 import {
+  ageSeconds,
   formatReady, formatCheckedAt, formatAge, readyOverride, formatSession, formatState, formatSessionGuards,
   formatObservedLines, formatSurvivalBriefs, formatActivity, ACTIVITY_DO_STALE_SECONDS, lsJsonRows,
   formatDeadAccounts,
@@ -157,6 +158,25 @@ describe("formatCheckedAt (cli/readiness-format.ts)", () => {
     const at = (iso: string) => formatCheckedAt({ kind: "provisioned", checkedAt: iso }, NOW);
     // NOW is 2026-08-28T12:00:00.000Z; 484 minutes earlier is 03:56:00.000Z.
     expect(at("2026-08-28T03:56:00.000Z")).toBe("8h ago");
+  });
+});
+
+describe("ageSeconds (cli/readiness-format.ts)", () => {
+  const NOW = new Date("2026-08-28T12:00:00.000Z");
+
+  it("valid ISO: whole seconds since, floored", () => {
+    expect(ageSeconds("2026-08-28T11:59:53.000Z", NOW)).toBe(7);
+    expect(ageSeconds("2026-08-28T09:00:00.000Z", NOW)).toBe(3 * 3600);
+    // 7.75s elapsed: floor 7, round 8 — pins Math.floor against a round regression.
+    expect(ageSeconds("2026-08-28T11:59:52.250Z", NOW)).toBe(7);
+  });
+
+  it("unparseable string reads 0, never NaN", () => {
+    expect(ageSeconds("not-a-date", NOW)).toBe(0);
+  });
+
+  it("future timestamp (clock skew) reads 0, never negative", () => {
+    expect(ageSeconds("2026-08-28T12:00:30.000Z", NOW)).toBe(0);
   });
 });
 
