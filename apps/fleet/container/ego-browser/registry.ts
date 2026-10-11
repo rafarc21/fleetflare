@@ -1,10 +1,12 @@
 /**
  * Pure task-space / label bookkeeping. Deliberately has no Playwright
- * import and does no I/O -- generic over the "target" type (a real
- * Playwright Page daemon-side, a plain fake object in tests) and the
- * "context" type (a real BrowserContext daemon-side, anything in tests).
- * daemon.ts is the only module that plugs real Playwright types in here;
- * everything below is fast, deterministic, and unit-testable on its own.
+ * import and performs no I/O of its own -- generic over the "target" type
+ * (a real Playwright Page daemon-side, a plain fake object in tests) and
+ * the "context" type (a real BrowserContext daemon-side, anything in
+ * tests). The only I/O (target/context close) goes through an injected
+ * TaskCloser. daemon.ts is the only module that plugs real Playwright
+ * types in here; everything below is fast, deterministic, and
+ * unit-testable on its own.
  */
 
 export interface LabelState<TTarget> {
@@ -20,6 +22,14 @@ export interface FinishReceipt {
   closed: string[];
   /** true when nothing survived and the whole space (context) should close too. */
   spaceClosed: boolean;
+}
+
+/** How the record actually closes a target/context. Injected so this module
+ * stays Playwright-free: daemon.ts plugs real page.close()/context.close(),
+ * tests plug fakes. */
+export interface TaskCloser<TTarget, TContext> {
+  closeTarget(target: TTarget): Promise<void>;
+  closeContext(context: TContext): Promise<void>;
 }
 
 export class TaskSpaceRecord<TTarget, TContext> {
@@ -116,16 +126,39 @@ export class TaskSpaceRecord<TTarget, TContext> {
   }
 
   /**
-   * Pure receipt computation for task.finish({keep}). Does NOT close any
-   * real target -- the caller (daemon.ts) reads `closed` back and does the
-   * actual Playwright page.close()/context.close() work, then calls
-   * removeLabel for each closed label itself.
+   * Closes ONE label's target and forgets the label. Unlike finish(),
+   * errors PROPAGATE and the label is NOT removed when the close throws --
+   * a caller closing a page it still points at needs to hear the failure
+   * (this is page.close's semantics; finish is best-effort sweep).
    */
-  finish(keep: FinishKeep): FinishReceipt {
+  async closeLabel(label: string, closer: TaskCloser<TTarget, TContext>): Promise<void> {
+    const target = this.getTarget(label);
+    if (target) await closer.closeTarget(target);
+    this.removeLabel(label);
+  }
+
+  /**
+   * task.finish({keep}): computes the same retained/closed/spaceClosed
+   * receipt as always, then performs the close itself via the injected
+   * `closer`. Best-effort teardown, deliberately: a target/context close
+   * that rejects is swallowed (an already-dying page must never abort the
+   * sweep) and the label/context still get removed.
+   */
+  async finish(keep: FinishKeep, closer: TaskCloser<TTarget, TContext>): Promise<FinishReceipt> {
     const allLabels = [...this.labels.keys()];
     const retained = keep === "all" ? allLabels : allLabels.filter((l) => keep.includes(l));
     const closed = allLabels.filter((l) => !retained.includes(l));
-    return { retained, closed, spaceClosed: retained.length === 0 };
+    const spaceClosed = retained.length === 0;
+
+    for (const label of closed) {
+      const target = this.getTarget(label);
+      if (target) await closer.closeTarget(target).catch(() => {});
+      this.removeLabel(label);
+    }
+    if (spaceClosed) {
+      await closer.closeContext(this.context).catch(() => {});
+    }
+    return { retained, closed, spaceClosed };
   }
 }
 
@@ -177,19 +210,26 @@ export class Registry<TTarget, TContext> {
   }
 
   private lockKey(nameOrId: string | number): string {
+    const asNumber = this.numericId(nameOrId);
+    return asNumber !== null ? `id:${asNumber}` : `name:${String(nameOrId)}`;
+  }
+
+  /** The one numeric-id parse both lockKey and resolveLocked use: a
+   * `nameOrId` that is (or stringifies to) a finite number is a literal
+   * spaceId, everything else is a name. */
+  private numericId(nameOrId: string | number): number | null {
     const asNumber = typeof nameOrId === "number" ? nameOrId : Number(nameOrId);
     const isNumeric = Number.isFinite(asNumber) && String(nameOrId).trim() !== "" && !Number.isNaN(asNumber);
-    return isNumeric ? `id:${asNumber}` : `name:${String(nameOrId)}`;
+    return isNumeric ? asNumber : null;
   }
 
   private async resolveLocked(
     nameOrId: string | number,
     makeContext: () => TContext | Promise<TContext>,
   ): Promise<TaskSpaceRecord<TTarget, TContext>> {
-    const asNumber = typeof nameOrId === "number" ? nameOrId : Number(nameOrId);
-    const isNumeric = Number.isFinite(asNumber) && String(nameOrId).trim() !== "" && !Number.isNaN(asNumber);
+    const asNumber = this.numericId(nameOrId);
 
-    if (isNumeric) {
+    if (asNumber !== null) {
       const existing = this.spaces.get(asNumber);
       if (existing) return existing;
       const created = new TaskSpaceRecord<TTarget, TContext>(asNumber, String(nameOrId), await makeContext());
@@ -214,6 +254,21 @@ export class Registry<TTarget, TContext> {
 
   get(spaceId: number): TaskSpaceRecord<TTarget, TContext> | undefined {
     return this.spaces.get(spaceId);
+  }
+
+  /**
+   * task.finish({keep}) at the registry level: the whole close -- target
+   * closes, label removals, context close, and the space's own removal
+   * from this registry -- behind one call, so no caller can get the
+   * ordering wrong. Throws the same "no task space" error the daemon's
+   * per-space lookups throw for an unknown/already-finished id.
+   */
+  async finish(spaceId: number, keep: FinishKeep, closer: TaskCloser<TTarget, TContext>): Promise<FinishReceipt> {
+    const space = this.spaces.get(spaceId);
+    if (!space) throw new Error(`ego-browser: no task space ${spaceId} (finished, or never created)`);
+    const receipt = await space.finish(keep, closer);
+    if (receipt.spaceClosed) this.remove(space.spaceId);
+    return receipt;
   }
 
   list(): TaskSpaceRecord<TTarget, TContext>[] {

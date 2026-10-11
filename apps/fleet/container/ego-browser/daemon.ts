@@ -11,7 +11,7 @@ import { basename } from "node:path";
 import { chromium, errors, type Browser, type BrowserContext, type Page as PwPage } from "playwright-core";
 import { resolvePaths } from "./paths";
 import { encodeMessage, MessageFramer, type RpcRequest } from "./rpc";
-import { Registry, type FinishKeep, type TaskSpaceRecord } from "./registry";
+import { Registry, type FinishKeep, type TaskSpaceRecord, type TaskCloser } from "./registry";
 import { IdleShutdown, resolveIdleMs } from "./idle-shutdown";
 import { findDirectChildPid, raceWithTimeout } from "./process-reap";
 import type { FnOrStringWire, SnapshotOpts, UrlMatcherWire } from "./wire";
@@ -227,6 +227,13 @@ async function resolveSpace(spaceId: number): Promise<TaskSpaceRecord<PwPage, Br
   return space;
 }
 
+// The real-Playwright plug for registry.ts's TaskCloser port: close is the
+// one piece of teardown the pure record cannot own itself.
+const realCloser: TaskCloser<PwPage, BrowserContext> = {
+  closeTarget: (page) => page.close(),
+  closeContext: (context) => context.close(),
+};
+
 /**
  * Materializes label's real Page the first time anything actually acts on
  * it. Delegates the actual get-or-create to TaskSpaceRecord.resolveTarget,
@@ -336,19 +343,12 @@ const methods: Record<string, Handler> = {
     return { label };
   },
 
+  // The whole close -- target closes, label removals, context close,
+  // registry removal -- lives behind Registry.finish now; the wire response
+  // keeps its exact historical shape ({retained, closed}, no spaceClosed).
   async "space.finish"(params: { spaceId: number; keep: FinishKeep }) {
-    const space = await resolveSpace(params.spaceId);
-    const receipt = space.finish(params.keep);
-    for (const label of receipt.closed) {
-      const target = space.getTarget(label);
-      if (target) await target.close().catch(() => {});
-      space.removeLabel(label);
-    }
-    if (receipt.spaceClosed) {
-      await space.context.close().catch(() => {});
-      registry.remove(space.spaceId);
-    }
-    return { retained: receipt.retained, closed: receipt.closed };
+    const { retained, closed } = await registry.finish(params.spaceId, params.keep, realCloser);
+    return { retained, closed };
   },
 
   async "page.goto"(params: { spaceId: number; label: string; url: string; opts?: Record<string, unknown> }) {
@@ -496,11 +496,11 @@ const methods: Record<string, Handler> = {
     return null;
   },
 
+  // Close errors PROPAGATE here (the record's closeLabel keeps them) -- a
+  // caller closing a page still holds a handle to must hear the failure.
   async "page.close"(params: { spaceId: number; label: string }) {
     const space = await resolveSpace(params.spaceId);
-    const target = space.getTarget(params.label);
-    if (target) await target.close();
-    space.removeLabel(params.label);
+    await space.closeLabel(params.label, realCloser);
     return null;
   },
 
