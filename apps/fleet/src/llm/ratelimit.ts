@@ -8,11 +8,12 @@
 // uselessness within seconds of a normal session starting.
 //
 // Shares its real logic (atomic increment-then-check, minute/day bucketing,
-// stale-row pruning) with junior/ratelimit.ts via ../ratelimit.ts — only
-// the D1 key prefixes, env var names, and numeric defaults differ. This
-// module holds TWO lead kinds: the messages route's (per-minute + daily)
-// and count_tokens' own (per-minute ONLY, its own prefixes, no daily cap).
-import { checkAndConsumeRateLimit, parsePositiveInt, type RateLimitKind, type RateLimitResult } from "../ratelimit";
+// stale-row pruning) with junior/ratelimit.ts via ../ratelimit.ts. Issue
+// #368 (sweep-4 finding F8): the parse-env-then-consume wrappers are
+// makeRateLimitKind products now — this module holds TWO lead kinds as spec
+// objects: the messages route's (per-minute + daily) and count_tokens' own
+// (per-minute ONLY, its own prefixes, no daily arm).
+import { makeRateLimitKind, type RateLimitResult } from "../ratelimit";
 
 // 60/min: the maestro's own suggested number (#284) — a Claude Code lead's
 // agentic loop can legitimately burst many tool-use round trips per minute
@@ -29,22 +30,23 @@ export const DEFAULT_LEAD_RATE_PER_MINUTE = 60;
 // unattended overnight.
 export const DEFAULT_LEAD_DAILY_CAP = 2000;
 
-const LEAD_KIND: RateLimitKind = { ratePrefix: "lead-rate:", dailyPrefix: "lead-daily:" };
-
-export interface LeadRateLimitEnv {
+// Type aliases, not interfaces: they must satisfy the factory's generic
+// `E extends Record<string, string | undefined>` constraint, and only
+// type aliases get implicit index signatures.
+export type LeadRateLimitEnv = {
   LEAD_RATE_PER_MINUTE?: string;
   LEAD_DAILY_CAP?: string;
-}
+};
 
 export type LeadRateLimitResult = RateLimitResult;
 
-export async function checkAndConsumeLeadRateLimit(
-  db: D1Database, env: LeadRateLimitEnv, studioId: string, now: number,
-): Promise<LeadRateLimitResult> {
-  const perMinute = parsePositiveInt(env.LEAD_RATE_PER_MINUTE, DEFAULT_LEAD_RATE_PER_MINUTE);
-  const dailyCap = parsePositiveInt(env.LEAD_DAILY_CAP, DEFAULT_LEAD_DAILY_CAP);
-  return checkAndConsumeRateLimit(db, studioId, now, perMinute, dailyCap, LEAD_KIND);
-}
+export const checkAndConsumeLeadRateLimit = makeRateLimitKind<LeadRateLimitEnv>({
+  kind: { ratePrefix: "lead-rate:", dailyPrefix: "lead-daily:" },
+  perMinuteEnv: "LEAD_RATE_PER_MINUTE",
+  perMinuteDefault: DEFAULT_LEAD_RATE_PER_MINUTE,
+  dailyCapEnv: "LEAD_DAILY_CAP",
+  dailyCapDefault: DEFAULT_LEAD_DAILY_CAP,
+});
 
 // count_tokens' OWN bucket, deliberately per-minute ONLY: the endpoint
 // spends no AI budget, and drawing its ~1800-calls/day volume (busiest GLM
@@ -52,18 +54,16 @@ export async function checkAndConsumeLeadRateLimit(
 // studios out until UTC midnight.
 export const DEFAULT_LEAD_COUNT_TOKENS_RATE_PER_MINUTE = 60;
 
-const LEAD_COUNT_TOKENS_KIND: RateLimitKind = { ratePrefix: "lead-count-rate:", dailyPrefix: "lead-count-daily:" };
-
-export interface LeadCountTokensRateLimitEnv {
+export type LeadCountTokensRateLimitEnv = {
   LEAD_COUNT_TOKENS_RATE_PER_MINUTE?: string;
-}
+};
 
-export async function checkAndConsumeLeadCountTokensRateLimit(
-  db: D1Database, env: LeadCountTokensRateLimitEnv, studioId: string, now: number,
-): Promise<LeadRateLimitResult> {
-  const perMinute = parsePositiveInt(env.LEAD_COUNT_TOKENS_RATE_PER_MINUTE, DEFAULT_LEAD_COUNT_TOKENS_RATE_PER_MINUTE);
-  // The core takes BOTH counters, so a never-reachable cap keeps the daily
-  // counter inert (1 row/studio/day, pruned after 2 days) without adding a
-  // "skip daily" arm to the core's contract for its two daily-capped kinds.
-  return checkAndConsumeRateLimit(db, studioId, now, perMinute, Number.MAX_SAFE_INTEGER, LEAD_COUNT_TOKENS_KIND);
-}
+// dailyPrefix stays even though no daily arm exists: the pruning sweep in
+// ../ratelimit.ts still names both prefixes, and keeping RateLimitKind's
+// shape unchanged (one two-prefix kind per spec) costs nothing — the
+// lead-count-daily: DELETE simply never matches a row.
+export const checkAndConsumeLeadCountTokensRateLimit = makeRateLimitKind<LeadCountTokensRateLimitEnv>({
+  kind: { ratePrefix: "lead-count-rate:", dailyPrefix: "lead-count-daily:" },
+  perMinuteEnv: "LEAD_COUNT_TOKENS_RATE_PER_MINUTE",
+  perMinuteDefault: DEFAULT_LEAD_COUNT_TOKENS_RATE_PER_MINUTE,
+});
