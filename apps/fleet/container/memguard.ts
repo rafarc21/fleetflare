@@ -520,6 +520,73 @@ function num(name: string, fallback: number): number {
   return Number.isFinite(v) && process.env[name] !== "" && process.env[name] !== undefined ? v : fallback;
 }
 
+/** The ports one guard tick needs: every /proc read, kill, adj write, log
+ *  line and clock the loop makes, injected — the io the interface tests
+ *  script and main() wires to the real thing. */
+export interface GuardIo {
+  readProcs(): Proc[];
+  readMemory(): Memory;
+  resolveLeadParentPid(): number | null;
+  kill(pid: number, signal: Signal): void;
+  setAdj(plan: Array<{ pid: number; adj: number }>): void;
+  log(line: string): void;
+}
+
+/** When the loop should tick next. */
+export interface GuardReport {
+  nextMs: number;
+}
+
+/** createGuard's fixed loop parameters: the guard's own pid, the /proc tree
+ *  the adj pass scans, the two tick cadences and the adj cadence. */
+export interface GuardOpts {
+  selfPid: number;
+  procRoot: string;
+  ticks: { intervalMs: number; fastIntervalMs: number };
+  adjEveryMs: number;
+}
+
+/**
+ * Issue #324: the loop main() used to inline, as a guard object over an
+ * injected io port. Behavior identical: same adj cadence (first tick, then
+ * every adjEveryMs), same lead-parent refresh rule (a failed resolution
+ * clears a known-good pid — #270 round 2), same gate/decide/settle
+ * sequence, same log lines, same silent settle when the signal itself
+ * throws (the victim exited between the scan and the kill).
+ */
+export function createGuard(io: GuardIo, cfg: GuardConfig, opts: GuardOpts): { tick(now: number): GuardReport } {
+  let state = initialState();
+  let leadParentPid: number | null = null;
+  let lastAdj = 0;
+  const adjCache = newAdjCache();
+  return {
+    tick(now: number): GuardReport {
+      const mem = io.readMemory();
+      if (now - lastAdj >= opts.adjEveryMs) {
+        leadParentPid = refreshLeadParentPid(leadParentPid, io.resolveLeadParentPid());
+        io.setAdj(adjScan(opts.procRoot, adjCache, opts.selfPid, leadParentPid));
+        lastAdj = now;
+      }
+      const r = step(state, mem, () => io.readProcs(), now, cfg, opts.ticks, opts.selfPid, leadParentPid);
+      state = r.state;
+      if (r.procs) io.setAdj(adjPlan(r.procs, opts.selfPid, leadParentPid));
+      if (r.noVictim) {
+        io.log(`${new Date(now).toISOString()} NO_VICTIM avail_mib=${mem.availMiB} total_mib=${mem.totalMiB} source=${mem.source}`);
+      }
+      if (r.action) {
+        try {
+          io.kill(r.action.victim.pid, r.action.signal);
+          io.log(formatLogLine(new Date(now), r.action.signal, r.action.victim, mem));
+        } catch {
+          // It exited between the scan and the signal: settle as if it had.
+          state = { ...state, pending: null, settleUntil: now + cfg.settleMs };
+        }
+      }
+      return { nextMs: r.nextMs };
+    },
+  };
+}
+
 function main(): void {
   const cfg: GuardConfig = {
     termPct: num("MEMGUARD_TERM_PCT", 6),
@@ -535,68 +602,34 @@ function main(): void {
   };
   const adjEveryMs = num("MEMGUARD_ADJ_INTERVAL_MS", 5000);
   const logPath = process.env.MEMGUARD_LOG || `${process.env.FLEET_WORKSPACE || "/workspace"}/.fleet/memguard.log`;
-  const self = process.pid;
-  const log = (line: string) => {
-    try {
-      appendFileSync(logPath, line + "\n");
-    } catch {
-      // A guard that cannot log still guards.
-    }
-  };
-  const applyAdj = (plan: Array<{ pid: number; adj: number }>) => {
-    for (const { pid, adj } of plan) {
-      try {
-        writeFileSync(`/proc/${pid}/oom_score_adj`, String(adj));
-      } catch {
-        // Exited, or no CAP_SYS_RESOURCE for a negative value.
-      }
-    }
-  };
-  const adjCache = newAdjCache();
-
   trimLog(logPath, LOG_MAX_LINES);
-  log(
-    `${new Date().toISOString()} START pid=${self} term_pct=${cfg.termPct} kill_pct=${cfg.killPct} ` +
-      `grace_ms=${cfg.graceMs} settle_ms=${cfg.settleMs} recover_mib=${cfg.recoverMiB} min_victim_mib=${cfg.minVictimMiB} interval_ms=${ticks.intervalMs}`,
-  );
-  let state = initialState();
-  let lastAdj = 0;
-  // #238: THE lead's pane-shell pid, re-resolved on the same ADJ_INTERVAL_MS
-  // cadence as the adj pass below -- spawning tmux is far pricier than a
-  // /proc read, so this must not run on the 100 ms fast tick. Re-resolved,
-  // not resolved once: studio-bringup.sh's claude_stop can `respawn-pane -k`
-  // the pane, which keeps the pane but replaces the process inside it, so the
-  // pane shell's pid CAN change over a container's life. #270 round 2: a
-  // FAILED resolution (tmux not up yet, socket/session missing, the 300 ms
-  // timeout tripping) DOES clear an already-known good pid -- see
-  // refreshLeadParentPid's, resolveLeadParentPid's and isProtected's own doc
-  // comments for why unresolved must fail toward the OLD broad protection,
-  // never stay narrow around a pid that may now be stale.
-  let leadParentPid: number | null = null;
-  const tick = () => {
-    const now = Date.now();
-    const mem = readMemory("/proc", "/sys/fs/cgroup");
-    if (now - lastAdj >= adjEveryMs) {
-      leadParentPid = refreshLeadParentPid(leadParentPid, resolveLeadParentPid());
-      applyAdj(adjScan("/proc", adjCache, self, leadParentPid));
-      lastAdj = now;
-    }
-    const r = step(state, mem, () => readProcs("/proc"), now, cfg, ticks, self, leadParentPid);
-    state = r.state;
-    if (r.procs) applyAdj(adjPlan(r.procs, self, leadParentPid));
-    if (r.noVictim) {
-      log(`${new Date(now).toISOString()} NO_VICTIM avail_mib=${mem.availMiB} total_mib=${mem.totalMiB} source=${mem.source}`);
-    }
-    if (r.action) {
-      try {
-        process.kill(r.action.victim.pid, r.action.signal);
-        log(formatLogLine(new Date(now), r.action.signal, r.action.victim, mem));
-      } catch {
-        // It exited between the scan and the signal: settle as if it had.
-        state = { ...state, pending: null, settleUntil: now + cfg.settleMs };
+  const io: GuardIo = {
+    readProcs: () => readProcs("/proc"),
+    readMemory: () => readMemory("/proc", "/sys/fs/cgroup"),
+    resolveLeadParentPid: () => resolveLeadParentPid(),
+    kill: (pid, signal) => process.kill(pid, signal),
+    setAdj: (plan) => {
+      for (const { pid, adj } of plan) {
+        try {
+          writeFileSync(`/proc/${pid}/oom_score_adj`, String(adj));
+        } catch {
+          // Exited, or no CAP_SYS_RESOURCE for a negative value.
+        }
       }
-    }
-    setTimeout(tick, r.nextMs);
+    },
+    log: (line) => {
+      try {
+        appendFileSync(logPath, line + "\n");
+      } catch {
+        // A guard that cannot log still guards.
+      }
+    },
+  };
+  log(`${new Date().toISOString()} START pid=${process.pid} term_pct=${cfg.termPct} kill_pct=${cfg.killPct} grace_ms=${cfg.graceMs} settle_ms=${cfg.settleMs} recover_mib=${cfg.recoverMiB} min_victim_mib=${cfg.minVictimMiB} interval_ms=${ticks.intervalMs}`);
+  const g = createGuard(io, cfg, { selfPid: process.pid, procRoot: "/proc", ticks, adjEveryMs });
+  const tick = (): void => {
+    const next = g.tick(Date.now());
+    setTimeout(tick, next.nextMs);
   };
   setTimeout(tick, ticks.intervalMs);
 }

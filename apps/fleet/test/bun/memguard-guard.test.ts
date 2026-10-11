@@ -237,10 +237,17 @@ describe("createGuard — the tick interface (issue #324)", () => {
     rmSync(join(tree, "200"), { recursive: true });
     writeTree(tree, [newLead, newPane]);
     g.tick(T0 + 5000); // adj #2: leadParentPid changed -> cache invalidated, all re-read
-    expect(io.adjLog).toHaveLength(2);
-    expect(io.adjLog[1].find((e) => e.pid === 201)?.adj).toBe(-1000); // the NEW lead is pinned
-    expect(io.adjLog[1].find((e) => e.pid === 999)?.adj).toBe(-1000); // and its pane shell with it
-    expect(io.adjLog[1].find((e) => e.pid === 150)?.adj).toBe(500); // the OLD pane shell: protection followed
+    // Both adj writes go through setAdj (the periodic scan pass AND the
+    // per-scan plan — exactly the two applyAdj calls main() made), so take
+    // the LAST write per pid across every plan this tick saw: the final
+    // oom_score_adj state, not "the second plan".
+    const last = (pid: number) => {
+      const writes = io.adjLog.flat().filter((e) => e.pid === pid);
+      return writes[writes.length - 1]?.adj;
+    };
+    expect(last(201)).toBe(-1000); // the NEW lead is pinned
+    expect(last(999)).toBe(-1000); // and its pane shell with it
+    expect(last(150)).toBe(500); // the OLD pane shell: protection followed
     expect(io.kills).toHaveLength(1); // mem healthy: no escalation this tick
     g.tick(T0 + 5100); // low again, victim 700 gone: settle
     expect(io.kills).toHaveLength(1);
