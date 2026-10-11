@@ -158,13 +158,37 @@ export function createRpcClient(transport: RpcTransport): RpcClient {
  * undefined) or an error response carrying the handler's own message.
  * Unknown methods get the same error-response shape, so a client never
  * hangs on a typo'd method name.
+ *
+ * `opts` carries the caller's per-request side effects, so rpc.ts stays
+ * agnostic about who is serving:
+ * - `onDispatch(req)` fires before the handler lookup -- even for an
+ *   unknown method. The daemon increments its in-flight count here, so
+ *   nothing can slip past the count the way a lookup-then-increment would.
+ * - `onSettled(req)` fires in a `finally` after the response is written,
+ *   for success, handler-throw, and unknown-method alike -- the daemon
+ *   decrements its in-flight count and re-arms its idle timer there.
+ * - `onError(req, message)` fires for every ERROR response (handler
+ *   throw or unknown method), carrying the exact message the client saw
+ *   on the wire -- the daemon builds its `method <m> failed: <message>`
+ *   log line from it.
  */
-export function serveRpc(transport: RpcTransport, handlers: Record<string, (params: any) => unknown>): void {
+export interface ServeRpcOptions {
+  onDispatch?: (req: RpcRequest) => void;
+  onSettled?: (req: RpcRequest) => void;
+  onError?: (req: RpcRequest, message: string) => void;
+}
+
+export function serveRpc(
+  transport: RpcTransport,
+  handlers: Record<string, (params: any) => unknown>,
+  opts?: ServeRpcOptions,
+): void {
   const framer = new MessageFramer<RpcRequest>();
 
   transport.onData((chunk) => {
     for (const req of framer.push(chunk)) {
       void (async () => {
+        opts?.onDispatch?.(req);
         try {
           const handler = handlers[req.method];
           if (!handler) throw new Error(`ego-browser: unknown RPC method "${req.method}"`);
@@ -172,7 +196,10 @@ export function serveRpc(transport: RpcTransport, handlers: Record<string, (para
           transport.write(encodeMessage({ id: req.id, result: result ?? null }));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
+          opts?.onError?.(req, message);
           transport.write(encodeMessage({ id: req.id, error: { message } }));
+        } finally {
+          opts?.onSettled?.(req);
         }
       })();
     }
