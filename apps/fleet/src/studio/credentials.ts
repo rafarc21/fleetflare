@@ -10,12 +10,12 @@
  * have to be reachable from the bun:test lane. do.ts re-exports both, so every
  * existing importer is unchanged.
  */
-// blueprint.ts's own UTF-8-safe base64 (chunked TextEncoder + btoa), reused
+// The shared UTF-8-safe base64 (chunked TextEncoder + btoa), reused
 // rather than re-derived: issue #253's git wrapper carries an em dash in its
 // refusal message, and a bare btoa() throws outright on any non-Latin1 byte.
-// blueprint.ts imports nothing itself, so this stays loadable from the
+// src/base64.ts imports nothing, so this stays loadable from the
 // bun:test lane exactly as this file already was.
-import { base64EncodeUtf8 } from "./blueprint";
+import { base64EncodeUtf8 } from "../base64";
 // Issue #1: leak-gate.ts imports nothing, so this stays bun:test-loadable too.
 import { LEAK_SCAN_PATH } from "../leak-gate";
 

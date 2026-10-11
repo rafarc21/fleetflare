@@ -18,7 +18,8 @@ import {
   type HealAttempt,
   type OperationInFlight,
 } from "../src/studio/provision";
-import { appendHouseRules, base64EncodeUtf8, BlueprintError } from "../src/studio/blueprint";
+import { appendHouseRules, BlueprintError } from "../src/studio/blueprint";
+import { base64EncodeUtf8 } from "../src/base64";
 import { recordStudio } from "../src/studio/registry";
 import { gatedStateIn, opsFileFetcher, installLeakGatePort } from "../src/studio/do";
 import { writeProxyConfigCmd } from "../src/write-proxy/container-config";

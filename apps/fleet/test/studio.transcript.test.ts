@@ -115,7 +115,7 @@ function b64(bytes: number[]): string {
 
 /** UTF-8 aware, for fixtures with real text (terminal output is not
  *  Latin1-only — claude's own TUI uses box-drawing/Unicode) — same shape as
- *  src/studio/blueprint.ts's base64EncodeUtf8. Plain `btoa(str)` throws
+ *  src/base64.ts's base64EncodeUtf8. Plain `btoa(str)` throws
  *  outright on any character outside Latin1. */
 function b64Utf8(s: string): string {
   return btoa(String.fromCharCode(...new TextEncoder().encode(s)));

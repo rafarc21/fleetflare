@@ -1,7 +1,8 @@
 // Studio parsing — P4a-1. Same contract as blueprint.ts: raw text in, typed
 // Studio out, BlueprintError names bad field. Flat frontmatter only; studio
 // nesting = directory structure (members/, hooks/), never syntax.
-import { appendBrief, appendHouseRules, appendMemoryIndex, BlueprintError, parseSimpleArray, parseBoolean, VALID_EFFORT_LEVELS, base64EncodeUtf8 } from "./blueprint";
+import { appendBrief, appendHouseRules, appendMemoryIndex, BlueprintError, parseSimpleArray, parseBoolean, VALID_EFFORT_LEVELS } from "./blueprint";
+import { base64EncodeUtf8 } from "../base64";
 
 export interface Studio {
   /** Studio identifier — matches its directory name under
