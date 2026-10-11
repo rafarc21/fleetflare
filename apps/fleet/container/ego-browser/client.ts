@@ -3,7 +3,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type EgoBrowserPaths, resolvePaths } from "./paths";
-import { encodeMessage, isRpcFailure, MessageFramer, type RpcResponse } from "./rpc";
+import { createRpcClient, decodeChunk, type RpcClient, type RpcTransport } from "./rpc";
 
 const DAEMON_PATH = join(dirname(fileURLToPath(import.meta.url)), "daemon.ts");
 
@@ -144,65 +144,62 @@ export async function ensureDaemonAlive(paths: EgoBrowserPaths = resolvePaths())
   );
 }
 
-interface PendingCall {
-  resolve: (value: unknown) => void;
-  reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
 interface Connection {
   socket: Bun.Socket;
-  framer: MessageFramer<RpcResponse>;
-  pending: Map<number, PendingCall>;
-  nextId: number;
+  client: RpcClient;
 }
 
 const connections = new Map<string, Promise<Connection>>();
-
-function failAllPending(conn: Connection, err: Error): void {
-  for (const [id, p] of conn.pending) {
-    clearTimeout(p.timer);
-    p.reject(err);
-    conn.pending.delete(id);
-  }
-}
 
 async function getConnection(paths: EgoBrowserPaths): Promise<Connection> {
   const cached = connections.get(paths.sockFile);
   if (cached) return cached;
 
   const connPromise = (async (): Promise<Connection> => {
+    // Bun registers socket handlers ONCE at Bun.connect time, so the
+    // transport's callback slots must be late-bound: the data/close/error
+    // handlers below route through these, and createRpcClient fills them
+    // during its own setup. The socket itself only exists once connect
+    // resolves -- transport.write closes over conn.socket, assigned after.
     const conn: Connection = {
       socket: undefined as unknown as Bun.Socket,
-      framer: new MessageFramer<RpcResponse>(),
-      pending: new Map(),
-      nextId: 1,
+      client: undefined as unknown as RpcClient,
     };
+    let onData: (chunk: string) => void = () => {};
+    let onClose: (err?: Error) => void = () => {};
+    const transport: RpcTransport = {
+      write: (data: string) => {
+        conn.socket.write(data);
+      },
+      onData: (cb: (chunk: string) => void) => {
+        onData = cb;
+      },
+      onClose: (cb: (err?: Error) => void) => {
+        onClose = cb;
+      },
+    };
+    const client = createRpcClient(transport);
+    // The connection is dead: no response can ever arrive on it again, so
+    // drop the cache entry -- the next call() opens a fresh one. Same move
+    // the old inline close/error handlers made.
+    client.onClosed(() => connections.delete(paths.sockFile));
+
     const socket = await Bun.connect<undefined>({
       unix: paths.sockFile,
       socket: {
         data(_socket, data) {
-          const text = Buffer.isBuffer(data) ? data.toString("utf8") : Buffer.from(data).toString("utf8");
-          for (const msg of conn.framer.push(text)) {
-            const pending = conn.pending.get(msg.id);
-            if (!pending) continue;
-            conn.pending.delete(msg.id);
-            clearTimeout(pending.timer);
-            if (isRpcFailure(msg)) pending.reject(new Error(msg.error.message));
-            else pending.resolve(msg.result);
-          }
+          onData(decodeChunk(data));
         },
         close() {
-          failAllPending(conn, new Error("ego-browser: daemon connection closed"));
-          connections.delete(paths.sockFile);
+          onClose();
         },
         error(_socket, err) {
-          failAllPending(conn, err instanceof Error ? err : new Error(String(err)));
-          connections.delete(paths.sockFile);
+          onClose(err instanceof Error ? err : new Error(String(err)));
         },
       },
     });
     conn.socket = socket;
+    conn.client = client;
     return conn;
   })();
 
@@ -221,14 +218,5 @@ export async function call(method: string, params?: unknown, timeoutMs = DEFAULT
   const paths = resolvePaths();
   await ensureDaemonAlive(paths);
   const conn = await getConnection(paths);
-
-  const id = conn.nextId++;
-  return new Promise<unknown>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      conn.pending.delete(id);
-      reject(new Error(`ego-browser: RPC call "${method}" timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    conn.pending.set(id, { resolve, reject, timer });
-    conn.socket.write(encodeMessage({ id, method, params }));
-  });
+  return conn.client.call(method, params, timeoutMs);
 }
