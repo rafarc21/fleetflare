@@ -10,6 +10,7 @@ import { alertedKey, rearmKey, clearRearm } from "../src/tasks/watchdog";
 import { __resetExceptionRateCapForTests } from "../src/exceptions";
 import type { TaskRecord } from "../src/tasks/loop";
 import type { Env } from "../src/env";
+import { nsWith } from "./helpers/fake-namespace";
 
 // scheduled()'s own doc comment calls it untested — "a scheduled export can
 // no more be constructed under vitest-pool-workers than AgentDO can" — but
@@ -251,10 +252,7 @@ describe("fleet anthropic (GLM lead) mount — issue #249", () => {
 // the runtime's container flag, never an exec.
 describe("scheduled() stopped-container watch (issue #95)", () => {
   function fakeStudio(calls: string[]): Env["STUDIO"] {
-    return {
-      idFromName: (n: string) => n,
-      get: (id: string) => ({ watchContainer: async () => { calls.push(id); } }),
-    } as unknown as Env["STUDIO"];
+    return nsWith((id: string) => ({ watchContainer: async () => { calls.push(id); } }));
   }
   const row = (id: string, state: string) => ({
     id, state, tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
@@ -293,10 +291,7 @@ describe("scheduled() order (PR #109 review)", () => {
         },
       }),
     } as unknown as Env["AGENT"];
-    const studio = {
-      idFromName: (n: string) => n,
-      get: () => ({ watchContainer: async () => { order.push("watch"); } }),
-    } as unknown as Env["STUDIO"];
+    const studio = nsWith({ watchContainer: async () => { order.push("watch"); } });
     await recordStudio(env, {
       id: "acme-os--maestro", state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
       lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
