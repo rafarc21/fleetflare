@@ -625,7 +625,7 @@ function main(): void {
       }
     },
   };
-  log(`${new Date().toISOString()} START pid=${process.pid} term_pct=${cfg.termPct} kill_pct=${cfg.killPct} grace_ms=${cfg.graceMs} settle_ms=${cfg.settleMs} recover_mib=${cfg.recoverMiB} min_victim_mib=${cfg.minVictimMiB} interval_ms=${ticks.intervalMs}`);
+  io.log(`${new Date().toISOString()} START pid=${process.pid} term_pct=${cfg.termPct} kill_pct=${cfg.killPct} grace_ms=${cfg.graceMs} settle_ms=${cfg.settleMs} recover_mib=${cfg.recoverMiB} min_victim_mib=${cfg.minVictimMiB} interval_ms=${ticks.intervalMs}`);
   const g = createGuard(io, cfg, { selfPid: process.pid, procRoot: "/proc", ticks, adjEveryMs });
   const tick = (): void => {
     const next = g.tick(Date.now());
