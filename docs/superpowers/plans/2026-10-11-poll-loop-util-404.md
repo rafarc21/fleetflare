@@ -11,13 +11,15 @@ accounts.ts's copy drifted: no ticker heartbeat, so a slow GET reads as a hang.
 
 1. RED: `test/bun/poll.test.ts` — poll util direct tests with injected clock/
    sleep: budget exhausts (returns timeout after budget measured from
-   caller-supplied `at`, not loop entry), shouldContinue true short-circuits,
+   caller-supplied `at`, not loop entry), first non-null read wins,
    tick cadence fires per interval, ticker stopper clears the interval.
    Helper does not exist yet — test fails to import.
 2. GREEN: `cli/poll.ts` (pure, clock/sleep injected): `poll()` bounded loop +
    `ticker()` heartbeat. Migrate ff.ts waitProvisioned + ticker + secs onto it;
-   migrate accounts.ts watchAccounts onto it (accounts gains the heartbeat,
-   closing the drift). All operator-facing lines byte-identical.
+   migrate accounts.ts watchAccounts onto it (heartbeat stays ff-only:
+   --watch already prints one line per iteration, and the byte-identity
+   boundary forbids new output — the slow-GET heartbeat drift stays open
+   as follow-up). All operator-facing lines byte-identical.
 3. Verify: `bun test test/bun/poll.test.ts test/bun/ff-no-tty.test.ts
    test/bun/ff-new-race.test.ts test/bun/ff-new-main.test.ts
    test/bun/ff-file-task-retry.test.ts test/bun/accounts-cli.test.ts` (25
