@@ -165,9 +165,10 @@ describe("a completion-record comment never wakes the task's studio", () => {
 
 // #363: the first-line fold is shared, so its CRLF handling gets pinned
 // ONCE here instead of per predicate. GitHub comment bodies can and do
-// arrive with \r\n line endings; a fold that loses either half of the
-// split+trim (the \r? in the regex, or the trim that also strips \r)
-// breaks the exact-match against the marker and fails these pins.
+// arrive with \r\n line endings. The \r? and the trim are belt-and-suspenders
+// for those first lines: a fold re-typed without BOTH -- a bare split on
+// "\n" with no trim -- leaves a trailing "\r" on the first line, breaks
+// the exact-match against the marker, and fails these pins.
 describe("first-line marker rules survive CRLF bodies (issue #363)", () => {
   it("/wake with trailing space before a CRLF newline still qualifies, for any task state", () => {
     expect(qualifiesForCommentWake("working", "\r\nplain reply text\r\n", "rafarc21")).toBe(false);
