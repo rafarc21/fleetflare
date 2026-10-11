@@ -77,6 +77,16 @@ describe("checkAndConsumeJuniorRateLimit", () => {
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, DEFAULT_JUNIOR_RATE_PER_MINUTE)).toMatchObject({ ok: false, limit: "per-minute" });
   });
 
+  // #368: the wrapper is a makeRateLimitKind product now — pin the floor
+  // half of parsePositiveInt through the real public function, so a future
+  // factory edit that drops it fails here, not in prod.
+  it("a fractional per-minute cap floors to its integer part", async () => {
+    const env_ = { JUNIOR_RATE_PER_MINUTE: "2.9" };
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toMatchObject({ ok: false, limit: "per-minute" });
+  });
+
   // PR #9 review, BLOCKER F1: the pre-fix implementation reads the counter,
   // checks it, and only THEN writes the increment — two separate D1
   // round-trips with nothing atomic between them. N genuinely concurrent
