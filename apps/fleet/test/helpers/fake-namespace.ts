@@ -13,15 +13,12 @@ import type { Env } from "../../src/env";
  *  function get(id) dispatches to (per-id fakes, e.g. grid's tails map). */
 export type NsStub = Record<string, unknown> | ((id: string) => Record<string, unknown>);
 
-/** The extracted shape: idFromName(name) === name, get(id) === stub. An
- *  object stub also lands its own members on the namespace surface (the
- *  pinned envWithNs test reads a stub member straight off env.STUDIO); a
- *  function stub cannot, and doesn't need to — its per-id results only
- *  ever come back through get(). The spread comes first, so a stub member
- *  named `get`/`idFromName` can never shadow the real ones. */
+/** The extracted shape — exactly three things: an object stub means get()
+ *  returns it for every id; a function stub means get(id) dispatches to it;
+ *  and idFromName(name) === name. get() is the only window onto a stub:
+ *  stub members never land on the namespace surface itself. */
 export function nsWith(stub: NsStub): Env["STUDIO"] {
   return {
-    ...(typeof stub === "function" ? {} : stub),
     idFromName: ((name: string) => name) as unknown as Env["STUDIO"]["idFromName"],
     get: ((id: string) =>
       typeof stub === "function" ? stub(id) : stub) as unknown as Env["STUDIO"]["get"],
