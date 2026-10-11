@@ -46,11 +46,11 @@ import { oneLine } from "../github/wake-events";
  */
 const WAKE_MARKER = "/wake";
 
-/** The comment's first line, trimmed — the marker surface every predicate
+/** The comment's first line, trimmed -- the marker surface every predicate
  *  below reads. One fold, not one per predicate: a fourth marker would
  *  otherwise re-type the split+trim and drift on \r handling (issue #363).
  *  NOT `oneLine`: that flattens every newline, while the marker rule is
- *  first-line only — see hasWakeMarker's own mid-comment spoof pin. */
+ *  first-line only -- see hasWakeMarker's own mid-comment spoof pin. */
 function firstLine(body: string): string {
   return (body.split(/\r?\n/)[0] ?? "").trim();
 }

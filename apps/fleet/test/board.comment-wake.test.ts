@@ -164,19 +164,19 @@ describe("a completion-record comment never wakes the task's studio", () => {
 });
 
 // #363: the first-line fold is shared, so its CRLF handling gets pinned
-// ONCE here instead of per predicate. A comment body carrying Windows
-// line endings must still match the marker rules: GitHub bodies can and
-// do arrive with \r\n, and a fold that split on "\n" alone would leave a
-// trailing "\r" that breaks the exact-match against "/wake".
+// ONCE here instead of per predicate. GitHub comment bodies can and do
+// arrive with \r\n line endings; a fold that loses either half of the
+// split+trim (the \r? in the regex, or the trim that also strips \r)
+// breaks the exact-match against the marker and fails these pins.
 describe("first-line marker rules survive CRLF bodies (issue #363)", () => {
-  it("/wake with leading space and CRLF newline still qualifies, for any task state", () => {
+  it("/wake with trailing space before a CRLF newline still qualifies, for any task state", () => {
     expect(qualifiesForCommentWake("working", "\r\nplain reply text\r\n", "rafarc21")).toBe(false);
     expect(qualifiesForCommentWake("working", "/wake \r\nsecond line", "rafarc21")).toBe(true);
     expect(qualifiesForCommentWake("working", "/wake\r\nsecond line", "rafarc21")).toBe(true);
   });
 
-  it("a CRLF completion record still never wakes — first line matches the marker exactly", () => {
-    const record = doneRecordComment("websites--pilot", "{}");
-    expect(qualifiesForCommentWake("input_required", record + "\r", "rafarc21")).toBe(false);
+  it("a CRLF completion record still never wakes -- first line matches the marker exactly", () => {
+    const record = doneRecordComment("websites--pilot", "{}").replace("\n", "\r\n");
+    expect(qualifiesForCommentWake("input_required", record, "rafarc21")).toBe(false);
   });
 });
