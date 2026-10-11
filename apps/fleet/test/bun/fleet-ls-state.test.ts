@@ -1,16 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { formatTable } from "../../cli/fleet";
-import type { StudioStatus } from "../../src/studio/types";
-
 // Issue #95: formatTable's STATE column must go through formatState, or the
 // detector's verdict never reaches the operator's screen.
-function row(overrides: Partial<StudioStatus>): StudioStatus {
-  return {
-    id: "acme-os--maestro", state: "stopped", tailscaleHost: null, lastRefresh: null,
-    error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null,
-    repoSlug: null, ...overrides,
-  };
-}
+import { row } from "../helpers/studio-row";
 
 describe("fleet ls — stopped studio whose container runs", () => {
   test("STATE says the container is running and billing", () => {

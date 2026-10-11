@@ -1,18 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { formatTable } from "../../cli/fleet";
-import type { StudioStatus } from "../../src/studio/types";
-
 // Issues #289/#285: the ACCOUNT cell. The Worker stamps the LAUNCHED account
 // into claudeAccount (withAccountDisplay), the next launch's account into
 // claudeAccountNext when they differ, and launchedAccount: null for a refused
 // launch that left nothing running on a named account.
-function row(overrides: Partial<StudioStatus>): StudioStatus {
-  return {
-    id: "demosite-life--pilot", state: "running", tailscaleHost: null, lastRefresh: null,
-    error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null,
-    repoSlug: null, ...overrides,
-  };
-}
+import { runningRow } from "../helpers/studio-row";
+import type { StudioStatus } from "../../src/studio/types";
+
+const row = (o: Partial<StudioStatus> = {}): StudioStatus =>
+  runningRow({ id: "demosite-life--pilot", ...o });
 
 function accountCell(s: StudioStatus): string {
   const [header, line] = formatTable([s]).split("\n");

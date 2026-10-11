@@ -4,6 +4,7 @@ import { runAccountFailover, PANE_CAPTURE_MARKER, type FailoverDeps } from "../s
 import { STATUS_KEY, DESTROYING_KEY } from "../src/studio/provision";
 import type { SessionSyncDeps } from "../src/studio/session-sync";
 import type { StudioStatus, StudioState } from "../src/studio/types";
+import { row as baseRow } from "./helpers/studio-row";
 
 // ---------------------------------------------------------------------------
 // Issue #123, fix round (verifier S2): a tick exec that STARTED before a
@@ -22,12 +23,7 @@ import type { StudioStatus, StudioState } from "../src/studio/types";
 
 const ID = "fleetflare--web-studio";
 
-function row(state: StudioState): StudioStatus {
-  return {
-    id: ID, state, tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
-    burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-  };
-}
+const row = (state: StudioState): StudioStatus => baseRow({ id: ID, state });
 
 function store(state: StudioState = "running") {
   const map = new Map<string, unknown>([[STATUS_KEY, row(state)]]);
