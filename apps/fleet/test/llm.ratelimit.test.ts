@@ -37,7 +37,7 @@ describe("checkAndConsumeLeadRateLimit — defaults", () => {
     for (let i = 0; i < DEFAULT_LEAD_RATE_PER_MINUTE; i++) {
       expect(await checkAndConsumeLeadRateLimit(env.DB, {}, STUDIO, i)).toEqual({ ok: true });
     }
-    expect(await checkAndConsumeLeadRateLimit(env.DB, {}, STUDIO, DEFAULT_LEAD_RATE_PER_MINUTE)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, {}, STUDIO, DEFAULT_LEAD_RATE_PER_MINUTE)).toMatchObject({ ok: false, limit: "per-minute" });
   });
 
   // The 60/min default is already driven through real behavior above (a
@@ -57,7 +57,7 @@ describe("checkAndConsumeLeadRateLimit — defaults", () => {
 
     // Distinct minute buckets so the per-minute cap never factors in.
     expect(await checkAndConsumeLeadRateLimit(env.DB, {}, STUDIO, 0)).toEqual({ ok: true });
-    expect(await checkAndConsumeLeadRateLimit(env.DB, {}, STUDIO, MINUTE)).toEqual({ ok: false, limit: "daily" });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, {}, STUDIO, MINUTE)).toMatchObject({ ok: false, limit: "daily" });
   });
 
   it("defaults are sane: both positive, daily >= per-minute", () => {
@@ -72,13 +72,13 @@ describe("checkAndConsumeLeadRateLimit — config + bucketing", () => {
     const e = { LEAD_RATE_PER_MINUTE: "2" };
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: true });
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 100)).toEqual({ ok: true });
-    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 200)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 200)).toMatchObject({ ok: false, limit: "per-minute" });
   });
 
   it("a new minute bucket resets the per-minute count", async () => {
     const e = { LEAD_RATE_PER_MINUTE: "1" };
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: true });
-    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 500)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 500)).toMatchObject({ ok: false, limit: "per-minute" });
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, MINUTE + 1)).toEqual({ ok: true });
   });
 
@@ -86,20 +86,20 @@ describe("checkAndConsumeLeadRateLimit — config + bucketing", () => {
     const e = { LEAD_RATE_PER_MINUTE: "100", LEAD_DAILY_CAP: "2" };
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: true });
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, MINUTE)).toEqual({ ok: true });
-    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, MINUTE * 2)).toEqual({ ok: false, limit: "daily" });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, MINUTE * 2)).toMatchObject({ ok: false, limit: "daily" });
   });
 
   it("a new UTC day resets the daily count", async () => {
     const e = { LEAD_RATE_PER_MINUTE: "100", LEAD_DAILY_CAP: "1" };
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: true });
-    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, MINUTE)).toEqual({ ok: false, limit: "daily" });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, MINUTE)).toMatchObject({ ok: false, limit: "daily" });
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, DAY + 1)).toEqual({ ok: true });
   });
 
   it("tracks each studio independently", async () => {
     const e = { LEAD_RATE_PER_MINUTE: "1" };
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: true });
-    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 0)).toMatchObject({ ok: false, limit: "per-minute" });
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, OTHER, 0)).toEqual({ ok: true });
   });
 
@@ -108,7 +108,7 @@ describe("checkAndConsumeLeadRateLimit — config + bucketing", () => {
     for (let i = 0; i < DEFAULT_LEAD_RATE_PER_MINUTE; i++) {
       expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, i)).toEqual({ ok: true });
     }
-    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, DEFAULT_LEAD_RATE_PER_MINUTE)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, DEFAULT_LEAD_RATE_PER_MINUTE)).toMatchObject({ ok: false, limit: "per-minute" });
   });
 });
 
@@ -122,7 +122,7 @@ describe("checkAndConsumeLeadRateLimit — genuinely separate from junior's", ()
     for (let i = 0; i < 5; i++) {
       expect(await checkAndConsumeJuniorRateLimit(env.DB, juniorEnv, STUDIO, 0)).toEqual({ ok: true });
     }
-    expect(await checkAndConsumeJuniorRateLimit(env.DB, juniorEnv, STUDIO, 0)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, juniorEnv, STUDIO, 0)).toMatchObject({ ok: false, limit: "per-minute" });
 
     // Same studio, same instant — the lead route's own limit (default 60)
     // is untouched by junior's 5 calls above.
@@ -135,7 +135,7 @@ describe("checkAndConsumeLeadRateLimit — genuinely separate from junior's", ()
     for (let i = 0; i < 3; i++) {
       expect(await checkAndConsumeLeadRateLimit(env.DB, leadEnv, STUDIO, 0)).toEqual({ ok: true });
     }
-    expect(await checkAndConsumeLeadRateLimit(env.DB, leadEnv, STUDIO, 0)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, leadEnv, STUDIO, 0)).toMatchObject({ ok: false, limit: "per-minute" });
 
     const junior = await checkAndConsumeJuniorRateLimit(env.DB, {}, STUDIO, 0);
     expect(junior).toEqual({ ok: true });

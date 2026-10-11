@@ -9,7 +9,9 @@
 //
 // Shares its real logic (atomic increment-then-check, minute/day bucketing,
 // stale-row pruning) with junior/ratelimit.ts via ../ratelimit.ts — only
-// the D1 key prefixes, env var names, and numeric defaults differ.
+// the D1 key prefixes, env var names, and numeric defaults differ. This
+// module holds TWO lead kinds: the messages route's (per-minute + daily)
+// and count_tokens' own (per-minute ONLY, its own prefixes, no daily cap).
 import { checkAndConsumeRateLimit, parsePositiveInt, type RateLimitKind, type RateLimitResult } from "../ratelimit";
 
 // 60/min: the maestro's own suggested number (#284) — a Claude Code lead's
@@ -42,4 +44,26 @@ export async function checkAndConsumeLeadRateLimit(
   const perMinute = parsePositiveInt(env.LEAD_RATE_PER_MINUTE, DEFAULT_LEAD_RATE_PER_MINUTE);
   const dailyCap = parsePositiveInt(env.LEAD_DAILY_CAP, DEFAULT_LEAD_DAILY_CAP);
   return checkAndConsumeRateLimit(db, studioId, now, perMinute, dailyCap, LEAD_KIND);
+}
+
+// count_tokens' OWN bucket, deliberately per-minute ONLY: the endpoint
+// spends no AI budget, and drawing its ~1800-calls/day volume (busiest GLM
+// studio, measured 2026-10-11) from the messages route's daily cap locked
+// studios out until UTC midnight.
+export const DEFAULT_LEAD_COUNT_TOKENS_RATE_PER_MINUTE = 60;
+
+const LEAD_COUNT_TOKENS_KIND: RateLimitKind = { ratePrefix: "lead-count-rate:", dailyPrefix: "lead-count-daily:" };
+
+export interface LeadCountTokensRateLimitEnv {
+  LEAD_COUNT_TOKENS_RATE_PER_MINUTE?: string;
+}
+
+export async function checkAndConsumeLeadCountTokensRateLimit(
+  db: D1Database, env: LeadCountTokensRateLimitEnv, studioId: string, now: number,
+): Promise<LeadRateLimitResult> {
+  const perMinute = parsePositiveInt(env.LEAD_COUNT_TOKENS_RATE_PER_MINUTE, DEFAULT_LEAD_COUNT_TOKENS_RATE_PER_MINUTE);
+  // The core takes BOTH counters, so a never-reachable cap keeps the daily
+  // counter inert (1 row/studio/day, pruned after 2 days) without adding a
+  // "skip daily" arm to the core's contract for its two daily-capped kinds.
+  return checkAndConsumeRateLimit(db, studioId, now, perMinute, Number.MAX_SAFE_INTEGER, LEAD_COUNT_TOKENS_KIND);
 }

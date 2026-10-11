@@ -19,7 +19,7 @@ import { readCappedBody } from "../http/capped-body";
 import { isSpawnTokenShaped, resolveSpawnParent, type SpawnParent } from "../studio/spawn";
 import { listStudios } from "../studio/registry";
 import type { StudioStatus } from "../studio/types";
-import { checkAndConsumeLeadRateLimit } from "./ratelimit";
+import { checkAndConsumeLeadCountTokensRateLimit, checkAndConsumeLeadRateLimit } from "./ratelimit";
 import { parsePositiveInt } from "../ratelimit";
 import { insertJuniorUsage } from "../junior/usage";
 import {
@@ -57,6 +57,37 @@ const text = (body: string, status: number) => new Response(body, { status });
  *  classifyAiError doc comment for the type/status table this fills in. */
 function anthropicErrorBody(type: string, message: string): Json {
   return { type: "error", error: { type, message } };
+}
+
+/** A 429 without retry-after leaves Claude Code to guess its backoff;
+ *  seconds rounded up so a client never retries before the window
+ *  has actually rolled over. */
+function rateLimitRefusal(message: string, retryAfterMs: number): Response {
+  return Response.json(anthropicErrorBody("rate_limit_error", message), {
+    status: 429,
+    headers: { "retry-after": String(Math.ceil(retryAfterMs / 1000)) },
+  });
+}
+
+/** Consume one unit of the lead rate budget; null = ok, a 429 Response =
+ *  refused. The messages route's own limiter — per-minute + daily, with
+ *  the refusal text and window math that route has always answered. */
+async function consumeLeadRate(env: Env, studioId: string): Promise<Response | null> {
+  const rate = await checkAndConsumeLeadRateLimit(env.DB, env, studioId, Date.now());
+  return rate.ok ? null : rateLimitRefusal(
+    rate.limit === "per-minute"
+      ? "rate limit exceeded: too many glm-lead calls this minute"
+      : "rate limit exceeded: daily glm-lead cap reached",
+    rate.retryAfterMs,
+  );
+}
+
+/** Same refusal shape as the messages route, but count_tokens' own text —
+ *  a client told "too many glm-lead calls" on a count_tokens probe would
+ *  misread its /messages budget as gone. */
+async function consumeLeadCountTokensRate(env: Env, studioId: string): Promise<Response | null> {
+  const rate = await checkAndConsumeLeadCountTokensRateLimit(env.DB, env, studioId, Date.now());
+  return rate.ok ? null : rateLimitRefusal("rate limit exceeded: too many count_tokens calls this minute", rate.retryAfterMs);
 }
 
 /**
@@ -326,10 +357,12 @@ async function pumpAnthropicStream(
  *  the `leadType === "glm"` gate. See `handleFleetAnthropicMessages`'s own
  *  (now-removed) inline comments for why each individual check exists —
  *  this function only collects them into one place so both routes keep
- *  enforcing the exact same thing. The per-minute/daily rate limit is
- *  deliberately NOT part of this shared gate: `handleFleetAnthropicMessages`
- *  applies it (it spends Workers AI budget), `handleFleetAnthropicCountTokens`
- *  does not (see that function's own doc comment for why).
+ *  enforcing the exact same thing. The rate limit stays OUT of this shared
+ *  gate, applied by each route itself right after the gate — the messages
+ *  route enforces its per-minute/daily limiter, count_tokens its OWN
+ *  per-minute-only one (separate D1 prefix, no daily cap), each at its own
+ *  position (before any body work), keeping the gate's own contract
+ *  "refusal or studio, nothing spent".
  *
  *  Returns either an early refusal `Response` (any one of the checks above
  *  failing) or the resolved `studio`/`allRows` the caller needs to proceed —
@@ -453,15 +486,8 @@ export async function handleFleetAnthropicMessages(
   // counters (llm/ratelimit.ts), keyed by studio id but under distinct key
   // prefixes — genuinely separate budget from junior's, even though both
   // routes still spend out of the same underlying Workers AI quota.
-  const rate = await checkAndConsumeLeadRateLimit(env.DB, env, studio.id, Date.now());
-  if (!rate.ok) {
-    return text(
-      rate.limit === "per-minute"
-        ? "rate limit exceeded: too many glm-lead calls this minute"
-        : "rate limit exceeded: daily glm-lead cap reached",
-      429,
-    );
-  }
+  const refusal = await consumeLeadRate(env, studio.id);
+  if (refusal) return refusal;
 
   const raw = await readCappedBody(req, ANTHROPIC_BODY_CAP);
   if (raw === null) return text("payload too large", 413);
@@ -551,15 +577,19 @@ export async function handleFleetAnthropicMessages(
 /** ESTIMATE ONLY, not a real count — this backend has no tokenizer exposed
  *  to it at all (no Anthropic tokenizer, no access to GLM's own vocab), so
  *  there is no way to answer this honestly with an exact number. Heuristic:
- *  total character count of every flattened OpenAI-shape message's content
- *  (text and/or tool-call name+arguments), divided by ~4 — the commonly
- *  cited rough chars-per-token ratio for English text. Flagged here rather
- *  than guessed at silently, same "say so in a comment instead of guessing"
- *  convention classifyAiError's own doc comment (translate.ts) already
- *  established for this file. `Math.max(1, ...)` only to avoid reporting 0
- *  for a technically-non-empty request — not a claim that 1 is ever the
- *  real count. */
-function estimateInputTokens(messages: Json[]): number {
+ *  total character count of every message's string content, its tool_calls
+ *  (name + arguments), and the request's tools JSON (their schemas are real
+ *  prompt material the backend re-receives every call), divided by ~4 —
+ *  the commonly cited rough chars-per-token ratio for English text. Runs
+ *  on POST-translation messages, where anthropicRequestToOpenAI has
+ *  already flattened any Anthropic content array into string content, so
+ *  a message whose content is not a string contributes nothing here.
+ *  Flagged here rather than guessed at silently, same "say so in a comment
+ *  instead of guessing" convention classifyAiError's own doc comment
+ *  (translate.ts) already established for this file.
+ *  `Math.max(1, ...)` only to avoid reporting 0 for a technically-non-empty
+ *  request — not a claim that 1 is ever the real count. */
+function estimateInputTokens(messages: Json[], tools: Json[] | undefined): number {
   let chars = 0;
   for (const m of messages) {
     if (typeof m.content === "string") chars += m.content.length;
@@ -567,6 +597,7 @@ function estimateInputTokens(messages: Json[]): number {
       chars += String(tc.function?.name ?? "").length + String(tc.function?.arguments ?? "").length;
     }
   }
+  for (const t of Array.isArray(tools) ? tools : []) chars += JSON.stringify(t ?? {}).length;
   return Math.max(1, Math.round(chars / 4));
 }
 
@@ -583,11 +614,12 @@ function estimateInputTokens(messages: Json[]): number {
  * are all still enforced here even though this route never actually calls
  * `env.AI.run` — none of those checks exist BECAUSE of the AI call; they
  * exist because this is still a spawn-token-authenticated glm-lead-only
- * surface, same as every other check in this file. The per-minute/daily
- * rate limit (`checkAndConsumeLeadRateLimit`) is deliberately NOT applied
- * here — unlike the real message-generation route, this one spends no
- * Workers AI budget at all, so there is nothing for that limiter to
- * protect.
+ * surface, same as every other check in this file. Rate limiting too, same
+ * position (after the auth gate, before any body work), but from its OWN
+ * per-minute-only limiter (`checkAndConsumeLeadCountTokensRateLimit`,
+ * separate D1 prefix, no daily cap) — an unthrottled endpoint is a free
+ * D1-hammering surface, yet its calls spend no AI budget and must not
+ * draw down the messages route's.
  */
 export async function handleFleetAnthropicCountTokens(
   req: Request, env: Env, ctx: ExecutionContext,
@@ -595,6 +627,13 @@ export async function handleFleetAnthropicCountTokens(
 ): Promise<Response> {
   const gate = await authenticateGlmLeadRequest(req, ANTHROPIC_COUNT_TOKENS_PATH, env, rows);
   if ("response" in gate) return gate.response;
+  const { studio } = gate;
+
+  // count_tokens gets its OWN per-minute bucket: it spends no AI budget,
+  // and drawing it from the /messages daily cap locked studios out
+  // (measured 2026-10-11) — see consumeLeadCountTokensRate's doc comment.
+  const refusal = await consumeLeadCountTokensRate(env, studio.id);
+  if (refusal) return refusal;
 
   const raw = await readCappedBody(req, ANTHROPIC_BODY_CAP);
   if (raw === null) return text("payload too large", 413);
@@ -603,5 +642,5 @@ export async function handleFleetAnthropicCountTokens(
   if (!Array.isArray(body?.messages) || body.messages.length === 0) return text("messages required", 400);
 
   const openaiBody = anthropicRequestToOpenAI(body);
-  return json({ input_tokens: estimateInputTokens(openaiBody.messages) }, 200);
+  return json({ input_tokens: estimateInputTokens(openaiBody.messages, body.tools) }, 200);
 }

@@ -182,14 +182,36 @@ describe("handleFleetAnthropicMessages — spend controls (MAJOR 2)", () => {
 
   // Board issue #284, MAJOR 1: this route has its OWN rate limit now
   // (LEAD_RATE_PER_MINUTE, src/llm/ratelimit.ts) — junior's own
-  // JUNIOR_RATE_PER_MINUTE no longer has any effect here.
+  // JUNIOR_RATE_PER_MINUTE no longer has any effect here. The 429 is now
+  // Anthropic-shaped with a retry-after header, not bare text.
   it("429 once the per-minute rate limit is exceeded — uses its OWN LEAD_RATE_PER_MINUTE, not junior's", async () => {
     const { token, rows, e } = await setup(undefined, { LEAD_RATE_PER_MINUTE: "1" });
     const first = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(first.status).toBe(200);
     const second = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(second.status).toBe(429);
-    expect(await second.text()).toContain("too many glm-lead calls this minute");
+    const retryAfter = second.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(await second.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "rate limit exceeded: too many glm-lead calls this minute" },
+    });
+  });
+
+  it("429 past the daily cap — same Anthropic rate_limit_error body + retry-after (#298-1)", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_DAILY_CAP: "1" });
+    const first = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(first.status).toBe(200);
+    const second = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(second.status).toBe(429);
+    const retryAfter = second.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(await second.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "rate limit exceeded: daily glm-lead cap reached" },
+    });
   });
 
   it("junior's own JUNIOR_RATE_PER_MINUTE has no effect on this route — the two limits are separate", async () => {
@@ -416,6 +438,40 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
     expect(JSON.parse(errorFrame!.split("data: ")[1])).toEqual({
       type: "error", error: { type: "api_error", message: "upstream blew up mid-generation" },
+    });
+
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].ok).toBe(0);
+  });
+
+  // The overflow-shaped sibling of the test above — Claude Code's client
+  // recognizes "prompt is too long" to trigger auto-compact mid-session,
+  // so the raw upstream overflow text must not pass through.
+  it("an overflow-shaped upstream {error:...} chunk mid-stream emits event: error carrying the fixed 'prompt is too long' message, not the raw upstream text (#298-4)", async () => {
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: "This model's maximum context length is 32768 tokens" } })}\n\n`));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    expect(eventTypes).not.toContain("message_stop");
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toEqual({
+      type: "error", error: { type: "invalid_request_error", message: "prompt is too long" },
     });
 
     await ctx.drain();
@@ -968,5 +1024,94 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
     expect(run).not.toHaveBeenCalled();
     const json = (await r.json()) as { input_tokens: number };
     expect(json.input_tokens).toBeGreaterThan(10);
+  });
+
+  // The request's tools are real prompt material the backend re-receives
+  // every call — an estimate that ignores them comes in low and skews
+  // Claude Code's compact decisions the endpoint exists to feed.
+  it("a body with a non-trivial tools array estimates HIGHER than the same body without tools (#298-3)", async () => {
+    const { token, rows, e } = await setup();
+    const tool = {
+      name: "get_weather", description: "look up the current weather for a city",
+      input_schema: { type: "object", properties: { city: { type: "string" }, units: { type: "string" } }, required: ["city"] },
+    };
+    const base = { model: "claude-opus-4-5", messages: [{ role: "user", content: "weather in nyc?" }] };
+    const withTools = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH, body: { ...base, tools: [tool] } }), e, ctx, rows,
+    );
+    const withoutTools = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH, body: base }), e, ctx, rows,
+    );
+    const estimateWith = ((await withTools.json()) as { input_tokens: number }).input_tokens;
+    const estimateWithout = ((await withoutTools.json()) as { input_tokens: number }).input_tokens;
+    expect(estimateWith).toBeGreaterThan(estimateWithout);
+  });
+
+  it("array-content messages ({type:'text'} blocks) are counted, not skipped (#298-3)", async () => {
+    const { token, rows, e } = await setup();
+    const long = "a sentence of genuine content, ".repeat(20);
+    const r = await handleFleetAnthropicCountTokens(
+      req({
+        token, path: ANTHROPIC_COUNT_TOKENS_PATH,
+        body: { model: "claude-opus-4-5", messages: [{ role: "user", content: [{ type: "text", text: long }] }] },
+      }), e, ctx, rows,
+    );
+    const json = (await r.json()) as { input_tokens: number };
+    expect(json.input_tokens).toBeGreaterThan(10);
+  });
+
+  // Still throttled — the endpoint spends no AI budget, but an unthrottled
+  // endpoint is a free D1-hammering surface — now from its OWN per-minute
+  // budget, never the messages route's.
+  it("429 once its OWN per-minute limit is exceeded — same Anthropic rate_limit_error body + retry-after (#298-3)", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "1" });
+    const first = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
+    );
+    expect(first.status).toBe(200);
+    const second = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
+    );
+    expect(second.status).toBe(429);
+    const retryAfter = second.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(await second.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "rate limit exceeded: too many count_tokens calls this minute" },
+    });
+  });
+
+  // A count_tokens call must spend NOTHING from the messages budget: the
+  // busiest GLM studio ran ~1800 count_tokens calls a day, and drawing them
+  // from the shared per-minute/daily counters locked studios out.
+  it("count_tokens and /messages have separate per-minute budgets — a count_tokens call spends none of /messages'", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_RATE_PER_MINUTE: "1", LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "1" });
+    const count = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(count.status).toBe(200);
+    // /messages still answers 200 — the count_tokens call above spent none
+    // of its per-minute budget.
+    const msg = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(msg.status).toBe(200);
+    // The SECOND count_tokens call is what trips count_tokens' own budget.
+    const counted = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(counted.status).toBe(429);
+    const retryAfter = counted.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(await counted.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "rate limit exceeded: too many count_tokens calls this minute" },
+    });
+  });
+
+  // count_tokens spends no AI budget, so no daily cap applies to it — and
+  // /messages' own daily cap must never gate it either.
+  it("count_tokens has no daily cap — /messages' LEAD_DAILY_CAP does not gate it", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_DAILY_CAP: "1" });
+    const msg = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(msg.status).toBe(200);
+    const count = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(count.status).toBe(200);
   });
 });
