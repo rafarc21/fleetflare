@@ -1,4 +1,5 @@
 import { closesIssueByKeyword } from "./promote-close";
+import { nextPageLink } from "./next-link";
 import { base64EncodeUtf8 } from "../base64";
 
 // Issue #331: a neutral product name, not the App's own bot slug
@@ -798,14 +799,19 @@ export async function resolveCanonicalRepoName(token: string, repo: string): Pro
 
 type ClosingIssueNode = { number: number; repository: { nameWithOwner: string } };
 
-/** Issue #252: GitHub resolves "Fixes other/repo#12" into
- *  closingIssuesReferences too. Only this repo's issues are ours to close.
- *  #265: "this repo" is the caller's slug OR GitHub's canonical name for it —
- *  after a rename/transfer the slug is stale and GitHub names the issue by
- *  its new home (the getIssueCloser pattern, #149). Any case. */
+/** "This repo" for a name from GitHub: the caller's slug OR GitHub's
+ *  canonical owner/name (#265) — after a rename/transfer the slug is stale and
+ *  GitHub names the issue by its new home (the getIssueCloser pattern,
+ *  #149). Any case. A name that is absent (undefined) is never this
+ *  repo: getIssueCloser's PR-closer path reads that as foreign (#367).
+ *  Issue #252: GitHub resolves "Fixes other/repo#12" into
+ *  closingIssuesReferences too. Only this repo's issues are ours to close. */
+function sameRepoName(known: readonly string[], name: string | undefined): boolean {
+  return name !== undefined && known.map((r) => r.toLowerCase()).includes(name.toLowerCase());
+}
+
 function sameRepoIssues(nodes: ClosingIssueNode[], names: readonly string[]): number[] {
-  const known = names.map((r) => r.toLowerCase());
-  return nodes.filter((n) => known.includes(n.repository.nameWithOwner.toLowerCase())).map((n) => n.number);
+  return nodes.filter((n) => sameRepoName(names, n.repository.nameWithOwner)).map((n) => n.number);
 }
 
 /**
@@ -865,17 +871,14 @@ export async function getIssueCloser(token: string, repo: string, number: number
     };
   }>(token, query, { owner, repo: name, number }, `closer of ${repo}#${number}`);
   const issue = data.repository?.issue;
-  // `repo` is the board's lowercased slug; GitHub answers canonical case, and
-  // after a rename/transfer the new name. Same repo = either, ignoring case.
-  const known = [repo, data.repository?.nameWithOwner ?? repo].map((r) => r.toLowerCase());
-  const sameRepo = (r: string | undefined) => r !== undefined && known.includes(r.toLowerCase());
+  const names = [repo, data.repository?.nameWithOwner ?? repo];
   const raw = issue?.timelineItems?.nodes?.at(-1)?.closer ?? null;
   let closer: IssueCloser["closer"] = null;
   if (raw?.__typename === "PullRequest" && typeof raw.number === "number") {
     const prRepo = raw.repository?.nameWithOwner;
-    closer = { kind: "pr", number: raw.number, merged: raw.merged === true, repo: sameRepo(prRepo) ? repo : prRepo ?? "" };
+    closer = { kind: "pr", number: raw.number, merged: raw.merged === true, repo: sameRepoName(names, prRepo) ? repo : prRepo ?? "" };
   } else if (raw?.__typename === "Commit" && typeof raw.oid === "string") {
-    const pr = raw.associatedPullRequests?.nodes?.find((n) => n.merged === true && sameRepo(n.repository?.nameWithOwner));
+    const pr = raw.associatedPullRequests?.nodes?.find((n) => n.merged === true && sameRepoName(names, n.repository?.nameWithOwner));
     closer = pr ? { kind: "pr", number: pr.number, merged: true, repo } : { kind: "commit", sha: raw.oid };
   }
   return { stateReason: issue?.stateReason ?? null, closer };
@@ -1008,18 +1011,6 @@ export async function listMatchingBranches(token: string, repo: string, prefix: 
 export const BRANCH_NAMES_PAGE_SIZE = 100;
 export const BRANCH_NAMES_MAX_PAGES = 10;
 
-/** Picks the `rel="next"` target out of a `Link` response header
- *  (RFC 8288, comma-joined `<url>; rel="..."` entries) — `null` when there is
- *  no such header or no `next` entry in it, i.e. "no more pages". */
-function parseNextLink(linkHeader: string | null): string | null {
-  if (linkHeader === null) return null;
-  for (const part of linkHeader.split(",")) {
-    const match = part.match(/<([^>]+)>\s*;\s*rel="next"/);
-    if (match) return match[1]!;
-  }
-  return null;
-}
-
 /**
  * `truncated: true` means the page cap (`BRANCH_NAMES_MAX_PAGES`) was hit
  * while GitHub still had a `next` link to offer — the result is a genuine
@@ -1044,7 +1035,7 @@ export async function listAllBranchNames(
       `list branches for ${repo}`,
     );
     for (const b of JSON.parse(text) as { name: string }[]) names.push(b.name);
-    url = parseNextLink(res.headers.get("link"));
+    url = nextPageLink(res.headers.get("link"));
   }
   return { names, truncated: url !== null };
 }

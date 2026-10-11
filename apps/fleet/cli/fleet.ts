@@ -2715,7 +2715,11 @@ async function main(): Promise<void> {
     case "junior":
       // Only "stats" reaches here — enable/disable/status already returned
       // above, before loadCredentials(), per #218's early-dispatch guard.
-      return cmdJuniorStats(creds, parsed.since);
+      // Return code wired like cmdJunior's branch above, not `return`ed:
+      // main() is Promise<void>, and the default exit dep already called
+      // process.exit(1) on any usage error before a number gets here.
+      process.exitCode = await cmdJuniorStats(creds, parsed.since);
+      return;
     case "accounts":
       return parsed.sync
         ? cmdAccountsSync(creds, { watch: parsed.watch, json: parsed.json, writeLabels: parsed.writeLabels })

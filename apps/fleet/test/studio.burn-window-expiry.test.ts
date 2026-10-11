@@ -27,6 +27,7 @@ import type { SessionSyncDeps } from "../src/studio/session-sync";
 import type { StudioStatus } from "../src/studio/types";
 import type { Burn } from "../src/studio/burn";
 import type { Env } from "../src/env";
+import { authorizedReq } from "./helpers/http";
 
 const STOPPED_ID = "acme-os--maestro";
 const LIVE_ID = "demosite-life--scratch";
@@ -135,13 +136,6 @@ function envWithStatusStub(row: StudioStatus): Env {
       get,
     } as unknown as Env["STUDIO"],
   } as unknown as Env;
-}
-
-function authorizedReq(path: string, init: RequestInit = {}) {
-  return new Request(`https://x${path}`, {
-    ...init,
-    headers: { "Cf-Access-Jwt-Assertion": "test-jwt", ...(init.headers ?? {}) },
-  });
 }
 
 beforeEach(async () => {
