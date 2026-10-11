@@ -93,17 +93,6 @@ async function buildTerminalPage(): Promise<string> {
   return html;
 }
 
-/**
- * No third-party bundle to inline (see this file's own header) — reads the
- * hand-authored template as-is. Still routed through this script rather
- * than checked in directly under the template's own name, so it gets the
- * same sourceMappingURL guard as terminal.html and the same "the build
- * artifact is what src/studio/grid.ts imports, never the template" wiring.
- */
-async function buildGridPage(): Promise<string> {
-  return readFile(path.join(PAGE_DIR, "grid.template.html"), "utf8");
-}
-
 async function main() {
   const pkgRaw = await readFile(path.join(XTERM_DIR, "package.json"), "utf8");
   const xtermVersion = (JSON.parse(pkgRaw) as { version: string }).version;
@@ -114,7 +103,12 @@ async function main() {
   await writeFile(terminalOut, terminalHtml, "utf8");
   console.log(`build-page: wrote ${terminalOut} (${terminalHtml.length} bytes, @xterm/xterm@${xtermVersion})`);
 
-  const gridHtml = await buildGridPage();
+  // No third-party bundle to inline (see this file's own header) — reads the
+  // hand-authored template as-is. Still routed through this script rather
+  // than checked in directly under the template's own name, so it gets the
+  // same sourceMappingURL guard as terminal.html and the same "the build
+  // artifact is what src/studio/grid.ts imports, never the template" wiring.
+  const gridHtml = await readFile(path.join(PAGE_DIR, "grid.template.html"), "utf8");
   assertNoSourceMappingUrl(gridHtml, "grid.html");
   const gridOut = path.join(PAGE_DIR, "grid.html");
   await writeFile(gridOut, gridHtml, "utf8");
