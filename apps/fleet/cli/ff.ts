@@ -42,7 +42,7 @@ import {
   listStudioTasks,
 } from "./fleet";
 import { openStudioRow, defaultOrcaDeps } from "./orca-workspace";
-import { repoIdSegment } from "../src/studio/repo";
+import { refuseBadSegment, repoIdSegment } from "../src/studio/repo";
 import {
   parseFfArgs, ffDecision, ffTaskBrief, parseVerdict, verdictOutcome, ffTimeoutLines, ffAttachGate,
   FF_HELP, type ProvisionedVerdict, type VerdictOutcome, type FfDecision, type FfTask,
@@ -478,8 +478,7 @@ async function main(): Promise<void> {
     // the silent-wrong-target failure the whole repo-detection feature exists
     // to remove. The wording matches repo.ts's own 400 for the same case.
     if (segment === null) {
-      fail(`repo "${detected.slug}" cannot name a studio: "${short}" is not a valid id segment ` +
-        "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)");
+      fail(refuseBadSegment(detected.slug, short));
     }
     say(`repo ${detected.slug} (from git remote origin)`);
   } else {

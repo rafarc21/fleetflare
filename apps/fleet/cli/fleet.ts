@@ -27,7 +27,7 @@ import { grabClipboardPng } from "./paste-mac";
 import { classifyInput, CTRL_V } from "./input";
 import { parseCliArgs, renderHelp } from "../src/studio/cli-args";
 import { parseStudioId } from "../src/studio/ids";
-import { parseGitRemote, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
+import { parseGitRemote, refuseBadSegment, repoIdSegment, studioIdForTarget, studioIdIn } from "../src/studio/repo";
 import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior, cmdJuniorStats } from "./junior";
 import { cmdAccounts, cmdAccountsSync, cmdAccountsHold, cmdAccountsClear } from "./accounts";
@@ -781,8 +781,7 @@ async function resolveTabsScope(
   // comparison in this codebase goes through, never a raw slug/id compare.
   const badSegment = (slug: string): { ok: false; message: string } => ({
     ok: false,
-    message: `fleet tabs: repo "${slug}" cannot name a studio: not a valid id segment ` +
-      "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)",
+    message: `fleet tabs: ${refuseBadSegment(slug, slug.split("/")[1] ?? "")}`,
   });
 
   if (flags.repo !== null) {
