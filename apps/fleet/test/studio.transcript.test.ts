@@ -8,6 +8,7 @@ import {
   INCARNATION_PATH, SESSION_FOUND_SECTION, SESSION_CONTINUE_SECTION, SESSION_CWD_SECTION,
 } from "../src/studio/observed";
 import { REAL_PILOT_PANE } from "./fixtures/rate-limit-panes";
+import { fakeStorage as doStorage } from "./helpers/do-storage";
 
 // Wire-format literals — the container↔Worker delimited-stdout protocol, same
 // convention test/studio.observation-tick.test.ts:33-34 already established:
@@ -79,15 +80,16 @@ function fixedNow(iso: string): () => Date {
 function fakeStorage(
   seed?: { manifest?: TranscriptManifest; tail?: string; bootId?: string },
 ): TranscriptStorage & { putKeys: string[]; failNextPutFor: string | null } {
-  const map = new Map<string, TranscriptManifest | string>();
-  if (seed?.manifest) map.set(TRANSCRIPT_MANIFEST_KEY, seed.manifest);
-  if (seed?.tail !== undefined) map.set(TRANSCRIPT_TAIL_KEY, seed.tail);
-  if (seed?.bootId !== undefined) map.set(TRANSCRIPT_BOOT_ID_KEY, seed.bootId);
+  const initial: Record<string, unknown> = {};
+  if (seed?.manifest) initial[TRANSCRIPT_MANIFEST_KEY] = seed.manifest;
+  if (seed?.tail !== undefined) initial[TRANSCRIPT_TAIL_KEY] = seed.tail;
+  if (seed?.bootId !== undefined) initial[TRANSCRIPT_BOOT_ID_KEY] = seed.bootId;
+  const s = doStorage(initial);
   const putKeys: string[] = [];
   const storage = {
     putKeys,
     failNextPutFor: null as string | null,
-    get: (async (key: string) => map.get(key)) as TranscriptStorage["get"],
+    get: s.get as unknown as TranscriptStorage["get"],
     put: (async (
       keyOrEntries: string | Record<string, TranscriptManifest | string>,
       value?: TranscriptManifest | string,
@@ -102,9 +104,9 @@ function fakeStorage(
       }
       for (const [key, v] of Object.entries(entries)) {
         putKeys.push(key);
-        map.set(key, v);
+        s.map.set(key, v);
       }
-    }) as TranscriptStorage["put"],
+    }) as unknown as TranscriptStorage["put"],
   };
   return storage;
 }
