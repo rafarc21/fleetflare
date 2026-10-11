@@ -7,10 +7,12 @@
 // echoed, never a bare `cat FILE || echo ''` piped straight into stdout).
 // Same throwaway-tmpdir convention test/bun/inspect-cmd.test.ts already
 // established — no tmux needed here, this is plain file I/O.
+// Issue #349: suite self-skips on non-GNU stat (BSD reads -1 sentinel) — see gnuStat below.
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { writeIncarnationCmd } from "../../src/studio/observed";
 // Wire-format contract (issue #275): the real builder is private now, so the
 // real-shell round trip below runs the test-owned wire-format copy — same
@@ -31,7 +33,16 @@ function isolatedTmuxEnv(dir: string): Record<string, string | undefined> {
   return { ...rest, TMUX_TMPDIR: dir };
 }
 
-describe("incarnation file round-trip through a real shell (issue #85, maestro correction #2)", () => {
+// Issue #349: tests 1+3 run shipTickCmd's GNU-only `stat -c %s` probe —
+// BSD stat reads the -1 sentinel and CHUNK never emits: false red, skip.
+function gnuStat(): boolean {
+  const stat = spawnSync("stat", ["-c", "%s", "/"], { encoding: "utf8" });
+  return stat.status === 0 && /^\d+$/.test((stat.stdout ?? "").trim());
+}
+
+const suite = gnuStat() ? describe : describe.skip;
+
+suite("incarnation file round-trip through a real shell (issue #85, maestro correction #2)", () => {
   test("a token written with writeIncarnationCmd, read back via shipTickCmd's own read fragment, never glues onto the next section", () => {
     // Hermetic: `shipTickCmd` also references TRANSCRIPT_LOG_PATH/
     // TRANSCRIPT_BOOT_ID_PATH under `/workspace/.transcript/`, so every
