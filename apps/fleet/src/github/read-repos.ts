@@ -19,7 +19,7 @@
 // studio is deleted instead of minted — covering the paths (webhook close,
 // a merge auto-completing the task) that never pass the route.
 import { checkReadRepos, mintReadReposToken, resolveRepoAuthKind, READ_REPOS_MAX, READ_REPOS_PERMISSIONS } from "./auth";
-import { deleteFlag, getFlag, setFlag } from "../state";
+import { deleteFlag, getFlag, scanStateTaskKeys, setFlag } from "../state";
 import { USER_AGENT } from "./app";
 import { getStudioStub } from "../studio/profile";
 import { GitHubError } from "../board/api";
@@ -156,16 +156,11 @@ export async function revokeStudioReadToken(env: Env, studioId: string): Promise
 /** Every grant held for `studioId`. A row that does not parse, or whose
  *  shape is off, is skipped (fail closed — no grant). */
 export async function readReposGrantsForStudio(db: D1Database, studioId: string): Promise<ReadReposGrant[]> {
-  const rows = await db.prepare(`SELECT key, value FROM fleet_state WHERE key LIKE ?`)
-    .bind(`${KEY_PREFIX}%`).all<{ key: string; value: string }>();
   const out: ReadReposGrant[] = [];
-  for (const row of rows.results) {
-    if (!row.key.startsWith(KEY_PREFIX)) continue;
-    const rest = row.key.slice(KEY_PREFIX.length);
-    const colon = rest.lastIndexOf(":");
-    const repo = rest.slice(0, colon);
-    const num = rest.slice(colon + 1);
-    if (colon <= 0 || !/^\d+$/.test(num)) continue;
+  for (const row of await scanStateTaskKeys(db, KEY_PREFIX)) {
+    // The bare namespace makes the repo part of every true key here — the
+    // scan's repo "" would be a hand-edit the grammar says to drop.
+    if (row.repo === "") continue;
     let parsed: { studioId?: unknown; repos?: unknown };
     try {
       parsed = JSON.parse(row.value) as typeof parsed;
@@ -174,7 +169,7 @@ export async function readReposGrantsForStudio(db: D1Database, studioId: string)
     }
     if (parsed.studioId !== studioId) continue;
     if (!Array.isArray(parsed.repos) || !parsed.repos.every((r) => typeof r === "string")) continue;
-    out.push({ repo, number: Number(num), studioId, repos: parsed.repos as string[] });
+    out.push({ repo: row.repo, number: row.number, studioId, repos: parsed.repos as string[] });
   }
   return out.sort((a, b) => a.repo.localeCompare(b.repo) || a.number - b.number);
 }

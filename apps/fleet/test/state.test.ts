@@ -115,18 +115,21 @@ describe("scanStateTaskKeys", () => {
 
   it("returns rows UNSORTED, in the engine's own LIKE-return order", async () => {
     // The scan's contract is unsorted: callers own order (authz sorts
-    // numerically, grants by repo localeCompare then number). Pinned by
-    // comparing against the engine's own LIKE query — the same statement
-    // the scan will run — never a guessed insertion order.
+    // numerically, grants by repo localeCompare then number). Pinned against
+    // the engine's return for the SAME statement the scan runs — not a
+    // guessed order: D1 answers `SELECT key` alone from key's covering
+    // index (sorted), but `SELECT key, value` as a rowid walk (insertion
+    // order); the two statement shapes are not order-equivalent.
     await seed([["ns:b:2", "v2"], ["ns:a:1", "v1"], ["ns:c:3", "v3"]]);
-    const raw = await env.DB.prepare(`SELECT key FROM fleet_state WHERE key LIKE ?`)
-      .bind("ns:%").all<{ key: string }>();
+    const raw = await env.DB.prepare(`SELECT key, value FROM fleet_state WHERE key LIKE ?`)
+      .bind("ns:%").all<{ key: string; value: string }>();
     expect(await scanStateTaskKeys(env.DB, "ns:"))
       .toEqual([{ repo: "b", number: 2, value: "v2" },
                 { repo: "a", number: 1, value: "v1" },
                 { repo: "c", number: 3, value: "v3" }]);
-    // Sanity on the comparison's premise: the engine's return is what the
-    // assertion above was built against (rowid/insertion order here).
+    // The premise the equality above was written against, pinned: if the
+    // engine's plan for this statement ever changes, this fails first and
+    // loudly instead of the equality passing for a changed reason.
     expect(raw.results.map((r) => r.key)).toEqual(["ns:b:2", "ns:a:1", "ns:c:3"]);
   });
 });
