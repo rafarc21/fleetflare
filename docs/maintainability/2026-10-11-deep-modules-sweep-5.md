@@ -147,7 +147,7 @@ pins the number. ~2 L. Bundle with F7's PR.
 
 ## Counts
 
-8 GLM-OK findings (F1-F7, F9, F10) → one deepen issue each. F6 carries the
+9 GLM-OK findings (F1-F7, F9, F10) → one deepen issue each. F6 carries the
 slice rule in its title/body. 1 CLAUDE-ONLY (F8) recorded here for the
 Claude lane, no issue filed by this sweep. F9/F10 ride along in other
 issues' PRs per their own text.
