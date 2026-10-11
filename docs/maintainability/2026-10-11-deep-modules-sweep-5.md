@@ -129,7 +129,7 @@ pins the number. ~2 L. Bundle with F7's PR.
 
 ## Not filed (deferred / noted)
 
-- `cli/fleet.ts` 2738 lines — split candidates (reap wiring :2027-2245,
+- `cli/fleet.ts` 2742 lines — split candidates (reap wiring :2027-2245,
   rescue-all :1689-2020) are CLAUDE-ONLY territory (rescue, failover) and
   already named by sweep-2 D2/D3/D4; nothing new this sweep.
 - `scripts/test-lies-check.ts` (566) / `localci/summarize.ts` — scanCalls
