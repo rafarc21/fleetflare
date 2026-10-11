@@ -6,7 +6,6 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSnippet } from "./exec-snippet";
-import { bringupSrc, expectBrings, expectBringsNot } from "./bringup-pins";
 
 // Board issue #2 (gates single source): the three hook scripts moved out of
 // studio-bringup.sh's own heredocs into real files at the repo root
@@ -20,7 +19,7 @@ import { bringupSrc, expectBrings, expectBringsNot } from "./bringup-pins";
 // own vitest.config.ts bindings for the equivalent wiring there). Every
 // behavioral test below is unchanged: same snippet content, same runSnippet
 // calls, same assertions.
-const BRINGUP = bringupSrc();
+const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
 const LEAD_GATE = readFileSync(join(import.meta.dir, "../../../../gates/lead-gate.sh"), "utf8");
 const COMPLETION_GATE = readFileSync(join(import.meta.dir, "../../../../gates/completion-gate.sh"), "utf8");
 
@@ -481,7 +480,7 @@ describe("completion gate no-ops without STUDIO_ID (defense in depth, board issu
 });
 
 test("the installed matcher is not a fixed tool list", () => {
-  expectBringsNot('"matcher": "Edit|Write|NotebookEdit|Bash"');
+  expect(BRINGUP).not.toContain('"matcher": "Edit|Write|NotebookEdit|Bash"');
 });
 
 describe("install-marker hook wiring (board #350, round 5 review, item 1)", () => {
@@ -492,14 +491,14 @@ describe("install-marker hook wiring (board #350, round 5 review, item 1)", () =
   // installs and registers it, the same way the maestro bake-in tests below
   // pin the MECHANISM, not just the script's own logic in isolation.
   test("copies the single-source gates/install-marker.sh into the hooks directory and makes it executable", () => {
-    expectBrings("cp /opt/blueprint/gates/install-marker.sh ~/.claude/hooks/install-marker.sh");
-    expectBrings("chmod 0755 ~/.claude/hooks/install-marker.sh");
+    expect(BRINGUP).toContain("cp /opt/blueprint/gates/install-marker.sh ~/.claude/hooks/install-marker.sh");
+    expect(BRINGUP).toContain("chmod 0755 ~/.claude/hooks/install-marker.sh");
   });
 
   test("registers it as a PostToolUse hook, guarded to fail OPEN (never blocks) on a missing/non-executable script — unlike lead-gate/completion-gate's fail-CLOSED posture, this hook enforces no security/completion invariant", () => {
-    expectBrings('cfg.setdefault("hooks", {}).setdefault("PostToolUse", [])');
-    expectBrings('[ -x \\"$S\\" ] && exec \\"$S\\" || exit 0');
-    expectBringsNot('"S=\\"$HOME/.claude/hooks/install-marker.sh\\"; [ -x \\"$S\\" ] || { echo');
+    expect(BRINGUP).toContain('cfg.setdefault("hooks", {}).setdefault("PostToolUse", [])');
+    expect(BRINGUP).toContain('[ -x \\"$S\\" ] && exec \\"$S\\" || exit 0');
+    expect(BRINGUP).not.toContain('"S=\\"$HOME/.claude/hooks/install-marker.sh\\"; [ -x \\"$S\\" ] || { echo');
   });
 
   test("registered in the SAME bring-up block as lead-gate/session-reemit, so one bring-up installs all three hooks or none", () => {
@@ -1787,8 +1786,8 @@ describe("activity-heartbeat hook — studio-bringup.sh settings.json wiring (is
 });
 
 test("activity-heartbeat.sh is copied from the blueprint, single source of truth, same guard/warn posture as the other hooks", () => {
-  expectBrings("/opt/blueprint/gates/activity-heartbeat.sh");
-  expectBrings("~/.claude/hooks/activity-heartbeat.sh");
+  expect(BRINGUP).toContain("/opt/blueprint/gates/activity-heartbeat.sh");
+  expect(BRINGUP).toContain("~/.claude/hooks/activity-heartbeat.sh");
 });
 
 test("no PreCompact hook is registered", () => {

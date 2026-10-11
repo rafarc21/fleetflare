@@ -13,6 +13,7 @@ import {
 } from "../src/studio/do";
 import { LIMIT_SIGHTING_KEY, type LimitSighting } from "../src/studio/rate-limit";
 import { V2_SESSION_LIMIT_PANE } from "./fixtures/rate-limit-panes";
+import { fakeStorage as doStorage } from "./helpers/do-storage";
 import { spawnDeps } from "../src/studio/routes";
 import type { Env } from "../src/env";
 import { runDestroy } from "../src/studio/destroy";
@@ -31,13 +32,8 @@ function status(state: StudioStatus["state"]): StudioStatus {
 }
 
 function fakeStorage(seed?: StudioStatus) {
-  const map = new Map<string, unknown>();
-  if (seed) map.set(STATUS_KEY, seed);
-  return {
-    map,
-    get: (async (key: string) => map.get(key)) as StudioStorage["get"],
-    put: (async (key: string, value: unknown) => { map.set(key, value); }) as StudioStorage["put"],
-  };
+  const s = doStorage(seed ? { [STATUS_KEY]: seed } : undefined);
+  return s as unknown as StudioStorage & { map: Map<string, unknown> };
 }
 
 /** A container whose pane answers `pane`, recording every command. */

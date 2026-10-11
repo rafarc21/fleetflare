@@ -449,7 +449,7 @@ describe("github webhook -> maestro wake", () => {
  * on the assignee's own entries in `wakes` (distinguishable by studio id;
  * the maestro's id is always `<repo>--maestro`, never a bare `studio:` value).
  */
-describe("github webhook -> comment wakes the task's OWN assignee (board issue #236)", () => {
+describe("github webhook -> comment wakes the task's OWN assignee, never another studio under the same label", () => {
   const ASSIGNEE = "websites--web-studio";
   const COMMENT_URL = "https://github.com/acme-org/websites/issues/231#issuecomment-1";
 
@@ -631,7 +631,7 @@ describe("github webhook -> comment wakes the task's OWN assignee (board issue #
   // (github/webhook.ts's `wakeTaskOnComment` -> board/comment-wake.ts's
   // `wakeOnComment`), not just at the pure-unit level (see
   // test/board.comment-wake.test.ts for that).
-  describe("issue #284 round 2: repo check threaded through the real webhook handler", () => {
+  describe("comment wake: the assignee's recorded repo must match the comment's own repo", () => {
     it("refuses to wake the task's own assignee when it is provisioned for a DIFFERENT repo than the comment's own", async () => {
       await recordStudio(env as any, {
         id: ASSIGNEE, state: "running", repoSlug: "other-org/other-repo",
@@ -776,7 +776,7 @@ describe("github webhook -> comment wakes the task's OWN assignee (board issue #
  * wakeStudio calls in 33 minutes against a stopped demosite-life--maestro --
  * this is purely about not reaching that gate at all from a stopped studio.
  */
-describe("github webhook -> maestro wake (issue #182: skip a stopped maestro)", () => {
+describe("github webhook -> maestro wake: a stopped maestro is skipped, a running one still woken", () => {
   const STUDIO_ID = "websites--maestro";
 
   async function setState(state: "running" | "stopped") {
@@ -865,7 +865,7 @@ describe("github webhook -> maestro wake (issue #182: skip a stopped maestro)", 
  * (github/auth.ts) rather than needing a signed App JWT -- irrelevant to
  * what this suite proves, and the simpler path to wire.
  */
-describe("github webhook -> auto-close on promote (board issue #8)", () => {
+describe("github webhook -> auto-close the board task when its PR is promoted to main", () => {
   // Deliberately NOT acme-org/websites: wrangler.jsonc's real
   // GITHUB_REPO_AUTH pins that owner to the App provider, which would need
   // a signed JWT this suite has no reason to build. An owner absent from
@@ -1702,7 +1702,7 @@ describe("github webhook -> auto-close on promote (board issue #8)", () => {
 // token) is seen here. Any terminal label added OR removed, or a close,
 // revokes the task's junior record: revoking only, never granting, so a
 // relabel terminal -> live can no longer bring junior back.
-describe("issues webhook — junior revoke (issue #35)", () => {
+describe("issues webhook — a terminal label or close also revokes the task's junior authorization", () => {
   const STUDIO = "websites--web-studio";
   const issues = (action: string, extra: Record<string, unknown> = {}, repo = "acme-org/websites") => JSON.stringify({
     action, issue: { number: 7 }, repository: { full_name: repo }, sender: { login: "someone" }, ...extra,

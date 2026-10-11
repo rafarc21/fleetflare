@@ -8,7 +8,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import {
+  checkAndConsumeLeadCountTokensRateLimit,
   checkAndConsumeLeadRateLimit,
+  DEFAULT_LEAD_COUNT_TOKENS_RATE_PER_MINUTE,
   DEFAULT_LEAD_DAILY_CAP,
   DEFAULT_LEAD_RATE_PER_MINUTE,
 } from "../src/llm/ratelimit";
@@ -110,6 +112,13 @@ describe("checkAndConsumeLeadRateLimit — config + bucketing", () => {
     }
     expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, DEFAULT_LEAD_RATE_PER_MINUTE)).toMatchObject({ ok: false, limit: "per-minute" });
   });
+
+  it("a fractional daily cap floors to its integer part", async () => {
+    const e = { LEAD_RATE_PER_MINUTE: "100", LEAD_DAILY_CAP: "2.9" };
+    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, MINUTE)).toEqual({ ok: true });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, e, STUDIO, MINUTE * 2)).toMatchObject({ ok: false, limit: "daily" });
+  });
 });
 
 // MAJOR 1's whole point: the lead limit must NOT share a budget with
@@ -165,5 +174,56 @@ describe("checkAndConsumeLeadRateLimit — genuinely separate from junior's", ()
     // limiters ever shared a key prefix for the same studio/bucket.
     const newKeys = afterBoth.filter((k) => !afterJunior.includes(k));
     expect(newKeys.length).toBeGreaterThan(0);
+  });
+});
+
+// Issue #368 (sweep-4 F8): the wrappers are makeRateLimitKind products now.
+// count_tokens had NO coverage before this — these pin its per-minute-only
+// shape through the real public function, against real D1.
+describe("checkAndConsumeLeadCountTokensRateLimit — #368", () => {
+  it("blocks the (configured + 1)th call within the same minute", async () => {
+    const e = { LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "2" };
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, 100)).toEqual({ ok: true });
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, 200)).toMatchObject({ ok: false, limit: "per-minute" });
+  });
+
+  it("has no daily arm: a new minute bucket always resets, and no daily row is ever written", async () => {
+    const e = { LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "1" };
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, 0)).toMatchObject({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, MINUTE + 1)).toEqual({ ok: true });
+    // #368: the old Number.MAX_SAFE_INTEGER trick still wrote one inert
+    // lead-count-daily: row per studio per day; the explicit no-daily arm
+    // must write none at all.
+    const row = await env.DB
+      .prepare(`SELECT COUNT(*) AS n FROM fleet_state WHERE key LIKE 'lead-count-daily:%'`)
+      .first<{ n: number }>();
+    expect(row!.n).toBe(0);
+  });
+
+  it("spends nothing from the messages route's own budget", async () => {
+    const leadEnv = { LEAD_RATE_PER_MINUTE: "1" };
+    const ctEnv = { LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "1" };
+    // Exhaust the messages route's per-minute budget for this studio/minute...
+    expect(await checkAndConsumeLeadRateLimit(env.DB, leadEnv, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeLeadRateLimit(env.DB, leadEnv, STUDIO, 0)).toMatchObject({ ok: false, limit: "per-minute" });
+    // ...same studio, same minute: count_tokens' own bucket is untouched.
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, ctEnv, STUDIO, 0)).toEqual({ ok: true });
+  });
+
+  it("garbage config falls back to the default rather than disabling the limit", async () => {
+    const e = { LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "not-a-number" };
+    for (let i = 0; i < DEFAULT_LEAD_COUNT_TOKENS_RATE_PER_MINUTE; i++) {
+      expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, i)).toEqual({ ok: true });
+    }
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, DEFAULT_LEAD_COUNT_TOKENS_RATE_PER_MINUTE)).toMatchObject({ ok: false, limit: "per-minute" });
+  });
+
+  it("a fractional per-minute cap floors to its integer part", async () => {
+    const e = { LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "2.9" };
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, 0)).toEqual({ ok: true });
+    expect(await checkAndConsumeLeadCountTokensRateLimit(env.DB, e, STUDIO, 0)).toMatchObject({ ok: false, limit: "per-minute" });
   });
 });

@@ -78,8 +78,10 @@ async function pruneStaleCounters(db: D1Database, now: number, kind: RateLimitKi
 }
 
 /**
- * Checks BOTH limits for one `kind` and, only if neither is exceeded,
- * consumes one unit of each.
+ * Checks the limits for one `kind` and, only if none is exceeded,
+ * consumes one unit of each. A `dailyCap` of `null` marks a
+ * per-minute-only kind: the daily arm is skipped entirely — no daily
+ * row is written and no daily refusal can happen.
  *
  * Bucketed by `Math.floor(now / window)`, so a bucket boundary is a plain
  * integer change — no bucket-expiry logic is needed for CORRECTNESS, since
@@ -109,12 +111,10 @@ async function pruneStaleCounters(db: D1Database, now: number, kind: RateLimitKi
  */
 export async function checkAndConsumeRateLimit(
   db: D1Database, subjectId: string, now: number,
-  perMinute: number, dailyCap: number, kind: RateLimitKind,
+  perMinute: number, dailyCap: number | null, kind: RateLimitKind,
 ): Promise<RateLimitResult> {
   const minuteBucket = Math.floor(now / MINUTE_MS);
-  const dayBucket = Math.floor(now / DAY_MS);
   const rKey = bucketKey(kind.ratePrefix, subjectId, minuteBucket);
-  const dKey = bucketKey(kind.dailyPrefix, subjectId, dayBucket);
 
   // Item (c): opportunistic, ahead of this call's own increments — see
   // pruneStaleCounters's own doc comment for why inline rather than a cron.
@@ -123,8 +123,54 @@ export async function checkAndConsumeRateLimit(
   const minuteCount = await incrementCounter(db, rKey, now);
   if (minuteCount > perMinute) return { ok: false, limit: "per-minute", retryAfterMs: MINUTE_MS - (now % MINUTE_MS) };
 
+  // #368: per-minute-only kind (count_tokens) — explicit no-daily arm,
+  // replacing the old Number.MAX_SAFE_INTEGER inert-daily sentinel: the
+  // daily counter is simply never touched, rather than fed a cap no call
+  // count could ever reach.
+  if (dailyCap === null) return { ok: true };
+
+  const dayBucket = Math.floor(now / DAY_MS);
+  const dKey = bucketKey(kind.dailyPrefix, subjectId, dayBucket);
   const dayCount = await incrementCounter(db, dKey, now);
   if (dayCount > dailyCap) return { ok: false, limit: "daily", retryAfterMs: DAY_MS - (now % DAY_MS) };
 
   return { ok: true };
+}
+
+/** The config surface of ONE kind of rate limit — everything a kind's
+ *  wrapper used to re-type by hand (issue #368, sweep-4 finding F8): its
+ *  key prefixes, which env var names carry its two caps, and the defaults a
+ *  fresh deploy falls back to. `dailyCapEnv`/`dailyCapDefault` are both
+ *  present or both absent — a per-minute-only kind (count_tokens) declares
+ *  no daily cap at all rather than a never-reachable sentinel. */
+export type RateLimitKindSpec<E extends Record<string, string | undefined>> =
+  | {
+      kind: RateLimitKind;
+      perMinuteEnv: keyof E & string;
+      perMinuteDefault: number;
+      dailyCapEnv: keyof E & string;
+      dailyCapDefault: number;
+    }
+  | {
+      kind: RateLimitKind;
+      perMinuteEnv: keyof E & string;
+      perMinuteDefault: number;
+      dailyCapEnv?: undefined;
+    };
+
+/** Fold the parse-env-then-consume wrapper every kind duplicated (issue
+ *  #368): returns a ready `(db, env, studioId, now)` check-and-consume for
+ *  one spec. The three existing kinds (junior, lead, lead count_tokens)
+ *  are one-line factory products of this; a future 4th kind — the #335
+ *  retry lane, a webhook lane — is a spec object, not a copied wrapper. */
+export function makeRateLimitKind<E extends Record<string, string | undefined>>(
+  spec: RateLimitKindSpec<E>,
+): (db: D1Database, env: E, studioId: string, now: number) => Promise<RateLimitResult> {
+  return async (db, env, studioId, now) => {
+    const perMinute = parsePositiveInt(env[spec.perMinuteEnv], spec.perMinuteDefault);
+    const dailyCap = "dailyCapDefault" in spec
+      ? parsePositiveInt(env[spec.dailyCapEnv], spec.dailyCapDefault)
+      : null;
+    return checkAndConsumeRateLimit(db, studioId, now, perMinute, dailyCap, spec.kind);
+  };
 }
