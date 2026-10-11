@@ -86,7 +86,7 @@ export interface GuardConfig {
 
 export type Signal = "SIGTERM" | "SIGKILL";
 
-export interface GuardState {
+interface GuardState {
   /** The victim signalled last, until it is gone. `at` = when it was signalled. */
   pending: { pid: number; start: number; termAt: number; killed?: boolean } | null;
   /** No new victim before this time: the last one's memory is draining. */
@@ -204,7 +204,7 @@ export function resolveLeadParentPid(run: RunTmux = spawnTmux, timeoutMs = TMUX_
  * keeping it in the signature makes that regression expressible as a
  * one-line mutant against this exact function.
  */
-export function refreshLeadParentPid(previous: number | null, resolved: number | null): number | null {
+function refreshLeadParentPid(previous: number | null, resolved: number | null): number | null {
   return resolved;
 }
 
@@ -218,7 +218,7 @@ export function refreshLeadParentPid(previous: number | null, resolved: number |
  * protecting a nested `claude -p` a bit too generously while unresolved -- is
  * merely today's already-shipped, already-accepted behaviour.
  */
-export function isProtected(p: Proc, selfPid: number, leadParentPid: number | null): boolean {
+function isProtected(p: Proc, selfPid: number, leadParentPid: number | null): boolean {
   if (p.pid === 1 || p.pid === selfPid) return true;
   if (PROTECTED_COMM.has(p.comm)) return true;
   if (p.argv.some((a) => a.includes("/container-server/"))) return true; // sandbox executor pool
@@ -230,7 +230,7 @@ export function isProtected(p: Proc, selfPid: number, leadParentPid: number | nu
 
 /** Protected processes plus every ancestor of one: killing the lead's pane
  *  shell (or this guard's flock parent) takes the protected child with it. */
-export function protectedSet(procs: Proc[], selfPid: number, leadParentPid: number | null): Set<number> {
+function protectedSet(procs: Proc[], selfPid: number, leadParentPid: number | null): Set<number> {
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   const out = new Set<number>();
   for (const p of procs) {
@@ -249,7 +249,7 @@ export function protectedSet(procs: Proc[], selfPid: number, leadParentPid: numb
  * gate wins only while it is at least half the largest candidate -- a small
  * vitest worker is not worth sparing a 2 GiB runaway for.
  */
-export function pickVictim(procs: Proc[], selfPid: number, leadParentPid: number | null, minVictimMiB: number): Proc | null {
+function pickVictim(procs: Proc[], selfPid: number, leadParentPid: number | null, minVictimMiB: number): Proc | null {
   const prot = protectedSet(procs, selfPid, leadParentPid);
   const open = procs.filter((p) => !prot.has(p.pid) && p.rssKiB >= minVictimMiB * 1024);
   const largest = (ps: Proc[]) => ps.reduce<Proc | null>((a, p) => (!a || p.rssKiB > a.rssKiB ? p : a), null);
@@ -259,7 +259,7 @@ export function pickVictim(procs: Proc[], selfPid: number, leadParentPid: number
   return largest(preferred) ?? top;
 }
 
-export function adjPlan(procs: Proc[], selfPid: number, leadParentPid: number | null): Array<{ pid: number; adj: number }> {
+function adjPlan(procs: Proc[], selfPid: number, leadParentPid: number | null): Array<{ pid: number; adj: number }> {
   const prot = protectedSet(procs, selfPid, leadParentPid);
   const plan: Array<{ pid: number; adj: number }> = [];
   for (const p of procs) {
@@ -274,12 +274,12 @@ export function adjPlan(procs: Proc[], selfPid: number, leadParentPid: number | 
 
 /** adjScan's incremental state: pid -> comm as last seen, plus the
  *  leadParentPid that cache was built against (#270 round 2, see adjScan). */
-export interface AdjCache {
+interface AdjCache {
   comm: Map<number, string>;
   leadParentPid: number | null;
 }
 
-export function newAdjCache(): AdjCache {
+function newAdjCache(): AdjCache {
   return { comm: new Map(), leadParentPid: null };
 }
 
@@ -298,7 +298,7 @@ export function newAdjCache(): AdjCache {
  * that immunity, unexamined, until it next exec's or a full non-incremental
  * pass happens to run -- so a leadParentPid change forces one full re-check.
  */
-export function adjScan(
+function adjScan(
   procRoot: string,
   cache: AdjCache,
   selfPid: number,
@@ -368,7 +368,7 @@ export function readMemory(procRoot: string, cgroupRoot: string): Memory {
   };
 }
 
-export function initialState(): GuardState {
+function initialState(): GuardState {
   return { pending: null, settleUntil: null, noVictimLogged: false };
 }
 
@@ -389,7 +389,7 @@ function recovered(mem: Memory, cfg: GuardConfig): boolean {
  * settle for settleMs before choosing another. `noVictim` is true on the one
  * tick per low episode where nothing qualified.
  */
-export function decide(
+function decide(
   state: GuardState,
   mem: Memory,
   procs: Proc[],
@@ -430,7 +430,7 @@ export function decide(
 }
 
 /** Fast while there is something to watch; slow when healthy or when nothing can be killed. */
-export function nextTickMs(
+function nextTickMs(
   low: boolean,
   state: GuardState,
   now: number,
@@ -448,7 +448,7 @@ export function nextTickMs(
  * needed). Returns what to signal, whether to log NO_VICTIM, the processes
  * it scanned (for the adj pass) and when to tick next.
  */
-export function step(
+function step(
   state: GuardState,
   mem: Memory,
   scan: () => Proc[],
