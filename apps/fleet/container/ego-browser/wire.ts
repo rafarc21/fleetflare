@@ -24,3 +24,47 @@ export interface SnapshotOpts {
   includeActionMarks?: boolean;
   includeStableLocator?: boolean;
 }
+
+/** The one place an RPC method's wire name, params shape, and result shape
+ * are declared. api.ts's forwarder types each call from this map; the
+ * daemon's dispatcher types each handler from the same map -- a name or
+ * param drift on either side is a type error here, not a silent wire bug. */
+export interface PageEnvelope {
+  spaceId: number;
+  label: string;
+}
+
+/** Params for every page.* method: the envelope plus the method's own args. */
+export type PageParams<K extends PageRpcMethod> = PageEnvelope & RpcMethods[K]["params"];
+
+export type PageRpcMethod = keyof RpcMethods & `page.${string}`;
+
+export interface RpcMethods {
+  taskSpace: { params: { nameOrId: string | number; profileId?: string }; result: { spaceId: number; name: string } };
+  listTaskSpaces: { params: {}; result: Array<{ spaceId: number; name: string }> };
+  "space.pages": { params: { spaceId: number }; result: Array<{ label: string }> };
+  "space.newPage": { params: { spaceId: number }; result: { label: string } };
+  "space.finish": { params: { spaceId: number; keep: "all" | string[] }; result: { retained: string[]; closed: string[] } };
+  "page.goto": { params: { url: string; opts?: Record<string, unknown> }; result: null };
+  "page.reload": { params: { opts?: Record<string, unknown> }; result: null };
+  "page.url": { params: {}; result: string };
+  "page.title": { params: {}; result: string };
+  "page.info": { params: {}; result: unknown };
+  "page.screenshot": { params: { opts?: { path?: string; fullPage?: boolean; clip?: unknown; scale?: unknown; raw?: boolean } }; result: unknown };
+  "page.evaluate": { params: { fn: FnOrStringWire; arg?: unknown }; result: unknown };
+  "page.click": { params: { selector: string; opts?: Record<string, unknown> }; result: null };
+  "page.dblclick": { params: { selector: string; opts?: Record<string, unknown> }; result: null };
+  "page.hover": { params: { selector: string; opts?: Record<string, unknown> }; result: null };
+  "page.fill": { params: { selector: string; value: string; opts?: Record<string, unknown> }; result: null };
+  "page.press": { params: { selector: string; chord: string; opts?: Record<string, unknown> }; result: null };
+  "page.focus": { params: { selector: string; opts?: Record<string, unknown> }; result: null };
+  "page.selectOption": { params: { selector: string; valueOrValues: unknown; opts?: Record<string, unknown> }; result: unknown };
+  "page.setInputFiles": { params: { selector: string; pathOrPaths: string | string[] }; result: null };
+  "page.waitForSelector": { params: { selector: string; opts?: Record<string, unknown> }; result: null };
+  "page.waitForLoadState": { params: { state?: string; opts?: Record<string, unknown> }; result: null };
+  "page.waitForURL": { params: { urlMatcher: UrlMatcherWire; opts?: Record<string, unknown> }; result: null };
+  "page.waitForFunction": { params: { fn: FnOrStringWire; arg?: unknown; opts?: Record<string, unknown> }; result: unknown };
+  "page.waitForTimeout": { params: { ms: number }; result: null };
+  "page.close": { params: {}; result: null };
+  "page.snapshot": { params: { opts?: SnapshotOpts }; result: unknown };
+}

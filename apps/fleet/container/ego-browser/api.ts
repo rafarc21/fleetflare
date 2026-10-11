@@ -4,9 +4,11 @@
  * plus the loud-fail stubs for the methods this shim deliberately does not
  * implement. Every function/method here is JSON-serializable-args-only --
  * no real Playwright object ever crosses back into the user's script.
+ * The wire map in ./wire.ts (RpcMethods) is the single source for every
+ * method name and params/result shape these calls produce.
  */
 import { call as rpcCall } from "./client";
-import type { FnOrStringWire, SnapshotOpts, UrlMatcherWire } from "./wire";
+import type { FnOrStringWire, PageRpcMethod, RpcMethods, SnapshotOpts, UrlMatcherWire } from "./wire";
 
 export type RpcCall = (method: string, params?: unknown) => Promise<unknown>;
 
@@ -43,76 +45,83 @@ export class Page {
     this.call = call;
   }
 
+  /** The one forwarder every page.* call goes through: merges the envelope
+   * and types the method's params and result from the wire map. The only
+   * `as` in this class lives here, never at a call site. */
+  private async fwd<K extends PageRpcMethod>(method: K, params: RpcMethods[K]["params"]): Promise<RpcMethods[K]["result"]> {
+    return this.call(method, { spaceId: this.spaceId, label: this.label, ...params }) as Promise<RpcMethods[K]["result"]>;
+  }
+
   async goto(url: string, opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.goto", { spaceId: this.spaceId, label: this.label, url, opts });
+    await this.fwd("page.goto", { url, opts });
   }
 
   async reload(opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.reload", { spaceId: this.spaceId, label: this.label, opts });
+    await this.fwd("page.reload", { opts });
   }
 
   async url(): Promise<string> {
-    return (await this.call("page.url", { spaceId: this.spaceId, label: this.label })) as string;
+    return this.fwd("page.url", {});
   }
 
   async title(): Promise<string> {
-    return (await this.call("page.title", { spaceId: this.spaceId, label: this.label })) as string;
+    return this.fwd("page.title", {});
   }
 
   async info(): Promise<unknown> {
-    return this.call("page.info", { spaceId: this.spaceId, label: this.label });
+    return this.fwd("page.info", {});
   }
 
   async screenshot(opts?: { path?: string; fullPage?: boolean; clip?: unknown; scale?: unknown; raw?: boolean }): Promise<unknown> {
-    return this.call("page.screenshot", { spaceId: this.spaceId, label: this.label, opts });
+    return this.fwd("page.screenshot", { opts });
   }
 
   async evaluate(fnOrString: ((...args: unknown[]) => unknown) | string, arg?: unknown): Promise<unknown> {
-    return this.call("page.evaluate", { spaceId: this.spaceId, label: this.label, fn: marshalFnOrString(fnOrString), arg });
+    return this.fwd("page.evaluate", { fn: marshalFnOrString(fnOrString), arg });
   }
 
   async click(selector: string, opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.click", { spaceId: this.spaceId, label: this.label, selector, opts });
+    await this.fwd("page.click", { selector, opts });
   }
 
   async dblclick(selector: string, opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.dblclick", { spaceId: this.spaceId, label: this.label, selector, opts });
+    await this.fwd("page.dblclick", { selector, opts });
   }
 
   async hover(selector: string, opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.hover", { spaceId: this.spaceId, label: this.label, selector, opts });
+    await this.fwd("page.hover", { selector, opts });
   }
 
   async fill(selector: string, value: string, opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.fill", { spaceId: this.spaceId, label: this.label, selector, value, opts });
+    await this.fwd("page.fill", { selector, value, opts });
   }
 
   async press(selector: string, chord: string, opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.press", { spaceId: this.spaceId, label: this.label, selector, chord, opts });
+    await this.fwd("page.press", { selector, chord, opts });
   }
 
   async focus(selector: string, opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.focus", { spaceId: this.spaceId, label: this.label, selector, opts });
+    await this.fwd("page.focus", { selector, opts });
   }
 
   async selectOption(selector: string, valueOrValues: unknown, opts?: Record<string, unknown>): Promise<unknown> {
-    return this.call("page.selectOption", { spaceId: this.spaceId, label: this.label, selector, valueOrValues, opts });
+    return this.fwd("page.selectOption", { selector, valueOrValues, opts });
   }
 
   async setInputFiles(selector: string, pathOrPaths: string | string[]): Promise<void> {
-    await this.call("page.setInputFiles", { spaceId: this.spaceId, label: this.label, selector, pathOrPaths });
+    await this.fwd("page.setInputFiles", { selector, pathOrPaths });
   }
 
   async waitForSelector(selector: string, opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.waitForSelector", { spaceId: this.spaceId, label: this.label, selector, opts });
+    await this.fwd("page.waitForSelector", { selector, opts });
   }
 
   async waitForLoadState(state?: string, opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.waitForLoadState", { spaceId: this.spaceId, label: this.label, state, opts });
+    await this.fwd("page.waitForLoadState", { state, opts });
   }
 
   async waitForURL(urlMatcher: string | RegExp | ((url: URL) => boolean), opts?: Record<string, unknown>): Promise<void> {
-    await this.call("page.waitForURL", { spaceId: this.spaceId, label: this.label, urlMatcher: marshalUrlMatcher(urlMatcher), opts });
+    await this.fwd("page.waitForURL", { urlMatcher: marshalUrlMatcher(urlMatcher), opts });
   }
 
   async waitForFunction(
@@ -120,25 +129,19 @@ export class Page {
     arg?: unknown,
     opts?: Record<string, unknown>,
   ): Promise<unknown> {
-    return this.call("page.waitForFunction", {
-      spaceId: this.spaceId,
-      label: this.label,
-      fn: marshalFnOrString(fnOrString),
-      arg,
-      opts,
-    });
+    return this.fwd("page.waitForFunction", { fn: marshalFnOrString(fnOrString), arg, opts });
   }
 
   async waitForTimeout(ms: number): Promise<void> {
-    await this.call("page.waitForTimeout", { spaceId: this.spaceId, label: this.label, ms });
+    await this.fwd("page.waitForTimeout", { ms });
   }
 
   async close(): Promise<void> {
-    await this.call("page.close", { spaceId: this.spaceId, label: this.label });
+    await this.fwd("page.close", {});
   }
 
   async snapshot(opts?: SnapshotOpts): Promise<unknown> {
-    return this.call("page.snapshot", { spaceId: this.spaceId, label: this.label, opts });
+    return this.fwd("page.snapshot", { opts });
   }
 }
 
