@@ -1298,6 +1298,15 @@ describe("formatActivity (cli/readiness-format.ts)", () => {
     expect(formatActivity(s, NOW)).toBe("—");
   });
 
+  it("#403 table: a stopped studio never carries the member-alert suffix", () => {
+    const alerts: MemberAlert[] = [{
+      kind: "memguard-kill", name: "vitest", at: "2026-09-25T12:00:00.000Z",
+      detail: "comm=vitest rss_mib=612 pid=42", confidence: "measured",
+    }];
+    const s = status({ state: "stopped", observed: { ...emptyObserved(), memberAlerts: alerts } });
+    expect(formatActivity(s, NOW)).toBe("—");
+  });
+
   it("#403 table: provisioning also renders — (no lead at all)", () => {
     const s = status({ state: "provisioning" });
     expect(formatActivity(s, NOW)).toBe("—");

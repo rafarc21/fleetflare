@@ -381,8 +381,8 @@ function formatMemberAlertLines(alerts: MemberAlert[] | null, now: Date): string
  *  report a leftover verdict; then the stored activity verdict.
  *
  *  `rl` rides the result so each renderer keeps ONLY its own rendering:
- *  `formatActivity` needs `until`/`seenAt` for its clock string, `lsJsonRows`
- *  needs them for `leadSince`/`limitResetsAt`. */
+ *  `formatActivity` needs `until` for its clock string, `lsJsonRows` needs
+ *  `seenAt`/`until` for `leadSince`/`limitResetsAt`. */
 type LeadGate =
   | { kind: "stopped"; rl: null }
   | { kind: "dead" | "modal"; rl: RateLimitObservation }
@@ -413,7 +413,11 @@ export function formatActivity(status: StudioStatus, now: Date, staleAfterSecond
   const gate = leadGate(status, now);
   let base: string;
   switch (gate.kind) {
+    // Review round 1 (S1): the pre-fold code returned "—" for a non-live
+    // row BEFORE the member-alert suffix below ran, so a stopped row never
+    // carried an alert note; the early return here keeps that exact shape.
     case "stopped":
+      return "—";
     case "replaced":
       base = "—";
       break;
@@ -428,7 +432,10 @@ export function formatActivity(status: StudioStatus, now: Date, staleAfterSecond
         ? `LIMIT · resets ${formatResetUtcClock(new Date(Date.parse(gate.rl.until)))}`
         : "LIMIT";
       break;
-    default:
+    // No `default:` — an explicit case lets tsc enforce that every future
+    // LeadGate kind gains a rendering here (the repo's own exhaustiveness
+    // convention, e.g. src/approvals/gates.ts).
+    case "activity":
       base = formatActivityVerdict(status.observed?.activity ?? null, now, staleAfterSeconds);
   }
   // Issue #311 — the freshest current alert (buildMemberAlerts's own push
@@ -490,7 +497,8 @@ export function lsJsonRows(
       }
       case "replaced":
         return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
-      default: {
+      // No `default:` — explicit case for tsc exhaustiveness over LeadGate.
+      case "activity": {
         const a = s.observed?.activity ?? null;
         if (!a || ageSeconds(a.observedAt, now) > staleAfterSeconds || a.state === "unknown") {
           return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
