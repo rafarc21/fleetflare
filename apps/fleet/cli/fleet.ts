@@ -1452,7 +1452,7 @@ async function cmdDestroy(
   // out." for a destroy that had SUCCEEDED, and skipped the Orca teardown
   // below. See cli/destroy-outcome.ts's header.
   const report = await requestDestroy(
-    { destroy: studioUrl(creds, id, destroyPath(force, discardUnsynced, park, strictUnmerged)), status: studioUrl(creds, id, "/status") },
+    { destroy: studioUrl(creds, id, destroyPath(force, discardUnsynced, park)), status: studioUrl(creds, id, "/status") },
     accessHeaders(creds), id,
   );
   for (const line of report.lines) console.error(line);

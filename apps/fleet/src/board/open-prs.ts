@@ -22,16 +22,17 @@
 // shipped (findLatestResultEnvelope — the same "the current truth lives in
 // the newest result envelope, not the last comment" rule board task #119
 // established), and getPullRequest names that PR's live state. pr-landed.ts
-// walks the same chain for a different question ("which open tasks claim a
-// PR in the latest push"); this is its sibling walking the studio-scoped
-// half.
+// owns that chain for a different question ("which open tasks claim a PR in
+// the latest push"); this module calls its ONE shared scan
+// (openTasksWithLatestPr) for the studio-scoped half, so the candidate
+// filter, per-task degrade posture, and the 300-candidate bound stay
+// identical by construction.
 //
 // Pure over the same BoardApi port everything else in this directory is — no
 // Env, no binding, so every rule below is provable without a live issue.
 
-import { listTasks, showTask, type BoardApi, type BoardResult } from "./board";
-import { findLatestResultEnvelope } from "./verify";
-import { taskStates, type BoardTaskView } from "./types";
+import { listTasks, type BoardApi, type BoardResult } from "./board";
+import { openTasksWithLatestPr } from "./pr-landed";
 
 /** One unmerged PR this studio still has a live interest in — the exact
  *  record the warning prints: which task shipped it, which PR it is, its
@@ -47,25 +48,9 @@ export interface OpenPr {
  * Every unmerged, still-open PR named by one of `studioId`'s assigned tasks'
  * newest result envelopes.
  *
- * Which tasks are scanned — pr-landed.ts's own candidate rule, verbatim,
- * because the two questions share the same failure mode (a GitHub native
- * closing keyword flips `open` the instant a PR merges, before any board
- * write lands, so `task.open` alone would drop the exact task whose PR state
- * is most interesting):
- *
- *   - `task.open || task.state !== "completed"` — a task GitHub already
- *     closed AND the board already called completed is done work: skipped
- *     without a single per-task GitHub read (no showTask, no
- *     getPullRequest). Everything else still has a live interest in its PR,
- *     including the two shapes that matter most for this warning:
- *       - OPEN issue, `completed` board label — the aftermath of an
- *         awaiting_merge task whose verifier ran before the merge landed;
- *       - OPEN issue, terminal-but-not-completed — re-openable work.
- *   - `taskStates(task.labels).length > 0` — board #198's exclusion: an
- *     issue with ZERO state labels is never a fleet task (an ordinary repo
- *     issue the assignedTo label filter cannot have skipped), so scanning it
- *     is pure waste. Deliberately NOT `state !== null`: a drifted task
- *     carrying two state labels IS a real fleet task and stays scanned.
+ * Which tasks are scanned — the filter, bound, and degrade posture are
+ * pr-landed.ts's own (see openTasksWithLatestPr), shared so the two scans
+ * can never drift.
  *
  * Degrades per task, never per scan — the posture pr-landed.ts already
  * takes: a thrown showTask/getPullRequest or a `{ok:false}` showTask logs
@@ -87,36 +72,16 @@ export async function studioOpenPrs(
   const listed = await listTasks(api, repo, { assignedTo: studioId });
   if (!listed.ok) return listed;
 
-  // The candidate filter BEFORE any per-task read, for the same cost reason
-  // pr-landed.ts states: a task already closed AND completed on the board
-  // costs this scan nothing at all — not even a showTask.
-  const candidates = listed.value.filter(
-    (task: BoardTaskView) => (task.open || task.state !== "completed") && taskStates(task.labels).length > 0,
-  );
-
+  // The ONE shared envelope scan (pr-landed.ts's openTasksWithLatestPr) walks
+  // the candidates — the same filter, the same per-task degrade posture, and
+  // the same OPEN_TASKS_SCAN_MAX_CANDIDATES bound its other two callers
+  // (promote-close, task-reap) already live under; this module reuses all of
+  // it rather than re-implementing the plumbing (#332 review: pr-landed's own
+  // header says neither caller re-implements the scan, and a third walk would
+  // drift — the two "live PR interest" scans must agree forever).
+  const tasksWithPr = await openTasksWithLatestPr(api, repo, listed.value);
   const prs: OpenPr[] = [];
-  for (const task of candidates) {
-    let prNumber: number | null = null;
-    try {
-      const shown = await showTask(api, repo, task.number);
-      if (shown.ok) {
-        const envelope = findLatestResultEnvelope(shown.value.comments);
-        if (envelope) {
-          for (const art of envelope.payload.artifacts) {
-            if (art.pr === undefined) continue;
-            const num = Number.parseInt(art.pr.replace(/^#/, ""), 10);
-            if (Number.isInteger(num) && num > 0) {
-              prNumber = num;
-              break;
-            }
-          }
-        }
-      } else {
-        console.error(`open-prs: reading task #${task.number} in ${repo} failed (${shown.status}): ${shown.message}`);
-      }
-    } catch (err) {
-      console.error(`open-prs: reading task #${task.number} in ${repo} threw`, err);
-    }
+  for (const { taskNumber, prNumber } of tasksWithPr) {
     if (prNumber === null) continue;
 
     try {
@@ -129,14 +94,14 @@ export async function studioOpenPrs(
       // warning is about.
       if (!pr.merged && pr.open) {
         prs.push({
-          taskNumber: task.number,
+          taskNumber,
           prNumber,
           title: pr.title,
           url: `https://github.com/${repo}/pull/${prNumber}`,
         });
       }
     } catch (err) {
-      console.error(`open-prs: reading PR #${prNumber} for task #${task.number} in ${repo} threw`, err);
+      console.error(`open-prs: reading PR #${prNumber} for task #${taskNumber} in ${repo} threw`, err);
     }
   }
   return { ok: true, value: prs };

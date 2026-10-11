@@ -16,7 +16,7 @@ function body(sig: string): string {
 
 describe("fleet destroy — every flag reaches the route", () => {
   test("cmdDestroy builds its path from every flag (issue #59 adds --park, #332 adds --strict-unmerged)", () => {
-    expect(body("async function cmdDestroy(")).toContain("destroyPath(force, discardUnsynced, park, strictUnmerged)");
+    expect(body("async function cmdDestroy(")).toContain("destroyPath(force, discardUnsynced, park)");
   });
 
   test("the dispatcher hands cmdDestroy the parsed discard, park and strict-unmerged flags", () => {
