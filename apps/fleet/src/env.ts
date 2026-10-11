@@ -91,6 +91,16 @@ export interface Env {
   LEAD_RATE_PER_MINUTE?: string;
   LEAD_DAILY_CAP?: string;
   /**
+   * Per-studio per-minute throttle on
+   * `POST /fleet/llm/anthropic/v1/messages/count_tokens` (default 60), its
+   * OWN D1 counter (src/llm/ratelimit.ts) with NO daily cap — the endpoint
+   * spends no AI budget, so drawing its calls from the messages route's
+   * daily budget above locked studios out. Garbage input falls back to the
+   * default rather than disabling the limit — see ratelimit.ts's
+   * parsePositiveInt.
+   */
+  LEAD_COUNT_TOKENS_RATE_PER_MINUTE?: string;
+  /**
    * Issue #302: ms the glm-lead route waits for the next upstream stream
    * chunk before it cancels the upstream and sends the client an SSE
    * `event: error` (default 90000 — llm/anthropic-route.ts's
