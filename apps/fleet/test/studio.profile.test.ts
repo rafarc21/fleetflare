@@ -3,6 +3,7 @@ import {
   isBigProfileRole, doClassForRole, realDoClassForRole, studioNamespace, getStudioStubForRow, BIG_PROFILE_ROLES,
 } from "../src/studio/profile";
 import type { Env } from "../src/env";
+import { nsWith } from "./helpers/fake-namespace";
 
 // Issue #107 (#70 ask 3): profile.ts's own role-name-keyed routing — see
 // that file's header for the full ruling. These are pure-function tests
@@ -66,10 +67,7 @@ describe("realDoClassForRole", () => {
  *  which namespace served it, so a test can tell them apart without a real
  *  DO. */
 function fakeNamespace(marker: "default" | "big") {
-  return {
-    idFromName: (name: string) => name as unknown as DurableObjectId,
-    get: (id: DurableObjectId) => ({ marker, id: id as unknown as string }),
-  } as unknown as Env["STUDIO"];
+  return nsWith((id: string) => ({ marker, id }));
 }
 
 function fakeEnv(): Env {
