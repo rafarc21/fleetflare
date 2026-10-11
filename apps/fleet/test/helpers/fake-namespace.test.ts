@@ -11,11 +11,11 @@ import { nsWith, envWithNs } from "./fake-namespace";
 // can override more bindings around it.
 
 describe("nsWith", () => {
-  it("returns the object stub from get for every id, and the name verbatim from idFromName", () => {
+  it("returns the object stub from get for every id, and the name verbatim from idFromName", async () => {
     const ns = nsWith({ getStatusDetail: async () => ({ id: "x" }) });
     expect((ns.idFromName as unknown as (n: string) => string)("acme--web-studio")).toBe("acme--web-studio");
     const stub = ns.get("ignored" as never) as unknown as { getStatusDetail: () => Promise<{ id: string }> };
-    expect(stub.getStatusDetail()).resolves.toEqual({ id: "x" });
+    await expect(stub.getStatusDetail()).resolves.toEqual({ id: "x" });
     expect(ns.get("other" as never)).toBe(stub as never);
   });
 
