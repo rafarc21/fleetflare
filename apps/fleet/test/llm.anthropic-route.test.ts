@@ -974,10 +974,11 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
     expect(json.input_tokens).toBeGreaterThan(10);
   });
 
-  // Parity with the messages route: the endpoint spends no AI budget, but
-  // an unthrottled endpoint is a free D1-hammering surface.
-  it("429 once the LEAD per-minute limit is exceeded — same Anthropic rate_limit_error body + retry-after (#298-3)", async () => {
-    const { token, rows, e } = await setup(undefined, { LEAD_RATE_PER_MINUTE: "1" });
+  // Still throttled — the endpoint spends no AI budget, but an unthrottled
+  // endpoint is a free D1-hammering surface — now from its OWN per-minute
+  // budget, never the messages route's.
+  it("429 once its OWN per-minute limit is exceeded — same Anthropic rate_limit_error body + retry-after (#298-3)", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "1" });
     const first = await handleFleetAnthropicCountTokens(
       req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
     );
@@ -991,7 +992,40 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
     expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
     expect(await second.json()).toEqual({
       type: "error",
-      error: { type: "rate_limit_error", message: "rate limit exceeded: too many glm-lead calls this minute" },
+      error: { type: "rate_limit_error", message: "rate limit exceeded: too many count_tokens calls this minute" },
     });
+  });
+
+  // A count_tokens call must spend NOTHING from the messages budget: the
+  // busiest GLM studio ran ~1800 count_tokens calls a day, and drawing them
+  // from the shared per-minute/daily counters locked studios out.
+  it("count_tokens and /messages have separate per-minute budgets — a count_tokens call spends none of /messages'", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_RATE_PER_MINUTE: "1", LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "1" });
+    const count = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(count.status).toBe(200);
+    // /messages still answers 200 — the count_tokens call above spent none
+    // of its per-minute budget.
+    const msg = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(msg.status).toBe(200);
+    // The SECOND count_tokens call is what trips count_tokens' own budget.
+    const counted = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(counted.status).toBe(429);
+    const retryAfter = counted.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(await counted.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "rate limit exceeded: too many count_tokens calls this minute" },
+    });
+  });
+
+  // count_tokens spends no AI budget, so no daily cap applies to it — and
+  // /messages' own daily cap must never gate it either.
+  it("count_tokens has no daily cap — /messages' LEAD_DAILY_CAP does not gate it", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_DAILY_CAP: "1" });
+    const msg = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(msg.status).toBe(200);
+    const count = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(count.status).toBe(200);
   });
 });

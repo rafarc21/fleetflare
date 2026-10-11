@@ -14,8 +14,11 @@ is ops-watch, skipped per maestro. Tier: bounded fix, no brainstorm.
 2. count_tokens (anthropic-route.ts): `estimateInputTokens` now also
    counts tools JSON and array-content blocks, not just string content —
    count_tokens came in low, skewing Claude Code's compact decisions.
-   The endpoint now applies the same LEAD per-minute/daily limiter as the
-   messages route (parity, no free D1-hammering surface).
+   The endpoint is throttled by its OWN per-minute-only limiter (own D1
+   prefix, `LEAD_COUNT_TOKENS_RATE_PER_MINUTE`, no daily cap) — its calls
+   spend no AI budget, so they must not draw down the messages route's
+   per-minute/daily budget (follow-up review on the PR, measured
+   2026-10-11: shared counters locked studios out until UTC midnight).
 3. Mid-stream overflow (translate.ts): `streamErrorFrame` now uses
    classifyAiError's override message, so a context-overflow error chunk
    surfaces as "prompt is too long" in `event: error` — the string Claude

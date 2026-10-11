@@ -19,7 +19,7 @@ import { readCappedBody } from "../http/capped-body";
 import { isSpawnTokenShaped, resolveSpawnParent, type SpawnParent } from "../studio/spawn";
 import { listStudios } from "../studio/registry";
 import type { StudioStatus } from "../studio/types";
-import { checkAndConsumeLeadRateLimit } from "./ratelimit";
+import { checkAndConsumeLeadCountTokensRateLimit, checkAndConsumeLeadRateLimit } from "./ratelimit";
 import { parsePositiveInt } from "../ratelimit";
 import { insertJuniorUsage } from "../junior/usage";
 import {
@@ -70,8 +70,8 @@ function rateLimitRefusal(message: string, retryAfterMs: number): Response {
 }
 
 /** Consume one unit of the lead rate budget; null = ok, a 429 Response =
- *  refused. Both glm-lead routes share the same refusal text and window
- *  math, so they share the branch too. */
+ *  refused. The messages route's own limiter — per-minute + daily, with
+ *  the refusal text and window math that route has always answered. */
 async function consumeLeadRate(env: Env, studioId: string): Promise<Response | null> {
   const rate = await checkAndConsumeLeadRateLimit(env.DB, env, studioId, Date.now());
   return rate.ok ? null : rateLimitRefusal(
@@ -80,6 +80,14 @@ async function consumeLeadRate(env: Env, studioId: string): Promise<Response | n
       : "rate limit exceeded: daily glm-lead cap reached",
     rate.retryAfterMs,
   );
+}
+
+/** Same refusal shape as the messages route, but count_tokens' own text —
+ *  a client told "too many glm-lead calls" on a count_tokens probe would
+ *  misread its /messages budget as gone. */
+async function consumeLeadCountTokensRate(env: Env, studioId: string): Promise<Response | null> {
+  const rate = await checkAndConsumeLeadCountTokensRateLimit(env.DB, env, studioId, Date.now());
+  return rate.ok ? null : rateLimitRefusal("rate limit exceeded: too many count_tokens calls this minute", rate.retryAfterMs);
 }
 
 /**
@@ -341,12 +349,12 @@ async function pumpAnthropicStream(
  *  the `leadType === "glm"` gate. See `handleFleetAnthropicMessages`'s own
  *  (now-removed) inline comments for why each individual check exists —
  *  this function only collects them into one place so both routes keep
- *  enforcing the exact same thing. The per-minute/daily rate limit stays
- *  OUT of this shared gate, applied by each route itself right after the
- *  gate — both routes now enforce it, but each consumes from the same
- *  caller's studio-id counters at its own position (before any body
- *  work), keeping the gate's own contract "refusal or studio, nothing
- *  spent".
+ *  enforcing the exact same thing. The rate limit stays OUT of this shared
+ *  gate, applied by each route itself right after the gate — the messages
+ *  route enforces its per-minute/daily limiter, count_tokens its OWN
+ *  per-minute-only one (separate D1 prefix, no daily cap), each at its own
+ *  position (before any body work), keeping the gate's own contract
+ *  "refusal or studio, nothing spent".
  *
  *  Returns either an early refusal `Response` (any one of the checks above
  *  failing) or the resolved `studio`/`allRows` the caller needs to proceed —
@@ -589,12 +597,12 @@ function estimateInputTokens(messages: Json[], tools: Json[] | undefined): numbe
  * are all still enforced here even though this route never actually calls
  * `env.AI.run` — none of those checks exist BECAUSE of the AI call; they
  * exist because this is still a spawn-token-authenticated glm-lead-only
- * surface, same as every other check in this file. The same
- * per-minute/daily rate limit (`checkAndConsumeLeadRateLimit`) as the
- * messages route is applied here too, same position (after the auth gate,
- * before any body work) — the endpoint spends no AI budget, but an
- * unthrottled endpoint is a free D1-hammering surface, and the review
- * asked for parity.
+ * surface, same as every other check in this file. Rate limiting too, same
+ * position (after the auth gate, before any body work), but from its OWN
+ * per-minute-only limiter (`checkAndConsumeLeadCountTokensRateLimit`,
+ * separate D1 prefix, no daily cap) — an unthrottled endpoint is a free
+ * D1-hammering surface, yet its calls spend no AI budget and must not
+ * draw down the messages route's.
  */
 export async function handleFleetAnthropicCountTokens(
   req: Request, env: Env, ctx: ExecutionContext,
@@ -604,9 +612,10 @@ export async function handleFleetAnthropicCountTokens(
   if ("response" in gate) return gate.response;
   const { studio } = gate;
 
-  // Same limiter, same position, same refusal as the messages route —
-  // see consumeLeadRate's own doc comment.
-  const refusal = await consumeLeadRate(env, studio.id);
+  // count_tokens gets its OWN per-minute bucket: it spends no AI budget,
+  // and drawing it from the /messages daily cap locked studios out
+  // (measured 2026-10-11) — see consumeLeadCountTokensRate's doc comment.
+  const refusal = await consumeLeadCountTokensRate(env, studio.id);
   if (refusal) return refusal;
 
   const raw = await readCappedBody(req, ANTHROPIC_BODY_CAP);
