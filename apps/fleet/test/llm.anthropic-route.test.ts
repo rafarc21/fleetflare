@@ -632,11 +632,56 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
       await ctx.drain();
       expect(spy).toHaveBeenCalledTimes(1);
       const line = spy.mock.calls[0].map(String).join(" ");
+      // Issue #304: the reason is now failureClass()'s own output — class/
+      // status only. `no_finish_reason` carries no upstream text, so its
+      // redacted form is the string itself, unchanged.
       expect(line).toBe(`[glm-lead] call failed studio=${ME} stream=true in=0 out=0 reason=no_finish_reason`);
       expect(line).not.toContain("TOP-SECRET-PROMPT-TEXT");
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // Board issue #304, item 3: the upstream's OWN error message can echo
+  // request input — a context-overflow error quoting the prompt is the
+  // exact shape that motivated this. `wrangler tail` output outlives the
+  // request, so the console line must carry the failure CLASS only. The D1
+  // `error` column is NOT redacted: the full message stays there for
+  // diagnosis (issue #302's truncation cap still applies).
+  it("a prompt-echoing upstream error never reaches the console line, but the full message stays in the D1 error column (issue #304)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { token, rows, e } = await setup();
+      (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => {
+        throw new Error("bad input near: TOP-SECRET-PROMPT-TEXT");
+      });
+      const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+      expect(r.status).toBe(500);
+      await ctx.drain();
+      expect(spy).toHaveBeenCalledTimes(1);
+      const line = spy.mock.calls[0].map(String).join(" ");
+      expect(line).not.toContain("TOP-SECRET-PROMPT-TEXT");
+      expect(line).toContain("reason=ai_run_error 500 api_error");
+      expect((await usageRows())[0].error).toBe("ai_run_error 500 api_error: bad input near: TOP-SECRET-PROMPT-TEXT");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("failureClass keeps the class/status and drops everything from the first ':' onward (issue #304)", async () => {
+    const { failureClass } = await import("../src/llm/anthropic-route");
+    // Plain reasons never carry upstream text — they pass through unchanged.
+    expect(failureClass("idle_timeout after 40ms")).toBe("idle_timeout after 40ms");
+    expect(failureClass("client_abort")).toBe("client_abort");
+    expect(failureClass("no_finish_reason")).toBe("no_finish_reason");
+    // Every failureReason shape: everything from the FIRST ':' onward is
+    // the upstream message — dropped, even when the message itself carries
+    // more colons.
+    expect(failureClass("upstream_read_error overloaded_error: AiError: capacity exceeded mid-stream"))
+      .toBe("upstream_read_error overloaded_error");
+    expect(failureClass("upstream_error_chunk api_error: upstream blew up")).toBe("upstream_error_chunk api_error");
+    expect(failureClass("ai_run_error 504 api_error: upstream timeout")).toBe("ai_run_error 504 api_error");
+    expect(failureClass("pump_error: something broke inside the pump")).toBe("pump_error");
   });
 
   it("a successful call writes no console.error line and a null error column", async () => {
