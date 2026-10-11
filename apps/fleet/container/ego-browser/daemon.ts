@@ -144,11 +144,12 @@ const IDLE_MS = resolveIdleMs();
 // as reasonable for "spawn a fresh daemon and connect to it").
 const STARTUP_GRACE_MS = 5000;
 
-// Incremented at the very start of handleRequest, decremented in a
-// `finally` at the very end -- guards the race where a request that will
-// soon push registry.list().length away from zero (e.g. taskSpace creating
-// a brand-new space) is genuinely in flight, past the point the registry
-// still reads empty but not yet past the point it isn't. See the plan doc.
+// Incremented by serveRpc's onDispatch hook (before the handler lookup,
+// even for an unknown method), decremented in onSettled's finally -- guards
+// the race where a request that will soon push registry.list().length away
+// from zero (e.g. taskSpace creating a brand-new space) is genuinely in
+// flight, past the point the registry still reads empty but not yet past
+// the point it isn't. See the plan doc.
 let inFlightRequests = 0;
 
 // Follow-up review finding on the original #36 fix: the old shutdown() had
@@ -594,8 +595,9 @@ log(`daemon started, pid ${process.pid}, socket ${paths.sockFile}`);
 
 // Covers "spawned but never used at all" -- a daemon that comes up and
 // then receives zero requests would otherwise never arm its own idle
-// timer, since scheduleIdleCheck() is otherwise only called from inside
-// handleRequest. Uses STARTUP_GRACE_MS (see its own comment above), not
+// timer, since scheduleIdleCheck() is otherwise only called from
+// serveRpc's onSettled hook. Uses STARTUP_GRACE_MS (see its own comment
+// above), not
 // the raw IDLE_MS a short-window config might set -- board #36's live
 // reproduction (see the plan doc) proved a short IDLE_MS here races the
 // daemon's own first client: ensureDaemonAlive always spawns THEN
