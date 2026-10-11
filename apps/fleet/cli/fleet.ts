@@ -373,7 +373,8 @@ export function fullErrorLine(s: StudioStatus): string | null {
  * is not a board state, #110). Placed between WIP and READY because
  * park-readiness is read beside the work-age columns. `openPrs` (studio id
  * -> count) comes from cmdLs's one batched GET /studio/board/open-prs per
- * distinct repo; see the cell's own comment for the "-"/count/0 contract.
+ * distinct repo — opt-in via `--prs` (#332 review H1: bare ls never fans out
+ * live reads); see the cell's own comment for the "-"/count/0 contract.
  * Every single-studio call site passes no map and renders "-" — "no data" is
  * the honest reading for a view that never asked the board.
  */
@@ -492,10 +493,19 @@ function openPrsHeaders(creds: Credentials): Record<string, string> {
   return { ...accessHeaders(creds), Accept: "application/json" };
 }
 
+/** #332 review H1: every open-prs client fetch carries its own deadline —
+ *  `fleet ls` must never sit waiting on a slow scan; the AbortSignal turns
+ *  a hung read into the same "no data" degrade the 404 path already takes. */
+export const OPEN_PRS_TIMEOUT_MS = 10_000;
+
 /**
  * The per-studio PRS counts for a whole listing (#332): one fetch per
  * DISTINCT repo, merged into a single studio-id -> count map for formatTable
- * and `fleet ls --json` (readiness-format.ts's lsJsonRows).
+ * and `fleet ls --json` (readiness-format.ts's lsJsonRows), plus the
+ * `unknown` list — every studio whose scan the route REPORTS as failed
+ * (#332 review H2: absent from `counts`, so its cell renders '-'; cmdLs
+ * prints one degrade warning naming them, and "scan failed" must never
+ * read as a confident zero).
  *
  * WHICH value names a "distinct repo": the row's own `repoSlug` — the full
  * `owner/name` the Worker resolved and wrote (StudioStatus.repoSlug), not
@@ -507,6 +517,10 @@ function openPrsHeaders(creds: Credentials): Record<string, string> {
  * reading of that null, so a fleet mid-upgrade (some rows null, some not,
  * same repo) reads every studio from the right map.
  *
+ * #332 review H1: every fetch carries an AbortSignal (OPEN_PRS_TIMEOUT_MS)
+ * — `fleet ls` never sits waiting on a slow scan; a hung read degrades the
+ * same way the 404 path already does.
+ *
  * `fetchImpl` is a parameter for the same reason TabsDeps exists: the real
  * caller passes the global fetch; a test passes a fake and needs no network.
  * Never throws and never rejects — every failure reads as "that repo's
@@ -514,7 +528,7 @@ function openPrsHeaders(creds: Credentials): Record<string, string> {
  */
 export async function openPrsByStudio(
   creds: Credentials, studios: StudioStatus[], fetchImpl: typeof fetch = fetch,
-): Promise<Map<string, number>> {
+): Promise<{ counts: Map<string, number>; unknown: string[] }> {
   // Keyed by the value that decides the FETCH (repoSlug, with every null
   // row folded onto the default-repo group), so two rows of one repo always
   // share one request and a mixed null/non-null fleet never reads one
@@ -527,27 +541,35 @@ export async function openPrsByStudio(
     groups.set(key, group);
   }
   const counts = new Map<string, number>();
+  const unknown: string[] = [];
   for (const group of groups.values()) {
     try {
-      const res = await fetchImpl(boardUrl(creds, openPrsPath(group.param)), { headers: openPrsHeaders(creds) });
+      const res = await fetchImpl(boardUrl(creds, openPrsPath(group.param)), {
+        headers: openPrsHeaders(creds),
+        signal: AbortSignal.timeout(OPEN_PRS_TIMEOUT_MS),
+      });
       // !ok — a 404 from a Worker that predates this route above all — is
       // NO data for this repo's studios, never a failed ls: their cells read
       // "-", and every other repo keeps its real answer.
       if (!res.ok) continue;
-      const body = (await res.json()) as { prs: Record<string, OpenPr[]> };
+      const body = (await res.json()) as { prs?: Record<string, OpenPr[]>; unknown?: string[] };
       for (const id of group.ids) {
+        // The route answers every studio of the repo: a covered id (an
+        // array entry, empty included) is a counted answer; an id the body
+        // names in `unknown` is a scan the route RAN and could not answer —
+        // reported, never recorded as 0; anything else is a mismatched
+        // answer (an old route shape with no `unknown` key, a foreign id),
+        // recorded as absence, never a silent 0.
         const prs = body.prs?.[id];
-        // The route answers every studio of the repo, so an ABSENT id is a
-        // mismatched answer, not an empty lane — recorded as absence, never
-        // a silent 0.
         if (Array.isArray(prs)) counts.set(id, prs.length);
+        else if (body.unknown?.includes(id)) unknown.push(id);
       }
     } catch {
       // A transport blip on one repo's read is the same as the route being
       // unavailable: absence for that group, real answers for the rest.
     }
   }
-  return counts;
+  return { counts, unknown };
 }
 
 /**
@@ -556,14 +578,29 @@ export async function openPrsByStudio(
  * or a 200 whose map does not cover this studio) and is the ONLY failure
  * shape: this helper never throws and never invents an empty list, because
  * the strict refusal must treat "unknown" and "zero" as different facts.
+ *
+ * #332 review H2: `{ ok: false, unknown: true }` is the DIFFERENT failure —
+ * the route ANSWERED, and named this studio in its `unknown` array: the scan
+ * ran and could not answer. Strict refuses on that one (a scan-failed studio
+ * is not an unavailable route); the plain { ok: false } (route-missing,
+ * transport blip, uncovered map) still proceeds loudly.
+ *
+ * #332 review H1: the fetch carries the same OPEN_PRS_TIMEOUT_MS deadline —
+ * a hung read is a "could not look", never a hung destroy.
  */
 export async function fetchStudioOpenPrs(
   creds: Credentials, repoParam: string | null, studioId: string, fetchImpl: typeof fetch = fetch,
-): Promise<{ ok: true; prs: OpenPr[] } | { ok: false }> {
+): Promise<{ ok: true; prs: OpenPr[] } | { ok: false; unknown?: true }> {
   try {
-    const res = await fetchImpl(boardUrl(creds, openPrsPath(repoParam)), { headers: openPrsHeaders(creds) });
+    const res = await fetchImpl(boardUrl(creds, openPrsPath(repoParam)), {
+      headers: openPrsHeaders(creds),
+      signal: AbortSignal.timeout(OPEN_PRS_TIMEOUT_MS),
+    });
     if (!res.ok) return { ok: false };
-    const body = (await res.json()) as { prs: Record<string, OpenPr[]> };
+    const body = (await res.json()) as { prs?: Record<string, OpenPr[]>; unknown?: string[] };
+    // The route ran and could not answer for THIS studio — scan-failed,
+    // a different fact from route-missing.
+    if (Array.isArray(body.unknown) && body.unknown.includes(studioId)) return { ok: false, unknown: true };
     const prs = body.prs?.[studioId];
     return Array.isArray(prs) ? { ok: true, prs } : { ok: false };
   } catch {
@@ -614,10 +651,21 @@ export function parkWarningLines(id: string, prs: OpenPr[]): string[] {
 export const STRICT_UNMERGED_UNKNOWN_PROCEEDING =
   "fleet destroy: unmerged-PR status unknown (open-prs route unavailable) — proceeding";
 
+/** #332 review H2: a scan the route REPORTS as failed is not the same as an
+ *  unavailable route — the check ran and could not answer, so strict has the
+ *  one thing it needs to refuse: uncertainty about zero. */
+export const STRICT_UNMERGED_UNKNOWN_SCAN =
+  "fleet destroy: refusing: unmerged-PR status unknown (the scan failed for this studio) — cannot confirm zero PRs (--strict-unmerged); re-run, or drop the flag to proceed";
+
 /** The post-destroy warning's own degradation line: same honesty, one line,
  *  nothing claimed the check could not back. */
 export const PARK_WARNING_UNAVAILABLE =
   "park warning: could not check unmerged PRs (route unavailable)";
+
+/** The park warning's unknown-scan line: the route ANSWERED, but this
+ *  studio's own scan failed — "could not check", never a clean zero. */
+export const PARK_WARNING_UNKNOWN_SCAN =
+  "park warning: could not check unmerged PRs (the scan failed for this studio)";
 
 /**
  * Issue #37: one studio, checked LIVE — POST /studio/:id/check (routes.ts).
@@ -814,7 +862,7 @@ async function refreshAll(creds: Credentials, studios: StudioStatus[]): Promise<
 }
 
 export async function cmdLs(
-  creds: Credentials, fresh: boolean, orcaDeps: OrcaDeps = defaultOrcaDeps(), json = false,
+  creds: Credentials, fresh: boolean, orcaDeps: OrcaDeps = defaultOrcaDeps(), json = false, prs = false,
 ): Promise<void> {
   // Task 5 (P2 plane 3): explicit, now that GET /studio/ content-negotiates
   // on Accept (routes.ts) — without this, a future default change there
@@ -832,20 +880,33 @@ export async function cmdLs(
   // printed; bare `fleet ls` prints what the registry already has, and the
   // CHECKED column says how old each of those verdicts is.
   const studios = fresh ? await refreshAll(creds, recorded) : recorded;
-  // Board issue #332: the PRS column's data — launched now so the batched
-  // open-prs fetch (one per distinct repo, inside the Worker) overlaps the
-  // Orca read below instead of stacking on it. Best-effort and never
-  // rejects: a Worker that predates the route only costs this await.
-  const openPrs = openPrsByStudio(creds, studios);
+  // Board issue #332, #332 review H1: the PRS column's data is --prs OPT-IN
+  // — bare `fleet ls` never fans out live reads (a 30s monitor polling ls
+  // was burning ~27k GitHub calls/hr through the Worker's per-studio
+  // scans), staying the one registry read issue #37 rules it must be.
+  // With --prs the batched fetch (one per distinct repo, inside the Worker)
+  // is launched now so it overlaps the Orca read below instead of stacking
+  // on it. Best-effort and never rejects: a Worker that predates the route
+  // only costs this await.
+  const openPrs = prs
+    ? openPrsByStudio(creds, studios)
+    : Promise.resolve({ counts: new Map<string, number>(), unknown: [] as string[] });
+  // #332 review H2: a scan the route reports as failed prints ONE degrade
+  // warning naming the studios — never a confident zero. console.error, so
+  // stdout stays machine-clean in --json mode.
+  const { counts: openPrsCounts, unknown: openPrsUnknown } = await openPrs;
+  if (openPrsUnknown.length > 0) {
+    console.error(`fleet ls: unmerged-PR status unknown for ${openPrsUnknown.join(", ")} (scan failed)`);
+  }
   // Issue #70 ask 4: machine-readable lead state, nothing else on stdout.
   // #332: openPrs rides each row when the route answered for its repo.
   if (json) {
-    console.log(JSON.stringify(lsJsonRows(studios, new Date(), undefined, await openPrs), null, 2));
+    console.log(JSON.stringify(lsJsonRows(studios, new Date(), undefined, openPrsCounts), null, 2));
     return;
   }
   for (const line of formatLsHead(studios)) console.log(line);
   const orca = await readStudioRows(studios, orcaDeps);
-  console.log(formatTable(studios, new Date(), orca.rows, await openPrs));
+  console.log(formatTable(studios, new Date(), orca.rows, openPrsCounts));
   // #299: stdout, not stderr — survives `fleet ls 2>&1 | grep`-style reads.
   if (orca.footer && studios.length > 0) console.log(orca.footer);
   // Issue #53: idle studios bill with zero events; say so above the caveat.
@@ -1436,6 +1497,12 @@ async function cmdDestroy(
       creds, row.ok ? row.status.repoSlug : null, id,
     );
     if (!answer.ok) {
+      if (answer.unknown) {
+        // #332 review H2: the scan ran and failed for THIS studio — refuse;
+        // an unavailable route (the else) still proceeds loudly.
+        console.error(STRICT_UNMERGED_UNKNOWN_SCAN);
+        process.exit(1);
+      }
       // Plan ruling: a 404/unavailable route is NOT evidence of zero PRs,
       // and blocking a destroy on a Worker upgrade race is worse than the
       // warning — strict degrades to proceeding, loudly.
@@ -1473,7 +1540,9 @@ async function cmdDestroy(
     if (parseStudioId(id) !== null) {
       const answer = await fetchStudioOpenPrs(creds, report.status?.repoSlug ?? null, id);
       if (!answer.ok) {
-        console.error(PARK_WARNING_UNAVAILABLE);
+        // #332 review H2: the scan ran and failed for THIS studio — its own
+        // line, never the route-unavailable one.
+        console.error(answer.unknown ? PARK_WARNING_UNKNOWN_SCAN : PARK_WARNING_UNAVAILABLE);
       } else if (answer.prs.length > 0) {
         for (const line of parkWarningLines(id, answer.prs)) console.error(line);
       }
@@ -2894,7 +2963,7 @@ async function main(): Promise<void> {
   const creds = await loadCredentials();
   switch (parsed.cmd) {
     case "ls":
-      return cmdLs(creds, parsed.fresh, defaultOrcaDeps(), parsed.json);
+      return cmdLs(creds, parsed.fresh, defaultOrcaDeps(), parsed.json, parsed.prs);
     case "check":
       return cmdCheck(creds, parsed.id);
     case "clear-session-guard":

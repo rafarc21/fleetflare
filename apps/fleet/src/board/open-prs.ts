@@ -53,18 +53,25 @@ export interface OpenPr {
  * can never drift.
  *
  * Degrades per task, never per scan — the posture pr-landed.ts already
- * takes: a thrown showTask/getPullRequest or a `{ok:false}` showTask logs
+ * takes for showTask/listTasks (openTasksWithLatestPr owns that posture and
+ * it is unchanged): a thrown showTask or a `{ok:false}` showTask logs
  * via console.error and contributes nothing for THAT task alone. The
  * alternative — failing the whole scan on one bad task — would report the
  * OTHERS' unmerged PRs as absent on a 5xx, which is exactly the false
  * "nothing to warn about" shape this module exists to prevent; the honest
  * contract is one bad task contributes nothing AND the rest of the scan
- * still answers for the tasks it could read. Only the studio-wide board
- * listing itself is scan-fatal: a `{ok:false}` listTasks is returned AS-IS
- * (status and message verbatim, never collapsed into "zero PRs" — an
- * unreadable board must not read as a clean board, the same fail-closed
- * rule board.ts's openAssignedTasks documents for destroy's gate), and a
- * THROWN listIssues propagates to the caller rather than being swallowed.
+ * still answers for the tasks it could read.
+ *
+ * #332 review H2 (operator-ordered): a thrown getPullRequest FAILS THE
+ * WHOLE SCAN ({ok:false}) — PR-state unreadable is never a dropped PR. A
+ * PR whose live state cannot be read means this module cannot answer the
+ * question it exists for, and a dropped PR would report a false zero to
+ * --strict-unmerged. The scan-fatal set: the studio-wide board listing (a
+ * `{ok:false}` listTasks is returned AS-IS, status and message verbatim,
+ * never collapsed into "zero PRs" — an unreadable board must not read as a
+ * clean board, the same fail-closed rule board.ts's openAssignedTasks
+ * documents for destroy's gate), a THROWN listIssues (propagates to the
+ * caller rather than being swallowed), and now an unreadable PR state.
  */
 export async function studioOpenPrs(
   api: BoardApi, repo: string, studioId: string,
@@ -101,7 +108,12 @@ export async function studioOpenPrs(
         });
       }
     } catch (err) {
+      // #332 review H2: a PR whose live state cannot be read means this
+      // module cannot answer the question it exists for — dropping it
+      // would report a false zero to --strict-unmerged. The whole scan
+      // reads as failed (the route's `unknown`), never as clean.
       console.error(`open-prs: reading PR #${prNumber} for task #${taskNumber} in ${repo} threw`, err);
+      return { ok: false, status: 502, message: `reading PR #${prNumber} for task #${taskNumber} in ${repo} failed` };
     }
   }
   return { ok: true, value: prs };

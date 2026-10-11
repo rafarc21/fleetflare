@@ -428,10 +428,11 @@ export interface LsJsonRow {
   lastLine: string | null;
   /** Board issue #332: how many unmerged, still-open PRs this studio's
    *  assigned tasks name, per the board's open-prs route. Present ONLY when
-   *  the route answered for the studio's repo (`fleet ls` passes the map
-   *  openPrsByStudio built); absent means "no data" (an old Worker whose
-   *  route 404s), never a silent 0 — the same "-"-vs-count split the PRS
-   *  table column renders. */
+   *  the route answered for the studio's repo (`fleet ls --prs` passes the
+   *  map openPrsByStudio built — opt-in, #332 review H1; bare ls passes
+   *  none); absent means "no data" (no --prs, or an old Worker whose route
+   *  404s), never a silent 0 — the same "-"-vs-count split the PRS table
+   *  column renders. */
   openPrs?: number;
 }
 

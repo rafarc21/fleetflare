@@ -438,25 +438,29 @@ async function handleTaskReapRoute(
 // not blank the parker's view of every other lane — the whole failure shape
 // this warning exists to prevent is a parker reading "nothing to warn
 // about" that was actually "the scan could not look". So a failed studio
-// reads as an EMPTY list in the map plus a console.error naming it, the
-// route still answers 200, and every other lane keeps its real answer. (A
-// `studioOpenPrs` that THROWS — the studio-wide board listing itself
-// failing — degrades the same way, for the same reason.) The honest-empty
-// ambiguity is accepted deliberately: the CLI column prints `-` for
-// "unknown" only when the ROUTE itself is unavailable, and the Worker's
-// logs carry the per-studio failure an operator can go read.
+// still gets its lane answered: the route stays 200, every other lane keeps
+// its real answer, and (#332 review H2) the failed studio lands in the
+// top-level `unknown` array instead of `prs` — a scan the route REPORTS as
+// failed is a different fact from an empty lane, and the CLI renders `-`
+// plus a warning on it while strict refuses. (A `studioOpenPrs` that
+// THROWS — the studio-wide board listing itself failing — degrades the same
+// way, for the same reason.) The Worker's logs still carry the per-studio
+// failure an operator can go read.
 
 /**
  * `GET /studio/board/open-prs?repo=<slug>` — issue #332. Absent `repo` is
  * the fleet default, exactly as reap reads it (`resolveBoardRepo` owns
  * every decision, including whether the fleet can reach a named repo).
  *
- * Response: `{ repo, prs: { [studioId]: OpenPr[] } }` — every studio whose
- * registry row binds it to that repo (case-insensitive; a null `repoSlug`
- * is a pre-P4a studio cloned from the fleet default, so it belongs to the
- * repo only when the resolved repo IS the default — `resolveStudioBoardRepo`'s
- * own reading of the same field). Zero matching studios answers
- * `{ repo, prs: {} }` — an empty fleet-repo is a fact, not a failure.
+ * Response: `{ repo, prs: { [studioId]: OpenPr[] }, unknown: string[] }` —
+ * every studio whose registry row binds it to that repo (case-insensitive;
+ * a null `repoSlug` is a pre-P4a studio cloned from the fleet default, so
+ * it belongs to the repo only when the resolved repo IS the default —
+ * `resolveStudioBoardRepo`'s own reading of the same field), plus the
+ * `unknown` array: a studio the route could not answer — the CLI renders
+ * `-` and warns; strict refuses on it. Zero matching studios answers
+ * `{ repo, prs: {}, unknown: [] }` — an empty fleet-repo is a fact, not a
+ * failure.
  *
  * The studio set is the real registry (`listStudios`, the same read
  * `fleet ls` itself gets) with no injection seam, because a D1 read is not
@@ -482,6 +486,7 @@ async function handleOpenPrsRoute(
   const studios = (await listStudios(env))
     .filter((s) => (s.repoSlug ?? defaultLower).toLowerCase() === repo);
   const prs: Record<string, OpenPr[]> = {};
+  const unknown: string[] = [];
   for (const studio of studios) {
     try {
       const result = await studioOpenPrs(api, repo, studio.id);
@@ -489,14 +494,14 @@ async function handleOpenPrsRoute(
         prs[studio.id] = result.value;
       } else {
         console.error(`open-prs: scanning ${studio.id} in ${repo} failed (${result.status}): ${result.message}`);
-        prs[studio.id] = [];
+        unknown.push(studio.id);
       }
     } catch (err) {
       console.error(`open-prs: scanning ${studio.id} in ${repo} threw`, err);
-      prs[studio.id] = [];
+      unknown.push(studio.id);
     }
   }
-  return Response.json({ repo, prs });
+  return Response.json({ repo, prs, unknown });
 }
 
 /**
