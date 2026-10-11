@@ -182,8 +182,8 @@ describe("handleFleetAnthropicMessages — spend controls (MAJOR 2)", () => {
 
   // Board issue #284, MAJOR 1: this route has its OWN rate limit now
   // (LEAD_RATE_PER_MINUTE, src/llm/ratelimit.ts) — junior's own
-  // JUNIOR_RATE_PER_MINUTE no longer has any effect here. Issue #298-1:
-  // the 429 is Anthropic-shaped with a retry-after header, not bare text.
+  // JUNIOR_RATE_PER_MINUTE no longer has any effect here. The 429 is now
+  // Anthropic-shaped with a retry-after header, not bare text.
   it("429 once the per-minute rate limit is exceeded — uses its OWN LEAD_RATE_PER_MINUTE, not junior's", async () => {
     const { token, rows, e } = await setup(undefined, { LEAD_RATE_PER_MINUTE: "1" });
     const first = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
@@ -446,9 +446,9 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     expect(rowsLogged[0].ok).toBe(0);
   });
 
-  // #298-4: the overflow-shaped sibling of the test above — Claude Code's
-  // client recognizes "prompt is too long" to trigger auto-compact mid-
-  // session, so the raw upstream overflow text must not pass through.
+  // The overflow-shaped sibling of the test above — Claude Code's client
+  // recognizes "prompt is too long" to trigger auto-compact mid-session,
+  // so the raw upstream overflow text must not pass through.
   it("an overflow-shaped upstream {error:...} chunk mid-stream emits event: error carrying the fixed 'prompt is too long' message, not the raw upstream text (#298-4)", async () => {
     const enc = new TextEncoder();
     const upstream = new ReadableStream<Uint8Array>({
@@ -940,9 +940,9 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
     expect(json.input_tokens).toBeGreaterThan(10);
   });
 
-  // #298-3: the request's tools are real prompt material the backend
-  // re-receives every call — an estimate that ignores them comes in low
-  // and skews Claude Code's compact decisions the endpoint exists to feed.
+  // The request's tools are real prompt material the backend re-receives
+  // every call — an estimate that ignores them comes in low and skews
+  // Claude Code's compact decisions the endpoint exists to feed.
   it("a body with a non-trivial tools array estimates HIGHER than the same body without tools (#298-3)", async () => {
     const { token, rows, e } = await setup();
     const tool = {

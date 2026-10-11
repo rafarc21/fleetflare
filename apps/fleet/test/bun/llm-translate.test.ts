@@ -407,9 +407,9 @@ describe("streamErrorFrame", () => {
     expect(data).toEqual({ type: "error", error: { type: "overloaded_error", message: "AiError: capacity exceeded" } });
   });
 
-  // #298-4: Claude Code recognizes "prompt is too long" to trigger
-  // auto-compact mid-stream too, which matters for long GLM sessions — the
-  // raw upstream overflow text passes that signal by.
+  // Claude Code recognizes "prompt is too long" to trigger auto-compact
+  // mid-stream too, which matters for long GLM sessions — the raw upstream
+  // overflow text passes that signal by.
   test("a context-overflow-shaped message surfaces the classifyAiError override, not the raw upstream text (#298-4)", () => {
     const frame = streamErrorFrame("This model's maximum context length is 32768 tokens");
     const { event, data } = parseFrame(frame);
@@ -419,7 +419,7 @@ describe("streamErrorFrame", () => {
     });
   });
 
-  test("a capacity-shaped message keeps the raw upstream text — no override exists there (#298-4)", () => {
+  test("a capacity-shaped message keeps the raw upstream text — no override exists there", () => {
     const frame = streamErrorFrame("AiError: capacity exceeded mid-generation");
     const { data } = parseFrame(frame);
     expect((data as { error: { message: string } }).error.message).toBe("AiError: capacity exceeded mid-generation");

@@ -98,8 +98,8 @@ describe("checkAndConsumeJuniorRateLimit", () => {
   });
 });
 
-// Board issue #298-1: a refusal now carries retryAfterMs — ms until the
-// fixed window rolls over — so the 429 can name an honest backoff window.
+// A refusal now carries retryAfterMs — ms until the fixed window rolls
+// over — so the 429 can name an honest backoff window.
 describe("checkAndConsumeJuniorRateLimit — refusal retryAfterMs (#298-1)", () => {
   it("a per-minute refusal carries retryAfterMs in (0, 60_000] — ms to the minute bucket's rollover", async () => {
     const env_ = { JUNIOR_RATE_PER_MINUTE: "1" };

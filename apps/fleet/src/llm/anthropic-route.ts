@@ -59,9 +59,9 @@ function anthropicErrorBody(type: string, message: string): Json {
   return { type: "error", error: { type, message } };
 }
 
-/** #298-1: a 429 without retry-after leaves Claude Code to guess its own
- *  backoff; seconds rounded up so the client never retries before the
- *  window has actually rolled over. */
+/** A 429 without retry-after leaves Claude Code to guess its backoff;
+ *  seconds rounded up so a client never retries before the window
+ *  has actually rolled over. */
 function rateLimitRefusal(message: string, retryAfterMs: number): Response {
   return Response.json(anthropicErrorBody("rate_limit_error", message), {
     status: 429,
@@ -330,8 +330,8 @@ async function pumpAnthropicStream(
  *  this function only collects them into one place so both routes keep
  *  enforcing the exact same thing. The per-minute/daily rate limit stays
  *  OUT of this shared gate, applied by each route itself right after the
- *  gate — both routes now enforce it (#298-3), but each consumes from the
- *  same caller's studio-id counters at its own position (before any body
+ *  gate — both routes now enforce it, but each consumes from the same
+ *  caller's studio-id counters at its own position (before any body
  *  work), keeping the gate's own contract "refusal or studio, nothing
  *  spent".
  *
@@ -548,11 +548,11 @@ export async function handleFleetAnthropicMessages(
  *  there is no way to answer this honestly with an exact number. Heuristic:
  *  total character count of every message's content (string or per-block
  *  JSON), its tool_calls, and the request's tools JSON (their schemas are
- *  real prompt material the backend re-receives every call — #298-3),
- *  divided by ~4 — the commonly cited rough chars-per-token ratio for
- *  English text. Flagged here rather than guessed at silently, same "say so
- *  in a comment instead of guessing" convention classifyAiError's own doc
- *  comment (translate.ts) already established for this file.
+ *  real prompt material the backend re-receives every call), divided by
+ *  ~4 — the commonly cited rough chars-per-token ratio for English text.
+ *  Flagged here rather than guessed at silently, same "say so in a comment
+ *  instead of guessing" convention classifyAiError's own doc comment
+ *  (translate.ts) already established for this file.
  *  `Math.max(1, ...)` only to avoid reporting 0 for a technically-non-empty
  *  request — not a claim that 1 is ever the real count. */
 function estimateInputTokens(messages: Json[], tools: Json[] | undefined): number {
@@ -584,7 +584,7 @@ function estimateInputTokens(messages: Json[], tools: Json[] | undefined): numbe
  * are all still enforced here even though this route never actually calls
  * `env.AI.run` — none of those checks exist BECAUSE of the AI call; they
  * exist because this is still a spawn-token-authenticated glm-lead-only
- * surface, same as every other check in this file. #298-3: the same
+ * surface, same as every other check in this file. The same
  * per-minute/daily rate limit (`checkAndConsumeLeadRateLimit`) as the
  * messages route is applied here too, same position (after the auth gate,
  * before any body work) — the endpoint spends no AI budget, but an

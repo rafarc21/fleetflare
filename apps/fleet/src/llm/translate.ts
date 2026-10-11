@@ -559,9 +559,9 @@ export function closeStream(state: StreamState): string[] {
  * MAJOR 3 (maestro review round 1): the Anthropic SSE frame for a genuine
  * mid-stream upstream failure — `event: error`, never a faked `end_turn` +
  * `message_stop` pair. `type` reuses classifyAiError's own error-type
- * mapping; the override `message`, when present, is used too (#298-4):
- * Claude Code's client recognizes "prompt is too long" to trigger
- * auto-compact mid-stream as well, which matters for long GLM sessions.
+ * mapping; the override `message`, when present, is used too — Claude
+ * Code's client recognizes "prompt is too long" to trigger auto-compact
+ * mid-stream as well, which matters for long GLM sessions.
  */
 export function streamErrorFrame(message: string): string {
   const { type, message: override } = classifyAiError(message);

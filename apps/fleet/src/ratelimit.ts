@@ -25,8 +25,8 @@ const DAY_MS = 86_400_000;
 const RATE_RETENTION_MS = MINUTE_MS * 2;
 const DAILY_RETENTION_MS = DAY_MS * 2;
 
-// #298-1: a refusal without retryAfterMs gives the client no backoff
-// signal; the fixed window means the exact rollover instant is known.
+// A refusal without retryAfterMs gives the client no backoff signal;
+// the fixed window means the exact rollover instant is known.
 export type RateLimitResult =
   | { ok: true }
   | { ok: false; limit: "per-minute" | "daily"; retryAfterMs: number };
