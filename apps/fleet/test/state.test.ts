@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeEach } from "vitest";
-import { getFlag, setFlag, incrementCounter } from "../src/state";
+import { getFlag, setFlag, incrementCounter, scanStateTaskKeys } from "../src/state";
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
@@ -49,5 +49,84 @@ describe("incrementCounter", () => {
     );
     expect(new Set(results).size).toBe(n);
     expect(Math.max(...results)).toBe(n);
+  });
+});
+
+// #365: two callers hand-roll the "<prefix><repo>:<number>" key grammar at
+// DIFFERENT depths (junior/authz.ts embeds the repo in the prefix,
+// github/read-repos.ts passes the bare namespace), each with its own LIKE
+// scan, startsWith re-check and digit test. These cases pin the one shared
+// scanner before it exists: the LIKE-wildcard trap authz's own comment
+// names, the colonless-rest depth split between the two callers, the shapes
+// both reject, and the UNSORTED contract — sorting is a caller's verb.
+describe("scanStateTaskKeys", () => {
+  async function seed(rows: [key: string, value: string][]) {
+    for (const [key, value] of rows) {
+      await env.DB.prepare(`INSERT INTO fleet_state (key, value, ts) VALUES (?, ?, ?)`)
+        .bind(key, value, 1).run();
+    }
+  }
+
+  it("LIKE's `_` wildcard hands back a same-length decoy; startsWith is what rejects it", async () => {
+    // Authz depth: the repo is IN the prefix. `we_bsite` holds an `_`, so
+    // the LIKE pattern's `_` matches ANY single char — D1 returns the
+    // decoy `we-bsite` row, and only the exact prefix re-check kills it.
+    // A shorter decoy (`website:9`, one char less) never matches the LIKE
+    // at all — `_` is exactly one char — so it would prove nothing.
+    await seed([
+      ["ns:acme-org/we_bsite:5", "v5"],
+      ["ns:acme-org/we-bsite:9", "decoy"],
+    ]);
+    const rows = await scanStateTaskKeys(env.DB, "ns:acme-org/we_bsite:");
+    expect(rows).toEqual([{ repo: "", number: 5, value: "v5" }]);
+  });
+
+  it("a colonless numeric rest reads repo \"\" — grants drops it by filter, never by the scan", async () => {
+    // The two callers' rules disagree on this shape: authz's prefix already
+    // named the repo, so `42` is a TRUE row there; grants' bare namespace
+    // makes a hand-edited `read-repos:42` one it must not read as task 42.
+    // The scan itself keeps the union — which is which is a caller's depth
+    // filter, not a parse rule.
+    await seed([["ns:42", "v"]]);
+    expect(await scanStateTaskKeys(env.DB, "ns:")).toEqual([{ repo: "", number: 42, value: "v" }]);
+  });
+
+  it("rejects a non-numeric suffix, a trailing-empty suffix, a bare non-numeric rest and an empty repo", async () => {
+    await seed([
+      ["ns:acme-org/repo:notanumber", "x"],
+      ["ns:acme-org/repo:", "x"],
+      ["ns:abc", "x"],
+      ["ns::7", "x"],
+    ]);
+    expect(await scanStateTaskKeys(env.DB, "ns:")).toEqual([]);
+  });
+
+  it("keeps a multi-colon repo name intact, splitting at the LAST colon", async () => {
+    await seed([["ns:acme-org/we:ird:5", "v"]]);
+    expect(await scanStateTaskKeys(env.DB, "ns:"))
+      .toEqual([{ repo: "acme-org/we:ird", number: 5, value: "v" }]);
+  });
+
+  it("passes each row's value through untouched", async () => {
+    await seed([["ns:a:1", "one"], ["ns:b:2", "two"]]);
+    const rows = await scanStateTaskKeys(env.DB, "ns:");
+    expect(rows.map((r) => r.value)).toEqual(["one", "two"]);
+  });
+
+  it("returns rows UNSORTED, in the engine's own LIKE-return order", async () => {
+    // The scan's contract is unsorted: callers own order (authz sorts
+    // numerically, grants by repo localeCompare then number). Pinned by
+    // comparing against the engine's own LIKE query — the same statement
+    // the scan will run — never a guessed insertion order.
+    await seed([["ns:b:2", "v2"], ["ns:a:1", "v1"], ["ns:c:3", "v3"]]);
+    const raw = await env.DB.prepare(`SELECT key FROM fleet_state WHERE key LIKE ?`)
+      .bind("ns:%").all<{ key: string }>();
+    expect(await scanStateTaskKeys(env.DB, "ns:"))
+      .toEqual([{ repo: "b", number: 2, value: "v2" },
+                { repo: "a", number: 1, value: "v1" },
+                { repo: "c", number: 3, value: "v3" }]);
+    // Sanity on the comparison's premise: the engine's return is what the
+    // assertion above was built against (rowid/insertion order here).
+    expect(raw.results.map((r) => r.key)).toEqual(["ns:b:2", "ns:a:1", "ns:c:3"]);
   });
 });
