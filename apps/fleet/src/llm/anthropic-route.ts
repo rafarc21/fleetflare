@@ -181,6 +181,14 @@ function failureReason(kind: string, message: string): string {
   return `${kind} ${classifyAiError(message).type}: ${message}`;
 }
 
+/** Board issue #304: the console line names the class/status only — an
+ *  upstream error message can echo request input, and `wrangler tail`
+ *  output outlives the request. */
+export function failureClass(failure: string): string {
+  const colon = failure.indexOf(":");
+  return colon === -1 ? failure : failure.slice(0, colon);
+}
+
 /** Builds the Anthropic SSE byte stream for one request: the prelude,
  *  then every chunk the upstream OpenAI-compatible stream yields, translated
  *  through translate.ts's pure state machine, then the closing frames. Kept
@@ -390,6 +398,15 @@ const USAGE_MODE = "lead";
  *  counts and the reason only, never prompt or response text. Before this,
  *  an upstream stall left `ok=0` rows with no reason and empty tail logs.
  *
+ *  Board issue #304, item 3: "never prompt or response text" was not quite
+ *  true of the console line before this fix — the upstream's OWN error
+ *  message can echo request input (a context-overflow error quoting the
+ *  prompt is the shape the review flagged), and `wrangler tail` output
+ *  outlives the request. The console line now carries failureClass()'s
+ *  class/status only, while the D1 `error` column keeps the full capped
+ *  message — that one stays queryable per-row for diagnosis, where the
+ *  console line's blast radius is not.
+ *
  *  Issue #335: every row also carries the call's wall time (`startedAt` to
  *  now, retry backoff included) and its env.AI.run attempt count. */
 function logUsage(
@@ -403,7 +420,7 @@ function logUsage(
     : call.failure.replace(/\s+/g, " ").slice(0, FAILURE_REASON_CAP);
   if (!ok) {
     console.error(
-      `[glm-lead] call failed studio=${studioId} stream=${stream} in=${inputTokens} out=${outputTokens} reason=${error ?? "unknown"}`,
+      `[glm-lead] call failed studio=${studioId} stream=${stream} in=${inputTokens} out=${outputTokens} reason=${failureClass(error ?? "unknown")}`,
     );
   }
   ctx.waitUntil(insertJuniorUsage(env.DB, {
