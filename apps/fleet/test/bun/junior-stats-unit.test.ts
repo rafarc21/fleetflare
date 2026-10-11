@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fetchJuniorUsage, cmdJuniorStats, type JuniorUsageFetch } from "../../cli/junior";
+import { fetchJuniorUsage, cmdJuniorStats, formatJuniorStats, type JuniorUsageFetch } from "../../cli/junior";
 import { juniorUsageLogPath } from "../../../../skills/junior/src/usage";
 
 const CREDS = { workerUrl: "http://127.0.0.1:1", accessClientId: "id", accessClientSecret: "secret" } as const;
@@ -179,5 +179,37 @@ describe("cmdJuniorStats (injected fetch)", () => {
     expect(out.join("\n")).toMatch(/laptop-a\s+1\s+5\s+5/);
     expect((out.join("\n").match(/laptop-a/g) ?? []).length).toBe(1);
     rmSync(home, { recursive: true, force: true });
+  });
+});
+
+// Issue #399 (sweep-5 F1): byte-exact characterization pins of
+// formatJuniorStats, written BEFORE the formatColumns fold. Two ids with
+// different digit lengths (2 vs 12 calls, 100 vs 12345 input tokens) so
+// column-width alignment is fully exercised, plus the TOTAL row. Any width
+// or gap change in the shared builder shows up here first.
+describe("formatJuniorStats — exact bytes (#399)", () => {
+  const ROWS = [
+    { id: "a", calls: 2, inputTokens: 100, outputTokens: 50 },
+    { id: "b", calls: 12, inputTokens: 12345, outputTokens: 6789 },
+  ];
+
+  test("header, both rows, and the TOTAL row: every byte of the table", () => {
+    expect(formatJuniorStats(ROWS)).toBe(
+      "ID     CALLS  INPUT TOKENS  OUTPUT TOKENS\n" +
+      "a      2      100           50\n" +
+      "b      12     12345         6789\n" +
+      "TOTAL  14     12445         6839",
+    );
+  });
+
+  // The drift this fold cites: the current implementation pads EVERY column
+  // then trimEnds each line, so the #205 rule lives in the trimEnd, not in
+  // the table. These bytes prove trimEnd is a no-op on an already-unpadded
+  // last column — the fold (default: last column never padded) must keep
+  // every line identical.
+  test("no line ends in whitespace (trimEnd on an already-unpadded last column is a no-op)", () => {
+    for (const line of formatJuniorStats(ROWS).split("\n")) {
+      expect(line).toBe(line.trimEnd());
+    }
   });
 });
