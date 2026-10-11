@@ -534,6 +534,47 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
     expect(rowsLogged[0]).toMatchObject({ ok: 0, error: "idle_timeout after 40ms" });
   });
 
+  it("a slow-but-steady stream (gaps under LEAD_STREAM_IDLE_MS, total time over it) completes normally — the idle timer re-arms on every chunk", async () => {
+    // Issue #304, item 1: the stall test above proves a PERMANENT stall trips
+    // the timer, but a stream with gaps under the limit and total time over
+    // it would pass even with one single overall deadline armed before the
+    // loop. This pins the actual contract: every chunk re-arms the timer, so
+    // a live stream that keeps making progress never trips it.
+    const enc = new TextEncoder();
+    const chunks = [
+      ...Array.from({ length: 7 }, (_, i) => ({ choices: [{ delta: { content: `c${i}` } }] })),
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 2 } },
+    ];
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    let enqueued = 0;
+    const upstream = new ReadableStream<Uint8Array>({
+      // One SSE frame per pull, with a 60ms gap before each: every gap is
+      // under the 300ms idle limit, but 8 pulls x 60ms ~ 480ms total is over
+      // it — only per-chunk re-arming lets this stream through.
+      async pull(controller) {
+        if (enqueued >= chunks.length) { controller.close(); return; }
+        await sleep(60);
+        if (enqueued < chunks.length - 1) controller.enqueue(enc.encode(`data: ${JSON.stringify(chunks[enqueued])}\n\n`));
+        else controller.enqueue(enc.encode(`data: ${JSON.stringify(chunks[enqueued])}\n\ndata: [DONE]\n\n`));
+        enqueued++;
+      },
+    });
+    const { token, rows, e } = await streamSetup(upstream, { LEAD_STREAM_IDLE_MS: "300" } as Partial<Env>);
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual([
+      "message_start", "content_block_start", "content_block_delta", "content_block_delta", "content_block_delta",
+      "content_block_delta", "content_block_delta", "content_block_delta", "content_block_delta", "content_block_stop",
+      "message_delta", "message_stop",
+    ]);
+    expect(eventTypes).not.toContain("error");
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 1, error: null });
+  });
+
   it("a garbage LEAD_STREAM_IDLE_MS falls back to the default instead of disabling the timeout", async () => {
     const { LEAD_STREAM_IDLE_MS_DEFAULT, leadStreamIdleMs } = await import("../src/llm/anthropic-route");
     expect(LEAD_STREAM_IDLE_MS_DEFAULT).toBe(90_000);
