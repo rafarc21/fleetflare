@@ -67,7 +67,7 @@ describe("formatTable — no trailing pad, capped ERROR (#205)", () => {
   // Issue #399 (sweep-5 F1): one full-row exact-bytes pin of formatTable,
   // written BEFORE the formatColumns fold. The base row carries null
   // readiness/observed/burn (helpers/studio-row's defaults), so every cell
-  // renders a clock-free constant (? / "-" / "never" / "…") and the whole
+  // renders a clock-free constant (? / "-" / "never") and the whole
   // single-row table is byte-pinnable. This transcribes the table's own
   // output for that fixed input — the before-snapshot the fold must keep.
   test("a base row's whole single-row table, every byte (#399)", () => {
