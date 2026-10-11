@@ -98,7 +98,7 @@ describe("cmdJuniorStats (injected fetch)", () => {
     const logs: string[] = [];
     const code = await cmdJuniorStats(CREDS, undefined, {
       doFetch, stdout: (l) => logs.push(l), stderr: () => {}, exit: () => { throw new Error("must not exit on worker rows"); },
-      now: () => 0, home,
+      home,
     });
     expect(code).toBe(0);
     expect(logs.join("\n")).toMatch(/pilot--acme-x\s+3\s+100\s+50/);
@@ -113,11 +113,15 @@ describe("cmdJuniorStats (injected fetch)", () => {
     const out: string[] = [], err: string[] = [];
     const code = await cmdJuniorStats(CREDS, undefined, {
       doFetch, stdout: (l) => out.push(l), stderr: (l) => err.push(l), exit: () => { throw new Error("soft-fail must not exit"); },
-      now: () => 0, home,
+      home,
     });
     expect(code).toBe(0);
     expect(out.join("\n")).toContain("laptop-a");
     expect(err.join("\n").toLowerCase()).toContain("fleet-wide stats unavailable");
+    // The warning in full, byte-for-byte: a soft-fail line drifting (wrong
+    // status shape, dropped "showing local-only", reworded prefix) must fail
+    // here, not just somewhere downstream of a loose lowercase prefix match.
+    expect(err[0]).toBe("fleet junior stats: fleet-wide stats unavailable (HTTP 500: boom) — showing local-only");
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -127,7 +131,7 @@ describe("cmdJuniorStats (injected fetch)", () => {
     const out: string[] = [], err: string[] = [];
     const code = await cmdJuniorStats(CREDS, undefined, {
       doFetch, stdout: (l) => out.push(l), stderr: (l) => err.push(l), exit: () => { throw new Error("soft-fail must not exit"); },
-      now: () => 0, home,
+      home,
     });
     expect(code).toBe(0);
     expect(out.join("\n")).toContain("laptop-a");
@@ -143,11 +147,37 @@ describe("cmdJuniorStats (injected fetch)", () => {
     const code = await cmdJuniorStats(CREDS, "not-a-duration", {
       doFetch: async () => { fetches++; throw new Error("unreachable"); }, stdout: (l) => out.push(l), stderr: (l) => err.push(l),
       exit: (c) => { if (c !== 1) throw new Error("usage error must exit 1"); },
-      now: () => 0, home,
+      home,
     });
     expect(code).toBe(1);
     expect(fetches).toBe(0);
     expect(err.length).toBeGreaterThan(0);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("--since 24h against a pinned clock: local rows older than the cutoff drop", async () => {
+    const home = mkdtempSync(join(tmpdir(), "junior-unit-home-"));
+    const dir = join(home, ".local", "share", "fleet");
+    mkdirSync(dir, { recursive: true });
+    const dayMs = 24 * 60 * 60 * 1000;
+    const hourMs = 60 * 60 * 1000;
+    // Written at now()-2h and now()-30d: only the recent line survives the
+    // `--since 24h` cutoff (2h >= cutoff; 30d < it), and the cutoff is only
+    // reproducible because `now` is pinned — the real clock would move under
+    // the test. This is the one place the now seam is actually exercised;
+    // every other cmdJuniorStats test leaves it out.
+    const nowMs = 1770000000000;
+    const row = (ts: number) => `${JSON.stringify({ ts, id: "laptop-a", mode: "edit", model: "glm", input_tokens: 5, output_tokens: 5, ok: true })}\n`;
+    writeFileSync(join(dir, "junior-usage.jsonl"), row(nowMs - 2 * hourMs) + row(nowMs - 30 * dayMs));
+    const { doFetch } = fakeFetch([{ body: JSON.stringify({ rows: [], totals: { calls: 0, inputTokens: 0, outputTokens: 0 } }) }]);
+    const out: string[] = [];
+    const code = await cmdJuniorStats(CREDS, "24h", {
+      doFetch, stdout: (l) => out.push(l), stderr: () => {}, exit: () => { throw new Error("must not exit"); },
+      now: () => nowMs, home,
+    });
+    expect(code).toBe(0);
+    expect(out.join("\n")).toMatch(/laptop-a\s+1\s+5\s+5/);
+    expect((out.join("\n").match(/laptop-a/g) ?? []).length).toBe(1);
     rmSync(home, { recursive: true, force: true });
   });
 });
