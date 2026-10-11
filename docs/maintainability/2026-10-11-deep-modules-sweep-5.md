@@ -38,14 +38,10 @@ last-column-unpadded rule; four callers become 2-liners. ~60 L.
 
 `err instanceof Error ? err.message : String(err)` inline ×30 across 10
 cli files at 8367c19 (orca-workspace 9, fleet 8, reap 6, +7 files at 1
-each); junior.ts:196 carries the `e`-spelling twin of the same fold. The
-"HTML `<title>` else JSON `.error` else slice" body-decode is written 3x
-(`cli/repair-failure.ts:19-41`, `cli/inspect-request.ts:46-48`, and the
-timeout-name triage beside it in destroy-outcome/recycle-outcome). One
-pure `diag.ts`: `errText(err)` + `decodeBody(status, text)` returning
-today's exact strings; callers keep their own label/exit policy.
-Migrate the read-verb + format call sites only — fleet.ts's rescue/reap
-wiring and the destroy/recycle triage stay in the Claude lane. ~90 L.
+each); junior.ts:196 carries the `e`-spelling twin of the same fold.
+The HTML-title/JSON-`.error`/slice body-decode is written 3x (repair-failure.ts:19-41, inspect-request.ts:46-48, destroy/recycle timeout triage).
+One pure `diag.ts`: `errText(err)` + `decodeBody(status, text)` returning today's exact strings; callers keep their own label/exit policy.
+Migrate the read-verb + format call sites only — fleet.ts's rescue/reap wiring and the destroy/recycle triage stay in the Claude lane. ~90 L.
 
 ### F3. `ageSeconds` → one exported core in readiness-format — GLM-OK
 

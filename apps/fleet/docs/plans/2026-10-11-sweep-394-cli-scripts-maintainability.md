@@ -19,8 +19,9 @@ one deepen issue per GLM-OK finding, one PR (doc only). No code changes.
    3-line pass-through; F10 dead-export WATCH_INTERVAL_MS (test-only).
    Tiers: F1,F2,F3,F4,F5,F7,F9,F10 GLM-OK; F6 GLM-OK slice (rescue/deploy
    poll wiring stays the Claude lane); F8 dropped round 1 (dup of open #318).
-4. Write docs/maintainability/2026-10-11-deep-modules-sweep-5.md (10
-   findings, 4-6 lines each: file:line evidence, proposed change, tier).
+4. Write docs/maintainability/2026-10-11-deep-modules-sweep-5.md (9
+   findings + 1 dropped in review, 4-6 lines each: file:line evidence,
+   proposed change, tier).
 5. File one deepen(GLM-OK): S5-Fn issue per GLM-OK finding (lead files
    these, not you).
 6. Gates serial: bun run check; bun run english-check; bun run
