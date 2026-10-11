@@ -204,7 +204,7 @@ The ones worth knowing before you need them:
       local — `ff <id>`, press Esc, detach, re-assign; remote — Esc as a raw
       byte, since `orca terminal send` has no `--key` flag and Enter can
       confirm "Upgrade your plan": check the status bar shows the claude
-      window (not `1:shell*` — see the `orca terminal send` trap below), then
+      window (not `1:shell*` — see the `1:shell*` send rule below), then
       `orca terminal send --terminal <handle> --text $'\033'` with NO
       `--enter` (the `$'…'` ANSI-C quoting sends the one Esc byte; `--enter`
       appends the newline that is the confirm key this must never send),
