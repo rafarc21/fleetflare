@@ -24,9 +24,8 @@ let root: string;
 let repo: string;
 let calls: string;
 
-// Local wrapper keeps this file's original semantics (cwd param, repo when
-// omitted; TMUX scrubbed; throws on failure; stdout-only return) — zero
-// call-site edits.
+// Local wrapper keeps the original semantics (cwd defaults to repo, TMUX
+// scrubbed, throws on failure, stdout-only return) — zero call-site edits.
 function sh(cmd: string, cwd = repo) {
   const r = shShared(cmd, { cwd, env: { TMUX: "" }, throwOnError: true });
   return r.out;
