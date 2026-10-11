@@ -30,13 +30,13 @@ describe("checkAndConsumeJuniorRateLimit", () => {
     const env_ = { JUNIOR_RATE_PER_MINUTE: "2" };
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 100)).toEqual({ ok: true });
-    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 200)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 200)).toMatchObject({ ok: false, limit: "per-minute" });
   });
 
   it("a new minute bucket resets the per-minute count", async () => {
     const env_ = { JUNIOR_RATE_PER_MINUTE: "1" };
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
-    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 500)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 500)).toMatchObject({ ok: false, limit: "per-minute" });
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, MINUTE + 1)).toEqual({ ok: true });
   });
 
@@ -46,20 +46,20 @@ describe("checkAndConsumeJuniorRateLimit", () => {
     // different minute bucket so only the daily counter is exercised.
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, MINUTE)).toEqual({ ok: true });
-    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, MINUTE * 2)).toEqual({ ok: false, limit: "daily" });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, MINUTE * 2)).toMatchObject({ ok: false, limit: "daily" });
   });
 
   it("a new UTC day resets the daily count", async () => {
     const env_ = { JUNIOR_RATE_PER_MINUTE: "100", JUNIOR_DAILY_CAP: "1" };
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
-    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, MINUTE)).toEqual({ ok: false, limit: "daily" });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, MINUTE)).toMatchObject({ ok: false, limit: "daily" });
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, DAY + 1)).toEqual({ ok: true });
   });
 
   it("tracks each studio independently", async () => {
     const env_ = { JUNIOR_RATE_PER_MINUTE: "1" };
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
-    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toMatchObject({ ok: false, limit: "per-minute" });
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, OTHER, 0)).toEqual({ ok: true });
   });
 
@@ -74,7 +74,7 @@ describe("checkAndConsumeJuniorRateLimit", () => {
     for (let i = 0; i < DEFAULT_JUNIOR_RATE_PER_MINUTE; i++) {
       expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, i)).toEqual({ ok: true });
     }
-    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, DEFAULT_JUNIOR_RATE_PER_MINUTE)).toEqual({ ok: false, limit: "per-minute" });
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, DEFAULT_JUNIOR_RATE_PER_MINUTE)).toMatchObject({ ok: false, limit: "per-minute" });
   });
 
   // PR #9 review, BLOCKER F1: the pre-fix implementation reads the counter,
@@ -95,6 +95,46 @@ describe("checkAndConsumeJuniorRateLimit", () => {
     );
     const succeeded = results.filter((r) => r.ok).length;
     expect(succeeded).toBe(cap);
+  });
+});
+
+// Board issue #298-1: a refusal now carries retryAfterMs — ms until the
+// fixed window rolls over — so the 429 can name an honest backoff window.
+describe("checkAndConsumeJuniorRateLimit — refusal retryAfterMs (#298-1)", () => {
+  it("a per-minute refusal carries retryAfterMs in (0, 60_000] — ms to the minute bucket's rollover", async () => {
+    const env_ = { JUNIOR_RATE_PER_MINUTE: "1" };
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 1000)).toEqual({ ok: true });
+    const refused = await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 1000);
+    expect(refused).toMatchObject({ ok: false, limit: "per-minute", retryAfterMs: 59_000 });
+    if (!refused.ok) {
+      // now=1000 -> 60_000 - 1000 = 59_000 ms until the window rolls over.
+      expect(refused.retryAfterMs).toBe(59_000);
+      expect(refused.retryAfterMs).toBeGreaterThan(0);
+      expect(refused.retryAfterMs).toBeLessThanOrEqual(MINUTE);
+    }
+  });
+
+  it("a daily refusal carries retryAfterMs in (0, 86_400_000] — ms to the UTC day bucket's rollover", async () => {
+    const env_ = { JUNIOR_RATE_PER_MINUTE: "100", JUNIOR_DAILY_CAP: "1" };
+    expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 1000)).toEqual({ ok: true });
+    const refused = await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 1000);
+    expect(refused).toMatchObject({ ok: false, limit: "daily", retryAfterMs: DAY - 1000 });
+    if (!refused.ok) {
+      expect(refused.retryAfterMs).toBe(DAY - 1000);
+      expect(refused.retryAfterMs).toBeGreaterThan(0);
+      expect(refused.retryAfterMs).toBeLessThanOrEqual(DAY);
+    }
+  });
+
+  it("a per-minute refusal near the bucket boundary carries a small retryAfterMs", async () => {
+    const env_ = { JUNIOR_RATE_PER_MINUTE: "1" };
+    await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 59_000);
+    const refused = await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 59_000);
+    if (!refused.ok) {
+      expect(refused.retryAfterMs).toBe(1_000);
+      expect(refused.retryAfterMs).toBeGreaterThan(0);
+      expect(refused.retryAfterMs).toBeLessThanOrEqual(MINUTE);
+    }
   });
 });
 

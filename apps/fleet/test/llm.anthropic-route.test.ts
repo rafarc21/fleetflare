@@ -182,14 +182,36 @@ describe("handleFleetAnthropicMessages — spend controls (MAJOR 2)", () => {
 
   // Board issue #284, MAJOR 1: this route has its OWN rate limit now
   // (LEAD_RATE_PER_MINUTE, src/llm/ratelimit.ts) — junior's own
-  // JUNIOR_RATE_PER_MINUTE no longer has any effect here.
+  // JUNIOR_RATE_PER_MINUTE no longer has any effect here. Issue #298-1:
+  // the 429 is Anthropic-shaped with a retry-after header, not bare text.
   it("429 once the per-minute rate limit is exceeded — uses its OWN LEAD_RATE_PER_MINUTE, not junior's", async () => {
     const { token, rows, e } = await setup(undefined, { LEAD_RATE_PER_MINUTE: "1" });
     const first = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(first.status).toBe(200);
     const second = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(second.status).toBe(429);
-    expect(await second.text()).toContain("too many glm-lead calls this minute");
+    const retryAfter = second.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(await second.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "rate limit exceeded: too many glm-lead calls this minute" },
+    });
+  });
+
+  it("429 past the daily cap — same Anthropic rate_limit_error body + retry-after (#298-1)", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_DAILY_CAP: "1" });
+    const first = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(first.status).toBe(200);
+    const second = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(second.status).toBe(429);
+    const retryAfter = second.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(await second.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "rate limit exceeded: daily glm-lead cap reached" },
+    });
   });
 
   it("junior's own JUNIOR_RATE_PER_MINUTE has no effect on this route — the two limits are separate", async () => {

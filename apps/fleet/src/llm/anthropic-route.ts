@@ -59,6 +59,16 @@ function anthropicErrorBody(type: string, message: string): Json {
   return { type: "error", error: { type, message } };
 }
 
+/** #298-1: a 429 without retry-after leaves Claude Code to guess its own
+ *  backoff; seconds rounded up so the client never retries before the
+ *  window has actually rolled over. */
+function rateLimitRefusal(message: string, retryAfterMs: number): Response {
+  return Response.json(anthropicErrorBody("rate_limit_error", message), {
+    status: 429,
+    headers: { "retry-after": String(Math.ceil(retryAfterMs / 1000)) },
+  });
+}
+
 /**
  * Claude Code, run with `ANTHROPIC_AUTH_TOKEN` set, sends it as `Authorization:
  * Bearer <token>` (maestro decision, #249 STATUS 2026-10-08T02:29Z). The
@@ -438,11 +448,11 @@ export async function handleFleetAnthropicMessages(
   // routes still spend out of the same underlying Workers AI quota.
   const rate = await checkAndConsumeLeadRateLimit(env.DB, env, studio.id, Date.now());
   if (!rate.ok) {
-    return text(
+    return rateLimitRefusal(
       rate.limit === "per-minute"
         ? "rate limit exceeded: too many glm-lead calls this minute"
         : "rate limit exceeded: daily glm-lead cap reached",
-      429,
+      rate.retryAfterMs,
     );
   }
 

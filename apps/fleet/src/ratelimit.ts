@@ -25,9 +25,11 @@ const DAY_MS = 86_400_000;
 const RATE_RETENTION_MS = MINUTE_MS * 2;
 const DAILY_RETENTION_MS = DAY_MS * 2;
 
+// #298-1: a refusal without retryAfterMs gives the client no backoff
+// signal; the fixed window means the exact rollover instant is known.
 export type RateLimitResult =
   | { ok: true }
-  | { ok: false; limit: "per-minute" | "daily" };
+  | { ok: false; limit: "per-minute" | "daily"; retryAfterMs: number };
 
 /** One "kind" of rate limit: its own D1 key prefixes, so two kinds keyed by
  *  the same subject id never collide in the shared fleet_state table.
@@ -119,10 +121,10 @@ export async function checkAndConsumeRateLimit(
   await pruneStaleCounters(db, now, kind);
 
   const minuteCount = await incrementCounter(db, rKey, now);
-  if (minuteCount > perMinute) return { ok: false, limit: "per-minute" };
+  if (minuteCount > perMinute) return { ok: false, limit: "per-minute", retryAfterMs: MINUTE_MS - (now % MINUTE_MS) };
 
   const dayCount = await incrementCounter(db, dKey, now);
-  if (dayCount > dailyCap) return { ok: false, limit: "daily" };
+  if (dayCount > dailyCap) return { ok: false, limit: "daily", retryAfterMs: DAY_MS - (now % DAY_MS) };
 
   return { ok: true };
 }
