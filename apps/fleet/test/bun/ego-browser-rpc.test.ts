@@ -318,3 +318,103 @@ describe("createRpcClient + serveRpc over an in-memory pair", () => {
     expect(responses).toEqual([{ id: 1, result: null }]);
   });
 });
+
+describe("serveRpc dispatch hooks (daemon's in-flight counting + error log)", () => {
+  test("onDispatch fires before the handler runs, even for an unknown method", async () => {
+    const pair = makeSocketPair();
+    const client = createRpcClient(pair.clientTransport);
+    const seen: Array<{ stage: string; method: string }> = [];
+    serveRpc(pair.serverTransport, {
+      known(_params: unknown): unknown {
+        seen.push({ stage: "handler", method: "known" });
+        return "ok";
+      },
+    }, {
+      onDispatch(req) {
+        seen.push({ stage: "onDispatch", method: req.method });
+      },
+    });
+
+    await expect(client.call("known")).resolves.toBe("ok");
+    await expect(client.call("nope")).rejects.toThrow('ego-browser: unknown RPC method "nope"');
+
+    // The hook fired BEFORE its request's handler (or unknown-method
+    // error) -- the daemon increments in-flight first, so nothing can
+    // slip past the count.
+    expect(seen).toEqual([
+      { stage: "onDispatch", method: "known" },
+      { stage: "handler", method: "known" },
+      { stage: "onDispatch", method: "nope" },
+    ]);
+  });
+
+  test("onSettled fires after the response is written, for success, handler-throw, and unknown method alike", async () => {
+    const pair = makeSocketPair();
+    const client = createRpcClient(pair.clientTransport);
+    const responses = tapResponses(pair.clientTransport);
+    const settled: Array<{ stage: string; method: string }> = [];
+    serveRpc(pair.serverTransport, {
+      ok(_params: unknown): unknown {
+        return "fine";
+      },
+      boom(_params: unknown): unknown {
+        throw new Error("handler exploded");
+      },
+    }, {
+      onDispatch(req) {
+        settled.push({ stage: "onDispatch", method: req.method });
+      },
+      onSettled(req) {
+        // The response for THIS request is already on the wire when the
+        // hook fires -- the daemon decrements + re-arms its idle timer
+        // only once the request is truly done.
+        const seen = settled.filter((s) => s.method === req.method && s.stage === "onDispatch").length;
+        expect(responses.some((res) => res.id === req.id)).toBe(seen > 0);
+        settled.push({ stage: "onSettled", method: req.method });
+      },
+    });
+
+    await expect(client.call("ok")).resolves.toBe("fine");
+    await expect(client.call("boom")).rejects.toThrow("handler exploded");
+    await expect(client.call("ghost")).rejects.toThrow('ego-browser: unknown RPC method "ghost"');
+
+    expect(settled).toEqual([
+      { stage: "onDispatch", method: "ok" },
+      { stage: "onSettled", method: "ok" },
+      { stage: "onDispatch", method: "boom" },
+      { stage: "onSettled", method: "boom" },
+      { stage: "onDispatch", method: "ghost" },
+      { stage: "onSettled", method: "ghost" },
+    ]);
+  });
+
+  test("onError fires with the request and error message for handler throws and unknown methods, never for success", async () => {
+    const pair = makeSocketPair();
+    const client = createRpcClient(pair.clientTransport);
+    const errors: Array<{ method: string; message: string }> = [];
+    serveRpc(pair.serverTransport, {
+      ok(_params: unknown): unknown {
+        return "fine";
+      },
+      boom(_params: unknown): unknown {
+        throw new Error("handler exploded");
+      },
+    }, {
+      onError(req, message) {
+        errors.push({ method: req.method, message });
+      },
+    });
+
+    await expect(client.call("ok")).resolves.toBe("fine");
+    await expect(client.call("boom")).rejects.toThrow("handler exploded");
+    await expect(client.call("ghost")).rejects.toThrow('ego-browser: unknown RPC method "ghost"');
+
+    // Both error shapes reach the hook with the exact message the client
+    // saw on the wire -- the daemon's `method <m> failed: <message>` log
+    // line is built from these. A success never fires it.
+    expect(errors).toEqual([
+      { method: "boom", message: "handler exploded" },
+      { method: "ghost", message: 'ego-browser: unknown RPC method "ghost"' },
+    ]);
+  });
+});
