@@ -433,8 +433,8 @@ export function formatActivity(status: StudioStatus, now: Date, staleAfterSecond
         : "LIMIT";
       break;
     // No `default:` — an explicit case lets tsc enforce that every future
-    // LeadGate kind gains a rendering here (the repo's own exhaustiveness
-    // convention, e.g. src/approvals/gates.ts).
+    // LeadGate kind gains a rendering here (the repo's no-default switch
+    // convention, e.g. src/studio/survival-delivery.ts).
     case "activity":
       base = formatActivityVerdict(status.observed?.activity ?? null, now, staleAfterSeconds);
   }

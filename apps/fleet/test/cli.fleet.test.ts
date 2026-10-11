@@ -1307,6 +1307,26 @@ describe("formatActivity (cli/readiness-format.ts)", () => {
     expect(formatActivity(s, NOW)).toBe("—");
   });
 
+  // The mirror of the stopped test above — the S1 line-pair's OTHER half.
+  // `case "stopped"` early-returns bare; `case "replaced"` falls through to
+  // the suffix, and that difference is invisible in the switch itself — this
+  // pin is what keeps a future tidy-up from "unifying" them silently.
+  it("#403 table: a replaced studio keeps the member-alert suffix on its —", () => {
+    const alerts: MemberAlert[] = [{
+      kind: "memguard-kill", name: "vitest", at: "2026-09-25T12:00:00.000Z",
+      detail: "comm=vitest rss_mib=612 pid=42", confidence: "measured",
+    }];
+    const s = status({
+      state: "running",
+      observed: {
+        ...emptyObserved(),
+        replacedAt: "2026-09-25T12:00:00.000Z",
+        memberAlerts: alerts,
+      },
+    });
+    expect(formatActivity(s, NOW)).toBe("— · member killed by memguard 2m ago (comm=vitest rss_mib=612 pid=42)");
+  });
+
   it("#403 table: provisioning also renders — (no lead at all)", () => {
     const s = status({ state: "provisioning" });
     expect(formatActivity(s, NOW)).toBe("—");
