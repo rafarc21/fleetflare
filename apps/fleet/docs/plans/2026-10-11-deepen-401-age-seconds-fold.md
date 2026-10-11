@@ -1,7 +1,7 @@
 # Plan — #401 S5-F3 export ageSeconds, fold 5 inline copies
 
-Refs https://github.com/rafarc21/fleetflare/issues/401. Sweep-5 finding F3
-(docs/maintainability/2026-10-11-deep-modules-sweep-5.md).
+Refs https://github.com/rafarc21/fleetflare/issues/401 (sweep-5 finding F3,
+deep-modules sweep by the maestro; doc not yet landed on main).
 
 ## Problem
 

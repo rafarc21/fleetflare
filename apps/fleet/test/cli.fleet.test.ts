@@ -167,6 +167,8 @@ describe("ageSeconds (cli/readiness-format.ts)", () => {
   it("valid ISO: whole seconds since, floored", () => {
     expect(ageSeconds("2026-08-28T11:59:53.000Z", NOW)).toBe(7);
     expect(ageSeconds("2026-08-28T09:00:00.000Z", NOW)).toBe(3 * 3600);
+    // 7.75s elapsed: floor 7, round 8 — pins Math.floor against a round regression.
+    expect(ageSeconds("2026-08-28T11:59:52.250Z", NOW)).toBe(7);
   });
 
   it("unparseable string reads 0, never NaN", () => {
