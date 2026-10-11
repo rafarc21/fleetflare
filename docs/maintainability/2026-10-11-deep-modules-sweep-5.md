@@ -21,7 +21,6 @@ failover, deploy, migrations. CLAUDE-ONLY = touches any of those.
 | 5 | lead-state precedence (formatActivity vs lsJsonRows) → one shared gate | GLM-OK |
 | 6 | bounded poll loops (ff ticker/poll vs accounts watch) → one `poll` util | GLM-OK (slice) |
 | 7 | accounts-format slot grammar vs src/studio/accounts.ts → one shared parser | GLM-OK |
-| 8 | loadCredentials trio (exiting / null / tagged) → one `readCredentialsFile` | CLAUDE-ONLY (credentials) |
 | 9 | buildGridPage 3-line pass-through → inline (sweep-2 D12) | GLM-OK |
 | 10 | WATCH_INTERVAL_MS export test-only → drop export | GLM-OK |
 
@@ -37,15 +36,16 @@ last-column-unpadded rule; four callers become 2-liners. ~60 L.
 
 ### F2. CLI error decode → one `cli/diag.ts` — GLM-OK
 
-`errText` inline ×30 across 10 cli files (orca 9, fleet 8, reap 6, +7 more);
-the same "HTML `<title>` else JSON `.error` else slice" body-decode written
-3× (`cli/repair-failure.ts:19-41`, `cli/inspect-request.ts:46-48`,
-`cli/destroy-outcome.ts:137-140` timeout-name triage beside it). One
-`diag.ts` exporting `errText(err)`, `decodeBody(status, text)` (returning
-the SAME strings today's three decoders print); callers keep their own
-label/exit policy. Wire-format-preserving; ~90 L. Rescue/destroy verbs
-migrate in the Claude lane — this issue covers fleet.ts's read verbs +
-accounts/format files only.
+`err instanceof Error ? err.message : String(err)` inline ×30 across 10
+cli files at 8367c19 (orca-workspace 9, fleet 8, reap 6, +7 files at 1
+each); junior.ts:196 carries the `e`-spelling twin of the same fold. The
+"HTML `<title>` else JSON `.error` else slice" body-decode is written 3x
+(`cli/repair-failure.ts:19-41`, `cli/inspect-request.ts:46-48`, and the
+timeout-name triage beside it in destroy-outcome/recycle-outcome). One
+pure `diag.ts`: `errText(err)` + `decodeBody(status, text)` returning
+today's exact strings; callers keep their own label/exit policy.
+Migrate the read-verb + format call sites only — fleet.ts's rescue/reap
+wiring and the destroy/recycle triage stay in the Claude lane. ~90 L.
 
 ### F3. `ageSeconds` → one exported core in readiness-format — GLM-OK
 
@@ -58,15 +58,13 @@ shared body); wip-format's four inline folds call it. ~15 L. Keeps the
 
 ### F4. Repo-segment refusal → one `refuseBadSegment(prefix, slug)` — GLM-OK
 
-The same "repo cannot name a studio — not a valid id segment (lowercase
-alphanumerics joined by single hyphens; dots and underscores fold to
-hyphens)" wording at `src/studio/repo.ts:158-165` and `:313-320`, plus two
-CLI pre-flight twins (`cli/ff.ts:471-483`, `cli/fleet.ts:780-805` tabs) that
-split the slug and call `repoIdSegment` themselves. One exported
-`refuseBadSegment` in repo.ts returning the refusal; CLI sites stop
-re-typing the parenthetical rule. Wordings differ slightly today (tabs
-omits the quoted `"${short}"`) — fold to repo.ts's canonical string;
-~25 L. Two-way door (error text only).
+The same "repo cannot name a studio — not a valid id segment (…dots and
+underscores fold to hyphens)" wording at `src/studio/repo.ts:158-165`
+and `:313-320`, plus two CLI pre-flight twins that hand-split the slug
+(`cli/ff.ts:471-483`, `cli/fleet.ts:780-805` tabs — its copy drifted:
+omits the quoted `"${short}"`). One exported refusal builder in repo.ts;
+each site keeps its own prefix and exit-status policy. Fold tabs's
+wording up to repo.ts's canonical string (error text only). ~25 L.
 
 ### F5. Lead-state precedence → one shared gate — GLM-OK
 
@@ -96,20 +94,9 @@ F1/D4's Claude lane. ~70 L. Edge wording unchanged.
 `cli/accounts-format.ts:277-289` (`slotNumber`/`labelVarName`) re-implements
 src/studio/accounts.ts's `CLAUDE_CODE_OAUTH_TOKEN[_n]` grammar (accounts.ts
 :72-74) as a parse-back "deliberately not imported" (that file's own comment
-cites the Env-adjacent import graph). claude-swap.ts's 2026-11 #366-adjacent
-cleanup made the join pure; move the grammar (both directions) into a
-tiny `src/studio/account-slot.ts` importing nothing; accounts-format and
+cites the Env-adjacent import graph). Move the grammar (both directions) into
+a tiny `src/studio/account-slot.ts` importing nothing; accounts-format and
 src/studio/accounts.ts both import it. ~30 L. Byte-identical output.
-
-### F8. Credentials trio → one `readCredentialsFile()` — CLAUDE-ONLY (credentials)
-
-`cli/fleet.ts:86-214`: `loadCredentials` (exits), `loadCredentialsIfPresent`
-(null), `tryLoadCredentials` (tagged) — three near-copies of the same
-file-exists/mode-warning/JSON/field-checks sequence, each header comment
-justifying the duplication by the OTHER two. One private
-`readCredentialsFile(): Credentials | {error}` + three thin wrappers keeps
-every contract; deletes ~60 duplicated lines. CLAUDE-ONLY: it is the
-credentials path (~/.fleet/credentials, mode warnings).
 
 ### F9. `buildGridPage` pass-through → inline — GLM-OK (sweep-2 D12)
 
@@ -119,17 +106,28 @@ into any GLM PR touching scripts/". This is that PR's ride-along: inline the
 read into main's grid half; the sourceMappingURL guard that consumes it
 stays. ~6 L. Bundle with F1's PR (both are trivially behavior-preserving).
 
-### F10. `WATCH_INTERVAL_MS` test-only export → drop the export — GLM-OK
+### F10. `WATCH_INTERVAL_MS` dead export → drop the export — GLM-OK
 
-`cli/accounts.ts:348` exports the constant so test/bun/accounts-cli.test.ts
-can read it; the value (60_000) is also asserted by a literal in the same
-test. Sweep-1's "export dies, no pass-through" culture (#357): drop the
-export keyword, keep the const module-private; the test's literal already
-pins the number. ~2 L. Bundle with F7's PR.
+`cli/accounts.ts:348` exports `WATCH_INTERVAL_MS = 60_000`; nothing
+imports it anywhere (repo-wide grep at 8367c19 — the only other mentions
+are two comments in test/bun/accounts-cli.test.ts at :531/:569, and the
+test's one `60_000` at :360 is a fixture time offset, not an interval
+assertion). Dead export: drop the `export` keyword, keep the const and
+its clamping comment module-private. Zero test impact — no import to
+break. ~2 L. Bundle with F7's PR.
 
 ## Not filed (deferred / noted)
 
-- `cli/fleet.ts` 2742 lines — split candidates (reap wiring :2027-2245,
+- `cli/fleet.ts:86-214`'s credentials trio
+  (`loadCredentials`/`loadCredentialsIfPresent`/`tryLoadCredentials`) —
+  already sweep-2 F3, open as deepen issue #318, still unlanded at
+  8367c19; dropped from this sweep's findings in round-1 review as a
+  duplicate, not re-filed.
+- `cli/memory-format.ts:27-35` (`formatMemoryTable`) — a padEnd table,
+  but a materially different shape (one computed width, padStart
+  numerics, fixed header), not the widths-from-rows dance F1's four
+  sites share; not folded.
+- `cli/fleet.ts` 2742 lines — split candidates (reap wiring :2027-2211,
   rescue-all :1689-2020) are CLAUDE-ONLY territory (rescue, failover) and
   already named by sweep-2 D2/D3/D4; nothing new this sweep.
 - `scripts/test-lies-check.ts` (566) / `localci/summarize.ts` — scanCalls
@@ -148,6 +146,6 @@ pins the number. ~2 L. Bundle with F7's PR.
 ## Counts
 
 9 GLM-OK findings (F1-F7, F9, F10) → one deepen issue each. F6 carries the
-slice rule in its title/body. 1 CLAUDE-ONLY (F8) recorded here for the
-Claude lane, no issue filed by this sweep. F9/F10 ride along in other
-issues' PRs per their own text.
+slice rule in its title/body. F8 (credentials trio) was dropped in round-1
+review: duplicate of open deepen issue #318 (sweep-2 F3), which still owns
+it. F9/F10 ride along in other issues' PRs per their own text.

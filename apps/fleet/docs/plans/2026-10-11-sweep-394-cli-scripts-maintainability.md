@@ -15,10 +15,10 @@ one deepen issue per GLM-OK finding, one PR (doc only). No code changes.
    copies; F4 repo-segment refusal 4 sites; F5 lead-state precedence 2
    implementations; F6 ff.ts poll/ticker vs accounts --watch loop; F7
    accounts-format slot grammar vs src/studio/accounts.ts; F8
-   fleet.ts:86-214 loadCredentials trio; F9 sweep D12 buildGridPage
+   fleet.ts:86-214 loadCredentials trio (dropped round 1: dup of open #318); F9 sweep D12 buildGridPage
    3-line pass-through; F10 dead-export WATCH_INTERVAL_MS (test-only).
-   Tiers: F1,F2,F3,F4,F5,F7,F9,F10 GLM-OK; F6 GLM-OK slice (pause wiring
-   in F1's PR 2 lane, CLAUDE); F8 CLAUDE-ONLY (credentials).
+   Tiers: F1,F2,F3,F4,F5,F7,F9,F10 GLM-OK; F6 GLM-OK slice (rescue/deploy
+   poll wiring stays the Claude lane); F8 dropped round 1 (dup of open #318).
 4. Write docs/maintainability/2026-10-11-deep-modules-sweep-5.md (10
    findings, 4-6 lines each: file:line evidence, proposed change, tier).
 5. File one deepen(GLM-OK): S5-Fn issue per GLM-OK finding (lead files
@@ -29,5 +29,4 @@ one deepen issue per GLM-OK finding, one PR (doc only). No code changes.
 ## Verification
 
 All three gates exit 0 on the doc-only branch. english-check clean on the
-new doc (the doc's example words are English-only; the two Portuguese
-marker words quoted as data carry `english-check: allow` line-escapes).
+new doc (it contains no Portuguese marker words).
