@@ -13,6 +13,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSy
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { accessHeaders, juniorUrl, type Credentials } from "./fleet";
+import { errText } from "./diag";
 import { juniorUsageLogPath } from "../../../skills/junior/src/usage";
 
 export interface JuniorPaths { skillLink: string; config: string; skillSrc: string }
@@ -193,7 +194,7 @@ export async function fetchJuniorUsage(
       rows: body.rows.map((r) => ({ id: r.studioId, calls: r.calls, inputTokens: r.inputTokens, outputTokens: r.outputTokens })),
     };
   } catch (e) {
-    return { ok: false, status: 0, message: e instanceof Error ? e.message : String(e) };
+    return { ok: false, status: 0, message: errText(e) };
   }
 }
 

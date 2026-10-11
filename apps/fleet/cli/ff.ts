@@ -51,6 +51,7 @@ import type { StudioStatus } from "../src/studio/types";
 import type { BoardTask } from "../src/board/types";
 import { formatAssignWake } from "./task-format";
 import { repairFailureLine } from "./repair-failure";
+import { errText } from "./diag";
 import { postTaskNew, taskNewFailureLine } from "./task-new-retry";
 import type { AssignWakeReport } from "../src/board/assign-wake";
 
@@ -78,10 +79,6 @@ function say(line: string): void {
 function fail(line: string): never {
   console.error(`ff: ${line}`);
   process.exit(1);
-}
-
-function errText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** Elapsed seconds, for a progress line. */
