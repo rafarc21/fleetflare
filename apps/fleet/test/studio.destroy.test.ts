@@ -387,6 +387,35 @@ describe("destroyWithSync", () => {
     expect(await storage.get(DESTROY_EPOCH_KEY)).toBe(4);
   });
 
+  // Board issue #331: the destroy's own stopped-row write must never carry a
+  // readiness verdict taken before it — a stopped studio has no meaningful
+  // readiness, and a stale verdict (the live incident: the readiness exec's
+  // start-refusal text, stamped inconclusive onto the row the destroy was
+  // already taking) reads in `fleet ls` forever, since nothing ever
+  // re-checks a stopped studio.
+  it("a stopped row never keeps a stale readiness verdict — the destroy's own row write clears it (#331)", async () => {
+    const syncDeps = fakeSyncDeps();
+    const destroy = vi.fn(async () => {});
+    const recordStudioFn = vi.fn(async () => {});
+    const storage = fakeCombinedStorage({
+      status: {
+        id: STUDIO_ID, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+        lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
+        readiness: {
+          kind: "inconclusive",
+          reason: `studio ${STUDIO_ID} is being destroyed — it will not start a container`,
+          checkedAt: `${TODAY}T11:59:00.000Z`,
+        },
+      },
+    });
+
+    const result = await destroyWithSync(syncDeps, storage, STUDIO_ID, destroy, recordStudioFn, REPO, noopResolveMemoryRepo, noopCommit);
+
+    expect(result.state).toBe("stopped");
+    expect(result.readiness ?? null).toBeNull();
+    expect((await storage.get(STATUS_KEY))?.readiness ?? null).toBeNull();
+  });
+
   // Review round 2 (#210), finding 2 (BLOCKER) — a stale `parkedAt` carried
   // onto the STOPPED row (this write used to spread `...(existing ??
   // freshStatus(idFallback))` unchanged) survives a later resume and makes

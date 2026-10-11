@@ -1419,9 +1419,11 @@ describe("syncSessionCycle — an auto-stop mid-tick must gate retrySurvivalBrie
   // `&& !stoppedAfterFailover` guard those two already carry. `checked` only
   // reads "provisioned" here because `checkAndRecordReadiness`'s own
   // `state === "stopped"` early return (do.ts) hands back the row VERBATIM,
-  // readiness included — `destroyAndRecord` (destroy.ts) never clears
-  // `readiness` on the way to `state: "stopped"`, so a row stopped THIS tick
-  // can still carry last tick's "provisioned" verdict.
+  // readiness included — the REAL destroy clears readiness on the way to
+  // `state: "stopped"` (#331), but this test's own mock hand-writes the
+  // stopped row, so it deliberately preserves the stale-verdict shape and
+  // proves the WIP gate does NOT depend on readiness being cleared: a row
+  // stopped THIS tick can still carry last tick's "provisioned" verdict.
   it("the failover step auto-stops this tick; the WIP-sync step must not exec into the now-stopped container either", async () => {
     const storage = fakeCycleStorage({
       status: { ...parkedPastAutoStop(), readiness: { kind: "provisioned", checkedAt: FAILOVER_NOW.toISOString() } },
