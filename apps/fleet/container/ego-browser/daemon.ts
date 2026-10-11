@@ -6,9 +6,10 @@
  * `ego-browser nodejs` invocation. Spawned on demand by client.ts
  * (ensureDaemonAlive) -- never run directly by a user script.
  */
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { basename } from "node:path";
 import { chromium, errors, type Browser, type BrowserContext, type Page as PwPage } from "playwright-core";
+import { DaemonEndpoint } from "./endpoint";
 import { resolvePaths } from "./paths";
 import { encodeMessage, MessageFramer, type RpcRequest } from "./rpc";
 import { Registry, type FinishKeep, type TaskSpaceRecord } from "./registry";
@@ -18,6 +19,7 @@ import type { FnOrStringWire, SnapshotOpts, UrlMatcherWire } from "./wire";
 
 const paths = resolvePaths();
 mkdirSync(paths.home, { recursive: true });
+const endpoint = new DaemonEndpoint(paths);
 
 function log(line: string): void {
   try {
@@ -132,7 +134,7 @@ const IDLE_MS = resolveIdleMs();
 
 // Startup-only grace period, separate from IDLE_MS (board #36's live
 // reproduction -- see the plan doc): daemon.ts's one startup call to
-// scheduleIdleCheck() used to arm with the raw, possibly very short IDLE_MS
+// schedule() used to arm with the raw, possibly very short IDLE_MS
 // a test/config sets, even though "nobody has connected within IDLE_MS of
 // boot" is not reliable evidence "nobody ever will" the way it is once a
 // real request has actually been served at least once -- ensureDaemonAlive
@@ -144,16 +146,9 @@ const IDLE_MS = resolveIdleMs();
 // as reasonable for "spawn a fresh daemon and connect to it").
 const STARTUP_GRACE_MS = 5000;
 
-// Incremented at the very start of handleRequest, decremented in a
-// `finally` at the very end -- guards the race where a request that will
-// soon push registry.list().length away from zero (e.g. taskSpace creating
-// a brand-new space) is genuinely in flight, past the point the registry
-// still reads empty but not yet past the point it isn't. See the plan doc.
-let inFlightRequests = 0;
-
 // Follow-up review finding on the original #36 fix: the old shutdown() had
 // no actual timeout on browser.close() -- `.finally()` (which gated the
-// SIGKILL backstop AND the rmSync/process.exit cleanup below it) only ran
+// SIGKILL backstop AND the pid/sock cleanup/process.exit below it) only ran
 // once close()'s promise SETTLED. A hung close() (unresponsive CDP
 // connection, wedged renderer -- anything short of an outright rejection)
 // meant that `await` never returned, so `.finally()` never ran, the SIGKILL
@@ -205,21 +200,15 @@ async function shutdown(reason: string): Promise<void> {
       // once the pid is fully reaped and its slot recycled.
     }
   }
-  rmSync(paths.pidFile, { force: true });
-  rmSync(paths.sockFile, { force: true });
+  endpoint.removePidAndSockFiles();
   process.exit(0);
 }
 
 const idleShutdown = new IdleShutdown({
   idleMs: IDLE_MS,
   spacesEmpty: () => registry.list().length === 0,
-  inFlightZero: () => inFlightRequests === 0,
   onIdle: () => shutdown(`idle for ${IDLE_MS}ms with zero task spaces open`),
 });
-
-function scheduleIdleCheck(overrideMs?: number): void {
-  idleShutdown.schedule(overrideMs);
-}
 
 async function resolveSpace(spaceId: number): Promise<TaskSpaceRecord<PwPage, BrowserContext>> {
   const space = registry.get(spaceId);
@@ -513,28 +502,23 @@ const methods: Record<string, Handler> = {
 // ---------------------------------------------------------------------------
 // Socket server.
 // ---------------------------------------------------------------------------
-rmSync(paths.sockFile, { force: true });
+endpoint.removeSockFile();
 
 const framers = new WeakMap<Bun.Socket, MessageFramer<RpcRequest>>();
 
 async function handleRequest(socket: Bun.Socket, req: RpcRequest): Promise<void> {
-  inFlightRequests += 1;
-  try {
-    const handler = methods[req.method];
-    if (!handler) throw new Error(`ego-browser: unknown RPC method "${req.method}"`);
-    const result = await handler(req.params);
-    socket.write(encodeMessage({ id: req.id, result: result ?? null }));
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log(`method ${req.method} failed: ${message}`);
-    socket.write(encodeMessage({ id: req.id, error: { message } }));
-  } finally {
-    // Any request can be the one that took the space count to zero
-    // (space.finish) or away from zero (taskSpace) -- every request needs
-    // to re-arm/clear the idle timer, whether it resolved or threw.
-    inFlightRequests -= 1;
-    scheduleIdleCheck();
-  }
+  return idleShutdown.track(async () => {
+    try {
+      const handler = methods[req.method];
+      if (!handler) throw new Error(`ego-browser: unknown RPC method "${req.method}"`);
+      const result = await handler(req.params);
+      socket.write(encodeMessage({ id: req.id, result: result ?? null }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`method ${req.method} failed: ${message}`);
+      socket.write(encodeMessage({ id: req.id, error: { message } }));
+    }
+  });
 }
 
 Bun.listen({
@@ -565,17 +549,17 @@ Bun.listen({
 // ensureDaemonAlive treats "pidfile exists + pid alive + socket connects"
 // as the alive signal, so writing this any earlier would let a client
 // briefly observe a pidfile with no live socket behind it.
-writeFileSync(paths.pidFile, String(process.pid));
+endpoint.writePid(process.pid);
 log(`daemon started, pid ${process.pid}, socket ${paths.sockFile}`);
 
 // Covers "spawned but never used at all" -- a daemon that comes up and
 // then receives zero requests would otherwise never arm its own idle
-// timer, since scheduleIdleCheck() is otherwise only called from inside
-// handleRequest. Uses STARTUP_GRACE_MS (see its own comment above), not
-// the raw IDLE_MS a short-window config might set -- board #36's live
-// reproduction (see the plan doc) proved a short IDLE_MS here races the
-// daemon's own first client: ensureDaemonAlive always spawns THEN
-// immediately starts connecting, so "nobody has connected within IDLE_MS
-// of boot" is not reliable evidence of "nobody ever will" the way it is
-// once a real request has actually been served at least once.
-scheduleIdleCheck(Math.max(IDLE_MS, STARTUP_GRACE_MS));
+// timer, since the startup schedule() below is otherwise only preceded by
+// handleRequest-driven re-arms. Uses STARTUP_GRACE_MS (see its own
+// comment above), not the raw IDLE_MS a short-window config might set --
+// board #36's live reproduction (see the plan doc) proved a short IDLE_MS
+// here races the daemon's own first client: ensureDaemonAlive always
+// spawns THEN immediately starts connecting, so "nobody has connected
+// within IDLE_MS of boot" is not reliable evidence of "nobody ever will"
+// the way it is once a real request has actually been served at least once.
+idleShutdown.schedule(Math.max(IDLE_MS, STARTUP_GRACE_MS));

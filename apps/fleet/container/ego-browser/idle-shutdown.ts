@@ -3,8 +3,8 @@
  * Deliberately has no Bun/playwright-core import and does no I/O -- same
  * spirit as registry.ts: fast, deterministic, unit-testable on its own via
  * injected fake timers and state predicates. daemon.ts is the only module
- * that plugs real state (registry.list().length, the in-flight request
- * counter, process.exit) in here.
+ * that plugs real state (registry.list().length, process.exit) in here;
+ * the in-flight request counter lives inside this class now.
  *
  * See docs/plans/2026-09-23-ego-browser-idle-shutdown.md for the full
  * design/tension writeup. Short version: the daemon must shut itself down
@@ -29,8 +29,6 @@ export interface IdleShutdownOptions {
   idleMs: number;
   /** True when zero task spaces remain open, read fresh each time it's called. */
   spacesEmpty: () => boolean;
-  /** True when zero RPC requests are currently in flight, read fresh each time it's called. */
-  inFlightZero: () => boolean;
   onIdle: () => void | Promise<void>;
   /** Injectable for tests -- real daemon.ts uses the platform globals. */
   setTimeoutFn?: typeof setTimeout;
@@ -48,15 +46,14 @@ export class IdleShutdown {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly idleMs: number;
   private readonly spacesEmpty: () => boolean;
-  private readonly inFlightZero: () => boolean;
   private readonly onIdle: () => void | Promise<void>;
   private readonly setTimeoutFn: typeof setTimeout;
   private readonly clearTimeoutFn: typeof clearTimeout;
+  private inFlight = 0;
 
   constructor(opts: IdleShutdownOptions) {
     this.idleMs = opts.idleMs;
     this.spacesEmpty = opts.spacesEmpty;
-    this.inFlightZero = opts.inFlightZero;
     this.onIdle = opts.onIdle;
     this.setTimeoutFn = opts.setTimeoutFn ?? setTimeout;
     this.clearTimeoutFn = opts.clearTimeoutFn ?? clearTimeout;
@@ -75,9 +72,9 @@ export class IdleShutdown {
    * self-destructing before the very client that spawned it had sent its
    * first byte, because the startup call armed the same short idleMs a
    * test/config might use, with no allowance for spawn+connect overhead).
-   * Every other call (handleRequest's finally, after a real request has
-   * actually settled) keeps calling schedule() with no argument, so the
-   * steady-state idle window is completely unaffected.
+   * Every other call (track()'s finally, after a real request has actually
+   * settled) keeps calling schedule() with no argument, so the steady-state
+   * idle window is completely unaffected.
    */
   schedule(overrideMs?: number): void {
     if (this.timer !== undefined) {
@@ -94,11 +91,27 @@ export class IdleShutdown {
       // (past the point registry.list().length still reads 0, not yet
       // past the point it becomes 1) -- see the plan doc's race section.
       // If either check fails, this fired timer is just a no-op: the
-      // in-flight request's own handleRequest completion calls schedule()
-      // again once it's done, and that call sees the real, settled state.
-      if (this.spacesEmpty() && this.inFlightZero()) {
+      // in-flight request's own completion re-arms via track()'s finally,
+      // and that re-arm sees the real, settled state.
+      if (this.spacesEmpty() && this.inFlight === 0) {
         void this.onIdle();
       }
     }, overrideMs ?? this.idleMs);
+  }
+
+  /**
+   * Wraps one RPC request: the in-flight counter is this module's own
+   * state now, callers never touch it (the fire-time in-flight re-check
+   * is the create-space race guard), and every settled request re-arms
+   * the idle window with the plain configured idleMs.
+   */
+  async track<T>(fn: () => Promise<T>): Promise<T> {
+    this.inFlight += 1;
+    try {
+      return await fn();
+    } finally {
+      this.inFlight -= 1;
+      this.schedule();
+    }
   }
 }

@@ -62,7 +62,6 @@ describe("IdleShutdown.schedule", () => {
     const idle = new IdleShutdown({
       idleMs: 1000,
       spacesEmpty: () => true,
-      inFlightZero: () => true,
       onIdle: () => {
         idleFired += 1;
       },
@@ -82,7 +81,6 @@ describe("IdleShutdown.schedule", () => {
     const idle = new IdleShutdown({
       idleMs: 1000,
       spacesEmpty: () => false,
-      inFlightZero: () => true,
       onIdle: () => {
         idleFired += 1;
       },
@@ -103,7 +101,6 @@ describe("IdleShutdown.schedule", () => {
     const idle = new IdleShutdown({
       idleMs: 1000,
       spacesEmpty: () => spaces === 0,
-      inFlightZero: () => true,
       onIdle: () => {
         idleFired += 1;
       },
@@ -120,14 +117,12 @@ describe("IdleShutdown.schedule", () => {
     expect(idleFired).toBe(0);
   });
 
-  test("fire-time re-check suppresses shutdown if a request is still in-flight, even with zero spaces (the create-space race)", () => {
+  test("fire-time re-check suppresses shutdown if a request is still in-flight, even with zero spaces (the create-space race)", async () => {
     const clock = makeFakeClock();
-    let inFlight = 0;
     let idleFired = 0;
     const idle = new IdleShutdown({
       idleMs: 1000,
       spacesEmpty: () => true, // registry.list().length reads 0 -- the new space isn't committed yet
-      inFlightZero: () => inFlight === 0,
       onIdle: () => {
         idleFired += 1;
       },
@@ -136,12 +131,13 @@ describe("IdleShutdown.schedule", () => {
     });
 
     idle.schedule();
-    // Simulates a taskSpace() RPC handler that's already past
-    // handleRequest's inFlight++ but not yet past the await that would
-    // push registry.list().length to 1.
-    inFlight = 1;
+    // Simulates a taskSpace() RPC handler that's already inside track()
+    // but not yet past the await that would push registry.list().length
+    // to 1.
+    const inFlight = idle.track(() => new Promise<never>(() => {}));
     clock.fireAll();
     expect(idleFired).toBe(0);
+    void inFlight;
   });
 
   // Board #36 investigation: live reproduction (see the plan doc) found the
@@ -160,7 +156,6 @@ describe("IdleShutdown.schedule", () => {
     const idle = new IdleShutdown({
       idleMs: 400,
       spacesEmpty: () => true,
-      inFlightZero: () => true,
       onIdle: () => {},
       setTimeoutFn: clock.setTimeoutFn,
       clearTimeoutFn: clock.clearTimeoutFn,
@@ -175,7 +170,6 @@ describe("IdleShutdown.schedule", () => {
     const idle = new IdleShutdown({
       idleMs: 400,
       spacesEmpty: () => true,
-      inFlightZero: () => true,
       onIdle: () => {},
       setTimeoutFn: clock.setTimeoutFn,
       clearTimeoutFn: clock.clearTimeoutFn,
@@ -190,7 +184,6 @@ describe("IdleShutdown.schedule", () => {
     const idle = new IdleShutdown({
       idleMs: 1000,
       spacesEmpty: () => true,
-      inFlightZero: () => true,
       onIdle: () => {},
       setTimeoutFn: clock.setTimeoutFn,
       clearTimeoutFn: clock.clearTimeoutFn,
@@ -209,7 +202,6 @@ describe("IdleShutdown.schedule", () => {
     const idle = new IdleShutdown({
       idleMs: 1000,
       spacesEmpty: () => spaces === 0,
-      inFlightZero: () => true,
       onIdle: () => {
         idleFired += 1;
       },
