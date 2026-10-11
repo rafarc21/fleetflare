@@ -905,4 +905,59 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
     const json = (await r.json()) as { input_tokens: number };
     expect(json.input_tokens).toBeGreaterThan(10);
   });
+
+  // #298-3: the request's tools are real prompt material the backend
+  // re-receives every call — an estimate that ignores them comes in low
+  // and skews Claude Code's compact decisions the endpoint exists to feed.
+  it("a body with a non-trivial tools array estimates HIGHER than the same body without tools (#298-3)", async () => {
+    const { token, rows, e } = await setup();
+    const tool = {
+      name: "get_weather", description: "look up the current weather for a city",
+      input_schema: { type: "object", properties: { city: { type: "string" }, units: { type: "string" } }, required: ["city"] },
+    };
+    const base = { model: "claude-opus-4-5", messages: [{ role: "user", content: "weather in nyc?" }] };
+    const withTools = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH, body: { ...base, tools: [tool] } }), e, ctx, rows,
+    );
+    const withoutTools = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH, body: base }), e, ctx, rows,
+    );
+    const estimateWith = ((await withTools.json()) as { input_tokens: number }).input_tokens;
+    const estimateWithout = ((await withoutTools.json()) as { input_tokens: number }).input_tokens;
+    expect(estimateWith).toBeGreaterThan(estimateWithout);
+  });
+
+  it("array-content messages ({type:'text'} blocks) are counted, not skipped (#298-3)", async () => {
+    const { token, rows, e } = await setup();
+    const long = "a sentence of genuine content, ".repeat(20);
+    const r = await handleFleetAnthropicCountTokens(
+      req({
+        token, path: ANTHROPIC_COUNT_TOKENS_PATH,
+        body: { model: "claude-opus-4-5", messages: [{ role: "user", content: [{ type: "text", text: long }] }] },
+      }), e, ctx, rows,
+    );
+    const json = (await r.json()) as { input_tokens: number };
+    expect(json.input_tokens).toBeGreaterThan(10);
+  });
+
+  // Parity with the messages route: the endpoint spends no AI budget, but
+  // an unthrottled endpoint is a free D1-hammering surface.
+  it("429 once the LEAD per-minute limit is exceeded — same Anthropic rate_limit_error body + retry-after (#298-3)", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_RATE_PER_MINUTE: "1" });
+    const first = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
+    );
+    expect(first.status).toBe(200);
+    const second = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
+    );
+    expect(second.status).toBe(429);
+    const retryAfter = second.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(await second.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "rate limit exceeded: too many glm-lead calls this minute" },
+    });
+  });
 });

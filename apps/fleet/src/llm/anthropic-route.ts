@@ -328,10 +328,12 @@ async function pumpAnthropicStream(
  *  the `leadType === "glm"` gate. See `handleFleetAnthropicMessages`'s own
  *  (now-removed) inline comments for why each individual check exists —
  *  this function only collects them into one place so both routes keep
- *  enforcing the exact same thing. The per-minute/daily rate limit is
- *  deliberately NOT part of this shared gate: `handleFleetAnthropicMessages`
- *  applies it (it spends Workers AI budget), `handleFleetAnthropicCountTokens`
- *  does not (see that function's own doc comment for why).
+ *  enforcing the exact same thing. The per-minute/daily rate limit stays
+ *  OUT of this shared gate, applied by each route itself right after the
+ *  gate — both routes now enforce it (#298-3), but each consumes from the
+ *  same caller's studio-id counters at its own position (before any body
+ *  work), keeping the gate's own contract "refusal or studio, nothing
+ *  spent".
  *
  *  Returns either an early refusal `Response` (any one of the checks above
  *  failing) or the resolved `studio`/`allRows` the caller needs to proceed —
@@ -544,22 +546,28 @@ export async function handleFleetAnthropicMessages(
 /** ESTIMATE ONLY, not a real count — this backend has no tokenizer exposed
  *  to it at all (no Anthropic tokenizer, no access to GLM's own vocab), so
  *  there is no way to answer this honestly with an exact number. Heuristic:
- *  total character count of every flattened OpenAI-shape message's content
- *  (text and/or tool-call name+arguments), divided by ~4 — the commonly
- *  cited rough chars-per-token ratio for English text. Flagged here rather
- *  than guessed at silently, same "say so in a comment instead of guessing"
- *  convention classifyAiError's own doc comment (translate.ts) already
- *  established for this file. `Math.max(1, ...)` only to avoid reporting 0
- *  for a technically-non-empty request — not a claim that 1 is ever the
- *  real count. */
-function estimateInputTokens(messages: Json[]): number {
+ *  total character count of every message's content (string or per-block
+ *  JSON), its tool_calls, and the request's tools JSON (their schemas are
+ *  real prompt material the backend re-receives every call — #298-3),
+ *  divided by ~4 — the commonly cited rough chars-per-token ratio for
+ *  English text. Flagged here rather than guessed at silently, same "say so
+ *  in a comment instead of guessing" convention classifyAiError's own doc
+ *  comment (translate.ts) already established for this file.
+ *  `Math.max(1, ...)` only to avoid reporting 0 for a technically-non-empty
+ *  request — not a claim that 1 is ever the real count. */
+function estimateInputTokens(messages: Json[], tools: Json[] | undefined): number {
   let chars = 0;
   for (const m of messages) {
-    if (typeof m.content === "string") chars += m.content.length;
+    if (typeof m.content === "string") {
+      chars += m.content.length;
+    } else if (Array.isArray(m.content)) {
+      for (const b of m.content) chars += JSON.stringify(b ?? {}).length;
+    }
     for (const tc of Array.isArray(m.tool_calls) ? m.tool_calls : []) {
       chars += String(tc.function?.name ?? "").length + String(tc.function?.arguments ?? "").length;
     }
   }
+  for (const t of Array.isArray(tools) ? tools : []) chars += JSON.stringify(t ?? {}).length;
   return Math.max(1, Math.round(chars / 4));
 }
 
@@ -576,11 +584,12 @@ function estimateInputTokens(messages: Json[]): number {
  * are all still enforced here even though this route never actually calls
  * `env.AI.run` — none of those checks exist BECAUSE of the AI call; they
  * exist because this is still a spawn-token-authenticated glm-lead-only
- * surface, same as every other check in this file. The per-minute/daily
- * rate limit (`checkAndConsumeLeadRateLimit`) is deliberately NOT applied
- * here — unlike the real message-generation route, this one spends no
- * Workers AI budget at all, so there is nothing for that limiter to
- * protect.
+ * surface, same as every other check in this file. #298-3: the same
+ * per-minute/daily rate limit (`checkAndConsumeLeadRateLimit`) as the
+ * messages route is applied here too, same position (after the auth gate,
+ * before any body work) — the endpoint spends no AI budget, but an
+ * unthrottled endpoint is a free D1-hammering surface, and the review
+ * asked for parity.
  */
 export async function handleFleetAnthropicCountTokens(
   req: Request, env: Env, ctx: ExecutionContext,
@@ -588,6 +597,17 @@ export async function handleFleetAnthropicCountTokens(
 ): Promise<Response> {
   const gate = await authenticateGlmLeadRequest(req, ANTHROPIC_COUNT_TOKENS_PATH, env, rows);
   if ("response" in gate) return gate.response;
+  const { studio } = gate;
+
+  const rate = await checkAndConsumeLeadRateLimit(env.DB, env, studio.id, Date.now());
+  if (!rate.ok) {
+    return rateLimitRefusal(
+      rate.limit === "per-minute"
+        ? "rate limit exceeded: too many glm-lead calls this minute"
+        : "rate limit exceeded: daily glm-lead cap reached",
+      rate.retryAfterMs,
+    );
+  }
 
   const raw = await readCappedBody(req, ANTHROPIC_BODY_CAP);
   if (raw === null) return text("payload too large", 413);
@@ -596,5 +616,5 @@ export async function handleFleetAnthropicCountTokens(
   if (!Array.isArray(body?.messages) || body.messages.length === 0) return text("messages required", 400);
 
   const openaiBody = anthropicRequestToOpenAI(body);
-  return json({ input_tokens: estimateInputTokens(openaiBody.messages) }, 200);
+  return json({ input_tokens: estimateInputTokens(openaiBody.messages, body.tools) }, 200);
 }
