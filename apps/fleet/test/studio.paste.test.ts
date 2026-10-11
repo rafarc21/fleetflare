@@ -7,6 +7,7 @@ import {
   pasteWithStorage, PASTE_MIME_EXT, PASTE_MAX_BYTES, PASTE_SEQ_KEY, type PasteDeps, type SeqStorage,
 } from "../src/studio/paste";
 import type { Env } from "../src/env";
+import { nsWith } from "./helpers/fake-namespace";
 
 // Same fake-DO-namespace approach as test/studio.routes.test.ts's
 // fakeStudioNamespace: a live StudioDO cannot be constructed under
@@ -32,12 +33,10 @@ function fakeSeqStorage(): SeqStorage {
 function fakeStudioNamespace(writeFile: PasteDeps["writeFile"]) {
   const storage = fakeSeqStorage();
   const deps: PasteDeps = { writeFile };
-  const stub = {
-    pasteImage: (contentType: string, bytes: Uint8Array) => pasteWithStorage(deps, storage, contentType, bytes),
-  };
   return {
-    idFromName: (name: string) => name as unknown as DurableObjectId,
-    get: () => stub as unknown as ReturnType<Env["STUDIO"]["get"]>,
+    ...nsWith({
+      pasteImage: (contentType: string, bytes: Uint8Array) => pasteWithStorage(deps, storage, contentType, bytes),
+    }),
     storage,
   };
 }
