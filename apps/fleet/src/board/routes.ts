@@ -48,6 +48,7 @@ import { realWakeDeps } from "./wake-deps";
 import { attemptVerification, parseGithubUrl, type VerifyFetch } from "./verify";
 import { openTasksWithLatestPr } from "./pr-landed";
 import { closeTaskOnPromote } from "./close-action";
+import { studioOpenPrs, type OpenPr } from "./open-prs";
 import { runTaskReap, type ReapDeps, type LandedCheck } from "../studio/task-reap";
 import { runRescueGc, type RescueBranch } from "../studio/rescue-gc";
 import { listStudios } from "../studio/registry";
@@ -96,6 +97,13 @@ export function githubBoardApi(env: Env, leakDeps: Partial<LeakGuardDeps> = {}):
     commitExists: async (repo, sha) => commitExists(await token(repo), repo, sha),
     closeIssue: async (repo, number, reason) => closeIssueApi(await token(repo), repo, number, reason),
     listOpenPullFiles: async (repo) => listOpenPullFiles(await token(repo), repo),
+    // Board issue #332: the narrowed port member — one GitHub call, the same
+    // getPullRequest the reap port above already reaches for, mapping to
+    // just the four fields the unmerged-PR warning prints.
+    getPullRequest: async (repo, number) => {
+      const pr = await getPullRequest(await token(repo), repo, number);
+      return { number: pr.number, merged: pr.merged, open: pr.open, title: pr.title };
+    },
   }, leakGuard({ ...realLeakDeps(env, token), ...leakDeps }));
 }
 
@@ -406,6 +414,94 @@ async function handleTaskReapRoute(
   } catch (err) {
     return upstreamFailure(err, req.method, new URL(req.url).pathname);
   }
+}
+
+// --- board issue #332: GET /studio/board/open-prs ----------------------------
+//
+// The route half of the park/destroy unmerged-PR warning: one call answers
+// "which studios of THIS repo still have unmerged PRs", so `fleet ls`'s PRS
+// column and destroy's warning read the fleet's live PR state without either
+// holding a GitHub credential.
+//
+// WHY BATCHED PER REPO, one route answering every studio of that repo at
+// once: issue #37's `fleet ls` ruling — "Do NOT make `fleet ls` always check
+// live" — bans a per-studio live fan-out on the listing path. The live
+// GitHub reads this route makes (per-studio task scans, per-PR state
+// checks) happen HERE, inside the Worker, exactly once per repo the caller
+// names — the CLI's one fetch is answered from the map. The studio set is
+// also read in ONE registry pass (`listStudios`), filtered by each row's
+// own `repoSlug`.
+//
+// WHY BEST-EFFORT DEGRADE, never a 5xx for one studio: `studioOpenPrs` can
+// answer `{ok:false}` for one studio's board read (an upstream hiccup), and
+// the plan's ruling for this route is that one studio's board trouble must
+// not blank the parker's view of every other lane — the whole failure shape
+// this warning exists to prevent is a parker reading "nothing to warn
+// about" that was actually "the scan could not look". So a failed studio
+// still gets its lane answered: the route stays 200, every other lane keeps
+// its real answer, and (#332 review H2) the failed studio lands in the
+// top-level `unknown` array instead of `prs` — a scan the route REPORTS as
+// failed is a different fact from an empty lane, and the CLI renders `-`
+// plus a warning on it while strict refuses. (A `studioOpenPrs` that
+// THROWS — the studio-wide board listing itself failing — degrades the same
+// way, for the same reason.) The Worker's logs still carry the per-studio
+// failure an operator can go read.
+
+/**
+ * `GET /studio/board/open-prs?repo=<slug>` — issue #332. Absent `repo` is
+ * the fleet default, exactly as reap reads it (`resolveBoardRepo` owns
+ * every decision, including whether the fleet can reach a named repo).
+ *
+ * Response: `{ repo, prs: { [studioId]: OpenPr[] }, unknown: string[] }` —
+ * every studio whose registry row binds it to that repo (case-insensitive;
+ * a null `repoSlug` is a pre-P4a studio cloned from the fleet default, so
+ * it belongs to the repo only when the resolved repo IS the default —
+ * `resolveStudioBoardRepo`'s own reading of the same field), plus the
+ * `unknown` array: a studio the route could not answer — the CLI renders
+ * `-` and warns; strict refuses on it. Zero matching studios answers
+ * `{ repo, prs: {}, unknown: [] }` — an empty fleet-repo is a fact, not a
+ * failure.
+ *
+ * The studio set is the real registry (`listStudios`, the same read
+ * `fleet ls` itself gets) with no injection seam, because a D1 read is not
+ * one of the two things that cannot run under the test pool (see this
+ * file's header) — test/board.open-prs-route.test.ts seeds real rows via
+ * `recordStudio`, the same way board.routes.test.ts's own registry-dependent
+ * tests (issue #81) already do.
+ */
+async function handleOpenPrsRoute(
+  req: Request, env: Env, api: BoardApi, reach: RepoReachFetch,
+): Promise<Response> {
+  // Method first, before anything that costs a call, so a wrong verb never
+  // mints a token — reap's own gate order.
+  if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
+  const repoResult = await resolveBoardRepo(
+    { reachRepo: reach },
+    { requested: new URL(req.url).searchParams.get("repo") ?? undefined, defaultSlug: env.AGENT_REPO },
+  );
+  if (!repoResult.ok) return respond(repoResult);
+  const repo = repoResult.value;
+
+  const defaultLower = env.AGENT_REPO.toLowerCase();
+  const studios = (await listStudios(env))
+    .filter((s) => (s.repoSlug ?? defaultLower).toLowerCase() === repo);
+  const prs: Record<string, OpenPr[]> = {};
+  const unknown: string[] = [];
+  for (const studio of studios) {
+    try {
+      const result = await studioOpenPrs(api, repo, studio.id);
+      if (result.ok) {
+        prs[studio.id] = result.value;
+      } else {
+        console.error(`open-prs: scanning ${studio.id} in ${repo} failed (${result.status}): ${result.message}`);
+        unknown.push(studio.id);
+      }
+    } catch (err) {
+      console.error(`open-prs: scanning ${studio.id} in ${repo} threw`, err);
+      unknown.push(studio.id);
+    }
+  }
+  return Response.json({ repo, prs, unknown });
 }
 
 /**
@@ -731,6 +827,11 @@ export async function handleBoard(
   }
   if (url.pathname === "/studio/board/tasks/rescue-gc") {
     return handleRescueGcRoute(req, env, reach, rescueGcPort);
+  }
+  // Board issue #332: same "own check, not a BOARD_ROUTE_RE alternative"
+  // reason as reap above — this path names no task number.
+  if (url.pathname === "/studio/board/open-prs") {
+    return handleOpenPrsRoute(req, env, api, reach);
   }
 
   const m = BOARD_ROUTE_RE.exec(url.pathname);

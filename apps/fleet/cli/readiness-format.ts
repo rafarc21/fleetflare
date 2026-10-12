@@ -467,46 +467,67 @@ export interface LsJsonRow {
   /** The lead's last visible, non-chrome message line — redacted, bounded;
    *  issue #108 (#70 ask 4 remainder). */
   lastLine: string | null;
+  /** Board issue #332: how many unmerged, still-open PRs this studio's
+   *  assigned tasks name, per the board's open-prs route. Present ONLY when
+   *  the route answered for the studio's repo (`fleet ls --prs` passes the
+   *  map openPrsByStudio built — opt-in, #332 review H1; bare ls passes
+   *  none); absent means "no data" (no --prs, or an old Worker whose route
+   *  404s), never a silent 0 — the same "-"-vs-count split the PRS table
+   *  column renders. */
+  openPrs?: number;
 }
 
 /** The same data the ACTIVITY column renders, as a lead state per studio. */
 export function lsJsonRows(
   studios: StudioStatus[], now: Date, staleAfterSeconds: number = ACTIVITY_MIRROR_STALE_SECONDS,
+  openPrs?: Map<string, number>,
 ): LsJsonRow[] {
   return studios.map((s) => {
-    const base = {
-      id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds),
-      lastLine: s.observed?.lastMessageLine ?? null,
-    };
-    // Issue #403 — the precedence chain lives in leadGate above; this keeps
-    // only the JSON row's own field mapping per kind.
-    const gate = leadGate(s, now);
-    switch (gate.kind) {
-      case "stopped":
-        return { ...base, lead: "stopped", leadSince: null, limitResetsAt: null };
-      case "dead":
-        return { ...base, lead: "dead", leadSince: gate.rl.seenAt, limitResetsAt: null };
-      case "modal":
-        return { ...base, lead: "modal", leadSince: gate.rl.seenAt, limitResetsAt: gate.rl.until ?? null };
-      case "limit": {
-        // `until === null` (no readable reset printed) and a reset still in
-        // the future are BOTH "limit" here; the `limitResetsAt` field carries
-        // the clock either way, null when there was none.
-        const until = gate.rl.until ?? null;
-        return { ...base, lead: "limit", leadSince: gate.rl.seenAt, limitResetsAt: until };
-      }
-      case "replaced":
-        return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
-      // No `default:` — explicit case for tsc exhaustiveness over LeadGate.
-      case "activity": {
-        const a = s.observed?.activity ?? null;
-        if (!a || ageSeconds(a.observedAt, now) > staleAfterSeconds || a.state === "unknown") {
-          return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
+    // #403's precedence chain lives in leadGate above; the nested-function
+    // wrap is #332's: the PRS decoration below wraps every kind's return in
+    // ONE place instead of editing each case.
+    const leadRow = (): LsJsonRow => {
+      const base = {
+        id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds),
+        lastLine: s.observed?.lastMessageLine ?? null,
+      };
+      // Issue #403 — the precedence chain lives in leadGate above; this keeps
+      // only the JSON row's own field mapping per kind.
+      const gate = leadGate(s, now);
+      switch (gate.kind) {
+        case "stopped":
+          return { ...base, lead: "stopped", leadSince: null, limitResetsAt: null };
+        case "dead":
+          return { ...base, lead: "dead", leadSince: gate.rl.seenAt, limitResetsAt: null };
+        case "modal":
+          return { ...base, lead: "modal", leadSince: gate.rl.seenAt, limitResetsAt: gate.rl.until ?? null };
+        case "limit": {
+          // `until === null` (no readable reset printed) and a reset still in
+          // the future are BOTH "limit" here; the `limitResetsAt` field carries
+          // the clock either way, null when there was none.
+          const until = gate.rl.until ?? null;
+          return { ...base, lead: "limit", leadSince: gate.rl.seenAt, limitResetsAt: until };
         }
-        if (a.state === "limit") return { ...base, lead: "limit", leadSince: a.since, limitResetsAt: null };
-        return { ...base, lead: a.state, leadSince: a.since, limitResetsAt: null };
+        case "replaced":
+          return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
+        // No `default:` — explicit case for tsc exhaustiveness over LeadGate.
+        case "activity": {
+          const a = s.observed?.activity ?? null;
+          if (!a || ageSeconds(a.observedAt, now) > staleAfterSeconds || a.state === "unknown") {
+            return { ...base, lead: "unknown", leadSince: null, limitResetsAt: null };
+          }
+          if (a.state === "limit") return { ...base, lead: "limit", leadSince: a.since, limitResetsAt: null };
+          return { ...base, lead: a.state, leadSince: a.since, limitResetsAt: null };
+        }
       }
-    }
+    };
+    const row = leadRow();
+    // Board issue #332: an entry (0 included) is a counted answer; ABSENCE
+    // is "no data", so the key is omitted entirely rather than written as 0 —
+    // a reader scraping this JSON must never mistake "could not look" for
+    // "looked and found none".
+    const count = openPrs?.get(s.id);
+    return count === undefined ? row : { ...row, openPrs: count };
   });
 }
 
