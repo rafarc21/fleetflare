@@ -24,7 +24,7 @@ import { openTasksWithLatestPr } from "../board/pr-landed";
 import { closeTaskOnPromote } from "../board/close-action";
 import type { BoardApi } from "../board/board";
 import { makeTimeBudget, budgetExceeded, AUTO_CLOSE_BUDGET_MS, type TimeBudget } from "../time-budget";
-import { getFlag, setFlag } from "../state";
+import { flagIsSet, markEpisode, clearEpisode } from "../state";
 import { taskAssignees, taskStates, SECURITY_LABEL, type TaskState } from "../board/types";
 import { qualifiesForCommentWake, wakeOnComment } from "../board/comment-wake";
 import { realWakeDeps } from "../board/wake-deps";
@@ -192,9 +192,9 @@ async function wakeMaestro(env: Env, event: string, body: string, now: number): 
       // benign behaviour (the studio is deliberately stopped), not a genuine
       // failure, so it goes through console.log; console.error below stays
       // reserved for a call that actually threw.
-      if ((await getFlag(env.DB, skipKey)) !== "1") {
+      if (!(await flagIsSet(env.DB, skipKey))) {
         console.log(`maestro wake (${studioId}) skipped: studio is stopped`);
-        await setFlag(env.DB, skipKey, "1", now);
+        await markEpisode(env.DB, skipKey, now);
       }
       return;
     }
@@ -202,7 +202,7 @@ async function wakeMaestro(env: Env, event: string, body: string, now: number): 
     // unconditionally, same posture watchdog.ts's clearRearm takes for its
     // own pair of flags: a redundant write of "0" is free, and this is what
     // makes the NEXT stop episode log again instead of a permanent mute.
-    await setFlag(env.DB, skipKey, "0", now);
+    await clearEpisode(env.DB, skipKey, now);
     const outcome = await (await getStudioStub(env, studioId)).wakeStudio(digest);
     logWakeOutcome(`maestro wake (${studioId})`, outcome);
   } catch (err) {
