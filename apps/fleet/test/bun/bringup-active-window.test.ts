@@ -15,8 +15,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { requireTools } from "./require-tool";
 import { BRINGUP, extractRegion } from "./exec-snippet";
+import { requireTools } from "./require-tool";
 
 const REGION = extractRegion(BRINGUP, "shell-window");
 // Nested-tmux and tool-absence are different reasons to not run this suite:
