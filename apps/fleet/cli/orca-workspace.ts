@@ -86,7 +86,7 @@ const LOCK_POLL_MS = 200;
 const LOCK_WAIT_MS = 60_000;
 const LOCK_STALE_MS = 120_000;
 
-export interface LockBudget {
+interface LockBudget {
   waitMs: number;
   staleMs: number;
 }
@@ -786,7 +786,7 @@ export type ContextSalvageDeps = SalvageDestination;
 
 /** `~/fleet-teardown-salvage` — durable, outside any worktree a `rm` could
  *  ever reach, so a salvage never lands somewhere the NEXT teardown deletes. */
-export function defaultSalvageDestination(): ContextSalvageDeps {
+function defaultSalvageDestination(): ContextSalvageDeps {
   return { root: join(homedir(), "fleet-teardown-salvage"), now: () => new Date() };
 }
 
@@ -978,7 +978,7 @@ export function classifyStudioRow(
 
 /** `rows` per studio id; `footer` is null on a full answer, else ONE stdout
  *  line naming why every row reads `?`. */
-export interface StudioRows {
+interface StudioRows {
   rows: Map<string, string>;
   footer: string | null;
 }
@@ -1125,7 +1125,7 @@ export async function reconcileStudioWorkspaces(
 // for free too (`state === "stopped"`, no Orca call at all), which is why
 // `planStudioWorkspaces` below mirrors that same skip.
 
-export type WorkspacePreview =
+type WorkspacePreview =
   | { kind: "open" }
   | { kind: "has one" }
   | { kind: "skipped"; why: string };
@@ -1173,7 +1173,7 @@ export async function planStudioWorkspaces(studios: StudioStatus[], deps: OrcaDe
 /** Spawns the orca CLI, killing it at `timeoutMs`. Never throws: a spawn that
  *  cannot even start reads as a failed call, which the caller already handles
  *  identically to a failed command. */
-export function orcaRunner(bin: string): OrcaRun {
+function orcaRunner(bin: string): OrcaRun {
   return async (args, timeoutMs) => {
     let timedOut = false;
     try {

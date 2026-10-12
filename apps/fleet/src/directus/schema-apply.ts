@@ -40,7 +40,7 @@ export interface AdminConfig {
  *  network and no global patching. */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
-export interface ApplyReport {
+interface ApplyReport {
   collectionsCreated: string[];
   collectionsExisting: string[];
   fieldsCreated: string[];

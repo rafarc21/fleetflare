@@ -72,7 +72,7 @@ export function taskKeyMarker(key: string): string {
   return `<!-- fleet-task-key: ${key} -->`;
 }
 
-export type BriefResult =
+type BriefResult =
   | { ok: true; brief: TaskBrief }
   | { ok: false; message: string };
 

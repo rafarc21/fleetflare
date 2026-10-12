@@ -8,7 +8,7 @@ import type { Env } from "../env";
  * from config (`TELEGRAM_OPERATOR_ID`), never from code. Every Telegram call
  * site reads its token and recipient from here, so "off" has one meaning.
  */
-export interface TelegramConfig {
+interface TelegramConfig {
   token: string;
   webhookSecret: string;
   /** Telegram user id of the one operator; in a DM also the chat id. */

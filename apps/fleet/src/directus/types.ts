@@ -71,7 +71,7 @@ export interface ContractCommercial extends ContractStakes {
   penalty_terms?: string | null;
 }
 
-export type RequirementStatus =
+type RequirementStatus =
   | "proposed" | "agreed" | "in_progress" | "satisfied" | "waived";
 
 export interface EstateRequirement {
@@ -87,7 +87,7 @@ export interface EstateRequirement {
   issue_number?: number | null;
 }
 
-export type DecisionStatus = "open" | "ruled" | "superseded";
+type DecisionStatus = "open" | "ruled" | "superseded";
 
 export interface EstateDecision {
   id: Id;

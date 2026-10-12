@@ -362,6 +362,23 @@ const FP_INIT_B = 0x01000193;
 const FP_PRIME_A = 16777619;
 const FP_PRIME_B = 2166136261;
 
+/** The two-roll FNV-1a-style fold every fingerprint/map-key in this file
+ *  runs: rolls `s`'s first `end` chars (default: all of `s`, clamped to
+ *  `s.length`) through both hashes and returns the raw roll pair. Callers
+ *  own the rendering — `fingerprintOf` (content, with separator) or the
+ *  short map-key concatenation (no separator). */
+function fnv2(s: string, end?: number): [number, number] {
+  let a = FP_INIT_A;
+  let b = FP_INIT_B;
+  const stop = Math.min(end ?? s.length, s.length);
+  for (let i = 0; i < stop; i++) {
+    const c = s.charCodeAt(i);
+    a = Math.imul(a ^ c, FP_PRIME_A);
+    b = Math.imul(b ^ c, FP_PRIME_B);
+  }
+  return [a, b];
+}
+
 /**
  * The two rolls as one short string. Base-36 keeps it to 15 chars at the very
  * most (two 32-bit values plus a separator), so a cursor holding one per path
@@ -382,14 +399,7 @@ function fingerprintOf(a: number, b: number): string {
 /** `text`'s first `end` chars, fingerprinted. UTF-16 code units, matching
  *  every offset in this file. */
 function prefixFingerprint(text: string, end: number): string {
-  let a = FP_INIT_A;
-  let b = FP_INIT_B;
-  const stop = Math.min(end, text.length);
-  for (let i = 0; i < stop; i++) {
-    const c = text.charCodeAt(i);
-    a = Math.imul(a ^ c, FP_PRIME_A);
-    b = Math.imul(b ^ c, FP_PRIME_B);
-  }
+  const [a, b] = fnv2(text, end);
   return fingerprintOf(a, b);
 }
 
@@ -428,13 +438,7 @@ function prefixFingerprint(text: string, end: number): string {
  * for that id space's own, much larger-scale collision argument.
  */
 function sessionMapKey(key: string): string {
-  let a = FP_INIT_A;
-  let b = FP_INIT_B;
-  for (let i = 0; i < key.length; i++) {
-    const c = key.charCodeAt(i);
-    a = Math.imul(a ^ c, FP_PRIME_A);
-    b = Math.imul(b ^ c, FP_PRIME_B);
-  }
+  const [a, b] = fnv2(key);
   return `${(a >>> 0).toString(36)}${(b >>> 0).toString(36)}`;
 }
 
@@ -548,13 +552,7 @@ function sessionMapKey(key: string): string {
  * comment for how its own cross-path scan handles both key generations.
  */
 function realPathMapKey(path: string): string {
-  let a = FP_INIT_A;
-  let b = FP_INIT_B;
-  for (let i = 0; i < path.length; i++) {
-    const c = path.charCodeAt(i);
-    a = Math.imul(a ^ c, FP_PRIME_A);
-    b = Math.imul(b ^ c, FP_PRIME_B);
-  }
+  const [a, b] = fnv2(path);
   return `${(a >>> 0).toString(36)}${(b >>> 0).toString(36)}`;
 }
 
@@ -1770,7 +1768,7 @@ function isJsonlFile(name: string, header: Uint8Array): boolean {
 /** One jsonl member: complete lines, tar mtime (seconds), and the top-level
  *  `timestamp` of its last complete line (null if that line was over
  *  STATS_LINE_CAP or carried none). Counters only, never content. */
-export type SessionFileStat = { lines: number; mtime: number; lastTs: string | null };
+type SessionFileStat = { lines: number; mtime: number; lastTs: string | null };
 export type SessionStats = Record<string, SessionFileStat>;
 /** The one file the guard compares against: the snapshot's newest session. */
 export type SessionMark = { file: string; lines: number; lastTs: string | null };

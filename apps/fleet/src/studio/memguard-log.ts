@@ -17,8 +17,8 @@
 // See docs/superpowers/specs/2026-09-24-row-tells-truth-design.md, "PR3
 // addendum (issue #311)".
 
-export type MemguardSignal = "SIGTERM" | "SIGKILL";
-export type MemguardMemorySource = "cgroup" | "meminfo";
+type MemguardSignal = "SIGTERM" | "SIGKILL";
+type MemguardMemorySource = "cgroup" | "meminfo";
 
 export interface MemguardKillLogEntry {
   /** The log line's own ISO timestamp — memguard.ts's own clock, not this

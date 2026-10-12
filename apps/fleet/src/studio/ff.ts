@@ -92,7 +92,7 @@ export type FfTask =
   | { kind: "new"; text: string }
   | { kind: "adopt"; number: number };
 
-export type FfArgs =
+type FfArgs =
   /** Issue #269: `newInstance` is `--new` — spawn a FRESH instance of this
    *  role on the lowest free number rather than attaching to the one that is
    *  already there. False for every invocation written before #269, which is
@@ -404,12 +404,12 @@ export function ffTimeoutLines(id: string, lastSeen: string, elapsedSeconds: num
 
 /** Whether each end of this process is a real terminal. Node reports `isTTY`
  *  as `undefined` (not `false`) on a pipe, so the caller coerces. */
-export interface TtyEnds {
+interface TtyEnds {
   stdin: boolean;
   stdout: boolean;
 }
 
-export type FfAttachGate =
+type FfAttachGate =
   /** A real terminal on both ends — attach, as `ff` always has. */
   | { kind: "attach" }
   /** No terminal. Say what happened and stop; never attach, never hang. */

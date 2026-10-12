@@ -14,7 +14,7 @@ import { errText, decodeBody } from "./diag";
  */
 export const INSPECT_CLIENT_TIMEOUT_MS = INSPECT_EXEC_MS + 15_000;
 
-export type InspectRequestResult =
+type InspectRequestResult =
   | { ok: true; body: unknown }
   | { ok: false; message: string };
 

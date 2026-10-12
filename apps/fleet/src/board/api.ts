@@ -379,7 +379,7 @@ export const TASK_TEXTS_MAX_PAGES = 20;
  *  as separate fields (not pre-joined) so the caller controls the join order
  *  — src/memory/routes.ts's taskTexts joins title, body, then comments, the
  *  exact order the REST loop it replaces produced. */
-export interface IssueTexts {
+interface IssueTexts {
   number: number;
   title: string;
   body: string;
@@ -436,7 +436,7 @@ const ISSUE_TEXTS_QUERY = `
  *  tell "complete" from "truncated" apart would report a partial citation
  *  survey as a whole one — see `handleMemory` in memory/routes.ts, the only
  *  caller that reads this flag today. */
-export interface ListIssueTextsResult {
+interface ListIssueTextsResult {
   issues: IssueTexts[];
   truncated: boolean;
 }

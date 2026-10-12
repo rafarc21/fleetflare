@@ -57,7 +57,7 @@ const GH_BUILTIN_COMMANDS = [
 const STUDIO_REAL_GH_PATH = "/usr/bin/gh";
 const STUDIO_GH_WRAPPER_PATH = "/usr/local/bin/gh";
 
-export function studioGhWrapperScript(
+function studioGhWrapperScript(
   realGh = STUDIO_REAL_GH_PATH, scanPath = LEAK_SCAN_PATH, marker = WRITE_PROXY_MARKER,
 ): string {
   return [

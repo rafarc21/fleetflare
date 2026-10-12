@@ -584,7 +584,7 @@ export async function autoStartSubmittedTasks(
  *  the Worker caps subrequests per request, so a big backlog goes in pages. */
 export const TERMINAL_CLOSE_PAGE = 40;
 
-export interface TerminalCloseOutcome {
+interface TerminalCloseOutcome {
   number: number;
   state: TaskState;
   outcome: "would-close" | "closed" | "error";
@@ -713,7 +713,7 @@ export async function commentEnvelope(
 
 /** Adoption refuses to take a task another studio holds; reassignment is the
  *  verb that does that, and writes the lineage saying so. */
-export type AssignMode = "adopt" | "reassign";
+type AssignMode = "adopt" | "reassign";
 
 /**
  * The lineage comment. From, to, when, why — P5 §3, verbatim.
@@ -961,7 +961,7 @@ export async function showTask(
 /** Same port, same reasoning as src/studio/repo.ts's WorkRepoDeps — see its
  *  doc comment for why P6a made this a per-repo question that carries its own
  *  refusal wording back. */
-export interface BoardRepoDeps {
+interface BoardRepoDeps {
   reachRepo: (slug: string) => Promise<RepoReach>;
 }
 
