@@ -23,7 +23,7 @@
 // (cli/task-format.ts's `[junior]` marker) reads to show a human the task was
 // authorized. That is a DISPLAY use, not a security one, and this file is
 // deliberately the only place that decides the real thing.
-import { deleteFlag, getFlag, setFlag } from "../state";
+import { deleteFlag, getFlag, scanStateTaskKeys, setFlag } from "../state";
 import { GitHubError } from "../board/api";
 import { TERMINAL_TASK_STATES, type BoardTask } from "../board/types";
 
@@ -114,12 +114,12 @@ export async function sweepJuniorAuthorizations(
   page: { limit?: number; after?: number } = {},
 ): Promise<{ results: JuniorSweepOutcome[]; next: number | null }> {
   const prefix = `junior-auth:${repo.toLowerCase()}:`;
-  // LIKE treats `_` as a wildcard and repo names may hold one: the exact
-  // prefix check below is what actually decides.
-  const rows = await db.prepare(`SELECT key FROM fleet_state WHERE key LIKE ?`).bind(`${prefix}%`).all<{ key: string }>();
-  const numbers = rows.results
-    .filter((r) => r.key.startsWith(prefix) && /^\d+$/.test(r.key.slice(prefix.length)))
-    .map((r) => Number(r.key.slice(prefix.length)))
+  // The prefix embeds the repo, so a true row's suffix is a bare number —
+  // state.ts's scan returns it with repo "". The startsWith/`_`-wildcard
+  // reasoning lives there now, with the scan.
+  const numbers = (await scanStateTaskKeys(db, prefix))
+    .filter((r) => r.repo === "")
+    .map((r) => r.number)
     .sort((a, b) => a - b);
   // Issue #41: one page past `after`; `next` = the last number read, null
   // once nothing is left. Revoked records vanish, so the cursor is a number.

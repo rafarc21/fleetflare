@@ -96,7 +96,8 @@ export interface MemorySurvey {
 export function countCitations(tasks: TaskCitation[], targets: string[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const target of targets) {
-    const base = target.split("/").pop()!.replace(/\.md$/, "");
+    // split("/") never yields [], so ?? is type-honesty, not reachable code; if it ever fired, the whole-target needle would under-count — the unsafe side.
+    const base = (target.split("/").pop() ?? target).replace(/\.md$/, "");
     const seen = new Set<number>();
     for (const task of tasks) if (task.text.includes(base)) seen.add(task.number);
     counts[target] = seen.size;
@@ -164,7 +165,8 @@ export function surveyMemory(
   const candidates: MemorySurvey["candidates"] = { promote: [], keep: [], demote: [], hold: [] };
   const files: MemoryFileMeta[] = live.map((s) => {
     const target = targetFor(s.path);
-    const harvested = harvestDateOf(target.split("/").pop()!);
+    // No-stamp fallback means ageMs null, which never auto-demotes — the safe side.
+    const harvested = harvestDateOf(target.split("/").pop() ?? target);
     const ageMs = harvested === null ? null : now.getTime() - harvested.getTime();
     const verdict = demotionVerdict(counts[target], ageMs);
     candidates[verdict].push(target);
@@ -289,7 +291,9 @@ export function planCompaction(
 
   // 3. Thresholds. Judgment proposes; arithmetic decides.
   for (const target of demote) {
-    const f = byTarget.get(target)!;
+    // Checked not asserted — the named-sweep three loops above is the real guard; refuse if it ever moves.
+    const f = byTarget.get(target);
+    if (!f) return refuse(`${target} is not a memory file under ${MEMORY_DIR}/ — nothing to compact`);
     if (f.citations > 0) {
       return refuse(`${target} is cited by ${f.citations} task(s) — only an uncited file is demoted (§9)`);
     }
@@ -307,7 +311,9 @@ export function planCompaction(
     if (p.content.trim() === "") return refuse(`${p.path} has no content — a promotion may not create an empty skill`);
     if (p.sources.length === 0) return refuse(`${p.path} promotes no memory file — nothing to collapse`);
     for (const target of p.sources) {
-      const f = byTarget.get(target)!;
+      // Checked not asserted — same named-sweep guarantee as the demote loop above.
+      const f = byTarget.get(target);
+      if (!f) return refuse(`${target} is not a memory file under ${MEMORY_DIR}/ — nothing to compact`);
       if (f.citations < PROMOTION_CITATIONS) {
         return refuse(
           `${target} is cited by ${f.citations} task(s); promotion to a skill needs ${PROMOTION_CITATIONS}+ (§9)`,

@@ -49,6 +49,7 @@ import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
 import { repairFailureLine, discardNote, destroyPath } from "./repair-failure";
 import { errText } from "./diag";
+import { parseStudioStatus, parseStudioStatusArray } from "./studio-row";
 import { requestDestroy, readStatus, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome";
 import { requestRecycle } from "./recycle-outcome";
 import {
@@ -689,7 +690,11 @@ async function cmdCheck(creds: Credentials, id: string): Promise<void> {
     console.error(repairFailureLine("check", res.status, await res.text()));
     process.exit(1);
   }
-  const status = (await res.json()) as StudioStatus;
+  const status = parseStudioStatus(await res.json());
+  if (status === null) {
+    console.error("fleet check: answered 200 but the body was not a studio row");
+    process.exit(1);
+  }
   console.log(formatTable([status]));
   const full = fullErrorLine(status);
   if (full) console.log(full);
@@ -727,7 +732,12 @@ async function cmdClearSessionGuard(creds: Credentials, id: string): Promise<voi
     console.error(repairFailureLine("clear-session-guard", res.status, await res.text()));
     process.exit(1);
   }
-  console.log(formatTable([(await res.json()) as StudioStatus]));
+  const clearedRow = parseStudioStatus(await res.json());
+  if (clearedRow === null) {
+    console.error("fleet clear-session-guard: answered 200 but the body was not a studio row");
+    process.exit(1);
+  }
+  console.log(formatTable([clearedRow]));
   console.error(
     `fleet: ${id}'s next sync will force-upload over R2's latest (old latest preserved under sessions/${id}/superseded/) — one-shot, consumed by whichever runs first: the periodic sync tick, or a restart/recycle/destroy's own pre-teardown sync. Destroying a stopped (not-running) container skips sync entirely and leaves the override armed.`,
   );
@@ -850,7 +860,14 @@ async function refreshAll(creds: Credentials, studios: StudioStatus[]): Promise<
         console.error(repairFailureLine("check", res.status, await res.text(), `fleet ls --fresh: ${s.id}`));
         return s;
       }
-      return (await res.json()) as StudioStatus;
+      // Same posture as the catch below: a body this side cannot read
+      // leaves the studio's last recorded row in place, never a gap.
+      const refreshed = parseStudioStatus(await res.json());
+      if (refreshed === null) {
+        console.error(`fleet ls --fresh: ${s.id}: answered 200 but the body was not a studio row`);
+        return s;
+      }
+      return refreshed;
     } catch (err) {
       console.error(`fleet ls --fresh: ${s.id}: ${errText(err)}`);
       return s;
@@ -872,7 +889,11 @@ export async function cmdLs(
     console.error(`fleet ls: ${res.status} ${(await res.text()).slice(0, 300)}`);
     process.exit(1);
   }
-  const recorded = (await res.json()) as StudioStatus[];
+  const recorded = parseStudioStatusArray(await res.json());
+  if (recorded === null) {
+    console.error(`fleet ls: answered ${res.status} but the body was not studio rows`);
+    process.exit(1);
+  }
   // Issue #37: --fresh re-checks every studio LIVE before the table is
   // printed; bare `fleet ls` prints what the registry already has, and the
   // CHECKED column says how old each of those verdicts is.
@@ -1127,7 +1148,9 @@ async function cmdTabs(creds: Credentials, flags: TabsFlags): Promise<void> {
           headers: { ...accessHeaders(creds), Accept: "application/json" },
         });
         if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 300)}`);
-        return (await res.json()) as StudioStatus[];
+        const studios = parseStudioStatusArray(await res.json());
+        if (studios === null) throw new Error("studio listing was not studio rows");
+        return studios;
       },
       listStudioTasks: (id) => listStudioTasks(creds, id),
       orcaDeps: defaultOrcaDeps(),
@@ -1174,7 +1197,9 @@ async function onboardListStudios(creds: Credentials): Promise<StudioStatus[]> {
     headers: { ...accessHeaders(creds), Accept: "application/json" },
   });
   if (!res.ok) throw new Error(`fleet ls: ${res.status} ${(await res.text()).slice(0, 300)}`);
-  return (await res.json()) as StudioStatus[];
+  const studios = parseStudioStatusArray(await res.json());
+  if (studios === null) throw new Error("studio listing was not studio rows");
+  return studios;
 }
 
 /**
@@ -1314,7 +1339,11 @@ async function cmdSpawn(
     console.error(`fleet spawn: ${res.status} ${(await res.text()).slice(0, 300)}`);
     process.exit(1);
   }
-  const spawned = (await res.json()) as StudioStatus;
+  const spawned = parseStudioStatus(await res.json());
+  if (spawned === null) {
+    console.error("fleet spawn: answered 200 but the body was not a studio row");
+    process.exit(1);
+  }
   console.log(formatTable([spawned]));
   // Issue #305: stderr, like reportRepo — stdout stays the table.
   const spawnAccount = formatAccountResolution("fleet spawn", spawned);
@@ -1375,7 +1404,11 @@ async function cmdProvision(
     console.error(repairFailureLine("provision", res.status, await res.text()));
     process.exit(1);
   }
-  const studio = (await res.json()) as StudioStatus;
+  const studio = parseStudioStatus(await res.json());
+  if (studio === null) {
+    console.error("fleet provision: answered 200 but the body was not a studio row");
+    process.exit(1);
+  }
   console.log(formatTable([studio]));
   // Issue #305: stderr, like reportRepo — stdout stays the table.
   const provisionAccount = formatAccountResolution("fleet provision", studio);
@@ -1428,15 +1461,21 @@ async function cmdRecycle(
   // read must never claim the Orca sidebar/rescue-report work below, the
   // same rule cmdDestroy's own `report.teardown` gate follows for #203.
   if (report.kind === "ok" || report.kind === "timeout-provisioned") {
-    const studio = report.status as StudioStatus;
-    // Issue #39: the pre-destroy rescue, one line per worktree.
-    for (const line of studio.rescueReport ?? []) console.log(`rescue: ${line}`);
-    if (discardUnsynced) console.error(discardNote(id));
-    // Same rule as `fleet spawn`: this path also leaves a studio running, so
-    // it also owes that studio a visible row in Orca's sidebar. Idempotent,
-    // so a studio that already has one is not given a second.
-    const rowTasks = await listStudioTasks(creds, studio.id);
-    await openStudioRow(studio.id, rowTasks, defaultOrcaDeps());
+    // The decoder narrows the confirmed row before the Orca/rescue work
+    // runs; a null decode leaves this side with no row to act on, so the
+    // whole block is skipped — the report lines above and the exit code
+    // below are untouched, the same posture an unconfirmed outcome takes.
+    const studio = parseStudioStatus(report.status);
+    if (studio !== null) {
+      // Issue #39: the pre-destroy rescue, one line per worktree.
+      for (const line of studio.rescueReport ?? []) console.log(`rescue: ${line}`);
+      if (discardUnsynced) console.error(discardNote(id));
+      // Same rule as `fleet spawn`: this path also leaves a studio running, so
+      // it also owes that studio a visible row in Orca's sidebar. Idempotent,
+      // so a studio that already has one is not given a second.
+      const rowTasks = await listStudioTasks(creds, studio.id);
+      await openStudioRow(studio.id, rowTasks, defaultOrcaDeps());
+    }
   }
   if (report.exitCode !== 0) process.exit(report.exitCode);
 }
@@ -2378,8 +2417,9 @@ export function reapDeps(
     now: () => new Date(),
     listStudios: async () => {
       const body = await fetchJson(new URL("/studio/", creds.workerUrl).toString(), headers, readMs);
-      if (!Array.isArray(body)) throw new Error("studio listing was not a JSON array");
-      return body as StudioStatus[];
+      const studios = parseStudioStatusArray(body);
+      if (studios === null) throw new Error("studio listing was not studio rows");
+      return studios;
     },
     listBoard: async () => {
       const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}`), headers, readMs);

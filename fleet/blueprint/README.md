@@ -28,7 +28,7 @@ real.
 
 ## Skills are vendored here too
 
-`../../skills/<name>/SKILL.md` (repo root, alongside `container/`) is the
+`../../skills/<name>/SKILL.md` (repo root, alongside `apps/fleet/container/`) is the
 same single-source pattern as the roles and studios above: `studio-bringup.sh`
 resolves a declared skill from `/opt/blueprint/skills/<name>` inside a
 container, and `/opt/blueprint` IS this repo's checkout. Once a skill lands

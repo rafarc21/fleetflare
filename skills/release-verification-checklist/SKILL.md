@@ -88,17 +88,25 @@ Two traps that have actually bitten:
 | `reference/data-schema.md` | the data JSON shape |
 | `reference/operate.md` | endpoints, tokens, add-a-page, deploy, rotate, kill switch |
 
-## This directory IS version-controlled (since 2026-08-04)
+## Version control: vendored in the blueprint repo
 
-`~/.claude/skills/` is a git repo as of `37a9381`. Changes here have history and
-a diff. `node_modules/`, `.venv/` and the three third-party skills carrying their
-own upstream remotes are gitignored — source is 4.7 MB of the 464 MB on disk.
+This skill directory is version-controlled in **rafarc21/fleetflare** (the
+blueprint repo), under `skills/release-verification-checklist/`. On the
+operator's Mac, `~/.claude/skills/release-verification-checklist` is a symlink
+into that checkout; in studio containers `studio-bringup.sh` symlinks it to
+`/opt/blueprint/skills/release-verification-checklist`, which is the same
+checkout (apps/fleet/container/studio-bringup.sh:866-867). Local and cloud read
+the one file; no second copy drifts.
 
-There is still **no review trail** — commits land directly, with no PR. So before
-editing `worker/` or `render.ts`, consider whether the change should be reviewed
-somewhere first, and always re-run `worker/` tests
+History: from 2026-08-04 (commit `37a9381`) `~/.claude/skills/` was its own git
+repo, with no review trail — commits landed directly, no PR. That repo is
+history now; the vendored checkout replaced it.
+
+**Every edit — including `worker/` and `render.ts` — lands as a PR in this
+repo**, through normal review. There is no direct-commit path. Before editing
+`worker/` or `render.ts`, re-run `worker/` tests
 (`cd worker && npm ci && npx vitest run`) plus a render diff against a known
 batch before trusting it.
 
-Committing is now the cheap part. Do it per change, so a wrong claim in a skill
-is visibly corrected rather than silently replaced.
+Keep PRs small and per change, so a wrong claim in a skill is visibly corrected
+rather than silently replaced.

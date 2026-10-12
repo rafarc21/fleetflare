@@ -196,7 +196,11 @@ export async function mintInstallationTokenDetail(
     // JWT and any token are not — neither is logged or included here.
     throw new MintTokenError(res.status, `installation token failed (${res.status}): ${text.slice(0, 300)}`);
   }
-  const parsed = JSON.parse(text) as { token: string; repositories?: { full_name?: unknown }[] };
+  const parsed = JSON.parse(text) as { token?: string; repositories?: { full_name?: unknown }[] };
+  // A 2xx body can still lack token — never hand callers undefined or "" on the mint path.
+  if (typeof parsed.token !== "string" || parsed.token === "") {
+    throw new MintTokenError(res.status, `installation token failed (${res.status}): response named no token`);
+  }
   const repositories = (parsed.repositories ?? [])
     .map((r) => r.full_name)
     .filter((n): n is string => typeof n === "string");

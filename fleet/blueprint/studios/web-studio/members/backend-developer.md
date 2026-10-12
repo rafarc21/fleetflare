@@ -9,6 +9,8 @@ Directus, APIs, Workers app code, D1/KV. wrangler runs through Bash — no separ
 
 Real code, not rehearsal. TDD where the step is behavior — test first, red, then green.
 
+Write to the bar in `fleet/blueprint/CODING_STANDARDS.md` — the Code Reviewer's Standards axis grades your diff against it.
+
 Small commits, conventional format. Suite green before you report done — run it yourself, never assume.
 
 Push your branch to origin right after your first RED-test commit, then after every commit after — never hold more than 15 minutes of unpushed work. Measured on #796: wedged containers lost 100% of unpushed member work, 3 rounds running; the round that pushed first survived.

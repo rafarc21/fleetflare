@@ -5,13 +5,16 @@
 // src/studio/claude-swap.ts's types, accounts.ts's pure
 // NULL_UNTIL_CEILING_MS (#306), rate-limit.ts's pure accountHoldActive
 // (#340 — that module's own header declares it pure, no Env, no imports),
-// and cli/columns.ts's formatColumns (#399 — pure, imports nothing), so it
-// is directly unit-testable the
+// account-slot.ts's labelVarName (#405 — the slot-name grammar, once
+// duplicated here as a local parse-back, now shared; account-slot.ts
+// imports nothing so it drags no graph), and cli/columns.ts's formatColumns
+// (#399 — pure, imports nothing), so it is directly unit-testable the
 // same way cli/task-format.ts and cli/restart-format.ts already are (see
 // cli/burn-format.ts's own header for the general "pure sibling of an impure
 // cli/ file" convention this follows).
 import type { CswapAccount, SlotJoin, SyncDecision } from "../src/studio/claude-swap";
 import { NULL_UNTIL_CEILING_MS } from "../src/studio/accounts";
+import { labelVarName } from "../src/studio/account-slot";
 import { accountHoldActive, type AccountLimitKind } from "../src/studio/rate-limit";
 import { formatColumns } from "./columns";
 
@@ -269,24 +272,6 @@ export function buildLabelSuggestions(rows: AccountSnapshotRow[]): string[] {
   return rows
     .filter((r): r is AccountSnapshotRow & { matchedEmail: string } => r.matchSource === "inferred" && r.matchedEmail !== null)
     .map((r) => `${labelVarName(r.name)}=${r.matchedEmail}`);
-}
-
-/** The secret name's own 1-based slot number (accounts.ts's
- *  `claudeAccountVarName`, not imported here — see this module's header on
- *  why this stays Bun/node-free and pulls in none of src/studio/accounts.ts's
- *  own `Env`-adjacent graph), or null for a name outside that shape. */
-function slotNumber(secretName: string): number | null {
-  if (secretName === "CLAUDE_CODE_OAUTH_TOKEN") return 1;
-  const m = /^CLAUDE_CODE_OAUTH_TOKEN_(\d+)$/.exec(secretName);
-  return m ? Number(m[1]) : null;
-}
-
-/** `CLAUDE_ACCOUNT_<n>_LABEL` for a known slot name; falls back to naming
- *  the secret itself for a name outside the ordinary shape (defensive only —
- *  every real fleet slot matches `slotNumber`'s pattern). */
-function labelVarName(secretName: string): string {
-  const n = slotNumber(secretName);
-  return n === null ? `CLAUDE_ACCOUNT_${secretName}_LABEL` : `CLAUDE_ACCOUNT_${n}_LABEL`;
 }
 
 /**
