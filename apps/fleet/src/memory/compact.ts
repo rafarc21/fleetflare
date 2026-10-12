@@ -96,7 +96,7 @@ export interface MemorySurvey {
 export function countCitations(tasks: TaskCitation[], targets: string[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const target of targets) {
-    // split("/") never yields [], so ?? is type-honesty not reachable code; the whole-target fallback matches nothing, the safe side.
+    // split("/") never yields [], so ?? is type-honesty, not reachable code; if it ever fired, the whole-target needle would under-count — the unsafe side.
     const base = (target.split("/").pop() ?? target).replace(/\.md$/, "");
     const seen = new Set<number>();
     for (const task of tasks) if (task.text.includes(base)) seen.add(task.number);
