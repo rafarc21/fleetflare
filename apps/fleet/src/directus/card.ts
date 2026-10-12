@@ -38,13 +38,13 @@ import type { DirectusConfig } from "./client";
 import type { ProjectEstate } from "./types";
 
 /**
- * Upper bound §7 names outright. Asserted by test against the fullest card
- * the renderer can produce — every optional block present, decisions at their
+ * Upper bound §7 names outright, asserted against the fullest card the
+ * renderer can produce — every optional block present, decisions at their
  * cap. The renderer does not truncate to fit; it is CONSTRUCTED to fit, so a
  * future block that would blow the budget fails a test instead of silently
  * eating the tail of the card.
  */
-export const CARD_MAX_LINES = 20;
+const CARD_MAX_LINES = 20;
 
 /**
  * How many open decisions ride in the card. Three, because that is what fits
@@ -53,7 +53,7 @@ export const CARD_MAX_LINES = 20;
  * COUNTED in the line, never dropped silently: a lead that reads "3 of 7
  * shown" knows to ask.
  */
-export const CARD_DECISION_LIMIT = 3;
+const CARD_DECISION_LIMIT = 3;
 
 /**
  * How many open decisions the READ pulls. Larger than CARD_DECISION_LIMIT on
@@ -62,7 +62,7 @@ export const CARD_DECISION_LIMIT = 3;
  * report at "3 of 4" — technically true, materially misleading, and the
  * misleading direction is the dangerous one (a lead under-asks).
  */
-export const CARD_DECISION_FETCH_LIMIT = 20;
+const CARD_DECISION_FETCH_LIMIT = 20;
 
 /** Per-field ceiling for anything a human typed into Directus. Long enough
  *  for a real scope boundary, short enough that one verbose field cannot take
