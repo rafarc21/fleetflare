@@ -57,6 +57,7 @@ import type { StudioStatus } from "../src/studio/types";
 import type { BoardTask } from "../src/board/types";
 import { salvageContext, type SalvageOutcome, type SalvageDestination } from "./context-salvage";
 import { attachTitleState, ATTACH_STALE_MS } from "./attach-liveness";
+import { errText } from "./diag";
 
 // ---------------------------------------------------------------------------
 // Budgets. `worktree create` does a real git checkout, so it gets the generous
@@ -550,7 +551,7 @@ export async function ensureStudioWorkspace(id: string, title: string, deps: Orc
     // why this, not a tighter guard, is the actual fix.
     return await deps.lock(id, () => ensure(id, title, deps));
   } catch (err) {
-    const why = err instanceof Error ? err.message : String(err);
+    const why = errText(err);
     deps.log(`${id}: no Orca workspace opened — ${why}`);
     return { kind: "failed", why };
   }
@@ -666,7 +667,7 @@ async function ensure(id: string, title: string, deps: OrcaDeps): Promise<Worksp
       LIST_TIMEOUT_MS,
     );
   } catch (err) {
-    const why = err instanceof Error ? err.message : String(err);
+    const why = errText(err);
     console.error(`fleet: ${id}: orca worktree set --display-name failed (title not stamped) -- ${why}`);
   }
 
@@ -807,7 +808,7 @@ export async function removeStudioWorkspace(
   try {
     return await removeWorkspace(id, deps, salvageDest);
   } catch (err) {
-    const why = err instanceof Error ? err.message : String(err);
+    const why = errText(err);
     return { kind: "failed", why };
   }
 }
@@ -826,7 +827,7 @@ async function removeWorkspace(id: string, deps: OrcaDeps, salvageDest: ContextS
   try {
     existing = findStudioWorktree(id, await fullList(deps, "worktrees", LIST_TIMEOUT_MS), deps.registry);
   } catch (err) {
-    return { kind: "unverified", why: err instanceof Error ? err.message : String(err) };
+    return { kind: "unverified", why: errText(err) };
   }
   if (!existing) {
     // #124 item 7, LIVE 2026-09-24 16:01Z: "teardown already complete" was
@@ -837,7 +838,7 @@ async function removeWorkspace(id: string, deps: OrcaDeps, salvageDest: ContextS
     try {
       terms = await fullList(deps, "terminals", LIST_TIMEOUT_MS);
     } catch (err) {
-      return { kind: "unverified", why: err instanceof Error ? err.message : String(err) };
+      return { kind: "unverified", why: errText(err) };
     }
     // By folder, ANY title (#135 review): the live orphaned PTY — tab-less,
     // an invisible reconnecting client — reports title null. The found-row
@@ -1004,7 +1005,7 @@ export async function readStudioRows(studios: StudioStatus[], deps: OrcaDeps): P
       footer: null,
     };
   } catch (err) {
-    return unknown(`Orca did not answer — ${err instanceof Error ? err.message : String(err)}; re-run fleet ls`);
+    return unknown(`Orca did not answer — ${errText(err)}; re-run fleet ls`);
   }
 }
 
@@ -1038,7 +1039,7 @@ export async function findAttachHandle(id: string, deps: OrcaDeps): Promise<stri
     if (candidates.length === 0) return null;
     return rankAttachTerminals(candidates, id)[0]?.handle ?? null;
   } catch (err) {
-    deps.log(`${id}: attach handle lookup failed — ${err instanceof Error ? err.message : String(err)}`);
+    deps.log(`${id}: attach handle lookup failed — ${errText(err)}`);
     return null;
   }
 }
@@ -1136,7 +1137,7 @@ export async function previewStudioWorkspace(id: string, deps: OrcaDeps): Promis
     const worktrees = listed.result?.worktrees ?? [];
     return findStudioWorktree(id, worktrees, deps.registry) ? { kind: "has one" } : { kind: "open" };
   } catch (err) {
-    return { kind: "skipped", why: err instanceof Error ? err.message : String(err) };
+    return { kind: "skipped", why: errText(err) };
   }
 }
 
@@ -1192,7 +1193,7 @@ export function orcaRunner(bin: string): OrcaRun {
         clearTimeout(timer);
       }
     } catch (err) {
-      return { ok: false, stdout: "", stderr: err instanceof Error ? err.message : String(err), timedOut };
+      return { ok: false, stdout: "", stderr: errText(err), timedOut };
     }
   };
 }

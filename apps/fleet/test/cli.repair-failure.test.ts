@@ -8,6 +8,14 @@ describe("destroyPath — the flags ride recycle's own query names (#129)", () =
     expect(destroyPath(false, true)).toBe("/destroy?discard-unsynced=true");
     expect(destroyPath(true, true)).toBe("/destroy?force=true&discard-unsynced=true");
   });
+
+  // Board issue #332: --strict-unmerged refuses CLIENT-side, before the
+  // destroy request, so the route query stays three flags wide — nothing
+  // server-side ever reads a fourth.
+  it("never rides the query — the refusal is client-side (#332)", () => {
+    expect(destroyPath(false, false, false)).toBe("/destroy");
+    expect(destroyPath(true, false, true)).toBe("/destroy?force=true&park=true");
+  });
 });
 
 // Issue #96: every repair verb printed `${status} ${text.slice(0, 300)}`. The

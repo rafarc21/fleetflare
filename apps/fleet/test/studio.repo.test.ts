@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
-  parseGitRemote, parseRepoSlug, repoIdSegment, resolveWorkRepo, studioIdForTarget, studioIdIn,
-  type WorkRepoDeps,
+  parseGitRemote, parseRepoSlug, refuseBadSegment, repoIdSegment, resolveWorkRepo, studioIdForTarget,
+  studioIdIn, type WorkRepoDeps,
 } from "../src/studio/repo";
 import type { RepoReach } from "../src/github/reach";
 import { runningRow } from "./helpers/studio-row";
@@ -118,6 +118,12 @@ describe("repoIdSegment", () => {
     expect(repoIdSegment("lead-")).toBeNull();
     expect(repoIdSegment("caf\u00e9")).toBeNull();
     expect(repoIdSegment("")).toBeNull();
+  });
+
+  it("refuseBadSegment builds the canonical refusal all four sites share", () => {
+    expect(refuseBadSegment("o/-weird", "-weird"))
+      .toBe(`repo "o/-weird" cannot name a studio: "-weird" is not a valid id segment ` +
+        "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)");
   });
 });
 

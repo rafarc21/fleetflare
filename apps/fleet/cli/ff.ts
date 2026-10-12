@@ -43,7 +43,7 @@ import {
 } from "./fleet";
 import { openStudioRow, defaultOrcaDeps } from "./orca-workspace";
 import { poll, ticker } from "./poll";
-import { repoIdSegment } from "../src/studio/repo";
+import { refuseBadSegment, repoIdSegment } from "../src/studio/repo";
 import {
   parseFfArgs, ffDecision, ffTaskBrief, parseVerdict, verdictOutcome, ffTimeoutLines, ffAttachGate,
   FF_HELP, type ProvisionedVerdict, type VerdictOutcome, type FfDecision, type FfTask,
@@ -52,6 +52,7 @@ import type { StudioStatus } from "../src/studio/types";
 import type { BoardTask } from "../src/board/types";
 import { formatAssignWake } from "./task-format";
 import { repairFailureLine } from "./repair-failure";
+import { errText } from "./diag";
 import { postTaskNew, taskNewFailureLine } from "./task-new-retry";
 import type { AssignWakeReport } from "../src/board/assign-wake";
 
@@ -79,10 +80,6 @@ function say(line: string): void {
 function fail(line: string): never {
   console.error(`ff: ${line}`);
   process.exit(1);
-}
-
-function errText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -471,8 +468,7 @@ async function main(): Promise<void> {
     // the silent-wrong-target failure the whole repo-detection feature exists
     // to remove. The wording matches repo.ts's own 400 for the same case.
     if (segment === null) {
-      fail(`repo "${detected.slug}" cannot name a studio: "${short}" is not a valid id segment ` +
-        "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)");
+      fail(refuseBadSegment(detected.slug, short));
     }
     say(`repo ${detected.slug} (from git remote origin)`);
   } else {

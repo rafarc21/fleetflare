@@ -2,16 +2,17 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { sh as shShared } from "./helpers/shell";
 
 // Issue #341: scripts/migrate-memory-store.sh, EXECUTED against real git. It
 // never touches the network and never pushes: it builds the store repo in an
 // output dir; the maestro pushes it (commands in the PR body).
 const SCRIPT = join(import.meta.dir, "../../scripts/migrate-memory-store.sh");
 let root: string;
+// Local wrapper keeps this file's original default (cwd param, root when
+// omitted) — zero call-site edits; git identity comes from the helper.
 function sh(cmd: string, cwd = root) {
-  const r = Bun.spawnSync({ cmd: ["bash", "-c", cmd], cwd, stdout: "pipe", stderr: "pipe",
-    env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
-  return { code: r.exitCode ?? -1, out: r.stdout.toString().trim(), err: r.stderr.toString().trim() };
+  return shShared(cmd, { cwd });
 }
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "fleet-memmig-"));

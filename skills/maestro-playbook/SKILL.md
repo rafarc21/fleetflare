@@ -256,6 +256,18 @@ as a raw byte, never an Enter: `orca terminal send` has no `--key` flag, so
 that appends the newline that is the confirm key) is the safe dismissal; see
 the fleet-cockpit skill's limit-modal note for the full procedure.
 
+Security-adjacent work parks at `completed`, never at `awaiting_merge`
+(board issue #332): security-adjacent PRs get bounced 1-2x with findings,
+every bounce needs the lane alive, and `awaiting_merge` is not a live board
+state — a park there sails through while the PR bounces, and every revive
+costs a nudge plus a lost turn; `awaiting_merge` is OK for routine work
+only. Before parking, read the `PRS` column on the studio's `fleet ls --prs`
+row (opt-in — bare `fleet ls` never makes live GitHub reads) —
+open unmerged PRs attributable to that studio; nonzero on security-adjacent
+work means the lane stays up. `fleet destroy --strict-unmerged` refuses when
+that studio still has unmerged PRs; plain destroy and `--park` print a
+non-blocking warning instead.
+
 ## 4. Workers never message the coordinator
 
 Workers write their report into their own repo artifact (a context file) and

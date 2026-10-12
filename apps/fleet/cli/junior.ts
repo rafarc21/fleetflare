@@ -13,7 +13,9 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSy
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { accessHeaders, juniorUrl, type Credentials } from "./fleet";
+import { errText } from "./diag";
 import { juniorUsageLogPath } from "../../../skills/junior/src/usage";
+import { formatColumns } from "./columns";
 
 export interface JuniorPaths { skillLink: string; config: string; skillSrc: string }
 type Out = { ok: boolean; lines: string[] };
@@ -155,10 +157,11 @@ export function formatJuniorStats(rows: JuniorStatsRow[]): string {
   const headers = ["ID", "CALLS", "INPUT TOKENS", "OUTPUT TOKENS"];
   const body = rows.map((r) => [r.id, String(r.calls), String(r.inputTokens), String(r.outputTokens)]);
   const totalRow = ["TOTAL", String(totals.calls), String(totals.inputTokens), String(totals.outputTokens)];
-  const allRows = [...body, totalRow];
-  const widths = headers.map((h, i) => Math.max(h.length, ...allRows.map((r) => r[i].length)));
-  const line = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i])).join("  ").trimEnd();
-  return [line(headers), ...allRows.map(line)].join("\n");
+  // formatColumns's own #205 default (last column never padded) replaces the
+  // old pad-every-column-then-trimEnd pair: identical bytes — the pin in
+  // test/bun/junior-stats-unit.test.ts proves pad-every-column-then-trimEnd
+  // produces the same bytes as never padding the last column.
+  return formatColumns(headers, [...body, totalRow]);
 }
 
 /** Issue #366: one HTTP round trip's answer, in the same tagged shape
@@ -193,7 +196,7 @@ export async function fetchJuniorUsage(
       rows: body.rows.map((r) => ({ id: r.studioId, calls: r.calls, inputTokens: r.inputTokens, outputTokens: r.outputTokens })),
     };
   } catch (e) {
-    return { ok: false, status: 0, message: e instanceof Error ? e.message : String(e) };
+    return { ok: false, status: 0, message: errText(e) };
   }
 }
 

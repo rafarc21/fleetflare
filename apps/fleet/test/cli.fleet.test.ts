@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fleetTotals } from "../cli/fleet-totals";
 import {
+  ageSeconds,
   formatReady, formatCheckedAt, formatAge, readyOverride, formatSession, formatState, formatSessionGuards,
   formatObservedLines, formatSurvivalBriefs, formatActivity, ACTIVITY_DO_STALE_SECONDS, lsJsonRows,
   formatDeadAccounts,
@@ -157,6 +158,25 @@ describe("formatCheckedAt (cli/readiness-format.ts)", () => {
     const at = (iso: string) => formatCheckedAt({ kind: "provisioned", checkedAt: iso }, NOW);
     // NOW is 2026-08-28T12:00:00.000Z; 484 minutes earlier is 03:56:00.000Z.
     expect(at("2026-08-28T03:56:00.000Z")).toBe("8h ago");
+  });
+});
+
+describe("ageSeconds (cli/readiness-format.ts)", () => {
+  const NOW = new Date("2026-08-28T12:00:00.000Z");
+
+  it("valid ISO: whole seconds since, floored", () => {
+    expect(ageSeconds("2026-08-28T11:59:53.000Z", NOW)).toBe(7);
+    expect(ageSeconds("2026-08-28T09:00:00.000Z", NOW)).toBe(3 * 3600);
+    // 7.75s elapsed: floor 7, round 8 — pins Math.floor against a round regression.
+    expect(ageSeconds("2026-08-28T11:59:52.250Z", NOW)).toBe(7);
+  });
+
+  it("unparseable string reads 0, never NaN", () => {
+    expect(ageSeconds("not-a-date", NOW)).toBe(0);
+  });
+
+  it("future timestamp (clock skew) reads 0, never negative", () => {
+    expect(ageSeconds("2026-08-28T12:00:30.000Z", NOW)).toBe(0);
   });
 });
 
@@ -1237,6 +1257,81 @@ describe("formatActivity (cli/readiness-format.ts)", () => {
     expect(formatActivity(s, NOW)).toBe("—");
   });
 
+  // Issue #403 — characterization table: every precedence kind, pinned on
+  // BOTH surfaces before the leadGate fold. These pin CURRENT behavior;
+  // the fold must keep every string byte-identical.
+  it("#403 table: degraded state renders exactly as running", () => {
+    const at = activity({ state: "working", since: "2026-09-25T12:01:20.000Z" });
+    const s = status({ state: "degraded", observed: { ...emptyObserved(), activity: at } });
+    expect(formatActivity(s, NOW)).toBe("WORKING 40s");
+  });
+
+  it("#403 table: bare LIMIT — until null, no select modal", () => {
+    const s = status({
+      rateLimited: { until: null, seenAt: "2026-09-25T12:00:00.000Z" },
+      observed: { ...emptyObserved(), activity: activity({ state: "limit" }) },
+    });
+    expect(formatActivity(s, NOW)).toBe("LIMIT");
+  });
+
+  it("#403 table: a past reset falls through to the stored verdict underneath", () => {
+    const s = status({
+      rateLimited: { until: "2026-09-25T11:00:00.000Z", seenAt: "2026-09-25T10:00:00.000Z" },
+      observed: { ...emptyObserved(), activity: activity({ state: "idle", since: "2026-09-25T11:15:00.000Z" }) },
+    });
+    expect(formatActivity(s, NOW)).toBe("IDLE 47m");
+  });
+
+  it("#403 table: an unparseable until falls through to the stored verdict underneath", () => {
+    const s = status({
+      rateLimited: { until: "not a date", seenAt: "2026-09-25T12:00:00.000Z" },
+      observed: { ...emptyObserved(), activity: activity({ state: "idle", since: "2026-09-25T11:15:00.000Z" }) },
+    });
+    expect(formatActivity(s, NOW)).toBe("IDLE 47m");
+  });
+
+  it("#403 table: a stopped studio ignores a rateLimited record entirely", () => {
+    const s = status({
+      state: "stopped",
+      rateLimited: { until: "2026-09-25T13:30:00.000Z", seenAt: "2026-09-25T12:00:00.000Z" },
+    });
+    expect(formatActivity(s, NOW)).toBe("—");
+  });
+
+  it("#403 table: a stopped studio never carries the member-alert suffix", () => {
+    const alerts: MemberAlert[] = [{
+      kind: "memguard-kill", name: "vitest", at: "2026-09-25T12:00:00.000Z",
+      detail: "comm=vitest rss_mib=612 pid=42", confidence: "measured",
+    }];
+    const s = status({ state: "stopped", observed: { ...emptyObserved(), memberAlerts: alerts } });
+    expect(formatActivity(s, NOW)).toBe("—");
+  });
+
+  // The mirror of the stopped test above — the S1 line-pair's OTHER half.
+  // `case "stopped"` early-returns bare; `case "replaced"` falls through to
+  // the suffix, and that difference is invisible in the switch itself — this
+  // pin is what keeps a future tidy-up from "unifying" them silently.
+  it("#403 table: a replaced studio keeps the member-alert suffix on its —", () => {
+    const alerts: MemberAlert[] = [{
+      kind: "memguard-kill", name: "vitest", at: "2026-09-25T12:00:00.000Z",
+      detail: "comm=vitest rss_mib=612 pid=42", confidence: "measured",
+    }];
+    const s = status({
+      state: "running",
+      observed: {
+        ...emptyObserved(),
+        replacedAt: "2026-09-25T12:00:00.000Z",
+        memberAlerts: alerts,
+      },
+    });
+    expect(formatActivity(s, NOW)).toBe("— · member killed by memguard 2m ago (comm=vitest rss_mib=612 pid=42)");
+  });
+
+  it("#403 table: provisioning also renders — (no lead at all)", () => {
+    const s = status({ state: "provisioning" });
+    expect(formatActivity(s, NOW)).toBe("—");
+  });
+
   // Issue #311 — a fresh member alert appends a " · <note>" suffix onto the
   // column, the ACTIVITY-column half of "surfaces as an ACTIVITY state ...
   // and a row note" (the OTHER half is formatObservedLines's own
@@ -1362,6 +1457,72 @@ describe("lsJsonRows", () => {
     });
     expect(r.lead).toBe("unknown");
     expect(r.leadSince).toBeNull();
+    expect(r.limitResetsAt).toBeNull();
+  });
+
+  // Board issue #332: `openPrs` per row — this studio's unmerged-PR count,
+  // present ONLY when the open-prs route answered for its repo (fleet ls
+  // passes the map openPrsByStudio built). Absence means "no data" (a route
+  // that 404ed, an old Worker), never a silent 0 — the exact false-clean
+  // reading this whole issue exists to prevent.
+  it("#332: openPrs rides along only when the route answered for the studio", () => {
+    const counted = lsJsonRows([status({ id: "websites--web-studio" })], NOW, undefined, new Map([["websites--web-studio", 2]]))[0];
+    expect(counted.openPrs).toBe(2);
+    const zero = lsJsonRows([status({ id: "websites--pilot" })], NOW, undefined, new Map([["websites--pilot", 0]]))[0];
+    expect(zero.openPrs).toBe(0);
+    // No map entry for this studio: NO openPrs key at all.
+    const absent = lsJsonRows([status({ id: "beta--pilot" })], NOW, undefined, new Map([["websites--pilot", 1]]))[0];
+    expect(Object.hasOwn(absent, "openPrs")).toBe(false);
+    // No map passed (a caller predating this feature): unchanged shape.
+    const noMap = lsJsonRows([status({ id: "websites--pilot" })], NOW)[0];
+    expect(Object.hasOwn(noMap, "openPrs")).toBe(false);
+  });
+
+  // Issue #403 — the OTHER surface of the same characterization table:
+  // same precedence kinds, same order, asserted on the JSON lead field.
+  it("#403 table: degraded state is live — a fresh verdict flows through", () => {
+    const r = row({ state: "degraded", observed: { ...emptyObserved(), activity: act({ state: "working", since: "2026-09-25T12:01:20.000Z" }) } });
+    expect(r.lead).toBe("working");
+    expect(r.leadSince).toBe("2026-09-25T12:01:20.000Z");
+  });
+
+  it("#403 table: bare limit — until null, no select — lead limit, reset null", () => {
+    const r = row({ rateLimited: { until: null, seenAt: "2026-09-25T11:30:00.000Z" } });
+    expect(r.lead).toBe("limit");
+    expect(r.leadSince).toBe("2026-09-25T11:30:00.000Z");
+    expect(r.limitResetsAt).toBeNull();
+  });
+
+  it("#403 table: a past reset falls through to the verdict underneath", () => {
+    const r = row({
+      rateLimited: { until: "2026-09-25T11:00:00.000Z", seenAt: "2026-09-25T10:00:00.000Z" },
+      observed: { ...emptyObserved(), activity: act({ state: "working", since: "2026-09-25T12:01:20.000Z" }) },
+    });
+    expect(r.lead).toBe("working");
+  });
+
+  it("#403 table: an unparseable until falls through to the verdict underneath", () => {
+    const r = row({
+      rateLimited: { until: "not a date", seenAt: "2026-09-25T12:00:00.000Z" },
+      observed: { ...emptyObserved(), activity: act({ state: "working", since: "2026-09-25T12:01:20.000Z" }) },
+    });
+    expect(r.lead).toBe("working");
+  });
+
+  it("#403 table: a stopped studio ignores a rateLimited record entirely", () => {
+    const r = row({
+      state: "stopped",
+      rateLimited: { until: "2026-09-25T13:30:00.000Z", seenAt: "2026-09-25T12:00:00.000Z" },
+    });
+    expect(r.lead).toBe("stopped");
+    expect(r.leadSince).toBeNull();
+    expect(r.limitResetsAt).toBeNull();
+  });
+
+  it("#403 table: a stored limit verdict (no row.rateLimited) maps to lead limit with its own since", () => {
+    const r = row({ observed: { ...emptyObserved(), activity: act({ state: "limit", since: "2026-09-25T11:00:00.000Z" }) } });
+    expect(r.lead).toBe("limit");
+    expect(r.leadSince).toBe("2026-09-25T11:00:00.000Z");
     expect(r.limitResetsAt).toBeNull();
   });
 });
