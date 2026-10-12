@@ -2441,9 +2441,13 @@ async function recordTaskWakeDelivered(storage: StudioStorage, incarnationKey: s
  * already has (issue #100): the check execs into the container, and an exec
  * STARTS a stopped one. Refused from storage alone, as `inconclusive` — a
  * statement about the check, which did not run, never about the studio.
+ *
+ * `id` threads to the check's own bring-up-tail failure log (S21 F9): this
+ * route is the one readiness surface whose failure line would otherwise name
+ * no studio at all.
  */
 export async function checkProvisionedGated(
-  storage: StudioStorage, syncDeps: SessionSyncDeps, repo: string,
+  storage: StudioStorage, syncDeps: SessionSyncDeps, repo: string, id: string,
 ): Promise<ProvisionedVerdict> {
   const state = await gatedStateIn(storage, syncDeps.now);
   if (state === null) {
@@ -2455,7 +2459,7 @@ export async function checkProvisionedGated(
   if (state === DESTROY_IN_FLIGHT) {
     return { kind: "inconclusive", reason: "check not run: a destroy is in flight — the check would start the container it is stopping" };
   }
-  return checkProvisionedWithRetry(syncDeps, repo, await storedHarness(storage));
+  return checkProvisionedWithRetry(syncDeps, repo, await storedHarness(storage), id);
 }
 
 /**
@@ -2554,9 +2558,10 @@ async function withBringupLogTail(syncDeps: SessionSyncDeps, reason: string, id?
       : tail;
     return `${reason}\n--- ${BRINGUP_LOG_PATH} (tail) ---\n${clipped}`;
   } catch (err) {
-    // `id` is optional because the SessionSyncDeps-driven check chain has
-    // call sites with no studio id in scope; where it is absent the bare
-    // text stays (S21 F9 — optional param, no forced thread).
+    // `id` stays optional only for the exported checkProvisionedWithRetry
+    // test seam, whose own suite calls it bare (test/studio.replacement
+    // .test.ts); every production path threads a real studio id, the gated
+    // /provisioned route being the last one closed (S21 F9, review N1).
     console.error(
       id === undefined
         ? "studio: bring-up log tail read failed, reporting the verdict without it"
@@ -5051,7 +5056,7 @@ async function applyActivityVerdict(
   recordStudioFn: ((status: StudioStatus) => Promise<void>) | undefined,
   paneVerdict: FrameVerdict,
   hookHeartbeat: HookHeartbeat | null | undefined,
-  id?: string,
+  id: string,
   onLeadWorking?: () => Promise<void>,
   onStaleBackgroundShell?: () => Promise<void>,
 ): Promise<void> {
@@ -5113,7 +5118,7 @@ type AutoWorkingStorage = {
  *  to working, so the board read `submitted` while they worked. Rate-bound,
  *  and never fails the tick: a board hiccup waits for the next window. */
 async function autoWorking(
-  deps: ShipDeps, storage: AutoWorkingStorage, onLeadWorking: () => Promise<void>, id?: string,
+  deps: ShipDeps, storage: AutoWorkingStorage, onLeadWorking: () => Promise<void>, id: string,
 ): Promise<void> {
   const last = Date.parse((await storage.get(AUTO_WORKING_KEY)) ?? "");
   if (Number.isFinite(last) && deps.now().getTime() - last < AUTO_WORKING_EVERY_MS) return;
@@ -5121,7 +5126,7 @@ async function autoWorking(
   try {
     await onLeadWorking();
   } catch (err) {
-    console.error(`studio ${id ?? "unknown"}: auto submitted->working failed, next window retries`, err);
+    console.error(`studio ${id}: auto submitted->working failed, next window retries`, err);
   }
 }
 
@@ -5145,7 +5150,7 @@ type StaleShellNudgeStorage = {
  *  never fails the tick: a wake gate refusal (stopped, limit modal, etc.) or
  *  a transient failure just waits for the next crossing/window. */
 async function staleShellNudge(
-  deps: ShipDeps, storage: StaleShellNudgeStorage, onStaleBackgroundShell: () => Promise<void>, id?: string,
+  deps: ShipDeps, storage: StaleShellNudgeStorage, onStaleBackgroundShell: () => Promise<void>, id: string,
 ): Promise<void> {
   const last = Date.parse((await storage.get(STALE_SHELL_NUDGE_KEY)) ?? "");
   if (Number.isFinite(last) && deps.now().getTime() - last < STALE_SHELL_NUDGE_EVERY_MS) return;
@@ -5153,7 +5158,7 @@ async function staleShellNudge(
   try {
     await onStaleBackgroundShell();
   } catch (err) {
-    console.error(`studio ${id ?? "unknown"}: stale background-shell nudge failed, next window retries`, err);
+    console.error(`studio ${id}: stale background-shell nudge failed, next window retries`, err);
   }
 }
 
@@ -8198,7 +8203,7 @@ export class StudioDO extends Sandbox<Env> {
    * i.e. the studio id's own repo segment, which is what routes.ts passes.
    */
   async checkProvisioned(repo: string): Promise<ProvisionedVerdict> {
-    return checkProvisionedGated(this.ctx.storage, this.syncDeps("readiness"), repo);
+    return checkProvisionedGated(this.ctx.storage, this.syncDeps("readiness"), repo, this.selfId());
   }
 
   /**
