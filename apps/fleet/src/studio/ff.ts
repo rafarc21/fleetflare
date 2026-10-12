@@ -48,7 +48,7 @@ export const FF_HELP = [
   "  ff <role>       another role, e.g. web-studio, release-studio, ...",
   '  ff <role> "<task>"  file that task on the board, assign it to that studio,',
   "                  spawn the studio FOR it, wait, attach",
-  "  ff <role> <n>   ADOPT existing issue #n: assign it to that studio, reset it",
+  "  ff <role> <n>   ADOPT existing issue #n (the # is optional): assign it to that studio, reset it",
   "                  to submitted, spawn the studio FOR it, wait, attach.",
   "                  Works on a bare issue filed by hand from a phone.",
   '  ff <role> --new "<task>"  a SECOND (third, ...) studio for that role in this',
