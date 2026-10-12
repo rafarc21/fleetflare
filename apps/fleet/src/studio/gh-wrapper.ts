@@ -39,7 +39,7 @@ export const STUDIO_GH_PROXY_MISSING =
   `fleet: this studio writes to GitHub through the fleet Worker, but ${GH_PROXY_CLIENT} is missing -- restart the studio on a current image`;
 
 /** Issue #7: the gh verbs fleet-gh-proxy carries to the Worker's /fleet/gh. */
-export const GH_PROXY_VERBS = [
+const GH_PROXY_VERBS = [
   "pr create", "pr edit", "pr ready", "pr comment", "pr review", "issue create", "issue edit", "issue comment",
 ];
 
@@ -48,14 +48,14 @@ export const GH_PROXY_VERBS = [
  * word outside this list is an alias or an extension: aliases are refused
  * (their expansion is never scanned), extensions get the argv scan.
  */
-export const GH_BUILTIN_COMMANDS = [
+const GH_BUILTIN_COMMANDS = [
   "a11y", "accessibility", "actions", "agent-task", "alias", "api", "attestation", "auth", "browse",
   "cache", "codespace", "completion", "config", "copilot", "credits", "discussion", "extension", "gist",
   "gpg-key", "help", "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo",
   "ruleset", "run", "search", "secret", "skill", "ssh-key", "status", "variable", "version", "workflow",
 ];
-export const STUDIO_REAL_GH_PATH = "/usr/bin/gh";
-export const STUDIO_GH_WRAPPER_PATH = "/usr/local/bin/gh";
+const STUDIO_REAL_GH_PATH = "/usr/bin/gh";
+const STUDIO_GH_WRAPPER_PATH = "/usr/local/bin/gh";
 
 export function studioGhWrapperScript(
   realGh = STUDIO_REAL_GH_PATH, scanPath = LEAK_SCAN_PATH, marker = WRITE_PROXY_MARKER,

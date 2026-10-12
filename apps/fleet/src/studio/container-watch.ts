@@ -10,7 +10,7 @@ import { STATUS_KEY, OPERATION_KEY, OPERATION_STALE_MS, type StudioStorage } fro
 import type { StudioStatus } from "./types";
 
 /** Every 5th minute of the Worker's minute cron. */
-export const WATCH_EVERY_MINUTES = 5;
+const WATCH_EVERY_MINUTES = 5;
 
 export function isWatchMinute(scheduledTime: number): boolean {
   return new Date(scheduledTime).getUTCMinutes() % WATCH_EVERY_MINUTES === 0;

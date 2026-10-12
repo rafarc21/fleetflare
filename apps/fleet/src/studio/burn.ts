@@ -1580,7 +1580,7 @@ export async function extractJsonlMembers(gzipTarBytes: Uint8Array): Promise<Map
 export const GUNZIP_SLICE = 65_536;
 
 /** The one reused view walkGzipTar reads the inflated tar into. */
-export const INFLATE_READ_VIEW = 1_048_576;
+const INFLATE_READ_VIEW = 1_048_576;
 
 /** Test seam: told how many inflated bytes the reader had consumed at the
  *  moment the gz source was fully fed (#176 review). Production never sets it. */

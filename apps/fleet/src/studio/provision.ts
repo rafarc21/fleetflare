@@ -1249,7 +1249,7 @@ export const BRINGUP_LOG_PATH = "/workspace/.fleet/bringup.log";
 /** How much of the log a failed verdict carries. Enough for one whole run's
  *  step list plus its stderr (a healthy run writes ~10 lines), short enough
  *  that a `fleet ls` row stays readable. */
-export const BRINGUP_LOG_TAIL_LINES = 60;
+const BRINGUP_LOG_TAIL_LINES = 60;
 
 /** Hard ceiling on the tail, in characters, applied after the read. The
  *  line count above bounds a WELL-FORMED log; this bounds a pathological one
@@ -3121,11 +3121,11 @@ async function bringUpAndVerify(
 export const SESSION_ADOPT_MARKER = "FLEET_SESSION_ADOPT";
 
 /** Issue #146: the image's adopt script (container/studio-adopt.sh). */
-export const SESSION_ADOPT_SCRIPT = "/opt/fleet/studio-adopt.sh";
+const SESSION_ADOPT_SCRIPT = "/opt/fleet/studio-adopt.sh";
 
 /** The in-container kill: `timeout -k 2 <this>` around the whole snippet, so a
  *  hung step (an unreadable file, a stalled disk) is killed where it runs. */
-export const SESSION_ADOPT_KILL_SECONDS = 15;
+const SESSION_ADOPT_KILL_SECONDS = 15;
 
 /** The Worker's own backstop, past the in-container kill plus its 2s grace.
  *  It only fires when the container cannot answer at all. Past it, bring-up

@@ -494,7 +494,7 @@ function openPrsHeaders(creds: Credentials): Record<string, string> {
 /** #332 review H1: every open-prs client fetch carries its own deadline —
  *  `fleet ls` must never sit waiting on a slow scan; the AbortSignal turns
  *  a hung read into the same "no data" degrade the 404 path already takes. */
-export const OPEN_PRS_TIMEOUT_MS = 10_000;
+const OPEN_PRS_TIMEOUT_MS = 10_000;
 
 /**
  * The per-studio PRS counts for a whole listing (#332): one fetch per
@@ -2357,11 +2357,11 @@ export async function cmdRescueAll(creds: Credentials, flags: RescueAllFlags): P
 // fleet reap — issue #53. Policy lives in cli/reap.ts; this is the wiring.
 
 /** Where reap keeps its backoff, stall-alarm and board-floor memory. */
-export const REAP_STATE_PATH = join(homedir(), ".fleet", "reap-state.json");
+const REAP_STATE_PATH = join(homedir(), ".fleet", "reap-state.json");
 
 /** Review F1: every plain read reap makes is bounded. A hung read must never
  *  sit between the last live read and a destroy, nor stall a poll. */
-export const REAP_READ_TIMEOUT_MS = 20_000;
+const REAP_READ_TIMEOUT_MS = 20_000;
 /** A lock file older than this is a crashed run's, and is taken over. */
 export const REAP_LOCK_STALE_MS = 15 * 60_000;
 
