@@ -947,7 +947,11 @@ function resolveOffsets(prev: BurnCursor, members: MemberFacts[]): ResolvedOffse
       // end of complete lines), so this is never null in practice.
       const print = member.fingerprintAt(end);
       if (print !== null) fileHashes[pid] = print;
-      const entry = sessions[mapKey]!;
+      // Issue #443 F6: `?? {counted: 0, hash: null}` — same-tick sound (rule
+      // (i) seeds `sessions[mapKey]` at line ~928 before this read), but the
+      // cursor is untrusted storage; the seed shape is the same nothing-to-
+      // trust entry legacySeed's unverified branch already falls back to.
+      const entry = sessions[mapKey] ?? { counted: 0, hash: null };
       // A hashless seed (entry.hash === null) is replaced unconditionally by
       // THIS member's own verified {end, print}, even when end is LOWER than
       // the legacy seed's counted — the seed never outlives its own seeding
@@ -1198,14 +1202,15 @@ export function pruneCursor(cursor: BurnCursor, presentPaths: ReadonlySet<string
     if (presentIds.has(pkey)) lastSeenAt[pkey] = nowSec;
     else if (lastSeenAt[pkey] === undefined) lastSeenAt[pkey] = nowSec; // first encounter: seen now, not stale
 
-    const seenAtMs = lastSeenAt[pkey]! * 1000;
+    const seenAtMs = (lastSeenAt[pkey] ?? nowSec) * 1000;
     if (nowMs - seenAtMs >= CURSOR_PRUNE_MS) {
       delete lastSeenAt[pkey];
       continue; // pruned: fileOffsets/fileHashes for this path are dropped
     }
 
-    fileOffsets[pkey] = cursor.fileOffsets[pkey]!;
-    if (cursor.fileHashes?.[pkey] !== undefined) fileHashes[pkey] = cursor.fileHashes[pkey]!;
+    fileOffsets[pkey] = cursor.fileOffsets[pkey] ?? 0;
+    const hash = cursor.fileHashes?.[pkey];
+    if (hash !== undefined) fileHashes[pkey] = hash;
     const literalKey = cursor.pathSession?.[pkey] === undefined ? sessionKeyOf(pkey) : null;
     const mapKey = cursor.pathSession?.[pkey] ?? (literalKey !== null ? sessionMapKey(literalKey) : undefined);
     if (mapKey !== undefined) {
@@ -1354,7 +1359,7 @@ export function pruneCursorForSize(
     while (bytes > targetBytes && i < ids.length) {
       const batchEnd = Math.min(i + RECHECK_BATCH, ids.length);
       for (; i < batchEnd; i++) {
-        act(ids[i]!);
+        act(ids[i] ?? ids[ids.length - 1] ?? "");
         count();
       }
       bytes = snapshot();
@@ -1953,9 +1958,10 @@ export async function burnIncrement(
   const siblingEnds = new Map<string, number[]>();
   for (const files of byKey.values()) {
     if (files.length < 2) continue;
-    const ends = files.map((f) => measured.get(f)!.endOfComplete);
+    const ends = files.map((f) => measured.get(f)?.endOfComplete ?? 0);
     for (const file of files) {
-      const m = measured.get(file)!;
+      const m = measured.get(file);
+      if (!m) continue;
       const want = [...new Set(ends)].filter((e) => e <= m.length && !m.prints.has(e)).sort((x, y) => x - y);
       if (want.length > 0) siblingEnds.set(file, want);
     }
@@ -1978,7 +1984,8 @@ export async function burnIncrement(
   }
 
   const { starts, cursor } = resolveOffsets(prev, order.map((file) => {
-    const m = measured.get(file)!;
+    const m = measured.get(file);
+    if (!m) throw new Error(`burnIncrement: measured member missing: ${file}`);
     return {
       file,
       key: sessionKeyOf(file),
@@ -1996,7 +2003,8 @@ export async function burnIncrement(
     const mine = occurrence++;
     const m = measured.get(name);
     if (!m || m.occurrence !== mine) return null;
-    const start = starts.get(name)!;
+    const start = starts.get(name);
+    if (start === undefined) return null;
     const decoder = new TextDecoder();
     let pos = 0;
     let line: string[] = [];

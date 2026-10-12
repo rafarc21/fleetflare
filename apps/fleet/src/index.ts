@@ -2,7 +2,7 @@ import type { Env } from "./env";
 import { handleTelegramWebhook } from "./telegram/webhook";
 import { handleGithubWebhook } from "./github/webhook";
 import { AGENTS, telegramConfig } from "./agents/registry";
-import { getFlag, setFlag, incrementCounter } from "./state";
+import { getFlag, setFlag, flagIsSet, markEpisode, incrementCounter } from "./state";
 import { sendCard } from "./telegram/api";
 import { staleTasks, rearmKey, alertedKey, shouldAlert } from "./tasks/watchdog";
 import type { TaskRecord } from "./tasks/loop";
@@ -216,14 +216,14 @@ async function handleScheduled(controller: ScheduledController, env: Env, _ctx: 
       // as the task stays stuck — a muted alert is exactly the failure §12
       // exists to prevent. Set only after a successful send, so a delivery
       // failure is retried next minute instead of silenced for good.
-      if (shouldAlert(attempts, (await getFlag(env.DB, alertedKey(task.taskId))) === "1")) {
+      if (shouldAlert(attempts, await flagIsSet(env.DB, alertedKey(task.taskId)))) {
         try {
           await sendCard(
             telegram.token, task.chatId,
             `WATCHDOG: task ${task.taskId} has not polled for ${Math.round(staleMs / 1000)}s. ` +
             `Re-arm attempt ${attempts} did not take.`,
           );
-          await setFlag(env.DB, alertedKey(task.taskId), "1", now);
+          await markEpisode(env.DB, alertedKey(task.taskId), now);
         } catch (err) {
           // sendCard throws on any Telegram-side failure (api.ts's call()
           // helper checks the JSON body's `ok` field, not just HTTP status).

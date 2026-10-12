@@ -23,6 +23,37 @@ export async function deleteFlag(db: D1Database, key: string): Promise<void> {
 }
 
 /**
+ * #447 (sweep-6 F1): the "episode marker" reading of this table. An
+ * episode flag is a fleet_state key whose value is "1" while an episode
+ * (a stale task, a stopped studio, a pause tap) is running and "0" once
+ * it has ended, so the NEXT episode on the same key acts again instead
+ * of being muted forever. Three call-site families shared this rule as
+ * hand-rolled getFlag/setFlag pairs, each re-deriving the "1"/"0"
+ * vocabulary: watchdog.ts's clearRearm (rearmKey+alertedKey), the
+ * stopped-wake skip flag (github/webhook.ts) and the Telegram "paused"
+ * flag. These three wrappers are the one home for that vocabulary.
+ * Thin by design: each IS its getFlag/setFlag call, no new SQL — the
+ * counter and scan shapes stay getFlag/setFlag/incrementCounter's own.
+ */
+export async function flagIsSet(db: D1Database, key: string): Promise<boolean> {
+  return (await getFlag(db, key)) === "1";
+}
+
+/** Marks an episode flag as set ("1") — the value every reader checks. */
+export async function markEpisode(db: D1Database, key: string, now: number): Promise<void> {
+  await setFlag(db, key, "1", now);
+}
+
+/**
+ * Ends the episode ("0"). Redundant by design: callers clear
+ * unconditionally on the recovery signal, so a clear of an already-clear
+ * key is a free write — the posture that makes the NEXT episode act.
+ */
+export async function clearEpisode(db: D1Database, key: string, now: number): Promise<void> {
+  await setFlag(db, key, "0", now);
+}
+
+/**
  * PR #9 review, BLOCKER F1: an atomic "increment `key` and tell me the new
  * total", as ONE D1 statement — never getFlag-then-setFlag, which is a read
  * and a write as two separate round-trips with nothing atomic between them.

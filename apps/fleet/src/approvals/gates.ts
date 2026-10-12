@@ -2,7 +2,7 @@ import type { Env } from "../env";
 import { agentForProject, telegramConfig } from "../agents/registry";
 import { getApproval, decideApproval, finishApproval } from "./store";
 import { appendEvent } from "../events/log";
-import { makeEvent } from "../events/schema";
+import { makeEvent, shortId } from "../events/schema";
 import { editCard, answerCallbackQuery, sendCard } from "../telegram/api";
 import { GATE_LABELS, type GateAction } from "../tasks/types";
 import { mintRepoToken } from "../github/auth";
@@ -102,7 +102,7 @@ export async function handleCallbackQuery(
           kind: "approval", project: row.project, ref: row.id,
           body: `${label}: ${state}`,
         },
-        now, crypto.randomUUID().slice(0, 8),
+        now, shortId(),
       ),
     ));
 
@@ -121,7 +121,7 @@ export async function handleCallbackQuery(
             kind: "report", project: row.project, ref: row.id,
             body: `${label} rejected by the operator. Do not retry unless told.`,
           },
-          now, crypto.randomUUID().slice(0, 8),
+          now, shortId(),
         ),
       ));
     return;

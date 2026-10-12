@@ -1,5 +1,5 @@
 import type { TaskRecord } from "./loop";
-import { setFlag } from "../state";
+import { clearEpisode } from "../state";
 
 export const STALE_MS = 3 * 60 * 1000;
 
@@ -76,8 +76,8 @@ export function rearmKey(taskId: string): string {
  * just written down.
  */
 export async function clearRearm(db: D1Database, taskId: string, now: number): Promise<void> {
-  await setFlag(db, rearmKey(taskId), "0", now);
-  await setFlag(db, alertedKey(taskId), "0", now);
+  await clearEpisode(db, rearmKey(taskId), now);
+  await clearEpisode(db, alertedKey(taskId), now);
 }
 
 /**

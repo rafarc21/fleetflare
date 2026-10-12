@@ -1,8 +1,8 @@
 import type { Env } from "../env";
 import { appendEvent } from "../events/log";
-import { makeEvent } from "../events/schema";
+import { makeEvent, shortId } from "../events/schema";
 import { agentForProject, telegramConfig } from "../agents/registry";
-import { getFlag, setFlag } from "../state";
+import { flagIsSet, markEpisode, clearEpisode } from "../state";
 import { sendMessage } from "./api";
 import type { TaskRecord } from "../tasks/loop";
 import { mintRepoToken } from "../github/auth";
@@ -59,7 +59,7 @@ export async function handleTelegramWebhook(
     const marker = makeEvent(
       { from: "human", to: "cto", kind: "decision", project, body: `callback_query ${cq.id}` },
       Date.now(),
-      crypto.randomUUID().slice(0, 8),
+      shortId(),
     );
     marker.id = `cb_${project}_${cq.id}`;
     const isNew = await appendEvent(env.DB, marker);
@@ -90,7 +90,7 @@ export async function handleTelegramWebhook(
   // event, no container spend) and a reply confirms the tap never landed
   // silently on the operator's phone.
   if (text === "/pause") {
-    await setFlag(env.DB, "paused", "1", Date.now());
+    await markEpisode(env.DB, "paused", Date.now());
     try {
       await sendMessage(tg.token, agent.chatId, "Paused. New tasks are refused until /resume.");
     } catch (err) {
@@ -99,7 +99,7 @@ export async function handleTelegramWebhook(
     return new Response("ok");
   }
   if (text === "/resume") {
-    await setFlag(env.DB, "paused", "0", Date.now());
+    await clearEpisode(env.DB, "paused", Date.now());
     try {
       await sendMessage(tg.token, agent.chatId, "Resumed.");
     } catch (err) {
@@ -126,7 +126,7 @@ export async function handleTelegramWebhook(
   const event = makeEvent(
     { from: "human", to: agent.id, kind: "human", project, body: text },
     Date.now(),
-    crypto.randomUUID().slice(0, 8),
+    shortId(),
   );
   // Telegram redelivers the same update_id whenever it doesn't see a fast
   // 2xx (e.g. the LLM round trip below runs long and the request times out
@@ -146,8 +146,8 @@ export async function handleTelegramWebhook(
   // Refuse a second concurrent run before spending a container on it.
   // Set by /pause above, cleared by /resume; survives a Worker redeploy
   // because it lives in D1, not memory.
-  const paused = await getFlag(env.DB, "paused");
-  if (paused === "1") {
+  const paused = await flagIsSet(env.DB, "paused");
+  if (paused) {
     try {
       await sendMessage(tg.token, agent.chatId, "Fleet is paused. /resume to continue.");
     } catch (err) {

@@ -359,13 +359,14 @@ describe("worker exception capture (#188)", () => {
   });
 
   it("scheduled: an uncaught exception (outside every local try/catch) lands a row AND is still rethrown unchanged", async () => {
-    // getFlag's own call site (the rearm-attempt counter read) is the one
-    // line in scheduled() with no local try/catch around it — see
-    // src/index.ts's handleScheduled.
+    // incrementCounter's own call site (the rearm-attempt increment) is the
+    // one line in scheduled() with no local try/catch around it — see
+    // src/index.ts's handleScheduled. (Merge of #476 + #452: the counter
+    // read used to be getFlag's; the alertedKey read is now flagIsSet.)
     // Same object-identity reasoning as the fetch test above (operator
     // fix-first review, PR #198).
-    const original = new Error("getFlag boom - scheduled exception test");
-    vi.spyOn(stateModule, "getFlag").mockRejectedValue(original);
+    const original = new Error("incrementCounter boom - scheduled exception test");
+    vi.spyOn(stateModule, "incrementCounter").mockRejectedValue(original);
     const fakeEnv = { ...env, AGENT: fakeAgentReturning(staleTask()) };
 
     const ctx = fakeCtx();
@@ -375,7 +376,7 @@ describe("worker exception capture (#188)", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].route).toBe("scheduled");
     expect(rows[0].name).toBe("Error");
-    expect(rows[0].message).toBe("getFlag boom - scheduled exception test");
+    expect(rows[0].message).toBe("incrementCounter boom - scheduled exception test");
     expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
   });
 

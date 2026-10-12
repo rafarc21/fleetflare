@@ -75,6 +75,16 @@ describe("mergePullRequest", () => {
     await mergePullRequest("tok", "o/r", "7", "t", "squash");
     expect(calls[0].headers).toEqual(GH_STD_HEADERS);
   });
+
+  it("a 2xx body with no sha throws, never returns undefined (S10-F2)", async () => {
+    respond = () => Response.json({});
+    try {
+      await mergePullRequest("tok", "o/r", "7", "t", "squash");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("merge failed (200): GitHub named no sha");
+    }
+  });
 });
 
 describe("fetchRepoFile", () => {
@@ -235,6 +245,17 @@ describe("upsertRepoFile", () => {
       expect((err as Error).message).toBe("upsert p.json: sha lookup failed (500): boom");
     }
   });
+
+  it("a sha-lookup body with no sha throws, never a sha-less PUT (S10-F2)", async () => {
+    respond = () => Response.json({});
+    try {
+      await upsertRepoFile("tok", "o/ops", "p.json", "{}", "msg");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("upsert p.json: sha lookup failed (200): GitHub named no sha");
+    }
+    expect(calls).toHaveLength(1); // GET only — the sha-less PUT never fired
+  });
 });
 
 // #363 round 3: the Worker's putOpsFile port must UPSERT (sha lookup, then
@@ -307,6 +328,16 @@ describe("createRepoFile", () => {
     respond = () => Response.json({ content: { sha: "def7890123" } });
     await createRepoFile("tok", "o/r", "fleet/memory/s/x.md", "fact", "msg");
     expect(calls[0].headers).toEqual(GH_STD_HEADERS);
+  });
+
+  it("a 2xx body with no content.sha throws, never a phantom empty sha (S10-F2)", async () => {
+    respond = () => Response.json({});
+    try {
+      await createRepoFile("tok", "o/r", "fleet/memory/s/x.md", "fact", "msg");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("create fleet/memory/s/x.md failed (200): GitHub named no sha");
+    }
   });
 });
 
