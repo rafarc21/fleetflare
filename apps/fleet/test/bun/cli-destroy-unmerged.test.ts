@@ -266,13 +266,13 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
         const u = new URL(req.url);
         requests.push(`${req.method} ${u.pathname}${u.search}`);
         if (u.pathname === `/studio/${ID}/status` && req.method === "GET") {
-          return Response.json({ id: ID, state: statusState, repoSlug: "acme-org/websites" });
+          return Response.json({ id: ID, state: statusState, error: null, repoSlug: "acme-org/websites" });
         }
         if (u.pathname === "/studio/board/open-prs" && req.method === "GET") {
           return Response.json(openPrsBody);
         }
         if (u.pathname === `/studio/${ID}/destroy` && req.method === "POST") {
-          return Response.json({ id: ID, state: "stopped", repoSlug: "acme-org/websites" });
+          return Response.json({ id: ID, state: "stopped", error: null, repoSlug: "acme-org/websites" });
         }
         return new Response("not found", { status: 404 });
       },
@@ -361,7 +361,7 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
         const u = new URL(req.url);
         requests.push(`${req.method} ${u.pathname}`);
         if (u.pathname === `/studio/${ID}/status` && req.method === "GET") {
-          return Response.json({ id: ID, state: "running", repoSlug: "acme-org/websites" });
+          return Response.json({ id: ID, state: "running", error: null, repoSlug: "acme-org/websites" });
         }
         if (u.pathname === "/studio/board/open-prs" && req.method === "GET") {
           return Response.json({ repo: "acme-org/websites", prs: { [ID]: [pr(9)] }, unknown: [] });
