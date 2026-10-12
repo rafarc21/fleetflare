@@ -7,9 +7,9 @@ Test-only fix. One file: apps/fleet/test/bun/install-cache-security.test.ts. No 
 
 The two "full pipeline" MUTANT PROOF tests (~line 477 restore, ~line 491 save) pass a BARE
 relative injection payload — `injectionPayload(marker)` returns `x$(touch /tmp/<marker>)y` —
-to the FIXED, shipped installCacheRestoreCmd / installCacheSaveCmd. Those commands' own
-`mkdir -p ${shQuote(dir)}` / `[ ! -d ${shQuote(dir)}/node_modules ]` lines materialize the
-literal relative name under the test's cwd (`apps/fleet/`), leaving empty
+to the FIXED, shipped installCacheRestoreCmd / installCacheSaveCmd. The restore command's own
+`mkdir -p ${shQuote(dir)}` line materializes the literal relative name under the test's cwd
+(the save command's stat line materializes nothing) (`apps/fleet/`), leaving empty
 `x$(touch /tmp/install-cache-sec-pwned-<hex>)y` dir trees. Empty dirs are invisible to
 `git status` and accumulate one per run (two hex markers measured on this studio).
 
