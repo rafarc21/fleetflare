@@ -8,6 +8,7 @@
 // too, and that project's `types` array has no "bun" entry. Keeping this
 // pure (no node:*/Bun imports) means a test can import it directly.
 import type { StudioStatus } from "../src/studio/types";
+import { SHIP_TRANSCRIPT_SECONDS } from "../src/studio/ship-cadence";
 import { SYNC_SESSION_SECONDS } from "../src/studio/session-sync";
 import { formatRateLimited, type RateLimitObservation } from "../src/studio/rate-limit";
 import { isUnreachable, type Observed } from "../src/studio/observed";
@@ -254,8 +255,11 @@ export function formatSession(status: StudioStatus, now: Date): string {
  * that age, never the stored word.
  *
  *   - `ACTIVITY_DO_STALE_SECONDS`: 3 × the ship tick's own 30s cadence
- *     (do.ts's `SHIP_TRANSCRIPT_SECONDS`) — the SAME three-consecutive-ticks
- *     shape PR1 uses for `unreachable`. For a caller reading the DO's own
+ *     (`SHIP_TRANSCRIPT_SECONDS`, the shared leaf src/studio/ship-cadence.ts)
+ *     — the SAME three-consecutive-ticks shape PR1 uses for `unreachable`.
+ *     The Worker-side twin, activity.ts's `HOOK_STALE_BUDGET_MS`, derives
+ *     from the same leaf, so the sync between the two budgets is mechanical:
+ *     bump the tick and both follow. For a caller reading the DO's own
  *     `activity` key directly (`fleet inspect`, `GET /studio/:id/status`).
  *   - `ACTIVITY_MIRROR_STALE_SECONDS`: `2 × SYNC_SESSION_SECONDS + 60`, the
  *     exact budget PR1 already uses for `unverified` — the D1 mirror only
@@ -268,7 +272,7 @@ export function formatSession(status: StudioStatus, now: Date): string {
  * third argument; a caller reading the DO directly passes
  * `ACTIVITY_DO_STALE_SECONDS` explicitly.
  */
-export const ACTIVITY_DO_STALE_SECONDS = 90;
+export const ACTIVITY_DO_STALE_SECONDS = 3 * SHIP_TRANSCRIPT_SECONDS;
 export const ACTIVITY_MIRROR_STALE_SECONDS = 2 * SYNC_SESSION_SECONDS + 60;
 
 /** `until`, a UTC instant, as claude itself prints a reset ("1:30pm (UTC)") —

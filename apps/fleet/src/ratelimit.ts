@@ -15,8 +15,12 @@
 // the two counters from ever colliding even though both are keyed by the
 // same studio id and live in the same fleet_state table (src/state.ts).
 import { incrementCounter } from "./state";
+// MINUTE_MS lives in src/durations.ts, not here: this file is Worker-side
+// (state.ts names the ambient D1Database type), and the shared declaration
+// must stay importable from CLI-reachable modules too — see durations.ts's
+// own header for the boundary rule.
+import { MINUTE_MS } from "./durations";
 
-const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 
 // Item (c): a window comfortably wider than the bucket size itself, so a

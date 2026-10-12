@@ -20,6 +20,7 @@ import {
   // — see that constant's own doc comment for why.
   MEMBER_ALERTS_KEY, MEMBER_ROWS_KEY,
 } from "./failover";
+import { SHIP_TRANSCRIPT_SECONDS } from "./ship-cadence";
 import type { RateLimitObservation } from "./rate-limit";
 
 // Issue #106 — `waiting-members` now carries WHICH sub-case produced it:
@@ -402,23 +403,17 @@ const HOOK_AXIS_STATES = new Set<HookHeartbeat["state"]>(["working", "idle", "wa
 
 /** Issue #221 fix round 2 (maestro review, PR #352, HIGH finding) — the
  *  staleness budget for CONSUMING a hook heartbeat, independent of the
- *  "newer than the last look" check `hookWinsAxis` does below. Without this,
- *  a lead killed mid-turn (crash, OOM) leaves a single stale hook stamp that
- *  the "newer than last look" check alone cannot age out IF ship ticks
- *  themselves stop running for a while — a stopped studio, or a fresh
- *  operation lock (`applyActivityVerdict`'s own `!live || activityOpFresh`
- *  carve-out, do.ts) skips writing `ACTIVITY_KEY` entirely, so
- *  `prevActivity.observedAt` freezes right along with the gap. A hook
- *  stamped just after the gap began could still read as "newer than last
- *  look" once ticks resume, despite being minutes old in real wall-clock
- *  terms by then. Mirrors `ACTIVITY_DO_STALE_SECONDS` (cli/readiness-
- *  format.ts, 90s = 3 × the 30s ship-tick cadence, that constant's own doc
- *  comment) as a plain number rather than an import — studio/ is a layer
- *  BELOW cli/ (cli imports `Activity` from here, never the reverse), and 90s
- *  is already the established "how stale is too stale" budget for this
- *  EXACT stored value elsewhere in the codebase, so reusing the NUMBER (not
- *  a cross-layer import) keeps the two budgets honestly in sync without
- *  inverting that dependency direction.
+ *  "newer than the last look" check `hookWinsAxis` does below: a hook stamp
+ *  older than this never wins, even when newer than a frozen
+ *  `prevActivity.observedAt` — a stopped studio, or a fresh operation lock
+ *  (`applyActivityVerdict`'s own `!live || activityOpFresh` carve-out,
+ *  do.ts) skips writing `ACTIVITY_KEY` entirely, so a hook stamped just
+ *  after the gap began could otherwise read as "newer than last look" once
+ *  ticks resume despite being minutes old. Ticks pause under a stopped
+ *  studio/operation lock; this budget ages the stamp out regardless.
+ *  Derived, like cli/readiness-format.ts's `ACTIVITY_DO_STALE_SECONDS`,
+ *  from the shared `SHIP_TRANSCRIPT_SECONDS` leaf (ship-cadence.ts): both
+ *  budgets are 3 × the ship-tick cadence, so bumping the tick moves both.
  *
  *  Known residual, accepted and named (maestro review, PR #352 round 3): a
  *  lead killed mid-turn can still render `WORKING` for up to one ship tick
@@ -427,7 +422,7 @@ const HOOK_AXIS_STATES = new Set<HookHeartbeat["state"]>(["working", "idle", "wa
  *  gone until the NEXT pane capture (or this budget's own expiry) corrects
  *  it. Bounded, self-healing within one tick, and strictly better than PR3a
  *  alone (up to 30s late either way, never permanently stuck). */
-const HOOK_STALE_BUDGET_MS = 90_000;
+const HOOK_STALE_BUDGET_MS = 3 * SHIP_TRANSCRIPT_SECONDS * 1000;
 
 /**
  * Issue #221 (PR3b) — "freshest wins, ties to the pane" (spec, verbatim):
