@@ -1656,7 +1656,7 @@ describe("burn cursor — a moved, re-adopted, shrunken or subagent transcript c
       expect(production.parseSkips).toBe(0);
       // The foreign entry is superseded, not crashed on, and the session's
       // own counted reflects the resolved end of the grown main file.
-      const entry = Object.entries(production.cursor.sessions).find(([k]) => k !== "unrelated-session-key");
+      const entry = Object.entries(production.cursor.sessions ?? {}).find(([k]) => k !== "unrelated-session-key");
       expect(entry).toBeDefined();
     });
   });
