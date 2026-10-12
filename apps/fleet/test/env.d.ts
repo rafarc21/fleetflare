@@ -23,6 +23,7 @@ declare global {
       TEST_TERMINAL_TEMPLATE_SRC: string;
       TEST_CLI_FLEET_SRC: string;
       TEST_STUDIO_DO_SRC: string;
+      TEST_SANDBOX_API_SRC: string;
       TEST_SURVIVAL_DELIVERY_SRC: string;
       TEST_FLEET_JSON: string;
       TEST_PILOT_ROLE_MD: string;

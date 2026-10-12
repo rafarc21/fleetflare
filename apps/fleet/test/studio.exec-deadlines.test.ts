@@ -4,6 +4,7 @@ import {
   isDeadlineExit, SessionBusyError,
   type SandboxHandle, type SbExecOptions,
 } from "../src/studio/sandbox-api";
+import { INSPECT_EXEC_MS } from "../src/studio/inspect";
 import { runScheduledTick, TICK_DEADLINES_MS } from "../src/studio/do";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
@@ -94,6 +95,19 @@ describe("EXEC_CLASSES — one session per fleet call class", () => {
     expect(EXEC_CLASSES.readiness.timeoutMs).toBeGreaterThan(20_000);
     // Large dirty-tree pushes (#110 review).
     expect(EXEC_CLASSES.rescue.timeoutMs).toBe(300_000);
+  });
+
+  // #507 (sweep-14 S14-F3): the class's inspect budget must BE
+  // INSPECT_EXEC_MS by reference — the table's own doc comment says so.
+  // A value assertion cannot tell a reference from a copy, so the source
+  // text is pinned, same technique as do.ts above (workerd has no
+  // filesystem, hence the vitest binding): the inspect line must name
+  // the constant, never a hand-copied literal.
+  it("inspect's class budget is INSPECT_EXEC_MS by reference, not a hand-copied 15_000 (#507)", () => {
+    expect(EXEC_CLASSES.inspect.timeoutMs).toBe(INSPECT_EXEC_MS);
+    const line = env.TEST_SANDBOX_API_SRC.split("\n").find((l) => l.trimStart().startsWith("inspect:"));
+    expect(line).toBeDefined();
+    expect(line).toContain("timeoutMs: INSPECT_EXEC_MS");
   });
 
   // Board #208 fix round, item 5: wip-sync must NOT share `sync`'s own 120s
