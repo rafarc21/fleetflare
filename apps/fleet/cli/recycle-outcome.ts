@@ -129,12 +129,12 @@ export interface RecycleReport {
  *  this is part of. */
 const RECYCLE_UNKNOWN_EXIT_CODE = 2;
 
-export interface RecycleUrls {
+interface RecycleUrls {
   recycle: string;
   status: string;
 }
 
-export interface RecycleOpts {
+interface RecycleOpts {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   pollAttempts?: number;
