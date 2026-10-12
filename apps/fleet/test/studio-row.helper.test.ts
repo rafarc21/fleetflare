@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { StudioStatus } from "../src/studio/types";
-import { row, runningRow, stoppedRow } from "./helpers/studio-row";
+import { row, runningRow, stoppedRow, burnRow } from "./helpers/studio-row";
 
 // Sweep-3 S3-F2 (#372): golden table for the shared studio-row fixture —
 // every migrated suite's old hand-written builder must equal one of these.
@@ -38,5 +38,38 @@ describe("studio-row helper", () => {
     const r = stoppedRow({ spawnTokenHash: "h" });
     expect(r.state).toBe("stopped");
     expect(r.spawnTokenHash).toBe("h");
+  });
+});
+
+// Sweep-18 F9 (#596): golden table for burnRow — the zero Burn literal that
+// co-travels with row(). window5hStart is REQUIRED (no default): the two
+// adopting sites genuinely diverge, so a call without it must not compile.
+describe("burnRow", () => {
+  it("burnRow({window5hStart}) is exactly the zero Burn, no extra keys", () => {
+    expect(burnRow({ window5hStart: "2026-08-16T00:00:00.000Z" })).toStrictEqual({
+      turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0,
+      window5hStart: "2026-08-16T00:00:00.000Z", window5hOutput: 0,
+    });
+  });
+
+  it("a call without window5hStart is a type error, not a silent zero", () => {
+    // Compile-time pin: window5hStart is REQUIRED, so this call fails
+    // type-checking — the @ts-expect-error directive is the assertion. The
+    // runtime half pins the same design's other edge: the helper never
+    // fabricates a window5hStart either, so there is no silent zero to fall
+    // back on when a caller forgets one.
+    // @ts-expect-error window5hStart is required
+    const silent = burnRow();
+    expect(silent.window5hStart).toBeUndefined();
+  });
+
+  it("burnRow({..., turns}) overrides the zero default for that key alone", () => {
+    const b = burnRow({ window5hStart: "x", turns: 7 });
+    expect(b.turns).toBe(7);
+    expect(b.window5hStart).toBe("x");
+    expect(b.inputTokens).toBe(0);
+    expect(b.outputTokens).toBe(0);
+    expect(b.costUsd).toBe(0);
+    expect(b.window5hOutput).toBe(0);
   });
 });
