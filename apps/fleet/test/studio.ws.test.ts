@@ -987,13 +987,24 @@ describe("sbAttachPty adapter", () => {
     // Both end the pump, but only one is worth alerting on, and reporting a
     // failure as a clean exit hides it completely.
     const sb = fakeSandboxPtyHost();
-    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24, studioId: "s-test" });
-    const reader = pty.readable.getReader();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24, studioId: "s-test" });
+      const reader = pty.readable.getReader();
 
-    sb.ptySocket.dispatchEvent(new Event("error"));
+      sb.ptySocket.dispatchEvent(new Event("error"));
 
-    await expect(reader.read()).rejects.toThrow();
-    reader.releaseLock();
+      await expect(reader.read()).rejects.toThrow();
+      // S21 F7 (review round-1 N5): the failure line names the studio whose
+      // pty socket died — every studio's tail lines interleave in one stream,
+      // and this catch is the only trace of a container-side pty crash.
+      const line = errSpy.mock.calls.map((c) => String(c[0]))
+        .find((s) => s.includes("pty socket error"));
+      expect(line).toMatch(/studio s-test pty socket error/);
+      reader.releaseLock();
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it("throws when the upgrade does not produce a websocket", async () => {

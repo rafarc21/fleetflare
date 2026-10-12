@@ -173,6 +173,18 @@ describe("StudioDO wiring (source) — #292 r2", () => {
     expect(ctor).toContain("this.envAccount = launched.envAccount");
   });
 
+  // S21 F10 (review round-1 N4): the constructor's spawn-token catch is the
+  // FIRST line a wedged studio ever emits — before any tick, before any
+  // status row — so it must name the DO (ctx.id.name, in scope two lines up
+  // for constructorLaunch itself). Pinned as source for the same reason the
+  // wiring tests above are: the constructor is unreachable by import here.
+  it("the constructor's spawn-token catch names the DO (S21 F10, N4)", () => {
+    const ctor = body("constructor(...args: ConstructorParameters<typeof Sandbox<Env>>) {");
+    expect(ctor).toContain(
+      "console.error(`studio ${ctx.id.name}: could not load the persisted spawn token at construction`, err)",
+    );
+  });
+
   it("every launch site takes envAccount from the launch launchAccountOrRefuse returned", () => {
     // #354: both fields now land in ONE launchFields assignment from `launch`.
     const site = "({ envVars: this.envVars, envAccount: this.envAccount } = launchFields(this.env, id, spawnToken, launch.name));";
