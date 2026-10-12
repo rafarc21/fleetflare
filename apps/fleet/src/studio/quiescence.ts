@@ -53,7 +53,7 @@ export type QuiescenceVerdict =
   | { quiescent: true; reason?: undefined }
   | { quiescent: false; reason: string };
 
-export function isUnfinished(doc: EnvelopeDoc): boolean {
+function isUnfinished(doc: EnvelopeDoc): boolean {
   return UNFINISHED_INTENTS.has(doc.envelope.intent) || UNFINISHED_STATUSES.has(doc.payload.status);
 }
 
