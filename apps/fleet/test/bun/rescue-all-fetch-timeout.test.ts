@@ -126,7 +126,9 @@ test("cmdRescueAll's real fetch call to a studio's /rescue route is built via re
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
-    if (url.endsWith("/studio/")) return Response.json([{ id: "acme--pilot", state: "running" }]);
+    // A real GET /studio/ row always carries error explicitly (recordStudio
+    // persists it on every write), so this fixture matches the real shape.
+    if (url.endsWith("/studio/")) return Response.json([{ id: "acme--pilot", state: "running", error: null }]);
     return Response.json({ ok: true, pushes: [] });
   }) as typeof fetch;
 

@@ -35,6 +35,7 @@ import type { StudioStatus } from "../src/studio/types";
 // (cli/fleet.ts's `import { requestDestroy, readStatus,
 // DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome"`) needs no change.
 import { readStatus } from "./status-poll";
+import { parseStudioStatus } from "./studio-row";
 export { readStatus };
 
 /**
@@ -148,7 +149,15 @@ export async function requestDestroy(
       lines: [repairFailureLine("destroy", res.status, await res.text())], teardown: false, exitCode: 1,
     };
   }
-  return { kind: "ok", status: (await res.json()) as StudioStatus, lines: [], teardown: true, exitCode: 0 };
+  const status = parseStudioStatus(await res.json());
+  if (status === null) {
+    return {
+      kind: "http-error", status: null,
+      lines: [`destroy answered HTTP ${res.status} but the body was not a studio row`],
+      teardown: false, exitCode: 1,
+    };
+  }
+  return { kind: "ok", status, lines: [], teardown: true, exitCode: 0 };
 }
 
 /** The whole point of #203: ask the row, bounded, and say what it said. */

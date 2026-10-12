@@ -16,6 +16,7 @@
 import type { StudioStatus } from "../src/studio/types";
 import type { OperationInFlight } from "../src/studio/provision";
 import { errText } from "./diag";
+import { parseStudioStatus } from "./studio-row";
 
 // Board issue #149: GET /studio/:id/status's real JSON body already carries
 // `operationInFlight` (do.ts's `statusDetailWithStorage` return type,
@@ -41,9 +42,17 @@ export async function readStatus(
     return { ok: false, why: errText(err) };
   }
   if (!res.ok) return { ok: false, why: `HTTP ${res.status} ${(await res.text().catch(() => "")).trim().slice(0, 200)}`.trim() };
+  let raw: unknown;
   try {
-    return { ok: true, status: (await res.json()) as StatusWithOperation };
+    raw = await res.json();
   } catch {
     return { ok: false, why: `HTTP ${res.status}, but the body was not JSON` };
   }
+  // The decoder does not know operationInFlight (a StatusWithOperation-only
+  // field), so the widening cast sits AFTER it, on the value it just proved.
+  const status = parseStudioStatus(raw);
+  if (status === null) {
+    return { ok: false, why: `HTTP ${res.status}, but the body was not a studio row` };
+  }
+  return { ok: true, status: status as StatusWithOperation };
 }
