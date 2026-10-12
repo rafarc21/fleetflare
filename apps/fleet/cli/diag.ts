@@ -19,9 +19,11 @@ export function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** The CLI's one readability budget for an error body — how much of a
- *  non-2xx body a terminal line shows. repair-failure.ts's 2000 is that
- *  verb's own deliberate budget; every plain snippet shares this one. */
+/** How much of a non-2xx body a plain error snippet shows — the budget
+ *  the fetch-failure lines named in #510 share. Two verbs carry their own
+ *  deliberate budgets instead: repair-failure.ts's 2000, and the board/
+ *  memory lines' raw `slice(0, 500)` (fleet.ts boardRequest,
+ *  taskStateFetch*, cmdMemoryLs). */
 export const ERROR_SNIPPET_MAX_CHARS = 300;
 
 /**
