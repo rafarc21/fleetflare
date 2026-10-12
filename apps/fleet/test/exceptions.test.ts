@@ -360,4 +360,29 @@ describe("pruneWorkerExceptions", () => {
     } as unknown as D1Database;
     await expect(pruneWorkerExceptions(failingDb, 1000)).resolves.toBeUndefined();
   });
+
+  // S21 F6: the catch states the consequence — without a working prune the
+  // table grows until the next insert's own prune succeeds.
+  it("logs the retention consequence when the delete fails", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failingDb = {
+        prepare() {
+          throw new Error("D1 is down");
+        },
+      } as unknown as D1Database;
+      await pruneWorkerExceptions(failingDb, 1000);
+      // Filter, not count: earlier tests' ctx.waitUntil-deferred prunes can
+      // still be resolving when this runs, adding their own console.error
+      // calls — this test only owns this call.
+      const prune = errSpy.mock.calls
+        .map((c) => String(c[0]))
+        .find((s) => s.startsWith("pruneWorkerExceptions failed"));
+      expect(prune).toBe(
+        "pruneWorkerExceptions failed — worker_exceptions retention unbounded until the next insert",
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });

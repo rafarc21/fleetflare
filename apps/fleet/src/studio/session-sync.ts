@@ -1012,7 +1012,7 @@ export async function syncSessionTick(
     await pruneDisplaced(deps, id);
     // A displaced candidate is still a real snapshot of the same session
     // files, so burn parses it and — if that succeeds — the watermark moves.
-    await advanceWatermark(storage, await parseBurn(deps, storage, id, bytes, now), tarStartedAt);
+    await advanceWatermark(storage, await parseBurn(deps, storage, id, bytes, now), tarStartedAt, id);
     return { bytes: 0, split, parts: split ? parts : 1, dailyWritten: false, pruned: 0, skipped: "displaced", displaced: key };
   }
 
@@ -1031,7 +1031,7 @@ export async function syncSessionTick(
   if (forcing) await storage.delete(SESSION_FORCE_KEY);
   if (await storage.get(SESSION_GUARD_KEY)) await storage.put(SESSION_GUARD_KEY, null);
 
-  await advanceWatermark(storage, await parseBurn(deps, storage, id, bytes, now), tarStartedAt);
+  await advanceWatermark(storage, await parseBurn(deps, storage, id, bytes, now), tarStartedAt, id);
 
   const today = now.toISOString().slice(0, 10);
   const priorDate = await storage.get(SESSION_DAILY_DATE_KEY);
@@ -1102,13 +1102,13 @@ async function pruneDisplaced(deps: SessionSyncDeps, id: string): Promise<void> 
  * came for has already succeeded, and the burn monitor is advisory (R-P2-4).
  */
 async function advanceWatermark(
-  storage: SessionSyncStorage, parsed: boolean, tarStartedAt: number,
+  storage: SessionSyncStorage, parsed: boolean, tarStartedAt: number, id: string,
 ): Promise<void> {
   if (!parsed) return;
   try {
     await storage.put(SESSION_BURN_WATERMARK_KEY, tarStartedAt);
   } catch (err) {
-    console.error("syncSession: burn watermark write failed, sync itself still succeeded", err);
+    console.error(`syncSession ${id}: burn watermark write failed, sync itself still succeeded`, err);
   }
 }
 

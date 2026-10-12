@@ -195,4 +195,36 @@ describe("StudioDO.sweepMaestro wiring (source-pinned — the class cannot be co
     const body = src.slice(start, src.indexOf("\n  }", start));
     expect(body).toContain("armSweep");
   });
+
+  // S21 F13 (sweep half): the outer catch is the one line that fires when
+  // the inner machinery is too broken to have logged anything itself — it
+  // must name the studio (and sweepMaestro is per-repo-maestro, several run).
+  // Source-pinned for the same reason the wiring tests above are: the class
+  // cannot be constructed under this harness.
+  it("the sweep catch names this DO (S21 F13)", () => {
+    expect(sweepBody()).toContain(
+      "console.error(`studio ${this.selfId()}: maestro sweep failed`, err)",
+    );
+  });
+
+  // S21 F13 (ship half): same reasoning on shipTranscript's own outer catch.
+  it("the ship tick catch names this DO (S21 F13)", () => {
+    const start = src.indexOf("  async shipTranscript(): Promise<void>");
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf("\n  }", start));
+    expect(body).toContain(
+      "console.error(`studio ${this.selfId()}: transcript ship tick failed`, err)",
+    );
+  });
+
+  // S21 F12: the nudge wake label carries this DO's id, matching every
+  // sibling wake label in the same file.
+  it("the stale background-shell nudge wake label names this DO (S21 F12)", () => {
+    const start = src.indexOf("  private async notifyStaleBackgroundShell()");
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf("\n  }", start));
+    expect(body).toContain(
+      "logWakeOutcome(`studio ${this.selfId()}: stale background-shell nudge`, outcome)",
+    );
+  });
 });

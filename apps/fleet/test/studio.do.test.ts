@@ -381,4 +381,23 @@ describe("runShipTickWithObservation — onStaleBackgroundShell (issue #106)", (
       .resolves.toBeDefined();
     expect((storage.map.get(ACTIVITY_KEY) as Activity).state).toBe("waiting-members");
   });
+
+  // S21 F11: the nudge's catch names the studio it failed on — every studio
+  // in the fleet runs this same once-per-15min line.
+  it("names the studio when the nudge itself throws (S21 F11)", async () => {
+    const storage = fakeStorage({ status: status() });
+    await run(SHELLS_IDLE_PANE, T0, storage, async () => {});
+    const crossing = new Date(T0.getTime() + 16 * MIN);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        run(SHELLS_IDLE_PANE, crossing, storage, async () => { throw new Error("wake refused"); }),
+      ).resolves.toBeDefined();
+      const line = errSpy.mock.calls.map((c) => String(c[0]))
+        .find((s) => s.includes("stale background-shell nudge failed"));
+      expect(line).toMatch(/studio websites--pilot: stale background-shell nudge failed, next window retries/);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });
