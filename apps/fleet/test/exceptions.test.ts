@@ -372,7 +372,10 @@ describe("pruneWorkerExceptions", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await expect(pruneWorkerExceptions(failingDb, 1000)).resolves.toBeUndefined();
-      expect(spy).toHaveBeenCalledWith("pruneWorkerExceptions failed", expect.any(Error));
+      expect(spy).toHaveBeenCalledWith(
+        "pruneWorkerExceptions failed — worker_exceptions retention unbounded until the next insert",
+        expect.any(Error),
+      );
     } finally {
       spy.mockRestore();
     }
