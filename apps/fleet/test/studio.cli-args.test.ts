@@ -718,6 +718,22 @@ describe("fleet task assign — P5 §3 reassignment", () => {
   it("refuses an unknown flag — a silently dropped --why loses the reason", () => {
     expect(parseCliArgs(["task", "assign", "42", "release-studio", "--reason", "x"]).cmd).toBe("usage");
   });
+
+  // #501 F6: both usage errors name all three target forms the parser accepts
+  // (VERBS.task-assign's args line spells them; the error strings must too).
+  // The assertion reads the message's OWN first line, not the full CLI_USAGE
+  // dump appended after it — the dump already carries the args line's
+  // three-form spelling and would make this pass on the wrong string.
+  it("usage errors name all three target forms: role | role--k | studio-id (#501 F6)", () => {
+    const missing = parseCliArgs(["task", "assign", "84"]);
+    expect(missing.cmd).toBe("usage");
+    if (missing.cmd !== "usage") throw new Error("unreachable");
+    expect(missing.message.split("\n")[0]).toContain("fleet task assign <n> <role | role--k | studio-id>");
+    const flagLooking = parseCliArgs(["task", "assign", "84", "--why"]);
+    expect(flagLooking.cmd).toBe("usage");
+    if (flagLooking.cmd !== "usage") throw new Error("unreachable");
+    expect(flagLooking.message.split("\n")[0]).toContain("fleet task assign <n> <role | role--k | studio-id>");
+  });
 });
 
 // Board task #131: `fleet task state <n> <to>` — the CLI verb wrapping
@@ -1188,6 +1204,33 @@ describe("fleet accounts hold|clear", () => {
     expect(parseCliArgs(["accounts", "hold", "S", "--force"]).cmd).toBe("usage");
   });
 
+  // #501 F7: same refusals as above, but the message NAMES the flag (and the
+  // bad value for --until) instead of the bare usage line — wording only; the
+  // parse result on every shape above stays "usage" exactly as it was.
+  it("hold names the flag in its refusals: --until's bad/missing value, --reason's missing value (#501 F7)", () => {
+    const badDate = parseCliArgs(["accounts", "hold", "S", "--until", "not-a-date"]);
+    expect(badDate.cmd).toBe("usage");
+    if (badDate.cmd !== "usage") throw new Error("unreachable");
+    expect(badDate.message).toContain('--until needs a parseable ISO date (got "not-a-date")');
+
+    const noReason = parseCliArgs(["accounts", "hold", "S", "--reason"]);
+    expect(noReason.cmd).toBe("usage");
+    if (noReason.cmd !== "usage") throw new Error("unreachable");
+    expect(noReason.message).toContain("--reason needs a text value");
+
+    const noUntil = parseCliArgs(["accounts", "hold", "S", "--until"]);
+    expect(noUntil.cmd).toBe("usage");
+    if (noUntil.cmd !== "usage") throw new Error("unreachable");
+    expect(noUntil.message).toContain("--until needs a parseable ISO date");
+  });
+
+  // --reason keeps accepting any text value, "--"-prefixed included — the
+  // #501 F7 behavior pin: wording changes, never what parses.
+  it("hold still accepts a --reason value that starts with -- (behavior unchanged, #501 F7)", () => {
+    expect(parseCliArgs(["accounts", "hold", "S", "--reason", "--until"]))
+      .toEqual({ cmd: "accounts-hold", name: "S", until: null, reason: "--until" });
+  });
+
   it("clear <slot>", () => {
     expect(parseCliArgs(["accounts", "clear", "CLAUDE_CODE_OAUTH_TOKEN_2"]))
       .toEqual({ cmd: "accounts-clear", name: "CLAUDE_CODE_OAUTH_TOKEN_2" });
@@ -1196,5 +1239,64 @@ describe("fleet accounts hold|clear", () => {
   it("clear refuses a missing slot or extra tokens", () => {
     expect(parseCliArgs(["accounts", "clear"]).cmd).toBe("usage");
     expect(parseCliArgs(["accounts", "clear", "S", "T"]).cmd).toBe("usage");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #501 F3-F11: help-text accuracy. Every assertion here is on VERBS
+// summaries / usage strings — the strings an agent actually reads — pinned
+// to the NEW wording the sweep-12 findings proposed. None of these change
+// what parses; F7's parse-shape pins live up in the hold block above.
+// ---------------------------------------------------------------------------
+
+describe("VERBS help text — #501 F3-F11", () => {
+  // F3: `fleet resume` is the IN-CONTAINER binary's verb, not the Mac CLI's
+  // — the summary must say so and name the Mac-side restart (`fleet provision`).
+  it("destroy: park names the in-container binary and the Mac CLI's own restart (#501 F3)", () => {
+    expect(VERBS.destroy.summary).toContain("in-container binary");
+    expect(VERBS.destroy.summary).toContain("fleet provision <id>");
+  });
+
+  // F8: --force DOES pass the cannot-answer refusal server-side, but also
+  // skips the open-task check — the help must say both, since the refusal
+  // lines deliberately never suggest --force.
+  it("destroy: --force's extra price is stated next to --discard-unsynced (#501 F8)", () => {
+    expect(VERBS.destroy.summary).toContain("also skips the open-task check");
+  });
+
+  // F4: the --json lead vocabulary includes `dead`, and the row carries
+  // `lastLine` and `openPrs` the old field list omitted.
+  it("ls: --json lead list ends .../stopped/dead; lastLine and openPrs are named (#501 F4)", () => {
+    expect(VERBS.ls.summary).toContain("/stopped/dead");
+    expect(VERBS.ls.summary).toContain("lastLine");
+    expect(VERBS.ls.summary).toContain("openPrs");
+  });
+
+  // F5: the role list is fleet.json's, not a hardcoded set the config can
+  // make stale; and maestro's Mac-vs-ff split is stated, not implied.
+  it("spawn: no hardcoded role list; maestro's operator-edge/ff-refusal stated (#501 F5)", () => {
+    expect(VERBS.spawn.summary).toContain("the roles this fleet declares in fleet.json");
+    expect(VERBS.spawn.summary).toContain("ff refuses it");
+    expect(VERBS.spawn.summary).not.toContain("release-studio, pilot");
+  });
+
+  // F7's help half: the args line states the pairing rule the parser
+  // actually enforces (intact flag+value pairs, any order after the slot).
+  it("accounts hold: args line states the intact flag+value pairs rule (#501 F7)", () => {
+    expect(VERBS["accounts-hold"].args).toContain("intact flag+value pairs");
+  });
+
+  // F9: ~60 is the route's default, not a property of the verb — the route
+  // takes ?lines=N and the Mac CLI never sends it.
+  it("inspect: ~60 pane lines named as the route's default, lines=N override stated (#501 F9)", () => {
+    expect(VERBS.inspect.summary).toContain("route's default");
+    expect(VERBS.inspect.summary).toContain("lines=N");
+  });
+
+  // F11: the stats table has no dedup across the remote/local halves — an
+  // id on both sides prints twice, and TOTAL covers both.
+  it("junior: stats says an id can appear twice and TOTAL sums both halves (#501 F11)", () => {
+    expect(VERBS.junior.summary).toContain("can appear twice");
+    expect(VERBS.junior.summary).toContain("sums both halves");
   });
 });
