@@ -95,7 +95,7 @@ async function waitFor(predicate: () => boolean, timeoutMs: number, intervalMs =
 
 describe("ego-browser daemon: getBrowser() against a genuinely-hung chromium launch", () => {
   test.skipIf(!IS_LINUX)(
-    "fails with a bounded, actionable error instead of hanging past EGO_BROWSER_LAUNCH_TIMEOUT_MS",
+    "fails with a bounded, actionable error instead of hanging past EGO_BROWSER_LAUNCH_TIMEOUT_MS (#276 — the launch-timeout bound)",
     async () => {
       const home = makeEgoBrowserHome();
       const pidfile = join(home, "hang-pids");
