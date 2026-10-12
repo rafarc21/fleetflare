@@ -62,6 +62,14 @@ const studioFleetSrc = await readFile(path.join(rootDir, "container", "studio-fl
 // container/server.ts, studio-bringup.sh and studio-fleet above.
 const studioDoSrc = await readFile(path.join(rootDir, "src", "studio", "do.ts"), "utf8");
 
+// S21 F3 (review round-1 N4): src/agents/do.ts's own source text, read for
+// the same reason studioDoSrc just above exists — AgentDO is container-backed
+// and cannot be constructed under vitest-pool-workers, so the two abort-catch
+// log lines this branch added (each naming the task it failed on) are pinned
+// as text by test/agents.do.test.ts, the same source-pin technique
+// TEST_STUDIO_DO_SRC already established.
+const agentsDoSrc = await readFile(path.join(rootDir, "src", "agents", "do.ts"), "utf8");
+
 // Issue #507: EXEC_CLASSES.inspect's budget must BE INSPECT_EXEC_MS by
 // reference, not a hand-copied 15_000 — a value test cannot tell a
 // reference from a copy, so the source text is pinned like do.ts above.
@@ -182,6 +190,7 @@ export default defineConfig({
           TEST_TERMINAL_TEMPLATE_SRC: terminalTemplateSrc,
           TEST_CLI_FLEET_SRC: cliFleetSrc,
           TEST_STUDIO_DO_SRC: studioDoSrc,
+          TEST_AGENT_DO_SRC: agentsDoSrc,
           TEST_SANDBOX_API_SRC: sandboxApiSrc,
           TEST_SURVIVAL_DELIVERY_SRC: survivalDeliverySrc,
           TEST_FLEET_JSON: testFleetJson,

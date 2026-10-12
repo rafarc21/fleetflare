@@ -7,13 +7,27 @@
 
 /** Silence past this means a dead view, not a quiet one: tmux redraws its
  *  status-line clock every minute, so a live pty never goes 90s frameless. */
-export const ATTACH_STALE_MS = Number(process.env.FLEET_ATTACH_STALE_MS ?? 90_000);
+export const ATTACH_STALE_MS = envNumber("FLEET_ATTACH_STALE_MS", 90_000);
 
 /** An upgrade with no answer in this long is abandoned and retried (#48
  *  point 3: an attach that never settles leaves the upgrade pending forever).
  *  #123/#151 merge: a cold first attach measured ~15s, so 15s flapped on a
  *  slow cold start — 30s is issue #123's original CONNECT_TIMEOUT_MS. */
-export const ATTACH_CONNECT_TIMEOUT_MS = Number(process.env.FLEET_ATTACH_CONNECT_TIMEOUT_MS ?? 30_000);
+export const ATTACH_CONNECT_TIMEOUT_MS = envNumber("FLEET_ATTACH_CONNECT_TIMEOUT_MS", 30_000);
+
+/** #566: `Number("90s")` is NaN, which silently killed both watchdogs —
+ *  a NaN staleness test never matches, so every frame read stale at ~1ms
+ *  intervals. A typo'd env value must refuse at startup, not disarm. */
+function envNumber(name: string, fallback: number): number {
+  // undefined OR "" means unset (an operator's empty `FOO=` is "no value
+  // given"), never a refusal: Number("") === 0 would otherwise reject it.
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return n;
+  console.error(`fleet: ${name} must be a number of ms, got ${JSON.stringify(raw)}`);
+  process.exit(1);
+}
 
 /** `HH:MM:SS` in UTC. */
 export function hhmmssZ(ms: number): string {

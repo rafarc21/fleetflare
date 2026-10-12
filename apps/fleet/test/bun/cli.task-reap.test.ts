@@ -9,9 +9,10 @@
 // no `repo` key (the Worker's own default stays the single source of that
 // fallback) and reportRepo prints its fallback line on stderr.
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeCredentials } from "./helpers/credentials";
 
 const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
 
@@ -29,13 +30,6 @@ function tmpDir(prefix: string): string {
 afterEach(() => {
   while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
-
-function writeCredentials(home: string, workerUrl: string) {
-  mkdirSync(join(home, ".fleet"), { recursive: true });
-  const path = join(home, ".fleet", "credentials");
-  writeFileSync(path, JSON.stringify({ workerUrl, accessClientId: "id", accessClientSecret: "secret" }));
-  chmodSync(path, 0o600);
-}
 
 /** A stand-in for the Worker's POST /studio/board/tasks/reap: records every
  *  request body and answers the one canned response this run needs. */
@@ -157,5 +151,55 @@ describe("fleet task reap — print loops", () => {
     expect(r.out).toContain("  (no open tasks)");
     expect(calls.length).toBe(1);
     expect(calls[0]!.apply).toBe(false);
+  });
+
+  // Issue #546: cmdTaskReap's --terminal branch used to exit 0 no matter
+  // what the page said -- a batch of failed closes printed as handled with
+  // a green exit. An error row (closeTerminalTasks' failure word) must
+  // leave exit 1. Dry pages never carry error rows, so the dry-run exit-0
+  // pins above stay as they are.
+  test("--terminal --apply with an error row: the failed line prints, and the exit is 1, not 0", async () => {
+    const home = tmpDir("reap-home-");
+    const page = {
+      repo: "example-org/acme", apply: true, terminal: true, remaining: 0,
+      results: [
+        { number: 201, state: "failed", outcome: "error", reason: "not_planned", error: "502" },
+      ],
+    };
+    const { server, calls } = startReapWorker(page);
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await run(["task", "reap", "--terminal", "--apply"], home);
+    server.stop(true);
+
+    expect(r.out).toContain("fleet task reap --terminal (--apply) — example-org/acme");
+    expect(r.out).toContain("  #201 (failed): error as not_planned — 502");
+    // remaining 0 means reapTerminalAll stops after this one page.
+    expect(calls.length).toBe(1);
+    expect(r.code).toBe(1);
+  });
+
+  // Issue #546: the non-terminal print loop's else-branch assumed every
+  // non-skipped row carries a sha. A failed row has a reason and no sha,
+  // so it must print the reason -- and per the plan's Worker-side policy
+  // the non-terminal exit stays 0 (a failed close there is reported, not
+  // escalated).
+  test("plain --apply with a failed row: the failed line with the reason prints, exit stays 0", async () => {
+    const home = tmpDir("reap-home-");
+    const answer = {
+      repo: "example-org/acme", apply: true, defaultBranch: "main",
+      results: [
+        { taskNumber: 12, prNumber: 9, outcome: "failed", reason: "close 500" },
+      ],
+    };
+    const { server } = startReapWorker(answer);
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await run(["task", "reap", "--apply"], home);
+    server.stop(true);
+
+    expect(r.out).toContain("fleet task reap (--apply) — example-org/acme @ main");
+    expect(r.out).toContain("  #12 (PR #9): failed — close 500");
+    expect(r.code).toBe(0);
   });
 });

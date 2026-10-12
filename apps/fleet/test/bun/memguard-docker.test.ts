@@ -31,22 +31,11 @@
 // the kernel ever has to choose."
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { BRINGUP, extractRegion } from "./exec-snippet";
 
 const CONTAINER_DIR = join(import.meta.dir, "../../container");
-const BRINGUP = readFileSync(join(CONTAINER_DIR, "studio-bringup.sh"), "utf8");
 const IMAGE = "oven/bun:1.3-debian";
-
-function extractRegion(src: string, marker: string): string {
-  const open = `# >>> ${marker} >>>`;
-  const close = `# <<< ${marker} <<<`;
-  const openAt = src.indexOf(open);
-  if (openAt === -1) throw new Error(`region opener ${open} not found in source`);
-  const closeAt = src.indexOf(close, openAt);
-  if (closeAt === -1) throw new Error(`region terminator ${close} not found in source`);
-  return src.slice(src.indexOf("\n", openAt) + 1, closeAt);
-}
 
 const dockerUp = spawnSync("docker", ["info"], { stdio: "ignore" }).status === 0;
 if (!dockerUp && process.env.CI) throw new Error("memguard-docker: docker is required in CI and is not available");

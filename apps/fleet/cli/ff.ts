@@ -10,9 +10,10 @@
  * src/studio/ff.ts's ffDecision for the refusal and the maestro-playbook
  * skill's Role section for why.
  *
- *   ff <role>            this repo's web-studio / release-studio / ...
- *   ff <role> "<task>"   file that task, spawn the studio FOR it, attach
- *   ff <role> <n>        adopt existing issue #n, spawn the studio FOR it, attach
+ *   ff                  REFUSES (resolves to maestro, board issue #250 — local only)
+ *   ff <role>           this repo's web-studio / release-studio / ...
+ *   ff <role> "<task>"  file that task, spawn the studio FOR it, attach
+ *   ff <role> <n>       adopt existing issue #n, spawn the studio FOR it, attach
  *   ff --help
  *
  * COMPOSITION, not new machinery. Every piece already existed and is reused

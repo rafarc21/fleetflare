@@ -150,6 +150,33 @@ describe("scheduled() watchdog (Carve-out C: alert dedupe)", () => {
     ]);
     expect(await getFlag(env.DB, rearmKey("task_stale_1"))).toBe("2");
   });
+
+  // S21 F4: the re-arm catch names the task whose re-arm dispatch failed.
+  it("names the task when the re-arm dispatch to the DO fails", async () => {
+    const agent = {
+      idFromName: (n: string) => n,
+      get: () => ({
+        fetch: async (url: string) => {
+          if (String(url).endsWith("/rearm")) {
+            throw new Error("DO unreachable");
+          }
+          return Response.json({ task: staleTask() });
+        },
+      }),
+    } as unknown as Env["AGENT"];
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await worker.scheduled({} as any, { ...env, AGENT: agent }, {} as any);
+      expect(errSpy).toHaveBeenCalled();
+      const rearm = errSpy.mock.calls.map((c) => String(c[0]))
+        .find((s) => s.includes("re-arm failed"));
+      expect(rearm).toBeDefined();
+      expect(rearm).toMatch(/re-arm failed for task_stale_1/);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });
 
 // P4 §5's board mount. The board lives at `/studio/board/*` because the

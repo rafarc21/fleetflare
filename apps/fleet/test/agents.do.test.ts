@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { advanceTask, type TaskRecord, type LoopDeps, type LoopOutcome } from "../src/tasks/loop";
 import { FakeRuntime } from "../src/agents/runtime";
 import { readSince } from "../src/events/log";
@@ -191,6 +191,24 @@ describe("pollOnce (Important 2, fix round 1 — proves the wedge is fixed)", ()
     // forever.
     expect(result.task).toEqual(original);
   });
+
+  // S21 F3: the catch's log names the task the throw belongs to.
+  it("names the task when the injected advance throws", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const boom = async (_d: LoopDeps, _t: TaskRecord): Promise<LoopOutcome> => {
+        throw new Error("D1 write failed");
+      };
+      const result = await pollOnce(
+        deps(new FakeRuntime([])), task({ taskId: "task_9" }), boom,
+      );
+      expect(result.kind).toBe("error");
+      expect(errSpy).toHaveBeenCalled();
+      expect(String(errSpy.mock.calls[0][0])).toMatch(/advanceTask threw for task_9/);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });
 
 // Fix round 1 (task 10a review, Important finding). clearRearm was wired to
@@ -300,5 +318,31 @@ describe("parseMaxTaskSeconds (Carve-out A)", () => {
 
   it("falls back to the default on a non-numeric value instead of NaN", () => {
     expect(parseMaxTaskSeconds("not-a-number")).toBe(DEFAULT_MAX_TASK_SECONDS);
+  });
+});
+
+// S21 F3 (review round-1 N4): both abort catches' log lines name the task
+// they failed on. AgentDO itself cannot be constructed under
+// vitest-pool-workers (container-backed — see toStartInput's own comment
+// above), and neither catch is reachable through the extracted seams
+// (shouldAbortOnTerminal / pollOnce) because each lives inside a class
+// method only this.ctx.* can drive, so the lines are pinned against the
+// live source text — the same slice technique test/studio.sweep.test.ts
+// uses for StudioDO via TEST_STUDIO_DO_SRC.
+describe("AgentDO abort catches (source-pinned — the class cannot be constructed here)", () => {
+  const src: string = env.TEST_AGENT_DO_SRC;
+
+  it("the /stop abort catch names the task it failed to stop (S21 F3, N4)", () => {
+    const start = src.indexOf("  async fetch(req: Request): Promise<Response> {");
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf("\n  }\n", start));
+    expect(body).toContain("`abort on /stop failed for ${stopping?.taskId ?? \"unknown\"}`");
+  });
+
+  it("the dead-container abort catch names the task it gave up on (S21 F3, N4)", () => {
+    const start = src.indexOf("  async pollTask(_payload: { taskId: string }): Promise<void> {");
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf("\n  }\n", start));
+    expect(body).toContain("`abort after dead container failed for ${task.taskId}`");
   });
 });

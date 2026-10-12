@@ -333,7 +333,7 @@ function fakeStudioNamespace(
     // route test prove the container was handed the identical command
     // test/bun/wake-cmd.test.ts ran against a real tmux, and that a stopped
     // or non-claude studio never sees it at all. Not a maestro, so no sweep.
-    checkProvisioned: (repo: string) => checkProvisionedGated(gateStorage, silentSyncDeps, repo),
+    checkProvisioned: (repo: string) => checkProvisionedGated(gateStorage, silentSyncDeps, repo, STUDIO_ID),
     wakeStudio: (prompt: string) =>
       wakeStudioWith(
         gateStorage,

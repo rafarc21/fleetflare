@@ -1900,7 +1900,11 @@ async function cmdTaskState(creds: Credentials, number: number, to: TaskState, f
  * own — same detect-and-report repo convention every other task command
  * uses, then prints the report the Worker sent back. `boardRequest` already
  * exits 1 on any non-ok response, so that case needs no special handling
- * here.
+ * here. #546: the --terminal branch exits 1 when any close errored (the
+ * terminal path's own failure word — it never goes through runTaskReap);
+ * the non-terminal branch keeps its all-outcomes-on-stdout exit-0 shape —
+ * which rows there count as run failures is the Worker's policy call, not
+ * this print loop's.
  */
 async function cmdTaskReap(creds: Credentials, apply: boolean, terminal = false): Promise<void> {
   const detected = await detectRepo();
@@ -1918,6 +1922,13 @@ async function cmdTaskReap(creds: Credentials, apply: boolean, terminal = false)
       console.log(`  #${r.number} (${r.state}): ${r.outcome} as ${r.reason}${r.error ? ` — ${r.error}` : ""}`);
     }
     if (t.remaining > 0) console.log(`  ${t.remaining} left: a page closed nothing; re-run after checking the errors above`);
+    // #546 (S19-F2): a close that failed is a failure this run must not
+    // report as success. Exit 1 when any row errored, mirroring rescue-all's
+    // failures counter; would-close/closed/deliberate-skip rows stay 0. The
+    // t.apply gate keeps dry runs 0 — a dry page only previews, and the
+    // Worker's real dry path never mints "error" rows (the dry-run print
+    // pin above feeds one in synthetically to cover the error line).
+    if (t.apply && t.results.some((r) => r.outcome === "error")) process.exit(1);
     return;
   }
   const result = (await boardRequest(creds, "fleet task reap", "/tasks/reap", {
@@ -1934,7 +1945,9 @@ async function cmdTaskReap(creds: Credentials, apply: boolean, terminal = false)
     return;
   }
   for (const r of result.results) {
-    if (r.outcome === "skipped") {
+    if (r.outcome === "failed") {
+      console.log(`  #${r.taskNumber} (PR #${r.prNumber}): failed — ${r.reason}`);
+    } else if (r.outcome === "skipped") {
       console.log(`  #${r.taskNumber}: skipped — ${r.reason}`);
     } else {
       console.log(`  #${r.taskNumber} (PR #${r.prNumber}): ${r.outcome} — ${r.sha.slice(0, 8)}`);
@@ -2581,10 +2594,29 @@ async function cmdMemoryLs(creds: Credentials): Promise<void> {
     console.error(`fleet memory ls: ${res.status} ${(await res.text()).slice(0, 500)}`);
     process.exit(1);
   }
-  const body = (await res.json()) as {
+  // Issue #548 (sweep 19 F5): a wrong-shaped or non-JSON 200 must die with
+  // this command's own named line like every sibling read verb (cmdLs:
+  // parseStudioStatusArray, fleet.ts:892-896), not as a TypeError thrown
+  // into main()'s generic catch.
+  let body: {
     repo: string; ref: string; index: { title: string }[]; unindexed: string[]; files: MemoryFileRow[];
     truncated: boolean;
   };
+  try {
+    const raw: unknown = await res.json();
+    if (typeof raw !== "object" || raw === null) throw new Error();
+    const r = raw as Record<string, unknown>;
+    if (typeof r.repo !== "string" || typeof r.ref !== "string") throw new Error();
+    if (!Array.isArray(r.index) || !Array.isArray(r.unindexed) || !Array.isArray(r.files)) throw new Error();
+    // Review round 1: files rows are checked to the depth the table
+    // renderer dereferences — target — the other row fields only print.
+    if (!r.files.every((f) => typeof f === "object" && f !== null && typeof (f as Record<string, unknown>).target === "string")) throw new Error();
+    if (typeof r.truncated !== "boolean") throw new Error();
+    body = r as typeof body;
+  } catch {
+    console.error("fleet memory ls: answered 200 but the body was not the survey shape");
+    process.exit(1);
+  }
   console.log(`memory: ${body.repo}@${body.ref} — ${body.index.length} index line(s), ${body.files.length} file(s), ${body.unindexed.length} unindexed`);
   console.log(MEMORY_LEGEND);
   console.log(formatMemoryTable(body.files));
@@ -2632,11 +2664,40 @@ async function cmdMemoryCompact(creds: Credentials): Promise<void> {
     console.error(`fleet memory compact: ${res.status} ${text.slice(0, 800)}`);
     process.exit(1);
   }
-  const body = JSON.parse(text) as {
+  // Issue #548 (sweep 19 F4): the compact is the one memory verb with a
+  // durable artifact — a 200 non-JSON body here means the Worker already
+  // opened the PR and the CLI merely failed to read the answer, so the
+  // refusal names the command and says the pass may have landed.
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    console.error(
+      "fleet memory compact: 200 but the body was not JSON — the pass may have landed; check the board repo's open PRs",
+    );
+    process.exit(1);
+  }
+  // Review round 1: a JSON 200 with the wrong shape is the exact case where
+  // the POST did land — it must reach the same may-have-landed outcome, not
+  // crash on body.summary into main()'s generic catch.
+  let body: {
     url: string; pr: number; branch: string;
     summary: { merged: number; demoted: number; promoted: number; archived: number; indexLines: number };
     truncated: boolean;
   };
+  try {
+    const o = raw as Record<string, unknown>;
+    if (typeof o.url !== "string" || typeof o.pr !== "number" || typeof o.branch !== "string") throw new Error();
+    if (typeof o.truncated !== "boolean" || typeof o.summary !== "object" || o.summary === null) throw new Error();
+    const s = o.summary as Record<string, unknown>;
+    if (!["merged", "demoted", "promoted", "archived", "indexLines"].every((k) => typeof s[k] === "number")) throw new Error();
+    body = o as typeof body;
+  } catch {
+    console.error(
+      "fleet memory compact: 200 but the body was not the compact shape — the pass may have landed; check the board repo's open PRs",
+    );
+    process.exit(1);
+  }
   const s = body.summary;
   console.log(`PR #${body.pr}  ${body.url}`);
   console.log(`branch ${body.branch}`);
@@ -2658,7 +2719,12 @@ async function cmdPaste(creds: Credentials, id: string): Promise<void> {
     console.error("fleet paste: no image on the clipboard (pngpaste missing, or the clipboard has no image)");
     process.exit(1);
   }
-  console.log(await uploadPaste(creds, id, bytes));
+  try {
+    console.log(await uploadPaste(creds, id, bytes));
+  } catch (err) {
+    console.error(`fleet paste: ${errText(err)}`);
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------

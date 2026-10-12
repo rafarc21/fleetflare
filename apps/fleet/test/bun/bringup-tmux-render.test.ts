@@ -15,26 +15,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
-
-/**
- * Pull a marked region out of shell source, verbatim.
- *
- * The companion to exec-snippet.ts's extractHeredoc, for a stretch of script
- * that studio-bringup.sh RUNS rather than emits. The bring-up brackets the
- * tmux rendering block with `# >>> <marker> >>>` / `# <<< <marker> <<<` for
- * exactly this: what runs below is the shipped bytes, not a re-typed copy.
- */
-function extractRegion(src: string, marker: string): string {
-  const open = `# >>> ${marker} >>>`;
-  const close = `# <<< ${marker} <<<`;
-  const openAt = src.indexOf(open);
-  if (openAt === -1) throw new Error(`region opener ${open} not found in source`);
-  const closeAt = src.indexOf(close, openAt);
-  if (closeAt === -1) throw new Error(`region terminator ${close} not found in source`);
-  return src.slice(src.indexOf("\n", openAt) + 1, closeAt);
-}
+import { BRINGUP, extractRegion } from "./exec-snippet";
 
 const REGION = extractRegion(BRINGUP, "tmux-render-options");
 

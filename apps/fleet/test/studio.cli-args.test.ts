@@ -37,6 +37,34 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
   });
 
+  // Sweep 20 F2 (#564): `--json=false` is not a stray positional — it is a
+  // known flag spelled with a value, which reads as accepted-and-overridden
+  // (the operator believes =false means table mode and gets the default by
+  // accident, wrong reason). Same for `=value` on any of the three flags,
+  // and for an unknown -- token entirely. Stray positionals stay ignored:
+  // that is ls's documented long-standing grammar.
+  it("ls refuses a flag spelled with a value (--json=false is not --json)", () => {
+    const r = parseCliArgs(["ls", "--json=false"]);
+    expect(r.cmd).toBe("usage");
+    if (r.cmd === "usage") expect(r.message).toMatch(/unexpected "--json=false" — ls flags are --fresh --prs --json \(no values\)/);
+    expect(parseCliArgs(["ls", "--fresh=1"]).cmd).toBe("usage");
+    expect(parseCliArgs(["ls", "--prs=x"]).cmd).toBe("usage");
+  });
+
+  it("ls refuses an unknown -- token, naming it", () => {
+    const r = parseCliArgs(["ls", "--no-such"]);
+    expect(r.cmd).toBe("usage");
+    if (r.cmd === "usage") expect(r.message).toMatch(/unexpected "--no-such" — ls flags are --fresh --prs --json \(no values\)/);
+    expect(parseCliArgs(["ls", "--fresh", "--jsonx"]).cmd).toBe("usage");
+  });
+
+  it("ls still ignores a stray positional next to valid flags", () => {
+    expect(parseCliArgs(["ls", "extra", "--json"])).toEqual({ cmd: "ls", fresh: false, json: true, prs: false });
+    // A single-dash token (-x) is not --prefixed: ls has no short flags,
+    // and the refusal line drawn by #564 starts at --.
+    expect(parseCliArgs(["ls", "-x"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
+  });
+
   // Issue #37's second half: there was no way to ask for the truth NOW. The
   // container check already existed (provisionedCheckCmd); nothing exposed it
   // on demand, so an operator needed a shell inside the container.
@@ -748,6 +776,22 @@ describe("fleet task assign — P5 §3 reassignment", () => {
   it("refuses an unknown flag — a silently dropped --why loses the reason", () => {
     expect(parseCliArgs(["task", "assign", "42", "release-studio", "--reason", "x"]).cmd).toBe("usage");
   });
+
+  // #501 F6: both usage errors name all three target forms the parser accepts
+  // (VERBS.task-assign's args line spells them; the error strings must too).
+  // The assertion reads the message's OWN first line, not the full CLI_USAGE
+  // dump appended after it — the dump already carries the args line's
+  // three-form spelling and would make this pass on the wrong string.
+  it("usage errors name all three target forms: role | role--k | studio-id (#501 F6)", () => {
+    const missing = parseCliArgs(["task", "assign", "84"]);
+    expect(missing.cmd).toBe("usage");
+    if (missing.cmd !== "usage") throw new Error("unreachable");
+    expect(missing.message.split("\n")[0]).toContain("fleet task assign <n> <role | role--k | studio-id>");
+    const flagLooking = parseCliArgs(["task", "assign", "84", "--why"]);
+    expect(flagLooking.cmd).toBe("usage");
+    if (flagLooking.cmd !== "usage") throw new Error("unreachable");
+    expect(flagLooking.message.split("\n")[0]).toContain("fleet task assign <n> <role | role--k | studio-id>");
+  });
 });
 
 // Board task #131: `fleet task state <n> <to>` — the CLI verb wrapping
@@ -1058,6 +1102,23 @@ describe("fleet memory", () => {
   it("`memory compact` is the write, and it is the only one", () => {
     expect(parseCliArgs(["memory", "compact"])).toEqual({ cmd: "memory-compact" });
   });
+  // #568 / sweep-20 F6: compact is the one memory verb with a durable,
+  // outward-facing artifact — it opens a PR in the blueprint repo — so a
+  // stray token (a flag the caller believes in, a paste accident) must be
+  // a usage error, never a silently-dropped extra.
+  it("an extra token after `memory compact` (or after `memory ls`) is a usage error, never silently dropped (#568)", () => {
+    for (const argv of [["junk"], ["--json"]]) {
+      const parsed = parseCliArgs(["memory", "compact", ...argv]);
+      expect(parsed.cmd).toBe("usage");
+      if (parsed.cmd === "usage") {
+        expect(parsed.message).toMatch(/unexpected/);
+        expect(parsed.message).toContain("fleet memory takes only ls | compact");
+      }
+    }
+    const ls = parseCliArgs(["memory", "ls", "x"]);
+    expect(ls.cmd).toBe("usage");
+    if (ls.cmd === "usage") expect(ls.message).toMatch(/unexpected/);
+  });
   it("anything else under memory is a usage error, never a silent no-op", () => {
     const parsed = parseCliArgs(["memory", "delete"]);
     expect(parsed.cmd).toBe("usage");
@@ -1201,6 +1262,33 @@ describe("fleet accounts hold|clear", () => {
     expect(parseCliArgs(["accounts", "hold", "S", "--force"]).cmd).toBe("usage");
   });
 
+  // #501 F7: same refusals as above, but the message NAMES the flag (and the
+  // bad value for --until) instead of the bare usage line — wording only; the
+  // parse result on every shape above stays "usage" exactly as it was.
+  it("hold names the flag in its refusals: --until's bad/missing value, --reason's missing value (#501 F7)", () => {
+    const badDate = parseCliArgs(["accounts", "hold", "S", "--until", "not-a-date"]);
+    expect(badDate.cmd).toBe("usage");
+    if (badDate.cmd !== "usage") throw new Error("unreachable");
+    expect(badDate.message).toContain('--until needs a parseable ISO date (got "not-a-date")');
+
+    const noReason = parseCliArgs(["accounts", "hold", "S", "--reason"]);
+    expect(noReason.cmd).toBe("usage");
+    if (noReason.cmd !== "usage") throw new Error("unreachable");
+    expect(noReason.message).toContain("--reason needs a text value");
+
+    const noUntil = parseCliArgs(["accounts", "hold", "S", "--until"]);
+    expect(noUntil.cmd).toBe("usage");
+    if (noUntil.cmd !== "usage") throw new Error("unreachable");
+    expect(noUntil.message).toContain("--until needs a parseable ISO date");
+  });
+
+  // --reason keeps accepting any text value, "--"-prefixed included — the
+  // #501 F7 behavior pin: wording changes, never what parses.
+  it("hold still accepts a --reason value that starts with -- (behavior unchanged, #501 F7)", () => {
+    expect(parseCliArgs(["accounts", "hold", "S", "--reason", "--until"]))
+      .toEqual({ cmd: "accounts-hold", name: "S", until: null, reason: "--until" });
+  });
+
   it("clear <slot>", () => {
     expect(parseCliArgs(["accounts", "clear", "CLAUDE_CODE_OAUTH_TOKEN_2"]))
       .toEqual({ cmd: "accounts-clear", name: "CLAUDE_CODE_OAUTH_TOKEN_2" });
@@ -1209,5 +1297,112 @@ describe("fleet accounts hold|clear", () => {
   it("clear refuses a missing slot or extra tokens", () => {
     expect(parseCliArgs(["accounts", "clear"]).cmd).toBe("usage");
     expect(parseCliArgs(["accounts", "clear", "S", "T"]).cmd).toBe("usage");
+  });
+});
+
+// Board task #565 (sweep 20, S20-F3): `0` is GitHub's "no issue" and this
+// CLI's own --continues grammar already refuses it; a >2^53 digit string
+// rounds in Number() to an issue that cannot exist. All four number-taking
+// task verbs share the grammar — pinned here per verb.
+describe("task number grammar refuses 0 and past-2^53 — board task #565", () => {
+  const past = "99999999999999999999"; // 20 nines — Number() rounds past 2^53
+
+  it("task show refuses 0, a leading-zero string, and past-2^53", () => {
+    expect(parseCliArgs(["task", "show", "0"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "show", "042"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "show", past]).cmd).toBe("usage");
+    // 2^53-1 is the top of the accepted range; 2^53 itself is past it.
+    expect(parseCliArgs(["task", "show", "9007199254740991"])).toEqual({ cmd: "task-show", number: 9007199254740991 });
+    expect(parseCliArgs(["task", "show", "9007199254740992"]).cmd).toBe("usage");
+  });
+
+  it("task verify refuses 0 and past-2^53", () => {
+    expect(parseCliArgs(["task", "verify", "0"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "verify", past]).cmd).toBe("usage");
+  });
+
+  it("task assign refuses 0 and past-2^53 as its number", () => {
+    expect(parseCliArgs(["task", "assign", "0", "pilot"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "assign", past, "pilot"]).cmd).toBe("usage");
+  });
+
+  it("task state refuses 0 and past-2^53 as its number", () => {
+    expect(parseCliArgs(["task", "state", "0", "working"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "state", past, "working"]).cmd).toBe("usage");
+  });
+
+  it("the refusal names the got value — not just a bare needs-an-issue-number", () => {
+    const parsed = parseCliArgs(["task", "show", "0"]);
+    expect(parsed.cmd).toBe("usage");
+    if (parsed.cmd !== "usage") return;
+    expect(parsed.message).toContain(`(got "0")`);
+  });
+
+  it("a real issue number still parses — the grammar is a floor, not a ceiling", () => {
+    expect(parseCliArgs(["task", "show", "12"])).toEqual({ cmd: "task-show", number: 12 });
+    expect(parseCliArgs(["task", "verify", "12"])).toEqual({ cmd: "task-verify", number: 12 });
+    expect(parseCliArgs(["task", "assign", "42", "pilot"]))
+      .toEqual({ cmd: "task-assign", number: 42, target: "pilot" });
+    expect(parseCliArgs(["task", "state", "42", "working"]))
+      .toEqual({ cmd: "task-state", number: 42, to: "working" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #501 F3-F11: help-text accuracy. Every assertion here is on VERBS
+// summaries / usage strings — the strings an agent actually reads — pinned
+// to the NEW wording the sweep-12 findings proposed. None of these change
+// what parses; F7's parse-shape pins live up in the hold block above.
+// ---------------------------------------------------------------------------
+
+describe("VERBS help text — #501 F3-F11", () => {
+  // F3: `fleet resume` is the IN-CONTAINER binary's verb, not the Mac CLI's
+  // — the summary must say so and name the Mac-side restart (`fleet provision`).
+  it("destroy: park names the in-container binary and the Mac CLI's own restart (#501 F3)", () => {
+    expect(VERBS.destroy.summary).toContain("in-container binary");
+    expect(VERBS.destroy.summary).toContain("fleet provision <id>");
+  });
+
+  // F8: --force DOES pass the cannot-answer refusal server-side, but also
+  // skips the open-task check — the help must say both, since the refusal
+  // lines deliberately never suggest --force.
+  it("destroy: --force's extra price is stated next to --discard-unsynced (#501 F8)", () => {
+    expect(VERBS.destroy.summary).toContain("also skips the open-task check");
+  });
+
+  // F4: the --json lead vocabulary includes `dead`, and the row carries
+  // `lastLine` and `openPrs` the old field list omitted.
+  it("ls: --json lead list ends .../stopped/dead; lastLine and openPrs are named (#501 F4)", () => {
+    expect(VERBS.ls.summary).toContain("/stopped/dead");
+    expect(VERBS.ls.summary).toContain("lastLine");
+    expect(VERBS.ls.summary).toContain("openPrs");
+  });
+
+  // F5: the role list is fleet.json's, not a hardcoded set the config can
+  // make stale; and maestro's Mac-vs-ff split is stated, not implied.
+  it("spawn: no hardcoded role list; maestro's operator-edge/ff-refusal stated (#501 F5)", () => {
+    expect(VERBS.spawn.summary).toContain("the roles this fleet declares in fleet.json");
+    expect(VERBS.spawn.summary).toContain("ff refuses it");
+    expect(VERBS.spawn.summary).not.toContain("release-studio, pilot");
+  });
+
+  // F7's help half: the args line states the pairing rule the parser
+  // actually enforces (intact flag+value pairs, any order after the slot).
+  it("accounts hold: args line states the intact flag+value pairs rule (#501 F7)", () => {
+    expect(VERBS["accounts-hold"].args).toContain("intact flag+value pairs");
+  });
+
+  // F9: ~60 is the route's default, not a property of the verb — the route
+  // takes ?lines=N and the Mac CLI never sends it.
+  it("inspect: ~60 pane lines named as the route's default, lines=N override stated (#501 F9)", () => {
+    expect(VERBS.inspect.summary).toContain("route's default");
+    expect(VERBS.inspect.summary).toContain("lines=N");
+  });
+
+  // F11: the stats table has no dedup across the remote/local halves — an
+  // id on both sides prints twice, and TOTAL covers both.
+  it("junior: stats says an id can appear twice and TOTAL sums both halves (#501 F11)", () => {
+    expect(VERBS.junior.summary).toContain("can appear twice");
+    expect(VERBS.junior.summary).toContain("sums both halves");
   });
 });

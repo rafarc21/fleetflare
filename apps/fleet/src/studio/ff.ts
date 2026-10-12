@@ -48,7 +48,7 @@ export const FF_HELP = [
   "  ff <role>       another role, e.g. web-studio, release-studio, ...",
   '  ff <role> "<task>"  file that task on the board, assign it to that studio,',
   "                  spawn the studio FOR it, wait, attach",
-  "  ff <role> <n>   ADOPT existing issue #n: assign it to that studio, reset it",
+  "  ff <role> <n>   ADOPT existing issue #n (the # is optional): assign it to that studio, reset it",
   "                  to submitted, spawn the studio FOR it, wait, attach.",
   "                  Works on a bare issue filed by hand from a phone.",
   '  ff <role> --new "<task>"  a SECOND (third, ...) studio for that role in this',
@@ -175,8 +175,15 @@ export function ffTaskBrief(task: string, assignee: string): {
  */
 export function parseFfArgs(argv: string[]): FfArgs {
   const newInstance = argv.includes(NEW_INSTANCE_FLAG);
+  // Board issue #569: help is checked BEFORE the filter, so an exact
+  // `--help`/`-h` token anywhere in argv wins — `ff web-studio --help` asks
+  // for help instead of filing a task titled "--help". Checked on argv, not
+  // the filtered array, and still first in the function so it wins over
+  // every usage error too. Exact tokens only: a task that CONTAINS the word
+  // (`ff pilot "drop the --help flag"`) is untouched, the same containment
+  // rule NEW_INSTANCE_FLAG has.
+  if (argv.includes("--help") || argv.includes("-h")) return { cmd: "help" };
   const [first, ...rest] = argv.filter((a) => a !== NEW_INSTANCE_FLAG);
-  if (first === "--help" || first === "-h") return { cmd: "help" };
   if (rest.length > 1) {
     return {
       cmd: "usage",

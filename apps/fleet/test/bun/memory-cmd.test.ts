@@ -70,7 +70,7 @@ const COMPACT = {
  *  and that the invalid-stdin refusal never POSTs at all. */
 function startMemoryWorker() {
   const requests: { method: string; path: string; body?: string }[] = [];
-  const state = { survey: SURVEY, compact: COMPACT, surveyStatus: 200 };
+  const state = { survey: SURVEY, compact: COMPACT, surveyStatus: 200, surveyBody: undefined as string | undefined, compactBody: undefined as string | undefined };
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -78,10 +78,12 @@ function startMemoryWorker() {
       if (url.pathname === "/studio/memory" && req.method === "GET") {
         requests.push({ method: "GET", path: url.pathname + url.search });
         if (state.surveyStatus !== 200) return new Response("boom", { status: state.surveyStatus });
+        if (state.surveyBody !== undefined) return new Response(state.surveyBody, { status: 200, headers: { "Content-Type": "text/html" } });
         return Response.json(state.survey);
       }
       if (url.pathname === "/studio/memory/compact" && req.method === "POST") {
         requests.push({ method: "POST", path: url.pathname, body: await req.text() });
+        if (state.compactBody !== undefined) return new Response(state.compactBody, { status: 200, headers: { "Content-Type": "text/html" } });
         return Response.json(state.compact);
       }
       return new Response("not found", { status: 404 });
@@ -177,6 +179,44 @@ describe("fleet memory ls", () => {
       worker.server.stop(true);
     }
   });
+
+  // Issue #548 (sweep 19 F5): a 200 whose body is not the survey shape must
+  // die inside cmdMemoryLs with the command's own named line — not throw a
+  // TypeError into main()'s catch as `fleet: <TypeError>`.
+  test("a 200 whose body is not JSON dies with the survey-shape line, exit 1", async () => {
+    const { home, cwd, worker } = await setup();
+    try {
+      worker.state.surveyBody = "<html>proxy error page</html>";
+      const r = await run(["memory", "ls"], home, cwd);
+
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("fleet memory ls: answered 200 but the body was not the survey shape");
+      expect(r.err).not.toMatch(/^fleet: /m);
+      expect(r.out).not.toContain("VERDICT:");
+      expect(r.out).not.toContain("memory: acme-org/websites@main");
+    } finally {
+      worker.server.stop(true);
+    }
+  });
+
+  // Issue #548 review round 1: the shape check must also cover the files
+  // ROWS — a files:[{}] 200 passes a top-level-only check and then crashes
+  // in formatMemoryTable's f.target.length, the exact TypeError the issue
+  // forbids. Same named line, never the generic `fleet: <TypeError>`.
+  test("a JSON 200 with a files row missing target dies with the survey-shape line, exit 1", async () => {
+    const { home, cwd, worker } = await setup();
+    try {
+      worker.state.surveyBody = JSON.stringify({ ...SURVEY, files: [{}] });
+      const r = await run(["memory", "ls"], home, cwd);
+
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("fleet memory ls: answered 200 but the body was not the survey shape");
+      expect(r.err).not.toMatch(/^fleet: /m);
+      expect(r.out).not.toContain("VERDICT:");
+    } finally {
+      worker.server.stop(true);
+    }
+  });
 });
 
 describe("fleet memory compact", () => {
@@ -235,6 +275,44 @@ describe("fleet memory compact", () => {
       const posts = worker.requests.filter((req) => req.method === "POST");
       expect(posts.length).toBe(1);
       expect(posts[0].body).toBe('{"proposal":{"merge":["x"]}}');
+    } finally {
+      worker.server.stop(true);
+    }
+  });
+
+  // Issue #548 (sweep 19 F4): a 200 non-JSON body means the POST already
+  // ran server-side — the named line must say the pass may have landed,
+  // never a bare `fleet: <SyntaxError>` from main()'s catch.
+  test("a 200 non-JSON body dies with the may-have-landed line, exit 1", async () => {
+    const { home, cwd, worker } = await setup();
+    try {
+      worker.state.compactBody = "<html>proxy error page</html>";
+      const r = await run(["memory", "compact"], home, cwd, "");
+
+      expect(r.code).toBe(1);
+      expect(r.err).toContain(
+        "fleet memory compact: 200 but the body was not JSON — the pass may have landed; check the board repo's open PRs",
+      );
+      expect(r.err).not.toMatch(/^fleet: /m);
+    } finally {
+      worker.server.stop(true);
+    }
+  });
+
+  // Issue #548 review round 1: a JSON 200 with the wrong shape is the exact
+  // case where the pass DID land — the pin demands the may-have-landed line
+  // with the compact-shape first clause, never a TypeError from body.summary.
+  test("a JSON 200 with the wrong shape dies with the may-have-landed line, exit 1", async () => {
+    const { home, cwd, worker } = await setup();
+    try {
+      worker.state.compactBody = '{"error":"gateway"}';
+      const r = await run(["memory", "compact"], home, cwd, "");
+
+      expect(r.code).toBe(1);
+      expect(r.err).toContain(
+        "fleet memory compact: 200 but the body was not the compact shape — the pass may have landed; check the board repo's open PRs",
+      );
+      expect(r.err).not.toMatch(/^fleet: /m);
     } finally {
       worker.server.stop(true);
     }

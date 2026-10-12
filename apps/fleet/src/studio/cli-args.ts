@@ -308,7 +308,7 @@ export interface VerbHelp {
 export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHelp> = {
   ls: {
     args: "[--fresh] [--prs] [--json]",
-    summary: "Every studio: id, repo, state, READY (provisioned/bare/\"?\" unknown, do.ts's periodic container check — the registry's own state/error can be stale, trust READY; READY may also read replaced/unreachable/unverified, issue #85, when the ship tick's own evidence contradicts the last container-side check), SESSION (resumed/fresh/LOST/\"?\", whether the live lead actually continued its history or started over, plus how old the last shipped snapshot is), CHECKED (how old that verdict is — up to 300s by default), tailnet host, burn, last activity (git commits — a quiet LAST ACTIVITY column means no recent commits, not that the studio is unhealthy; check READY/SESSION for that), error. Read-only. --fresh re-checks every studio live first (one container exec each, slower) instead of reading the last recorded verdict. --json prints only a JSON array: per studio id, state, repo, lead (working/idle/waiting-members/waiting-question/limit/modal/unknown/stopped), leadSince, limitResetsAt and the ACTIVITY text (issue #70). `--prs` fills the PRS column — one live open-prs read per distinct repo (live GitHub calls behind the Worker, so it is opt-in; a 10s client timeout bounds the wait; without the flag the column reads `-`).",
+    summary: "Every studio: id, repo, state, READY (provisioned/bare/\"?\" unknown, do.ts's periodic container check — the registry's own state/error can be stale, trust READY; READY may also read replaced/unreachable/unverified, issue #85, when the ship tick's own evidence contradicts the last container-side check), SESSION (resumed/fresh/LOST/\"?\", whether the live lead actually continued its history or started over, plus how old the last shipped snapshot is), CHECKED (how old that verdict is — up to 300s by default), tailnet host, burn, last activity (git commits — a quiet LAST ACTIVITY column means no recent commits, not that the studio is unhealthy; check READY/SESSION for that), error. Read-only. --fresh re-checks every studio live first (one container exec each, slower) instead of reading the last recorded verdict. --json prints only a JSON array: per studio id, state, repo, lead (working/idle/waiting-members/waiting-question/limit/modal/unknown/stopped/dead), leadSince, limitResetsAt, lastLine (the lead's last visible message line), openPrs (only with --prs; absent means no data) and the ACTIVITY text (issue #70). `--prs` fills the PRS column — one live open-prs read per distinct repo (live GitHub calls behind the Worker, so it is opt-in; a 10s client timeout bounds the wait; without the flag the column reads `-`).",
   },
   onboard: {
     args: "",
@@ -328,7 +328,7 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   },
   spawn: {
     args: "<role> [--new] [--lead claude|glm]",
-    summary: "Create a studio for <role> in the repo you are standing in (maestro, web-studio, release-studio, pilot, scratch). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them. Issue #249: `--lead glm` boots this studio's lead on this fleet's own GLM-translation route instead of a Claude account — no Claude quota spent, sticky for the studio's whole life (set once, here, never re-asked on a later provision/restart/recycle). `--lead claude` is the explicit, redundant spelling of today's default.",
+    summary: "Create a studio for <role> in the repo you are standing in (the roles this fleet declares in fleet.json). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them. Issue #249: `--lead glm` boots this studio's lead on this fleet's own GLM-translation route instead of a Claude account — no Claude quota spent, sticky for the studio's whole life (set once, here, never re-asked on a later provision/restart/recycle). `--lead claude` is the explicit, redundant spelling of today's default. maestro is spawnable from the Mac (the operator edge); ff refuses it (always local, issue #250), and `--new` never applies to it (singleton).",
   },
   provision: {
     args: "<id> [--fresh-session [--discard-session]|--no-fresh-session]",
@@ -344,7 +344,7 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   },
   inspect: {
     args: "<id>",
-    summary: "Read a studio WITHOUT attaching: pane_current_command for tmux studio:claude, whether the checkout exists, and the last ~60 pane lines via `tmux capture-pane -p`. Never opens the pty, never sends a keystroke, never resizes the shared terminal — the corruption `fleet attach` risks on an operator's own live view. Refuses a STOPPED studio outright (reading it would start its container and bill silently).",
+    summary: "Read a studio WITHOUT attaching: pane_current_command for tmux studio:claude, whether the checkout exists, and the last ~60 pane lines via `tmux capture-pane -p` (the route's default; `GET /inspect?lines=N` overrides — the Mac CLI always sends the default). Never opens the pty, never sends a keystroke, never resizes the shared terminal — the corruption `fleet attach` risks on an operator's own live view. Refuses a STOPPED studio outright (reading it would start its container and bill silently).",
   },
   recycle: {
     args: "<id> [--discard-unsynced] [--fresh-session] [--account mapped]",
@@ -352,7 +352,7 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   },
   destroy: {
     args: "<id> [--force] [--discard-unsynced] [--park] [--strict-unmerged]",
-    summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (or --force). A rescue-push that fails or cannot confirm the work was saved (killed exec, dead shell, deadline) refuses the same way, naming why. A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it. --park stops it RESUMABLE: a studio whose org-chart edges reach it may `fleet resume` it from its container (after a cooldown). Without --park, only you can start it again. Board issue #332: after a confirmed stop, destroy also prints a NON-BLOCKING `park warning` naming every unmerged PR the studio's tasks still have open (an unmerged, bounced PR needs this lane's history alive; check the PRS column in `fleet ls` before parking) — the warning costs nothing and never blocks, for plain destroy exactly as for --park. --strict-unmerged turns that same check into a REFUSAL before anything is destroyed, naming each PR; a check that cannot answer (an old Worker, a route blip) degrades to one warning line and proceeds — never blocks on a Worker upgrade race.",
+    summary: "Stop a studio for good: same pre-teardown rescue as recycle, but does NOT reprovision. Refuses if an open board task is still assigned to it, unless --force. Work typed into a lead after its task completed is NOT a task and does not block: file it with task new --continues (issue #54). A running container that cannot answer cannot be rescued: destroy REFUSES (409) and names the age of the last synced snapshot, unless --discard-unsynced (--force passes it too, but also skips the open-task check — the refusal lines only ever suggest --discard-unsynced on purpose). A rescue-push that fails or cannot confirm the work was saved (killed exec, dead shell, deadline) refuses the same way, naming why. A container that is not running is destroyed without any exec — its disk is already gone and an exec would boot it. --park stops it RESUMABLE: a studio whose org-chart edges reach it may resume it FROM ITS CONTAINER (`fleet resume`, the in-container binary) after a cooldown — the Mac CLI's own way to start it again is `fleet provision <id>`. Without --park, only you can start it again. Board issue #332: after a confirmed stop, destroy also prints a NON-BLOCKING `park warning` naming every unmerged PR the studio's tasks still have open (an unmerged, bounced PR needs this lane's history alive; check the PRS column in `fleet ls` before parking) — the warning costs nothing and never blocks, for plain destroy exactly as for --park. --strict-unmerged turns that same check into a REFUSAL before anything is destroyed, naming each PR; a check that cannot answer (an old Worker, a route blip) degrades to one warning line and proceeds — never blocks on a Worker upgrade race.",
   },
   "task-new": {
     args: "new --title T --objective O --output F --boundaries B [--sprint S] [--studio ID] [--repo owner/name] [--continues N] [--junior] [--read-repos owner/a,owner/b] [--provision [--fresh-session]] [--template retro]",
@@ -408,14 +408,14 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
   },
   junior: {
     args: "enable [--account <id>] | disable | status | stats [--since <dur|date>]",
-    summary: "Opt this Mac into the junior skill (Workers AI delegation, skills/junior/SKILL.md). enable symlinks ~/.claude/skills/junior to this checkout and stores the Cloudflare account id in ~/.config/fleet/junior.json; disable removes only that symlink; status prints whether it is on, the account, and which auth path a call would take. enable/disable/status are local only — never touch the Worker or any studio. stats is DIFFERENT: it calls the Worker's /studio/junior/usage route (needs ~/.fleet/credentials, like every other board/studio verb) and merges it with this machine's own local usage log (~/.local/share/fleet/junior-usage.jsonl, laptop/direct-transport calls that never reach the Worker), printing one row per studio/id plus a TOTAL. --since <dur|date> (e.g. 24h, 7d, or an ISO date) narrows both halves; omitted means all time.",
+    summary: "Opt this Mac into the junior skill (Workers AI delegation, skills/junior/SKILL.md). enable symlinks ~/.claude/skills/junior to this checkout and stores the Cloudflare account id in ~/.config/fleet/junior.json; disable removes only that symlink; status prints whether it is on, the account, and which auth path a call would take. enable/disable/status are local only — never touch the Worker or any studio. stats is DIFFERENT: it calls the Worker's /studio/junior/usage route (needs ~/.fleet/credentials, like every other board/studio verb) and merges it with this machine's own local usage log (~/.local/share/fleet/junior-usage.jsonl, laptop/direct-transport calls that never reach the Worker), printing one row per remote studio plus one per local log id — the same id can appear twice (its cloud calls and its laptop-side calls); TOTAL sums both halves. --since <dur|date> (e.g. 24h, 7d, or an ISO date) narrows both halves; omitted means all time.",
   },
   accounts: {
     args: "[sync] [--watch] [--json] [--write-labels]",
     summary: "Issue #232: join each configured Claude account slot to a LOCAL `cswap list --json` read (claude-swap, operator's own machine — docs/setup.md's \"Proactive account-limit sync\") — first by label===email, then (no label, or no match) by matching the slot's own recorded reset time against an unclaimed cswap account's reset time, within +/-5min, only when exactly one candidate qualifies — and show what a sync would do: SLOT, LABEL, MATCH (label/inferred/unmapped/cswap-missing), 5h%/7d% usage, the reset time that would trip a limit, ROW STATE (what D1 holds now), WOULD (what sync would change it to, '-' if nothing, 'no data (...)' when cswap's own reading for a known account is stale or failed — distinct from unmapped). Bare `fleet accounts` is READ-ONLY — it never calls the Worker's write route. `sync` POSTs every limit/clear decision to /studio/accounts/sync: pct >= 95 on any window marks that slot limited until that window's own reset; everything under 95 clears it, including a stale dead row (a fresh low reading right after re-login IS the proof it's alive again) — except a HELD row (issue #336: KIND spend_cap, the org's monthly spend cap the failover saw, held until the next UTC month start; or KIND hold, an operator's), which sync never clears or shortens; reports applied/rejected/skipped (skipped = a fresher sighting already recorded, correct no-op). --watch reruns every 60s, printing only when something changed; --json prints the raw snapshot instead of the table. --write-labels prints a pasteable CLAUDE_ACCOUNT_<n>_LABEL=<email> line per inferred match (folded into the JSON object under labelSuggestions when combined with --json, never a bare line that would corrupt it) — this command never writes any config file itself. cswap missing/erroring never crashes this — every slot just reads matchSource cswap-missing. KIND says what the row is: window (5h/7d quota), spend_cap, or hold.",
   },
   "accounts-hold": {
-    args: "hold <slot> [--until <ISO>] [--reason <text>]",
+    args: "hold <slot> [--until <ISO>] [--reason <text>] (any order after the slot, as intact flag+value pairs)",
     summary: "Issue #336: mark one account slot limited fleet-wide (KIND hold) until --until, or until `fleet accounts clear`. No studio launches or fails over onto it meanwhile; `fleet accounts sync` never clears or shortens it. Audited in the events log.",
   },
   "accounts-clear": {
@@ -554,6 +554,16 @@ function splitReadRepos(raw: string): string[] | null {
   return repos.length === 0 ? null : repos;
 }
 
+/** Board task #565: an issue number is 1..2^53-1 — `0` is GitHub's "no
+ *  issue" (the CLI's own --continues grammar already refuses it) and
+ *  Number() rounds digit strings past 2^53 to issues that cannot exist. */
+function parseIssueNumber(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  if (!/^[1-9][0-9]*$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 /** Narrowed from CliCommand (review round 1 on #567) so idArg, whose generic
  *  return type cannot accept the full union, can call it too — every other
  *  caller still returns it into a CliCommand context, which this narrower
@@ -585,32 +595,36 @@ function parseTask(argv: string[]): CliCommand {
   const [sub, ...rest] = argv;
   if (sub === "show") {
     const raw = rest[0];
-    if (raw === undefined || !/^\d+$/.test(raw)) return usage("fleet task show needs an issue number");
-    return { cmd: "task-show", number: Number(raw) };
+    const number = parseIssueNumber(raw);
+    if (number === null) return usage(`fleet task show needs an issue number${raw === undefined ? "" : ` (got ${JSON.stringify(raw)})`}`);
+    return { cmd: "task-show", number };
   }
   if (sub === "verify") {
     const raw = rest[0];
-    if (raw === undefined || !/^\d+$/.test(raw)) return usage("fleet task verify needs an issue number");
-    return { cmd: "task-verify", number: Number(raw) };
+    const number = parseIssueNumber(raw);
+    if (number === null) return usage(`fleet task verify needs an issue number${raw === undefined ? "" : ` (got ${JSON.stringify(raw)})`}`);
+    return { cmd: "task-verify", number };
   }
   if (sub === "assign") {
     // Two positionals, then flags — the only verb here with that shape, which
     // is why it is split out rather than folded into parseFlags's all-flags
     // grammar below.
     const [rawNumber, target, ...flagArgv] = rest;
-    if (rawNumber === undefined || !/^\d+$/.test(rawNumber)) {
-      return usage("fleet task assign needs an issue number: fleet task assign <n> <role>");
+    const number = parseIssueNumber(rawNumber);
+    if (number === null) {
+      const got = rawNumber === undefined ? "" : ` (got ${JSON.stringify(rawNumber)})`;
+      return usage(`fleet task assign needs an issue number: fleet task assign <n> <role | role--k | studio-id>${got}`);
     }
     // `startsWith("--")` is what tells a missing positional from a flag, and it
     // survives issue #269 untouched: every target shape STARTS with a segment
     // (`pilot`, `pilot--2`, `websites--pilot--2`), so no valid target can begin
     // with the delimiter.
     if (target === undefined || target.startsWith("--")) {
-      return usage("fleet task assign needs the role or studio to move it to: fleet task assign <n> <role>");
+      return usage("fleet task assign needs the role or studio to move it to: fleet task assign <n> <role | role--k | studio-id>");
     }
     const flags = parseFlags(flagArgv, TASK_FLAGS.assign);
     if ("bad" in flags) return usage(`unexpected ${JSON.stringify(flags.bad)}`);
-    const assign: CliCommand = { cmd: "task-assign", number: Number(rawNumber), target };
+    const assign: CliCommand = { cmd: "task-assign", number, target };
     if (flags.why !== undefined) assign.why = flags.why;
     if (flags["read-repos"] !== undefined) {
       const readRepos = splitReadRepos(flags["read-repos"]);
@@ -628,15 +642,17 @@ function parseTask(argv: string[]): CliCommand {
     const [rawNumber, to, ...extra] = rest;
     const fromNone = extra.length === 1 && extra[0] === "--from-none";
     if (extra.length > 0 && !fromNone) return usage(`unexpected ${JSON.stringify(extra[0])}`);
-    if (rawNumber === undefined || !/^\d+$/.test(rawNumber)) {
-      return usage("fleet task state needs an issue number: fleet task state <n> <to>");
+    const number = parseIssueNumber(rawNumber);
+    if (number === null) {
+      const got = rawNumber === undefined ? "" : ` (got ${JSON.stringify(rawNumber)})`;
+      return usage(`fleet task state needs an issue number: fleet task state <n> <to>${got}`);
     }
     if (!isTaskState(to)) {
       return usage(
         `fleet task state needs a valid target state: fleet task state <n> <to> — one of ${TASK_STATES.join("|")}`,
       );
     }
-    return { cmd: "task-state", number: Number(rawNumber), to, ...(fromNone ? { fromNone: true as const } : {}) };
+    return { cmd: "task-state", number, to, ...(fromNone ? { fromNone: true as const } : {}) };
   }
   if (sub === "reap") {
     // Zero positionals, one optional bare boolean flag — NOT the
@@ -803,8 +819,18 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // positional to collide with), keeping `ls`'s own long-standing "a stray
     // extra token is ignored" grammar exactly as it was for everything else.
     // #332 review H1: `--prs` rides the same read-from-anywhere shape.
-    case "ls":
-      return { cmd: "ls", fresh: argv.slice(1).includes("--fresh"), json: argv.slice(1).includes("--json"), prs: argv.slice(1).includes("--prs") };
+    // #564 (sweep 20 F2): a -- token that is not one of the three exact
+    // spellings — an =value form of a known flag, or an unknown flag — is
+    // a usage error, never silently dropped; stray positionals stay ignored.
+    case "ls": {
+      const rest = argv.slice(1);
+      for (const token of rest) {
+        if (token.startsWith("--") && token !== "--fresh" && token !== "--json" && token !== "--prs") {
+          return usage(`unexpected ${JSON.stringify(token)} — ls flags are --fresh --prs --json (no values)`);
+        }
+      }
+      return { cmd: "ls", fresh: rest.includes("--fresh"), json: rest.includes("--json"), prs: rest.includes("--prs") };
+    }
     case "onboard":
       return { cmd: "onboard" };
     // Issue #216: `--repo <owner/repo>` (value form or `--repo=value`),
@@ -1051,10 +1077,22 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // Bare `fleet memory` is an alias for `fleet memory ls` — the survey is
     // the only thing you can safely do without thinking, so it is what an
     // operator who typed half a command gets.
-    case "memory":
-      if (arg === undefined || arg === "ls") return { cmd: "memory-ls" };
-      if (arg === "compact") return { cmd: "memory-compact" };
+    case "memory": {
+      // #568 / sweep-20 F6: compact is the one memory verb that opens a PR in
+      // the blueprint repo, so a token past the subcommand — a flag the caller
+      // believes in (`--json`), a paste accident — is a usage error, never a
+      // silently-dropped extra that runs the full compact anyway.
+      const rest = argv.slice(2);
+      if (arg === undefined || arg === "ls") {
+        if (rest.length > 0) return usage(`unexpected ${JSON.stringify(rest[0])} — fleet memory takes only ls | compact`);
+        return { cmd: "memory-ls" };
+      }
+      if (arg === "compact") {
+        if (rest.length > 0) return usage(`unexpected ${JSON.stringify(rest[0])} — fleet memory takes only ls | compact`);
+        return { cmd: "memory-compact" };
+      }
       return usage(`unknown memory command ${JSON.stringify(arg)}`);
+    }
     // Task 8 / issue #218: `fleet junior enable [--account <id>] | disable |
     // status | stats [--since <dur|date>]`.
     case "junior": {
@@ -1086,15 +1124,31 @@ export function parseCliArgs(argv: string[]): CliCommand {
         return { cmd: "accounts-clear", name: rest[1] };
       }
       if (rest[0] === "hold") {
-        const holdUsage = "usage: fleet accounts hold <slot> [--until <ISO>] [--reason <text>]";
+        // #501 F7: same accepts, same refusals as before — only the usage
+        // MESSAGE now names the flag (and --until's bad value) instead of
+        // the bare usage line, so an operator can tell which flag broke.
+        const holdUsage =
+          "usage: fleet accounts hold <slot> [--until <ISO>] [--reason <text>] (any order after the slot, as intact flag+value pairs)";
         const name = rest[1];
         if (name === undefined || name.startsWith("--")) return usage(holdUsage);
         let until: string | null = null;
         let reason: string | null = null;
         for (let i = 2; i < rest.length; i += 2) {
           const value = rest[i + 1];
-          if (value === undefined) return usage(holdUsage);
-          if (rest[i] === "--until" && Number.isFinite(Date.parse(value))) { until = value; continue; }
+          if (value === undefined) {
+            // A trailing flag with no value after it: name it rather than
+            // the bare usage line. Anything else with a missing value (an
+            // unknown flag) keeps the generic line.
+            if (rest[i] === "--until") return usage(`--until needs a parseable ISO date\n${holdUsage}`);
+            if (rest[i] === "--reason") return usage(`--reason needs a text value\n${holdUsage}`);
+            return usage(holdUsage);
+          }
+          // --until is checked first so its bad value gets the named message
+          // rather than falling through to the generic one below.
+          if (rest[i] === "--until") {
+            if (Number.isFinite(Date.parse(value))) { until = value; continue; }
+            return usage(`--until needs a parseable ISO date (got "${value}")\n${holdUsage}`);
+          }
           if (rest[i] === "--reason") { reason = value; continue; }
           return usage(holdUsage);
         }

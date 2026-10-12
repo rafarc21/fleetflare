@@ -417,7 +417,7 @@ export interface SandboxPtyHost {
  * for this exact socket). terminal.ts translates between them.
  */
 export async function sbAttachPty(
-  sb: SandboxPtyHost, opts: { cols: number; rows: number },
+  sb: SandboxPtyHost, opts: { cols: number; rows: number; studioId: string },
 ): Promise<PtyHandle> {
   // Brings the shared session into existence. A duplicate id is the only
   // expected failure here and simply means a previous attach already created
@@ -467,7 +467,7 @@ export async function sbAttachPty(
    *  recover the same way, but only one of them is worth alerting on, and a
    *  silent clean close would hide it entirely. */
   const failStream = (err: unknown) => {
-    console.error("studio pty socket error", err);
+    console.error(`studio ${opts.studioId} pty socket error`, err);
     try {
       controller?.error(err instanceof Error ? err : new Error("studio pty socket error"));
     } catch {

@@ -1,6 +1,13 @@
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+/**
+ * The studio-bringup.sh source, read once and shared by the bun-lane
+ * bring-up tests. Kept here (not per-file) because every reader sits in
+ * this same test/bun directory, so ../../container resolves identically.
+ */
+export const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
 
 /**
  * Pull a heredoc body out of shell source. studio-bringup.sh emits its hook
@@ -41,6 +48,24 @@ export function extractShellFunc(src: string, name: string): string {
   const endIdx = lines.findIndex((l) => l === "}");
   if (endIdx === -1) throw new Error(`shell function ${name}() has no closing brace at column 0`);
   return lines.slice(0, endIdx + 1).join("\n");
+}
+
+/**
+ * Pull a `# >>> marker >>>` .. `# <<< marker <<<` region out of shell source,
+ * excluding both marker lines. studio-bringup.sh delimits editable regions
+ * with a `# >>> name >>>` opener line and a `# <<< name <<<` terminator line
+ * at column 0; what runs in a test is the body between them, byte-identical
+ * to what the container script ships, so a pinned fragment cannot drift from
+ * the live script it claims to pin.
+ */
+export function extractRegion(src: string, marker: string): string {
+  const open = `# >>> ${marker} >>>`;
+  const close = `# <<< ${marker} <<<`;
+  const openAt = src.indexOf(open);
+  if (openAt === -1) throw new Error(`region opener ${open} not found in source`);
+  const closeAt = src.indexOf(close, openAt);
+  if (closeAt === -1) throw new Error(`region terminator ${close} not found in source`);
+  return src.slice(src.indexOf("\n", openAt) + 1, closeAt);
 }
 
 const PARENT_SENTINEL = "__PARENT_STILL_ALIVE__";

@@ -80,7 +80,7 @@ async function terminalMessage(deps: LoopDeps, task: TaskRecord, body: string): 
     await sendCard(deps.botToken, task.chatId, body);
   } catch (err) {
     // Never unwind a logged event over a delivery failure. Day 1 rule.
-    console.error("terminal notify failed", err);
+    console.error(`terminal notify failed for ${task.taskId}`, err);
     // console.error only reaches a Workers log nobody reads. Record it as
     // its own event too, so it exists somewhere queryable from D1 — the
     // operator is often unattended when this fires. `to: task.agentId`, not
@@ -105,7 +105,7 @@ export async function advanceTask(deps: LoopDeps, task: TaskRecord): Promise<Loo
     try {
       await deps.runtime.abort();
     } catch (err) {
-      console.error("abort failed", err);
+      console.error(`abort failed for ${task.taskId}`, err);
     }
     await terminalMessage(
       deps, task,
@@ -154,7 +154,7 @@ export async function advanceTask(deps: LoopDeps, task: TaskRecord): Promise<Loo
         await editCard(deps.botToken, next.chatId, next.liveMessageId, card(next, all));
       }
     } catch (err) {
-      console.error("live card update failed", err);
+      console.error(`live card update failed for ${next.taskId}`, err);
     }
     next.shownMilestones = status.milestones.length;
   }
@@ -218,7 +218,7 @@ export async function advanceTask(deps: LoopDeps, task: TaskRecord): Promise<Loo
         await setApprovalMessageId(deps.db, id, messageId);
       } catch (err) {
         // The row stays pending and queryable even if the message never lands.
-        console.error("approval card failed", err);
+        console.error(`approval card failed for ${next.taskId}`, err);
         await report(
           deps, next, next.agentId,
           `telegram delivery failed: ${err instanceof Error ? err.message : String(err)}`,

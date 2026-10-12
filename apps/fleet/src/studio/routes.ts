@@ -1466,7 +1466,7 @@ export async function handleStudio(
       // reach a caller (it doesn't here; nothing about a paste failure is
       // actionable client-side beyond "it failed"). Logged server-side only,
       // same as sandbox-api.ts's own failStream does for a dead pty socket.
-      console.error("studio paste write failed", err);
+      console.error(`studio ${id.full} paste write failed`, err);
       return new Response("write failed", { status: 500 });
     }
   }

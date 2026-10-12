@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractHeredoc, runSnippet } from "./exec-snippet";
+import { BRINGUP, extractHeredoc, extractRegion, runSnippet } from "./exec-snippet";
 
 describe("extractHeredoc", () => {
   test("returns the body between the quoted delimiters", () => {
@@ -39,5 +39,37 @@ describe("runSnippet", () => {
     const script = "echo before; exit 0";
     expect(runSnippet({ script }).parentAlive).toBe(true);
     expect(runSnippet({ script, sourced: true }).parentAlive).toBe(false);
+  });
+});
+
+describe("extractRegion", () => {
+  const src = [
+    "prefix line",
+    "# >>> shell-window >>>",
+    "body one",
+    "body two",
+    "# <<< shell-window <<<",
+    "suffix line",
+  ].join("\n");
+
+  test("returns the lines between the marker pair, exclusive of both marker lines", () => {
+    // The slice ends at the terminator's column-0 `#`, so the newline that
+    // ends the last body line is part of the region — matching all 9
+    // folded copies, whose consumers rely on `${extractRegion(...)}\n`
+    // composing correctly.
+    expect(extractRegion(src, "shell-window")).toBe("body one\nbody two\n");
+  });
+
+  test("throws naming the opener when the region is absent", () => {
+    expect(() => extractRegion("nothing here", "shell-window")).toThrow("region opener");
+  });
+
+  test("throws naming the terminator when only the closer side exists", () => {
+    expect(() => extractRegion("# >>> only >>>\nbody", "only")).toThrow("region terminator");
+  });
+
+  test("BRINGUP reads the real studio-bringup.sh source", () => {
+    expect(BRINGUP.length).toBeGreaterThan(1000);
+    expect(BRINGUP).toContain("# >>> shell-window >>>");
   });
 });
