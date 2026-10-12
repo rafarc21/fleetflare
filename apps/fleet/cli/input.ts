@@ -11,10 +11,10 @@
 // multi-byte chunk for an embedded 0x1d used to kill the session on any
 // local paste that happened to contain that byte; an embedded 0x16 used to
 // splice a paste-upload attempt into the middle of forwarded text.
-export const CTRL_RBRACKET = 0x1d;
+const CTRL_RBRACKET = 0x1d;
 export const CTRL_V = 0x16;
 
-export type Intercept = "escape" | "paste" | null;
+type Intercept = "escape" | "paste" | null;
 
 /** `null` means "not a standalone control keypress — forward the chunk
  *  exactly as received", which covers both an ordinary single byte and any

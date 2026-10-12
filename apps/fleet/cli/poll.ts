@@ -2,7 +2,7 @@
 // --watch share (#404). Clock/sleep injected so tests pin the budget math —
 // the budget counts from `at`, not loop entry; ff.ts's operator-facing lines
 // print Math.round'd elapsed seconds, so that rounding lives here, once.
-export interface PollOpts<T> {
+interface PollOpts<T> {
   /** The start the budget counts from, NOT loop entry: ff's spawn POST
    *  blocks for most of a bring-up, and the wait must not get a fresh
    *  budget on top of that. */

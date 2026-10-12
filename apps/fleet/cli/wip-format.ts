@@ -55,7 +55,7 @@ const WIP_CHECK_PRIORITY: Record<"pushed" | "clean" | "markers-only" | "no-check
   failed: 0, pushed: 1, "no-checkout": 2, "markers-only": 3, clean: 4,
 };
 
-export type WipCheckEntry = { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" };
+type WipCheckEntry = { at: string; result: "pushed" | "clean" | "markers-only" | "no-checkout" | "failed" };
 
 /**
  * Maestro review round 1 on PR #245 (issue #241), MAJOR 1 — `wipLastCheck`
