@@ -4,9 +4,14 @@
  * the ONE reset grammar (failover.ts's detector imports it), the staleness
  * rule (#106/#112), the conversion to UTC, and the words `fleet ls` renders.
  *
- * Pure: no Env, no imports. The CLI imports it (fleet ls READY), so it must
- * not pull the Worker's graph in.
+ * Pure: no Env; its one import (MINUTE_MS from ../durations) is a
+ * zero-import module, so the CLI (fleet ls READY) still pulls no Worker
+ * graph — the rule src/durations.ts's own header states. Not from
+ * ../ratelimit, whose state.ts import names the ambient D1Database type
+ * the cli/bun tsconfig projects do not carry (the bun run check failure
+ * issue #508's first cut hit).
  */
+import { MINUTE_MS } from "../durations";
 
 /** What the failover capture last saw, stored on the row (StudioStatus.rateLimited). */
 export interface RateLimitObservation {
@@ -141,7 +146,7 @@ export function parseResetUtc(printed: string, now: Date): string | null {
   const [, , mon, day, hour, minute, ampm, tz] = m;
   const nowWall = wallClock(now, tz);
   if (nowWall === null) return null;
-  const offset = nowWall - Math.floor(now.getTime() / 60_000) * 60_000;
+  const offset = nowWall - Math.floor(now.getTime() / MINUTE_MS) * MINUTE_MS;
   const h = hour24(hour, ampm);
   const min = Number(minute ?? 0);
   if (h > 23 || min > 59) return null;
