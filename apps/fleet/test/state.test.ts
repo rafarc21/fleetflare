@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeEach } from "vitest";
-import { getFlag, setFlag, incrementCounter, scanStateTaskKeys } from "../src/state";
+import { getFlag, setFlag, incrementCounter, scanStateTaskKeys, flagIsSet, markEpisode, clearEpisode } from "../src/state";
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
@@ -131,5 +131,27 @@ describe("scanStateTaskKeys", () => {
     // engine's plan for this statement ever changes, this fails first and
     // loudly instead of the equality passing for a changed reason.
     expect(raw.results.map((r) => r.key)).toEqual(["ns:b:2", "ns:a:1", "ns:c:3"]);
+  });
+});
+
+// #447 (sweep-6 F1): the three episode-marker wrappers. flagIsSet reads the
+// exact "1" vocabulary every call site shares; markEpisode/clearEpisode
+// write it. Absent key reads as not-set — the same null-handling getFlag's
+// own contract already answers with.
+describe("episode flags", () => {
+  it("an absent key is not set, a \"1\" key is, a \"0\" key is not", async () => {
+    expect(await flagIsSet(env.DB, "paused")).toBe(false);
+    await markEpisode(env.DB, "paused", 1000);
+    expect(await flagIsSet(env.DB, "paused")).toBe(true);
+    await clearEpisode(env.DB, "paused", 2000);
+    expect(await flagIsSet(env.DB, "paused")).toBe(false);
+    expect(await getFlag(env.DB, "paused")).toBe("0");
+  });
+
+  it("markEpisode writes the literal wire value \"1\" clearEpisode resets to \"0\"", async () => {
+    await markEpisode(env.DB, "k", 1000);
+    expect(await getFlag(env.DB, "k")).toBe("1");
+    await clearEpisode(env.DB, "k", 2000);
+    expect(await getFlag(env.DB, "k")).toBe("0");
   });
 });
