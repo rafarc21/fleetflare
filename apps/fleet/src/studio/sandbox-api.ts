@@ -31,6 +31,7 @@
 
 import { proxyTerminal } from "@cloudflare/sandbox";
 import { withKillDeadline, KILL_GRACE_SECONDS } from "./exec-deadline";
+import { INSPECT_EXEC_MS } from "./inspect";
 import { bytesToBase64 } from "../base64";
 import { raceWithDeadline } from "../race-timeout";
 
@@ -160,7 +161,7 @@ export const EXEC_CLASSES = {
   ship: { sessionId: "fleet-ship", timeoutMs: 20_000 },
   sync: { sessionId: "fleet-sync", timeoutMs: 120_000 },
   readiness: { sessionId: "fleet-readiness", timeoutMs: 60_000 },
-  inspect: { sessionId: "fleet-inspect", timeoutMs: 15_000 },
+  inspect: { sessionId: "fleet-inspect", timeoutMs: INSPECT_EXEC_MS },
   rescue: { sessionId: "fleet-rescue", timeoutMs: 300_000 },
   wake: { sessionId: "fleet-wake", timeoutMs: 30_000 },
   refresh: { sessionId: "fleet-refresh", timeoutMs: 150_000 },
