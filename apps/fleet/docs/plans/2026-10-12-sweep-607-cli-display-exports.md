@@ -24,13 +24,15 @@ keyword is a convenience nobody took.
    - cli/orca-workspace.ts:113 OrcaRun (type alias), :167 WorkspaceOutcome (type alias)
    - cli/junior.ts:20 JuniorPaths (interface)
 2. Commit + push branch sweep-607-cli-display-exports.
-3. Verify: tsc all 4 projects, targeted test files, english-check (one gate at a time).
+3. Verify: tsc all 5 projects (root, container, cli, test-integration, test), targeted test files, english-check (one gate at a time).
 
 ## Verification
 
 - cd apps/fleet && tsc --noEmit  (exit 0)
 - cd apps/fleet && tsc --noEmit -p cli  (exit 0 — the compile pin: any hidden importer fails here)
 - cd apps/fleet && tsc --noEmit -p test  (exit 0)
+- cd apps/fleet && tsc --noEmit -p container  (exit 0)
+- cd apps/fleet && tsc --noEmit -p test-integration  (exit 0)
 - cd apps/fleet && flock /tmp/fleet-gate.lock bun run test test/cli.input.test.ts test/cli.recycle-outcome.test.ts test/cli.junior-sweep.test.ts (exit 0)
 - cd apps/fleet && flock /tmp/fleet-gate.lock bun test test/bun/poll.test.ts test/bun/orca-workspace.test.ts test/bun/fleet-ls-wip.test.ts  (exit 0 — bun:test lane; vitest.config.ts excludes test/bun/**)
 - cd apps/fleet && bun run english-check  (exit 0)
