@@ -46,6 +46,26 @@ describe("parseFfArgs", () => {
   it("--help and -h ask for help", () => {
     expect(parseFfArgs(["--help"])).toEqual({ cmd: "help" });
     expect(parseFfArgs(["-h"])).toEqual({ cmd: "help" });
+    // Board issue #569: ANY position, not just the first token — before the
+    // fix these parsed to a new task whose text was "--help", which filed a
+    // board issue titled "--help" against the role.
+    expect(parseFfArgs(["web-studio", "--help"])).toEqual({ cmd: "help" });
+    expect(parseFfArgs(["web-studio", "-h"])).toEqual({ cmd: "help" });
+    expect(parseFfArgs(["--new", "--help"])).toEqual({ cmd: "help" });
+    expect(parseFfArgs(["pilot", "--new", "--help"])).toEqual({ cmd: "help" });
+    expect(parseFfArgs(["pilot", "--help", "fix the header"])).toEqual({ cmd: "help" });
+  });
+
+  it("a task that merely CONTAINS --help stays the task; a bare `--` is still a usage error (board issue #569)", () => {
+    // Exact token match only, same containment rule `--new` has.
+    expect(parseFfArgs(["pilot", "drop the --help flag"])).toEqual({
+      cmd: "ff", role: "pilot", task: { kind: "new", text: "drop the --help flag" },
+      newInstance: false,
+    });
+    // `--` is not a help token either; bare and ALONE it is not a valid role
+    // segment, so it keeps the existing usage error — never help, never a
+    // filed issue (the plan pins that this path needs no new code).
+    expect(parseFfArgs(["--"]).cmd).toBe("usage");
   });
 
   it("rejects a role that could never be half of a studio id", () => {
