@@ -102,7 +102,7 @@ export function oneLine(s: string): string {
  * on `"unknown"`) vs `repoMismatchReason`/`board/comment-wake.ts`'s inline
  * check (both fail closed on `"unknown"`, same as `"different"`).
  */
-export type RepoMatch = "same" | "different" | "unknown";
+type RepoMatch = "same" | "different" | "unknown";
 
 export async function sameRepoSlug(
   a: string, b: string, resolveCanonical: (slug: string) => Promise<string>,
