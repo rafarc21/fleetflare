@@ -2,9 +2,8 @@
 
 Sweep-14 §S14-F10 (docs/maintainability/2026-10-12-magic-numbers-sweep-14.md,
 parent #485): port 8080 re-typed 4x — defaultPort on both Container subclasses
-(agents/do.ts:179, deploy/do.ts:211), deploy/do.ts containerFetch calls
-(:234, :271), runtime.ts:49's silent default. sleepAfter stays per-class
-(20m vs 5m — real divergence, it is config).
+(agents/do.ts, deploy/do.ts), deploy/do.ts containerFetch calls, runtime.ts's
+silent default parameter. sleepAfter stays per-class (20m vs 5m — config).
 
 ## Change (behavior identical — every value still 8080)
 
@@ -16,6 +15,7 @@ parent #485): port 8080 re-typed 4x — defaultPort on both Container subclasses
 
 ## TDD
 
-RED pin test/bun/container-port.test.ts landed (c706a04). GREEN: fold above,
-`bun test test/bun/container-port.test.ts` 3/3, touched vitest files pass,
-`bun run check` + `bun run english-check` alone (gate budget). Two-way door.
+RED pin test/bun/container-port.test.ts (c706a04) — behavioral default +
+override tests plus an import-edge pin. GREEN fold (8e67220): 3/3 pin tests,
+touched vitest files pass, `bun run check` + `bun run english-check` green.
+Two-way door: revert restores four literals.

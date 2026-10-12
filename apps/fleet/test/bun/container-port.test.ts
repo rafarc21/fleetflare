@@ -5,10 +5,12 @@
 // containerFetch calls in deploy/do.ts, and ContainerRuntime's default
 // parameter. This file pins two things: ContainerRuntime's default port is
 // the shared CONTAINER_PORT (behavioral — a fake Container records the port
-// containerFetch actually receives), and both DO files import that one name
-// (wiring pin, same scanImports idiom as session-stats-cycle.test.ts — the
-// import list is inspected with Bun's transpiler, never by reading file
-// text, which scripts/test-lies-check.ts flags as a source-reading lie).
+// containerFetch actually receives), and each DO keeps a runtime import
+// edge (import-edge pin — scanImports sees import PATHS only, not the names
+// imported, so it proves each DO keeps its runtime import edge, not which
+// symbol rides it; the stronger per-site pin is follow-up task material).
+// The import list is inspected with Bun's transpiler, never by reading
+// file text, which scripts/test-lies-check.ts flags as a source-reading lie.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -43,17 +45,17 @@ describe("issue #514 CONTAINER_PORT — ContainerRuntime's default is the one na
   });
 });
 
-describe("issue #514 wiring pin — both DOs import the shared port from runtime", () => {
+describe("issue #514 import-edge pin — each DO keeps a runtime import edge", () => {
   const importPaths = (file: string): string[] =>
     new Bun.Transpiler({ loader: "ts" })
       .scanImports(readFileSync(file, "utf8"))
       .map((i) => i.path)
       .filter((p) => p === "./runtime" || p === "../agents/runtime");
 
-  test("agents/do.ts and deploy/do.ts reach runtime.ts", () => {
-    // Both DOs already import from runtime today (ContainerRuntime, env
-    // types); this pins that the path exists so the CONTAINER_PORT import
-    // rides it — sweep-14's risk was a silent third copy, not a new edge.
+  test("agents/do.ts and deploy/do.ts keep a runtime import edge", () => {
+    // agents/do.ts already imported ContainerRuntime and task types from
+    // ./runtime; deploy/do.ts gains the edge in this change. This asserts
+    // the edge only — per-site CONTAINER_PORT adoption is the follow-up.
     expect(importPaths(AGENTS_DO).length).toBeGreaterThan(0);
     expect(importPaths(DEPLOY_DO).length).toBeGreaterThan(0);
   });
