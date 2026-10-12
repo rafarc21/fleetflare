@@ -37,6 +37,31 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
   });
 
+  // Sweep 20 F2 (#564): `--json=false` is not a stray positional — it is a
+  // known flag spelled with a value, which reads as accepted-and-overridden
+  // (the operator believes =false means table mode and gets the default by
+  // accident, wrong reason). Same for `=value` on any of the three flags,
+  // and for an unknown -- token entirely. Stray positionals stay ignored:
+  // that is ls's documented long-standing grammar.
+  it("ls refuses a flag spelled with a value (--json=false is not --json)", () => {
+    const r = parseCliArgs(["ls", "--json=false"]);
+    expect(r.cmd).toBe("usage");
+    if (r.cmd === "usage") expect(r.message).toMatch(/unexpected "--json=false"/);
+    expect(parseCliArgs(["ls", "--fresh=1"]).cmd).toBe("usage");
+    expect(parseCliArgs(["ls", "--prs=x"]).cmd).toBe("usage");
+  });
+
+  it("ls refuses an unknown -- token, naming it", () => {
+    const r = parseCliArgs(["ls", "--no-such"]);
+    expect(r.cmd).toBe("usage");
+    if (r.cmd === "usage") expect(r.message).toMatch(/unexpected "--no-such"/);
+    expect(parseCliArgs(["ls", "--fresh", "--jsonx"]).cmd).toBe("usage");
+  });
+
+  it("ls still ignores a stray positional next to valid flags", () => {
+    expect(parseCliArgs(["ls", "extra", "--json"])).toEqual({ cmd: "ls", fresh: false, json: true, prs: false });
+  });
+
   // Issue #37's second half: there was no way to ask for the truth NOW. The
   // container check already existed (provisionedCheckCmd); nothing exposed it
   // on demand, so an operator needed a shell inside the container.
