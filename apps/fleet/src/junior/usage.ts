@@ -16,7 +16,7 @@
 import type { Env } from "../env";
 import { verifyAccess } from "../studio/auth";
 
-export interface JuniorUsageRow {
+interface JuniorUsageRow {
   id: string;
   ts: number;
   studioId: string;
@@ -80,14 +80,14 @@ export async function insertJuniorUsage(db: D1Database, row: JuniorUsageRow): Pr
   }
 }
 
-export interface JuniorUsageAggregateRow {
+interface JuniorUsageAggregateRow {
   studioId: string;
   calls: number;
   inputTokens: number;
   outputTokens: number;
 }
 
-export interface JuniorUsageAggregate {
+interface JuniorUsageAggregate {
   rows: JuniorUsageAggregateRow[];
   totals: { calls: number; inputTokens: number; outputTokens: number };
 }
