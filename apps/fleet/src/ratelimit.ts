@@ -31,7 +31,7 @@ const DAILY_RETENTION_MS = DAY_MS * 2;
 
 // A refusal without retryAfterMs gives the client no backoff signal;
 // the fixed window means the exact rollover instant is known.
-export type RateLimitResult =
+type RateLimitResult =
   | { ok: true }
   | { ok: false; limit: "per-minute" | "daily"; retryAfterMs: number };
 
@@ -40,7 +40,7 @@ export type RateLimitResult =
  *  Prefixes are expected to already include their own trailing separator
  *  (e.g. "junior-rate:"), matching this module's `${prefix}${id}:${bucket}`
  *  key shape. */
-export interface RateLimitKind {
+interface RateLimitKind {
   ratePrefix: string;
   dailyPrefix: string;
 }
@@ -113,7 +113,7 @@ async function pruneStaleCounters(db: D1Database, now: number, kind: RateLimitKi
  * reached, which is what keeps a caller from bypassing a cap by retrying
  * rejected calls for free.
  */
-export async function checkAndConsumeRateLimit(
+async function checkAndConsumeRateLimit(
   db: D1Database, subjectId: string, now: number,
   perMinute: number, dailyCap: number | null, kind: RateLimitKind,
 ): Promise<RateLimitResult> {
@@ -147,7 +147,7 @@ export async function checkAndConsumeRateLimit(
  *  fresh deploy falls back to. `dailyCapEnv`/`dailyCapDefault` are both
  *  present or both absent — a per-minute-only kind (count_tokens) declares
  *  no daily cap at all rather than a never-reachable sentinel. */
-export type RateLimitKindSpec<E extends Record<string, string | undefined>> =
+type RateLimitKindSpec<E extends Record<string, string | undefined>> =
   | {
       kind: RateLimitKind;
       perMinuteEnv: keyof E & string;
