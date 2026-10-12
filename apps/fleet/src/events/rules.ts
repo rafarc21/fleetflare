@@ -1,8 +1,8 @@
 import type { FleetEvent } from "./schema";
 
-export const CTO_ID = "cto";
+const CTO_ID = "cto";
 
-export type Decision =
+type Decision =
   | { allow: true; toHuman: boolean }
   | { allow: false; reason: string };
 

@@ -36,7 +36,7 @@ function toEvent(r: Row): FleetEvent {
  *  instead of @cloudflare/workers-types. The real `D1Database` satisfies this
  *  structurally; every existing call site keeps passing exactly what it
  *  already passed. */
-export interface D1PortStatement {
+interface D1PortStatement {
   bind(...values: unknown[]): D1PortStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
   run(): Promise<{ meta: { changes: number } }>;

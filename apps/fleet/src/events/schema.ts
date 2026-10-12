@@ -21,7 +21,7 @@ export interface FleetEvent {
   requiresAck: boolean;
 }
 
-export interface NewEvent {
+interface NewEvent {
   from: string;
   to: string;
   kind: EventKind;
