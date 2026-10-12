@@ -20,18 +20,7 @@ import { writeIncarnationCmd } from "../../src/studio/observed";
 // test/bun/transcript-wire-equivalence.test.ts (see
 // transcript-wire-format.ts's header for the drift contract).
 import { shipTickCmdWire as shipTickCmd, SECTION_INCARNATION, SECTION_CHUNK } from "./transcript-wire-format";
-
-/** Same isolation this repo's own real-tmux suites (test/bun/pane-probe.ts,
- *  test/bun/wake-cmd.test.ts) already establish: `TMUX_TMPDIR` alone is NOT
- *  isolation — a shell that already has `$TMUX` set (running inside a live
- *  tmux session) ignores `TMUX_TMPDIR` entirely and addresses whatever
- *  server `$TMUX` names, which is exactly how this feature's own lead was
- *  measured to die from an insufficiently-isolated test run. Both must be
- *  stripped, never just one. */
-function isolatedTmuxEnv(dir: string): Record<string, string | undefined> {
-  const { TMUX: _tmux, TMUX_PANE: _pane, ...rest } = process.env;
-  return { ...rest, TMUX_TMPDIR: dir };
-}
+import { isolatedTmuxEnv } from "./helpers/tmux-env";
 
 // Issue #349: tests 1+3 run shipTickCmd's GNU-only `stat -c %s` probe —
 // BSD stat reads the -1 sentinel and CHUNK never emits: false red, skip.

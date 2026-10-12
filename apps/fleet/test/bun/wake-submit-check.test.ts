@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { submitCheckCmd, submitFragment, SUBMIT_HINT_TEXT } from "../../src/studio/wake";
+import { isolatedTmuxEnv } from "./helpers/tmux-env";
 
 /**
  * Issue #249 round-2 review, item 3 — the post-Enter SUBMIT CONFIRMATION,
@@ -17,17 +18,7 @@ import { submitCheckCmd, submitFragment, SUBMIT_HINT_TEXT } from "../../src/stud
  * `submitCheck`/`submitFragment` pair `wakeCmd` builds it from, and prints
  * `SUBMIT <code>` — 0 the typed text is gone from the box (the wake landed),
  * 1 still drafted, 2 unreadable.
- *
- * TMUX/TMUX_PANE are stripped for test/bun/wake-cmd.test.ts's own MEASURED
- * reason: with `$TMUX` set, tmux targets the CURRENT server and ignores
- * TMUX_TMPDIR, and the session/window names here are the real ones
- * (`studio:claude`) — three studio leads died that way over two days.
  */
-function isolatedTmuxEnv(dir: string): Record<string, string | undefined> {
-  const { TMUX: _tmux, TMUX_PANE: _pane, ...rest } = process.env;
-  return { ...rest, TMUX_TMPDIR: dir };
-}
-
 /** The prompt every fixture below is "about" — a real survival re-brief's own
  *  first line, so the fragment under test is the fragment production uses. */
 const PROMPT = "What survived, fleetflare--pilot: - Task branches: none";
