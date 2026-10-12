@@ -8,7 +8,7 @@
 // invocation is INJECTED, so no test here ever shells out to real Orca — the
 // one test that does spawn a process (`never fails its caller`) runs a bun
 // script that injects a throwing runner.
-import { test, expect, mock } from "bun:test";
+import { test, expect, mock, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as nodeOs from "node:os";
@@ -1363,6 +1363,64 @@ test("fileLockAt releases the lock file even when the held function throws", asy
   await fileLockAt(dir, "websites--maestro", async () => { ran = true; });
   expect(ran).toBe(true);
   rmSync(dir, { recursive: true, force: true });
+});
+
+// Issue #519 (sweep 13): the release path's `unlinkSync(path)` catch used to
+// swallow EVERY error with no trace, the same silence as the raced
+// stale-lock steal it was written for. A release failure the steal does NOT
+// explain (a real unlink error -- permissions, an unwritable dir) must log
+// one console.error; ENOENT stays silent by design (that is the steal
+// racing the holder's own release, already commented at the site). The held
+// function's result must still come back untouched -- the lock body already
+// completed, so the release failure is not the caller's failure.
+//
+// Real-fs trick, same lane as every fileLockAt test above: fileLockAt
+// acquires its own lock file for real, and the held fn then swaps that
+// file for a DIRECTORY of the same name, so the release's unlink fails
+// EISDIR (an error that is provably not ENOENT). chmod is useless here
+// (these tests run as root, which unlinks through 0o555 anyway); a directory
+// named like the lock file is deterministic.
+test("fileLockAt: a non-ENOENT release failure logs one console.error and still returns the held fn's result (#519)", async () => {
+  const dir = tmpLockDir();
+  const lockPath = join(dir, lockFileName("websites--maestro"));
+  const errSpy = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const result = await fileLockAt(dir, "websites--maestro", async () => {
+      // Swap the lock file for a directory mid-critical-section, so
+      // fileLockAt's own release unlink hits EISDIR, not ENOENT.
+      rmSync(lockPath, { force: true });
+      mkdirSync(lockPath);
+      return "held-result";
+    });
+    expect(result).toBe("held-result");
+    const releases = errSpy.mock.calls.map((c: unknown[]) => c.join(" ")).filter((m) => m.includes("lock") && m.includes("release"));
+    expect(releases).toHaveLength(1);
+    expect(releases[0]).not.toContain("ENOENT");
+  } finally {
+    errSpy.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The ENOENT half of the same contract: the raced stale-lock steal already
+// commented at the release site stays SILENT -- this is already green today
+// (pinning it guards the #519 fix from over-logging the one case the site
+// explicitly documents as expected).
+test("fileLockAt: an ENOENT release (raced stale-lock steal) stays silent — pins unchanged behavior for #519", async () => {
+  const dir = tmpLockDir();
+  const lockPath = join(dir, lockFileName("websites--maestro"));
+  const errSpy = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const result = await fileLockAt(dir, "websites--maestro", async () => {
+      rmSync(lockPath, { force: true }); // a third caller stole and released it first
+      return "held-result";
+    });
+    expect(result).toBe("held-result");
+    expect(errSpy).not.toHaveBeenCalled();
+  } finally {
+    errSpy.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 

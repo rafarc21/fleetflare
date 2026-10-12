@@ -1867,6 +1867,29 @@ describe("transitionTask — a failed label add never strands zero labels (issue
     expect(addLabels).toHaveBeenLastCalledWith("o/r", 12, ["input_required"]);
   });
 
+  // Issue #519 (sweep 13): the first addLabels attempt's catch used to fall
+  // through to the retry with no trace, so a transient GitHub 500 looked
+  // identical to a slow one in the tail. One console.warn now names the
+  // failed attempt (task, repo, target state, error) before the retry fires
+  // -- the swallow itself stays, the retry contract above is unchanged.
+  it("the retried add logs one console.warn naming the failed attempt before the retry (#519)", async () => {
+    const warns = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const addLabels = vi.fn().mockRejectedValueOnce(new Error("GitHub 500")).mockResolvedValueOnce(undefined);
+      const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })), addLabels });
+      const res = await transitionTask(api, "o/r", 12, { from: "working", to: "input_required" });
+      expect(res.ok).toBe(true);
+      expect(addLabels).toHaveBeenCalledTimes(2);
+      const retryWarns = warns.mock.calls.filter((c) => c.join(" ").includes("retrying"));
+      expect(retryWarns).toHaveLength(1);
+      expect(retryWarns[0].join(" ")).toContain("#12");
+      expect(retryWarns[0].join(" ")).toContain("input_required");
+      expect(retryWarns[0].join(" ")).toContain("GitHub 500");
+    } finally {
+      warns.mockRestore();
+    }
+  });
+
   it("the add fails twice: the old label is put back, and the failure still surfaces", async () => {
     const addLabels = vi.fn(async (_r: string, _n: number, labels: string[]) => {
       if (labels[0] === "input_required") throw new Error("GitHub 500");

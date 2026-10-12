@@ -184,6 +184,42 @@ describe("handleFleetJunior", () => {
     expect(JSON.parse((await r.text()).trim())).toEqual({ content: "ok", finish: "stop", usage: { in: 1, out: 2, neurons: null } });
     expect(run).toHaveBeenCalledWith(good.model, { messages: good.messages, max_tokens: 100 });
   });
+  // Issue #519 (sweep 13): the usage insert's own `.catch(() => {})` used to
+  // drop a failed insert with no trace, so a missing usage row read as "the
+  // studio never called". The swallow stays (a logging failure must never
+  // affect the result already written to the studio) but one console.error
+  // must name the insert failure. Same fake-D1 idiom as
+  // junior.usage.test.ts's own missing-column db, forwarded to the real
+  // env.DB for every other statement.
+  it("a failed usage-row insert leaves the streamed result intact and logs one console.error (#519)", async () => {
+    const { token, rows, e } = await setup();
+    const realDb = (e as unknown as { DB: D1Database }).DB;
+    const db = {
+      prepare: (sql: string) => {
+        if (sql.includes("INSERT INTO junior_usage_log")) {
+          return {
+            bind: () => ({
+              run: async () => { throw new Error("D1_ERROR: the database is locked by another connection"); },
+            }),
+          };
+        }
+        return realDb.prepare(sql);
+      },
+    } as unknown as D1Database;
+    (e as unknown as { DB: D1Database }).DB = db;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await handleFleetJunior(req(token, good), e, ctx, board(), rows);
+      expect(r.status).toBe(200);
+      expect(JSON.parse((await r.text()).trim())).toEqual({ content: "ok", finish: "stop", usage: { in: 1, out: 2, neurons: null } });
+      await ctx.drain();
+      const failures = errors.mock.calls.filter((c) => c.join(" ").includes("insert"));
+      expect(failures).toHaveLength(1);
+      expect(failures[0].join(" ")).toContain("usage");
+    } finally {
+      errors.mockRestore();
+    }
+  });
   it("AI error becomes an error body with a classified code", async () => {
     const { token, rows, e } = await setup();
     (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => { throw new Error("AiError: AiError: Request timeout (abc)"); });

@@ -505,8 +505,9 @@ async function addStateAfterRemove(api: BoardApi, repo: string, number: number, 
   try {
     await api.addLabels(repo, number, [to]);
     return;
-  } catch {
-    // one retry below
+  } catch (err) {
+    // The retry below may still land it — this names the failed first attempt.
+    console.warn(`board: task #${number} add "${to}" failed, retrying once`, err);
   }
   try {
     await api.addLabels(repo, number, [to]);

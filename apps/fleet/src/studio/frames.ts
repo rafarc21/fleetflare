@@ -7,7 +7,7 @@ export function parseFrame(data: string | ArrayBuffer) {
     const j = JSON.parse(data);
     if (j?.t === "resize" && Number.isInteger(j.cols) && Number.isInteger(j.rows) && j.cols > 0 && j.rows > 0)
       return { type: "resize" as const, cols: j.cols, rows: j.rows };
-  } catch {}
+  } catch { /* deliberate: a non-JSON or malformed frame is not a resize — fall through to "ignore" */ }
   return { type: "ignore" as const };
 }
 

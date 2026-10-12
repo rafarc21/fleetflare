@@ -214,12 +214,12 @@ export async function handleFleetJunior(
     // `void`-prefixed fire-and-forget here would let the Workers runtime
     // tear down this execution context the instant the response stream
     // below closes, silently dropping the row mid-insert. The insert's own
-    // `.catch(() => {})` still means a logging failure can never affect (or
-    // delay) the result already written to the studio.
+    // `.catch` logs one console.error on failure — a logging failure still
+    // never affects (or delays) the result already written to the studio.
     ctx.waitUntil(insertJuniorUsage(env.DB, {
       id: crypto.randomUUID(), ts: Date.now(), studioId: studio.id, mode, model: body.model,
       inputTokens, outputTokens, ok,
-    }).catch(() => {}));
+    }).catch((e) => console.error("junior: usage insert failed", e instanceof Error ? e.message : String(e))));
     // A client that aborted mid-call leaves this writer closed/errored by
     // the time the AI call resolves — writing to it then would otherwise be
     // an unhandled rejection inside this detached IIFE. Swallow it: the

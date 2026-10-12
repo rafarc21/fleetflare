@@ -209,6 +209,33 @@ describe("github webhook", () => {
     expect(sent).toEqual([]);
   });
 
+  // Issue #519 (sweep 13): wakeMaestro's JSON.parse(body) catch used to drop
+  // an unparseable payload with no trace at all. The swallow itself stays --
+  // GitHub retries a non-2xx delivery, and a body that isn't JSON is not
+  // something a retry fixes -- but one console.warn must name the skip, so a
+  // corrupted-in-transit delivery is distinguishable from a silently dead
+  // webhook in the tail. Event "issues" here, deliberately: the push path
+  // never reaches wakeMaestro at all, and "issues" exercises the revoke
+  // paths whose OWN parse failures log as console.error (not warn), leaving
+  // the warn count attributable to wakeMaestro alone.
+  it("logs one console.warn on a validly signed non-JSON body — still 200, still zero wakes (#519)", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warns = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const body = "not json at all";
+      const res = await post(body, await sign(body), "issues");
+      expect(res.status).toBe(200);
+      expect(wakes).toEqual([]);
+      expect(warns).toHaveBeenCalledTimes(1);
+      expect(warns.mock.calls[0].join(" ")).toContain("not JSON");
+      await drainLast();
+      expect(wakes).toEqual([]);
+    } finally {
+      warns.mockRestore();
+      errors.mockRestore();
+    }
+  });
+
   it("returns 200 without crashing on a validly signed JSON body of literal null", async () => {
     const body = "null";
     const res = await post(body, await sign(body));
