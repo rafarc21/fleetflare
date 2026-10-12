@@ -183,7 +183,7 @@ function grantStillLive(task: BoardTask, studioId: string): boolean {
 /** The board comment for a failed read mint. Posted on the task issue,
  *  which may be PUBLIC while the sibling repos are private: only the repo
  *  count and the HTTP status, never a repo name or GitHub's error text. */
-export function readReposFailureComment(studioId: string, repoCount: number, err: unknown): string {
+function readReposFailureComment(studioId: string, repoCount: number, err: unknown): string {
   const cause = err instanceof MintTokenError ? `GitHub answered HTTP ${err.status}` : "the grant was refused before reaching GitHub";
   return `read-repos: the read-only token for ${studioId} (${repoCount} ${repoCount === 1 ? "repo" : "repos"}) ` +
     `could not be minted (${cause}), so this studio has no sibling-repo access right now. ` +

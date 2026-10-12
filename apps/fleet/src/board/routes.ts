@@ -316,7 +316,7 @@ function realRescueGcPort(env: Env): RescueGcPort {
 }
 
 /** Default age before a rescue branch may go: two weeks of someone reading it. */
-export const RESCUE_GC_DEFAULT_DAYS = 14;
+const RESCUE_GC_DEFAULT_DAYS = 14;
 
 /**
  * `POST /studio/board/tasks/rescue-gc {apply?, olderThanDays?, repo?}` —

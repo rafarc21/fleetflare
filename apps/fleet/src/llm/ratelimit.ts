@@ -13,7 +13,7 @@
 // makeRateLimitKind products now — this module holds TWO lead kinds as spec
 // objects: the messages route's (per-minute + daily) and count_tokens' own
 // (per-minute ONLY, its own prefixes, no daily arm).
-import { makeRateLimitKind, type RateLimitResult } from "../ratelimit";
+import { makeRateLimitKind } from "../ratelimit";
 
 // 60/min: the maestro's own suggested number (#284) — a Claude Code lead's
 // agentic loop can legitimately burst many tool-use round trips per minute
@@ -37,8 +37,6 @@ export type LeadRateLimitEnv = {
   LEAD_RATE_PER_MINUTE?: string;
   LEAD_DAILY_CAP?: string;
 };
-
-export type LeadRateLimitResult = RateLimitResult;
 
 export const checkAndConsumeLeadRateLimit = makeRateLimitKind<LeadRateLimitEnv>({
   kind: { ratePrefix: "lead-rate:", dailyPrefix: "lead-daily:" },

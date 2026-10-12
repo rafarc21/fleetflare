@@ -611,7 +611,7 @@ export function partReadCmd(index: number): string {
 // ---------------------------------------------------------------------------
 
 /** Glob (and name prefix) of an aside dir under ~/.claude/projects. */
-export const SESSION_ASIDE_GLOB = "fleet-aside-*";
+const SESSION_ASIDE_GLOB = "fleet-aside-*";
 const ASIDE_DIR_RE = /^fleet-aside-[A-Za-z0-9-]+$/;
 const ASIDE_MARKER = ".fleet-shipped";
 /** 256 MiB (64 parts of SESSION_SPLIT_PART): bounds one tick's exec count.

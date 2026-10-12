@@ -115,14 +115,12 @@ export async function pollOnce(
  * "continue" or "terminal" — as opposed to "error" (advanceTask itself
  * threw; pollOnce's catch above returns the pre-poll task unmutated).
  *
- * Fix round 1 (task 10a review, Important finding): the schedule firing is
- * not, on its own, proof a poll happened. A persistent throw inside
- * advanceTask (an unguarded appendEvent/createApproval failure — report()
- * in tasks/loop.ts has no try/catch anywhere in its chain) makes pollOnce
- * return kind:"error" on every 5s retry, with lastHeartbeat frozen at its
- * pre-throw value. Clearing the re-arm counter on that outcome anyway — the
- * bug this replaces, which called clearRearm unconditionally before
- * pollOnce even ran — resets the counter faster than the 60s cron
+ * The schedule firing is not, on its own, proof a poll happened. A
+ * persistent throw inside advanceTask (an unguarded appendEvent/
+ * createApproval failure — report() in tasks/loop.ts has no try/catch
+ * anywhere in its chain) makes pollOnce return kind:"error" on every 5s
+ * retry, with lastHeartbeat frozen at its pre-throw value. Clearing the
+ * re-arm counter on that outcome resets it faster than the 60s cron
  * (scheduled(), src/index.ts) can ever read two consecutive non-zero
  * values, making its attempts >= 2 alert structurally unreachable for
  * exactly the failure class the watchdog exists to catch, even though
@@ -131,8 +129,8 @@ export async function pollOnce(
  *
  * Extracted so the decision is unit-testable without a real AgentDO — same
  * reason as shouldAbortOnTerminal/pollOnce above; pollTask's own call site is
- * now one call to pollAndClearRearm (below), which wraps this gated call —
- * see its doc comment for why the clearRearm step itself had to move into a
+ * one call to pollAndClearRearm (below), which wraps this gated call — see
+ * its doc comment for why the clearRearm step itself had to move into a
  * testable seam too.
  */
 export function shouldClearRearm(result: { kind: PollOutcome["kind"] }): boolean {
