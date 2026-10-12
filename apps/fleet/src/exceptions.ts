@@ -6,6 +6,7 @@
 // before rethrowing the SAME error unchanged. No new credential — the
 // Worker already holds D1 write access via `env.DB`.
 import { redactSecrets } from "./studio/redact";
+import { raceWithDeadline } from "./race-timeout";
 
 /**
  * A thrown non-Error value (reject with a string, a plain object, etc) has
@@ -138,10 +139,10 @@ function describeError(err: unknown): { name: string; message: string; stackHead
  * issues against D1 must never be allowed to hang past a fixed budget — a
  * slow/degraded D1 blocking the Worker's own response past this point would
  * turn the symptom (D1 trouble) into the cause (every failing request also
- * stalling on D1). Same `Promise.race` + `setTimeout` idiom as
- * src/studio/sandbox-api.ts's `sbExec`/src/studio/do.ts's exec deadlines —
- * `clearTimeout` in `finally` either way, so a fast insert never leaves a
- * dangling timer.
+ * stalling on D1). The insert below now CALLS the shared race-with-deadline
+ * helper src/race-timeout.ts (the same idiom src/studio/sandbox-api.ts's
+ * `sbExec` and src/studio/do.ts's exec deadlines use), which clears its
+ * timer on every settle, so a fast insert never leaves a dangling timer.
  */
 const INSERT_TIMEOUT_MS = 2000;
 
@@ -261,27 +262,17 @@ export async function recordWorkerException(
     head = null;
   }
   try {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`recordWorkerException insert timed out after ${INSERT_TIMEOUT_MS}ms`)),
-        INSERT_TIMEOUT_MS,
-      );
-    });
-    try {
-      await Promise.race([
-        db
-          .prepare(
-            `INSERT INTO worker_exceptions (id, ts, route, name, message, stack_head)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(crypto.randomUUID(), now, route, name, message, head)
-          .run(),
-        deadline,
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
+    await raceWithDeadline(
+      db
+        .prepare(
+          `INSERT INTO worker_exceptions (id, ts, route, name, message, stack_head)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(crypto.randomUUID(), now, route, name, message, head)
+        .run(),
+      INSERT_TIMEOUT_MS,
+      () => new Error(`recordWorkerException insert timed out after ${INSERT_TIMEOUT_MS}ms`),
+    );
   } catch (insertErr) {
     console.error("recordWorkerException insert failed", insertErr);
     return;
