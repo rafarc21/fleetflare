@@ -78,6 +78,7 @@ export interface ReapDeps {
 
 export type ReapOutcome =
   | { taskNumber: number; prNumber: number; outcome: "would-close" | CloseOutcome; sha: string }
+  | { taskNumber: number; prNumber: number; outcome: "failed"; reason: string }
   | { taskNumber: number; prNumber?: number; outcome: "skipped"; reason: string };
 
 /**
@@ -90,10 +91,15 @@ export type ReapOutcome =
  * the close-action's own dedup guard (keyed on repo+issue+sha) is what
  * makes the second call a no-op, not anything checked here.
  *
- * One outcome per task, in the order `listOpenTasks` returned them. A
- * failure anywhere for ONE task (a thrown `checkLanded`, or the
- * close-action itself answering `{ok:false}`) is reported as that task's
- * own `skipped` outcome and never stops the rest of the run.
+ * One outcome per task, in the order `listOpenTasks` returned them. Two
+ * kinds of per-task failure, #546's split, and neither ever stops the rest
+ * of the run: evidence-gathering failures (a thrown `findCloser`,
+ * `checkLanded`, or `prClaims`) stay `skipped` — the close was never
+ * attempted, so there is nothing to have failed at but the look; a close
+ * the run DID attempt and lost (deps.close throwing, or answering
+ * `{ok:false}`) is that task's own `failed` outcome, carrying the PR the
+ * close went through — a word apart from a deliberate skip, so a failed
+ * close batch can no longer read as handled park.
  */
 export async function runTaskReap(deps: ReapDeps, apply: boolean): Promise<ReapOutcome[]> {
   const tasks = await deps.listOpenTasks();
@@ -179,14 +185,16 @@ export async function runTaskReap(deps: ReapDeps, apply: boolean): Promise<ReapO
     try {
       closed = await deps.close(t.taskNumber, sha);
     } catch (err) {
+      // #546: the close was attempted and lost — `failed`, not `skipped`,
+      // carrying the PR it went through.
       results.push({
-        taskNumber: t.taskNumber, outcome: "skipped",
+        taskNumber: t.taskNumber, prNumber, outcome: "failed",
         reason: `close failed: ${err instanceof Error ? err.message : String(err)}`,
       });
       continue;
     }
     if (!closed.ok) {
-      results.push({ taskNumber: t.taskNumber, outcome: "skipped", reason: closed.message ?? "close failed" });
+      results.push({ taskNumber: t.taskNumber, prNumber, outcome: "failed", reason: closed.message ?? "close failed" });
       continue;
     }
     results.push({ taskNumber: t.taskNumber, prNumber, outcome: closed.outcome, sha });

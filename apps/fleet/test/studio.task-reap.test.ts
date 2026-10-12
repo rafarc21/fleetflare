@@ -109,22 +109,27 @@ describe("runTaskReap — apply: true", () => {
     expect(close).not.toHaveBeenCalled();
   });
 
-  it("a close-action failure is reported as skipped with the failure's own message, not thrown", async () => {
+  // Issue #546: a close that genuinely failed (deps.close answering
+  // {ok:false}) is a DIFFERENT fact from a deliberate skip -- folding it
+  // into "skipped" made a failed close batch read as handled park. It now
+  // reports "failed", carrying the PR it tried to close.
+  it("a close-action failure (ok:false) is reported as failed with the failure's own message and PR, not thrown", async () => {
     const d = deps({
       listOpenTasks: async () => [{ taskNumber: 1, prNumber: 9 }],
       checkLanded: async () => ({ landed: true, sha: "abc123" }),
       close: async () => ({ ok: false, message: "board CAS conflict" }),
     });
     const result = await runTaskReap(d, true);
-    expect(result).toEqual([{ taskNumber: 1, outcome: "skipped", reason: "board CAS conflict" }]);
+    expect(result).toEqual([{ taskNumber: 1, prNumber: 9, outcome: "failed", reason: "board CAS conflict" }]);
   });
 
-  it("a THROWN close (not a rejected {ok:false}) is reported as skipped with the real error, not closed", async () => {
+  it("a THROWN close (not a rejected {ok:false}) is reported as failed with the real error, not closed", async () => {
     // Board issue #8, Finding 1's caller-side follow-up: close-action.ts's
     // closeTaskOnPromote now throws on a genuine write failure instead of
     // silently swallowing it into a dedup no-op. This proves runTaskReap's
     // own try/catch around deps.close (already present) correctly reports
-    // that as "skipped" with the failure's own message, not "closed".
+    // that as "failed" -- a word apart from a deliberate skip -- with the
+    // failure's own message, not "closed".
     const d = deps({
       listOpenTasks: async () => [{ taskNumber: 1, prNumber: 9 }],
       checkLanded: async () => ({ landed: true, sha: "abc123" }),
@@ -132,8 +137,27 @@ describe("runTaskReap — apply: true", () => {
     });
     const result = await runTaskReap(d, true);
     expect(result).toEqual([
-      { taskNumber: 1, outcome: "skipped", reason: expect.stringContaining("board CAS conflict") },
+      { taskNumber: 1, prNumber: 9, outcome: "failed", reason: expect.stringContaining("board CAS conflict") },
     ]);
+  });
+
+  // Issue #546: one failed close must not stop the rest of the batch, and
+  // the "failed" it leaves must not be confused with a deliberate skip in
+  // the same report -- row 2's park is still "skipped".
+  it("one task's failed close does not stop the others, and deliberate skips stay skipped", async () => {
+    const d = deps({
+      listOpenTasks: async () => [
+        { taskNumber: 1, prNumber: 9 },
+        { taskNumber: 2, prNumber: 10, state: "input_required" },
+        { taskNumber: 3, prNumber: 11 },
+      ],
+      checkLanded: async () => ({ landed: true, sha: "s" }),
+      close: async (n) => { if (n === 1) throw new Error("close 500"); return { ok: true, outcome: "closed" as const }; },
+    });
+    const result = await runTaskReap(d, true);
+    expect(result[0]).toEqual({ taskNumber: 1, prNumber: 9, outcome: "failed", reason: expect.stringContaining("close 500") });
+    expect(result[1]).toEqual({ taskNumber: 2, prNumber: 10, outcome: "skipped", reason: "parked input_required" });
+    expect(result[2]).toEqual({ taskNumber: 3, prNumber: 11, outcome: "closed", sha: "s" });
   });
 
   it("a thrown checkLanded for one task is reported as skipped and does not stop the others", async () => {

@@ -783,8 +783,18 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // positional to collide with), keeping `ls`'s own long-standing "a stray
     // extra token is ignored" grammar exactly as it was for everything else.
     // #332 review H1: `--prs` rides the same read-from-anywhere shape.
-    case "ls":
-      return { cmd: "ls", fresh: argv.slice(1).includes("--fresh"), json: argv.slice(1).includes("--json"), prs: argv.slice(1).includes("--prs") };
+    // #564 (sweep 20 F2): a -- token that is not one of the three exact
+    // spellings — an =value form of a known flag, or an unknown flag — is
+    // a usage error, never silently dropped; stray positionals stay ignored.
+    case "ls": {
+      const rest = argv.slice(1);
+      for (const token of rest) {
+        if (token.startsWith("--") && token !== "--fresh" && token !== "--json" && token !== "--prs") {
+          return usage(`unexpected ${JSON.stringify(token)} — ls flags are --fresh --prs --json (no values)`);
+        }
+      }
+      return { cmd: "ls", fresh: rest.includes("--fresh"), json: rest.includes("--json"), prs: rest.includes("--prs") };
+    }
     case "onboard":
       return { cmd: "onboard" };
     // Issue #216: `--repo <owner/repo>` (value form or `--repo=value`),
@@ -1031,10 +1041,22 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // Bare `fleet memory` is an alias for `fleet memory ls` — the survey is
     // the only thing you can safely do without thinking, so it is what an
     // operator who typed half a command gets.
-    case "memory":
-      if (arg === undefined || arg === "ls") return { cmd: "memory-ls" };
-      if (arg === "compact") return { cmd: "memory-compact" };
+    case "memory": {
+      // #568 / sweep-20 F6: compact is the one memory verb that opens a PR in
+      // the blueprint repo, so a token past the subcommand — a flag the caller
+      // believes in (`--json`), a paste accident — is a usage error, never a
+      // silently-dropped extra that runs the full compact anyway.
+      const rest = argv.slice(2);
+      if (arg === undefined || arg === "ls") {
+        if (rest.length > 0) return usage(`unexpected ${JSON.stringify(rest[0])} — fleet memory takes only ls | compact`);
+        return { cmd: "memory-ls" };
+      }
+      if (arg === "compact") {
+        if (rest.length > 0) return usage(`unexpected ${JSON.stringify(rest[0])} — fleet memory takes only ls | compact`);
+        return { cmd: "memory-compact" };
+      }
       return usage(`unknown memory command ${JSON.stringify(arg)}`);
+    }
     // Task 8 / issue #218: `fleet junior enable [--account <id>] | disable |
     // status | stats [--since <dur|date>]`.
     case "junior": {

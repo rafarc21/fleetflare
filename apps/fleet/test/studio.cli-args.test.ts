@@ -37,6 +37,34 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
   });
 
+  // Sweep 20 F2 (#564): `--json=false` is not a stray positional — it is a
+  // known flag spelled with a value, which reads as accepted-and-overridden
+  // (the operator believes =false means table mode and gets the default by
+  // accident, wrong reason). Same for `=value` on any of the three flags,
+  // and for an unknown -- token entirely. Stray positionals stay ignored:
+  // that is ls's documented long-standing grammar.
+  it("ls refuses a flag spelled with a value (--json=false is not --json)", () => {
+    const r = parseCliArgs(["ls", "--json=false"]);
+    expect(r.cmd).toBe("usage");
+    if (r.cmd === "usage") expect(r.message).toMatch(/unexpected "--json=false" — ls flags are --fresh --prs --json \(no values\)/);
+    expect(parseCliArgs(["ls", "--fresh=1"]).cmd).toBe("usage");
+    expect(parseCliArgs(["ls", "--prs=x"]).cmd).toBe("usage");
+  });
+
+  it("ls refuses an unknown -- token, naming it", () => {
+    const r = parseCliArgs(["ls", "--no-such"]);
+    expect(r.cmd).toBe("usage");
+    if (r.cmd === "usage") expect(r.message).toMatch(/unexpected "--no-such" — ls flags are --fresh --prs --json \(no values\)/);
+    expect(parseCliArgs(["ls", "--fresh", "--jsonx"]).cmd).toBe("usage");
+  });
+
+  it("ls still ignores a stray positional next to valid flags", () => {
+    expect(parseCliArgs(["ls", "extra", "--json"])).toEqual({ cmd: "ls", fresh: false, json: true, prs: false });
+    // A single-dash token (-x) is not --prefixed: ls has no short flags,
+    // and the refusal line drawn by #564 starts at --.
+    expect(parseCliArgs(["ls", "-x"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
+  });
+
   // Issue #37's second half: there was no way to ask for the truth NOW. The
   // container check already existed (provisionedCheckCmd); nothing exposed it
   // on demand, so an operator needed a shell inside the container.
@@ -999,6 +1027,23 @@ describe("fleet memory", () => {
   });
   it("`memory compact` is the write, and it is the only one", () => {
     expect(parseCliArgs(["memory", "compact"])).toEqual({ cmd: "memory-compact" });
+  });
+  // #568 / sweep-20 F6: compact is the one memory verb with a durable,
+  // outward-facing artifact — it opens a PR in the blueprint repo — so a
+  // stray token (a flag the caller believes in, a paste accident) must be
+  // a usage error, never a silently-dropped extra.
+  it("an extra token after `memory compact` (or after `memory ls`) is a usage error, never silently dropped (#568)", () => {
+    for (const argv of [["junk"], ["--json"]]) {
+      const parsed = parseCliArgs(["memory", "compact", ...argv]);
+      expect(parsed.cmd).toBe("usage");
+      if (parsed.cmd === "usage") {
+        expect(parsed.message).toMatch(/unexpected/);
+        expect(parsed.message).toContain("fleet memory takes only ls | compact");
+      }
+    }
+    const ls = parseCliArgs(["memory", "ls", "x"]);
+    expect(ls.cmd).toBe("usage");
+    if (ls.cmd === "usage") expect(ls.message).toMatch(/unexpected/);
   });
   it("anything else under memory is a usage error, never a silent no-op", () => {
     const parsed = parseCliArgs(["memory", "delete"]);
