@@ -40,8 +40,9 @@ Rewrite the section in place (between the Files table and EOF), lines outside
    small per-change PRs.
 
 ## Verification
-`cd /workspace/fleet && bun run scripts/english-check.ts` (skills/*.md are
-scanned) — exit 0; `git diff origin/main..HEAD --stat` shows exactly 2 files.
+`cd /workspace/fleetflare/apps/fleet && bun run scripts/english-check.ts`
+(skills/*.md are scanned) — exit 0; `git diff origin/main..HEAD --stat` shows
+exactly 2 files.
 No test suite, tsc, or vitest — docs-only, no code surface.
 
 ## Out of scope
