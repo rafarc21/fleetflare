@@ -42,11 +42,14 @@ export class FakeRuntime implements AgentRuntime {
   }
 }
 
+/** The container's internal HTTP port — the one number every DO and the runtime must agree on (sweep-14 S14-F10). */
+export const CONTAINER_PORT = 8080;
+
 /** Talks to the agent container over its internal HTTP port. */
 export class ContainerRuntime implements AgentRuntime {
   constructor(
     private readonly container: Container,
-    private readonly port: number = 8080,
+    private readonly port: number = CONTAINER_PORT,
   ) {}
 
   private async call(path: string, body?: unknown): Promise<Response> {
