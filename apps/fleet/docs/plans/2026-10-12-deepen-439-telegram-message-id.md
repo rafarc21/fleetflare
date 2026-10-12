@@ -28,13 +28,13 @@ The chunker's inline cast becomes `result?: unknown` and the same narrowing runs
 
 ## Steps (TDD)
 
-1. RED: three cases in test/telegram.api.test.ts — sendCard on `{ok:true}` (no result), sendCard on `{ok:true, result:{}}`, sendMessage on `{ok:true}` — all expect `rejects.toThrow(/no message_id/)`. Run `bun vitest run test/telegram.api.test.ts` from apps/fleet — the new cases fail (today they resolve with `undefined` instead of throwing). Commit. Push.
+1. RED: three cases in test/telegram.api.test.ts — sendCard on `{ok:true}` (no result), sendCard on `{ok:true, result:{}}`, sendMessage on `{ok:true}` — all expect `rejects.toThrow(/no message_id/)`. Run `bun vitest run test/telegram.api.test.ts` from apps/fleet — the new cases fail. (Observed RED: the two no-`result` cases crash with a raw `TypeError` on the old blind deref; the `result:{}` case resolves `undefined` instead of throwing.) Commit. Push.
 2. GREEN: the narrowing above at both sites in src/telegram/api.ts. New cases pass; existing telegram/approvals suites pass UNCHANGED. Commit. Push.
 3. Verify, one heavy gate at a time: from apps/fleet, `bun vitest run test/telegram.api.test.ts test/telegram.callback.test.ts test/telegram.chunk.test.ts test/telegram.webhook.test.ts test/approvals.gates.test.ts`; then `bun run check`; then `bun run english-check`.
 
 ## Boundaries
 
 - `call()` return type stays `unknown`. No new module, no new dependency, no interface export churn.
-- Exact throw string `telegram sendMessage returned no message_id` at both sites.
+- Throw string `telegram sendMessage returned no message_id` at sendCard; the chunker site appends `after ${sent} piece(s)`, matching the file's existing partial-delivery accounting (`failed after ${sent} piece(s)` at its other two throws). Both match the tests' `/no message_id/` regex.
 - Branch `fix-439-telegram-message-id` from origin/main (NOT fix-405, which is in gate). Push after the RED commit and every commit after (`LEFTHOOK=0 git push`).
 - Heavy gates: `bun run check` (repo-wide tsc across five projects) runs at the end, ALONE, never alongside another gate. Targeted vitest suites are not heavy.
