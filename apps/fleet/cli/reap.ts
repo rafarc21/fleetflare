@@ -59,15 +59,13 @@ export const REAP_BACKOFF_MS = 30 * 60_000;
 export const STALL_AFTER_MS = 10 * 60_000;
 /** One STALL line per studio per this window. */
 export const STALL_ALARM_EVERY_MS = 15 * 60_000;
-/** `fleet reap`'s default threshold: long on purpose. `--idle 5m` opts lower. */
-export const REAP_DEFAULT_IDLE_MS = 30 * 60_000;
 /** The live pane capture must be at least this fresh to count as evidence. */
-export const REAP_CAPTURE_MAX_AGE_MS = 120_000;
+const REAP_CAPTURE_MAX_AGE_MS = 120_000;
 /** Review F1: the FINAL live read (the call right before destroy) must answer
  *  within this, or the gap it leaves before destroy is not bounded. */
 export const REAP_LIVE_READ_MAX_MS = 30_000;
 /** This many live-read refusals in a row back a studio off (review item 6). */
-export const REAP_REFUSALS_BEFORE_BACKOFF = 3;
+const REAP_REFUSALS_BEFORE_BACKOFF = 3;
 
 export interface ReapFlags {
   /** false = dry-run (the default): report only. */

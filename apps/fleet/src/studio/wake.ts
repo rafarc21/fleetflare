@@ -234,7 +234,7 @@ export function surveyOverlayOnScreen(screen: string): boolean {
 }
 
 /** Prefix of the one verdict line the in-container guard prints. */
-export const WAKE_VERDICT = "__FLEET_WAKE__";
+const WAKE_VERDICT = "__FLEET_WAKE__";
 
 /**
  * Issue #249 round-2 review, item 3 — HOW THE INPUT BOX IS FOUND.
@@ -260,7 +260,7 @@ const COMPOSER_ROW = "^[[:space:]]*(│[[:space:]]*)?❯";
  * it, which would break a fixed-string match. A box narrower than ~18 columns
  * is not a box a lead is working in.
  */
-export const SUBMIT_FRAGMENT_CHARS = 16;
+const SUBMIT_FRAGMENT_CHARS = 16;
 
 /** The leading slice of a flattened prompt the submit check greps for. */
 export function submitFragment(prompt: string): string {
