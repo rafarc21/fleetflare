@@ -1028,6 +1028,23 @@ describe("fleet memory", () => {
   it("`memory compact` is the write, and it is the only one", () => {
     expect(parseCliArgs(["memory", "compact"])).toEqual({ cmd: "memory-compact" });
   });
+  // #568 / sweep-20 F6: compact is the one memory verb with a durable,
+  // outward-facing artifact — it opens a PR in the blueprint repo — so a
+  // stray token (a flag the caller believes in, a paste accident) must be
+  // a usage error, never a silently-dropped extra.
+  it("an extra token after `memory compact` (or after `memory ls`) is a usage error, never silently dropped (#568)", () => {
+    for (const argv of [["junk"], ["--json"]]) {
+      const parsed = parseCliArgs(["memory", "compact", ...argv]);
+      expect(parsed.cmd).toBe("usage");
+      if (parsed.cmd === "usage") {
+        expect(parsed.message).toMatch(/unexpected/);
+        expect(parsed.message).toContain("fleet memory takes only ls | compact");
+      }
+    }
+    const ls = parseCliArgs(["memory", "ls", "x"]);
+    expect(ls.cmd).toBe("usage");
+    if (ls.cmd === "usage") expect(ls.message).toMatch(/unexpected/);
+  });
   it("anything else under memory is a usage error, never a silent no-op", () => {
     const parsed = parseCliArgs(["memory", "delete"]);
     expect(parsed.cmd).toBe("usage");
