@@ -32,7 +32,7 @@ keyword is a convenience nobody took.
 - cd apps/fleet && tsc --noEmit -p cli  (exit 0 — the compile pin: any hidden importer fails here)
 - cd apps/fleet && tsc --noEmit -p test  (exit 0)
 - cd apps/fleet && flock /tmp/fleet-gate.lock bun run test test/cli.input.test.ts test/cli.recycle-outcome.test.ts test/cli.junior-sweep.test.ts (exit 0)
-- cd apps/fleet && flock /tmp/fleet-gate.lock bun run test test/bun/poll.test.ts test/bun/orca-workspace.test.ts test/bun/fleet-ls-wip.test.ts (exit 0)
+- cd apps/fleet && flock /tmp/fleet-gate.lock bun test test/bun/poll.test.ts test/bun/orca-workspace.test.ts test/bun/fleet-ls-wip.test.ts  (exit 0 — bun:test lane; vitest.config.ts excludes test/bun/**)
 - cd apps/fleet && bun run english-check  (exit 0)
 
 ## Boundaries
