@@ -23,7 +23,7 @@ export async function sendMessage(token: string, chatId: string, text: string): 
     const body = (await res.json()) as {
       ok?: boolean;
       description?: string;
-      result: { message_id: number };
+      result?: unknown;
     };
     // Telegram reports logical failure in the body, not the status — the
     // same gap that shipped as a bug on setWebhook once already. res.ok
@@ -34,7 +34,13 @@ export async function sendMessage(token: string, chatId: string, text: string): 
         `telegram sendMessage failed after ${sent} piece(s): ${body.description ?? JSON.stringify(body)}`,
       );
     }
-    ids.push(body.result.message_id);
+    // A 200-ok body with a missing/partial result (Telegram has done this on
+    // partial outages) must throw here, not push a broken message_id.
+    const messageId = (body.result as { message_id?: unknown } | null | undefined)?.message_id;
+    if (typeof messageId !== "number") {
+      throw new Error(`telegram sendMessage returned no message_id after ${sent} piece(s)`);
+    }
+    ids.push(messageId);
     sent++;
   }
 
@@ -136,7 +142,14 @@ export async function sendCard(
     text: body,
     reply_markup: keyboard(buttons),
   });
-  return (result as { message_id: number }).message_id;
+  // A 200-ok body with a missing/partial result (Telegram has done this on
+  // partial outages) must throw here, not hand back a broken message_id the
+  // caller's editCard would silently target.
+  const messageId = (result as { message_id?: unknown } | null | undefined)?.message_id;
+  if (typeof messageId !== "number") {
+    throw new Error("telegram sendMessage returned no message_id");
+  }
+  return messageId;
 }
 
 export async function editCard(
