@@ -228,8 +228,10 @@ REAL("#177 review — bring-up's own launch path goes through the shadow, end to
     const fns = ["claude_pane_field", "claude_pane_command", "claude_launch_landed", "claude_launch_needed", "claude_launch"]
       .map((f) => extractShellFunc(BRINGUP, f)).join("\n");
 
+    // CLAUDE_ALIVE_TRIES=20 matches the production default: 8 was a wall-clock window too small under CI load —
+    // the poll timed out while bash was still exec'ing the fake lead, firing the retry this test asserts never fired (#424).
     const r = b.sh(
-      `set -euo pipefail\n${SHADOW()}\n${fns}\nexport CLAUDE_ALIVE_TRIES=8 CLAUDE_SETTLE_SECONDS=1\n` +
+      `set -euo pipefail\n${SHADOW()}\n${fns}\nexport CLAUDE_ALIVE_TRIES=20 CLAUDE_SETTLE_SECONDS=1\n` +
         `if claude_launch_needed; then if claude_launch ${JSON.stringify(`${join(lb, "claude")} 300`)}; then echo LANDED; else echo MISSED; fi; else echo NOT_SENT; fi`,
     );
 
