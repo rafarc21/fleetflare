@@ -54,3 +54,48 @@ export async function incrementCounter(
     .first<{ value: string }>();
   return Number(row!.value);
 }
+
+/** One row of a "<prefix><repo>:<number>" keyed scan, value included. */
+export interface StateTaskKey {
+  repo: string;
+  number: number;
+  value: string;
+}
+
+/**
+ * The one scan behind the two fleet_state readers keyed
+ * "<prefix><repo>:<number>" (junior-auth:…:N and read-repos:…:N). One LIKE
+ * pass hands D1 the prefix, then the exact `startsWith` re-check decides:
+ * LIKE treats `_` as a wildcard (and ASCII case-folds both sides), and a
+ * repo name may hold an `_` — so a same-length near-miss key D1 happily
+ * returns dies here. The rest is the shared grammar: split at the LAST
+ * colon (a repo name may hold a colon too), repo "" when the suffix is a
+ * bare number (the prefix already named the repo — authz's depth), keep
+ * iff the suffix is digits and the repo is not empty.
+ *
+ * Returns UNSORTED: order is a caller's verb (authz sorts numerically,
+ * grants by repo then number). `value` is always fetched because one of
+ * the two callers needs it and the other must not grow a second query
+ * shape. Rows are pure reads — no writer anywhere ships this key shape
+ * with a non-numeric suffix or an empty repo, so those die silently,
+ * fail-closed, the same way both hand-rolled copies already did.
+ */
+export async function scanStateTaskKeys(
+  db: D1Database, prefix: string,
+): Promise<StateTaskKey[]> {
+  const rows = await db
+    .prepare(`SELECT key, value FROM fleet_state WHERE key LIKE ?`)
+    .bind(`${prefix}%`)
+    .all<{ key: string; value: string }>();
+  const out: StateTaskKey[] = [];
+  for (const row of rows.results) {
+    if (!row.key.startsWith(prefix)) continue;
+    const rest = row.key.slice(prefix.length);
+    const colon = rest.lastIndexOf(":");
+    const repo = colon < 0 ? "" : rest.slice(0, colon);
+    const num = colon < 0 ? rest : rest.slice(colon + 1);
+    if (colon === 0 || !/^\d+$/.test(num)) continue;
+    out.push({ repo, number: Number(num), value: row.value });
+  }
+  return out;
+}
