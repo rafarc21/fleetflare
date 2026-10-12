@@ -4,6 +4,7 @@ import { appendEvent } from "../events/log";
 import { makeEvent, shortId } from "../events/schema";
 import { sendCard } from "../telegram/api";
 import { telegramConfig } from "../agents/registry";
+import { CONTAINER_PORT } from "../agents/runtime";
 import type { DeployTarget } from "./targets";
 
 const POLL_SECONDS = 10;
@@ -208,7 +209,7 @@ export async function runDeploy(deps: RunDeployDeps, target: DeployTarget): Prom
 }
 
 export class DeployDO extends Container<Env> {
-  defaultPort = 8080;
+  defaultPort = CONTAINER_PORT;
   sleepAfter = "5m";
 
   // No CLAUDE_CODE_OAUTH_TOKEN. This container must never be able to reason,
@@ -231,7 +232,7 @@ export class DeployDO extends Container<Env> {
           headers: { "content-type": "application/json" },
           body: JSON.stringify(target),
         }),
-        8080,
+        CONTAINER_PORT,
       );
       const text = await res.text();
       if (!res.ok) return new Response(text, { status: res.status });
@@ -268,7 +269,7 @@ export class DeployDO extends Container<Env> {
 
     let poll: DeployPoll;
     try {
-      const res = await this.containerFetch(new Request("http://container/status"), 8080);
+      const res = await this.containerFetch(new Request("http://container/status"), CONTAINER_PORT);
       poll = { ok: true, status: (await res.json()) as DeployStatus };
     } catch (err) {
       poll = { ok: false, error: err };

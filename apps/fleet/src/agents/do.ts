@@ -2,7 +2,7 @@ import { Container } from "@cloudflare/containers";
 import type { Env } from "../env";
 import { advanceTask, type TaskRecord, type LoopDeps, type LoopOutcome } from "../tasks/loop";
 import { clearRearm } from "../tasks/watchdog";
-import { ContainerRuntime, type AgentRuntime, type StartTaskInput } from "./runtime";
+import { ContainerRuntime, CONTAINER_PORT, type AgentRuntime, type StartTaskInput } from "./runtime";
 import { telegramConfig } from "./registry";
 
 const POLL_SECONDS = 5;
@@ -176,7 +176,7 @@ export async function pollAndClearRearm(
 }
 
 export class AgentDO extends Container<Env> {
-  defaultPort = 8080;
+  defaultPort = CONTAINER_PORT;
   sleepAfter = "20m";
 
   envVars = {
