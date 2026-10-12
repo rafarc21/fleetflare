@@ -58,9 +58,17 @@ function runAttach(home: string, extraEnv: Record<string, string>) {
   cleanups.push(() => { try { proc.kill(); } catch {} });
   let err = "";
   let out = "";
-  (async () => { for await (const c of proc.stderr) err += new TextDecoder().decode(c); })();
-  (async () => { for await (const c of proc.stdout) out += new TextDecoder().decode(c); })();
-  return { proc, stderr: () => err, stdout: () => out };
+  // Resolves at stream EOF — the child's exit — never before: `proc.exited`
+  // alone races the pipe drain, so the final stderr chunk can still be in
+  // flight when it resolves. Tests that read stderr AFTER an exit (T6/T7)
+  // await this; live-child tests (T1–T5, T8) keep the accumulating accessor,
+  // same split accounts-cli.test.ts's `run` (Promise.all drain) vs its
+  // `readUntil` (live read) already makes.
+  const drained = Promise.all([
+    (async () => { for await (const c of proc.stderr) err += new TextDecoder().decode(c); })(),
+    (async () => { for await (const c of proc.stdout) out += new TextDecoder().decode(c); })(),
+  ]).then(() => undefined);
+  return { proc, stderr: () => err, stdout: () => out, drained };
 }
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -204,15 +212,17 @@ test("T4: a live view that keeps getting frames never goes stale and never recon
 const NO_SERVER = "http://127.0.0.1:1";
 
 test("T6: a non-numeric FLEET_ATTACH_STALE_MS refuses at startup, never silently NaN", async () => {
-  const { proc, stderr } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_STALE_MS: "90s" });
+  const { proc, stderr, drained } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_STALE_MS: "90s" });
   const code = await Promise.race([proc.exited, Bun.sleep(10_000).then(() => -99)]);
+  if (code === 1) await drained; // EOF, not just exit — the refusal line must be in
   expect(code).toBe(1);
   expect(stderr()).toContain('fleet: FLEET_ATTACH_STALE_MS must be a number of ms, got "90s"');
 }, 15000);
 
 test("T7: a non-numeric FLEET_ATTACH_CONNECT_TIMEOUT_MS refuses the same way", async () => {
-  const { proc, stderr } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_CONNECT_TIMEOUT_MS: "30x" });
+  const { proc, stderr, drained } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_CONNECT_TIMEOUT_MS: "30x" });
   const code = await Promise.race([proc.exited, Bun.sleep(10_000).then(() => -99)]);
+  if (code === 1) await drained; // EOF, not just exit — the refusal line must be in
   expect(code).toBe(1);
   expect(stderr()).toContain('fleet: FLEET_ATTACH_CONNECT_TIMEOUT_MS must be a number of ms, got "30x"');
 }, 15000);
@@ -220,11 +230,11 @@ test("T7: a non-numeric FLEET_ATTACH_CONNECT_TIMEOUT_MS refuses the same way", a
 test("T8: an empty FLEET_ATTACH_STALE_MS falls back to the default, not a refusal", async () => {
   // An empty value is the operator's "I left FLEET_ATTACH_STALE_MS= blank",
   // not a typo — treat as unset, fallback 90s. No server listens, so the
-  // child hangs on its connect/reconnect loop (exit code there is that
-  // error path, NOT what we pin); refusal-vs-fallback is pinned on stderr
-  // alone, and the race tolerates the hang either way.
+  // child lives in its reconnect loop; still running at 8s IS the pin —
+  // module load must have completed (fallback applied) with no refusal line.
   const { proc, stderr } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_STALE_MS: "" });
-  await Promise.race([proc.exited, Bun.sleep(8000).then(() => null)]);
+  const state = await Promise.race([proc.exited.then(() => "exited"), Bun.sleep(8000).then(() => "running")]);
+  expect(state).toBe("running");
   expect(stderr()).not.toContain("must be a number of ms");
 }, 15000);
 
