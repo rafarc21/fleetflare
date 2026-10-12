@@ -783,8 +783,18 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // positional to collide with), keeping `ls`'s own long-standing "a stray
     // extra token is ignored" grammar exactly as it was for everything else.
     // #332 review H1: `--prs` rides the same read-from-anywhere shape.
-    case "ls":
-      return { cmd: "ls", fresh: argv.slice(1).includes("--fresh"), json: argv.slice(1).includes("--json"), prs: argv.slice(1).includes("--prs") };
+    // #564 (sweep 20 F2): a -- token that is not one of the three exact
+    // spellings — an =value form of a known flag, or an unknown flag — is
+    // a usage error, never silently dropped; stray positionals stay ignored.
+    case "ls": {
+      const rest = argv.slice(1);
+      for (const token of rest) {
+        if (token.startsWith("--") && token !== "--fresh" && token !== "--json" && token !== "--prs") {
+          return usage(`unexpected ${JSON.stringify(token)} — ls flags are --fresh --prs --json (no values)`);
+        }
+      }
+      return { cmd: "ls", fresh: rest.includes("--fresh"), json: rest.includes("--json"), prs: rest.includes("--prs") };
+    }
     case "onboard":
       return { cmd: "onboard" };
     // Issue #216: `--repo <owner/repo>` (value form or `--repo=value`),
