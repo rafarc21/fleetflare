@@ -2,7 +2,7 @@
 
 Ref #415. Analysis only, read-only, no code changed. Sixth maintainability sweep; scope `apps/fleet/src/**` EXCEPT board/, github/, junior/, llm/ (sweep 4) and the CLAUDE-ONLY surface (auth, tokens, credentials, write-proxy, rescue, failover, accounts routing, deploy, migrations, leak gate).
 
-Sweeps 1-4 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-deep-modules-sweep-2.md, 2026-10-11-test-sweep-3.md, 2026-10-11-deep-modules-sweep-4.md) and the open deepen(*) issues they filed are NOT repeated here. Sweep 5 (#394, cli/+scripts/) is in flight by another studio; its doc `2026-10-11-deep-modules-sweep-5.md` is not on `origin/main` yet — its filed issues (#399 and siblings) were checked instead. Line refs = physical lines at `origin/main` `ec85d08`, paths relative to `apps/fleet/`.
+Sweeps 1-5 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-deep-modules-sweep-2.md, 2026-10-11-test-sweep-3.md, 2026-10-11-deep-modules-sweep-4.md, 2026-10-11-deep-modules-sweep-5.md) and the open deepen(*) issues they filed are NOT repeated here. Line refs = physical lines at `origin/main` `ec85d08` (all re-verified against the current head: nothing in scope moved except state.ts's appended scanStateTaskKeys, which shifts no ref below), paths relative to `apps/fleet/`.
 
 **Tier rule (from #361):** GLM-OK = none of auth, tokens, rescue, failover, deploy, migrations, credentials. CLAUDE-ONLY = touches any of those.
 
