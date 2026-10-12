@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { cleanupEgoBrowserHome, makeEgoBrowserHome, runEgoBrowser } from "./ego-browser-cli-helpers";
+import { waitFor } from "./helpers/poll";
 
 // Board issue #276's own acceptance criterion: "No hang ever: bounded
 // timeout + clear error if browser cannot start." getBrowser()'s sibling
@@ -82,15 +83,6 @@ function isGenuinelyTerminated(pid: number): boolean {
   const sig = readProcSignal(pid);
   if (!sig.exists) return true;
   return sig.zombie && sig.fdSize === 0;
-}
-
-async function waitFor(predicate: () => boolean, timeoutMs: number, intervalMs = 50): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return true;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  return predicate();
 }
 
 describe("ego-browser daemon: getBrowser() against a genuinely-hung chromium launch", () => {

@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { cleanupEgoBrowserHome, makeEgoBrowserHome, runEgoBrowser } from "./ego-browser-cli-helpers";
+import { waitFor } from "./helpers/poll";
 
 // Board issue #32: the daemon never exited on its own, so a single browser
 // call left a headless Chrome resident for the rest of the studio's life.
@@ -49,15 +50,6 @@ function processAlive(pid: number): boolean {
   } catch {
     return false;
   }
-}
-
-async function waitFor(predicate: () => boolean, timeoutMs: number, intervalMs = 50): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return true;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  return predicate();
 }
 
 describe("ego-browser daemon idle shutdown", () => {
