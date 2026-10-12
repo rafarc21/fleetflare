@@ -554,6 +554,15 @@ function splitReadRepos(raw: string): string[] | null {
   return repos.length === 0 ? null : repos;
 }
 
+/** Board task #565: an issue number is 1..2^53 — `0` is GitHub's "no
+ *  issue" (the CLI's own --continues grammar already refuses it) and
+ *  Number() rounds digit strings past 2^53 to issues that cannot exist. */
+function parseIssueNumber(raw: string): number | null {
+  if (!/^[1-9][0-9]*$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 function usage(message: string): CliCommand {
   return { cmd: "usage", message: `${message}\n${CLI_USAGE}` };
 }
@@ -565,21 +574,24 @@ function parseTask(argv: string[]): CliCommand {
   const [sub, ...rest] = argv;
   if (sub === "show") {
     const raw = rest[0];
-    if (raw === undefined || !/^\d+$/.test(raw)) return usage("fleet task show needs an issue number");
-    return { cmd: "task-show", number: Number(raw) };
+    const number = raw === undefined ? null : parseIssueNumber(raw);
+    if (number === null) return usage(`fleet task show needs an issue number (got ${JSON.stringify(raw)})`);
+    return { cmd: "task-show", number };
   }
   if (sub === "verify") {
     const raw = rest[0];
-    if (raw === undefined || !/^\d+$/.test(raw)) return usage("fleet task verify needs an issue number");
-    return { cmd: "task-verify", number: Number(raw) };
+    const number = raw === undefined ? null : parseIssueNumber(raw);
+    if (number === null) return usage(`fleet task verify needs an issue number (got ${JSON.stringify(raw)})`);
+    return { cmd: "task-verify", number };
   }
   if (sub === "assign") {
     // Two positionals, then flags — the only verb here with that shape, which
     // is why it is split out rather than folded into parseFlags's all-flags
     // grammar below.
     const [rawNumber, target, ...flagArgv] = rest;
-    if (rawNumber === undefined || !/^\d+$/.test(rawNumber)) {
-      return usage("fleet task assign needs an issue number: fleet task assign <n> <role>");
+    const number = rawNumber === undefined ? null : parseIssueNumber(rawNumber);
+    if (number === null) {
+      return usage(`fleet task assign needs an issue number: fleet task assign <n> <role> (got ${JSON.stringify(rawNumber)})`);
     }
     // `startsWith("--")` is what tells a missing positional from a flag, and it
     // survives issue #269 untouched: every target shape STARTS with a segment
@@ -590,7 +602,7 @@ function parseTask(argv: string[]): CliCommand {
     }
     const flags = parseFlags(flagArgv, TASK_FLAGS.assign);
     if ("bad" in flags) return usage(`unexpected ${JSON.stringify(flags.bad)}`);
-    const assign: CliCommand = { cmd: "task-assign", number: Number(rawNumber), target };
+    const assign: CliCommand = { cmd: "task-assign", number, target };
     if (flags.why !== undefined) assign.why = flags.why;
     if (flags["read-repos"] !== undefined) {
       const readRepos = splitReadRepos(flags["read-repos"]);
@@ -608,15 +620,16 @@ function parseTask(argv: string[]): CliCommand {
     const [rawNumber, to, ...extra] = rest;
     const fromNone = extra.length === 1 && extra[0] === "--from-none";
     if (extra.length > 0 && !fromNone) return usage(`unexpected ${JSON.stringify(extra[0])}`);
-    if (rawNumber === undefined || !/^\d+$/.test(rawNumber)) {
-      return usage("fleet task state needs an issue number: fleet task state <n> <to>");
+    const number = rawNumber === undefined ? null : parseIssueNumber(rawNumber);
+    if (number === null) {
+      return usage(`fleet task state needs an issue number: fleet task state <n> <to> (got ${JSON.stringify(rawNumber)})`);
     }
     if (!isTaskState(to)) {
       return usage(
         `fleet task state needs a valid target state: fleet task state <n> <to> — one of ${TASK_STATES.join("|")}`,
       );
     }
-    return { cmd: "task-state", number: Number(rawNumber), to, ...(fromNone ? { fromNone: true as const } : {}) };
+    return { cmd: "task-state", number, to, ...(fromNone ? { fromNone: true as const } : {}) };
   }
   if (sub === "reap") {
     // Zero positionals, one optional bare boolean flag — NOT the
