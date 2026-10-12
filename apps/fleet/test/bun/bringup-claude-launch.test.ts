@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractShellFunc, runSnippet } from "./exec-snippet";
+import { BRINGUP, extractShellFunc, runSnippet } from "./exec-snippet";
 
 // Issue #54, measured 2026-09-23 on `acme-os--web-studio` after an image
 // rollout replaced its container:
@@ -14,8 +14,6 @@ import { extractShellFunc, runSnippet } from "./exec-snippet";
 //     at the pane again, so provision reported success over a dead studio.
 // Both halves are executed here against the REAL function bodies studio
 // containers run, extracted verbatim out of container/studio-bringup.sh.
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
-
 const HAS_CONVERSATION = () => extractShellFunc(BRINGUP, "claude_has_conversation");
 const PROJECT_DIR = () => extractShellFunc(BRINGUP, "claude_project_dir");
 // Issue #67 put the hardened probe (`claude_pane_field`) under

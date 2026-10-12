@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractShellFunc, runSnippet } from "./exec-snippet";
+import { BRINGUP, extractShellFunc, runSnippet } from "./exec-snippet";
 
 /**
  * Issue #6: bring-up typed the WHOLE claude command, role prompt inlined via
@@ -19,7 +19,6 @@ import { extractShellFunc, runSnippet } from "./exec-snippet";
  * The real-tmux half (the line actually typed through send-keys and landing)
  * lives in bringup-claude-relaunch.test.ts, which runs on Linux CI.
  */
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
 const LAUNCH_LINE = () => extractShellFunc(BRINGUP, "claude_launch_line");
 
 /** Past 64 KB, and full of what shell quoting gets wrong. */
