@@ -73,6 +73,24 @@ describe("telegram api", () => {
     await expect(sendMessage("T", "99", "hi")).rejects.toThrow(/chat not found/);
   });
 
+  it("sendCard throws when a 200-ok body has no result", async () => {
+    globalThis.fetch = (async () =>
+      Response.json({ ok: true })) as typeof globalThis.fetch;
+    await expect(sendCard("T", "99", "hi")).rejects.toThrow(/no message_id/);
+  });
+
+  it("sendCard throws when result carries no numeric message_id", async () => {
+    globalThis.fetch = (async () =>
+      Response.json({ ok: true, result: {} })) as typeof globalThis.fetch;
+    await expect(sendCard("T", "99", "hi")).rejects.toThrow(/no message_id/);
+  });
+
+  it("sendMessage throws when a 200-ok body has no result", async () => {
+    globalThis.fetch = (async () =>
+      Response.json({ ok: true })) as typeof globalThis.fetch;
+    await expect(sendMessage("T", "99", "hi")).rejects.toThrow(/no message_id/);
+  });
+
   it("setWebhook registers both message and callback_query updates", async () => {
     // MUST FIX 1: "message" alone silently excludes every button tap — no
     // error, no delivery, every approval gate dead the moment this
