@@ -75,13 +75,22 @@ describe("parseStudioStatus — one untrusted wire row", () => {
   });
 
   it("throws nothing on any input shape", () => {
-    const cases: unknown[] = [
-      MINIMAL, row(), { ...MINIMAL, state: "booting" }, { state: "stopped", error: null },
+    // Sweep-22 F4: not.toThrow alone proves no exception escaped, never that
+    // the right VALUE came back. Valid shapes decode to something; every
+    // other shape must come back null, the decoder's whole contract.
+    const valid: unknown[] = [MINIMAL, row()];
+    const invalid: unknown[] = [
+      { ...MINIMAL, state: "booting" }, { state: "stopped", error: null },
       { ...MINIMAL, id: 42 }, { ...MINIMAL, error: 3 }, { id: "acme-os--maestro", state: "stopped" },
       "x", 7, null, undefined, [MINIMAL], [], { id: null, state: null, error: null },
     ];
-    for (const c of cases) {
+    for (const c of valid) {
       expect(() => parseStudioStatus(c)).not.toThrow();
+      expect(parseStudioStatus(c)).not.toBeNull();
+    }
+    for (const c of invalid) {
+      expect(() => parseStudioStatus(c)).not.toThrow();
+      expect(parseStudioStatus(c)).toBeNull();
     }
   });
 });
@@ -117,12 +126,21 @@ describe("parseStudioStatusArray — one listing route's whole body", () => {
   });
 
   it("throws nothing on any input shape", () => {
-    const cases: unknown[] = [
-      [], [row()], [row(), { bad: true }], MINIMAL, null, undefined, "x", 7,
+    // Same shape as the single-row loop above: valid cases (a real array of
+    // rows, and the empty fleet) must decode; every other shape must be null.
+    const valid: unknown[] = [[], [row()]];
+    const invalid: unknown[] = [
+      [row(), { bad: true }], MINIMAL, null, undefined, "x", 7,
       [{ id: 1, state: "running", error: null }],
     ];
-    for (const c of cases) {
+    for (const c of valid) {
       expect(() => parseStudioStatusArray(c)).not.toThrow();
+      expect(parseStudioStatusArray(c)).not.toBeNull();
+    }
+    expect(parseStudioStatusArray([])).toEqual([]);
+    for (const c of invalid) {
+      expect(() => parseStudioStatusArray(c)).not.toThrow();
+      expect(parseStudioStatusArray(c)).toBeNull();
     }
   });
 });
