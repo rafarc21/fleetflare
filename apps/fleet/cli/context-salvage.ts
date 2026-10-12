@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, cpSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { errText } from "./diag";
 
-export interface ContextInventory {
+interface ContextInventory {
   screenshotCount: number;
   contextFileCount: number;
   totalCount: number;

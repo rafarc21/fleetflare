@@ -95,7 +95,7 @@ export async function revokeJuniorAuthorization(
 export const JUNIOR_SWEEP_PAGE = 40;
 
 /** Issue #35: one record's verdict from sweepJuniorAuthorizations. */
-export interface JuniorSweepOutcome {
+interface JuniorSweepOutcome {
   number: number;
   outcome: "kept" | "would-revoke" | "revoked" | "error";
   reason: string;

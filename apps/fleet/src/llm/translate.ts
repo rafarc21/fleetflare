@@ -353,7 +353,7 @@ export function parseSseDataLine(line: string): Json | "DONE" | null {
   try { return JSON.parse(payload); } catch { return null; }
 }
 
-export interface StreamState {
+interface StreamState {
   /** Index of the next NEW content block this stream will open. */
   nextIndex: number;
   /** Anthropic content-block index currently holding the running text block,
@@ -623,7 +623,7 @@ export function parseStreamErrorChunk(chunk: Json): string | null {
  * `pumpAnthropicStream`'s own stream-ending call site needs this broader
  * check.
  */
-export interface StreamCloseResult {
+interface StreamCloseResult {
   frames: string[];
   ok: boolean;
 }

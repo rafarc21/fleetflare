@@ -13,7 +13,7 @@ export function parseFrame(data: string | ArrayBuffer) {
 
 /** What a client knows about its own output stream. Shaped after node's
  *  `process.stdout`, which is what every caller passes. */
-export interface TerminalSize {
+interface TerminalSize {
   isTTY?: boolean;
   columns?: number;
   rows?: number;

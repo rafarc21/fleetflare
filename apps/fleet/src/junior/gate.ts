@@ -23,7 +23,7 @@ import { parseInstallCacheRepos } from "../studio/install-cache";
  *  with zero harmful edits. Anything else is refused at the Worker. */
 export const JUNIOR_MODELS: readonly string[] = ["@cf/zai-org/glm-5.3", "@cf/deepseek-ai/deepseek-v4-pro-0813"];
 
-export interface JuniorGateEnv { FLEET_JUNIOR?: string; JUNIOR_REPOS?: string }
+interface JuniorGateEnv { FLEET_JUNIOR?: string; JUNIOR_REPOS?: string }
 
 export function juniorEnabled(
   env: JuniorGateEnv, workRepoSlug: string | undefined,

@@ -47,7 +47,7 @@ export function extractPaths(text: string): string[] {
 }
 
 /** One path the brief named that something else already claims, and who. */
-export interface PathOverlap {
+interface PathOverlap {
   path: string;
   prs: number[];
   tasks: number[];

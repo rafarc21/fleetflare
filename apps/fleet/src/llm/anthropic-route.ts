@@ -160,7 +160,7 @@ export function leadAiRetryBaseMs(env: { LEAD_AI_RETRY_BASE_MS?: string }): numb
 }
 
 /** The last env.AI.run failure, plus how many attempts were spent. */
-export class AiRunError extends Error {
+class AiRunError extends Error {
   constructor(message: string, readonly attempts: number) { super(message); }
 }
 

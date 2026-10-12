@@ -25,7 +25,7 @@ import { makeEvent, shortId } from "../events/schema";
 // test/bun) that import this module's types through src/studio/task-reap.ts.
 export type CloseOutcome = "closed" | "already-closed" | "no-op";
 
-export interface CloseEvidence {
+interface CloseEvidence {
   /** The commit that proves this task's work landed on the default branch —
    *  the promotion PR's squash commit, a regular merge commit, or one of a
    *  PR's own original commits, whichever resolveIssuesForPushCommits /
@@ -37,7 +37,7 @@ export interface CloseEvidence {
   branch: string;
 }
 
-export interface CloseOnPromoteResult {
+interface CloseOnPromoteResult {
   ok: true;
   /** Still `ok: true` for every outcome above — a repeat delivery or a
    *  genuinely-already-closed issue is not a failure. */

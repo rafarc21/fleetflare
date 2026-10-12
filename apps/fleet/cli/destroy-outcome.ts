@@ -75,7 +75,7 @@ export const DESTROY_POLL_INTERVAL_MS = 10_000;
  *  whole poll window. */
 export const DESTROY_STATUS_TIMEOUT_MS = 15_000;
 
-export interface DestroyReport {
+interface DestroyReport {
   /**
    * `ok`              the destroy answered 200 — the normal path.
    * `http-error`      it answered non-2xx (a 409 refusal, a 500) — a real
@@ -98,12 +98,12 @@ export interface DestroyReport {
   exitCode: number;
 }
 
-export interface DestroyUrls {
+interface DestroyUrls {
   destroy: string;
   status: string;
 }
 
-export interface DestroyOpts {
+interface DestroyOpts {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   pollAttempts?: number;

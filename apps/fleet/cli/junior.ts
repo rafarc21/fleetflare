@@ -168,7 +168,7 @@ export function formatJuniorStats(rows: JuniorStatsRow[]): string {
  *  cli/fleet.ts's task-state fetchers already established — never thrown,
  *  never exiting, so the command edge below stays the only place with a
  *  failure policy. status 0 = fetch itself threw (network down, DNS, …). */
-export type JuniorUsageResult =
+type JuniorUsageResult =
   | { ok: true; rows: JuniorStatsRow[] }
   | { ok: false; status: number; message: string };
 
@@ -200,7 +200,7 @@ export async function fetchJuniorUsage(
   }
 }
 
-export interface JuniorStatsDeps {
+interface JuniorStatsDeps {
   doFetch?: JuniorUsageFetch;
   stdout?: (line: string) => void;
   stderr?: (line: string) => void;
