@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { slotSecretName, slotNumberOf, labelVarName } from "../src/studio/account-slot";
+import { accountLabel, MAX_CLAUDE_ACCOUNTS, type ClaudeAccountEnv } from "../src/studio/accounts";
 
 // ---------------------------------------------------------------------------
 // Issue #405 (sweep #394, finding F7) — the slot-name grammar round-trip
@@ -99,7 +100,9 @@ describe("labelVarName", () => {
   // Secret name -> CLAUDE_ACCOUNT_<n>_LABEL (accounts.ts's own label
   // convention, spelled from the cli side today). The defensive fallback for
   // a name outside the grammar — CLAUDE_ACCOUNT_<secretName>_LABEL — must
-  // stay byte-identical to cli/accounts-format.ts:286-289: `--write-labels`
+  // stay byte-identical to the pre-#405 cli/accounts-format.ts labelVarName
+  // fallback (deleted by this PR — the defensive foreign-name spelling
+  // CLAUDE_ACCOUNT_<name>_LABEL): `--write-labels`
   // builds a paste-able config line from whatever name it was handed, so a
   // foreign name must still produce a well-formed (if never-set) variable
   // name, never a crash and never a blank.
@@ -107,5 +110,70 @@ describe("labelVarName", () => {
     expect(labelVarName("CLAUDE_CODE_OAUTH_TOKEN")).toBe("CLAUDE_ACCOUNT_1_LABEL");
     expect(labelVarName("CLAUDE_CODE_OAUTH_TOKEN_2")).toBe("CLAUDE_ACCOUNT_2_LABEL");
     expect(labelVarName("SOMETHING_ELSE")).toBe("CLAUDE_ACCOUNT_SOMETHING_ELSE_LABEL");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #441 maestro review findings 2/3 — the canonical-spelling rule, pinned
+// through accountLabel.
+// ---------------------------------------------------------------------------
+describe("slotOf's canonical-spelling rule, via accountLabel (PR #441 findings 2/3)", () => {
+  // accounts.ts's private slotOf (name -> position) used to be a loop over
+  // 1..MAX comparing slotSecretName(p) === name, so a name only ever read as
+  // the position whose own canonical spelling it IS. The #405 fold replaced
+  // that loop with slotNumberOf(name) plus a 1..MAX window check — but
+  // slotNumberOf parses ANY _<n> suffix (PR #441 maestro review finding 2),
+  // so CLAUDE_CODE_OAUTH_TOKEN_1 (NOT slot 1's name — that is the unsuffixed
+  // CLAUDE_CODE_OAUTH_TOKEN), _01 and _09 all parsed into window slots, and
+  // accountLabel would read a FOREIGN secret's spelling off slot 1's or
+  // slot 9's label. The fix re-imposes the scan's own rule: a parsed n
+  // counts only when the name IS slot n's canonical spelling
+  // (slotSecretName(n) === name), keeping slotOf byte-identical to the
+  // pre-#405 scan for EVERY input. slotOf itself is private, so these pin
+  // the rule through accountLabel — the public function whose result
+  // depends on it: it returns the label only for canonical slot names,
+  // null otherwise. The label vars are read through ClaudeAccountEnv's
+  // structural unknown cast (the same envWith shape
+  // test/studio.account-failover.test.ts already uses for Env), so the
+  // env object below carries label keys the interface itself does not name.
+  const env = {
+    CLAUDE_CODE_OAUTH_TOKEN: "t",
+    CLAUDE_ACCOUNT_1_LABEL: "primary@example.com",
+    CLAUDE_ACCOUNT_9_LABEL: "nine@example.com",
+  } as unknown as ClaudeAccountEnv;
+
+  // Non-canonical in-window spellings -> null, never a real slot's label.
+  // The env deliberately sets slot 1's and slot 9's labels so the old buggy
+  // behavior is VISIBLE here rather than a silent null: _1 and _01 parsed
+  // as slot 1 and would have read "primary@example.com", _09 parsed as
+  // slot 9 and would have read "nine@example.com" — the old scan gave null
+  // for all three, and so must the fold.
+  it("non-canonical in-window spellings (_1, _01, _09) read null, never slot 1's or slot 9's label", () => {
+    expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN_1")).toBeNull();
+    expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN_01")).toBeNull();
+    expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN_09")).toBeNull();
+  });
+
+  // Out-of-window and out-of-grammar spellings -> null, matching the old
+  // scan in every one of these cases already: _0 parses as 0 (below the
+  // 1..MAX window), _10 parses as 10 (beyond it — MAX_CLAUDE_ACCOUNTS is 9,
+  // pinned here alongside the case that depends on it), a double underscore
+  // fails the grammar's regex entirely, and the bare empty string is as
+  // foreign as any name can be.
+  it("out-of-window and out-of-grammar spellings (_0, _10, __2, empty) read null", () => {
+    expect(MAX_CLAUDE_ACCOUNTS).toBe(9);
+    expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN_0")).toBeNull();
+    expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN_10")).toBeNull();
+    expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN__2")).toBeNull();
+    expect(accountLabel(env, "")).toBeNull();
+  });
+
+  // The canonical spellings still read their OWN slots: the unsuffixed
+  // name is slot 1 (every pre-#53 deploy's one and only secret), and a
+  // canonical slot with NO label set reads null too — accountLabel's
+  // documented behavior for an unset label var, not a slotOf rejection.
+  it("canonical spellings read their own slot: the unsuffixed name is slot 1; a label-less slot reads null", () => {
+    expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN")).toBe("primary@example.com");
+    expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN_2")).toBeNull();
   });
 });

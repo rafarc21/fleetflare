@@ -1115,14 +1115,21 @@ export async function launchAccountOrReroute(
 
 /** The slot a secret name holds, or null for a name outside the list. Issue
  *  #405: delegates the parse to account-slot.ts's `slotNumberOf` (which parses
- *  any _<n>), then re-imposes the 1..MAX_CLAUDE_ACCOUNTS window HERE — the
- *  window policy stays next to the constant because account-slot.ts is
- *  import-free. Byte-identical to the old scan: the loop only ever matched
- *  positions 1..MAX, so a name like CLAUDE_CODE_OAUTH_TOKEN_10 still reads
- *  null (cli's side gets the 10 directly from slotNumberOf). */
+ *  ANY _<n>, so CLAUDE_CODE_OAUTH_TOKEN_01 and _1 both parse to 1, _09 to 9),
+ *  but those are NOT slot spellings — slot 1's name is the unsuffixed
+ *  CLAUDE_CODE_OAUTH_TOKEN, slot 9's is _9 exactly. The `slotSecretName(n)
+ *  === name` check is what makes a parsed n count only when `name` IS that
+ *  slot's own canonical spelling, and the 1..MAX_CLAUDE_ACCOUNTS window is
+ *  re-imposed HERE (the window policy stays next to the constant because
+ *  account-slot.ts is import-free) — together they keep slotOf
+ *  byte-identical to the pre-#405 scan (loop 1..MAX comparing
+ *  slotSecretName(p) === name) for EVERY input: _1/_01/_09 read as foreign,
+ *  not as slots 1 and 9, and _10 and beyond stay null via the 1..MAX window
+ *  (cli's side gets the 10 directly from slotNumberOf).
+ *  Reference: PR #441 maestro review finding 2. */
 function slotOf(name: string): number | null {
   const n = slotNumberOf(name);
-  return n !== null && n >= 1 && n <= MAX_CLAUDE_ACCOUNTS ? n : null;
+  return n !== null && n >= 1 && n <= MAX_CLAUDE_ACCOUNTS && slotSecretName(n) === name ? n : null;
 }
 
 /**
