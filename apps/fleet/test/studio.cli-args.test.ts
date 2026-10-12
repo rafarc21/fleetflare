@@ -1153,3 +1153,48 @@ describe("fleet accounts hold|clear", () => {
     expect(parseCliArgs(["accounts", "clear", "S", "T"]).cmd).toBe("usage");
   });
 });
+
+// Board task #565 (sweep 20, S20-F3): `0` is GitHub's "no issue" and this
+// CLI's own --continues grammar already refuses it; a >2^53 digit string
+// rounds in Number() to an issue that cannot exist. All four number-taking
+// task verbs share the grammar — pinned here per verb.
+describe("task number grammar refuses 0 and past-2^53 — board task #565", () => {
+  const past = "99999999999999999999"; // 20 nines — Number() rounds past 2^53
+
+  it("task show refuses 0, a leading-zero string, and past-2^53", () => {
+    expect(parseCliArgs(["task", "show", "0"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "show", "042"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "show", past]).cmd).toBe("usage");
+  });
+
+  it("task verify refuses 0 and past-2^53", () => {
+    expect(parseCliArgs(["task", "verify", "0"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "verify", past]).cmd).toBe("usage");
+  });
+
+  it("task assign refuses 0 and past-2^53 as its number", () => {
+    expect(parseCliArgs(["task", "assign", "0", "pilot"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "assign", past, "pilot"]).cmd).toBe("usage");
+  });
+
+  it("task state refuses 0 and past-2^53 as its number", () => {
+    expect(parseCliArgs(["task", "state", "0", "working"]).cmd).toBe("usage");
+    expect(parseCliArgs(["task", "state", past, "working"]).cmd).toBe("usage");
+  });
+
+  it("the refusal names the got value — not just a bare needs-an-issue-number", () => {
+    const parsed = parseCliArgs(["task", "show", "0"]);
+    expect(parsed.cmd).toBe("usage");
+    if (parsed.cmd !== "usage") return;
+    expect(parsed.message).toContain(`(got "0")`);
+  });
+
+  it("a real issue number still parses — the grammar is a floor, not a ceiling", () => {
+    expect(parseCliArgs(["task", "show", "12"])).toEqual({ cmd: "task-show", number: 12 });
+    expect(parseCliArgs(["task", "verify", "12"])).toEqual({ cmd: "task-verify", number: 12 });
+    expect(parseCliArgs(["task", "assign", "42", "pilot"]))
+      .toEqual({ cmd: "task-assign", number: 42, target: "pilot" });
+    expect(parseCliArgs(["task", "state", "42", "working"]))
+      .toEqual({ cmd: "task-state", number: 42, to: "working" });
+  });
+});
