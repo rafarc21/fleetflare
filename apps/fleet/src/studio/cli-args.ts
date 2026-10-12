@@ -558,6 +558,19 @@ function usage(message: string): CliCommand {
   return { cmd: "usage", message: `${message}\n${CLI_USAGE}` };
 }
 
+/** Issue #567: the one-argument grammar every id-taking verb shares — the
+ * id must exist, must not be a flag, and nothing may follow it, the same
+ * "never silently ignore a token" posture `destroy`'s own id-slot check
+ * (below) documents. Kept shared because check/paste/clear-session-guard/
+ * inspect all had the identical defect. */
+function idArg<V extends string>(argv: string[], verb: V): { cmd: V; id: string } | { cmd: "usage"; message: string } {
+  const [id, ...rest] = argv;
+  if (id === undefined) return { cmd: "usage", message: CLI_USAGE };
+  if (id.startsWith("--")) return { cmd: "usage", message: `fleet ${verb} needs a studio id (got ${JSON.stringify(id)})\n${CLI_USAGE}` };
+  if (rest.length > 0) return { cmd: "usage", message: `unexpected ${JSON.stringify(rest[0])} — fleet ${verb} takes exactly one studio id\n${CLI_USAGE}` };
+  return { cmd: verb, id };
+}
+
 /** `fleet task <sub> ...`. Split out of parseCliArgs's switch because it is
  *  the only command with a second word, and folding two grammars into one
  *  switch reads as neither. */
@@ -825,7 +838,7 @@ export function parseCliArgs(argv: string[]): CliCommand {
       return usage(`unexpected ${JSON.stringify(rest[0])}`);
     }
     case "paste":
-      return arg ? { cmd: "paste", id: arg } : { cmd: "usage", message: CLI_USAGE };
+      return idArg(argv.slice(1), "paste");
     // Issue #269: same bespoke shape as `recycle --discard-unsynced` above and
     // `destroy --force` below, same reasons.
     case "spawn": {
@@ -911,11 +924,11 @@ export function parseCliArgs(argv: string[]): CliCommand {
       };
     }
     case "check":
-      return arg ? { cmd: "check", id: arg } : { cmd: "usage", message: CLI_USAGE };
+      return idArg(argv.slice(1), "check");
     case "clear-session-guard":
-      return arg ? { cmd: "clear-session-guard", id: arg } : { cmd: "usage", message: CLI_USAGE };
+      return idArg(argv.slice(1), "clear-session-guard");
     case "inspect":
-      return arg ? { cmd: "inspect", id: arg } : { cmd: "usage", message: CLI_USAGE };
+      return idArg(argv.slice(1), "inspect");
     // Board task #124: `fleet destroy <id> [--force]`. The id plus a small
     // fixed set of no-value trailing flags are read; anything else after the
     // id is a usage error, the same "an unknown flag is never silently
