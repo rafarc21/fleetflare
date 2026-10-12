@@ -49,7 +49,7 @@ export interface DirectusConfig {
  * registry row (hundreds of bytes) — it exists to stop a pathological case,
  * not to trim.
  */
-export const DIRECTUS_MAX_BYTES = 262_144; // 256KB
+const DIRECTUS_MAX_BYTES = 262_144; // 256KB
 
 /**
  * Per-request timeout. Load-bearing on the provision path specifically: a
@@ -65,7 +65,7 @@ export const DIRECTUS_TIMEOUT_MS = 4_000;
  *  limit is 100; a project with more requirements than this has a process
  *  problem before it has a paging problem, and a silent truncation is worse
  *  than a visible ceiling — `listRequirements` reports when it hits it. */
-export const REQUIREMENTS_PAGE_LIMIT = 200;
+const REQUIREMENTS_PAGE_LIMIT = 200;
 
 /**
  * Resolves the two config values, or `null` for "Directus is not configured".
