@@ -1,7 +1,8 @@
 import { env, SELF } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi, afterEach } from "vitest";
 import { readSince } from "../src/events/log";
 import { handleTelegramWebhook } from "../src/telegram/webhook";
+import { setFlag, deleteFlag } from "../src/state";
 import type { Env } from "../src/env";
 
 const SECRET = "test-secret";
@@ -250,6 +251,148 @@ describe("telegram webhook", () => {
     expect(res.status).toBe(200);
     expect(calls.started).toBe(0);
     expect(await readSince(env.DB, "cto", 0)).toHaveLength(1);
+  });
+
+  // S21 F2: every catch in the webhook names the agent (or project/cq.id)
+  // it failed on. The failing id is "cto" — the one agent the registry
+  // carries for project "websites".
+  describe("failure logs name the agent", () => {
+    let realFetch: typeof globalThis.fetch;
+
+    beforeEach(() => {
+      realFetch = globalThis.fetch;
+    });
+    afterEach(() => { globalThis.fetch = realFetch; });
+
+    const command = (text: string, updateId: number) => new Request("https://x/tg/websites", {
+      method: "POST",
+      headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET! },
+      body: JSON.stringify({
+        update_id: updateId,
+        message: { from: { id: 100000001 }, chat: { id: 100000001 }, text },
+      }),
+    });
+
+    const fakeAgentRejecting = {
+      idFromName: (n: string) => n,
+      get: () => ({ fetch: () => Promise.reject(new Error("DO unreachable")) }),
+    } as unknown as Env["AGENT"];
+
+    const fakeAgentOk = {
+      idFromName: (n: string) => n,
+      get: () => ({ fetch: async () => new Response("ok") }),
+    } as unknown as Env["AGENT"];
+
+    const ghEnv = (agent: Env["AGENT"]) => ({
+      ...env, AGENT: agent,
+      // A PAT so mintRepoToken needs no network and no app key: the /stop
+      // and dispatch paths reach their own fetch/stub calls, not the mint's
+      // "not configured" throw.
+      GITHUB_TOKEN: "github_pat_fake",
+      GITHUB_APP_ID: undefined, GITHUB_APP_PRIVATE_KEY: undefined,
+      FLEET_WRITE_PROXY_REPOS: "",
+    } as unknown as Env);
+
+    const tgDown = () =>
+      (globalThis.fetch = (async () => {
+        throw new Error("telegram down");
+      }) as typeof globalThis.fetch);
+
+    it("names the agent when the /pause notice fails to send", async () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        tgDown();
+        const res = await handleTelegramWebhook(command("/pause", 9001), env, "websites");
+        expect(res.status).toBe(200);
+        expect(errSpy).toHaveBeenCalled();
+        expect(String(errSpy.mock.calls[0][0])).toMatch(/pause notice failed for cto/);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it("names the agent when the /resume notice fails to send", async () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        tgDown();
+        const res = await handleTelegramWebhook(command("/resume", 9002), env, "websites");
+        expect(res.status).toBe(200);
+        expect(errSpy).toHaveBeenCalled();
+        expect(String(errSpy.mock.calls[0][0])).toMatch(/resume notice failed for cto/);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it("names the agent when the /stop dispatch to the DO fails", async () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        tgDown();
+        const res = await handleTelegramWebhook(
+          command("/stop", 9003), ghEnv(fakeAgentRejecting), "websites",
+        );
+        expect(res.status).toBe(200);
+        expect(errSpy).toHaveBeenCalled();
+        expect(String(errSpy.mock.calls[0][0])).toMatch(/stop dispatch failed for cto/);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it("names the agent when the task dispatch to the DO fails", async () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        tgDown();
+        const res = await handleTelegramWebhook(
+          command("do the thing", 9004), ghEnv(fakeAgentRejecting), "websites",
+        );
+        expect(res.status).toBe(200);
+        expect(errSpy).toHaveBeenCalled();
+        expect(String(errSpy.mock.calls[0][0])).toMatch(/agent dispatch failed for cto/);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it("names the agent when the paused notice fails to send", async () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await setFlag(env.DB, "paused", "1", 1);
+        tgDown();
+        const res = await handleTelegramWebhook(
+          command("do the thing", 9005), ghEnv(fakeAgentOk), "websites",
+        );
+        expect(res.status).toBe(200);
+        expect(errSpy).toHaveBeenCalled();
+        expect(String(errSpy.mock.calls[0][0])).toMatch(/paused notice failed for cto/);
+      } finally {
+        await deleteFlag(env.DB, "paused");
+        errSpy.mockRestore();
+      }
+    });
+
+    it("names project and query id when handleCallbackQuery throws", async () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        tgDown();
+        const res = await handleTelegramWebhook(new Request("https://x/tg/websites", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET!,
+          },
+          body: JSON.stringify({
+            update_id: 9006,
+            callback_query: { id: "cbq_7", from: { id: 100000001 } },
+          }),
+        }), env, "websites");
+        expect(res.status).toBe(200);
+        expect(errSpy).toHaveBeenCalled();
+        expect(String(errSpy.mock.calls[0][0])).toMatch(/callback failed for websites\/cbq_7/);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
   });
 });
 

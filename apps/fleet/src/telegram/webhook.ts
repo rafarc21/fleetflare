@@ -69,7 +69,7 @@ export async function handleTelegramWebhook(
     try {
       await handleCallbackQuery(env, cq, makeExecutor(env), Date.now());
     } catch (err) {
-      console.error("callback failed", err);
+      console.error(`callback failed for ${project}/${cq.id}`, err);
     }
     return new Response("ok");
   }
@@ -94,7 +94,7 @@ export async function handleTelegramWebhook(
     try {
       await sendMessage(tg.token, agent.chatId, "Paused. New tasks are refused until /resume.");
     } catch (err) {
-      console.error("pause notice failed", err);
+      console.error(`pause notice failed for ${agent.id}`, err);
     }
     return new Response("ok");
   }
@@ -103,7 +103,7 @@ export async function handleTelegramWebhook(
     try {
       await sendMessage(tg.token, agent.chatId, "Resumed.");
     } catch (err) {
-      console.error("resume notice failed", err);
+      console.error(`resume notice failed for ${agent.id}`, err);
     }
     return new Response("ok");
   }
@@ -113,12 +113,12 @@ export async function handleTelegramWebhook(
       const doRes = await stub.fetch("https://agent/abort", { method: "POST" });
       await doRes.text(); // drain: vitest-pool-workers isolated storage, same as /start below
     } catch (err) {
-      console.error("stop dispatch failed", err);
+      console.error(`stop dispatch failed for ${agent.id}`, err);
     }
     try {
       await sendMessage(tg.token, agent.chatId, "Stopped.");
     } catch (err) {
-      console.error("stop notice failed", err);
+      console.error(`stop notice failed for ${agent.id}`, err);
     }
     return new Response("ok");
   }
@@ -153,7 +153,7 @@ export async function handleTelegramWebhook(
     } catch (err) {
       // Same always-200 contract as the dispatch below: the event is
       // already logged, so a failed notice must not surface as a 500.
-      console.error("paused notice failed", err);
+      console.error(`paused notice failed for ${agent.id}`, err);
     }
     return new Response("ok");
   }
@@ -204,7 +204,7 @@ export async function handleTelegramWebhook(
       console.error("agent start rejected", doRes.status, doBody.slice(0, 300));
     }
   } catch (err) {
-    console.error("agent dispatch failed", err);
+    console.error(`agent dispatch failed for ${agent.id}`, err);
   }
   return new Response("ok");
 }
