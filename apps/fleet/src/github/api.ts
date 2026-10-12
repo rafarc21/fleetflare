@@ -91,13 +91,18 @@ export async function mergePullRequest(
   // GitHub explains itself well on a failure here — "not mergeable", "review
   // required", "base was modified" — so ghRequest passes its words through
   // rather than inventing ours. The token itself never appears in the message.
-  const { text } = await ghRequest(
+  const { res, text } = await ghRequest(
     token,
     `https://api.github.com/repos/${repo}/pulls/${pr}/merge`,
     { method: "PUT", body: JSON.stringify({ commit_title: commitTitle, merge_method: mergeMethod }) },
     "merge",
   );
-  return (JSON.parse(text) as { sha: string }).sha;
+  // A 2xx body can still lack sha (proxy/schema drift) — never hand callers undefined.
+  const sha = (JSON.parse(text) as { sha?: string }).sha;
+  if (typeof sha !== "string") {
+    throw new Error(`merge failed (${res.status}): GitHub named no sha`);
+  }
+  return sha;
 }
 
 /**
@@ -211,7 +216,7 @@ export async function createRepoFile(
   /** The existing file's blob sha, to replace it (#363). Absent = create. */
   sha?: string,
 ): Promise<{ path: string; sha: string }> {
-  const { text } = await ghRequest(
+  const { res, text } = await ghRequest(
     token,
     `https://api.github.com/repos/${repo}/contents/${path}`,
     {
@@ -220,8 +225,13 @@ export async function createRepoFile(
     },
     `create ${path}`,
   );
+  // A 2xx body can still lack content.sha — a phantom "" sha is a lie about the commit.
   const body = JSON.parse(text) as { content?: { sha?: string } };
-  return { path, sha: body.content?.sha ?? "" };
+  const newSha = body.content?.sha;
+  if (typeof newSha !== "string") {
+    throw new Error(`create ${path} failed (${res.status}): GitHub named no sha`);
+  }
+  return { path, sha: newSha };
 }
 
 /**
@@ -246,7 +256,13 @@ export async function upsertRepoFile(
   );
   let sha: string | undefined;
   if (res.ok) {
-    sha = (JSON.parse(text) as { sha?: string }).sha;
+    // A shape-lie body would leave sha undefined and the PUT would 422 over an
+    // existing file — throw with the same prefix the failed lookup uses.
+    const found = (JSON.parse(text) as { sha?: string }).sha;
+    if (typeof found !== "string") {
+      throw new Error(`upsert ${path}: sha lookup failed (${res.status}): GitHub named no sha`);
+    }
+    sha = found;
   }
   return createRepoFile(token, repo, path, content, message, sha);
 }
