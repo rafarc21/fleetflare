@@ -463,7 +463,7 @@ export const ROLE_ENV_KEY = "roleEnv";
  * could silently gain (or lose) a key"), and a boolean is not a bring-up env
  * var at all.
  */
-export const KEEP_ALIVE_KEY = "keepAlive";
+const KEEP_ALIVE_KEY = "keepAlive";
 
 /**
  * Issue #71: the one-heal-per-bare-episode marker.
@@ -880,7 +880,7 @@ export function freshStatus(id: string): StudioStatus {
  * shell, which actually knows the filesystem's state, decides; DO storage
  * no longer pretends to.
  */
-export function guardedCloneCmd(workRepoSlug: string, targetDir: string): string {
+function guardedCloneCmd(workRepoSlug: string, targetDir: string): string {
   return `test -d ${targetDir}/.git || git clone --depth 1 https://github.com/${workRepoSlug}.git ${targetDir}`;
 }
 
@@ -1356,7 +1356,7 @@ export const BRINGUP_RETRY_HEALED =
  * never gets that directory at all (measured live: websites--pilot, HOOK=0
  * SKILLS=0) and must not be failed over its absence.
  */
-export async function verifyBringupLanded(
+async function verifyBringupLanded(
   deps: ProvisionDeps, repo: string | null, isStudio: boolean,
 ): Promise<void> {
   if (repo !== null) {
@@ -1563,7 +1563,7 @@ export function provisionedCheckCmd(repo: string, harness?: string | null): stri
  *  removed when it succeeds. Holds one fixed line, `tailnet: quota reached`
  *  or `tailnet: down`. `${FLEET_WORKSPACE:-/workspace}` is the same
  *  expansion bring-up uses, so the two always name one file. */
-export const TAILNET_DOWN_PATH = "${FLEET_WORKSPACE:-/workspace}/.fleet/tailnet-down";
+const TAILNET_DOWN_PATH = "${FLEET_WORKSPACE:-/workspace}/.fleet/tailnet-down";
 
 /** The marker line out of the check's stdout, or null. A strict match:
  *  anything else the container printed is not a tailnet warning. */
@@ -1769,7 +1769,7 @@ async function refreshMemoryClone(deps: ProvisionDeps, id: string, workRepoSlug:
  * — see resolveOperatorHouseRules's own doc comment for exactly when it is
  * non-null.
  */
-export interface OpsHouseRulesOutcome {
+interface OpsHouseRulesOutcome {
   text: string | null;
   note: string | null;
 }
@@ -3132,7 +3132,7 @@ const SESSION_ADOPT_KILL_SECONDS = 15;
  *  proceeds exactly as before. */
 export const SESSION_ADOPT_DEADLINE_MS = 20_000;
 
-export type SessionAdoption =
+type SessionAdoption =
   | { outcome: "adopted"; sessionId: string; fromKey: string; at: string }
   | { outcome: "root" | "none" }
   | { outcome: "unknown"; reason: string };
@@ -3254,7 +3254,7 @@ export function parseFreshSession(stdout: string): string[] | null {
 }
 
 /** Issue #28: the row note for a --fresh-session bring-up. */
-export function freshSessionNoteFor(moved: string[] | null, studioId: string): string {
+function freshSessionNoteFor(moved: string[] | null, studioId: string): string {
   if (moved === null) {
     return "fresh session not confirmed: bring-up printed no FLEET_SESSION_FRESH line (older image?) -- " +
       "the old session was NOT moved aside and claude may have resumed it";
