@@ -129,8 +129,8 @@ function assertIsolatedEnv(env: Record<string, string | undefined>): void {
   }
 }
 
-/** Copied from test/bun/pane-probe.test.ts verbatim, for the reason that
- *  file's own comment gives: TMUX_TMPDIR alone is NOT isolation, and this
+/** Same isolation as the shared test/bun/helpers/tmux-env.ts helper, for the reason that
+ *  helper's own comment gives: TMUX_TMPDIR alone is NOT isolation, and this
  *  suite's session/window names are the REAL ones, so a run inside a live
  *  studio would otherwise probe — and `kill-server` — that studio's own
  *  tmux. This env still backs `paneLeadProbeCmd()` itself (production code,
@@ -139,7 +139,7 @@ function assertIsolatedEnv(env: Record<string, string | undefined>): void {
  *  `socketFlag`.
  *
  *  `PATH` is prepended with `<dir>/bin` — the ONLY addition beyond the
- *  original wake-cmd.test.ts/pane-probe.test.ts copy this comment refers
+ *  shared helpers/tmux-env.ts copy this comment refers
  *  to — so a bare `claude` typed into the pane resolves to this suite's own
  *  fake lead (see `installFakeClaude`) rather than whatever (if anything)
  *  happens to be named `claude` on the machine running this test. */

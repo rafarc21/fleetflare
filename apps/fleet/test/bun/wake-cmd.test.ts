@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { wakeCmd } from "../../src/studio/wake";
+import { isolatedTmuxEnv } from "./helpers/tmux-env";
 
 /**
  * Executes the REAL emitted wake command against a REAL tmux server, in a
@@ -13,24 +14,6 @@ import { wakeCmd } from "../../src/studio/wake";
  * This is the lane that proves quoting: a source-text assertion cannot tell
  * a correctly-escaped prompt from one that a shell would tear apart.
  */
-/**
- * An env whose tmux can ONLY reach the throwaway server under `dir`.
- *
- * `TMUX_TMPDIR` alone is not isolation. When `TMUX` is set -- i.e. this test
- * runs INSIDE a tmux session, which is exactly where a studio lead runs it --
- * tmux targets the CURRENT server named in `$TMUX` and ignores TMUX_TMPDIR.
- * The session/window names here are the real ones (`studio:claude`), so this
- * suite then typed its fixtures into the live claude window and its
- * `kill-server` killed the studio outright. MEASURED 2026-09-18: a sentinel
- * server with those names died when this file ran inside it; three studio
- * leads died this way over two days. Stripping TMUX/TMUX_PANE makes tmux fall
- * back to TMUX_TMPDIR, i.e. the throwaway server, wherever the test runs.
- */
-function isolatedTmuxEnv(dir: string): Record<string, string | undefined> {
-  const { TMUX: _tmux, TMUX_PANE: _pane, ...rest } = process.env;
-  return { ...rest, TMUX_TMPDIR: dir };
-}
-
 function sendIntoRealTmux(prompt: string): { out: string; code: number; stderr: string } {
   const dir = mkdtempSync(join(tmpdir(), "fleet-wake-"));
   const outFile = join(dir, "out");

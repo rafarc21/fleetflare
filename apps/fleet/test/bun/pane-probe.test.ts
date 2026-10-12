@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PANE_PROBE_CMD } from "../../src/studio/wake";
+import { isolatedTmuxEnv } from "./helpers/tmux-env";
 
 /**
  * Board issue #41, half one: the pane probe, executed against a REAL tmux
@@ -11,18 +12,7 @@ import { PANE_PROBE_CMD } from "../../src/studio/wake";
  * source-text assertion proves nothing: what matters is that real tmux prints
  * `claude` for a claude pane, `bash` for a bare shell, and fails non-zero
  * when the window is gone.
- *
- * `isolatedTmuxEnv` is copied from wake-cmd.test.ts verbatim, for the reason
- * that file's own comment gives: TMUX_TMPDIR alone is NOT isolation, and this
- * suite's session/window names are the REAL ones, so a run inside a live
- * studio would otherwise probe — and `kill-server` — that studio's own tmux.
- * Three leads died that way before it was found.
  */
-function isolatedTmuxEnv(dir: string): Record<string, string | undefined> {
-  const { TMUX: _tmux, TMUX_PANE: _pane, ...rest } = process.env;
-  return { ...rest, TMUX_TMPDIR: dir };
-}
-
 /** Runs PANE_PROBE_CMD against a throwaway server whose `studio:claude`
  *  window runs `command`. `null` skips creating that window entirely. */
 function probeAgainst(command: string | null): { stdout: string; code: number; stderr: string } {

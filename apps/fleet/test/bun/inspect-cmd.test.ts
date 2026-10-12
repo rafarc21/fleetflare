@@ -15,16 +15,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectCmd, parseInspectOutput, CHECKOUT_PRESENT, CHECKOUT_MISSING } from "../../src/studio/inspect";
-
-/** Copied from test/bun/pane-probe.test.ts verbatim, for the reason that
- *  file's own comment gives: TMUX_TMPDIR alone is NOT isolation, and this
- *  suite's session/window names are the REAL ones, so a run inside a live
- *  studio would otherwise probe — and `kill-server` — that studio's own
- *  tmux. Three leads died that way before it was found. */
-function isolatedTmuxEnv(dir: string): Record<string, string | undefined> {
-  const { TMUX: _tmux, TMUX_PANE: _pane, ...rest } = process.env;
-  return { ...rest, TMUX_TMPDIR: dir };
-}
+import { isolatedTmuxEnv } from "./helpers/tmux-env";
 
 interface Sh {
   (cmd: string): { code: number; stdout: string; stderr: string };
