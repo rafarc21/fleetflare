@@ -10,7 +10,7 @@
 
 import { transitionTask, type BoardApi } from "./board";
 import { appendEvent, type D1Port } from "../events/log";
-import { makeEvent } from "../events/schema";
+import { makeEvent, shortId } from "../events/schema";
 
 // Board issue #157's build constraint is closed by this file itself:
 // `CloseOutcome` lives HERE now (the old close-outcome.ts leaf shim is
@@ -181,7 +181,7 @@ export async function closeTaskOnPromote(
       from: "worker", to: "board", kind: "task", project: repo,
       body: `close #${issueNumber} @ ${evidence.sha} -> ${evidence.branch}`,
     },
-    now, crypto.randomUUID().slice(0, 8),
+    now, shortId(),
   );
   marker.id = eventId;
   await appendEvent(db, marker);
