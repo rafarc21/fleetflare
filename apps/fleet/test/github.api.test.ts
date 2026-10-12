@@ -78,8 +78,12 @@ describe("mergePullRequest", () => {
 
   it("a 2xx body with no sha throws, never returns undefined (S10-F2)", async () => {
     respond = () => Response.json({});
-    await expect(mergePullRequest("tok", "o/r", "7", "t", "squash"))
-      .rejects.toThrow(/named no sha/);
+    try {
+      await mergePullRequest("tok", "o/r", "7", "t", "squash");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("merge failed (200): GitHub named no sha");
+    }
   });
 });
 
@@ -244,8 +248,12 @@ describe("upsertRepoFile", () => {
 
   it("a sha-lookup body with no sha throws, never a sha-less PUT (S10-F2)", async () => {
     respond = () => Response.json({});
-    await expect(upsertRepoFile("tok", "o/ops", "p.json", "{}", "msg"))
-      .rejects.toThrow(/named no sha/);
+    try {
+      await upsertRepoFile("tok", "o/ops", "p.json", "{}", "msg");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("upsert p.json: sha lookup failed (200): GitHub named no sha");
+    }
     expect(calls).toHaveLength(1); // GET only — the sha-less PUT never fired
   });
 });
@@ -324,8 +332,12 @@ describe("createRepoFile", () => {
 
   it("a 2xx body with no content.sha throws, never a phantom empty sha (S10-F2)", async () => {
     respond = () => Response.json({});
-    await expect(createRepoFile("tok", "o/r", "fleet/memory/s/x.md", "fact", "msg"))
-      .rejects.toThrow(/named no sha/);
+    try {
+      await createRepoFile("tok", "o/r", "fleet/memory/s/x.md", "fact", "msg");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("create fleet/memory/s/x.md failed (200): GitHub named no sha");
+    }
   });
 });
 

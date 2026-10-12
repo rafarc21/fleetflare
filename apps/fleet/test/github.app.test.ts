@@ -114,13 +114,17 @@ describe("mintInstallationToken", () => {
     const err = await mintInstallationToken(env(), "acme-org", "acme-org/websites")
       .then(() => undefined, (e: unknown) => e);
     expect(err).toBeInstanceOf(MintTokenError);
-    expect((err as Error).message).toMatch(/named no token/);
+    expect((err as Error).message).toBe("installation token failed (200): response named no token");
   });
 
   it("an empty-string token is treated as no token (S10-F2)", async () => {
     respond = () => Response.json({ token: "" });
-    await expect(mintInstallationToken(env(), "acme-org", "acme-org/websites"))
-      .rejects.toThrow(/named no token/);
+    try {
+      await mintInstallationToken(env(), "acme-org", "acme-org/websites");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toBe("installation token failed (200): response named no token");
+    }
   });
 
   it("refuses to run unconfigured rather than sending an empty JWT", async () => {
