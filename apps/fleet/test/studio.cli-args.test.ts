@@ -46,7 +46,7 @@ describe("parseCliArgs", () => {
   it("ls refuses a flag spelled with a value (--json=false is not --json)", () => {
     const r = parseCliArgs(["ls", "--json=false"]);
     expect(r.cmd).toBe("usage");
-    if (r.cmd === "usage") expect(r.message).toMatch(/unexpected "--json=false"/);
+    if (r.cmd === "usage") expect(r.message).toMatch(/unexpected "--json=false" — ls flags are --fresh --prs --json \(no values\)/);
     expect(parseCliArgs(["ls", "--fresh=1"]).cmd).toBe("usage");
     expect(parseCliArgs(["ls", "--prs=x"]).cmd).toBe("usage");
   });
@@ -54,12 +54,15 @@ describe("parseCliArgs", () => {
   it("ls refuses an unknown -- token, naming it", () => {
     const r = parseCliArgs(["ls", "--no-such"]);
     expect(r.cmd).toBe("usage");
-    if (r.cmd === "usage") expect(r.message).toMatch(/unexpected "--no-such"/);
+    if (r.cmd === "usage") expect(r.message).toMatch(/unexpected "--no-such" — ls flags are --fresh --prs --json \(no values\)/);
     expect(parseCliArgs(["ls", "--fresh", "--jsonx"]).cmd).toBe("usage");
   });
 
   it("ls still ignores a stray positional next to valid flags", () => {
     expect(parseCliArgs(["ls", "extra", "--json"])).toEqual({ cmd: "ls", fresh: false, json: true, prs: false });
+    // A single-dash token (-x) is not --prefixed: ls has no short flags,
+    // and the refusal line drawn by #564 starts at --.
+    expect(parseCliArgs(["ls", "-x"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
   });
 
   // Issue #37's second half: there was no way to ask for the truth NOW. The
