@@ -1404,7 +1404,7 @@ function heartbeat(
 }
 
 describe("activity-heartbeat hook — event to state map", () => {
-  linuxOnly("UserPromptSubmit writes working", () => {
+  linuxOnly("UserPromptSubmit writes working (#221)", () => {
     const r = heartbeat({ hook_event_name: "UserPromptSubmit" });
     expect(r.code).toBe(0);
     expect(r.written).toMatchObject({ state: "working" });
@@ -1422,7 +1422,7 @@ describe("activity-heartbeat hook — event to state map", () => {
   // "...3NZ" string — `Date.parse` reads that as NaN. fakeBsdDateDir()
   // reproduces exactly that observed BSD output shape. This confirms the
   // ACTUAL shipped script degrades to a valid whole-second stamp instead.
-  linuxOnly("UserPromptSubmit on a BSD-style date (no %N, no gdate): degrades to a valid whole-second stamp, never a malformed 3N string", () => {
+  linuxOnly("UserPromptSubmit on a BSD-style date (no %N, no gdate): degrades to a valid whole-second stamp, never a malformed 3N string (#221)", () => {
     const r = heartbeat(
       { hook_event_name: "UserPromptSubmit" },
       { extraPathDir: fakeBsdDateDir() },
@@ -1435,51 +1435,51 @@ describe("activity-heartbeat hook — event to state map", () => {
     expect(Number.isFinite(Date.parse(at))).toBe(true);
   });
 
-  linuxOnly("Stop writes idle", () => {
+  linuxOnly("Stop writes idle (#221)", () => {
     const r = heartbeat({ hook_event_name: "Stop" });
     expect(r.code).toBe(0);
     expect(r.written).toMatchObject({ state: "idle" });
   });
 
-  linuxOnly("Notification with notification_type permission_prompt writes waiting-question", () => {
+  linuxOnly("Notification with notification_type permission_prompt writes waiting-question (#221)", () => {
     const r = heartbeat({ hook_event_name: "Notification", notification_type: "permission_prompt" });
     expect(r.code).toBe(0);
     expect(r.written).toMatchObject({ state: "waiting-question" });
   });
 
-  linuxOnly("Notification with notification_type elicitation_dialog writes waiting-question", () => {
+  linuxOnly("Notification with notification_type elicitation_dialog writes waiting-question (#221)", () => {
     const r = heartbeat({ hook_event_name: "Notification", notification_type: "elicitation_dialog" });
     expect(r.written).toMatchObject({ state: "waiting-question" });
   });
 
-  linuxOnly("Notification with notification_type idle_prompt writes idle", () => {
+  linuxOnly("Notification with notification_type idle_prompt writes idle (#221)", () => {
     const r = heartbeat({ hook_event_name: "Notification", notification_type: "idle_prompt" });
     expect(r.written).toMatchObject({ state: "idle" });
   });
 
-  linuxOnly("Notification with no notification_type but a permission-shaped message falls back to waiting-question", () => {
+  linuxOnly("Notification with no notification_type but a permission-shaped message falls back to waiting-question (#221)", () => {
     const r = heartbeat({ hook_event_name: "Notification", message: "Claude needs your permission to use Bash" });
     expect(r.written).toMatchObject({ state: "waiting-question" });
   });
 
-  linuxOnly("Notification with no notification_type but a 'waiting for your input' message falls back to idle", () => {
+  linuxOnly("Notification with no notification_type but a 'waiting for your input' message falls back to idle (#221)", () => {
     const r = heartbeat({ hook_event_name: "Notification", message: "Claude is waiting for your input" });
     expect(r.written).toMatchObject({ state: "idle" });
   });
 
-  linuxOnly("Notification with an unrecognised type and no matching message text writes nothing, still exit 0", () => {
+  linuxOnly("Notification with an unrecognised type and no matching message text writes nothing, still exit 0 (#221)", () => {
     const r = heartbeat({ hook_event_name: "Notification", notification_type: "something_else", message: "hi" });
     expect(r.code).toBe(0);
     expect(r.written).toBeUndefined();
   });
 
-  linuxOnly("SessionStart writes NOTHING — a deliberate scope cut, see the script's own header", () => {
+  linuxOnly("SessionStart writes NOTHING — a deliberate scope cut, see the script's own header (#221)", () => {
     const r = heartbeat({ hook_event_name: "SessionStart", source: "startup" });
     expect(r.code).toBe(0);
     expect(r.written).toBeUndefined();
   });
 
-  linuxOnly("an unrecognised event writes nothing, still exit 0", () => {
+  linuxOnly("an unrecognised event writes nothing, still exit 0 (#221)", () => {
     const r = heartbeat({ hook_event_name: "SomeFutureEvent" });
     expect(r.code).toBe(0);
     expect(r.written).toBeUndefined();
@@ -1487,7 +1487,7 @@ describe("activity-heartbeat hook — event to state map", () => {
 });
 
 describe("activity-heartbeat hook — silent, always exit 0 (never blocks a turn)", () => {
-  linuxOnly("malformed stdin: exit 0, nothing written, no stderr noise", () => {
+  linuxOnly("malformed stdin: exit 0, nothing written, no stderr noise (#221)", () => {
     const r = heartbeat(undefined, { rawStdin: "not json" });
     expect(r.code).toBe(0);
     expect(r.written).toBeUndefined();
@@ -1495,7 +1495,7 @@ describe("activity-heartbeat hook — silent, always exit 0 (never blocks a turn
     expect(r.stdout.trim()).toBe("");
   });
 
-  linuxOnly("empty stdin: exit 0, nothing written", () => {
+  linuxOnly("empty stdin: exit 0, nothing written (#221)", () => {
     const r = heartbeat(undefined, { rawStdin: "" });
     expect(r.code).toBe(0);
     expect(r.written).toBeUndefined();
@@ -1507,7 +1507,7 @@ describe("activity-heartbeat hook — silent, always exit 0 (never blocks a turn
   // to be created makes `mkdir -p` fail regardless of the running user's
   // privileges (a plain permission bit is not a reliable proof under a
   // root-run test harness, where root ignores them).
-  linuxOnly("MUTANT PROOF (c): an unwritable target path still exits 0, never propagates the write failure", () => {
+  linuxOnly("MUTANT PROOF (c): an unwritable target path still exits 0, never propagates the write failure (#221)", () => {
     const dir = mkdtempSync(join(tmpdir(), "fleet-heartbeat-blocked-"));
     try {
       const blocker = join(dir, "blocker");
@@ -1539,7 +1539,7 @@ describe("activity-heartbeat hook — silent, always exit 0 (never blocks a turn
   // independent of the running user's privileges (root ignores permission
   // bits, but not this) — the SAME reason MUTANT PROOF (c) above uses a
   // blocker FILE instead of a permission bit for its own scenario.
-  linuxOnly("MUTANT PROOF (item 3): an unwritable tmp file (name too long) never leaks a redirection error to real stderr", () => {
+  linuxOnly("MUTANT PROOF (item 3): an unwritable tmp file (name too long) never leaks a redirection error to real stderr (#221)", () => {
     const dir = mkdtempSync(join(tmpdir(), "fleet-heartbeat-longname-"));
     try {
       const longBase = `${"a".repeat(250)}.json`;
@@ -1577,7 +1577,7 @@ describe("activity-heartbeat hook — silent, always exit 0 (never blocks a turn
 });
 
 describe("activity-heartbeat hook — atomic write", () => {
-  linuxOnly("no .tmp file is left behind after a successful write", () => {
+  linuxOnly("no .tmp file is left behind after a successful write (#221)", () => {
     const dir = mkdtempSync(join(tmpdir(), "fleet-heartbeat-"));
     try {
       const activityPath = join(dir, "activity.json");
@@ -1595,7 +1595,7 @@ describe("activity-heartbeat hook — atomic write", () => {
 });
 
 describe("activity-heartbeat hook — lead-only heartbeat (issue #221 fix round 2, item 2)", () => {
-  linuxOnly("MUTANT PROOF (d): a Stop fired from the LEAD's own top-level session overwrites the heartbeat", () => {
+  linuxOnly("MUTANT PROOF (d): a Stop fired from the LEAD's own top-level session overwrites the heartbeat (#221)", () => {
     const dir = mkdtempSync(join(tmpdir(), "fleet-heartbeat-lead-"));
     try {
       const activityPath = join(dir, "activity.json");
@@ -1619,7 +1619,7 @@ describe("activity-heartbeat hook — lead-only heartbeat (issue #221 fix round 
   // Before this fix, ANY claude-named process sharing STUDIO_ID/HOME could
   // write here — this is exactly the memguard.ts #238 scenario (a nested
   // `claude -p` the lead itself spawns), from the hook script's own side.
-  linuxOnly("MUTANT PROOF (d): a Stop fired from a NESTED claude -p subprocess never overwrites the lead's own heartbeat", () => {
+  linuxOnly("MUTANT PROOF (d): a Stop fired from a NESTED claude -p subprocess never overwrites the lead's own heartbeat (#221)", () => {
     const dir = mkdtempSync(join(tmpdir(), "fleet-heartbeat-nested-"));
     try {
       const activityPath = join(dir, "activity.json");
@@ -1640,7 +1640,7 @@ describe("activity-heartbeat hook — lead-only heartbeat (issue #221 fix round 
     }
   });
 
-  linuxOnly("a nested claude -p is refused even with NOTHING already written — a blanket identity rule, not just overwrite protection", () => {
+  linuxOnly("a nested claude -p is refused even with NOTHING already written — a blanket identity rule, not just overwrite protection (#221)", () => {
     // Honest about the shape of the fix: is_lead_session is a blanket
     // refusal, not a "only refuse if it would overwrite something" rule —
     // pinning this the other way (an empty starting file) would be
@@ -1662,7 +1662,7 @@ describe("activity-heartbeat hook — lead-only heartbeat (issue #221 fix round 
     }
   });
 
-  linuxOnly("no tmux on PATH at all: fails closed (no write), never crashes, never blocks", () => {
+  linuxOnly("no tmux on PATH at all: fails closed (no write), never crashes, never blocks (#221)", () => {
     const dir = mkdtempSync(join(tmpdir(), "fleet-heartbeat-notmux-"));
     try {
       const activityPath = join(dir, "activity.json");

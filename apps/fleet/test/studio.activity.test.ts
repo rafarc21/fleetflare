@@ -5,7 +5,7 @@
 // below) — no real-tmux capture, ever. See docs/superpowers/specs/
 // 2026-09-24-row-tells-truth-design.md, "PR3 — activity states", for the full
 // state table this pins.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   readActivityFrame, nextActivity, clearActivityState, ACTIVITY_KEY, type Activity,
   parseHookHeartbeat, type HookHeartbeat, extractLastVisibleLine, LAST_LINE_MAX_CHARS,
@@ -689,12 +689,36 @@ describe("clearActivityState — Fix 4", () => {
 
   it("never throws when the storage has no delete method at all (an older narrow-port test fake)", async () => {
     const noDelete = {} as { delete(key: string): Promise<unknown> };
-    await expect(clearActivityState(noDelete)).resolves.toBeUndefined();
+    // Sweep-22 F5: `storage.delete(...)` on a plain {} throws a TypeError
+    // INSIDE the try — the shared catch handles it like any other storage
+    // failure and LOGS it (clearActivityState's whole body is one try/catch).
+    // The swallow must be the designed, logged one, not a silent one.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(clearActivityState(noDelete)).resolves.toBeUndefined();
+      expect(spy).toHaveBeenCalledWith(
+        "clearActivityState: could not clear activity state, continuing",
+        expect.any(String),
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("never throws when delete itself rejects", async () => {
     const throwing = { delete: async () => { throw new Error("storage down"); } };
-    await expect(clearActivityState(throwing)).resolves.toBeUndefined();
+    // Sweep-22 F5: same companion — the rejection reaches the shared catch
+    // and is logged there, which is the proof the swallow was deliberate.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(clearActivityState(throwing)).resolves.toBeUndefined();
+      expect(spy).toHaveBeenCalledWith(
+        "clearActivityState: could not clear activity state, continuing",
+        "storage down",
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("REGRESSION: since resets after a stop -> bring-up cycle instead of surviving it", async () => {

@@ -64,7 +64,16 @@ describe("recordWorkerException", () => {
         throw new Error("D1 is down");
       },
     } as unknown as D1Database;
-    await expect(recordWorkerException(failingDb, "/x", new Error("original"), 4000, fakeCtx())).resolves.toBeUndefined();
+    // Sweep-22 F5: resolving undefined proves only the swallow. The one
+    // thing the catch actually does is LOG the insert failure — a silent
+    // drop (the exact bug class sweep-13/#519 fought) must fail this test.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(recordWorkerException(failingDb, "/x", new Error("original"), 4000, fakeCtx())).resolves.toBeUndefined();
+      expect(spy).toHaveBeenCalledWith("recordWorkerException insert failed", expect.any(Error));
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("caps message/stack_head at MAX_FIELD_CHARS, AFTER redaction has already run (fresh-context review, PR #198)", async () => {
@@ -358,7 +367,18 @@ describe("pruneWorkerExceptions", () => {
         throw new Error("D1 is down");
       },
     } as unknown as D1Database;
-    await expect(pruneWorkerExceptions(failingDb, 1000)).resolves.toBeUndefined();
+    // Sweep-22 F5: same companion as the insert-failure case above — the
+    // swallow must be the designed one (logged), not a lost one.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(pruneWorkerExceptions(failingDb, 1000)).resolves.toBeUndefined();
+      expect(spy).toHaveBeenCalledWith(
+        "pruneWorkerExceptions failed — worker_exceptions retention unbounded until the next insert",
+        expect.any(Error),
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   // S21 F6: the catch states the consequence — without a working prune the

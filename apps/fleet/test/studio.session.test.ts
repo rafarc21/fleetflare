@@ -1257,11 +1257,12 @@ describe("syncSessionCycle — install-cache save in-flight guard (board #350 ro
 
     let resolveSaved!: () => void;
     const hashPersisted = new Promise<void>((r) => { resolveSaved = r; });
+    let hashKey: string | null = null;
     const storage: typeof baseStorage = {
       ...baseStorage,
       put: (async (key: string, value: unknown) => {
         await baseStorage.put(key as never, value as never);
-        if (key.startsWith("installCacheHash:")) resolveSaved();
+        if (key.startsWith("installCacheHash:")) { hashKey = key; resolveSaved(); }
       }) as typeof baseStorage.put,
     };
 
@@ -1270,8 +1271,13 @@ describe("syncSessionCycle — install-cache save in-flight guard (board #350 ro
       null, null, null, null, installCacheDeps, guard,
     );
     // A genuine save actually ran — proven by the hash marker being
-    // persisted, not merely that no exception was thrown.
+    // persisted, not merely that no exception was thrown. The marker is read
+    // back through the same storage the save wrote it to, so a hook that
+    // fires on nothing (or a save that skips the put) fails as a diff here,
+    // never as a hang on `await hashPersisted`.
     await hashPersisted;
+    expect(hashKey).not.toBeNull();
+    expect(await storage.get(hashKey!)).not.toBeNull();
   });
 });
 
