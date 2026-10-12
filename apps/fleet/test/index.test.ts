@@ -137,6 +137,19 @@ describe("scheduled() watchdog (Carve-out C: alert dedupe)", () => {
     await worker.scheduled({} as any, fakeEnv, {} as any); // attempts 2 -> alerts again
     expect(alerts).toHaveLength(2);
   });
+
+  // #452 (sweep-6 F6): two scheduled ticks running CONCURRENTLY must land
+  // distinct rearm totals — the read-then-write pair this used to be could
+  // have both read "0" and both written "1", the exact race incrementCounter
+  // exists to kill (state.ts:25-41).
+  it("two concurrent scheduled ticks land the rearm counter on 2", async () => {
+    const fakeEnv = { ...env, AGENT: fakeAgentReturning(staleTask()) };
+    await Promise.all([
+      worker.scheduled({} as any, fakeEnv, {} as any),
+      worker.scheduled({} as any, fakeEnv, {} as any),
+    ]);
+    expect(await getFlag(env.DB, rearmKey("task_stale_1"))).toBe("2");
+  });
 });
 
 // P4 §5's board mount. The board lives at `/studio/board/*` because the
