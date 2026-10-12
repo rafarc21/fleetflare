@@ -4,11 +4,14 @@
  * the ONE reset grammar (failover.ts's detector imports it), the staleness
  * rule (#106/#112), the conversion to UTC, and the words `fleet ls` renders.
  *
- * Pure: no Env; its one import (MINUTE_MS from ../ratelimit) pulls in only
- * src/state.ts, which imports nothing — the CLI (fleet ls READY) still pulls
- * no Worker graph.
+ * Pure: no Env; its one import (MINUTE_MS from ../durations) is a
+ * zero-import module, so the CLI (fleet ls READY) still pulls no Worker
+ * graph — the rule src/durations.ts's own header states. Not from
+ * ../ratelimit, whose state.ts import names the ambient D1Database type
+ * the cli/bun tsconfig projects do not carry (the bun run check failure
+ * issue #508's first cut hit).
  */
-import { MINUTE_MS } from "../ratelimit";
+import { MINUTE_MS } from "../durations";
 
 /** What the failover capture last saw, stored on the row (StudioStatus.rateLimited). */
 export interface RateLimitObservation {
