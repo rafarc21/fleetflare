@@ -1,8 +1,7 @@
-// One guarded decoder for every CLI read of a studio row. A Worker older or
-// newer than the CLI can answer a deploy-window shape a bare `as
-// StudioStatus` cast would wave through, leaving `state` undefined and the
-// CLI branching on nothing. Type-only imports (no runtime graph) so this is
-// safe to import from anywhere — the Worker's src/studio included.
+// One guarded decoder for every CLI read of a studio row: a Worker older or
+// newer than the CLI during a deploy window answers a shape a bare `as
+// StudioStatus` cast would wave through, leaving `state` undefined. Type-only
+// imports (no runtime graph) so the Worker's own src/studio can use it too.
 import type { StudioStatus, StudioState } from "../src/studio/types";
 
 /** The four states the CLI branches on — the StudioState union as a value. */
