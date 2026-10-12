@@ -1,14 +1,18 @@
 // Board issue #8: the ONE shared "which open tasks claim a PR in their
-// latest envelope" scan, written once and walked from two opposite
-// directions:
-//   - src/github/promote-close.ts (push-triggered): a push just landed;
-//     check whether any open task's claimed PR shows up in THAT push's own
-//     commit list.
+// latest envelope" scan, written once and walked from three directions:
+//   - src/github/promote-close.ts (push-triggered, run inside ctx.waitUntil):
+//     a push just landed; check whether any open task's claimed PR shows up
+//     in THAT push's own commit list.
 //   - src/studio/task-reap.ts (poll-triggered, no push exists): the SAME
 //     question, answered by asking GitHub directly whether the claimed PR's
 //     merge commit is now an ancestor of the default branch.
-// Neither caller re-implements the envelope scan itself — only HOW "landed"
-// is decided differs, and that decision lives entirely in each caller.
+//   - src/board/open-prs.ts (#332's studio-scoped read, synchronous route
+//     handler, one bounded scan per studio per request, NOT inside
+//     ctx.waitUntil): which of one studio's assigned tasks' envelopes name
+//     a PR, asked for that studio's unmerged-PR answer only.
+// No caller re-implements the envelope scan itself — only HOW "landed" (or
+// "unmerged") is decided differs, and that decision lives entirely in each
+// caller.
 //
 // Reuses src/board/verify.ts's own findLatestResultEnvelope (comments
 // scanned BACKWARDS for the newest intent:"result" envelope) — board task
@@ -28,19 +32,22 @@ import { AUTO_CLOSE_BUDGET_MS, budgetExceeded, type TimeBudget } from "../time-b
  * documented, never-thrown bound rather than an unbounded loop nothing here
  * would notice growing without limit.
  *
- * The math: this is the ONE scan both `github/webhook.ts`'s deferred
- * envelope cross-check (Path 2, run inside `ctx.waitUntil` — see that
- * file's own header) AND `studio/task-reap.ts`'s reap route (via
- * `board/routes.ts`'s `listOpenTasks`) call — bounding it here bounds both
- * callers for free. §5's busiest repo measured 2026-09-24: ~41 candidates
- * today; issue #180 itself projects ~186 once #163's `listIssues`
- * pagination fix deploys and a wider net of issues stays visible past the
- * old single-page cutoff. At 300 candidates * 2 subrequests = 600, plus
- * `listTasks`'s own `BOARD_MAX_PAGES` (20) page-fetches and Path 1's own
- * small per-push cost, this stays comfortably under Cloudflare's
- * 1000-subrequests-per-invocation cap even if candidate counts keep
- * growing well past today's projection — this runs inside `ctx.waitUntil`,
- * so wall-clock here is a lesser concern than the subrequest budget itself.
+ * The math: three callers now share this ONE scan — github/webhook.ts's
+ * deferred envelope cross-check (Path 2, inside `ctx.waitUntil`), studio/
+ * task-reap.ts's reap route (via `board/routes.ts`'s `listOpenTasks`), and
+ * (#332) open-prs.ts's studio-scoped read — so bounding it here bounds all
+ * three for free. The two waitUntil/reap callers run it ONCE per
+ * invocation; open-prs.ts runs it once PER STUDIO inside one synchronous
+ * route request, and the cross-studio total is that route's own concern,
+ * documented beside its Promise.all (board/routes.ts). §5's busiest repo
+ * measured 2026-09-24: ~41 candidates today; issue #180 projects ~186 once
+ * #163's `listIssues` pagination fix keeps a wider net visible. At 300
+ * candidates * 2 subrequests (showTask: getIssue + listComments) = 600,
+ * plus listTasks' own BOARD_MAX_PAGES (20) page-fetches, a single scan
+ * stays comfortably under Cloudflare's 1000-subrequests-per-invocation cap
+ * even past today's projection — and where wall-clock matters (the
+ * synchronous route, not the deferred paths) the per-studio scans run
+ * concurrently, which changes only wall-clock, never the count.
  *
  * KNOWN LIMITATION, recorded rather than papered over (mirrors
  * `github/webhook.ts`'s own "KNOWN LIMITATION" register): the bound applies
@@ -57,10 +64,18 @@ export const OPEN_TASKS_SCAN_MAX_CANDIDATES = 300;
  *  `null` when there is no envelope yet, or the newest one names no `pr`
  *  artifact. `null` is carried rather than the task being dropped: both
  *  callers report "no PR artifact found" as its own outcome, not a silent
- *  omission. */
+ *  omission. `readFailed` (#416 item 3-tail) says which side of the
+ *  distinction a `prNumber: null` came from: `true` is "this task's
+ *  comments could not be read at all" (a thrown showTask or its own
+ *  `{ok:false}`), `false` is "read fine, the envelope names no PR". The two
+ *  original callers ignore it — promote-close and task-reap degrade per
+ *  task and `null` is their degrade answer either way; open-prs.ts reads
+ *  it to fail its whole scan (a false zero to --strict-unmerged), which is
+ *  why it cannot be re-derived there from `prNumber === null` alone. */
 export interface OpenTaskPr {
   taskNumber: number;
   prNumber: number | null;
+  readFailed: boolean;
 }
 
 /**
@@ -140,6 +155,7 @@ export async function openTasksWithLatestPr(
     }
     const task = scanned[i];
     let prNumber: number | null = null;
+    let readFailed = false;
     try {
       const shown = await showTask(api, repo, task.number);
       if (shown.ok) {
@@ -156,11 +172,13 @@ export async function openTasksWithLatestPr(
         }
       } else {
         console.error(`pr-landed: reading task #${task.number} in ${repo} failed (${shown.status}): ${shown.message}`);
+        readFailed = true;
       }
     } catch (err) {
       console.error(`pr-landed: reading task #${task.number} in ${repo} threw`, err);
+      readFailed = true;
     }
-    out.push({ taskNumber: task.number, prNumber });
+    out.push({ taskNumber: task.number, prNumber, readFailed });
   }
   return out;
 }
