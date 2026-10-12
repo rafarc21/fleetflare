@@ -786,7 +786,7 @@ export type ContextSalvageDeps = SalvageDestination;
 
 /** `~/fleet-teardown-salvage` — durable, outside any worktree a `rm` could
  *  ever reach, so a salvage never lands somewhere the NEXT teardown deletes. */
-export function defaultSalvageDestination(): ContextSalvageDeps {
+function defaultSalvageDestination(): ContextSalvageDeps {
   return { root: join(homedir(), "fleet-teardown-salvage"), now: () => new Date() };
 }
 
@@ -1173,7 +1173,7 @@ export async function planStudioWorkspaces(studios: StudioStatus[], deps: OrcaDe
 /** Spawns the orca CLI, killing it at `timeoutMs`. Never throws: a spawn that
  *  cannot even start reads as a failed call, which the caller already handles
  *  identically to a failed command. */
-export function orcaRunner(bin: string): OrcaRun {
+function orcaRunner(bin: string): OrcaRun {
   return async (args, timeoutMs) => {
     let timedOut = false;
     try {

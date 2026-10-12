@@ -169,8 +169,6 @@ export const EXEC_CLASSES = {
   wipSync: { sessionId: "fleet-wip-sync", timeoutMs: 90_000 },
 } as const satisfies Record<string, SbExecOptions>;
 
-export type ExecClass = keyof typeof EXEC_CLASSES;
-
 export class ExecDeadlineError extends Error {
   constructor(timeoutMs: number, sessionId: string | undefined) {
     super(`sandbox exec exceeded its ${timeoutMs}ms deadline (session ${sessionId ?? "default"})`);

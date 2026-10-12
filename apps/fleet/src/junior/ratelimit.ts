@@ -17,7 +17,7 @@
 // finding F8): the parse-env-then-consume wrapper is makeRateLimitKind's too —
 // this module supplies junior's own key prefixes, env var names, and defaults
 // as ONE spec object. Public exports and behavior are unchanged.
-import { makeRateLimitKind, type RateLimitResult } from "../ratelimit";
+import { makeRateLimitKind } from "../ratelimit";
 
 export const DEFAULT_JUNIOR_RATE_PER_MINUTE = 5;
 export const DEFAULT_JUNIOR_DAILY_CAP = 50;
@@ -29,8 +29,6 @@ export type JuniorRateLimitEnv = {
   JUNIOR_RATE_PER_MINUTE?: string;
   JUNIOR_DAILY_CAP?: string;
 };
-
-export type JuniorRateLimitResult = RateLimitResult;
 
 export const checkAndConsumeJuniorRateLimit = makeRateLimitKind<JuniorRateLimitEnv>({
   kind: { ratePrefix: "junior-rate:", dailyPrefix: "junior-daily:" },
