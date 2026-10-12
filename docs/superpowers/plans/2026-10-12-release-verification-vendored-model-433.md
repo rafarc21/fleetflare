@@ -26,7 +26,7 @@ Rewrite the section in place (between the Files table and EOF), lines outside
    `/opt/blueprint/skills/release-verification-checklist`, the same checkout
    (apps/fleet/container/studio-bringup.sh:866-867). Local and cloud read the
    one file; no second copy drifts.
-3. History stays history: until 2026-08-04 (37a9381) `~/.claude/skills/` was
+3. History stays history: from 2026-08-04 (37a9381) `~/.claude/skills/` was
    its own git repo, no review trail — commits landed directly, no PR. That
    repo is history; the vendored checkout replaced it. The 4.7 MB/464 MB
    on-disk numbers described the old standalone repo — dropped (they read as

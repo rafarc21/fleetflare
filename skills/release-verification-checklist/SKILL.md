@@ -98,7 +98,7 @@ into that checkout; in studio containers `studio-bringup.sh` symlinks it to
 checkout (apps/fleet/container/studio-bringup.sh:866-867). Local and cloud read
 the one file; no second copy drifts.
 
-History: until 2026-08-04 (commit `37a9381`) `~/.claude/skills/` was its own git
+History: from 2026-08-04 (commit `37a9381`) `~/.claude/skills/` was its own git
 repo, with no review trail — commits landed directly, no PR. That repo is
 history now; the vendored checkout replaced it.
 
