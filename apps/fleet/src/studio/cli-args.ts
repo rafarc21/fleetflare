@@ -1031,10 +1031,22 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // Bare `fleet memory` is an alias for `fleet memory ls` — the survey is
     // the only thing you can safely do without thinking, so it is what an
     // operator who typed half a command gets.
-    case "memory":
-      if (arg === undefined || arg === "ls") return { cmd: "memory-ls" };
-      if (arg === "compact") return { cmd: "memory-compact" };
+    case "memory": {
+      // #568 / sweep-20 F6: compact is the one memory verb that opens a PR in
+      // the blueprint repo, so a token past the subcommand — a flag the caller
+      // believes in (`--json`), a paste accident — is a usage error, never a
+      // silently-dropped extra that runs the full compact anyway.
+      const rest = argv.slice(2);
+      if (arg === undefined || arg === "ls") {
+        if (rest.length > 0) return usage(`unexpected ${JSON.stringify(rest[0])} — fleet memory takes only ls | compact`);
+        return { cmd: "memory-ls" };
+      }
+      if (arg === "compact") {
+        if (rest.length > 0) return usage(`unexpected ${JSON.stringify(rest[0])} — fleet memory takes only ls | compact`);
+        return { cmd: "memory-compact" };
+      }
       return usage(`unknown memory command ${JSON.stringify(arg)}`);
+    }
     // Task 8 / issue #218: `fleet junior enable [--account <id>] | disable |
     // status | stats [--since <dur|date>]`.
     case "junior": {
