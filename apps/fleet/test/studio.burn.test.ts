@@ -1157,6 +1157,37 @@ describe("syncSessionTick — the burn watermark advances after a successful par
     expect((await storage.get(BURN_KEY))!.outputTokens).toBe(9); // burn really did parse
     expect(await storage.get(SESSION_BURN_WATERMARK_KEY)).toBe(TAR_STARTED_AT);
   });
+
+  // S21 F15: the watermark write's own catch names the session it failed
+  // on — the sync itself already succeeded, so the failure line is the only
+  // trace the next tick's over-admissive cutoff has.
+  it("a watermark put that throws logs the session and still resolves the sync (S21 F15)", async () => {
+    const jsonl = `${assistantLine({ input_tokens: 1, output_tokens: 3 })}\n`;
+    const deps = await fakeSyncDepsWithJsonl(jsonl);
+    const base = fakeBurnStorage();
+    // Poison ONLY the watermark write; every other put (cursor, burn) hits
+    // the same Map-backed fake as above.
+    const poisoned = {
+      ...base,
+      put: (async (keyOrEntries: string | Record<string, unknown>, value?: unknown) => {
+        const keys = typeof keyOrEntries === "string" ? [keyOrEntries] : Object.keys(keyOrEntries);
+        if (keys.includes(SESSION_BURN_WATERMARK_KEY)) {
+          throw new Error("storage write failed");
+        }
+        return base.put(keyOrEntries as never, value);
+      }),
+    } as typeof base;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await syncSessionTick(deps, poisoned, STUDIO_ID);
+      expect(result.bytes).toBeGreaterThan(0); // the sync itself still succeeded
+      const line = errSpy.mock.calls.map((c) => String(c[0]))
+        .find((s) => s.includes("burn watermark write failed"));
+      expect(line).toMatch(/syncSession websites--pilot: burn watermark write failed, sync itself still succeeded/);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

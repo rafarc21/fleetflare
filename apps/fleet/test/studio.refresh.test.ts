@@ -328,7 +328,7 @@ describe("runRefreshCredential", () => {
 describe("readTailscaleHost", () => {
   it("returns the trimmed stdout as the host when the read succeeds with content", async () => {
     const sbExec = vi.fn(async () => ({ code: 0, stdout: "studio-pilot.tailnet-1234.ts.net\n", stderr: "" }));
-    const result = await readTailscaleHost(sbExec);
+    const result = await readTailscaleHost(sbExec, STUDIO_ID);
     expect(result).toEqual({ ok: true, host: "studio-pilot.tailnet-1234.ts.net" });
   });
 
@@ -336,20 +336,20 @@ describe("readTailscaleHost", () => {
     const sbExec = vi.fn(async () => ({
       code: 1, stdout: "", stderr: "cat: /workspace/.ts-host: No such file or directory",
     }));
-    const result = await readTailscaleHost(sbExec);
+    const result = await readTailscaleHost(sbExec, STUDIO_ID);
     expect(result).toEqual({ ok: true, host: null });
   });
 
   it("a zero exit with empty stdout (file present but blank) also reads as host:null", async () => {
     const sbExec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
-    const result = await readTailscaleHost(sbExec);
+    const result = await readTailscaleHost(sbExec, STUDIO_ID);
     expect(result).toEqual({ ok: true, host: null });
   });
 
   it("a deadline exit (124/137) is UNKNOWN: ok:false, never a cleared host (#110 review)", async () => {
     for (const code of [124, 137]) {
       const sbExec = vi.fn(async () => ({ code, stdout: "", stderr: "" }));
-      await expect(readTailscaleHost(sbExec)).resolves.toEqual({ ok: false });
+      await expect(readTailscaleHost(sbExec, STUDIO_ID)).resolves.toEqual({ ok: false });
     }
   });
 
@@ -357,7 +357,24 @@ describe("readTailscaleHost", () => {
     const sbExec = vi.fn(async () => {
       throw new Error("container unavailable");
     });
-    await expect(readTailscaleHost(sbExec)).resolves.toEqual({ ok: false });
+    await expect(readTailscaleHost(sbExec, STUDIO_ID)).resolves.toEqual({ ok: false });
+  });
+
+  // S21 F8: the catch names the studio whose host read failed — the refresh
+  // tick runs for every studio, so a bare string is unattributable in a
+  // merged tail.
+  it("names the studio when the host read itself throws (S21 F8)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const sbExec = vi.fn(async () => {
+        throw new Error("container unavailable");
+      });
+      await expect(readTailscaleHost(sbExec, "websites--pilot")).resolves.toEqual({ ok: false });
+      expect(errSpy).toHaveBeenCalledTimes(1);
+      expect(String(errSpy.mock.calls[0][0])).toMatch(/studio websites--pilot: tailscaleHost read failed/);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 
