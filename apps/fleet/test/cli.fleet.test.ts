@@ -14,6 +14,7 @@ import type { MemberAlert } from "../src/studio/member-alerts";
 import { SHIP_TRANSCRIPT_SECONDS } from "../src/studio/ship-cadence";
 import { REAL_PILOT_PANE } from "./fixtures/rate-limit-panes";
 import { DEAD_FRAME } from "./studio.failover-real-panes.test";
+import { row, burnRow } from "./helpers/studio-row";
 
 // Fleet Spawn P3, Task 5 (R-P3-4: "fleet ls totals line if cheap"). Imports
 // cli/fleet-totals.ts specifically, NOT cli/fleet.ts — the same reason
@@ -28,21 +29,11 @@ import { DEAD_FRAME } from "./studio.failover-real-panes.test";
 // global. cli/fleet-totals.ts is a deliberately Bun/node-free pure module
 // (see its own header) for exactly this reason.
 
-function burn(overrides: Partial<Burn> = {}): Burn {
-  return {
-    turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0,
-    window5hStart: "2026-08-16T00:00:00.000Z", window5hOutput: 0,
-    ...overrides,
-  };
-}
-
-function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: "websites--pilot", state: "running", tailscaleHost: null, lastRefresh: null,
-    error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    ...overrides,
-  };
-}
+// Sweep-18 F9 (#596): both fold onto test/helpers/studio-row. This file's
+// burn() pins the FROZEN window5hStart (grid's uses `now`, per issue #181 —
+// burnRow leaves the key required for exactly this divergence).
+const burn = (o: Partial<Burn> = {}) => burnRow({ window5hStart: "2026-08-16T00:00:00.000Z", ...o });
+const status = (o: Partial<StudioStatus> = {}) => row({ id: "websites--pilot", state: "running", ...o });
 
 describe("fleetTotals (cli/fleet.ts)", () => {
   it("sums turns/outputTokens/window5hOutput across every studio", () => {

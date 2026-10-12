@@ -10,6 +10,7 @@ import { ACTIVITY_KEY, type Activity } from "../src/studio/activity";
 import { MEMBER_ALERTS_KEY, type MemberAlert } from "../src/studio/member-alerts";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
 import type { TranscriptStorage, ShipDeps } from "../src/studio/transcript";
+import { row } from "./helpers/studio-row";
 
 // Wire-format literal (marker is container↔Worker protocol, pinned here so
 // this assert fails when the builder drifts — same convention
@@ -27,13 +28,7 @@ const SECTION_PANE = "---FLEET-PANE---";
 // seam, a distinct enough concern to earn its own file, the same call
 // test/studio.readiness.test.ts's header already makes for its own feature.
 
-function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: "websites--pilot", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
-    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    ...overrides,
-  };
-}
+const status = (o: Partial<StudioStatus> = {}) => row({ id: "websites--pilot", state: "running", ...o });
 
 function fakeObservedStorage(seed?: Observed): ObservedStorage {
   const map = new Map<string, unknown>();
@@ -235,13 +230,9 @@ describe("runShipTickWithObservation — onStaleBackgroundShell (issue #106)", (
     "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
   ].join("\n");
 
-  function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-    return {
-      id: "websites--pilot", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
-      lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-      ...overrides,
-    };
-  }
+  // Sweep-18 F9 (#596): same body as the top-level wrapper above, rebuilt
+  // locally here per this describe's own scope (shadowing, not sharing).
+  const status = (o: Partial<StudioStatus> = {}) => row({ id: "websites--pilot", state: "running", ...o });
 
   /** Same "one Map-backed fake satisfying every narrow port
    *  runShipTickWithObservation needs at once" shape test/studio.

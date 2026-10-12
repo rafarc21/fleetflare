@@ -23,6 +23,7 @@ import { MEMBERS_TICKING_KEY } from "../src/studio/failover";
 import { MEMBER_ALERTS_KEY, MEMBER_ROWS_KEY, type MemberAlert } from "../src/studio/member-alerts";
 import { exhaustedMessage } from "../src/studio/failover";
 import { redactSecrets } from "../src/studio/redact";
+import { row } from "./helpers/studio-row";
 
 /** UTF-8 aware base64 — a pane frame carries claude's own box-drawing/emoji
  *  glyphs, which plain `btoa` throws on outright (Latin1 only). */
@@ -79,13 +80,7 @@ function stdoutWithPaneAndMemguard(pane: string, memguardLines: string[], incarn
 const TOK_1 = "11111111-2222-3333-4444-555555555555";
 const TOK_2 = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
-function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: "websites--pilot", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
-    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    ...overrides,
-  };
-}
+const status = (o: Partial<StudioStatus> = {}) => row({ id: "websites--pilot", state: "running", ...o });
 
 /**
  * One Map-backed fake satisfying every narrow port `runShipTickWithObservation`

@@ -8,6 +8,7 @@ import { STUDIO_TMUX, withStudioTmux } from "../src/studio/tmux";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import { fixedNow } from "./helpers/datetime";
 import { fakeStorage as doStorage } from "./helpers/do-storage";
+import { row } from "./helpers/studio-row";
 
 // Fleet ls readiness fix ("a dead studio looks alive" — P5a Task 5's Finding
 // 2, live-measured: 3 of 4 studios bare, `fleet ls` showed every one
@@ -24,13 +25,7 @@ import { fakeStorage as doStorage } from "./helpers/do-storage";
 const STUDIO_ID = "websites--pilot";
 const NOW_ISO = "2026-08-28T12:00:00.000Z";
 
-function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: STUDIO_ID, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
-    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    ...overrides,
-  };
-}
+const status = (o: Partial<StudioStatus> = {}) => row({ id: STUDIO_ID, state: "running", ...o });
 
 /** Map-backed StudioStorage via the shared test/helpers/do-storage builder
  *  (issue #371) — one delegator per suite keeps the local seed shape. */

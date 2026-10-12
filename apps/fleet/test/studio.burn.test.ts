@@ -20,6 +20,7 @@ import { recordStudio } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { fixedNow } from "./helpers/datetime";
+import { row } from "./helpers/studio-row";
 
 // P2 plane 4 (token monitor) — docs/superpowers/specs/2026-08-16-studio-memory-p2-design.md,
 // ruling R-P2-4. Fixture jsonl shape below is SYNTHESIZED, not copied: derived
@@ -1194,13 +1195,7 @@ describe("syncSessionTick — the burn watermark advances after a successful par
 // mirrorBurnToRegistry (do.ts) — DO-storage burn -> StudioStatus.burn -> registry
 // ---------------------------------------------------------------------------
 
-function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: STUDIO_ID, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
-    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    ...overrides,
-  };
-}
+const status = (o: Partial<StudioStatus> = {}) => row({ id: STUDIO_ID, state: "running", ...o });
 
 describe("mirrorBurnToRegistry", () => {
   it("copies DO storage's burn onto StudioStatus.burn and calls recordStudio", async () => {

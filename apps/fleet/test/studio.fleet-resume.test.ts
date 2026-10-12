@@ -12,6 +12,7 @@ import { LaunchRefusedError, StartRefusedError } from "../src/studio/do";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { nsWith } from "./helpers/fake-namespace";
+import { row } from "./helpers/studio-row";
 
 // Issue #59: a studio resumes a STOPPED instance under its own org-chart
 // edges. Same gate as spawn (maySpawn over ROLES), same provision path
@@ -20,16 +21,12 @@ import { nsWith } from "./helpers/fake-namespace";
 const REPO_SLUG = "example-org/websites";
 const MAESTRO: SpawnParent = { id: "websites--maestro", repo: "websites", role: "maestro", repoSlug: REPO_SLUG };
 
-function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: "websites--web-studio--5", state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
-    lastRefreshError: null, burn: null, spawnedBy: "operator", spawnTokenHash: null, repoSlug: REPO_SLUG,
-    // Review round 1: only an operator-PARKED studio, stopped past the
-    // cooldown, is resumable (test/studio.resume-guards.test.ts).
-    parked: true, stoppedAt: "2026-09-01T00:00:00.000Z",
-    ...overrides,
-  };
-}
+// Sweep-18 F9 (#596): row() carries the 11 census nulls; this file's five
+// extra defaults ride as overrides.
+// Review round 1: only an operator-PARKED studio, stopped past the
+// cooldown, is resumable (test/studio.resume-guards.test.ts).
+const status = (o: Partial<StudioStatus> = {}) =>
+  row({ id: "websites--web-studio--5", state: "stopped", spawnedBy: "operator", repoSlug: REPO_SLUG, parked: true, stoppedAt: "2026-09-01T00:00:00.000Z", ...o });
 
 function deps(rows: StudioStatus[], provisioned: { id: string; cfg: ProvisionConfig }[] = []): ResumeDeps {
   return {

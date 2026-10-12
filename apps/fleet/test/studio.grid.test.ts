@@ -10,6 +10,7 @@ import type { Burn } from "../src/studio/burn";
 import type { Env } from "../src/env";
 import { envWithNs } from "./helpers/fake-namespace";
 import { authorizedReq } from "./helpers/http";
+import { row, burnRow } from "./helpers/studio-row";
 // Text-module import of the checked-in build artifact — same mechanism
 // src/studio/grid.ts itself uses (see html.d.ts). Read directly here so the
 // "no external requests / no stray source-map comment / placeholder intact"
@@ -20,13 +21,10 @@ import gridHtmlArtifact from "../page/grid.html";
 const STUDIO_ID = "websites--pilot";
 const OTHER_ID = "websites--scratch";
 
-function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: STUDIO_ID, state: "running", tailscaleHost: null, lastRefresh: "2026-08-16T00:00:00.000Z",
-    error: null, lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    ...overrides,
-  };
-}
+// Sweep-18 F9 (#596): row() carries the 11 census nulls; the lastRefresh
+// pin (2026-08-16) stays local to this wrapper.
+const status = (o: Partial<StudioStatus> = {}) =>
+  row({ id: STUDIO_ID, state: "running", lastRefresh: "2026-08-16T00:00:00.000Z", ...o });
 
 // Issue #181: window5hStart is `now`, not a frozen 2026-08-16 literal.
 // registry.ts's listStudios now reads an ELAPSED 5h bucket as 0, so a
@@ -34,13 +32,7 @@ function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
 // window5hOutput reaching the page assert the expiry instead of the render
 // it exists to cover. The expiry itself has its own file
 // (test/studio.burn-window-expiry.test.ts).
-function burn(overrides: Partial<Burn> = {}): Burn {
-  return {
-    turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0,
-    window5hStart: new Date().toISOString(), window5hOutput: 0,
-    ...overrides,
-  };
-}
+const burn = (o: Partial<Burn> = {}) => burnRow({ window5hStart: new Date().toISOString(), ...o });
 
 // A live StudioDO cannot be constructed under vitest-pool-workers (see
 // test/studio.routes.test.ts's own fakeStudioNamespace header for the full
