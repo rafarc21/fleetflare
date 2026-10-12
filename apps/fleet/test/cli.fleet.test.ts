@@ -11,6 +11,7 @@ import type { Burn } from "../src/studio/burn";
 import { emptyObserved, type SurvivalBriefPending } from "../src/studio/observed";
 import { readActivityFrame, nextActivity, type Activity } from "../src/studio/activity";
 import type { MemberAlert } from "../src/studio/member-alerts";
+import { SHIP_TRANSCRIPT_SECONDS } from "../src/studio/ship-cadence";
 import { REAL_PILOT_PANE } from "./fixtures/rate-limit-panes";
 import { DEAD_FRAME } from "./studio.failover-real-panes.test";
 
@@ -1524,6 +1525,45 @@ describe("lsJsonRows", () => {
     expect(r.lead).toBe("limit");
     expect(r.leadSince).toBe("2026-09-25T11:00:00.000Z");
     expect(r.limitResetsAt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Board issue #513 — the 90s staleness twins, pinned mechanically. Two budgets
+// gate the same stored activity verdict on opposite sides of the Worker/CLI
+// split: `ACTIVITY_DO_STALE_SECONDS` (cli/readiness-format.ts, the reader-side
+// "?" budget) and `HOOK_STALE_BUDGET_MS` (src/studio/activity.ts, the
+// hook-consumption budget). Both DERIVE from the ship tick's cadence
+// (`SHIP_TRANSCRIPT_SECONDS`, src/studio/ship-cadence.ts) rather than each
+// hardcoding its own 90 — bump the cadence and both budgets follow. The first
+// pin checks the CLI constant against the cadence leaf directly; the second
+// drives `nextActivity` to the Worker-side budget's exact boundary, because
+// that budget is module-private and only observable through behavior.
+// ---------------------------------------------------------------------------
+describe("staleness-budget twins derive from SHIP_TRANSCRIPT_SECONDS (issue #513)", () => {
+  it("ACTIVITY_DO_STALE_SECONDS is three ship ticks of the shared cadence", () => {
+    expect(ACTIVITY_DO_STALE_SECONDS).toBe(SHIP_TRANSCRIPT_SECONDS * 3);
+  });
+
+  it("the hook-consumption budget is the same three ticks: a hook one second past them loses to the pane, one exactly at them still wins", () => {
+    // Hook and pane AGREE on `idle` — the same shape the budget tests in
+    // test/studio.activity.test.ts use — so the round-3 working-pane
+    // asymmetry guard can never mask either outcome; only the budget
+    // decides. prev.observedAt (12:00:00) predates both hook stamps, so the
+    // "newer than last look" check passes for both too.
+    const READ_AT = new Date("2026-09-25T12:10:00.000Z");
+    const budgetMs = 3 * SHIP_TRANSCRIPT_SECONDS * 1000;
+    const prev = nextActivity(null, { kind: "working" }, null, null, new Date("2026-09-25T12:00:00.000Z"));
+    // One second PAST three ticks: stale, the pane's own verdict wins.
+    const stale = nextActivity(prev, { kind: "idle" }, null, null, READ_AT, {
+      state: "idle", at: new Date(READ_AT.getTime() - budgetMs - 1000).toISOString(),
+    });
+    expect(stale.source).toBe("pane");
+    // Exactly three ticks old: the last instant that still wins.
+    const fresh = nextActivity(prev, { kind: "idle" }, null, null, READ_AT, {
+      state: "idle", at: new Date(READ_AT.getTime() - budgetMs).toISOString(),
+    });
+    expect(fresh.source).toBe("hook");
   });
 });
 
