@@ -105,7 +105,7 @@ export async function pollOnce(
   try {
     return await advance(deps, task);
   } catch (err) {
-    console.error("advanceTask threw; rescheduling instead of wedging", err);
+    console.error(`advanceTask threw for ${task.taskId}; rescheduling instead of wedging`, err);
     return { kind: "error", task };
   }
 }
@@ -169,7 +169,7 @@ export async function pollAndClearRearm(
     try {
       await clearRearm(deps.db, task.taskId, deps.now);
     } catch (err) {
-      console.error("clearRearm failed; leaving the task to reschedule anyway", err);
+      console.error(`clearRearm failed for ${task.taskId}; leaving the task to reschedule anyway`, err);
     }
   }
   return result;
@@ -217,6 +217,9 @@ export class AgentDO extends Container<Env> {
     }
     if (url.pathname === "/abort" && req.method === "POST") {
       this.deleteSchedules("pollTask");
+      // Read before delete: the abort below can fail, and its log names the
+      // task it failed on — the stored record is gone one line later.
+      const stopping = await this.ctx.storage.get<TaskRecord>(TASK_KEY);
       await this.ctx.storage.delete(TASK_KEY);
       try {
         await this.rt().abort();
@@ -226,7 +229,7 @@ export class AgentDO extends Container<Env> {
         // tell Task 6's /stop caller the stop failed when it already
         // mostly succeeded. Same pattern as pollTask's terminal-path abort
         // below, and webhook.ts's paused notice.
-        console.error("abort on /stop failed", err);
+        console.error(`abort on /stop failed for ${stopping?.taskId ?? "unknown"}`, err);
       }
       return Response.json({ ok: true });
     }
@@ -317,7 +320,7 @@ export class AgentDO extends Container<Env> {
         } catch (err) {
           // Same reason status() just failed: likely to fail again. Must
           // not block clearing the task — the operator is already told.
-          console.error("abort after dead container failed", err);
+          console.error(`abort after dead container failed for ${task.taskId}`, err);
         }
       }
       await this.ctx.storage.delete(TASK_KEY);

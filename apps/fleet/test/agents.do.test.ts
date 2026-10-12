@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { advanceTask, type TaskRecord, type LoopDeps, type LoopOutcome } from "../src/tasks/loop";
 import { FakeRuntime } from "../src/agents/runtime";
 import { readSince } from "../src/events/log";
@@ -190,6 +190,24 @@ describe("pollOnce (Important 2, fix round 1 — proves the wedge is fixed)", ()
     // while TASK_KEY is never cleared — every later /start would 409
     // forever.
     expect(result.task).toEqual(original);
+  });
+
+  // S21 F3: the catch's log names the task the throw belongs to.
+  it("names the task when the injected advance throws", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const boom = async (_d: LoopDeps, _t: TaskRecord): Promise<LoopOutcome> => {
+        throw new Error("D1 write failed");
+      };
+      const result = await pollOnce(
+        deps(new FakeRuntime([])), task({ taskId: "task_9" }), boom,
+      );
+      expect(result.kind).toBe("error");
+      expect(errSpy).toHaveBeenCalled();
+      expect(String(errSpy.mock.calls[0][0])).toMatch(/advanceTask threw for task_9/);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 
