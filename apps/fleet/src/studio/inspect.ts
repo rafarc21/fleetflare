@@ -69,7 +69,7 @@ import { bringupLogTailCmd } from "./provision";
  *  `WAKE_TARGET` (wake.ts) — a live studio accumulates extra windows
  *  (bring-up's own `shell`, an operator's or a probe's extras), and this
  *  must keep reading the claude window regardless of which one is active. */
-export const INSPECT_TARGET = "studio:claude";
+const INSPECT_TARGET = "studio:claude";
 
 /** How many pane lines `tmux capture-pane -p -S -<n>` returns when a caller
  *  does not ask for a specific count. Generous enough to show a lead's last
@@ -113,12 +113,12 @@ export const TAIL_BEGIN = "FLEET_INSPECT_TAIL_BEGIN";
 // Issue #85 — two more sentinel-bounded sections, both read BEFORE
 // TAIL_BEGIN's pane capture (same ordering reasoning: everything after
 // TAIL_BEGIN is raw, unparsed pane content).
-export const INCARNATION_SECTION = "FLEET_INSPECT_INCARNATION";
-export const BRINGUP_LOG_SECTION = "FLEET_INSPECT_BRINGUP_LOG";
+const INCARNATION_SECTION = "FLEET_INSPECT_INCARNATION";
+const BRINGUP_LOG_SECTION = "FLEET_INSPECT_BRINGUP_LOG";
 /** How many bringup.log lines `fleet inspect` shows — short: this is a
  *  quick "did the last bring-up land cleanly" glance, not the full log
  *  provision.ts's own retry/degrade path already surfaces on failure. */
-export const INSPECT_BRINGUP_LOG_LINES = 15;
+const INSPECT_BRINGUP_LOG_LINES = 15;
 
 /**
  * The one command `runInspect` hands to `sbExec`. Five read-only tmux/shell
@@ -179,7 +179,7 @@ export function inspectCmd(repo: string, tailLines: number = INSPECT_DEFAULT_TAI
   );
 }
 
-export interface InspectSnapshot {
+interface InspectSnapshot {
   /** `/workspace/<repo>/.git` exists in the container. */
   checkoutExists: boolean;
   /** `pane_current_command` for `studio:claude` — "claude" proves the lead
@@ -249,9 +249,9 @@ export function parseInspectOutput(stdout: string): InspectSnapshot {
 /** The container-exec port — same shape as `WakeExec` (wake.ts) and
  *  `ProvisionDeps.sbExec` (provision.ts), the established seam every studio
  *  subsystem that touches a container takes. */
-export type InspectExec = (cmd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
+type InspectExec = (cmd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
 
-export interface InspectDeps {
+interface InspectDeps {
   /** This studio's OWN recorded state — read from the DO's own storage,
    *  never the D1 registry mirror. Same ruling `GatedWakeDeps.recordedState`
    *  (wake.ts) and `sweepMaestro`'s `isStopped` (do.ts) already state, for
