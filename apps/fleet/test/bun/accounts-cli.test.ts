@@ -10,10 +10,11 @@
 // (`{schemaVersion, activeAccountNumber, accounts}`), never a bare array —
 // see `writeFakeCswap`'s own header below.
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CSWAP_LIST_FIXTURE, CSWAP_LIST_ENVELOPE, OVER_FIVE_HOUR, UNDER_THRESHOLD, RELOGIN_REQUIRED, STALE_OK } from "../fixtures/cswap-list";
+import { writeCredentials } from "./helpers/credentials";
 
 const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
 
@@ -27,13 +28,6 @@ function tmpDir(prefix: string): string {
 afterEach(() => {
   while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
-
-function writeCredentials(home: string, workerUrl: string) {
-  mkdirSync(join(home, ".fleet"), { recursive: true });
-  const path = join(home, ".fleet", "credentials");
-  writeFileSync(path, JSON.stringify({ workerUrl, accessClientId: "id", accessClientSecret: "secret" }));
-  chmodSync(path, 0o600);
-}
 
 /** A fake `cswap` on PATH: `cswap list --json` prints `payload` verbatim
  *  (`JSON.stringify`'d), anything else exits 1. Issue #240: the real `cswap
