@@ -72,27 +72,27 @@ describe("openTasksWithLatestPr", () => {
     const doc = envelopeDoc({ artifacts: [{ kind: "pr", pr: "9" }] });
     const api = fakeApi({ listComments: vi.fn(async () => [envelopeComment(doc)]) });
     const result = await openTasksWithLatestPr(api, "o/r", [view({ number: 12 })]);
-    expect(result).toEqual([{ taskNumber: 12, prNumber: 9 }]);
+    expect(result).toEqual([{ taskNumber: 12, prNumber: 9, readFailed: false }]);
   });
 
   it("a `#`-prefixed pr artifact is parsed the same way", async () => {
     const doc = envelopeDoc({ artifacts: [{ kind: "pr", pr: "#9" }] });
     const api = fakeApi({ listComments: vi.fn(async () => [envelopeComment(doc)]) });
     const result = await openTasksWithLatestPr(api, "o/r", [view({ number: 12 })]);
-    expect(result).toEqual([{ taskNumber: 12, prNumber: 9 }]);
+    expect(result).toEqual([{ taskNumber: 12, prNumber: 9, readFailed: false }]);
   });
 
   it("a task with no envelope at all reports prNumber: null, not a skip", async () => {
     const api = fakeApi({ listComments: vi.fn(async () => []) });
     const result = await openTasksWithLatestPr(api, "o/r", [view({ number: 12 })]);
-    expect(result).toEqual([{ taskNumber: 12, prNumber: null }]);
+    expect(result).toEqual([{ taskNumber: 12, prNumber: null, readFailed: false }]);
   });
 
   it("an envelope with no pr artifact reports prNumber: null", async () => {
     const doc = envelopeDoc({ artifacts: [{ kind: "code", path: "src/x.ts" }] });
     const api = fakeApi({ listComments: vi.fn(async () => [envelopeComment(doc)]) });
     const result = await openTasksWithLatestPr(api, "o/r", [view({ number: 12 })]);
-    expect(result).toEqual([{ taskNumber: 12, prNumber: null }]);
+    expect(result).toEqual([{ taskNumber: 12, prNumber: null, readFailed: false }]);
   });
 
   it("a later plain comment does not shadow the real result envelope's PR", async () => {
@@ -104,7 +104,7 @@ describe("openTasksWithLatestPr", () => {
       ]),
     });
     const result = await openTasksWithLatestPr(api, "o/r", [view({ number: 12 })]);
-    expect(result).toEqual([{ taskNumber: 12, prNumber: 9 }]);
+    expect(result).toEqual([{ taskNumber: 12, prNumber: 9, readFailed: false }]);
   });
 
   // Board issue #26: a GitHub native closing keyword (e.g. "closes #12" in a
@@ -121,7 +121,7 @@ describe("openTasksWithLatestPr", () => {
     const result = await openTasksWithLatestPr(
       api, "o/r", [view({ number: 12, open: false, state: "working" })],
     );
-    expect(result).toEqual([{ taskNumber: 12, prNumber: 9 }]);
+    expect(result).toEqual([{ taskNumber: 12, prNumber: 9, readFailed: false }]);
   });
 
   it("skips a task that is BOTH closed AND already labeled completed -- genuinely done", async () => {
@@ -142,7 +142,7 @@ describe("openTasksWithLatestPr", () => {
         number === 12 ? [envelopeComment(docA)] : number === 13 ? [envelopeComment(docB)] : []),
     });
     const result = await openTasksWithLatestPr(api, "o/r", [view({ number: 12 }), view({ number: 13 })]);
-    expect(result).toEqual([{ taskNumber: 12, prNumber: 9 }, { taskNumber: 13, prNumber: 11 }]);
+    expect(result).toEqual([{ taskNumber: 12, prNumber: 9, readFailed: false }, { taskNumber: 13, prNumber: 11, readFailed: false }]);
   });
 
   it("a thrown lookup for one task reports null and does not stop the others", async () => {
@@ -154,7 +154,32 @@ describe("openTasksWithLatestPr", () => {
       }),
     });
     const result = await openTasksWithLatestPr(api, "o/r", [view({ number: 12 }), view({ number: 13 })]);
-    expect(result).toEqual([{ taskNumber: 12, prNumber: null }, { taskNumber: 13, prNumber: 11 }]);
+    expect(result).toEqual([{ taskNumber: 12, prNumber: null, readFailed: true }, { taskNumber: 13, prNumber: 11, readFailed: false }]);
+  });
+
+  // #416 item 3-tail: the scan must be able to distinguish "read this task,
+  // found no PR" from "could not read this task" — open-prs.ts turns the
+  // second into a scan failure (its own `unknown` marker), while this scan's
+  // own callers (promote-close, reap) keep reading prNumber: null either way.
+  it("a read failure for one task reports readFailed: true — prNumber: null alone no longer claims 'looked'", async () => {
+    const docB = envelopeDoc({ artifacts: [{ kind: "pr", pr: "11" }] }, 13);
+    const api = fakeApi({
+      listComments: vi.fn(async (_repo: string, number: number) => {
+        if (number === 12) throw new Error("boom");
+        return [envelopeComment(docB)];
+      }),
+    });
+    const result = await openTasksWithLatestPr(api, "o/r", [view({ number: 12 }), view({ number: 13 })]);
+    expect(result).toEqual([
+      { taskNumber: 12, prNumber: null, readFailed: true },
+      { taskNumber: 13, prNumber: 11, readFailed: false },
+    ]);
+  });
+
+  it("a clean read with no envelope reports readFailed: false — 'no PR found' is never 'could not read'", async () => {
+    const api = fakeApi({ listComments: vi.fn(async () => []) });
+    const result = await openTasksWithLatestPr(api, "o/r", [view({ number: 12 })]);
+    expect(result).toEqual([{ taskNumber: 12, prNumber: null, readFailed: false }]);
   });
 
   // Board issue #180: this is the ONE shared scan both the webhook's
@@ -247,7 +272,7 @@ describe("openTasksWithLatestPr", () => {
 
       const result = await openTasksWithLatestPr(api, "o/r", [labelled, unlabelled]);
 
-      expect(result).toEqual([{ taskNumber: 12, prNumber: 9 }]);
+      expect(result).toEqual([{ taskNumber: 12, prNumber: 9, readFailed: false }]);
       expect(listComments).toHaveBeenCalledTimes(1);
       expect(listComments).toHaveBeenCalledWith("o/r", 12);
     });
@@ -264,7 +289,7 @@ describe("openTasksWithLatestPr", () => {
 
       const result = await openTasksWithLatestPr(api, "o/r", [drifted]);
 
-      expect(result).toEqual([{ taskNumber: 12, prNumber: 9 }]);
+      expect(result).toEqual([{ taskNumber: 12, prNumber: 9, readFailed: false }]);
     });
   });
 
