@@ -737,7 +737,14 @@ fleet accounts                # table: slot, label, match (label/inferred/unmapp
 fleet accounts --write-labels # same, plus pasteable CLAUDE_ACCOUNT_<n>_LABEL=<email> suggestions for inferred slots (folds into --json's own object instead of a bare line when combined with --json)
 fleet accounts sync           # same read, then WRITES: posts limit/clear decisions to fleet; reports applied/rejected/skipped
 fleet accounts sync --watch   # loops every 60s, prints only on change, ctrl-c stops
+fleet accounts clear 4        # deletes slot 4's limit row, whatever it holds; audited as one events row
 ```
+
+`clear` is also the escape hatch for a limit charged to the WRONG slot
+(issue #333): that sighting is the freshest row, so `sync` skips it as
+"newer row exists". `clear` and `hold` take a slot number (`4`; `1` is
+`CLAUDE_CODE_OAUTH_TOKEN`) or the secret name; an unconfigured slot is a
+400 and writes nothing.
 
 Rule: pct >= 95 on EITHER the 5h window, the 7d window, OR any per-model
 window marks that slot limited until THAT window's own reset time.

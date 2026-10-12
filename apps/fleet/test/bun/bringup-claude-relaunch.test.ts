@@ -697,6 +697,87 @@ REAL("studio-bringup.sh claude-launch region — a large restored session never 
   }, T);
 });
 
+REAL("studio-bringup.sh claude-launch region — the lead runs on the token bring-up was handed (issue #333)", () => {
+  // MEASURED 2026-10-10 (issue #333): an inline failover switch wrote its
+  // token into the tmux SESSION env and exported it in the pane's bash. A
+  // later bring-up found that same session, launched into that same bash,
+  // and claude ran on the switched token while the row recorded the
+  // container's own account -- limits charged to the wrong slot.
+  function staleStudio() {
+    const s = fresh();
+    const wrap = join(s.dir, "wrap");
+    const seen = join(s.dir, "seen-token");
+    mkdirSync(wrap, { recursive: true });
+    writeFileSync(
+      join(wrap, "claude"),
+      "#!/bin/bash\n" +
+        `printf '%s' "\${CLAUDE_CODE_OAUTH_TOKEN-UNSET}" > ${JSON.stringify(seen)}\n` +
+        `exec ${JSON.stringify(join(s.bin, "claude"))} 300\n`,
+      { mode: 0o755 },
+    );
+    // The failover's leftovers: the token in the session env AND exported
+    // in the pane's shell (failover.ts accountSwitchCmd's adopt line).
+    s.start("claude", `exec env CLAUDE_CODE_OAUTH_TOKEN=tok-switched-stale PATH=${wrap}:$PATH /bin/bash`);
+    s.tmux("set-environment -t studio CLAUDE_CODE_OAUTH_TOKEN tok-switched-stale");
+    expect(s.waitForPane("bash")).toBe("bash");
+    return { s, seen };
+  }
+
+  function runRegion(s: FakeStudio, token: string | null) {
+    const env: Record<string, string> = {
+      CLAUDE_ALIVE_TRIES: "10",
+      CLAUDE_SETTLE_SECONDS: "1",
+      ...(s.env as Record<string, string>),
+      FLEET_WORKSPACE: join(s.dir, "ws"),
+      STUDIO_ID: "acme-os--web-studio",
+      ROLE_PROMPT_B64: Buffer.from("brief").toString("base64"),
+      ROLE_ALLOWED_TOOLS: "Read",
+      ROLE_EFFORT: "",
+    };
+    if (token === null) delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    else env.CLAUDE_CODE_OAUTH_TOKEN = token;
+    return runSnippet({
+      shell: "bash",
+      env,
+      script:
+        "set -euo pipefail\n" +
+        `[ "$(command -v tmux)" = ${JSON.stringify(join(s.bin, "tmux"))} ] || { echo "relaunch harness: bare tmux is not the pinned wrapper -- refusing" >&2; exit 97; }\n` +
+        `cd ${JSON.stringify(s.dir)}\n` +
+        `${DECISION()}\n` +
+        ["claude_launch_line", "claude_project_dir", "claude_has_conversation", "claude_process_census"]
+          .map((f) => extractShellFunc(BRINGUP, f))
+          .join("\n") +
+        "\n" +
+        extractRegion(BRINGUP, "claude-launch") +
+        'echo "VERDICT ${claude_launch_failed:-0}"\n',
+      timeout: 60000,
+    });
+  }
+
+  test("a reused session holding a switched token: claude launches on the CONTAINER's token", () => {
+    const { s, seen } = staleStudio();
+    const r = runRegion(s, "tok-container-own");
+    expect(r.stdout).toContain("VERDICT 0");
+    expect(readFileSync(seen, "utf8")).toBe("tok-container-own");
+    // And the session env says so too: any pane tmux starts later is born on it.
+    expect(s.tmux("show-environment -t studio CLAUDE_CODE_OAUTH_TOKEN").stdout).toBe("CLAUDE_CODE_OAUTH_TOKEN=tok-container-own");
+  }, T);
+
+  test("the token is never TYPED: the pane (mirrored to the transcript) never shows it", () => {
+    const { s } = staleStudio();
+    runRegion(s, "tok-container-own");
+    const screen = s.tmux("capture-pane -p -J -S - -t studio:claude").stdout;
+    expect(screen).not.toContain("tok-container-own");
+  }, T);
+
+  test("no token handed to bring-up: the session is left as it was, nothing unset", () => {
+    const { s, seen } = staleStudio();
+    const r = runRegion(s, null);
+    expect(r.stdout).toContain("VERDICT 0");
+    expect(readFileSync(seen, "utf8")).toBe("tok-switched-stale");
+  }, T);
+});
+
 /**
  * The harness's own safety, asserted rather than trusted. Every one of these
  * is a way this fleet's tests have hit, or nearly hit, a tmux they did not

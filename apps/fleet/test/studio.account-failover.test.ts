@@ -912,6 +912,15 @@ describe("runAccountFailover — (a) a pane showing the rate-limit modal trigger
     for (const c of h.execs) expect(c).not.toContain(TOKEN_2);
   });
 
+  it("issue #333: the relaunch carries the NEXT token, so bring-up pins the switch instead of undoing it", async () => {
+    // Bring-up now pins the tmux session token to the one it is handed. A
+    // relaunch handed nothing would re-pin the container's own token -- the
+    // limited account this switch just left.
+    const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE) });
+    await run(h);
+    expect(h.deps.relaunch).toHaveBeenCalledWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_2 });
+  });
+
   it("records which account the studio is now on, so an operator can SEE it", async () => {
     const h = harness({ accounts: TWO_ACCOUNTS, pane: captured(MODAL_PANE) });
     await run(h);
@@ -2147,6 +2156,19 @@ describe("runAccountFailover — borrow another repo's primary (issue #131, Stag
     expect(last.state).toBe("running");
     expect(h.notices[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN_4");
     expect(h.notices[0]).toContain("CLAUDE_CODE_OAUTH_TOKEN_2");
+  });
+
+  it("issue #333: hand-back's relaunch carries the primary's token, so bring-up pins it", async () => {
+    const h = harness({
+      accounts: four, pane: captured(IDLE_PANE), primary: "CLAUDE_CODE_OAUTH_TOKEN_2", primaryIsMapped: true,
+      initial: status({
+        claudeAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4",
+        borrowedAccount: "CLAUDE_CODE_OAUTH_TOKEN_4", borrowedFromRepo: "repo-b",
+      }),
+    });
+    await run(h);
+    const primaryToken = four.find((a) => a.name === "CLAUDE_CODE_OAUTH_TOKEN_2")!.token;
+    expect(h.deps.relaunch).toHaveBeenCalledWith({ CLAUDE_CODE_OAUTH_TOKEN: primaryToken });
   });
 
   // -------------------------------------------------------------------

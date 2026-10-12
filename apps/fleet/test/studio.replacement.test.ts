@@ -221,6 +221,17 @@ describe("runRestart — a replaced container is verified on disk before it is c
     expect(deps.cmds).not.toContain(AGENTS_CHECK);
   });
 
+  it("issue #333: the restart's bring-up is handed the recorded launch token over the stored role env", async () => {
+    const deps = restartDeps(() => undefined);
+    const withToken: ProvisionDeps = { ...deps, launchEnv: async () => ({ CLAUDE_CODE_OAUTH_TOKEN: "tok-launched" }) };
+    const storage = fakeStorage({ status: status(), roleEnv: STUDIO_ENV });
+
+    await restartWithStorage(withToken, storage, STUDIO_ID, "rafarc21/fleetflare");
+
+    const bringup = (deps.sbExec as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === BRINGUP_CMD);
+    expect(bringup?.[1]).toEqual({ ...STUDIO_ENV, CLAUDE_CODE_OAUTH_TOKEN: "tok-launched" });
+  });
+
   it("both checks run strictly AFTER bring-up — this is a post-bring-up re-check, not a precondition", async () => {
     const deps = restartDeps(() => undefined);
     const storage = fakeStorage({ status: status(), roleEnv: STUDIO_ENV });

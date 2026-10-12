@@ -3184,6 +3184,44 @@ describe("issue #336 — held account rows", () => {
     expect((await handleStudio(authorizedReq("/studio/accounts/hold"), testEnv)).status).toBe(405);
   });
 
+  // Issue #333: a bare slot number ("4") names the same slot as its secret
+  // name; slot 1 is the unsuffixed CLAUDE_CODE_OAUTH_TOKEN.
+  const withSlot4 = () => {
+    const { testEnv } = envWithFakeStudio();
+    return { ...testEnv, CLAUDE_CODE_OAUTH_TOKEN_4: "test-oauth-4" } as unknown as Env;
+  };
+
+  it("POST /studio/accounts/hold accepts a bare slot number and audits the full secret name", async () => {
+    authorized();
+    const testEnv = withSlot4();
+    const res = await handleStudio(post("/studio/accounts/hold", { name: "4", until: FAR }), testEnv);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ name: "CLAUDE_CODE_OAUTH_TOKEN_4", kind: "hold", until: FAR, reason: null });
+    expect(await readOneAccountLimit(testEnv.DB, "CLAUDE_CODE_OAUTH_TOKEN_4")).toMatchObject({ until: FAR, kind: "hold" });
+    expect(await readOneAccountLimit(testEnv.DB, "4")).toBeNull();
+    expect((await auditRows(testEnv.DB))[0]?.ref).toBe("CLAUDE_CODE_OAUTH_TOKEN_4");
+  });
+
+  it("POST /studio/accounts/clear accepts slot 1 as the unsuffixed secret name", async () => {
+    authorized();
+    const testEnv = withSlot4();
+    await writeAccountHold(testEnv.DB, NAME, { until: FAR, seenAt: "2026-10-01T00:00:00.000Z", kind: "spend_cap" });
+    const res = await handleStudio(post("/studio/accounts/clear", { name: "1" }), testEnv);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ name: NAME, cleared: true, was: "spend_cap" });
+    expect(await readOneAccountLimit(testEnv.DB, NAME)).toBeNull();
+  });
+
+  it("a bare slot number that is unconfigured or out of range is a 400, writing nothing", async () => {
+    authorized();
+    const testEnv = withSlot4();
+    for (const name of ["2", "0", "10", "04", "-1"]) {
+      expect((await handleStudio(post("/studio/accounts/hold", { name }), testEnv)).status, name).toBe(400);
+      expect((await handleStudio(post("/studio/accounts/clear", { name }), testEnv)).status, name).toBe(400);
+    }
+    expect(await auditRows(testEnv.DB)).toEqual([]);
+  });
+
   it("GET /studio/accounts reports each row's kind and reason", async () => {
     authorized();
     const { testEnv } = envWithFakeStudio();

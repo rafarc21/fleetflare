@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env as testEnv } from "cloudflare:test";
 import {
-  launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch,
+  launchAccountOrRefuse, launchAccountName, recordLaunchedAccount, constructorLaunch, recordedLaunchEnv,
   decideAccountClears, applyAccountClears, clearForceMappedAccount, refuseUnlessMappedAccountLaunchable,
   resolveLeadType,
 } from "../src/studio/do";
@@ -152,6 +152,24 @@ describe("constructorLaunch — a DO restart reads the launch back, never re-der
   });
 });
 
+// Issue #333: what every bring-up is handed, so bring-up pins the tmux
+// session to the account limits are charged to -- never a token an earlier
+// failover left in a reused session, and never today's map.
+describe("recordedLaunchEnv — bring-up runs on the account the row records (#333)", () => {
+  const env = envWith({ ...ALL, CLAUDE_ACCOUNT_BY_REPO: MAP_2 });
+
+  it("recorded account 3 (map says 2): account 3's token", () => {
+    expect(recordedLaunchEnv(env, status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }))).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_3 });
+  });
+
+  it("no record, a gone secret, or no row: nothing -- the container's own env decides", () => {
+    expect(recordedLaunchEnv(env, status())).toEqual({});
+    const two = envWith({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_1, CLAUDE_CODE_OAUTH_TOKEN_2: TOKEN_2 });
+    expect(recordedLaunchEnv(two, status({ launchedAccount: "CLAUDE_CODE_OAUTH_TOKEN_3" }))).toEqual({});
+    expect(recordedLaunchEnv(env, undefined)).toEqual({});
+  });
+});
+
 // The DO itself cannot be constructed under vitest-pool-workers (container-
 // backed), so its WIRING is pinned in the source: every start records what it
 // launched on, and each envVars assignment carries its account beside it.
@@ -165,6 +183,12 @@ describe("StudioDO wiring (source) — #292 r2", () => {
 
   it("onStart records the launched account", () => {
     expect(body("async onStart(): Promise<void> {")).toContain("recordLaunchedAccount(this.ctx.storage, this.selfId(), this.envAccount");
+  });
+
+  it("#333: provision deps hand bring-up the recorded launch token, read at exec time", () => {
+    expect(body("private deps(): ProvisionDeps {")).toContain(
+      "launchEnv: async () => recordedLaunchEnv(this.env, await this.ctx.storage.get<StudioStatus>(STATUS_KEY))",
+    );
   });
 
   it("the constructor reads the launch back through constructorLaunch", () => {
