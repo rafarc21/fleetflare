@@ -411,8 +411,8 @@ function injectionFired(script: string, marker: string, env: Record<string, stri
 
 /** Scans the test process's own CWD (apps/fleet/) for the empty
  *  `x$(touch …)y` dir trees a BARE relative injection payload leaves
- *  behind when the shipped command's own mkdir/test-stat lines
- *  materialize the literal payload name — the cwd litter finding #598
+ *  behind when the shipped restore command's own mkdir line
+ *  materializes the literal payload name — the cwd litter finding #598
  *  is about, which `git status` cannot see (empty dirs). */
 function cwdLitter(): string[] {
   return readdirSync(".").filter((n) => n.startsWith("x$("));
@@ -487,7 +487,7 @@ describe("install-cache — item 5 SECURITY: shell metacharacter injection via d
     const marker = pwnedMarkerPath();
     // Absolute, inside the per-test tmpdir (finding #598): the `$( )` must
     // still be shQuote'd or the marker fires, while the command's own
-    // mkdir/test lines materialize any literal name under `base`, not the
+    // mkdir line materializes any literal name under `base`, not the
     // test cwd.
     const evil = join(base, injectionPayload(marker));
     // The full, real, shipped restore command — not just the isolated line —
@@ -507,8 +507,10 @@ describe("install-cache — item 5 SECURITY: shell metacharacter injection via d
   test("MUTANT PROOF — the FIXED, shipped installCacheSaveCmd (full pipeline) blocks the identical payload", () => {
     const marker = pwnedMarkerPath();
     // Absolute, inside the per-test tmpdir (finding #598) — same reasoning
-    // as the restore proof above: the command's own test-stat line
-    // materializes any literal name under `base`, not the test cwd.
+    // the save command's own stat line never materializes anything — but
+    // the absolute prefix keeps the literal name inside `base` should any
+    // future command line ever mkdir it, and the litter assertion below
+    // guards exactly that.
     const evil = join(base, injectionPayload(marker));
     // The full, real, shipped save command — `[ ! -d <dir>/node_modules ]`
     // is false for this nonexistent directory, so this legitimately takes
