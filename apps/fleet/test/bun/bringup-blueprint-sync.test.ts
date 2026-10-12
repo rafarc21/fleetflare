@@ -1,9 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createServer, type Server, type Socket } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractShellFunc, runSnippet } from "./exec-snippet";
+import { BRINGUP, extractShellFunc, runSnippet } from "./exec-snippet";
 
 /**
  * Issue #11: bring-up cloned the blueprint only when /opt/blueprint/.git was
@@ -16,7 +16,6 @@ import { extractShellFunc, runSnippet } from "./exec-snippet";
  * local bare repo with git's own url.<base>.insteadOf, passed through
  * GIT_CONFIG_* env, so the clone and fetch lines run unchanged.
  */
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
 const SYNC = () => extractShellFunc(BRINGUP, "blueprint_sync");
 
 /** blueprint_sync bounds its network calls with coreutils `timeout`, which the

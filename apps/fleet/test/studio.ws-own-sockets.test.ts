@@ -39,7 +39,7 @@ const upgrade = () => new Request("https://studio/ws/terminal", { headers: { Upg
 describe("viewer sockets are the bridge's own, not hibernation-dispatched (#151)", () => {
   it("a LATE viewer's input reaches the pty with nothing forwarding it", async () => {
     const pty = fakePty();
-    const bridge = new TerminalBridge(async () => pty.handle);
+    const bridge = new TerminalBridge(async () => pty.handle, "s-test");
     openClient(await bridge.attach(upgrade()));              // creator
     const late = openClient(await bridge.attach(upgrade())); // joiner
     late.ws.send(new Uint8Array([0x6c, 0x73]));
@@ -48,7 +48,7 @@ describe("viewer sockets are the bridge's own, not hibernation-dispatched (#151)
 
   it("a joiner's FIRST frame being a resize does not silence it", async () => {
     const pty = fakePty();
-    const bridge = new TerminalBridge(async () => pty.handle);
+    const bridge = new TerminalBridge(async () => pty.handle, "s-test");
     openClient(await bridge.attach(upgrade()));
     const late = openClient(await bridge.attach(upgrade()));
     late.ws.send(JSON.stringify({ t: "resize", cols: 120, rows: 40 }));
@@ -58,7 +58,7 @@ describe("viewer sockets are the bridge's own, not hibernation-dispatched (#151)
 
   it("output fans out to every viewer the bridge accepted", async () => {
     const pty = fakePty();
-    const bridge = new TerminalBridge(async () => pty.handle);
+    const bridge = new TerminalBridge(async () => pty.handle, "s-test");
     const a = openClient(await bridge.attach(upgrade()));
     const b = openClient(await bridge.attach(upgrade()));
     pty.emit(new Uint8Array([1, 2, 3]));
@@ -70,7 +70,7 @@ describe("viewer sockets are the bridge's own, not hibernation-dispatched (#151)
 
   it("the last viewer leaving closes the pty — learned from the socket, not a runtime event", async () => {
     const pty = fakePty();
-    const bridge = new TerminalBridge(async () => pty.handle);
+    const bridge = new TerminalBridge(async () => pty.handle, "s-test");
     const a = openClient(await bridge.attach(upgrade()));
     const b = openClient(await bridge.attach(upgrade()));
     a.ws.close(1000, "bye");

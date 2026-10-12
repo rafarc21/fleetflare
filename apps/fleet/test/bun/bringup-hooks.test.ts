@@ -5,7 +5,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSnippet } from "./exec-snippet";
+import { BRINGUP, runSnippet } from "./exec-snippet";
 
 // Board issue #2 (gates single source): the three hook scripts moved out of
 // studio-bringup.sh's own heredocs into real files at the repo root
@@ -19,7 +19,6 @@ import { runSnippet } from "./exec-snippet";
 // own vitest.config.ts bindings for the equivalent wiring there). Every
 // behavioral test below is unchanged: same snippet content, same runSnippet
 // calls, same assertions.
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
 const LEAD_GATE = readFileSync(join(import.meta.dir, "../../../../gates/lead-gate.sh"), "utf8");
 const COMPLETION_GATE = readFileSync(join(import.meta.dir, "../../../../gates/completion-gate.sh"), "utf8");
 

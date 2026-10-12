@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSnippet } from "./exec-snippet";
+import { BRINGUP, runSnippet } from "./exec-snippet";
 import { redactSecrets } from "../../src/studio/redact";
 import { bringupLogAppendCmd, bringupLogTailCmd, BRINGUP_LOG_PATH } from "../../src/studio/provision";
 
@@ -22,8 +22,6 @@ import { bringupLogAppendCmd, bringupLogTailCmd, BRINGUP_LOG_PATH } from "../../
 // These tests run the REAL function bodies a studio container executes,
 // extracted verbatim out of container/studio-bringup.sh, so what is exercised
 // here is the shipped code and not a re-typed copy of it.
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
-
 /**
  * Pull one `name() { ... }` body out of shell source, brace-matched from the
  * opening line to a closing `}` at column 0 — the shape every function in

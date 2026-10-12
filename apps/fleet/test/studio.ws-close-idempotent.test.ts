@@ -30,7 +30,7 @@ describe("close() is idempotent per viewer (#153 review)", () => {
     const first = fakePty();
     const second = fakePty();
     let n = 0;
-    const bridge = new TerminalBridge(async () => (++n === 1 ? first.handle : second.handle));
+    const bridge = new TerminalBridge(async () => (++n === 1 ? first.handle : second.handle), "s-test");
     const v = fakeViewer();
     bridge.adopt(v.ws);
     await bridge.message(v.ws, JSON.stringify({ t: "resize", cols: 100, rows: 30 })); // opens pty #1
@@ -54,7 +54,7 @@ describe("close() is idempotent per viewer (#153 review)", () => {
     // the `close` listener removed from adopt() — 0 tests fail today.
     // A fake viewer that dispatches ONLY "close" pins the listener itself.
     const pty = fakePty();
-    const bridge = new TerminalBridge(async () => pty.handle);
+    const bridge = new TerminalBridge(async () => pty.handle, "s-test");
     const v = fakeViewer();
     bridge.adopt(v.ws);
     await bridge.message(v.ws, JSON.stringify({ t: "resize", cols: 100, rows: 30 }));
@@ -82,7 +82,7 @@ describe("close() is idempotent per viewer (#153 review)", () => {
       // the chain, but Promise.reject is the real shape.
       close: () => Promise.reject(new Error("boom: exec socket refused the close")),
     };
-    const bridge = new TerminalBridge(async () => handle);
+    const bridge = new TerminalBridge(async () => handle, "s-test");
     const v = fakeViewer();
     bridge.adopt(v.ws);
     await bridge.message(v.ws, JSON.stringify({ t: "resize", cols: 100, rows: 30 }));

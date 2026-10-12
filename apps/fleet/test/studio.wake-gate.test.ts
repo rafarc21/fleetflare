@@ -18,7 +18,7 @@ import { spawnDeps } from "../src/studio/routes";
 import type { Env } from "../src/env";
 import { runDestroy } from "../src/studio/destroy";
 import { runGatedWake, wakeCmd, logWakeOutcome, PANE_PROBE_CMD, PANE_SCREEN_CMD, type WakeOutcome } from "../src/studio/wake";
-import { STATUS_KEY, DESTROYING_KEY, DESTROY_IN_FLIGHT, type StudioStorage } from "../src/studio/provision";
+import { STATUS_KEY, DESTROYING_KEY, DESTROY_IN_FLIGHT, bringupLogTailCmd, type StudioStorage } from "../src/studio/provision";
 import { runInspect } from "../src/studio/inspect";
 import type { SessionSyncDeps } from "../src/studio/session-sync";
 import type { StudioStatus } from "../src/studio/types";
@@ -244,7 +244,7 @@ describe("checkProvisionedGated — GET /studio/:id/provisioned never starts a s
 
   it("a STOPPED studio answers inconclusive with zero execs", async () => {
     const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
-    const verdict = await checkProvisionedGated(fakeStorage(status("stopped")), syncDeps(exec), "fleetflare");
+    const verdict = await checkProvisionedGated(fakeStorage(status("stopped")), syncDeps(exec), "fleetflare", STUDIO_ID);
     expect(exec).not.toHaveBeenCalled();
     expect(verdict.kind).toBe("inconclusive");
     expect((verdict as { reason: string }).reason).toContain("stopped");
@@ -252,15 +252,40 @@ describe("checkProvisionedGated — GET /studio/:id/provisioned never starts a s
 
   it("a never-provisioned studio answers inconclusive with zero execs", async () => {
     const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
-    const verdict = await checkProvisionedGated(fakeStorage(), syncDeps(exec), "fleetflare");
+    const verdict = await checkProvisionedGated(fakeStorage(), syncDeps(exec), "fleetflare", STUDIO_ID);
     expect(exec).not.toHaveBeenCalled();
     expect(verdict.kind).toBe("inconclusive");
   });
 
   it("a running studio still runs the real check", async () => {
     const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
-    await checkProvisionedGated(fakeStorage(status("running")), syncDeps(exec), "fleetflare");
+    await checkProvisionedGated(fakeStorage(status("running")), syncDeps(exec), "fleetflare", STUDIO_ID);
     expect(exec).toHaveBeenCalled();
+  });
+
+  // S21 F9, review round-1 N1: the gated route is the one readiness surface
+  // whose bring-up-tail failure line had no studio name left — the id is in
+  // scope at the StudioDO call site (selfId, same as checkNow), so it must be
+  // threaded through, not dropped at the gate.
+  it("a bare verdict whose log-tail read ALSO throws names the studio in the failure line (N1)", async () => {
+    const exec = vi.fn(async (cmd: string) => {
+      if (cmd === bringupLogTailCmd()) throw new Error("sandbox unreachable");
+      return { code: 0, stdout: "no git checkout at /workspace/fleetflare", stderr: "" };
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const verdict = await checkProvisionedGated(fakeStorage(status("running")), syncDeps(exec), "fleetflare", STUDIO_ID);
+      expect(verdict.kind).toBe("bare");
+      const line = errSpy.mock.calls.map((c) => String(c[0]))
+        .find((s) => s.includes("bring-up log tail read failed"));
+      expect(line).toMatch(
+        /studio fleetflare--maestro: bring-up log tail read failed, reporting the verdict without it/,
+      );
+      // The verdict is the decision; the diagnostic must not have altered it.
+      expect((verdict as { reason: string }).reason).toBe("no git checkout at /workspace/fleetflare");
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 
@@ -328,7 +353,7 @@ describe("the destroy marker's refusal names itself (#100 N4)", () => {
     const storage = fakeStorage(status("running"));
     await storage.put(DESTROYING_KEY, new Date(NOW.getTime() - 5_000).toISOString());
     const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
-    const verdict = await checkProvisionedGated(storage, { exec, now: () => NOW } as unknown as SessionSyncDeps, "fleetflare");
+    const verdict = await checkProvisionedGated(storage, { exec, now: () => NOW } as unknown as SessionSyncDeps, "fleetflare", STUDIO_ID);
     expect(exec).not.toHaveBeenCalled();
     expect((verdict as { reason: string }).reason).toContain("a destroy is in flight");
   });

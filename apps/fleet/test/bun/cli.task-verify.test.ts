@@ -23,9 +23,10 @@
 // The stand-in does not validate accessHeaders' auth headers; asserting on
 // them is out of scope here.
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeCredentials } from "./helpers/credentials";
 
 const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
 
@@ -39,13 +40,6 @@ function tmpDir(prefix: string): string {
 afterEach(() => {
   while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
-
-function writeCredentials(home: string, workerUrl: string) {
-  mkdirSync(join(home, ".fleet"), { recursive: true });
-  const path = join(home, ".fleet", "credentials");
-  writeFileSync(path, JSON.stringify({ workerUrl, accessClientId: "id", accessClientSecret: "secret" }));
-  chmodSync(path, 0o600);
-}
 
 interface SeenRequest { method: string; path: string; body: unknown }
 

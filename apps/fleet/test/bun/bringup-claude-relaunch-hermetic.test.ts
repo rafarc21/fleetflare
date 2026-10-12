@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractShellFunc, runSnippet } from "./exec-snippet";
+import { BRINGUP, extractShellFunc, runSnippet } from "./exec-snippet";
 
 /**
  * Issue #67's decision, executed everywhere.
@@ -22,8 +22,6 @@ import { extractShellFunc, runSnippet } from "./exec-snippet";
  * and every branch of the decision is reachable, including one the real
  * suite cannot stage cheaply: a lead that ignores C-c.
  */
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
-
 const DECISION = () =>
   [
     extractShellFunc(BRINGUP, "claude_pane_field"),

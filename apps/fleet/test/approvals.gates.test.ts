@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { handleCallbackQuery, makeExecutor, type GateExecutor } from "../src/approvals/gates";
 import { createApproval, getApproval } from "../src/approvals/store";
 import { readSince } from "../src/events/log";
@@ -184,6 +184,55 @@ describe("handleCallbackQuery", () => {
     const failedNotice = calls.find((c) => /FAILED/.test(c.body?.text ?? ""));
     expect(failedNotice).toBeDefined();
     expect(failedNotice?.body.text).toMatch(/not mergeable/);
+  });
+
+  // S21 F5: every step() label inside handleCallbackQuery carries the
+  // approval id, so a logged step failure names the approval it failed on.
+  it("prefixes step failures with the approval id", async () => {
+    await seed();
+    globalThis.fetch = (async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      calls.push({ url, body: JSON.parse(init.body as string) });
+      if (url.includes("answerCallbackQuery")) {
+        return Response.json({ ok: false, description: "query is too old" });
+      }
+      return Response.json({ ok: true, result: { message_id: 900 } });
+    }) as typeof globalThis.fetch;
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await handleCallbackQuery(env, cq(), executor, 2000);
+      // The ack step fails (ok:false above); its label must carry "appr_1: ".
+      const ack = errSpy.mock.calls.map((c) => String(c[0]))
+        .find((s) => s.includes("callback acknowledgement failed"));
+      expect(ack).toBeDefined();
+      expect(ack).toMatch(/^appr_1: /);
+
+      // And the same prefix on a later step: poison finishApproval(executed)
+      // through a second run on a fresh approval row.
+      const realPrepare = env.DB.prepare.bind(env.DB);
+      const poisonedDb = {
+        prepare(sql: string) {
+          if (sql.startsWith("UPDATE approvals SET state = ?, result = ?")) {
+            return { bind: () => ({ run: async () => { throw new Error("D1 write failed"); } }) };
+          }
+          return realPrepare(sql);
+        },
+      } as unknown as D1Database;
+      errSpy.mockClear();
+      await seed("appr_2");
+      await env.DB.prepare("UPDATE approvals SET message_id = 77 WHERE id = ?").bind("appr_2").run();
+      await handleCallbackQuery(
+        { ...env, DB: poisonedDb },
+        cq({ data: "appr_2:yes" }), executor, 3000,
+      );
+      const finish = errSpy.mock.calls.map((c) => String(c[0]))
+        .find((s) => s.includes("finishApproval(executed) failed"));
+      expect(finish).toBeDefined();
+      expect(finish).toMatch(/^appr_2: /);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it("completes the decision end to end when answerCallbackQuery itself fails", async () => {

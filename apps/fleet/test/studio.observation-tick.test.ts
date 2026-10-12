@@ -2060,6 +2060,23 @@ describe("runShipTickWithObservation — onLeadWorking", () => {
     await expect(run(WORKING_PANE, storage, async () => { throw new Error("GitHub 502"); })).resolves.toBeDefined();
     expect((storage.map.get(ACTIVITY_KEY) as Activity).state).toBe("working");
   });
+
+  // S21 F11: the auto submitted->working catch names the studio — identical
+  // lines from several studios are the exact ambiguity this batch kills.
+  it("names the studio when the board move itself throws (S21 F11)", async () => {
+    const storage = fakeStorage({ status: status(), activity: idleBefore });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        run(WORKING_PANE, storage, async () => { throw new Error("GitHub 502"); }),
+      ).resolves.toBeDefined();
+      const line = errSpy.mock.calls.map((c) => String(c[0]))
+        .find((s) => s.includes("auto submitted->working failed"));
+      expect(line).toMatch(/studio websites--pilot: auto submitted->working failed, next window retries/);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });
 
 // Issue #108 (#70 ask 4 remainder) — Observed.lastMessageLine, extracted from

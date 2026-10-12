@@ -58,7 +58,8 @@ function bufferedBytes(ws: WebSocket): number {
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
-export type AttachPty = (opts: { cols: number; rows: number }) => Promise<PtyHandle>;
+export type AttachPty =
+  (opts: { cols: number; rows: number; studioId: string }) => Promise<PtyHandle>;
 
 export class TerminalBridge {
   /** The one shared pty, as a promise so that two clients upgrading at the
@@ -77,7 +78,7 @@ export class TerminalBridge {
    *  and without a pty there is nothing to watch. */
   private viewers = new Set<WebSocket>();
 
-  constructor(private readonly attachPty: AttachPty) {}
+  constructor(private readonly attachPty: AttachPty, private readonly studioId: string) {}
 
   /** How many viewers are attached right now. */
   viewerCount(): number {
@@ -97,7 +98,7 @@ export class TerminalBridge {
     this.viewers.add(ws);
     ws.addEventListener("message", (event) => {
       this.message(ws, event.data as string | ArrayBuffer).catch((err) => {
-        console.error("studio terminal input failed", err);
+        console.error(`studio ${this.studioId} terminal input failed`, err);
       });
     });
     // An abrupt drop (a phone losing signal) delivers `error`, not `close`;
@@ -120,7 +121,7 @@ export class TerminalBridge {
     try {
       pty = await this.ensurePty();
     } catch (err) {
-      console.error("studio terminal attach failed", err);
+      console.error(`studio ${this.studioId} terminal attach failed`, err);
       // Deliberately does NOT call forgetPty(), for the same reason the
       // success path below does not (see the TOCTOU comment there). This used
       // to, unconditionally, and that was a second defect of exactly the kind
@@ -234,7 +235,9 @@ export class TerminalBridge {
   private ensurePty(): Promise<PtyHandle> {
     if (this.pty) return this.pty;
 
-    const attempt: Promise<PtyHandle> = this.attachPty({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS }).then(
+    const attempt: Promise<PtyHandle> = this.attachPty({
+      cols: DEFAULT_COLS, rows: DEFAULT_ROWS, studioId: this.studioId,
+    }).then(
       (pty) => {
         this.live = pty;
         void this.pump(pty);
@@ -307,7 +310,7 @@ export class TerminalBridge {
     } catch (err) {
       // A pty that failed rather than ended (sandbox-api errors the stream on
       // a socket error, so the two are distinguishable here). Same recovery.
-      console.error("studio terminal pty read failed", err);
+      console.error(`studio ${this.studioId} terminal pty read failed`, err);
     } finally {
       reader.releaseLock();
       this.ptyEnded(pty);
@@ -364,7 +367,7 @@ export class TerminalBridge {
         ws.send(queue.shift() as Uint8Array);
       }
     } catch (err) {
-      console.error("studio terminal send failed; dropping this client's output", err);
+      console.error(`studio ${this.studioId} terminal send failed; dropping this client's output`, err);
       this.backlog.delete(ws);
       return;
     }

@@ -9,9 +9,10 @@
 // no `repo` key (the Worker's own default stays the single source of that
 // fallback) and reportRepo prints its fallback line on stderr.
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeCredentials } from "./helpers/credentials";
 
 const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
 
@@ -29,13 +30,6 @@ function tmpDir(prefix: string): string {
 afterEach(() => {
   while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
-
-function writeCredentials(home: string, workerUrl: string) {
-  mkdirSync(join(home, ".fleet"), { recursive: true });
-  const path = join(home, ".fleet", "credentials");
-  writeFileSync(path, JSON.stringify({ workerUrl, accessClientId: "id", accessClientSecret: "secret" }));
-  chmodSync(path, 0o600);
-}
 
 /** A stand-in for the Worker's POST /studio/board/tasks/reap: records every
  *  request body and answers the one canned response this run needs. */

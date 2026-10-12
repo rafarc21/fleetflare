@@ -80,7 +80,7 @@ export async function handleCallbackQuery(
   // this succeeding. The CAS above already committed the decision; a 429, a
   // 5xx, or Telegram's own very common {ok:false, "query is too old..."}
   // must not unwind it.
-  await step("callback acknowledgement failed", () => answerCallbackQuery(tg.token, cq.id));
+  await step(`${id}: callback acknowledgement failed`, () => answerCallbackQuery(tg.token, cq.id));
 
   const label = GATE_LABELS[row.action];
   const stamp = new Date(now).toISOString();
@@ -89,11 +89,11 @@ export async function handleCallbackQuery(
   // second tappable button on screen.
   if (row.messageId !== null) {
     const messageId = row.messageId;
-    await step("keyboard strip failed", () =>
+    await step(`${id}: keyboard strip failed`, () =>
       editCard(tg.token, row.chatId, messageId, `${label} — ${state} ${stamp}`));
   }
 
-  await step("approval event failed", () =>
+  await step(`${id}: approval event failed`, () =>
     appendEvent(
       env.DB,
       makeEvent(
@@ -110,9 +110,9 @@ export async function handleCallbackQuery(
     // The agent stays stopped. A rejected gate never auto-starts a new turn:
     // the operator's reason for rejecting is not yet known to anyone, and
     // guessing it burns an opus turn on the wrong work.
-    await step("finishApproval(rejected) failed", () =>
+    await step(`${id}: finishApproval(rejected) failed`, () =>
       finishApproval(env.DB, id, "failed", "rejected by operator"));
-    await step("rejection report event failed", () =>
+    await step(`${id}: rejection report event failed`, () =>
       appendEvent(
         env.DB,
         makeEvent(
@@ -145,8 +145,8 @@ export async function handleCallbackQuery(
     // top of a verdict execute() has already decided — finishApproval's own
     // write is just as capable of throwing (a transient D1 error) as the
     // notice is, and neither may stop the operator from being told.
-    await step("finishApproval(failed) write failed", () => finishApproval(env.DB, id, "failed", msg));
-    await step("failure notice failed", () =>
+    await step(`${id}: finishApproval(failed) write failed`, () => finishApproval(env.DB, id, "failed", msg));
+    await step(`${id}: failure notice failed`, () =>
       sendCard(tg.token, row.chatId, `${label} FAILED — ${msg}`));
     return;
   }
@@ -155,8 +155,8 @@ export async function handleCallbackQuery(
   // top of a success that has already happened — independent of each other
   // too, so a D1 hiccup recording "executed" doesn't also suppress the
   // notification, or vice versa. Neither may report "failed".
-  await step("finishApproval(executed) failed", () => finishApproval(env.DB, id, "executed", result));
-  await step("success notice failed", () =>
+  await step(`${id}: finishApproval(executed) failed`, () => finishApproval(env.DB, id, "executed", result));
+  await step(`${id}: success notice failed`, () =>
     sendCard(tg.token, row.chatId, `${label} done — ${result}`));
 }
 

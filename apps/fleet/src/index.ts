@@ -205,7 +205,7 @@ async function handleScheduled(controller: ScheduledController, env: Env, _ctx: 
         const stub = env.AGENT.get(env.AGENT.idFromName(task.agentId));
         await (await stub.fetch("https://agent/rearm", { method: "POST" })).text();
       } catch (err) {
-        console.error("re-arm failed", err);
+        console.error(`re-arm failed for ${task.taskId}`, err);
       }
       // Alert on the second failure, not the first: one missed schedule is a
       // hiccup, two in a row is the fleet going deaf — which is exactly what

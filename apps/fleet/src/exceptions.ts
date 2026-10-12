@@ -217,7 +217,7 @@ export async function pruneWorkerExceptions(db: D1Database, keep: number = 1000)
       .bind(keep - 1)
       .run();
   } catch (err) {
-    console.error("pruneWorkerExceptions failed", err);
+    console.error("pruneWorkerExceptions failed — worker_exceptions retention unbounded until the next insert", err);
   }
 }
 

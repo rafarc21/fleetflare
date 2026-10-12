@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { advanceTask, type TaskRecord, type LoopDeps } from "../src/tasks/loop";
 import { FakeRuntime } from "../src/agents/runtime";
 import { readSince } from "../src/events/log";
@@ -175,6 +175,81 @@ describe("advanceTask", () => {
     expect(out.kind).toBe("terminal");
     const events = await readSince(env.DB, "human", 0);
     expect(events.some((e) => /unreachable|lost/i.test(e.body))).toBe(true);
+  });
+
+  // S21 F1: every catch in the loop names the task it failed on.
+  it("names the task when the budget abort itself fails", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = new FakeRuntime([running(["still going"])]);
+      r.abort = () => Promise.reject(new Error("container gone"));
+      await advanceTask(
+        deps(r, { now: 1000 + 901_000 }),
+        task({ liveMessageId: 501, startedTs: 1000 }),
+      );
+      expect(errSpy).toHaveBeenCalled();
+      expect(String(errSpy.mock.calls[0][0])).toMatch(/abort failed for task_/);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("names the task when the terminal notify send fails", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchBackup = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        throw new Error("telegram down");
+      }) as typeof globalThis.fetch;
+      const r = new FakeRuntime([{
+        state: "done", taskId: "task_1", milestones: [], pendingApproval: null,
+        result: "PR #7 open", error: null, costUsd: null,
+      }]);
+      await advanceTask(deps(r), task({ liveMessageId: 501 }));
+      expect(errSpy).toHaveBeenCalled();
+      expect(String(errSpy.mock.calls[0][0])).toMatch(/terminal notify failed for task_/);
+    } finally {
+      globalThis.fetch = fetchBackup;
+      errSpy.mockRestore();
+    }
+  });
+
+  it("names the task when the live card update fails", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchBackup = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        throw new Error("telegram down");
+      }) as typeof globalThis.fetch;
+      const r = new FakeRuntime([running(["cloned repo"])]);
+      await advanceTask(deps(r), task({ liveMessageId: 501, shownMilestones: 0 }));
+      expect(errSpy).toHaveBeenCalled();
+      expect(String(errSpy.mock.calls[0][0])).toMatch(/live card update failed for task_/);
+    } finally {
+      globalThis.fetch = fetchBackup;
+      errSpy.mockRestore();
+    }
+  });
+
+  it("names the task when the approval card send fails", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchBackup = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        throw new Error("telegram down");
+      }) as typeof globalThis.fetch;
+      const r = new FakeRuntime([{
+        state: "done", taskId: "task_1", milestones: [],
+        pendingApproval: { action: "merge_staging", params: { repo: "o/r", pr: "7" } },
+        result: null, error: null, costUsd: null,
+      }]);
+      await advanceTask(deps(r), task({ liveMessageId: 501 }));
+      expect(errSpy).toHaveBeenCalled();
+      expect(String(errSpy.mock.calls[0][0])).toMatch(/approval card failed for task_/);
+    } finally {
+      globalThis.fetch = fetchBackup;
+      errSpy.mockRestore();
+    }
   });
 
   it("resets the failure counter after a successful poll", async () => {

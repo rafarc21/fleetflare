@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { checkAndRecordReadiness, provisionWithFreshVerdict, CHECK_ATTEMPTS } from "../src/studio/do";
 import {
   STATUS_KEY, PROVISIONED_OK, provisionedCheckCmd, bringupLogTailCmd, tailnetWarningIn, type StudioStorage,
@@ -209,6 +209,30 @@ describe("checkAndRecordReadiness (do.ts)", () => {
 
     expect(called).toBe(false);
     expect(deps.execCalls).toHaveLength(0);
+  });
+
+  // S21 F9: the bring-up tail's catch names the studio whose log tail it
+  // could not read — one refresh tick carries every studio's tail lines.
+  it("names the studio when the bring-up log tail read itself throws (S21 F9)", async () => {
+    const storage = fakeStorage({ status: status() });
+    const deps = fakeSyncDeps(async (cmd: string) => {
+      if (cmd === bringupLogTailCmd()) throw new Error("container exec refused");
+      return { code: 0, stdout: "no git checkout at /workspace/websites", stderr: "" };
+    });
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await checkAndRecordReadiness(deps, storage, STUDIO_ID, async () => {});
+      const line = errSpy.mock.calls.map((c) => String(c[0]))
+        .find((s) => s.includes("bring-up log tail read failed"));
+      expect(line).toMatch(
+        /studio websites--pilot: bring-up log tail read failed, reporting the verdict without it/,
+      );
+      // The verdict is the decision; the diagnostic must not have altered it.
+      expect((await storage.get(STATUS_KEY))?.readiness?.kind).toBe("bare");
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it("checks the REPO segment of the studio id, not the full id, not the role", async () => {

@@ -378,6 +378,7 @@ async function refreshReadRepos(
  */
 export async function readTailscaleHost(
   sbExec: (cmd: string) => Promise<{ code: number; stdout: string; stderr: string }>,
+  id: string,
 ): Promise<{ ok: true; host: string | null } | { ok: false }> {
   try {
     const res = await sbExec("cat /workspace/.ts-host 2>/dev/null");
@@ -386,7 +387,7 @@ export async function readTailscaleHost(
     const host = res.stdout.trim();
     return { ok: true, host: host.length > 0 ? host : null };
   } catch (err) {
-    console.error("studio tailscaleHost read failed", err);
+    console.error(`studio ${id}: tailscaleHost read failed`, err);
     return { ok: false };
   }
 }
@@ -452,7 +453,7 @@ export async function runRefreshToken(
         // Same rule as deploy/do.ts's terminalReport and agents/do.ts's
         // abort-on-terminal catch: a failed alert must not unwind an
         // already-computed, already-degraded status.
-        console.error("studio refresh telegram alert failed", err);
+        console.error(`studio ${next.id}: refresh telegram alert failed`, err);
       }
     }
   }
@@ -462,7 +463,7 @@ export async function runRefreshToken(
   // to its GitHub token. See readTailscaleHost's own doc comment for why
   // absent -> null (overwrite) but a throw leaves `next.tailscaleHost`
   // (already carried forward from `base` by the spreads above) untouched.
-  const tsHost = await readTailscaleHost(deps.sbExec);
+  const tsHost = await readTailscaleHost(deps.sbExec, next.id);
   if (tsHost.ok) next = { ...next, tailscaleHost: tsHost.host };
 
   await deps.recordStudio(next);
@@ -2122,11 +2123,11 @@ export function readinessOf(verdict: ProvisionedVerdict, checkedAt: string): Stu
  * returned immediately without a second attempt.
  */
 export async function checkProvisionedWithRetry(
-  syncDeps: SessionSyncDeps, repo: string, harness?: string | null,
+  syncDeps: SessionSyncDeps, repo: string, harness?: string | null, id?: string,
 ): Promise<ProvisionedVerdict> {
   let last: ProvisionedVerdict = { kind: "inconclusive", reason: "check never ran" };
   for (let attempt = 0; attempt < CHECK_ATTEMPTS; attempt++) {
-    last = await runProvisionedCheck(syncDeps, repo, harness);
+    last = await runProvisionedCheck(syncDeps, repo, harness, id);
     if (last.kind !== "inconclusive") return last;
   }
   return last;
@@ -2440,9 +2441,13 @@ async function recordTaskWakeDelivered(storage: StudioStorage, incarnationKey: s
  * already has (issue #100): the check execs into the container, and an exec
  * STARTS a stopped one. Refused from storage alone, as `inconclusive` — a
  * statement about the check, which did not run, never about the studio.
+ *
+ * `id` threads to the check's own bring-up-tail failure log (S21 F9): this
+ * route is the one readiness surface whose failure line would otherwise name
+ * no studio at all.
  */
 export async function checkProvisionedGated(
-  storage: StudioStorage, syncDeps: SessionSyncDeps, repo: string,
+  storage: StudioStorage, syncDeps: SessionSyncDeps, repo: string, id: string,
 ): Promise<ProvisionedVerdict> {
   const state = await gatedStateIn(storage, syncDeps.now);
   if (state === null) {
@@ -2454,7 +2459,7 @@ export async function checkProvisionedGated(
   if (state === DESTROY_IN_FLIGHT) {
     return { kind: "inconclusive", reason: "check not run: a destroy is in flight — the check would start the container it is stopping" };
   }
-  return checkProvisionedWithRetry(syncDeps, repo, await storedHarness(storage));
+  return checkProvisionedWithRetry(syncDeps, repo, await storedHarness(storage), id);
 }
 
 /**
@@ -2480,7 +2485,7 @@ async function recycleVerdict(
   if (status.state !== "running") {
     return { kind: "bare", reason: `provisioning reported ${status.state}: ${status.error ?? "no error recorded"}` };
   }
-  return checkProvisionedWithRetry(syncDeps, cfg.repo, harness);
+  return checkProvisionedWithRetry(syncDeps, cfg.repo, harness, status.id);
 }
 
 /** One exec of provision.ts's provisionedCheckCmd, mapped to a verdict. The
@@ -2488,7 +2493,7 @@ async function recycleVerdict(
  *  provisioned); a throw or an unrecognisable answer is inconclusive, never
  *  a failure — see recycleVerdict's doc comment. */
 async function runProvisionedCheck(
-  syncDeps: SessionSyncDeps, repo: string, harness?: string | null,
+  syncDeps: SessionSyncDeps, repo: string, harness?: string | null, id?: string,
 ): Promise<ProvisionedVerdict> {
   try {
     const res = await syncDeps.exec(provisionedCheckCmd(repo, harness));
@@ -2513,7 +2518,7 @@ async function runProvisionedCheck(
     // exact diagnostic that had to be reconstructed from file mtimes on
     // 2026-09-23. Paid ONLY on a bare verdict: a provisioned studio never
     // issues this exec at all.
-    if (out.length > 0) return { kind: "bare", reason: await withBringupLogTail(syncDeps, out) };
+    if (out.length > 0) return { kind: "bare", reason: await withBringupLogTail(syncDeps, out, id) };
     const stderr = res.stderr.trim();
     return {
       kind: "inconclusive",
@@ -2543,7 +2548,7 @@ async function runProvisionedCheck(
  * bring-up's own `bringup_redact`, so this is the second of two passes, not
  * the only one.
  */
-async function withBringupLogTail(syncDeps: SessionSyncDeps, reason: string): Promise<string> {
+async function withBringupLogTail(syncDeps: SessionSyncDeps, reason: string, id?: string): Promise<string> {
   try {
     const res = await syncDeps.exec(bringupLogTailCmd());
     const tail = res.stdout.trim();
@@ -2553,7 +2558,16 @@ async function withBringupLogTail(syncDeps: SessionSyncDeps, reason: string): Pr
       : tail;
     return `${reason}\n--- ${BRINGUP_LOG_PATH} (tail) ---\n${clipped}`;
   } catch (err) {
-    console.error("studio: bring-up log tail read failed, reporting the verdict without it", err);
+    // `id` stays optional only for the exported checkProvisionedWithRetry
+    // test seam, whose own suite (studio.replacement.test.ts) calls it
+    // bare; every production path threads a real studio id, the gated
+    // /provisioned route being the last one closed (S21 F9, review N1).
+    console.error(
+      id === undefined
+        ? "studio: bring-up log tail read failed, reporting the verdict without it"
+        : `studio ${id}: bring-up log tail read failed, reporting the verdict without it`,
+      err,
+    );
     return reason;
   }
 }
@@ -2956,7 +2970,7 @@ export async function checkAndRecordReadiness(
   if (!parsed) return null;
   const harness = await storedHarness(storage);
   const destroyLanded = await watchForDestroy(storage, syncDeps.now);
-  const verdict = await checkProvisionedWithRetry(syncDeps, parsed.repo, harness);
+  const verdict = await checkProvisionedWithRetry(syncDeps, parsed.repo, harness, idFallback);
   const readiness = readinessOf(verdict, syncDeps.now().toISOString());
   // Issue #123: the check's exec opened the input gate; a destroy that landed
   // meanwhile keeps its row. Otherwise build on the row as it is NOW.
@@ -5042,6 +5056,7 @@ async function applyActivityVerdict(
   recordStudioFn: ((status: StudioStatus) => Promise<void>) | undefined,
   paneVerdict: FrameVerdict,
   hookHeartbeat: HookHeartbeat | null | undefined,
+  id: string,
   onLeadWorking?: () => Promise<void>,
   onStaleBackgroundShell?: () => Promise<void>,
 ): Promise<void> {
@@ -5062,7 +5077,7 @@ async function applyActivityVerdict(
     if (fresh) await recordStudioFn(await withObserved(storage, fresh));
   }
   if (onLeadWorking && nextAct.state === "working" && prevActivity?.state !== "working") {
-    await autoWorking(deps, storage as unknown as AutoWorkingStorage, onLeadWorking);
+    await autoWorking(deps, storage as unknown as AutoWorkingStorage, onLeadWorking, id);
   }
   if (onStaleBackgroundShell) {
     const nextAge = backgroundShellAgeMs(nextAct, deps.now());
@@ -5083,7 +5098,7 @@ async function applyActivityVerdict(
     const nowStale = nextAge !== null && nextAge >= BACKGROUND_SHELL_STALE_MS;
     const wasStale = prevAge !== null && prevAge >= BACKGROUND_SHELL_STALE_MS;
     if (nowStale && !wasStale) {
-      await staleShellNudge(deps, storage as unknown as StaleShellNudgeStorage, onStaleBackgroundShell);
+      await staleShellNudge(deps, storage as unknown as StaleShellNudgeStorage, onStaleBackgroundShell, id);
     }
   }
 }
@@ -5103,7 +5118,7 @@ type AutoWorkingStorage = {
  *  to working, so the board read `submitted` while they worked. Rate-bound,
  *  and never fails the tick: a board hiccup waits for the next window. */
 async function autoWorking(
-  deps: ShipDeps, storage: AutoWorkingStorage, onLeadWorking: () => Promise<void>,
+  deps: ShipDeps, storage: AutoWorkingStorage, onLeadWorking: () => Promise<void>, id: string,
 ): Promise<void> {
   const last = Date.parse((await storage.get(AUTO_WORKING_KEY)) ?? "");
   if (Number.isFinite(last) && deps.now().getTime() - last < AUTO_WORKING_EVERY_MS) return;
@@ -5111,7 +5126,7 @@ async function autoWorking(
   try {
     await onLeadWorking();
   } catch (err) {
-    console.error("auto submitted->working failed, next window retries", err);
+    console.error(`studio ${id}: auto submitted->working failed, next window retries`, err);
   }
 }
 
@@ -5135,7 +5150,7 @@ type StaleShellNudgeStorage = {
  *  never fails the tick: a wake gate refusal (stopped, limit modal, etc.) or
  *  a transient failure just waits for the next crossing/window. */
 async function staleShellNudge(
-  deps: ShipDeps, storage: StaleShellNudgeStorage, onStaleBackgroundShell: () => Promise<void>,
+  deps: ShipDeps, storage: StaleShellNudgeStorage, onStaleBackgroundShell: () => Promise<void>, id: string,
 ): Promise<void> {
   const last = Date.parse((await storage.get(STALE_SHELL_NUDGE_KEY)) ?? "");
   if (Number.isFinite(last) && deps.now().getTime() - last < STALE_SHELL_NUDGE_EVERY_MS) return;
@@ -5143,7 +5158,7 @@ async function staleShellNudge(
   try {
     await onStaleBackgroundShell();
   } catch (err) {
-    console.error("stale background-shell nudge failed, next window retries", err);
+    console.error(`studio ${id}: stale background-shell nudge failed, next window retries`, err);
   }
 }
 
@@ -5480,7 +5495,7 @@ export async function runShipTickWithObservation(
       // No exec result exists on this path at all (the exec itself never
       // answered) — no hook evidence either, same reasoning as the synthetic
       // pane verdict right above.
-      await applyActivityVerdict(deps, storage, recordStudioFn, probeFailedVerdict, undefined);
+      await applyActivityVerdict(deps, storage, recordStudioFn, probeFailedVerdict, undefined, id);
     } catch (activityErr) {
       console.error(`shipTranscript ${id}: could not record "probe failed" activity, continuing`, activityErr);
     }
@@ -5572,7 +5587,7 @@ export async function runShipTickWithObservation(
   // `applyActivityVerdict`, above `runShipTickWithObservation`).
   if (result.paneVerdict !== undefined) {
     await applyActivityVerdict(
-      deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat, onLeadWorking, onStaleBackgroundShell,
+      deps, storage, recordStudioFn, result.paneVerdict, result.hookHeartbeat, id, onLeadWorking, onStaleBackgroundShell,
     );
   }
 
@@ -5792,7 +5807,7 @@ export class StudioDO extends Sandbox<Env> {
         this.envVars = launched.envVars;
         this.envAccount = launched.envAccount;
       } catch (err) {
-        console.error("studio: could not load the persisted spawn token at construction", err);
+        console.error(`studio ${ctx.id.name}: could not load the persisted spawn token at construction`, err);
       }
     });
   }
@@ -5811,7 +5826,7 @@ export class StudioDO extends Sandbox<Env> {
    * dropped joiners in production on 2026-09-24.
    */
   private terminal(): TerminalBridge {
-    this.bridge ??= new TerminalBridge((opts) => sbAttachPty(this, opts));
+    this.bridge ??= new TerminalBridge((opts) => sbAttachPty(this, opts), this.selfId());
     return this.bridge;
   }
 
@@ -6216,7 +6231,7 @@ export class StudioDO extends Sandbox<Env> {
       this.ctx.storage, (cmd: string) => sbExec(this, cmd, EXEC_CLASSES.wake), this.isMaestro(), () => this.armSweep(),
       STALE_BACKGROUND_SHELL_NUDGE_PROMPT, undefined, this.selfId(),
     ));
-    logWakeOutcome("stale background-shell nudge", outcome);
+    logWakeOutcome(`studio ${this.selfId()}: stale background-shell nudge`, outcome);
   }
 
   /**
@@ -8188,7 +8203,7 @@ export class StudioDO extends Sandbox<Env> {
    * i.e. the studio id's own repo segment, which is what routes.ts passes.
    */
   async checkProvisioned(repo: string): Promise<ProvisionedVerdict> {
-    return checkProvisionedGated(this.ctx.storage, this.syncDeps("readiness"), repo);
+    return checkProvisionedGated(this.ctx.storage, this.syncDeps("readiness"), repo, this.selfId());
   }
 
   /**
@@ -8266,7 +8281,7 @@ export class StudioDO extends Sandbox<Env> {
             () => this.notifyStaleBackgroundShell(),
           );
         } catch (err) {
-          console.error("studio transcript ship failed", err);
+          console.error(`studio ${this.selfId()}: transcript ship tick failed`, err);
         }
       },
       () => this.rearm("shipTranscript", SHIP_TRANSCRIPT_SECONDS),
@@ -8583,7 +8598,7 @@ export class StudioDO extends Sandbox<Env> {
           logWakeOutcome("maestro sweep wake", result.wake);
           stop = result.stop;
         } catch (err) {
-          console.error("maestro sweep failed", err);
+          console.error(`studio ${this.selfId()}: maestro sweep failed`, err);
         }
       },
       async () => {

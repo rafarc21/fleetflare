@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractShellFunc } from "./exec-snippet";
+import { BRINGUP, extractRegion, extractShellFunc } from "./exec-snippet";
 import { requireTools } from "./require-tool";
 import { STUDIO_TMUX, STUDIO_TMUX_SOCKET, withStudioTmux } from "../../src/studio/tmux";
 
@@ -23,19 +23,7 @@ import { STUDIO_TMUX, STUDIO_TMUX_SOCKET, withStudioTmux } from "../../src/studi
  * `<dir>/tmux-<uid>/…`, and the default-server `kill-server` below kills only
  * the throwaway one. Never run with $TMUX set.
  */
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
 const SHELL = readFileSync(join(import.meta.dir, "../../container/studio-shell.sh"), "utf8");
-
-/** A `# >>> marker >>>` … `# <<< marker <<<` region, verbatim. */
-function extractRegion(src: string, marker: string): string {
-  const open = `# >>> ${marker} >>>`;
-  const close = `# <<< ${marker} <<<`;
-  const openAt = src.indexOf(open);
-  if (openAt === -1) throw new Error(`region opener ${open} not found in source`);
-  const closeAt = src.indexOf(close, openAt);
-  if (closeAt === -1) throw new Error(`region terminator ${close} not found in source`);
-  return src.slice(src.indexOf("\n", openAt) + 1, closeAt);
-}
 
 /** Bring-up's tmux shadow: every call it makes goes to fleet-studio. */
 const SHADOW = () => extractShellFunc(BRINGUP, "tmux");
