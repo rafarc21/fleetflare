@@ -19,7 +19,7 @@ Sweeps 1-4 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-de
 | 7 | profile.ts test-only re-export of container-class triple | GLM-OK |
 | 8 | directus client/card const exports used only by tests | GLM-OK |
 | 9 | watchdog.ts comment narrates 3 review rounds, not the contract | GLM-OK |
-| 10 | repo-slug `owner/name` grammar in 4 hands (GLM-OK slice: ops-repo only; rescue + write-proxy + test-creds already noted by sweep 1) | CLAUDE-ONLY |
+| 10 | repo-slug `owner/name` grammar in 4 hands (ops-repo + rescue + write-proxy already noted by sweep 1; test-creds is the one new home) | CLAUDE-ONLY |
 
 ### F1. One episode-flag module behind the three "1"/"0" flag dances — GLM-OK
 
@@ -84,7 +84,7 @@ Sweeps 1-4 (docs/maintainability/2026-10-08-deep-modules-sweep.md, 2026-10-10-de
 - **Proposed change:** rewrite the two doc comments to state the contract (what clears, when, why both flags, what happens without the reset) citing at most one issue ref each where the measured fact lives; delete the round-numbering and earlier-version narratives. `agents/do.ts`'s `shouldClearRearm` comment trims its round-1 story to the rule. Comment-only diff, no code change.
 - **Characterization first:** `test/watchdog.test.ts` + `test/agents.do.test.ts` pass unchanged (comments only); english-check clean.
 
-### F10. repo-slug `owner/name` grammar in 4 hands — CLAUDE-ONLY (slice: ops-repo already noted by sweep 1)
+### F10. repo-slug `owner/name` grammar in 4 hands — CLAUDE-ONLY (ops-repo/rescue/write-proxy noted by sweep 1)
 
 - **Files:** `const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/` at `src/ops-repo.ts:15`, `src/write-proxy/mode.ts:28`, `src/studio/rescue.ts:35` (`RESCUE_REPO_RE`), `src/creds/test-creds.ts:38` (`SLUG_RE`); each pairs it with its own trim/blank/null/log dance (`resolveOpsRepo` :17-25, `resolveRescueRemote` :39-47, mode.ts's `repoListed` family :41-56, test-creds' slug check :82).
 - **Problem:** one grammar, four homes. Sweep 1's deferred list (its doc, line 374) already named this fold — listing `ops-repo.ts`, `studio/rescue.ts`, `write-proxy/mode.ts` (+ memory/store.ts's pure pass-through) — and ruled its GLM-OK slice = ops-repo.ts + memory/store.ts only, rest CLAUDE-ONLY. The one home sweep 1 did not see is `creds/test-creds.ts:38` (credentials ground). Recorded here with that addition.
