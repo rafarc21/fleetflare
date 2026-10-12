@@ -110,7 +110,7 @@ interface RemoteUsageAggregate {
  * `--since` at all means "all time" (0). A string neither shape can parse
  * is reported as `{error}`, never silently treated as "all time".
  */
-export function parseSinceArg(since: string | undefined, now: () => number = Date.now): number | { error: string } {
+function parseSinceArg(since: string | undefined, now: () => number = Date.now): number | { error: string } {
   if (since === undefined) return 0;
   const dur = /^(\d+)([hd])$/.exec(since);
   if (dur) {

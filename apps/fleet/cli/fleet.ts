@@ -2382,7 +2382,7 @@ function isCountMap(v: unknown): v is Record<string, number> {
 
 /** Review F5: the state file's exact shape, or null. Absent maps are fine
  *  (older file); present-but-wrong is not. */
-export function parseReapState(raw: string): ReapState | null {
+function parseReapState(raw: string): ReapState | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

@@ -15,7 +15,7 @@
  */
 
 /** Largest whole unit, same scale `fleet ls`'s CHECKED column uses. */
-export function formatSnapshotAge(ms: number): string {
+function formatSnapshotAge(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);

@@ -3409,7 +3409,7 @@ async function recordRetryAttempt(deps: ProvisionDeps, reason: string): Promise<
  * it is ever stored, so this is the same defensive second pass, not the
  * only guard.
  */
-export function runGetStatus(existing: StudioStatus | null, idFallback: string): StudioStatus {
+function runGetStatus(existing: StudioStatus | null, idFallback: string): StudioStatus {
   const status = existing ?? {
     id: idFallback, state: "stopped" as const, tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
     burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,

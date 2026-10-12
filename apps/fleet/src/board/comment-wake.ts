@@ -85,7 +85,7 @@ export function isDoneRecordComment(body: string): boolean {
  * self-sustaining-loop failure mode `wake-events.ts`'s `WAVE_LOG_TITLE`
  * exclusion already exists to prevent for the maestro's own wave log.
  */
-export function isEnvelopeComment(body: string): boolean {
+function isEnvelopeComment(body: string): boolean {
   return parseEnvelopeComment(body) !== null;
 }
 
@@ -105,7 +105,7 @@ export function isEnvelopeComment(body: string): boolean {
  * that precedence is decided) -- this predicate only says "machine-shaped
  * login", not "always excluded".
  */
-export function isBotComment(authorLogin: string | undefined): boolean {
+function isBotComment(authorLogin: string | undefined): boolean {
   return typeof authorLogin === "string" && authorLogin.endsWith("[bot]");
 }
 
