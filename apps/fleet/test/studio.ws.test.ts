@@ -136,7 +136,7 @@ function fakeViewer(opts: { send?: (bytes: Uint8Array) => void; bufferedAmount?:
 }
 
 function envWithFakeStudio(attachPty: AttachPty) {
-  const bridge = new TerminalBridge(attachPty);
+  const bridge = new TerminalBridge(attachPty, "s-test");
   const seen: Request[] = [];
   const stub = {
     fetch: (req: Request) => {
@@ -515,7 +515,7 @@ describe("abrupt drops (a viewer socket's error event)", () => {
 
   it("an errored last socket closes the pty (it must not leak an attacher)", async () => {
     const pty = fakePty();
-    const bridge = new TerminalBridge(async () => pty.handle);
+    const bridge = new TerminalBridge(async () => pty.handle, "s-test");
     const viewer = fakeViewer();
     bridge.adopt(viewer.ws);
     await bridge.message(viewer.ws, JSON.stringify({ t: "resize", cols: 100, rows: 30 }));
@@ -563,7 +563,7 @@ describe("a throwing client must not silence the others", () => {
       },
     }).ws;
 
-    const bridge = new TerminalBridge(async () => pty.handle);
+    const bridge = new TerminalBridge(async () => pty.handle, "s-test");
     for (const ws of [first.ws, broken, third.ws]) bridge.adopt(ws);
     await bridge.message(first.ws, JSON.stringify({ t: "resize", cols: 100, rows: 30 }));
 
@@ -732,13 +732,31 @@ describe("a failed pty attempt must not be cached (issue #48)", () => {
     const attach = vi.fn(async () => {
       throw new Error("container unavailable");
     });
-    const bridge = new TerminalBridge(attach);
+    const bridge = new TerminalBridge(attach, "s-test");
     const frame = new Uint8Array([97]).buffer;
 
     await expect(bridge.message({} as WebSocket, frame)).rejects.toThrow("container unavailable");
     await expect(bridge.message({} as WebSocket, frame)).rejects.toThrow("container unavailable");
 
     expect(attach).toHaveBeenCalledTimes(2);
+  });
+
+  // S21 F7: the attach failure names the studio whose container refused the
+  // pty — the one question a merged wrangler tail cannot answer otherwise.
+  it("names the studio when the attach itself fails", async () => {
+    const attach = vi.fn(async () => {
+      throw new Error("container unavailable");
+    });
+    const bridge = new TerminalBridge(attach, "s-test");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await bridge.attach(upgradeReq());
+      expect(res.status).toBe(503);
+      expect(errSpy).toHaveBeenCalled();
+      expect(String(errSpy.mock.calls[0][0])).toMatch(/studio s-test terminal attach failed/);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it("a failure reached through message() does not make the next upgrade refuse", async () => {
@@ -752,7 +770,7 @@ describe("a failed pty attempt must not be cached (issue #48)", () => {
       if (calls === 1) throw new Error("container unavailable");
       return pty.handle;
     });
-    const bridge = new TerminalBridge(attach);
+    const bridge = new TerminalBridge(attach, "s-test");
 
     await expect(bridge.message({} as WebSocket, new Uint8Array([97]).buffer)).rejects.toThrow();
 
@@ -777,7 +795,7 @@ describe("a failed pty attempt must not be cached (issue #48)", () => {
       if (calls === 1) return new Promise<PtyHandle>((_resolve, reject) => (rejectFirst = reject));
       return healthy.handle;
     });
-    const bridge = new TerminalBridge(attach);
+    const bridge = new TerminalBridge(attach, "s-test");
 
     // Attempt #1 is in flight and will not settle for a while.
     const slow = bridge.attach(upgradeReq());
@@ -828,7 +846,7 @@ describe("WS_BUFFER_MAX backpressure", () => {
       },
     }).ws;
 
-    const bridge = new TerminalBridge(async () => pty.handle);
+    const bridge = new TerminalBridge(async () => pty.handle, "s-test");
     bridge.adopt(slow);
     await bridge.message(slow, JSON.stringify({ t: "resize", cols: 100, rows: 30 }));
 
@@ -886,7 +904,7 @@ describe("sbAttachPty adapter", () => {
   it("creates the shared studio session and requests the pty with the given size", async () => {
     const sb = fakeSandboxPtyHost();
 
-    await sbAttachPty(sb.host, { cols: 100, rows: 30 });
+    await sbAttachPty(sb.host, { cols: 100, rows: 30, studioId: "s-test" });
 
     expect(sb.createSession).toHaveBeenCalledWith({ id: STUDIO_SESSION_ID });
     expect(sb.seen).toHaveLength(1);
@@ -905,7 +923,7 @@ describe("sbAttachPty adapter", () => {
     // a rename of PtyOptions.shell cannot pass silently.
     const sb = fakeSandboxPtyHost();
 
-    await sbAttachPty(sb.host, { cols: 80, rows: 24 });
+    await sbAttachPty(sb.host, { cols: 80, rows: 24, studioId: "s-test" });
 
     // The literal, not the import — ties the test to the real query param.
     expect(new URL(sb.seen[0].url).searchParams.get("shell")).toBe("/opt/fleet/studio-shell.sh");
@@ -915,7 +933,7 @@ describe("sbAttachPty adapter", () => {
     const sb = fakeSandboxPtyHost();
     sb.createSession.mockRejectedValueOnce(new Error("session 'studio' already exists"));
 
-    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24 });
+    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24, studioId: "s-test" });
 
     expect(pty).toBeDefined();
     expect(sb.seen).toHaveLength(1);
@@ -923,7 +941,7 @@ describe("sbAttachPty adapter", () => {
 
   it("write sends terminal bytes as a binary frame", async () => {
     const sb = fakeSandboxPtyHost();
-    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24 });
+    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24, studioId: "s-test" });
 
     pty.write(new Uint8Array([108, 115, 13]));
 
@@ -933,7 +951,7 @@ describe("sbAttachPty adapter", () => {
 
   it("resize speaks the container's own {type:'resize'} control format, not the browser frame", async () => {
     const sb = fakeSandboxPtyHost();
-    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24 });
+    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24, studioId: "s-test" });
 
     pty.resize(132, 43);
 
@@ -943,7 +961,7 @@ describe("sbAttachPty adapter", () => {
 
   it("container output surfaces on readable; container control text does not", async () => {
     const sb = fakeSandboxPtyHost();
-    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24 });
+    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24, studioId: "s-test" });
     const reader = pty.readable.getReader();
 
     sb.container.send(JSON.stringify({ type: "ready" }));
@@ -956,7 +974,7 @@ describe("sbAttachPty adapter", () => {
 
   it("closing the container socket ends the readable stream cleanly", async () => {
     const sb = fakeSandboxPtyHost();
-    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24 });
+    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24, studioId: "s-test" });
     const reader = pty.readable.getReader();
 
     sb.container.close();
@@ -969,7 +987,7 @@ describe("sbAttachPty adapter", () => {
     // Both end the pump, but only one is worth alerting on, and reporting a
     // failure as a clean exit hides it completely.
     const sb = fakeSandboxPtyHost();
-    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24 });
+    const pty = await sbAttachPty(sb.host, { cols: 80, rows: 24, studioId: "s-test" });
     const reader = pty.readable.getReader();
 
     sb.ptySocket.dispatchEvent(new Event("error"));
@@ -984,6 +1002,6 @@ describe("sbAttachPty adapter", () => {
       fetch: async () => new Response("no container", { status: 502 }),
     };
 
-    await expect(sbAttachPty(host, { cols: 80, rows: 24 })).rejects.toThrow(/502/);
+    await expect(sbAttachPty(host, { cols: 80, rows: 24, studioId: "s-test" })).rejects.toThrow(/502/);
   });
 });

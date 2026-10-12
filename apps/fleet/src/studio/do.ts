@@ -5811,7 +5811,7 @@ export class StudioDO extends Sandbox<Env> {
    * dropped joiners in production on 2026-09-24.
    */
   private terminal(): TerminalBridge {
-    this.bridge ??= new TerminalBridge((opts) => sbAttachPty(this, opts));
+    this.bridge ??= new TerminalBridge((opts) => sbAttachPty(this, opts), this.selfId());
     return this.bridge;
   }
 

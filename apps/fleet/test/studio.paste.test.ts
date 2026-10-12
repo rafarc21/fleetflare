@@ -203,6 +203,26 @@ describe("POST /studio/:id/paste", () => {
     const own = Object.getOwnPropertyNames(StudioDO.prototype);
     expect(own).toContain("pasteImage");
   });
+
+  // S21 F7: the paste catch names the studio the failed write belongs to.
+  it("names the studio when the paste write fails", async () => {
+    authorized();
+    const writeFile = vi.fn(async () => {
+      throw new Error("sandbox writeFile failed");
+    });
+    const { testEnv } = envWithFakeStudio(writeFile);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await handleStudio(pasteReq(STUDIO_ID, "image/png", new Uint8Array([1])), testEnv);
+      expect(res.status).toBe(500);
+      expect(errSpy).toHaveBeenCalled();
+      expect(String(errSpy.mock.calls[0][0])).toMatch(
+        /studio websites--pilot paste write failed/,
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });
 
 describe("PASTE_MAX_BYTES", () => {
