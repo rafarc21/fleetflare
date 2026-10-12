@@ -19,9 +19,9 @@
 
 import { showTask, type BoardApi, type BoardResult, type TaskComment } from "./board";
 
-export type StepVerdict = "attempted-ok" | "attempted-failed" | "not-mechanically-checkable";
+type StepVerdict = "attempted-ok" | "attempted-failed" | "not-mechanically-checkable";
 
-export interface StepResult {
+interface StepResult {
   /** The step's own text (or, for the url check, the url itself) — what a
    *  human skims to see WHICH check this line is about. */
   label: string;
@@ -85,7 +85,7 @@ export function findLatestResultEnvelope(comments: TaskComment[]) {
 // A step may match more than one candidate (all are checked); a step
 // matching none is not-mechanically-checkable.
 
-export interface RefCandidate {
+interface RefCandidate {
   kind: "pr" | "branch" | "commit";
   value: string;
 }
@@ -199,7 +199,7 @@ async function checkUrl(fetchUrl: VerifyFetch, url: string): Promise<StepResult>
  *  authenticated existence check needs to answer it. `repo` is already
  *  lowercased, matching this codebase's repo-slug convention elsewhere
  *  (board.ts's resolveBoardRepo). */
-export type GithubUrlCheck =
+type GithubUrlCheck =
   | { kind: "commit"; repo: string; sha: string }
   | { kind: "pr"; repo: string; number: number }
   | { kind: "issue"; repo: string; number: number }
