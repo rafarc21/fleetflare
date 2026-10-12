@@ -2652,7 +2652,12 @@ async function cmdPaste(creds: Credentials, id: string): Promise<void> {
     console.error("fleet paste: no image on the clipboard (pngpaste missing, or the clipboard has no image)");
     process.exit(1);
   }
-  console.log(await uploadPaste(creds, id, bytes));
+  try {
+    console.log(await uploadPaste(creds, id, bytes));
+  } catch (err) {
+    console.error(`fleet paste: ${errText(err)}`);
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
