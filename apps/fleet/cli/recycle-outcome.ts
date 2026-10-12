@@ -36,6 +36,7 @@ import { repairFailureLine } from "./repair-failure";
 import { readStatus } from "./status-poll";
 import type { StatusWithOperation } from "./status-poll";
 import { DESTROY_CLIENT_TIMEOUT_MS, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome";
+import { parseStudioStatus } from "./studio-row";
 import type { StudioStatus } from "../src/studio/types";
 
 /**
@@ -192,7 +193,15 @@ export async function requestRecycle(
       lines: [repairFailureLine("recycle", res.status, await res.text())], exitCode: 1,
     };
   }
-  return { kind: "ok", status: (await res.json()) as StudioStatus, lines: [], exitCode: 0 };
+  const status = parseStudioStatus(await res.json());
+  if (status === null) {
+    return {
+      kind: "http-error", status: null,
+      lines: [`recycle answered HTTP ${res.status} but the body was not a studio row`],
+      exitCode: 1,
+    };
+  }
+  return { kind: "ok", status, lines: [], exitCode: 0 };
 }
 
 /** The recycle-specific verdict: does this row prove THIS call's own recycle

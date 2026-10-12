@@ -52,6 +52,7 @@ import type { BoardTask } from "../src/board/types";
 import { formatAssignWake } from "./task-format";
 import { repairFailureLine } from "./repair-failure";
 import { errText } from "./diag";
+import { parseStudioStatus, parseStudioStatusArray } from "./studio-row";
 import { postTaskNew, taskNewFailureLine } from "./task-new-retry";
 import type { AssignWakeReport } from "../src/board/assign-wake";
 
@@ -103,7 +104,9 @@ async function listStudios(creds: Credentials): Promise<StudioStatus[]> {
     headers: { ...accessHeaders(creds), Accept: "application/json" },
   });
   if (!res.ok) fail(`could not list studios: ${res.status} ${(await res.text()).slice(0, 300)}`);
-  return (await res.json()) as StudioStatus[];
+  const studios = parseStudioStatusArray(await res.json());
+  if (studios === null) fail("studio listing was not studio rows");
+  return studios;
 }
 
 /** The registry's own view. `null` on any failure rather than an exit: this
@@ -115,7 +118,7 @@ async function fetchStatus(creds: Credentials, id: string): Promise<StudioStatus
   try {
     const res = await fetch(studioUrl(creds, id, "/status"), { headers: accessHeaders(creds) });
     if (!res.ok) return null;
-    return (await res.json()) as StudioStatus;
+    return parseStudioStatus(await res.json());
   } catch {
     return null;
   }
@@ -207,7 +210,9 @@ async function spawnStudio(
       }
       fail(`spawn failed: ${res.status} ${body.slice(0, 300)}`);
     }
-    return ((await res.json()) as StudioStatus).id;
+    const spawnedRow = parseStudioStatus(await res.json());
+    if (spawnedRow === null) fail(`spawn answered HTTP ${res.status} but the body was not a studio row`);
+    return spawnedRow.id;
   } finally {
     stop();
   }

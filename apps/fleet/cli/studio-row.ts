@@ -24,7 +24,7 @@ export function parseStudioStatus(raw: unknown): StudioStatus | null {
   // registry always persists `error` explicitly, so a wire row without it
   // is a different shape than this CLI was built for.
   if (typeof r.error !== "string" && r.error !== null) return null;
-  return r as StudioStatus;
+  return r as unknown as StudioStatus;
 }
 
 /** A listing route's whole body: every element must decode, else null —
