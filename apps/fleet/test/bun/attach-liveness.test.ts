@@ -13,6 +13,14 @@
 //       <HH:MM:SS>Z" once the view goes stale.
 //   T4: a frame every 300ms with a 1500ms stale threshold never goes stale —
 //       pins that a real frame resets the watchdog's lastFrameAt.
+//   T6: a non-numeric FLEET_ATTACH_STALE_MS refuses at startup (exit 1, the
+//       message names the value) — Number("90s") is NaN, which silently
+//       collapsed the watchdog to a ~1ms interval (#566).
+//   T7: the FLEET_ATTACH_CONNECT_TIMEOUT_MS sibling refuses the same way —
+//       NaN there silently disabled #123's connect-abandon timer.
+//   T8: an EMPTY value is unset, not a typo — it must fall back to the
+//       default, never be refused: a fix that only guards isFinite && n > 0
+//       would refuse it, because Number("") === 0.
 //
 // T1/T3 use a hand-rolled raw-TCP zombie, not Bun.serve's own WebSocket
 // server: Bun.serve answers a client's close frame with its own close frame
@@ -181,6 +189,43 @@ test("T4: a live view that keeps getting frames never goes stale and never recon
   await Bun.sleep(4000);
   expect(stderr()).not.toMatch(/no output for \d+s/);
   expect(w.upgrades()).toBe(1);
+}, 15000);
+
+// #566 — WHY: `Number(process.env.FLEET_ATTACH_STALE_MS ?? 90_000)` had no NaN
+// guard, so the natural unit-suffix typo "90s" meant a NaN watchdog interval
+// (~1ms) and a staleness test that read false for EVERY frame — both attach
+// watchdogs silently dead, no message anywhere. The refusal must fire at
+// module load, before any connect, so these spawn against a port where
+// NOTHING listens (127.0.0.1:1) and never need a server.
+//
+// Measured today (the bug): the child never exits — it reconnects to the
+// dead port forever — so `proc.exited` never resolves; the race returns -99
+// instead, making the RED an explicit -99 !== 1 rather than a 15s burn.
+const NO_SERVER = "http://127.0.0.1:1";
+
+test("T6: a non-numeric FLEET_ATTACH_STALE_MS refuses at startup, never silently NaN", async () => {
+  const { proc, stderr } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_STALE_MS: "90s" });
+  const code = await Promise.race([proc.exited, Bun.sleep(10_000).then(() => -99)]);
+  expect(code).toBe(1);
+  expect(stderr()).toContain('fleet: FLEET_ATTACH_STALE_MS must be a number of ms, got "90s"');
+}, 15000);
+
+test("T7: a non-numeric FLEET_ATTACH_CONNECT_TIMEOUT_MS refuses the same way", async () => {
+  const { proc, stderr } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_CONNECT_TIMEOUT_MS: "30x" });
+  const code = await Promise.race([proc.exited, Bun.sleep(10_000).then(() => -99)]);
+  expect(code).toBe(1);
+  expect(stderr()).toContain('fleet: FLEET_ATTACH_CONNECT_TIMEOUT_MS must be a number of ms, got "30x"');
+}, 15000);
+
+test("T8: an empty FLEET_ATTACH_STALE_MS falls back to the default, not a refusal", async () => {
+  // An empty value is the operator's "I left FLEET_ATTACH_STALE_MS= blank",
+  // not a typo — treat as unset, fallback 90s. No server listens, so the
+  // child hangs on its connect/reconnect loop (exit code there is that
+  // error path, NOT what we pin); refusal-vs-fallback is pinned on stderr
+  // alone, and the race tolerates the hang either way.
+  const { proc, stderr } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_STALE_MS: "" });
+  await Promise.race([proc.exited, Bun.sleep(8000).then(() => null)]);
+  expect(stderr()).not.toContain("must be a number of ms");
 }, 15000);
 
 test("attachTitle formats waiting, live and stale states", () => {
