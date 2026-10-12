@@ -13,15 +13,28 @@ describe("parseCliArgs", () => {
   // operator reaches for when something looks wrong, and fanning an exec out
   // to every studio there is how it becomes the slowest.
   it("ls takes no argument and is NOT fresh by default", () => {
-    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false });
+    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
   });
 
   it("ls --fresh asks for a live check per studio", () => {
-    expect(parseCliArgs(["ls", "--fresh"])).toEqual({ cmd: "ls", fresh: true, json: false });
+    expect(parseCliArgs(["ls", "--fresh"])).toEqual({ cmd: "ls", fresh: true, json: false, prs: false });
+  });
+
+  // #332 review H1: the PRS column is OPT-IN — bare `fleet ls` never makes
+  // live GitHub reads (a 30s monitor polling ls was burning ~27k calls/hr
+  // through the Worker's per-studio scans). Same "no value, just presence"
+  // shape --fresh already takes, read from anywhere after the verb.
+  it("ls --prs asks for the PRS column's live open-prs read (opt-in, never the default)", () => {
+    expect(parseCliArgs(["ls", "--prs"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: true });
+  });
+
+  it("ls --prs composes with --fresh and --json, in any order", () => {
+    expect(parseCliArgs(["ls", "--fresh", "--prs", "--json"])).toEqual({ cmd: "ls", fresh: true, json: true, prs: true });
+    expect(parseCliArgs(["ls", "--json", "--prs", "--fresh"])).toEqual({ cmd: "ls", fresh: true, json: true, prs: true });
   });
 
   it("ls ignores a stray extra token (only the first two argv slots are read)", () => {
-    expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false, json: false });
+    expect(parseCliArgs(["ls", "extra"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
   });
 
   // Issue #37's second half: there was no way to ask for the truth NOW. The
@@ -342,6 +355,47 @@ describe("parseCliArgs", () => {
   // named "--force") — it is a usage error, same as `fleet destroy` bare.
   it("destroy --force with no id is a usage error, not a destroy of a studio named \"--force\"", () => {
     expect(parseCliArgs(["destroy", "--force"])).toEqual({ cmd: "usage", message: CLI_USAGE });
+  });
+
+  // Board issue #332: --strict-unmerged — the same bespoke "no value, just
+  // presence" shape as --force/--discard-unsynced/--park, refused with every
+  // other trailing token and when slid into the id slot.
+  it("destroy --strict-unmerged parses, alone or beside every other flag, in any order (#332)", () => {
+    expect(parseCliArgs(["destroy", "websites--scratch", "--strict-unmerged"])).toEqual({
+      cmd: "destroy", id: "websites--scratch", force: false, discardUnsynced: false, strictUnmerged: true,
+    });
+    for (const rest of [
+      ["--force", "--park", "--strict-unmerged"],
+      ["--strict-unmerged", "--force", "--park"],
+      ["--discard-unsynced", "--strict-unmerged"],
+    ]) {
+      expect(parseCliArgs(["destroy", "websites--scratch", ...rest])).toEqual({
+        cmd: "destroy", id: "websites--scratch", force: rest.includes("--force"),
+        discardUnsynced: rest.includes("--discard-unsynced"),
+        ...(rest.includes("--park") ? { park: true } : {}),
+        strictUnmerged: true,
+      });
+    }
+  });
+
+  it("plain destroy (no --strict-unmerged) keeps its exact shape — no strictUnmerged key (#332 regression pin)", () => {
+    const res = parseCliArgs(["destroy", "websites--scratch"]);
+    expect(res).toEqual({ cmd: "destroy", id: "websites--scratch", force: false, discardUnsynced: false });
+    expect(Object.keys(res)).not.toContain("strictUnmerged");
+  });
+
+  it("destroy --strict-unmerged twice, or sliding into the id slot, or beside an unknown flag, is a usage error", () => {
+    expect(parseCliArgs(["destroy", "websites--scratch", "--strict-unmerged", "--strict-unmerged"]).cmd).toBe("usage");
+    expect(parseCliArgs(["destroy", "--strict-unmerged"])).toEqual({ cmd: "usage", message: CLI_USAGE });
+    // A typo'd prefix (--strict) is an unknown token, never silently ignored.
+    expect(parseCliArgs(["destroy", "websites--scratch", "--strict"]).cmd).toBe("usage");
+    expect(parseCliArgs(["destroy", "websites--scratch", "--strict-unmerged", "--verbose"]).cmd).toBe("usage");
+  });
+
+  it("destroy's help names --strict-unmerged (#332)", () => {
+    expect(VERBS.destroy.args).toContain("--strict-unmerged");
+    expect(VERBS.destroy.summary).toContain("--strict-unmerged");
+    expect(VERBS.destroy.summary).toContain("park warning");
   });
 
   it("an unrecognised command is a usage error, not a crash", () => {
@@ -701,9 +755,9 @@ describe("fleet task new --continues — issue #54", () => {
 
 describe("fleet ls --json — issue #70", () => {
   it("--json sets json; combines with --fresh", () => {
-    expect(parseCliArgs(["ls", "--json"])).toEqual({ cmd: "ls", fresh: false, json: true });
-    expect(parseCliArgs(["ls", "--fresh", "--json"])).toEqual({ cmd: "ls", fresh: true, json: true });
-    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false });
+    expect(parseCliArgs(["ls", "--json"])).toEqual({ cmd: "ls", fresh: false, json: true, prs: false });
+    expect(parseCliArgs(["ls", "--fresh", "--json"])).toEqual({ cmd: "ls", fresh: true, json: true, prs: false });
+    expect(parseCliArgs(["ls"])).toEqual({ cmd: "ls", fresh: false, json: false, prs: false });
   });
 });
 

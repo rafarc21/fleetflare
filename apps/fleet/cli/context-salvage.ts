@@ -17,6 +17,7 @@
  */
 import { existsSync, mkdirSync, cpSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { errText } from "./diag";
 
 export interface ContextInventory {
   screenshotCount: number;
@@ -103,7 +104,6 @@ export function salvageContext(worktreePath: string, studioId: string, dest: Sal
     cpSync(join(worktreePath, ".context"), destination, { recursive: true });
     return { kind: "salvaged", destination, inventory };
   } catch (err) {
-    const why = err instanceof Error ? err.message : String(err);
-    return { kind: "refused", inventory, why: `salvage of .context/ failed: ${why}` };
+    return { kind: "refused", inventory, why: `salvage of .context/ failed: ${errText(err)}` };
   }
 }

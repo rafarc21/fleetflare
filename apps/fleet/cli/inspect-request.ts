@@ -3,6 +3,7 @@
 // header): a test can import it without dragging Bun globals into the root
 // type-check.
 import { INSPECT_EXEC_MS } from "../src/studio/inspect";
+import { errText, decodeBody } from "./diag";
 
 /**
  * How long `fleet inspect` waits for the Worker. Before #91 the fetch had no
@@ -38,14 +39,12 @@ export async function requestInspect(
           `after ${INSPECT_EXEC_MS / 1000}s)`,
       };
     }
-    return { ok: false, message: `could not reach the Worker: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, message: `could not reach the Worker: ${errText(err)}` };
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    // A Cloudflare error page (e.g. 1101 "Worker threw exception") is a whole
-    // HTML document; its <title> is the only part worth a terminal line.
-    const title = /<title>([^<]*)<\/title>/i.exec(text)?.[1]?.trim();
-    const detail = title ?? text.trim().slice(0, 300);
+    // A Cloudflare error page's <title> is the only part worth a terminal line — ./diag's decodeBody owns that decode (and its JSON .error branch).
+    const detail = decodeBody(res.status, text, 300);
     return {
       ok: false,
       message: `HTTP ${res.status} from the Worker/Durable Object side (the container was never ` +

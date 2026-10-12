@@ -335,4 +335,7 @@ test("--repo naming an invalid segment refuses, same posture as a no-repo cwd", 
   const result = await runTabs(flags({ repo: "acme/-" }), deps);
   expect(result.ok).toBe(false);
   expect(listStudiosCalls.length).toBe(0);
+  if (result.ok) throw new Error("unreachable");
+  expect(result.message).toBe(`fleet tabs: repo "acme/-" cannot name a studio: "-" is not a valid id segment ` +
+    "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)");
 });

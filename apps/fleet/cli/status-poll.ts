@@ -15,6 +15,7 @@
 // caller. Only `readStatus` itself moved; the two constants did not.
 import type { StudioStatus } from "../src/studio/types";
 import type { OperationInFlight } from "../src/studio/provision";
+import { errText } from "./diag";
 
 // Board issue #149: GET /studio/:id/status's real JSON body already carries
 // `operationInFlight` (do.ts's `statusDetailWithStorage` return type,
@@ -37,7 +38,7 @@ export async function readStatus(
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
-    return { ok: false, why: err instanceof Error ? err.message : String(err) };
+    return { ok: false, why: errText(err) };
   }
   if (!res.ok) return { ok: false, why: `HTTP ${res.status} ${(await res.text().catch(() => "")).trim().slice(0, 200)}`.trim() };
   try {

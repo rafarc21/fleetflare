@@ -63,6 +63,23 @@ describe("formatTable — no trailing pad, capped ERROR (#205)", () => {
     expect(t).toContain("clone failed: 403");
     expect(t).not.toContain("…");
   });
+
+  // Issue #399 (sweep-5 F1): one full-row exact-bytes pin of formatTable,
+  // written BEFORE the formatColumns fold. The base row carries null
+  // readiness/observed/burn (helpers/studio-row's defaults), so every cell
+  // renders a clock-free constant (? / "-" / "never") and the whole
+  // single-row table is byte-pinnable. This transcribes the table's own
+  // output for that fixed input — the before-snapshot the fold must keep.
+  // Board issue #332: the pin now carries the PRS column (between WIP and
+  // READY); a no-data row renders "-" in it, re-transcribed from the
+  // table's own output.
+  test("a base row's whole single-row table, every byte (#399)", () => {
+    const t = formatTable([row()]);
+    expect(t).toBe(
+      "ID                REPO     STATE    RST  WIP  PRS  READY  SESSION     ACTIVITY  CHECKED  ROW  ACCOUNT                  HOST  BURN  REFRESHED  ERROR\n" +
+      "acme-os--maestro  acme-os  running  -    -    -    ?      ? · snap ?  ?         never    -    CLAUDE_CODE_OAUTH_TOKEN  -     -     -          -",
+    );
+  });
 });
 
 describe("fleet check <id> keeps the full error (#205)", () => {
