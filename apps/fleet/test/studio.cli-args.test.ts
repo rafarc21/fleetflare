@@ -1165,6 +1165,9 @@ describe("task number grammar refuses 0 and past-2^53 — board task #565", () =
     expect(parseCliArgs(["task", "show", "0"]).cmd).toBe("usage");
     expect(parseCliArgs(["task", "show", "042"]).cmd).toBe("usage");
     expect(parseCliArgs(["task", "show", past]).cmd).toBe("usage");
+    // 2^53-1 is the top of the accepted range; 2^53 itself is past it.
+    expect(parseCliArgs(["task", "show", "9007199254740991"])).toEqual({ cmd: "task-show", number: 9007199254740991 });
+    expect(parseCliArgs(["task", "show", "9007199254740992"]).cmd).toBe("usage");
   });
 
   it("task verify refuses 0 and past-2^53", () => {

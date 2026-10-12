@@ -554,10 +554,11 @@ function splitReadRepos(raw: string): string[] | null {
   return repos.length === 0 ? null : repos;
 }
 
-/** Board task #565: an issue number is 1..2^53 — `0` is GitHub's "no
+/** Board task #565: an issue number is 1..2^53-1 — `0` is GitHub's "no
  *  issue" (the CLI's own --continues grammar already refuses it) and
  *  Number() rounds digit strings past 2^53 to issues that cannot exist. */
-function parseIssueNumber(raw: string): number | null {
+function parseIssueNumber(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
   if (!/^[1-9][0-9]*$/.test(raw)) return null;
   const n = Number(raw);
   return Number.isSafeInteger(n) ? n : null;
@@ -574,14 +575,14 @@ function parseTask(argv: string[]): CliCommand {
   const [sub, ...rest] = argv;
   if (sub === "show") {
     const raw = rest[0];
-    const number = raw === undefined ? null : parseIssueNumber(raw);
-    if (number === null) return usage(`fleet task show needs an issue number (got ${JSON.stringify(raw)})`);
+    const number = parseIssueNumber(raw);
+    if (number === null) return usage(`fleet task show needs an issue number${raw === undefined ? "" : ` (got ${JSON.stringify(raw)})`}`);
     return { cmd: "task-show", number };
   }
   if (sub === "verify") {
     const raw = rest[0];
-    const number = raw === undefined ? null : parseIssueNumber(raw);
-    if (number === null) return usage(`fleet task verify needs an issue number (got ${JSON.stringify(raw)})`);
+    const number = parseIssueNumber(raw);
+    if (number === null) return usage(`fleet task verify needs an issue number${raw === undefined ? "" : ` (got ${JSON.stringify(raw)})`}`);
     return { cmd: "task-verify", number };
   }
   if (sub === "assign") {
@@ -589,9 +590,10 @@ function parseTask(argv: string[]): CliCommand {
     // is why it is split out rather than folded into parseFlags's all-flags
     // grammar below.
     const [rawNumber, target, ...flagArgv] = rest;
-    const number = rawNumber === undefined ? null : parseIssueNumber(rawNumber);
+    const number = parseIssueNumber(rawNumber);
     if (number === null) {
-      return usage(`fleet task assign needs an issue number: fleet task assign <n> <role> (got ${JSON.stringify(rawNumber)})`);
+      const got = rawNumber === undefined ? "" : ` (got ${JSON.stringify(rawNumber)})`;
+      return usage(`fleet task assign needs an issue number: fleet task assign <n> <role>${got}`);
     }
     // `startsWith("--")` is what tells a missing positional from a flag, and it
     // survives issue #269 untouched: every target shape STARTS with a segment
@@ -620,9 +622,10 @@ function parseTask(argv: string[]): CliCommand {
     const [rawNumber, to, ...extra] = rest;
     const fromNone = extra.length === 1 && extra[0] === "--from-none";
     if (extra.length > 0 && !fromNone) return usage(`unexpected ${JSON.stringify(extra[0])}`);
-    const number = rawNumber === undefined ? null : parseIssueNumber(rawNumber);
+    const number = parseIssueNumber(rawNumber);
     if (number === null) {
-      return usage(`fleet task state needs an issue number: fleet task state <n> <to> (got ${JSON.stringify(rawNumber)})`);
+      const got = rawNumber === undefined ? "" : ` (got ${JSON.stringify(rawNumber)})`;
+      return usage(`fleet task state needs an issue number: fleet task state <n> <to>${got}`);
     }
     if (!isTaskState(to)) {
       return usage(
