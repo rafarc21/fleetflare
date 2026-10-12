@@ -1209,7 +1209,8 @@ export function pruneCursor(cursor: BurnCursor, presentPaths: ReadonlySet<string
     }
 
     fileOffsets[pkey] = cursor.fileOffsets[pkey] ?? 0;
-    if (cursor.fileHashes?.[pkey] !== undefined) fileHashes[pkey] = cursor.fileHashes[pkey]!;
+    const hash = cursor.fileHashes?.[pkey];
+    if (hash !== undefined) fileHashes[pkey] = hash;
     const literalKey = cursor.pathSession?.[pkey] === undefined ? sessionKeyOf(pkey) : null;
     const mapKey = cursor.pathSession?.[pkey] ?? (literalKey !== null ? sessionMapKey(literalKey) : undefined);
     if (mapKey !== undefined) {
