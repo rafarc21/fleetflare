@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { slotSecretName, slotNumberOf, labelVarName } from "../src/studio/account-slot";
-import { accountLabel, MAX_CLAUDE_ACCOUNTS, type ClaudeAccountEnv } from "../src/studio/accounts";
+import { accountLabel, type ClaudeAccountEnv } from "../src/studio/accounts";
 
 // ---------------------------------------------------------------------------
 // Issue #405 (sweep #394, finding F7) — the slot-name grammar round-trip
@@ -156,13 +156,15 @@ describe("slotOf's canonical-spelling rule, via accountLabel (PR #441 findings 2
 
   // Out-of-window and out-of-grammar spellings -> null, matching the old
   // scan in every one of these cases already: _0 parses as 0 (below the
-  // 1..MAX window), _10 parses as 10 (beyond it — MAX_CLAUDE_ACCOUNTS is 9,
-  // pinned here alongside the case that depends on it), a double underscore
-  // fails the grammar's regex entirely, and the bare empty string is as
-  // foreign as any name can be.
+  // 1..MAX window), a double underscore fails the grammar's regex
+  // entirely, and the bare empty string is as foreign as any name can be.
+  // The window's two edges are pinned here by behavior — the last in-window
+  // slot's canonical name reads its own label, one slot past it reads null
+  // (slot 9 in, slot 10 out) — never by restating the constant's value,
+  // the mirror test-lies-check's tautological rule refuses.
   it("out-of-window and out-of-grammar spellings (_0, _10, __2, empty) read null", () => {
-    expect(MAX_CLAUDE_ACCOUNTS).toBe(9);
     expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN_0")).toBeNull();
+    expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN_9")).toBe("nine@example.com");
     expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN_10")).toBeNull();
     expect(accountLabel(env, "CLAUDE_CODE_OAUTH_TOKEN__2")).toBeNull();
     expect(accountLabel(env, "")).toBeNull();
