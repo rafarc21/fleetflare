@@ -502,7 +502,7 @@ async function autoClosePhaseB(env: Env, setup: AutoCloseSetup, now: number): Pr
     const tasksResult = await listTasks(setup.api, setup.repo, {});
     const allTasks = tasksResult.ok ? tasksResult.value : [];
     const candidates = (await openTasksWithLatestPr(setup.api, setup.repo, allTasks, setup.budget))
-      .filter((t): t is { taskNumber: number; prNumber: number } => t.prNumber !== null)
+      .filter((t): t is { taskNumber: number; prNumber: number; readFailed: boolean } => t.prNumber !== null)
       .map((t) => ({ taskNumber: t.taskNumber, prNumber: t.prNumber }));
 
     // Board issue #215, Gap 1 (second check): the budget can run out DURING

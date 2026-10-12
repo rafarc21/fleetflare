@@ -10,13 +10,15 @@ import { studioLabel, type BoardTask, type BoardTaskView, type EnvelopeDoc } fro
 // test/board.verify.test.ts — the PORT is faked as a plain object literal
 // (never a vi.mock of the module under test), so every assertion below is
 // about what studioOpenPrs DID, never about a live issue or a source file's
-// text. The one vi.spyOn below targets board.ts's PUBLIC listTasks export —
-// the same collaborator-spy shape test/board.read-repos.test.ts already uses
-// for authModule.verifyAccess — and exists only because a `{assignedTo}`-only
-// listTasks call has no milestone/state leg to refuse on, so a `{ok:false}` is
-// structurally unreachable through the port alone; board.board.test.ts's own
-// "listIssues throwing resolves to null" comment records that same fact for
-// resolveLatestAssignedBrief.
+// text. The two vi.spyOn uses below target board.ts's PUBLIC listTasks and
+// showTask exports — the same collaborator-spy shape
+// test/board.read-repos.test.ts already uses for authModule.verifyAccess —
+// and exist only because a `{assignedTo}`-only listTasks call has no
+// milestone/state leg to refuse on, so a `{ok:false}` is structurally
+// unreachable through the port alone (and showTask, built on a plain
+// getIssue + listComments pair, cannot answer `{ok:false}` through the port
+// either); board.board.test.ts's own "listIssues throwing resolves to null"
+// comment records that same fact for resolveLatestAssignedBrief.
 
 const REPO = "acme-org/websites";
 const MINE = "websites--web-studio";
@@ -195,7 +197,12 @@ describe("studioOpenPrs", () => {
     expect(api.getPullRequest).not.toHaveBeenCalled();
   });
 
-  it("one task's showTask throwing degrades to nothing for THAT task — the others still reported", async () => {
+  // #416 item 3-tail: a task whose comments could not be read is a hole in
+  // the scan, not a "no PR" answer — the route's `unknown` array (a failed
+  // studio-wide scan) must be reachable from a per-task GitHub failure too,
+  // else strict undercounts on a mid-scan GitHub hiccup (the exact gap the
+  // #417 status comment left open).
+  it("one task's showTask throwing fails the whole scan — {ok:false}, never a silent no-PR for that task", async () => {
     const docB = envelopeDoc({ artifacts: [{ kind: "pr", pr: "11" }] }, 13);
     const api = tasksApi([view({ number: 12 }), view({ number: 13 })], { 13: [envelopeComment(docB)] }, {
       getIssue: vi.fn(async (_repo: string, number: number) => {
@@ -206,8 +213,31 @@ describe("studioOpenPrs", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const result = await studioOpenPrs(api, REPO, MINE);
     expect(result).toEqual({
-      ok: true,
-      value: [{ taskNumber: 13, prNumber: 11, title: "feat: the thing", url: `https://github.com/${REPO}/pull/11` }],
+      ok: false,
+      status: 502,
+      message: expect.stringContaining("#12"),
+    });
+    expect(errors).toHaveBeenCalled();
+  });
+
+  it("a {ok:false} showTask answer for one task fails the scan the same way — both read legs, not just the thrown one", async () => {
+    const docB = envelopeDoc({ artifacts: [{ kind: "pr", pr: "11" }] }, 13);
+    const api = fakeApi({
+      listIssues: vi.fn(async () => [view({ number: 12 }), view({ number: 13 })]),
+      getIssue: vi.fn(async (_repo: string, number: number) => task({ number })),
+      listComments: vi.fn(async (_repo: string, number: number) =>
+        number === 13 ? [envelopeComment(docB)] : []),
+    });
+    vi.spyOn(boardModule, "showTask").mockImplementation(async (_api, _repo, number: number) =>
+      number === 12
+        ? { ok: false as const, status: 502, message: "board upstream failed" }
+        : ({ ok: true as const, value: { task: task({ number }), comments: [] } } as const));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await studioOpenPrs(api, REPO, MINE);
+    expect(result).toEqual({
+      ok: false,
+      status: 502,
+      message: expect.stringContaining("#12"),
     });
     expect(errors).toHaveBeenCalled();
   });
@@ -215,9 +245,11 @@ describe("studioOpenPrs", () => {
   // #332 review H2 (operator-ordered): a PR whose live state cannot be read
   // means this module cannot answer the question it exists for — dropping it
   // would report a false zero to --strict-unmerged. The whole scan reads as
-  // failed (the route's `unknown`), never as clean. Deliberately DIFFERENT
-  // from the showTask-degrade contract below: openTasksWithLatestPr owns
-  // that posture and it is unchanged.
+  // failed (the route's `unknown`), never as clean. The same fail-closed
+  // family as the unread-task contract above (#416 item 3-tail): an unread
+  // task AND an unreadable PR state both fail the whole scan ({ok:false}),
+  // while pr-landed.ts's own two callers (promote-close, task-reap) keep
+  // the per-task degrade.
   it("one task's getPullRequest throwing fails the whole scan — {ok:false}, never a false zero", async () => {
     const docA = envelopeDoc({ artifacts: [{ kind: "pr", pr: "9" }] }, 12);
     const docB = envelopeDoc({ artifacts: [{ kind: "pr", pr: "11" }] }, 13);

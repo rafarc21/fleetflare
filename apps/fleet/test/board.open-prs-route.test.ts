@@ -262,6 +262,31 @@ describe("GET /studio/board/open-prs", () => {
     expect(logged).toContain("board upstream failed");
   });
 
+  // #416 item 2: one route request scans every studio of the repo
+  // CONCURRENTLY (Promise.all), not per-studio sequentially — fleet ls
+  // wall-clock drops by the studio count while the subrequest total is
+  // unchanged. Pinned behaviorally, not by source text: a scan that blocks
+  // until BOTH have started proves the second never waited for the first.
+  it("scans the studios of one repo concurrently — a blocked first studio never delays the second's start", async () => {
+    authorized();
+    await seedStudio("websites--web-studio", "acme-org/websites");
+    await seedStudio("websites--release-studio", "acme-org/websites");
+    let started = 0;
+    let bothStartedTogether = false;
+    vi.spyOn(openPrsModule, "studioOpenPrs").mockImplementation(async () => {
+      started += 1;
+      if (started === 2) bothStartedTogether = true;
+      await new Promise<void>((resolve) => {
+        const check = () => (started >= 2 ? resolve() : setTimeout(check, 0));
+        check();
+      });
+      return { ok: true as const, value: [] };
+    });
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, fakeApi(), reach);
+    expect(res.status).toBe(200);
+    expect(bothStartedTogether).toBe(true);
+  });
+
   // #332 review (maestro's ask): an auth failure must never cost a scan —
   // the gate at the top of handleBoard runs before the route reads a single
   // GitHub lane. Real verifyAccess (no spy — the same shape board.routes
