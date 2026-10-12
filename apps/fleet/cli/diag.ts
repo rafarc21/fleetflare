@@ -19,6 +19,11 @@ export function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** The CLI's one readability budget for an error body — how much of a
+ *  non-2xx body a terminal line shows. repair-failure.ts's 2000 is that
+ *  verb's own deliberate budget; every plain snippet shares this one. */
+export const ERROR_SNIPPET_MAX_CHARS = 300;
+
 /**
  * A non-2xx Worker body, reduced to the DETAIL of one terminal line — the
  * label, the status prefix, and the exit/throw policy all stay at the call

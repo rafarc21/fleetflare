@@ -20,7 +20,7 @@ import {
   formatAccountsTable, snapshotsEqual, buildLabelSuggestions, parseCswapListOutput, formatCswapUnavailableNote,
   type AccountSnapshotRow, type AccountCurrentState, type CswapRead,
 } from "./accounts-format";
-import { errText } from "./diag";
+import { errText, ERROR_SNIPPET_MAX_CHARS } from "./diag";
 
 export interface AccountsFlags {
   watch: boolean;
@@ -97,7 +97,7 @@ async function fetchAccountsApi(creds: Credentials): Promise<AccountsApiRow[]> {
     throw new Error(`fleet accounts: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
   if (!res.ok) {
-    throw new Error(`fleet accounts: ${res.status} ${(await res.text()).slice(0, 300)}`);
+    throw new Error(`fleet accounts: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
   }
   return (await res.json()) as AccountsApiRow[];
 }
@@ -316,7 +316,7 @@ async function doSync(creds: Credentials, fetchedAt: Date = new Date()): Promise
     throw new Error(`fleet accounts sync: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
   if (!res.ok) {
-    throw new Error(`fleet accounts sync: ${res.status} ${(await res.text()).slice(0, 300)}`);
+    throw new Error(`fleet accounts sync: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
   }
   const { applied, rejected, skipped } = (await res.json()) as {
     applied: string[];
@@ -452,7 +452,7 @@ async function postAccountsVerb(creds: Credentials, verb: "hold" | "clear", body
   } catch (err) {
     throw new Error(`fleet accounts ${verb}: could not reach ${creds.workerUrl}: ${errText(err)}`);
   }
-  if (!res.ok) throw new Error(`fleet accounts ${verb}: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) throw new Error(`fleet accounts ${verb}: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
   return res.json();
 }
 
