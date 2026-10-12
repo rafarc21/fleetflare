@@ -52,15 +52,15 @@ export interface OpenPr {
  * pr-landed.ts's own (see openTasksWithLatestPr), shared so the two scans
  * can never drift.
  *
- * Degrades per task, never per scan — the posture pr-landed.ts already
- * takes for showTask/listTasks (openTasksWithLatestPr owns that posture and
- * it is unchanged): a thrown showTask or a `{ok:false}` showTask logs
- * via console.error and contributes nothing for THAT task alone. The
- * alternative — failing the whole scan on one bad task — would report the
- * OTHERS' unmerged PRs as absent on a 5xx, which is exactly the false
- * "nothing to warn about" shape this module exists to prevent; the honest
- * contract is one bad task contributes nothing AND the rest of the scan
- * still answers for the tasks it could read.
+ * Degrade posture, per caller (#416 item 3-tail) — the per-task degrade
+ * (a thrown or `{ok:false}` showTask logging via console.error and
+ * reporting `prNumber: null`, `readFailed: true` for THAT task alone) is
+ * pr-landed.ts's own posture, owned by its two original callers
+ * (promote-close, task-reap), for whom one unread task must not stop the
+ * others. THIS caller instead treats an unread task as scan-fatal —
+ * `{ok:false}` — because a dropped task would undercount to
+ * --strict-unmerged; the unread-task rule joins the same fail-closed
+ * family as the thrown getPullRequest below.
  *
  * #332 review H2 (operator-ordered): a thrown getPullRequest FAILS THE
  * WHOLE SCAN ({ok:false}) — PR-state unreadable is never a dropped PR. A
@@ -88,7 +88,16 @@ export async function studioOpenPrs(
   // drift — the two "live PR interest" scans must agree forever).
   const tasksWithPr = await openTasksWithLatestPr(api, repo, listed.value);
   const prs: OpenPr[] = [];
-  for (const { taskNumber, prNumber } of tasksWithPr) {
+  for (const { taskNumber, prNumber, readFailed } of tasksWithPr) {
+    // #416 item 3-tail: an unreadable task is a hole in the scan, never a
+    // "no PR" answer for it — dropping it would let a mid-scan GitHub
+    // failure read as a confirmed zero to --strict-unmerged. Same
+    // fail-closed family as a thrown getPullRequest below: the whole scan
+    // answers {ok:false} so the route's `unknown` carries it.
+    if (readFailed) {
+      console.error(`open-prs: reading task #${taskNumber} in ${repo} failed`);
+      return { ok: false, status: 502, message: `reading task #${taskNumber} in ${repo} failed` };
+    }
     if (prNumber === null) continue;
 
     try {
