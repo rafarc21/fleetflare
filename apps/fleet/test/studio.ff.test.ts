@@ -136,6 +136,13 @@ describe("parseFfArgs", () => {
     expect(FF_HELP).toContain(DEFAULT_FF_ROLE);
     expect(FF_HELP).toContain("ctrl-]");
   });
+
+  // #501 F10: parseFfArgs accepts `#`-prefixed numbers (`/^#?(\d+)$/`), and
+  // the adopt line must say so — an operator typing `ff pilot #42` is typing
+  // it the way issues are written everywhere else, not making a mistake.
+  it("the adopt line says the # is optional (#501 F10)", () => {
+    expect(FF_HELP).toContain("the # is optional");
+  });
 });
 
 describe("isProvisioned", () => {
