@@ -49,6 +49,7 @@ import { readActivityFrame, agentPanelRows } from "../src/studio/activity";
 import type { BoardTask } from "../src/board/types";
 import { studioLabel, LIVE_TASK_STATES } from "../src/board/types";
 import { footerAtBottom, aboveAgentPanel, RULE_LINE } from "../src/studio/failover";
+import { errText } from "./diag";
 export { parseIdleDuration } from "../src/studio/cli-args";
 import { ACTIVITY_DO_STALE_SECONDS, ACTIVITY_MIRROR_STALE_SECONDS, formatAge } from "./readiness-format";
 
@@ -254,7 +255,7 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
   try {
     studios = await deps.listStudios();
   } catch (err) {
-    deps.log(`fleet reap: could not list studios (${err instanceof Error ? err.message : String(err)}) — nothing done`);
+    deps.log(`fleet reap: could not list studios (${errText(err)}) — nothing done`);
     return { exitCode: 1 };
   }
   let state: ReapState;
@@ -264,7 +265,7 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
   try {
     state = await deps.loadState();
   } catch (err) {
-    deps.log(`fleet reap: state unreadable (${err instanceof Error ? err.message : String(err)}) — floor unknown, reaping nothing this poll`);
+    deps.log(`fleet reap: state unreadable (${errText(err)}) — floor unknown, reaping nothing this poll`);
     state = emptyReapState();
     floorUnknown = true;
   }
@@ -285,7 +286,7 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
   try {
     board = await deps.listBoard();
   } catch (err) {
-    deps.log(`fleet reap: board read failed (${err instanceof Error ? err.message : String(err)}) — reaping nothing this poll`);
+    deps.log(`fleet reap: board read failed (${errText(err)}) — reaping nothing this poll`);
     return exit(1);
   }
   // A repo that uses the board always has task history (state=all): zero rows
@@ -379,7 +380,7 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
     try {
       await deps.heartbeat?.();
     } catch (err) {
-      deps.log(`fleet reap: run lock refresh failed (${err instanceof Error ? err.message : String(err)}) — stopping before ${s.id}`);
+      deps.log(`fleet reap: run lock refresh failed (${errText(err)}) — stopping before ${s.id}`);
       return exit(1);
     }
     try {
@@ -393,7 +394,7 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
       try {
         fresh = await deps.studioTasks(s.id);
       } catch (err) {
-        deps.log(`skip ${s.id}: fresh task read failed (${err instanceof Error ? err.message : String(err)})`);
+        deps.log(`skip ${s.id}: fresh task read failed (${errText(err)})`);
         continue;
       }
       const live = liveTasksOf(s.id, fresh);
@@ -422,7 +423,7 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
       const how = result.outcome === "already-stopped" ? "already stopped by another destroy" : "destroyed";
       deps.log(`REAPED ${s.id}: ${idleWord(idleMs)}, no open task, rescued, ${how}`);
     } catch (err) {
-      backOff(s.id, `error: ${err instanceof Error ? err.message : String(err)}`);
+      backOff(s.id, `error: ${errText(err)}`);
     }
   }
   return exit(0);

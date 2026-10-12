@@ -48,6 +48,7 @@ import { requestInspect, renderInspect, formatSessionForceArmedLine, type Inspec
 import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
 import { repairFailureLine, discardNote, destroyPath } from "./repair-failure";
+import { errText } from "./diag";
 import { requestDestroy, readStatus, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome";
 import { requestRecycle } from "./recycle-outcome";
 import {
@@ -628,7 +629,7 @@ async function refreshAll(creds: Credentials, studios: StudioStatus[]): Promise<
       }
       return (await res.json()) as StudioStatus;
     } catch (err) {
-      console.error(`fleet ls --fresh: ${s.id}: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`fleet ls --fresh: ${s.id}: ${errText(err)}`);
       return s;
     }
   }));
@@ -892,7 +893,7 @@ async function cmdTabs(creds: Credentials, flags: TabsFlags): Promise<void> {
       log: (line) => console.log(line),
     });
   } catch (err) {
-    console.error(`fleet tabs: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`fleet tabs: ${errText(err)}`);
     process.exit(1);
   }
   if (!result.ok) {
@@ -1876,7 +1877,7 @@ export async function runRescueAll(flags: RescueAllFlags, deps: RescueAllDeps): 
     try {
       outcome = await rescueWithTimeout(deps.rescueStudio, s.id, timeoutMs);
     } catch (err) {
-      outcome = { ok: false, error: err instanceof Error ? err.message : String(err) };
+      outcome = { ok: false, error: errText(err) };
     }
     const elapsed = `(${((Date.now() - startedAt) / 1000).toFixed(1)}s)`;
     if (!outcome.ok) {
@@ -2004,7 +2005,7 @@ export async function cmdRescueAll(creds: Credentials, flags: RescueAllFlags): P
       } catch (err) {
         const name = err instanceof Error ? err.name : "";
         if (name === "TimeoutError" || name === "AbortError") return rescueTimedOutOutcome(timeoutMs);
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        return { ok: false, error: errText(err) };
       }
       if (!res.ok) return { ok: false, error: `${res.status} ${(await res.text()).slice(0, 300)}` };
       return (await res.json()) as RescueAllOutcome;
@@ -2111,7 +2112,7 @@ export function reapDeps(
         const outcome = (await res.json()) as RescueAllOutcome;
         return outcome.ok === true ? { ok: true } : { ok: false, error: outcome.error ?? "rescue answered not ok" };
       } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        return { ok: false, error: errText(err) };
       }
     },
     destroy: async (id) => {
@@ -2412,7 +2413,7 @@ export async function cmdAttach(creds: Credentials, id: string): Promise<void> {
       // discipline to do that for us).
       // uploadPaste's own thrown message already reads "paste upload
       // failed: ..." — not re-stated here, or the line would stutter.
-      console.error(`\r\n[fleet] ${err instanceof Error ? err.message : String(err)}\r\n`);
+      console.error(`\r\n[fleet] ${errText(err)}\r\n`);
       ws.send(new Uint8Array([CTRL_V]));
     }
   }
@@ -2483,7 +2484,7 @@ export async function cmdAttach(creds: Credentials, id: string): Promise<void> {
           try {
             if ((await handleChunk(ws, chunk)) === "exit") finish("exit");
           } catch (err) {
-            console.error(`fleet: input handling failed: ${err instanceof Error ? err.message : String(err)}`);
+            console.error(`fleet: input handling failed: ${errText(err)}`);
           }
         });
       };
@@ -2731,7 +2732,7 @@ async function main(): Promise<void> {
 // Task 9 headless verification script does exactly this.
 if (import.meta.main) {
   main().catch((err) => {
-    console.error(`fleet: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`fleet: ${errText(err)}`);
     process.exit(1);
   });
 }

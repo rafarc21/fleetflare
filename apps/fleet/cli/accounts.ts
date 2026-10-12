@@ -19,6 +19,7 @@ import {
   formatAccountsTable, snapshotsEqual, buildLabelSuggestions, parseCswapListOutput, formatCswapUnavailableNote,
   type AccountSnapshotRow, type AccountCurrentState, type CswapRead,
 } from "./accounts-format";
+import { errText } from "./diag";
 
 export interface AccountsFlags {
   watch: boolean;
@@ -80,15 +81,11 @@ export async function readCswapList(): Promise<CswapRead> {
 
 /** Message text, not console output: `--watch`'s loop needs to catch and
  *  retry on exactly the same failures a one-shot command exits on (see
- *  cli/ff.ts's `errText`, same shape), so both the bad-status and the raw
+ *  cli/diag.ts's `errText`), so both the bad-status and the raw
  *  network-exception case THROW here rather than printing/exiting directly.
  *  The two one-shot callers (`cmdAccounts`, `cmdAccountsSync`) catch this at
  *  their own top level and print+exit exactly as before; `watchAccounts`'s
  *  loop catches it per-iteration and retries instead. */
-function errText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 async function fetchAccountsApi(creds: Credentials): Promise<AccountsApiRow[]> {
   let res: Response;
   try {
