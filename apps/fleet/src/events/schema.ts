@@ -46,3 +46,7 @@ export function makeEvent(input: NewEvent, now: number, rand: string): FleetEven
     requiresAck: input.requiresAck ?? false,
   };
 }
+
+export function shortId(): string {
+  return crypto.randomUUID().slice(0, 8);
+}

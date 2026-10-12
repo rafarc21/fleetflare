@@ -192,8 +192,10 @@ describe("fetchStudioOpenPrs — one studio's live answer (#332)", () => {
 // so this is the only lane that can observe the whole edge: parse → status
 // read → open-prs read → `unknown` refusal → exit 1, with the stand-in
 // recording every request so "the destroy never fired" is an assertion, not
-// an inference from a source pin (cli-destroy-flags.test.ts's ordering pin
-// above carries the structural half).
+// an inference from a source pin — and the behavioral tests in this file
+// now carry the structural half too: request recording proves flag wiring,
+// refusal-before-destroy, and warning-after-stop, without reading source
+// text (#416 item 4: they replaced the old cmdDestroy source-pin file).
 describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 review H2)", () => {
   const FLEET_CLI = join(import.meta.dir, "../../cli/fleet.ts");
   const ID = "websites--web-studio";
@@ -251,6 +253,33 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
     return { out, err, code };
   }
 
+  /** The Worker stand-in, destroy-capable: GET /studio/<id>/status answers a
+   *  row (state given), GET /studio/board/open-prs answers the scripted body,
+   *  POST /studio/<id>/destroy answers a stopped row, and every request is
+   *  recorded WITH its query string so "which flags reached the URL" is an
+   *  assertion on a real request, never a source pin. */
+  function startDestroyWorker(openPrsBody: unknown, statusState: "running" | "stopped" = "stopped") {
+    const requests: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const u = new URL(req.url);
+        requests.push(`${req.method} ${u.pathname}${u.search}`);
+        if (u.pathname === `/studio/${ID}/status` && req.method === "GET") {
+          return Response.json({ id: ID, state: statusState, error: null, repoSlug: "acme-org/websites" });
+        }
+        if (u.pathname === "/studio/board/open-prs" && req.method === "GET") {
+          return Response.json(openPrsBody);
+        }
+        if (u.pathname === `/studio/${ID}/destroy` && req.method === "POST") {
+          return Response.json({ id: ID, state: "stopped", error: null, repoSlug: "acme-org/websites" });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    return { server, requests };
+  }
+
   test("a scan the route reports FAILED (unknown: [<id>]) refuses: the line, exit 1, and NO destroy request", async () => {
     const { server, requests } = startWorker({ repo: "acme-org/websites", prs: {}, unknown: [ID] });
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
@@ -269,6 +298,87 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
       expect(requests.some((p) => p.endsWith("/destroy"))).toBe(false);
     } finally {
       server.stop(true);
+    }
+  });
+
+  test("every destroy flag reaches the request's query string — force, discard-unsynced, park (issue #59, #332)", async () => {
+    const { server, requests } = startDestroyWorker({ repo: "acme-org/websites", prs: {}, unknown: [] });
+    const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
+    try {
+      const r = await run(["destroy", ID, "--force", "--discard-unsynced", "--park"], home);
+      expect(requests).toContain(`POST /studio/${ID}/destroy?force=true&discard-unsynced=true&park=true`);
+      expect(r.code).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("no flags: the destroy request carries a bare /destroy path — no empty query string", async () => {
+    const { server, requests } = startDestroyWorker({ repo: "acme-org/websites", prs: {}, unknown: [] });
+    const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
+    try {
+      await run(["destroy", ID], home);
+      expect(requests).toContain(`POST /studio/${ID}/destroy`);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("strict refusal with real PRs found: prints the refusal, exits 1, and the destroy never fired", async () => {
+    const { server, requests } = startDestroyWorker({
+      repo: "acme-org/websites", prs: { [ID]: [pr(9), pr(31)] }, unknown: [],
+    });
+    const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
+    try {
+      const r = await run(["destroy", ID, "--strict-unmerged"], home);
+      expect(r.err).toContain("fleet destroy: refusing: 2 unmerged PR(s) still open (--strict-unmerged)");
+      expect(r.code).toBe(1);
+      expect(requests.some((p) => p.endsWith("/destroy"))).toBe(false);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  // #332's ordering pin, behavioral: the park warning prints only on the
+  // CONFIRMED teardown path — a destroy answered 500 prints none at all.
+  test("park warning prints after a confirmed stop; a 500 destroy prints no park warning", async () => {
+    // Confirmed stop: the warning names the PR on stderr, exit 0.
+    const ok = startDestroyWorker({ repo: "acme-org/websites", prs: { [ID]: [pr(9)] }, unknown: [] });
+    const okHome = tmpHomeWithCredentials(`http://127.0.0.1:${ok.server.port}`);
+    try {
+      const r = await run(["destroy", ID], okHome);
+      expect(r.err).toContain("park warning: websites--web-studio still has 1 unmerged PR(s)");
+      expect(r.code).toBe(0);
+    } finally {
+      ok.server.stop(true);
+    }
+
+    // A destroy answered 500: no teardown, no park warning, exit 1.
+    const requests: string[] = [];
+    const failServer = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const u = new URL(req.url);
+        requests.push(`${req.method} ${u.pathname}`);
+        if (u.pathname === `/studio/${ID}/status` && req.method === "GET") {
+          return Response.json({ id: ID, state: "running", error: null, repoSlug: "acme-org/websites" });
+        }
+        if (u.pathname === "/studio/board/open-prs" && req.method === "GET") {
+          return Response.json({ repo: "acme-org/websites", prs: { [ID]: [pr(9)] }, unknown: [] });
+        }
+        if (u.pathname === `/studio/${ID}/destroy` && req.method === "POST") {
+          return new Response("destroy refused", { status: 500 });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const failHome = tmpHomeWithCredentials(`http://127.0.0.1:${failServer.port}`);
+    try {
+      const r = await run(["destroy", ID], failHome);
+      expect(r.err).not.toContain("park warning");
+      expect(r.code).toBe(1);
+    } finally {
+      failServer.stop(true);
     }
   });
 });

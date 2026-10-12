@@ -98,10 +98,10 @@ describe("cmdPrintAttachHandle — board #220", () => {
   });
 });
 
-// Source-pinning, same technique test/bun/cli-destroy-flags.test.ts already
-// uses for a call-site guarantee plain behavior tests can't make: proving
-// what a function's body does NOT contain, and where one branch sits
-// relative to another in main()'s own dispatcher.
+// Source-pinning, the technique test/bun/wake-gate-wiring.test.ts uses for
+// call-site guarantees plain behavior tests can't make, used here for the
+// same kind: proving what a function's body does NOT contain, and where one
+// branch sits relative to another in main()'s own dispatcher.
 describe("cmdPrintAttachHandle never touches cmdAttach's interactive machinery", () => {
   const src = readFileSync(join(import.meta.dir, "../../cli/fleet.ts"), "utf8");
 

@@ -1,5 +1,5 @@
 import { appendEvent } from "../events/log";
-import { makeEvent, type FleetEvent } from "../events/schema";
+import { makeEvent, shortId, type FleetEvent } from "../events/schema";
 import { routeDecision } from "../events/rules";
 import { sendCard, editCard, type InlineButton } from "../telegram/api";
 import { createApproval, setApprovalMessageId } from "../approvals/store";
@@ -34,10 +34,6 @@ export type LoopOutcome =
   | { kind: "continue"; task: TaskRecord }
   | { kind: "terminal"; task: TaskRecord };
 
-function rid(): string {
-  return crypto.randomUUID().slice(0, 8);
-}
-
 function card(task: TaskRecord, milestones: string[]): string {
   const lines = milestones.map((m) => `• ${m}`).join("\n");
   return `Working — ${task.taskId}\n${lines}`;
@@ -56,7 +52,7 @@ async function report(
       from: task.agentId, to, kind: "report",
       project: task.project, thread: task.thread, ref: task.taskId, body,
     },
-    deps.now, rid(),
+    deps.now, shortId(),
   );
   await appendEvent(deps.db, evt);
   return evt;
@@ -176,7 +172,7 @@ export async function advanceTask(deps: LoopDeps, task: TaskRecord): Promise<Loo
 
   // done
   if (status.pendingApproval) {
-    const id = `appr_${deps.now.toString(36)}_${rid()}`;
+    const id = `appr_${deps.now.toString(36)}_${shortId()}`;
     const eventBody =
       `${GATE_LABELS[status.pendingApproval.action]} — ` +
       `${JSON.stringify(status.pendingApproval.params)}`;
@@ -185,7 +181,7 @@ export async function advanceTask(deps: LoopDeps, task: TaskRecord): Promise<Loo
         from: next.agentId, to: "human", kind: "approval_request",
         project: next.project, thread: next.thread, ref: id, body: eventBody,
       },
-      deps.now, rid(),
+      deps.now, shortId(),
     );
     await appendEvent(deps.db, evt);
     await createApproval(

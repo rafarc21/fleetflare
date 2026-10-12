@@ -1629,6 +1629,36 @@ describe("burn cursor — a moved, re-adopted, shrunken or subagent transcript c
       const production = await burnIncrement(LEGACY_CURSOR, gz);
       expect(production.delta).toEqual({ turns: 1, inputTokens: 1, outputTokens: 77, costUsd: 0 });
     });
+
+    it("burnIncrement: a session entry key with no seeded mapKey resolves, not throws (issue #443 F6)", async () => {
+      // F6 hardening target: `sessions[mapKey]!` at resolveOffsets' rule (h)
+      // trusts the earlier rule pass to have seeded the entry this tick. A
+      // cursor is untrusted storage — shape it so a member's session key
+      // decodes to an entry the (h) read can miss: same tick as
+      // LEGACY_CURSOR's own migration (both files present), but the stored
+      // `sessions` map carries an entry whose key is an UNRELATED literal
+      // session key string — sessionMapKey(SID) never matches it, so the (h)
+      // read goes through the legacySeed path and must resolve without
+      // throwing. Before the fix this shape is already tolerated (the assert
+      // is same-tick-sound); the test pins the contract so a future refactor
+      // that breaks the seeding order fails HERE, not in production ticks.
+      const grownMain = MAIN_TEXT + legacyLine("legacy-u5", 5);
+      const foreignCursor: BurnCursor = {
+        ...LEGACY_CURSOR,
+        sessions: {
+          "unrelated-session-key": { counted: 5, hash: null },
+        } as unknown as Record<string, string>,
+      };
+      const gz = await gzipBytes(buildTar([{ name: ROOT, content: grownMain }, { name: SUB_A, content: SUB_TEXT }]));
+      const production = await burnIncrement(foreignCursor, gz);
+      // New content is counted: exactly the u5 line's own tokens.
+      expect(production.delta).toEqual({ turns: 1, inputTokens: 1, outputTokens: 5, costUsd: 0 });
+      expect(production.parseSkips).toBe(0);
+      // The foreign entry is superseded, not crashed on, and the session's
+      // own counted reflects the resolved end of the grown main file.
+      const entry = Object.entries(production.cursor.sessions ?? {}).find(([k]) => k !== "unrelated-session-key");
+      expect(entry).toBeDefined();
+    });
   });
 
   // ---------------------------------------------------------------------------

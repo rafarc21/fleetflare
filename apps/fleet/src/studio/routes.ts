@@ -42,7 +42,7 @@ import {
 } from "./account-limits-store";
 import { accountHoldActive } from "./rate-limit";
 import { appendEvent } from "../events/log";
-import { makeEvent } from "../events/schema";
+import { makeEvent, shortId } from "../events/schema";
 import { writeFleetAccountUsage, readOneAccountUsage } from "./account-usage-store";
 import { countWorkerExceptions } from "../exceptions";
 
@@ -498,7 +498,7 @@ export async function handleStudio(
     const now = new Date();
     const audit = (text: string) => appendEvent(env.DB, makeEvent(
       { from: "operator", to: "accounts", kind: "decision", project: "fleet", ref: name, body: text },
-      now.getTime(), crypto.randomUUID().slice(0, 8),
+      now.getTime(), shortId(),
     ));
     if (url.pathname === "/studio/accounts/clear") {
       const current = await readOneAccountLimit(env.DB, name);
