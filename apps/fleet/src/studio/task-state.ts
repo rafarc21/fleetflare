@@ -35,7 +35,7 @@ export type TaskStateFetchResult =
  *  file's header: a stale-`from` 409 is transitionTask's own words, and
  *  paraphrasing it would defeat the reason the route names what it actually
  *  found. */
-export type TaskStateResult =
+type TaskStateResult =
   | { ok: true; from: string; to: string }
   | { ok: false; status: number; message: string };
 
