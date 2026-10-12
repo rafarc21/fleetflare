@@ -59,7 +59,7 @@ The read of container/studio-bringup.sh appears 15 times: 14 identical spellings
 
 ### F10 — `fakeStorage(initial)` clones — CLAUDE-ONLY (adoption gap)
 
-5 byte-identical (md5-identical) clones of `function fakeStorage(initial?: StudioStatus)`: `studio.account-by-repo.test.ts:39`, `studio.account-launched.test.ts:50`, `studio.account-unmapped.test.ts:39`, `studio.auto-continue.test.ts:69`, `studio.parked-auto-resume.test.ts:91` — exactly what `helpers/do-storage.ts` `fakeStorage(seed)` does via `fakeStorage(initial ? {[STATUS_KEY]: initial} : undefined)` (the wrapper pattern `wake-gate.test.ts:34` already uses). 4 of 5 failover-lane. Census note: the other ~20 local fakeStorage variants are genuinely divergent (multi-key seeds, write-failure injection, single-method Pick shapes, multi-port unions) and stay local BY DESIGN per #371's helper header. CLAUDE-ONLY.
+5 byte-identical (md5-identical) clones of `function fakeStorage(initial?: StudioStatus)`: `studio.account-by-repo.test.ts:39`, `studio.account-launched.test.ts:50`, `studio.account-unmapped.test.ts:39`, `studio.auto-continue.test.ts:69`, `studio.parked-auto-resume.test.ts:91` — exactly what `helpers/do-storage.ts` `fakeStorage(seed)` does via `fakeStorage(initial ? {[STATUS_KEY]: initial} : undefined)` (the wrapper pattern `studio.wake-gate.test.ts:34` already uses). 4 of 5 failover-lane. Census note: the other ~20 local fakeStorage variants are genuinely divergent (multi-key seeds, write-failure injection, single-method Pick shapes, multi-port unions) and stay local BY DESIGN per #371's helper header. CLAUDE-ONLY.
 
 ### F11 — `waitFor(predicate, timeoutMs, intervalMs=50)` — GLM-OK
 
