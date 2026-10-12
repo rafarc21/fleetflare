@@ -63,6 +63,12 @@ appended by an LLM, no signature, no lock. Worker can write
 Fix: Worker GETs the PR before accepting. `src/github/api.ts` already reaches
 `pulls/`.
 
+**Landed since (2026-10): the Worker now verifies PR-claiming artifacts.**
+`getPullRequest` (src/board/board.ts) resolves a claimed PR's live state
+before an envelope is accepted, and a thrown lookup fails the envelope
+(issue #332 review). §3 item 1 below is therefore partially DONE — do not
+re-litigate it as a steal.
+
 ### 2.2 SessionStart hook is compaction-blind
 
 `apps/fleet/container/studio-bringup.sh` never reads hook payload `source`
@@ -247,7 +253,7 @@ firstmate's deepest work — but see §5.1: do NOT port their architecture.
 33. **Declarative dispatch routing.** `docs/examples/crew-dispatch.json` maps
     task shape → harness/model/effort, with an ARRAY of alternatives resolved by
     quota. Ours is one hardcoded ternary
-    (`ROLE_EFFORT: studio.effort ?? (name === "maestro" ? "max" : "")`).
+    (`ROLE_EFFORT: role.effort ?? (role.name === "cto" ? "max" : "")`, blueprint.ts:764).
 34. **Concurrency as an earned, archived proof.** Admission to the parallel test
     lane requires a RECORDED passing proof; `--check-coverage` refuses if the
     runner's embedded set diverges from `--list`. Never retries a failure into

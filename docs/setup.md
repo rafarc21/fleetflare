@@ -148,8 +148,8 @@ placeholder pattern: `apps/fleet/package.json`'s `migrate:local`/
 `wrangler d1 migrations apply`, so a database named anything else will not
 be found unless you also edit those two scripts.
 
-The migrations in `apps/fleet/migrations/` (`0001_init.sql`, `0002_day2.sql`
-today) apply with the project's own scripts, both wrapping
+The migrations in `apps/fleet/migrations/` (six today: `0001_init.sql` …
+`0006_junior_usage_duration.sql`) apply with the project's own scripts, both wrapping
 `apps/fleet/scripts/deploy.sh`: `migrate:remote` (`d1 migrations apply fleet
 --remote`) and `migrate:local` (`d1 migrations apply fleet --local`, against
 a local D1 for `wrangler dev`; `--local` is one of `deploy.sh`'s read-only
