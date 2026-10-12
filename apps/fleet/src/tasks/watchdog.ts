@@ -42,38 +42,34 @@ export function rearmKey(taskId: string): string {
  * actually completed (advanceTask returned "continue" or "terminal"), not
  * on the schedule merely firing.
  *
- * Fix round 1 (task 10a review, Important finding): an earlier version
- * called this unconditionally, before pollOnce even ran, on the reasoning
- * that a failed poll was "already handled by MAX_FAILED_POLLS in
- * tasks/loop.ts." Wrong for the throw class that actually matters here —
- * MAX_FAILED_POLLS only increments inside runtime.status()'s own catch
- * block, a different path entirely from advanceTask itself throwing (an
- * unguarded appendEvent/createApproval failure; report() in tasks/loop.ts
- * has no try/catch anywhere in its chain). That throw makes pollOnce return
- * kind:"error" with the task UNCHANGED, so an unconditional clear reset the
- * counter on every 5s retry forever, making scheduled()'s "two in a row"
- * alert structurally unreachable — silencing the watchdog for exactly the
- * failure class it exists to catch, even while staleTasks() kept correctly
- * flagging the task as stale on every tick. See shouldClearRearm in
+ * Gated because a poll that ends in kind:"error" (advanceTask itself
+ * threw) leaves the task unchanged and its heartbeat frozen at the
+ * pre-throw value — clearing on that outcome would reset the counter on
+ * every 5s retry while scheduled() (src/index.ts) reads it only every 60s,
+ * making its "two in a row" alert structurally unreachable for exactly the
+ * throw class the watchdog exists to catch: an unguarded
+ * appendEvent/createApproval failure, which MAX_FAILED_POLLS never counts
+ * (it only increments inside runtime.status()'s own catch block, a
+ * different path from advanceTask throwing; report() in tasks/loop.ts has
+ * no try/catch anywhere in its chain). See shouldClearRearm in
  * src/agents/do.ts for the extracted decision.
  *
- * Without a reset at all (unconditional or gated) the counter only ever
- * grows: an isolated hiccup early in a long task's life that self-heals the
- * moment /rearm reschedules it would leave a residual count behind, and an
+ * Some reset is still needed: without one the counter only ever grows — an
+ * isolated hiccup early in a long task's life that self-heals the moment
+ * /rearm reschedules it would leave a residual count behind, and an
  * unrelated hiccup much later in the same task would combine with that
  * residue to false-trigger the "two in a row" alert in scheduled() even
  * though the two were never actually consecutive.
  *
- * Final re-review residual: an earlier version cleared only rearmKey.
- * alertedKey has exactly one other call site, scheduled() (src/index.ts),
- * which only ever sets it, never clears it — so once a taskId crossed the
- * alert threshold and alerted, every later stale episode on that SAME
- * taskId alerted zero more times, forever, even after a full recovery in
- * between. That is the opposite of alertedKey's own documented contract
- * (below): "alert once per stuck episode," not a permanent mute. Clearing
- * both flags in this one place — the one function that already knows a
- * recovery just happened — is what keeps that contract true instead of
- * just written down.
+ * Both flags, because alertedKey's only other call site, scheduled()
+ * (src/index.ts), only ever sets it, never clears it — clearing rearmKey
+ * alone would leave a taskId permanently muted after its first alert:
+ * every later stale episode on that SAME taskId would alert zero more
+ * times, forever, even after a full recovery in between. That is the
+ * opposite of alertedKey's own documented contract (below): "alert once
+ * per stuck episode," not a permanent mute. Clearing both flags in this
+ * one place — the one function that already knows a recovery just
+ * happened — is what keeps that contract true.
  */
 export async function clearRearm(db: D1Database, taskId: string, now: number): Promise<void> {
   await setFlag(db, rearmKey(taskId), "0", now);
@@ -89,27 +85,26 @@ export async function clearRearm(db: D1Database, taskId: string, now: number): P
  * signal that resets rearmKey, so "alert once per taskId" is "alert once
  * per stuck episode," not a permanent mute either across a task's unrelated
  * future runs OR across that same task's own later episodes — see
- * clearRearm's doc comment for the final-review fix that made the latter
- * half of that claim true instead of merely intended.
+ * clearRearm's doc comment for the one clear that keeps that true.
  */
 export function alertedKey(taskId: string): string {
   return `alerted:${taskId}`;
 }
 
 /**
- * Carve-out C (final-review fix wave). scheduled()'s alert had no backoff
- * and no dedupe: once a stale task crossed attempts >= 2, it re-sent the
- * identical Telegram message every single minute for as long as the task
- * stayed stuck, forever — a muted alert is exactly the failure spec §12
- * exists to prevent. True only the first time the threshold is crossed for
- * a given taskId; the caller persists that (alertedKey) once the send
- * actually succeeds, so a delivery failure is retried next minute rather
- * than silenced.
+ * True only the first time a task crosses the two-consecutive-failures
+ * threshold — one alert per stale episode, not one per minute. Without
+ * the dedupe, scheduled() would re-send the identical Telegram message
+ * every single minute the task stayed stuck, and an operator who mutes
+ * the channel is exactly the failure spec §12 exists to prevent. The
+ * caller persists "already alerted" (alertedKey) once the send actually
+ * succeeds, so a delivery failure is retried next minute rather than
+ * silenced.
  *
- * A one-shot flag, not a backoff: simplest fix that closes the silent-spam
- * failure. The operator may prefer a backoff (re-alert every N minutes)
- * instead of total silence after the first — a real product call, not
- * something this fix locks in.
+ * A one-shot flag, not a backoff: simplest shape that closes the spam. The
+ * operator may prefer re-alerting every N minutes instead of total silence
+ * after the first — a real product call, not something this shape locks
+ * in.
  */
 export function shouldAlert(attempts: number, alreadyAlerted: boolean): boolean {
   return attempts >= 2 && !alreadyAlerted;
