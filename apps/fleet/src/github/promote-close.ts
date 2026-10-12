@@ -53,7 +53,7 @@ export type BatchedPull = {
 
 /** One commit's batched answer: its PRs (GitHub's first page) and, when
  *  known, how many it has in all. */
-export type BatchedCommit = { prsTotal?: number; prs: BatchedPull[] };
+type BatchedCommit = { prsTotal?: number; prs: BatchedPull[] };
 
 /** Issue #208: commits per batched call — GitHub's practical ceiling for
  *  aliased sub-selections in one GraphQL query. */
@@ -287,7 +287,7 @@ async function resolveForCommit(
  *  existing pure-unit caller (this module's own test suite) is unaffected:
  *  `repo` only names the push in the budget-exceeded log line below, and
  *  `budget` (board issue #198), when omitted, never stops the loop early. */
-export interface ResolvePushCommitsOptions {
+interface ResolvePushCommitsOptions {
   repo?: string;
   budget?: TimeBudget;
 }
@@ -346,7 +346,7 @@ export async function resolveIssuesForPushCommits(
 
 /** One open task whose latest §6 envelope names a PR — src/board/pr-landed.ts's
  *  scan is what actually produces these; this module only consumes them. */
-export interface EnvelopePrCandidate {
+interface EnvelopePrCandidate {
   taskNumber: number;
   prNumber: number;
 }

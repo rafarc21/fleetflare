@@ -372,7 +372,7 @@ export async function repoIsPrivate(token: string, repo: string): Promise<boolea
 /** One file write, or — `content: null` — the removal of that path. Mirrors
  *  src/memory/compact.ts's FileChange exactly; a compaction plan's changes are
  *  handed here unmodified. */
-export interface RepoFileChange {
+interface RepoFileChange {
   path: string;
   content: string | null;
 }
@@ -710,7 +710,7 @@ export async function compareExists(token: string, repo: string, base: string, h
  *  no judgement call itself — see promote-close.ts's own squash-fallback
  *  rule for why "closingIssuesReferences came back empty" is used instead of
  *  a base/head heuristic). */
-export interface CommitPull {
+interface CommitPull {
   number: number;
   base: string;
   head: string;
@@ -1158,7 +1158,7 @@ export async function deleteBranch(token: string, repo: string, branch: string):
 }
 
 /** One commit's batched answer: its PRs (first page) and how many exist. */
-export type BatchedCommitAnswer = {
+type BatchedCommitAnswer = {
   prsTotal: number;
   prs: { number: number; closingIssues: number[]; closingIssuesTotal?: number; commits?: string[]; commitsTotal?: number }[];
 };
