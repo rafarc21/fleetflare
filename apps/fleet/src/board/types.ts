@@ -140,7 +140,7 @@ export function taskAssignees(labels: string[]): string[] {
  * that issue invisible — filed, and inert. Anything with no `studio:` label
  * is backlog, however it arrived.
  */
-export function isBacklog(labels: string[]): boolean {
+function isBacklog(labels: string[]): boolean {
   return taskAssignees(labels).length === 0;
 }
 
@@ -151,7 +151,7 @@ export function isBacklog(labels: string[]): boolean {
  * waiting out, so "survived a whole sprint with nobody on it" is the signal
  * rather than "filed yesterday evening".
  */
-export const BACKLOG_STALE_MS = 3 * 24 * 60 * 60 * 1000;
+const BACKLOG_STALE_MS = 3 * 24 * 60 * 60 * 1000;
 
 /**
  * The states that mean something OTHER than "waiting for someone to pick this
