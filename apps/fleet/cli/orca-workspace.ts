@@ -399,9 +399,10 @@ function rankAttachTerminals(terms: OrcaTerminalEntry[], id: string): OrcaTermin
 }
 
 /** An unfiltered `worktree list` / `terminal list`, ALL rows. Throws when the
- *  answer is partial (`truncated`) or not the expected array (unparseable
- *  output decodes to `{}`) — #124 M1/M3: an empty answer only proves absence
- *  when it is complete. */
+ *  answer is partial (`truncated`) or not the expected array — #124 M1/M3: an
+ *  empty answer only proves absence when it is complete. Unparseable output
+ *  never gets this far: orcaJson itself throws (#516), so the shape check here
+ *  only catches a parsed-but-wrong envelope (truncated / missing array). */
 async function fullList<K extends "worktrees" | "terminals">(
   deps: OrcaDeps, key: K, timeoutMs: number,
 ): Promise<NonNullable<NonNullable<OrcaEnvelope["result"]>[K]>> {
@@ -424,7 +425,7 @@ async function orcaJson(deps: OrcaDeps, args: string[], timeoutMs: number): Prom
   try {
     return JSON.parse(res.stdout) as OrcaEnvelope;
   } catch {
-    return {};
+    throw new Error(`${what} printed unparseable JSON`);
   }
 }
 
