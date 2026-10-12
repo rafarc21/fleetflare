@@ -453,7 +453,7 @@ export async function runRefreshToken(
         // Same rule as deploy/do.ts's terminalReport and agents/do.ts's
         // abort-on-terminal catch: a failed alert must not unwind an
         // already-computed, already-degraded status.
-        console.error("studio refresh telegram alert failed", err);
+        console.error(`studio ${next.id}: refresh telegram alert failed`, err);
       }
     }
   }
@@ -6226,7 +6226,7 @@ export class StudioDO extends Sandbox<Env> {
       this.ctx.storage, (cmd: string) => sbExec(this, cmd, EXEC_CLASSES.wake), this.isMaestro(), () => this.armSweep(),
       STALE_BACKGROUND_SHELL_NUDGE_PROMPT, undefined, this.selfId(),
     ));
-    logWakeOutcome("stale background-shell nudge", outcome);
+    logWakeOutcome(`studio ${this.selfId()}: stale background-shell nudge`, outcome);
   }
 
   /**
@@ -8276,7 +8276,7 @@ export class StudioDO extends Sandbox<Env> {
             () => this.notifyStaleBackgroundShell(),
           );
         } catch (err) {
-          console.error("studio transcript ship failed", err);
+          console.error(`studio ${this.selfId()}: transcript ship tick failed`, err);
         }
       },
       () => this.rearm("shipTranscript", SHIP_TRANSCRIPT_SECONDS),
@@ -8593,7 +8593,7 @@ export class StudioDO extends Sandbox<Env> {
           logWakeOutcome("maestro sweep wake", result.wake);
           stop = result.stop;
         } catch (err) {
-          console.error("maestro sweep failed", err);
+          console.error(`studio ${this.selfId()}: maestro sweep failed`, err);
         }
       },
       async () => {

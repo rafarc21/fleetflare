@@ -469,6 +469,30 @@ describe("runRefreshToken", () => {
     expect(deps.notified).toHaveLength(1); // must alert — this IS refresh's first failure
   });
 
+  // S21 F14: the notify catch names the studio whose alert was lost — the
+  // degraded row records the failure, but only this line says WHY the
+  // operator never heard about it.
+  it("names the studio when the degraded-state telegram alert itself fails (S21 F14)", async () => {
+    const deps = fakeRefreshDeps({
+      mintToken: vi.fn(async () => {
+        throw new Error("GitHub App not configured");
+      }),
+      notify: vi.fn(async () => {
+        throw new Error("telegram down");
+      }),
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const next = await runRefreshToken(deps, status({ state: "running" }), STUDIO_ID);
+      expect(next.state).toBe("degraded"); // the status still lands despite the lost alert
+      const line = errSpy.mock.calls.map((c) => String(c[0]))
+        .find((s) => s.includes("refresh telegram alert failed"));
+      expect(line).toMatch(/studio websites--pilot: refresh telegram alert failed/);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
   it("a second consecutive failure does not alert a second time", async () => {
     const deps = fakeRefreshDeps({
       mintToken: vi.fn(async () => {
