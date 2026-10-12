@@ -23,7 +23,7 @@ module-private generics. One line each:
 
 ## Verification (sequential, one heavy gate at a time)
 
-1. `cd apps/fleet && bun test test/junior.ratelimit.test.ts test/llm.ratelimit.test.ts`
+1. `cd apps/fleet && npx vitest run test/junior.ratelimit.test.ts test/llm.ratelimit.test.ts`
 2. `cd apps/fleet && npx tsc --noEmit`
 3. `cd apps/fleet && npx tsc --noEmit -p test`
 4. `cd apps/fleet && bun run scripts/english-check.ts`
