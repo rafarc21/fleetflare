@@ -1954,7 +1954,17 @@ test("#124/#299: readStudioRows — unparseable orca output reads '?', never 'no
   const f = fake({ "worktree list": ok("not json"), "terminal list": LIST_OK("terminals", []) });
   const out = await readStudioRows([{ id: "websites--pilot", state: "stopped" } as StudioStatus], f.deps);
   expect(out.rows.get("websites--pilot")).toBe("?");
-  expect(out.footer).toContain("orca worktree list returned no worktrees array");
+  expect(out.footer).toContain("orca worktree list printed unparseable JSON");
+});
+
+test("#516: orcaJson throws on unparseable output — a 0-exit non-JSON answer never decodes as an empty envelope", async () => {
+  const f = fake({ "worktree list": ok("not json") });
+  const out = await ensureStudioWorkspace("websites--pilot", TEST_TITLE, f.deps);
+  expect(out.kind).toBe("failed");
+  if (out.kind === "failed") expect(out.why).toContain("printed unparseable JSON");
+  // mis-decoding `{}` would read [] worktrees and CREATE a duplicate row — the exact bug
+  expect(f.calls.some((c) => c[0] === "worktree" && c[1] === "create")).toBe(false);
+  expect(f.calls.some((c) => c[0] === "repo" && c[1] === "list")).toBe(false);
 });
 
 // N2: a "stopped" studio whose container still runs is billing — its row is

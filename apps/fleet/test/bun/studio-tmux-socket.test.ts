@@ -141,7 +141,13 @@ REAL("#117 — the studio session lives on `tmux -L fleet-studio`, never the def
     const L = `tmux -L ${STUDIO_TMUX_SOCKET}`;
     b.sh(`${L} send-keys -t studio:claude -- ${JSON.stringify(`${join(b.bin, "lead-sleep")} 300`)} Enter`);
     const lead = () => b.sh(`${L} display-message -p -t studio:claude '#{pane_current_command}'`).stdout;
-    expect(b.waitFor(() => lead() !== "bash" && lead() !== "")).toBe(true);
+    // TwoServers pins SHELL=/bin/sh (line 90), so the pane's shell is dash, not
+    // the production bash. The old negative condition (not "bash") passed on
+    // the very first probe against the pre-exec "sh" reading, snapshotting a
+    // transitional state that can flip to lead-sleep mid-test under CI load.
+    // The positive condition waits for the exec the test then asserts is
+    // stable across the kill-server, mirroring production's claude_launch_landed.
+    expect(b.waitFor(() => lead() === "lead-sleep")).toBe(true);
     const before = lead();
     // Something to kill: a server on the default socket, as a test would start.
     expect(b.sh("tmux new-session -d -s decoy").code).toBe(0);

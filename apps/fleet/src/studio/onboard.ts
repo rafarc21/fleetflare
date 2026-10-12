@@ -26,13 +26,13 @@ import type { StudioStatus } from "./types";
 import { parseStudioId } from "./ids";
 import { repoIdSegment } from "./repo";
 
-export interface OnboardCheck {
+interface OnboardCheck {
   label: string;
   pass: boolean;
   detail: string;
 }
 
-export interface OnboardResult {
+interface OnboardResult {
   checks: OnboardCheck[];
   /** Only checks 1-3 (repo detected, reach, credentials+worker) are hard
    *  failures — check 4 (studio already exists) is informational per the

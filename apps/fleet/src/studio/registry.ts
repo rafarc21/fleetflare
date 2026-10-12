@@ -367,7 +367,7 @@ export async function withAccountResolution(env: Env, row: StudioStatus): Promis
  * `getStudioRow` stays null-for-both for its existing callers; this is the
  * one place that needs the third state.
  */
-export type StudioRowLookup =
+type StudioRowLookup =
   | { kind: "found"; row: StudioStatus }
   | { kind: "absent" }
   | { kind: "malformed" };

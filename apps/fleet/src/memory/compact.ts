@@ -35,7 +35,7 @@ export const SPRINT_MS = 2 * 24 * 60 * 60 * 1000;
 export const DEMOTION_MIN_AGE_MS = 2 * SPRINT_MS;
 
 /** §9's "3+ tasks -> promote to a SKILL". */
-export const PROMOTION_CITATIONS = 3;
+const PROMOTION_CITATIONS = 3;
 
 /** One memory file as it exists in the blueprint repo. */
 export interface MemorySource {
@@ -53,7 +53,7 @@ export interface TaskCitation {
 
 export type Verdict = "promote" | "keep" | "demote" | "hold";
 
-export interface MemoryFileMeta {
+interface MemoryFileMeta {
   /** Path relative to `fleet/memory/` — what an index line's target is. */
   target: string;
   path: string;
@@ -65,7 +65,7 @@ export interface MemoryFileMeta {
   verdict: Verdict;
 }
 
-export interface MemorySurvey {
+interface MemorySurvey {
   /** The EFFECTIVE index: existing lines, plus a mechanically bootstrapped
    *  line for every memory file that has none. */
   entries: IndexEntry[];
@@ -179,7 +179,7 @@ export function surveyMemory(
 /** Merge several index LINES into one. Never merges files. `sources[0]` keeps
  *  its file in place and becomes the surviving line's target; the rest move to
  *  archive/ and are cited by the `+N archived` count. */
-export interface MergeOp {
+interface MergeOp {
   title: string;
   summary: string;
   sources: string[];
@@ -189,7 +189,7 @@ export interface MergeOp {
  *  body travels IN the proposal so the PR is self-contained — a line citing a
  *  skill that does not exist yet would be exactly the dangling reference this
  *  design refuses to create. */
-export interface PromoteOp {
+interface PromoteOp {
   /** Repo path under `skills/`. */
   path: string;
   title: string;
@@ -212,7 +212,7 @@ export interface FileChange {
   content: string | null;
 }
 
-export interface CompactionPlan {
+interface CompactionPlan {
   branch: string;
   title: string;
   body: string;
@@ -220,7 +220,7 @@ export interface CompactionPlan {
   summary: { merged: number; demoted: number; promoted: number; archived: number; indexLines: number };
 }
 
-export type PlanResult =
+type PlanResult =
   | { ok: true; plan: CompactionPlan }
   | { ok: false; status: number; message: string };
 
