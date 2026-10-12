@@ -1,12 +1,15 @@
 // apps/fleet/test/bun/cli.task-verify.test.ts
 // Issue #491 (sweep 11 finding S11-F3, refs #467): `fleet task verify <n>`.
-// cli/fleet.ts's cmdTaskVerify (:1797, dispatch :3029) only POSTs to the
-// Worker's verify route and prints back what it found — four slices of it,
-// none previously tested: the per-result icon lines (✅ attempted-ok /
-// ❌ attempted-failed / ➖ other, the `icon` helper :1806-1807), the envelope
-// header naming `envelopeMsgId` (:1808), the trailing `comment: <url>` line
-// (:1810), and `boardRequest`'s exit-1-on-non-2xx posture (:1596-1605). The
-// Worker's OWN verify logic (reading the newest §6 envelope, mechanically
+// cli/fleet.ts's cmdTaskVerify (:1797, dispatch :3029) POSTs to the Worker's
+// verify route and prints back what it found — the per-result icon lines
+// (✅ attempted-ok / ❌ attempted-failed / ➖ other, the `icon` helper
+// :1806-1807), the envelope header naming `envelopeMsgId` (:1808), the
+// trailing `comment: <url>` line (:1810), and `boardRequest`'s
+// exit-1-on-non-2xx posture (:1596-1605). It also pins the exit code
+// (#545, refs #539): the print loop still prints every result in full, but
+// the command exits 1 when any verdict is `attempted-failed` and exits 0
+// when none is — attempted-ok and not-mechanically-checkable both stay 0.
+// The Worker's OWN verify logic (reading the newest §6 envelope, mechanically
 // re-checking it, posting the classifying comment) already lives in
 // test/board.verify.test.ts — this file is only the CLI half.
 //
@@ -98,7 +101,7 @@ describe("fleet task verify", () => {
     ],
   };
 
-  test("prints the envelope header, both icon lines, and the comment url; POSTs an empty-body request and exits 0", async () => {
+  test("prints the envelope header, both icon lines, and the comment url; POSTs an empty-body request and exits 1 — one verdict is attempted-failed", async () => {
     const home = tmpDir("task-verify-home-");
     const cwd = tmpDir("task-verify-cwd-"); // no .git here, deliberately
     const { server, seen } = startVerifyStandIn(ANSWER);
@@ -107,7 +110,10 @@ describe("fleet task verify", () => {
     const r = await runVerify(home, cwd);
     server.stop(true);
 
-    expect(r.code).toBe(0);
+    // The loop prints everything in full, but the verdict halves: any
+    // attempted-failed result makes the command exit 1 — the ❌ above is a
+    // failure, so $? must say so.
+    expect(r.code).toBe(1);
     expect(seen.length).toBe(1);
     // The request half: one POST to the verify route, and — because the cwd
     // holds no git repo for detectRepo to read — a body with NO repo field,
@@ -145,5 +151,45 @@ describe("fleet task verify", () => {
     expect(r.err).toContain("fleet task verify: 500 worker boom");
     expect(r.out).not.toContain("checking result envelope");
     expect(r.out).not.toContain("comment:");
+  });
+
+  test("all-attempted-ok results exit 0", async () => {
+    const home = tmpDir("task-verify-home-");
+    const cwd = tmpDir("task-verify-cwd-");
+    const { server } = startVerifyStandIn({
+      comment: { url: "https://github.com/o/r/issues/77#issuecomment-2" },
+      envelopeMsgId: "msg-42",
+      results: [
+        { label: "open the PR", verdict: "attempted-ok", detail: "PR #79 open" },
+      ],
+    });
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await runVerify(home, cwd);
+    server.stop(true);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("  ✅ attempted-ok — open the PR: PR #79 open");
+    expect(r.out).toContain("comment: https://github.com/o/r/issues/77#issuecomment-2");
+  });
+
+  test("a not-mechanically-checkable verdict exits 0", async () => {
+    const home = tmpDir("task-verify-home-");
+    const cwd = tmpDir("task-verify-cwd-");
+    const { server } = startVerifyStandIn({
+      comment: { url: "https://github.com/o/r/issues/77#issuecomment-3" },
+      envelopeMsgId: "msg-43",
+      results: [
+        { label: "review the docs", verdict: "not-mechanically-checkable", detail: "needs eyes" },
+      ],
+    });
+    writeCredentials(home, `http://127.0.0.1:${server.port}`);
+
+    const r = await runVerify(home, cwd);
+    server.stop(true);
+
+    // An unmechanizable step is not a failure — ➖ prints, $? stays 0.
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("  ➖ not-mechanically-checkable — review the docs: needs eyes");
   });
 });
