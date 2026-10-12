@@ -45,7 +45,7 @@ describe("raceWithDeadline — the deadline wins", () => {
     const setTimeoutFn = vi.fn((fn: () => void, ms?: number) => {
       calls.push([fn, ms ?? -1]);
       return 0 as unknown as ReturnType<typeof setTimeout>;
-    }) as typeof setTimeout;
+    }) as unknown as typeof setTimeout;
     const p = raceWithDeadline(new Promise<never>(() => {}), 5_000, () => new Error("x"), setTimeoutFn);
     void p.catch(() => {});
     expect(setTimeoutFn).toHaveBeenCalledTimes(1);

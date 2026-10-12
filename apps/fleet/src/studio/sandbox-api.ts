@@ -32,6 +32,7 @@
 import { proxyTerminal } from "@cloudflare/sandbox";
 import { withKillDeadline, KILL_GRACE_SECONDS } from "./exec-deadline";
 import { bytesToBase64 } from "../base64";
+import { raceWithDeadline } from "../race-timeout";
 
 export { withKillDeadline, KILL_GRACE_SECONDS, isDeadlineExit } from "./exec-deadline";
 
@@ -216,23 +217,15 @@ export async function sbExec(
   const call = sessionId !== undefined
     ? sb.execWithSessionToken(command, sessionId, ...extra)
     : sb.exec(command, ...extra);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      let held = abandoned.get(sb);
-      if (!held) abandoned.set(sb, (held = new Set()));
-      held.add(key);
-      const release = () => { held.delete(key); };
-      call.then(release, release);
-      reject(new ExecDeadlineError(timeoutMs, sessionId));
-    }, timeoutMs + DEADLINE_SLACK_MS);
+  const r = await raceWithDeadline(call, timeoutMs + DEADLINE_SLACK_MS, () => {
+    let held = abandoned.get(sb);
+    if (!held) abandoned.set(sb, (held = new Set()));
+    held.add(key);
+    const release = () => { held.delete(key); };
+    call.then(release, release);
+    return new ExecDeadlineError(timeoutMs, sessionId);
   });
-  try {
-    const r = await Promise.race([call, deadline]);
-    return { code: r.exitCode, stdout: r.stdout, stderr: r.stderr };
-  } finally {
-    clearTimeout(timer);
-  }
+  return { code: r.exitCode, stdout: r.stdout, stderr: r.stderr };
 }
 
 // writeFile's `content` param is `string | ReadableStream<Uint8Array>` (no
