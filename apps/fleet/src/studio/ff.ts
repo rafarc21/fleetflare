@@ -175,8 +175,15 @@ export function ffTaskBrief(task: string, assignee: string): {
  */
 export function parseFfArgs(argv: string[]): FfArgs {
   const newInstance = argv.includes(NEW_INSTANCE_FLAG);
+  // Board issue #569: help is checked BEFORE the filter, so an exact
+  // `--help`/`-h` token anywhere in argv wins — `ff web-studio --help` asks
+  // for help instead of filing a task titled "--help". Checked on argv, not
+  // the filtered array, and still first in the function so it wins over
+  // every usage error too. Exact tokens only: a task that CONTAINS the word
+  // (`ff pilot "drop the --help flag"`) is untouched, the same containment
+  // rule NEW_INSTANCE_FLAG has.
+  if (argv.includes("--help") || argv.includes("-h")) return { cmd: "help" };
   const [first, ...rest] = argv.filter((a) => a !== NEW_INSTANCE_FLAG);
-  if (first === "--help" || first === "-h") return { cmd: "help" };
   if (rest.length > 1) {
     return {
       cmd: "usage",
