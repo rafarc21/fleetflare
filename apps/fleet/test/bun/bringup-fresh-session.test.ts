@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractShellFunc, runSnippet } from "./exec-snippet";
+import { BRINGUP, extractRegion, extractShellFunc, runSnippet } from "./exec-snippet";
 import { parseFreshSession } from "../../src/studio/provision";
 import { requireTools } from "./require-tool";
 
@@ -17,18 +17,7 @@ import { requireTools } from "./require-tool";
  * Runs the shipped regions against a temp HOME, same harness as
  * bringup-session-adopt.test.ts.
  */
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
 const ADOPT_SCRIPT = join(import.meta.dir, "../../container/studio-adopt.sh");
-
-function extractRegion(src: string, marker: string): string {
-  const open = `# >>> ${marker} >>>`;
-  const close = `# <<< ${marker} <<<`;
-  const openAt = src.indexOf(open);
-  if (openAt === -1) throw new Error(`region opener ${open} not found in source`);
-  const closeAt = src.indexOf(close, openAt);
-  if (closeAt === -1) throw new Error(`region terminator ${close} not found in source`);
-  return src.slice(src.indexOf("\n", openAt) + 1, closeAt);
-}
 
 const CONTINUE_GUARD = () => {
   const line = BRINGUP.split("\n").find((l) => l.includes("if claude_has_conversation ") && l.includes("--continue"));
