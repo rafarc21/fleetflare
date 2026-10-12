@@ -164,6 +164,8 @@ async function wakeMaestro(env: Env, event: string, body: string, now: number): 
   try {
     payload = JSON.parse(body);
   } catch {
+    // A retry can't fix a body that isn't JSON — but the skip must be visible.
+    console.warn("board: wake skipped: webhook body not JSON");
     return;
   }
   const digest = deltaDigest(event, payload);

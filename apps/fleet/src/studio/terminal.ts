@@ -208,7 +208,9 @@ export class TerminalBridge {
 
     const pending = this.pty;
     this.forgetPty();
-    void pending?.then((pty) => pty.close()).catch(() => {});
+    // The last viewer is already gone — nobody to deliver an error to, so the
+    // swallow stays; but the failure itself must not vanish with them.
+    void pending?.then((pty) => pty.close()).catch((err) => console.error("studio terminal pty close failed", err));
   }
 
   /**

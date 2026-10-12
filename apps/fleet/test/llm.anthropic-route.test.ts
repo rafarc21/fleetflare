@@ -243,6 +243,44 @@ describe("handleFleetAnthropicMessages — spend controls (MAJOR 2)", () => {
     expect(rowsLogged[0]).toMatchObject({ studioId: ME, model: GLM_LEAD_MODEL, inputTokens: 11, outputTokens: 4, ok: 1 });
   });
 
+  // Issue #519 (sweep 13): logUsage's insertJuniorUsage .catch(() => {})
+  // used to drop a failed usage insert with no trace, so a whole day's
+  // missing usage rows read identically to "nobody called". The swallow
+  // stays (a logging failure must never touch the response already
+  // returned) but one console.error naming "usage insert failed" must
+  // fire. Same fake-D1 idiom as junior.usage.test.ts's own
+  // missing-column db, forwarded to the real env.DB for every OTHER
+  // statement (the rate limiter's fleet_state reads still need to work
+  // for the call to reach the insert at all).
+  it("a failed usage-row insert leaves the response intact and logs one console.error naming the insert failure (#519)", async () => {
+    const realDb = env.DB;
+    const db = {
+      prepare: (sql: string) => {
+        if (sql.includes("INSERT INTO junior_usage_log")) {
+          return {
+            bind: () => ({
+              run: async () => { throw new Error("D1_ERROR: the database is locked by another connection"); },
+            }),
+          };
+        }
+        return realDb.prepare(sql);
+      },
+    } as unknown as D1Database;
+    const { token, rows, e } = await setup();
+    (e as { DB: unknown }).DB = db;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+      expect(r.status).toBe(200);
+      expect(await r.json()).toMatchObject({ type: "message", role: "assistant" });
+      await ctx.drain();
+      const failures = errors.mock.calls.filter((c) => c.join(" ").includes("usage insert failed"));
+      expect(failures).toHaveLength(1);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("a failed non-streaming call (env.AI.run throws) still logs a usage row, ok: false", async () => {
     const { token, rows, e } = await setup();
     (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => { throw new Error("AiError: capacity exceeded"); });
@@ -545,6 +583,93 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     const rowsLogged = await usageRows();
     expect(rowsLogged).toHaveLength(1);
     expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1, error: null });
+  });
+
+  // Issue #519 (sweep 13): the `.finally(() => { writer.close().catch(() => {}) })`
+  // after pumpAnthropicStream used to drop a failed close with no trace. The
+  // pump itself already finished OK here -- the client consumed every frame
+  // through message_stop, then went away before the close round-trip, which
+  // is exactly the window where close() rejects (cancelling the readable
+  // errors the writable side). The close failure must not disturb the
+  // already-returned response or the usage row; it must log one
+  // console.error. The fake DB below gates ONLY the usage insert on a
+  // manual deferred (still forwarded to the real env.DB) so the cancel
+  // deterministically lands between the pump's own return and the
+  // `.finally`'s close() -- and so the row is released INSIDE this test's
+  // own lifetime, never leaking into the next test's usageRows() read.
+  it("a writer.close() rejection after the pump finished logs one console.error, and the ok usage row still lands (#519)", async () => {
+    const enc = new TextEncoder();
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 2 } },
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const realDb = env.DB;
+    let releaseInsert: () => void = () => {};
+    const insertGate = new Promise<void>((resolve) => { releaseInsert = resolve; });
+    let insertRun: Promise<unknown> | null = null;
+    const gatedUsageDb = {
+      prepare: (sql: string) => {
+        if (!sql.includes("INSERT INTO junior_usage_log")) return realDb.prepare(sql);
+        const stmt = realDb.prepare(sql);
+        return {
+          bind: (...args: unknown[]) => ({
+            run: () => {
+              insertRun = (async () => {
+                await insertGate;
+                return (stmt as unknown as { bind: (...a: unknown[]) => { run: () => Promise<unknown> } }).bind(...args).run();
+              })();
+              return insertRun;
+            },
+          }),
+        };
+      },
+    } as unknown as D1Database;
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, DB: gatedUsageDb } as unknown as Env;
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+      expect(r.status).toBe(200);
+
+      // Consume every frame the pump wrote -- through message_stop, the
+      // last one -- so the pump's own writes have all resolved and it
+      // returns ok. Then the client drops (cancel) while the insert is
+      // still gated, before the `.finally`'s writer.close() runs.
+      const reader = r.body!.getReader();
+      const dec = new TextDecoder();
+      let text = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += dec.decode(value, { stream: true });
+        if (text.includes("message_stop")) break;
+      }
+      expect(text).toContain("message_stop");
+      await reader.cancel("client closed the tab before the close round-trip");
+      await ctx.drain();
+
+      const closeFailures = errors.mock.calls.filter((c) => c.join(" ").includes("writer close failed"));
+      expect(closeFailures).toHaveLength(1);
+      // The pump had already finished OK -- release the insert and let the
+      // usage row land, ok:1.
+      releaseInsert();
+      await insertRun;
+      const rowsLogged = await usageRows();
+      expect(rowsLogged).toHaveLength(1);
+      expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1, error: null });
+    } finally {
+      errors.mockRestore();
+    }
   });
 });
 

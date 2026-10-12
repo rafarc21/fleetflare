@@ -459,7 +459,7 @@ function logUsage(
   ctx.waitUntil(insertJuniorUsage(env.DB, {
     id: crypto.randomUUID(), ts: Date.now(), studioId, mode: USAGE_MODE, model: GLM_LEAD_MODEL,
     inputTokens, outputTokens, ok, ...(error === undefined ? {} : { error }), durationMs, attempts,
-  }).catch(() => {}));
+  }).catch((e) => console.error("[glm-lead] usage insert failed", e instanceof Error ? e.message : String(e))));
 }
 
 /** Issue #302: an upstream error message can be arbitrarily long (a stack, an
@@ -564,7 +564,7 @@ export async function handleFleetAnthropicMessages(
           stream: true, inputTokens: 0, outputTokens: 0, ok: false,
           failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`, startedAt, attempts,
         }))
-        .finally(() => { writer.close().catch(() => {}); }),
+        .finally(() => { writer.close().catch((e) => console.error("[glm-lead] writer close failed after stream end", e instanceof Error ? e.message : String(e))); }),
     );
     return new Response(readable, { status: 200, headers: { "content-type": "text/event-stream" } });
   }

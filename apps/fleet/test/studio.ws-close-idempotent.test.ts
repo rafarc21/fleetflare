@@ -1,6 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { TerminalBridge } from "../src/studio/terminal";
 import type { PtyHandle } from "../src/studio/sandbox-api";
+
+afterEach(() => { vi.restoreAllMocks(); });
 
 // Measured in local workerd (wrangler dev, real network viewer, PR #153 head):
 // a viewer that SENT frames and then closed cleanly fires `close` (1000) AND
@@ -61,5 +63,39 @@ describe("close() is idempotent per viewer (#153 review)", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(pty.closes()).toBe(1);
+  });
+
+  // Issue #519 (sweep 13): close()'s `void pending?.then((pty) =>
+  // pty.close()).catch(() => {})` used to drop a failed pty close with no
+  // trace -- a container whose exec socket refused the close round-trip
+  // leaked silently. The swallow itself stays (the last viewer is already
+  // gone, there is nobody left to deliver an error to) but one
+  // console.error must name the real close failure, and the rejection must
+  // never surface as an unhandled one.
+  it("a pty close() rejection after the last viewer left logs one console.error, never an unhandled rejection (#519)", async () => {
+    const handle: PtyHandle = {
+      readable: new ReadableStream<Uint8Array>(),
+      write: () => {},
+      resize: () => {},
+      // The real close() is `ws.close(...)` on the container socket -- an
+      // async round-trip that can reject. Sync-throw would be equivalent for
+      // the chain, but Promise.reject is the real shape.
+      close: () => Promise.reject(new Error("boom: exec socket refused the close")),
+    };
+    const bridge = new TerminalBridge(async () => handle);
+    const v = fakeViewer();
+    bridge.adopt(v.ws);
+    await bridge.message(v.ws, JSON.stringify({ t: "resize", cols: 100, rows: 30 }));
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    v.fire("close"); // last viewer leaves -> close() runs on the resolved pty
+    // The pty promise's .then continuation (and its .catch) run on the
+    // microtask queue; two macrotask ticks guarantee both settled.
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const closeFailures = errors.mock.calls.filter((c) => c.join(" ").includes("close failed"));
+    expect(closeFailures).toHaveLength(1);
+    errors.mockRestore();
   });
 });

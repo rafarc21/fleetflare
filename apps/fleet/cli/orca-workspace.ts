@@ -1265,9 +1265,12 @@ export async function fileLockAt<T>(
   } finally {
     try {
       unlinkSync(path);
-    } catch {
-      // Already gone (raced a stale-lock steal from a THIRD caller past the
-      // deadline above) — the lock is released either way, fine.
+    } catch (err) {
+      // ENOENT is the raced stale-lock steal from a THIRD caller past the
+      // deadline above — already released, fine. Anything else must log;
+      // the held fn's result is unaffected either way.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") console.error(`orca: lock release failed at ${path}`, err);
     }
   }
 }

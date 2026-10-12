@@ -26,8 +26,13 @@ export async function grabClipboardPng(): Promise<Uint8Array | null> {
     const file = Bun.file(PASTE_TMP_PATH);
     const bytes = new Uint8Array(await file.arrayBuffer());
     // Best-effort cleanup — a leftover screenshot in /tmp is cosmetic, not a
-    // reason to fail a paste that already succeeded.
-    await file.delete().catch(() => {});
+    // reason to fail a paste that already succeeded. ENOENT (never there /
+    // already cleaned) is silent by design; anything else gets one line. The
+    // errno code is interpolated because Error.toString() drops it.
+    await file.delete().catch((e) => {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") console.error(`paste: tmp cleanup failed${code ? ` (${code})` : ""}`, e);
+    });
     return bytes;
   } catch {
     // Bun.spawn throws synchronously (ENOENT) when `pngpaste` isn't on
