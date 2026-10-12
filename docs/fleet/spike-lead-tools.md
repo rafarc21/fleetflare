@@ -181,6 +181,15 @@ and blocks file-WRITE forms from the lead — a blocklist of the observed
 escape, not a general sandbox. See `apps/fleet/container/studio-bringup.sh`
 for the real list and its honest limits.
 
+**Amended again by P7a Task 5 (2026-10): the shipped matcher is `.*`.** A
+fixed tool list only catches tools named ahead of time — the exact hole this
+spike's Step-2 escape (printf through Bash) demonstrated in miniature. The
+decision moved INTO the hook script: the matcher now matches every tool call
+and the script tells Bash apart by shape (see
+`apps/fleet/container/studio-bringup.sh`'s matcher block and the hook's own
+comment). The `Edit|Write|NotebookEdit` list survives only as the hook's
+fastest path.
+
 Logic: read hook JSON from stdin. `agent_id` absent → lead's own call →
 exit 2, stderr `"dispatch a member — leads never implement"`. `agent_id`
 present → member call → exit 0.

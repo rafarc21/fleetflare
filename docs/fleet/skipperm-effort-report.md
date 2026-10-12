@@ -35,6 +35,8 @@ Condensed security comment (operator's text, placed at both claude-launch sites 
   - Verified the flow-through by hand: `resolveBringupEnv` returns `roleBringupEnv(role)` whole, no destructuring. `runProvision` passes `resolved.bringupEnv` whole to `deps.sbExec(BRINGUP_CMD, ...)` and to `storage.put(ROLE_ENV_KEY, roleEnv)`. `restartWithStorage` reads `ROLE_ENV_KEY` back whole and passes it straight to `runRestart` → `sbExec(BRINGUP_CMD, roleEnv)`. Nothing enumerates the three keys anywhere on this path — ROLE_EFFORT survives provision AND restart by construction, not by extra plumbing.
 - `container/studio-bringup.sh` — after the `--allowedTools` line: `[ -n "${ROLE_EFFORT:-}" ] && claude_args+=(--effort "$ROLE_EFFORT")`. Empty → no flag → claude's own default.
 
+*Superseded count (2026-10, issue #276): `roleBringupEnv` returns FOUR keys and `RoleEnv` a fixed quadruple — `ROLE_MCP` joined the set; the three documented here are unchanged.*
+
 No real blueprint content changed. `fleet.json` has no `"cto"` role yet (checked: `roles: ["pilot", "scratch"]`), and no `fleet/blueprint/roles/cto.md` exists. Out of scope here — operator's file list never named `fleet.json` or a new role file. This PR ships the mechanism only; a real cto role provisions with `ROLE_EFFORT=max` automatically once one is added, with zero further code change.
 
 ## Tests
