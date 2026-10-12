@@ -21,7 +21,7 @@ Scopes nest. Each includes everything from the scope above it.
 
 ## Prerequisites
 
-- **agent-browser** installed: `bun install -g agent-browser && agent-browser install`
+- **agent-browser** installed: `bun install -g agent-browser && agent-browser install` — on the operator's Mac only. Studio containers do not ship agent-browser and must not install it; they drive the browser through the ego-browser skill (see `skills/ego-browser/SKILL.md`) — `ego-browser nodejs` with `taskSpace`/Page, snapshot and screenshot included. The `agent-browser …` command lines below are written for the Mac.
 - **Dev server** running: `bun run dev` (or production URL for live site QA)
 - **GitHub MCP** configured (for issue management)
 - **ffmpeg** installed: `brew install ffmpeg` (for video conversion)
@@ -67,7 +67,7 @@ For each page in the site (or the specified page):
 **T2. Interactive elements have Zaraz attributes**
 - `agent-browser snapshot -i` to get the page structure
 - Verify all `<a>`, `<button>`, `<form>` elements that are conversion-relevant have `data-zaraz-event` attributes
-- Cross-reference against the canonical event table for the client type (ecommerce or leadgen — see `docs/platform-spec.md`)
+- Cross-reference against the canonical event table for the client type (ecommerce or leadgen — see `docs/platform-spec.md` in the client repo under test, not this repo)
 
 **T3. Events fire on interaction**
 - For each interactive element with `data-zaraz-event`:
@@ -696,7 +696,5 @@ When invoked from the CRO orchestrator: scope is always `page`, target is the va
 
 ## Reference
 
-- `docs/platform-spec.md` — canonical event tables, client.json schema
-- `playbooks/tracking-validation.md` — tracking validation methodology
-- `configs/zaraz-base.json` — Zaraz trigger/tool configuration
+- `docs/platform-spec.md` (in the client repo under test, not this repo) — canonical event tables, client.json schema
 - Shopify Admin API: `refundCreate`, `orderCancel`, `discountCodeBasicCreate`, `stagedUploadsCreate`, `fileCreate`
