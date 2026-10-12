@@ -446,6 +446,22 @@ async function handleTaskReapRoute(
 // THROWS — the studio-wide board listing itself failing — degrades the same
 // way, for the same reason.) The Worker's logs still carry the per-studio
 // failure an operator can go read.
+//
+// WHY CONCURRENT (#416 item 2), with the cross-studio subrequest budget
+// made explicit (#416 item 5): one studio's scan is bounded by
+// OPEN_TASKS_SCAN_MAX_CANDIDATES (300) * 2 subrequests per showTask
+// (getIssue + listComments), plus the studio-wide listTasks
+// (<= BOARD_MAX_PAGES=20) and one getPullRequest per envelope-named PR —
+// worst case ~(300 * 2) + 20 + 300 ≈ 920 per studio, and the
+// 1000-subrequest cap is PER INVOCATION, so a repo with several studios
+// could in principle multiply that. Today's reality is far below it
+// (measured 2026-09-24: ~41 candidates on the busiest repo, ~2
+// subrequests each) and a real crossing first shows up as per-studio
+// degrade logs, never a silent wrong answer. Recorded rather than capped:
+// the route's callers (fleet ls, destroy's strict check) read a missing
+// lane as "unknown", so a capped studio would degrade loudly anyway. If a
+// repo ever approaches the cap, the fix is a per-request ceiling like
+// pr-landed's own bound, filed as a follow-up then.
 
 /**
  * `GET /studio/board/open-prs?repo=<slug>` — issue #332. Absent `repo` is
@@ -487,19 +503,27 @@ async function handleOpenPrsRoute(
     .filter((s) => (s.repoSlug ?? defaultLower).toLowerCase() === repo);
   const prs: Record<string, OpenPr[]> = {};
   const unknown: string[] = [];
-  for (const studio of studios) {
-    try {
-      const result = await studioOpenPrs(api, repo, studio.id);
-      if (result.ok) {
-        prs[studio.id] = result.value;
-      } else {
+  // #416 item 2: concurrent, not sequential — wall-clock drops by the
+  // studio count while the subrequest total is identical (Promise.all
+  // changes scheduling, never how many calls run). Each studio's result
+  // lands in its own slot by input order below, never pushed as it
+  // resolves, so prs/unknown ordering stays registry-stable.
+  const results = await Promise.all(studios.map((studio) =>
+    (async () => {
+      try {
+        const result = await studioOpenPrs(api, repo, studio.id);
+        if (result.ok) return { id: studio.id, prs: result.value } as const;
         console.error(`open-prs: scanning ${studio.id} in ${repo} failed (${result.status}): ${result.message}`);
-        unknown.push(studio.id);
+        return { id: studio.id, unknown: true } as const;
+      } catch (err) {
+        console.error(`open-prs: scanning ${studio.id} in ${repo} threw`, err);
+        return { id: studio.id, unknown: true } as const;
       }
-    } catch (err) {
-      console.error(`open-prs: scanning ${studio.id} in ${repo} threw`, err);
-      unknown.push(studio.id);
-    }
+    })(),
+  ));
+  for (const r of results) {
+    if ("unknown" in r) unknown.push(r.id);
+    else prs[r.id] = r.prs;
   }
   return Response.json({ repo, prs, unknown });
 }
