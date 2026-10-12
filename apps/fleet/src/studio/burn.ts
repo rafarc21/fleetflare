@@ -49,7 +49,7 @@ export {
 /**
  * Per-file cursor into decoded jsonl TEXT (not raw container bytes —
  * `jsonlByFile`'s values already arrive as decoded strings, extracted by
- * `extractJsonlMembers` below). `fileOffsets[file]` is a string-index offset,
+ * `extractJsonlMembers` (./session-stats.ts, re-exported below)). `fileOffsets[file]` is a string-index offset,
  * advanced only up to the end of the LAST COMPLETE line (its trailing "\n")
  * a parse has ever seen — see `parseUsageIncrement`'s own doc comment for why
  * a trailing partial line is deliberately left unconsumed rather than
@@ -1149,7 +1149,7 @@ function countUsageLine(line: string, acc: { delta: BurnDelta; parseSkips: numbe
  * path merely being squeezed out tick-to-tick by the budget rule is NEVER
  * pruned while its session is still live — only a path absent for two
  * genuinely idle days (the session actually ended, or claude's own 30-day
- * transcript cleanup — `SESSION_CLEANUP_MS` below — already removed it) is
+ * transcript cleanup — `SESSION_CLEANUP_MS` (./session-stats.ts, issue #449) — already removed it) is
  * ever dropped.
  *
  * Issue #258 round-2 review (LOW, accepted): a subagent transcript pruned
