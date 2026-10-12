@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  isBigProfileRole, doClassForRole, realDoClassForRole, studioNamespace, getStudioStubForRow, BIG_PROFILE_ROLES,
+  doClassForRole, isBigProfileRole, BIG_PROFILE_ROLES,
+} from "../src/studio/container-class";
+import {
+  realDoClassForRole, studioNamespace, getStudioStubForRow,
 } from "../src/studio/profile";
 import type { Env } from "../src/env";
 import { nsWith } from "./helpers/fake-namespace";
