@@ -2559,8 +2559,8 @@ async function withBringupLogTail(syncDeps: SessionSyncDeps, reason: string, id?
     return `${reason}\n--- ${BRINGUP_LOG_PATH} (tail) ---\n${clipped}`;
   } catch (err) {
     // `id` stays optional only for the exported checkProvisionedWithRetry
-    // test seam, whose own suite calls it bare (test/studio.replacement
-    // .test.ts); every production path threads a real studio id, the gated
+    // test seam, whose own suite (studio.replacement.test.ts) calls it
+    // bare; every production path threads a real studio id, the gated
     // /provisioned route being the last one closed (S21 F9, review N1).
     console.error(
       id === undefined
