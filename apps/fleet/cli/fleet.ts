@@ -1793,6 +1793,10 @@ async function cmdTaskShow(creds: Credentials, number: number): Promise<void> {
  * `boardRequest` already exits 1 on any non-ok response (including the
  * route's 404 when the task carries no result envelope yet), so that case
  * needs no special handling here.
+ *
+ * Exits 1 when any result verdict is attempted-failed — the same posture
+ * every other check verb already has; not-mechanically-checkable is not a
+ * failure.
  */
 async function cmdTaskVerify(creds: Credentials, number: number): Promise<void> {
   const detected = await detectRepo();
@@ -1808,6 +1812,8 @@ async function cmdTaskVerify(creds: Credentials, number: number): Promise<void> 
   console.log(`fleet task verify #${number} — checking result envelope ${result.envelopeMsgId}:`);
   for (const r of result.results) console.log(`  ${icon(r.verdict)} ${r.verdict} — ${r.label}: ${r.detail}`);
   console.log(`comment: ${result.comment.url}`);
+  // Failure must be visible from $?: not-mechanically-checkable is not one.
+  if (result.results.some((r) => r.verdict === "attempted-failed")) process.exit(1);
 }
 
 /**
