@@ -17,7 +17,7 @@ import { errText } from "./diag";
 import { juniorUsageLogPath } from "../../../skills/junior/src/usage";
 import { formatColumns } from "./columns";
 
-export interface JuniorPaths { skillLink: string; config: string; skillSrc: string }
+interface JuniorPaths { skillLink: string; config: string; skillSrc: string }
 type Out = { ok: boolean; lines: string[] };
 
 export function juniorPaths(home: string, repoRoot: string): JuniorPaths {

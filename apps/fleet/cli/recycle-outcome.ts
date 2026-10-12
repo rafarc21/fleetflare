@@ -83,7 +83,7 @@ export const RECYCLE_CLIENT_TIMEOUT_MS = DESTROY_CLIENT_TIMEOUT_MS + 600_000 + 6
 export const RECYCLE_POLL_ATTEMPTS = 6;
 export const RECYCLE_POLL_INTERVAL_MS = 10_000;
 
-export interface RecycleReport {
+interface RecycleReport {
   /**
    * `ok`                  the recycle answered 200 — the normal path.
    * `http-error`          it answered non-2xx (a 409 refusal, a 500) — a real

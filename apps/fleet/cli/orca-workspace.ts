@@ -110,7 +110,7 @@ export interface OrcaResult {
   timedOut: boolean;
 }
 
-export type OrcaRun = (args: string[], timeoutMs: number) => Promise<OrcaResult>;
+type OrcaRun = (args: string[], timeoutMs: number) => Promise<OrcaResult>;
 
 /**
  * Board #39's decoupled lookup key: the Orca worktree id this code last
@@ -164,7 +164,7 @@ export interface OrcaDeps {
   lock: <T>(studioId: string, fn: () => Promise<T>) => Promise<T>;
 }
 
-export type WorkspaceOutcome =
+type WorkspaceOutcome =
   | { kind: "skipped"; why: string }
   | { kind: "exists"; closedDuplicates?: string[] }
   | { kind: "created"; closedDuplicates?: string[] }

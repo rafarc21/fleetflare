@@ -455,7 +455,7 @@ export function formatActivity(status: StudioStatus, now: Date, staleAfterSecond
 }
 
 /** Issue #70 ask 4: one studio's lead, machine-readable (`fleet ls --json`). */
-export interface LsJsonRow {
+interface LsJsonRow {
   id: string;
   state: StudioStatus["state"];
   repo: string | null;
