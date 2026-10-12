@@ -554,20 +554,27 @@ function splitReadRepos(raw: string): string[] | null {
   return repos.length === 0 ? null : repos;
 }
 
-function usage(message: string): CliCommand {
+/** Narrowed from CliCommand (review round 1 on #567) so idArg, whose generic
+ *  return type cannot accept the full union, can call it too — every other
+ *  caller still returns it into a CliCommand context, which this narrower
+ *  type satisfies. */
+function usage(message: string): { cmd: "usage"; message: string } {
   return { cmd: "usage", message: `${message}\n${CLI_USAGE}` };
 }
 
 /** Issue #567: the one-argument grammar every id-taking verb shares — the
- * id must exist, must not be a flag, and nothing may follow it, the same
- * "never silently ignore a token" posture `destroy`'s own id-slot check
- * (below) documents. Kept shared because check/paste/clear-session-guard/
- * inspect all had the identical defect. */
+ * id must exist and be non-empty (an empty id, review round 1, used to
+ * reach the Worker as /studio//check — a 404 after a full round trip,
+ * where every untouched id verb's truthiness check refuses it locally),
+ * must not be a flag, and nothing may follow it, the same "never silently
+ * ignore a token" posture `destroy`'s own id-slot check (below) documents.
+ * Kept shared because check/paste/clear-session-guard/inspect all had the
+ * identical defect. */
 function idArg<V extends string>(argv: string[], verb: V): { cmd: V; id: string } | { cmd: "usage"; message: string } {
   const [id, ...rest] = argv;
-  if (id === undefined) return { cmd: "usage", message: CLI_USAGE };
-  if (id.startsWith("--")) return { cmd: "usage", message: `fleet ${verb} needs a studio id (got ${JSON.stringify(id)})\n${CLI_USAGE}` };
-  if (rest.length > 0) return { cmd: "usage", message: `unexpected ${JSON.stringify(rest[0])} — fleet ${verb} takes exactly one studio id\n${CLI_USAGE}` };
+  if (id === undefined || id === "") return { cmd: "usage", message: CLI_USAGE };
+  if (id.startsWith("--")) return usage(`fleet ${verb} needs a studio id (got ${JSON.stringify(id)})`);
+  if (rest.length > 0) return usage(`unexpected ${JSON.stringify(rest[0])} — fleet ${verb} takes exactly one studio id`);
   return { cmd: verb, id };
 }
 

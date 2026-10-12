@@ -49,8 +49,8 @@ describe("parseCliArgs", () => {
   // the id slot (`check --json` parsed as a request for a studio named
   // "--json") and a token after a good id used to be silently dropped
   // (`check x --json` did a plain check while reading as a JSON-output ask).
-  // Same posture `destroy`'s own comment block (cli-args.ts:928-935) already
-  // documents for its id slot — a usage error, never a silent misparse.
+  // Same posture `destroy`'s own id-slot comment block already documents —
+  // a usage error, never a silent misparse.
   it("check refuses a flag-shaped id and any trailing token", () => {
     expect(parseCliArgs(["check", "--json"])).toEqual({
       cmd: "usage", message: `fleet check needs a studio id (got "--json")\n${CLI_USAGE}`,
@@ -58,6 +58,16 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["check", "websites--pilot", "--json"])).toEqual({
       cmd: "usage", message: `unexpected "--json" — fleet check takes exactly one studio id\n${CLI_USAGE}`,
     });
+  });
+
+  // Issue #567 review round 1: an EMPTY id is not an id. The idArg() helper
+  // destructures it as "present" (`id === undefined` only), and an empty
+  // string would have sailed to the Worker as /studio//check — the route
+  // regex rejects it, a bare 404 after a full round trip. Every untouched
+  // id verb (destroy/provision/recycle/spawn) still refuses "" via its
+  // truthiness check; this pin keeps check in that same posture.
+  it("check refuses an empty id", () => {
+    expect(parseCliArgs(["check", ""])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });
 
   // Board #140 (#94 follow-up): the operator's escape from a sync guard
