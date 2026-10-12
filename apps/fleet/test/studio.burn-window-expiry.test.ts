@@ -29,6 +29,7 @@ import type { Burn } from "../src/studio/burn";
 import type { Env } from "../src/env";
 import { envWithNs } from "./helpers/fake-namespace";
 import { authorizedReq } from "./helpers/http";
+import { row } from "./helpers/studio-row";
 
 const STOPPED_ID = "acme-os--maestro";
 const LIVE_ID = "demosite-life--scratch";
@@ -57,14 +58,11 @@ function liveBurn(overrides: Partial<Burn> = {}): Burn {
   };
 }
 
-function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: STOPPED_ID, state: "stopped", tailscaleHost: null, lastRefresh: null, error: null,
-    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    readiness: null,
-    ...overrides,
-  };
-}
+// Sweep-18 F9 (#596): row() carries the 11 census nulls; `readiness: null`
+// (this file's own 12th field) stays local to the wrapper, per the helper's
+// header contract — row()'s 11-field default set is frozen.
+const status = (o: Partial<StudioStatus> = {}) =>
+  row({ id: STOPPED_ID, state: "stopped", readiness: null, ...o });
 
 // Narrow fake: the grid render path (routes.ts's renderStudioGrid) only
 // ever call getTranscriptTail().

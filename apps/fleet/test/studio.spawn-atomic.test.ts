@@ -6,6 +6,7 @@ import { listStudios, recordStudio, getStudioRow } from "../src/studio/registry"
 import { LaunchRefusedError, StartRefusedError } from "../src/studio/do";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
+import { row } from "./helpers/studio-row";
 
 // ---------------------------------------------------------------------------
 // Issue #296 — `instance: "next"` was read-then-create: two concurrent spawns
@@ -19,13 +20,7 @@ import type { Env } from "../src/env";
 
 const PARENT: SpawnParent = { id: "websites--pilot", repo: "websites", role: "pilot" };
 
-function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: "websites--release", state: "running", tailscaleHost: null, lastRefresh: null, error: null,
-    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    ...overrides,
-  };
-}
+const status = (o: Partial<StudioStatus> = {}) => row({ id: "websites--release", state: "running", ...o });
 
 /** One request's deps: the real registry + claim, a provision that takes a
  *  moment (a real one takes minutes) and then records the row like the DO. */
