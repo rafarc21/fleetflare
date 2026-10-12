@@ -58,9 +58,7 @@ is a misconfiguration, not a normal spawn target, and
 `fleet/blueprint/studios/maestro/studio.md` is a stub for exactly that case
 — a cloud studio provisioned with this role stops and escalates to the
 operator instead of coordinating anything. See the `maestro-playbook`
-skill's Role section for the full rule. `org.json` still lists a `cto` role
-and an `operator` node from before this; those are being reconciled in the
-blueprint (board task).
+skill's Role section for the full rule.
 
 A maestro uses subagents only when the output INFORMS or ADMINISTERS (status,
 PR checks, grooming, closing issues, research, briefs, creating a worker) —
@@ -73,7 +71,8 @@ Roles: `maestro`, `web-studio`, `release-studio`, `pilot`, `scratch`.
 **One studio per role per repo.** The id is `<repo>--<role>`, so there is
 exactly one `acme-os--web-studio`. "One studio per task" and "every task on a
 web-studio" cannot both be true for two tasks on the same repo — pick one.
-Several related tasks can share one studio; see `fleet-dispatch-grouping-rule`.
+Several related tasks can share one studio; see the collision-free grouping rule
+in `fleet/blueprint/studios/web-studio/studio.md`.
 
 **Where a role is defined — studio first.** `provision.ts` tries
 `fleet/blueprint/studios/<name>/studio.md` BEFORE `fleet/blueprint/roles/<name>.md`.
@@ -101,8 +100,7 @@ So a `web-studio` lead gets 403 for every role. That is the gate working, not
 a dead capability. The in-container help says "within this studio's org-chart
 edges" and does not list them — this table does. A lead that cannot fan out
 to peers fans out to its OWN member subagents instead, which is usually what
-you wanted anyway. (`org.json` also lists `cto -> release, qa, dev`; none of
-those four roles has a definition file, so those edges resolve to nothing.)
+you wanted anyway.
 
 **A lead cannot write files, so it cannot commit its own report.** The same
 hook that refuses its Edit/Write refuses the markdown deliverable too. A lead
