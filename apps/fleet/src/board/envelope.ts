@@ -33,7 +33,7 @@ export const ENVELOPE_SCHEMA_VERSION = "1";
  *  miss the artifacts and evidence rendered around them. */
 export const ENVELOPE_MAX_CHARS = 65_536;
 
-export type EnvelopeResult =
+type EnvelopeResult =
   | { ok: true; doc: EnvelopeDoc }
   | { ok: false; message: string };
 

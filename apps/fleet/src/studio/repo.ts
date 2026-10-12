@@ -132,7 +132,7 @@ export function refuseBadSegment(slug: string, short: string): string {
     "(lowercase alphanumerics joined by single hyphens; dots and underscores fold to hyphens)";
 }
 
-export type StudioIdResult = { ok: true; id: string } | { ok: false; message: string };
+type StudioIdResult = { ok: true; id: string } | { ok: false; message: string };
 
 /**
  * The studio id a ROLE names inside a detected repo — `<repo-segment>--<role>`.
@@ -225,7 +225,7 @@ export interface WorkRepoDeps {
   reachRepo: (slug: string) => Promise<RepoReach>;
 }
 
-export interface WorkRepoRequest {
+interface WorkRepoRequest {
   /** The caller's raw `repo` body field. `undefined` = "no opinion", which
    *  falls back to `boundSlug` then `defaultSlug` and skips verification
    *  entirely — neither of those came from a caller. */

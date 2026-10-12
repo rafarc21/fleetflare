@@ -102,7 +102,7 @@ import type { ClientFacingStatus, EstateRequest } from "./types";
  * the gap between the two is the thing the operator's client-facing rules say never
  * to reveal.
  */
-export interface ClientRequestView {
+interface ClientRequestView {
   id: string;
   status: ClientFacingStatus;
   /** The client's own words, unchanged. */

@@ -41,7 +41,7 @@
 /** Directus field types this schema uses. Narrow on purpose — an unbounded
  *  string here would let a typo ("boolen") reach the apply script and fail
  *  against a live instance instead of against `tsc`. */
-export type FieldType =
+type FieldType =
   | "uuid" | "string" | "text" | "integer" | "boolean"
   | "date" | "timestamp" | "json";
 
