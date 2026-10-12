@@ -451,7 +451,11 @@ describe("reap — F1: bounded gap between live read and destroy", () => {
       await runReap(flags(), f.deps);
       state = f.saved()!;
     }
-    expect(state.backoffUntil[PILOT]).toBeDefined();
+    // The 30m is the claim: NOW + REAP_BACKOFF_MS, not just any truthy date.
+    expect(Date.parse(state.backoffUntil[PILOT]!)).toBe(NOW.getTime() + REAP_BACKOFF_MS);
+    // This describe has no other REAP_BACKOFF_MS pin (the sibling pin lives in
+    // the "rescue failure, 409 and backoff" describe below) — one per describe.
+    expect(REAP_BACKOFF_MS).toBe(30 * MIN);
   });
 });
 
@@ -560,13 +564,13 @@ describe("reap — rescue failure, 409 and backoff", () => {
   test("destroy refused (409) -> back off 30m", async () => {
     const f = fake({ studios: [IDLE_45()], board: HISTORY, destroy: () => ({ outcome: "refused", message: "409 destroy refused" }) });
     await runReap(flags(), f.deps);
-    expect(f.saved()!.backoffUntil[PILOT]).toBeDefined();
+    expect(Date.parse(f.saved()!.backoffUntil[PILOT]!)).toBe(NOW.getTime() + REAP_BACKOFF_MS);
   });
 
   test("destroy outcome unknown -> back off 30m", async () => {
     const f = fake({ studios: [IDLE_45()], board: HISTORY, destroy: () => ({ outcome: "unknown", message: "timed out" }) });
     await runReap(flags(), f.deps);
-    expect(f.saved()!.backoffUntil[PILOT]).toBeDefined();
+    expect(Date.parse(f.saved()!.backoffUntil[PILOT]!)).toBe(NOW.getTime() + REAP_BACKOFF_MS);
   });
 
   test("inside the backoff window -> nothing attempted; after it -> tried again", async () => {
@@ -581,10 +585,23 @@ describe("reap — rescue failure, 409 and backoff", () => {
   });
 
   test("a successful destroy clears its state entries", async () => {
-    const state = { ...emptyReapState(), backoffUntil: { [PILOT]: new Date(NOW.getTime() - MIN).toISOString() } };
+    // Seed all three per-studio maps: "entries" is plural, and cli/reap.ts's
+    // success path deletes backoffUntil, stallAlarmAt AND refusals for the
+    // destroyed id (a regression that stops clearing any one of them must
+    // fail here, not pass untouched). The seeded refusals count is below the
+    // backoff threshold and only counts LIVE-READ refusals while a candidate,
+    // so a clean inspect leaves it untouched until the destroy clears it.
+    const state = {
+      ...emptyReapState(),
+      backoffUntil: { [PILOT]: new Date(NOW.getTime() - MIN).toISOString() },
+      stallAlarmAt: { [PILOT]: new Date(NOW.getTime() - MIN).toISOString() },
+      refusals: { [PILOT]: 2 },
+    };
     const f = fake({ studios: [IDLE_45()], board: HISTORY, state });
     await runReap(flags(), f.deps);
     expect(f.saved()!.backoffUntil[PILOT]).toBeUndefined();
+    expect(f.saved()!.stallAlarmAt[PILOT]).toBeUndefined();
+    expect(f.saved()!.refusals[PILOT]).toBeUndefined();
   });
 });
 
