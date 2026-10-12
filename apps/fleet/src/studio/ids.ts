@@ -54,7 +54,7 @@ const ALL_DIGITS_RE = /^[0-9]+$/;
 /** A studio id, taken apart. `instance` is ALWAYS a positive integer — 1 for
  *  the two-segment form — so a reader never has to handle "absent" as a third
  *  case, and `buildStudioId` puts the same value back where it came from. */
-export interface StudioId {
+interface StudioId {
   repo: string;
   role: string;
   instance: number;
@@ -149,7 +149,7 @@ export function nextFreeInstance(ids: Iterable<string>, repo: string, role: stri
  * spelling instance 1 out loud is a reasonable thing to do, while that one is
  * the canonical form of a stored id, where two spellings would be a bug.
  */
-export type StudioTarget =
+type StudioTarget =
   | { kind: "role"; role: string; instance: number }
   | { kind: "id"; repo: string; role: string; instance: number };
 

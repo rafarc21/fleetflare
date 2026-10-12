@@ -57,7 +57,7 @@ export function sweepPrompt(n: number, verdict: QuiescenceVerdict, final: boolea
   return `${head} | fleet NOT quiescent: ${reason} | report a wave, then act unprompted.`;
 }
 
-export interface SweepResult {
+interface SweepResult {
   stop: boolean;
   /** Why the chain ended, or null while it continues. Two different reasons
    *  end it, and a caller that could not tell them apart would report a
