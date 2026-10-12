@@ -1174,7 +1174,7 @@ describe("syncSessionTick — the burn watermark advances after a successful par
         if (keys.includes(SESSION_BURN_WATERMARK_KEY)) {
           throw new Error("storage write failed");
         }
-        return base.put(keyOrEntries as never, value);
+        return base.put(keyOrEntries as never, value as never);
       }),
     } as typeof base;
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
