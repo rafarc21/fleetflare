@@ -62,6 +62,11 @@ const studioFleetSrc = await readFile(path.join(rootDir, "container", "studio-fl
 // container/server.ts, studio-bringup.sh and studio-fleet above.
 const studioDoSrc = await readFile(path.join(rootDir, "src", "studio", "do.ts"), "utf8");
 
+// Issue #507: EXEC_CLASSES.inspect's budget must BE INSPECT_EXEC_MS by
+// reference, not a hand-copied 15_000 — a value test cannot tell a
+// reference from a copy, so the source text is pinned like do.ts above.
+const sandboxApiSrc = await readFile(path.join(rootDir, "src", "studio", "sandbox-api.ts"), "utf8");
+
 // Issue #249 (PR4b): the survival re-brief's delivery module, source-pinned
 // for the SAME reason do.ts is — the guarantee under test is a NEGATIVE one
 // ("this feature introduces no second single-flight wake path, no second
@@ -177,6 +182,7 @@ export default defineConfig({
           TEST_TERMINAL_TEMPLATE_SRC: terminalTemplateSrc,
           TEST_CLI_FLEET_SRC: cliFleetSrc,
           TEST_STUDIO_DO_SRC: studioDoSrc,
+          TEST_SANDBOX_API_SRC: sandboxApiSrc,
           TEST_SURVIVAL_DELIVERY_SRC: survivalDeliverySrc,
           TEST_FLEET_JSON: testFleetJson,
           TEST_PILOT_ROLE_MD: testPilotRoleMd,

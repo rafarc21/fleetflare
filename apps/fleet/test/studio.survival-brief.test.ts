@@ -4,6 +4,11 @@ import {
   composeSurvivalBrief, sanitizeBranch, RESUMED_TRUST_ORIGIN_LINE, type SurvivalInput, type SurvivalWipRef,
 } from "../src/studio/survival-brief";
 import type { ObservedSession, RestoreOutcome } from "../src/studio/observed";
+// S14-F7 (refs #511): imported LIVE from the cli side -- the test->cli
+// direction is legal (only src->cli is forbidden, survival-brief.ts's own
+// header, issue #107) -- so the pin below compares the brief's rendered age
+// tokens against the real formatAge's output, never a copied expectation.
+import { formatAge } from "../cli/readiness-format";
 
 const NOW = "2026-09-24T14:00:00.000Z";
 const CONTROL_CHAR_RE = /[\x00-\x09\x0b-\x1f\x7f-\x9f]/;
@@ -1343,5 +1348,82 @@ describe("(#231 fix 2b, revised round 1 MAJOR 3, round 2 items 2a/2b) the old-se
       `- Old session moved aside to ${ASIDE_R2} (R2 -- the local copy is gone if this container was later ` +
       "replaced), 10m ago; check it for anything lost since then.",
     );
+  });
+});
+
+// S14-F7 (refs #511): formatSurvivalAge is a byte-identical copy of cli
+// readiness-format.ts's formatAge, and the src→cli import direction is
+// forbidden (survival-brief.ts's own header, issue #107), so this pin asserts
+// equality with the LIVE formatAge rather than deduplicating the two: the
+// brief's rendered age wording must match on both render paths, always.
+describe("formatSurvivalAge pinned to cli formatAge wording (S14-F7, refs #511)", () => {
+  // Bucket boundaries: the floor of each side of the 60s/3600s/86400s
+  // thresholds, the exact-multiple promotions (1h, 1d, 2d), and the
+  // fall-through shapes (25h is a multiple of 3600 but not 86400; 3599s and
+  // 86399s just miss their promotions).
+  const BOUNDARIES = [0, 7, 59, 60, 61, 119, 300, 3599, 3600, 3661, 86399, 86400, 90000, 172800];
+
+  /** The Session line's rendered age token. baseSession's defaults carry no
+   *  snapshotSource and no upper-bound flag, so the suffix is exactly
+   *  "from snap <age> old" and ends the line. */
+  function snapAgeToken(snapshotAgeS: number): string {
+    const out = composeSurvivalBrief(baseInput({ session: baseSession({ snapshotAgeS }) }));
+    const line = out.split("\n").find((l) => l.startsWith("- Session:"))!;
+    expect(line).toMatch(/from snap .+ old$/);
+    return line.match(/from snap (.+) old$/)![1];
+  }
+
+  /** The Task line's rendered age token. `lastCommitAt` is derived from the
+   *  same NOW the composer computes every task age against, X seconds
+   *  earlier, so ageFrom hands formatSurvivalAge exactly X seconds and the
+   *  "last <age> ago" suffix ends the line. */
+  function taskAgeToken(ageS: number): string {
+    const lastCommitAt = new Date(Date.parse(NOW) - ageS * 1000).toISOString();
+    const out = composeSurvivalBrief(baseInput({
+      tasks: { ok: true, value: [{ taskNumber: 6, taskTitle: "pin", branch: "b", commitsAheadOfMain: 1, lastCommitAt }] },
+    }));
+    const line = out.split("\n").find((l) => l.startsWith("- Task #6"))!;
+    expect(line).toMatch(/, last .+ ago$/);
+    return line.match(/, last (.+) ago$/)![1];
+  }
+
+  it("one worked example keeps the wording human-readable: an exact hour is 'from snap 1h old' / 'last 1h ago'", () => {
+    expect(composeSurvivalBrief(baseInput({ session: baseSession({ snapshotAgeS: 3600 }) })))
+      .toContain("- Session: resumed · from snap 1h old");
+    const lastCommitAt = new Date(Date.parse(NOW) - 3600 * 1000).toISOString();
+    expect(composeSurvivalBrief(baseInput({
+      tasks: { ok: true, value: [{ taskNumber: 6, taskTitle: "pin", branch: "b", commitsAheadOfMain: 1, lastCommitAt }] },
+    }))).toContain("- Task #6 \"pin\": b — 1 commit ahead of main, last 1h ago");
+  });
+
+  it.each(BOUNDARIES)(
+    "Session 'from snap' suffix at %s seconds equals formatAge's token",
+    (ageS) => {
+      expect(snapAgeToken(ageS)).toBe(formatAge(ageS));
+    },
+  );
+
+  it.each(BOUNDARIES)(
+    "task line 'last … ago' at %s seconds equals formatAge's token",
+    (ageS) => {
+      expect(taskAgeToken(ageS)).toBe(formatAge(ageS));
+    },
+  );
+
+  it("a negative age clamps to 0s on both paths — formatAge clamps the same way, so the pin holds at the clamp too", () => {
+    // The Session path clamps inside formatSurvivalAge itself (Math.max(0,…));
+    // the task path clamps inside ageFrom, which floors a FUTURE lastCommitAt
+    // to 0 before formatSurvivalAge ever sees it. formatAge clamps
+    // identically, so the existing "from snap 0s old" behavior (pinned in the
+    // boundaries describe above) is re-pinned here against the real function.
+    expect(snapAgeToken(-5)).toBe(formatAge(-5));
+    expect(taskAgeToken(-5)).toBe(formatAge(-5));
+  });
+
+  it("a fractional age floors on both paths, matching formatAge's own floor", () => {
+    // 90.5s is exactly representable in floating point, so the ms arithmetic
+    // in taskAgeToken is exact; floor(90.5) = 90 -> "1m" on both sides.
+    expect(snapAgeToken(90.5)).toBe(formatAge(90.5));
+    expect(taskAgeToken(90.5)).toBe(formatAge(90.5));
   });
 });
