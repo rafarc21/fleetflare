@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractHeredoc, extractRegion, runSnippet, BRINGUP } from "./exec-snippet";
+import { BRINGUP, extractHeredoc, extractRegion, runSnippet } from "./exec-snippet";
 
 describe("extractHeredoc", () => {
   test("returns the body between the quoted delimiters", () => {
