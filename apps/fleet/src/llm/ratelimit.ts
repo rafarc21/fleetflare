@@ -33,7 +33,7 @@ export const DEFAULT_LEAD_DAILY_CAP = 2000;
 // Type aliases, not interfaces: they must satisfy the factory's generic
 // `E extends Record<string, string | undefined>` constraint, and only
 // type aliases get implicit index signatures.
-export type LeadRateLimitEnv = {
+type LeadRateLimitEnv = {
   LEAD_RATE_PER_MINUTE?: string;
   LEAD_DAILY_CAP?: string;
 };
@@ -52,7 +52,7 @@ export const checkAndConsumeLeadRateLimit = makeRateLimitKind<LeadRateLimitEnv>(
 // studios out until UTC midnight.
 export const DEFAULT_LEAD_COUNT_TOKENS_RATE_PER_MINUTE = 60;
 
-export type LeadCountTokensRateLimitEnv = {
+type LeadCountTokensRateLimitEnv = {
   LEAD_COUNT_TOKENS_RATE_PER_MINUTE?: string;
 };
 

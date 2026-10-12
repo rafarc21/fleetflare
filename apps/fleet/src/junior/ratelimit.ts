@@ -25,7 +25,7 @@ export const DEFAULT_JUNIOR_DAILY_CAP = 50;
 // A type alias, not an interface: it must satisfy the factory's generic
 // `E extends Record<string, string | undefined>` constraint, and only type
 // aliases get implicit index signatures.
-export type JuniorRateLimitEnv = {
+type JuniorRateLimitEnv = {
   JUNIOR_RATE_PER_MINUTE?: string;
   JUNIOR_DAILY_CAP?: string;
 };
