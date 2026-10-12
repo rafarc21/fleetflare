@@ -191,8 +191,28 @@ describe("fleet memory ls", () => {
 
       expect(r.code).toBe(1);
       expect(r.err).toContain("fleet memory ls: answered 200 but the body was not the survey shape");
+      expect(r.err).not.toMatch(/^fleet: /m);
       expect(r.out).not.toContain("VERDICT:");
       expect(r.out).not.toContain("memory: acme-org/websites@main");
+    } finally {
+      worker.server.stop(true);
+    }
+  });
+
+  // Issue #548 review round 1: the shape check must also cover the files
+  // ROWS — a files:[{}] 200 passes a top-level-only check and then crashes
+  // in formatMemoryTable's f.target.length, the exact TypeError the issue
+  // forbids. Same named line, never the generic `fleet: <TypeError>`.
+  test("a JSON 200 with a files row missing target dies with the survey-shape line, exit 1", async () => {
+    const { home, cwd, worker } = await setup();
+    try {
+      worker.state.surveyBody = JSON.stringify({ ...SURVEY, files: [{}] });
+      const r = await run(["memory", "ls"], home, cwd);
+
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("fleet memory ls: answered 200 but the body was not the survey shape");
+      expect(r.err).not.toMatch(/^fleet: /m);
+      expect(r.out).not.toContain("VERDICT:");
     } finally {
       worker.server.stop(true);
     }
@@ -272,6 +292,25 @@ describe("fleet memory compact", () => {
       expect(r.code).toBe(1);
       expect(r.err).toContain(
         "fleet memory compact: 200 but the body was not JSON — the pass may have landed; check the board repo's open PRs",
+      );
+      expect(r.err).not.toMatch(/^fleet: /m);
+    } finally {
+      worker.server.stop(true);
+    }
+  });
+
+  // Issue #548 review round 1: a JSON 200 with the wrong shape is the exact
+  // case where the pass DID land — the pin demands the may-have-landed line
+  // with the compact-shape first clause, never a TypeError from body.summary.
+  test("a JSON 200 with the wrong shape dies with the may-have-landed line, exit 1", async () => {
+    const { home, cwd, worker } = await setup();
+    try {
+      worker.state.compactBody = '{"error":"gateway"}';
+      const r = await run(["memory", "compact"], home, cwd, "");
+
+      expect(r.code).toBe(1);
+      expect(r.err).toContain(
+        "fleet memory compact: 200 but the body was not the compact shape — the pass may have landed; check the board repo's open PRs",
       );
       expect(r.err).not.toMatch(/^fleet: /m);
     } finally {
