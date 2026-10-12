@@ -63,7 +63,7 @@ export const PATH1_BATCH_MAX = 100;
  *  budget left than this can run past the ~30s waitUntil ceiling and be killed
  *  with no log (#215's failure mode); those commits take the REST walk, whose
  *  per-call checks log the cutoff. */
-export const PATH1_BATCH_MIN_BUDGET_MS = 10_000;
+const PATH1_BATCH_MIN_BUDGET_MS = 10_000;
 
 /** One issue this fleet can now mechanically prove is done: which issue,
  *  which sha carried the proof, and which PR the proof came through — `sha`
