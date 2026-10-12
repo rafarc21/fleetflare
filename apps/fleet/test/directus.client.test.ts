@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   directusConfig, fetchProjectByKey, fetchContractStakes, fetchContractCommercial,
   listRequirements, listOpenDecisions, listRequests, fetchProjectEstate, stripCommercial,
-  DIRECTUS_MAX_BYTES, REQUIREMENTS_PAGE_LIMIT, type DirectusConfig,
+  type DirectusConfig,
 } from "../src/directus/client";
 import type { Env } from "../src/env";
 
@@ -144,12 +144,12 @@ describe("requirements — the on-demand tier", () => {
     expect(rows[0].acceptance).toBe("loads < 2s");
     expect(truncated).toBe(false);
     expect(q().get("sort")).toBe("sort,ref");
-    expect(q().get("limit")).toBe(String(REQUIREMENTS_PAGE_LIMIT));
+    expect(q().get("limit")).toBe("200");
     expect(q().get("filter[project][_eq]")).toBe("p1");
   });
 
   it("reports truncation rather than silently shortening the list a checklist groups by", async () => {
-    const full = Array.from({ length: REQUIREMENTS_PAGE_LIMIT }, (_, i) => ({ id: `r${i}`, ref: `R-${i}` }));
+    const full = Array.from({ length: 200 }, (_, i) => ({ id: `r${i}`, ref: `R-${i}` }));
     responder = () => Response.json({ data: full });
     expect((await listRequirements(CFG, "p1")).truncated).toBe(true);
   });
@@ -196,7 +196,7 @@ describe("failures surface loudly here — fail-open is card.ts's job, not this 
   });
 
   it("caps the response size — this text can reach a studio's system prompt", async () => {
-    responder = () => Response.json({ data: [{ id: "p1", key: "beta", notes: "x".repeat(DIRECTUS_MAX_BYTES) }] });
+    responder = () => Response.json({ data: [{ id: "p1", key: "beta", notes: "x".repeat(262_144) }] });
     await expect(fetchProjectByKey(CFG, "beta")).rejects.toThrow(/exceeds the 262144-byte cap/);
   });
 });
