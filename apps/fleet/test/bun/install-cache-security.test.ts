@@ -409,6 +409,15 @@ function injectionFired(script: string, marker: string, env: Record<string, stri
   return fired;
 }
 
+/** Scans the test process's own CWD (apps/fleet/) for the empty
+ *  `x$(touch …)y` dir trees a BARE relative injection payload leaves
+ *  behind when the shipped command's own mkdir/test-stat lines
+ *  materialize the literal payload name — the cwd litter finding #598
+ *  is about, which `git status` cannot see (empty dirs). */
+function cwdLitter(): string[] {
+  return readdirSync(".").filter((n) => n.startsWith("x$("));
+}
+
 // Pre-fix command text, reconstructed verbatim from git history (the exact
 // shapes install-cache.ts shipped before round 3's shQuote fix) — never
 // imported from src/, they no longer exist there.
@@ -476,12 +485,19 @@ describe("install-cache — item 5 SECURITY: shell metacharacter injection via d
   });
   test("MUTANT PROOF — the FIXED, shipped installCacheRestoreCmd (full pipeline) blocks the identical payload", () => {
     const marker = pwnedMarkerPath();
-    const evil = injectionPayload(marker);
+    // Absolute, inside the per-test tmpdir (finding #598): the `$( )` must
+    // still be shQuote'd or the marker fires, while the command's own
+    // mkdir/test lines materialize any literal name under `base`, not the
+    // test cwd.
+    const evil = join(base, injectionPayload(marker));
     // The full, real, shipped restore command — not just the isolated line —
     // run with no real presigned URL (curl will fail; irrelevant to this
     // proof, which only cares whether the payload's OWN touch ever fired).
     const fired = injectionFired(installCacheRestoreCmd(evil), marker, { [INSTALL_CACHE_URL_ENV]: "file:///does/not/exist" });
     expect(fired).toBe(false);
+    // Finding #598: the proof must not pay for itself in cwd litter — the
+    // bare payload's literal dir name belongs under `base`, never here.
+    expect(cwdLitter()).toEqual([]);
   });
 
   test("MUTANT BASELINE — installCacheSaveCmd's own PRE-FIX 'tar -C ${dir} -c node_modules' line genuinely executes an injected payload", () => {
@@ -490,7 +506,10 @@ describe("install-cache — item 5 SECURITY: shell metacharacter injection via d
   });
   test("MUTANT PROOF — the FIXED, shipped installCacheSaveCmd (full pipeline) blocks the identical payload", () => {
     const marker = pwnedMarkerPath();
-    const evil = injectionPayload(marker);
+    // Absolute, inside the per-test tmpdir (finding #598) — same reasoning
+    // as the restore proof above: the command's own test-stat line
+    // materializes any literal name under `base`, not the test cwd.
+    const evil = join(base, injectionPayload(marker));
     // The full, real, shipped save command — `[ ! -d <dir>/node_modules ]`
     // is false for this nonexistent directory, so this legitimately takes
     // the "skip:no-node_modules" branch; the only thing this proof cares
@@ -498,6 +517,8 @@ describe("install-cache — item 5 SECURITY: shell metacharacter injection via d
     // it, which happens (or, post-fix, does not) regardless of that outcome.
     const fired = injectionFired(installCacheSaveCmd(evil), marker);
     expect(fired).toBe(false);
+    // Finding #598, same reasoning as the restore proof above.
+    expect(cwdLitter()).toEqual([]);
   });
 
   test("a directory name with a literal single quote is also handled safely (the escape shQuote itself needs)", () => {
