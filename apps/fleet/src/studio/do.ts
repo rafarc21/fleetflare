@@ -236,16 +236,8 @@ export const REFRESH_SECONDS = 3000;
 /** PR #292 review item 2: DO storage key for the last minted read token. */
 const READ_REPOS_TOKEN_KEY = "readReposToken";
 
-/**
- * P2 plane 1 (transcript durability): how often the `shipTranscript`
- * schedule below fires. Design spec's own number ("StudioDO schedule
- * shipTranscript every 30s") — short, unlike REFRESH_SECONDS above, because
- * an operator watching the grid card (a later task) wants the hot-tail
- * preview to feel close to live, and because R2 chunk objects have no
- * meaningful cost pressure at this cadence (unlike GitHub's 60-minute token
- * lifetime, which is what actually bounds REFRESH_SECONDS).
- */
-export const SHIP_TRANSCRIPT_SECONDS = 30;
+export { SHIP_TRANSCRIPT_SECONDS } from "./ship-cadence";
+import { SHIP_TRANSCRIPT_SECONDS } from "./ship-cadence";
 
 export interface RefreshDeps {
   /** Issue #7: null = no credential for this studio (proxy mode, no read
