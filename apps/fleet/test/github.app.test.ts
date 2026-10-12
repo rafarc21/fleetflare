@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { installationEnvName, mintInstallationToken } from "../src/github/app";
+import { installationEnvName, mintInstallationToken, MintTokenError } from "../src/github/app";
 
 let pem: string;
 let publicKey: CryptoKey;
@@ -107,6 +107,20 @@ describe("mintInstallationToken", () => {
   it("throws GitHub's own message on a non-2xx", async () => {
     respond = () => new Response('{"message":"Bad credentials"}', { status: 401 });
     await expect(mintInstallationToken(env(), "acme-org", "acme-org/websites")).rejects.toThrow(/Bad credentials/);
+  });
+
+  it("a 2xx body with no token throws MintTokenError, never returns undefined (S10-F2)", async () => {
+    respond = () => Response.json({});
+    const err = await mintInstallationToken(env(), "acme-org", "acme-org/websites")
+      .then(() => undefined, (e: unknown) => e);
+    expect(err).toBeInstanceOf(MintTokenError);
+    expect((err as Error).message).toMatch(/named no token/);
+  });
+
+  it("an empty-string token is treated as no token (S10-F2)", async () => {
+    respond = () => Response.json({ token: "" });
+    await expect(mintInstallationToken(env(), "acme-org", "acme-org/websites"))
+      .rejects.toThrow(/named no token/);
   });
 
   it("refuses to run unconfigured rather than sending an empty JWT", async () => {
