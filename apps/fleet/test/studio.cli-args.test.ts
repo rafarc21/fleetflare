@@ -73,6 +73,31 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["check"])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });
 
+  // Issue #567 (sweep 20 finding 5): a flag-shaped token used to slide into
+  // the id slot (`check --json` parsed as a request for a studio named
+  // "--json") and a token after a good id used to be silently dropped
+  // (`check x --json` did a plain check while reading as a JSON-output ask).
+  // Same posture `destroy`'s own id-slot comment block already documents —
+  // a usage error, never a silent misparse.
+  it("check refuses a flag-shaped id and any trailing token", () => {
+    expect(parseCliArgs(["check", "--json"])).toEqual({
+      cmd: "usage", message: `fleet check needs a studio id (got "--json")\n${CLI_USAGE}`,
+    });
+    expect(parseCliArgs(["check", "websites--pilot", "--json"])).toEqual({
+      cmd: "usage", message: `unexpected "--json" — fleet check takes exactly one studio id\n${CLI_USAGE}`,
+    });
+  });
+
+  // Issue #567 review round 1: an EMPTY id is not an id. The idArg() helper
+  // destructures it as "present" (`id === undefined` only), and an empty
+  // string would have sailed to the Worker as /studio//check — the route
+  // regex rejects it, a bare 404 after a full round trip. Every untouched
+  // id verb (destroy/provision/recycle/spawn) still refuses "" via its
+  // truthiness check; this pin keeps check in that same posture.
+  it("check refuses an empty id", () => {
+    expect(parseCliArgs(["check", ""])).toEqual({ cmd: "usage", message: CLI_USAGE });
+  });
+
   // Board #140 (#94 follow-up): the operator's escape from a sync guard
   // stuck on a stale/wrong baseline. Same one-argument grammar as `check`.
   it("clear-session-guard requires an id", () => {
@@ -82,11 +107,33 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["clear-session-guard"])).toEqual({ cmd: "usage", message: CLI_USAGE });
   });
 
+  // Issue #567: same refusal shape as `check`'s pins above, for the same
+  // reasons — clear-session-guard is the destructive override of a safety
+  // mechanism, so a misparsed id is the worst place for one.
+  it("clear-session-guard refuses a flag-shaped id and any trailing token", () => {
+    expect(parseCliArgs(["clear-session-guard", "--json"])).toEqual({
+      cmd: "usage", message: `fleet clear-session-guard needs a studio id (got "--json")\n${CLI_USAGE}`,
+    });
+    expect(parseCliArgs(["clear-session-guard", "websites--pilot", "--json"])).toEqual({
+      cmd: "usage", message: `unexpected "--json" — fleet clear-session-guard takes exactly one studio id\n${CLI_USAGE}`,
+    });
+  });
+
   // Board issue #47: read a studio without attaching a tmux client. Same
   // one-argument grammar as `check`.
   it("inspect requires an id", () => {
     expect(parseCliArgs(["inspect", "websites--pilot"])).toEqual({ cmd: "inspect", id: "websites--pilot" });
     expect(parseCliArgs(["inspect"])).toEqual({ cmd: "usage", message: CLI_USAGE });
+  });
+
+  // Issue #567: same refusal shape as `check`'s own flag/trailing pins above.
+  it("inspect refuses a flag-shaped id and any trailing token", () => {
+    expect(parseCliArgs(["inspect", "--json"])).toEqual({
+      cmd: "usage", message: `fleet inspect needs a studio id (got "--json")\n${CLI_USAGE}`,
+    });
+    expect(parseCliArgs(["inspect", "websites--pilot", "--json"])).toEqual({
+      cmd: "usage", message: `unexpected "--json" — fleet inspect takes exactly one studio id\n${CLI_USAGE}`,
+    });
   });
 
   // Board task #125: same zero-argument grammar as `ls`.
@@ -159,6 +206,17 @@ describe("parseCliArgs", () => {
   it("paste requires an id", () => {
     expect(parseCliArgs(["paste", "websites--pilot"])).toEqual({ cmd: "paste", id: "websites--pilot" });
     expect(parseCliArgs(["paste"])).toEqual({ cmd: "usage", message: CLI_USAGE });
+  });
+
+  // Issue #567: same refusal shape as `check`'s pins above — paste pushes
+  // text at a live studio, so a flag-shaped id must never reach the Worker.
+  it("paste refuses a flag-shaped id and any trailing token", () => {
+    expect(parseCliArgs(["paste", "--json"])).toEqual({
+      cmd: "usage", message: `fleet paste needs a studio id (got "--json")\n${CLI_USAGE}`,
+    });
+    expect(parseCliArgs(["paste", "websites--pilot", "--json"])).toEqual({
+      cmd: "usage", message: `unexpected "--json" — fleet paste takes exactly one studio id\n${CLI_USAGE}`,
+    });
   });
 
   it("spawn requires a role", () => {
