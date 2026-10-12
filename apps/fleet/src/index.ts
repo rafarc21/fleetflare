@@ -2,7 +2,7 @@ import type { Env } from "./env";
 import { handleTelegramWebhook } from "./telegram/webhook";
 import { handleGithubWebhook } from "./github/webhook";
 import { AGENTS, telegramConfig } from "./agents/registry";
-import { getFlag, setFlag } from "./state";
+import { getFlag, setFlag, incrementCounter } from "./state";
 import { sendCard } from "./telegram/api";
 import { staleTasks, rearmKey, alertedKey, shouldAlert } from "./tasks/watchdog";
 import type { TaskRecord } from "./tasks/loop";
@@ -200,8 +200,7 @@ async function handleScheduled(controller: ScheduledController, env: Env, _ctx: 
     const now = Date.now();
     for (const { task, staleMs } of staleTasks(records, now)) {
       const key = rearmKey(task.taskId);
-      const attempts = Number((await getFlag(env.DB, key)) ?? "0") + 1;
-      await setFlag(env.DB, key, String(attempts), now);
+      const attempts = await incrementCounter(env.DB, key, now);
       try {
         const stub = env.AGENT.get(env.AGENT.idFromName(task.agentId));
         await (await stub.fetch("https://agent/rearm", { method: "POST" })).text();
