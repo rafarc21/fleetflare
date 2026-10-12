@@ -14,10 +14,6 @@ import {
 } from "./accounts";
 import { readFleetAccountLimits } from "./account-limits-store";
 import { parseStudioId } from "./ids";
-// A CLI-owned decoder imported by the Worker's own registry: type-only on
-// the src side (no runtime edge from src into cli), runtime here because a
-// D1 row can be as wrong as a wire row and must fail the same loud way.
-import { parseStudioStatus } from "../../cli/studio-row";
 
 // src/agents/registry.ts (the pattern this follows) is a hardcoded static
 // array — there is no persistence mechanism to literally copy, since Day 1's
@@ -382,18 +378,12 @@ export async function getStudioRowLookup(env: Env, id: string): Promise<StudioRo
     .bind(studioKey(id))
     .first<{ value: string }>();
   if (!row) return { kind: "absent" };
-  let decoded: ReturnType<typeof parseStudioStatus> = null;
   try {
-    decoded = parseStudioStatus(JSON.parse(row.value));
+    return { kind: "found", row: JSON.parse(row.value) as StudioStatus };
   } catch (err) {
     console.error(`getStudioRowLookup: malformed fleet_state row for ${id}`, err);
     return { kind: "malformed" };
   }
-  if (decoded === null) {
-    console.error(`getStudioRowLookup: malformed fleet_state row for ${id}`);
-    return { kind: "malformed" };
-  }
-  return { kind: "found", row: decoded };
 }
 
 /**
@@ -441,11 +431,7 @@ export async function listStudios(env: Env, now: Date = new Date()): Promise<Stu
     // future schema change, any other write path that isn't recordStudio)
     // must not fail the whole listing for every other studio.
     try {
-      const row = parseStudioStatus(JSON.parse(r.value));
-      if (row === null) {
-        console.error(`listStudios: skipping a malformed fleet_state row (${r.value.slice(0, 120)})`);
-        continue;
-      }
+      const row = JSON.parse(r.value) as StudioStatus;
       const reserved = otherRepoPrimaries(env, parseStudioId(row.id)?.repo ?? null);
       rows.push(await withAccountDisplay(env, { ...row, burn: expireBurnWindow(row.burn, now) }, limits, reserved, now));
     } catch (err) {
