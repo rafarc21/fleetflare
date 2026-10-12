@@ -245,9 +245,11 @@ describe("studioOpenPrs", () => {
   // #332 review H2 (operator-ordered): a PR whose live state cannot be read
   // means this module cannot answer the question it exists for — dropping it
   // would report a false zero to --strict-unmerged. The whole scan reads as
-  // failed (the route's `unknown`), never as clean. Deliberately DIFFERENT
-  // from the showTask-degrade contract below: openTasksWithLatestPr owns
-  // that posture and it is unchanged.
+  // failed (the route's `unknown`), never as clean. The same fail-closed
+  // family as the unread-task contract above (#416 item 3-tail): an unread
+  // task AND an unreadable PR state both fail the whole scan ({ok:false}),
+  // while pr-landed.ts's own two callers (promote-close, task-reap) keep
+  // the per-task degrade.
   it("one task's getPullRequest throwing fails the whole scan — {ok:false}, never a false zero", async () => {
     const docA = envelopeDoc({ artifacts: [{ kind: "pr", pr: "9" }] }, 12);
     const docB = envelopeDoc({ artifacts: [{ kind: "pr", pr: "11" }] }, 13);
