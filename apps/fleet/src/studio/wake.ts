@@ -132,7 +132,7 @@ export function flattenPrompt(prompt: string): string {
  */
 const ROW_LEAD = "^[[:space:]]*(│[[:space:]]*(❯[[:space:]]*)?)?";
 const ROW_TAIL = "[[:space:]]*(│)?[[:space:]]*$";
-export const LOOSE_LIMIT_PATTERNS: readonly string[] = [
+const LOOSE_LIMIT_PATTERNS: readonly string[] = [
   `${ROW_LEAD}Enter to confirm · Esc to cancel${ROW_TAIL}`,
   `${ROW_LEAD}Esc to cancel · Tab to amend · ctrl\\+e to explain${ROW_TAIL}`,
   // #146: the ▔-ruled top of ANY select-style modal — footer-wording-
@@ -194,14 +194,14 @@ const SURVEY_HEADER_TEXT = "How is Claude doing this session\\? \\(optional\\)";
  *  documents (a bare multibyte glyph directly before a quantifier binds to
  *  its last BYTE, not the whole character — wrapping in a group fixes it). */
 const SURVEY_HEADER_ROW_LEAD = "^[[:space:]]*(│[[:space:]]*)?(⏺|●)?[[:space:]]*";
-/** POSIX ERE, C-locale safe — exported so `wakeCmd` can fold it into the
+/** POSIX ERE, C-locale safe — the same source `wakeCmd` folds into the
  *  container-side `grep -E` scan too (defense-in-depth, finding 1): the
  *  header's own literal text is specific enough to be safe as a STANDALONE
  *  pattern there, unlike a bare numbered-row shape would be. The two-row
  *  proximity check below stays JS-side only — a single `grep -E` line
  *  pattern cannot express "this row, AND within N rows below it, that
  *  other shape" the way `LOOSE_LIMIT_PATTERNS`'s single-row entries can. */
-export const SURVEY_HEADER_PATTERN = `${SURVEY_HEADER_ROW_LEAD}${SURVEY_HEADER_TEXT}${ROW_TAIL}`;
+const SURVEY_HEADER_PATTERN = `${SURVEY_HEADER_ROW_LEAD}${SURVEY_HEADER_TEXT}${ROW_TAIL}`;
 const SURVEY_HEADER_ROW = new RegExp(SURVEY_HEADER_PATTERN.replaceAll("[[:space:]]", "\\s"));
 
 /** At least two `N: label` tokens on the SAME row — claude draws every
@@ -221,7 +221,7 @@ const SURVEY_HEADER_PROXIMITY = 3;
  *  carries `SURVEY_CHOICE_TOKEN` at least twice. Header absent: never
  *  flags, even if a lead's own prose happens to contain a short numbered
  *  row shape (finding 2, maestro round-2 review, PR #170). */
-export function surveyOverlayOnScreen(screen: string): boolean {
+function surveyOverlayOnScreen(screen: string): boolean {
   const tail = screen.split("\n").filter((l) => l.trim() !== "").slice(-LOOSE_TAIL_LINES);
   const headerIdx = tail.findIndex((l) => SURVEY_HEADER_ROW.test(l));
   if (headerIdx < 0) return false;
