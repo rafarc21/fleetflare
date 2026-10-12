@@ -52,7 +52,7 @@ import type { StudioStatus } from "../src/studio/types";
 import type { BoardTask } from "../src/board/types";
 import { formatAssignWake } from "./task-format";
 import { repairFailureLine } from "./repair-failure";
-import { errText } from "./diag";
+import { errText, ERROR_SNIPPET_MAX_CHARS } from "./diag";
 import { parseStudioStatus, parseStudioStatusArray } from "./studio-row";
 import { postTaskNew, taskNewFailureLine } from "./task-new-retry";
 import type { AssignWakeReport } from "../src/board/assign-wake";
@@ -91,7 +91,7 @@ async function listStudios(creds: Credentials): Promise<StudioStatus[]> {
   const res = await fetch(new URL("/studio/", creds.workerUrl), {
     headers: { ...accessHeaders(creds), Accept: "application/json" },
   });
-  if (!res.ok) fail(`could not list studios: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) fail(`could not list studios: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
   const studios = parseStudioStatusArray(await res.json());
   if (studios === null) fail("studio listing was not studio rows");
   return studios;
@@ -196,7 +196,7 @@ async function spawnStudio(
         fail(`${knownId ?? role} ${instance === "next" ? "the next free instance" : `instance ${instance}`} ` +
           "was just taken by another spawn — run it again");
       }
-      fail(`spawn failed: ${res.status} ${body.slice(0, 300)}`);
+      fail(`spawn failed: ${res.status} ${body.slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
     }
     const spawnedRow = parseStudioStatus(await res.json());
     if (spawnedRow === null) fail(`spawn answered HTTP ${res.status} but the body was not a studio row`);
@@ -310,7 +310,7 @@ async function adoptTask(
     headers: { ...accessHeaders(creds), "Content-Type": "application/json" },
     body: JSON.stringify({ assignee: studioId, ...(repoSlug ? { repo: repoSlug } : {}) }),
   });
-  if (!res.ok) fail(`could not adopt #${number}: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) fail(`could not adopt #${number}: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
   const adopted = (await res.json()) as BoardTask & { wake?: AssignWakeReport };
   say(`adopted #${adopted.number} -> ${studioId} (${adopted.state})`);
   say(`  ${adopted.url}`);

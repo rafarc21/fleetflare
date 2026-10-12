@@ -3,7 +3,7 @@
 // header): a test can import it without dragging Bun globals into the root
 // type-check.
 import { INSPECT_EXEC_MS } from "../src/studio/inspect";
-import { errText, decodeBody } from "./diag";
+import { errText, decodeBody, ERROR_SNIPPET_MAX_CHARS } from "./diag";
 
 /**
  * How long `fleet inspect` waits for the Worker. Before #91 the fetch had no
@@ -44,7 +44,7 @@ export async function requestInspect(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     // A Cloudflare error page's <title> is the only part worth a terminal line — ./diag's decodeBody owns that decode (and its JSON .error branch).
-    const detail = decodeBody(res.status, text, 300);
+    const detail = decodeBody(res.status, text, ERROR_SNIPPET_MAX_CHARS);
     return {
       ok: false,
       message: `HTTP ${res.status} from the Worker/Durable Object side (the container was never ` +

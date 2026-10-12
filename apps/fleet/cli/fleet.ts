@@ -48,7 +48,7 @@ import { requestInspect, renderInspect, formatSessionForceArmedLine, type Inspec
 import type { Observed } from "../src/studio/observed";
 import { ATTACH_CONNECT_TIMEOUT_MS, ATTACH_STALE_MS, attachTitle, hhmmssZ, titleSequence } from "./attach-liveness";
 import { repairFailureLine, discardNote, destroyPath } from "./repair-failure";
-import { errText } from "./diag";
+import { errText, ERROR_SNIPPET_MAX_CHARS } from "./diag";
 import { parseStudioStatus, parseStudioStatusArray } from "./studio-row";
 import { requestDestroy, readStatus, DESTROY_STATUS_TIMEOUT_MS } from "./destroy-outcome";
 import { requestRecycle } from "./recycle-outcome";
@@ -886,7 +886,7 @@ export async function cmdLs(
     headers: { ...accessHeaders(creds), Accept: "application/json" },
   });
   if (!res.ok) {
-    console.error(`fleet ls: ${res.status} ${(await res.text()).slice(0, 300)}`);
+    console.error(`fleet ls: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
     process.exit(1);
   }
   const recorded = parseStudioStatusArray(await res.json());
@@ -1147,7 +1147,7 @@ async function cmdTabs(creds: Credentials, flags: TabsFlags): Promise<void> {
         const res = await fetch(new URL("/studio/", creds.workerUrl), {
           headers: { ...accessHeaders(creds), Accept: "application/json" },
         });
-        if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 300)}`);
+        if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
         const studios = parseStudioStatusArray(await res.json());
         if (studios === null) throw new Error("studio listing was not studio rows");
         return studios;
@@ -1184,7 +1184,7 @@ async function onboardCheckReach(creds: Credentials, repo: string): Promise<Repo
   const res = await fetch(new URL(`/studio/reach?repo=${encodeURIComponent(repo)}`, creds.workerUrl), {
     headers: { ...accessHeaders(creds), Accept: "application/json" },
   });
-  if (!res.ok) throw new Error(`reach check: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) throw new Error(`reach check: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
   return (await res.json()) as RepoReach;
 }
 
@@ -1196,7 +1196,7 @@ async function onboardListStudios(creds: Credentials): Promise<StudioStatus[]> {
   const res = await fetch(new URL("/studio/", creds.workerUrl), {
     headers: { ...accessHeaders(creds), Accept: "application/json" },
   });
-  if (!res.ok) throw new Error(`fleet ls: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) throw new Error(`fleet ls: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
   const studios = parseStudioStatusArray(await res.json());
   if (studios === null) throw new Error("studio listing was not studio rows");
   return studios;
@@ -1336,7 +1336,7 @@ async function cmdSpawn(
     }),
   });
   if (!res.ok) {
-    console.error(`fleet spawn: ${res.status} ${(await res.text()).slice(0, 300)}`);
+    console.error(`fleet spawn: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
     process.exit(1);
   }
   const spawned = parseStudioStatus(await res.json());
@@ -2344,7 +2344,7 @@ export async function cmdRescueAll(creds: Credentials, flags: RescueAllFlags): P
         if (name === "TimeoutError" || name === "AbortError") return rescueTimedOutOutcome(timeoutMs);
         return { ok: false, error: errText(err) };
       }
-      if (!res.ok) return { ok: false, error: `${res.status} ${(await res.text()).slice(0, 300)}` };
+      if (!res.ok) return { ok: false, error: `${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}` };
       return (await res.json()) as RescueAllOutcome;
     },
     log: (line) => console.log(line),
@@ -2367,7 +2367,7 @@ export const REAP_LOCK_STALE_MS = 15 * 60_000;
 
 async function fetchJson(url: string, headers: Record<string, string>, timeoutMs: number): Promise<unknown> {
   const res = await fetch(url, { headers: { ...headers, Accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
   return res.json();
 }
 
@@ -2446,7 +2446,7 @@ export function reapDeps(
     rescue: async (id) => {
       try {
         const res = await fetch(studioUrl(creds, id, "/rescue"), rescueFetchInit(headers, RESCUE_ALL_STUDIO_TIMEOUT_MS));
-        if (!res.ok) return { ok: false, error: `${res.status} ${(await res.text()).slice(0, 300)}` };
+        if (!res.ok) return { ok: false, error: `${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}` };
         const outcome = (await res.json()) as RescueAllOutcome;
         return outcome.ok === true ? { ok: true } : { ok: false, error: outcome.error ?? "rescue answered not ok" };
       } catch (err) {
@@ -2554,7 +2554,7 @@ async function uploadPaste(creds: Credentials, id: string, bytes: Uint8Array): P
     headers: { ...accessHeaders(creds), "Content-Type": "image/png" },
     body: bytes,
   });
-  if (!res.ok) throw new Error(`paste upload failed: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) throw new Error(`paste upload failed: ${res.status} ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}`);
   const body = (await res.json()) as { path: string };
   return body.path;
 }

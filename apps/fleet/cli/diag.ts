@@ -19,6 +19,13 @@ export function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** How much of a non-2xx body a plain error snippet shows — the budget
+ *  the fetch-failure lines named in #510 share. Two verbs carry their own
+ *  deliberate budgets instead: repair-failure.ts's 2000, and the board/
+ *  memory lines' raw `slice(0, 500)` (fleet.ts boardRequest,
+ *  taskStateFetch*, cmdMemoryLs). */
+export const ERROR_SNIPPET_MAX_CHARS = 300;
+
 /**
  * A non-2xx Worker body, reduced to the DETAIL of one terminal line — the
  * label, the status prefix, and the exit/throw policy all stay at the call
