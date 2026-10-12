@@ -35,8 +35,12 @@ function writeCredentials(home: string, workerUrl: string) {
   chmodSync(path, 0o600);
 }
 
-// The two MemoryFileRow fixtures test/cli.memory-format.test.ts already
-// uses -- reused here, never new inline data.
+// The two MemoryFileRow fixtures are COPIED VERBATIM from the local (and
+// unexported) `rows` array in test/cli.memory-format.test.ts -- importing
+// them would mean exporting from that out-of-scope file. The copy is safe
+// only because the assertions below pin its exact contents: if the source
+// rows ever change, the pinned table/header assertions here must be
+// re-checked against them.
 const ROWS = [
   { target: "websites--pilot/a.md", citations: 3, ageMs: 9 * 24 * 3600 * 1000, indexed: true, verdict: "promote" },
   { target: "websites--web-studio/bb.md", citations: 0, ageMs: null, indexed: false, verdict: "hold" },
@@ -92,7 +96,7 @@ function startMemoryWorker() {
 async function run(args: string[], home: string, cwd: string, stdinBytes?: string) {
   const proc = Bun.spawn({
     cmd: [process.execPath, FLEET, ...args],
-    env: { ...process.env, HOME: home },
+    env: { PATH: process.env.PATH!, HOME: home },
     cwd,
     stdin: stdinBytes === undefined ? "ignore" : "pipe",
     stdout: "pipe",
@@ -187,6 +191,7 @@ describe("fleet memory compact", () => {
       expect(r.out).toContain(
         "merged 3, demoted 2, promoted 1; 4 file(s) MOVED to fleet/memory/archive/ (none deleted); index now 12 line(s)",
       );
+      expect(r.out).not.toContain("WARNING: citation survey truncated");
       const posts = worker.requests.filter((req) => req.method === "POST");
       expect(posts.length).toBe(1);
       expect(posts[0].body).toBe("{}");
