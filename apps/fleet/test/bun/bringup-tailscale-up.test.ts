@@ -39,18 +39,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
-
-function extractRegion(src: string, marker: string): string {
-  const open = `# >>> ${marker} >>>`;
-  const close = `# <<< ${marker} <<<`;
-  const openAt = src.indexOf(open);
-  if (openAt === -1) throw new Error(`region opener ${open} not found in source`);
-  const closeAt = src.indexOf(close, openAt);
-  if (closeAt === -1) throw new Error(`region terminator ${close} not found in source`);
-  return src.slice(src.indexOf("\n", openAt) + 1, closeAt);
-}
+import { BRINGUP, extractRegion } from "./exec-snippet";
 
 const REGION = extractRegion(BRINGUP, "tailscale-up");
 

@@ -12,22 +12,11 @@
 // throwaway TMUX_TMPDIR + HOME (same isolation as bringup-tmux-render.test.ts),
 // and reads the active window back from tmux. Never a studio's own server.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BRINGUP, extractRegion } from "./exec-snippet";
 import { requireTools } from "./require-tool";
-
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
-
-function extractRegion(src: string, marker: string): string {
-  const open = `# >>> ${marker} >>>`;
-  const close = `# <<< ${marker} <<<`;
-  const openAt = src.indexOf(open);
-  if (openAt === -1) throw new Error(`region opener ${open} not found in source`);
-  const closeAt = src.indexOf(close, openAt);
-  if (closeAt === -1) throw new Error(`region terminator ${close} not found in source`);
-  return src.slice(src.indexOf("\n", openAt) + 1, closeAt);
-}
 
 const REGION = extractRegion(BRINGUP, "shell-window");
 // Nested-tmux and tool-absence are different reasons to not run this suite:

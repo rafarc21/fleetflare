@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractShellFunc, runSnippet } from "./exec-snippet";
+import { BRINGUP, extractRegion, extractShellFunc, runSnippet } from "./exec-snippet";
 
 /**
  * Issue #67: every provision must not start ANOTHER claude.
@@ -26,19 +26,6 @@ import { extractShellFunc, runSnippet } from "./exec-snippet";
  * a process named `claude` in the pane — so what is under test is exactly the
  * decision of WHETHER to send it, and how many processes that leaves behind.
  */
-const BRINGUP = readFileSync(join(import.meta.dir, "../../container/studio-bringup.sh"), "utf8");
-
-/** A `# >>> name >>>` ... `# <<< name <<<` region of bring-up, verbatim. */
-function extractRegion(src: string, marker: string): string {
-  const open = `# >>> ${marker} >>>`;
-  const close = `# <<< ${marker} <<<`;
-  const openAt = src.indexOf(open);
-  if (openAt === -1) throw new Error(`region opener ${open} not found in source`);
-  const closeAt = src.indexOf(close, openAt);
-  if (closeAt === -1) throw new Error(`region terminator ${close} not found in source`);
-  return src.slice(src.indexOf("\n", openAt) + 1, closeAt);
-}
-
 const DECISION = () =>
   [
     // Bring-up's tmux shadow (#117): every call below goes `-L fleet-studio`,
