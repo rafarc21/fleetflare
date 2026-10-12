@@ -345,7 +345,7 @@ export function isJsonlFile(name: string, header: Uint8Array): boolean {
 /** One jsonl member: complete lines, tar mtime (seconds), and the top-level
  *  `timestamp` of its last complete line (null if that line was over
  *  STATS_LINE_CAP or carried none). Counters only, never content. */
-export type SessionFileStat = { lines: number; mtime: number; lastTs: string | null };
+type SessionFileStat = { lines: number; mtime: number; lastTs: string | null };
 export type SessionStats = Record<string, SessionFileStat>;
 /** The one file the guard compares against: the snapshot's newest session. */
 export type SessionMark = { file: string; lines: number; lastTs: string | null };

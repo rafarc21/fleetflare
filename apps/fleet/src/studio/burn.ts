@@ -39,7 +39,7 @@ import { walkGzipTar, isJsonlFile, type MemberSink } from "./session-stats";
 export {
   sessionStats, newestMark, poorerThan, SessionArchiveFormatError,
   readJsonlMembersFromTar, extractJsonlMembers, INFLATE_PROBE, GUNZIP_SLICE,
-  type SessionMark, type SessionStats, type SessionFileStat,
+  type SessionMark, type SessionStats,
 } from "./session-stats";
 
 // ---------------------------------------------------------------------------
