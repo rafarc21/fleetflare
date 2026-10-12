@@ -13,6 +13,14 @@
 //       <HH:MM:SS>Z" once the view goes stale.
 //   T4: a frame every 300ms with a 1500ms stale threshold never goes stale —
 //       pins that a real frame resets the watchdog's lastFrameAt.
+//   T6: a non-numeric FLEET_ATTACH_STALE_MS refuses at startup (exit 1, the
+//       message names the value) — Number("90s") is NaN, which silently
+//       collapsed the watchdog to a ~1ms interval (#566).
+//   T7: the FLEET_ATTACH_CONNECT_TIMEOUT_MS sibling refuses the same way —
+//       NaN there silently disabled #123's connect-abandon timer.
+//   T8: an EMPTY value is unset, not a typo — it must fall back to the
+//       default, never be refused: a fix that only guards isFinite && n > 0
+//       would refuse it, because Number("") === 0.
 //
 // T1/T3 use a hand-rolled raw-TCP zombie, not Bun.serve's own WebSocket
 // server: Bun.serve answers a client's close frame with its own close frame
@@ -50,9 +58,17 @@ function runAttach(home: string, extraEnv: Record<string, string>) {
   cleanups.push(() => { try { proc.kill(); } catch {} });
   let err = "";
   let out = "";
-  (async () => { for await (const c of proc.stderr) err += new TextDecoder().decode(c); })();
-  (async () => { for await (const c of proc.stdout) out += new TextDecoder().decode(c); })();
-  return { proc, stderr: () => err, stdout: () => out };
+  // Resolves at stream EOF — the child's exit — never before: `proc.exited`
+  // alone races the pipe drain, so the final stderr chunk can still be in
+  // flight when it resolves. Tests that read stderr AFTER an exit (T6/T7)
+  // await this; live-child tests (T1–T5, T8) keep the accumulating accessor,
+  // same split accounts-cli.test.ts's `run` (Promise.all drain) vs its
+  // `readUntil` (live read) already makes.
+  const drained = Promise.all([
+    (async () => { for await (const c of proc.stderr) err += new TextDecoder().decode(c); })(),
+    (async () => { for await (const c of proc.stdout) out += new TextDecoder().decode(c); })(),
+  ]).then(() => undefined);
+  return { proc, stderr: () => err, stdout: () => out, drained };
 }
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -181,6 +197,45 @@ test("T4: a live view that keeps getting frames never goes stale and never recon
   await Bun.sleep(4000);
   expect(stderr()).not.toMatch(/no output for \d+s/);
   expect(w.upgrades()).toBe(1);
+}, 15000);
+
+// #566 — WHY: `Number(process.env.FLEET_ATTACH_STALE_MS ?? 90_000)` had no NaN
+// guard, so the natural unit-suffix typo "90s" meant a NaN watchdog interval
+// (~1ms) and a staleness test that read false for EVERY frame — both attach
+// watchdogs silently dead, no message anywhere. The refusal must fire at
+// module load, before any connect, so these spawn against a port where
+// NOTHING listens (127.0.0.1:1) and never need a server.
+//
+// Measured today (the bug): the child never exits — it reconnects to the
+// dead port forever — so `proc.exited` never resolves; the race returns -99
+// instead, making the RED an explicit -99 !== 1 rather than a 15s burn.
+const NO_SERVER = "http://127.0.0.1:1";
+
+test("T6: a non-numeric FLEET_ATTACH_STALE_MS refuses at startup, never silently NaN", async () => {
+  const { proc, stderr, drained } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_STALE_MS: "90s" });
+  const code = await Promise.race([proc.exited, Bun.sleep(10_000).then(() => -99)]);
+  if (code === 1) await drained; // EOF, not just exit — the refusal line must be in
+  expect(code).toBe(1);
+  expect(stderr()).toContain('fleet: FLEET_ATTACH_STALE_MS must be a number of ms, got "90s"');
+}, 15000);
+
+test("T7: a non-numeric FLEET_ATTACH_CONNECT_TIMEOUT_MS refuses the same way", async () => {
+  const { proc, stderr, drained } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_CONNECT_TIMEOUT_MS: "30x" });
+  const code = await Promise.race([proc.exited, Bun.sleep(10_000).then(() => -99)]);
+  if (code === 1) await drained; // EOF, not just exit — the refusal line must be in
+  expect(code).toBe(1);
+  expect(stderr()).toContain('fleet: FLEET_ATTACH_CONNECT_TIMEOUT_MS must be a number of ms, got "30x"');
+}, 15000);
+
+test("T8: an empty FLEET_ATTACH_STALE_MS falls back to the default, not a refusal", async () => {
+  // An empty value is the operator's "I left FLEET_ATTACH_STALE_MS= blank",
+  // not a typo — treat as unset, fallback 90s. No server listens, so the
+  // child lives in its reconnect loop; still running at 8s IS the pin —
+  // module load must have completed (fallback applied) with no refusal line.
+  const { proc, stderr } = runAttach(fakeHome(NO_SERVER), { FLEET_ATTACH_STALE_MS: "" });
+  const state = await Promise.race([proc.exited.then(() => "exited"), Bun.sleep(8000).then(() => "running")]);
+  expect(state).toBe("running");
+  expect(stderr()).not.toContain("must be a number of ms");
 }, 15000);
 
 test("attachTitle formats waiting, live and stale states", () => {
