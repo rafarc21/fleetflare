@@ -16,7 +16,7 @@
 // same studio id and live in the same fleet_state table (src/state.ts).
 import { incrementCounter } from "./state";
 
-const MINUTE_MS = 60_000;
+export const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 
 // Item (c): a window comfortably wider than the bucket size itself, so a
