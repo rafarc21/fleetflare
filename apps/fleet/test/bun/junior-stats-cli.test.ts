@@ -5,18 +5,12 @@
 // Mirrors junior-local-cli.test.ts's real-subprocess-against-a-real-HOME
 // pattern; the Worker side here is a real local Bun.serve, never mocked.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeCredentials } from "./helpers/credentials";
 
 const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
-
-function writeCredentials(home: string, workerUrl: string) {
-  mkdirSync(join(home, ".fleet"), { recursive: true });
-  const path = join(home, ".fleet", "credentials");
-  writeFileSync(path, JSON.stringify({ workerUrl, accessClientId: "id", accessClientSecret: "secret" }));
-  chmodSync(path, 0o600);
-}
 
 function writeLocalUsage(home: string, lines: Record<string, unknown>[]) {
   const dir = join(home, ".local", "share", "fleet");
