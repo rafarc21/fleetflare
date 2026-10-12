@@ -1,6 +1,6 @@
 import type { Env } from "../env";
 import { appendEvent } from "../events/log";
-import { makeEvent } from "../events/schema";
+import { makeEvent, shortId } from "../events/schema";
 import { agentForProject, telegramConfig } from "../agents/registry";
 import { getFlag, setFlag } from "../state";
 import { sendMessage } from "./api";
@@ -59,7 +59,7 @@ export async function handleTelegramWebhook(
     const marker = makeEvent(
       { from: "human", to: "cto", kind: "decision", project, body: `callback_query ${cq.id}` },
       Date.now(),
-      crypto.randomUUID().slice(0, 8),
+      shortId(),
     );
     marker.id = `cb_${project}_${cq.id}`;
     const isNew = await appendEvent(env.DB, marker);
@@ -126,7 +126,7 @@ export async function handleTelegramWebhook(
   const event = makeEvent(
     { from: "human", to: agent.id, kind: "human", project, body: text },
     Date.now(),
-    crypto.randomUUID().slice(0, 8),
+    shortId(),
   );
   // Telegram redelivers the same update_id whenever it doesn't see a fast
   // 2xx (e.g. the LLM round trip below runs long and the request times out

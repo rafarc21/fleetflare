@@ -5,7 +5,7 @@ import { recentApprovalsFor } from "../approvals/store";
 import { sendCard } from "../telegram/api";
 import { agentForProject, telegramConfig } from "../agents/registry";
 import { appendEvent } from "../events/log";
-import { makeEvent } from "../events/schema";
+import { makeEvent, shortId } from "../events/schema";
 import { deltaDigest, maestroIdFor } from "./wake-events";
 import { listStudios } from "../studio/registry";
 import { logWakeOutcome } from "../studio/wake";
@@ -685,7 +685,7 @@ export async function handleGithubWebhook(
     env.DB,
     makeEvent(
       { from: "worker", to: "human", kind: "escalation", project, body: alert },
-      nowMs, crypto.randomUUID().slice(0, 8),
+      nowMs, shortId(),
     ),
   );
   // Board #334: with Telegram off the D1 event above is the whole record.

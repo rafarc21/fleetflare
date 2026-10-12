@@ -1,7 +1,7 @@
 import { Container } from "@cloudflare/containers";
 import type { Env } from "../env";
 import { appendEvent } from "../events/log";
-import { makeEvent } from "../events/schema";
+import { makeEvent, shortId } from "../events/schema";
 import { sendCard } from "../telegram/api";
 import { telegramConfig } from "../agents/registry";
 import type { DeployTarget } from "./targets";
@@ -87,7 +87,7 @@ export async function advanceDeploy(
             project: job.project, ref: job.targetId,
             body: `poll ${failedPolls}/${deps.maxFailedPolls} failed: ${msg}`,
           },
-          deps.now, crypto.randomUUID().slice(0, 8),
+          deps.now, shortId(),
         ),
       );
       return { done: false, job: next };
@@ -167,7 +167,7 @@ async function terminalReport(
     deps.db,
     makeEvent(
       { from: "deploy", to: "human", kind: "report", project, ref: targetId, body },
-      deps.now, crypto.randomUUID().slice(0, 8),
+      deps.now, shortId(),
     ),
   );
   try {
