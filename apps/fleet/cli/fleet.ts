@@ -1900,7 +1900,11 @@ async function cmdTaskState(creds: Credentials, number: number, to: TaskState, f
  * own — same detect-and-report repo convention every other task command
  * uses, then prints the report the Worker sent back. `boardRequest` already
  * exits 1 on any non-ok response, so that case needs no special handling
- * here.
+ * here. #546: the --terminal branch exits 1 when any close errored (the
+ * terminal path's own failure word — it never goes through runTaskReap);
+ * the non-terminal branch keeps its all-outcomes-on-stdout exit-0 shape —
+ * which rows there count as run failures is the Worker's policy call, not
+ * this print loop's.
  */
 async function cmdTaskReap(creds: Credentials, apply: boolean, terminal = false): Promise<void> {
   const detected = await detectRepo();
@@ -1918,6 +1922,13 @@ async function cmdTaskReap(creds: Credentials, apply: boolean, terminal = false)
       console.log(`  #${r.number} (${r.state}): ${r.outcome} as ${r.reason}${r.error ? ` — ${r.error}` : ""}`);
     }
     if (t.remaining > 0) console.log(`  ${t.remaining} left: a page closed nothing; re-run after checking the errors above`);
+    // #546 (S19-F2): a close that failed is a failure this run must not
+    // report as success. Exit 1 when any row errored, mirroring rescue-all's
+    // failures counter; would-close/closed/deliberate-skip rows stay 0. The
+    // t.apply gate keeps dry runs 0 — a dry page only previews, and the
+    // Worker's real dry path never mints "error" rows (the dry-run print
+    // pin above feeds one in synthetically to cover the error line).
+    if (t.apply && t.results.some((r) => r.outcome === "error")) process.exit(1);
     return;
   }
   const result = (await boardRequest(creds, "fleet task reap", "/tasks/reap", {
@@ -1934,7 +1945,9 @@ async function cmdTaskReap(creds: Credentials, apply: boolean, terminal = false)
     return;
   }
   for (const r of result.results) {
-    if (r.outcome === "skipped") {
+    if (r.outcome === "failed") {
+      console.log(`  #${r.taskNumber} (PR #${r.prNumber}): failed — ${r.reason}`);
+    } else if (r.outcome === "skipped") {
       console.log(`  #${r.taskNumber}: skipped — ${r.reason}`);
     } else {
       console.log(`  #${r.taskNumber} (PR #${r.prNumber}): ${r.outcome} — ${r.sha.slice(0, 8)}`);

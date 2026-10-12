@@ -1228,10 +1228,11 @@ describe("POST /studio/board/tasks/reap", () => {
   // failure propagates OUT of closeTaskOnPromote as a throw instead of a
   // silent no-op. This route's `close` wrapper must not let that throw get
   // coerced into a "closed" outcome -- runTaskReap's own try/catch around
-  // `deps.close` is what turns it into a "skipped" outcome carrying the
-  // real error, and this proves that wiring holds end-to-end through the
-  // route, not just in task-reap.ts's pure core.
-  it("apply: true reports a thrown close-action failure as skipped with the real error, not closed", async () => {
+  // `deps.close` is what turns it into a "failed" outcome (issue #546: a
+  // word apart from a deliberate skip) carrying the real error, and this
+  // proves that wiring holds end-to-end through the route, not just in
+  // task-reap.ts's pure core.
+  it("apply: true reports a thrown close-action failure as failed with the real error and PR, not closed", async () => {
     authorized();
     // Distinct issue number + sha from every other test in this describe
     // block -- close-action.ts's dedup guard is keyed on (repo, issue, sha)
@@ -1250,9 +1251,9 @@ describe("POST /studio/board/tasks/reap", () => {
       testEnv, api, reach, undefined, reapPort,
     );
     expect(res.status).toBe(200);
-    const body = await res.json() as { results: { taskNumber: number; outcome: string; reason?: string }[] };
+    const body = await res.json() as { results: { taskNumber: number; prNumber?: number; outcome: string; reason?: string }[] };
     expect(body.results).toEqual([
-      { taskNumber: 99, outcome: "skipped", reason: expect.stringContaining("GitHub 502") },
+      { taskNumber: 99, prNumber: 9, outcome: "failed", reason: expect.stringContaining("GitHub 502") },
     ]);
   });
 
