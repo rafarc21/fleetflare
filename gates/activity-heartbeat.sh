@@ -200,7 +200,7 @@ write_state() {
   # Issue #370 (maestro review, PR #352 post-merge) — round 3's own comment
   # here claimed "this container never runs a date without %N support," true
   # of the PRODUCTION studio container (Linux/GNU always) but false of WHERE
-  # THIS SCRIPT ALSO RUNS: `test/bun/bringup-hooks.test.ts` execs this exact
+  # THIS SCRIPT ALSO RUNS: `test/bun/bringup-heartbeat.test.ts` execs this exact
   # file for real, on whatever host `bun test` runs on — a maestro's own Mac
   # included. macOS ships BSD date, which has no `%N` at all and prints the
   # LITERAL characters `%3N` was asking for verbatim (`...:00.3NZ`) instead of

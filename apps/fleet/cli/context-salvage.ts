@@ -11,7 +11,7 @@
  * Deliberately has no Orca import and does no `orca` shelling out — pure
  * filesystem, synchronous, so it is unit-testable with a real `mkdtempSync`
  * fixture (this repo's own established pattern for fs-touching bun:test —
- * see test/bun/blueprint-credential.test.ts, bringup-hooks.test.ts) and does
+ * see test/bun/blueprint-credential.test.ts, bringup-gates.test.ts) and does
  * not need the injected-`run` machinery cli/orca-workspace.ts carries for
  * the parts of teardown that DO talk to Orca.
  */
