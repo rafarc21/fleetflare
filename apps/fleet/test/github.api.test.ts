@@ -553,7 +553,16 @@ describe("listAllBranchNames", () => {
 
   it("throws GitHub's own words on a non-2xx, token never in the message", async () => {
     respond = () => new Response("boom", { status: 503 });
-    await expect(listAllBranchNames("tok", "o/r")).rejects.toThrow(/503/);
+    // try/catch, not rejects.toThrow: the caught message must be checked
+    // twice (status words present, token absent) — the shape :122, :315
+    // and :1352 already use for their "never leaks the token" twins.
+    try {
+      await listAllBranchNames("super-secret-token", "o/r");
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error).message).toMatch(/503/);
+      expect((err as Error).message).not.toContain("super-secret-token");
+    }
   });
 
   // Reviewer finding 1 (PR #239): a single `per_page=100` page silently
