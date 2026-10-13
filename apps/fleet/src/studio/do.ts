@@ -51,7 +51,7 @@ import {
   deliverSurvivalBriefOnBringup, retryPendingSurvivalBrief, composeSurvivalDelivery, paneBusy,
   fetchRescueBranchCandidates, SURVIVAL_COMPARE_BASE,
   type BusyVerdict, type ComposedBrief, type SurvivalDeliveryOutcome,
-  type SurvivalSources, type SurvivalTaskRef,
+  type SurvivalSources, type SurvivalTaskRef, type WipSyncSnapshot,
 } from "./survival-delivery";
 import {
   nextActivity, ACTIVITY_KEY, clearActivityState, extractLastVisibleLine, truncateLine,
@@ -4650,8 +4650,8 @@ export async function loadOrMintSpawnToken(storage: SpawnTokenStorage): Promise<
  * So: mint once, keep forever. `container env == registry hash` now holds by
  * construction rather than by timing. **Rotation is an operator procedure**,
  * not a side effect of a routine call — delete SPAWN_TOKEN_KEY from the
- * studio's DO storage, recycle the container, provision. See
- * docs/superpowers/OPERATOR-FINISH-LIST.md §9.
+ * studio's DO storage, recycle the container, provision. See the
+ * operator's own finish-list notes (kept outside this repo), §9.
  *
  * **Ordering invariant (review round 1, Important 3).** The writes are one
  * SHORT early sequence — no clone, no bring-up, no GitHub call inside it —
@@ -6430,7 +6430,8 @@ export class StudioDO extends Sandbox<Env> {
   /**
    * Issue #249 (PR4b): wires `deliverSurvivalBriefOnBringup`
    * (survival-delivery.ts's standalone extraction, tested with no DO
-   * construction in test/studio.survival-delivery.test.ts) to this DO's real
+   * construction in test/studio.survival-input.test.ts and
+   * test/studio.survival-retry.test.ts) to this DO's real
    * Observed record, real pane probe, real GitHub reads and real wake.
    *
    * ONE `getObserved` SNAPSHOT, TAKEN HERE, threaded into everything below —
@@ -6510,9 +6511,16 @@ export class StudioDO extends Sandbox<Env> {
         }),
         () => this.survivalBusy(),
         this.survivalCompose(
-          workRepoSlug, session, snapshot.wipSyncedAt ?? null, session.wipBootStampBefore ?? null,
-          snapshot.lastSessionAside ?? null, snapshot.lastSessionAsideAt ?? null,
-          snapshot.wipSyncedBootStamp ?? null, asideShip,
+          workRepoSlug, session, {
+            syncedAt: snapshot.wipSyncedAt ?? null,
+            bootStamp: session.wipBootStampBefore ?? null,
+            lastAside: snapshot.lastSessionAside ?? null,
+            lastAsideAt: snapshot.lastSessionAsideAt ?? null,
+            syncedBootStamp: snapshot.wipSyncedBootStamp ?? null,
+            // Passed through AS READ: `undefined` (no ship has run) stays
+            // distinct from `null` (a ship ran clean) — never `?? null`.
+            asideShip,
+          },
         ),
         (prompt) => this.wakeStudioOnAssignment(prompt),
         () => ctx.moved(),
@@ -6588,14 +6596,16 @@ export class StudioDO extends Sandbox<Env> {
         // `pending.wipBootStamp` is left in place on `SurvivalBriefPending`
         // for wire back-compat only and is no longer read for composition.
         (pending) => this.survivalCompose(
-          workRepoSlug, pending.session, pending.wipSyncedAt ?? null, pending.session.wipBootStampBefore ?? null,
-          pending.lastSessionAside ?? null, pending.lastSessionAsideAt ?? null,
-          pending.wipSyncedBootStamp ?? null,
-          // Maestro review round 2 on PR #235 (issue #231), item 2b — the
-          // pending record's OWN frozen copy (SurvivalBriefPending.
-          // asideShip), never a fresh read, same reason every other field in
-          // this call is the pending record's own copy and not a live one.
-          pending.asideShip,
+          workRepoSlug, pending.session, {
+            syncedAt: pending.wipSyncedAt ?? null,
+            bootStamp: pending.session.wipBootStampBefore ?? null,
+            lastAside: pending.lastSessionAside ?? null,
+            lastAsideAt: pending.lastSessionAsideAt ?? null,
+            syncedBootStamp: pending.wipSyncedBootStamp ?? null,
+            // Pending record's own frozen copy — never a fresh read; and
+            // `undefined` (no ship has run) stays distinct from `null`.
+            asideShip: pending.asideShip,
+          },
         )(),
         (prompt) => this.wakeStudioOnAssignment(prompt, true),
       ));
@@ -6640,28 +6650,8 @@ export class StudioDO extends Sandbox<Env> {
    * instruction — a brief naming the surviving branches is worth delivering
    * without it.
    */
-  // Board issue #208, part 2: `wipSyncedAt` is the caller's own frozen
-  // capture (bring-up's `snapshot.wipSyncedAt`, or the retry's
-  // `pending.wipSyncedAt`) — see composeSurvivalDelivery's own doc comment
-  // for why it only ever renders on a `via: "heal"` session.
   private survivalCompose(
-    workRepoSlug: string, session: ObservedSession, wipSyncedAt: string | null = null,
-    // Issue #231: same "caller's own frozen capture" treatment wipSyncedAt
-    // above already gets — see composeSurvivalDelivery's own doc comment.
-    wipBootStamp: string | null = null, lastSessionAside: string[] | null = null,
-    // Maestro review round 1 on PR #235, MAJOR 3 (issue #231): same
-    // "caller's own frozen capture" treatment as the three params above.
-    lastSessionAsideAt: string | null = null,
-    // Maestro review round 2 on PR #235 (issue #231), item 1: same
-    // "caller's own frozen capture" treatment as every param above — see
-    // composeSurvivalDelivery's own doc comment.
-    wipSyncedBootStamp: string | null = null,
-    // Maestro review round 2 on PR #235 (issue #231), item 2b: same
-    // "caller's own frozen capture" treatment as every param above.
-    // `undefined` (no ship has run) and `null` (a ship ran clean) are both
-    // meaningful and distinct — see `SurvivalInput.asideShip`'s own doc
-    // comment, survival-brief.ts.
-    asideShip?: AsideShipRecord | null,
+    workRepoSlug: string, session: ObservedSession, wip?: WipSyncSnapshot,
   ): () => Promise<ComposedBrief> {
     return async () => {
       let tasks: SurvivalTaskRef[];
@@ -6672,7 +6662,7 @@ export class StudioDO extends Sandbox<Env> {
       }
       return composeSurvivalDelivery(
         this.survivalSources(workRepoSlug), { ok: true, value: tasks }, session, new Date().toISOString(),
-        wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt, wipSyncedBootStamp, asideShip,
+        wip,
       );
     };
   }

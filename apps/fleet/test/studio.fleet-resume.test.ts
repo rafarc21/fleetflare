@@ -41,6 +41,7 @@ function deps(rows: StudioStatus[], provisioned: { id: string; cfg: ProvisionCon
     },
     resolveBrief: async () => ({ ok: false, status: 500, message: "unused" }),
     notifyMaestro: async () => {},
+    assignModel: async () => {},
     maxStudios: DEFAULT_MAX_STUDIOS,
     claimStudioId: async () => null,
     claimStopped: async () => async () => {},

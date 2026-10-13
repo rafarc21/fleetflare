@@ -16,7 +16,8 @@
 // `moved` param. StudioDO cannot be constructed under vitest-pool-workers
 // (do.ts's own header), so behaviour that is not extractable is behaviour
 // that cannot be tested; the wiring in do.ts stays a thin, source-pinned
-// forward. See test/studio.survival-delivery.test.ts.
+// forward. See test/studio.survival-input.test.ts and
+// test/studio.survival-retry.test.ts.
 
 import { aboveAgentPanel, MODAL_TAIL_LINES, PANE_CAPTURE_MARKER, PANE_QUIESCE_SECONDS } from "./failover";
 import {
@@ -622,6 +623,47 @@ export interface SurvivalSources {
 export const SURVIVAL_COMPARE_BASE = "main";
 
 /**
+ * The frozen observed-session wip sextuplet (board issues #208, #231) — the
+ * six travel as one group or not at all, because they are all the same kind
+ * of thing: each field as it stood AT ONE bring-up, captured by the caller
+ * and never re-read. OPTIONAL/absent means the same thing every old `= null`
+ * default meant: the feature that threads this field was never armed.
+ */
+export interface WipSyncSnapshot {
+  // Board issue #208, part 2 — `Observed.wipSyncedAt` AS FROZEN at bring-up
+  // (see `SurvivalBriefPending.wipSyncedAt`'s own doc comment, observed.ts,
+  // for why it must be frozen rather than re-read). OPTIONAL with a `null`
+  // default so every pre-#208 caller (and every existing fixture in this
+  // file's own tests) keeps compiling unchanged.
+  /** `Observed.wipSyncedAt` as frozen at bring-up — see SurvivalInput.wipSyncedAt's own doc comment (survival-brief.ts) for why frozen, never re-read. */
+  syncedAt?: string | null;
+  // Issue #231 — threaded the SAME path `syncedAt` just above already
+  // takes, both OPTIONAL with a `null` default for the identical reason.
+  /** `Observed.wipBootStamp` as frozen at bring-up — same reason as `syncedAt`. */
+  bootStamp?: string | null;
+  /** `Observed.lastSessionAside` as it stood at bring-up — same reason as `syncedAt`. */
+  lastAside?: string[] | null;
+  // Maestro review round 1 on PR #235, MAJOR 3 — same OPTIONAL/`null`-default
+  // threading every other frozen-at-bring-up field above already takes.
+  /** When `lastAside` was stamped — same reason as `syncedAt`. */
+  lastAsideAt?: string | null;
+  // Maestro review round 2 on PR #235 (issue #231), item 1 — same
+  // OPTIONAL/`null`-default threading every other frozen-at-bring-up field
+  // above already takes. See `SurvivalInput.wipSyncedBootStamp`'s own doc
+  // comment (survival-brief.ts) for why this, and not `bootStamp` above,
+  // is what `wipSyncLine` actually renders.
+  /** `Observed.wipSyncedBootStamp` — the exact ref the last GENUINELY SYNCED push targeted; see SurvivalInput.wipSyncedBootStamp's own doc comment (survival-brief.ts). */
+  syncedBootStamp?: string | null;
+  // Maestro review round 2 on PR #235 (issue #231), item 2b — same OPTIONAL,
+  // caller's-own-frozen-capture threading as every param above. See
+  // `SurvivalInput.asideShip`'s own doc comment (survival-brief.ts) for the
+  // three states this carries; `undefined` (never passed) is distinct from
+  // `null` and both must survive unchanged through this function.
+  /** `Observed`'s ASIDE_SHIP_KEY record — `undefined` (never passed) is distinct from `null` (a ship ran clean); never coerce. */
+  asideShip?: AsideShipRecord | null;
+}
+
+/**
  * Turns the studio's live tasks into PR4a's `SurvivalInput`.
  *
  * TAKES NO STORAGE PORT, ON PURPOSE. `session` arrives as a PARAMETER,
@@ -656,32 +698,9 @@ export async function resolveSurvivalInput(
   tasks: Checked<SurvivalTaskRef[]>,
   session: ObservedSession | null,
   now: string,
-  // Board issue #208, part 2 — `Observed.wipSyncedAt` AS FROZEN at bring-up
-  // (see `SurvivalBriefPending.wipSyncedAt`'s own doc comment, observed.ts,
-  // for why it must be frozen rather than re-read). OPTIONAL with a `null`
-  // default so every pre-#208 caller (and every existing fixture in this
-  // file's own tests) keeps compiling unchanged.
-  wipSyncedAt: string | null = null,
-  // Issue #231 — threaded the SAME path `wipSyncedAt` just above already
-  // takes, both OPTIONAL with a `null` default for the identical reason.
-  wipBootStamp: string | null = null,
-  lastSessionAside: string[] | null = null,
-  // Maestro review round 1 on PR #235, MAJOR 3 — same OPTIONAL/`null`-default
-  // threading every other frozen-at-bring-up field above already takes.
-  lastSessionAsideAt: string | null = null,
-  // Maestro review round 2 on PR #235 (issue #231), item 1 — same
-  // OPTIONAL/`null`-default threading every other frozen-at-bring-up field
-  // above already takes. See `SurvivalInput.wipSyncedBootStamp`'s own doc
-  // comment (survival-brief.ts) for why this, and not `wipBootStamp` above,
-  // is what `wipSyncLine` actually renders.
-  wipSyncedBootStamp: string | null = null,
-  // Maestro review round 2 on PR #235 (issue #231), item 2b — same OPTIONAL,
-  // caller's-own-frozen-capture threading as every param above. See
-  // `SurvivalInput.asideShip`'s own doc comment (survival-brief.ts) for the
-  // three states this carries; `undefined` (never passed) is distinct from
-  // `null` and both must survive unchanged through this function.
-  asideShip?: AsideShipRecord | null,
+  wip?: WipSyncSnapshot,
 ): Promise<SurvivalInput> {
+  const { syncedAt: wipSyncedAt, bootStamp: wipBootStamp, lastAside: lastSessionAside, lastAsideAt: lastSessionAsideAt, syncedBootStamp: wipSyncedBootStamp, asideShip } = wip ?? {};
   if (!tasks.ok) {
     return {
       studioId: sources.studioId,
@@ -1019,29 +1038,17 @@ export async function resolveSurvivalInput(
  *  thunk the delivery function below takes. An EMPTY string is PR4a's own
  *  signal that there is nothing worth re-briefing about.
  *
- *  `wipSyncedAt` (board issue #208, part 2) and `wipBootStamp`/
- *  `lastSessionAside`/`lastSessionAsideAt` (issue #231) pass straight
- *  through to `resolveSurvivalInput` — see that function's own doc comment.
- *  `wipSyncedBootStamp` (maestro review round 2 on PR #235, issue #231, item
- *  1) does too. `asideShip` (same review, item 2b) does too. */
+ *  The six fields of `wip` (a `WipSyncSnapshot`) pass straight through to
+ *  `resolveSurvivalInput` — see that function's and `WipSyncSnapshot`'s own
+ *  doc comments. */
 export async function composeSurvivalDelivery(
   sources: SurvivalSources,
   tasks: Checked<SurvivalTaskRef[]>,
   session: ObservedSession | null,
   now: string,
-  wipSyncedAt: string | null = null,
-  wipBootStamp: string | null = null,
-  lastSessionAside: string[] | null = null,
-  lastSessionAsideAt: string | null = null,
-  wipSyncedBootStamp: string | null = null,
-  asideShip?: AsideShipRecord | null,
+  wip?: WipSyncSnapshot,
 ): Promise<string> {
-  return composeSurvivalBrief(
-    await resolveSurvivalInput(
-      sources, tasks, session, now, wipSyncedAt, wipBootStamp, lastSessionAside, lastSessionAsideAt,
-      wipSyncedBootStamp, asideShip,
-    ),
-  );
+  return composeSurvivalBrief(await resolveSurvivalInput(sources, tasks, session, now, wip));
 }
 
 // ---------------------------------------------------------------------------

@@ -54,6 +54,9 @@ Two house rules that shape every row below:
 | `LEAD_COUNT_TOKENS_RATE_PER_MINUTE` | 60 | glm-lead `/count_tokens` calls per rolling 60s per studio (its own counter, no daily cap) | `src/llm/ratelimit.ts` |
 | `LEAD_STREAM_IDLE_MS` | 90000 | ms the glm-lead route waits for an upstream stream chunk before erroring | `src/llm/anthropic-route.ts` |
 | `LEAD_AI_RETRY_BASE_MS` | 500 | Base backoff (ms) before retrying a pre-stream Workers AI 504/529 (2 retries max) | `src/llm/anthropic-route.ts` |
+| `LEAD_MODEL_POOL` | off | `"on"`: route every non-Claude lead call across a pool of Workers AI models (GLM, Kimi, DeepSeek) via AI Gateway | `src/llm/anthropic-route.ts`, `src/llm/model-quality-cron.ts` |
+| `LEAD_AI_GATEWAY_ID` | `default` | AI Gateway id every lead Workers AI call routes through | `src/llm/anthropic-route.ts` |
+| `MODEL_QUALITY_ISSUE` | unset (no posting) | Board issue number the daily model-quality table comments on; demotion still runs when the pool is on | `src/llm/model-quality-cron.ts` |
 | `BURN_ALERT_OUTPUT_TOKENS_5H` | `0` (off) | Rolling-5h output-token alert threshold, Telegram once per window | `src/studio/do.ts` |
 | `FLEET_BOT_NAME` / `FLEET_BOT_EMAIL` | `fleetflare[bot]` | Task container's git identity (default applied in container/server.ts; rescue side in src/studio/rescue.ts); never a studio's identity — src/studio/credentials.ts only refuses a studio identity equal to it | `container/server.ts` (default), `src/studio/credentials.ts` (refusal rule) |
 | `FLEET_STUDIO_GIT_NAME` / `FLEET_STUDIO_GIT_EMAIL` | `fleet-studio <fleet-studio@users.noreply.github.com>` | Git identity every studio and its rescue commits are authored as; both or neither; a `[bot]` value or one equal to `FLEET_BOT_*` is ignored | `src/studio/credentials.ts` |

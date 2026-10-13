@@ -27,6 +27,9 @@ import {
   createStreamState, streamPrelude, applyOpenAIStreamChunk, closeStreamOrError, parseSseDataLine,
   parseStreamErrorChunk, streamErrorFrame,
 } from "./translate";
+import { pickModels } from "./router";
+import { getAssignedModel, getModelStates } from "./model-store";
+import { POOL, modelById, type PoolModel } from "./models";
 
 export const ANTHROPIC_MESSAGES_PATH = "/fleet/llm/anthropic/v1/messages";
 
@@ -164,6 +167,65 @@ class AiRunError extends Error {
   constructor(message: string, readonly attempts: number) { super(message); }
 }
 
+/** Incident fix (#717): Task 4 (spec 2026-10-13-model-pool-design,
+ *  Component 4) shipped an AI Gateway option attached to EVERY `env.AI.run`
+ *  call, defaulting to the account's own `"default"` gateway id when
+ *  `LEAD_AI_GATEWAY_ID` (env.ts) was unset. That default gateway was not
+ *  actually provisioned for unified billing in production — every GLM lead
+ *  call came back `"2021: Insufficient unified billing credits"` the instant
+ *  it deployed. There is no default gateway id anymore: the option is
+ *  attached ONLY when an operator has explicitly set `LEAD_AI_GATEWAY_ID` to
+ *  a non-empty string (`resolveGatewayId` below); unset/empty means no
+ *  gateway option at all, the exact pre-Task-4 `ai.run(model, body)` call
+ *  shape (two arguments, not three with `undefined`). */
+export function resolveGatewayId(env: { LEAD_AI_GATEWAY_ID?: string }): string | undefined {
+  return env.LEAD_AI_GATEWAY_ID ? env.LEAD_AI_GATEWAY_ID : undefined;
+}
+
+/** Task 4: 429/code-3021 ("Account rate limit exceeded", the spec's own
+ *  Problem-section wording) — the ONE failure shape that means "this model
+ *  specifically is out of budget right now", so the overflow loop below
+ *  moves to the next pool model immediately rather than retrying the same
+ *  one. `\b3021\b` catches the bare error code even on upstream wording that
+ *  doesn't also say "rate limit" in English (classifyAiError's own
+ *  `/rate limit|too many/i` already covers the wording this spec's measured
+ *  messages use, but the numeric code is the more durable signal). */
+const isRateLimited = (message: string) => /\b3021\b|rate limit|too many/i.test(message);
+
+/** Incident fix (#717 continued, production 2026-10-13): kimi (10/49 calls),
+ *  deepseek (1/3) and GLM (2/18) all threw upstream 500s in the same 6-minute
+ *  window — `4002: could not route request to AI model`, `8005: Internal
+ *  server error` — that `runModelPoolOverflow`'s break condition below used
+ *  to treat as terminal (classifyAiError has no special case for either, so
+ *  both fall through to its generic `{status: 500, type: "api_error"}`
+ *  bucket, same as any other unrecognized message — see that function's own
+ *  doc comment). A genuine per-request 500 is not something another model
+ *  would answer differently in general, but THESE specific shapes are: they
+ *  say the upstream couldn't route/serve the request at all, not that the
+ *  request itself was bad. Same overflow posture as `isRateLimited`/3021 —
+ *  move to the NEXT model immediately, no same-model backoff/retry (unlike
+ *  504/529, which exhaust `runAiWithRetry`'s same-model retry first) — but
+ *  kept as its OWN predicate rather than folded into `isRateLimited` itself:
+ *  `isRateLimited` is also read at the final all-exhausted call site below to
+ *  decide whether to report 429 `rate_limit_error` instead of
+ *  `classifyAiError`'s own status/type, and these are not rate-limit errors —
+ *  widening `isRateLimited` would have silently turned an exhausted 4002/8005
+ *  run into a misreported 429 there too. Scoped to this loop's own error
+ *  classification only, per the incident's own ask — `classifyAiError`'s
+ *  status/type mapping for these strings is untouched.
+ *
+ *  Code review (Standards axis, #717): matches on the bare numeric codes
+ *  ONLY, not on the generic phrases that originally accompanied them. The
+ *  known incident strings — `"500 api_error: 4002: could not route request
+ *  to AI model"` and `"8005: Internal server error"` — both already contain
+ *  their own numeric code, so `\b4002\b|\b8005\b` matches them exactly
+ *  without needing a bare `could not route` or `internal server error`
+ *  alternative. A bare `internal server error` alternative in particular
+ *  would have matched the literal generic HTTP 500 reason phrase from ANY
+ *  model's genuinely-terminal, unrelated 500 — silently routing it to the
+ *  next model instead of failing fast as the paragraph above requires. */
+const isOverflowRoutingError = (message: string) => /\b4002\b|\b8005\b/i.test(message);
+
 /** env.AI.run with issue #335's pre-stream retry. Resolves to the first
  *  successful value and the attempt count; rejects with AiRunError carrying
  *  the last upstream message. `sleep`/`random` are injectable for tests. */
@@ -265,10 +327,23 @@ export function failureClass(failure: string): string {
  *       cancelled (no point paying for tokens nobody reads) and the call is
  *       reported as `client_abort`, not an upstream failure.
  * Every abnormal end now also carries `failure` (see PumpResult).
+ *
+ * `requestedMaxTokens` (fresh-context review, #717 critical follow-up): the
+ * INBOUND Anthropic request's own `max_tokens`, threaded to
+ * `closeStreamOrError` (translate.ts) so the final `message_delta.usage.
+ * output_tokens` frame is clamped the same way the non-streaming path's
+ * `openAIResponseToAnthropic` call already is — the streaming path was the
+ * one left genuinely unprotected: GLM's self-reported `completion_tokens`
+ * (inflated by `reasoning_content`) used to reach the client verbatim here,
+ * which is what actually broke live GLM-lead studios mid-turn (they stream
+ * by default). Also clamps the `outputTokens` this function itself resolves
+ * to on a clean end, below — the SAME number `handleFleetAnthropicMessages`
+ * logs into the D1 usage row, kept consistent with what the client was
+ * actually told rather than the raw, possibly-inflated upstream figure.
  */
 async function pumpAnthropicStream(
   upstream: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<Uint8Array>,
-  id: string, model: string, idleMs: number,
+  id: string, model: string, requestedMaxTokens: number, idleMs: number,
 ): Promise<PumpResult> {
   const enc = new TextEncoder();
   const write = async (frames: string[]) => {
@@ -280,7 +355,9 @@ async function pumpAnthropicStream(
   const reader = upstream.getReader();
   const cancelUpstream = () => { reader.cancel().catch(() => {}); };
   const end = (ok: boolean, failure?: string): PumpResult => ({
-    inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok, ...(failure === undefined ? {} : { failure }),
+    inputTokens: state.inputTokens,
+    outputTokens: ok ? Math.min(state.outputTokens, requestedMaxTokens) : state.outputTokens,
+    ok, ...(failure === undefined ? {} : { failure }),
   });
 
   try {
@@ -335,7 +412,7 @@ async function pumpAnthropicStream(
     // Board issue #284 (a): closeStreamOrError (translate.ts) checks whether
     // the stream ever confirmed a finish_reason before emitting closeStream's
     // normal frames — see that function's own doc comment.
-    const closed = closeStreamOrError(state);
+    const closed = closeStreamOrError(state, requestedMaxTokens);
     await write(closed.frames);
     return end(closed.ok, closed.ok ? undefined : "no_finish_reason");
   } catch (e) {
@@ -441,10 +518,16 @@ const USAGE_MODE = "lead";
  *  console line's blast radius is not.
  *
  *  Issue #335: every row also carries the call's wall time (`startedAt` to
- *  now, retry backoff included) and its env.AI.run attempt count. */
+ *  now, retry backoff included) and its env.AI.run attempt count.
+ *
+ *  Task 4 (spec 2026-10-13-model-pool-design): `model` is now REQUIRED on
+ *  every call site — the model actually used (the overflow loop's winning
+ *  candidate, or the last one tried on a total failure), never the fixed
+ *  `GLM_LEAD_MODEL` this call used to hardcode regardless of which model
+ *  the request actually hit. */
 function logUsage(
   env: Env, ctx: ExecutionContext, studioId: string,
-  call: { stream: boolean; inputTokens: number; outputTokens: number; ok: boolean; failure?: string; startedAt: number; attempts: number },
+  call: { model: string; stream: boolean; inputTokens: number; outputTokens: number; ok: boolean; failure?: string; startedAt: number; attempts: number },
 ): void {
   const { stream, inputTokens, outputTokens, ok, attempts } = call;
   const durationMs = Math.max(0, Math.round(Date.now() - call.startedAt));
@@ -457,7 +540,7 @@ function logUsage(
     );
   }
   ctx.waitUntil(insertJuniorUsage(env.DB, {
-    id: crypto.randomUUID(), ts: Date.now(), studioId, mode: USAGE_MODE, model: GLM_LEAD_MODEL,
+    id: crypto.randomUUID(), ts: Date.now(), studioId, mode: USAGE_MODE, model: call.model,
     inputTokens, outputTokens, ok, ...(error === undefined ? {} : { error }), durationMs, attempts,
   }).catch((e) => console.error("[glm-lead] usage insert failed", e instanceof Error ? e.message : String(e))));
 }
@@ -466,9 +549,70 @@ function logUsage(
  *  HTML error page); the reason column only needs enough to classify it. */
 const FAILURE_REASON_CAP = 300;
 
+/** The outcome of walking `pickModels`' candidate list — either the winning
+ *  model's own upstream value, or (every candidate exhausted) the last
+ *  model tried and the message it failed with. Either way `usedModel`/
+ *  `attempts` are what the caller's usage row needs regardless of outcome —
+ *  see `runModelPoolOverflow`'s own doc comment. */
+type ModelOverflowResult =
+  | { ok: true; upstream: Json; usedModel: string; attempts: number }
+  | { ok: false; usedModel: string; attempts: number; lastMessage: string };
+
+/** Code review (Standards axis, #717): extracted verbatim out of
+ *  `handleFleetAnthropicMessages`'s own body — the self-contained walk over
+ *  `order` (pickModels' own candidate model list), applying issue #335's
+ *  same-model retry (`runAiWithRetry`) to each candidate in turn. Spec
+ *  Component 4's own rule: a 429/3021, a 4002/8005 (incident #717
+ *  continued — `isOverflowRoutingError`'s own doc comment), or a 504/529
+ *  that already exhausted its same-model retry, moves to the next
+ *  candidate; anything else (a 4xx the request
+ *  itself caused, an unrecognized genuine 500) is not a failure another
+ *  model would answer differently, so the walk stops there and reports it
+ *  as the final failure.
+ *
+ *  `attempts` accumulates every `env.AI.run` call across EVERY model this
+ *  walk tried, not just the winning model's own retry count — a usage
+ *  row's `attempts` is the total number of `env.AI.run` calls the whole
+ *  call cost (see `handleFleetAnthropicMessages`'s own doc comment on
+ *  `startedAt`/`attempts`). Pure aside from the `ai.run` call itself — no
+ *  env/ctx/studio reach-in, so a caller supplies exactly what the walk
+ *  needs and nothing more. */
+async function runModelPoolOverflow(
+  ai: NonNullable<Env["AI"]>, order: string[], body: Json,
+  gatewayId: string | undefined, baseMs: number,
+): Promise<ModelOverflowResult> {
+  let attempts = 0;
+  let usedModel = order[0];
+  let lastMessage = "";
+  for (const modelId of order) {
+    const pm = modelById(modelId) ?? POOL[0];
+    usedModel = pm.id;
+    const openaiBody = anthropicRequestToOpenAI(body, { id: pm.id, minMaxTokens: pm.minMaxTokens, maxMaxTokens: pm.maxMaxTokens });
+    // Incident fix (#717): the gateway option is attached ONLY when
+    // `gatewayId` is actually set — `ai.run(pm.id, openaiBody)` with no
+    // third argument at all otherwise, not `ai.run(pm.id, openaiBody,
+    // undefined)`.
+    try {
+      const r = await runAiWithRetry(
+        () => (gatewayId === undefined ? ai.run(pm.id, openaiBody) : ai.run(pm.id, openaiBody, { gateway: { id: gatewayId } })),
+        { baseMs },
+      );
+      return { ok: true, upstream: r.value, usedModel, attempts: attempts + r.attempts };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      lastMessage = message;
+      attempts += e instanceof AiRunError ? e.attempts : 1;
+      const { status } = classifyAiError(message);
+      if (!(isRateLimited(message) || isOverflowRoutingError(message) || status === 504 || status === 529)) break;
+    }
+  }
+  return { ok: false, usedModel, attempts, lastMessage };
+}
+
 export async function handleFleetAnthropicMessages(
   req: Request, env: Env, ctx: ExecutionContext,
   rows: () => Promise<StudioStatus[]> = () => listStudios(env),
+  pool?: readonly PoolModel[],
 ): Promise<Response> {
   const gate = await authenticateGlmLeadRequest(req, ANTHROPIC_MESSAGES_PATH, env, rows);
   if ("response" in gate) return gate.response;
@@ -497,7 +641,6 @@ export async function handleFleetAnthropicMessages(
   if (typeof body?.max_tokens !== "number" || !(body.max_tokens > 0)) return text("max_tokens required", 400);
 
   const requestedModel = typeof body.model === "string" && body.model.length > 0 ? body.model : GLM_LEAD_MODEL;
-  const openaiBody = anthropicRequestToOpenAI(body);
   const ai = env.AI;
   // Defensive: `authenticateGlmLeadRequest` already refused with 404 above
   // when `!env.AI`, so this is unreachable at runtime — kept only because
@@ -505,24 +648,59 @@ export async function handleFleetAnthropicMessages(
   // the call boundary into this one.
   if (!ai) return text("not found", 404);
 
-  // Issue #335: one clock and one attempt count per call, for both branches.
+  // Task 4 (spec 2026-10-13-model-pool-design, Components 3/4): the ordered
+  // list of models this call walks. Pool off keeps the exact pre-#717
+  // behavior — `pickModels` returns `[POOL[0].id]` (GLM) unconditionally
+  // when `poolOn` is false, so there is nothing else to change here for an
+  // operator who hasn't flipped `LEAD_MODEL_POOL` on yet. `assigned`/
+  // `states` are only ever read from D1 when the pool is actually on — pool
+  // off has no use for either, and `pickModels` ignores them anyway.
+  const poolOn = env.LEAD_MODEL_POOL === "on";
+  const gatewayId = resolveGatewayId(env);
+  const order = pickModels({
+    studioId: studio.id,
+    requestedModel: body.model,
+    poolOn,
+    assigned: poolOn ? await getAssignedModel(env.DB, studio.id) : null,
+    states: poolOn ? await getModelStates(env.DB) : {},
+    ...(pool === undefined ? {} : { pool }),
+  });
+
+  // Issue #335: one clock per call. `attempts` now accumulates across EVERY
+  // model this call walks (Task 4's overflow loop), not just the winning
+  // model's own #335 retry count — a usage row's `attempts` is the total
+  // number of `env.AI.run` calls this one Messages-API request cost.
   const startedAt = Date.now();
   const stream = body.stream === true;
-  let upstream: Json;
-  let attempts: number;
-  try {
-    ({ value: upstream, attempts } = await runAiWithRetry(
-      () => ai.run(GLM_LEAD_MODEL, openaiBody), { baseMs: leadAiRetryBaseMs(env) },
-    ));
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    const { status, type, message: overrideMessage } = classifyAiError(message);
+  const overflow = await runModelPoolOverflow(ai, order, body, gatewayId, leadAiRetryBaseMs(env));
+  const { usedModel, attempts } = overflow;
+
+  if (!overflow.ok) {
+    // Spec Component 4: "all exhausted -> 429 + retry-after (shortest known
+    // reset)" — every candidate model either 429'd/3021'd or exhausted its
+    // own transient retry. A rate-limited exhaustion is reported as 429
+    // regardless of which specific upstream wording the LAST model used
+    // (classifyAiError's own mapping stays the fallback for anything else).
+    const { lastMessage } = overflow;
+    const rateLimited = isRateLimited(lastMessage);
+    const { status, type, message: overrideMessage } = rateLimited
+      ? { status: 429, type: "rate_limit_error", message: undefined as string | undefined }
+      : classifyAiError(lastMessage);
     logUsage(env, ctx, studio.id, {
-      stream, inputTokens: 0, outputTokens: 0, ok: false, failure: `ai_run_error ${status} ${type}: ${message}`,
-      startedAt, attempts: e instanceof AiRunError ? e.attempts : 1,
+      model: usedModel, stream, inputTokens: 0, outputTokens: 0, ok: false,
+      failure: `ai_run_error ${status} ${type}: ${lastMessage}`, startedAt, attempts,
     });
-    return json(anthropicErrorBody(type, overrideMessage ?? message), status);
+    const res = json(anthropicErrorBody(type, overrideMessage ?? lastMessage), status);
+    if (status === 429) {
+      // Same window-rollover discipline as rateLimitRefusal's own 429s
+      // above — 30s is the simplest reset estimate available without this
+      // route tracking a per-model 3021 cooldown clock yet (no model in the
+      // pool reports one today).
+      res.headers.set("retry-after", "30");
+    }
+    return res;
   }
+  const { upstream } = overflow;
 
   if (stream) {
     if (!(upstream instanceof ReadableStream)) {
@@ -533,8 +711,8 @@ export async function handleFleetAnthropicMessages(
       // provider that ignored `stream: true` and returned a plain object
       // anyway is translated through the non-streaming path rather than
       // crashing on `.getReader()`.
-      const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel });
-      logUsage(env, ctx, studio.id, { stream: true, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
+      const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
+      logUsage(env, ctx, studio.id, { model: usedModel, stream: true, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
       return json(anthropic, 200);
     }
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -558,10 +736,10 @@ export async function handleFleetAnthropicMessages(
     // rejection; what still rejects here is a bug inside the pump itself,
     // logged as `pump_error` rather than dropped without a row.
     ctx.waitUntil(
-      pumpAnthropicStream(upstream, writer, id, requestedModel, leadStreamIdleMs(env))
-        .then((result) => logUsage(env, ctx, studio.id, { stream: true, ...result, startedAt, attempts }))
+      pumpAnthropicStream(upstream, writer, id, requestedModel, body.max_tokens, leadStreamIdleMs(env))
+        .then((result) => logUsage(env, ctx, studio.id, { model: usedModel, stream: true, ...result, startedAt, attempts }))
         .catch((e) => logUsage(env, ctx, studio.id, {
-          stream: true, inputTokens: 0, outputTokens: 0, ok: false,
+          model: usedModel, stream: true, inputTokens: 0, outputTokens: 0, ok: false,
           failure: `pump_error: ${e instanceof Error ? e.message : String(e)}`, startedAt, attempts,
         }))
         .finally(() => { writer.close().catch((e) => console.error("[glm-lead] writer close failed after stream end", e instanceof Error ? e.message : String(e))); }),
@@ -569,8 +747,15 @@ export async function handleFleetAnthropicMessages(
     return new Response(readable, { status: 200, headers: { "content-type": "text/event-stream" } });
   }
 
-  const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel });
-  logUsage(env, ctx, studio.id, { stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
+  // Fresh-context review (#717 critical follow-up): this is the REAL
+  // non-streaming path (the branch above at `stream === true` is only the
+  // defensive fallback for a provider that ignored `stream: true`) — the
+  // one call site the original incident fix actually missed.
+  // `requestedMaxTokens` was previously omitted here entirely, so an
+  // inflated upstream `completion_tokens` reached the client, and this logged
+  // usage row, completely unclamped.
+  const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
+  logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
   return json(anthropic, 200);
 }
 

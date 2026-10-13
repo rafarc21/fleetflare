@@ -252,6 +252,14 @@ describe("parseCliArgs", () => {
       .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, leadType: "claude" });
   });
 
+  // #717: the model pool's two extra pool keys ride the SAME --lead flag.
+  it("spawn --lead also takes kimi/deepseek (#717)", () => {
+    expect(parseCliArgs(["spawn", "pilot", "--lead", "kimi"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, leadType: "kimi" });
+    expect(parseCliArgs(["spawn", "pilot", "--lead", "deepseek"]))
+      .toEqual({ cmd: "spawn", role: "pilot", newInstance: false, leadType: "deepseek" });
+  });
+
   it("spawn --lead rejects anything other than claude/glm, and a bare --lead with no value", () => {
     expect(parseCliArgs(["spawn", "pilot", "--lead", "gpt4"]).cmd).toBe("usage");
     expect(parseCliArgs(["spawn", "pilot", "--lead"]).cmd).toBe("usage");
@@ -1057,6 +1065,12 @@ describe("fleet help", () => {
   it("documents every verb the CLI dispatches, by name — no verb can be missing", () => {
     const help = renderHelp();
     for (const cmd of Object.keys(VERBS)) {
+      // #717: models' three cmd literals (models-ls/-assign/-set) don't
+      // share task-/accounts-'s "suffix is the sub-action word" shape (ls
+      // has none, set's own sub-action is promote/demote, not "set") — the
+      // collapsed verb name alone is still a genuine substring of every one
+      // of its rendered lines, which is all this test is pinning.
+      if (cmd.startsWith("models-")) { expect(help).toContain("fleet models"); continue; }
       const two = ["task-", "memory-", "accounts-"].find((prefix) => cmd.startsWith(prefix));
       const word = two ? `fleet ${two.slice(0, -1)} ${cmd.slice(two.length)}` : `fleet ${cmd}`;
       expect(help).toContain(word);
@@ -1073,7 +1087,7 @@ describe("fleet help", () => {
   it("derives the short usage from the same table, so the two can never disagree", () => {
     for (const [cmd, help] of Object.entries(VERBS)) {
       const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory"
-        : cmd.startsWith("accounts-") ? "accounts" : cmd;
+        : cmd.startsWith("accounts-") ? "accounts" : cmd.startsWith("models-") ? "models" : cmd;
       expect(CLI_USAGE).toContain(`fleet ${name}${help.args ? " " + help.args : ""}`);
     }
     expect(CLI_USAGE).toContain("fleet help");
@@ -1292,6 +1306,19 @@ describe("fleet accounts hold|clear", () => {
   it("clear <slot>", () => {
     expect(parseCliArgs(["accounts", "clear", "CLAUDE_CODE_OAUTH_TOKEN_2"]))
       .toEqual({ cmd: "accounts-clear", name: "CLAUDE_CODE_OAUTH_TOKEN_2" });
+  });
+
+  // #717: `fleet models [assign <studio> <model> | promote <model> | demote
+  // <model>]` — bare lists the pool table, the three sub-actions each POST.
+  it("models parses", () => {
+    expect(parseCliArgs(["models"])).toEqual({ cmd: "models-ls" });
+    expect(parseCliArgs(["models", "assign", "r--web-studio--49", "kimi"]))
+      .toEqual({ cmd: "models-assign", studio: "r--web-studio--49", model: "kimi" });
+    expect(parseCliArgs(["models", "demote", "deepseek"]))
+      .toEqual({ cmd: "models-set", state: "demote", model: "deepseek" });
+    expect(parseCliArgs(["models", "promote", "deepseek"]))
+      .toEqual({ cmd: "models-set", state: "promote", model: "deepseek" });
+    expect(parseCliArgs(["models", "bogus"]).cmd).toBe("usage");
   });
 
   it("clear refuses a missing slot or extra tokens", () => {

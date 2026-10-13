@@ -21,7 +21,8 @@
 import type { Env } from "../env";
 import { verifyAccess } from "../studio/auth";
 import { redactSecrets } from "../studio/redact";
-import { reachRepo, repoTokenMinter, mintRepoToken, type RepoReach } from "../github/auth";
+import { reachRepo, repoTokenMinter, mintRepoToken } from "../github/auth";
+import type { RepoReachFetch } from "../github/reach";
 import {
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   closeIssue as closeIssueApi, getDefaultBranch, getPullRequest, commitReachableFromBranch,
@@ -122,8 +123,6 @@ export function realLeakDeps(env: Env, token: (repo: string) => Promise<string>)
     },
   };
 }
-
-export type RepoReachFetch = (slug: string) => Promise<RepoReach>;
 
 function githubRepoReach(env: Env): RepoReachFetch {
   return (slug: string) => reachRepo(env, slug);

@@ -3,9 +3,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as authModule from "../src/studio/auth";
 import * as registryModule from "../src/studio/registry";
 import * as stateModule from "../src/state";
+import * as modelQualityCronModule from "../src/llm/model-quality-cron";
+import * as boardApiModule from "../src/board/api";
+import * as githubAuthModule from "../src/github/auth";
 import worker from "../src/index";
 import { getFlag } from "../src/state";
 import { recordStudio } from "../src/studio/registry";
+import { getModelStates } from "../src/llm/model-store";
+import { POOL } from "../src/llm/models";
 import { alertedKey, rearmKey, clearRearm } from "../src/tasks/watchdog";
 import { __resetExceptionRateCapForTests } from "../src/exceptions";
 import type { TaskRecord } from "../src/tasks/loop";
@@ -340,6 +345,40 @@ describe("scheduled() order (PR #109 review)", () => {
       { scheduledTime: Date.UTC(2026, 8, 24, 12, 40) } as any, { ...env, AGENT: agent, STUDIO: studio }, {} as any,
     );
     expect(order).toEqual(["rearm", "watch"]);
+  });
+});
+
+// Finding 7 (#717 review): the Task 6 model-quality glue in handleScheduled
+// (runDailyModelQuality + postModelQualityComment) had no test of its own,
+// breaking this file's established convention of covering every scheduled()
+// glue block (see the watchdog describe above). collectOutcomes/createComment/
+// repoTokenMinter are each spied on their own module namespace, the same
+// seam authModule.verifyAccess/registryModule.listStudios already use above
+// — runDailyModelQuality itself runs for real, so this exercises the actual
+// wiring (deps.collect/deps.post -> the real GitHub-facing functions) rather
+// than re-testing runDailyModelQuality's own demote/post logic, which
+// test/llm.model-quality-cron.test.ts already covers directly.
+describe("scheduled() model quality glue (#717, Task 6)", () => {
+  it("wires collectOutcomes and postModelQualityComment into runDailyModelQuality", async () => {
+    vi.spyOn(githubAuthModule, "repoTokenMinter").mockReturnValue(async () => "glue-test-token");
+    const commentSpy = vi.spyOn(boardApiModule, "createComment")
+      .mockResolvedValue({ id: 1, url: "https://example.com" });
+    const outcomes = [
+      ...Array.from({ length: 10 }, (_, i) => ({ model: POOL[0].id, closedAt: i, firstCiPassed: true, bounced: false, reverted: false })),
+      ...Array.from({ length: 10 }, (_, i) => ({ model: POOL[1].id, closedAt: i, firstCiPassed: false, bounced: false, reverted: false })),
+    ];
+    vi.spyOn(modelQualityCronModule, "collectOutcomes").mockResolvedValue(outcomes);
+
+    const fakeEnv = { ...env, AGENT: fakeAgentReturning(null), LEAD_MODEL_POOL: "on", MODEL_QUALITY_ISSUE: "99" };
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 9, 20, 6) } as any, fakeEnv, {} as any);
+
+    expect(commentSpy).toHaveBeenCalledTimes(1);
+    const [token, repo, issueNumber, body] = commentSpy.mock.calls[0];
+    expect(token).toBe("glue-test-token");
+    expect(repo).toBe(fakeEnv.AGENT_REPO);
+    expect(issueNumber).toBe(99);
+    expect(body).toContain(`Demoted: ${POOL[1].id}`);
+    expect((await getModelStates(env.DB))[POOL[1].id]).toBe("demoted");
   });
 });
 

@@ -42,6 +42,7 @@ operator-specific values.
 | `FLEET_DIRECTUS` | the Directus project card in studio prompts | `DIRECTUS_URL`, secret `DIRECTUS_TOKEN` |
 | `FLEET_AUTO_FAILOVER` | automatic Claude-account switch on a usage limit | more than one `CLAUDE_CODE_OAUTH_TOKEN_<n>` |
 | `FLEET_JUNIOR` | the junior skill (Workers AI delegation): studios get the skill and `/fleet/junior` answers — AND the glm-lead LLM route (`/fleet/llm/anthropic/v1/messages`), which reuses this same flag: leave it off on a glm fleet and the whole LLM path is gone | the "ai" binding; `JUNIOR_REPOS` optionally narrows to a comma list of owner/repo; `JUNIOR_RATE_PER_MINUTE` and `JUNIOR_DAILY_CAP` throttle junior; `LEAD_RATE_PER_MINUTE`, `LEAD_DAILY_CAP`, `LEAD_COUNT_TOKENS_RATE_PER_MINUTE`, `LEAD_STREAM_IDLE_MS`, `LEAD_AI_RETRY_BASE_MS` tune the glm-lead route — defaults and readers in [docs/env-vars.md](env-vars.md) |
+| `LEAD_MODEL_POOL` | routes every non-Claude studio lead call across a pool of Workers AI models (GLM, Kimi, DeepSeek) via AI Gateway instead of GLM alone; `"on"` enables it, anything else (default) keeps today's GLM-only behavior | `LEAD_AI_GATEWAY_ID` optionally names the AI Gateway every pool call routes through (default `"default"`); `MODEL_QUALITY_ISSUE` optionally names the board issue the daily per-model quality table posts to (posting is skipped if unset) |
 
 With `FLEET_TELEGRAM` off, AgentDO and DeployDO stay declared (removing a
 Durable Object class needs a migration) but nothing reaches them, so their

@@ -139,7 +139,7 @@ function fakeSyncDeps(opts: {
    *  default) answers HARVEST_NO_RECORD — the common case. Completion gate
    *  DOES ask for `learnings` (studio-bringup.sh:877-878) — field is
    *  OPTIONAL, never a refusal condition, so most `.fleet/done.json`
-   *  records still omit it. Pinned by `test/bun/bringup-hooks.test.ts`. So
+   *  records still omit it. Pinned by `test/bun/bringup-gates.test.ts`. So
    *  every pre-existing recycle test in this file keeps behaving exactly as
    *  it did before this field existed. `null` means the exec itself
    *  throws, same convention as `rescue`/`checks` above. */
@@ -5077,7 +5077,7 @@ describe("container/studio-bringup.sh — Tier-0 completion gate (spec §4)", ()
 // ---------------------------------------------------------------------------
 // container/studio-bringup.sh — C2: session-reemit wiring is pinned at BOTH
 // ends (Task 6). Before this block, `grep -rn "session-reemit|SessionStart|
-// working-set" test/` returned only test/bun/bringup-hooks.test.ts's
+// working-set" test/` returned only test/bun/bringup-heartbeat.test.ts's
 // executed-BEHAVIOR tests of the extracted REEMIT script -- nothing asserted
 // that bring-up actually REGISTERS the SessionStart hook, nothing asserted
 // the persist step exists, and nothing compared the path the hook reads

@@ -39,6 +39,7 @@ function deps(rows: StudioStatus[], provisioned: string[] = [], roles = ["maestr
     },
     resolveBrief: async () => ({ ok: false, status: 500, message: "unused" }),
     notifyMaestro: async () => {},
+    assignModel: async () => {},
     maxStudios: DEFAULT_MAX_STUDIOS,
     claimStudioId: async () => null,
     claimStopped: async () => async () => {},

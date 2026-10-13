@@ -13,6 +13,7 @@ import {
   handleFleetAnthropicCountTokens, ANTHROPIC_COUNT_TOKENS_PATH,
 } from "../src/llm/anthropic-route";
 import { GLM_LEAD_MODEL, GLM_MIN_MAX_TOKENS } from "../src/llm/translate";
+import { POOL, type PoolModel } from "../src/llm/models";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -63,6 +64,24 @@ async function setup(
 }
 
 const good = { model: "claude-opus-4-5", max_tokens: 100, messages: [{ role: "user", content: "hi" }] };
+
+/** Task 4 (spec 2026-10-13-model-pool-design) — a smaller variant of
+ *  `setup()` above, for the gateway/pool-overflow tests: takes a caller-built
+ *  `ai` stub directly (so a test can assert on its own `run` mock's call
+ *  args/sequence) instead of `setup()`'s own wrapped `vi.fn(async () =>
+ *  aiResult)`. Builds the same authorized POST (`good` body, a freshly
+ *  minted spawn token, a glm-led registry row) every other happy-path test
+ *  in this file already does. `pool` (code review, Standards axis, #717):
+ *  `handleFleetAnthropicMessages`'s own test-injection seam for the model
+ *  pool pickModels walks — the same `rows`-style override already used for
+ *  DB injection, now extended so a test can hand it a fixture pool instead
+ *  of mutating the real, shared `models.ts` POOL export. */
+async function callRoute(opts: { ai: { run: ReturnType<typeof vi.fn> }; envOverrides?: Partial<Env>; pool?: readonly PoolModel[] }) {
+  const token = mintSpawnToken();
+  const rows = async () => [row(ME, await hashSpawnToken(token))];
+  const e = { ...env, FLEET_JUNIOR: "on", AI: opts.ai, ...FAST_RETRY, ...(opts.envOverrides ?? {}) } as unknown as Env;
+  return handleFleetAnthropicMessages(req({ token }), e, ctx, rows, opts.pool);
+}
 
 function req(opts: { token?: string | null; apiKey?: string; body?: unknown; path?: string; method?: string }) {
   const headers: Record<string, string> = {};
@@ -308,9 +327,31 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     const { token, rows, e, run } = await setup();
     const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(r.status).toBe(200);
+    // Incident fix (#717): no LEAD_AI_GATEWAY_ID set in this fixture env, so
+    // env.AI.run is called with exactly the pre-model-pool 2-arg shape — no
+    // gateway option attached.
     expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS });
     const body = await r.json();
     expect(body).toMatchObject({ type: "message", role: "assistant", model: good.model, content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 3, output_tokens: 2 } });
+  });
+
+  // Fresh-context review, #717 critical follow-up: the REAL non-streaming
+  // path (handleFleetAnthropicMessages's own call to
+  // openAIResponseToAnthropic, not the `stream: true`-but-upstream-ignored-it
+  // defensive fallback branch) used to omit `requestedMaxTokens` entirely —
+  // an inflated upstream completion_tokens (reasoning_content spend) reached
+  // the client verbatim. This exercises the REAL route handler end to end,
+  // not the pure translate.ts function in isolation.
+  it("a huge upstream completion_tokens (reasoning_content inflation) is clamped to the request's own max_tokens, not reported verbatim", async () => {
+    const { token, rows, e } = await setup({
+      choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 50, completion_tokens: 70000 },
+    });
+    const body = { model: "claude-opus-4-5", max_tokens: 8000, messages: [{ role: "user", content: "hi" }] };
+    const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const replyBody = (await r.json()) as { usage: { output_tokens: number } };
+    expect(replyBody.usage.output_tokens).toBe(8000);
   });
 
   it("a tool_use round trip: request tool_result -> OpenAI tool message, response tool_calls -> Anthropic tool_use block", async () => {
@@ -583,6 +624,47 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     const rowsLogged = await usageRows();
     expect(rowsLogged).toHaveLength(1);
     expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1, error: null });
+  });
+
+  // Fresh-context review, #717 critical follow-up: this is the critical gap
+  // — Claude Code streams by default, so THIS path (pumpAnthropicStream ->
+  // applyOpenAIStreamChunk/closeStreamOrError) is the one that actually
+  // broke live GLM-lead studios mid-turn. Exercises the REAL route handler
+  // end to end (a real SSE ReadableStream upstream, parsed back out of the
+  // Response body), not the pure translate.ts functions in isolation.
+  it("streaming: a huge upstream completion_tokens (reasoning_content inflation) is clamped to the request's own max_tokens in the final message_delta, not reported verbatim", async () => {
+    const enc = new TextEncoder();
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 50, completion_tokens: 70000 } },
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+    const body = { model: "claude-opus-4-5", max_tokens: 8000, stream: true, messages: [{ role: "user", content: "hi" }] };
+
+    const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const deltaLine = text.split("\n\n").find((frame) => frame.includes("message_delta"));
+    const deltaData = JSON.parse(deltaLine!.slice(deltaLine!.indexOf("data:") + 5).trim()) as { usage: { output_tokens: number } };
+    expect(deltaData.usage.output_tokens).toBe(8000);
+
+    // The D1 usage-log row (what `handleFleetAnthropicMessages` bills
+    // against) stays consistent with what the client was actually told,
+    // rather than the raw, unclamped upstream figure.
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ studioId: ME, outputTokens: 8000, ok: 1 });
   });
 
   // Issue #519 (sweep 13): the `.finally(() => { writer.close().catch(() => {}) })`
@@ -1238,5 +1320,197 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
     expect(msg.status).toBe(200);
     const count = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
     expect(count.status).toBe(200);
+  });
+});
+
+// Task 4 (spec 2026-10-13-model-pool-design, Components 3/4): every
+// env.AI.run call now carries the AI Gateway option (unified billing/logs),
+// and LEAD_MODEL_POOL=on walks router.ts's pickModels order on a 429/3021,
+// instead of hardcoding GLM.
+describe("model pool + gateway (spec 2026-10-13)", () => {
+  // Incident fix (#717): a production account's "default" AI Gateway isn't
+  // provisioned for unified billing — `ai.run(model, body, { gateway: { id:
+  // "default" } })` came back "2021: Insufficient unified billing credits"
+  // for EVERY GLM lead call the instant this got deployed. The gateway
+  // option is now OFF unless `LEAD_AI_GATEWAY_ID` is actually set to a
+  // non-empty string — unset means the exact pre-model-pool call shape:
+  // `ai.run(model, body)`, no third argument at all (not `undefined`, not
+  // `{}` — a genuinely 2-length args array, since a provider could branch on
+  // `arguments.length`).
+  it("LEAD_AI_GATEWAY_ID unset: ai.run is called with no gateway option at all (2 args)", async () => {
+    const calls: unknown[][] = [];
+    const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
+    const res = await callRoute({ ai, envOverrides: {} });
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe("@cf/zai-org/glm-5.3");
+    expect(calls[0].length).toBe(2);
+  });
+
+  it("LEAD_AI_GATEWAY_ID set to empty string: same as unset — no gateway option, 2 args", async () => {
+    const calls: unknown[][] = [];
+    const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_AI_GATEWAY_ID: "" } });
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].length).toBe(2);
+  });
+
+  it("pool on: 3021 on first model moves to next model, no backoff", async () => {
+    // The real pool has exactly ONE smoke-passed model today (GLM —
+    // models.ts's own POOL, kimi/deepseek not yet smoke-tested) — pickModels
+    // never offers a smoke-UNtested model as an overflow candidate (the
+    // pool's own entry rule, enforced in router.ts, not something this
+    // route may bypass), so there is genuinely no SECOND model to move to
+    // without a fixture pool where kimi has smoke-passed. Built as a plain
+    // copy of the real POOL (code review, Standards axis, #717) and handed
+    // to `callRoute`'s own `pool` override — `handleFleetAnthropicMessages`'s
+    // test-injection seam — rather than mutating the real, shared `models.ts`
+    // POOL export, which no sibling test could be sure stayed unmutated.
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("3021: rate limiting: Account rate limit exceeded");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    // Global Constraint: logUsage must record the model actually used
+    // (`usedModel`) — the SECOND model tried, never a hardcoded constant
+    // (code review, Spec axis, #717).
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].model).toBe(seen[1]);
+  });
+
+  it("pool on: every model 429s → 429 rate_limit_error with retry-after", async () => {
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => { seen.push(model); throw new Error("3021: Account rate limit exceeded"); }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" } });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    // Global Constraint: the logged usage row's model must be the LAST
+    // model actually tried, never a hardcoded constant (code review,
+    // Spec axis, #717).
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].model).toBe(seen[seen.length - 1]);
+  });
+
+  // Review Focus item 3: a genuine multi-model exhaustion — the real POOL
+  // has only one smoke-passed model today, so the test above cannot
+  // distinguish "last model tried" from "first model tried" (code review,
+  // Spec axis, #717). Built the same way as the "moves to next model"
+  // fixture pool above: a plain copy of the real POOL with every entry
+  // forced to `smokePassed: true`, handed to `callRoute`'s own `pool`
+  // injection seam rather than mutating the shared `models.ts` POOL export.
+  it("pool on: 3021 on every model (genuine multi-model exhaustion) → 429, AI called once per model, usage row logs the LAST model tried", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      throw new Error("3021: rate limiting: Account rate limit exceeded");
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    // router.ts's own round-robin hash of the studio id picks WHICH pool
+    // model goes first — not necessarily the pool's declaration order — so
+    // this asserts against `seen` (the actual try order), not a hardcoded
+    // sequence: every model was tried exactly once, with no backoff/retry
+    // on a rate-limit.
+    expect(ai.run).toHaveBeenCalledTimes(testPool.length);
+    expect(seen).toHaveLength(testPool.length);
+    expect(new Set(seen)).toEqual(new Set(testPool.map((m) => m.id)));
+    expect(seen[seen.length - 1]).not.toBe(seen[0]);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    // The logged model is the LAST one actually tried — not the first, and
+    // not a hardcoded GLM constant.
+    expect(rowsLogged[0].model).toBe(seen[seen.length - 1]);
+    expect(rowsLogged[0].model).not.toBe(seen[0]);
+    expect(rowsLogged[0].model).not.toBe(GLM_LEAD_MODEL);
+  });
+
+  // Incident fix (#717 continued, production 2026-10-13): kimi/deepseek/GLM
+  // all measured upstream 500s the overflow loop used to treat as terminal —
+  // `4002: could not route request to AI model` and `8005: Internal server
+  // error` — breaking the loop and failing the turn instead of moving to the
+  // next pool candidate. Same fixture shape as "3021 on first model moves to
+  // next model" above: a kimi copy forced to `smokePassed: true` so there is
+  // a genuine second candidate to move to.
+  it("pool on: upstream 4002 (could not route) on first model moves to next model, no backoff", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("500 api_error: 4002: could not route request to AI model");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(2);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    // No same-model retry on this error shape — the first model was tried
+    // exactly once before the loop moved on, unlike 504/529's own
+    // runAiWithRetry same-model retry.
+    expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
+  });
+
+  it("pool on: upstream 8005 (Internal server error) on first model moves to next model, no backoff", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("8005: Internal server error");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(2);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
+  });
+
+  // Code review (Spec axis, #717): the whole point of `isOverflowRoutingError`
+  // being its OWN predicate rather than folded into `isRateLimited` is that
+  // an all-models-exhausted 4002/8005 run reports `classifyAiError`'s own
+  // default (500 `api_error`), NOT the 429 `rate_limit_error` the
+  // all-exhausted call site reports when `isRateLimited` triggered the
+  // exhaustion (see the "3021 on every model" test above). Same fixture
+  // shape as that test — every POOL entry forced to `smokePassed: true` —
+  // but throwing the 4002 incident string instead of a 3021.
+  it("pool on: 4002 on every model (genuine multi-model exhaustion) → 500 api_error, NOT 429 rate_limit_error", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      throw new Error("500 api_error: 4002: could not route request to AI model");
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(500);
+    expect((await res.json() as any).error.type).toBe("api_error");
+    expect(ai.run).toHaveBeenCalledTimes(testPool.length);
+    expect(seen).toHaveLength(testPool.length);
+  });
+
+  it("custom gateway id via LEAD_AI_GATEWAY_ID", async () => {
+    const calls: unknown[][] = [];
+    const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
+    await callRoute({ ai, envOverrides: { LEAD_AI_GATEWAY_ID: "fleet" } });
+    expect(calls[0][2]).toEqual({ gateway: { id: "fleet" } });
   });
 });

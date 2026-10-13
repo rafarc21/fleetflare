@@ -19,6 +19,7 @@ import {
   type OperationInFlight,
 } from "../src/studio/provision";
 import { recordStudio, listStudios, getStudioRow } from "../src/studio/registry";
+import { POOL } from "../src/llm/models";
 import { getStudioStub } from "../src/studio/profile";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -354,6 +355,7 @@ describe("runSpawn — MAX_STUDIOS cap (R-P3-3)", () => {
       provisionChild: provisionChild ?? (async (childId: string) => status({ id: childId, state: "running" })),
       resolveBrief: noBrief,
       notifyMaestro: async () => {},
+      assignModel: async () => {},
       maxStudios,
       claimStudioId: memoryClaim(),
     };
@@ -426,6 +428,7 @@ describe("runSpawn — MAX_STUDIOS cap (R-P3-3)", () => {
       provisionChild: async (childId: string) => status({ id: childId }),
       resolveBrief: noBrief,
       notifyMaestro: async () => {},
+      assignModel: async () => {},
       maxStudios: DEFAULT_MAX_STUDIOS,
       claimStudioId: memoryClaim(),
     };
@@ -454,6 +457,7 @@ describe("runSpawn — instance allocation (#269)", () => {
       },
       resolveBrief: noBrief,
       notifyMaestro: async () => {},
+      assignModel: async () => {},
       maxStudios: DEFAULT_MAX_STUDIOS,
       claimStudioId: memoryClaim(),
     };
@@ -612,6 +616,7 @@ describe("runSpawn — maestro is a singleton role (#269 round 2)", () => {
       provisionChild: async (childId: string) => status({ id: childId, state: "running" }),
       resolveBrief: noBrief,
       notifyMaestro: async () => {},
+      assignModel: async () => {},
       maxStudios: DEFAULT_MAX_STUDIOS,
       claimStudioId: memoryClaim(),
     };
@@ -1303,6 +1308,7 @@ describe("runSpawn — {task} (P4a-2 brief pickup)", () => {
       provisionChild: provisionChild ?? (async (childId: string) => status({ id: childId, state: "running" })),
       resolveBrief,
       notifyMaestro: async () => {},
+      assignModel: async () => {},
       maxStudios: DEFAULT_MAX_STUDIOS,
       claimStudioId: memoryClaim(),
     };
@@ -1377,9 +1383,21 @@ describe("readLeadTypeRequest", () => {
     expect(readLeadTypeRequest(undefined)).toBeUndefined();
   });
 
-  it("\"glm\" and \"claude\" pass through verbatim", () => {
-    expect(readLeadTypeRequest({ leadType: "glm" })).toBe("glm");
-    expect(readLeadTypeRequest({ leadType: "claude" })).toBe("claude");
+  // #717: the return shape widened from a bare string to {leadType, model?}
+  // — "claude" carries no `model` field at all (never `model: undefined`);
+  // "glm" now ALSO pins the pool's own glm id, rather than leaving the
+  // studio's main model to the router's round-robin default.
+  it("\"claude\" -> {leadType: \"claude\"}, no model field", () => {
+    expect(readLeadTypeRequest({ leadType: "claude" })).toEqual({ leadType: "claude" });
+  });
+
+  it("\"glm\" -> glm-led with the pool's own glm model pinned", () => {
+    expect(readLeadTypeRequest({ leadType: "glm" })).toEqual({ leadType: "glm", model: POOL[0].id });
+  });
+
+  it("\"kimi\"/\"deepseek\" -> glm-led with that pool model pinned (#717)", () => {
+    expect(readLeadTypeRequest({ leadType: "kimi" })).toEqual({ leadType: "glm", model: POOL[1].id });
+    expect(readLeadTypeRequest({ leadType: "deepseek" })).toEqual({ leadType: "glm", model: POOL[2].id });
   });
 
   it("anything else is malformed -> null (a 400, never coerced or silently dropped)", () => {
@@ -1398,13 +1416,14 @@ describe("readLeadTypeRequest", () => {
 describe("runSpawn — {leadType} (#249)", () => {
   const PARENT: SpawnParent = { id: PARENT_ID, repo: "websites", role: "pilot", repoSlug: REPO_SLUG };
 
-  function leadDeps(provisionChild: SpawnDeps["provisionChild"]): SpawnDeps {
+  function leadDeps(provisionChild: SpawnDeps["provisionChild"], assignModel?: SpawnDeps["assignModel"]): SpawnDeps {
     return {
       listStudios: async () => [],
       fetchPolicy: async () => ({ org: { edges: { pilot: ["release"] }, gates: {} }, roles: ["pilot", "release"] }),
       provisionChild,
       resolveBrief: async () => ({ ok: true, value: "brief" }),
       notifyMaestro: async () => {},
+      assignModel: assignModel ?? (async () => {}),
       maxStudios: DEFAULT_MAX_STUDIOS,
       claimStudioId: memoryClaim(),
     };
@@ -1439,6 +1458,57 @@ describe("runSpawn — {leadType} (#249)", () => {
     expect(fetchPolicy).not.toHaveBeenCalled();
     expect(provisioned).toBe(false);
   });
+
+  // #717: "kimi"/"deepseek" pin a pool model via deps.assignModel, AFTER the
+  // studio row's first write — never before (see runSpawn's own call site).
+  it("leadType: \"kimi\" assigns the pool's kimi model to the child AFTER provisionChild succeeds", async () => {
+    const calls: [string, string][] = [];
+    const deps = leadDeps(
+      async (childId: string) => status({ id: childId }),
+      async (studioId: string, modelId: string) => { calls.push([studioId, modelId]); },
+    );
+    const res = await runSpawn(deps, PARENT, { role: "release", leadType: "kimi" });
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([["websites--release", POOL[1].id]]);
+  });
+
+  it("leadType: \"deepseek\" assigns the pool's deepseek model", async () => {
+    const calls: [string, string][] = [];
+    const deps = leadDeps(
+      async (childId: string) => status({ id: childId }),
+      async (studioId: string, modelId: string) => { calls.push([studioId, modelId]); },
+    );
+    const res = await runSpawn(deps, PARENT, { role: "release", leadType: "deepseek" });
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([["websites--release", POOL[2].id]]);
+  });
+
+  it("leadType: \"glm\" also assigns the pool's glm model (pinned, not left to round-robin)", async () => {
+    const calls: [string, string][] = [];
+    const deps = leadDeps(
+      async (childId: string) => status({ id: childId }),
+      async (studioId: string, modelId: string) => { calls.push([studioId, modelId]); },
+    );
+    const res = await runSpawn(deps, PARENT, { role: "release", leadType: "glm" });
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([["websites--release", POOL[0].id]]);
+  });
+
+  it("leadType: \"claude\" (and no leadType at all) assigns no model", async () => {
+    const calls: [string, string][] = [];
+    const spy = async (studioId: string, modelId: string) => { calls.push([studioId, modelId]); };
+    await runSpawn(leadDeps(async (childId: string) => status({ id: childId }), spy), PARENT, { role: "release", leadType: "claude" });
+    await runSpawn(leadDeps(async (childId: string) => status({ id: childId }), spy), PARENT, { role: "release" });
+    expect(calls).toEqual([]);
+  });
+
+  it("a model-assignment failure is swallowed — the spawn still succeeds", async () => {
+    const res = await runSpawn(
+      leadDeps(async (childId: string) => status({ id: childId }), async () => { throw new Error("D1 down"); }),
+      PARENT, { role: "release", leadType: "kimi" },
+    );
+    expect(res.status).toBe(200);
+  });
 });
 
 /**
@@ -1461,6 +1531,7 @@ describe("runSpawn -> maestro re-arm", () => {
         maxStudios: DEFAULT_MAX_STUDIOS,
         claimStudioId: memoryClaim(),
         notifyMaestro: async (studioId: string, prompt: string) => { woke.push([studioId, prompt]); },
+        assignModel: async () => {},
         ...over,
       },
     };

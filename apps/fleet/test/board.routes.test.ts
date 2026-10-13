@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import type { RepoReach } from "../src/github/reach";
+import type { RepoReach, RepoReachFetch } from "../src/github/reach";
 import { env } from "cloudflare:test";
 import * as authModule from "../src/studio/auth";
 import { handleBoard, githubAwareVerifyFetch, openTaskChecker, type GithubUrlExistenceChecks, type ReapPort, type RescueGcPort } from "../src/board/routes";
@@ -1486,3 +1486,26 @@ describe("task new/assign refuses security-labelled work onto a glm-lead studio 
   });
 });
 
+describe("RepoReachFetch canonical alias", () => {
+  it("is the one exported alias, imported from github/reach", async () => {
+    // S29-F4: the alias lives in src/github/reach.ts and both routes files
+    // import it — this compile is the test. A missing reach.ts export is
+    // TS2305; keeping the import while re-declaring a local is TS2440.
+    // Restoring a local export and dropping the import compiles clean —
+    // that revert is grep's to catch, not tsc's.
+    const fetch: RepoReachFetch = async () => ({ reachable: true });
+    expect(await fetch("acme-org/websites")).toEqual({ reachable: true });
+  });
+});
+
+// Board issue #664 deviation note (see the plan doc's RED step): importing
+// `type RepoReachFetch` from ../src/board/routes can never compile in the
+// sweep's own end state — step GREEN turns that file's export into a plain
+// (non-re-exported) import from src/github/reach, and a type-only import is
+// invisible to vitest's esbuild transform either way. So this block pins
+// the canonical shape where it will live, and the compiler that proves it
+// is `tsc --noEmit` (root tsconfig includes test/**), which fails on a
+// missing reach.ts export (TS2305) and on an import-plus-local
+// re-declaration (TS2440). A reverted routes file that restores its own
+// export and drops the import compiles clean — the sweep greps for that,
+// the compiler does not.
