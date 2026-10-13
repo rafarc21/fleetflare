@@ -1381,6 +1381,72 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(rowsLogged[0].model).not.toBe(GLM_LEAD_MODEL);
   });
 
+  // Incident fix (#717 continued, production 2026-10-13): kimi/deepseek/GLM
+  // all measured upstream 500s the overflow loop used to treat as terminal —
+  // `4002: could not route request to AI model` and `8005: Internal server
+  // error` — breaking the loop and failing the turn instead of moving to the
+  // next pool candidate. Same fixture shape as "3021 on first model moves to
+  // next model" above: a kimi copy forced to `smokePassed: true` so there is
+  // a genuine second candidate to move to.
+  it("pool on: upstream 4002 (could not route) on first model moves to next model, no backoff", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("500 api_error: 4002: could not route request to AI model");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(2);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    // No same-model retry on this error shape — the first model was tried
+    // exactly once before the loop moved on, unlike 504/529's own
+    // runAiWithRetry same-model retry.
+    expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
+  });
+
+  it("pool on: upstream 8005 (Internal server error) on first model moves to next model, no backoff", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("8005: Internal server error");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(2);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
+  });
+
+  // Code review (Spec axis, #717): the whole point of `isOverflowRoutingError`
+  // being its OWN predicate rather than folded into `isRateLimited` is that
+  // an all-models-exhausted 4002/8005 run reports `classifyAiError`'s own
+  // default (500 `api_error`), NOT the 429 `rate_limit_error` the
+  // all-exhausted call site reports when `isRateLimited` triggered the
+  // exhaustion (see the "3021 on every model" test above). Same fixture
+  // shape as that test — every POOL entry forced to `smokePassed: true` —
+  // but throwing the 4002 incident string instead of a 3021.
+  it("pool on: 4002 on every model (genuine multi-model exhaustion) → 500 api_error, NOT 429 rate_limit_error", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      throw new Error("500 api_error: 4002: could not route request to AI model");
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(500);
+    expect((await res.json() as any).error.type).toBe("api_error");
+    expect(ai.run).toHaveBeenCalledTimes(testPool.length);
+    expect(seen).toHaveLength(testPool.length);
+  });
+
   it("custom gateway id via LEAD_AI_GATEWAY_ID", async () => {
     const calls: unknown[][] = [];
     const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };

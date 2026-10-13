@@ -192,6 +192,40 @@ export function resolveGatewayId(env: { LEAD_AI_GATEWAY_ID?: string }): string |
  *  messages use, but the numeric code is the more durable signal). */
 const isRateLimited = (message: string) => /\b3021\b|rate limit|too many/i.test(message);
 
+/** Incident fix (#717 continued, production 2026-10-13): kimi (10/49 calls),
+ *  deepseek (1/3) and GLM (2/18) all threw upstream 500s in the same 6-minute
+ *  window — `4002: could not route request to AI model`, `8005: Internal
+ *  server error` — that `runModelPoolOverflow`'s break condition below used
+ *  to treat as terminal (classifyAiError has no special case for either, so
+ *  both fall through to its generic `{status: 500, type: "api_error"}`
+ *  bucket, same as any other unrecognized message — see that function's own
+ *  doc comment). A genuine per-request 500 is not something another model
+ *  would answer differently in general, but THESE specific shapes are: they
+ *  say the upstream couldn't route/serve the request at all, not that the
+ *  request itself was bad. Same overflow posture as `isRateLimited`/3021 —
+ *  move to the NEXT model immediately, no same-model backoff/retry (unlike
+ *  504/529, which exhaust `runAiWithRetry`'s same-model retry first) — but
+ *  kept as its OWN predicate rather than folded into `isRateLimited` itself:
+ *  `isRateLimited` is also read at the final all-exhausted call site below to
+ *  decide whether to report 429 `rate_limit_error` instead of
+ *  `classifyAiError`'s own status/type, and these are not rate-limit errors —
+ *  widening `isRateLimited` would have silently turned an exhausted 4002/8005
+ *  run into a misreported 429 there too. Scoped to this loop's own error
+ *  classification only, per the incident's own ask — `classifyAiError`'s
+ *  status/type mapping for these strings is untouched.
+ *
+ *  Code review (Standards axis, #717): matches on the bare numeric codes
+ *  ONLY, not on the generic phrases that originally accompanied them. The
+ *  known incident strings — `"500 api_error: 4002: could not route request
+ *  to AI model"` and `"8005: Internal server error"` — both already contain
+ *  their own numeric code, so `\b4002\b|\b8005\b` matches them exactly
+ *  without needing a bare `could not route` or `internal server error`
+ *  alternative. A bare `internal server error` alternative in particular
+ *  would have matched the literal generic HTTP 500 reason phrase from ANY
+ *  model's genuinely-terminal, unrelated 500 — silently routing it to the
+ *  next model instead of failing fast as the paragraph above requires. */
+const isOverflowRoutingError = (message: string) => /\b4002\b|\b8005\b/i.test(message);
+
 /** env.AI.run with issue #335's pre-stream retry. Resolves to the first
  *  successful value and the attempt count; rejects with AiRunError carrying
  *  the last upstream message. `sleep`/`random` are injectable for tests. */
@@ -513,11 +547,13 @@ type ModelOverflowResult =
  *  `handleFleetAnthropicMessages`'s own body — the self-contained walk over
  *  `order` (pickModels' own candidate model list), applying issue #335's
  *  same-model retry (`runAiWithRetry`) to each candidate in turn. Spec
- *  Component 4's own rule: a 429/3021, or a 504/529 that already exhausted
- *  its same-model retry, moves to the next candidate; anything else (a 4xx
- *  the request itself caused, a genuine 500) is not a failure another model
- *  would answer differently, so the walk stops there and reports it as the
- *  final failure.
+ *  Component 4's own rule: a 429/3021, a 4002/8005 (incident #717
+ *  continued — `isOverflowRoutingError`'s own doc comment), or a 504/529
+ *  that already exhausted its same-model retry, moves to the next
+ *  candidate; anything else (a 4xx the request
+ *  itself caused, an unrecognized genuine 500) is not a failure another
+ *  model would answer differently, so the walk stops there and reports it
+ *  as the final failure.
  *
  *  `attempts` accumulates every `env.AI.run` call across EVERY model this
  *  walk tried, not just the winning model's own retry count — a usage
@@ -552,7 +588,7 @@ async function runModelPoolOverflow(
       lastMessage = message;
       attempts += e instanceof AiRunError ? e.attempts : 1;
       const { status } = classifyAiError(message);
-      if (!(isRateLimited(message) || status === 504 || status === 529)) break;
+      if (!(isRateLimited(message) || isOverflowRoutingError(message) || status === 504 || status === 529)) break;
     }
   }
   return { ok: false, usedModel, attempts, lastMessage };
