@@ -6430,7 +6430,8 @@ export class StudioDO extends Sandbox<Env> {
   /**
    * Issue #249 (PR4b): wires `deliverSurvivalBriefOnBringup`
    * (survival-delivery.ts's standalone extraction, tested with no DO
-   * construction in test/studio.survival-delivery.test.ts) to this DO's real
+   * construction in test/studio.survival-input.test.ts and
+   * test/studio.survival-retry.test.ts) to this DO's real
    * Observed record, real pane probe, real GitHub reads and real wake.
    *
    * ONE `getObserved` SNAPSHOT, TAKEN HERE, threaded into everything below —
