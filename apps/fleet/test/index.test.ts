@@ -16,6 +16,7 @@ import { __resetExceptionRateCapForTests } from "../src/exceptions";
 import type { TaskRecord } from "../src/tasks/loop";
 import type { Env } from "../src/env";
 import { nsWith } from "./helpers/fake-namespace";
+import { fakeCtx } from "./helpers/fake-ctx";
 
 // scheduled()'s own doc comment calls it untested — "a scheduled export can
 // no more be constructed under vitest-pool-workers than AgentDO can" — but
@@ -44,24 +45,7 @@ function fakeAgentReturning(task: TaskRecord | null): Env["AGENT"] {
   } as unknown as Env["AGENT"];
 }
 
-/**
- * Operator fix-first review on PR #198 (issue #188): a fake ExecutionContext
- * whose `waitUntil` is a spy, not a no-op — `recordWorkerException` now
- * hands its own prune off to `ctx.waitUntil` rather than awaiting it inline,
- * so any test on the exception-capture path needs a real (if fire-and-
- * forget) `waitUntil` to assert against, not the bare `{} as any` the
- * happy-path tests above use (those never reach `recordWorkerException` at
- * all, so `{} as any` stays fine for them). Same queue-don't-await shape as
- * test/github.webhook.test.ts's own `fakeCtx()`.
- */
-function fakeCtx() {
-  const tasks: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: vi.fn((p: Promise<unknown>) => { tasks.push(p); p.catch(() => {}); }),
-    passThroughOnException: () => {},
-  };
-  return ctx as unknown as ExecutionContext & { waitUntil: ReturnType<typeof vi.fn> };
-}
+// fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746)
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
