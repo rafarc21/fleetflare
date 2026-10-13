@@ -49,8 +49,9 @@ A local `maestro` session (the operator's own machine, never a cloud studio)
 coordinates a repo's work and never implements — it dispatches briefs to the
 cloud studios that do. `web-studio` and `release-studio` carry members.
 `pilot` and `scratch` are lightweight. A studio id is `<repo>--<role>`, so one
-repo supports one studio per role — parallelism beyond that comes from
-members inside each studio, which is the intended shape.
+repo supports one studio per role by default — `fleet spawn --new` adds
+numbered instances (#269) — parallelism beyond that comes from members inside
+each studio, which is the intended shape.
 
 ## Safety
 
@@ -103,8 +104,10 @@ Worker instead; and no studio ever holds a Cloudflare deploy credential. See
 One studio per role — a studio id is `<repo>--<role>`, so `web-studio`,
 `release-studio`, `pilot`, and `scratch` can all run at once on the same
 repo (`maestro` itself is a local session on the operator's own machine,
-never one of these cloud studios). Parallelism beyond that comes from the
-member subagents inside each studio.
+never one of these cloud studios). A role's `--new` flag (issue #269) adds
+numbered instances of it — `<repo>--<role>--2`, `--3`, ... — on the fleet's
+one shared Claude account. Parallelism beyond that comes from the member
+subagents inside each studio.
 
 **Can leads implement code themselves?**
 No. A PreToolUse hook refuses a lead's `Edit`/`Write` and its file-writing
