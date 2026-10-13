@@ -13,8 +13,8 @@ export interface PoolModel {
 
 export const POOL: readonly PoolModel[] = [
   { key: "glm", id: "@cf/zai-org/glm-5.3", minMaxTokens: 16000, smokePassed: true },
-  { key: "kimi", id: "@cf/moonshotai/kimi-k2.7-code", minMaxTokens: 16000, smokePassed: false },
-  { key: "deepseek", id: "@cf/deepseek-ai/deepseek-v4-pro-0813", minMaxTokens: 16000, smokePassed: false },
+  { key: "kimi", id: "@cf/moonshotai/kimi-k2.7-code", minMaxTokens: 16000, smokePassed: true },
+  { key: "deepseek", id: "@cf/deepseek-ai/deepseek-v4-pro-0813", minMaxTokens: 16000, smokePassed: true },
 ];
 
 export function modelByKey(key: string): PoolModel | undefined {
