@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   shipTranscriptTick, getTranscriptTailWithStorage,
+  SECTION_BOOTID, SECTION_STAT, SECTION_INCARNATION, SECTION_CHUNK, SECTION_TAIL,
+  SECTION_PANE, SECTION_ACTIVITY_HOOK, SECTION_MEMGUARD,
   type ShipDeps, type TranscriptStorage,
 } from "../src/studio/transcript";
 import { chunkKey, TRANSCRIPT_PULL_MAX, HOT_TAIL_BYTES, type TranscriptManifest } from "../src/studio/archive";
@@ -8,21 +10,17 @@ import {
   INCARNATION_PATH, SESSION_FOUND_SECTION, SESSION_CONTINUE_SECTION, SESSION_CWD_SECTION,
 } from "../src/studio/observed";
 import { REAL_PILOT_PANE } from "./fixtures/rate-limit-panes";
-import { fixedNow, b64 } from "./helpers/datetime";
+import { fixedNow, b64, b64Utf8 } from "./helpers/datetime";
 import { fakeStorage as doStorage } from "./helpers/do-storage";
 
 // Wire-format literals — the container↔Worker delimited-stdout protocol, same
 // convention test/studio.observation-tick.test.ts:33-34 already established:
-// markers/paths/keys are protocol, not implementation, and pinning them as
-// literals is what lets these asserts fail when the builder drifts.
-const SECTION_BOOTID = "---FLEET-BOOTID---";
-const SECTION_STAT = "---FLEET-STAT---";
-const SECTION_INCARNATION = "---FLEET-INCARNATION---";
-const SECTION_CHUNK = "---FLEET-CHUNK---";
-const SECTION_TAIL = "---FLEET-TAIL---";
-const SECTION_PANE = "---FLEET-PANE---";
-const SECTION_ACTIVITY_HOOK = "---FLEET-ACTIVITY-HOOK---";
-const SECTION_MEMGUARD = "---FLEET-MEMGUARD---";
+// markers/paths/keys are protocol, not implementation. The SECTION_* markers
+// are now IMPORTED from the builder's own exports (src/studio/transcript.ts)
+// rather than re-spelled here — the drift contract is owned by
+// test/bun/transcript-wire-format.ts's spec copy plus the wire-equivalence
+// suite's byte-for-byte expect. TRANSCRIPT_LOG_PATH, TRANSCRIPT_BOOT_ID_PATH
+// and the storage keys stay local literals — protocol, not SECTION_* scope.
 const TRANSCRIPT_LOG_PATH = "/workspace/.transcript/claude.log";
 const TRANSCRIPT_BOOT_ID_PATH = "/workspace/.transcript/boot-id";
 const TRANSCRIPT_MANIFEST_KEY = "transcriptManifest";
@@ -106,14 +104,6 @@ function fakeStorage(
     }) as unknown as TranscriptStorage["put"],
   };
   return storage;
-}
-
-/** UTF-8 aware, for fixtures with real text (terminal output is not
- *  Latin1-only — claude's own TUI uses box-drawing/Unicode) — same shape as
- *  src/base64.ts's base64EncodeUtf8. Plain `btoa(str)` throws
- *  outright on any character outside Latin1. */
-function b64Utf8(s: string): string {
-  return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
 }
 
 /**

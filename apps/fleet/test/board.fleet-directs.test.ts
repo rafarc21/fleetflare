@@ -1,14 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
-import { env } from "cloudflare:test";
 import { handleFleetBoard, type PolicyFetch } from "../src/board/routes";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import { studioLabel, type BoardTask } from "../src/board/types";
 import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
+import { repoEnv } from "./helpers/env-with";
 import type { BoardApi } from "../src/board/board";
 import type { AssignWakeDeps } from "../src/board/assign-wake";
 import type { StudioStatus } from "../src/studio/types";
-import type { Env } from "../src/env";
 
 // Issue #59: a studio files and assigns tasks for the studios its org-chart
 // edges let it spawn — and for nobody else. The gate is the SAME maySpawn
@@ -19,7 +18,7 @@ const MAESTRO = "websites--maestro";
 const CHILD = "websites--web-studio--5";
 const NOT_CHILD = "websites--pilot--5";
 const REPO = "example-org/websites";
-const testEnv = { ...env, AGENT_REPO: REPO } as unknown as Env;
+const testEnv = repoEnv(REPO);
 
 const policy: PolicyFetch = async () => ({
   org: { edges: { maestro: ["web-studio", "maestro"] }, gates: {} },

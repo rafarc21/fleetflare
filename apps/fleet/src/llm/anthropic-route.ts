@@ -162,6 +162,10 @@ export function leadAiRetryBaseMs(env: { LEAD_AI_RETRY_BASE_MS?: string }): numb
   return parsePositiveInt(env.LEAD_AI_RETRY_BASE_MS, LEAD_AI_RETRY_BASE_MS_DEFAULT);
 }
 
+/** #767: same-model backoff schedule for a rate-limited (3021) upstream — the account window rolls over within a minute, so in-Worker waits beat a 429 that ends the client's whole turn. */
+export const RATE_LIMIT_BACKOFF_MS = [3_000, 6_000, 12_000, 20_000] as const;
+export const RATE_LIMIT_BACKOFF_CAP_MS = 45_000;
+
 /** The last env.AI.run failure, plus how many attempts were spent. */
 class AiRunError extends Error {
   constructor(message: string, readonly attempts: number) { super(message); }
@@ -245,6 +249,32 @@ export async function runAiWithRetry<T>(
       }
       const ceiling = opts.baseMs * 2 ** (attempt - 1);
       await sleep(ceiling / 2 + random() * (ceiling / 2));
+    }
+  }
+}
+
+/** #767: runAiWithRetry plus same-model backoff when the exhaustion was a rate limit: up to 4 extra rounds on the jittered schedule, cumulative sleep capped. Any other failure rethrows immediately. */
+export async function runAiWithRateLimitBackoff<T>(
+  run: () => Promise<T>,
+  opts: { baseMs: number; sleep?: (ms: number) => Promise<void>; random?: () => number },
+): Promise<{ value: T; attempts: number }> {
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const random = opts.random ?? Math.random;
+  let attempts = 0;
+  let slept = 0;
+  for (let round = 0; ; round++) {
+    try {
+      const r = await runAiWithRetry(run, opts);
+      return { value: r.value, attempts: attempts + r.attempts };
+    } catch (e) {
+      if (!(e instanceof AiRunError)) throw e;
+      attempts += e.attempts;
+      const message = e.message;
+      if (round >= RATE_LIMIT_BACKOFF_MS.length || !isRateLimited(message)) {
+        throw new AiRunError(message, attempts);
+      }
+      const ms = Math.min(RATE_LIMIT_BACKOFF_MS[round] * (0.7 + 0.6 * random()), RATE_LIMIT_BACKOFF_CAP_MS - slept);
+      if (ms > 0) { await sleep(ms); slept += ms; }
     }
   }
 }
@@ -580,28 +610,37 @@ type ModelOverflowResult =
 async function runModelPoolOverflow(
   ai: NonNullable<Env["AI"]>, order: string[], body: Json,
   gatewayId: string | undefined, baseMs: number,
+  retryDeps?: { sleep?: (ms: number) => Promise<void>; random?: () => number },
 ): Promise<ModelOverflowResult> {
   let attempts = 0;
   let usedModel = order[0];
   let lastMessage = "";
+  const seen = new Set<string>();
   for (const modelId of order) {
     const pm = modelById(modelId) ?? POOL[0];
     usedModel = pm.id;
     const openaiBody = anthropicRequestToOpenAI(body, { id: pm.id, minMaxTokens: pm.minMaxTokens, maxMaxTokens: pm.maxMaxTokens });
+    const backoffHere = order.length === 1 || order.every((id) => id === modelId || seen.has(id));
     // Incident fix (#717): the gateway option is attached ONLY when
     // `gatewayId` is actually set — `ai.run(pm.id, openaiBody)` with no
     // third argument at all otherwise, not `ai.run(pm.id, openaiBody,
     // undefined)`.
     try {
-      const r = await runAiWithRetry(
-        () => (gatewayId === undefined ? ai.run(pm.id, openaiBody) : ai.run(pm.id, openaiBody, { gateway: { id: gatewayId } })),
-        { baseMs },
-      );
+      const r = await (backoffHere
+        ? runAiWithRateLimitBackoff(
+            () => (gatewayId === undefined ? ai.run(pm.id, openaiBody) : ai.run(pm.id, openaiBody, { gateway: { id: gatewayId } })),
+            { baseMs, ...(retryDeps ?? {}) },
+          )
+        : runAiWithRetry(
+            () => (gatewayId === undefined ? ai.run(pm.id, openaiBody) : ai.run(pm.id, openaiBody, { gateway: { id: gatewayId } })),
+            { baseMs },
+          ));
       return { ok: true, upstream: r.value, usedModel, attempts: attempts + r.attempts };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       lastMessage = message;
       attempts += e instanceof AiRunError ? e.attempts : 1;
+      if (isRateLimited(message)) seen.add(modelId);
       const { status } = classifyAiError(message);
       if (!(isRateLimited(message) || isOverflowRoutingError(message) || status === 504 || status === 529)) break;
     }
@@ -613,6 +652,7 @@ export async function handleFleetAnthropicMessages(
   req: Request, env: Env, ctx: ExecutionContext,
   rows: () => Promise<StudioStatus[]> = () => listStudios(env),
   pool?: readonly PoolModel[],
+  retryDeps?: { sleep?: (ms: number) => Promise<void>; random?: () => number },
 ): Promise<Response> {
   const gate = await authenticateGlmLeadRequest(req, ANTHROPIC_MESSAGES_PATH, env, rows);
   if ("response" in gate) return gate.response;
@@ -676,7 +716,7 @@ export async function handleFleetAnthropicMessages(
   // number of `env.AI.run` calls this one Messages-API request cost.
   const startedAt = Date.now();
   const stream = body.stream === true;
-  const overflow = await runModelPoolOverflow(ai, order, body, gatewayId, leadAiRetryBaseMs(env));
+  const overflow = await runModelPoolOverflow(ai, order, body, gatewayId, leadAiRetryBaseMs(env), retryDeps);
   const { usedModel, attempts } = overflow;
 
   if (!overflow.ok) {

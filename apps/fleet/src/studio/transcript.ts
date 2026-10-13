@@ -263,21 +263,21 @@ function bootIdChanged(stored: string | undefined, fresh: string): boolean {
  * search, as defense in depth against a hypothetically different base64
  * variant ever being substituted in.
  */
-const SECTION_BOOTID = "---FLEET-BOOTID---";
-const SECTION_STAT = "---FLEET-STAT---";
+export const SECTION_BOOTID = "---FLEET-BOOTID---";
+export const SECTION_STAT = "---FLEET-STAT---";
 /** Issue #85 — the incarnation token section, read unconditionally between
  *  STAT and the file-exists guard. Same hyphen-safe alphabet argument as its
  *  siblings above. */
-const SECTION_INCARNATION = "---FLEET-INCARNATION---";
-const SECTION_CHUNK = "---FLEET-CHUNK---";
-const SECTION_TAIL = "---FLEET-TAIL---";
+export const SECTION_INCARNATION = "---FLEET-INCARNATION---";
+export const SECTION_CHUNK = "---FLEET-CHUNK---";
+export const SECTION_TAIL = "---FLEET-TAIL---";
 /** Issue #221 (PR3a, Task 3) — the pane-frame section: one `capture-pane -p`
  *  frame, base64'd like SECTION_CHUNK/SECTION_TAIL, folded into the SAME
  *  exec right after the incarnation read (and after the adoption probe
  *  fragment, when one runs) so its own content ends exactly where the
  *  next known marker begins — see `shipTickCmd`'s own doc comment. Same
  *  hyphen-safe alphabet argument as its siblings above. */
-const SECTION_PANE = "---FLEET-PANE---";
+export const SECTION_PANE = "---FLEET-PANE---";
 /** Issue #221 (PR3b) — the hook-heartbeat section: the container's own
  *  `/workspace/.fleet/activity.json`, catted and base64'd like every other
  *  section here. Placed as the very LAST thing `shipTickCmd` emits (after
@@ -286,7 +286,7 @@ const SECTION_PANE = "---FLEET-PANE---";
  *  needed only two boundary fixes (`parsePaneSection`, `parseMemguardSection`,
  *  `parseShipTickSections`'s `tailB64`) instead of a parser rewrite. Same
  *  hyphen-safe alphabet argument as its siblings above. */
-const SECTION_ACTIVITY_HOOK = "---FLEET-ACTIVITY-HOOK---";
+export const SECTION_ACTIVITY_HOOK = "---FLEET-ACTIVITY-HOOK---";
 /** Where `gates/activity-heartbeat.sh`'s atomic tmp-then-mv write lands.
  *  Kept in lockstep with that script's own hardcoded path BY CONVENTION —
  *  the same duplication `TRANSCRIPT_LOG_PATH` already accepts against
@@ -296,7 +296,7 @@ const ACTIVITY_HOOK_PATH = "/workspace/.fleet/activity.json";
 /** Issue #311 — memguard's own kill log, tailed on the SAME exec right
  *  after SECTION_PANE. Same hyphen-safe alphabet argument as its siblings
  *  above. See `shipTickCmd`'s own doc comment for placement. */
-const SECTION_MEMGUARD = "---FLEET-MEMGUARD---";
+export const SECTION_MEMGUARD = "---FLEET-MEMGUARD---";
 
 /** Where container/memguard.ts (issue #169) already writes one line per
  *  kill (`formatLogLine`, memguard.ts:508-516) — matches that file's own

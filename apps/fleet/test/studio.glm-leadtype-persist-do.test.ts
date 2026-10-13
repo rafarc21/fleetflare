@@ -28,6 +28,7 @@ import { STATUS_KEY, type OpCtx } from "../src/studio/provision";
 import { listStudios } from "../src/studio/registry";
 import { handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH } from "../src/llm/anthropic-route";
 import type { StudioStatus } from "../src/studio/types";
+import { fakeCtx } from "./helpers/fake-ctx";
 
 // A repo/role pair unique to this file, so its D1 registry row never
 // collides with any other test file's own fixtures under the same key.
@@ -92,13 +93,7 @@ function freshStudioFixture(doEnv: Env) {
   return { doObj, map };
 }
 
-function fakeCtx(): ExecutionContext {
-  const tasks: Promise<unknown>[] = [];
-  return {
-    waitUntil: (p: Promise<unknown>) => { tasks.push(p); p.catch(() => {}); },
-    passThroughOnException: () => {},
-  } as unknown as ExecutionContext;
-}
+// fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746)
 
 afterEach(() => {
   vi.restoreAllMocks();

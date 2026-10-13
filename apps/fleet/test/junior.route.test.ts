@@ -9,6 +9,7 @@ import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import type { BoardApi } from "../src/board/board";
 import { studioLabel, type BoardTask } from "../src/board/types";
+import { fakeCtx, type FakeCtx } from "./helpers/fake-ctx";
 
 const REPO = "acme-org/websites";
 const ME = "websites--web-studio";
@@ -25,21 +26,7 @@ function row(id: string, hash: string, repoSlug: string | null = REPO): StudioSt
   return { id, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
     lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: hash, repoSlug };
 }
-// Issue #218 finding 1: `handleFleetJunior` now hands its usage-log insert
-// off to `ctx.waitUntil` (house pattern — see github/webhook.ts's
-// `autoCloseOnPromote` and exceptions.ts's `pruneWorkerExceptions`) instead
-// of a bare fire-and-forget `void`. Same queue-don't-await fake `ctx` shape
-// already established by test/github.webhook.test.ts and
-// test/exceptions.test.ts's own `fakeCtx()`.
-function fakeCtx() {
-  const tasks: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: vi.fn((p: Promise<unknown>) => { tasks.push(p); p.catch(() => {}); }),
-    passThroughOnException: () => {},
-    drain: () => Promise.all(tasks),
-  };
-  return ctx as unknown as ExecutionContext & { waitUntil: ReturnType<typeof vi.fn>; drain: () => Promise<unknown[]> };
-}
+// fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746)
 let ctx: ReturnType<typeof fakeCtx>;
 // `authorize` seeds the B1 D1 record for task #7 (the default `boardTask()`)
 // assigned to `ME` — the Worker-side record that is now the actual /fleet/

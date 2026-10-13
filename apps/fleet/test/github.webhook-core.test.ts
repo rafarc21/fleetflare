@@ -5,6 +5,7 @@ import { createApproval, decideApproval, finishApproval } from "../src/approvals
 import { readSince } from "../src/events/log";
 import { recordStudio } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
+import { fakeCtx } from "./helpers/fake-ctx";
 import { sign } from "./helpers/webhook-sign";
 
 const SECRET = "hook-secret";
@@ -71,27 +72,7 @@ function envWithStudio() {
   } as any;
 }
 
-/**
- * Board issue #180: a fake Workers ExecutionContext. `waitUntil` just
- * queues the promise (never awaits it itself — that's the whole point of
- * `ctx.waitUntil`, matched here), and `drain()` is this test file's own
- * extension for waiting on everything queued so far, once a test's
- * assertions actually depend on the deferred phase (Path 2, the envelope
- * cross-check) having run. Cast rather than fully implementing the real
- * interface's `props`/`tracing` fields (@cloudflare/workers-types) — this
- * codebase's own precedent for a minimal fake here is index.test.ts's
- * `{} as any` for `scheduled`'s unused `_ctx`; this one is used, so it needs
- * real `waitUntil` behavior, but nothing past that.
- */
-function fakeCtx() {
-  const tasks: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: (p: Promise<unknown>) => { tasks.push(p); },
-    passThroughOnException: () => {},
-    drain: () => Promise.all(tasks),
-  };
-  return ctx as unknown as ExecutionContext & { drain: () => Promise<unknown[]> };
-}
+// fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746); webhook variant passes swallow:false so a rejecting queued task stays observable through drain().
 
 // Board issue #236 round 2: `wakeTaskOnComment` now runs behind
 // `ctx.waitUntil` (SHOULD-FIX item 4 -- it can take up to 30s and must not
@@ -104,7 +85,7 @@ function fakeCtx() {
 let lastCtx: ReturnType<typeof fakeCtx> | null = null;
 
 async function post(body: string, sig: string | null, event = "push") {
-  lastCtx = fakeCtx();
+  lastCtx = fakeCtx({ swallow: false });
   return handleGithubWebhook(
     new Request("https://x/gh", {
       method: "POST",
@@ -327,7 +308,7 @@ describe("github webhook — misconfigured GITHUB_WEBHOOK_SECRET", () => {
       }),
       env, // GITHUB_WEBHOOK_SECRET is not in vitest.config.ts's shared bindings
       () => 5_000_000,
-      fakeCtx(),
+      fakeCtx({ swallow: false }),
     );
     expect(res.status).toBe(503);
     expect(sent).toEqual([]);
@@ -344,7 +325,7 @@ describe("github webhook — misconfigured GITHUB_WEBHOOK_SECRET", () => {
       }),
       { ...env, GITHUB_WEBHOOK_SECRET: "" },
       () => 5_000_000,
-      fakeCtx(),
+      fakeCtx({ swallow: false }),
     );
     expect(res.status).toBe(503);
     expect(sent).toEqual([]);
