@@ -11,20 +11,18 @@ import { describe, it, expect, vi } from "vitest";
 import { runShipTickWithObservation, withObserved } from "../src/studio/do";
 import { emptyObserved, OBSERVED_KEY, type BringupVia, type Observed, type ObservedStorage } from "../src/studio/observed";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
-import type { TranscriptStorage } from "../src/studio/transcript";
+import { type TranscriptStorage, SECTION_BOOTID, SECTION_STAT, SECTION_INCARNATION, SECTION_CHUNK, SECTION_TAIL } from "../src/studio/transcript";
 import { RESTARTS_KEY, recordRestart, restartsInWindow, RESTART_WINDOW_MS, type RestartLog } from "../src/studio/restarts";
 import type { StudioStatus } from "../src/studio/types";
 import { formatRestartCell } from "../cli/restart-format";
 import { fakeStorage as doStorage } from "./helpers/do-storage";
 
-// Wire-format literals (markers/paths/keys are the container↔Worker protocol,
-// pinned here as literals so these asserts fail when the builder drifts —
-// same convention test/studio.observation-tick.test.ts:33-34 established).
-const SECTION_BOOTID = "---FLEET-BOOTID---";
-const SECTION_STAT = "---FLEET-STAT---";
-const SECTION_INCARNATION = "---FLEET-INCARNATION---";
-const SECTION_CHUNK = "---FLEET-CHUNK---";
-const SECTION_TAIL = "---FLEET-TAIL---";
+// Wire-format literals — the SECTION_* markers are now IMPORTED from the
+// builder's own exports (src/studio/transcript.ts) rather than re-spelled
+// here; the drift contract is owned by test/bun/transcript-wire-format.ts's
+// spec copy plus the wire-equivalence suite's byte-for-byte expect. The
+// TRANSCRIPT_*_KEY storage keys stay local literals — protocol, not SECTION_*
+// scope (same convention test/studio.observation-tick.test.ts:33-34 established).
 const TRANSCRIPT_BOOT_ID_KEY = "transcriptBootId";
 const TRANSCRIPT_MANIFEST_KEY = "transcriptManifest";
 
