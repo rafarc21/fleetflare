@@ -20,6 +20,7 @@ import {
 } from "../src/studio/failover";
 import type { ClaudeAccount } from "../src/studio/accounts";
 import { composeSurvivalBrief } from "../src/studio/survival-brief";
+import { row } from "./helpers/studio-row";
 
 const REPO = "acme-os";
 const STUDIO_ID = `${REPO}--release-studio`;
@@ -41,13 +42,7 @@ const STUDIO_ENV: StudioEnv = {
   BLUEPRINT_REPO: "rafarc21/fleetflare",
 };
 
-function status(overrides: Partial<StudioStatus> = {}): StudioStatus {
-  return {
-    id: STUDIO_ID, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
-    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: null, repoSlug: null,
-    ...overrides,
-  };
-}
+const status = (o: Partial<StudioStatus> = {}) => row({ id: STUDIO_ID, state: "running", ...o });
 
 /** The same Map-backed StudioStorage fake every other studio suite defines
  *  locally — kept per-file, matching this feature's established convention. */
