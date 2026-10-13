@@ -23,7 +23,7 @@ const body = (src: string, sig: string): string => {
 };
 
 const agentsDoSrc: string = env.TEST_AGENT_DO_SRC;
-const deployDoSrc: string = (env as unknown as { TEST_DEPLOY_DO_SRC: string }).TEST_DEPLOY_DO_SRC;
+const deployDoSrc: string = env.TEST_DEPLOY_DO_SRC;
 
 describe("issue #559 — CONTAINER_PORT rides every per-DO site (source-pinned)", () => {
   it("AgentDO's defaultPort is CONTAINER_PORT, not a re-typed literal", () => {
