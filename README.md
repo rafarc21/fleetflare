@@ -31,7 +31,8 @@ sync.
 - 🎭 **A role per job.** A local `maestro` session (your own machine, never a
   cloud studio) coordinates each repo's work; the cloud studios that carry it
   out are `web-studio`/`release-studio` (carry members), `pilot`/`scratch`
-  (lightweight) — one studio per role per repo.
+  (lightweight) — one studio per role per repo (a role's `--new` flag adds
+  instances — `--2`, `--3` — when a parallel lead is worth it).
 
 Key concepts, the architecture, the full FAQ, and the repository layout are
 in **[docs/architecture.md](docs/architecture.md)**.
