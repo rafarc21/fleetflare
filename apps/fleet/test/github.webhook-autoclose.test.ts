@@ -5,6 +5,7 @@ import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
 import { recordStudio } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
 import { isJuniorAuthorized, recordJuniorAuthorization } from "../src/junior/authz";
+import { fakeCtx } from "./helpers/fake-ctx";
 
 const SECRET = "hook-secret";
 let sent: { body: any }[] = [];
@@ -80,27 +81,7 @@ function envWithStudio() {
   } as any;
 }
 
-/**
- * Board issue #180: a fake Workers ExecutionContext. `waitUntil` just
- * queues the promise (never awaits it itself — that's the whole point of
- * `ctx.waitUntil`, matched here), and `drain()` is this test file's own
- * extension for waiting on everything queued so far, once a test's
- * assertions actually depend on the deferred phase (Path 2, the envelope
- * cross-check) having run. Cast rather than fully implementing the real
- * interface's `props`/`tracing` fields (@cloudflare/workers-types) — this
- * codebase's own precedent for a minimal fake here is index.test.ts's
- * `{} as any` for `scheduled`'s unused `_ctx`; this one is used, so it needs
- * real `waitUntil` behavior, but nothing past that.
- */
-function fakeCtx() {
-  const tasks: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: (p: Promise<unknown>) => { tasks.push(p); },
-    passThroughOnException: () => {},
-    drain: () => Promise.all(tasks),
-  };
-  return ctx as unknown as ExecutionContext & { drain: () => Promise<unknown[]> };
-}
+// fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746); webhook variant passes swallow:false so a rejecting queued task stays observable through drain().
 
 // Board issue #236 round 2: `wakeTaskOnComment` now runs behind
 // `ctx.waitUntil` (SHOULD-FIX item 4 -- it can take up to 30s and must not
@@ -113,7 +94,7 @@ function fakeCtx() {
 let lastCtx: ReturnType<typeof fakeCtx> | null = null;
 
 async function post(body: string, sig: string | null, event = "push") {
-  lastCtx = fakeCtx();
+  lastCtx = fakeCtx({ swallow: false });
   return handleGithubWebhook(
     new Request("https://x/gh", {
       method: "POST",
@@ -359,7 +340,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     closingIssues[7] = [42];
 
     const body = pushWithCommits("refs/heads/main", [{ id: "commitsha1", message: "feat: x" }]);
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -390,7 +371,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     closingIssues[7] = [42];
 
     const body = pushWithCommits("refs/heads/main", [{ id: sha, message: "feat: x" }]);
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -419,7 +400,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
       closingIssues[7] = [{ number: 12, repo: "other/repo" }, 13];
 
       const body = pushWithCommits("refs/heads/main", [{ id: sha, message: "feat: x" }]);
-      const ctx = fakeCtx();
+      const ctx = fakeCtx({ swallow: false });
       const res = await handleGithubWebhook(
         new Request("https://x/gh", {
           method: "POST",
@@ -452,13 +433,13 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
       body,
     });
 
-    const ctx1 = fakeCtx();
+    const ctx1 = fakeCtx({ swallow: false });
     await handleGithubWebhook(req(), envWithToken(), () => 5_000_000, ctx1);
     await ctx1.drain();
     const closeCallsAfterFirst = githubCalls.filter((c) => c.method === "PATCH").length;
     expect(closeCallsAfterFirst).toBe(1);
 
-    const ctx2 = fakeCtx();
+    const ctx2 = fakeCtx({ swallow: false });
     await handleGithubWebhook(req(), envWithToken(), () => 6_000_000, ctx2);
     await ctx2.drain();
     const closeCallsAfterSecond = githubCalls.filter((c) => c.method === "PATCH").length;
@@ -492,7 +473,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
       { id: "commitsha1", message: "feat: x" },
       { id: "commitsha2", message: "feat: y" },
     ]);
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -515,7 +496,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
 
   it("does nothing for a push to a branch other than the default", async () => {
     const body = pushWithCommits("refs/heads/some-feature", [{ id: "commitsha1", message: "wip" }]);
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -561,7 +542,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     pullCommits[9] = ["commitsha1"];
 
     const body = pushWithCommits("refs/heads/main", [{ id: "commitsha1", message: "feat: y" }]);
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -644,7 +625,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
       { id: "commitsha1", message: "feat: x" },
       { id: "commitsha2", message: "chore: y" },
     ]);
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -703,7 +684,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
 
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const body = pushWithCommits("refs/heads/main", [{ id: "commitsha1", message: "feat: x" }]);
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -746,7 +727,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const now = () => { calls++; return calls >= 5 ? 30_000 : 0; };
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -782,7 +763,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const now = () => { calls++; return calls >= 5 ? 22_000 : 0; };
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -838,7 +819,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const now = () => { calls++; return calls >= 7 ? 30_000 : 0; };
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -902,7 +883,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
       { id: "commitsha2", message: "feat: y" },
       { id: "commitsha3", message: "feat: z" },
     ]);
-    const ctx = fakeCtx();
+    const ctx = fakeCtx({ swallow: false });
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
@@ -965,7 +946,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
       }),
       envWithToken(),
       () => 5_000_000,
-      fakeCtx(),
+      fakeCtx({ swallow: false }),
     );
 
     expect(res.status).toBe(200);
@@ -994,7 +975,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
       }),
       envWithToken(),
       () => 5_000_000,
-      fakeCtx(),
+      fakeCtx({ swallow: false }),
     );
 
     expect(res.status).toBe(200);
