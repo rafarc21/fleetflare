@@ -1,5 +1,5 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
+  "$schema": "../node_modules/wrangler/config-schema.json",
   // Issue #329 critical fix round: the fleet's real, account-specific
   // wrangler.jsonc no longer lives in this repo at all (see
   // apps/fleet/scripts/deploy.sh's header and docs/setup.md's Quickstart
@@ -16,8 +16,19 @@
   // for the public template a stranger fills in with THEIR OWN real values
   // for their own ops-repo-equivalent, and deploy.sh for how a real deploy
   // is actually run.
+  // Issue #769: this file lives under test/ ON PURPOSE, not at apps/fleet/.
+  // vitest-pool-workers feeds the ambient test env from `.dev.vars`, and
+  // wrangler resolves that lookup against THE CONFIG FILE'S OWN DIRECTORY
+  // (getVarsForDev -> loadDotDevDotVars). At the app root the lookup hit
+  // apps/fleet/.dev.vars — the operator's untracked local secrets, present in
+  // every studio container — and every key in it leaked into the ambient test
+  // env (7 github.webhook-core tests failed on the leaked
+  // GITHUB_WEBHOOK_SECRET / GITHUB_APP_PRIVATE_KEY). Under test/ the lookup
+  // targets test/.dev.vars, a path nothing writes. Pinned by
+  // test/bun/wrangler-test-config-location.test.ts — never move this file
+  // back to the app root.
   "name": "fleet-test",
-  "main": "src/index.ts",
+  "main": "../src/index.ts",
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
@@ -51,7 +62,7 @@
     "TELEGRAM_OPERATOR_ID": "100000001"
   },
   "d1_databases": [
-    { "binding": "DB", "database_name": "fleet-test", "database_id": "00000000-0000-4000-8000-000000000000", "migrations_dir": "migrations" }
+    { "binding": "DB", "database_name": "fleet-test", "database_id": "00000000-0000-4000-8000-000000000000", "migrations_dir": "../migrations" }
   ],
   "r2_buckets": [
     { "binding": "STUDIO_ARCHIVE", "bucket_name": "fleet-test-archive" }
@@ -73,24 +84,24 @@
   "containers": [
     {
       "class_name": "AgentDO",
-      "image": "./container/Dockerfile",
+      "image": "../container/Dockerfile",
       "instance_type": "standard-1",
       "max_instances": 3
     },
     {
       "class_name": "DeployDO",
-      "image": "./container/Dockerfile.deploy",
+      "image": "../container/Dockerfile.deploy",
       "instance_type": "standard-1",
       "max_instances": 2
     },
     {
       "class_name": "StudioDO",
-      "image": "./container/Dockerfile.studio",
+      "image": "../container/Dockerfile.studio",
       // Same build-context pin as the real config — see that file's own
       // (now ops-repo-only) comment history / wrangler.example.jsonc for the
       // full reasoning. Kept here too so this test config parses/binds
       // identically in shape to what's actually deployed.
-      "image_build_context": ".",
+      "image_build_context": "..",
       "instance_type": "standard-1",
       "max_instances": 5,
       "rollout_step_percentage": 100
@@ -102,8 +113,8 @@
       // Dockerfile); max_instances kept small since only release-studio-
       // shaped ids land here.
       "class_name": "StudioBigDO",
-      "image": "./container/Dockerfile.studio",
-      "image_build_context": ".",
+      "image": "../container/Dockerfile.studio",
+      "image_build_context": "..",
       "instance_type": "standard-4",
       "max_instances": 2,
       "rollout_step_percentage": 100
