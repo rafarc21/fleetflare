@@ -13,6 +13,7 @@ import {
   handleFleetAnthropicCountTokens, ANTHROPIC_COUNT_TOKENS_PATH,
 } from "../src/llm/anthropic-route";
 import { GLM_LEAD_MODEL, GLM_MIN_MAX_TOKENS } from "../src/llm/translate";
+import { POOL } from "../src/llm/models";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -322,7 +323,8 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     const { token, rows, e, run } = await setup();
     const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(r.status).toBe(200);
-    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS });
+    // Task 4: every env.AI.run call now carries the AI Gateway option too.
+    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS }, { gateway: { id: "default" } });
     const body = await r.json();
     expect(body).toMatchObject({ type: "message", role: "assistant", model: good.model, content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 3, output_tokens: 2 } });
   });
@@ -348,7 +350,7 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
         { role: "tool", tool_call_id: "toolu_1", content: "sunny" },
       ],
       max_tokens: GLM_MIN_MAX_TOKENS,
-    });
+    }, { gateway: { id: "default" } });
     const replyBody = (await r.json()) as { content: unknown };
     expect(replyBody.content).toEqual([{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "nyc" } }]);
   });
@@ -390,7 +392,7 @@ describe("handleFleetAnthropicMessages — streaming", () => {
       "message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop",
     ]);
     expect(text).toContain('"text":"hi"');
-    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, expect.objectContaining({ stream: true, stream_options: { include_usage: true } }));
+    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, expect.objectContaining({ stream: true, stream_options: { include_usage: true } }), { gateway: { id: "default" } });
   });
 
   // Maestro review round 1, MAJOR 3: the exact bug — a mid-stream upstream
@@ -1271,16 +1273,32 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
   });
 
   it("pool on: 3021 on first model moves to next model, no backoff", async () => {
-    const seen: string[] = [];
-    const ai = { run: vi.fn(async (model: string) => {
-      seen.push(model);
-      if (seen.length === 1) throw new Error("3021: rate limiting: Account rate limit exceeded");
-      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
-    }) };
-    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" } });
-    expect(res.status).toBe(200);
-    expect(seen.length).toBe(2);
-    expect(seen[0]).not.toBe(seen[1]);
+    // The real pool has exactly ONE smoke-passed model today (GLM —
+    // models.ts's own POOL, kimi/deepseek not yet smoke-tested) — pickModels
+    // never offers a smoke-UNtested model as an overflow candidate (the
+    // pool's own entry rule, enforced in router.ts, not something this
+    // route may bypass), so there is genuinely no SECOND model to move to
+    // without this flip. Flipping kimi's own `smokePassed` for the
+    // duration of this one test (restored in `finally`, before any other
+    // test in this file can observe it) simulates "kimi has passed smoke"
+    // without touching the real, committed pool state.
+    const kimi = POOL[1];
+    const originalSmokePassed = kimi.smokePassed;
+    (kimi as { smokePassed: boolean }).smokePassed = true;
+    try {
+      const seen: string[] = [];
+      const ai = { run: vi.fn(async (model: string) => {
+        seen.push(model);
+        if (seen.length === 1) throw new Error("3021: rate limiting: Account rate limit exceeded");
+        return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+      }) };
+      const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" } });
+      expect(res.status).toBe(200);
+      expect(seen.length).toBe(2);
+      expect(seen[0]).not.toBe(seen[1]);
+    } finally {
+      (kimi as { smokePassed: boolean }).smokePassed = originalSmokePassed;
+    }
   });
 
   it("pool on: every model 429s → 429 rate_limit_error with retry-after", async () => {
