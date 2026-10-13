@@ -46,6 +46,8 @@ import { appendEvent } from "../events/log";
 import { makeEvent, shortId } from "../events/schema";
 import { writeFleetAccountUsage, readOneAccountUsage } from "./account-usage-store";
 import { countWorkerExceptions } from "../exceptions";
+import { handleModelsRoute } from "../llm/models-route";
+import { setAssignedModel } from "../llm/model-store";
 
 const ROUTE_RE = /^\/studio\/([^/]+)\/(status|provisioned|provision|restart|recycle|destroy|wake|check|rescue|inspect|ws\/terminal|paste|terminal|clear-session-guard)$/;
 
@@ -271,6 +273,10 @@ export function spawnDeps(env: Env, fetchFile: BlueprintFetch, resolveBrief: Bri
       const role = parseStudioId(childId)?.role ?? "";
       return claimStudioRow(env, { ...placeholder, doClass: realDoClassForRole(env, role) });
     },
+    // #717: the model pool's own `--lead kimi|deepseek`/`--lead glm`
+    // assignment — see SpawnDeps.assignModel's own doc comment for why
+    // this is a port rather than a direct model-store call from spawn.ts.
+    assignModel: (studioId: string, modelId: string) => setAssignedModel(env.DB, studioId, modelId),
     // Issue #59 review round 1 (M1): resume's atomic stopped -> provisioning flip.
     claimStopped: (studioId: string) => claimStoppedRow(env, studioId),
     now: () => new Date(),
@@ -888,6 +894,20 @@ export async function handleStudio(
       applied.push(name);
     }));
     return Response.json({ applied, rejected, skipped });
+  }
+
+  /**
+   * #717's model pool — the operator's `fleet models` surface (list every
+   * pool model + its state + per-studio assignments, assign/promote/
+   * demote). No studio id in any of these paths, so they sit alongside
+   * `/studio/accounts*` rather than inside ROUTE_RE's id-scoped dispatch.
+   * Same Access-gated lane as every route above (verifyAccess already ran
+   * unconditionally at the top of this function) — `handleModelsRoute`
+   * itself carries no auth of its own, deliberately, so this mount point is
+   * the ONLY place that guards it.
+   */
+  if (url.pathname === "/studio/models" || url.pathname.startsWith("/studio/models/")) {
+    return handleModelsRoute(req, env);
   }
 
   /**
