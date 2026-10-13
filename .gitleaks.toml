@@ -33,10 +33,9 @@ regexes = [
   # what it's for: proving secrets never reach logs/output, not a real token.
   '''ghs_PSLEAKCANARY0123456789''',
 
-  # apps/fleet/test/board.create.test.ts, apps/fleet/test/board.assign.test.ts,
-  # apps/fleet/test/board.routes.test.ts — a fake idempotency-key /
-  # fleet-task-key fixture used to test board comment-marker parsing. Not a
-  # credential of any kind.
+  # apps/fleet/test/board.create.test.ts, apps/fleet/test/board.routes.test.ts
+  # — a fake idempotency-key / fleet-task-key fixture used to test board
+  # comment-marker parsing. Not a credential of any kind.
   '''k-0123456789abcdef''',
 
   # apps/fleet/test/bun/bringup-log.test.ts,
