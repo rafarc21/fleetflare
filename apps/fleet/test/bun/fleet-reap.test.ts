@@ -15,7 +15,7 @@ import { REAL_WEBSTUDIO_PANE } from "../fixtures/rate-limit-panes";
 import { WORKING_GLYPH_DOT_FOOTER_ESC_PANE } from "../fixtures/activity-panes";
 import type { StudioStatus } from "../../src/studio/types";
 import { type Activity, nextActivity, readActivityFrame } from "../../src/studio/activity";
-import type { BoardTask, TaskState } from "../../src/board/types";
+import type { BoardTask, BoardTaskState } from "../../src/board/types";
 
 const NOW = new Date("2026-09-29T12:00:00.000Z");
 const MIN = 60_000;
@@ -67,7 +67,7 @@ function studio(id: string, act: Activity | null, over: Partial<StudioStatus> = 
   } as StudioStatus;
 }
 
-function task(number: number, assignee: string | null, state: TaskState | null = "working", open = true): BoardTask {
+function task(number: number, assignee: string | null, state: BoardTaskState | null = "working", open = true): BoardTask {
   return {
     number, url: "", title: `t${number}`, body: "", state,
     labels: assignee ? [`studio:${assignee}`] : [], assignee, milestone: null, open, updatedAt: NOW.toISOString(),
