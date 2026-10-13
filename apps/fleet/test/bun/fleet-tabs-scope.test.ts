@@ -19,18 +19,13 @@ import type { OrcaDeps, OrcaResult } from "../../cli/orca-workspace";
 import type { StudioStatus } from "../../src/studio/types";
 import type { BoardTask } from "../../src/board/types";
 import type { DetectedRepo } from "../../cli/fleet";
+import { ORCA_ENV, ok, terminals } from "./helpers/orca-fixtures";
 
 // ---------------------------------------------------------------------------
 // Fakes — same shape as orca-workspace.test.ts's own `fake()` (matched on the
 // first two argv words), duplicated here rather than imported: that helper
 // is not exported, and this file's fixtures are deliberately smaller (no
 // duplicate-terminal ranking, no salvage, none of that suite's other concerns).
-
-const ORCA_ENV = { TERM_PROGRAM: "Orca" } as Record<string, string | undefined>;
-
-function ok(stdout: string): OrcaResult {
-  return { ok: true, stdout, stderr: "", timedOut: false };
-}
 
 function studio(id: string, state: StudioStatus["state"] = "running"): StudioStatus {
   return { id, state } as StudioStatus;
@@ -84,13 +79,6 @@ const TERM_CREATED = ok(JSON.stringify({
   ok: true,
   result: { terminal: { handle: "term_new", title: "fleet" } },
 }));
-
-function terminals(...connected: boolean[]): OrcaResult {
-  return ok(JSON.stringify({
-    ok: true,
-    result: { terminals: connected.map((c, i) => ({ handle: `term_${i}`, title: "fleet", connected: c })) },
-  }));
-}
 
 /** A `runTabs` deps bag with sane, overridable defaults. `detectRepo`,
  *  `listStudios` and `confirm` are spied (call counts recorded) so the
