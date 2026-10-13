@@ -79,7 +79,7 @@ const sandboxApiSrc = await readFile(path.join(rootDir, "src", "studio", "sandbo
 // for the SAME reason do.ts is — the guarantee under test is a NEGATIVE one
 // ("this feature introduces no second single-flight wake path, no second
 // wakeLock, and no container exec of its own"), which no amount of calling the
-// function can demonstrate. See test/studio.survival-delivery.test.ts's
+// function can demonstrate. See test/studio.survival-retry.test.ts's
 // "shared single-flight" block.
 const survivalDeliverySrc = await readFile(path.join(rootDir, "src", "studio", "survival-delivery.ts"), "utf8");
 

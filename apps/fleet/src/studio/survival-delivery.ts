@@ -16,7 +16,8 @@
 // `moved` param. StudioDO cannot be constructed under vitest-pool-workers
 // (do.ts's own header), so behaviour that is not extractable is behaviour
 // that cannot be tested; the wiring in do.ts stays a thin, source-pinned
-// forward. See test/studio.survival-delivery.test.ts.
+// forward. See test/studio.survival-input.test.ts and
+// test/studio.survival-retry.test.ts.
 
 import { aboveAgentPanel, MODAL_TAIL_LINES, PANE_CAPTURE_MARKER, PANE_QUIESCE_SECONDS } from "./failover";
 import {
