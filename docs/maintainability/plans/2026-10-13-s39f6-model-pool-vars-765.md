@@ -20,8 +20,9 @@ LEAD_* throttle block (lines 104-132), same shape as the other flags:
 - `"LEAD_MODEL_POOL": "off"` — active, off by default, matches
   FLEET_TELEGRAM/FLEET_JUNIOR shape. A commented-out gate is invisible to
   the public-config test's JSON parse and to an operator skimming vars.
-- `// "LEAD_AI_GATEWAY_ID": "default",` — commented; unset means the same
-  default, so no need to force it active.
+- `// "LEAD_AI_GATEWAY_ID": "default",` — commented; unset attaches NO
+  gateway option (post-#717 there is no default gateway id), so never
+  force it active.
 - `// "LEAD_MODEL_OVERFLOW": "off",` — commented; unset means overflow ON
   (pool's intended behavior), the "off" value is the niche opt-out (#768).
 - `// "MODEL_QUALITY_ISSUE": "<issue-number>",` — commented; unset skips
