@@ -1489,9 +1489,10 @@ describe("task new/assign refuses security-labelled work onto a glm-lead studio 
 describe("RepoReachFetch canonical alias", () => {
   it("is the one exported alias, imported from github/reach", async () => {
     // S29-F4: the alias lives in src/github/reach.ts and both routes files
-    // import it — this compile is the test. A re-declared local in either
-    // routes file is a duplicate-identifier error; a missing reach.ts
-    // export is a no-such-name error.
+    // import it — this compile is the test. A missing reach.ts export is
+    // TS2305; keeping the import while re-declaring a local is TS2440.
+    // Restoring a local export and dropping the import compiles clean —
+    // that revert is grep's to catch, not tsc's.
     const fetch: RepoReachFetch = async () => ({ reachable: true });
     expect(await fetch("acme-org/websites")).toEqual({ reachable: true });
   });
@@ -1504,5 +1505,7 @@ describe("RepoReachFetch canonical alias", () => {
 // invisible to vitest's esbuild transform either way. So this block pins
 // the canonical shape where it will live, and the compiler that proves it
 // is `tsc --noEmit` (root tsconfig includes test/**), which fails on a
-// missing reach.ts export (TS2305) and on a re-declared local alias in
-// either routes file (TS2300 duplicate identifier).
+// missing reach.ts export (TS2305) and on an import-plus-local
+// re-declaration (TS2440). A reverted routes file that restores its own
+// export and drops the import compiles clean — the sweep greps for that,
+// the compiler does not.
