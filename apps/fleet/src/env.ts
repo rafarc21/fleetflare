@@ -432,4 +432,8 @@ export interface Env {
   TEST_CREDS_BY_REPO?: string;
   /** Optional Infisical API origin (self-hosted). Default https://app.infisical.com. https only. */
   INFISICAL_API_URL?: string;
+  /** "on" enables the lead model pool (spec 2026-10-13-model-pool-design). */
+  LEAD_MODEL_POOL?: string;
+  /** AI Gateway id every lead Workers AI call routes through. Default "default". */
+  LEAD_AI_GATEWAY_ID?: string;
 }

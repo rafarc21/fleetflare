@@ -119,6 +119,22 @@ describe("anthropicRequestToOpenAI — GLM_MIN_MAX_TOKENS floor", () => {
   });
 });
 
+// Task 4 (spec 2026-10-13-model-pool-design, Components 3/4): the picked pool
+// model now selects BOTH the outbound `model` id and the `max_tokens` floor —
+// previously both were hardcoded to GLM_LEAD_MODEL/GLM_MIN_MAX_TOKENS.
+describe("anthropicRequestToOpenAI — pool model override", () => {
+  test("model override sets id and max_tokens floor", () => {
+    const out = anthropicRequestToOpenAI({ messages: [{ role: "user", content: "hi" }], max_tokens: 10 }, { id: "@cf/b/kimi", minMaxTokens: 9000 });
+    expect(out.model).toBe("@cf/b/kimi");
+    expect(out.max_tokens).toBe(9000);
+  });
+  test("no override keeps GLM defaults", () => {
+    const out = anthropicRequestToOpenAI({ messages: [{ role: "user", content: "hi" }], max_tokens: 10 });
+    expect(out.model).toBe("@cf/zai-org/glm-5.3");
+    expect(out.max_tokens).toBe(16000);
+  });
+});
+
 describe("anthropicRequestToOpenAI — tools", () => {
   test("input_schema becomes OpenAI function/parameters", () => {
     const out = anthropicRequestToOpenAI({
