@@ -5,6 +5,7 @@ import { handleGithubWebhook } from "../src/github/webhook";
 import { handleTelegramWebhook } from "../src/telegram/webhook";
 import { directusConfig } from "../src/directus/client";
 import type { Env } from "../src/env";
+import { sign } from "./helpers/webhook-sign";
 
 /**
  * Board issue #334 — public release. The legacy Telegram surface (AgentDO,
@@ -32,14 +33,6 @@ beforeEach(async () => {
 afterEach(() => {
   globalThis.fetch = realFetch;
 });
-
-async function sign(body: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw", new TextEncoder().encode(WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
-  return "sha256=" + [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 function tgUpdate(fromId: number) {
   return new Request("https://fleet.test/tg/websites", {
@@ -69,7 +62,7 @@ describe("FLEET_TELEGRAM off (#334)", () => {
     });
     const req = new Request("https://fleet.test/gh", {
       method: "POST",
-      headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body), "content-type": "application/json" },
+      headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, WEBHOOK_SECRET), "content-type": "application/json" },
       body,
     });
     const res = await handleGithubWebhook(req, off(), Date.now, { waitUntil: () => {} } as unknown as ExecutionContext);

@@ -5,20 +5,11 @@ import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
 import { recordStudio } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
 import { isJuniorAuthorized, recordJuniorAuthorization } from "../src/junior/authz";
+import { sign } from "./helpers/webhook-sign";
 
 const SECRET = "hook-secret";
 let sent: { body: any }[] = [];
 let realFetch: typeof globalThis.fetch;
-
-async function sign(body: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw", new TextEncoder().encode(SECRET),
-    { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
-  return "sha256=" + [...new Uint8Array(sig)]
-    .map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 const push = (ref: string) => JSON.stringify({
   ref, after: "deadbeefcafe",
@@ -363,7 +354,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -394,7 +385,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -423,7 +414,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
       const res = await handleGithubWebhook(
         new Request("https://x/gh", {
           method: "POST",
-          headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+          headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
           body,
         }),
         envWithToken(),
@@ -445,7 +436,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     closingIssues[7] = [42];
 
     const body = pushWithCommits("refs/heads/main", [{ id: "commitsha1", message: "feat: x" }]);
-    const sig = await sign(body);
+    const sig = await sign(body, SECRET);
     const req = () => new Request("https://x/gh", {
       method: "POST",
       headers: { "x-github-event": "push", "x-hub-signature-256": sig },
@@ -496,7 +487,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -519,7 +510,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -565,7 +556,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -648,7 +639,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -707,7 +698,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -750,7 +741,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -786,7 +777,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -842,7 +833,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -906,7 +897,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "push", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -960,7 +951,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "issues", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "issues", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -989,7 +980,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
     const res = await handleGithubWebhook(
       new Request("https://x/gh", {
         method: "POST",
-        headers: { "x-github-event": "issues", "x-hub-signature-256": await sign(body) },
+        headers: { "x-github-event": "issues", "x-hub-signature-256": await sign(body, SECRET) },
         body,
       }),
       envWithToken(),
@@ -1019,7 +1010,7 @@ describe("issues webhook — a terminal label or close also revokes the task's j
     it(`${action} ${label}: record revoked`, async () => {
       await seed();
       const body = issues(action, { label: { name: label } });
-      expect((await post(body, await sign(body), "issues")).status).toBe(200);
+      expect((await post(body, await sign(body, SECRET), "issues")).status).toBe(200);
       await drainLast();
       expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(false);
     });
@@ -1033,7 +1024,7 @@ describe("issues webhook — a terminal label or close also revokes the task's j
     onWake = async () => { authorizedAtWake = await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO); };
     // A titled issue: the maestro wake digest needs one (wake-events.ts).
     const body = issues("labeled", { label: { name: "canceled" }, issue: { number: 7, title: "t", state: "open" } });
-    expect((await post(body, await sign(body), "issues")).status).toBe(200);
+    expect((await post(body, await sign(body, SECRET), "issues")).status).toBe(200);
     await drainLast();
     expect(wakes.map(([id]) => id)).toContain("websites--maestro");
     expect(authorizedAtWake).toBe(false);
@@ -1042,7 +1033,7 @@ describe("issues webhook — a terminal label or close also revokes the task's j
   it("closed: record revoked", async () => {
     await seed();
     const body = issues("closed");
-    await post(body, await sign(body), "issues");
+    await post(body, await sign(body, SECRET), "issues");
     await drainLast();
     expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(false);
   });
@@ -1051,7 +1042,7 @@ describe("issues webhook — a terminal label or close also revokes the task's j
     await seed();
     for (const name of ["working", "junior", "bug"]) {
       const body = issues("labeled", { label: { name } });
-      await post(body, await sign(body), "issues");
+      await post(body, await sign(body, SECRET), "issues");
       await drainLast();
     }
     expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(true);
@@ -1067,7 +1058,7 @@ describe("issues webhook — a terminal label or close also revokes the task's j
   it("another repo's same issue number: untouched", async () => {
     await seed();
     const body = issues("labeled", { label: { name: "canceled" } }, "acme-org/other");
-    await post(body, await sign(body), "issues");
+    await post(body, await sign(body, SECRET), "issues");
     await drainLast();
     expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(true);
   });
