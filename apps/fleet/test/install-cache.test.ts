@@ -14,7 +14,7 @@
 // (staging dir, member-filtered extraction, path-traversal rejection) need a
 // REAL shell (`curl`/`zstd`/`tar`) to prove — vitest-pool-workers (workerd)
 // has neither a filesystem nor child_process, so those live in
-// test/bun/install-cache-security.test.ts instead (the same "no filesystem
+// test/bun/install-cache-security-parse.test.ts instead (the same "no filesystem
 // in workerd" split this repo's own vitest.config.ts documents for
 // container/server.ts and studio-bringup.sh). This file only asserts on the
 // COMMAND TEXT for those (curl flags present, staging/mv/member-filter
@@ -27,7 +27,7 @@
 //   (b) a repo NOT in the gate must provably make zero R2/network calls.
 //   (c) the LRU prune must keep exactly the newest 2 keys, never more, never
 //       fewer.
-//   (d) SECURITY — extraction scope: test/bun/install-cache-security.test.ts.
+//   (d) SECURITY — extraction scope: test/bun/install-cache-security-parse.test.ts.
 //   (e) the SAVE key is built from the directory actually being saved, never
 //       another directory's.
 //   (f) a restore exec that THROWS is caught and reported, never propagated.
@@ -376,7 +376,7 @@ describe("bunInstallRunningCmd / parseBunInstallRunning", () => {
   // now asks a purely filesystem-shaped question: does that marker exist,
   // and is it NEWER than every lockfile in the directory (not stale)? See
   // this function's own doc comment (install-cache.ts) for the full
-  // reasoning, and test/bun/install-cache-security.test.ts's own
+  // reasoning, and test/bun/install-cache-security-parse.test.ts's own
   // `bunInstallRunningCmd` section for real-filesystem proof this file
   // (vitest-pool-workers, no filesystem/child_process) cannot give.
   it("scopes the check to the ONE directory given (cd's into it), and checks for the completion marker rather than scanning /proc", () => {
@@ -433,7 +433,7 @@ describe("bunInstallRunningCmd / parseBunInstallRunning", () => {
 // Transport commands — command-TEXT assertions only. The real shell
 // behaviour (staging dir, member-filtered extraction, path-traversal
 // rejection, exit-code propagation) is proven against a real bash/tar/zstd
-// in test/bun/install-cache-security.test.ts, which vitest-pool-workers
+// in test/bun/install-cache-security-parse.test.ts, which vitest-pool-workers
 // cannot run itself (no filesystem, no child_process).
 // ---------------------------------------------------------------------------
 
@@ -470,7 +470,7 @@ describe("installCacheRestoreCmd", () => {
   // (the traversal-guard's own security check, which must still run BEFORE
   // any extraction), once into `tar -x -f -` for the real extraction — never
   // materializing a full decompressed `.tar` file on disk at either stage.
-  // See test/bun/install-cache-security.test.ts for the REAL bash-exec proof
+  // See test/bun/install-cache-security-disk.test.ts for the REAL bash-exec proof
   // that both the traversal guard AND the disk-space saving actually hold —
   // this file only pins the command TEXT (no filesystem in workerd).
   // ---------------------------------------------------------------------------
@@ -523,7 +523,7 @@ describe("installCacheRestoreCmd", () => {
   // pulled back to the Worker — computed with `stat` on the already-
   // materialized `$work/dl.tar.zst`) against `df`'s own reported available
   // space on the SAME filesystem `$work` lives on. See
-  // test/bun/install-cache-security.test.ts for the REAL bash-exec proof that
+  // test/bun/install-cache-security-parse.test.ts for the REAL bash-exec proof that
   // this check actually fires (and never tombstones) — this file only pins
   // the command TEXT (no filesystem in workerd — this file's own header).
   // ---------------------------------------------------------------------------

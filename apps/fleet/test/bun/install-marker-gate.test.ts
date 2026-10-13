@@ -10,7 +10,7 @@ import { runSnippet } from "./exec-snippet";
 // package-manager install command finishes in a directory and looks like it
 // actually succeeded, replacing round 4's own over-broad live-/proc-scan
 // signal entirely (see that function's own doc comment in install-cache.ts,
-// and this file's sibling test/bun/install-cache-security.test.ts for the
+// and this file's sibling test/bun/install-cache-security-parse.test.ts for the
 // bunInstallRunningCmd-side proof that a settled marker correctly ignores an
 // unrelated long-lived process).
 //

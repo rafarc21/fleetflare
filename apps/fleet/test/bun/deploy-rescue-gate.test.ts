@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
  * some tests, a real spawned fake-CF-API server process). bun:test's bare
  * 5000ms default was too tight for this container's real subprocess-spawn
  * overhead and flaked 5/138 tests whenever the file ran in full (same class
- * of bug as #216's install-cache-security.test.ts, fixed the same way:
+ * of bug as #216's install-cache-security-parse.test.ts, fixed the same way:
  * measure, then give the test an honest explicit ceiling instead of the
  * bare default).
  *

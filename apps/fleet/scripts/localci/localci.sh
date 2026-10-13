@@ -179,7 +179,7 @@ if [ "${1:-}" = "--lanes" ]; then
     fi
     # Issue #388: docker's DEFAULT seccomp profile refuses the
     # unshare(CLONE_NEWUSER|CLONE_NEWNS|...) combination
-    # test/bun/install-cache-security.test.ts's own unshare-gated suite needs
+    # test/bun/install-cache-security-disk.test.ts's own unshare-gated suite needs
     # (issue #388's own real-full-disk ENOSPC proof) -- "Operation not
     # permitted", for both root and an unprivileged user inside the
     # container, confirmed live against a plain `docker run` with no

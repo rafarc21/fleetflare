@@ -143,7 +143,7 @@ function mktemp(): string {
 // else it silently skips, same as every other requireTools() gate.
 //
 // List sourced from every requireTools()/tool-presence call site on main at
-// the time of writing: zstd (install-cache-security.test.ts, #356),
+// the time of writing: zstd (install-cache-security-parse.test.ts, #356),
 // tmux (bringup-active-window.test.ts, studio-tmux-socket.test.ts),
 // timeout (bringup-session-adopt.test.ts, exec-deadline.test.ts,
 // worktree-session-adopt.test.ts, studio-adopt.test.ts), sha256sum + tar
