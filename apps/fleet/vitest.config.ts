@@ -70,6 +70,13 @@ const studioDoSrc = await readFile(path.join(rootDir, "src", "studio", "do.ts"),
 // TEST_STUDIO_DO_SRC already established.
 const agentsDoSrc = await readFile(path.join(rootDir, "src", "agents", "do.ts"), "utf8");
 
+// Issue #559: src/deploy/do.ts's own source text, bound for the same
+// reason agentsDoSrc just above exists — DeployDO is container-backed and
+// cannot be constructed under vitest-pool-workers, so its CONTAINER_PORT
+// wiring (defaultPort + both containerFetch port args) is pinned as text
+// by test/deploy-do-port.test.ts, same technique as TEST_AGENT_DO_SRC.
+const deployDoSrc = await readFile(path.join(rootDir, "src", "deploy", "do.ts"), "utf8");
+
 // Issue #507: EXEC_CLASSES.inspect's budget must BE INSPECT_EXEC_MS by
 // reference, not a hand-copied 15_000 — a value test cannot tell a
 // reference from a copy, so the source text is pinned like do.ts above.
@@ -191,6 +198,7 @@ export default defineConfig({
           TEST_CLI_FLEET_SRC: cliFleetSrc,
           TEST_STUDIO_DO_SRC: studioDoSrc,
           TEST_AGENT_DO_SRC: agentsDoSrc,
+          TEST_DEPLOY_DO_SRC: deployDoSrc,
           TEST_SANDBOX_API_SRC: sandboxApiSrc,
           TEST_SURVIVAL_DELIVERY_SRC: survivalDeliverySrc,
           TEST_FLEET_JSON: testFleetJson,
