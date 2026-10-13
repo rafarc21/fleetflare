@@ -546,9 +546,12 @@ describe("assignTask — adoption and reassignment (P5 §3)", () => {
     // The port itself carries no delete verb — the directive below IS the
     // assertion, same mechanics as studio.exports-pin-608.test.ts: TS2339
     // fires today because BoardApi has no deleteComment; add one and the
-    // directive goes unused (TS2578), failing `bun run check`'s
-    // `tsc --noEmit -p test` pass. Compile-time pin — vitest never
-    // typechecks, so the runtime half below is what vitest proves:
+    // directive goes unused (TS2578), failing `bun run check`'s root
+    // `tsc --noEmit` pass — the tsconfig project that owns this file
+    // (root tsconfig.json includes test/**; test/tsconfig.json's own
+    // project covers only test/bun/** plus two bun:test files, measured:
+    // it stayed exit 0 under the mutation). Compile-time pin — vitest
+    // never typechecks, so the runtime half below is what vitest proves:
     // reassignment comments the lineage exactly once and deletes nothing.
     // @ts-expect-error TS2339 — BoardApi has no deleteComment verb
     void api.deleteComment;

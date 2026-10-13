@@ -19,17 +19,21 @@ deletion; nothing in the body proves that.
    (studio.exports-pin-608.test.ts): a `@ts-expect-error TS2339` directive
    on `api.deleteComment`. TS2339 fires today because the port has no such
    verb; add one and the directive goes unused (TS2578), failing
-   `bun run check`'s `tsc --noEmit -p test` pass. vitest keeps the runtime
-   half: createComment called exactly once on reassignment.
+   `bun run check`'s root `tsc --noEmit` pass. Measured during
+   verification: the root tsconfig.json project owns this file (its
+   include is test/**); `tsc --noEmit -p test` stayed exit 0 under the
+   mutation — test/tsconfig.json covers only test/bun/** plus two
+   bun:test files. vitest keeps the runtime half: createComment called
+   exactly once on reassignment.
 3. Verify sequentially, one gate at a time (heavy-gate rule): vitest on
    the one file; mutation RED/GREEN — add a deleteComment verb to BoardApi,
-   expect `tsc --noEmit -p test` to fail TS2578, revert, expect green
-   (this runs the tsc gate TWICE, never alongside another gate);
+   expect the root `tsc --noEmit` to fail TS2578, revert, expect green
+   (this runs a tsc gate TWICE, never alongside another gate);
    english-check; test-lies-check.
 4. Push branch, completion record.
 
 ## Risk
 
 Test-only, no src/ change. The pin is compile-time: invisible to vitest,
-fires only under `tsc -p test` / `bun run check` — the test comment says
-so. Door: two-way.
+fires only under the root `tsc --noEmit` / `bun run check` — the test
+comment says so. Door: two-way.
