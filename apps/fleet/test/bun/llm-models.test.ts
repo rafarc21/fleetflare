@@ -15,7 +15,14 @@ describe("model pool registry", () => {
     expect(new Set(POOL.map((m) => m.id)).size).toBe(POOL.length);
   });
   test("glm keeps today's id and 16000 max_tokens floor", () => {
-    expect(modelByKey("glm")).toEqual({ key: "glm", id: "@cf/zai-org/glm-5.3", minMaxTokens: 16000, smokePassed: true });
+    expect(modelByKey("glm")).toEqual({ key: "glm", id: "@cf/zai-org/glm-5.3", minMaxTokens: 16000, maxMaxTokens: 32000, smokePassed: true });
+  });
+  // Incident #717: a per-model ceiling on the SAME computed max_tokens the
+  // floor above bounds — reasoning_content can push total output past
+  // Claude Code's hard 64k output-token limit even when max_tokens was
+  // requested far below that.
+  test("every model has a maxMaxTokens ceiling above its own floor", () => {
+    expect(POOL.every((m) => m.maxMaxTokens > m.minMaxTokens)).toBe(true);
   });
   test("lookups miss cleanly", () => {
     expect(modelByKey("gpt4")).toBeUndefined();

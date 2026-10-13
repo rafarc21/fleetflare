@@ -124,7 +124,7 @@ describe("anthropicRequestToOpenAI — GLM_MIN_MAX_TOKENS floor", () => {
 // previously both were hardcoded to GLM_LEAD_MODEL/GLM_MIN_MAX_TOKENS.
 describe("anthropicRequestToOpenAI — pool model override", () => {
   test("model override sets id and max_tokens floor", () => {
-    const out = anthropicRequestToOpenAI({ messages: [{ role: "user", content: "hi" }], max_tokens: 10 }, { id: "@cf/b/kimi", minMaxTokens: 9000 });
+    const out = anthropicRequestToOpenAI({ messages: [{ role: "user", content: "hi" }], max_tokens: 10 }, { id: "@cf/b/kimi", minMaxTokens: 9000, maxMaxTokens: 32000 });
     expect(out.model).toBe("@cf/b/kimi");
     expect(out.max_tokens).toBe(9000);
   });
@@ -132,6 +132,41 @@ describe("anthropicRequestToOpenAI — pool model override", () => {
     const out = anthropicRequestToOpenAI({ messages: [{ role: "user", content: "hi" }], max_tokens: 10 });
     expect(out.model).toBe("@cf/zai-org/glm-5.3");
     expect(out.max_tokens).toBe(16000);
+  });
+});
+
+// Incident #717: a live GLM-lead studio died mid-turn with "API Error:
+// response exceeded the 64000 output token maximum" — a model's
+// reasoning_content (visible chain-of-thought emitted alongside the final
+// answer) can push TOTAL output past Claude Code's own hard 64k output-token
+// limit even when the inbound Anthropic request's own `max_tokens` was far
+// smaller than that. GLM_MIN_MAX_TOKENS above is a FLOOR only; this is the
+// matching CEILING on the same computed value — never let the upstream
+// request ask for more than `model.maxMaxTokens`, regardless of what the
+// client (after the floor already raised it) or the floor itself asked for.
+describe("anthropicRequestToOpenAI — maxMaxTokens ceiling", () => {
+  test("a max_tokens above the ceiling is clamped down to maxMaxTokens, not passed through", () => {
+    const out = anthropicRequestToOpenAI(
+      { messages: [{ role: "user", content: "hi" }], max_tokens: 100000 },
+      { id: "@cf/b/kimi", minMaxTokens: 16000, maxMaxTokens: 32000 },
+    );
+    expect(out.max_tokens).toBe(32000);
+  });
+
+  test("a max_tokens below the floor still floors to minMaxTokens — the ceiling doesn't break the existing floor behavior", () => {
+    const out = anthropicRequestToOpenAI(
+      { messages: [{ role: "user", content: "hi" }], max_tokens: 5000 },
+      { id: "@cf/b/kimi", minMaxTokens: 16000, maxMaxTokens: 32000 },
+    );
+    expect(out.max_tokens).toBe(16000);
+  });
+
+  test("a max_tokens strictly between floor and ceiling passes through unchanged", () => {
+    const out = anthropicRequestToOpenAI(
+      { messages: [{ role: "user", content: "hi" }], max_tokens: 20000 },
+      { id: "@cf/b/kimi", minMaxTokens: 16000, maxMaxTokens: 32000 },
+    );
+    expect(out.max_tokens).toBe(20000);
   });
 });
 
@@ -295,6 +330,41 @@ describe("openAIResponseToAnthropic — text", () => {
       usage: { prompt_tokens: 500, completion_tokens: 6861, completion_tokens_details: { reasoning_tokens: 9000 } },
     }, { model: "m" });
     expect(out.usage).toEqual({ input_tokens: 500, output_tokens: 6861 });
+  });
+});
+
+// Incident #717 part B: the floor/ceiling on the OUTBOUND max_tokens (above)
+// bounds what the upstream request ASKS for, but reasoning_content can still
+// inflate the upstream's SELF-REPORTED completion_tokens past what the
+// ORIGINAL client request asked for — reporting that inflated number back as
+// `usage.output_tokens` would make Claude Code's own token-accounting see a
+// bigger number than it itself requested. `opts.requestedMaxTokens` is the
+// inbound Anthropic request's own `max_tokens`, BEFORE any floor/ceiling
+// clamping — a reporting-only clamp on the numeric usage field, never on the
+// actual returned content.
+describe("openAIResponseToAnthropic — output_tokens clamped to requestedMaxTokens", () => {
+  test("a huge completion_tokens (reasoning_content inflation) is clamped to the original request's max_tokens", () => {
+    const out = openAIResponseToAnthropic({
+      choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 50, completion_tokens: 70000 },
+    }, { model: "m", requestedMaxTokens: 8000 });
+    expect(out.usage).toEqual({ input_tokens: 50, output_tokens: 8000 });
+  });
+
+  test("a normal completion_tokens smaller than requestedMaxTokens passes through unchanged", () => {
+    const out = openAIResponseToAnthropic({
+      choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 50, completion_tokens: 3000 },
+    }, { model: "m", requestedMaxTokens: 8000 });
+    expect(out.usage).toEqual({ input_tokens: 50, output_tokens: 3000 });
+  });
+
+  test("no requestedMaxTokens provided (back-compat) — no clamping applied", () => {
+    const out = openAIResponseToAnthropic({
+      choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 50, completion_tokens: 70000 },
+    }, { model: "m" });
+    expect(out.usage).toEqual({ input_tokens: 50, output_tokens: 70000 });
   });
 });
 
