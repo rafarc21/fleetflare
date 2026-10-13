@@ -172,6 +172,16 @@ describe("container/studio-fleet — the board verbs (P4a-2)", () => {
       // Client-side courtesy only. The Worker refuses it too, which is the
       // enforcement — see src/board/board.ts's LEAD_TASK_STATES.
       expect(src()).toContain("the Worker refuses it too");
+      // The refusal is a usage-error, and main() exits on usage-error before
+      // buildRequest is ever called — there is no request to intercept, so
+      // the clause is pinned by source ordering, the same way the pre-gate
+      // refusal test below pins its own.
+      expect(src()).toContain('if (to === "completed") {');
+      expect(src()).toMatch(/if \(to === "completed"\) \{[\s\S]{0,400}kind: "usage-error"/);
+      const refuseIdx = src().indexOf('if (cmd.kind === "usage-error") {');
+      const buildIdx = src().indexOf("buildRequest(spawnEnv, cmd)");
+      expect(refuseIdx).toBeGreaterThan(-1);
+      expect(buildIdx).toBeGreaterThan(refuseIdx);
     });
 
     it("POSTs {to} to /fleet/tasks/<n>/state and sends no label call of any kind", () => {
