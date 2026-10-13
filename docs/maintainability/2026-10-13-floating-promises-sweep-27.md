@@ -20,7 +20,7 @@ zero; nothing here needs a fix.
 
 ## Method
 
-TS compiler API (typescript 5.9.3 program over all 176 src+cli files, same
+TS compiler API (typescript 5.9.3 program over all 181 src+cli files, same
 approach as sweep 25), 11 passes covering every promise-dropping position:
 
 1. Expression-statement calls whose callee's type is Promise-like.
@@ -54,24 +54,24 @@ Plus hand verification of every `.then(` / `.catch(` / `new Promise(` /
   `process.exit`/`stdout.write`/`stdin.on`, `writeFileSync`/`mkdirSync`/
   `unlinkSync`/`renameSync`/`cpSync`, `ws.accept`/`ws.send`/`ws.close`
   (workerd WS API is sync), `proc.kill`, `JSON.parse` — or `ctx.waitUntil(...)`
-  (7 sites: `src/junior/route.ts:218`, `src/exceptions.ts:286`,
-  `src/github/webhook.ts:631`, `src/github/webhook.ts:657`,
-  `src/llm/anthropic-route.ts:458`, `src/llm/anthropic-route.ts:560`).
+  (6 sites: `src/junior/route.ts:219`, `src/exceptions.ts:287`,
+  `src/github/webhook.ts:632`, `src/github/webhook.ts:658`,
+  `src/llm/anthropic-route.ts:459`, `src/llm/anthropic-route.ts:560`).
   `src/studio/do.ts:5794` `ctx.blockConcurrencyWhile` in the constructor is
   the platform's documented constructor-async-init API and its callback is
   fully try/catch'd, so it cannot reject.
 - **Event-handler / timer callbacks** (the classic residue class): 8 in src —
-  `src/studio/terminal.ts:96,100,106,107` (message handler
+  `src/studio/terminal.ts:99,100,106,107` (message handler
   `message(...).catch(log)`; close/error handlers sync), `src/studio/sandbox-api.ts:479,487,488`
   (sync enqueue / failStream), `setInterval` at `src/junior/route.ts:191`
   (heartbeat `.catch` stops the interval). No async callback is registered
-  into any `forEach`, `.map(async` (all 7 are `Promise.all`-wrapped or
+  into any `forEach`, `.map(async` (all 8 are `Promise.all`-wrapped or
   returned), `on`, or `setTimeout` anywhere in scope — including the attach
   path's ws handlers (`cli/fleet.ts:2916-2948`), whose only async work is
   the `chain = chain.then(...)` stdin sequence with try/catch inside every
   link.
-- **All 15 `new Promise` executors** resolve/reject synchronously or via
-  timer callbacks (deadline idioms); all 9 `.then(` sites have rejection
+- **All 16 `new Promise` executors** resolve/reject synchronously or via
+  timer callbacks (deadline idioms); all 8 `.then(` sites have rejection
   handlers; `cli/fleet.ts:2892`'s stdin chain try/catches every link.
 - **Container/SDK calls** verified against library source:
   `deleteSchedules`/`renewActivityTimeout` are sync; `pty.write` is
@@ -81,8 +81,7 @@ Plus hand verification of every `.then(` / `.catch(` / `new Promise(` /
   write-proxy/*, deploy/do.ts, leak-gate, auth.ts, creds/) were inside every
   pass's scope — zero hits there too, so no CLAUDE-ONLY findings either.
 - Sweep 13's swallowed-`.catch(() => {})` sites were checked and excluded
-  from re-reporting: the junior usage inserts and reader-cancel swallows are
-  already findings 9/10 there.
+  from re-reporting: the junior usage inserts are already finding 10 there.
 
 ## Annotated, not findings
 

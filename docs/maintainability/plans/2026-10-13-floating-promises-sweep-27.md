@@ -5,7 +5,7 @@ Doc-only sweep, no code changes. Scan at origin/main 8dd1778.
 ## Steps
 
 1. Branch 641-floating-promises-sweep-27 off origin/main (done).
-2. Scan every promise-dropping position in apps/fleet/src + cli (container excluded) via TS compiler API: 11 passes — expression-statement, void-operand, logical/comma/ternary arms, condition position, stored-then-unconsumed, async callbacks under forEach/map/on/addEventListener/setTimeout, promise-as-arg, template spans, object props, dep-interface members, name-driven statement calls; hand-read the any-typed residue. Result: zero floating promises.
+2. Scan every promise-dropping position in apps/fleet/src + cli (container excluded) via TS compiler API: 11 passes — expression-statement, void-operand, logical/comma/ternary/condition arms, async callbacks under forEach/map/on/addEventListener/setTimeout, promise-as-arg, template spans + object props, dep-interface members, name-driven statement calls, `new Promise` executors, `.then(` sites; hand-read the any-typed residue. Result: zero floating promises.
 3. Write docs/maintainability/2026-10-13-floating-promises-sweep-27.md — method, the zero, evidence trail, annotated-not-findings.
 4. Commit both docs, push branch (LEFTHOOK=0).
 5. No follow-up issues: nothing to fix. File none.
