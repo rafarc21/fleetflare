@@ -12,11 +12,9 @@ splits in this PR. Census by wc -l at origin/main 5b7a234: 19 files in
 3. For each top-15 file: map top-level describe()/suite() blocks (grep -n), identify seams by src module under test, proposed split names per existing convention <module>.<aspect>.test.ts, shared setup per half, tier-lane verdict (CLAUDE-ONLY if any of auth, secrets, tokens, credentials, rescue, failover, accounts routing, deploy, migrations, write-proxy, leak-gate, approvals is the file's subject; GLM-OK otherwise).
 4. Write docs/maintainability/2026-10-13-mid-size-test-files-sweep-35.md (15 findings, sweep-26 doc shape).
 5. Commit both docs, push branch (LEFTHOOK=0 git push -u origin sweep-735-mid-size-test-files-35).
-6. File one issue per batch: test(GLM-OK|CLAUDE-ONLY): S35-Fn <short>, refs #735, never closing keywords.
-7. Open doc-only PR referencing #735, no closing keywords.
+6. File one issue per batch: test(GLM-OK|CLAUDE-ONLY): S35-Fn <short>, refs #735, never closing keywords; open doc-only PR, no closing keywords.
 
 ## Verification
 
-- Doc-only: no build/test gate applies. git diff origin/main --stat shows only the two new .md files.
-- Every line ref re-checked against working tree before commit.
+- Doc-only: no build/test gate applies. git diff origin/main --stat shows only the two new .md files; every line ref re-checked against working tree before commit.
 - bun run english-check on the two docs.

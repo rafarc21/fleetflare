@@ -183,13 +183,14 @@ one seam per finding, halves sized by the line ranges measured.
 - **Lines:** 712, bun lane, 14 describes over cli/reap.ts's runReap
   core (issue #53).
 - **Seams:**
-  - runReap guards `:149-686` — running-turn veto, open-task stall
-    alarm, task-filed-between-list-and-destroy race, F1 bounded gap,
-    F2/F3 live pane chrome, F4/F5 scope and state, board read
-    failure/floor, rescue failure 409 backoff, dry-run, registry derived
-    each poll, destroy racing another destroy.
-  - parsers/alarm `:652-712` — formatIdleAlarm (the fleet ls line),
-    parseIdleDuration.
+  - runReap guards `:149-651` + `:683-712` — running-turn veto, open-task
+    stall alarm, task-filed-between-list-and-destroy race, F1 bounded
+    gap, F2/F3 live pane chrome, F4/F5 scope and state, board read
+    failure/floor, rescue failure 409 backoff, dry-run, registry
+    derived each poll, destroy racing another destroy (:683-712, after
+    the parsers).
+  - parsers/alarm `:652-682` — formatIdleAlarm (the fleet ls line, :652),
+    parseIdleDuration (:672).
 - **Proposed split:** `test/bun/reap-guards.test.ts` (the runReap
   describes) and `test/bun/reap-alarm.test.ts` (formatIdleAlarm +
   parseIdleDuration).
@@ -331,16 +332,16 @@ one seam per finding, halves sized by the line ranges measured.
   incident comment, isolatedTmuxEnv + socketFlag + assertIsolatedEnv
   hard guards, installFakeClaude/startLeadInPane/waitForPane builders.
 - **Seams:**
-  - `:313-522` — lead identity: member claude -p subprocess never the
+  - `:313-475` — lead identity: member claude -p subprocess never the
     lead, missing studio:claude window answers found:false, per-argv
     --continue detection, no raw argv, lead vs member cwd/argv,
     substring-containment cases (#117-adjacent argv shapes).
-  - `:523-657` — scoping: foreign pane/unrelated claude never found,
-    foreign lower-pid claude never confuses pid-tree scoping,
+  - `:476-657` — scoping: foreign pane/unrelated claude never found
+    (:476), foreign lower-pid claude never confuses pid-tree scoping,
     shell-only session found:false, private -L fleet-studio socket
     auto-detection (#117).
 - **Proposed split:** `test/bun/pane-probe-lead-identity.test.ts`
-  (:313-522) and `test/bun/pane-probe-lead-scope.test.ts` (:523-657).
+  (:313-475) and `test/bun/pane-probe-lead-scope.test.ts` (:476-657).
 - **Shared setup:** the isolation machinery is LOAD-BEARING (the
   incident comment records two leads dying when it was weaker) — both
   halves need isolatedTmuxEnv + socketFlag + assertIsolatedEnv +
