@@ -69,7 +69,7 @@ async function run(home: string) {
 }
 
 /** A BoardTask JSON as the real Worker sends it (src/board/types.ts's own
- *  shape — state is TaskState | null, the drift-carrying null these tests
+ *  shape — state is BoardTaskState | null, the drift-carrying null these tests
  *  exist to exercise). */
 function taskJson(state: string | null, labels: string[]) {
   return {
