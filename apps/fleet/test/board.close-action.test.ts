@@ -121,6 +121,16 @@ describe("closeTaskOnPromote", () => {
       expect(api.closeIssue).toHaveBeenCalledTimes(2);
     });
 
+    it("reads the clock from opts.now, never a positional (S32-F9)", async () => {
+      const api = fakeApi();
+      await closeTaskOnPromote(
+        testEnv.DB, api, "o/r", 12, { sha: "sha-opts-9999", branch: "main" }, { now: 4_000 },
+      );
+      const events = await readSince(testEnv.DB, "board", 0);
+      const marker = events.find((e) => e.id === "gh_close_o/r_12_sha-opts-9999");
+      expect(marker?.ts).toBe(4_000);
+    });
+
     it("records a marker row an operator/webhook redelivery can be traced through", async () => {
       const api = fakeApi();
       await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "tracedsha1", branch: "main" }, 1_000);
