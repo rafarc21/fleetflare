@@ -22,10 +22,13 @@ export async function setAssignedModel(db: D1Database, studioId: string, modelId
 
 export async function getModelStates(db: D1Database): Promise<Record<string, ModelState>> {
   const out: Record<string, ModelState> = {};
-  for (const m of POOL) {
+  // Read in parallel — one fleet_state row per pool model, same shape as
+  // account-usage-store.ts's readFleetAccountUsage / account-limits-store.ts's
+  // readFleetAccountLimits.
+  await Promise.all(POOL.map(async (m) => {
     const v = await getFlag(db, STATE(m.id));
     out[m.id] = v !== null && (STATES as readonly string[]).includes(v) ? (v as ModelState) : "active";
-  }
+  }));
   return out;
 }
 
