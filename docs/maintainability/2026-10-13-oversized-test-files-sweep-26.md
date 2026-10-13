@@ -118,14 +118,15 @@ finding, halves sized by the line ranges measured.
     (#208/#231 threads).
   - `:1778-2353` — HOLD/BLOCKER rounds: never-onto-checked-out-branch,
     pre-push-hook survival, per-call-site push budgets (#359/#362/#371).
-  - `:2353-2623` — identity/remote configuration (#335, #1).
+  - `:2353-3531` — identity/remote configuration (#335, #1 + its nested #16 depth-1, credential-helper-token, #30 discovery-fetch describes).
   - `:3532-4039` — report shape + on-origin reachability checks
     (#39/#49/#58/#80/#233/#241).
 - **Proposed split:** `test/bun/rescue-push-walk.test.ts` (walk core +
   report + on-origin: :220-974 + :3532-4039) and
   `test/bun/rescue-push-remote.test.ts` (snapshot/wip-sync/budgets/
-  identity/remote: :975-2623 + :1778-2353). Gaps 2623→3532 are
-  mid-file helpers.
+  identity/remote: :975-3531 + :1778-2353). No gaps: :2623-3531 is the
+  private-remote cluster (issue #1 outer describe + nested #16,
+  credential-helper token, #30), which belongs with the remote half.
 - **Shared setup:** REAL_GIT_BIN/TIMEOUT_BIN/PERL_BIN lane guards +
   shim dirs (top ~130 lines), mkdtemp'd fixtures per test. Both
   halves need the lane guard preamble + `bun:test` imports; the
