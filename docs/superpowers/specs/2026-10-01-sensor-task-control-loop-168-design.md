@@ -104,7 +104,7 @@ The issue's dampener rule: "CI fails if a sensor count rises vs main's baseline.
 Issue #168 requires: every auto task on the board, the rate cap, and the current burn, all visible somewhere — and a capped filing rate. Proposed mechanism, mirroring an existing pattern in this repo rather than inventing a new one:
 
 - **A dedicated `auto-sensor` label** on every task a sensor files, so the board itself is query-filterable to exactly this population (`gh issue list --label auto-sensor`) without any extra bookkeeping.
-- **A pinned tracking issue**, rewritten on every sensor run, the same pattern `fleet/blueprint/studios/maestro/studio.md:104` already uses for its wave log ("Comment the wave on the pinned board issue `fleet: maestro wave log`. That issue is the wave history; nothing else is."). A pinned `fleet: sensor burn log` issue, its body rewritten each run with the rate-cap value, the current window's burn against that cap, and a per-sensor breakdown, gives one place that shows the whole invariant at a glance — same shape as the precedent, not a new convention.
+- **A pinned tracking issue**, rewritten on every sensor run, the same pattern `skills/maestro-playbook/SKILL.md:417` already uses for its wave log ("Comment the wave on the pinned board issue `fleet: maestro wave log`. That issue is the wave history; nothing else is."). A pinned `fleet: sensor burn log` issue, its body rewritten each run with the rate-cap value, the current window's burn against that cap, and a per-sensor breakdown, gives one place that shows the whole invariant at a glance — same shape as the precedent, not a new convention.
 
 Both are recommendations; the operator picks the exact cap number (closing section).
 
