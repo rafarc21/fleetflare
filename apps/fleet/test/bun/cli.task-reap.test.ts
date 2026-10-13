@@ -9,27 +9,14 @@
 // no `repo` key (the Worker's own default stays the single source of that
 // fallback) and reportRepo prints its fallback line on stderr.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { writeCredentials } from "./helpers/credentials";
-
-const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
+import { cleanupTempDirs, FLEET, tmpDir } from "./helpers/fleet-cli";
 
 /** What the CLI POSTs to /tasks/reap. `repo` and `terminal` ride only when
  *  the branch that sends them is the one taken — see each test's asserts. */
 interface ReapCall { apply: boolean; terminal?: boolean; repo?: string }
 
-const tempDirs: string[] = [];
-function tmpDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tempDirs.push(dir);
-  return dir;
-}
-
-afterEach(() => {
-  while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 /** A stand-in for the Worker's POST /studio/board/tasks/reap: records every
  *  request body and answers the one canned response this run needs. */

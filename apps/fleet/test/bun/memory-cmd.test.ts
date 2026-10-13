@@ -11,22 +11,11 @@
 // cwd with NO .git, so detectRepo() falls back and reportRepo prints its
 // fallback stderr line -- which also pins the no-query GET URL shape.
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { cleanupTempDirs, FLEET, tmpDir } from "./helpers/fleet-cli";
 
-const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
-
-const tempDirs: string[] = [];
-function tmpDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tempDirs.push(dir);
-  return dir;
-}
-
-afterEach(() => {
-  while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function writeCredentials(home: string, workerUrl: string) {
   mkdirSync(join(home, ".fleet"));
