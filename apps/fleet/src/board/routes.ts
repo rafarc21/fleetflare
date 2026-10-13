@@ -824,10 +824,11 @@ async function lsRepoForStudio(
 }
 
 /** The injectable seams of every board route: the parts a minted
- * installation token or a live GitHub call needs, so the routes below run
- * under the test pool without one. Sweep 32 finding S32-F1 (issue #666):
- * these were six trailing positionals, which forced every test injecting a
- * late port to spell out `undefined` holes for the earlier ones. */
+ * installation token, a live GitHub call, or a Durable Object call needs,
+ * so the routes below run under the test pool without one. Sweep 32
+ * finding S32-F1 (issue #666): these were six trailing positionals, which
+ * forced every test injecting a late port to spell out `undefined` holes
+ * for the earlier ones. */
 type BoardPorts = {
   api?: BoardApi;
   reach?: RepoReachFetch;
