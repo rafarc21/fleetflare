@@ -28,13 +28,14 @@ import { PANE_CAPTURE_MARKER, PANE_QUIESCE_SECONDS } from "../src/studio/failove
 import { composeSurvivalBrief } from "../src/studio/survival-brief";
 import {
   OBSERVED_KEY, emptyObserved,
-  type BringupVia, type Observed, type ObservedSession, type ObservedStorage,
+  type BringupVia, type Observed, type ObservedStorage,
   type SurvivalBriefPending,
 } from "../src/studio/observed";
 import type { WakeOutcome } from "../src/studio/wake";
 import { TERMINAL_TASK_STATES, LIVE_TASK_STATES } from "../src/board/types";
 import { env } from "cloudflare:test";
 import { REAL_WEBSTUDIO_PANE } from "./fixtures/rate-limit-panes";
+import { session } from "./helpers/observed-session";
 
 const STUDIO = "fleetflare--web-studio";
 const NOW = "2026-09-25T12:00:00.000Z";
@@ -49,13 +50,6 @@ function fakeObserved(seed?: Partial<Observed>) {
     put: async (_key, value) => { map.set(OBSERVED_KEY, value); },
   };
   return { map, storage, stored: () => map.get(OBSERVED_KEY) };
-}
-
-function session(over: Partial<ObservedSession> = {}): ObservedSession {
-  return {
-    verdict: "resumed", at: NOW, via: "recycle", restore: "restored",
-    snapshotAgeS: 600, turnsBefore: 12, reason: null, ...over,
-  };
 }
 
 // A REAL `tmux capture-pane -p` of fleetflare--web-studio (#106's own capture
