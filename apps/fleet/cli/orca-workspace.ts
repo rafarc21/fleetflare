@@ -618,6 +618,47 @@ function findStudioWorktree(id: string, worktrees: OrcaWorktree[], registry: Wor
 }
 
 async function ensure(id: string, title: string, deps: OrcaDeps): Promise<WorkspaceOutcome> {
+  const { selector, created } = await ensureWorktreeHalf(id, title, deps);
+  const { kept, closedDuplicates } = await reconcileAttachTerminals(id, selector, deps);
+
+  if (!created && kept && isHealthyAttach(kept, id)) {
+    // The shortcut above only ever fires on a REPEAT call against a worktree
+    // that already existed before this call started — never on the branch
+    // that just created the worktree. See the comment just below for why.
+    return { kind: "exists", closedDuplicates };
+  }
+
+  // Defensive handling for an UNCONFIRMED hypothesis (Acme CTO report; not
+  // measurable from inside this container — no Orca here to check against).
+  // Sometimes the extra tab reported is an EMPTY shell, not a `fleet attach`
+  // session. Hypothesis: `orca worktree create` might open its own default
+  // terminal as a side effect, before the `terminal create` call below ever
+  // runs. If the shortcut above applied uniformly (including right after a
+  // brand-new `worktree create`), that hypothesized default terminal would
+  // also read `connected: true`, and this code would skip creating the REAL
+  // `fleet attach <id>` terminal on the studio's very first call — an empty
+  // shell forever, which would make the CTO's report worse, not better. So
+  // on the `created` path (this call just made the worktree) the shortcut is
+  // never taken and we always proceed to create the attach terminal below,
+  // unconditionally. `terminal close` is now a CONFIRMED subcommand (board
+  // #57's `removeWorkspace`, and board #42's duplicate-reconcile just above,
+  // both call it) — but it is deliberately not used here to tidy up a
+  // possible stray default terminal, because on this exact path nothing in
+  // `terms` (fetched above, before this call ever created the REAL attach
+  // terminal) can be told apart from a hypothesized stray by `isAttachTerminal`:
+  // a bare shell from `worktree create`'s own possible side effect would not
+  // carry an attach title and so is not even in `attachTerminals` to begin with,
+  // and the reconcile pass above only ever runs on terminals that already
+  // passed that filter. Residual, unverified-either-way risk: if the stray-
+  // terminal hypothesis is true, a studio's first-ever call may leave one
+  // extra, harmless, empty stray tab beside the real one — it does not recur
+  // on every call (that's the bug fixed above) and it never blocks the real
+  // attach terminal from being created.
+  await createAttachTerminal(id, selector, deps);
+  return { kind: "created", closedDuplicates };
+}
+
+async function ensureWorktreeHalf(id: string, title: string, deps: OrcaDeps): Promise<{ selector: string; created: boolean }> {
   const name = studioWorkspaceName(id);
   const listed = await orcaJson(deps, ["worktree", "list", "--json"], LIST_TIMEOUT_MS);
   const worktrees = listed.result?.worktrees ?? [];
@@ -672,25 +713,33 @@ async function ensure(id: string, title: string, deps: OrcaDeps): Promise<Worksp
     console.error(`fleet: ${id}: orca worktree set --display-name failed (title not stamped) -- ${why}`);
   }
 
-  // The terminal half, checked separately: a row whose attach terminal was
-  // closed is still a row, and treating the worktree's existence as proof of a
-  // terminal is how a studio ends up with a sidebar entry that opens onto
-  // nothing.
-  //
-  // Idempotency key: `isAttachTerminal` (board #42) — a terminal that is both
-  // `connected` AND titled as an attach (the four forms at
-  // `ATTACH_TERMINAL_TITLE`). Board #6 MEASURED on Orca 1.4.198 that `list`'s
-  // `title` never reflects `--title`/rename; #206 MEASURED the opposite on
-  // Orca 1.4.209 — `<id>` for minutes after create — so `title === id` is
-  // one accepted form, never the only one. Not `connected` alone
-  // either (board #6's own fix, MEASURED WRONG by board #42: a plain shell an
-  // operator opens in this single-purpose worktree also reports `connected:
-  // true`, so `connected` alone can satisfy this check with NO real attach
-  // terminal ever created, or make `fleet tabs` believe a studio is covered
-  // when it is not — see `isAttachTerminal`'s own comment for the measured
-  // cases and why `title === "fleet"` is the closest available proxy for
-  // "this terminal's command is `fleet attach <id>`" that Orca's schema
-  // exposes).
+  return { selector, created };
+}
+
+// The terminal half, checked separately: a row whose attach terminal was
+// closed is still a row, and treating the worktree's existence as proof of a
+// terminal is how a studio ends up with a sidebar entry that opens onto
+// nothing.
+//
+// Idempotency key: `isAttachTerminal` (board #42) — a terminal that is both
+// `connected` AND titled as an attach (the four forms at
+// `ATTACH_TERMINAL_TITLE`). Board #6 MEASURED on Orca 1.4.198 that `list`'s
+// `title` never reflects `--title`/rename; #206 MEASURED the opposite on
+// Orca 1.4.209 — `<id>` for minutes after create — so `title === id` is
+// one accepted form, never the only one. Not `connected` alone
+// either (board #6's own fix, MEASURED WRONG by board #42: a plain shell an
+// operator opens in this single-purpose worktree also reports `connected:
+// true`, so `connected` alone can satisfy this check with NO real attach
+// terminal ever created, or make `fleet tabs` believe a studio is covered
+// when it is not — see `isAttachTerminal`'s own comment for the measured
+// cases and why `title === "fleet"` is the closest available proxy for
+// "this terminal's command is `fleet attach <id>`" that Orca's schema
+// exposes).
+async function reconcileAttachTerminals(
+  id: string,
+  selector: string,
+  deps: OrcaDeps,
+): Promise<{ kept: OrcaTerminalEntry | undefined; closedDuplicates: string[] | undefined }> {
   const terms = await orcaJson(deps, ["terminal", "list", "--worktree", selector, "--json"], LIST_TIMEOUT_MS);
   const attachTerminals = (terms.result?.terminals ?? []).filter((t) => isAttachTerminal(t, id));
 
@@ -722,39 +771,10 @@ async function ensure(id: string, title: string, deps: OrcaDeps): Promise<Worksp
     await orcaJson(deps, ["terminal", "close", "--terminal", kept.handle, "--json"], LIST_TIMEOUT_MS);
   }
 
-  if (!created && kept && isHealthyAttach(kept, id)) {
-    // The shortcut above only ever fires on a REPEAT call against a worktree
-    // that already existed before this call started — never on the branch
-    // that just created the worktree. See the comment just below for why.
-    return { kind: "exists", closedDuplicates };
-  }
+  return { kept, closedDuplicates };
+}
 
-  // Defensive handling for an UNCONFIRMED hypothesis (Acme CTO report; not
-  // measurable from inside this container — no Orca here to check against).
-  // Sometimes the extra tab reported is an EMPTY shell, not a `fleet attach`
-  // session. Hypothesis: `orca worktree create` might open its own default
-  // terminal as a side effect, before the `terminal create` call below ever
-  // runs. If the shortcut above applied uniformly (including right after a
-  // brand-new `worktree create`), that hypothesized default terminal would
-  // also read `connected: true`, and this code would skip creating the REAL
-  // `fleet attach <id>` terminal on the studio's very first call — an empty
-  // shell forever, which would make the CTO's report worse, not better. So
-  // on the `created` path (this call just made the worktree) the shortcut is
-  // never taken and we always proceed to create the attach terminal below,
-  // unconditionally. `terminal close` is now a CONFIRMED subcommand (board
-  // #57's `removeWorkspace`, and board #42's duplicate-reconcile just above,
-  // both call it) — but it is deliberately not used here to tidy up a
-  // possible stray default terminal, because on this exact path nothing in
-  // `terms` (fetched above, before this call ever created the REAL attach
-  // terminal) can be told apart from a hypothesized stray by `isAttachTerminal`:
-  // a bare shell from `worktree create`'s own possible side effect would not
-  // carry an attach title and so is not even in `attachTerminals` to begin with,
-  // and the reconcile pass above only ever runs on terminals that already
-  // passed that filter. Residual, unverified-either-way risk: if the stray-
-  // terminal hypothesis is true, a studio's first-ever call may leave one
-  // extra, harmless, empty stray tab beside the real one — it does not recur
-  // on every call (that's the bug fixed above) and it never blocks the real
-  // attach terminal from being created.
+async function createAttachTerminal(id: string, selector: string, deps: OrcaDeps): Promise<void> {
   const made = await orcaJson(
     deps,
     ["terminal", "create", "--worktree", selector, "--title", id, "--command", `fleet attach ${id}`, "--json"],
@@ -770,7 +790,6 @@ async function ensure(id: string, title: string, deps: OrcaDeps): Promise<Worksp
   // window stacks another client.
   const handle = made.result?.terminal?.handle;
   if (handle) await orcaJson(deps, ["terminal", "rename", "--terminal", handle, "--title", id, "--json"], LIST_TIMEOUT_MS);
-  return { kind: "created", closedDuplicates };
 }
 
 // ---------------------------------------------------------------------------
