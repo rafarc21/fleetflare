@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { closeTaskOnPromote } from "../src/board/close-action";
 import { readSince } from "../src/events/log";
+import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import type { BoardApi } from "../src/board/board";
 import type { BoardTask } from "../src/board/types";
 import type { Env } from "../src/env";
@@ -11,33 +12,11 @@ import type { Env } from "../src/env";
 // appendEvent + ON CONFLICT DO NOTHING pattern -- and a fake BoardApi for
 // every GitHub call, so no test needs a live issue.
 
-function task(overrides: Partial<BoardTask> = {}): BoardTask {
-  return {
-    number: 12, url: "https://github.com/o/r/issues/12", title: "Some task",
-    body: "## Objective\n\nShip it.\n", state: "working", labels: ["working"],
-    assignee: null, milestone: null, open: true, updatedAt: "2026-09-18T10:00:00Z", ...overrides,
-  };
-}
-
-function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
-  return {
-    createIssue: vi.fn(async () => task()),
-    getIssue: vi.fn(async () => task()),
-    listIssues: vi.fn(async () => [task()]),
-    addLabels: vi.fn(async () => {}),
-    removeLabel: vi.fn(async () => {}),
-    createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/12#issuecomment-1" })),
-    pullRequestExists: vi.fn(async () => true),
-    listComments: vi.fn(async () => []),
-    listMilestones: vi.fn(async () => []),
-    branchExists: vi.fn(async () => true),
-    commitExists: vi.fn(async () => true),
-    closeIssue: vi.fn(async () => {}),
-    listOpenPullFiles: vi.fn(async () => []),
-    getPullRequest: vi.fn(async () => ({ number: 0, merged: false, open: true, title: "" })),
-    ...overrides,
-  };
-}
+// This file's old builders kept a "working"-state default task and a
+// 2026-09-18 updatedAt; the thin wrapper below preserves both explicitly.
+const task = (overrides: Partial<BoardTask> = {}) =>
+  boardTask({ state: "working", labels: ["working"], updatedAt: "2026-09-18T10:00:00Z", ...overrides });
+const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi(overrides, () => task());
 
 const testEnv = env as unknown as Env;
 
