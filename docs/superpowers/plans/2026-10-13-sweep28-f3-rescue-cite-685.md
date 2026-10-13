@@ -1,4 +1,4 @@
-# Sweep 28 F3 — rescue.ts stale plan-doc cite (issue #685)
+# Sweep 28 F3 — rescue.ts stale plan-doc cite (refs #685, refs #643)
 
 Task: https://github.com/rafarc21/fleetflare/issues/685
 Findings doc (sweep 28): https://github.com/rafarc21/fleetflare/blob/main/docs/maintainability/2026-10-13-stale-comments-sweep-28.md
