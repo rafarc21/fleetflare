@@ -1066,14 +1066,35 @@ describe("handleFleetAnthropicMessages — pre-stream retry and call duration (i
     expect((await usageRows())[0]).toMatchObject({ ok: 0, attempts: 3, error: `ai_run_error 504 api_error: ${TIMEOUT_504}` });
   });
 
-  it("a 4xx-mapped error is never retried (context overflow 400, rate limit 429)", async () => {
-    for (const message of ["This model's maximum context length is 32768 tokens", "AiError: rate limit reached"]) {
+  it("a 4xx-mapped error is never retried (context overflow 400); a rate limit 429 gets only #767 backoff, not a #335 retry", async () => {
+    // Context overflow: classifyAiError maps it to a 400 — runAiWithRetry
+    // does not retry it, and it is not a rate limit, so #767's backoff
+    // does not fire either: exactly one call, fail fast.
+    {
       const { token, rows, e } = await setup();
-      const run = vi.fn(async () => { throw new Error(message); });
+      const run = vi.fn(async () => { throw new Error("This model's maximum context length is 32768 tokens"); });
       (e.AI as { run: unknown }).run = run;
       const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
       expect(r.status).toBeLessThan(500);
       expect(run).toHaveBeenCalledTimes(1);
+    }
+    // Rate limit: still not a #335 retryable status (runAiWithRetry only
+    // retries 504/529), but #767's backoff now fires — pool off means the
+    // single model has nowhere else to go, so it reruns up to 4 extra
+    // rounds on the backoff schedule before reporting the 429.
+    {
+      const sleeps: number[] = [];
+      const { token, rows, e } = await setup();
+      const run = vi.fn(async () => { throw new Error("AiError: rate limit reached"); });
+      (e.AI as { run: unknown }).run = run;
+      const r = await handleFleetAnthropicMessages(
+        req({ token }), e, ctx, rows,
+        undefined,
+        { sleep: async (ms) => { sleeps.push(ms); }, random: () => 0 },
+      );
+      expect(r.status).toBe(429);
+      expect(run).toHaveBeenCalledTimes(5);
+      expect(sleeps).toEqual([2100, 4200, 8400, 14000]);
     }
   });
 
@@ -1399,10 +1420,18 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
   it("pool on: every model 429s → 429 rate_limit_error with retry-after", async () => {
     const seen: string[] = [];
     const ai = { run: vi.fn(async (model: string) => { seen.push(model); throw new Error("3021: Account rate limit exceeded"); }) };
-    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" } });
+    const res = await callRoute({
+      ai, envOverrides: { LEAD_MODEL_POOL: "on" },
+      retryDeps: { sleep: async () => {}, random: () => 0 },
+    });
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("30");
     expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    // #767: the LAST candidate has no untried model left to move to (every
+    // other candidate already 3021'd this walk), so it reruns through the
+    // same-model backoff — 1 first turn + 4 backoff rounds. 3 candidates
+    // in the pool → 1 + 1 + 5 = 7 ai.run calls.
+    expect(ai.run).toHaveBeenCalledTimes(7);
     // Global Constraint: the logged usage row's model must be the LAST
     // model actually tried, never a hardcoded constant (code review,
     // Spec axis, #717).
@@ -1419,25 +1448,31 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
   // fixture pool above: a plain copy of the real POOL with every entry
   // forced to `smokePassed: true`, handed to `callRoute`'s own `pool`
   // injection seam rather than mutating the shared `models.ts` POOL export.
-  it("pool on: 3021 on every model (genuine multi-model exhaustion) → 429, AI called once per model, usage row logs the LAST model tried", async () => {
+  it("pool on: 3021 on every model (genuine multi-model exhaustion) → 429, first models once, LAST model retried via #767 backoff, usage row logs the LAST model tried", async () => {
     const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
     const seen: string[] = [];
     const ai = { run: vi.fn(async (model: string) => {
       seen.push(model);
       throw new Error("3021: rate limiting: Account rate limit exceeded");
     }) };
-    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    const res = await callRoute({
+      ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool,
+      retryDeps: { sleep: async () => {}, random: () => 0 },
+    });
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("30");
     expect((await res.json() as any).error.type).toBe("rate_limit_error");
     // router.ts's own round-robin hash of the studio id picks WHICH pool
     // model goes first — not necessarily the pool's declaration order — so
     // this asserts against `seen` (the actual try order), not a hardcoded
-    // sequence: every model was tried exactly once, with no backoff/retry
-    // on a rate-limit.
-    expect(ai.run).toHaveBeenCalledTimes(testPool.length);
-    expect(seen).toHaveLength(testPool.length);
+    // sequence. #767: the FIRST candidates are fresh on their own turn, so
+    // each is tried once; the LAST candidate has no untried model to move
+    // to (every other candidate already 3021'd this walk), so it reruns
+    // through the same-model backoff — 1 first turn + 4 backoff rounds.
+    expect(ai.run).toHaveBeenCalledTimes(testPool.length + 4);
+    expect(seen).toHaveLength(testPool.length + 4);
     expect(new Set(seen)).toEqual(new Set(testPool.map((m) => m.id)));
+    expect(seen.filter((m) => m === seen[seen.length - 1])).toHaveLength(5);
     expect(seen[seen.length - 1]).not.toBe(seen[0]);
     await ctx.drain();
     const rowsLogged = await usageRows();
@@ -1594,9 +1629,10 @@ describe("#767 — 3021 same-model backoff", () => {
     const deps = { sleep: async (ms: number) => { sleeps.push(ms); }, random: () => 1 };
     await expect(runAiWithRateLimitBackoff(run, { baseMs: 1, ...deps })).rejects.toMatchObject({ attempts: 5 });
     // 130% of [3000,6000,12000] then the cap clamps 20000*1.3 to the
-    // remaining 45000 - (3900+7800+15600) = 17700.
-    expect(sleeps).toEqual([3900, 7800, 15600, 17700]);
-    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(45_000);
+    // remaining 45000 - (3900+7800+15600) = 17700. Rounded: 3000*1.3 is
+    // 3899.999... in float math, so compare rounded values, not exact.
+    expect(sleeps.map(Math.round)).toEqual([3900, 7800, 15600, 17700]);
+    expect(Math.round(sleeps.reduce((a, b) => a + b, 0))).toBe(45_000);
   });
 
   it("route-level pool-off (order=[glm]): 3021,3021,ok → 200, usage row attempts 3", async () => {
