@@ -331,8 +331,11 @@ export async function listInstallationRepos(token: string): Promise<string[]> {
 // honestly claim "nothing was deleted" — a reviewer sees the move as a move.
 
 /** ghRequest plus the JSON.parse — ghJson adds only the parsing; the thrown
- *  message (GitHub's own words, token never in it) comes from ghRequest. */
-async function ghJson<T>(token: string, url: string, init: GhInit, what: string): Promise<T> {
+ *  message (GitHub's own words, token never in it) comes from ghRequest.
+ *  Exported (Finding 5, #717 review) so llm/model-quality-cron.ts's GET-only
+ *  calls use this instead of reimplementing the same two-line wrapper under
+ *  a different name. */
+export async function ghJson<T>(token: string, url: string, init: GhInit, what: string): Promise<T> {
   const { text } = await ghRequest(token, url, init, what);
   return JSON.parse(text) as T;
 }

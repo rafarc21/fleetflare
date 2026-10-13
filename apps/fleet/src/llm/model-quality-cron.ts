@@ -14,22 +14,21 @@
 // (the real cron) and test/llm.model-quality-cron.test.ts (vitest's
 // cloudflare:test pool, which has the real Workers types) — see that test's
 // own header for why collectOutcomes itself is never unit-tested directly.
-import { ghRequest, listPullCommits } from "../github/api";
+import { ghJson, listPullCommits } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
 import { getFlag, setFlag } from "../state";
 import { getAssignedModel, setModelState } from "./model-store";
 import { modelStats, shouldDemote, statsTable, type PrOutcome } from "./model-quality";
+import { taskAssignees } from "../board/types";
 import type { Env } from "../env";
 
 const QUALITY_WINDOW_DAYS = 14;
 const GITHUB_API = "https://api.github.com";
 
-/** ghRequest plus the JSON.parse, same minimal wrapper github/api.ts's own
- *  module-private ghJson already is — kept local since this file has no
- *  other caller for it. */
+/** GET + JSON.parse, GitHub-API shaped — thin wrapper over the shared
+ *  ghJson (github/api.ts), which this file has no other caller for. */
 async function ghGet<T>(token: string, url: string, what: string): Promise<T> {
-  const { text } = await ghRequest(token, url, { method: "GET" }, what);
-  return JSON.parse(text) as T;
+  return ghJson<T>(token, url, { method: "GET" }, what);
 }
 
 /** The `refs #N` every board PR body carries (never a closing keyword — see
@@ -37,13 +36,6 @@ async function ghGet<T>(token: string, url: string, what: string): Promise<T> {
 function refsIssue(body: string): number | null {
   const m = body.match(/\brefs #(\d+)\b/i);
   return m ? Number(m[1]) : null;
-}
-
-/** The `studio:<name>` label on a board issue — the one label the model
- *  pool cares about on this path. `null` when the issue carries none. */
-function studioLabel(labels: { name: string }[]): string | null {
-  const l = labels.find((x) => x.name.startsWith("studio:"));
-  return l ? l.name.slice("studio:".length) : null;
 }
 
 interface RawPull {
@@ -94,9 +86,12 @@ function wasReverted(prNumber: number, candidates: RawPull[]): boolean {
  * head sha carried a failed check — a fix-and-repush after a CI failure),
  * and whether a later merged PR reverted it.
  *
- * A PR with no `refs #N` in its body, an issue with no `studio:` label, or a
- * studio with no assigned pool model is skipped outright — Claude-led and
- * unassigned studios have no model to score.
+ * A PR with no `refs #N` in its body, an issue whose `studio:` labels don't
+ * resolve to EXACTLY ONE studio (zero or two — see board/types.ts's
+ * taskAssignees doc comment for why both are real signals rather than
+ * something to guess past), or a studio with no assigned pool model is
+ * skipped outright — Claude-led, unassigned, and ambiguously-labelled
+ * studios have no model to score.
  */
 export async function collectOutcomes(env: Env): Promise<PrOutcome[]> {
   const repo = env.AGENT_REPO;
@@ -115,8 +110,9 @@ export async function collectOutcomes(env: Env): Promise<PrOutcome[]> {
     const issue = await ghGet<{ labels: { name: string }[] }>(
       token, `${GITHUB_API}/repos/${repo}/issues/${issueNumber}`, `read issue ${repo}#${issueNumber}`,
     );
-    const studio = studioLabel(issue.labels);
-    if (studio === null) continue;
+    const assignees = taskAssignees(issue.labels.map((l) => l.name));
+    if (assignees.length !== 1) continue;
+    const studio = assignees[0];
 
     const model = await getAssignedModel(env.DB, studio);
     if (model === null) continue;
@@ -153,6 +149,13 @@ function utcDateString(ms: number): string {
  * `MODEL_QUALITY_ISSUE` is set — posts the stats table via `deps.post`.
  * Demotion always runs when the pool is on and it is a new day; posting is
  * the one piece that is skipped when the board issue is not configured.
+ *
+ * The day-flag is written ONLY after `deps.collect()` and the demote/post
+ * work it feeds have all succeeded (#717 review, Finding 3) — `collect()`
+ * is several sequential GitHub API calls over a network, and a transient
+ * failure there must be retryable on the NEXT minute's invocation, not
+ * silently disable demotion monitoring for the rest of the day. Marking the
+ * day done BEFORE that work runs would do exactly that.
  */
 export async function runDailyModelQuality(
   env: Env,
@@ -163,7 +166,6 @@ export async function runDailyModelQuality(
   const today = utcDateString(deps.now);
   const last = await getFlag(env.DB, LAST_DAY_FLAG);
   if (last === today) return;
-  await setFlag(env.DB, LAST_DAY_FLAG, today, deps.now);
 
   const stats = modelStats(await deps.collect());
   const demoted = shouldDemote(stats);
@@ -173,4 +175,6 @@ export async function runDailyModelQuality(
     const demotedLine = demoted.length > 0 ? `\n\nDemoted: ${demoted.join(", ")}` : "\n\nDemoted: none";
     await deps.post(statsTable(stats) + demotedLine);
   }
+
+  await setFlag(env.DB, LAST_DAY_FLAG, today, deps.now);
 }

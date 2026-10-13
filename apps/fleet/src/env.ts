@@ -444,10 +444,10 @@ export interface Env {
   /** AI Gateway id every lead Workers AI call routes through. Default "default". */
   LEAD_AI_GATEWAY_ID?: string;
   /**
-   * Board issue number the daily model-quality pass (src/llm/model-quality.ts's
-   * runDailyModelQuality, Task 6) comments its stats table on. Optional —
-   * unset skips posting, but demotion still runs whenever LEAD_MODEL_POOL
-   * is "on" and the pass has not already run today.
+   * Board issue number the daily model-quality pass (src/llm/model-quality-
+   * cron.ts's runDailyModelQuality, Task 6) comments its stats table on.
+   * Optional — unset skips posting, but demotion still runs whenever
+   * LEAD_MODEL_POOL is "on" and the pass has not already run today.
    */
   MODEL_QUALITY_ISSUE?: string;
 }

@@ -30,4 +30,21 @@ describe("daily model quality", () => {
     await runDailyModelQuality({ ...env, LEAD_MODEL_POOL: "off" } as any, { collect: async () => outcomes, post, now: Date.UTC(2026, 9, 15, 6) });
     expect(post).not.toHaveBeenCalled();
   });
+
+  // Finding 4 (#717 review): posting is conditional on MODEL_QUALITY_ISSUE,
+  // but demotion must still happen when posting is skipped — unverified
+  // before this test. A separate outcomes fixture (demoting POOL[1], which
+  // the test above never touches) keeps this assertion attributable to this
+  // test's own call rather than state the earlier test already left behind.
+  it("pool on, MODEL_QUALITY_ISSUE unset: demotes without ever calling post", async () => {
+    const post = vi.fn(async () => {});
+    const outcomesNoIssue = [
+      ...Array.from({ length: 10 }, (_, i) => ({ model: POOL[0].id, closedAt: i, firstCiPassed: true, bounced: false, reverted: false })),
+      ...Array.from({ length: 10 }, (_, i) => ({ model: POOL[1].id, closedAt: i, firstCiPassed: false, bounced: false, reverted: false })),
+    ];
+    const e = { ...env, LEAD_MODEL_POOL: "on", MODEL_QUALITY_ISSUE: undefined };
+    await runDailyModelQuality(e as any, { collect: async () => outcomesNoIssue, post, now: Date.UTC(2026, 9, 16, 6) });
+    expect(post).not.toHaveBeenCalled();
+    expect((await getModelStates(env.DB))[POOL[1].id]).toBe("demoted");
+  });
 });
