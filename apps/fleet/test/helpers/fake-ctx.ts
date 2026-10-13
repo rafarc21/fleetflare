@@ -30,7 +30,14 @@ export type FakeCtx = ExecutionContext & {
  *  vi.fn spy so suites can assert call counts. drain(): Promise.all of
  *  everything queued so far. Cast out rather than fully implementing
  *  props/tracing — same precedent as the per-suite fakes this replaces
- *  (sweep 33 F2, board issue #746). */
+ *  (sweep 33 F2, board issue #746).
+ *
+ *  Overloads — the default (drain: true) is declared LAST because
+ *  `ReturnType<typeof fakeCtx>` resolves to the last overload: suites that
+ *  hold `let ctx: ReturnType<typeof fakeCtx>` and call `await ctx.drain()`
+ *  get a NON-optional drain with no non-null assertion at any call site. */
+export function fakeCtx(opts: FakeCtxOpts & { drain: false }): FakeCtx;
+export function fakeCtx(opts?: FakeCtxOpts & { drain?: true }): FakeCtx & { drain: () => Promise<unknown[]> };
 export function fakeCtx(opts: FakeCtxOpts = {}): FakeCtx {
   const tasks: Promise<unknown>[] = [];
   const { drain = true, swallow = true } = opts;

@@ -16,26 +16,12 @@ import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import type { BoardApi } from "../src/board/board";
 import { studioLabel, type BoardTask } from "../src/board/types";
+import { fakeCtx, type FakeCtx } from "./helpers/fake-ctx";
 
 const REPO = "acme-org/websites";
 const ME = "websites--web-studio";
 
-// Issue #218 finding 1: the usage-log insert is handed to `ctx.waitUntil`
-// now (house pattern — github/webhook.ts's `autoCloseOnPromote`,
-// exceptions.ts's `pruneWorkerExceptions`), never a bare fire-and-forget
-// `void`, so the Workers runtime cannot tear the execution context down
-// mid-insert once the response stream closes. Same queue-don't-await fake
-// `ctx` shape test/github.webhook.test.ts's and test/exceptions.test.ts's
-// own `fakeCtx()` already establish.
-function fakeCtx() {
-  const tasks: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: vi.fn((p: Promise<unknown>) => { tasks.push(p); p.catch(() => {}); }),
-    passThroughOnException: () => {},
-    drain: () => Promise.all(tasks),
-  };
-  return ctx as unknown as ExecutionContext & { waitUntil: ReturnType<typeof vi.fn>; drain: () => Promise<unknown[]> };
-}
+// fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746)
 let ctx: ReturnType<typeof fakeCtx>;
 
 beforeEach(async () => {

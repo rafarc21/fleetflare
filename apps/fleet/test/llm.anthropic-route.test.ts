@@ -17,6 +17,7 @@ import { POOL, type PoolModel } from "../src/llm/models";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
+import { fakeCtx, type FakeCtx } from "./helpers/fake-ctx";
 
 const ME = "acme-org--web-studio";
 // Maestro review round 1, MAJOR 2: every row here carries `leadType: "glm"`
@@ -29,15 +30,7 @@ function row(id: string, hash: string, leadType: "claude" | "glm" | undefined = 
     lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: hash, repoSlug: "acme-org/websites",
     ...(leadType === undefined ? {} : { leadType }) };
 }
-function fakeCtx() {
-  const tasks: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: vi.fn((p: Promise<unknown>) => { tasks.push(p); p.catch(() => {}); }),
-    passThroughOnException: () => {},
-    drain: () => Promise.all(tasks),
-  };
-  return ctx as unknown as ExecutionContext & { waitUntil: ReturnType<typeof vi.fn>; drain: () => Promise<unknown[]> };
-}
+// fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746)
 let ctx: ReturnType<typeof fakeCtx>;
 
 async function usageRows() {
