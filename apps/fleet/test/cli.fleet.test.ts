@@ -1282,7 +1282,7 @@ describe("formatActivity (cli/readiness-format.ts)", () => {
     expect(formatActivity(s, NOW)).toBe("IDLE 47m");
   });
 
-  it("#403 table: a stopped studio ignores a rateLimited record entirely", () => {
+  it("#403 table: a stopped studio renders — for its activity regardless of a rateLimited record", () => {
     const s = status({
       state: "stopped",
       rateLimited: { until: "2026-09-25T13:30:00.000Z", seenAt: "2026-09-25T12:00:00.000Z" },
