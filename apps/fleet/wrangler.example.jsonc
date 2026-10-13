@@ -101,9 +101,12 @@
     "FLEET_TELEGRAM": "off",
     "FLEET_DIRECTUS": "off",
     "FLEET_AUTO_FAILOVER": "off",
-    // FLEET_JUNIOR gates the junior skill (Workers AI delegation, see
-    // skills/junior/SKILL.md): studios get the skill and /fleet/junior
-    // answers only when "on". JUNIOR_REPOS optionally narrows it to a comma
+    // FLEET_JUNIOR gates BOTH Workers-AI-spending routes: the junior skill
+    // (Workers AI delegation, see skills/junior/SKILL.md — studios get the
+    // skill and /fleet/junior answers) AND the glm-lead LLM route
+    // (/fleet/llm/anthropic/v1/messages, which reuses this same flag — leave
+    // it off on a glm fleet and the whole LLM path is gone). Only when "on".
+    // JUNIOR_REPOS optionally narrows it to a comma
     // list of owner/repo. Needs the "ai" binding above. JUNIOR_RATE_PER_MINUTE
     // and JUNIOR_DAILY_CAP throttle each studio (defaults: 5/minute, 50/day —
     // both optional, uncomment to change).
@@ -118,6 +121,9 @@
     // (defaults: 60/minute, 2000/day — both optional, uncomment to change).
     // "LEAD_RATE_PER_MINUTE": "60",
     // "LEAD_DAILY_CAP": "2000",
+    // .../count_tokens sibling (its OWN D1 counter, no daily cap — the
+    // endpoint spends no AI budget). Default 60.
+    // "LEAD_COUNT_TOKENS_RATE_PER_MINUTE": "60",
     // Issue #302: glm-lead stream idle timeout (ms without an upstream chunk
     // before the route sends the client `event: error`). Default 90000.
     // "LEAD_STREAM_IDLE_MS": "90000",
