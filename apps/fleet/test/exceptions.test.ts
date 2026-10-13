@@ -4,19 +4,9 @@ import {
   recordWorkerException, pruneWorkerExceptions, countWorkerExceptions,
   __resetExceptionRateCapForTests,
 } from "../src/exceptions";
+import { fakeCtx } from "./helpers/fake-ctx";
 
-// Same fire-and-forget fake ExecutionContext test/github.webhook.test.ts's
-// own fakeCtx() already establishes for `ctx.waitUntil` — queues the promise
-// rather than awaiting it, so a test can assert it was handed off without
-// that itself blocking the test.
-function fakeCtx() {
-  const tasks: Promise<unknown>[] = [];
-  const ctx = {
-    waitUntil: vi.fn((p: Promise<unknown>) => { tasks.push(p); p.catch(() => {}); }),
-    passThroughOnException: () => {},
-  };
-  return ctx as unknown as ExecutionContext & { waitUntil: ReturnType<typeof vi.fn> };
-}
+// fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746)
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM worker_exceptions").run();
