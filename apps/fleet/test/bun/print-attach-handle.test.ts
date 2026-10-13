@@ -12,12 +12,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { cmdPrintAttachHandle } from "../../cli/fleet";
 import type { OrcaDeps, OrcaResult } from "../../cli/orca-workspace";
-
-const ORCA_ENV = { TERM_PROGRAM: "Orca" } as Record<string, string | undefined>;
-
-function ok(stdout: string): OrcaResult {
-  return { ok: true, stdout, stderr: "", timedOut: false };
-}
+import { ORCA_ENV, ok } from "./helpers/orca-fixtures";
 
 function fake(answers: Record<string, OrcaResult>): { deps: OrcaDeps; calls: string[][] } {
   const calls: string[][] = [];
