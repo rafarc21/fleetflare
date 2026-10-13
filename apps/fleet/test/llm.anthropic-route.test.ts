@@ -1425,6 +1425,28 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
   });
 
+  // Code review (Spec axis, #717): the whole point of `isOverflowRoutingError`
+  // being its OWN predicate rather than folded into `isRateLimited` is that
+  // an all-models-exhausted 4002/8005 run reports `classifyAiError`'s own
+  // default (500 `api_error`), NOT the 429 `rate_limit_error` the
+  // all-exhausted call site reports when `isRateLimited` triggered the
+  // exhaustion (see the "3021 on every model" test above). Same fixture
+  // shape as that test — every POOL entry forced to `smokePassed: true` —
+  // but throwing the 4002 incident string instead of a 3021.
+  it("pool on: 4002 on every model (genuine multi-model exhaustion) → 500 api_error, NOT 429 rate_limit_error", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      throw new Error("500 api_error: 4002: could not route request to AI model");
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(500);
+    expect((await res.json() as any).error.type).toBe("api_error");
+    expect(ai.run).toHaveBeenCalledTimes(testPool.length);
+    expect(seen).toHaveLength(testPool.length);
+  });
+
   it("custom gateway id via LEAD_AI_GATEWAY_ID", async () => {
     const calls: unknown[][] = [];
     const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };

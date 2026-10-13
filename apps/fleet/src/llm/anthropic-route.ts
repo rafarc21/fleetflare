@@ -212,8 +212,19 @@ const isRateLimited = (message: string) => /\b3021\b|rate limit|too many/i.test(
  *  widening `isRateLimited` would have silently turned an exhausted 4002/8005
  *  run into a misreported 429 there too. Scoped to this loop's own error
  *  classification only, per the incident's own ask — `classifyAiError`'s
- *  status/type mapping for these strings is untouched. */
-const isOverflowRoutingError = (message: string) => /\b4002\b|\b8005\b|could not route|internal server error/i.test(message);
+ *  status/type mapping for these strings is untouched.
+ *
+ *  Code review (Standards axis, #717): matches on the bare numeric codes
+ *  ONLY, not on the generic phrases that originally accompanied them. The
+ *  known incident strings — `"500 api_error: 4002: could not route request
+ *  to AI model"` and `"8005: Internal server error"` — both already contain
+ *  their own numeric code, so `\b4002\b|\b8005\b` matches them exactly
+ *  without needing a bare `could not route` or `internal server error`
+ *  alternative. A bare `internal server error` alternative in particular
+ *  would have matched the literal generic HTTP 500 reason phrase from ANY
+ *  model's genuinely-terminal, unrelated 500 — silently routing it to the
+ *  next model instead of failing fast as the paragraph above requires. */
+const isOverflowRoutingError = (message: string) => /\b4002\b|\b8005\b/i.test(message);
 
 /** env.AI.run with issue #335's pre-stream retry. Resolves to the first
  *  successful value and the attempt count; rejects with AiRunError carrying
@@ -536,10 +547,10 @@ type ModelOverflowResult =
  *  `handleFleetAnthropicMessages`'s own body — the self-contained walk over
  *  `order` (pickModels' own candidate model list), applying issue #335's
  *  same-model retry (`runAiWithRetry`) to each candidate in turn. Spec
- *  Component 4's own rule: a 429/3021, a 4002/8005/"could not route"/
- *  "internal server error" (incident #717 continued — `isOverflowRoutingError`'s
- *  own doc comment), or a 504/529 that already exhausted its same-model
- *  retry, moves to the next candidate; anything else (a 4xx the request
+ *  Component 4's own rule: a 429/3021, a 4002/8005 (incident #717
+ *  continued — `isOverflowRoutingError`'s own doc comment), or a 504/529
+ *  that already exhausted its same-model retry, moves to the next
+ *  candidate; anything else (a 4xx the request
  *  itself caused, an unrecognized genuine 500) is not a failure another
  *  model would answer differently, so the walk stops there and reports it
  *  as the final failure.
