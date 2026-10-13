@@ -24,12 +24,7 @@ import { MEMBER_ALERTS_KEY, MEMBER_ROWS_KEY, type MemberAlert } from "../src/stu
 import { exhaustedMessage } from "../src/studio/failover";
 import { redactSecrets } from "../src/studio/redact";
 import { row } from "./helpers/studio-row";
-
-/** UTF-8 aware base64 — a pane frame carries claude's own box-drawing/emoji
- *  glyphs, which plain `btoa` throws on outright (Latin1 only). */
-function b64Utf8(s: string): string {
-  return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
-}
+import { b64Utf8 } from "./helpers/datetime";
 
 const SECTION_PANE_MARKER = "---FLEET-PANE---";
 const SECTION_MEMGUARD_MARKER = "---FLEET-MEMGUARD---";
