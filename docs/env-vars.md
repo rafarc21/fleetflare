@@ -26,7 +26,7 @@ Two house rules that shape every row below:
 | Var | Default | What it does | Reader |
 |---|---|---|---|
 | `AGENT_REPO` | — (required) | The fleet's own repo `owner/name`: where `fleet.json` is read from, the default work repo, and the agent loop's task repo | `src/studio/repo.ts` |
-| `AGENT_BASE_REF` | `main` | Ref AgentDO clones its task repo at | `src/telegram/webhook.ts` |
+| `AGENT_BASE_REF` | `staging` (code fallback; the example template commits `main` — sane for any fork) | Ref AgentDO clones its task repo at | `src/telegram/webhook.ts` |
 | `AGENT_MODEL` | `claude-opus-5` | Model name AgentDO passes to the CLI | `src/agents/do.ts` |
 | `MAX_TASK_SECONDS` | `900` | AgentDO task container time cap (seconds) | `src/agents/do.ts` |
 | `MAX_STUDIOS` | `100` | Fleet-wide cap on existing studios, enforced at both provision entry points | `src/studio/spawn.ts` |
@@ -43,7 +43,7 @@ Two house rules that shape every row below:
 | `DIRECTUS_URL` | off (card off) | Directus instance origin, https only | `src/directus/client.ts` |
 | `FLEET_AUTO_FAILOVER` | off | `"on"`: switch Claude accounts automatically on a usage limit | `src/studio/accounts.ts` |
 | `FLEET_JUNIOR` | off | `"on"`: junior skill + `/fleet/junior` answers, AND the glm-lead LLM route (`/fleet/llm/anthropic/v1/messages`) — one flag gates both Workers-AI-spending routes | `src/junior/gate.ts`, `src/llm/anthropic-route.ts` |
-| `JUNIOR_REPOS` | every repo | Comma list of `owner/repo` narrowing `FLEET_JUNIOR`'s skill + route | `src/junior/gate.ts` |
+| `JUNIOR_REPOS` | every repo | Comma list of `owner/repo` narrowing the junior skill, `/fleet/junior`, and the glm-lead PROVISION gate (`do.ts` refuses a glm studio whose repo is narrowed out); the glm route at request time checks only `FLEET_JUNIOR` | `src/junior/gate.ts` |
 | `JUNIOR_RATE_PER_MINUTE` | 5 | `/fleet/junior` calls per rolling 60s per studio | `src/junior/ratelimit.ts` |
 | `JUNIOR_DAILY_CAP` | 50 | `/fleet/junior` calls per UTC day per studio | `src/junior/ratelimit.ts` |
 | `LEAD_RATE_PER_MINUTE` | 60 | glm-lead messages-route calls per rolling 60s per studio | `src/llm/ratelimit.ts` |
@@ -55,7 +55,7 @@ Two house rules that shape every row below:
 | `FLEET_BOT_NAME` / `FLEET_BOT_EMAIL` | `fleetflare[bot]` | Task container's git identity (container/server.ts); never a studio's identity | `src/studio/credentials.ts` |
 | `FLEET_STUDIO_GIT_NAME` / `FLEET_STUDIO_GIT_EMAIL` | `fleet-studio <fleet-studio@users.noreply.github.com>` | Git identity every studio and its rescue commits are authored as; both or neither; a `[bot]` value or one equal to `FLEET_BOT_*` is ignored | `src/studio/credentials.ts` |
 | `INSTALL_CACHE_REPOS` | off | Comma list of `owner/repo` opting repos into the per-repo `bun install` cache; needs the three `R2_*` secrets below | `src/studio/install-cache.ts` |
-| `R2_BUCKET_NAME` | `fleetflare-archive` (`R2_BUCKET_NAME_DEFAULT`) | The `STUDIO_ARCHIVE` binding's real `bucket_name`; presigned install-cache URLs sign against it | `src/studio/install-cache.ts` |
+| `R2_BUCKET_NAME` | `studio-archive` (`R2_BUCKET_NAME_DEFAULT`) | The `STUDIO_ARCHIVE` binding's real `bucket_name`; presigned install-cache URLs sign against it | `src/studio/install-cache.ts` |
 | `FLEET_RESCUE_REMOTE` | origin | `owner/name` of a PRIVATE repo rescue pushes go to for public work repos only | `src/studio/rescue.ts` |
 | `FLEET_WRITE_PROXY_REPOS` | off everywhere | Comma list of `owner/name` whose studios hold read-only GitHub creds and write through the Worker proxy | `src/write-proxy/mode.ts` |
 | `FLEET_WRITE_PROXY_DEFAULT_BRANCH_REPOS` | refuse every default-branch push | Comma list of `owner/name` whose default branch the proxy may push anyway | `src/write-proxy/mode.ts` |
@@ -110,7 +110,7 @@ grepping studio (or a curious operator) can identify each one.
 | Var | Who sets it | Reader |
 |---|---|---|
 | `STUDIO_NAME` | Worker, at provision | `src/studio/provision.ts` |
-| `STUDIO_ID` | Worker, at provision | `src/studio/provision.ts` |
+| `STUDIO_ID` | Worker, at provision | `src/studio/do.ts` (sets), `cli/orca-workspace.ts` (reads) |
 | `STUDIO_SKILLS` | Worker, at provision (comma list) | `src/studio/provision.ts` |
 | `STUDIO_MEMBERS_B64` | Worker, at provision (base64 member bundle) | `src/studio/provision.ts` |
 | `STUDIO_COMPLETION_GATE` | Worker, at provision ("" when the role writes no code) | `src/studio/provision.ts` |
