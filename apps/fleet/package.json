@@ -36,7 +36,9 @@
   "dependencies": {
     "@cloudflare/containers": "^0.0.20",
     "@cloudflare/sandbox": "0.12.7",
-    "aws4fetch": "^1.0.20",
-    "playwright-core": "^1.63.0"
-  }
+    "aws4fetch": "^1.0.20"
+  },
+  "workspaces": [
+    "container/ego-browser"
+  ]
 }

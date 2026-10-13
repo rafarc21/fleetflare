@@ -8,7 +8,6 @@
         "@cloudflare/containers": "^0.0.20",
         "@cloudflare/sandbox": "0.12.7",
         "aws4fetch": "^1.0.20",
-        "playwright-core": "^1.63.0",
       },
       "devDependencies": {
         "@cloudflare/vitest-pool-workers": "0.19.1",
@@ -19,6 +18,12 @@
         "typescript": "^5.7.0",
         "vitest": "^4.1.0",
         "wrangler": "^4.141.0",
+      },
+    },
+    "container/ego-browser": {
+      "name": "ego-browser",
+      "dependencies": {
+        "playwright-core": "1.63.0",
       },
     },
   },
@@ -250,6 +255,8 @@
     "cookie": ["cookie@1.1.1", "", {}, "sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ=="],
 
     "detect-libc": ["detect-libc@2.1.2", "", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],
+
+    "ego-browser": ["ego-browser@workspace:container/ego-browser"],
 
     "error-stack-parser-es": ["error-stack-parser-es@1.0.5", "", {}, "sha512-5qucVt2XcuGMcEGgWI7i+yZpmpByQ8J1lHhcL7PwqCwu9FPP3VUXzT4ltHe5i2z9dePwEHcDVOAfSnHsOlCXRA=="],
 
