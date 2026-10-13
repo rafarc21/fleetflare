@@ -656,11 +656,15 @@ export async function handleFleetAnthropicMessages(
   // `states` are only ever read from D1 when the pool is actually on — pool
   // off has no use for either, and `pickModels` ignores them anyway.
   const poolOn = env.LEAD_MODEL_POOL === "on";
+  // LEAD_MODEL_OVERFLOW=off (#768): the walk is assigned-model-only —
+  // `pickModels` returns the one model and the overflow loop below never
+  // has a second candidate to move to.
   const gatewayId = resolveGatewayId(env);
   const order = pickModels({
     studioId: studio.id,
     requestedModel: body.model,
     poolOn,
+    overflowOn: env.LEAD_MODEL_OVERFLOW !== "off",
     assigned: poolOn ? await getAssignedModel(env.DB, studio.id) : null,
     states: poolOn ? await getModelStates(env.DB) : {},
     ...(pool === undefined ? {} : { pool }),

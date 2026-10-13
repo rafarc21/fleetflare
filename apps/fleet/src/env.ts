@@ -441,6 +441,9 @@ export interface Env {
   INFISICAL_API_URL?: string;
   /** "on" enables the lead model pool (spec 2026-10-13-model-pool-design). */
   LEAD_MODEL_POOL?: string;
+  /** "off" disables lead model-pool overflow — each studio stays on its ONE
+   *  assigned model (#768). Any other value (or unset): overflow on. */
+  LEAD_MODEL_OVERFLOW?: string;
   /** AI Gateway id every lead Workers AI call routes through. Default "default". */
   LEAD_AI_GATEWAY_ID?: string;
   /**
