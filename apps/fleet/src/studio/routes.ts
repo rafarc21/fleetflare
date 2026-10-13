@@ -23,7 +23,8 @@ import {
   runSpawn, runResume, resolveSpawnParent, resolveSpawnPolicy, resolveMaxStudios, liveStudioCount, isSpawnTokenShaped,
   SPAWN_TOKEN_HEADER, OPERATOR_ID, type SpawnDeps, type ResumeDeps, type SpawnParent,
 } from "./spawn";
-import { reachRepo, repoTokenMinter, type RepoReach } from "../github/auth";
+import { reachRepo, repoTokenMinter } from "../github/auth";
+import type { RepoReachFetch } from "../github/reach";
 import { fetchRepoFile } from "../github/api";
 import { resolveWorkRepo, parseRepoSlug, type WorkRepoDeps } from "./repo";
 import { briefPromptResolver } from "../board/routes";
@@ -184,7 +185,6 @@ function githubBlueprintFetch(env: Env): BlueprintFetch {
  * requests this adds are one per operator-initiated spawn/provision that
  * actually names a different repo.
  */
-export type RepoReachFetch = (slug: string) => Promise<RepoReach>;
 
 function githubRepoReach(env: Env): RepoReachFetch {
   return (slug: string) => reachRepo(env, slug);
