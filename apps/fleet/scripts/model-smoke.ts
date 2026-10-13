@@ -45,7 +45,7 @@ async function call(body: unknown): Promise<Response> {
 const first = { messages: [{ role: "user", content: "Call get_weather for Paris." }], tools, max_tokens: 1024 };
 
 // 1. Tool call.
-const r1 = openAIResponseToAnthropic(await (await call(first)).json().then((j: any) => j.result ?? j), { model: m.id });
+const r1 = openAIResponseToAnthropic(await (await call(first)).json().then((j: any) => j.result ?? j), { model: m.id, requestedMaxTokens: first.max_tokens });
 const tu = r1.content.find((b: any) => b.type === "tool_use");
 if (!tu || tu.name !== "get_weather" || String(tu.input?.city).toLowerCase() !== "paris") {
   console.error("SMOKE FAIL tool_call", JSON.stringify(r1.content).slice(0, 300));
@@ -61,7 +61,7 @@ const second = {
     { role: "user", content: [{ type: "tool_result", tool_use_id: tu.id, content: "18C sunny" }] },
   ],
 };
-const r2 = openAIResponseToAnthropic(await (await call(second)).json().then((j: any) => j.result ?? j), { model: m.id });
+const r2 = openAIResponseToAnthropic(await (await call(second)).json().then((j: any) => j.result ?? j), { model: m.id, requestedMaxTokens: first.max_tokens });
 if (!JSON.stringify(r2.content).includes("18")) {
   console.error("SMOKE FAIL multi_turn");
   process.exit(1);

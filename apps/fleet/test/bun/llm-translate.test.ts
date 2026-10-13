@@ -275,7 +275,7 @@ describe("openAIResponseToAnthropic — text", () => {
     const out = openAIResponseToAnthropic({
       choices: [{ message: { role: "assistant", content: "hello" }, finish_reason: "stop" }],
       usage: { prompt_tokens: 11, completion_tokens: 4 },
-    }, { model: "claude-opus-4-5" });
+    }, { model: "claude-opus-4-5", requestedMaxTokens: 1_000_000 });
     expect(out.type).toBe("message");
     expect(out.role).toBe("assistant");
     expect(out.model).toBe("claude-opus-4-5");
@@ -296,7 +296,7 @@ describe("openAIResponseToAnthropic — text", () => {
     const out = openAIResponseToAnthropic({
       choices: [{ message: { role: "assistant", content: "x" }, finish_reason: finish }],
       usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }, { model: "m" });
+    }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.stop_reason).toBe(expected);
   });
 
@@ -310,7 +310,7 @@ describe("openAIResponseToAnthropic — text", () => {
     const out = openAIResponseToAnthropic({
       choices: [{ message: { role: "assistant", content: "" }, finish_reason: "stop" }],
       usage: { prompt_tokens: 50, completion_tokens: 3000 },
-    }, { model: "m" });
+    }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.content).toEqual([]);
     expect(out.stop_reason).toBe("max_tokens");
   });
@@ -328,7 +328,7 @@ describe("openAIResponseToAnthropic — text", () => {
     const out = openAIResponseToAnthropic({
       choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
       usage: { prompt_tokens: 500, completion_tokens: 6861, completion_tokens_details: { reasoning_tokens: 9000 } },
-    }, { model: "m" });
+    }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.usage).toEqual({ input_tokens: 500, output_tokens: 6861 });
   });
 });
@@ -359,12 +359,19 @@ describe("openAIResponseToAnthropic — output_tokens clamped to requestedMaxTok
     expect(out.usage).toEqual({ input_tokens: 50, output_tokens: 3000 });
   });
 
-  test("no requestedMaxTokens provided (back-compat) — no clamping applied", () => {
+  // Fresh-context review (#717 critical follow-up): `requestedMaxTokens` is
+  // now a REQUIRED field, not optional — an optional field here is exactly
+  // how the real non-streaming route call site shipped unclamped with no
+  // compiler error, no failing test. There is no longer a "not provided"
+  // shape to test; this pins the boundary instead (completion_tokens exactly
+  // equal to requestedMaxTokens passes through unchanged, never clamped
+  // below the real count).
+  test("completion_tokens exactly equal to requestedMaxTokens is not clamped below itself", () => {
     const out = openAIResponseToAnthropic({
       choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 50, completion_tokens: 70000 },
-    }, { model: "m" });
-    expect(out.usage).toEqual({ input_tokens: 50, output_tokens: 70000 });
+      usage: { prompt_tokens: 50, completion_tokens: 8000 },
+    }, { model: "m", requestedMaxTokens: 8000 });
+    expect(out.usage).toEqual({ input_tokens: 50, output_tokens: 8000 });
   });
 });
 
@@ -379,7 +386,7 @@ describe("openAIResponseToAnthropic — tool_calls", () => {
         finish_reason: "tool_calls",
       }],
       usage: { prompt_tokens: 2, completion_tokens: 3 },
-    }, { model: "m" });
+    }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.content).toEqual([{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "nyc" } }]);
     expect(out.stop_reason).toBe("tool_use");
   });
@@ -394,7 +401,7 @@ describe("openAIResponseToAnthropic — tool_calls", () => {
         finish_reason: "tool_calls",
       }],
       usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }, { model: "m" });
+    }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.content).toEqual([
       { type: "text", text: "checking now" },
       { type: "tool_use", id: "call_1", name: "f", input: {} },
@@ -408,7 +415,7 @@ describe("openAIResponseToAnthropic — tool_calls", () => {
         finish_reason: "tool_calls",
       }],
       usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }, { model: "m" });
+    }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.content[0]).toEqual({ type: "tool_use", id: "c1", name: "f", input: {} });
   });
 
@@ -423,7 +430,7 @@ describe("openAIResponseToAnthropic — tool_calls", () => {
         finish_reason: "tool_calls",
       }],
       usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }, { model: "m" });
+    }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.content[0].id).toMatch(/^toolu_[0-9a-f]{32}$/);
   });
 
@@ -434,7 +441,7 @@ describe("openAIResponseToAnthropic — tool_calls", () => {
         finish_reason: "tool_calls",
       }],
       usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }, { model: "m" });
+    }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.content[0].id).toBe("call_abc123");
   });
 
@@ -453,7 +460,7 @@ describe("openAIResponseToAnthropic — tool_calls", () => {
         finish_reason: "stop",
       }],
       usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }, { model: "m" });
+    }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.stop_reason).toBe("tool_use");
   });
 });
@@ -534,7 +541,7 @@ describe("streaming: prelude + chunk application + close", () => {
     frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "Hel" } }] }));
     frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "lo" } }] }));
     frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] }));
-    frames.push(...closeStream(state));
+    frames.push(...closeStream(state, 1_000_000));
 
     const events = frames.map(parseFrame);
     expect(events.map((e) => e.event)).toEqual([
@@ -565,7 +572,7 @@ describe("streaming: prelude + chunk application + close", () => {
     frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"city":' } }] } }] }));
     frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"nyc"}' } }] } }] }));
     frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "tool_calls" }] }));
-    frames.push(...closeStream(state));
+    frames.push(...closeStream(state, 1_000_000));
 
     const events = frames.map(parseFrame);
     expect(events.map((e) => e.event)).toEqual([
@@ -590,8 +597,24 @@ describe("streaming: prelude + chunk application + close", () => {
     const state = createStreamState();
     applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });
     applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 9 } });
-    const [delta] = closeStream(state).filter((f) => f.includes("message_delta")).map(parseFrame);
+    const [delta] = closeStream(state, 1_000_000).filter((f) => f.includes("message_delta")).map(parseFrame);
     expect((delta.data as { usage: { output_tokens: number } }).usage.output_tokens).toBe(9);
+  });
+
+  // Fresh-context review (#717 critical follow-up): the streaming-side
+  // equivalent of the non-streaming "output_tokens clamped to
+  // requestedMaxTokens" describe block above — GLM's self-reported
+  // `completion_tokens` (inflated by `reasoning_content`) can far exceed
+  // the ORIGINAL client request's own `max_tokens`; `closeStream`'s emitted
+  // `message_delta.usage.output_tokens` must never report more than that,
+  // same reporting-only clamp `openAIResponseToAnthropic` already applies
+  // on the non-streaming path.
+  test("a huge state.outputTokens (reasoning_content inflation) is clamped to requestedMaxTokens in the emitted message_delta", () => {
+    const state = createStreamState();
+    applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });
+    applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 70000 } });
+    const [delta] = closeStream(state, 8000).filter((f) => f.includes("message_delta")).map(parseFrame);
+    expect((delta.data as { usage: { output_tokens: number } }).usage.output_tokens).toBe(8000);
   });
 
   // Fresh-context review finding 1: the prior fix (MAJOR 4 above) only got
@@ -607,7 +630,7 @@ describe("streaming: prelude + chunk application + close", () => {
     const state = createStreamState();
     applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });
     applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 9 } });
-    const [delta] = closeStream(state).filter((f) => f.includes("message_delta")).map(parseFrame);
+    const [delta] = closeStream(state, 1_000_000).filter((f) => f.includes("message_delta")).map(parseFrame);
     expect((delta.data as { usage: { input_tokens: number; output_tokens: number } }).usage).toEqual({
       input_tokens: 5, output_tokens: 9,
     });
@@ -655,7 +678,7 @@ describe("streaming: prelude + chunk application + close", () => {
     });
     // No finish_reason chunk at all this time — e.g. the upstream closed the
     // stream without ever sending one.
-    const [delta] = closeStream(state).filter((f) => f.includes("message_delta")).map(parseFrame);
+    const [delta] = closeStream(state, 1_000_000).filter((f) => f.includes("message_delta")).map(parseFrame);
     expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("tool_use");
   });
 
@@ -669,13 +692,13 @@ describe("streaming: prelude + chunk application + close", () => {
   test("closeStream reports stop_reason: max_tokens when no content block was ever opened, even if finish_reason said 'stop'", () => {
     const state = createStreamState();
     applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] });
-    const [delta] = closeStream(state).filter((f) => f.includes("message_delta")).map(parseFrame);
+    const [delta] = closeStream(state, 1_000_000).filter((f) => f.includes("message_delta")).map(parseFrame);
     expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("max_tokens");
   });
 
   test("closeStream reports stop_reason: max_tokens when applyOpenAIStreamChunk was never even called", () => {
     const state = createStreamState();
-    const [delta] = closeStream(state).filter((f) => f.includes("message_delta")).map(parseFrame);
+    const [delta] = closeStream(state, 1_000_000).filter((f) => f.includes("message_delta")).map(parseFrame);
     expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("max_tokens");
   });
 
@@ -711,7 +734,7 @@ describe("closeStreamOrError — board issue #284 (a): stream ends without ever 
     const state = createStreamState();
     applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "partial, then the connection just stopped" } }] });
     // No finish_reason chunk ever arrives — the upstream stream simply ends.
-    const result = closeStreamOrError(state);
+    const result = closeStreamOrError(state, 1_000_000);
     expect(result.ok).toBe(false);
     expect(result.frames).toHaveLength(1);
     const { event, data } = parseFrame(result.frames[0]);
@@ -723,7 +746,7 @@ describe("closeStreamOrError — board issue #284 (a): stream ends without ever 
     const state = createStreamState();
     applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });
     applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] });
-    const result = closeStreamOrError(state);
+    const result = closeStreamOrError(state, 1_000_000);
     expect(result.ok).toBe(true);
     const events = result.frames.map(parseFrame);
     expect(events.map((e) => e.event)).toEqual(["content_block_stop", "message_delta", "message_stop"]);
@@ -737,7 +760,7 @@ describe("closeStreamOrError — board issue #284 (a): stream ends without ever 
   test("the max_tokens-floor empty-content guard (finish_reason present, no content opened) still closes normally, not as an error", () => {
     const state = createStreamState();
     applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] });
-    const result = closeStreamOrError(state);
+    const result = closeStreamOrError(state, 1_000_000);
     expect(result.ok).toBe(true);
     const [delta] = result.frames.filter((f) => f.includes("message_delta")).map(parseFrame);
     expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("max_tokens");
@@ -752,7 +775,7 @@ describe("closeStreamOrError — board issue #284 (a): stream ends without ever 
       choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "f", arguments: "{}" } }] } }],
     });
     applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "tool_calls" }] });
-    const result = closeStreamOrError(state);
+    const result = closeStreamOrError(state, 1_000_000);
     expect(result.ok).toBe(true);
     const [delta] = result.frames.filter((f) => f.includes("message_delta")).map(parseFrame);
     expect((delta.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("tool_use");

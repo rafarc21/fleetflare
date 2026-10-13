@@ -272,19 +272,24 @@ function anyToolUseBlocks(blocks: Json[]): boolean {
  *
  * `opts.requestedMaxTokens` (incident #717, part B): the INBOUND Anthropic
  * request's own `max_tokens`, BEFORE any floor/ceiling clamping this file's
- * own `anthropicRequestToOpenAI` applied for the upstream call. When
- * present, the reported `usage.output_tokens` below is clamped to never
- * exceed it — the upstream's self-reported `completion_tokens` can be
- * inflated by `reasoning_content` well past what the client itself asked
- * for, and reporting that inflated number back would make Claude Code's
- * own token-accounting see a bigger number than it requested. Reporting-
- * only: never changes the actual `content` returned above, only this one
- * numeric usage field. Omitted entirely (no clamping) for back-compat with
- * callers that don't pass it.
+ * own `anthropicRequestToOpenAI` applied for the upstream call. The reported
+ * `usage.output_tokens` below is always clamped to never exceed it — the
+ * upstream's self-reported `completion_tokens` can be inflated by
+ * `reasoning_content` well past what the client itself asked for, and
+ * reporting that inflated number back would make Claude Code's own
+ * token-accounting see a bigger number than it requested. Reporting-only:
+ * never changes the actual `content` returned above, only this one numeric
+ * usage field.
+ *
+ * Code review (fresh-context, #717 follow-up): REQUIRED, not optional — an
+ * optional field here is exactly how the real non-streaming call site in
+ * anthropic-route.ts silently shipped with no clamp at all (no compiler
+ * error, no failing test, caught only by a later review). Every call site is
+ * now forced to supply it; grep for this symbol to find every one.
  */
 export function openAIResponseToAnthropic(
   resp: Json,
-  opts: { model: string; id?: string; requestedMaxTokens?: number },
+  opts: { model: string; id?: string; requestedMaxTokens: number },
 ): Json {
   const choice = resp?.choices?.[0] ?? {};
   const message = choice.message ?? {};
@@ -333,11 +338,9 @@ export function openAIResponseToAnthropic(
       // were additive, completion_tokens would need to be far larger.
       //
       // Incident #717, part B: clamped to `opts.requestedMaxTokens` (the
-      // ORIGINAL client request's own max_tokens, pre-floor/ceiling) when
-      // provided — see this function's own doc comment above.
-      output_tokens: opts.requestedMaxTokens !== undefined
-        ? Math.min(resp?.usage?.completion_tokens ?? 0, opts.requestedMaxTokens)
-        : (resp?.usage?.completion_tokens ?? 0),
+      // ORIGINAL client request's own max_tokens, pre-floor/ceiling) — see
+      // this function's own doc comment above.
+      output_tokens: Math.min(resp?.usage?.completion_tokens ?? 0, opts.requestedMaxTokens),
     },
   };
 }
@@ -581,8 +584,18 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
  * `input_tokens: 0` on every single streamed turn, forever. An extra key on
  * a JSON object `message_delta` already carries is not a shape Claude
  * Code's own SSE parsing has any reason to reject.
+ *
+ * `requestedMaxTokens` (fresh-context review, #717 critical follow-up): this
+ * is the streaming-side equivalent of `openAIResponseToAnthropic`'s own
+ * `opts.requestedMaxTokens` clamp — REQUIRED, same reasoning (an optional
+ * field here is exactly how the non-streaming call site shipped unclamped
+ * with no compiler error). The emitted `usage.output_tokens` below is
+ * clamped to never exceed it; `state.outputTokens` itself (read by this
+ * function's own caller, `pumpAnthropicStream`, for the D1 usage-log row) is
+ * left untouched here — this is reporting-only, same as the non-streaming
+ * function's own clamp.
  */
-export function closeStream(state: StreamState): string[] {
+export function closeStream(state: StreamState, requestedMaxTokens: number): string[] {
   const events: string[] = [];
   closeOpenBlock(state, events);
   // Minor fix (maestro review round 1): derived from whether this stream
@@ -606,7 +619,7 @@ export function closeStream(state: StreamState): string[] {
   events.push(sseEvent("message_delta", {
     type: "message_delta",
     delta: { stop_reason: stopReason, stop_sequence: null },
-    usage: { input_tokens: state.inputTokens, output_tokens: state.outputTokens },
+    usage: { input_tokens: state.inputTokens, output_tokens: Math.min(state.outputTokens, requestedMaxTokens) },
   }));
   events.push(sseEvent("message_stop", { type: "message_stop" }));
   return events;
@@ -685,9 +698,9 @@ interface StreamCloseResult {
   ok: boolean;
 }
 
-export function closeStreamOrError(state: StreamState): StreamCloseResult {
+export function closeStreamOrError(state: StreamState, requestedMaxTokens: number): StreamCloseResult {
   if (state.finishReason === null) {
     return { frames: [streamErrorFrame("upstream stream ended without a finish reason")], ok: false };
   }
-  return { frames: closeStream(state), ok: true };
+  return { frames: closeStream(state, requestedMaxTokens), ok: true };
 }

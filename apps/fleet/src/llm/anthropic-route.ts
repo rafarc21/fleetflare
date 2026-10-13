@@ -327,10 +327,23 @@ export function failureClass(failure: string): string {
  *       cancelled (no point paying for tokens nobody reads) and the call is
  *       reported as `client_abort`, not an upstream failure.
  * Every abnormal end now also carries `failure` (see PumpResult).
+ *
+ * `requestedMaxTokens` (fresh-context review, #717 critical follow-up): the
+ * INBOUND Anthropic request's own `max_tokens`, threaded to
+ * `closeStreamOrError` (translate.ts) so the final `message_delta.usage.
+ * output_tokens` frame is clamped the same way the non-streaming path's
+ * `openAIResponseToAnthropic` call already is — the streaming path was the
+ * one left genuinely unprotected: GLM's self-reported `completion_tokens`
+ * (inflated by `reasoning_content`) used to reach the client verbatim here,
+ * which is what actually broke live GLM-lead studios mid-turn (they stream
+ * by default). Also clamps the `outputTokens` this function itself resolves
+ * to on a clean end, below — the SAME number `handleFleetAnthropicMessages`
+ * logs into the D1 usage row, kept consistent with what the client was
+ * actually told rather than the raw, possibly-inflated upstream figure.
  */
 async function pumpAnthropicStream(
   upstream: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<Uint8Array>,
-  id: string, model: string, idleMs: number,
+  id: string, model: string, requestedMaxTokens: number, idleMs: number,
 ): Promise<PumpResult> {
   const enc = new TextEncoder();
   const write = async (frames: string[]) => {
@@ -342,7 +355,9 @@ async function pumpAnthropicStream(
   const reader = upstream.getReader();
   const cancelUpstream = () => { reader.cancel().catch(() => {}); };
   const end = (ok: boolean, failure?: string): PumpResult => ({
-    inputTokens: state.inputTokens, outputTokens: state.outputTokens, ok, ...(failure === undefined ? {} : { failure }),
+    inputTokens: state.inputTokens,
+    outputTokens: ok ? Math.min(state.outputTokens, requestedMaxTokens) : state.outputTokens,
+    ok, ...(failure === undefined ? {} : { failure }),
   });
 
   try {
@@ -397,7 +412,7 @@ async function pumpAnthropicStream(
     // Board issue #284 (a): closeStreamOrError (translate.ts) checks whether
     // the stream ever confirmed a finish_reason before emitting closeStream's
     // normal frames — see that function's own doc comment.
-    const closed = closeStreamOrError(state);
+    const closed = closeStreamOrError(state, requestedMaxTokens);
     await write(closed.frames);
     return end(closed.ok, closed.ok ? undefined : "no_finish_reason");
   } catch (e) {
@@ -721,7 +736,7 @@ export async function handleFleetAnthropicMessages(
     // rejection; what still rejects here is a bug inside the pump itself,
     // logged as `pump_error` rather than dropped without a row.
     ctx.waitUntil(
-      pumpAnthropicStream(upstream, writer, id, requestedModel, leadStreamIdleMs(env))
+      pumpAnthropicStream(upstream, writer, id, requestedModel, body.max_tokens, leadStreamIdleMs(env))
         .then((result) => logUsage(env, ctx, studio.id, { model: usedModel, stream: true, ...result, startedAt, attempts }))
         .catch((e) => logUsage(env, ctx, studio.id, {
           model: usedModel, stream: true, inputTokens: 0, outputTokens: 0, ok: false,
@@ -732,7 +747,14 @@ export async function handleFleetAnthropicMessages(
     return new Response(readable, { status: 200, headers: { "content-type": "text/event-stream" } });
   }
 
-  const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel });
+  // Fresh-context review (#717 critical follow-up): this is the REAL
+  // non-streaming path (the branch above at `stream === true` is only the
+  // defensive fallback for a provider that ignored `stream: true`) — the
+  // one call site the original incident fix actually missed.
+  // `requestedMaxTokens` was previously omitted here entirely, so an
+  // inflated upstream `completion_tokens` reached the client, and this logged
+  // usage row, completely unclamped.
+  const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
   logUsage(env, ctx, studio.id, { model: usedModel, stream: false, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
   return json(anthropic, 200);
 }
