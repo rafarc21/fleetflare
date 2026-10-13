@@ -10,11 +10,10 @@
 // dependency is the spawned `pngpaste`, so a bin-only PATH fully controls
 // what the child's clipboard holds -- an empty bin dir IS "no image".
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { cleanupTempDirs, FLEET, tmpDir } from "./helpers/fleet-cli";
 
-const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
 // grabClipboardPng's fixed, non-injectable tmp path -- shared machine-wide,
 // so no lane may leave it dirty (same ownership as paste-mac.test.ts).
 const PASTE_TMP = "/tmp/fleet-paste.png";
@@ -22,17 +21,10 @@ const PASTE_TMP = "/tmp/fleet-paste.png";
 // fake itself.
 const CP = existsSync("/bin/cp") ? "/bin/cp" : "/usr/bin/cp";
 
-const tempDirs: string[] = [];
-function tmpDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tempDirs.push(dir);
-  return dir;
-}
-
 beforeEach(() => { rmSync(PASTE_TMP, { force: true }); });
 afterEach(() => {
   rmSync(PASTE_TMP, { force: true });
-  while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  cleanupTempDirs();
 });
 
 function writeCredentials(home: string, workerUrl: string) {

@@ -14,6 +14,7 @@ import {
 } from "../src/llm/anthropic-route";
 import { GLM_LEAD_MODEL, GLM_MIN_MAX_TOKENS } from "../src/llm/translate";
 import { POOL, type PoolModel } from "../src/llm/models";
+import { setAssignedModel } from "../src/llm/model-store";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -1526,6 +1527,62 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(seen.length).toBe(2);
     expect(seen[0]).not.toBe(seen[1]);
     expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
+  });
+
+  // LEAD_MODEL_OVERFLOW=off (#768): each model has its own 20 rpm budget, so
+  // keeping a studio on its ONE assigned model spreads capacity across the
+  // pool. Same fixture pool shape as the overflow tests above — a kimi copy
+  // forced to `smokePassed: true` — plus a real D1 assigned-model row, so
+  // the route reads a genuine assignment, never a hardcoded constant.
+  it("LEAD_MODEL_OVERFLOW=off: assigned kimi is the only model tried — no overflow candidates", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    await setAssignedModel(env.DB, ME, POOL[1].id);
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on", LEAD_MODEL_OVERFLOW: "off" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([POOL[1].id]);
+  });
+
+  it("LEAD_MODEL_OVERFLOW=off: 3021 on the assigned model → 429, no second-model call", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    await setAssignedModel(env.DB, ME, POOL[1].id);
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      throw new Error("3021: Account rate limit exceeded");
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on", LEAD_MODEL_OVERFLOW: "off" }, pool: testPool });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    expect(ai.run).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([POOL[1].id]);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].model).toBe(POOL[1].id);
+  });
+
+  it("LEAD_MODEL_OVERFLOW unset (default on): 3021 on first model still moves to next — overflow behavior unchanged", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("3021: Account rate limit exceeded");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
   });
 
   // Code review (Spec axis, #717): the whole point of `isOverflowRoutingError`

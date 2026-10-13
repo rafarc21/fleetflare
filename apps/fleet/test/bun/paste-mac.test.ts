@@ -6,9 +6,9 @@
 // function in a child bun process under a PATH this file fully controls.
 // Both harnesses live here: #498's real-lane tests above, #519's mock pins below.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { cleanupTempDirs, tmpDir } from "./helpers/fleet-cli";
 import { grabClipboardPng } from "../../cli/paste-mac";
 
 const PASTE_MAC = join(import.meta.dir, "../../cli/paste-mac");
@@ -18,13 +18,6 @@ const PASTE_TMP = "/tmp/fleet-paste.png";
 // The fake pngpaste body must not PATH-lookup its tools: its PATH holds
 // only the fake itself.
 const CP = existsSync("/bin/cp") ? "/bin/cp" : "/usr/bin/cp";
-
-const tempDirs: string[] = [];
-function tmpDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tempDirs.push(dir);
-  return dir;
-}
 
 /**
  * Bun.spawn's argv resolution ignores in-process `process.env.PATH` mutations
@@ -68,7 +61,7 @@ beforeEach(() => { rmSync(PASTE_TMP, { force: true }); });
 afterEach(() => {
   // The fixed tmp path is shared machine-wide, so no lane may leave it dirty.
   rmSync(PASTE_TMP, { force: true });
-  while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  cleanupTempDirs();
 });
 
 describe("grabClipboardPng (cli/paste-mac)", () => {

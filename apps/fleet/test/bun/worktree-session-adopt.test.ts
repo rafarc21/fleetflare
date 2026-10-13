@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { runSnippet } from "./exec-snippet";
 import { requireTools } from "./require-tool";
 import { adoptWorktreeSessionCmd, parseSessionAdoption } from "../../src/studio/provision";
+import { CLI, projects, REPO, ROOT_ID, ROOT_KEY, SDK, session, setAdoptHome, TEAMMATE, WT_ID, WT_KEY } from "./helpers/adopt-fixtures";
 
 // Issue #116, measured 2026-09-24 on fleetflare--web-studio: the lead had
 // entered a Claude Code worktree, so claude keyed its whole transcript to
@@ -20,15 +21,7 @@ import { adoptWorktreeSessionCmd, parseSessionAdoption } from "../../src/studio/
 //
 // These tests run the real command in a real shell against a temp HOME.
 
-const REPO = "fleetflare";
-const ROOT_KEY = "-workspace-fleetflare";
-const WT_KEY = "-workspace-fleetflare--claude-worktrees-row-tells-truth-85-pr1";
-const WT_ID = "b1c006ac-dd42-48a7-a063-90400c353858";
-const ROOT_ID = "0f0f0f0f-1111-4222-8333-444444444444";
 const OTHER_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-const CLI = '{"type":"user","entrypoint":"cli","sessionId":"x"}\n';
-const SDK = '{"type":"user","entrypoint":"sdk-cli","sessionId":"x"}\n';
-const TEAMMATE = '{"type":"user","entrypoint":"cli","teamName":"crew","sessionId":"x"}\n';
 
 // macOS has no coreutils `timeout`; the container does. Where it is absent a
 // pass-through shim stands in (drops `-k N SECS`), so every behaviour test
@@ -38,19 +31,6 @@ const HAS_TIMEOUT = Bun.spawnSync({ cmd: ["sh", "-c", "command -v timeout"] }).e
 let home: string;
 let log: string;
 let pathEnv: string;
-
-function projects(key: string): string {
-  return join(home, ".claude", "projects", key);
-}
-
-function session(key: string, id: string, body: string, ageSeconds: number): string {
-  mkdirSync(projects(key), { recursive: true });
-  const path = join(projects(key), `${id}.jsonl`);
-  writeFileSync(path, body);
-  const t = Date.now() / 1000 - ageSeconds;
-  utimesSync(path, t, t);
-  return path;
-}
 
 // The Worker's inline command (containers on an old image). A scriptPath
 // that cannot exist forces its inline branch.
@@ -83,6 +63,7 @@ const run = runInline;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "fleet-adopt-"));
+  setAdoptHome(home);
   log = join(home, "bringup.log");
   pathEnv = process.env.PATH ?? "";
   if (!HAS_TIMEOUT) {

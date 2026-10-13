@@ -9,23 +9,10 @@
 // runs with a bare temp dir as cwd AND HOME, so detectRepo finds no git repo,
 // reportRepo prints its fallback line, and repoQuery stays empty (no ?repo=).
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { writeCredentials } from "./helpers/credentials";
+import { cleanupTempDirs, FLEET, tmpDir } from "./helpers/fleet-cli";
 
-const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
-
-const tempDirs: string[] = [];
-function tmpDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tempDirs.push(dir);
-  return dir;
-}
-
-afterEach(() => {
-  while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 /** One stand-in Worker, answering the two routes cmdTaskState's halves call:
  *  GET /studio/board/tasks/12 (fetchCurrent) and POST

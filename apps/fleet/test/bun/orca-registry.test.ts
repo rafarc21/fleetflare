@@ -41,16 +41,11 @@ import {
 import { attachTitle } from "../../cli/attach-liveness";
 import type { BoardTask } from "../../src/board/types";
 import type { StudioStatus } from "../../src/studio/types";
+import { ORCA_ENV, ok, terminals } from "./helpers/orca-fixtures";
 
 // ---------------------------------------------------------------------------
 // Fakes. `run` records every argv it was handed, which is how the "makes NO
 // orca call" and "no second create" tests assert absence rather than outcome.
-
-const ORCA_ENV = { TERM_PROGRAM: "Orca" } as Record<string, string | undefined>;
-
-function ok(stdout: string): OrcaResult {
-  return { ok: true, stdout, stderr: "", timedOut: false };
-}
 
 interface Fake {
   deps: OrcaDeps;
@@ -173,21 +168,6 @@ function worktreesWithPath(...entries: { displayName: string; path: string }[]):
   return ok(JSON.stringify({
     ok: true,
     result: { worktrees: entries.map((e) => ({ id: `repo-websites::/w/${e.displayName}`, displayName: e.displayName, path: e.path })) },
-  }));
-}
-
-// The `fleet attach <id>` terminal is always titled "fleet" (MEASURED on
-// 1.4.198 — see orca-workspace.ts's own comment): the process name, never
-// the studio id and never the custom label `terminal rename` sets. Board
-// #42: idempotency keys on BOTH `connected` AND `title === "fleet"` — this
-// helper covers the common case (every entry IS the attach terminal), each
-// argument is one terminal's `connected` value. Use `terminalEntries` below
-// for a fixture that also needs a non-"fleet" title (a plain shell) or the
-// `orphaned`/`writable`/`lastOutputAt` fields the duplicate-ranking uses.
-function terminals(...connected: boolean[]): OrcaResult {
-  return ok(JSON.stringify({
-    ok: true,
-    result: { terminals: connected.map((c, i) => ({ handle: `term_${i}`, title: "fleet", connected: c })) },
   }));
 }
 

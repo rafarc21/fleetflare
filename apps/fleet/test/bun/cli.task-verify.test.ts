@@ -23,23 +23,10 @@
 // The stand-in does not validate accessHeaders' auth headers; asserting on
 // them is out of scope here.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { writeCredentials } from "./helpers/credentials";
+import { cleanupTempDirs, FLEET, tmpDir } from "./helpers/fleet-cli";
 
-const FLEET = join(import.meta.dir, "../../cli/fleet.ts");
-
-const tempDirs: string[] = [];
-function tmpDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tempDirs.push(dir);
-  return dir;
-}
-
-afterEach(() => {
-  while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 interface SeenRequest { method: string; path: string; body: unknown }
 
