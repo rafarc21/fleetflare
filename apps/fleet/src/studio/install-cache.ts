@@ -200,7 +200,7 @@ export function installCachePrefix(repoSlug: string, dirSlug: string): string {
 /** How many lockfile-hash generations one (repo, directory) pair keeps at
  *  once. #350's own design: "LRU-prune to the newest 2 keys per repo" — read
  *  here as "per cached directory", the redesign's own unit of caching. */
-export const INSTALL_CACHE_KEEP_GENERATIONS = 2;
+const INSTALL_CACHE_KEEP_GENERATIONS = 2;
 
 /** Pure LRU-prune decision: given every object under one (repo, directory)
  *  cache prefix, which keys are stale (older than the newest `keep`) and
@@ -737,7 +737,7 @@ export const INSTALL_ACTIVITY_WINDOW_SECONDS = 30;
  *  `node_modules` once a real package-manager install there looks complete —
  *  see that file's own header for exactly when/how, and this section's
  *  comment above for why a hook writes it rather than fleet's own code. */
-export const INSTALL_COMPLETE_MARKER = ".fleet-install-complete";
+const INSTALL_COMPLETE_MARKER = ".fleet-install-complete";
 
 export function bunInstallRunningCmd(dir: string): string {
   const quoted = shQuote(dir);
@@ -1325,7 +1325,7 @@ export function parseSaveOutcome(stdout: string): { saved: boolean; reason: stri
  *  (src/env.ts), so this file does not need to import that type and stays
  *  independently testable with a plain object literal, the same pattern
  *  accounts.ts's ClaudeAccountEnv draws for itself. */
-export interface R2PresignEnv {
+interface R2PresignEnv {
   R2_ACCOUNT_ID?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
@@ -1349,7 +1349,7 @@ export const R2_BUCKET_NAME_DEFAULT = "studio-archive";
  *  #350's own measured 0.5-1.1 GiB range over a slow path, short enough that
  *  a leaked URL (a Worker log line, a container crash dump) is not usable
  *  for long. Applies to both directions; nothing here needs them to differ. */
-export const INSTALL_CACHE_URL_TTL_SECONDS = 1800;
+const INSTALL_CACHE_URL_TTL_SECONDS = 1800;
 
 /**
  * Mints a presigned R2 URL for `key`, or `null` when the three secrets above
@@ -1449,7 +1449,7 @@ export interface InstallCacheRestoreDeps {
   installCacheRestoreNow?(): Date;
 }
 
-export type InstallCacheRestoreOutcome =
+type InstallCacheRestoreOutcome =
   | "skip:node_modules-present" | "skip:no-lockfile" | "skip:no-object" | "skip:restore-failed"
   | "skip:restore-failed-tombstoned" | "skip:unsafe-path" | "skip:restore-budget-exceeded" | "restored";
 
@@ -1458,7 +1458,7 @@ export type InstallCacheRestoreOutcome =
  *  `dirSlug` is what actually named its R2 key, carried alongside for a
  *  caller/test that wants to correlate the two without recomputing the
  *  hash. */
-export interface InstallCacheDirRestoreResult {
+interface InstallCacheDirRestoreResult {
   relDir: string; dirSlug: string; attempted: boolean; outcome: InstallCacheRestoreOutcome;
 }
 
@@ -1472,7 +1472,7 @@ export interface InstallCacheDirRestoreResult {
  *  a genuine restore — the same boolean shape provision.ts's call sites
  *  already log on (`if (result.attempted) console.warn(...)`), so neither
  *  call site needed to change for this redesign. */
-export interface InstallCacheRestoreResult {
+interface InstallCacheRestoreResult {
   attempted: boolean;
   outcome: string;
   dirs: InstallCacheDirRestoreResult[];
@@ -1849,7 +1849,7 @@ export function installCacheReverifyKey(dirSlug: string): string {
 // attempt, no inherited cooldown.
 // ---------------------------------------------------------------------------
 
-export interface InstallCacheFailureRecord {
+interface InstallCacheFailureRecord {
   lockHash: string;
   attempts: number;
   lastFailedAt: string;
@@ -1998,11 +1998,11 @@ export interface InstallCacheSaveStorage {
   put(key: string, value: string): Promise<void>;
 }
 
-export type InstallCacheSaveOutcome =
+type InstallCacheSaveOutcome =
   | "skip:install-running" | "skip:no-lockfile" | "unchanged" | "already-cached"
   | "skip:no-object-url" | "skip:save-failed" | "skip:save-backoff" | "skip:unsafe-path" | "saved";
 
-export interface InstallCacheDirSaveResult {
+interface InstallCacheDirSaveResult {
   relDir: string; dirSlug: string; attempted: boolean; outcome: InstallCacheSaveOutcome;
 }
 
@@ -2010,7 +2010,7 @@ export interface InstallCacheDirSaveResult {
  *  string summary, empty `dirs` for a top-level refusal" shape, for the
  *  save side's own top-level refusals (`gate:off`, `no-repo`,
  *  `skip:no-lockfile` when discovery finds nothing at all). */
-export interface InstallCacheSaveResult {
+interface InstallCacheSaveResult {
   attempted: boolean;
   outcome: string;
   dirs: InstallCacheDirSaveResult[];
