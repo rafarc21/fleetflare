@@ -74,7 +74,7 @@ import {
   type OrcaDeps, type TabsReport, type TabsPlanEntry,
 } from "./orca-workspace";
 import type { StudioStatus } from "../src/studio/types";
-import type { BoardTask, TaskState } from "../src/board/types";
+import type { BoardTask, BoardTaskState } from "../src/board/types";
 import type { TaskComment } from "../src/board/board";
 import type { TaskBriefArgs } from "../src/studio/cli-args";
 
@@ -1873,7 +1873,7 @@ async function taskStateFetchTransition(
  * exits 1, the same posture `boardRequest` already establishes for every
  * other board verb in this file.
  */
-async function cmdTaskState(creds: Credentials, number: number, to: TaskState, fromNone = false): Promise<void> {
+async function cmdTaskState(creds: Credentials, number: number, to: BoardTaskState, fromNone = false): Promise<void> {
   const detected = await detectRepo();
   reportRepo("fleet task state", detected);
 

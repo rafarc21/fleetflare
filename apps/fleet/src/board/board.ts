@@ -24,7 +24,7 @@ import { parseEnvelope, parseEnvelopeComment, renderEnvelopeComment } from "./en
 import {
   isStaleBacklog, isTaskState, studioLabel, taskAssignees, taskStates, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES,
   JUNIOR_LABEL, SECURITY_LABEL,
-  type BoardTask, type BoardTaskView, type EnvelopeDoc, type TaskState, type CloseReason,
+  type BoardTask, type BoardTaskView, type EnvelopeDoc, type BoardTaskState, type CloseReason,
 } from "./types";
 import { GitHubError, type BoardComment, type IssueInput, type ListIssuesQuery } from "./api";
 import { extractPaths, findPathOverlaps, formatPathOverlapWarnings } from "./path-overlap";
@@ -78,7 +78,7 @@ export type BoardResult<T> =
 
 /** The one entry state. §5: a task is born submitted; every later state is a
  *  transition this Worker wrote. */
-const ENTRY_STATE: TaskState = "submitted";
+const ENTRY_STATE: BoardTaskState = "submitted";
 
 /**
  * Board issue #41, half one, and board issue #158: the hook that fires on
@@ -480,7 +480,7 @@ export async function transitionTask(
  * on the retry means the first remove landed despite its 500: removed. A
  * first-try 404 is another writer (the CAS just read the label) and surfaces.
  */
-async function removeStateWithRetry(api: BoardApi, repo: string, number: number, from: TaskState): Promise<void> {
+async function removeStateWithRetry(api: BoardApi, repo: string, number: number, from: BoardTaskState): Promise<void> {
   try {
     await api.removeLabel(repo, number, from);
     return;
@@ -501,7 +501,7 @@ async function removeStateWithRetry(api: BoardApi, repo: string, number: number,
  * if it still fails, the old label goes back (best effort) and the original
  * failure propagates -- the task reads as it did before the attempt.
  */
-async function addStateAfterRemove(api: BoardApi, repo: string, number: number, from: TaskState, to: TaskState): Promise<void> {
+async function addStateAfterRemove(api: BoardApi, repo: string, number: number, from: BoardTaskState, to: BoardTaskState): Promise<void> {
   try {
     await api.addLabels(repo, number, [to]);
     return;
@@ -528,7 +528,7 @@ async function addStateAfterRemove(api: BoardApi, repo: string, number: number, 
  * the issue. Same closed-issue rule and terminal close as any transition.
  */
 async function repairStateless(
-  api: BoardApi, repo: string, number: number, task: BoardTask, observed: TaskState[], to: TaskState,
+  api: BoardApi, repo: string, number: number, task: BoardTask, observed: BoardTaskState[], to: BoardTaskState,
 ): Promise<BoardResult<BoardTask>> {
   if (observed.length > 0) {
     return {
@@ -587,7 +587,7 @@ export const TERMINAL_CLOSE_PAGE = 40;
 
 interface TerminalCloseOutcome {
   number: number;
-  state: TaskState;
+  state: BoardTaskState;
   outcome: "would-close" | "closed" | "error";
   reason: CloseReason;
   error?: string;
@@ -606,16 +606,16 @@ export async function closeTerminalTasks(
   const stale = (await api.listIssues(repo, {}))
     .filter((t) => t.open && t.state !== null && TERMINAL_TASK_STATES.includes(t.state))
     .sort((a, b) => a.number - b.number);
-  const reasonOf = (state: TaskState): CloseReason => (state === "completed" ? "completed" : "not_planned");
+  const reasonOf = (state: BoardTaskState): CloseReason => (state === "completed" ? "completed" : "not_planned");
   if (!apply) {
     return {
-      results: stale.map((t) => ({ number: t.number, state: t.state as TaskState, outcome: "would-close", reason: reasonOf(t.state as TaskState) })),
+      results: stale.map((t) => ({ number: t.number, state: t.state as BoardTaskState, outcome: "would-close", reason: reasonOf(t.state as BoardTaskState) })),
       remaining: 0,
     };
   }
   const results: TerminalCloseOutcome[] = [];
   for (const t of stale.slice(0, TERMINAL_CLOSE_PAGE)) {
-    const state = t.state as TaskState;
+    const state = t.state as BoardTaskState;
     const reason = reasonOf(state);
     try {
       await api.closeIssue(repo, t.number, reason);
@@ -1094,7 +1094,7 @@ export async function showStudioTask(
  *
  * Exported so the refusal message and the tests name one list, not two.
  */
-export const LEAD_TASK_STATES: readonly TaskState[] = ["working", "input_required", "awaiting_merge", "failed"];
+export const LEAD_TASK_STATES: readonly BoardTaskState[] = ["working", "input_required", "awaiting_merge", "failed"];
 
 /**
  * A lead moves the state of its OWN task — board issue #41, half two.
@@ -1220,7 +1220,7 @@ export async function resolveBriefPrompt(
  * `openAssignedTasks` deliberately fails CLOSED and is NOT built on this.
  */
 async function assignedOpenTasks(
-  api: BoardApi, repo: string, studioId: string, states: readonly TaskState[],
+  api: BoardApi, repo: string, studioId: string, states: readonly BoardTaskState[],
   who: "assigned-task" | "open-tasks-needing-rebrief",
 ): Promise<BoardTaskView[] | null> {
   let result: BoardResult<BoardTaskView[]>;
@@ -1310,7 +1310,7 @@ export async function resolveLatestAssignedBrief(
  *  as its own named export anyway: it is a SEPARATE policy decision ("what
  *  earns a bring-up re-delivery wake") from LIVE_TASK_STATES's ("what counts
  *  as work still owed"), even though the two currently agree on every state. */
-export const REBRIEF_TASK_STATES: readonly TaskState[] = LIVE_TASK_STATES;
+export const REBRIEF_TASK_STATES: readonly BoardTaskState[] = LIVE_TASK_STATES;
 
 /**
  * Issue #137: every OPEN task currently assigned to `studioId` in a

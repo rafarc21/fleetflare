@@ -34,18 +34,18 @@
 export const TASK_STATES = [
   "submitted", "working", "input_required", "awaiting_merge", "completed", "failed", "canceled",
 ] as const;
-export type TaskState = (typeof TASK_STATES)[number];
+export type BoardTaskState = (typeof TASK_STATES)[number];
 
 /** Finished work. None of these closes the issue — sprint close does. */
-export const TERMINAL_TASK_STATES: readonly TaskState[] = ["completed", "failed", "canceled"];
+export const TERMINAL_TASK_STATES: readonly BoardTaskState[] = ["completed", "failed", "canceled"];
 
 /** GitHub's own close reason. Issue #55: a canceled or failed task closes as
  *  "not_planned", so a closed issue still says whether the work landed. */
 export type CloseReason = "completed" | "not_planned";
 /** Work still owed: what a studio may be briefed on. */
-export const LIVE_TASK_STATES: readonly TaskState[] = ["submitted", "working", "input_required"];
+export const LIVE_TASK_STATES: readonly BoardTaskState[] = ["submitted", "working", "input_required"];
 
-export function isTaskState(raw: unknown): raw is TaskState {
+export function isTaskState(raw: unknown): raw is BoardTaskState {
   return typeof raw === "string" && (TASK_STATES as readonly string[]).includes(raw);
 }
 
@@ -71,10 +71,10 @@ export const SECURITY_LABEL = "security";
  * state labels" are both real, both mean a writer other than this Worker
  * touched the issue, and both have to be distinguishable from a healthy
  * single-state issue by the caller that refuses to write over them. Collapse
- * that to `TaskState | null` here and the ambiguous case becomes
+ * that to `BoardTaskState | null` here and the ambiguous case becomes
  * indistinguishable from the absent one.
  */
-export function taskStates(labels: string[]): TaskState[] {
+export function taskStates(labels: string[]): BoardTaskState[] {
   return TASK_STATES.filter((s) => labels.includes(s));
 }
 
@@ -161,7 +161,7 @@ const BACKLOG_STALE_MS = 3 * 24 * 60 * 60 * 1000;
  *   - the three terminal states are finished work, and flagging finished work
  *     as neglected is pure noise on a board the operator reads on his phone.
  */
-const NOT_STALE_STATES: readonly TaskState[] = ["input_required", "completed", "failed", "canceled"];
+const NOT_STALE_STATES: readonly BoardTaskState[] = ["input_required", "completed", "failed", "canceled"];
 
 /**
  * P5 §3's stale flag: age + no blockers + no assignment, computed MECHANICALLY
@@ -198,7 +198,7 @@ export interface BoardTask {
    *  every task because GitHub returns it on the list endpoint too, so a
    *  team reading its own brief costs no extra call. */
   body: string;
-  state: TaskState | null;
+  state: BoardTaskState | null;
   labels: string[];
   /**
    * The studio this task belongs to, or null when `taskAssignees` did not

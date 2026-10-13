@@ -25,7 +25,7 @@ import { closeTaskOnPromote } from "../board/close-action";
 import type { BoardApi } from "../board/board";
 import { makeTimeBudget, budgetExceeded, AUTO_CLOSE_BUDGET_MS, type TimeBudget } from "../time-budget";
 import { flagIsSet, markEpisode, clearEpisode } from "../state";
-import { taskAssignees, taskStates, SECURITY_LABEL, type TaskState } from "../board/types";
+import { taskAssignees, taskStates, SECURITY_LABEL, type BoardTaskState } from "../board/types";
 import { qualifiesForCommentWake, wakeOnComment } from "../board/comment-wake";
 import { realWakeDeps } from "../board/wake-deps";
 
@@ -264,7 +264,7 @@ async function wakeTaskOnComment(env: Env, body: string): Promise<void> {
     // qualifiesForCommentWake's own doc comment for why an unclear read must
     // never be upgraded into an unmarked wake.
     const states = taskStates(labels);
-    const state: TaskState | null = states.length === 1 ? states[0] : null;
+    const state: BoardTaskState | null = states.length === 1 ? states[0] : null;
     // Precedence (see qualifiesForCommentWake's own doc comment): a real §6
     // envelope always excludes; an explicit /wake marker always qualifies,
     // even from a [bot] author; only otherwise does the [bot] filter apply.
