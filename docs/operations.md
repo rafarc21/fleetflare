@@ -5,6 +5,14 @@ edges around deploys and rollouts, and how CI works on this repository.
 Moved out of the root [README.md](../README.md) so the front door stays
 short — nothing here is condensed, only relocated.
 
+The one page listing every environment variable — operator-facing vars,
+secrets, computed-name families, and the container-/CLI-injected set a
+studio's environment actually carries (STUDIO_NAME, STUDIO_SKILLS,
+STUDIO_MEMBERS_B64, STUDIO_COMPLETION_GATE, STUDIO_ID, ORCA_WORKTREE_ID,
+TERM_PROGRAM, ORCA_CLI_COMMAND, FLEET_MEMORY_TOKEN, and friends — all
+set by the Worker or the runtime, never operator config) — is
+[docs/env-vars.md](env-vars.md).
+
 ## Things that will bite you
 
 This section is the one worth reading twice. Every entry below was measured, not

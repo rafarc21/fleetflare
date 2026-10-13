@@ -41,7 +41,7 @@ operator-specific values.
 | `FLEET_TELEGRAM` | the legacy Telegram surface: `/tg` webhook, AgentDO tasks, DeployDO approvals, operator alerts | secrets `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`; var `TELEGRAM_OPERATOR_ID` |
 | `FLEET_DIRECTUS` | the Directus project card in studio prompts | `DIRECTUS_URL`, secret `DIRECTUS_TOKEN` |
 | `FLEET_AUTO_FAILOVER` | automatic Claude-account switch on a usage limit | more than one `CLAUDE_CODE_OAUTH_TOKEN_<n>` |
-| `FLEET_JUNIOR` | the junior skill (Workers AI delegation): studios get the skill and `/fleet/junior` answers | the "ai" binding; `JUNIOR_REPOS` optionally narrows to a comma list of owner/repo; `JUNIOR_RATE_PER_MINUTE` (default 5) and `JUNIOR_DAILY_CAP` (default 50) throttle each studio |
+| `FLEET_JUNIOR` | the junior skill (Workers AI delegation): studios get the skill and `/fleet/junior` answers — AND the glm-lead LLM route (`/fleet/llm/anthropic/v1/messages`), which reuses this same flag: leave it off on a glm fleet and the whole LLM path is gone | the "ai" binding; `JUNIOR_REPOS` optionally narrows to a comma list of owner/repo; `JUNIOR_RATE_PER_MINUTE` (default 5) and `JUNIOR_DAILY_CAP` (default 50) throttle junior; `LEAD_RATE_PER_MINUTE` (default 60), `LEAD_DAILY_CAP` (default 2000), `LEAD_COUNT_TOKENS_RATE_PER_MINUTE` (default 60), `LEAD_STREAM_IDLE_MS` (default 90000), `LEAD_AI_RETRY_BASE_MS` (default 500) tune the glm-lead route |
 
 With `FLEET_TELEGRAM` off, AgentDO and DeployDO stay declared (removing a
 Durable Object class needs a migration) but nothing reaches them, so their
@@ -58,7 +58,28 @@ A local maestro (your own Mac session, not a cloud studio) needs the
 Unlike junior, there is no enable/disable toggle or account config for it —
 once linked, it is just another skill your local Claude session reads.
 
+**glm-lead studios** carry no Claude credential at all: the Worker sets
+`ANTHROPIC_AUTH_TOKEN` to the studio's own spawn token and
+`ANTHROPIC_BASE_URL` to this Worker's glm route (`WORKER_PUBLIC_URL` + the
+route base), so `claude` in the container points at the fleet's own
+translation route (`apps/fleet/src/studio/do.ts`'s `studioEnvVars`). Both
+are Worker-computed and injected — never operator config.
+
+**`fleet junior enable` transport** (`apps/fleet/cli/junior.ts`): in a
+studio container it proxies through the Worker (`FLEET_WORKER_URL` +
+`FLEET_SPAWN_TOKEN`, both injected); on your own Mac it uses
+`CLOUDFLARE_API_TOKEN` if exported, else falls back to your logged-in
+wrangler. `CLOUDFLARE_ACCOUNT_ID` names the account in all three modes.
+
 ---
+
+## Environment variables reference
+
+Every var and secret — name, default, reader file, computed-name
+families, and the container-injected set — lives in one table now:
+[docs/env-vars.md](env-vars.md). This walkthrough names what a first
+deploy actually sets; env-vars.md is the page to check when a var's
+default or behavior matters.
 
 ## Quickstart from zero
 
@@ -305,7 +326,11 @@ flags) lives in `wrangler.jsonc`'s `vars` — see `AGENT_REPO`,
 `GITHUB_REPO_AUTH`, `WORKER_PUBLIC_URL`, `AGENT_BASE_REF`,
 `MAX_TASK_SECONDS`, `BURN_ALERT_OUTPUT_TOKENS_5H`, `MAX_STUDIOS`,
 `CLAUDE_ACCOUNT_BY_REPO`, `FLEET_AUTO_FAILOVER`, `FLEET_REQUIRE_ACCOUNT_MAP`, `AGENT_MODEL`,
-`DIRECTUS_URL` in `env.ts`. Actual credentials never go in `wrangler.jsonc` —
+`DIRECTUS_URL`, plus the junior and glm-lead throttles `JUNIOR_RATE_PER_MINUTE`,
+`JUNIOR_DAILY_CAP`, `LEAD_RATE_PER_MINUTE`, `LEAD_DAILY_CAP`,
+`LEAD_COUNT_TOKENS_RATE_PER_MINUTE`, `LEAD_STREAM_IDLE_MS`, `LEAD_AI_RETRY_BASE_MS`
+(all optional, each with a built-in default) in `env.ts`. The full list, with
+every default and reader file, is [docs/env-vars.md](env-vars.md). Actual credentials never go in `wrangler.jsonc` —
 they are set with `scripts/deploy.sh secret put <NAME>`, which prompts on
 stdin (never pass a secret as a CLI argument). Use `scripts/deploy.sh`, never
 a bare `wrangler secret put`: there is no `apps/fleet/wrangler.jsonc` tracked
@@ -364,6 +389,9 @@ scripts/deploy.sh secret put TELEGRAM_BOT_TOKEN          # optional, only with F
 scripts/deploy.sh secret put TELEGRAM_WEBHOOK_SECRET     # optional, only with FLEET_TELEGRAM="on" — see Telegram below
 scripts/deploy.sh secret put CLOUDFLARE_DEPLOY_TOKEN     # optional, only for the legacy Telegram deploy-approval gate — see step 7
 scripts/deploy.sh secret put DIRECTUS_TOKEN              # optional, only with FLEET_DIRECTUS="on"
+scripts/deploy.sh secret put R2_ACCOUNT_ID               # optional trio for the install cache — all three together or the feature stays off
+scripts/deploy.sh secret put R2_ACCESS_KEY_ID            #   (an R2 API token scoped to ONLY the archive bucket, never account-wide)
+scripts/deploy.sh secret put R2_SECRET_ACCESS_KEY        #   plus the opt-in var INSTALL_CACHE_REPOS naming repos whose cold bun install is slow enough to be worth it
 ```
 
 `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are secrets, not vars, even though
