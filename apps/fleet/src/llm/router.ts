@@ -38,6 +38,7 @@ export function pickModels(input: {
   states: Record<string, ModelState>;
   pool?: readonly PoolModel[];
   poolOn: boolean;
+  overflowOn: boolean;
 }): string[] {
   const pool = input.pool ?? POOL;
   if (!input.poolOn) return [pool[0].id];
@@ -45,6 +46,10 @@ export function pickModels(input: {
   const rank = (id: string) => ({ active: 0, overflow: 1, demoted: 2 })[stateOf(input.states, id)];
   const known = input.assigned !== null && eligible.some((m) => m.id === input.assigned);
   const main = known && rank(input.assigned!) === 0 ? input.assigned! : defaultModelFor(input.studioId, pool, input.states);
+  // LEAD_MODEL_OVERFLOW=off (#768): each model has its own 20 rpm budget, so
+  // keeping a studio on its ONE assigned model spreads capacity across models;
+  // cross-model overflow mid-conversation ended GLM turns badly.
+  if (!input.overflowOn) return [main];
   const rest = eligible
     .map((m) => m.id)
     .filter((id) => id !== main)
