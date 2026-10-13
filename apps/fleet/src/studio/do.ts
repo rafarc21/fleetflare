@@ -8415,7 +8415,7 @@ export class StudioDO extends Sandbox<Env> {
         studioId: this.selfId(),
       },
       prompt,
-      clearDraftFirst,
+      { clearDraftFirst },
     ));
   }
 
