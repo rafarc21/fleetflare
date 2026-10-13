@@ -6,9 +6,9 @@ import { pickModels, isSmallModelName, defaultModelFor } from "../../src/llm/rou
 import type { PoolModel } from "../../src/llm/models";
 
 const P: PoolModel[] = [
-  { key: "glm", id: "@cf/a/glm", minMaxTokens: 1, smokePassed: true },
-  { key: "kimi", id: "@cf/b/kimi", minMaxTokens: 1, smokePassed: true },
-  { key: "deepseek", id: "@cf/c/ds", minMaxTokens: 1, smokePassed: true },
+  { key: "glm", id: "@cf/a/glm", minMaxTokens: 1, maxMaxTokens: 32000, smokePassed: true },
+  { key: "kimi", id: "@cf/b/kimi", minMaxTokens: 1, maxMaxTokens: 32000, smokePassed: true },
+  { key: "deepseek", id: "@cf/c/ds", minMaxTokens: 1, maxMaxTokens: 32000, smokePassed: true },
 ];
 const ALL = { "@cf/a/glm": "active", "@cf/b/kimi": "active", "@cf/c/ds": "active" } as const;
 const base = { studioId: "repo--web-studio--49", requestedModel: "claude-opus-4", pool: P, poolOn: true };

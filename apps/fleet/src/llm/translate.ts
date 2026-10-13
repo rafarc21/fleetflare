@@ -40,6 +40,22 @@ export const GLM_LEAD_MODEL = "@cf/zai-org/glm-5.3";
  *  exactly what it asked for (see anthropicRequestToOpenAI below). */
 export const GLM_MIN_MAX_TOKENS = 16000;
 
+/** Ceiling on the `max_tokens` sent to GLM — incident #717, live 2026-10-13:
+ *  a GLM-lead studio died mid-turn with `"API Error: response exceeded the
+ *  64000 output token maximum"`. GLM_MIN_MAX_TOKENS above is a FLOOR only
+ *  (a request asking for more than it still gets exactly what it asked
+ *  for) — but GLM's `reasoning_content` (visible chain-of-thought tokens
+ *  emitted alongside the final answer) can push the TOTAL output past
+ *  Claude Code's own hard 64k output-token limit even when the inbound
+ *  request's own `max_tokens` was far smaller than that. This is the
+ *  matching ceiling: the computed upstream `max_tokens` (after the floor
+ *  above already ran) never exceeds this value, regardless of how large
+ *  the client's own request was. 32000 is the maestro's suggested default
+ *  (no more specific per-model value found in the model-pool-design spec/
+ *  plan docs as of this fix) — comfortably under the 64k hard limit even
+ *  allowing for reasoning_content on top of visible content. */
+export const GLM_MAX_MAX_TOKENS = 32000;
+
 // ---------------------------------------------------------------------------
 // Anthropic request -> OpenAI chat-completions request
 // ---------------------------------------------------------------------------
@@ -139,10 +155,13 @@ function anthropicMessageToOpenAI(m: Json): Json[] {
  * file's own pre-#717 tests). `model.minMaxTokens` is the SAME floor
  * `GLM_MIN_MAX_TOKENS` always was, just read per-model now instead of from
  * one constant — see that constant's own doc comment for why it exists.
+ * `model.maxMaxTokens` is the matching ceiling (incident #717 — see
+ * `GLM_MAX_MAX_TOKENS`'s own doc comment for why it exists).
  */
 export function anthropicRequestToOpenAI(
   body: Json,
-  model: { id: string; minMaxTokens: number } = { id: GLM_LEAD_MODEL, minMaxTokens: GLM_MIN_MAX_TOKENS },
+  model: { id: string; minMaxTokens: number; maxMaxTokens: number } =
+    { id: GLM_LEAD_MODEL, minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS },
 ): Json {
   const messages: Json[] = [];
   if (body.system !== undefined && body.system !== null) {
@@ -155,7 +174,15 @@ export function anthropicRequestToOpenAI(
 
   // model.minMaxTokens floor — see GLM_MIN_MAX_TOKENS's own doc comment.
   // Never lowers a client request that's already asking for more.
-  const out: Json = { model: model.id, messages, max_tokens: Math.max(Number(body.max_tokens) || 0, model.minMaxTokens) };
+  // model.maxMaxTokens ceiling (incident #717) — see GLM_MAX_MAX_TOKENS's
+  // own doc comment. Applied AFTER the floor, so a floor-raised value can
+  // still be clamped back down (the floor itself is always below the
+  // ceiling, so this never clamps a request the floor hadn't already
+  // raised above the client's own ask).
+  const out: Json = {
+    model: model.id, messages,
+    max_tokens: Math.min(Math.max(Number(body.max_tokens) || 0, model.minMaxTokens), model.maxMaxTokens),
+  };
   if (body.stream === true) {
     out.stream = true;
     // Maestro review round 1, MAJOR 4: the OpenAI-compatible streaming
@@ -242,8 +269,28 @@ function anyToolUseBlocks(blocks: Json[]): boolean {
  * Workers AI's OpenAI-chat-completions response -> one Anthropic Messages
  * API response (non-streaming shape: `{id, type:"message", role:"assistant",
  * content:[...], stop_reason, usage:{input_tokens,output_tokens}}`).
+ *
+ * `opts.requestedMaxTokens` (incident #717, part B): the INBOUND Anthropic
+ * request's own `max_tokens`, BEFORE any floor/ceiling clamping this file's
+ * own `anthropicRequestToOpenAI` applied for the upstream call. The reported
+ * `usage.output_tokens` below is always clamped to never exceed it — the
+ * upstream's self-reported `completion_tokens` can be inflated by
+ * `reasoning_content` well past what the client itself asked for, and
+ * reporting that inflated number back would make Claude Code's own
+ * token-accounting see a bigger number than it requested. Reporting-only:
+ * never changes the actual `content` returned above, only this one numeric
+ * usage field.
+ *
+ * Code review (fresh-context, #717 follow-up): REQUIRED, not optional — an
+ * optional field here is exactly how the real non-streaming call site in
+ * anthropic-route.ts silently shipped with no clamp at all (no compiler
+ * error, no failing test, caught only by a later review). Every call site is
+ * now forced to supply it; grep for this symbol to find every one.
  */
-export function openAIResponseToAnthropic(resp: Json, opts: { model: string; id?: string }): Json {
+export function openAIResponseToAnthropic(
+  resp: Json,
+  opts: { model: string; id?: string; requestedMaxTokens: number },
+): Json {
   const choice = resp?.choices?.[0] ?? {};
   const message = choice.message ?? {};
   const content: Json[] = [];
@@ -289,7 +336,11 @@ export function openAIResponseToAnthropic(resp: Json, opts: { model: string; id?
       // confirm this: ~24k chars of reasoning at ~4 chars/token is ~6000
       // tokens, almost exactly the reported 6861 completion_tokens — if they
       // were additive, completion_tokens would need to be far larger.
-      output_tokens: resp?.usage?.completion_tokens ?? 0,
+      //
+      // Incident #717, part B: clamped to `opts.requestedMaxTokens` (the
+      // ORIGINAL client request's own max_tokens, pre-floor/ceiling) — see
+      // this function's own doc comment above.
+      output_tokens: Math.min(resp?.usage?.completion_tokens ?? 0, opts.requestedMaxTokens),
     },
   };
 }
@@ -533,8 +584,18 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
  * `input_tokens: 0` on every single streamed turn, forever. An extra key on
  * a JSON object `message_delta` already carries is not a shape Claude
  * Code's own SSE parsing has any reason to reject.
+ *
+ * `requestedMaxTokens` (fresh-context review, #717 critical follow-up): this
+ * is the streaming-side equivalent of `openAIResponseToAnthropic`'s own
+ * `opts.requestedMaxTokens` clamp — REQUIRED, same reasoning (an optional
+ * field here is exactly how the non-streaming call site shipped unclamped
+ * with no compiler error). The emitted `usage.output_tokens` below is
+ * clamped to never exceed it; `state.outputTokens` itself (read by this
+ * function's own caller, `pumpAnthropicStream`, for the D1 usage-log row) is
+ * left untouched here — this is reporting-only, same as the non-streaming
+ * function's own clamp.
  */
-export function closeStream(state: StreamState): string[] {
+export function closeStream(state: StreamState, requestedMaxTokens: number): string[] {
   const events: string[] = [];
   closeOpenBlock(state, events);
   // Minor fix (maestro review round 1): derived from whether this stream
@@ -558,7 +619,7 @@ export function closeStream(state: StreamState): string[] {
   events.push(sseEvent("message_delta", {
     type: "message_delta",
     delta: { stop_reason: stopReason, stop_sequence: null },
-    usage: { input_tokens: state.inputTokens, output_tokens: state.outputTokens },
+    usage: { input_tokens: state.inputTokens, output_tokens: Math.min(state.outputTokens, requestedMaxTokens) },
   }));
   events.push(sseEvent("message_stop", { type: "message_stop" }));
   return events;
@@ -637,9 +698,9 @@ interface StreamCloseResult {
   ok: boolean;
 }
 
-export function closeStreamOrError(state: StreamState): StreamCloseResult {
+export function closeStreamOrError(state: StreamState, requestedMaxTokens: number): StreamCloseResult {
   if (state.finishReason === null) {
     return { frames: [streamErrorFrame("upstream stream ended without a finish reason")], ok: false };
   }
-  return { frames: closeStream(state), ok: true };
+  return { frames: closeStream(state, requestedMaxTokens), ok: true };
 }

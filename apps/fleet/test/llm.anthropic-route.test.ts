@@ -335,6 +335,25 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     expect(body).toMatchObject({ type: "message", role: "assistant", model: good.model, content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 3, output_tokens: 2 } });
   });
 
+  // Fresh-context review, #717 critical follow-up: the REAL non-streaming
+  // path (handleFleetAnthropicMessages's own call to
+  // openAIResponseToAnthropic, not the `stream: true`-but-upstream-ignored-it
+  // defensive fallback branch) used to omit `requestedMaxTokens` entirely —
+  // an inflated upstream completion_tokens (reasoning_content spend) reached
+  // the client verbatim. This exercises the REAL route handler end to end,
+  // not the pure translate.ts function in isolation.
+  it("a huge upstream completion_tokens (reasoning_content inflation) is clamped to the request's own max_tokens, not reported verbatim", async () => {
+    const { token, rows, e } = await setup({
+      choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 50, completion_tokens: 70000 },
+    });
+    const body = { model: "claude-opus-4-5", max_tokens: 8000, messages: [{ role: "user", content: "hi" }] };
+    const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const replyBody = (await r.json()) as { usage: { output_tokens: number } };
+    expect(replyBody.usage.output_tokens).toBe(8000);
+  });
+
   it("a tool_use round trip: request tool_result -> OpenAI tool message, response tool_calls -> Anthropic tool_use block", async () => {
     const { token, rows, e, run } = await setup({
       choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"city":"nyc"}' } }] }, finish_reason: "tool_calls" }],
@@ -605,6 +624,47 @@ describe("handleFleetAnthropicMessages — streaming", () => {
     const rowsLogged = await usageRows();
     expect(rowsLogged).toHaveLength(1);
     expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1, error: null });
+  });
+
+  // Fresh-context review, #717 critical follow-up: this is the critical gap
+  // — Claude Code streams by default, so THIS path (pumpAnthropicStream ->
+  // applyOpenAIStreamChunk/closeStreamOrError) is the one that actually
+  // broke live GLM-lead studios mid-turn. Exercises the REAL route handler
+  // end to end (a real SSE ReadableStream upstream, parsed back out of the
+  // Response body), not the pure translate.ts functions in isolation.
+  it("streaming: a huge upstream completion_tokens (reasoning_content inflation) is clamped to the request's own max_tokens in the final message_delta, not reported verbatim", async () => {
+    const enc = new TextEncoder();
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 50, completion_tokens: 70000 } },
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+    const body = { model: "claude-opus-4-5", max_tokens: 8000, stream: true, messages: [{ role: "user", content: "hi" }] };
+
+    const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const deltaLine = text.split("\n\n").find((frame) => frame.includes("message_delta"));
+    const deltaData = JSON.parse(deltaLine!.slice(deltaLine!.indexOf("data:") + 5).trim()) as { usage: { output_tokens: number } };
+    expect(deltaData.usage.output_tokens).toBe(8000);
+
+    // The D1 usage-log row (what `handleFleetAnthropicMessages` bills
+    // against) stays consistent with what the client was actually told,
+    // rather than the raw, unclamped upstream figure.
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ studioId: ME, outputTokens: 8000, ok: 1 });
   });
 
   // Issue #519 (sweep 13): the `.finally(() => { writer.close().catch(() => {}) })`
