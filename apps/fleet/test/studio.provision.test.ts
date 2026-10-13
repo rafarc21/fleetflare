@@ -31,25 +31,19 @@ import { MEMORY_INDEX_PATH } from "../src/memory/index-file";
 import {
   LEAK_DENYLIST_PATH, LEAK_GATE_OFF, LEAK_GATE_ON, OPS_DENYLIST_PATH, denylistFileContent,
 } from "../src/leak-gate";
+import { fakeBlueprintFiles } from "./helpers/blueprint-fixture";
 
 const REPO_SLUG = "acme-org/websites";
 
-const FAKE_FLEET_JSON = JSON.stringify({
-  blueprint: { repo: REPO_SLUG, ref: "main" }, roles: ["pilot", "scratch"], instance_type: "standard-2",
-});
-const FAKE_ORG_JSON = JSON.stringify({ edges: { cto: ["release"] }, gates: { merge: ["release"] } });
-
+// Canned blueprint triple — the strings come from helpers/blueprint-fixture.ts
+// (refs #750) via the local alias names this file's 12 inline exact-path
+// dispatchers already reference; the dispatchers themselves stay untouched
+// (they probe exact 404 shapes and studio paths, not endsWith patterns).
 const FAKE_ROLE_PROMPT = "You are scratch. Sandbox role, low stakes.";
-const FAKE_ROLE_MD = `---
-name: scratch
-skills: []
-allowedTools: Bash(git *) Bash(gh *) Bash(bun *) Bash(fleet *) Edit Write
-may_spawn: []
-reports_to: operator
-gates: []
----
-${FAKE_ROLE_PROMPT}
-`;
+const { fleetJson: FAKE_FLEET_JSON, orgJson: FAKE_ORG_JSON, roleMd: FAKE_ROLE_MD } = fakeBlueprintFiles({
+  repo: REPO_SLUG, roles: ["pilot", "scratch"],
+  roleMd: { name: "scratch", prompt: FAKE_ROLE_PROMPT },
+});
 
 const FAKE_STUDIO_MD = `---
 name: web-studio

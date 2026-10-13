@@ -18,6 +18,7 @@ import {
 import { recordStudio, listStudios } from "../src/studio/registry";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
+import { fakeBlueprintFiles, fakeBlueprintFetch } from "./helpers/blueprint-fixture";
 
 // A live StudioDO cannot be constructed under vitest-pool-workers (see
 // src/studio/provision.ts's header, and src/studio/do.ts's own header) — so
@@ -28,36 +29,22 @@ import type { Env } from "../src/env";
 const STUDIO_ID = "websites--pilot";
 const NOW_ISO = "2026-08-16T00:10:00.000Z";
 
-// Task 11: canned blueprint content — same shape/purpose as
-// test/studio.routes.test.ts's own fakeFetchBlueprintFile (kept local
-// rather than shared, matching this file's existing convention of
-// redefining its own fakeStorage/fakeScheduler rather than importing
-// test/studio.routes.test.ts's). None of the tests below exercise the
-// blueprint fetch's OWN behavior (that's test/studio.blueprint.test.ts and
-// test/studio.routes.test.ts's job) — this just needs to round-trip through
-// the real parseFleetJson/parseRoleFile so provision keeps landing on
-// state:"running", the same reason it needs a working sbExec/recordStudio.
-const FAKE_FLEET_JSON = JSON.stringify({
-  blueprint: { repo: "acme-org/websites", ref: "main" }, roles: ["pilot"], instance_type: "standard-2",
+// Task 11: canned blueprint content — the triple + dispatcher now come from
+// helpers/blueprint-fixture.ts (refs #750), same shape/purpose the routes
+// suites' own fixture has. This suite's prompt is the load-bearing
+// divergence: "You are pilot. Work carefully." (shorter than the routes
+// suites' — spelled here as the builder arg, never a default). None of the
+// tests below exercise the blueprint fetch's OWN behavior (that's
+// test/studio.blueprint.test.ts and the routes suites' job) — this just
+// needs to round-trip through the real parseFleetJson/parseRoleFile so
+// provision keeps landing on state:"running".
+const FAKE = fakeBlueprintFiles({
+  repo: "acme-org/websites", roles: ["pilot"],
+  roleMd: { name: "pilot", prompt: "You are pilot. Work carefully." },
 });
-const FAKE_ROLE_MD = `---
-name: pilot
-skills: []
-allowedTools: Bash(git *) Bash(gh *) Bash(bun *) Bash(fleet *) Edit Write
-may_spawn: []
-reports_to: operator
-gates: []
----
-You are pilot. Work carefully.
-`;
-const FAKE_ORG_JSON = JSON.stringify({ edges: { cto: ["release"] }, gates: { merge: ["release"] } });
 
 function fakeFetchBlueprintFile(): ProvisionDeps["fetchBlueprintFile"] {
-  return vi.fn(async (_repo: string, path: string) => {
-    if (path.endsWith("fleet.json")) return FAKE_FLEET_JSON;
-    if (path.endsWith("org.json")) return FAKE_ORG_JSON;
-    return FAKE_ROLE_MD;
-  });
+  return vi.fn(fakeBlueprintFetch(FAKE));
 }
 
 // Same shape as test/studio.routes.test.ts's — see its comment for why `get`
