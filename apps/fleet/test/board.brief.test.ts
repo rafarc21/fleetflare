@@ -58,7 +58,7 @@ describe("parseBrief", () => {
   });
 
   it("refuses a body over GitHub's own issue body limit, naming the limit", () => {
-    const res = parseBrief({ ...good, objective: "x".repeat(TASK_BODY_MAX) });
+    const res = parseBrief({ ...good, objective: "x".repeat(TASK_BODY_MAX + 1) });
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.message).toContain(String(TASK_BODY_MAX));
