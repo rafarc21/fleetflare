@@ -137,7 +137,7 @@ describe("GET /studio/board/open-prs", () => {
       getPullRequest: vi.fn(async (_repo: string, number: number) =>
         ({ number, merged: false, open: true, title: "feat: the thing" })),
     });
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api, reach });
 
     expect(res.status).toBe(200);
     const body = await res.json() as { repo: string; prs: Record<string, unknown[]>; unknown: string[] };
@@ -163,7 +163,7 @@ describe("GET /studio/board/open-prs", () => {
     await seedStudio("websites--web-studio", "acme-org/websites");
     await seedStudio("beta--web-studio", "acme-org/beta");
     const api = fakeApi();
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api, reach });
 
     expect(res.status).toBe(200);
     const body = await res.json() as { prs: Record<string, unknown[]> };
@@ -176,7 +176,7 @@ describe("GET /studio/board/open-prs", () => {
   it("case-insensitive: an uppercase repoSlug row matches the lowercased resolved repo", async () => {
     authorized();
     await seedStudio("websites--web-studio", "ACME-ORG/Websites");
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, fakeApi(), reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api: fakeApi(), reach });
 
     expect(res.status).toBe(200);
     const body = await res.json() as { prs: Record<string, unknown[]> };
@@ -188,7 +188,7 @@ describe("GET /studio/board/open-prs", () => {
     await seedStudio("websites--legacy-studio", null);
 
     // Default repo (no repo query at all): included.
-    const included = await handleBoard(req("/studio/board/open-prs"), testEnv, fakeApi(), reach);
+    const included = await handleBoard(req("/studio/board/open-prs"), testEnv, { api: fakeApi(), reach });
     expect(included.status).toBe(200);
     expect(Object.keys((await included.json() as { prs: Record<string, unknown[]> }).prs))
       .toEqual(["websites--legacy-studio"]);
@@ -196,7 +196,7 @@ describe("GET /studio/board/open-prs", () => {
     // A named non-default repo: a pre-P4a studio was cloned from the fleet
     // default by construction, so it cannot belong to acme-org/beta.
     const excluded = await handleBoard(
-      req("/studio/board/open-prs?repo=acme-org/beta"), testEnv, fakeApi(), reach,
+      req("/studio/board/open-prs?repo=acme-org/beta"), testEnv, { api: fakeApi(), reach },
     );
     expect(excluded.status).toBe(200);
     expect((await excluded.json() as { prs: Record<string, unknown[]> }).prs).toEqual({});
@@ -222,7 +222,7 @@ describe("GET /studio/board/open-prs", () => {
       }),
     });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api, reach });
 
     expect(res.status).toBe(200);
     const body = await res.json() as { prs: Record<string, unknown[]>; unknown: string[] };
@@ -248,7 +248,7 @@ describe("GET /studio/board/open-prs", () => {
     vi.spyOn(openPrsModule, "studioOpenPrs").mockImplementation(async (_api, _repo, studioId) =>
       studioId === "websites--release-studio" ? bad : { ok: true as const, value: [] });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, fakeApi(), reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api: fakeApi(), reach });
 
     expect(res.status).toBe(200);
     const body = await res.json() as { prs: Record<string, unknown[]>; unknown: string[] };
@@ -282,7 +282,7 @@ describe("GET /studio/board/open-prs", () => {
       });
       return { ok: true as const, value: [] };
     });
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, fakeApi(), reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api: fakeApi(), reach });
     expect(res.status).toBe(200);
     expect(bothStartedTogether).toBe(true);
   });
@@ -295,7 +295,7 @@ describe("GET /studio/board/open-prs", () => {
   it("401s without an Access header — an auth failure never costs a scan", async () => {
     await seedStudio("websites--web-studio", "acme-org/websites");
     const api = fakeApi();
-    const res = await handleBoard(new Request("https://x/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    const res = await handleBoard(new Request("https://x/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api, reach });
     expect(res.status).toBe(401);
     expect(api.listIssues).toHaveBeenCalledTimes(0);
   });
@@ -305,7 +305,7 @@ describe("GET /studio/board/open-prs", () => {
     await seedStudio("websites--web-studio", "acme-org/websites");
     const res = await handleBoard(
       req("/studio/board/open-prs?repo=acme-org/websites", { method: "POST", body: "{}" }),
-      testEnv, fakeApi(), reach,
+      testEnv, { api: fakeApi(), reach },
     );
     expect(res.status).toBe(405);
   });
@@ -315,7 +315,7 @@ describe("GET /studio/board/open-prs", () => {
     await seedStudio("websites--web-studio", "acme-org/websites");
     const api = fakeApi();
     const res = await handleBoard(
-      req("/studio/board/open-prs?repo=someone/else"), testEnv, api, reach,
+      req("/studio/board/open-prs?repo=someone/else"), testEnv, { api, reach },
     );
     expect(res.status).toBe(403);
     expect(await res.text()).toContain("is not reachable by this fleet");
@@ -327,7 +327,7 @@ describe("GET /studio/board/open-prs", () => {
     authorized();
     await seedStudio("beta--web-studio", "acme-org/beta");
     const api = fakeApi();
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api, reach });
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ repo: "acme-org/websites", prs: {}, unknown: [] });
