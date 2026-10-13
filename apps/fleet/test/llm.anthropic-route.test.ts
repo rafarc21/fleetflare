@@ -70,11 +70,19 @@ const good = { model: "claude-opus-4-5", max_tokens: 100, messages: [{ role: "us
  *  pool pickModels walks — the same `rows`-style override already used for
  *  DB injection, now extended so a test can hand it a fixture pool instead
  *  of mutating the real, shared `models.ts` POOL export. */
-async function callRoute(opts: { ai: { run: ReturnType<typeof vi.fn> }; envOverrides?: Partial<Env>; pool?: readonly PoolModel[] }) {
+async function callRoute(opts: {
+  ai: { run: ReturnType<typeof vi.fn> };
+  envOverrides?: Partial<Env>;
+  pool?: readonly PoolModel[];
+  /** #767: fake sleep/random threaded through the handler's own 6th
+   *  param, so a route-level test can pin the backoff schedule exactly
+   *  without ever waiting a real 3s. */
+  retryDeps?: { sleep?: (ms: number) => Promise<void>; random?: () => number };
+}) {
   const token = mintSpawnToken();
   const rows = async () => [row(ME, await hashSpawnToken(token))];
   const e = { ...env, FLEET_JUNIOR: "on", AI: opts.ai, ...FAST_RETRY, ...(opts.envOverrides ?? {}) } as unknown as Env;
-  return handleFleetAnthropicMessages(req({ token }), e, ctx, rows, opts.pool);
+  return handleFleetAnthropicMessages(req({ token }), e, ctx, rows, opts.pool, opts.retryDeps);
 }
 
 function req(opts: { token?: string | null; apiKey?: string; body?: unknown; path?: string; method?: string }) {
@@ -1052,14 +1060,35 @@ describe("handleFleetAnthropicMessages — pre-stream retry and call duration (i
     expect((await usageRows())[0]).toMatchObject({ ok: 0, attempts: 3, error: `ai_run_error 504 api_error: ${TIMEOUT_504}` });
   });
 
-  it("a 4xx-mapped error is never retried (context overflow 400, rate limit 429)", async () => {
-    for (const message of ["This model's maximum context length is 32768 tokens", "AiError: rate limit reached"]) {
+  it("a 4xx-mapped error is never retried (context overflow 400); a rate limit 429 gets only #767 backoff, not a #335 retry", async () => {
+    // Context overflow: classifyAiError maps it to a 400 — runAiWithRetry
+    // does not retry it, and it is not a rate limit, so #767's backoff
+    // does not fire either: exactly one call, fail fast.
+    {
       const { token, rows, e } = await setup();
-      const run = vi.fn(async () => { throw new Error(message); });
+      const run = vi.fn(async () => { throw new Error("This model's maximum context length is 32768 tokens"); });
       (e.AI as { run: unknown }).run = run;
       const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
       expect(r.status).toBeLessThan(500);
       expect(run).toHaveBeenCalledTimes(1);
+    }
+    // Rate limit: still not a #335 retryable status (runAiWithRetry only
+    // retries 504/529), but #767's backoff now fires — pool off means the
+    // single model has nowhere else to go, so it reruns up to 4 extra
+    // rounds on the backoff schedule before reporting the 429.
+    {
+      const sleeps: number[] = [];
+      const { token, rows, e } = await setup();
+      const run = vi.fn(async () => { throw new Error("AiError: rate limit reached"); });
+      (e.AI as { run: unknown }).run = run;
+      const r = await handleFleetAnthropicMessages(
+        req({ token }), e, ctx, rows,
+        undefined,
+        { sleep: async (ms) => { sleeps.push(ms); }, random: () => 0 },
+      );
+      expect(r.status).toBe(429);
+      expect(run).toHaveBeenCalledTimes(5);
+      expect(sleeps).toEqual([2100, 4200, 8400, 14000]);
     }
   });
 
@@ -1385,10 +1414,18 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
   it("pool on: every model 429s → 429 rate_limit_error with retry-after", async () => {
     const seen: string[] = [];
     const ai = { run: vi.fn(async (model: string) => { seen.push(model); throw new Error("3021: Account rate limit exceeded"); }) };
-    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" } });
+    const res = await callRoute({
+      ai, envOverrides: { LEAD_MODEL_POOL: "on" },
+      retryDeps: { sleep: async () => {}, random: () => 0 },
+    });
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("30");
     expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    // #767: the LAST candidate has no untried model left to move to (every
+    // other candidate already 3021'd this walk), so it reruns through the
+    // same-model backoff — 1 first turn + 4 backoff rounds. 3 candidates
+    // in the pool → 1 + 1 + 5 = 7 ai.run calls.
+    expect(ai.run).toHaveBeenCalledTimes(7);
     // Global Constraint: the logged usage row's model must be the LAST
     // model actually tried, never a hardcoded constant (code review,
     // Spec axis, #717).
@@ -1405,25 +1442,31 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
   // fixture pool above: a plain copy of the real POOL with every entry
   // forced to `smokePassed: true`, handed to `callRoute`'s own `pool`
   // injection seam rather than mutating the shared `models.ts` POOL export.
-  it("pool on: 3021 on every model (genuine multi-model exhaustion) → 429, AI called once per model, usage row logs the LAST model tried", async () => {
+  it("pool on: 3021 on every model (genuine multi-model exhaustion) → 429, first models once, LAST model retried via #767 backoff, usage row logs the LAST model tried", async () => {
     const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
     const seen: string[] = [];
     const ai = { run: vi.fn(async (model: string) => {
       seen.push(model);
       throw new Error("3021: rate limiting: Account rate limit exceeded");
     }) };
-    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    const res = await callRoute({
+      ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool,
+      retryDeps: { sleep: async () => {}, random: () => 0 },
+    });
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("30");
     expect((await res.json() as any).error.type).toBe("rate_limit_error");
     // router.ts's own round-robin hash of the studio id picks WHICH pool
     // model goes first — not necessarily the pool's declaration order — so
     // this asserts against `seen` (the actual try order), not a hardcoded
-    // sequence: every model was tried exactly once, with no backoff/retry
-    // on a rate-limit.
-    expect(ai.run).toHaveBeenCalledTimes(testPool.length);
-    expect(seen).toHaveLength(testPool.length);
+    // sequence. #767: the FIRST candidates are fresh on their own turn, so
+    // each is tried once; the LAST candidate has no untried model to move
+    // to (every other candidate already 3021'd this walk), so it reruns
+    // through the same-model backoff — 1 first turn + 4 backoff rounds.
+    expect(ai.run).toHaveBeenCalledTimes(testPool.length + 4);
+    expect(seen).toHaveLength(testPool.length + 4);
     expect(new Set(seen)).toEqual(new Set(testPool.map((m) => m.id)));
+    expect(seen.filter((m) => m === seen[seen.length - 1])).toHaveLength(5);
     expect(seen[seen.length - 1]).not.toBe(seen[0]);
     await ctx.drain();
     const rowsLogged = await usageRows();
@@ -1499,21 +1542,29 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(seen).toEqual([POOL[1].id]);
   });
 
-  it("LEAD_MODEL_OVERFLOW=off: 3021 on the assigned model → 429, no second-model call", async () => {
+  it("LEAD_MODEL_OVERFLOW=off: 3021 on the assigned model → same-model #767 backoff, then 429, no second-model call", async () => {
     const kimi = { ...POOL[1], smokePassed: true };
     const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
     await setAssignedModel(env.DB, ME, POOL[1].id);
     const seen: string[] = [];
+    const sleeps: number[] = [];
     const ai = { run: vi.fn(async (model: string) => {
       seen.push(model);
       throw new Error("3021: Account rate limit exceeded");
     }) };
-    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on", LEAD_MODEL_OVERFLOW: "off" }, pool: testPool });
+    const res = await callRoute({
+      ai, envOverrides: { LEAD_MODEL_POOL: "on", LEAD_MODEL_OVERFLOW: "off" }, pool: testPool,
+      retryDeps: { sleep: async (ms: number) => { sleeps.push(ms); }, random: () => 0 },
+    });
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("30");
     expect((await res.json() as any).error.type).toBe("rate_limit_error");
-    expect(ai.run).toHaveBeenCalledTimes(1);
-    expect(seen).toEqual([POOL[1].id]);
+    // #767: overflow off means ONE candidate, so the same-model backoff
+    // fires — the assigned model reruns 1 first turn + 4 backoff rounds
+    // (fake sleep, jitter 0) before the 429. Still no second-model call.
+    expect(ai.run).toHaveBeenCalledTimes(5);
+    expect(seen).toEqual(Array.from({ length: 5 }, () => POOL[1].id));
+    expect(sleeps.map(Math.round)).toEqual([2100, 4200, 8400, 14000]);
     await ctx.drain();
     const rowsLogged = await usageRows();
     expect(rowsLogged).toHaveLength(1);
@@ -1562,5 +1613,155 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
     await callRoute({ ai, envOverrides: { LEAD_AI_GATEWAY_ID: "fleet" } });
     expect(calls[0][2]).toEqual({ gateway: { id: "fleet" } });
+  });
+});
+
+// #767: GLM's account is capped at 20 rpm, so ~60% of lead calls throw
+// `3021: rate limiting` from env.AI.run. The overflow walk's
+// move-to-next-model rule cannot help when there is no next model (pool
+// off, or every other candidate already 3021'd this walk), and a bare 429
+// makes Claude Code burn its own retry budget and end the turn. The fix
+// this block pins: rerun the SAME model on a jittered backoff schedule
+// [3s,6s,12s,20s] (±30%, cumulative sleep capped 45s) before giving up.
+describe("#767 — 3021 same-model backoff", () => {
+  // The measured production string — classifyAiError maps it to a 429,
+  // which runAiWithRetry does NOT retry (only 504/529), so each backoff
+  // round is exactly one ai.run call.
+  const R3021 = "3021: rate limiting: inference request per min rate reached";
+  const okReply = { choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } };
+
+  /** A run stub that throws the 3021 for its first `n` calls, then replies. */
+  function rateThen(n: number, then: unknown = okReply) {
+    let calls = 0;
+    return vi.fn(async () => {
+      if (calls < n) { calls++; throw new Error(R3021); }
+      return then;
+    });
+  }
+
+  function fakeSleep() {
+    const sleeps: number[] = [];
+    return { sleeps, deps: { sleep: async (ms: number) => { sleeps.push(ms); }, random: () => 0 } };
+  }
+
+  // Schedule pins use random=0 (the 70% jitter floor) unless a test
+  // specifically exercises the jitter itself.
+
+  it("direct runAiWithRateLimitBackoff: 3021,3021,ok resolves with attempts 3, sleeping 2100 then 4200 (random=0)", async () => {
+    const { runAiWithRateLimitBackoff } = await import("../src/llm/anthropic-route");
+    const { sleeps, deps } = fakeSleep();
+    const run = rateThen(2);
+    const r = await runAiWithRateLimitBackoff(run, { baseMs: 1, ...deps });
+    expect(r).toEqual({ value: okReply, attempts: 3 });
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([2100, 4200]);
+  });
+
+  it("direct: 5x3021 rejects as AiRunError with attempts 5, sleeping [2100,4200,8400,14000] (random=0)", async () => {
+    const { runAiWithRateLimitBackoff } = await import("../src/llm/anthropic-route");
+    const { sleeps, deps } = fakeSleep();
+    const run = rateThen(5);
+    await expect(runAiWithRateLimitBackoff(run, { baseMs: 1, ...deps })).rejects.toMatchObject({
+      message: R3021, attempts: 5,
+    });
+    expect(run).toHaveBeenCalledTimes(5);
+    expect(sleeps).toEqual([2100, 4200, 8400, 14000]);
+  });
+
+  it("direct: a non-rate-limited 500 rejects immediately, zero sleeps", async () => {
+    const { runAiWithRateLimitBackoff } = await import("../src/llm/anthropic-route");
+    const { sleeps, deps } = fakeSleep();
+    const run = vi.fn(async () => { throw new Error("AiError: something else broke"); });
+    await expect(runAiWithRateLimitBackoff(run, { baseMs: 1, ...deps })).rejects.toMatchObject({
+      message: "AiError: something else broke", attempts: 1,
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("direct: random=1 sleeps [3900,7800,15600,17700] — the 45s cap clamps the 4th round", async () => {
+    const { runAiWithRateLimitBackoff, RATE_LIMIT_BACKOFF_CAP_MS } = await import("../src/llm/anthropic-route");
+    expect(RATE_LIMIT_BACKOFF_CAP_MS).toBe(45_000);
+    const sleeps: number[] = [];
+    const run = rateThen(5);
+    const deps = { sleep: async (ms: number) => { sleeps.push(ms); }, random: () => 1 };
+    await expect(runAiWithRateLimitBackoff(run, { baseMs: 1, ...deps })).rejects.toMatchObject({ attempts: 5 });
+    // 130% of [3000,6000,12000] then the cap clamps 20000*1.3 to the
+    // remaining 45000 - (3900+7800+15600) = 17700. Rounded: 3000*1.3 is
+    // 3899.999... in float math, so compare rounded values, not exact.
+    expect(sleeps.map(Math.round)).toEqual([3900, 7800, 15600, 17700]);
+    expect(Math.round(sleeps.reduce((a, b) => a + b, 0))).toBe(45_000);
+  });
+
+  it("route-level pool-off (order=[glm]): 3021,3021,ok → 200, usage row attempts 3", async () => {
+    const { sleeps, deps } = fakeSleep();
+    const ai = { run: rateThen(2) };
+    const res = await callRoute({ ai, retryDeps: deps });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([2100, 4200]);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 1, attempts: 3, model: GLM_LEAD_MODEL });
+  });
+
+  it("route-level pool-off: 5x3021 → 429 rate_limit_error + retry-after 30, usage row attempts 5", async () => {
+    const { sleeps, deps } = fakeSleep();
+    const ai = { run: rateThen(5) };
+    const res = await callRoute({ ai, retryDeps: deps });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    expect(sleeps).toEqual([2100, 4200, 8400, 14000]);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 0, attempts: 5, model: GLM_LEAD_MODEL });
+  });
+
+  it("route-level pool-on, 3-model fixture pool: 3021 on the first model moves to the next — sleep never called", async () => {
+    // Same fixture-pool shape as the #717 tests above: a plain copy of the
+    // real POOL, every entry smoke-passed, handed to callRoute's own `pool`
+    // injection seam — never a mutation of the shared models.ts export.
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const { sleeps, deps } = fakeSleep();
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error(R3021);
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, retryDeps: deps });
+    expect(res.status).toBe(200);
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    // Today's move-to-next-model-first rule is pinned: no same-model
+    // backoff fires while another untried candidate remains.
+    expect(sleeps).toEqual([]);
+  });
+
+  it("route-level pool-on: first model 3021, second model 3021 → backoff fires on the second round (every other candidate seen)", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const { sleeps, deps } = fakeSleep();
+    const perModel: Record<string, number> = {};
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      perModel[model] = (perModel[model] ?? 0) + 1;
+      seen.push(model);
+      // Round 1: every candidate 3021s once, in walk order. Round 2: the
+      // LAST candidate's rerun finally succeeds.
+      if (perModel[model] === 1) throw new Error(R3021);
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, retryDeps: deps });
+    expect(res.status).toBe(200);
+    // First walk: all 3 candidates, once each, no backoff. Second walk
+    // reruns the last one (every OTHER candidate already seen) with a
+    // backoff sleep before its rerun.
+    expect(seen).toHaveLength(4);
+    expect(sleeps).toEqual([2100]);
+    const last = seen[2];
+    expect(seen[3]).toBe(last);
   });
 });
