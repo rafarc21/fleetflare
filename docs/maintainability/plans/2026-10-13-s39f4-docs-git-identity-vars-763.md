@@ -16,5 +16,5 @@ FLEET_STUDIO_GIT_* is both-or-neither and refuses `[bot]` shapes — a
 one-line parenthetical, full rules stay in env-vars.md (linked already).
 No code, no wrangler.example.jsonc, no env-vars.md edits.
 
-Verify: english-check and test-lies-check (both cover docs), zero exit.
+Verify: english-check (the one gate that scans docs), zero exit.
 Docs-only diff — full vitest/bun lanes and tsc untouched by it.
