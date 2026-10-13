@@ -326,11 +326,18 @@ flags) lives in `wrangler.jsonc`'s `vars` — see `AGENT_REPO`,
 `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`/`GITHUB_INSTALLATION_ID_<OWNER>`,
 `GITHUB_REPO_AUTH`, `WORKER_PUBLIC_URL`, `AGENT_BASE_REF`,
 `MAX_TASK_SECONDS`, `BURN_ALERT_OUTPUT_TOKENS_5H`, `MAX_STUDIOS`,
-`CLAUDE_ACCOUNT_BY_REPO`, `FLEET_AUTO_FAILOVER`, `FLEET_REQUIRE_ACCOUNT_MAP`, `AGENT_MODEL`,
-`DIRECTUS_URL`, plus the junior and glm-lead throttles `JUNIOR_RATE_PER_MINUTE`,
+`CLAUDE_ACCOUNT_BY_REPO`, `FLEET_AUTO_FAILOVER`, `FLEET_REQUIRE_ACCOUNT_MAP`,
+`FLEET_BOT_NAME`/`FLEET_BOT_EMAIL`, `FLEET_STUDIO_GIT_NAME`/`FLEET_STUDIO_GIT_EMAIL`,
+`AGENT_MODEL`, `DIRECTUS_URL`, plus the junior and glm-lead throttles
+`JUNIOR_RATE_PER_MINUTE`,
 `JUNIOR_DAILY_CAP`, `LEAD_RATE_PER_MINUTE`, `LEAD_DAILY_CAP`,
 `LEAD_COUNT_TOKENS_RATE_PER_MINUTE`, `LEAD_STREAM_IDLE_MS`, `LEAD_AI_RETRY_BASE_MS`
-(all optional, each with a built-in default) in `env.ts`. The full list, with
+(all optional, each with a built-in default) in `env.ts`. The git-identity
+pairs are optional too — `FLEET_BOT_NAME`/`FLEET_BOT_EMAIL` (the task
+container's identity, default `fleetflare[bot]`) and
+`FLEET_STUDIO_GIT_NAME`/`FLEET_STUDIO_GIT_EMAIL` (every studio's identity,
+both-or-neither, never a `[bot]` shape, default
+`fleet-studio <fleet-studio@users.noreply.github.com>`). The full list, with
 every default and reader file, is [docs/env-vars.md](env-vars.md). Actual credentials never go in `wrangler.jsonc` —
 they are set with `scripts/deploy.sh secret put <NAME>`, which prompts on
 stdin (never pass a secret as a CLI argument). Use `scripts/deploy.sh`, never
