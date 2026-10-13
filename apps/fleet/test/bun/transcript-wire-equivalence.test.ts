@@ -8,20 +8,19 @@
 // parameter matrix. Fails red in EITHER direction — builder drifts away from
 // the copy, or the copy drifts away from the builder.
 import { describe, expect, test } from "bun:test";
-import { shipTranscriptTick, type ShipDeps, type TranscriptStorage } from "../../src/studio/transcript";
+import {
+  shipTranscriptTick, SECTION_BOOTID, SECTION_STAT, SECTION_INCARNATION, SECTION_CHUNK, SECTION_TAIL,
+  type ShipDeps, type TranscriptStorage,
+} from "../../src/studio/transcript";
 import { shipTickCmdWire, rotateCmdWire } from "./transcript-wire-format";
 
-// Wire-format literals — the section markers, pinned as literals the same way
-// test/studio.transcript.test.ts's own wire-format block pins them: markers
-// are protocol, not implementation. These feed the fake stdout below, never
+// Wire-format markers — now IMPORTED from the builder's own exports
+// (src/studio/transcript.ts), no longer re-spelled as local literals: the
+// drift contract is owned by ./transcript-wire-format.ts's spec copy plus
+// this file's byte-for-byte expect. They feed the fake stdout below, never
 // an assert on the builder (that is the byte-for-byte expect's job), and the
 // tick's own parser still has to FIND them, so a renamed marker fails here
 // too, as a parse-shaped failure rather than a string diff.
-const SECTION_BOOTID = "---FLEET-BOOTID---";
-const SECTION_STAT = "---FLEET-STAT---";
-const SECTION_INCARNATION = "---FLEET-INCARNATION---";
-const SECTION_CHUNK = "---FLEET-CHUNK---";
-const SECTION_TAIL = "---FLEET-TAIL---";
 
 /**
  * Capturing fake `ShipDeps.exec`: records every command sent, answers the
