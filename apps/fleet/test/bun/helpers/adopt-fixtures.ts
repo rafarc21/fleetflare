@@ -1,7 +1,7 @@
 /**
- * Shared fixtures for the session-adoption suites (#749, sweep 33 F5): the
- * repo's root/worktree project keys, the session ids, and the first-line
- * transcript shapes every adopt test stages under a temp HOME.
+ * Shared fixtures for the session-adoption suites: the repo's root/worktree
+ * project keys, the session ids, and the first-line transcript shapes every
+ * adopt test stages under a temp HOME.
  */
 import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
