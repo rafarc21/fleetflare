@@ -530,7 +530,8 @@ function unconfirmedSubmitError(why: string): string {
  * GitHub retries), and the sweep's `finally` must reach its reschedule.
  * Failure is a returned value, so both can log it and carry on.
  */
-export async function runWake(exec: WakeExec, prompt: string, clearDraftFirst = false): Promise<WakeOutcome> {
+export async function runWake(exec: WakeExec, prompt: string, opts?: { clearDraftFirst?: boolean }): Promise<WakeOutcome> {
+  const clearDraftFirst = opts?.clearDraftFirst ?? false;
   const flat = flattenPrompt(prompt);
   if (!flat) return { ok: false, error: "refused: empty wake prompt" };
   try {
@@ -677,7 +678,7 @@ export interface GatedWakeDeps {
  * message may have left the draft this clears; every other caller leaves it
  * false and types as before.
  */
-export async function runGatedWake(deps: GatedWakeDeps, prompt: string, clearDraftFirst = false): Promise<WakeOutcome> {
+export async function runGatedWake(deps: GatedWakeDeps, prompt: string, opts?: { clearDraftFirst?: boolean }): Promise<WakeOutcome> {
   const refused = await stoppedRefusal(deps);
   if (refused) return refused;
 
@@ -788,7 +789,7 @@ export async function runGatedWake(deps: GatedWakeDeps, prompt: string, clearDra
     // redrawn by `--continue`, is history — the NEW account is not limited
     // by it, so the wake goes through.
     const switched = deps.switchedBlock ? await deps.switchedBlock().catch(() => null) : null;
-    if (switched === limitBlockKey(limit)) return afterLimitGate(deps, prompt, screen.stdout, clearDraftFirst);
+    if (switched === limitBlockKey(limit)) return afterLimitGate(deps, prompt, screen.stdout, opts);
     // An inline block the detector still counts is live by #106's staleness
     // rule (a stale one is not detected at all, and the wake goes through).
     const until = sighting?.block === limitBlockKey(limit)
@@ -801,7 +802,7 @@ export async function runGatedWake(deps: GatedWakeDeps, prompt: string, clearDra
     };
   }
 
-  return afterLimitGate(deps, prompt, screen.stdout, clearDraftFirst);
+  return afterLimitGate(deps, prompt, screen.stdout, opts);
 }
 
 /**
@@ -814,8 +815,9 @@ export async function runGatedWake(deps: GatedWakeDeps, prompt: string, clearDra
  * window, and the in-container guard already re-scans at the last instant.
  */
 async function afterLimitGate(
-  deps: GatedWakeDeps, prompt: string, screen: string, clearDraftFirst = false,
+  deps: GatedWakeDeps, prompt: string, screen: string, opts?: { clearDraftFirst?: boolean },
 ): Promise<WakeOutcome> {
+  const clearDraftFirst = opts?.clearDraftFirst ?? false;
   // Issue #136: the LOOSE check (see LOOSE_LIMIT_PATTERNS) — a modal shape the
   // strict detector has never seen (a status row under the footer, a boxed
   // V1) still refuses. The same patterns run again inside wakeCmd.
@@ -846,7 +848,7 @@ async function afterLimitGate(
   const late = await stoppedRefusal(deps);
   if (late) return late;
 
-  return runWake(deps.exec, prompt, clearDraftFirst);
+  return runWake(deps.exec, prompt, opts);
 }
 
 /** Gate 1 — stopped or never provisioned, answered from storage alone.
