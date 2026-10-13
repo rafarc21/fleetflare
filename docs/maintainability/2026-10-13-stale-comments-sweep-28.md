@@ -39,7 +39,7 @@ INSTALL_CACHE_RESTORE_DIR_WORST_CASE_MS") are self-aware history, correct.
 ### S28-F1. registry.ts — test-file citation missing the `.test` suffix — GLM-OK
 
 - **File:** `src/studio/registry.ts:266` — "pinned by test/studio.burn-window-expiry.ts's 'nothing write storage from a read'".
-- **Evidence:** `apps/fleet/test/` contains `studio.burn-window-expiry.test.ts`, no `studio.burn-window-expiry.ts`. The quoted test name exists at test/studio.burn-window-expiry.test.ts:190. A sibling comment (src/studio/transcript.ts:175 area) and test/helpers comments cite the same file WITH the suffix.
+- **Evidence:** `apps/fleet/test/` contains `studio.burn-window-expiry.test.ts`, no `studio.burn-window-expiry.ts`. The quoted test name exists at test/studio.burn-window-expiry.test.ts:190. Sibling citations spell it correctly WITH the suffix: test/studio.grid.test.ts:34 (`test/studio.burn-window-expiry.test.ts`).
 - **Proposed corrected comment:** `test/studio.burn-window-expiry.test.ts's "nothing write storage from a read"`.
 
 ### S28-F2. do.ts — OPERATOR-FINISH-LIST cited as a repo path that never existed — GLM-OK
