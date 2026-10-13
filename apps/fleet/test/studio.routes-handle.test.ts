@@ -26,6 +26,7 @@ import { redactSecrets } from "../src/studio/redact";
 import type { SessionSyncDeps, SessionSyncStorage } from "../src/studio/session-sync";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
+import { fakeBlueprintFiles, fakeBlueprintFetch } from "./helpers/blueprint-fixture";
 
 // ROLE_PROMPT_B64 is base64 of UTF-8 and every prompt now carries the house
 // rules, whose em dashes are multi-byte — bare atob() hands back Latin-1.
@@ -53,26 +54,23 @@ const decodeRolePrompt = (b64: string) =>
 const STUDIO_ID = "websites--pilot";
 
 // Task 11: canned blueprint content, routed by path — stands in for do.ts's
-// real fetchBlueprintFile (mintRepoToken + github/api.ts's
-// fetchRepoFile). Realistic enough to round-trip through the real
-// parseFleetJson/parseRoleFile (src/studio/blueprint.ts) so the EXISTING
-// "provision happy path" / idempotent / registry tests below keep landing
-// on state:"running" — a stub that returned garbage would make every one of
-// them degrade instead, for a reason unrelated to what they're actually
-// testing.
+// real fetchBlueprintFile (mintRepoToken + github/api.ts's fetchRepoFile).
+// The triple + dispatcher come from helpers/blueprint-fixture.ts (refs
+// #750); THIS suite's own args (repo, roles, role md, prompt) stay spelled
+// here — the divergence is load-bearing. The built strings round-trip
+// through the real parseFleetJson/parseRoleFile (src/studio/blueprint.ts)
+// so the "provision happy path" / idempotent / registry tests below keep
+// landing on state:"running".
 const FAKE_ROLE_PROMPT = "You are pilot. Work carefully. Small commits.";
-const FAKE_ROLE_MD = `---
-name: pilot
-skills: []
-allowedTools: Bash(git *) Bash(gh *) Bash(bun *) Bash(fleet *) Edit Write
-may_spawn: []
-reports_to: operator
-gates: []
----
-${FAKE_ROLE_PROMPT}
-`;
+const FAKE = fakeBlueprintFiles({
+  repo: "acme-org/websites", roles: ["pilot"],
+  roleMd: { name: "pilot", prompt: FAKE_ROLE_PROMPT },
+});
+const { fleetJson: FAKE_FLEET_JSON, orgJson: FAKE_ORG_JSON, roleMd: FAKE_ROLE_MD } = FAKE;
 // Fleet Spawn P3, Task 4 (R-P3-6): same role, `keep_alive: false` added —
-// used only by the setKeepAlive tests below.
+// used only by the setKeepAlive tests below. Kept local (suite-specific
+// variant, deliberately not folded): same frontmatter as FAKE.roleMd with
+// the keep_alive line, same prompt.
 const FAKE_ROLE_MD_KEEP_ALIVE_FALSE = `---
 name: pilot
 skills: []
@@ -84,18 +82,9 @@ keep_alive: false
 ---
 ${FAKE_ROLE_PROMPT}
 `;
-const FAKE_FLEET_JSON = JSON.stringify({
-  blueprint: { repo: "acme-org/websites", ref: "main" }, roles: ["pilot"], instance_type: "standard-2",
-});
-const FAKE_ORG_JSON = JSON.stringify({ edges: { cto: ["release"] }, gates: { merge: ["release"] } });
 
 function fakeFetchBlueprintFile(): ProvisionDeps["fetchBlueprintFile"] {
-  return vi.fn(async (_repo: string, path: string) => {
-    if (path.endsWith("fleet.json")) return FAKE_FLEET_JSON;
-    if (path.endsWith("org.json")) return FAKE_ORG_JSON;
-    if (path.endsWith(".md")) return FAKE_ROLE_MD;
-    throw new Error(`fakeFetchBlueprintFile: unexpected path ${path}`);
-  });
+  return vi.fn(fakeBlueprintFetch(FAKE));
 }
 
 // One Map behind both keys, exactly as the real DurableObjectStorage is one
@@ -506,9 +495,9 @@ describe("handleStudio", () => {
     });
     const fetchBlueprintFile = vi.fn(async (repo: string, path: string, ref: string) => {
       fetchedPaths.push(path);
-      if (path.endsWith("fleet.json")) return FAKE_FLEET_JSON;
-      if (path.endsWith("org.json")) return FAKE_ORG_JSON;
-      return FAKE_ROLE_MD;
+      if (path.endsWith("fleet.json")) return FAKE.fleetJson;
+      if (path.endsWith("org.json")) return FAKE.orgJson;
+      return FAKE.roleMd;
     });
     const { testEnv } = envWithFakeStudio(sbExecFake, fetchBlueprintFile);
 
@@ -550,9 +539,9 @@ describe("handleStudio", () => {
     const sbExecFake = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
     const fetchBlueprintFile = vi.fn(async (_repo: string, path: string, ref: string) => {
       fetchedRefs.push({ path, ref });
-      if (path.endsWith("fleet.json")) return FAKE_FLEET_JSON;
-      if (path.endsWith("org.json")) return FAKE_ORG_JSON;
-      return FAKE_ROLE_MD;
+      if (path.endsWith("fleet.json")) return FAKE.fleetJson;
+      if (path.endsWith("org.json")) return FAKE.orgJson;
+      return FAKE.roleMd;
     });
     const { testEnv } = envWithFakeStudio(sbExecFake, fetchBlueprintFile);
 
@@ -1561,8 +1550,8 @@ describe("handleStudio", () => {
     authorized();
     const sbExecFake = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
     const fetchBlueprintFile = vi.fn(async (_repo: string, path: string) => {
-      if (path.endsWith("fleet.json")) return FAKE_FLEET_JSON;
-      if (path.endsWith("org.json")) return FAKE_ORG_JSON;
+      if (path.endsWith("fleet.json")) return FAKE.fleetJson;
+      if (path.endsWith("org.json")) return FAKE.orgJson;
       return FAKE_ROLE_MD_KEEP_ALIVE_FALSE;
     });
     const { testEnv, fakeNs } = envWithFakeStudio(sbExecFake, fetchBlueprintFile);

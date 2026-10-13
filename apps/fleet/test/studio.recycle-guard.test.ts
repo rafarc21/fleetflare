@@ -11,6 +11,7 @@ import {
 import { BRINGUP_TOKEN_WRITE_SECTION, type ObservedStorage } from "../src/studio/observed";
 import type { SessionSyncDeps, SessionSyncStorage } from "../src/studio/session-sync";
 import type { ProvisionConfig, StudioStatus, StudioReadiness } from "../src/studio/types";
+import { fakeBlueprintFiles } from "./helpers/blueprint-fixture";
 
 /**
  * Issue #96, maestro amendment. Measured 2026-09-24: the BETA coordinator
@@ -66,20 +67,19 @@ function fullStorage(state = "running"): StudioStorage & SessionSyncStorage & Ob
   return storage(state) as StudioStorage & SessionSyncStorage & ObservedStorage;
 }
 
-const FAKE_FLEET_JSON = JSON.stringify({
-  blueprint: { repo: "rafarc21/fleetflare", ref: "main" }, roles: ["web-studio"], instance_type: "standard-2",
+// Canned blueprint triple — strings from helpers/blueprint-fixture.ts (refs
+// #750) via the local alias names realProvisionDeps()'s exact-path
+// dispatcher below already references; the dispatcher stays untouched. This
+// suite's own repo/role/tools (rafarc21/fleetflare, web-studio,
+// "Bash(git *) Bash(fleet *) Edit Write") stay builder args — the
+// divergence is load-bearing.
+const { fleetJson: FAKE_FLEET_JSON, orgJson: FAKE_ORG_JSON, roleMd: FAKE_ROLE_MD } = fakeBlueprintFiles({
+  repo: "rafarc21/fleetflare", roles: ["web-studio"],
+  roleMd: {
+    name: "web-studio", prompt: "You are web-studio. Sandbox role, low stakes.",
+    allowedTools: "Bash(git *) Bash(fleet *) Edit Write",
+  },
 });
-const FAKE_ROLE_MD = `---
-name: web-studio
-skills: []
-allowedTools: Bash(git *) Bash(fleet *) Edit Write
-may_spawn: []
-reports_to: operator
-gates: []
----
-You are web-studio. Sandbox role, low stakes.
-`;
-const FAKE_ORG_JSON = JSON.stringify({ edges: { cto: ["release"] }, gates: { merge: ["release"] } });
 
 /**
  * Review round 5, Finding 1 — a REAL `provisionWithStorage`-shaped

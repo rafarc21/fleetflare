@@ -23,6 +23,7 @@ import { POOL } from "../src/llm/models";
 import { getStudioStub } from "../src/studio/profile";
 import type { StudioStatus, ProvisionConfig } from "../src/studio/types";
 import type { Env } from "../src/env";
+import { fakeBlueprintFiles } from "./helpers/blueprint-fixture";
 
 // P3 Task 2 — /fleet/spawn (machine surface, R-P3-7) and /studio/spawn (the
 // operator passthrough). Same testing posture as test/studio.routes.test.ts:
@@ -41,28 +42,21 @@ import type { Env } from "../src/env";
 const PARENT_ID = "websites--pilot";
 const REPO_SLUG = "acme-org/websites";
 
-const FAKE_FLEET_JSON = JSON.stringify({
-  blueprint: { repo: REPO_SLUG, ref: "v1.0.0" },
+// Canned blueprint triple — strings from helpers/blueprint-fixture.ts (refs
+// #750) via the local alias names this file's dispatchers (and the comments
+// naming FAKE_FLEET_JSON) already use. The fixture org: pilot may spawn
+// release, and the operator may spawn the three roles T3 will add to the
+// real fleet/blueprint/org.json. Until then the real file has no `operator`
+// edge at all, and /studio/spawn 403s cleanly against it — proven by its own
+// test below.
+const { fleetJson: FAKE_FLEET_JSON, orgJson: FAKE_ORG_JSON, roleMd: FAKE_ROLE_MD } = fakeBlueprintFiles({
+  repo: REPO_SLUG, ref: "v1.0.0",
   roles: ["pilot", "release", "scratch", "cto"],
-  instance_type: "standard-2",
-});
-const FAKE_ROLE_MD = `---
-name: release
-skills: []
-allowedTools: Bash(git *) Edit
-may_spawn: []
-reports_to: cto
-gates: []
----
-You are release. Merge carefully.
-`;
-// The fixture org: pilot may spawn release, and the operator may spawn the
-// three roles T3 will add to the real fleet/blueprint/org.json. Until then
-// the real file has no `operator` edge at all, and /studio/spawn 403s
-// cleanly against it — proven by its own test below.
-const FAKE_ORG_JSON = JSON.stringify({
+  roleMd: {
+    name: "release", prompt: "You are release. Merge carefully.",
+    allowedTools: "Bash(git *) Edit", reportsTo: "cto",
+  },
   edges: { pilot: ["release"], operator: ["cto", "pilot", "scratch"] },
-  gates: { merge: ["release"] },
 });
 
 function fakeBlueprintFetch(overrides: Partial<Record<"fleet" | "org", () => Promise<string>>> = {}) {
