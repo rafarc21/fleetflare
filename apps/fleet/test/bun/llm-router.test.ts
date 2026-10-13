@@ -68,6 +68,12 @@ describe("pickModels", () => {
     const pool = P.map((m) => (m.key === "kimi" ? { ...m, smokePassed: false } : m));
     expect(pickModels({ ...base, pool, assigned: "@cf/b/kimi", states: { ...ALL } })).not.toContain("@cf/b/kimi");
   });
+
+  test("never throws and stays non-empty when nothing has smoke-passed", () => {
+    const pool = P.map((m) => ({ ...m, smokePassed: false }));
+    const out = pickModels({ ...base, pool, assigned: null, states: { ...ALL } });
+    expect(out.length).toBeGreaterThan(0);
+  });
 });
 
 describe("defaultModelFor", () => {

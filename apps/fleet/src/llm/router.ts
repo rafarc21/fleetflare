@@ -18,9 +18,14 @@ function hash(s: string): number {
   return h;
 }
 
-/** Round-robin default: stable per studio id over smoke-passed active models (any eligible model if none active). */
+/**
+ * Round-robin default: stable per studio id over smoke-passed active models (any eligible model if none active).
+ * Falls back to the full unfiltered pool when zero models have passed the smoke test, so a model id is always
+ * returned rather than crashing on an empty selection.
+ */
 export function defaultModelFor(studioId: string, pool: readonly PoolModel[], states: Record<string, ModelState>): string {
-  const eligible = pool.filter((m) => m.smokePassed);
+  const smokePassed = pool.filter((m) => m.smokePassed);
+  const eligible = smokePassed.length > 0 ? smokePassed : pool;
   const active = eligible.filter((m) => stateOf(states, m.id) === "active");
   const from = active.length > 0 ? active : eligible;
   return from[hash(studioId) % from.length].id;
@@ -39,7 +44,7 @@ export function pickModels(input: {
   const eligible = pool.filter((m) => m.smokePassed);
   const rank = (id: string) => ({ active: 0, overflow: 1, demoted: 2 })[stateOf(input.states, id)];
   const known = input.assigned !== null && eligible.some((m) => m.id === input.assigned);
-  const main = known && rank(input.assigned!) === 0 ? input.assigned! : defaultModelFor(input.studioId, eligible, input.states);
+  const main = known && rank(input.assigned!) === 0 ? input.assigned! : defaultModelFor(input.studioId, pool, input.states);
   const rest = eligible
     .map((m) => m.id)
     .filter((id) => id !== main)
