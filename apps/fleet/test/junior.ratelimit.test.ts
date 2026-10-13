@@ -26,7 +26,7 @@ describe("checkAndConsumeJuniorRateLimit", () => {
     expect(r).toEqual({ ok: true });
   });
 
-  it("blocks the (default + 1)th call within the same minute", async () => {
+  it("blocks the (configured + 1)th call within the same minute", async () => {
     const env_ = { JUNIOR_RATE_PER_MINUTE: "2" };
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 0)).toEqual({ ok: true });
     expect(await checkAndConsumeJuniorRateLimit(env.DB, env_, STUDIO, 100)).toEqual({ ok: true });
