@@ -333,7 +333,7 @@ function fakeStudioNamespace(
           wakeCmds.push(cmd);
           return cmd === PANE_PROBE_CMD ? wakePaneProbeResult : wakeExecResult;
         },
-        false, async () => {}, prompt,
+        { isMaestro: false, armSweep: async () => {}, prompt },
       ),
   };
   return {

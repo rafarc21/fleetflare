@@ -53,7 +53,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
     const storage = fakeStorage(status("stopped"));
     const { cmds, exec } = container();
     const armSweep = vi.fn(async () => {});
-    const outcome = await wakeStudioWith(storage, exec, true, armSweep, "WAKE EVENT #2 20s", () => NOW);
+    const outcome = await wakeStudioWith(storage, exec, { isMaestro: true, armSweep, prompt: "WAKE EVENT #2 20s", now: () => NOW });
     expect(cmds).toEqual([]);
     expect(armSweep).not.toHaveBeenCalled();
     expect(outcome.ok).toBe(false);
@@ -64,7 +64,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
   it("a never-provisioned studio (no recorded status): zero execs — a wake must not mint a container", async () => {
     const storage = fakeStorage();
     const { cmds, exec } = container();
-    const outcome = await wakeStudioWith(storage, exec, true, vi.fn(async () => {}), "WAKE", () => NOW);
+    const outcome = await wakeStudioWith(storage, exec, { isMaestro: true, armSweep: vi.fn(async () => {}), prompt: "WAKE", now: () => NOW });
     expect(cmds).toEqual([]);
     expect(outcome.ok).toBe(false);
     expect(outcome.skipped).toBe(true);
@@ -74,7 +74,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
     const storage = fakeStorage(status("running"));
     const { cmds, exec } = container("claude");
     const armSweep = vi.fn(async () => {});
-    const outcome = await wakeStudioWith(storage, exec, true, armSweep, "WAKE sweep 3", () => NOW);
+    const outcome = await wakeStudioWith(storage, exec, { isMaestro: true, armSweep, prompt: "WAKE sweep 3", now: () => NOW });
     expect(outcome).toEqual({ ok: true });
     expect(cmds).toEqual([PANE_PROBE_CMD, PANE_SCREEN_CMD, wakeCmd("WAKE sweep 3")]);
     expect(armSweep).toHaveBeenCalledTimes(1);
@@ -84,7 +84,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
     const storage = fakeStorage(status("running"));
     const { cmds, exec } = container("bash");
     const armSweep = vi.fn(async () => {});
-    const outcome = await wakeStudioWith(storage, exec, true, armSweep, "WAKE sweep 3", () => NOW);
+    const outcome = await wakeStudioWith(storage, exec, { isMaestro: true, armSweep, prompt: "WAKE sweep 3", now: () => NOW });
     expect(outcome.ok).toBe(false);
     expect(outcome.skipped).toBeUndefined();
     expect(cmds).toEqual([PANE_PROBE_CMD]);
@@ -95,7 +95,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
     const storage = fakeStorage(status("running"));
     const { exec } = container("claude");
     const armSweep = vi.fn(async () => {});
-    const outcome = await wakeStudioWith(storage, exec, false, armSweep, "WAKE", () => NOW);
+    const outcome = await wakeStudioWith(storage, exec, { isMaestro: false, armSweep, prompt: "WAKE", now: () => NOW });
     expect(outcome.ok).toBe(true);
     expect(armSweep).not.toHaveBeenCalled();
   });
@@ -104,7 +104,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
     const storage = fakeStorage(status("running"));
     await storage.put(DESTROYING_KEY, new Date(NOW.getTime() - 5_000).toISOString());
     const { cmds, exec } = container("claude");
-    const outcome = await wakeStudioWith(storage, exec, true, vi.fn(async () => {}), "WAKE", () => NOW);
+    const outcome = await wakeStudioWith(storage, exec, { isMaestro: true, armSweep: vi.fn(async () => {}), prompt: "WAKE", now: () => NOW });
     expect(cmds).toEqual([]);
     expect(outcome.ok).toBe(false);
     expect(outcome.skipped).toBe(true);
@@ -114,7 +114,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
     const storage = fakeStorage(status("running"));
     await storage.put(DESTROYING_KEY, new Date(NOW.getTime() - 60 * 60 * 1000).toISOString());
     const { cmds, exec } = container("claude");
-    const outcome = await wakeStudioWith(storage, exec, false, vi.fn(async () => {}), "WAKE", () => NOW);
+    const outcome = await wakeStudioWith(storage, exec, { isMaestro: false, armSweep: vi.fn(async () => {}), prompt: "WAKE", now: () => NOW });
     expect(outcome.ok).toBe(true);
     expect(cmds).toEqual([PANE_PROBE_CMD, PANE_SCREEN_CMD, wakeCmd("WAKE")]);
   });
@@ -344,7 +344,7 @@ describe("the destroy marker's refusal names itself (#100 N4)", () => {
     const storage = fakeStorage(status("running"));
     await storage.put(DESTROYING_KEY, new Date(NOW.getTime() - 5_000).toISOString());
     const { exec } = container("claude");
-    const outcome = await wakeStudioWith(storage, exec, false, vi.fn(async () => {}), "WAKE", () => NOW);
+    const outcome = await wakeStudioWith(storage, exec, { isMaestro: false, armSweep: vi.fn(async () => {}), prompt: "WAKE", now: () => NOW });
     expect(outcome.skipped).toBe(true);
     expect(outcome.error).toContain("a destroy is in flight");
   });

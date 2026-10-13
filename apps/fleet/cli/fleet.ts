@@ -31,6 +31,7 @@ import { parseGitRemote, refuseBadSegment, repoIdSegment, studioIdForTarget, stu
 import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior, cmdJuniorStats } from "./junior";
 import { cmdAccounts, cmdAccountsSync, cmdAccountsHold, cmdAccountsClear } from "./accounts";
+import { cmdModelsLs, cmdModelsAssign, cmdModelsSet } from "./models";
 import { formatAccountResolution } from "./accounts-format";
 import { sweepAllPages, type SweepPage } from "./junior-sweep";
 import { reapTerminalAll, type TerminalPage } from "./reap-terminal";
@@ -74,7 +75,7 @@ import {
   type OrcaDeps, type TabsReport, type TabsPlanEntry,
 } from "./orca-workspace";
 import type { StudioStatus } from "../src/studio/types";
-import type { BoardTask, TaskState } from "../src/board/types";
+import type { BoardTask, BoardTaskState } from "../src/board/types";
 import type { TaskComment } from "../src/board/board";
 import type { TaskBriefArgs } from "../src/studio/cli-args";
 
@@ -1307,7 +1308,7 @@ function reportRepo(cmd: string, detected: DetectedRepo): void {
  * spawn token, and with the parent fixed to the literal "operator" role).
  */
 async function cmdSpawn(
-  creds: Credentials, role: string, newInstance: boolean, leadType?: "claude" | "glm",
+  creds: Credentials, role: string, newInstance: boolean, leadType?: "claude" | "glm" | "kimi" | "deepseek",
 ): Promise<void> {
   // Dynamic repo selection (P4a): the detected repo rides along as `repo`.
   // Omitted entirely when this folder names none — the Worker's own default
@@ -1328,7 +1329,10 @@ async function cmdSpawn(
     //
     // Issue #249: `--lead glm` sends `leadType: "glm"` the SAME way — omitted
     // without the flag, so a bare `fleet spawn <role>` stays byte-identical
-    // to every request sent before this feature existed.
+    // to every request sent before this feature existed. #717: `--lead
+    // kimi`/`--lead deepseek` ride the identical field, unresolved — the
+    // Worker's own readLeadTypeRequest (src/studio/spawn.ts) is what maps
+    // either to a glm-led studio with that pool model pinned.
     body: JSON.stringify({
       role, ...(detected.slug ? { repo: detected.slug } : {}),
       ...(newInstance ? { instance: "next" } : {}),
@@ -1873,7 +1877,7 @@ async function taskStateFetchTransition(
  * exits 1, the same posture `boardRequest` already establishes for every
  * other board verb in this file.
  */
-async function cmdTaskState(creds: Credentials, number: number, to: TaskState, fromNone = false): Promise<void> {
+async function cmdTaskState(creds: Credentials, number: number, to: BoardTaskState, fromNone = false): Promise<void> {
   const detected = await detectRepo();
   reportRepo("fleet task state", detected);
 
@@ -3134,6 +3138,12 @@ async function main(): Promise<void> {
       return cmdAccountsHold(creds, parsed.name, parsed.until, parsed.reason);
     case "accounts-clear":
       return cmdAccountsClear(creds, parsed.name);
+    case "models-ls":
+      return cmdModelsLs(creds);
+    case "models-assign":
+      return cmdModelsAssign(creds, parsed.studio, parsed.model);
+    case "models-set":
+      return cmdModelsSet(creds, parsed.state, parsed.model);
   }
 }
 

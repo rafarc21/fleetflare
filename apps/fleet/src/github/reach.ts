@@ -31,3 +31,12 @@
  * they would then go and "fix".
  */
 export type RepoReach = { reachable: true } | { reachable: false; remedy: string };
+
+/**
+ * The fetch-side alias of the answer above: what src/github/auth.ts's
+ * reachRepo is, and what every caller that injects reachability names as a
+ * parameter. Swept here (S29-F4, refs #647) from two identical local
+ * declarations in src/board/routes.ts and src/studio/routes.ts; this module
+ * imports nothing, so every tsconfig project can type-check against it.
+ */
+export type RepoReachFetch = (slug: string) => Promise<RepoReach>;

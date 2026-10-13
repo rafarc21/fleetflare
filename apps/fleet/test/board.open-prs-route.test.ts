@@ -5,6 +5,7 @@ import * as authModule from "../src/studio/auth";
 import * as openPrsModule from "../src/board/open-prs";
 import { handleBoard } from "../src/board/routes";
 import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
+import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import type { BoardApi } from "../src/board/board";
 import type { BoardComment } from "../src/board/api";
 import { studioLabel, type BoardTask, type EnvelopeDoc } from "../src/board/types";
@@ -37,33 +38,15 @@ const reach = async (slug: string): Promise<RepoReach> =>
     ? { reachable: true }
     : { reachable: false, remedy: "is not reachable by this fleet" };
 
-function task(overrides: Partial<BoardTask> = {}): BoardTask {
-  return {
-    number: 12, url: "https://github.com/o/r/issues/12", title: "Build the task board",
-    body: "## Objective\n\nShip it.\n", state: "working", labels: ["working"],
-    assignee: null, milestone: null, open: true, updatedAt: "2026-08-25T10:00:00Z", ...overrides,
-  };
-}
-
-function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
-  return {
-    createIssue: vi.fn(async () => task()),
-    getIssue: vi.fn(async () => task()),
-    listIssues: vi.fn(async () => [task()]),
-    addLabels: vi.fn(async () => {}),
-    removeLabel: vi.fn(async () => {}),
-    createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/12#issuecomment-1" })),
-    pullRequestExists: vi.fn(async () => true),
-    listComments: vi.fn(async () => []),
-    listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1" }]),
-    branchExists: vi.fn(async () => true),
-    commitExists: vi.fn(async () => true),
-    closeIssue: vi.fn(async () => {}),
-    listOpenPullFiles: vi.fn(async () => []),
-    getPullRequest: vi.fn(async () => ({ number: 0, merged: false, open: true, title: "" })),
-    ...overrides,
-  };
-}
+// Old local defaults preserved: "Build the task board" title, "working"
+// state, and the Sprint-1 listMilestones seed.
+const task = (overrides: Partial<BoardTask> = {}) => boardTask({
+  title: "Build the task board", state: "working", labels: ["working"], ...overrides,
+});
+const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
+  listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1" }]),
+  ...overrides,
+}, () => task());
 
 /** Same shape as board.routes.test.ts's own seedStudio: the only fields the
  *  open-prs route reads are `id` and `repoSlug`, so the rest of the row is
@@ -137,7 +120,7 @@ describe("GET /studio/board/open-prs", () => {
       getPullRequest: vi.fn(async (_repo: string, number: number) =>
         ({ number, merged: false, open: true, title: "feat: the thing" })),
     });
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api, reach });
 
     expect(res.status).toBe(200);
     const body = await res.json() as { repo: string; prs: Record<string, unknown[]>; unknown: string[] };
@@ -163,7 +146,7 @@ describe("GET /studio/board/open-prs", () => {
     await seedStudio("websites--web-studio", "acme-org/websites");
     await seedStudio("beta--web-studio", "acme-org/beta");
     const api = fakeApi();
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api, reach });
 
     expect(res.status).toBe(200);
     const body = await res.json() as { prs: Record<string, unknown[]> };
@@ -176,7 +159,7 @@ describe("GET /studio/board/open-prs", () => {
   it("case-insensitive: an uppercase repoSlug row matches the lowercased resolved repo", async () => {
     authorized();
     await seedStudio("websites--web-studio", "ACME-ORG/Websites");
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, fakeApi(), reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api: fakeApi(), reach });
 
     expect(res.status).toBe(200);
     const body = await res.json() as { prs: Record<string, unknown[]> };
@@ -188,7 +171,7 @@ describe("GET /studio/board/open-prs", () => {
     await seedStudio("websites--legacy-studio", null);
 
     // Default repo (no repo query at all): included.
-    const included = await handleBoard(req("/studio/board/open-prs"), testEnv, fakeApi(), reach);
+    const included = await handleBoard(req("/studio/board/open-prs"), testEnv, { api: fakeApi(), reach });
     expect(included.status).toBe(200);
     expect(Object.keys((await included.json() as { prs: Record<string, unknown[]> }).prs))
       .toEqual(["websites--legacy-studio"]);
@@ -196,7 +179,7 @@ describe("GET /studio/board/open-prs", () => {
     // A named non-default repo: a pre-P4a studio was cloned from the fleet
     // default by construction, so it cannot belong to acme-org/beta.
     const excluded = await handleBoard(
-      req("/studio/board/open-prs?repo=acme-org/beta"), testEnv, fakeApi(), reach,
+      req("/studio/board/open-prs?repo=acme-org/beta"), testEnv, { api: fakeApi(), reach },
     );
     expect(excluded.status).toBe(200);
     expect((await excluded.json() as { prs: Record<string, unknown[]> }).prs).toEqual({});
@@ -222,7 +205,7 @@ describe("GET /studio/board/open-prs", () => {
       }),
     });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api, reach });
 
     expect(res.status).toBe(200);
     const body = await res.json() as { prs: Record<string, unknown[]>; unknown: string[] };
@@ -248,7 +231,7 @@ describe("GET /studio/board/open-prs", () => {
     vi.spyOn(openPrsModule, "studioOpenPrs").mockImplementation(async (_api, _repo, studioId) =>
       studioId === "websites--release-studio" ? bad : { ok: true as const, value: [] });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, fakeApi(), reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api: fakeApi(), reach });
 
     expect(res.status).toBe(200);
     const body = await res.json() as { prs: Record<string, unknown[]>; unknown: string[] };
@@ -282,7 +265,7 @@ describe("GET /studio/board/open-prs", () => {
       });
       return { ok: true as const, value: [] };
     });
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, fakeApi(), reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api: fakeApi(), reach });
     expect(res.status).toBe(200);
     expect(bothStartedTogether).toBe(true);
   });
@@ -295,7 +278,7 @@ describe("GET /studio/board/open-prs", () => {
   it("401s without an Access header — an auth failure never costs a scan", async () => {
     await seedStudio("websites--web-studio", "acme-org/websites");
     const api = fakeApi();
-    const res = await handleBoard(new Request("https://x/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    const res = await handleBoard(new Request("https://x/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api, reach });
     expect(res.status).toBe(401);
     expect(api.listIssues).toHaveBeenCalledTimes(0);
   });
@@ -305,7 +288,7 @@ describe("GET /studio/board/open-prs", () => {
     await seedStudio("websites--web-studio", "acme-org/websites");
     const res = await handleBoard(
       req("/studio/board/open-prs?repo=acme-org/websites", { method: "POST", body: "{}" }),
-      testEnv, fakeApi(), reach,
+      testEnv, { api: fakeApi(), reach },
     );
     expect(res.status).toBe(405);
   });
@@ -315,7 +298,7 @@ describe("GET /studio/board/open-prs", () => {
     await seedStudio("websites--web-studio", "acme-org/websites");
     const api = fakeApi();
     const res = await handleBoard(
-      req("/studio/board/open-prs?repo=someone/else"), testEnv, api, reach,
+      req("/studio/board/open-prs?repo=someone/else"), testEnv, { api, reach },
     );
     expect(res.status).toBe(403);
     expect(await res.text()).toContain("is not reachable by this fleet");
@@ -327,7 +310,7 @@ describe("GET /studio/board/open-prs", () => {
     authorized();
     await seedStudio("beta--web-studio", "acme-org/beta");
     const api = fakeApi();
-    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/open-prs?repo=acme-org/websites"), testEnv, { api, reach });
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ repo: "acme-org/websites", prs: {}, unknown: [] });

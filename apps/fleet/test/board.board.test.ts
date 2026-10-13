@@ -8,6 +8,7 @@ import {
   type BoardApi,
 } from "../src/board/board";
 import { parseEnvelopeComment, renderEnvelopeComment, parseEnvelope } from "../src/board/envelope";
+import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import {
   studioLabel, taskAssignees, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES, type BoardTask,
 } from "../src/board/types";
@@ -16,33 +17,15 @@ import { GitHubError } from "../src/board/api";
 
 const MSG_ID = "0d9f1c2e-0000-4000-8000-000000000001";
 
-function task(overrides: Partial<BoardTask> = {}): BoardTask {
-  return {
-    number: 12, url: "https://github.com/o/r/issues/12", title: "Build the task board",
-    body: "## Objective\n\nShip it.\n", state: "submitted", labels: ["submitted"],
-    assignee: null, milestone: "Sprint 1", open: true, updatedAt: "2026-08-25T10:00:00Z", ...overrides,
-  };
-}
-
-function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
-  return {
-    createIssue: vi.fn(async () => task()),
-    getIssue: vi.fn(async () => task()),
-    listIssues: vi.fn(async () => [task()]),
-    addLabels: vi.fn(async () => {}),
-    removeLabel: vi.fn(async () => {}),
-    createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/12#issuecomment-1" })),
-    pullRequestExists: vi.fn(async () => true),
-    listComments: vi.fn(async () => []),
-    listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1" }]),
-    branchExists: vi.fn(async () => true),
-    commitExists: vi.fn(async () => true),
-    closeIssue: vi.fn(async () => {}),
-    listOpenPullFiles: vi.fn(async () => []),
-    getPullRequest: vi.fn(async () => ({ number: 0, merged: false, open: true, title: "" })),
-    ...overrides,
-  };
-}
+// Old local defaults preserved as explicit overrides: title "Build the task
+// board", milestone "Sprint 1", and the Sprint-1 listMilestones seed the
+// createTask/listTasks milestone-resolution tests resolve against.
+const task = (overrides: Partial<BoardTask> = {}) =>
+  boardTask({ title: "Build the task board", milestone: "Sprint 1", ...overrides });
+const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
+  listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1" }]),
+  ...overrides,
+}, () => task());
 
 const brief = {
   title: "Build the task board",

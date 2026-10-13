@@ -145,3 +145,175 @@ the reason stated. "Proposed action" says un-export (used inside its own file
 ## Counts
 
 15 findings: 12 GLM-OK with proposed un-export actions (F1-F3, F5-F7, F9, F11-F13 + the F14 record + F15 keep), 1 CLAUDE-ONLY (F10, do.ts en-masse pass), 2 keep-with-reason (F4, F15), 1 record-only (F14). Filed deepen issues: one per actionable batch — F1, F2, F3, F5, F6, F7, F9, F11, F12, F13 (GLM-OK un-export batches), F10 (CLAUDE-ONLY), F8 (correction-only, no issue needed).
+
+## S24-F14 appendix — full sole-test-importer distribution (#613)
+
+Fresh count at origin/main f558821 (the sweep above was at 30bceb7), built
+with an importer map over src, cli, test, test-integration, scripts, page —
+container/ excluded both as exporter and importer; the excluded lanes
+(auth, secrets, rescue, failover, accounts routing, deploy, migrations,
+write-proxy, leak-gate, approvals) are excluded as exporters but still
+searched as importers. Method: parse every `import { NAME }` (including
+inline `type NAME` and multi-line blocks), `export { NAME } from`,
+`import * as X` plus X.NAME usage, and dynamic `await import()` /
+`import("mod").NAME`; comment and string mentions are not importers; a
+file importing itself does not count; re-export blocks are not counted as
+the re-exporter own exports. Class rule: the name has at least one
+importer, and EVERY importer is a test-lane file (test/, test/bun/,
+test-integration/).
+
+- Total: 481 in-scope sole-test-importer names across 92 modules. Delta
+  vs the sweep own 209/290 split: the original 209 is the same class under
+  a narrower rule — importers exactly one canonical own test file, 207
+  names here, plus burn.ts 2 more (the old pass attributed burn.ts
+  re-exported session-stats names to burn; this pass attributes them to
+  session-stats.ts, whose consumer burn.ts is a non-test file) — and the
+  7 anthropic-route.ts names the sweep recorded under F4 instead. The
+  290 rest of the old claim and the remaining 267 of the 481 are the same
+  class where several tests of one module, cross-module tests, or
+  fixtures import the name (do.ts 75, provision.ts 28, cli/fleet.ts 27
+  live here).
+- Per-module distribution, every module, count in parens at the row end:
+
+| module | names |
+|---|---|
+| src/studio/do.ts | ARCHIVE_DEADLINE_MS, AUTO_WORKING_EVERY_MS, AUTO_WORKING_KEY, BARE_SELF_HEALED, CHECK_ATTEMPTS, DELIVERED_TASK_KEY, DONE_RECORD_HASHES_KEY, ExecUnreachableError, LastStopStorage, LaunchRefusedError, ProvisionedVerdict, REFRESH_SECONDS, ROLLOUT_EXIT_MARKER, RefreshDeps, SHIP_EXEC_DEADLINE_MS, SPAWN_TOKEN_KEY, STALE_SHELL_NUDGE_EVERY_MS, STALE_SHELL_NUDGE_KEY, STUDIO_TICKS, SpawnTokenStorage, StartRefusedError, TICK_DEADLINES_MS, applyAccountClears, applyStudioGitSafetyPort, checkAndRecordReadiness, checkProvisionedGated, checkProvisionedWithRetry, clearForceMappedAccount, clearSessionGuard, constructorLaunch, decideAccountClears, decideHeal, deliverAssignedTaskOnBringup, disarmStudioTicks, doneRecordComment, doneRecordPutter, ensureSpawnToken, gatedStateIn, healBareContainer, healDiedInRollout, incarnationPatch, installLeakGatePort, launchAccountName, launchAccountOrRefuse, launchFields, loadOrMintSpawnToken, mainCheckoutPushFromFailure, mirrorBurnToRegistry, opsFileFetcher, provisionWithFreshVerdict, readTailscaleHost, recordContainerStop, recordLaunchedAccount, recordWipLastCheck, recycleWithSync, refreshWithStorage, refuseUnlessMappedAccountLaunchable, rescueSnapshot, resolveLeadType, restartWithFreshVerdict, restartWithSync, runRefreshCredential, runRefreshToken, runScheduledTick, runShipTickWithObservation, startAccountRefusal, startRefusal, statusDetailWithStorage, studioEnvVars, sweepWake, syncSessionCycle, wakeStudioWith, wipLastCheckResultOf, wipTargetChecksFrom, withObserved (75) |
+| src/studio/install-cache.ts | INSTALL_ACTIVITY_WINDOW_SECONDS, INSTALL_CACHE_FAILURE_BACKOFF_BASE_MS, INSTALL_CACHE_FAILURE_BACKOFF_MAX_MS, INSTALL_CACHE_MAX_BYTES, INSTALL_CACHE_RESTORE_BUDGET_MS, INSTALL_CACHE_RESTORE_DISK_SAFETY_MULTIPLIER, INSTALL_CACHE_REVERIFY_EVERY, INSTALL_CACHE_SAVE_LEASE_STALE_MS, INSTALL_CACHE_URL_ENV, LOCKFILE_CANDIDATES, R2_BUCKET_NAME_DEFAULT, WORKSPACE_LOCK_MARKERS, absoluteCacheDir, bunInstallRunningCmd, dirSlug, discoverCacheDirsCmd, guardDirWithinRepo, installCacheFailureBackoffActive, installCacheFailureBackoffMs, installCacheFailureKey, installCacheHashKey, installCacheKey, installCachePrefix, installCacheRestoreCmd, installCacheReverifyKey, installCacheSaveCmd, keysToPrune, lockHashCmd, nodeModulesPresentCmd, normalizeCacheDir, parseBunInstallRunning, parseCacheDirs, parseInstallCacheFailure, parseLockHash, parseRestoreFailureReason, parseSaveOutcome, repoCheckoutDirName (37) |
+| src/studio/provision.ts | BRINGUP_CMD, BRINGUP_RETRY_HEALED, CAVEMAN_FLAG_TRIES, CONTAINER_HAS_PROJECTS_CMD, DESTROY_EPOCH_KEY, FRESH_SESSION_INVOLUNTARY_LINE_THRESHOLD, FRESH_SESSION_MARKER, OPS_HOUSE_RULES_PATH, PROVISIONED_CHECK_TRIES, SESSION_ADOPT_DEADLINE_MS, SESSION_ADOPT_MARKER, SESSION_RESTORE_DIR, SESSION_RESTORE_MANIFEST_PATH, SessionMarkStorage, adoptWorktreeSession, adoptWorktreeSessionCmd, bringupLogAppendCmd, composePromptBlocks, discoverRescueRefsCmd, freshSessionInvoluntaryRefusal, parseFreshSession, parseSessionAdoption, recordBringupObservation, resolveBringupEnv, restorePartPath, runProvision, runRestart, runSessionRestore (28) |
+| cli/fleet.ts | DetectedRepo, PARK_WARNING_UNAVAILABLE, PARK_WARNING_UNKNOWN_SCAN, REAP_LOCK_STALE_MS, RescueAllDeps, RescueAllFlags, RescueAllOutcome, STRICT_UNMERGED_UNKNOWN_PROCEEDING, STRICT_UNMERGED_UNKNOWN_SCAN, TabsDeps, TabsFlags, cmdLs, cmdPrintAttachHandle, cmdRescueAll, fetchStudioOpenPrs, formatLsHead, formatStudioCount, formatTable, fullErrorLine, openPrsByStudio, parkWarningLines, reapDeps, rescueFetchInit, runRescueAll, runTabs, strictRefusalLines, withReapLock (27) |
+| src/studio/session-sync.ts | BURN_ALERTED_WINDOW_KEY, BURN_CURSOR_KEY, SESSION_ASIDE_MAX, SESSION_ASIDE_RAW_MAX, SESSION_BURN_WATERMARK_KEY, SESSION_DAILY_DATE_KEY, SESSION_EXCLUDES_PATH, SESSION_SYNC_DIR, SESSION_TAR_PATH, asideCleanCmd, asideListCmd, asideMarkCmd, asidePackCmd, asidePartReadCmd, partReadCmd, singleReadCmd, splitCmd, tarAndStatCmd (18) |
+| src/studio/survival-delivery.ts | SURVIVAL_RETRY_MAX_ATTEMPTS, SURVIVAL_RETRY_WINDOW_MS, SurvivalBringup, attributeRescueBranch, branchArtifacts, isRescueBranchFor, isWipRescueRef, matchesTaskNumber, midTurnRow, parseRescueStamp, prArtifactNumbers, rescueBranchNestedPrefix, rescueBranchPrefix, rescueBranchesFor, rescueRefStamp, resolveSurvivalInput, retryBoundExceeded, survivalBriefAllowed (18) |
+| cli/orca-workspace.ts | ContextSalvageDeps, OrcaResult, WorkspaceRegistry, WorkspaceRemovalOutcome, classifyStudioRow, describeWorkspaceRemoval, ensureStudioWorkspace, fileLockAt, fileWorkspaceRegistry, lockFileName, orcaPresent, previewStudioWorkspace, removeStudioWorkspace, studioWorkspaceName (14) |
+| src/studio/credentials.ts | READ_REPOS_TOKEN_PATH, STUDIO_GIT_WRAPPER_PATH, STUDIO_GIT_WRAPPER_TMP_PATH, STUDIO_PUSH_ALIAS_DEPTH_REFUSAL, STUDIO_PUSH_LEAK_REFUSAL, STUDIO_PUSH_NONCOMMIT_REFUSAL, STUDIO_PUSH_PLUMBING_REFUSAL, STUDIO_PUSH_PROBE_FAILED, STUDIO_PUSH_REFUSAL, STUDIO_PUSH_SHELL_ALIAS_REFUSAL, STUDIO_PUSH_SUBMODULE_REFUSAL, STUDIO_PUSH_UNRESOLVED_DEFAULT, studioGitWrapperScript (13) |
+| src/studio/wake.ts | LOOSE_TAIL_LINES, PANE_PROBE_CMD, PANE_SCREEN_CMD, SUBMIT_HINT_TEXT, WAKE_TARGET, flattenPrompt, looseLimitOnScreen, runWake, submitCheckCmd, submitFragment, wakeCmd (11) |
+| src/studio/observed.ts | BRINGUP_TOKEN_WRITE_SECTION, OBSERVED_KEY, SESSION_CONTINUE_SECTION, SESSION_CWD_SECTION, SESSION_FOUND_SECTION, SESSION_LEAD_AGE_SECTION, UNREACHABLE_ELAPSED_MS, emptyObserved, readFileLineCmd, writeIncarnationCmd (10) |
+| src/studio/org.ts | FleetJsonFetchDeps, ORG_CACHE_TTL_MS, ORG_RETRY_MS, OrgFetchDeps, __resetFleetJsonCacheForTests, __resetOrgCacheForTests, createFleetJsonCache, createOrgCache, parseOrgJson (9) |
+| cli/junior.ts | JuniorUsageFetch, fetchJuniorUsage, formatJuniorStats, juniorDisable, juniorEnable, juniorPaths, juniorStatus (7) |
+| src/agents/do.ts | DEFAULT_MAX_TASK_SECONDS, parseMaxTaskSeconds, pollAndClearRearm, pollOnce, shouldAbortOnTerminal, shouldClearRearm, toStartInput (7) |
+| src/directus/client.ts | fetchContractCommercial, fetchContractStakes, fetchProjectByKey, listOpenDecisions, listRequests, listRequirements, stripCommercial (7) |
+| src/llm/anthropic-route.ts | ANTHROPIC_BODY_CAP, LEAD_AI_RETRY_BASE_MS_DEFAULT, LEAD_STREAM_IDLE_MS_DEFAULT, failureClass, leadAiRetryBaseMs, leadStreamIdleMs, runAiWithRetry (7) |
+| src/studio/accounts.ts | ClaudeAccountEnv, MAX_CLAUDE_ACCOUNTS, USAGE_ORDERING_FRESHNESS_MS, claudeAccountVarName, parseAccountMap, selectByHeadroom, unmappedFallbackAccount (7) |
+| src/studio/claude-swap.ts | CswapWindow, HeadroomCandidate, MAX_USAGE_AGE_SECONDS, RESET_MATCH_WINDOW_MS, UsageHeadroom, pickHeadroomAccount, toUsageHeadroom (7) |
+| src/github/api.ts | BLUEPRINT_FILE_MAX_BYTES, INSTALLATION_REPOS_MAX_PAGES, INSTALLATION_REPOS_PAGE_SIZE, compareAhead, ghRequest, listAllBranchNames (6) |
+| src/studio/burn.ts | CURSOR_PERSIST_SOFT_CAP_BYTES, CURSOR_PERSIST_TARGET_BYTES, CURSOR_PRUNE_MS, __setPathMapKeyForTest, parseUsageIncrement, pathMapKey (6) |
+| src/studio/ff.ts | DEFAULT_FF_ROLE, FF_DEFAULT_BOUNDARIES, FF_DEFAULT_OUTPUT, FF_USAGE, describeState, isProvisioned (6) |
+| src/studio/inspect.ts | CHECKOUT_MISSING, CHECKOUT_PRESENT, INSPECT_DEFAULT_TAIL_LINES, TAIL_BEGIN, inspectCmd, parseInspectOutput (6) |
+| cli/reap.ts | REAP_BACKOFF_MS, ReapDestroyResult, ReapInspect, STALL_AFTER_MS, STALL_ALARM_EVERY_MS (5) |
+| src/board/routes.ts | GithubUrlExistenceChecks, PolicyFetch, ReapPort, RescueGcPort, githubAwareVerifyFetch (5) |
+| src/directus/schema-apply.ts | collectionPayload, fieldMismatch, fieldPayload, primaryKeyField, relationPayload (5) |
+| src/directus/schema.ts | CONTRACTS, DECISIONS, PROJECTS, REQUESTS, REQUIREMENTS (5) |
+| src/studio/destroy.ts | DESTROY_REFUSED_PREFIX, DestroyGuard, destroyRefusal, destroyRescueUnconfirmedRefusal, destroyWithSync (5) |
+| src/studio/member-alerts.ts | MemberRow, POLL_LOOP_ELAPSED_MINUTES, POLL_LOOP_TOKENS, goneMemberNames, pollLoopFlags (5) |
+| src/studio/sandbox-api.ts | ExecDeadlineError, STUDIO_SESSION_ID, SandboxHandle, SbExecOptions, SessionBusyError (5) |
+| cli/accounts-format.ts | ACCOUNTS_TABLE_UTC_NOTE, describeCurrentState, describeWould, wouldChange (4) |
+| src/board/board.ts | LEAD_TASK_STATES, REBRIEF_TASK_STATES, TERMINAL_CLOSE_PAGE, requireAssignedTask (4) |
+| src/directus/portal.ts | clientStatus, clientView, clientViews, isDelivered (4) |
+| src/memory/compact.ts | DEMOTION_MIN_AGE_MS, SPRINT_MS, countCitations, demotionVerdict (4) |
+| src/studio/spawn.ts | DEFAULT_MAX_STUDIOS, RESUME_COOLDOWN_MS, readInstanceRequest, readLeadTypeRequest (4) |
+| src/studio/sweep.ts | SWEEP_COUNT_KEY, SweepDeps, SweepStorage, sweepPrompt (4) |
+| cli/context-salvage.ts | inventoryContext, listContextFiles, salvageDestinationFor (3) |
+| cli/ff.ts | FfSpawnNewDeps, ffSpawnNew, fileTask (3) |
+| cli/recycle-outcome.ts | RECYCLE_CLIENT_TIMEOUT_MS, RECYCLE_POLL_ATTEMPTS, RECYCLE_POLL_INTERVAL_MS (3) |
+| src/board/api.ts | BOARD_MAX_PAGES, BOARD_PAGE_SIZE, TASK_TEXTS_MAX_PAGES (3) |
+| src/creds/test-creds.ts | __resetInfisicalTokenCacheForTests, lookupTestCred, parseTestCredsConfig (3) |
+| src/github/promote-close.ts | BatchedPull, PATH1_BATCH_MAX, mergeClosable (3) |
+| src/llm/ratelimit.ts | DEFAULT_LEAD_COUNT_TOKENS_RATE_PER_MINUTE, DEFAULT_LEAD_DAILY_CAP, DEFAULT_LEAD_RATE_PER_MINUTE (3) |
+| src/memory/routes.ts | MEMORY_SURVEY_MAX_FILES, MemoryDeps, githubMemoryDeps (3) |
+| src/studio/gh-wrapper.ts | STUDIO_GH_ALIAS_REFUSAL, STUDIO_GH_LEAK_REFUSAL, STUDIO_GH_PROXY_MISSING (3) |
+| src/studio/paste.ts | PASTE_SEQ_KEY, PasteDeps, SeqStorage (3) |
+| cli/destroy-outcome.ts | DESTROY_POLL_ATTEMPTS, DESTROY_POLL_INTERVAL_MS (2) |
+| cli/wip-format.ts | normalizeWipLastCheck, wipSyncRefEcho (2) |
+| src/board/envelope.ts | ENVELOPE_MAX_CHARS, ENVELOPE_SCHEMA_VERSION (2) |
+| src/board/verify.ts | extractRefCandidates, renderVerifyComment (2) |
+| src/directus/card.ts | CardDeps, renderProjectCard (2) |
+| src/exceptions.ts | __resetExceptionRateCapForTests, pruneWorkerExceptions (2) |
+| src/github/wake-events.ts | WAKE_EVENTS, WAVE_LOG_TITLE (2) |
+| src/junior/ratelimit.ts | DEFAULT_JUNIOR_DAILY_CAP, DEFAULT_JUNIOR_RATE_PER_MINUTE (2) |
+| src/junior/route.ts | JUNIOR_BODY_CAP, normalizeAiResult (2) |
+| src/llm/translate.ts | GLM_MIN_MAX_TOKENS, closeStream (2) |
+| src/studio/blueprint.ts | HOUSE_RULES, Role (2) |
+| src/studio/cli-args.ts | CLI_USAGE, VERBS (2) |
+| src/studio/container-class.ts | BIG_PROFILE_ROLES, doClassForRole (2) |
+| src/studio/onboard.ts | OnboardDeps, buildOnboardBrief (2) |
+| src/studio/registry.ts | getStudioRow, withAccountDisplay (2) |
+| src/studio/routes.ts | BlueprintFetch, spawnDeps (2) |
+| src/studio/survival-brief.ts | RESUMED_TRUST_ORIGIN_LINE, sanitizeBranch (2) |
+| src/studio/terminal.ts | AttachPty, WS_BUFFER_MAX (2) |
+| cli/inspect-request.ts | INSPECT_CLIENT_TIMEOUT_MS (1) |
+| cli/restart-format.ts | RESTART_CHURN_24H (1) |
+| cli/studio-row.ts | STUDIO_STATES (1) |
+| cli/task-format.ts | TITLE_WIDTH (1) |
+| cli/task-new-retry.ts | sendWithRetry (1) |
+| src/agents/runtime.ts | FakeRuntime (1) |
+| src/board/brief.ts | TASK_BODY_MAX (1) |
+| src/board/comment-wake.ts | commentDigest (1) |
+| src/board/pr-landed.ts | OPEN_TASKS_SCAN_MAX_CANDIDATES (1) |
+| src/board/wake-gate.ts | WakeRefusals (1) |
+| src/directus/types.ts | RequestStatus (1) |
+| src/events/log.ts | readSince (1) |
+| src/events/rules.ts | dedupeKey (1) |
+| src/github/read-repos.ts | revokeInstallationToken (1) |
+| src/github/webhook.ts | verifySignature (1) |
+| src/junior/usage.ts | aggregateJuniorUsage (1) |
+| src/memory/index-file.ts | MEMORY_ARCHIVE_DIR (1) |
+| src/memory/prompt.ts | MEMORY_INDEX_MAX_LINES (1) |
+| src/memory/specifics.ts | extractSpecifics (1) |
+| src/studio/activity.ts | LAST_LINE_MAX_CHARS (1) |
+| src/studio/archive.ts | ROTATION_THRESHOLD_BYTES (1) |
+| src/studio/frames.ts | encodeResize (1) |
+| src/studio/grid.ts | computeFleetTotals (1) |
+| src/studio/profile.ts | studioNamespace (1) |
+| src/studio/restarts.ts | RESTART_WINDOW_MS (1) |
+| src/studio/studio-blueprint.ts | TIER0_SKILLS (1) |
+| src/studio/task-reap.ts | ReapTaskInput (1) |
+| src/studio/task-state.ts | TaskStateDeps (1) |
+| src/studio/tmux.ts | STUDIO_TMUX_SOCKET (1) |
+| src/telegram/api.ts | setWebhook (1) |
+- Boundary calls: src/studio/do.ts is in scope by path (its file
+  name matches no excluded lane) and its 75 names are recorded above,
+  but by content it borders the rescue lane (the sweep own F10 tier
+  call) — any future fix batch touching them is CLAUDE-ONLY. Same
+  posture for src/creds/test-creds.ts (credentials-adjacent) and
+  src/studio/credentials.ts (git-wrapper constants). No name was dropped
+  on lane doubt.
+- Same class, by convention: `__reset*ForTests` /
+  `__setPathMapKeyForTest` hooks — org.ts:203 (__resetOrgCacheForTests),
+  org.ts:340 (__resetFleetJsonCacheForTests), test-creds.ts:110
+  (__resetInfisicalTokenCacheForTests), burn.ts:603
+  (__setPathMapKeyForTest), plus the sibling exceptions.ts:189
+  (__resetExceptionRateCapForTests, imported by two tests). All are
+  already in their module rows above; named here because the "Not
+  filed" section groups them with F14. The auth-lane hooks
+  (studio/auth.ts:108,112) stay out with their module.
+- KEEP verdict for every name in this table. test-lies-check enforces
+  that these tests exercise the real module, not mocks of it — the
+  import is the proof, not the problem.
+
+## S24-F14 appendix — future lint configuration (#613)
+
+When the repo adopts an unused-export linter (knip or successor),
+configure it so this class is never flagged. Facts verified 2026-10-12
+against knip v6.41.0 (schema at
+https://github.com/webpro-nl/knip/blob/main/packages/knip/src/schema/configuration.ts):
+
+- knip DEFAULT mode counts imports from test files as usage — the seams
+  above would NOT be flagged in a default run. No special config needed
+  for the default.
+- knip --production mode (entry patterns suffixed !) excludes test
+  files from analysis — a production-mode run WOULD flag every seam. If
+  production mode is ever adopted: pair it with per-glob
+  `ignoreIssues: { "src/studio/install-cache.ts": ["exports"], ... }`
+  for the seam modules (one entry per module row above), or keep the
+  seams out of production-mode scope.
+- Existing v6 options: `ignoreExportsUsedInFile` (default false —
+  exports used only in-file; NOT our case: these exports ARE imported,
+  by tests), `includeEntryExports` (default false), `ignoreIssues`
+  (per-glob issue-type suppression — the right lever), `ignore`
+  (per-glob). `ignoreExportsUsedInTest` NO LONGER EXISTS in v6 — it
+  was dropped because default behavior already treats test imports as
+  usage.
+- Repo shape for the config: vitest lane at apps/fleet/test/*.test.ts,
+  bun:test lane at apps/fleet/test/bun/*.test.ts, entry candidate
+  apps/fleet/src/index.ts. Index-only DO class re-exports (F15) and the
+  wrangler class_name bindings are a separate knip concern (entry
+  exports), not part of this class.

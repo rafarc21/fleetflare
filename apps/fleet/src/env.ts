@@ -114,8 +114,15 @@ export interface Env {
    * LEAD_AI_RETRY_BASE_MS_DEFAULT). Garbage input falls back to the default.
    */
   LEAD_AI_RETRY_BASE_MS?: string;
-  /** Workers AI binding (`"ai": { "binding": "AI" }`). Only junior uses it. */
-  AI?: { run(model: string, input: unknown): Promise<unknown> };
+  /**
+   * Workers AI binding (`"ai": { "binding": "AI" }`). junior and the
+   * glm-lead route (anthropic-route.ts) both use it; the glm-lead route's
+   * every call carries the third `options.gateway` argument (Task 4, spec
+   * 2026-10-13-model-pool-design) — routes the call through an AI Gateway
+   * for unified billing/logs, same optional-third-arg shape the real
+   * `Ai.run` binding documents.
+   */
+  AI?: { run(model: string, input: unknown, options?: { gateway?: { id: string } }): Promise<unknown> };
   /**
    * THE claude credential, and the first of an ordered list.
    *
@@ -432,4 +439,8 @@ export interface Env {
   TEST_CREDS_BY_REPO?: string;
   /** Optional Infisical API origin (self-hosted). Default https://app.infisical.com. https only. */
   INFISICAL_API_URL?: string;
+  /** "on" enables the lead model pool (spec 2026-10-13-model-pool-design). */
+  LEAD_MODEL_POOL?: string;
+  /** AI Gateway id every lead Workers AI call routes through. Default "default". */
+  LEAD_AI_GATEWAY_ID?: string;
 }
