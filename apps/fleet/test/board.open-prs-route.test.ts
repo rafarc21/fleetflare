@@ -6,10 +6,10 @@ import * as openPrsModule from "../src/board/open-prs";
 import { handleBoard } from "../src/board/routes";
 import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
 import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
+import { repoEnv } from "./helpers/env-with";
 import type { BoardApi } from "../src/board/board";
 import type { BoardComment } from "../src/board/api";
 import { studioLabel, type BoardTask, type EnvelopeDoc } from "../src/board/types";
-import type { Env } from "../src/env";
 import { recordStudio } from "../src/studio/registry";
 
 // Board issue #332, plan step 2: GET /studio/board/open-prs?repo=<slug> —
@@ -26,7 +26,7 @@ import { recordStudio } from "../src/studio/registry";
 // the null-repoSlug case faithful: the round trip through recordStudio's
 // JSON is the same one production reads.
 
-const testEnv = { ...env, AGENT_REPO: "acme-org/websites" } as unknown as Env;
+const testEnv = repoEnv("acme-org/websites");
 
 /** The P6a reachability seam handleBoard takes — a live GitHub call in
  *  production, with no test double: the SAME fake board.routes.test.ts
