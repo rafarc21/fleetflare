@@ -1,11 +1,14 @@
 # Environment variables reference
 
-Every environment variable the Worker and its CLIs read, on one page.
-This is the reference; [docs/setup.md](setup.md) stays the walkthrough
-(it names the vars a first deploy actually sets) and links here for the
-rest. `apps/fleet/src/env.ts` remains the source of truth — if a table
-row here ever disagrees with that file, env.ts wins. Reader paths are
-relative to `apps/fleet/`.
+Every operator-configurable var and secret, plus the Worker- and
+runtime-injected set a studio or task container actually carries, on one
+page. This is the reference; [docs/setup.md](setup.md) stays the
+walkthrough (it names the vars a first deploy actually sets) and links
+here for the rest. `apps/fleet/src/env.ts` remains the source of truth —
+if a table row here ever disagrees with that file, env.ts wins. Reader
+paths are relative to `apps/fleet/`. Out of scope, deliberately: the
+wrangler bindings themselves (DB, AI, AGENT, DEPLOY, STUDIO, STUDIO_BIG,
+STUDIO_ARCHIVE, R2 buckets) — config, not env vars.
 
 Two house rules that shape every row below:
 
@@ -51,8 +54,8 @@ Two house rules that shape every row below:
 | `LEAD_COUNT_TOKENS_RATE_PER_MINUTE` | 60 | glm-lead `/count_tokens` calls per rolling 60s per studio (its own counter, no daily cap) | `src/llm/ratelimit.ts` |
 | `LEAD_STREAM_IDLE_MS` | 90000 | ms the glm-lead route waits for an upstream stream chunk before erroring | `src/llm/anthropic-route.ts` |
 | `LEAD_AI_RETRY_BASE_MS` | 500 | Base backoff (ms) before retrying a pre-stream Workers AI 504/529 (2 retries max) | `src/llm/anthropic-route.ts` |
-| `BURN_ALERT_OUTPUT_TOKENS_5H` | `0` (off) | Rolling-5h output-token alert threshold, Telegram once per window | `src/studio/spawn.ts` |
-| `FLEET_BOT_NAME` / `FLEET_BOT_EMAIL` | `fleetflare[bot]` | Task container's git identity (container/server.ts); never a studio's identity | `src/studio/credentials.ts` |
+| `BURN_ALERT_OUTPUT_TOKENS_5H` | `0` (off) | Rolling-5h output-token alert threshold, Telegram once per window | `src/studio/do.ts` |
+| `FLEET_BOT_NAME` / `FLEET_BOT_EMAIL` | `fleetflare[bot]` | Task container's git identity (default applied in container/server.ts; rescue side in src/studio/rescue.ts); never a studio's identity — src/studio/credentials.ts only refuses a studio identity equal to it | `container/server.ts` (default), `src/studio/credentials.ts` (refusal rule) |
 | `FLEET_STUDIO_GIT_NAME` / `FLEET_STUDIO_GIT_EMAIL` | `fleet-studio <fleet-studio@users.noreply.github.com>` | Git identity every studio and its rescue commits are authored as; both or neither; a `[bot]` value or one equal to `FLEET_BOT_*` is ignored | `src/studio/credentials.ts` |
 | `INSTALL_CACHE_REPOS` | off | Comma list of `owner/repo` opting repos into the per-repo `bun install` cache; needs the three `R2_*` secrets below | `src/studio/install-cache.ts` |
 | `R2_BUCKET_NAME` | `studio-archive` (`R2_BUCKET_NAME_DEFAULT`) | The `STUDIO_ARCHIVE` binding's real `bucket_name`; presigned install-cache URLs sign against it | `src/studio/install-cache.ts` |
@@ -121,4 +124,13 @@ grepping studio (or a curious operator) can identify each one.
 | `ANTHROPIC_BASE_URL` | Worker, glm-lead studios only (= `WORKER_PUBLIC_URL` + glm route base) | `claude` in the container |
 | `TERM_PROGRAM` / `ORCA_WORKTREE_ID` | Orca (the editor), when a session runs inside it | `cli/orca-workspace.ts` |
 | `ORCA_CLI_COMMAND` | You, only to override the `orca` binary's name on PATH | `cli/orca-workspace.ts` |
+| `FLEET_GIT_NAME` / `FLEET_GIT_EMAIL` | Worker, on the git-identity credential exec (= the studio git identity) | `src/studio/credentials.ts` (sets), the `git config` exec (reads) |
+| `FLEET_TOKEN` | Worker, on the git credential exec (the container's GitHub token) | `src/studio/credentials.ts` (sets), `~/.git-credentials` write (reads) |
+| `ROLE_PROMPT_B64` | Worker, at provision (the role's prompt, base64) | `container/studio-bringup.sh` |
+| `ROLE_ALLOWED_TOOLS` / `ROLE_EFFORT` | Worker, at provision (claude `--allowedTools` / `--effort`) | `container/studio-bringup.sh` |
+| `ROLE_MCP` / `STUDIO_MCP` | Worker, at provision (MCP servers config) | `container/studio-bringup.sh` |
+| `STUDIO_LEAD_DISALLOWED` | Worker, at provision (lead tool-deny install switch) | `container/studio-bringup.sh` |
+| `FLEET_WORKSPACE` | Worker, at provision (the workspace dir, default /workspace) | `container/studio-bringup.sh` |
+| `FLEET_FRESH_SESSION` | Worker, only with `--fresh-session` provision/recycle | `container/studio-bringup.sh` |
+| `GH_TOKEN` / `GITHUB_TOKEN` | Worker, on the agent task container's claude exec (the task repo token) | `container/server.ts` |
 | `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` | You (your shell), for `fleet junior enable`'s direct Workers AI transport selection | `cli/junior.ts` |
