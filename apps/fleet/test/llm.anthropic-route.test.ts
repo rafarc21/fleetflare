@@ -1299,14 +1299,66 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(res.status).toBe(200);
     expect(seen.length).toBe(2);
     expect(seen[0]).not.toBe(seen[1]);
+    // Global Constraint: logUsage must record the model actually used
+    // (`usedModel`) — the SECOND model tried, never a hardcoded constant
+    // (code review, Spec axis, #717).
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].model).toBe(seen[1]);
   });
 
   it("pool on: every model 429s → 429 rate_limit_error with retry-after", async () => {
-    const ai = { run: vi.fn(async () => { throw new Error("3021: Account rate limit exceeded"); }) };
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => { seen.push(model); throw new Error("3021: Account rate limit exceeded"); }) };
     const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" } });
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("30");
     expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    // Global Constraint: the logged usage row's model must be the LAST
+    // model actually tried, never a hardcoded constant (code review,
+    // Spec axis, #717).
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].model).toBe(seen[seen.length - 1]);
+  });
+
+  // Review Focus item 3: a genuine multi-model exhaustion — the real POOL
+  // has only one smoke-passed model today, so the test above cannot
+  // distinguish "last model tried" from "first model tried" (code review,
+  // Spec axis, #717). Built the same way as the "moves to next model"
+  // fixture pool above: a plain copy of the real POOL with every entry
+  // forced to `smokePassed: true`, handed to `callRoute`'s own `pool`
+  // injection seam rather than mutating the shared `models.ts` POOL export.
+  it("pool on: 3021 on every model (genuine multi-model exhaustion) → 429, AI called once per model, usage row logs the LAST model tried", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      throw new Error("3021: rate limiting: Account rate limit exceeded");
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    // router.ts's own round-robin hash of the studio id picks WHICH pool
+    // model goes first — not necessarily the pool's declaration order — so
+    // this asserts against `seen` (the actual try order), not a hardcoded
+    // sequence: every model was tried exactly once, with no backoff/retry
+    // on a rate-limit.
+    expect(ai.run).toHaveBeenCalledTimes(testPool.length);
+    expect(seen).toHaveLength(testPool.length);
+    expect(new Set(seen)).toEqual(new Set(testPool.map((m) => m.id)));
+    expect(seen[seen.length - 1]).not.toBe(seen[0]);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    // The logged model is the LAST one actually tried — not the first, and
+    // not a hardcoded GLM constant.
+    expect(rowsLogged[0].model).toBe(seen[seen.length - 1]);
+    expect(rowsLogged[0].model).not.toBe(seen[0]);
+    expect(rowsLogged[0].model).not.toBe(GLM_LEAD_MODEL);
   });
 
   it("custom gateway id via LEAD_AI_GATEWAY_ID", async () => {
