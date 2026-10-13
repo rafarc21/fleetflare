@@ -167,12 +167,20 @@ class AiRunError extends Error {
   constructor(message: string, readonly attempts: number) { super(message); }
 }
 
-/** Task 4 (spec 2026-10-13-model-pool-design, Component 4): every
- *  `env.AI.run` call now routes through this AI Gateway id (unified billing
- *  + logs — see the spec's Problem section on why the account's own `default`
- *  gateway matters: paid Workers AI rate limits are 2.5x higher through it).
- *  `LEAD_AI_GATEWAY_ID` (env.ts) overrides it; absent/empty falls back here. */
-export const LEAD_AI_GATEWAY_DEFAULT = "default";
+/** Incident fix (#717): Task 4 (spec 2026-10-13-model-pool-design,
+ *  Component 4) shipped an AI Gateway option attached to EVERY `env.AI.run`
+ *  call, defaulting to the account's own `"default"` gateway id when
+ *  `LEAD_AI_GATEWAY_ID` (env.ts) was unset. That default gateway was not
+ *  actually provisioned for unified billing in production — every GLM lead
+ *  call came back `"2021: Insufficient unified billing credits"` the instant
+ *  it deployed. There is no default gateway id anymore: the option is
+ *  attached ONLY when an operator has explicitly set `LEAD_AI_GATEWAY_ID` to
+ *  a non-empty string (`resolveGatewayId` below); unset/empty means no
+ *  gateway option at all, the exact pre-Task-4 `ai.run(model, body)` call
+ *  shape (two arguments, not three with `undefined`). */
+export function resolveGatewayId(env: { LEAD_AI_GATEWAY_ID?: string }): string | undefined {
+  return env.LEAD_AI_GATEWAY_ID ? env.LEAD_AI_GATEWAY_ID : undefined;
+}
 
 /** Task 4: 429/code-3021 ("Account rate limit exceeded", the spec's own
  *  Problem-section wording) — the ONE failure shape that means "this model
@@ -520,7 +528,7 @@ type ModelOverflowResult =
  *  needs and nothing more. */
 async function runModelPoolOverflow(
   ai: NonNullable<Env["AI"]>, order: string[], body: Json,
-  gatewayOption: { gateway: { id: string } }, baseMs: number,
+  gatewayId: string | undefined, baseMs: number,
 ): Promise<ModelOverflowResult> {
   let attempts = 0;
   let usedModel = order[0];
@@ -529,8 +537,15 @@ async function runModelPoolOverflow(
     const pm = modelById(modelId) ?? POOL[0];
     usedModel = pm.id;
     const openaiBody = anthropicRequestToOpenAI(body, { id: pm.id, minMaxTokens: pm.minMaxTokens });
+    // Incident fix (#717): the gateway option is attached ONLY when
+    // `gatewayId` is actually set — `ai.run(pm.id, openaiBody)` with no
+    // third argument at all otherwise, not `ai.run(pm.id, openaiBody,
+    // undefined)`.
     try {
-      const r = await runAiWithRetry(() => ai.run(pm.id, openaiBody, gatewayOption), { baseMs });
+      const r = await runAiWithRetry(
+        () => (gatewayId === undefined ? ai.run(pm.id, openaiBody) : ai.run(pm.id, openaiBody, { gateway: { id: gatewayId } })),
+        { baseMs },
+      );
       return { ok: true, upstream: r.value, usedModel, attempts: attempts + r.attempts };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -590,7 +605,7 @@ export async function handleFleetAnthropicMessages(
   // `states` are only ever read from D1 when the pool is actually on — pool
   // off has no use for either, and `pickModels` ignores them anyway.
   const poolOn = env.LEAD_MODEL_POOL === "on";
-  const gatewayOption = { gateway: { id: env.LEAD_AI_GATEWAY_ID || LEAD_AI_GATEWAY_DEFAULT } };
+  const gatewayId = resolveGatewayId(env);
   const order = pickModels({
     studioId: studio.id,
     requestedModel: body.model,
@@ -606,7 +621,7 @@ export async function handleFleetAnthropicMessages(
   // number of `env.AI.run` calls this one Messages-API request cost.
   const startedAt = Date.now();
   const stream = body.stream === true;
-  const overflow = await runModelPoolOverflow(ai, order, body, gatewayOption, leadAiRetryBaseMs(env));
+  const overflow = await runModelPoolOverflow(ai, order, body, gatewayId, leadAiRetryBaseMs(env));
   const { usedModel, attempts } = overflow;
 
   if (!overflow.ok) {

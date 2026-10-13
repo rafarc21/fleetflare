@@ -327,8 +327,10 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
     const { token, rows, e, run } = await setup();
     const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
     expect(r.status).toBe(200);
-    // Task 4: every env.AI.run call now carries the AI Gateway option too.
-    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS }, { gateway: { id: "default" } });
+    // Incident fix (#717): no LEAD_AI_GATEWAY_ID set in this fixture env, so
+    // env.AI.run is called with exactly the pre-model-pool 2-arg shape — no
+    // gateway option attached.
+    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, { model: GLM_LEAD_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: GLM_MIN_MAX_TOKENS });
     const body = await r.json();
     expect(body).toMatchObject({ type: "message", role: "assistant", model: good.model, content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 3, output_tokens: 2 } });
   });
@@ -354,7 +356,7 @@ describe("handleFleetAnthropicMessages — non-streaming translation round trip"
         { role: "tool", tool_call_id: "toolu_1", content: "sunny" },
       ],
       max_tokens: GLM_MIN_MAX_TOKENS,
-    }, { gateway: { id: "default" } });
+    });
     const replyBody = (await r.json()) as { content: unknown };
     expect(replyBody.content).toEqual([{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "nyc" } }]);
   });
@@ -396,7 +398,7 @@ describe("handleFleetAnthropicMessages — streaming", () => {
       "message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop",
     ]);
     expect(text).toContain('"text":"hi"');
-    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, expect.objectContaining({ stream: true, stream_options: { include_usage: true } }), { gateway: { id: "default" } });
+    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, expect.objectContaining({ stream: true, stream_options: { include_usage: true } }));
   });
 
   // Maestro review round 1, MAJOR 3: the exact bug — a mid-stream upstream
@@ -1266,14 +1268,32 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
 // and LEAD_MODEL_POOL=on walks router.ts's pickModels order on a 429/3021,
 // instead of hardcoding GLM.
 describe("model pool + gateway (spec 2026-10-13)", () => {
-  it("every AI call carries the gateway option, pool off", async () => {
+  // Incident fix (#717): a production account's "default" AI Gateway isn't
+  // provisioned for unified billing — `ai.run(model, body, { gateway: { id:
+  // "default" } })` came back "2021: Insufficient unified billing credits"
+  // for EVERY GLM lead call the instant this got deployed. The gateway
+  // option is now OFF unless `LEAD_AI_GATEWAY_ID` is actually set to a
+  // non-empty string — unset means the exact pre-model-pool call shape:
+  // `ai.run(model, body)`, no third argument at all (not `undefined`, not
+  // `{}` — a genuinely 2-length args array, since a provider could branch on
+  // `arguments.length`).
+  it("LEAD_AI_GATEWAY_ID unset: ai.run is called with no gateway option at all (2 args)", async () => {
     const calls: unknown[][] = [];
     const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
     const res = await callRoute({ ai, envOverrides: {} });
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(1);
     expect(calls[0][0]).toBe("@cf/zai-org/glm-5.3");
-    expect(calls[0][2]).toEqual({ gateway: { id: "default" } });
+    expect(calls[0].length).toBe(2);
+  });
+
+  it("LEAD_AI_GATEWAY_ID set to empty string: same as unset — no gateway option, 2 args", async () => {
+    const calls: unknown[][] = [];
+    const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_AI_GATEWAY_ID: "" } });
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].length).toBe(2);
   });
 
   it("pool on: 3021 on first model moves to next model, no backoff", async () => {
