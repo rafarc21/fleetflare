@@ -1,12 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { env } from "cloudflare:test";
 import * as authModule from "../src/studio/auth";
 import { handleMemory, MEMORY_SURVEY_MAX_FILES, type MemoryDeps } from "../src/memory/routes";
 import { MEMORY_INDEX_PATH } from "../src/memory/index-file";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
+import { repoEnv } from "./helpers/env-with";
 import type { StudioStatus } from "../src/studio/types";
-import type { Env } from "../src/env";
 
 // GET/POST /studio/memory* and /fleet/memory* — P5 §9's compaction pass.
 //
@@ -18,7 +17,7 @@ import type { Env } from "../src/env";
 
 const REPO = "acme-org/websites";
 const BLUEPRINT = "acme-org/websites";
-const testEnv = { ...env, AGENT_REPO: REPO } as unknown as Env;
+const testEnv = repoEnv(REPO);
 const NOW = new Date("2026-09-10T12:00:00.000Z");
 const OLD = "2026-08-01T10-00-00-000Z";
 
