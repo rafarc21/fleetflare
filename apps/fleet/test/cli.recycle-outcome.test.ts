@@ -8,6 +8,7 @@ import { EXEC_CLASSES } from "../src/studio/sandbox-api";
 import type { StudioStatus } from "../src/studio/types";
 import type { ObservedSession } from "../src/studio/observed";
 import type { OperationInFlight } from "../src/studio/provision";
+import { session as observedSession } from "./helpers/observed-session";
 
 // Board task #133, measured 2026-09-30: `fleet recycle <id>` on a studio
 // whose lead sat on a limit modal never returned (killed after 15 min) even
@@ -26,12 +27,10 @@ const STATUS_URL = "https://x/studio/demosite-life--web-studio/status";
 const ID = "demosite-life--web-studio";
 const START = new Date("2026-09-30T12:00:00.000Z");
 
-function session(over: Partial<ObservedSession> = {}): ObservedSession {
-  return {
-    verdict: "resumed", at: "2026-09-30T12:00:00.000Z", via: "recycle", restore: "restored",
-    snapshotAgeS: 5, turnsBefore: 3, reason: null, ...over,
-  };
-}
+// #753 (S33-F9): old local defaults (at: START, snapshotAgeS: 5, turnsBefore: 3) fold here once —
+// the helper's own defaults are the survival pair's, so this file's 15 call sites stay untouched.
+const session = (over: Partial<ObservedSession> = {}): ObservedSession =>
+  observedSession({ at: START.toISOString(), snapshotAgeS: 5, turnsBefore: 3, ...over });
 
 function statusRow(
   state: StudioStatus["state"], observedSession?: ObservedSession | null,
