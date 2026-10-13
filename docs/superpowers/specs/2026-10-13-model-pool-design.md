@@ -60,6 +60,8 @@ Per main model, over its last 10 closed PRs (PR → studio → `leadModel`):
 
 **Auto-demote** when, over that window: first-try CI pass rate ≥ 25 points below the best model's, OR ≥ 2 reverts. Demoted model: no new studios; its studios switch main model at next task assignment; stays as overflow. Board issue + push notification on demotion.
 
+A model with fewer than 5 closed PRs in its window is never auto-demoted, whatever its rate — a brand-new model must accumulate a real sample before its first-try rate is a judgement about the model rather than noise from one or two PRs.
+
 **Report:** `fleet models` prints the table; a daily comment on a pinned board issue posts it. Override: `fleet models promote|demote <model>`.
 
 Data sources: GitHub checks + PR history, board task history, usage log. No new store.
