@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSnippet } from "./exec-snippet";
 import { adoptWorktreeSessionCmd, parseSessionAdoption } from "../../src/studio/provision";
+import { CLI, projects, REPO, ROOT_ID, ROOT_KEY, SDK, session, setAdoptHome, TEAMMATE, WT_ID, WT_KEY } from "./helpers/adopt-fixtures";
 
 /**
  * Issue #146: the worktree-session adopt moves INTO bring-up, as
@@ -17,15 +18,7 @@ import { adoptWorktreeSessionCmd, parseSessionAdoption } from "../../src/studio/
  * sibling adopts; the copy keeps the old mtime; two backups kept.
  */
 const SCRIPT = join(import.meta.dir, "../../container/studio-adopt.sh");
-const REPO = "fleetflare";
-const ROOT_KEY = "-workspace-fleetflare";
-const WT_KEY = "-workspace-fleetflare--claude-worktrees-row-tells-truth-85-pr1";
 const SIBLING_KEY = "-workspace-fleetflare-web";
-const WT_ID = "b1c006ac-dd42-48a7-a063-90400c353858";
-const ROOT_ID = "0f0f0f0f-1111-4222-8333-444444444444";
-const CLI = '{"type":"user","entrypoint":"cli","sessionId":"x"}\n';
-const SDK = '{"type":"user","entrypoint":"sdk-cli","sessionId":"x"}\n';
-const TEAMMATE = '{"type":"user","entrypoint":"cli","teamName":"crew","sessionId":"x"}\n';
 
 // macOS has no coreutils `timeout`; a pass-through shim stands in for the
 // inline command's wrapper (drops `-k N SECS`).
@@ -35,21 +28,9 @@ let home: string;
 let log: string;
 let pathEnv: string;
 
-function projects(key: string): string {
-  return join(home, ".claude", "projects", key);
-}
-
-function session(key: string, id: string, body: string, ageSeconds: number): string {
-  mkdirSync(projects(key), { recursive: true });
-  const path = join(projects(key), `${id}.jsonl`);
-  writeFileSync(path, body);
-  const t = Math.floor(Date.now() / 1000) - ageSeconds;
-  utimesSync(path, t, t);
-  return path;
-}
-
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "fleet-adopt-"));
+  setAdoptHome(home);
   log = join(home, "bringup.log");
   pathEnv = process.env.PATH ?? "";
   if (!HAS_TIMEOUT) {

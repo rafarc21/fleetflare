@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { BRINGUP, extractRegion, extractShellFunc, runSnippet } from "./exec-snippet";
 import { parseSessionAdoption } from "../../src/studio/provision";
 import { requireTools } from "./require-tool";
+import { CLI, WT_ID, WT_KEY } from "./helpers/adopt-fixtures";
 
 /**
  * Issue #146, end to end in bring-up's own bytes: a FRESH container whose
@@ -28,10 +29,6 @@ const CONTINUE_GUARD = () => {
   if (!line) throw new Error("bring-up's --continue guard line not found");
   return line.trim();
 };
-
-const WT_KEY = "-workspace-fleetflare--claude-worktrees-row-tells-truth-85-pr1";
-const WT_ID = "b1c006ac-dd42-48a7-a063-90400c353858";
-const CLI = '{"type":"user","entrypoint":"cli","sessionId":"x"}\n';
 
 // The restore verifies with sha256sum and the adopt is bounded by `timeout`,
 // both bounded by `tar`'s own extraction: all three coreutils/tar, all three
