@@ -64,6 +64,20 @@ async function setup(
 
 const good = { model: "claude-opus-4-5", max_tokens: 100, messages: [{ role: "user", content: "hi" }] };
 
+/** Task 4 (spec 2026-10-13-model-pool-design) — a smaller variant of
+ *  `setup()` above, for the gateway/pool-overflow tests: takes a caller-built
+ *  `ai` stub directly (so a test can assert on its own `run` mock's call
+ *  args/sequence) instead of `setup()`'s own wrapped `vi.fn(async () =>
+ *  aiResult)`. Builds the same authorized POST (`good` body, a freshly
+ *  minted spawn token, a glm-led registry row) every other happy-path test
+ *  in this file already does. */
+async function callRoute(opts: { ai: { run: ReturnType<typeof vi.fn> }; envOverrides?: Partial<Env> }) {
+  const token = mintSpawnToken();
+  const rows = async () => [row(ME, await hashSpawnToken(token))];
+  const e = { ...env, FLEET_JUNIOR: "on", AI: opts.ai, ...FAST_RETRY, ...(opts.envOverrides ?? {}) } as unknown as Env;
+  return handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+}
+
 function req(opts: { token?: string | null; apiKey?: string; body?: unknown; path?: string; method?: string }) {
   const headers: Record<string, string> = {};
   if (opts.token) headers.authorization = `Bearer ${opts.token}`;
@@ -1238,5 +1252,49 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
     expect(msg.status).toBe(200);
     const count = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
     expect(count.status).toBe(200);
+  });
+});
+
+// Task 4 (spec 2026-10-13-model-pool-design, Components 3/4): every
+// env.AI.run call now carries the AI Gateway option (unified billing/logs),
+// and LEAD_MODEL_POOL=on walks router.ts's pickModels order on a 429/3021,
+// instead of hardcoding GLM.
+describe("model pool + gateway (spec 2026-10-13)", () => {
+  it("every AI call carries the gateway option, pool off", async () => {
+    const calls: unknown[][] = [];
+    const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
+    const res = await callRoute({ ai, envOverrides: {} });
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe("@cf/zai-org/glm-5.3");
+    expect(calls[0][2]).toEqual({ gateway: { id: "default" } });
+  });
+
+  it("pool on: 3021 on first model moves to next model, no backoff", async () => {
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("3021: rate limiting: Account rate limit exceeded");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" } });
+    expect(res.status).toBe(200);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
+  });
+
+  it("pool on: every model 429s → 429 rate_limit_error with retry-after", async () => {
+    const ai = { run: vi.fn(async () => { throw new Error("3021: Account rate limit exceeded"); }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" } });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect((await res.json() as any).error.type).toBe("rate_limit_error");
+  });
+
+  it("custom gateway id via LEAD_AI_GATEWAY_ID", async () => {
+    const calls: unknown[][] = [];
+    const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
+    await callRoute({ ai, envOverrides: { LEAD_AI_GATEWAY_ID: "fleet" } });
+    expect(calls[0][2]).toEqual({ gateway: { id: "fleet" } });
   });
 });
