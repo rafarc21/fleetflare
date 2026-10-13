@@ -11,10 +11,13 @@ outside their own file:
   return type (api.ts:928).
 - `src/github/wake-events.ts:105` — `export type RepoMatch`. Appears nowhere
   outside wake-events.ts. Used in-file as `sameRepoSlug`'s return type
-  (wake-events.ts:109). All three callers (assign-wake.ts:199,
-  wake-gate.ts:41, comment-wake's inline check) compare string literals
-  ("same"/"different"/"unknown") or import `sameRepoSlug` only — none imports
-  the type.
+  (wake-events.ts:109). Both call sites (assign-wake.ts:199 and
+  wake-gate.ts:41, the latter shared by the wakeOnAssign and wakeOnComment
+  wakes) compare string literals ("same"/"different"/"unknown") or import
+  `sameRepoSlug` only — none imports the type. (An earlier draft said
+  "three callers", counting a comment-wake inline check the #263 deepening
+  removed; the stale JSDoc at wake-events.ts:101-103 still carries that
+  wording.)
 
 Sweep's own correction is on the record: MintTokenOpts (app.ts:79) was a
 first-pass false positive — it IS imported by src/github/auth.ts:58 — and any
@@ -29,6 +32,6 @@ lives).
 
 ## Verification
 
-- `bun test test/bun/wake-gate.test.ts test/bun/assign-wake.test.ts test/bun/comment-wake.test.ts test/bun/open-prs.test.ts` (adjust to the suite files that actually exist under apps/fleet/test/bun — run the ones covering wake-gate, assign-wake, comment-wake, open-prs) — expect all pass, unchanged.
+- `cd apps/fleet && npx vitest run test/board.wake-gate.test.ts test/board.assign-wake.test.ts test/board.comment-wake.test.ts test/board.open-prs.test.ts test/github.wake-events.test.ts test/github.api.test.ts` — the suites covering both types and all their consumers — expect all pass, unchanged.
 - `cd apps/fleet && bun run check` — all five tsc configs exit 0. This is the real proof: if any file outside github/ imported either type, tsc fails. Run under `flock /tmp/fleet-gate.lock` (one heavy gate at a time — another studio may hold it; if so, wait for the lock, don't skip).
 - grep proof: `grep -rn "PullRequestInfo\|RepoMatch" apps/fleet/src apps/fleet/test` shows mentions only in api.ts / wake-events.ts themselves (plus the board.ts comment naming PullRequestInfo as a narrowing source, which stays).
