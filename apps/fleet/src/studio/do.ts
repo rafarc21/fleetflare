@@ -2279,11 +2279,12 @@ export async function recordDeliveredTask(storage: StudioStorage, taskNumber: nu
  * container is the thing that is broken.
  */
 export async function wakeStudioWith(
-  storage: StudioStorage, exec: WakeExec, isMaestro: boolean, armSweep: () => Promise<void>,
-  prompt: string, now: () => Date = () => new Date(), studioId?: string,
+  storage: StudioStorage, exec: WakeExec,
+  opts: { isMaestro: boolean; armSweep: () => Promise<void>; prompt: string; now?: () => Date; studioId?: string },
 ): Promise<WakeOutcome> {
-  const outcome = await runGatedWake({ recordedState: () => gatedStateIn(storage, now), switchedBlock: () => switchedBlockIn(storage), limitSighting: () => limitSightingIn(storage), exec, now, studioId }, prompt);
-  if (outcome.ok && isMaestro) await armSweep();
+  const now = opts.now ?? (() => new Date());
+  const outcome = await runGatedWake({ recordedState: () => gatedStateIn(storage, now), switchedBlock: () => switchedBlockIn(storage), limitSighting: () => limitSightingIn(storage), exec, now, studioId: opts.studioId }, opts.prompt);
+  if (outcome.ok && opts.isMaestro) await opts.armSweep();
   return outcome;
 }
 
@@ -6228,8 +6229,12 @@ export class StudioDO extends Sandbox<Env> {
    *  re-arms the crash sweep on. */
   private async notifyStaleBackgroundShell(): Promise<void> {
     const outcome = await singleFlightWake(this.wakeLock, () => wakeStudioWith(
-      this.ctx.storage, (cmd: string) => sbExec(this, cmd, EXEC_CLASSES.wake), this.isMaestro(), () => this.armSweep(),
-      STALE_BACKGROUND_SHELL_NUDGE_PROMPT, undefined, this.selfId(),
+      this.ctx.storage,
+      (cmd: string) => sbExec(this, cmd, EXEC_CLASSES.wake),
+      {
+        isMaestro: this.isMaestro(), armSweep: () => this.armSweep(), prompt: STALE_BACKGROUND_SHELL_NUDGE_PROMPT,
+        studioId: this.selfId(),
+      },
     ));
     logWakeOutcome(`studio ${this.selfId()}: stale background-shell nudge`, outcome);
   }
@@ -8369,8 +8374,9 @@ export class StudioDO extends Sandbox<Env> {
    */
   async wakeStudio(prompt: string): Promise<WakeOutcome> {
     return singleFlightWake(this.wakeLock, () => wakeStudioWith(
-      this.ctx.storage, (cmd: string) => sbExec(this, cmd, EXEC_CLASSES.wake), this.isMaestro(), () => this.armSweep(), prompt,
-      undefined, this.selfId(),
+      this.ctx.storage,
+      (cmd: string) => sbExec(this, cmd, EXEC_CLASSES.wake),
+      { isMaestro: this.isMaestro(), armSweep: () => this.armSweep(), prompt, studioId: this.selfId() },
     ));
   }
 
