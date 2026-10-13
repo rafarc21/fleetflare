@@ -572,7 +572,7 @@ async function runModelPoolOverflow(
   for (const modelId of order) {
     const pm = modelById(modelId) ?? POOL[0];
     usedModel = pm.id;
-    const openaiBody = anthropicRequestToOpenAI(body, { id: pm.id, minMaxTokens: pm.minMaxTokens });
+    const openaiBody = anthropicRequestToOpenAI(body, { id: pm.id, minMaxTokens: pm.minMaxTokens, maxMaxTokens: pm.maxMaxTokens });
     // Incident fix (#717): the gateway option is attached ONLY when
     // `gatewayId` is actually set — `ai.run(pm.id, openaiBody)` with no
     // third argument at all otherwise, not `ai.run(pm.id, openaiBody,
@@ -696,7 +696,7 @@ export async function handleFleetAnthropicMessages(
       // provider that ignored `stream: true` and returned a plain object
       // anyway is translated through the non-streaming path rather than
       // crashing on `.getReader()`.
-      const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel });
+      const anthropic = openAIResponseToAnthropic(upstream, { model: requestedModel, requestedMaxTokens: body.max_tokens });
       logUsage(env, ctx, studio.id, { model: usedModel, stream: true, inputTokens: anthropic.usage.input_tokens, outputTokens: anthropic.usage.output_tokens, ok: true, startedAt, attempts });
       return json(anthropic, 200);
     }
