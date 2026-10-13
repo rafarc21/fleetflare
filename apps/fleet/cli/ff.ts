@@ -444,6 +444,88 @@ export async function ffSpawnNew(
 }
 
 // ---------------------------------------------------------------------------
+// The two branches main can enter, each lifted out of it whole. Their bodies
+// are main's former branch bodies moved verbatim (same lines, same order, same
+// exits); the shared return shape is what keeps main's dispatch thin: `{handedOff: true}`
+// when the helper did the final attach itself (main just returns), `{id}` when
+// it provisioned instead (main falls through to the shared wait + attach).
+
+/**
+ * The `decision.kind === "attach"` arm: the studio the registry says is up.
+ * Reads the container's own answer once, then either attaches right away
+ * (handing off — the two shapes of that are attachOrHandOff's business, not
+ * this one's) or repairs it with the same provision-everything-else path.
+ */
+async function attachFastOrProvision(
+  creds: Credentials, decision: Extract<FfDecision, { kind: "attach" }>, task: number | null,
+  repoSlug: string | null,
+): Promise<{ handedOff: true } | { id: string }> {
+  // The registry says this one is up. Before attaching, ASK THE CONTAINER:
+  // the registry only records what provisioning last CLAIMED, and the
+  // 2026-08-25 incident is precisely a container reporting `state: running`
+  // over an empty /workspace. One extra request on the happy path, and it
+  // is the request that makes "attach fast" safe rather than hopeful.
+  const outcome = await readOutcome(creds, decision.id);
+  if (outcome.kind === "provisioned" || outcome.kind === "unverified") {
+    say(`${decision.id}: ${outcome.note} — attaching`);
+    // A brief reaches a lead through its SYSTEM PROMPT, which is written
+    // once, when claude launches (container/studio-bringup.sh only launches
+    // it when the pane is still bash). This studio is already up and
+    // running something, so there is nothing to inject into — and a studio
+    // is one task at a time by design (§2.2).
+    //
+    // Board issue #41: the assignment above now WAKES this studio, which is
+    // the automatic version of what this used to ask the operator to type.
+    // The hint stays as the fallback for the cases the wake refuses (a lead
+    // whose pane is a bare shell, a container that would not answer) — the
+    // `woke the studio:` / `NO WAKE —` line printed above says which.
+    if (task !== null) {
+      say(`${decision.id} is already running — it did NOT boot with this brief; the wake above is how it hears about it.`);
+      // Board issue #213: provision/restart/recycle now all deliver the
+      // assigned task on bring-up (deliverAssignedTaskOnBringup, src/studio/
+      // do.ts), not just recycle — so any of the three is a real fallback,
+      // not only the heaviest one.
+      say(`  if that said NO WAKE, tell it: fleet task show ${task}   (or provision/recycle the studio to boot it on the task)`);
+    }
+    // the operator's rule: a studio that is up owes the sidebar a row. `ff` attaches
+    // in THIS terminal, which disappears the moment he detaches — the row is
+    // what survives that, so it is opened even on the fast attach path.
+    await attachOrHandOff(creds, decision.id, task);
+    return { handedOff: true };
+  }
+  // The container disagrees with the registry (or nothing can be read at
+  // all). Same repair as any other unprovisioned studio: provision, wait,
+  // then attach — never attach on a "bare" answer.
+  say(`${decision.id}: ${outcome.note} — provisioning it`);
+  await provisionStudio(creds, decision.id, repoSlug, task);
+  return { id: decision.id };
+}
+
+/**
+ * The `--new` arm of the spawn branch: the Worker allocates the instance
+ * (#281), ffSpawnNew owns the spawn-wait-file order, and this does the final
+ * attach — or exits, when the studio never came up.
+ */
+async function spawnNewStudio(
+  creds: Credentials, decision: Extract<FfDecision, { kind: "spawn" }>, role: string,
+  task: FfTask | null, repoSlug: string | null, startedAt: number,
+): Promise<{ handedOff: true } | { id: string }> {
+  say(`--new: spawning the next free "${role}" instance (the Worker allocates it)`);
+  const spawned = await ffSpawnNew(decision, task, {
+    spawn: () => spawnStudio(creds, role, repoSlug, null, null, "next"),
+    wait: (newId) => waitProvisioned(creds, newId, startedAt),
+    file: (newId, text) => fileTask(creds, repoSlug, newId, text),
+    adopt: (newId, number) => adoptTask(creds, repoSlug, newId, number),
+  }, role);
+  if (spawned === null) process.exit(1);
+  if (spawned.task !== null) {
+    say(`  if the wake above said NO WAKE, tell it: fleet task show ${spawned.task}`);
+  }
+  await attachOrHandOff(creds, spawned.id, spawned.task);
+  return { handedOff: true };
+}
+
+// ---------------------------------------------------------------------------
 // entry point
 
 async function main(): Promise<void> {
@@ -511,58 +593,14 @@ async function main(): Promise<void> {
   const startedAt = Date.now();
   let id: string;
   if (decision.kind === "attach") {
-    // The registry says this one is up. Before attaching, ASK THE CONTAINER:
-    // the registry only records what provisioning last CLAIMED, and the
-    // 2026-08-25 incident is precisely a container reporting `state: running`
-    // over an empty /workspace. One extra request on the happy path, and it
-    // is the request that makes "attach fast" safe rather than hopeful.
-    const outcome = await readOutcome(creds, decision.id);
-    if (outcome.kind === "provisioned" || outcome.kind === "unverified") {
-      say(`${decision.id}: ${outcome.note} — attaching`);
-      // A brief reaches a lead through its SYSTEM PROMPT, which is written
-      // once, when claude launches (container/studio-bringup.sh only launches
-      // it when the pane is still bash). This studio is already up and
-      // running something, so there is nothing to inject into — and a studio
-      // is one task at a time by design (§2.2).
-      //
-      // Board issue #41: the assignment above now WAKES this studio, which is
-      // the automatic version of what this used to ask the operator to type.
-      // The hint stays as the fallback for the cases the wake refuses (a lead
-      // whose pane is a bare shell, a container that would not answer) — the
-      // `woke the studio:` / `NO WAKE —` line printed above says which.
-      if (task !== null) {
-        say(`${decision.id} is already running — it did NOT boot with this brief; the wake above is how it hears about it.`);
-        // Board issue #213: provision/restart/recycle now all deliver the
-        // assigned task on bring-up (deliverAssignedTaskOnBringup, src/studio/
-        // do.ts), not just recycle — so any of the three is a real fallback,
-        // not only the heaviest one.
-        say(`  if that said NO WAKE, tell it: fleet task show ${task}   (or provision/recycle the studio to boot it on the task)`);
-      }
-      // the operator's rule: a studio that is up owes the sidebar a row. `ff` attaches
-      // in THIS terminal, which disappears the moment he detaches — the row is
-      // what survives that, so it is opened even on the fast attach path.
-      return attachOrHandOff(creds, decision.id, task);
-    }
-    // The container disagrees with the registry (or nothing can be read at
-    // all). Same repair as any other unprovisioned studio: provision, wait,
-    // then attach — never attach on a "bare" answer.
-    say(`${decision.id}: ${outcome.note} — provisioning it`);
-    await provisionStudio(creds, decision.id, segment === null ? null : detected.slug, task);
-    id = decision.id;
+    const a = await attachFastOrProvision(creds, decision, task, segment === null ? null : detected.slug);
+    if ("handedOff" in a) return;
+    id = a.id;
   } else if (decision.kind === "spawn") {
     if (isNew) {
-      say(`--new: spawning the next free "${parsed.role}" instance (the Worker allocates it)`);
-      const spawned = await ffSpawnNew(decision, parsed.task, {
-        spawn: () => spawnStudio(creds, parsed.role, detected.slug, null, null, "next"),
-        wait: (newId) => waitProvisioned(creds, newId, startedAt),
-        file: (newId, text) => fileTask(creds, detected.slug, newId, text),
-        adopt: (newId, number) => adoptTask(creds, detected.slug, newId, number),
-      }, parsed.role);
-      if (spawned === null) process.exit(1);
-      if (spawned.task !== null) {
-        say(`  if the wake above said NO WAKE, tell it: fleet task show ${spawned.task}`);
-      }
-      return attachOrHandOff(creds, spawned.id, spawned.task);
+      const s = await spawnNewStudio(creds, decision, parsed.role, parsed.task, detected.slug, startedAt);
+      if ("handedOff" in s) return;
+      id = s.id;
     }
     say(`no ${decision.id ?? `${parsed.role} studio`} in the fleet yet — spawning it`);
     id = await spawnStudio(creds, parsed.role, detected.slug, decision.id, task, decision.instance);
