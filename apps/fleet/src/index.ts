@@ -22,6 +22,9 @@ import { handleFleetGh } from "./write-proxy/gh-route";
 import { handleFleetGit } from "./write-proxy/git-worker";
 import { recordWorkerException } from "./exceptions";
 import { CREDS_PREFIX, handleFleetCreds } from "./creds/test-creds";
+import { runDailyModelQuality, collectOutcomes } from "./llm/model-quality-cron";
+import { createComment } from "./board/api";
+import { repoTokenMinter } from "./github/auth";
 
 export { AgentDO } from "./agents/do";
 // A container class declared in wrangler.jsonc without a matching export
@@ -178,7 +181,7 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, url: U
   return new Response("not found", { status: 404 });
 }
 
-async function handleScheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+async function handleScheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
   // Board #334: the AgentDO watchdog is part of the legacy Telegram
   // surface — off, nobody polls AgentDO (its container never starts).
   // The studio container-watch below runs either way.
@@ -248,4 +251,28 @@ async function handleScheduled(controller: ScheduledController, env: Env, _ctx: 
       console.error("container watch sweep failed", err);
     }
   }
+
+  // Task 6, spec 2026-10-13-model-pool-design (Quality): the daily
+  // model-quality pass. runDailyModelQuality owns its own once-per-UTC-day
+  // guard and the LEAD_MODEL_POOL gate; this is only the real-world wiring
+  // of its {collect, post, now} deps, same pattern every other cron block
+  // above uses for its own try/catch — a failure here must not stop the
+  // watchdog/container-watch work already done above it.
+  try {
+    await runDailyModelQuality(env, {
+      collect: () => collectOutcomes(env),
+      post: (text) => postModelQualityComment(env, text),
+      now: Date.now(),
+    });
+  } catch (err) {
+    await recordWorkerException(env.DB, "model-quality", err, Date.now(), ctx);
+  }
+}
+
+/** Posts the daily quality table on the board issue env.MODEL_QUALITY_ISSUE
+ *  names — runDailyModelQuality only calls this when that env var is set. */
+async function postModelQualityComment(env: Env, text: string): Promise<void> {
+  const repo = env.AGENT_REPO;
+  const token = await repoTokenMinter(env)(repo);
+  await createComment(token, repo, Number(env.MODEL_QUALITY_ISSUE), text);
 }
