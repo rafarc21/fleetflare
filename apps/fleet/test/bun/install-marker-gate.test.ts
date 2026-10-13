@@ -16,7 +16,7 @@ import { runSnippet } from "./exec-snippet";
 //
 // This file exercises the REAL, shipped gates/install-marker.sh — read
 // directly off disk, the same "single source of truth, read raw" convention
-// test/bun/bringup-hooks.test.ts already uses for lead-gate.sh/
+// test/bun/bringup-gates.test.ts already uses for lead-gate.sh/
 // completion-gate.sh (board issue #2/#17) — run via runSnippet the same way
 // Claude Code itself spawns a hook subprocess (sourced: false, the default,
 // per exec-snippet.ts's own doc comment on which mode models a hook script).
@@ -52,7 +52,7 @@ function markerPath(dir: string): string {
 
 /** Runs the real, shipped hook against a payload, with STUDIO_ID set (a real
  *  cloud studio) unless the test overrides it — same explicit-override
- *  convention test/bun/bringup-hooks.test.ts's own "no-ops without
+ *  convention test/bun/bringup-gates.test.ts's own "no-ops without
  *  STUDIO_ID" describe block uses, so this suite is deterministic regardless
  *  of whatever the ambient shell running it happens to have set. */
 function runGate(payload: unknown, env: Record<string, string> = {}): ReturnType<typeof runSnippet> {
