@@ -16,7 +16,7 @@ import type { BoardTask, EnvelopeDoc } from "../src/board/types";
 // Old local defaults preserved as explicit overrides: task number 109
 // (url/title/updatedAt with it), and the createComment URL keyed to 109.
 const task = (overrides: Partial<BoardTask> = {}) =>
-  boardTask({ number: 109, url: "https://github.com/o/r/issues/109", title: "Fleet Check task", updatedAt: "2026-09-08T10:00:00Z", ...overrides });
+  boardTask({ number: 109, url: "https://github.com/o/r/issues/109", title: "Fleet Check task", state: "working", labels: ["working"], updatedAt: "2026-09-08T10:00:00Z", ...overrides });
 const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
   createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/109#issuecomment-1" })),
   ...overrides,

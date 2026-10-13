@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { openTasksWithLatestPr, OPEN_TASKS_SCAN_MAX_CANDIDATES } from "../src/board/pr-landed";
 import { parseEnvelope } from "../src/board/envelope";
 import { envelopeComment, fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
-import type { BoardApi, TaskComment } from "../src/board/board";
+import type { BoardApi } from "../src/board/board";
 import type { BoardTask, BoardTaskView, EnvelopeDoc } from "../src/board/types";
 import type { TimeBudget } from "../src/time-budget";
 
