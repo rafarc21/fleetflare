@@ -13,7 +13,7 @@ import {
   handleFleetAnthropicCountTokens, ANTHROPIC_COUNT_TOKENS_PATH,
 } from "../src/llm/anthropic-route";
 import { GLM_LEAD_MODEL, GLM_MIN_MAX_TOKENS } from "../src/llm/translate";
-import { POOL } from "../src/llm/models";
+import { POOL, type PoolModel } from "../src/llm/models";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
@@ -71,12 +71,16 @@ const good = { model: "claude-opus-4-5", max_tokens: 100, messages: [{ role: "us
  *  args/sequence) instead of `setup()`'s own wrapped `vi.fn(async () =>
  *  aiResult)`. Builds the same authorized POST (`good` body, a freshly
  *  minted spawn token, a glm-led registry row) every other happy-path test
- *  in this file already does. */
-async function callRoute(opts: { ai: { run: ReturnType<typeof vi.fn> }; envOverrides?: Partial<Env> }) {
+ *  in this file already does. `pool` (code review, Standards axis, #717):
+ *  `handleFleetAnthropicMessages`'s own test-injection seam for the model
+ *  pool pickModels walks — the same `rows`-style override already used for
+ *  DB injection, now extended so a test can hand it a fixture pool instead
+ *  of mutating the real, shared `models.ts` POOL export. */
+async function callRoute(opts: { ai: { run: ReturnType<typeof vi.fn> }; envOverrides?: Partial<Env>; pool?: readonly PoolModel[] }) {
   const token = mintSpawnToken();
   const rows = async () => [row(ME, await hashSpawnToken(token))];
   const e = { ...env, FLEET_JUNIOR: "on", AI: opts.ai, ...FAST_RETRY, ...(opts.envOverrides ?? {}) } as unknown as Env;
-  return handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+  return handleFleetAnthropicMessages(req({ token }), e, ctx, rows, opts.pool);
 }
 
 function req(opts: { token?: string | null; apiKey?: string; body?: unknown; path?: string; method?: string }) {
@@ -1278,27 +1282,23 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     // never offers a smoke-UNtested model as an overflow candidate (the
     // pool's own entry rule, enforced in router.ts, not something this
     // route may bypass), so there is genuinely no SECOND model to move to
-    // without this flip. Flipping kimi's own `smokePassed` for the
-    // duration of this one test (restored in `finally`, before any other
-    // test in this file can observe it) simulates "kimi has passed smoke"
-    // without touching the real, committed pool state.
-    const kimi = POOL[1];
-    const originalSmokePassed = kimi.smokePassed;
-    (kimi as { smokePassed: boolean }).smokePassed = true;
-    try {
-      const seen: string[] = [];
-      const ai = { run: vi.fn(async (model: string) => {
-        seen.push(model);
-        if (seen.length === 1) throw new Error("3021: rate limiting: Account rate limit exceeded");
-        return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
-      }) };
-      const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" } });
-      expect(res.status).toBe(200);
-      expect(seen.length).toBe(2);
-      expect(seen[0]).not.toBe(seen[1]);
-    } finally {
-      (kimi as { smokePassed: boolean }).smokePassed = originalSmokePassed;
-    }
+    // without a fixture pool where kimi has smoke-passed. Built as a plain
+    // copy of the real POOL (code review, Standards axis, #717) and handed
+    // to `callRoute`'s own `pool` override — `handleFleetAnthropicMessages`'s
+    // test-injection seam — rather than mutating the real, shared `models.ts`
+    // POOL export, which no sibling test could be sure stayed unmutated.
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("3021: rate limiting: Account rate limit exceeded");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
   });
 
   it("pool on: every model 429s → 429 rate_limit_error with retry-after", async () => {

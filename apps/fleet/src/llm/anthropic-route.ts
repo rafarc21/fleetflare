@@ -29,7 +29,7 @@ import {
 } from "./translate";
 import { pickModels } from "./router";
 import { getAssignedModel, getModelStates } from "./model-store";
-import { POOL, modelById } from "./models";
+import { POOL, modelById, type PoolModel } from "./models";
 
 export const ANTHROPIC_MESSAGES_PATH = "/fleet/llm/anthropic/v1/messages";
 
@@ -492,9 +492,61 @@ function logUsage(
  *  HTML error page); the reason column only needs enough to classify it. */
 const FAILURE_REASON_CAP = 300;
 
+/** The outcome of walking `pickModels`' candidate list — either the winning
+ *  model's own upstream value, or (every candidate exhausted) the last
+ *  model tried and the message it failed with. Either way `usedModel`/
+ *  `attempts` are what the caller's usage row needs regardless of outcome —
+ *  see `runModelPoolOverflow`'s own doc comment. */
+type ModelOverflowResult =
+  | { ok: true; upstream: Json; usedModel: string; attempts: number }
+  | { ok: false; usedModel: string; attempts: number; lastMessage: string };
+
+/** Code review (Standards axis, #717): extracted verbatim out of
+ *  `handleFleetAnthropicMessages`'s own body — the self-contained walk over
+ *  `order` (pickModels' own candidate model list), applying issue #335's
+ *  same-model retry (`runAiWithRetry`) to each candidate in turn. Spec
+ *  Component 4's own rule: a 429/3021, or a 504/529 that already exhausted
+ *  its same-model retry, moves to the next candidate; anything else (a 4xx
+ *  the request itself caused, a genuine 500) is not a failure another model
+ *  would answer differently, so the walk stops there and reports it as the
+ *  final failure.
+ *
+ *  `attempts` accumulates every `env.AI.run` call across EVERY model this
+ *  walk tried, not just the winning model's own retry count — a usage
+ *  row's `attempts` is the total number of `env.AI.run` calls the whole
+ *  call cost (see `handleFleetAnthropicMessages`'s own doc comment on
+ *  `startedAt`/`attempts`). Pure aside from the `ai.run` call itself — no
+ *  env/ctx/studio reach-in, so a caller supplies exactly what the walk
+ *  needs and nothing more. */
+async function runModelPoolOverflow(
+  ai: NonNullable<Env["AI"]>, order: string[], body: Json,
+  gatewayOption: { gateway: { id: string } }, baseMs: number,
+): Promise<ModelOverflowResult> {
+  let attempts = 0;
+  let usedModel = order[0];
+  let lastMessage = "";
+  for (const modelId of order) {
+    const pm = modelById(modelId) ?? POOL[0];
+    usedModel = pm.id;
+    const openaiBody = anthropicRequestToOpenAI(body, { id: pm.id, minMaxTokens: pm.minMaxTokens });
+    try {
+      const r = await runAiWithRetry(() => ai.run(pm.id, openaiBody, gatewayOption), { baseMs });
+      return { ok: true, upstream: r.value, usedModel, attempts: attempts + r.attempts };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      lastMessage = message;
+      attempts += e instanceof AiRunError ? e.attempts : 1;
+      const { status } = classifyAiError(message);
+      if (!(isRateLimited(message) || status === 504 || status === 529)) break;
+    }
+  }
+  return { ok: false, usedModel, attempts, lastMessage };
+}
+
 export async function handleFleetAnthropicMessages(
   req: Request, env: Env, ctx: ExecutionContext,
   rows: () => Promise<StudioStatus[]> = () => listStudios(env),
+  pool?: readonly PoolModel[],
 ): Promise<Response> {
   const gate = await authenticateGlmLeadRequest(req, ANTHROPIC_MESSAGES_PATH, env, rows);
   if ("response" in gate) return gate.response;
@@ -545,6 +597,7 @@ export async function handleFleetAnthropicMessages(
     poolOn,
     assigned: poolOn ? await getAssignedModel(env.DB, studio.id) : null,
     states: poolOn ? await getModelStates(env.DB) : {},
+    ...(pool === undefined ? {} : { pool }),
   });
 
   // Issue #335: one clock per call. `attempts` now accumulates across EVERY
@@ -553,41 +606,16 @@ export async function handleFleetAnthropicMessages(
   // number of `env.AI.run` calls this one Messages-API request cost.
   const startedAt = Date.now();
   const stream = body.stream === true;
-  let upstream: Json | undefined;
-  let attempts = 0;
-  let usedModel = order[0];
-  let lastMessage = "";
-  for (const modelId of order) {
-    const pm = modelById(modelId) ?? POOL[0];
-    usedModel = pm.id;
-    const openaiBody = anthropicRequestToOpenAI(body, { id: pm.id, minMaxTokens: pm.minMaxTokens });
-    try {
-      const r = await runAiWithRetry(() => ai.run(pm.id, openaiBody, gatewayOption), { baseMs: leadAiRetryBaseMs(env) });
-      upstream = r.value;
-      attempts += r.attempts;
-      break;
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      lastMessage = message;
-      attempts += e instanceof AiRunError ? e.attempts : 1;
-      // Spec Component 4: 429/3021 moves to the next pool model immediately;
-      // a transient 504/529 already exhausted #335's own same-model retry
-      // (runAiWithRetry, above) before this catch ever runs, so it ALSO
-      // falls through to the next model rather than ending the turn here.
-      // Anything else (a 4xx the request itself caused, a genuine 500) is
-      // not a failure another model would answer any differently — stop
-      // walking and report it as-is.
-      const { status } = classifyAiError(message);
-      if (!(isRateLimited(message) || status === 504 || status === 529)) break;
-    }
-  }
+  const overflow = await runModelPoolOverflow(ai, order, body, gatewayOption, leadAiRetryBaseMs(env));
+  const { usedModel, attempts } = overflow;
 
-  if (upstream === undefined) {
+  if (!overflow.ok) {
     // Spec Component 4: "all exhausted -> 429 + retry-after (shortest known
     // reset)" — every candidate model either 429'd/3021'd or exhausted its
     // own transient retry. A rate-limited exhaustion is reported as 429
     // regardless of which specific upstream wording the LAST model used
     // (classifyAiError's own mapping stays the fallback for anything else).
+    const { lastMessage } = overflow;
     const rateLimited = isRateLimited(lastMessage);
     const { status, type, message: overrideMessage } = rateLimited
       ? { status: 429, type: "rate_limit_error", message: undefined as string | undefined }
@@ -606,6 +634,7 @@ export async function handleFleetAnthropicMessages(
     }
     return res;
   }
+  const { upstream } = overflow;
 
   if (stream) {
     if (!(upstream instanceof ReadableStream)) {
