@@ -5,6 +5,7 @@ import * as authModule from "../src/studio/auth";
 import * as openPrsModule from "../src/board/open-prs";
 import { handleBoard } from "../src/board/routes";
 import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
+import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import type { BoardApi } from "../src/board/board";
 import type { BoardComment } from "../src/board/api";
 import { studioLabel, type BoardTask, type EnvelopeDoc } from "../src/board/types";
@@ -37,33 +38,15 @@ const reach = async (slug: string): Promise<RepoReach> =>
     ? { reachable: true }
     : { reachable: false, remedy: "is not reachable by this fleet" };
 
-function task(overrides: Partial<BoardTask> = {}): BoardTask {
-  return {
-    number: 12, url: "https://github.com/o/r/issues/12", title: "Build the task board",
-    body: "## Objective\n\nShip it.\n", state: "working", labels: ["working"],
-    assignee: null, milestone: null, open: true, updatedAt: "2026-08-25T10:00:00Z", ...overrides,
-  };
-}
-
-function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
-  return {
-    createIssue: vi.fn(async () => task()),
-    getIssue: vi.fn(async () => task()),
-    listIssues: vi.fn(async () => [task()]),
-    addLabels: vi.fn(async () => {}),
-    removeLabel: vi.fn(async () => {}),
-    createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/12#issuecomment-1" })),
-    pullRequestExists: vi.fn(async () => true),
-    listComments: vi.fn(async () => []),
-    listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1" }]),
-    branchExists: vi.fn(async () => true),
-    commitExists: vi.fn(async () => true),
-    closeIssue: vi.fn(async () => {}),
-    listOpenPullFiles: vi.fn(async () => []),
-    getPullRequest: vi.fn(async () => ({ number: 0, merged: false, open: true, title: "" })),
-    ...overrides,
-  };
-}
+// Old local defaults preserved: "Build the task board" title, "working"
+// state, and the Sprint-1 listMilestones seed.
+const task = (overrides: Partial<BoardTask> = {}) => boardTask({
+  title: "Build the task board", state: "working", labels: ["working"], ...overrides,
+});
+const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
+  listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1" }]),
+  ...overrides,
+}, () => task());
 
 /** Same shape as board.routes.test.ts's own seedStudio: the only fields the
  *  open-prs route reads are `id` and `repoSlug`, so the rest of the row is

@@ -4,6 +4,7 @@ import { formatTaskTable, TITLE_WIDTH } from "../cli/task-format";
 import { formatAccountsTable } from "../cli/accounts-format";
 import type { AccountSnapshotRow, AccountCurrentState } from "../cli/accounts-format";
 import type { SyncDecision } from "../src/studio/claude-swap";
+import { task as boardTask } from "./helpers/board-api";
 import type { BoardTask } from "../src/board/types";
 
 // Issue #399 (sweep-5 F1): byte-exact characterization pins of the column
@@ -18,13 +19,11 @@ import type { BoardTask } from "../src/board/types";
 // below ARE the before-snapshot, so a fold that changes even one space
 // fails, while a fold that changes nothing passes without editing a line.
 
-function task(overrides: Partial<BoardTask> = {}): BoardTask {
-  return {
-    number: 12, url: "https://github.com/o/r/issues/12", title: "Build the task board",
-    body: "", state: "submitted", labels: ["submitted"], assignee: null,
-    milestone: "Sprint 1", open: true, updatedAt: "2026-08-25T10:00:00Z", ...overrides,
-  };
-}
+// Old local defaults preserved: "Build the task board" title, EMPTY body
+// (this file's byte pins never render an Objective header), Sprint 1.
+const task = (overrides: Partial<BoardTask> = {}) => boardTask({
+  title: "Build the task board", body: "", milestone: "Sprint 1", ...overrides,
+});
 
 // What a > TITLE_WIDTH title renders: the first TITLE_WIDTH-1 chars plus the
 // ellipsis — spelled this way instead of 51 literal x's so the pin stays
