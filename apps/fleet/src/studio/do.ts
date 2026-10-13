@@ -4650,8 +4650,8 @@ export async function loadOrMintSpawnToken(storage: SpawnTokenStorage): Promise<
  * So: mint once, keep forever. `container env == registry hash` now holds by
  * construction rather than by timing. **Rotation is an operator procedure**,
  * not a side effect of a routine call — delete SPAWN_TOKEN_KEY from the
- * studio's DO storage, recycle the container, provision. See
- * docs/superpowers/OPERATOR-FINISH-LIST.md §9.
+ * studio's DO storage, recycle the container, provision. See the
+ * operator's own finish-list notes (kept outside this repo), §9.
  *
  * **Ordering invariant (review round 1, Important 3).** The writes are one
  * SHORT early sequence — no clone, no bring-up, no GitHub call inside it —
