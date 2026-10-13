@@ -69,7 +69,7 @@ function req(path: string, body: unknown) {
 const BRIEF = { title: "Research", objective: "Read siblings", outputFormat: "A report", boundaries: "Read only" };
 
 const board = (r: Request, api: BoardApi) =>
-  handleBoard(r, testEnv, api, reach, undefined, undefined, wakeDeps());
+  handleBoard(r, testEnv, { api, reach, assignWake: wakeDeps() });
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM fleet_state").run();
@@ -118,7 +118,7 @@ describe("operator board: POST /tasks with readRepos", () => {
     const patEnv = { ...env, AGENT_REPO: REPO, GITHUB_TOKEN: "github_pat_x", GITHUB_APP_ID: "", GITHUB_REPO_AUTH: "" } as unknown as Env;
     const res = await handleBoard(
       req("/studio/board/tasks", { ...BRIEF, assignee: STUDIO, readRepos: ["acme-org/alpha"] }),
-      patEnv, api, reach, undefined, undefined, wakeDeps());
+      patEnv, { api, reach, assignWake: wakeDeps() });
     expect(res.status).toBe(400);
     expect(await res.text()).toMatch(/GitHub App/);
     expect(api.createIssue).not.toHaveBeenCalled();

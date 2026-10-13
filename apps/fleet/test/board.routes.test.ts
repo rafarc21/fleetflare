@@ -52,8 +52,8 @@ function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
 }
 
 const testEnv = { ...env, AGENT_REPO: "acme-org/websites" } as unknown as Env;
-/** The P6a reachability seam handleBoard takes as its 4th argument — a live
- *  GitHub call in production, with no test double. */
+/** The P6a reachability seam handleBoard takes in its ports object's `reach`
+ *  field — a live GitHub call in production, with no test double. */
 const reach = async (slug: string): Promise<RepoReach> =>
   ["acme-org/websites", "acme-org/beta"].includes(slug.toLowerCase())
     ? { reachable: true }
@@ -86,21 +86,21 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 describe("handleBoard", () => {
   it("401s without an Access header — the board is behind the same gate every studio route is", async () => {
-    const res = await handleBoard(new Request("https://x/studio/board/tasks"), testEnv, fakeApi(), reach);
+    const res = await handleBoard(new Request("https://x/studio/board/tasks"), testEnv, { api: fakeApi(), reach });
     expect(res.status).toBe(401);
   });
 
   it("404s an unknown board path and 405s a wrong verb", async () => {
     authorized();
-    expect((await handleBoard(req("/studio/board/nonsense"), testEnv, fakeApi(), reach)).status).toBe(404);
-    expect((await handleBoard(req("/studio/board/tasks/12", { method: "DELETE" }), testEnv, fakeApi(), reach)).status)
+    expect((await handleBoard(req("/studio/board/nonsense"), testEnv, { api: fakeApi(), reach })).status).toBe(404);
+    expect((await handleBoard(req("/studio/board/tasks/12", { method: "DELETE" }), testEnv, { api: fakeApi(), reach })).status)
       .toBe(405);
   });
 
   it("POST /tasks creates on the fleet's default repo when the caller names none", async () => {
     authorized();
     const api = fakeApi();
-    const res = await handleBoard(req("/studio/board/tasks", { method: "POST", body: JSON.stringify(brief) }), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/tasks", { method: "POST", body: JSON.stringify(brief) }), testEnv, { api, reach });
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(task());
@@ -112,7 +112,7 @@ describe("handleBoard", () => {
     const api = fakeApi();
     await handleBoard(
       req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, repo: "acme-org/beta" }) }),
-      testEnv, api, reach,
+      testEnv, { api, reach },
     );
     expect(vi.mocked(api.createIssue).mock.calls[0][0]).toBe("acme-org/beta");
   });
@@ -122,7 +122,7 @@ describe("handleBoard", () => {
     const api = fakeApi();
     const res = await handleBoard(
       req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, repo: "someone/else" }) }),
-      testEnv, api, reach,
+      testEnv, { api, reach },
     );
     expect(res.status).toBe(403);
     expect(api.createIssue).not.toHaveBeenCalled();
@@ -131,7 +131,7 @@ describe("handleBoard", () => {
   it("surfaces a bad brief as 400 with the reason in the body", async () => {
     authorized();
     const res = await handleBoard(
-      req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ title: "t" }) }), testEnv, fakeApi(), reach,
+      req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ title: "t" }) }), testEnv, { api: fakeApi(), reach },
     );
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("objective");
@@ -148,7 +148,7 @@ describe("handleBoard", () => {
     });
     const res = await handleBoard(
       req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, idempotencyKey: "k-0123456789abcdef" }) }),
-      testEnv, api, reach,
+      testEnv, { api, reach },
     );
     expect(res.status).toBe(502);
     expect(await res.text()).toContain("board upstream failed");
@@ -170,7 +170,7 @@ describe("handleBoard", () => {
           method: "POST",
           body: JSON.stringify({ ...brief, assignee: "acme--web-studio", junior: true }),
         }),
-        testEnv, api, reach,
+        testEnv, { api, reach },
       );
       expect(res.status).toBe(200);
       expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 55, "acme--web-studio")).toBe(true);
@@ -184,7 +184,7 @@ describe("handleBoard", () => {
       const api = fakeApi({ createIssue: vi.fn(async () => created) });
       await handleBoard(
         req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, assignee: "acme--web-studio" }) }),
-        testEnv, api, reach,
+        testEnv, { api, reach },
       );
       expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 56, "acme--web-studio")).toBe(false);
     });
@@ -195,7 +195,7 @@ describe("handleBoard", () => {
       const api = fakeApi({ createIssue: vi.fn(async () => created) });
       const res = await handleBoard(
         req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, junior: true }) }),
-        testEnv, api, reach,
+        testEnv, { api, reach },
       );
       expect(res.status).toBe(200);
       // Nothing to assert isJuniorAuthorized against directly (no studio id),
@@ -212,7 +212,7 @@ describe("handleBoard", () => {
     const api = fakeApi({ getIssue: vi.fn(async () => { throw new GitHubError(500, "GET failed (500)"); }) });
     const res = await handleBoard(
       req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: "websites--web-studio" }) }),
-      testEnv, api, reach,
+      testEnv, { api, reach },
     );
     expect(res.status).toBe(502);
     expect(await res.text()).toContain("board upstream failed");
@@ -222,7 +222,7 @@ describe("handleBoard", () => {
     authorized();
     const api = fakeApi({ listIssues: vi.fn(async () => []) });
     const res = await handleBoard(
-      req("/studio/board/tasks?milestone=Sprint%201&state=working"), testEnv, api, reach,
+      req("/studio/board/tasks?milestone=Sprint%201&state=working"), testEnv, { api, reach },
     );
     expect(res.status).toBe(200);
     expect(api.listIssues).toHaveBeenCalledWith("acme-org/websites", { milestone: 3, labels: ["working"] });
@@ -235,7 +235,7 @@ describe("handleBoard", () => {
         { id: 1, url: "u1", author: "rafarc21", createdAt: "t1", body: "looks good" },
       ]),
     });
-    const res = await handleBoard(req("/studio/board/tasks/12"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/tasks/12"), testEnv, { api, reach });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { task: BoardTask; comments: unknown[] };
     expect(body.task.number).toBe(12);
@@ -247,7 +247,7 @@ describe("handleBoard", () => {
     const api = fakeApi();
     const res = await handleBoard(
       req("/studio/board/tasks/12/state", { method: "POST", body: JSON.stringify({ from: "submitted", to: "working" }) }),
-      testEnv, api, reach,
+      testEnv, { api, reach },
     );
     expect(res.status).toBe(200);
     expect(((await res.json()) as BoardTask).state).toBe("working");
@@ -263,7 +263,7 @@ describe("handleBoard", () => {
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })) });
     const res = await handleBoard(
       req("/studio/board/tasks/12/state", { method: "POST", body: JSON.stringify({ from: "working", to: "canceled" }) }),
-      testEnv, api, reach,
+      testEnv, { api, reach },
     );
     expect(res.status).toBe(200);
     expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(false);
@@ -274,7 +274,7 @@ describe("handleBoard", () => {
     await recordJuniorAuthorization(testEnv.DB, "acme-org/websites", 12, "acme--web-studio", 1000);
     const res = await handleBoard(
       req("/studio/board/tasks/12/state", { method: "POST", body: JSON.stringify({ from: "submitted", to: "working" }) }),
-      testEnv, fakeApi(), reach,
+      testEnv, { api: fakeApi(), reach },
     );
     expect(res.status).toBe(200);
     expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(true);
@@ -288,12 +288,12 @@ describe("handleBoard", () => {
       listIssues: vi.fn(async () => [task({ number: 12, state: "canceled", labels: ["canceled"] })]),
       closeIssue,
     });
-    const dry = await handleBoard(req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ terminal: true }) }), testEnv, api, reach);
+    const dry = await handleBoard(req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ terminal: true }) }), testEnv, { api, reach });
     expect(await dry.json()).toMatchObject({ repo: "acme-org/websites", apply: false, terminal: true, remaining: 0,
       results: [{ number: 12, outcome: "would-close", reason: "not_planned" }] });
     expect(closeIssue).not.toHaveBeenCalled();
     const applied = await handleBoard(
-      req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ terminal: true, apply: true }) }), testEnv, api, reach,
+      req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ terminal: true, apply: true }) }), testEnv, { api, reach },
     );
     expect(await applied.json()).toMatchObject({ results: [{ number: 12, outcome: "closed" }] });
     expect(closeIssue).toHaveBeenCalledWith("acme-org/websites", 12, "not_planned");
@@ -304,13 +304,13 @@ describe("handleBoard", () => {
     authorized();
     await recordJuniorAuthorization(testEnv.DB, "acme-org/websites", 12, "acme--web-studio", 1000);
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"] })) });
-    const dry = await handleBoard(req("/studio/board/tasks/junior-sweep", { method: "POST", body: "{}" }), testEnv, api, reach);
+    const dry = await handleBoard(req("/studio/board/tasks/junior-sweep", { method: "POST", body: "{}" }), testEnv, { api, reach });
     expect(dry.status).toBe(200);
     const dryBody = (await dry.json()) as { repo: string; apply: boolean; results: { number: number; outcome: string }[] };
     expect(dryBody).toMatchObject({ repo: "acme-org/websites", apply: false, results: [{ number: 12, outcome: "would-revoke" }] });
     expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(true);
     const applied = await handleBoard(
-      req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ apply: true }) }), testEnv, api, reach,
+      req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ apply: true }) }), testEnv, { api, reach },
     );
     expect(((await applied.json()) as { results: { outcome: string }[] }).results[0].outcome).toBe("revoked");
     expect(await isJuniorAuthorized(testEnv.DB, "acme-org/websites", 12, "acme--web-studio")).toBe(false);
@@ -321,11 +321,11 @@ describe("handleBoard", () => {
     for (const n of [12, 13]) await recordJuniorAuthorization(testEnv.DB, "acme-org/websites", n, "acme--web-studio", 1000);
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })) });
     const first = await handleBoard(
-      req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ limit: 1 }) }), testEnv, api, reach,
+      req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ limit: 1 }) }), testEnv, { api, reach },
     );
     expect(await first.json()).toMatchObject({ next: 12, results: [{ number: 12 }] });
     const second = await handleBoard(
-      req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ limit: 1, after: 12 }) }), testEnv, api, reach,
+      req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ limit: 1, after: 12 }) }), testEnv, { api, reach },
     );
     expect(await second.json()).toMatchObject({ next: null, results: [{ number: 13 }] });
   });
@@ -338,7 +338,7 @@ describe("handleBoard", () => {
     const getIssue = vi.fn(async () => task({ state: "working", labels: ["working"] }));
     const res = await handleBoard(
       req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify({ limit: 10_000 }) }),
-      testEnv, fakeApi({ getIssue }), reach,
+      testEnv, { api: fakeApi({ getIssue }), reach },
     );
     const body = (await res.json()) as { results: unknown[]; next: number | null };
     expect(getIssue).toHaveBeenCalledTimes(JUNIOR_SWEEP_PAGE);
@@ -350,7 +350,7 @@ describe("handleBoard", () => {
     authorized();
     for (const bad of [{ after: -1 }, { after: "3" }, { limit: 0 }, { limit: 1.5 }]) {
       const res = await handleBoard(
-        req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify(bad) }), testEnv, fakeApi(), reach,
+        req("/studio/board/tasks/junior-sweep", { method: "POST", body: JSON.stringify(bad) }), testEnv, { api: fakeApi(), reach },
       );
       expect(res.status, JSON.stringify(bad)).toBe(400);
     }
@@ -358,7 +358,7 @@ describe("handleBoard", () => {
 
   it("#35: junior-sweep is POST only", async () => {
     authorized();
-    expect((await handleBoard(req("/studio/board/tasks/junior-sweep"), testEnv, fakeApi(), reach)).status).toBe(405);
+    expect((await handleBoard(req("/studio/board/tasks/junior-sweep"), testEnv, { api: fakeApi(), reach })).status).toBe(405);
   });
 
   it("409s a transition the Worker did not initiate", async () => {
@@ -366,7 +366,7 @@ describe("handleBoard", () => {
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })) });
     const res = await handleBoard(
       req("/studio/board/tasks/12/state", { method: "POST", body: JSON.stringify({ from: "submitted", to: "completed" }) }),
-      testEnv, api, reach,
+      testEnv, { api, reach },
     );
     expect(res.status).toBe(409);
     expect(await res.text()).toContain("single writer");
@@ -383,7 +383,7 @@ describe("handleBoard", () => {
           verification: { url: "https://x.test", steps: ["open it"], expected: "it works" },
         }),
       }),
-      testEnv, api, reach,
+      testEnv, { api, reach },
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { url: string; envelope: { envelope: { msg_id: string; task_id: number } } };
@@ -398,7 +398,7 @@ describe("handleBoard", () => {
     const api = fakeApi({
       getIssue: vi.fn(async () => { throw new GitHubError(404, "GET /repos/o/r/issues/999 failed (404): Not Found"); }),
     });
-    const res = await handleBoard(req("/studio/board/tasks/999"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/tasks/999"), testEnv, { api, reach });
     expect(res.status).toBe(404);
   });
 
@@ -407,13 +407,13 @@ describe("handleBoard", () => {
     const api = fakeApi({
       listIssues: vi.fn(async () => { throw new GitHubError(500, "GET /repos/o/r/issues failed (500): boom"); }),
     });
-    const res = await handleBoard(req("/studio/board/tasks"), testEnv, api, reach);
+    const res = await handleBoard(req("/studio/board/tasks"), testEnv, { api, reach });
     expect(res.status).toBe(502);
   });
 
   it("refuses a task number that is not a number at all", async () => {
     authorized();
-    const res = await handleBoard(req("/studio/board/tasks/abc"), testEnv, fakeApi(), reach);
+    const res = await handleBoard(req("/studio/board/tasks/abc"), testEnv, { api: fakeApi(), reach });
     expect(res.status).toBe(404);
   });
 
@@ -423,7 +423,7 @@ describe("handleBoard", () => {
     const res = await handleBoard(
       req("/studio/board/tasks/42/adopt", {
         method: "POST", body: JSON.stringify({ assignee: "websites--web-studio" }),
-      }), testEnv, api, reach,
+      }), testEnv, { api, reach },
     );
 
     expect(res.status).toBe(200);
@@ -446,7 +446,7 @@ describe("handleBoard", () => {
       req("/studio/board/tasks/42/assign", {
         method: "POST",
         body: JSON.stringify({ assignee: "websites--release-studio", why: "web studio died" }),
-      }), testEnv, api, reach,
+      }), testEnv, { api, reach },
     );
 
     expect(res.status).toBe(200);
@@ -482,7 +482,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps();
       const res = await handleBoard(
         req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
 
       expect(res.status).toBe(200);
@@ -498,7 +498,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps();
       await handleBoard(
         req("/studio/board/tasks/42/adopt", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
       expect(wake).toHaveBeenCalledTimes(1);
     });
@@ -509,7 +509,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps();
       const res = await handleBoard(
         req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
       expect(res.status).toBe(200);
       expect(wake).toHaveBeenCalledTimes(1);
@@ -522,7 +522,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps();
       const res = await handleBoard(
         req("/studio/board/tasks", { method: "POST", body: JSON.stringify(brief) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
       expect(wake).not.toHaveBeenCalled();
       expect(await res.json()).toEqual(task());
@@ -538,7 +538,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps();
       const res = await handleBoard(
         req("/studio/board/tasks/42/adopt", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
       expect(res.status).toBe(200);
       expect(wake).toHaveBeenCalledTimes(1);
@@ -559,7 +559,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps("stopped");
       const res = await handleBoard(
         req("/studio/board/tasks/42/adopt", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
       expect(res.status).toBe(200);
       expect(wake).not.toHaveBeenCalled();
@@ -575,7 +575,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps("stopped");
       const res = await handleBoard(
         req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
 
       expect(res.status).toBe(200);
@@ -604,7 +604,7 @@ describe("handleBoard", () => {
         req("/studio/board/tasks/42/assign", {
           method: "POST", body: JSON.stringify({ assignee: WEB, why: "nudge — check the failing test" }),
         }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
 
       expect(res.status).toBe(200);
@@ -629,7 +629,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps();
       const res = await handleBoard(
         req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
 
       expect(res.status).toBe(200);
@@ -651,7 +651,7 @@ describe("handleBoard", () => {
         req("/studio/board/tasks/42/assign", {
           method: "POST", body: JSON.stringify({ assignee: WEB, why: "release studio died" }),
         }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
 
       expect(res.status).toBe(200);
@@ -674,7 +674,7 @@ describe("handleBoard", () => {
       };
       const res = await handleBoard(
         req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
       expect(res.status).toBe(200);
       expect((await res.json() as { wake: { reason: string } }).wake.reason).toContain("DO unreachable");
@@ -686,7 +686,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps();
       const res = await handleBoard(
         req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
       expect(res.status).toBe(409);
       expect(wake).not.toHaveBeenCalled();
@@ -710,7 +710,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps("running", "acme-org/beta");
       const res = await handleBoard(
         req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
 
       expect(res.status).toBe(409);
@@ -732,7 +732,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps("running", "acme-org/beta");
       const res = await handleBoard(
         req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
       expect(res.status).toBe(409);
       expect(wake).not.toHaveBeenCalled();
@@ -751,7 +751,7 @@ describe("handleBoard", () => {
       const { deps, wake } = wakeDeps("running", null);
       const res = await handleBoard(
         req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
       expect(res.status).toBe(200);
       expect(wake).toHaveBeenCalledTimes(1);
@@ -770,7 +770,7 @@ describe("handleBoard", () => {
       deps.resolveCanonicalRepo = vi.fn(async () => { throw new Error("GitHub token expired"); });
       const res = await handleBoard(
         req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: WEB }) }),
-        testEnv, api, reach, undefined, undefined, deps,
+        testEnv, { api, reach, assignWake: deps },
       );
       expect(res.status).toBe(200);
       expect(api.addLabels).toHaveBeenCalled();
@@ -784,7 +784,7 @@ describe("handleBoard", () => {
   it("GETs are not assignment verbs — a read can never move a task", async () => {
     authorized();
     for (const action of ["adopt", "assign"]) {
-      const res = await handleBoard(req(`/studio/board/tasks/42/${action}`), testEnv, fakeApi(), reach);
+      const res = await handleBoard(req(`/studio/board/tasks/42/${action}`), testEnv, { api: fakeApi(), reach });
       expect(res.status).toBe(405);
     }
   });
@@ -810,13 +810,13 @@ describe("handleBoard", () => {
 
     it("GET is not allowed — a read must never trigger outbound checks or a comment", async () => {
       authorized();
-      const res = await handleBoard(req("/studio/board/tasks/42/verify"), testEnv, fakeApi(), reach);
+      const res = await handleBoard(req("/studio/board/tasks/42/verify"), testEnv, { api: fakeApi(), reach });
       expect(res.status).toBe(405);
     });
 
     it("401s without an Access header, same gate as every other action", async () => {
       const res = await handleBoard(
-        new Request("https://x/studio/board/tasks/42/verify", { method: "POST" }), testEnv, fakeApi(), reach,
+        new Request("https://x/studio/board/tasks/42/verify", { method: "POST" }), testEnv, { api: fakeApi(), reach },
       );
       expect(res.status).toBe(401);
     });
@@ -828,7 +828,7 @@ describe("handleBoard", () => {
         listComments: vi.fn(async () => [resultEnvelopeComment()]),
       });
       const res = await handleBoard(
-        req("/studio/board/tasks/42/verify", { method: "POST" }), testEnv, api, reach, okVerifyFetch,
+        req("/studio/board/tasks/42/verify", { method: "POST" }), testEnv, { api, reach, verifyFetch: okVerifyFetch },
       );
       expect(res.status).toBe(200);
       const body = (await res.json()) as { comment: { url: string }; results: { verdict: string }[] };
@@ -844,7 +844,7 @@ describe("handleBoard", () => {
         listComments: vi.fn(async () => []),
       });
       const res = await handleBoard(
-        req("/studio/board/tasks/42/verify", { method: "POST" }), testEnv, api, reach, okVerifyFetch,
+        req("/studio/board/tasks/42/verify", { method: "POST" }), testEnv, { api, reach, verifyFetch: okVerifyFetch },
       );
       expect(res.status).toBe(404);
       expect(api.createComment).not.toHaveBeenCalled();
@@ -956,14 +956,14 @@ describe("POST /studio/board/tasks/rescue-gc", () => {
   const post = (body: unknown) => req("/studio/board/tasks/rescue-gc", { method: "POST", body: JSON.stringify(body) });
 
   it("401s without an Access header", async () => {
-    const res = await handleBoard(new Request("https://x/studio/board/tasks/rescue-gc", { method: "POST" }), testEnv, fakeApi(), reach);
+    const res = await handleBoard(new Request("https://x/studio/board/tasks/rescue-gc", { method: "POST" }), testEnv, { api: fakeApi(), reach });
     expect(res.status).toBe(401);
   });
 
   it("dry-run by default: marker-only would be deleted, real work kept, nothing deleted", async () => {
     authorized();
     const port = fakePort();
-    const res = await handleBoard(post({}), testEnv, fakeApi(), reach, undefined, undefined, undefined, port);
+    const res = await handleBoard(post({}), testEnv, { api: fakeApi(), reach, rescueGcPort: port });
     expect(res.status).toBe(200);
     const body = await res.json() as { repo: string; apply: boolean; defaultBranch: string; olderThanDays: number; results: unknown[] };
     expect(body).toMatchObject({ repo: "acme-org/websites", apply: false, defaultBranch: "main", olderThanDays: 14 });
@@ -977,7 +977,7 @@ describe("POST /studio/board/tasks/rescue-gc", () => {
   it("apply + olderThanDays: deletes through the port, and honours the age", async () => {
     authorized();
     const port = fakePort();
-    const res = await handleBoard(post({ apply: true, olderThanDays: 7 }), testEnv, fakeApi(), reach, undefined, undefined, undefined, port);
+    const res = await handleBoard(post({ apply: true, olderThanDays: 7 }), testEnv, { api: fakeApi(), reach, rescueGcPort: port });
     const body = await res.json() as { olderThanDays: number; results: { outcome: string }[] };
     expect(body.olderThanDays).toBe(7);
     expect(body.results.map((r) => r.outcome)).toEqual(["deleted", "kept"]);
@@ -1016,13 +1016,13 @@ describe("POST /studio/board/tasks/reap", () => {
 
   it("405s anything but POST", async () => {
     authorized();
-    const res = await handleBoard(req("/studio/board/tasks/reap"), testEnv, fakeApi(), reach);
+    const res = await handleBoard(req("/studio/board/tasks/reap"), testEnv, { api: fakeApi(), reach });
     expect(res.status).toBe(405);
   });
 
   it("401s without an Access header — same gate as every other board route", async () => {
     const res = await handleBoard(
-      new Request("https://x/studio/board/tasks/reap", { method: "POST" }), testEnv, fakeApi(), reach,
+      new Request("https://x/studio/board/tasks/reap", { method: "POST" }), testEnv, { api: fakeApi(), reach },
     );
     expect(res.status).toBe(401);
   });
@@ -1042,7 +1042,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const reapPort = fakeReapPort({ checkLanded: vi.fn(async () => ({ landed: true, sha: "ef4e9a15" })), prClaims });
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ apply: true }) }),
-      testEnv, api, reach, undefined, reapPort,
+      testEnv, { api, reach, reapPort },
     );
     expect(res.status).toBe(200);
     const body = await res.json() as { results: unknown[] };
@@ -1063,7 +1063,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const reapPort = fakeReapPort({ checkLanded: vi.fn(async () => ({ landed: true, sha: "abc123" })) });
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({}) }),
-      testEnv, api, reach, undefined, reapPort,
+      testEnv, { api, reach, reapPort },
     );
     expect(res.status).toBe(200);
     const body = await res.json() as { repo: string; apply: boolean; defaultBranch: string; results: unknown[] };
@@ -1084,7 +1084,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const reapPort = fakeReapPort({ checkLanded: vi.fn(async () => ({ landed: true, sha: "abc123" })) });
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ apply: true }) }),
-      testEnv, api, reach, undefined, reapPort,
+      testEnv, { api, reach, reapPort },
     );
     expect(res.status).toBe(200);
     const body = await res.json() as { apply: boolean; results: unknown[] };
@@ -1111,7 +1111,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const reapPort = fakeReapPort({ checkLanded: vi.fn(async () => ({ landed: true, sha: "d93f0a9" })) });
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ apply: true }) }),
-      testEnv, api, reach, undefined, reapPort,
+      testEnv, { api, reach, reapPort },
     );
     expect(res.status).toBe(200);
     const body = await res.json() as { results: unknown[] };
@@ -1135,7 +1135,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const reapPort = fakeReapPort({ checkLanded: vi.fn(async () => ({ landed: true, sha: "e1a2b3c" })) });
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ apply: true }) }),
-      testEnv, api, reach, undefined, reapPort,
+      testEnv, { api, reach, reapPort },
     );
     expect(res.status).toBe(200);
     const body = await res.json() as { results: unknown[] };
@@ -1158,7 +1158,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const reapPort = fakeReapPort({ checkLanded: vi.fn(async () => ({ landed: true, sha: "abc123" })) });
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({}) }),
-      testEnv, api, reach, undefined, reapPort,
+      testEnv, { api, reach, reapPort },
     );
     expect(res.status).toBe(200);
     const body = await res.json() as { results: unknown[] };
@@ -1175,7 +1175,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const checkLanded = vi.fn(async () => ({ landed: false, sha: null }));
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({}) }),
-      testEnv, api, reach, undefined, fakeReapPort({ checkLanded }),
+      testEnv, { api, reach, reapPort: fakeReapPort({ checkLanded }) },
     );
     const body = await res.json() as { results: { outcome: string; reason?: string }[] };
     expect(body.results).toEqual([
@@ -1199,7 +1199,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const checkLanded = vi.fn(async () => ({ landed: true, sha: "m46" }));
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({}) }),
-      testEnv, api, reach, undefined, fakeReapPort({ findCloser, checkLanded }),
+      testEnv, { api, reach, reapPort: fakeReapPort({ findCloser, checkLanded }) },
     );
     const body = await res.json() as { results: unknown[] };
     expect(body.results).toEqual([
@@ -1217,7 +1217,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const api = fakeApi({ listIssues: vi.fn(async () => []) });
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ repo: "acme-org/beta" }) }),
-      testEnv, api, reach, undefined, fakeReapPort(),
+      testEnv, { api, reach, reapPort: fakeReapPort() },
     );
     const body = await res.json() as { repo: string };
     expect(body.repo).toBe("acme-org/beta");
@@ -1248,7 +1248,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const reapPort = fakeReapPort({ checkLanded: vi.fn(async () => ({ landed: true, sha: "throw-sha-1" })) });
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ apply: true }) }),
-      testEnv, api, reach, undefined, reapPort,
+      testEnv, { api, reach, reapPort },
     );
     expect(res.status).toBe(200);
     const body = await res.json() as { results: { taskNumber: number; prNumber?: number; outcome: string; reason?: string }[] };
@@ -1262,7 +1262,7 @@ describe("POST /studio/board/tasks/reap", () => {
     const reapPort = fakeReapPort();
     const res = await handleBoard(
       req("/studio/board/tasks/reap", { method: "POST", body: JSON.stringify({ repo: "someone/else" }) }),
-      testEnv, fakeApi(), reach, undefined, reapPort,
+      testEnv, { api: fakeApi(), reach, reapPort },
     );
     expect(res.status).toBe(403);
     expect(reapPort.getDefaultBranch).not.toHaveBeenCalled();
@@ -1320,8 +1320,8 @@ describe("GET /tasks?assignedTo= — the studio's own board (issue #63)", () => 
   async function ls(query: string, row: { state: string; repoSlug: string | null } | null) {
     authorized();
     const listIssues = vi.fn(async (_repo: string, _query: unknown) => [] as BoardTask[]);
-    const res = await handleBoard(req(`/studio/board/tasks?${query}`), testEnv, fakeApi({ listIssues }), reach,
-      undefined, undefined, wake(row));
+    const res = await handleBoard(req(`/studio/board/tasks?${query}`), testEnv,
+      { api: fakeApi({ listIssues }), reach, assignWake: wake(row) });
     return { res, listIssues };
   }
 
@@ -1376,7 +1376,7 @@ describe("create/assign to a studio with no registry row (issue #81)", () => {
     authorized();
     const api = fakeApi();
     const res = await handleBoard(req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, assignee: GHOST }) }),
-      testEnv, api, reach, undefined, undefined, wake(null));
+      testEnv, { api, reach, assignWake: wake(null) });
     expect(res.status).toBe(409);
     expect(await res.text()).toContain(GHOST);
     expect(api.createIssue).not.toHaveBeenCalled();
@@ -1386,7 +1386,7 @@ describe("create/assign to a studio with no registry row (issue #81)", () => {
     authorized();
     const api = fakeApi();
     const res = await handleBoard(req("/studio/board/tasks", { method: "POST",
-      body: JSON.stringify({ ...brief, assignee: GHOST, pendingSpawn: true }) }), testEnv, api, reach, undefined, undefined, wake(null));
+      body: JSON.stringify({ ...brief, assignee: GHOST, pendingSpawn: true }) }), testEnv, { api, reach, assignWake: wake(null) });
     expect(res.status).toBe(200);
     expect(api.createIssue).toHaveBeenCalled();
   });
@@ -1395,7 +1395,7 @@ describe("create/assign to a studio with no registry row (issue #81)", () => {
     authorized();
     const api = fakeApi();
     const res = await handleBoard(req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...brief, assignee: GHOST }) }),
-      testEnv, api, reach, undefined, undefined, wake({ state: "stopped", repoSlug: "acme-org/websites" }));
+      testEnv, { api, reach, assignWake: wake({ state: "stopped", repoSlug: "acme-org/websites" }) });
     expect(res.status).toBe(200);
   });
 
@@ -1403,7 +1403,7 @@ describe("create/assign to a studio with no registry row (issue #81)", () => {
     authorized();
     const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 42, state: "submitted", labels: ["submitted"], assignee: null })) });
     const res = await handleBoard(req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: GHOST }) }),
-      testEnv, api, reach, undefined, undefined, wake(null));
+      testEnv, { api, reach, assignWake: wake(null) });
     expect(res.status).toBe(409);
     expect(api.addLabels).not.toHaveBeenCalled();
   });
@@ -1412,7 +1412,7 @@ describe("create/assign to a studio with no registry row (issue #81)", () => {
     authorized();
     const api = fakeApi({ getIssue: vi.fn(async () => task({ number: 42, state: "submitted", labels: ["submitted"], assignee: null })) });
     const res = await handleBoard(req("/studio/board/tasks/42/adopt", { method: "POST", body: JSON.stringify({ assignee: GHOST }) }),
-      testEnv, api, reach, undefined, undefined, wake(null));
+      testEnv, { api, reach, assignWake: wake(null) });
     expect(res.status).toBe(200);
   });
 });
@@ -1441,7 +1441,7 @@ describe("task new/assign refuses security-labelled work onto a glm-lead studio 
     const api = fakeApi();
     const res = await handleBoard(
       req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...securityBrief, assignee: GLM_STUDIO }) }),
-      testEnv, api, reach, undefined, undefined, wake(),
+      testEnv, { api, reach, assignWake: wake() },
     );
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("security");
@@ -1453,7 +1453,7 @@ describe("task new/assign refuses security-labelled work onto a glm-lead studio 
     const api = fakeApi();
     const res = await handleBoard(
       req("/studio/board/tasks", { method: "POST", body: JSON.stringify({ ...securityBrief, assignee: CLAUDE_STUDIO }) }),
-      testEnv, api, reach, undefined, undefined, wake("claude"),
+      testEnv, { api, reach, assignWake: wake("claude") },
     );
     expect(res.status).toBe(200);
     expect(api.createIssue).toHaveBeenCalledTimes(1);
@@ -1466,7 +1466,7 @@ describe("task new/assign refuses security-labelled work onto a glm-lead studio 
     });
     const res = await handleBoard(
       req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: GLM_STUDIO }) }),
-      testEnv, api, reach, undefined, undefined, wake(),
+      testEnv, { api, reach, assignWake: wake() },
     );
     expect(res.status).toBe(400);
     expect(api.addLabels).not.toHaveBeenCalled();
@@ -1479,7 +1479,7 @@ describe("task new/assign refuses security-labelled work onto a glm-lead studio 
     });
     const res = await handleBoard(
       req("/studio/board/tasks/42/assign", { method: "POST", body: JSON.stringify({ assignee: CLAUDE_STUDIO }) }),
-      testEnv, api, reach, undefined, undefined, wake("claude"),
+      testEnv, { api, reach, assignWake: wake("claude") },
     );
     expect(res.status).toBe(200);
     expect(api.addLabels).toHaveBeenCalled();

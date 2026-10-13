@@ -2,8 +2,9 @@
 // src/studio/routes.ts's handleStudio — auth first, unconditionally, then
 // path, then method, then body — and the same seam discipline: the two things
 // that cannot run under the test pool (a minted installation token, a live
-// GitHub call) are defaulted parameters, so every route below is exercised in
-// test/board.routes.test.ts without one.
+// GitHub call) are fields of the `ports` object with env-resolving defaults,
+// so every route below is exercised in test/board.routes.test.ts without
+// one.
 //
 // Mounted under `/studio/board/` and NOT at a `/board/` prefix of its own,
 // which is a deployment fact rather than a naming preference: the Cloudflare
@@ -822,17 +823,30 @@ async function lsRepoForStudio(
   return { ok: true, repo: requested };
 }
 
+/** The injectable seams of every board route: the parts a minted
+ * installation token, a live GitHub call, or a Durable Object call needs,
+ * so the routes below run under the test pool without one. Sweep 32
+ * finding S32-F1 (issue #666): these were six trailing positionals, which
+ * forced every test injecting a late port to spell out `undefined` holes
+ * for the earlier ones. */
+type BoardPorts = {
+  api?: BoardApi;
+  reach?: RepoReachFetch;
+  verifyFetch?: VerifyFetch;
+  reapPort?: ReapPort;
+  assignWake?: AssignWakeDeps;
+  rescueGcPort?: RescueGcPort;
+};
+
 export async function handleBoard(
   req: Request, env: Env,
-  api: BoardApi = githubBoardApi(env),
-  reach: RepoReachFetch = githubRepoReach(env),
-  verifyFetch: VerifyFetch = realVerifyFetch(env),
-  reapPort: ReapPort = realReapPort(env),
-  // Board issue #41, half one. Same seam shape as `api`/`reach`/`reapPort`
-  // above: the real one reads D1 and talks to a Durable Object, and no test
-  // in this file needs either.
-  assignWake: AssignWakeDeps = realWakeDeps(env),
-  rescueGcPort: RescueGcPort = realRescueGcPort(env),
+  // Board issue #41, half one: `assignWake` is the same seam shape as the
+  // others — the real one reads D1 and talks to a Durable Object, and no
+  // test in this file needs either.
+  { api = githubBoardApi(env), reach = githubRepoReach(env),
+    verifyFetch = realVerifyFetch(env), reapPort = realReapPort(env),
+    assignWake = realWakeDeps(env),
+    rescueGcPort = realRescueGcPort(env) }: BoardPorts = {},
 ): Promise<Response> {
   const authFailure = await verifyAccess(req, env);
   if (authFailure) return authFailure;
