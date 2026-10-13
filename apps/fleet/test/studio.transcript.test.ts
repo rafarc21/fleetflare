@@ -8,7 +8,7 @@ import {
   INCARNATION_PATH, SESSION_FOUND_SECTION, SESSION_CONTINUE_SECTION, SESSION_CWD_SECTION,
 } from "../src/studio/observed";
 import { REAL_PILOT_PANE } from "./fixtures/rate-limit-panes";
-import { fixedNow, b64 } from "./helpers/datetime";
+import { fixedNow, b64, b64Utf8 } from "./helpers/datetime";
 import { fakeStorage as doStorage } from "./helpers/do-storage";
 
 // Wire-format literals — the container↔Worker delimited-stdout protocol, same
@@ -106,14 +106,6 @@ function fakeStorage(
     }) as unknown as TranscriptStorage["put"],
   };
   return storage;
-}
-
-/** UTF-8 aware, for fixtures with real text (terminal output is not
- *  Latin1-only — claude's own TUI uses box-drawing/Unicode) — same shape as
- *  src/base64.ts's base64EncodeUtf8. Plain `btoa(str)` throws
- *  outright on any character outside Latin1. */
-function b64Utf8(s: string): string {
-  return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
 }
 
 /**
