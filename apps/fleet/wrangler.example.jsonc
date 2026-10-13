@@ -130,6 +130,15 @@
     // Issue #335 (GLM route): base backoff (ms) before retrying a Workers AI
     // 504/529 thrown before the stream starts (2 retries max). Default 500.
     // "LEAD_AI_RETRY_BASE_MS": "500",
+    // Issue #765: lead model pool (docs/operations.md "Model pool") —
+    // route glm/kimi/deepseek lead calls across a Workers AI model pool
+    // via AI Gateway. Off = today's fixed-model behavior.
+    "LEAD_MODEL_POOL": "off",
+    // Optional companions (unset = default): gateway id, overflow opt-out
+    // (#768), board issue the daily model-quality table posts to.
+    // "LEAD_AI_GATEWAY_ID": "default",
+    // "LEAD_MODEL_OVERFLOW": "off",
+    // "MODEL_QUALITY_ISSUE": "<issue-number>",
     // Issue #335: must match r2_buckets[0].bucket_name below exactly
     // (install-cache.ts's presignR2 signs URLs against this value). Not a
     // secret — a bucket name isn't a credential.

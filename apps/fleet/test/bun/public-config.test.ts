@@ -74,4 +74,20 @@ describe("wrangler.example.jsonc (#334)", () => {
     const text = readFileSync(EXAMPLE, "utf8").replace(/^\s*\/\/.*$/gm, "");
     expect(JSON.parse(text).durable_objects?.code_update_strategy).toEqual({ mode: "immediate" });
   });
+
+  // #765 (S39-F6): the lead model pool's gate is a first-class feature
+  // flag like FLEET_TELEGRAM, so the template ships it visible and off;
+  // its three optional companions stay commented (unset = their default).
+  test("ships LEAD_MODEL_POOL off, companions commented-only (#765)", () => {
+    const v = vars(EXAMPLE);
+    expect(v.LEAD_MODEL_POOL).toBe("off");
+    expect(v.LEAD_AI_GATEWAY_ID).toBeUndefined();
+    expect(v.LEAD_MODEL_OVERFLOW).toBeUndefined();
+    expect(v.MODEL_QUALITY_ISSUE).toBeUndefined();
+    // And the companions ARE named in the file, as commented lines.
+    const text = readFileSync(EXAMPLE, "utf8");
+    for (const name of ["LEAD_AI_GATEWAY_ID", "LEAD_MODEL_OVERFLOW", "MODEL_QUALITY_ISSUE"]) {
+      expect({ name, present: text.includes(`"${name}"`) }).toEqual({ name, present: true });
+    }
+  });
 });
