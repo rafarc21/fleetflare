@@ -78,7 +78,11 @@ export type CliCommand =
   // sticky, set once at the studio's first-ever provision, never a per-task
   // flag like `--junior`). Optional, absent means `"claude"` — every spawn
   // call that predates this flag keeps sending the byte-identical request.
-  | { cmd: "spawn"; role: string; newInstance: boolean; leadType?: "claude" | "glm" }
+  // #717: `--lead kimi|deepseek` rides the SAME flag as `--lead claude|glm`
+  // — both pool keys map to a glm-led studio with that pool model pinned as
+  // the main model (readLeadTypeRequest, src/studio/spawn.ts), so the wire
+  // value here is still the raw string the operator typed, unresolved.
+  | { cmd: "spawn"; role: string; newInstance: boolean; leadType?: "claude" | "glm" | "kimi" | "deepseek" }
   // Issue #115: `cancelFreshSession` — `--no-fresh-session`, mutually
   // exclusive with `freshSession` above.
   // Issue #231: `discardSession` — `--discard-session`, the operator's
@@ -252,6 +256,14 @@ export type CliCommand =
   // POST /studio/accounts/hold|clear, both audited Worker-side.
   | { cmd: "accounts-hold"; name: string; until: string | null; reason: string | null }
   | { cmd: "accounts-clear"; name: string }
+  // #717: `fleet models [assign <studio> <model> | promote <model> | demote
+  // <model>]` — the operator surface for the non-Claude lead model pool
+  // (GET/POST /studio/models*). Bare lists the pool table + assignments;
+  // `model` throughout is either a pool KEY ("kimi") or the raw Workers AI
+  // id — the Worker route resolves either.
+  | { cmd: "models-ls" }
+  | { cmd: "models-assign"; studio: string; model: string }
+  | { cmd: "models-set"; state: "promote" | "demote"; model: string }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -327,8 +339,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Upload the Mac clipboard image into the studio and print the in-container path. ctrl-v does this inline while attached.",
   },
   spawn: {
-    args: "<role> [--new] [--lead claude|glm]",
-    summary: "Create a studio for <role> in the repo you are standing in (the roles this fleet declares in fleet.json). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them. Issue #249: `--lead glm` boots this studio's lead on this fleet's own GLM-translation route instead of a Claude account — no Claude quota spent, sticky for the studio's whole life (set once, here, never re-asked on a later provision/restart/recycle). `--lead claude` is the explicit, redundant spelling of today's default. maestro is spawnable from the Mac (the operator edge); ff refuses it (always local, issue #250), and `--new` never applies to it (singleton).",
+    args: "<role> [--new] [--lead claude|glm|kimi|deepseek]",
+    summary: "Create a studio for <role> in the repo you are standing in (the roles this fleet declares in fleet.json). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them. Issue #249: `--lead glm` boots this studio's lead on this fleet's own GLM-translation route instead of a Claude account — no Claude quota spent, sticky for the studio's whole life (set once, here, never re-asked on a later provision/restart/recycle). `--lead claude` is the explicit, redundant spelling of today's default. #717: `--lead kimi` / `--lead deepseek` are also glm-led, with that pool model (`fleet models`) pinned as the studio's main model instead of the round-robin default. maestro is spawnable from the Mac (the operator edge); ff refuses it (always local, issue #250), and `--new` never applies to it (singleton).",
   },
   provision: {
     args: "<id> [--fresh-session [--discard-session]|--no-fresh-session]",
@@ -422,6 +434,22 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     args: "clear <slot>",
     summary: "Issue #336: delete one slot's limit row, whatever it holds (window, spend_cap, hold, dead) — the way to free an org monthly spend cap once an admin has raised it. Audited in the events log.",
   },
+  // #717: three cmd literals (bare ls, assign, promote/demote) share one
+  // help line, same "fleet accounts [sync]|hold|clear" split just above —
+  // verbLine's own `models-` prefix collapse (below) is what folds all
+  // three back into a single "fleet models ..." printed line.
+  "models-ls": {
+    args: "[assign <studio> <model> | promote <model> | demote <model>]",
+    summary: "Model pool for non-Claude leads: table of models, states and studio assignments; assign/promote/demote.",
+  },
+  "models-assign": {
+    args: "assign <studio> <model>",
+    summary: "Assign <studio>'s main pool model — a key (glm/kimi/deepseek) or the raw Workers AI id.",
+  },
+  "models-set": {
+    args: "promote <model> | demote <model>",
+    summary: "Promote a demoted pool model back to active, or demote an active one out of rotation.",
+  },
 };
 
 /** Issue #53: "90s" | "5m" | "2h" -> ms; anything else (bare numbers, zero,
@@ -437,7 +465,7 @@ export function parseIdleDuration(raw: string): number | null {
 /** `fleet ls`, `fleet task show <n>` — the command line for one verb. */
 function verbLine(cmd: string, help: VerbHelp): string {
   const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory"
-    : cmd.startsWith("accounts-") ? "accounts" : cmd;
+    : cmd.startsWith("accounts-") ? "accounts" : cmd.startsWith("models-") ? "models" : cmd;
   return `fleet ${name}${help.args ? " " + help.args : ""}`;
 }
 
@@ -881,14 +909,14 @@ export function parseCliArgs(argv: string[]): CliCommand {
       // small token walk rather than the fixed-shape checks above, since
       // there are now two independent flags instead of one bare boolean.
       let newInstance = false;
-      let leadType: "claude" | "glm" | undefined;
+      let leadType: "claude" | "glm" | "kimi" | "deepseek" | undefined;
       for (let i = 0; i < rest.length; i++) {
         const token = rest[i];
         if (token === "--new" && !newInstance) { newInstance = true; continue; }
         if (token === "--lead" && leadType === undefined) {
           const value = rest[i + 1];
-          if (value !== "claude" && value !== "glm") {
-            return usage(`--lead needs "claude" or "glm", got ${JSON.stringify(value)}`);
+          if (value !== "claude" && value !== "glm" && value !== "kimi" && value !== "deepseek") {
+            return usage(`--lead needs "claude", "glm", "kimi" or "deepseek", got ${JSON.stringify(value)}`);
           }
           leadType = value;
           i += 1;
@@ -1166,6 +1194,23 @@ export function parseCliArgs(argv: string[]): CliCommand {
         return usage(`unexpected ${JSON.stringify(token)}`);
       }
       return { cmd: "accounts", sync, watch, json, writeLabels };
+    }
+    // #717: `fleet models [assign <studio> <model> | promote <model> |
+    // demote <model>]`. Same "sub-action word, never a flag" shape `fleet
+    // accounts` above uses — assign/promote/demote are each a real D1
+    // write Worker-side.
+    case "models": {
+      const rest = argv.slice(1);
+      if (rest.length === 0) return { cmd: "models-ls" };
+      if (rest[0] === "assign") {
+        if (rest.length !== 3) return usage("usage: fleet models assign <studio> <model>");
+        return { cmd: "models-assign", studio: rest[1], model: rest[2] };
+      }
+      if (rest[0] === "promote" || rest[0] === "demote") {
+        if (rest.length !== 2) return usage(`usage: fleet models ${rest[0]} <model>`);
+        return { cmd: "models-set", state: rest[0], model: rest[1] };
+      }
+      return usage("usage: fleet models [assign <studio> <model> | promote <model> | demote <model>]");
     }
     default:
       return { cmd: "usage", message: CLI_USAGE };

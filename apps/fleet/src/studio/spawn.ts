@@ -19,6 +19,10 @@ import { fetchOrgCached, fetchFleetJsonCached, hashSpawnToken, maySpawn, type Or
 import { FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF, ORG_JSON_PATH } from "./provision";
 import { launchOrStartRefusalResponse } from "./rpc-failure";
 import type { ProvisionConfig, StudioStatus } from "./types";
+// Pure, Env-free — the model pool registry (POOL/modelByKey) carries no
+// binding of its own, so importing it does not break this file's "imports
+// no Env" property (see this file's own header).
+import { modelByKey } from "../llm/models";
 
 /**
  * R-P3-7: the machine surface's credential. Spawn calls originate inside
@@ -186,6 +190,19 @@ export interface SpawnDeps {
    * idempotent DO provision gave two tasks one lead.
    */
   claimStudioId: (childId: string, placeholder: StudioStatus) => Promise<(() => Promise<void>) | null>;
+  /**
+   * #717: model pool assignment — when `readLeadTypeRequest`'s `--lead
+   * kimi|deepseek` (or `glm`, which pins the pool's own glm id rather than
+   * leaving the main-model pick to the router's round-robin default)
+   * resolves a POOL model, this persists it as `claimed.full`'s
+   * `lead-model:<childId>` flag, right after `provisionChild` succeeds —
+   * see runSpawn's own call site for why the ordering matters. routes.ts
+   * wires this to model-store.ts's `setAssignedModel(env.DB, ...)`; this
+   * file imports no `Env` of its own (see this file's own header), so the
+   * D1 write happens on the other side of this port, same as every other
+   * dependency here.
+   */
+  assignModel: (studioId: string, modelId: string) => Promise<void>;
 }
 
 /**
@@ -341,11 +358,31 @@ export function readInstanceRequest(body: unknown): number | "next" | null {
  * other string, or any non-string — never coerced: a typo'd
  * `leadType: "gpt4"` is a 400 worth seeing, not a silently-ignored claude
  * studio.
+ *
+ * #717: the model pool added two more accepted keys — `"kimi"` and
+ * `"deepseek"` — and widened the return shape from a bare string to
+ * `{leadType, model?}`, since both of those (and `"glm"` itself) now also
+ * carry a POOL MODEL to pin as the studio's main model (never just "glm, let
+ * the round-robin default pick"). `"claude"` carries no `model` field at
+ * all — the key is OMITTED, not set to `undefined`, so a caller spreading
+ * this object never sends a stray `model: undefined` key. `modelByKey` is
+ * pure and Env-free (models.ts), so this file's own "imports no Env" rule
+ * (see header) still holds.
  */
-export function readLeadTypeRequest(body: unknown): "claude" | "glm" | undefined | null {
+export function readLeadTypeRequest(
+  body: unknown,
+): { leadType: "claude" | "glm"; model?: string } | undefined | null {
   const raw = (body as { leadType?: unknown } | null)?.leadType;
   if (raw === undefined || raw === null) return undefined;
-  if (raw === "claude" || raw === "glm") return raw;
+  if (raw === "claude") return { leadType: "claude" };
+  if (raw === "glm" || raw === "kimi" || raw === "deepseek") {
+    const model = modelByKey(raw);
+    // Registry miss here would mean this fleet's own pool shrank below what
+    // this function still advertises accepting — a deployment fault, not a
+    // caller mistake, but still never a 500: falls through to the ordinary
+    // "malformed" null, same as any other unrecognised string.
+    return model ? { leadType: "glm", model: model.id } : null;
+  }
   return null;
 }
 
@@ -545,10 +582,11 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
 
   // Issue #249: `fleet spawn --lead glm` — same cheapest-check-first order
   // as `instance` just above, before any org.json fetch or registry scan.
-  const leadType = readLeadTypeRequest(body);
-  if (leadType === null) {
+  const leadRequest = readLeadTypeRequest(body);
+  if (leadRequest === null) {
     return new Response(
-      `bad leadType ${JSON.stringify((body as { leadType?: unknown }).leadType)} — expected "claude" or "glm"`,
+      `bad leadType ${JSON.stringify((body as { leadType?: unknown }).leadType)} — ` +
+      'expected "claude", "glm", "kimi" or "deepseek"',
       { status: 400 },
     );
   }
@@ -714,8 +752,11 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
       // path, same "absent means today's behaviour" discipline `instance`
       // just above follows — runProvision only ever reads this on a
       // studio's first-ever provision anyway (ProvisionConfig.leadType's
-      // own doc comment).
-      ...(leadType === undefined ? {} : { leadType }),
+      // own doc comment). #717: only the bare `"claude" | "glm"` half of
+      // `leadRequest` rides this RPC — `ProvisionConfig.leadType` has no
+      // `model` field of its own; that half is assigned separately, below,
+      // only once this write has actually landed.
+      ...(leadRequest === undefined ? {} : { leadType: leadRequest.leadType }),
     });
   } catch (err) {
     // A provision that threw may have left nothing but the placeholder: free
@@ -730,6 +771,22 @@ export async function runSpawn(deps: SpawnDeps, parent: SpawnParent, body: unkno
     const refusal = launchOrStartRefusalResponse(err);
     if (refusal) return refusal;
     throw err;
+  }
+  // #717: pin the model pool's own main-model choice for `claimed.full`,
+  // AFTER the studio row's first write has actually landed (never before —
+  // there is nothing to pin an assignment onto until then) and only when
+  // the request named one (`--lead kimi`/`--lead deepseek`, or `--lead
+  // glm`'s own id, rather than leaving a bare "glm" to the router's
+  // round-robin default). Swallowed on failure, same posture as
+  // notifyMaestro just below: a spawn is not undone by a model-store write
+  // that fails, and the picker's own unknown-assignment fallback (router.ts
+  // defaultModelFor) means a missing flag never leaves this studio stuck.
+  if (leadRequest?.model !== undefined) {
+    try {
+      await deps.assignModel(claimed.full, leadRequest.model);
+    } catch (err) {
+      console.error(`spawn: model assignment failed for ${claimed.full}`, err);
+    }
   }
   // AFTER the child is up, and never before: a wake that announced a studio
   // whose provision then failed would put maestro to work on something that
