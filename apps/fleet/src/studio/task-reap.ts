@@ -22,7 +22,7 @@ import type { IssueCloser } from "../github/api";
 // structural D1Port), so the non-Workers tsconfig projects
 // (cli/, test-integration/, test/bun) import it directly.
 import type { CloseOutcome } from "../board/close-action";
-import type { TaskState } from "../board/types";
+import type { BoardTaskState } from "../board/types";
 
 /** One open board task, and the PR its latest §6 result envelope names —
  *  `null` when there is none. Produced by the real side via
@@ -38,7 +38,7 @@ export interface ReapTaskInput {
   open?: boolean;
   /** Issue #248: the task's board state. `input_required` is parked on a
    *  human; reap never closes it. */
-  state?: TaskState | null;
+  state?: BoardTaskState | null;
 }
 
 /** Whether a task's PR is landed, and the sha that proves it. `sha` is

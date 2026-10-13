@@ -8,7 +8,7 @@ export const GATE_LABELS: Record<GateAction, string> = {
   deploy_prod: "Deploy production",
 };
 
-type TaskState = "idle" | "running" | "done" | "failed";
+type WorkerTaskState = "idle" | "running" | "done" | "failed";
 
 interface Milestone {
   ts: number;
@@ -22,7 +22,7 @@ interface PendingApproval {
 
 /** Exactly what the agent container's GET /status returns. */
 export interface TaskStatus {
-  state: TaskState;
+  state: WorkerTaskState;
   taskId: string | null;
   milestones: Milestone[];
   pendingApproval: PendingApproval | null;

@@ -27,7 +27,7 @@
 import type { AssignWakeDeps, AssignWakeReport } from "./assign-wake";
 import { wakeStudioFor } from "./wake-gate";
 import { parseEnvelopeComment } from "./envelope";
-import type { TaskState } from "./types";
+import type { BoardTaskState } from "./types";
 // The one flatten fold, imported rather than re-typed -- see assign-wake.ts's
 // own `assignDigest`, which flattens a task title the identical way for the
 // identical reason (issue #159 already exports this from wake-events.ts).
@@ -134,7 +134,7 @@ function isBotComment(authorLogin: string | undefined): boolean {
  *      the state could not be read cleanly.
  */
 export function qualifiesForCommentWake(
-  taskState: TaskState | null, commentBody: string, authorLogin: string | undefined,
+  taskState: BoardTaskState | null, commentBody: string, authorLogin: string | undefined,
 ): boolean {
   if (isEnvelopeComment(commentBody)) return false;
   if (isDoneRecordComment(commentBody)) return false;

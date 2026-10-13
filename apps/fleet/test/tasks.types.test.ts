@@ -30,7 +30,7 @@ describe("tasks/types consumed surface (S24-F2 pin)", () => {
       costUsd: null,
     };
     // A type-only pin: the value exists at runtime solely so tsc/vitest
-    // prove the interface still composes (TaskState/Milestone/PendingApproval
+    // prove the interface still composes (WorkerTaskState/Milestone/PendingApproval
     // stay in-file under TaskStatus after this branch un-exports them).
     expect(status.state).toBe("idle");
     expect(status.milestones).toEqual([]);

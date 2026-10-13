@@ -18,7 +18,7 @@
 // `StudioStatus`/`RepoReach` types across module lines (that file's own
 // header). `transitionTask` itself is NOT imported here or anywhere in this
 // module: this file only validates argv shape, never calls the Worker.
-import { TASK_STATES, isTaskState, type TaskState } from "../board/types";
+import { TASK_STATES, isTaskState, type BoardTaskState } from "../board/types";
 import { LIVENESS_RULE } from "./recycle-cost";
 // Board issue #165: `--template retro`'s fixed brief — see that module's own
 // header for why its title is static rather than datestamped.
@@ -190,7 +190,7 @@ export type CliCommand =
   // typing what it BELIEVES the state to be is exactly the stale value the
   // route's own compare-and-swap exists to catch.
   // Issue #82: `fromNone` = `--from-none`, repair a task with no state label.
-  | { cmd: "task-state"; number: number; to: TaskState; fromNone?: true }
+  | { cmd: "task-state"; number: number; to: BoardTaskState; fromNone?: true }
   // Board issue #8: deterministic backfill for a task whose PR merged/
   // promoted to the default branch but was never auto-closed — the ONLY
   // coverage for a repo whose owner resolves to the token auth path, where
