@@ -20,10 +20,14 @@ runtime change.
 
 Steps (TDD):
 1. RED: add board.routes test block importing `type RepoReachFetch` from
-   ../src/board/routes — fails while routes.ts declares its own local alias
-   it does not import (duplicate identifier) and fails at reach.ts (no such
-   export) once routes.ts imports it. Run vitest on the two touched test
-   files, confirm failure, commit.
+   ../src/github/reach — the canonical home. tsc --noEmit (root tsconfig
+   includes test/**) fails TS2305 while reach.ts has no such export; vitest
+   itself cannot see it (esbuild erases type-only imports), so tsc is the
+   RED proof. Deviation from the issue's proposed shape: the issue's
+   "Proposed action" pins the alias import at board/routes.ts, but step
+   GREEN turns that file's export into a plain import, so a board/routes
+   import target cannot compile in the end state. Run tsc, confirm TS2305,
+   commit.
 2. GREEN: reach.ts gains the alias export; both routes files drop local
    declarations and import it; board.ts drops BoardRepoDeps and imports
    WorkRepoDeps. Run the two test files, confirm pass, commit, push.

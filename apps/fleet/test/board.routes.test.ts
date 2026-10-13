@@ -1497,7 +1497,7 @@ describe("RepoReachFetch canonical alias", () => {
   });
 });
 
-// Board issue #664 deviation note (recorded in the plan doc): importing
+// Board issue #664 deviation note (see the plan doc's RED step): importing
 // `type RepoReachFetch` from ../src/board/routes can never compile in the
 // sweep's own end state — step GREEN turns that file's export into a plain
 // (non-re-exported) import from src/github/reach, and a type-only import is
@@ -1506,5 +1506,3 @@ describe("RepoReachFetch canonical alias", () => {
 // is `tsc --noEmit` (root tsconfig includes test/**), which fails on a
 // missing reach.ts export (TS2305) and on a re-declared local alias in
 // either routes file (TS2300 duplicate identifier).
-
-
