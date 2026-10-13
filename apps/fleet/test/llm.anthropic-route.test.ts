@@ -1549,21 +1549,29 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(seen).toEqual([POOL[1].id]);
   });
 
-  it("LEAD_MODEL_OVERFLOW=off: 3021 on the assigned model → 429, no second-model call", async () => {
+  it("LEAD_MODEL_OVERFLOW=off: 3021 on the assigned model → same-model #767 backoff, then 429, no second-model call", async () => {
     const kimi = { ...POOL[1], smokePassed: true };
     const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
     await setAssignedModel(env.DB, ME, POOL[1].id);
     const seen: string[] = [];
+    const sleeps: number[] = [];
     const ai = { run: vi.fn(async (model: string) => {
       seen.push(model);
       throw new Error("3021: Account rate limit exceeded");
     }) };
-    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on", LEAD_MODEL_OVERFLOW: "off" }, pool: testPool });
+    const res = await callRoute({
+      ai, envOverrides: { LEAD_MODEL_POOL: "on", LEAD_MODEL_OVERFLOW: "off" }, pool: testPool,
+      retryDeps: { sleep: async (ms: number) => { sleeps.push(ms); }, random: () => 0 },
+    });
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("30");
     expect((await res.json() as any).error.type).toBe("rate_limit_error");
-    expect(ai.run).toHaveBeenCalledTimes(1);
-    expect(seen).toEqual([POOL[1].id]);
+    // #767: overflow off means ONE candidate, so the same-model backoff
+    // fires — the assigned model reruns 1 first turn + 4 backoff rounds
+    // (fake sleep, jitter 0) before the 429. Still no second-model call.
+    expect(ai.run).toHaveBeenCalledTimes(5);
+    expect(seen).toEqual(Array.from({ length: 5 }, () => POOL[1].id));
+    expect(sleeps.map(Math.round)).toEqual([2100, 4200, 8400, 14000]);
     await ctx.drain();
     const rowsLogged = await usageRows();
     expect(rowsLogged).toHaveLength(1);
