@@ -904,7 +904,7 @@ export async function getIssueCloser(token: string, repo: string, number: number
  *  merged at all, the sha that landed (null until it does), and which
  *  branch it targeted — `staging` in the common case, occasionally the
  *  default branch directly. */
-export interface PullRequestInfo {
+interface PullRequestInfo {
   number: number;
   merged: boolean;
   mergeCommitSha: string | null;
