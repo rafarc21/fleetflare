@@ -2311,7 +2311,7 @@ export function wipSyncRef(studio: string, bootStamp: string): string {
  * `rescue_try_push`'s own documented contract.
  *
  * SCOPE, UPDATED (issue #231 fix 3b): the v1 "main checkout only" limitation
- * (see this feature's own plan doc, docs/plans/2026-10-03-feat-208-wip-sync.md)
+ * (see this feature's own plan doc, apps/fleet/docs/plans/2026-10-03-feat-208-wip-sync.md)
  * is lifted — this now walks the main checkout, then every member worktree
  * (`wip_sync_one`'s own call sites at the bottom of this script), each to
  * its own per-boot ref (`wip/<bootStamp>-wt-<wid>` — maestro review round 1
