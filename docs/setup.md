@@ -42,6 +42,7 @@ operator-specific values.
 | `FLEET_DIRECTUS` | the Directus project card in studio prompts | `DIRECTUS_URL`, secret `DIRECTUS_TOKEN` |
 | `FLEET_AUTO_FAILOVER` | automatic Claude-account switch on a usage limit | more than one `CLAUDE_CODE_OAUTH_TOKEN_<n>` |
 | `FLEET_JUNIOR` | the junior skill (Workers AI delegation): studios get the skill and `/fleet/junior` answers | the "ai" binding; `JUNIOR_REPOS` optionally narrows to a comma list of owner/repo; `JUNIOR_RATE_PER_MINUTE` (default 5) and `JUNIOR_DAILY_CAP` (default 50) throttle each studio |
+| `LEAD_MODEL_POOL` | routes every non-Claude studio lead call across a pool of Workers AI models (GLM, Kimi, DeepSeek) via AI Gateway instead of GLM alone; `"on"` enables it, anything else (default) keeps today's GLM-only behavior | `LEAD_AI_GATEWAY_ID` optionally names the AI Gateway every pool call routes through (default `"default"`); `MODEL_QUALITY_ISSUE` optionally names the board issue the daily per-model quality table posts to (posting is skipped if unset) |
 
 With `FLEET_TELEGRAM` off, AgentDO and DeployDO stay declared (removing a
 Durable Object class needs a migration) but nothing reaches them, so their

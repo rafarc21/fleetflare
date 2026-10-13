@@ -130,6 +130,44 @@ under the calling studio's own repo: 403.
 Every call writes one `{"event":"fleet_creds", studio, name, outcome, at}`
 line to the Worker logs. The value is never logged.
 
+## Model pool
+
+Issue #717. Non-Claude studio leads (`--lead glm`/`kimi`/`deepseek`) route
+through AI Gateway `default` across a pool of Workers AI models (GLM,
+Kimi, DeepSeek) instead of one fixed model, with per-studio main-model
+assignment, small-role pick, 429/3021 overflow to the next pool model, and
+daily quality-based auto-demotion. Off by default (`LEAD_MODEL_POOL`, see
+`docs/setup.md`); `LEAD_MODEL_POOL` off keeps today's GLM-only behavior.
+
+`fleet models` lists every pool model (key, id, state, smoke-passed) and
+every studio's current main-model assignment:
+
+    fleet models
+    fleet models assign <studio> <model>   # model = pool key (glm|kimi|deepseek) or full id
+    fleet models promote <model>
+    fleet models demote <model>
+
+`fleet spawn --lead glm|kimi|deepseek` boots a studio's lead on this
+fleet's own translation route instead of a Claude account, with `kimi`/
+`deepseek` pinning that pool model as the studio's main model (instead of
+the round-robin default) — same as `fleet models assign` on a fresh
+studio.
+
+A model only becomes eligible for the pool (`smokePassed: true` in
+`apps/fleet/src/llm/models.ts`) after it has actually passed a live smoke
+test: `bun scripts/model-smoke.ts glm|kimi|deepseek` from `apps/fleet/`,
+which needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in the
+environment and drives one tool call, a multi-turn tool-result reply, and
+a streamed reply through the Anthropic↔OpenAI translator against the real,
+live Workers AI binding. Run this by the maestro only, from your own Mac
+or ops environment — never inside a studio container, since no Cloudflare
+credentials exist there.
+
+Auto-demotion (daily cron, pool on only): a model is demoted to `demoted`
+state when, over its last 10 closed PRs (minimum 5 PRs before it is even
+eligible to be judged), its first-try CI pass rate is 25 or more points
+below the best model's, or it has 2 or more post-merge reverts.
+
 ## CI
 
 GitHub Actions runs natively on this repository — four workflows:
