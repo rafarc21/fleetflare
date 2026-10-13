@@ -7,16 +7,16 @@ closeTaskOnPromote(db: D1Port, api: BoardApi, repo: string, issueNumber: number,
   evidence: CloseEvidence, now: number = Date.now())
 ```
 
-The `now` positional reads as data (the mark-evidence timestamp) sitting after the `evidence` object that already carries the shape of the close. This function crosses the board/github boundary — called from src/board/routes.ts:409 (reap route), src/github/webhook.ts:414 (push close loop), and 25 test call sites in test/board.close-action.test.ts.
+The `now` positional reads as data (the mark-evidence timestamp) sitting after the `evidence` object that already carries the shape of the close. This function crosses the board/github boundary — called from src/board/routes.ts:408 (reap route), src/github/webhook.ts:414 (push close loop), and 25 test call sites in test/board.close-action.test.ts.
 
 ## Steps
 
 1. Branch `refactor-673-close-task-opts` off origin/main `040e6b1`.
-2. RED: test/board.close-action.test.ts — add one test inside the `idempotency` describe (after the "a DIFFERENT sha..." test) that calls `closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "sha-opts-9999", branch: "main" }, { now: 4_000 })` and asserts the marker row `gh_close_o/r_12_sha-opts-9999` carries `ts === 4_000`. Under the current positional signature the object lands in `now` and is never read, so the marker stamps wall clock — this test must fail before the refactor. Run the file: exactly this test red. Commit, push.
+2. RED: test/board.close-action.test.ts — add one test inside the `idempotency` describe (after the "a DIFFERENT sha..." test) that calls `closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "sha-opts-9999", branch: "main" }, { now: 4_000 })` and asserts the marker row `gh_close_o/r_12_sha-opts-9999` carries `ts === 4_000`. Under the current positional signature the object lands in `now` and is what gets passed to `makeEvent`/`appendEvent`, and real D1 refuses an object bind (D1_TYPE_ERROR) — the call throws before any marker row exists, so this test must fail before the refactor. Run the file: exactly this test red. Commit, push.
 3. GREEN, one atomic commit:
-   - close-action.ts: signature `closeTaskOnPromote(db: D1Port, api: BoardApi, repo: string, issueNumber: number, evidence: CloseEvidence, opts: { now?: number } = {})`; first body statement `const { now = Date.now() } = opts;`; everything else byte-identical. Add one comment line above the signature naming S32-F9.
+   - close-action.ts: signature `closeTaskOnPromote(db: D1Port, api: BoardApi, repo: string, issueNumber: number, evidence: CloseEvidence, opts: { now?: number } = {})`; first body statement `const { now = Date.now() } = opts;`; everything else byte-identical. Add a short provenance comment inside the parameter list naming S32-F9 (same shape as S32-F1's BoardPorts comment).
    - github/webhook.ts:414: trailing `now` becomes `{ now }`.
-   - board/routes.ts:409: unchanged — no argument after `evidence`.
+   - board/routes.ts:408: unchanged — no argument after `evidence`.
    - test/board.close-action.test.ts: all 25 call expressions migrate their trailing clock `, 1_000)` → `, { now: 1_000 })` and `, 2_000)` → `, { now: 2_000 })` (multi-line calls too).
 4. Self-check: `grep -rn "closeTaskOnPromote(" apps/fleet/src apps/fleet/test` — no call passes a bare number as sixth argument; every explicit clock is named `now:` inside an object.
 5. Verification, strictly serial, one gate at a time (container memory ceiling):
