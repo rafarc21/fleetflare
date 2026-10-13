@@ -47,7 +47,7 @@ finding, halves sized by the line ranges measured.
 
 | # | file | lines | proposed split (halves) | lane |
 |--:|---|---:|---|---|
-| 1 | test/studio.session.test.ts | 5339 | session-archive + session-recycle | GLM-OK |
+| 1 | test/studio.session.test.ts | 5339 | session-archive + session-recycle | CLAUDE-ONLY |
 | 2 | test/bun/rescue-push.test.ts | 4039 | rescue-push-walk + rescue-push-remote | CLAUDE-ONLY |
 | 3 | test/studio.routes.test.ts | 3959 | routes-handle + routes-accounts | GLM-OK |
 | 4 | test/studio.account-failover.test.ts | 2629 | failover-accounts + failover-run | CLAUDE-ONLY |
@@ -55,7 +55,7 @@ finding, halves sized by the line ranges measured.
 | 6 | test/bun/orca-workspace.test.ts | 2342 | orca-ensure + orca-registry | GLM-OK |
 | 7 | test/studio.replacement.test.ts | 2304 | replacement-restart + replacement-restore | GLM-OK |
 | 8 | test/bun/git-wrapper.test.ts | 2245 | wrapper-refusals + wrapper-leakgate | CLAUDE-ONLY |
-| 9 | test/studio.provision.test.ts | 2205 | provision-rescue + provision-leakgate | GLM-OK |
+| 9 | test/studio.provision.test.ts | 2205 | provision-rescue + provision-leakgate | CLAUDE-ONLY |
 | 10 | test/studio.survival-delivery.test.ts | 2168 | survival-input + survival-retry | GLM-OK |
 | 11 | test/studio.observation-tick.test.ts | 2168 | observation-prologue + observation-tick | GLM-OK |
 | 12 | test/bun/install-cache-security.test.ts | 2087 | cache-security-parse + cache-security-disk | GLM-OK |
@@ -63,7 +63,7 @@ finding, halves sized by the line ranges measured.
 | 14 | test/bun/bringup-hooks.test.ts | 1806 | hooks-leadgate + hooks-heartbeat | GLM-OK |
 | 15 | test/github.webhook.test.ts | 1797 | webhook-core + webhook-autoclose | GLM-OK |
 
-### F1. test/studio.session.test.ts — 5339 lines, 57 describes — GLM-OK
+### F1. test/studio.session.test.ts — 5339 lines, 57 describes — CLAUDE-ONLY
 
 - **Lines:** 5339. 57 top-level describes over at least five src
   modules — the largest file in the tree, ~2.5× the runner-up's
@@ -103,6 +103,9 @@ finding, halves sized by the line ranges measured.
   ObservedStorage + InstallCacheSaveStorage maps) would be duplicated
   or extracted to `test/helpers/do-storage.ts` (exists — adoption is
   part of the split work).
+- **Why CLAUDE-ONLY:** the lifecycle half owns the :3240-3712
+  rescuePush/rescueSnapshot cluster plus recycleWithSync's rescue
+  ordering (:4069+) — 110 rescue mentions; rescue is on the tier list.
 
 ### F2. test/bun/rescue-push.test.ts — 4039 lines, 41+ describes — CLAUDE-ONLY
 
@@ -198,9 +201,12 @@ finding, halves sized by the line ranges measured.
   fake StudioStorage maps + recordStudio seeds. Line builders are the
   extract candidate → `test/helpers/` new module (sweep-18 helper
   rule: shared fixture, both halves).
-- **Why CLAUDE-ONLY:** the syncSessionTick clusters exercise the
-  failover-seamed registry/parking steps (PARKED_AUTO_STOP_HOURS
-  family); parse half alone would be GLM-OK but the seam bundles both.
+- **Why CLAUDE-ONLY:** the cursor half wires mirrorBurnToRegistry
+  through do.ts's syncSessionTick — the same tick that owns
+  rescue/failover ordering; a split here moves do.ts-adjacent
+  machinery (verified: zero direct failover symbols in the file —
+  the reason is the do.ts adjacency, not in-file failover tests).
+  Parse half alone would be GLM-OK; the seam bundles both.
 
 ### F6. test/bun/orca-workspace.test.ts — 2342 lines, 0 describes / 143 tests — GLM-OK
 
@@ -266,7 +272,7 @@ finding, halves sized by the line ranges measured.
 - **Why CLAUDE-ONLY:** credentials (STUDIO_PUSH_* constants,
   wrapper install) + leak-gate, both tier-list.
 
-### F9. test/studio.provision.test.ts — 2205 lines, 17 describes — GLM-OK
+### F9. test/studio.provision.test.ts — 2205 lines, 17 describes — CLAUDE-ONLY
 
 - **Lines:** 2205. Provision core (`:112-1004` — provisionWithStorage,
   resolveBringupEnv, runProvision repo selection, discoverRescueRefs)
@@ -282,10 +288,11 @@ finding, halves sized by the line ranges measured.
   Map-backed StudioStorage, REPO_SLUG. Both halves need fakeStorage +
   the FAKE_* blueprint fixtures + a per-test sbExec vi.fn — the
   blueprint fixtures are the extract candidate (sweep-18).
-- **Lane note:** the leak-gate describes are in this file but the
-  split's lane stays GLM-OK — leak-gate tests assert behavior of the
-  gate installer, not gate secrets; if the reviewer disagrees, the
-  ports half is the one to re-mark.
+- **Why CLAUDE-ONLY:** the core half owns the :575-1004
+  discoverRescueRefsCmd cluster (rescue-branch discovery +
+  rescuePushCmd wiring, 88 rescue mentions in the file) — rescue is
+  on the tier list. The leak-gate describes (:1733-2108) reinforce,
+  not carry, the verdict.
 
 ### F10. test/studio.survival-delivery.test.ts — 2168 lines, 19 describes — GLM-OK
 
