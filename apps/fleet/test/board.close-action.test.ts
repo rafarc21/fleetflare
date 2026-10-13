@@ -49,7 +49,7 @@ describe("closeTaskOnPromote", () => {
   it("closes the issue, transitions the board to completed, and comments the evidence", async () => {
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "working", labels: ["working"] })) });
     const result = await closeTaskOnPromote(
-      testEnv.DB, api, "o/r", 12, { sha: "abc123456789", branch: "main" }, 1_000,
+      testEnv.DB, api, "o/r", 12, { sha: "abc123456789", branch: "main" }, { now: 1_000 },
     );
     expect(result).toEqual({ ok: true, outcome: "closed" });
     expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12, "completed");
@@ -61,7 +61,7 @@ describe("closeTaskOnPromote", () => {
 
   it("the posted comment reads exactly \"closed by <sha>, promoted to <branch>\"", async () => {
     const api = fakeApi();
-    await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "deadbeefcafe", branch: "staging" }, 1_000);
+    await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "deadbeefcafe", branch: "staging" }, { now: 1_000 });
     const body = vi.mocked(api.createComment).mock.calls[0][2];
     expect(body).toBe("closed by deadbeef, promoted to staging");
   });
@@ -78,7 +78,7 @@ describe("closeTaskOnPromote", () => {
         getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"], open: true })),
         listComments: vi.fn(async () => [{ id: 1, body: legacy }] as never),
       });
-      const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "newsha999999", branch: "main" }, 1_000);
+      const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "newsha999999", branch: "main" }, { now: 1_000 });
       expect(result).toEqual({ ok: true, outcome: "closed" });
       expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12);
       expect(api.createComment).not.toHaveBeenCalled();
@@ -86,14 +86,14 @@ describe("closeTaskOnPromote", () => {
 
     it("the SAME evidence the old Worker already recorded (its D1 key) -> no comment, no GitHub write (still reads the real state)", async () => {
       const oldApi = fakeApi();
-      await closeTaskOnPromote(testEnv.DB, oldApi, "o/r", 12, { sha: "abc123456789", branch: "main" }, 1_000);
+      await closeTaskOnPromote(testEnv.DB, oldApi, "o/r", 12, { sha: "abc123456789", branch: "main" }, { now: 1_000 });
       // Default fake task: state "working", open: true. `open: true` alone
       // would-be-triggering if the dedup-hit backfill only checked `open` --
       // it must also require `state === "completed"`, which this does NOT
       // have, so this is a genuine "no write" proof, not one that passes
       // merely because the state never qualifies for a close either way.
       const api = fakeApi();
-      const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "abc123456789", branch: "main" }, 2_000);
+      const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "abc123456789", branch: "main" }, { now: 2_000 });
       expect(result).toEqual({ ok: true, outcome: "no-op" });
       expect(api.getIssue).toHaveBeenCalledWith("o/r", 12);
       expect(api.closeIssue).not.toHaveBeenCalled();
@@ -104,8 +104,8 @@ describe("closeTaskOnPromote", () => {
   describe("idempotency", () => {
     it("the SAME evidence (repo+issue+sha) called twice performs the real work only once", async () => {
       const api = fakeApi();
-      const first = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "samesha1234", branch: "main" }, 1_000);
-      const second = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "samesha1234", branch: "main" }, 2_000);
+      const first = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "samesha1234", branch: "main" }, { now: 1_000 });
+      const second = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "samesha1234", branch: "main" }, { now: 2_000 });
       expect(first).toEqual({ ok: true, outcome: "closed" });
       expect(second).toEqual({ ok: true, outcome: "no-op" });
       expect(api.closeIssue).toHaveBeenCalledTimes(1);
@@ -115,15 +115,25 @@ describe("closeTaskOnPromote", () => {
 
     it("a DIFFERENT sha for the same issue is a distinct evidence key and closes again", async () => {
       const api = fakeApi();
-      await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "sha-one-123", branch: "main" }, 1_000);
-      const second = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "sha-two-456", branch: "main" }, 2_000);
+      await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "sha-one-123", branch: "main" }, { now: 1_000 });
+      const second = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "sha-two-456", branch: "main" }, { now: 2_000 });
       expect(second.outcome).toBe("closed");
       expect(api.closeIssue).toHaveBeenCalledTimes(2);
     });
 
+    it("reads the clock from opts.now, never a positional (S32-F9)", async () => {
+      const api = fakeApi();
+      await closeTaskOnPromote(
+        testEnv.DB, api, "o/r", 12, { sha: "sha-opts-9999", branch: "main" }, { now: 4_000 },
+      );
+      const events = await readSince(testEnv.DB, "board", 0);
+      const marker = events.find((e) => e.id === "gh_close_o/r_12_sha-opts-9999");
+      expect(marker?.ts).toBe(4_000);
+    });
+
     it("records a marker row an operator/webhook redelivery can be traced through", async () => {
       const api = fakeApi();
-      await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "tracedsha1", branch: "main" }, 1_000);
+      await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "tracedsha1", branch: "main" }, { now: 1_000 });
       const events = await readSince(testEnv.DB, "board", 0);
       expect(events.some((e) => e.id === "gh_close_o/r_12_tracedsha1")).toBe(true);
     });
@@ -143,7 +153,7 @@ describe("closeTaskOnPromote", () => {
       });
 
       await expect(
-        closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "poison-sha", branch: "main" }, 1_000),
+        closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "poison-sha", branch: "main" }, { now: 1_000 }),
       ).rejects.toThrow("GitHub 502");
 
       // No marker was committed by the failed attempt.
@@ -152,7 +162,7 @@ describe("closeTaskOnPromote", () => {
 
       // A retry with the SAME evidence genuinely retries the real work
       // (closeIssue called a second time) and succeeds this time.
-      const retry = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "poison-sha", branch: "main" }, 2_000);
+      const retry = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "poison-sha", branch: "main" }, { now: 2_000 });
       expect(retry).toEqual({ ok: true, outcome: "closed" });
       expect(api.closeIssue).toHaveBeenCalledTimes(2);
 
@@ -169,7 +179,7 @@ describe("closeTaskOnPromote", () => {
   // of `task.open`.
   it("a task already completed on the board but GitHub still open (#98) closes the GitHub issue only -- no re-transition, no re-comment", async () => {
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"], open: true })) });
-    const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "alreadyclosed", branch: "main" }, 1_000);
+    const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "alreadyclosed", branch: "main" }, { now: 1_000 });
     expect(result).toEqual({ ok: true, outcome: "closed" });
     expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12);
     expect(api.removeLabel).not.toHaveBeenCalled();
@@ -179,7 +189,7 @@ describe("closeTaskOnPromote", () => {
 
   it("a task already completed on the board AND already closed on GitHub is a true no-op -- no GitHub write at all", async () => {
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"], open: false })) });
-    const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "trulyclosed", branch: "main" }, 1_000);
+    const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "trulyclosed", branch: "main" }, { now: 1_000 });
     expect(result).toEqual({ ok: true, outcome: "already-closed" });
     expect(api.closeIssue).not.toHaveBeenCalled();
     expect(api.removeLabel).not.toHaveBeenCalled();
@@ -191,10 +201,10 @@ describe("closeTaskOnPromote", () => {
     it("a DIFFERENT sha discovered later for an already-completed, already-closed task is a full no-op past the dedup guard", async () => {
       const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"], open: false })) });
       // A prior call already closed this task under a different sha.
-      const first = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "sha-original", branch: "main" }, 1_000);
+      const first = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "sha-original", branch: "main" }, { now: 1_000 });
       expect(first).toEqual({ ok: true, outcome: "already-closed" });
 
-      const second = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "sha-late-discovery", branch: "main" }, 2_000);
+      const second = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "sha-late-discovery", branch: "main" }, { now: 2_000 });
       expect(second).toEqual({ ok: true, outcome: "already-closed" });
       expect(api.closeIssue).not.toHaveBeenCalled();
       expect(api.createComment).not.toHaveBeenCalled();
@@ -202,7 +212,7 @@ describe("closeTaskOnPromote", () => {
 
     it("still records the dedup marker for the late evidence, so a repeat of THAT sha is itself a no-op", async () => {
       const api = fakeApi({ getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"], open: false })) });
-      await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "late-sha-again", branch: "main" }, 1_000);
+      await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "late-sha-again", branch: "main" }, { now: 1_000 });
       const events = await readSince(testEnv.DB, "board", 0);
       expect(events.some((e) => e.id === "gh_close_o/r_12_late-sha-again")).toBe(true);
     });
@@ -210,7 +220,7 @@ describe("closeTaskOnPromote", () => {
 
   it("a task with no single board state label (drift) still closes the GitHub issue, logs, and does not throw", async () => {
     const api = fakeApi({ getIssue: vi.fn(async () => task({ state: null, labels: [] })) });
-    const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "driftsha1234", branch: "main" }, 1_000);
+    const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "driftsha1234", branch: "main" }, { now: 1_000 });
     expect(result).toEqual({ ok: true, outcome: "closed" });
     expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12);
     expect(api.removeLabel).not.toHaveBeenCalled();
@@ -227,12 +237,12 @@ describe("closeTaskOnPromote", () => {
   describe("dedup-hit backfill -- a dedup record already exists, but GitHub's own issue never actually closed (#98's real shape)", () => {
     it("dedup record pre-seeded (same sha) + board completed + GitHub open -> backfills the close only, no re-transition or re-comment", async () => {
       const seedApi = fakeApi();
-      await closeTaskOnPromote(testEnv.DB, seedApi, "o/r", 12, { sha: "backfillsha1", branch: "main" }, 1_000);
+      await closeTaskOnPromote(testEnv.DB, seedApi, "o/r", 12, { sha: "backfillsha1", branch: "main" }, { now: 1_000 });
 
       const api = fakeApi({
         getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"], open: true })),
       });
-      const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "backfillsha1", branch: "main" }, 2_000);
+      const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "backfillsha1", branch: "main" }, { now: 2_000 });
       expect(result).toEqual({ ok: true, outcome: "closed" });
       expect(api.closeIssue).toHaveBeenCalledTimes(1);
       expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12);
@@ -243,12 +253,12 @@ describe("closeTaskOnPromote", () => {
 
     it("dedup record pre-seeded (same sha) + board completed + GitHub closed -> true no-op, no GitHub write at all", async () => {
       const seedApi = fakeApi();
-      await closeTaskOnPromote(testEnv.DB, seedApi, "o/r", 12, { sha: "backfillsha2", branch: "main" }, 1_000);
+      await closeTaskOnPromote(testEnv.DB, seedApi, "o/r", 12, { sha: "backfillsha2", branch: "main" }, { now: 1_000 });
 
       const api = fakeApi({
         getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"], open: false })),
       });
-      const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "backfillsha2", branch: "main" }, 2_000);
+      const result = await closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "backfillsha2", branch: "main" }, { now: 2_000 });
       expect(result).toEqual({ ok: true, outcome: "no-op" });
       expect(api.closeIssue).not.toHaveBeenCalled();
       expect(api.createComment).not.toHaveBeenCalled();
@@ -269,7 +279,7 @@ describe("closeTaskOnPromote", () => {
       });
 
       await expect(
-        closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "poison-completed", branch: "main" }, 1_000),
+        closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "poison-completed", branch: "main" }, { now: 1_000 }),
       ).rejects.toThrow("GitHub 500");
 
       const events = await readSince(testEnv.DB, "board", 0);
@@ -278,7 +288,7 @@ describe("closeTaskOnPromote", () => {
 
     it("dedup record already exists, board completed, GitHub open, closeIssue throws on backfill -> error propagates, not swallowed into a false ok:true", async () => {
       const seedApi = fakeApi();
-      await closeTaskOnPromote(testEnv.DB, seedApi, "o/r", 12, { sha: "backfill-poison", branch: "main" }, 1_000);
+      await closeTaskOnPromote(testEnv.DB, seedApi, "o/r", 12, { sha: "backfill-poison", branch: "main" }, { now: 1_000 });
 
       const api = fakeApi({
         getIssue: vi.fn(async () => task({ state: "completed", labels: ["completed"], open: true })),
@@ -286,7 +296,7 @@ describe("closeTaskOnPromote", () => {
       });
 
       await expect(
-        closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "backfill-poison", branch: "main" }, 2_000),
+        closeTaskOnPromote(testEnv.DB, api, "o/r", 12, { sha: "backfill-poison", branch: "main" }, { now: 2_000 }),
       ).rejects.toThrow("GitHub 503");
       expect(api.closeIssue).toHaveBeenCalledWith("o/r", 12);
     });

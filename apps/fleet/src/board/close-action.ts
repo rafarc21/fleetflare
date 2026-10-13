@@ -117,8 +117,13 @@ interface CloseOnPromoteResult {
  *    nothing was falsely marked done, and the caller sees the real failure.
  */
 export async function closeTaskOnPromote(
-  db: D1Port, api: BoardApi, repo: string, issueNumber: number, evidence: CloseEvidence, now: number = Date.now(),
+  db: D1Port, api: BoardApi, repo: string, issueNumber: number, evidence: CloseEvidence,
+  // Sweep 32 finding S32-F9 (board issue #673): the clock moved from a
+  // sixth positional to a named field — it reads as data after the
+  // evidence object, and every caller that passes one names it now.
+  opts: { now?: number } = {},
 ): Promise<CloseOnPromoteResult> {
+  const { now = Date.now() } = opts;
   const eventId = `gh_close_${repo}_${issueNumber}_${evidence.sha}`;
   const already = await db.prepare(`SELECT 1 FROM events WHERE id = ?`).bind(eventId).first();
   if (already) {
