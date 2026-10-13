@@ -4,6 +4,7 @@ import { handleFleetBoard, type PolicyFetch } from "../src/board/routes";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import { studioLabel, type BoardTask } from "../src/board/types";
+import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import type { BoardApi } from "../src/board/board";
 import type { AssignWakeDeps } from "../src/board/assign-wake";
 import type { StudioStatus } from "../src/studio/types";
@@ -25,33 +26,19 @@ const policy: PolicyFetch = async () => ({
   roles: ["maestro", "web-studio", "pilot"],
 });
 
-function task(overrides: Partial<BoardTask> = {}): BoardTask {
-  return {
-    number: 71, url: "https://github.com/example-org/websites/issues/71", title: "Ship the thing",
-    body: "## Objective\n\nShip it.\n", state: "submitted", labels: ["submitted"],
-    assignee: null, milestone: null, open: true, updatedAt: "2026-09-29T10:00:00Z", ...overrides,
-  };
-}
-
-function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
-  return {
-    createIssue: vi.fn(async () => task({ labels: ["submitted", studioLabel(CHILD)], assignee: CHILD })),
-    getIssue: vi.fn(async () => task()),
-    listIssues: vi.fn(async () => []),
-    addLabels: vi.fn(async () => {}),
-    removeLabel: vi.fn(async () => {}),
-    createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/71#issuecomment-1" })),
-    pullRequestExists: vi.fn(async () => true),
-    listComments: vi.fn(async () => []),
-    listMilestones: vi.fn(async () => []),
-    branchExists: vi.fn(async () => true),
-    commitExists: vi.fn(async () => true),
-    closeIssue: vi.fn(async () => {}),
-    listOpenPullFiles: vi.fn(async () => []),
-    getPullRequest: vi.fn(async () => ({ number: 0, merged: false, open: true, title: "" })),
-    ...overrides,
-  };
-}
+// Old local defaults preserved: task 71 (example-org url, "Ship the thing",
+// 2026-09-29), a createIssue that hands the task to CHILD, an empty board
+// list, and the 71-keyed createComment URL.
+const task = (overrides: Partial<BoardTask> = {}) => boardTask({
+  number: 71, url: "https://github.com/example-org/websites/issues/71", title: "Ship the thing",
+  updatedAt: "2026-09-29T10:00:00Z", ...overrides,
+});
+const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
+  createIssue: vi.fn(async () => task({ labels: ["submitted", studioLabel(CHILD)], assignee: CHILD })),
+  createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/71#issuecomment-1" })),
+  listIssues: vi.fn(async () => []),
+  ...overrides,
+}, () => task());
 
 function wakeDeps(): AssignWakeDeps & { woken: string[] } {
   const woken: string[] = [];

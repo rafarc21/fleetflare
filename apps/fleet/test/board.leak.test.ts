@@ -8,6 +8,7 @@ import { LEAK_DENYLIST_MISSING, LEAK_SCAN_ERROR } from "../src/leak-gate";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
 import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import { studioLabel, type BoardTask } from "../src/board/types";
+import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import type { BoardApi } from "../src/board/board";
 import { runningRow } from "./helpers/studio-row";
 import type { StudioStatus } from "../src/studio/types";
@@ -29,33 +30,17 @@ function deps(overrides: Partial<LeakGuardDeps> = {}): LeakGuardDeps {
   };
 }
 
-function task(overrides: Partial<BoardTask> = {}): BoardTask {
-  return {
-    number: 71, url: `https://github.com/${REPO}/issues/71`, title: "Ship the thing",
-    body: "Ship it.", state: "submitted", labels: ["submitted"], assignee: null,
-    milestone: null, open: true, updatedAt: "2026-08-25T10:00:00Z", ...overrides,
-  };
-}
-
-function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
-  return {
-    createIssue: vi.fn(async () => task()),
-    getIssue: vi.fn(async () => task()),
-    listIssues: vi.fn(async () => [task()]),
-    addLabels: vi.fn(async () => {}),
-    removeLabel: vi.fn(async () => {}),
-    createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/71#issuecomment-1" })),
-    pullRequestExists: vi.fn(async () => true),
-    listComments: vi.fn(async () => []),
-    listMilestones: vi.fn(async () => []),
-    branchExists: vi.fn(async () => true),
-    commitExists: vi.fn(async () => true),
-    closeIssue: vi.fn(async () => {}),
-    listOpenPullFiles: vi.fn(async () => []),
-    getPullRequest: vi.fn(async () => ({ number: 0, merged: false, open: true, title: "" })),
-    ...overrides,
-  };
-}
+// Old local defaults preserved: task 71 (REPO-based url, plain "Ship it."
+// body — this file's fixtures never carry an Objective header) and the
+// 71-keyed createComment URL.
+const task = (overrides: Partial<BoardTask> = {}) => boardTask({
+  number: 71, url: `https://github.com/${REPO}/issues/71`, title: "Ship the thing",
+  body: "Ship it.", ...overrides,
+});
+const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
+  createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/71#issuecomment-1" })),
+  ...overrides,
+}, () => task());
 
 async function refusal(p: Promise<unknown>): Promise<LeakGateError> {
   const err = await p.then(() => null, (e: unknown) => e);

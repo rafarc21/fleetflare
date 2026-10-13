@@ -131,10 +131,19 @@ function anthropicMessageToOpenAI(m: Json): Json[] {
 
 /**
  * Anthropic Messages API request body -> Workers AI OpenAI-chat-completions
- * request body. `model` is always `GLM_LEAD_MODEL` — see that constant's own
- * doc comment.
+ * request body. `model` is the picked pool model (Task 4, spec
+ * 2026-10-13-model-pool-design — `anthropic-route.ts`'s overflow loop walks
+ * `router.ts`'s `pickModels` order, calling this once per candidate) —
+ * defaulted to GLM (`GLM_LEAD_MODEL`/`GLM_MIN_MAX_TOKENS`) for back-compat
+ * with callers that don't pass one (every pre-#717 call site, and this
+ * file's own pre-#717 tests). `model.minMaxTokens` is the SAME floor
+ * `GLM_MIN_MAX_TOKENS` always was, just read per-model now instead of from
+ * one constant — see that constant's own doc comment for why it exists.
  */
-export function anthropicRequestToOpenAI(body: Json): Json {
+export function anthropicRequestToOpenAI(
+  body: Json,
+  model: { id: string; minMaxTokens: number } = { id: GLM_LEAD_MODEL, minMaxTokens: GLM_MIN_MAX_TOKENS },
+): Json {
   const messages: Json[] = [];
   if (body.system !== undefined && body.system !== null) {
     const text = flattenTextLike(body.system);
@@ -144,9 +153,9 @@ export function anthropicRequestToOpenAI(body: Json): Json {
     messages.push(...anthropicMessageToOpenAI(m));
   }
 
-  // GLM_MIN_MAX_TOKENS floor — see that constant's own doc comment. Never
-  // lowers a client request that's already asking for more.
-  const out: Json = { model: GLM_LEAD_MODEL, messages, max_tokens: Math.max(Number(body.max_tokens) || 0, GLM_MIN_MAX_TOKENS) };
+  // model.minMaxTokens floor — see GLM_MIN_MAX_TOKENS's own doc comment.
+  // Never lowers a client request that's already asking for more.
+  const out: Json = { model: model.id, messages, max_tokens: Math.max(Number(body.max_tokens) || 0, model.minMaxTokens) };
   if (body.stream === true) {
     out.stream = true;
     // Maestro review round 1, MAJOR 4: the OpenAI-compatible streaming

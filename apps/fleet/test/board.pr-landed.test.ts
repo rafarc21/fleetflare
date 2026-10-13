@@ -1,44 +1,27 @@
 import { describe, it, expect, vi } from "vitest";
 import { openTasksWithLatestPr, OPEN_TASKS_SCAN_MAX_CANDIDATES } from "../src/board/pr-landed";
-import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
-import type { BoardApi, TaskComment } from "../src/board/board";
+import { parseEnvelope } from "../src/board/envelope";
+import { envelopeComment, fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
+import type { BoardApi } from "../src/board/board";
 import type { BoardTask, BoardTaskView, EnvelopeDoc } from "../src/board/types";
 import type { TimeBudget } from "../src/time-budget";
 
 // Same fake-BoardApi / envelope-comment conventions as test/board.verify.test.ts
 // and test/board.board.test.ts — one shared scan, proven without a live issue.
 
-function task(overrides: Partial<BoardTask> = {}): BoardTask {
-  return {
-    number: 12, url: "https://github.com/o/r/issues/12", title: "Some task",
-    body: "## Objective\n\nShip it.\n", state: "working", labels: ["working"],
-    assignee: null, milestone: null, open: true, updatedAt: "2026-09-18T10:00:00Z", ...overrides,
-  };
-}
+// Old local defaults preserved: a "working"-state default task and the
+// getIssue keyed on the passed issue number.
+const task = (overrides: Partial<BoardTask> = {}) =>
+  boardTask({ state: "working", labels: ["working"], updatedAt: "2026-09-18T10:00:00Z", ...overrides });
 
 function view(overrides: Partial<BoardTaskView> = {}): BoardTaskView {
   return { ...task(overrides), stale: false, ...overrides };
 }
 
-function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
-  return {
-    createIssue: vi.fn(async () => task()),
-    getIssue: vi.fn(async (repo: string, number: number) => task({ number })),
-    listIssues: vi.fn(async () => [task()]),
-    addLabels: vi.fn(async () => {}),
-    removeLabel: vi.fn(async () => {}),
-    createComment: vi.fn(async () => ({ id: 1, url: "https://github.com/o/r/issues/12#issuecomment-1" })),
-    pullRequestExists: vi.fn(async () => true),
-    listComments: vi.fn(async () => []),
-    listMilestones: vi.fn(async () => []),
-    branchExists: vi.fn(async () => true),
-    commitExists: vi.fn(async () => true),
-    closeIssue: vi.fn(async () => {}),
-    listOpenPullFiles: vi.fn(async () => []),
-    getPullRequest: vi.fn(async () => ({ number: 0, merged: false, open: true, title: "" })),
-    ...overrides,
-  };
-}
+const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
+  getIssue: vi.fn(async (_repo: string, number: number) => task({ number })),
+  ...overrides,
+}, () => task());
 
 let msgCounter = 0;
 function envelopeDoc(
@@ -57,14 +40,6 @@ function envelopeDoc(
   const parsed = parseEnvelope(raw, taskId, `msg-${msgCounter}`);
   if (!parsed.ok) throw new Error(parsed.message);
   return parsed.doc;
-}
-
-function envelopeComment(doc: EnvelopeDoc, overrides: Partial<TaskComment> = {}): TaskComment {
-  return {
-    id: msgCounter, url: `u${msgCounter}`, author: "example-bot[bot]",
-    createdAt: "2026-09-18T10:00:00Z", body: renderEnvelopeComment(doc), envelope: doc,
-    ...overrides,
-  };
 }
 
 describe("openTasksWithLatestPr", () => {

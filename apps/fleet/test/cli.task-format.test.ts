@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { formatTaskTable, formatTaskShow, formatAssignWake, TITLE_WIDTH } from "../cli/task-format";
 import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
+import { task as boardTask } from "./helpers/board-api";
 import type { BoardTask } from "../src/board/types";
 
 // Imports cli/task-format.ts specifically, NOT cli/fleet.ts — same reason
@@ -8,13 +9,10 @@ import type { BoardTask } from "../src/board/types";
 // bun-only globals that the root tsconfig's type set cannot resolve. This
 // module is deliberately Bun/node-free.
 
-function task(overrides: Partial<BoardTask> = {}): BoardTask {
-  return {
-    number: 12, url: "https://github.com/o/r/issues/12", title: "Build the task board",
-    body: "## Objective\n\nShip it.\n", state: "submitted", labels: ["submitted"],
-    assignee: null, milestone: "Sprint 1", open: true, updatedAt: "2026-08-25T10:00:00Z", ...overrides,
-  };
-}
+// Old local defaults preserved: "Build the task board" title, Sprint 1.
+const task = (overrides: Partial<BoardTask> = {}) => boardTask({
+  title: "Build the task board", milestone: "Sprint 1", ...overrides,
+});
 
 describe("formatTaskTable", () => {
   it("says so plainly when the board is empty", () => {

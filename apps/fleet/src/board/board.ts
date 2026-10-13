@@ -28,7 +28,7 @@ import {
 } from "./types";
 import { GitHubError, type BoardComment, type IssueInput, type ListIssuesQuery } from "./api";
 import { extractPaths, findPathOverlaps, formatPathOverlapWarnings } from "./path-overlap";
-import { parseRepoSlug } from "../studio/repo";
+import { parseRepoSlug, type WorkRepoDeps } from "../studio/repo";
 // Type-only, and from reach.ts not auth.ts — same reason src/studio/repo.ts
 // does: this module touches no Env and no binding. See github/reach.ts.
 import type { RepoReach } from "../github/reach";
@@ -959,13 +959,6 @@ export async function showTask(
   };
 }
 
-/** Same port, same reasoning as src/studio/repo.ts's WorkRepoDeps — see its
- *  doc comment for why P6a made this a per-repo question that carries its own
- *  refusal wording back. */
-interface BoardRepoDeps {
-  reachRepo: (slug: string) => Promise<RepoReach>;
-}
-
 /**
  * Which repo IS the board (§5: "board repo = repo being worked", not always
  * the fleet's own).
@@ -978,7 +971,7 @@ interface BoardRepoDeps {
  * wrangler.jsonc, which is deployment config and not client input.
  */
 export async function resolveBoardRepo(
-  deps: BoardRepoDeps, req: { requested: unknown; defaultSlug: string },
+  deps: WorkRepoDeps, req: { requested: unknown; defaultSlug: string },
 ): Promise<BoardResult<string>> {
   const defaultLower = req.defaultSlug.toLowerCase();
   if (req.requested === undefined || req.requested === null) return { ok: true, value: defaultLower };

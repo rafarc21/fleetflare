@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { studioOpenPrs } from "../src/board/open-prs";
-import { parseEnvelope, renderEnvelopeComment } from "../src/board/envelope";
+import { parseEnvelope } from "../src/board/envelope";
 import * as boardModule from "../src/board/board";
+import { envelopeComment, fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import type { BoardApi, TaskComment } from "../src/board/board";
 import { studioLabel, type BoardTask, type BoardTaskView, type EnvelopeDoc } from "../src/board/types";
 
@@ -23,13 +24,12 @@ import { studioLabel, type BoardTask, type BoardTaskView, type EnvelopeDoc } fro
 const REPO = "acme-org/websites";
 const MINE = "websites--web-studio";
 
-function task(overrides: Partial<BoardTask> = {}): BoardTask {
-  return {
-    number: 12, url: `https://github.com/${REPO}/issues/12`, title: "Ship it",
-    body: "## Objective\n\nShip it.\n", state: "working", labels: ["working", studioLabel(MINE)],
-    assignee: MINE, milestone: null, open: true, updatedAt: "2026-10-10T10:00:00Z", ...overrides,
-  };
-}
+// Old local defaults preserved: REPO-based url, this studio's own label and
+// assignee, "working" state, and the 2026-10-10 updatedAt.
+const task = (overrides: Partial<BoardTask> = {}) => boardTask({
+  url: `https://github.com/${REPO}/issues/12`, title: "Ship it", state: "working",
+  labels: ["working", studioLabel(MINE)], assignee: MINE, updatedAt: "2026-10-10T10:00:00Z", ...overrides,
+});
 
 function view(overrides: Partial<BoardTaskView> = {}): BoardTaskView {
   return { ...task(overrides), stale: false, ...overrides };
@@ -39,25 +39,12 @@ function pr(overrides: Partial<{ number: number; merged: boolean; open: boolean;
   return { number: 9, merged: false, open: true, title: "feat: the thing", ...overrides };
 }
 
-function fakeApi(overrides: Partial<BoardApi> = {}): BoardApi {
-  return {
-    createIssue: vi.fn(async () => task()),
-    getIssue: vi.fn(async (_repo: string, number: number) => task({ number })),
-    listIssues: vi.fn(async () => [task()]),
-    addLabels: vi.fn(async () => {}),
-    removeLabel: vi.fn(async () => {}),
-    createComment: vi.fn(async () => ({ id: 1, url: `https://github.com/${REPO}/issues/12#issuecomment-1` })),
-    pullRequestExists: vi.fn(async () => true),
-    listComments: vi.fn(async () => []),
-    listMilestones: vi.fn(async () => []),
-    branchExists: vi.fn(async () => true),
-    commitExists: vi.fn(async () => true),
-    closeIssue: vi.fn(async () => {}),
-    listOpenPullFiles: vi.fn(async () => []),
-    getPullRequest: vi.fn(async (_repo: string, number: number) => pr({ number })),
-    ...overrides,
-  };
-}
+const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
+  createComment: vi.fn(async () => ({ id: 1, url: `https://github.com/${REPO}/issues/12#issuecomment-1` })),
+  getIssue: vi.fn(async (_repo: string, number: number) => task({ number })),
+  getPullRequest: vi.fn(async (_repo: string, number: number) => pr({ number })),
+  ...overrides,
+}, () => task());
 
 let msgCounter = 0;
 function envelopeDoc(
@@ -76,14 +63,6 @@ function envelopeDoc(
   const parsed = parseEnvelope(raw, taskId, `msg-${msgCounter}`);
   if (!parsed.ok) throw new Error(parsed.message);
   return parsed.doc;
-}
-
-function envelopeComment(doc: EnvelopeDoc, overrides: Partial<TaskComment> = {}): TaskComment {
-  return {
-    id: msgCounter, url: `u${msgCounter}`, author: "example-bot[bot]",
-    createdAt: "2026-10-10T10:00:00Z", body: renderEnvelopeComment(doc), envelope: doc,
-    ...overrides,
-  };
 }
 
 /** The per-task fake: listIssues answers the studio's board, and getIssue +

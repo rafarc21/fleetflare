@@ -263,7 +263,7 @@ export async function recordStudio(env: Env, status: StudioStatus): Promise<void
  * out a `StudioStatus` from DO storage has to wrap it too.
  *
  * Purely a corrected VIEW: no branch below writes, and the stored row keeps
- * its stale bucket verbatim (pinned by test/studio.burn-window-expiry.ts's
+ * its stale bucket verbatim (pinned by test/studio.burn-window-expiry.test.ts's
  * "nothing write storage from a read"). The next real sync tick still rolls
  * the window the same way it always did.
  */
