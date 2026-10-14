@@ -28,9 +28,9 @@ esac
 # (ROLE_PROMPT_B64 unset or empty) still lands one byte on disk, a lone
 # newline, which passes `-r` (and would pass a size check too, since one
 # byte is still > 0). Only a check for actual non-whitespace content tells
-# "nothing to replay" apart from "a real working set". grep is already a
-# dependency of this same script (the settings.json hook-presence check
-# further down uses it), so this adds nothing new to the image.
+# "nothing to replay" apart from "a real working set". Line 34 is grep's only
+# use in this script; it adds nothing new to the image because bring-up
+# already runs it against the hook config (studio-bringup.sh:1207).
 grep -q '[^[:space:]]' "$ws" || exit 0
 printf 'Context was compacted. Your working set, replayed from disk:\n\n'
 cat "$ws"
