@@ -346,6 +346,7 @@ Line refs = physical lines at `origin/main` `cc9a9a4`.
 - **Skill step:** ICA §1 (shallow wrappers) + CD deletion test. **Strength:** Worth exploring.
 
 ### F14. Deepen close action: delete `board/close-outcome.ts` shim by narrowing `close-action.ts`'s `Env` to a D1 port — GLM-OK
+> Resolved 2026-10-11 by #342 (268f725): the shim is deleted, `close-action.ts` takes the structural `D1Port`; table row 2 and shortlist row 14 are history, true at the doc's pin `cc9a9a4`.
 
 - **Files:** `src/board/close-outcome.ts:1-14` (type-only, exists because `src/board/close-action.ts:11` imports `Env`, dragging DO types into CLI tsconfig); `Env` used only for `env.DB` (`close-action.ts:114`, `:178`).
 - **Problem:** file split by build constraint, not knowledge (ICA §1 "files split by step"). Depth 1.0 in table.

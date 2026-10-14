@@ -51,7 +51,7 @@ The read of container/studio-bringup.sh appears 15 times: 14 identical spellings
 
 ### F8 — `sign(body)` webhook HMAC-SHA256 signer — not filed
 
-×2: `public-flags.test.ts:36`, `github.webhook.test.ts:15` — identical logic, different secret const. Below the 3+ copy bar — recorded, no issue filed.
+×2: `public-flags.test.ts:36`, `github.webhook.test.ts:15` — identical logic, different secret const. Below the 3+ copy bar — recorded, no issue filed. (2026-10-13, #790: `github.webhook.test.ts` split by #720 into `github.webhook-core.test.ts` + `github.webhook-autoclose.test.ts`; both halves and `public-flags.test.ts` now share `helpers/webhook-sign.ts`'s `sign()` since #824.)
 
 ### F9 — `status(overrides)` StudioStatus builder — GLM-OK with carve-outs (adoption gap)
 
