@@ -255,7 +255,7 @@ Summary:
 
 ### F13. Deepen long repair verbs: hide timed POST, poll-on-no-answer loop and verdict wording behind `requestWithOutcome(verb, url, landed: (row) => boolean)` — CLAUDE-ONLY (rescue, failover)
 
-- **Files:** `cli/destroy-outcome.ts:123-152` (`requestDestroy`), `:155-220` (`pollAfterNoAnswer`); `cli/recycle-outcome.ts:160-196` (`requestRecycle`), `:301-368` (`pollAfterNoAnswer`) — same skeleton, predicate differs (`bringupLanded` `:289-297`); `cli/status-poll.ts` (48 lines) split only for sharing; pass-through re-export `cli/destroy-outcome.ts:37-38`; `cli/recycle-outcome.ts:38` imports `DESTROY_*` constants from sibling; grab-bag `cli/repair-failure.ts:161-173`; third outcome layer in wiring `cli/fleet.ts:2123-2142` (`destroyRaceOutcome` from `cli/reap.ts:108`).
+- **Files:** `cli/destroy-outcome.ts:123-152` (`requestDestroy`), `:155-220` (`pollAfterNoAnswer`); `cli/recycle-outcome.ts:160-196` (`requestRecycle`), `:301-368` (`pollAfterNoAnswer`) — same skeleton, predicate differs (`bringupLanded` `:289-297`); `cli/status-poll.ts` (48 lines) split only for sharing; pass-through re-export `cli/destroy-outcome.ts:37-38`; `cli/recycle-outcome.ts:38` imports `DESTROY_*` constants from sibling; grab-bag `cli/repair-failure.ts`; third outcome layer in wiring `cli/fleet.ts:2123-2142` (`destroyRaceOutcome` from `cli/reap.ts:108`).
 - **Problem:** "what happens when destroy/recycle times out" = 5 files. Files split by step (request / poll / format) not knowledge (one repair verb).
 - **Solution:** one generic module; destroy + recycle pass predicate + wording; `status-poll.ts` folds in.
 - **Dependency:** remote but owned (Worker) — `fetchImpl` port already exists.
@@ -264,7 +264,7 @@ Summary:
 
 ### F14. Deepen command inputs: replace positional boolean runs with the parsed command variant (`cmdDestroy(creds, parsed)`) — CLAUDE-ONLY (rescue, failover)
 
-- **Files:** `cli/fleet.ts:1101-1103` (`cmdProvision(creds, id, freshSession, cancelFreshSession, discardSession)`), `:1170-1172` (`cmdRecycle(…, discardUnsynced, freshSession, forceMappedAccount)`), `:1234` (`cmdDestroy(…, force, discardUnsynced, park)`), `cli/repair-failure.ts:161` (`destroyPath(force, discardUnsynced, park)`); dispatcher `cli/fleet.ts:2683-2692`; inner reuse `:1365`, `:2125`.
+- **Files:** `cli/fleet.ts:1101-1103` (`cmdProvision(creds, id, freshSession, cancelFreshSession, discardSession)`), `:1170-1172` (`cmdRecycle(…, discardUnsynced, freshSession, forceMappedAccount)`), `:1234` (`cmdDestroy(…, force, discardUnsynced, park)`), `cli/repair-failure.ts:45` (`destroyPath(force, discardUnsynced, park)`); dispatcher `cli/fleet.ts:2683-2692`; inner reuse `:1365`, `:2125`.
 - **Problem:** flag params leak parser shape; same-typed booleans swap silently. Only guard = source-text test `test/bun/cli-destroy-flags.test.ts:9-24` (greps `"destroyPath(force, discardUnsynced, park)"`). `--discard-unsynced` skips pre-teardown rescue → a swap is data loss.
 - **Solution:** pass the parser's variant object (or a named options object); `destroyPath` takes the same.
 - **Dependency:** in-process.
