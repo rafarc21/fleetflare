@@ -12,8 +12,10 @@ import { join } from "node:path";
  * `apps/fleet/.dev.vars` — exactly where the operator's untracked secrets sit
  * in every studio container (written by test-integration/harness.ts and by
  * `wrangler dev` convention) — and every key in it leaks into the ambient test
- * env (measured: 7 github.webhook-core tests fail on the leaked
- * GITHUB_WEBHOOK_SECRET and GITHUB_APP_PRIVATE_KEY).
+ * env. The operator measured 7 failing github.webhook-core tests in a real
+ * studio container (issue #769); re-measured in this branch's own repro, the
+ * misconfigured-secret 503 test fails deterministically and the count tests
+ * fail on the same leaked keys depending on the leaked file's exact shape.
  *
  * The fix moves the config to `apps/fleet/test/wrangler.test.jsonc`, so the
  * lookup targets `test/.dev.vars`, a path nothing ever writes. THIS test pins
