@@ -24,9 +24,9 @@ Smallest fix wins for a file this comment-dense.
 
 ## Steps
 
-1. RED test: one new linuxOnly test in apps/fleet/test/bun/bringup-heartbeat-core.test.ts.
-2. GREEN: `set -f` / `set +f` bracketing the split in gates/activity-heartbeat.sh.
-3. Fresh-context review, then QA, PR, envelope (lead handles 3-5; you do 1-2).
+1. RED test: one new linuxOnly test in apps/fleet/test/bun/bringup-heartbeat-core.test.ts — crafted stat tail carrying a glob char, stubbed cat, cwd containing a matching filename; pre-fix ppid_of returns garbage.
+2. GREEN: `set -f` / `set +f` bracketing the split in gates/activity-heartbeat.sh, comment updated.
+3. Fresh-context review, then QA, PR, envelope (lead handles 3; member does 1-2).
 
 ## Verification (gate budget)
 
