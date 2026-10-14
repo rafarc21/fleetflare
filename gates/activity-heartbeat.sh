@@ -85,7 +85,16 @@ ppid_of() {
   stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
   [ -n "$stat" ] || return 1
   rest="${stat##*) }"
+  # Glob off for the split (sweep 43, #875, refs #855): the unquoted
+  # `set -- $rest` word-splits (intended — $1 state, $2 ppid) but bash also
+  # GLOB-expands an unquoted expansion, so a `*?[` in any field would
+  # replace the positionals with cwd filename matches. Kernel stat fields
+  # cannot carry glob chars (state is one char, ppid numeric), so this is
+  # hardening, not a live bug. `set +f` restores unconditionally so
+  # globbing is never left off for the rest of the script.
+  set -f
   set -- $rest
+  set +f
   # $1 here is `state` (the field right after the closing paren); ppid is $2.
   [ -n "${2:-}" ] || return 1
   printf '%s\n' "$2"
