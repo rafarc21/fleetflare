@@ -2,7 +2,7 @@
 // kill log (`${FLEET_WORKSPACE:-/workspace}/.fleet/memguard.log`, one line
 // per kill via memguard.ts's `formatLogLine`). This file does NOT touch
 // container/memguard.ts — it reads the ALREADY-SHIPPED log format
-// (`memguard-select.test.ts`'s own `formatLogLine` test pins the exact
+// (`memguard-select-loop.test.ts`'s own `formatLogLine` test pins the exact
 // shape this regex parses). See docs/superpowers/specs/2026-09-24-row-
 // tells-truth-design.md, "PR3 addendum (issue #311)".
 import { describe, it, expect } from "vitest";

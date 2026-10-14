@@ -4,7 +4,7 @@
 // reads memguard's output; it never writes to the log, and it does not
 // touch container/memguard.ts at all — that file's `formatLogLine` already
 // writes one line per kill in a fixed, already-shipped, already-tested shape
-// (test/bun/memguard-select.test.ts's own `formatLogLine` describe block
+// (test/bun/memguard-select-loop.test.ts's own `formatLogLine` describe block
 // pins the exact text this regex parses):
 //
 //   <ISO> <SIGTERM|SIGKILL> pid=<n> comm=<name> rss_mib=<n> avail_mib=<n>
