@@ -4,8 +4,10 @@
 // and its printed lines, lost-entry healing, the real file-backed registry
 // and lock, row titles, the `fleet ls` ROW column, ranking, partial answers,
 // the openStudioRow/closeStudioRow pairs, and findAttachHandle. The
-// ensure-side half (ensureStudioWorkspace, name derivation, tabs/plan verbs,
-// the exit-code process test) lives in orca-ensure.test.ts.
+// ensure-core half (name derivation, presence, ensureStudioWorkspace's five
+// hard requirements) lives in orca-ensure-verbs.test.ts; the verbs/reconcile
+// half (duplicate-terminal reconciliation, the tabs/plan verbs, the
+// exit-code process test) in orca-ensure-reconcile.test.ts.
 //
 // bun:test lane, not the workerd lane: this is CLI code (Bun.which, Bun.spawn,
 // process env), and vitest-pool-workers cannot host any of it. Every orca
