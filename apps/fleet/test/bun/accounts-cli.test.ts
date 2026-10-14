@@ -5,7 +5,7 @@
 // the Worker (GET /studio/accounts, POST /studio/accounts/sync), a temp HOME
 // with a synthetic credentials file, and — for the "cswap available" tests —
 // a fake `cswap` executable on PATH that prints the SAME fixture
-// test/fixtures/cswap-list.ts's claude-swap.test.ts already uses, never new
+// test/fixtures/cswap-list.ts's claude-swap-join.test.ts already uses, never new
 // inline data. Issue #240: the fake binary prints the REAL envelope shape
 // (`{schemaVersion, activeAccountNumber, accounts}`), never a bare array —
 // see `writeFakeCswap`'s own header below.
@@ -116,7 +116,7 @@ function readUntil(stream: ReadableStream<Uint8Array>, predicate: (text: string)
 // Fleet slots joined to CSWAP_LIST_FIXTURE by label===email: primary ->
 // OVER_FIVE_HOUR (limit), spare -> UNDER_THRESHOLD (clear), a third with no
 // label -> unmanaged (no-label). Exercises all three decision kinds in one
-// snapshot, same as claude-swap.test.ts's own join tests.
+// snapshot, same as claude-swap-join.test.ts's own join tests.
 const ACCOUNT_SLOTS = [
   { name: "CLAUDE_CODE_OAUTH_TOKEN", label: "primary@example.com", dead: false, until: null, seenAt: null },
   { name: "CLAUDE_CODE_OAUTH_TOKEN_2", label: "spare@example.com", dead: false, until: null, seenAt: null },
