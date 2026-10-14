@@ -15,7 +15,7 @@ never reads. Stale since birth (PR #308, 2026-10-09).
 
 Reword lines 31-33 to what is true: line 34 is grep's only use in this
 script; the dependency adds nothing new to the image because bring-up
-(studio-bringup.sh:1207) already uses grep against settings.json in the same
+(studio-bringup.sh:1207) already runs grep against the hook config in the same
 image. No literal `settings.json` string may remain in session-reemit.sh
 (verify step greps for 0 hits). No executable line changes.
 
