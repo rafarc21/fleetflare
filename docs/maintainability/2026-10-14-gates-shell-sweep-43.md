@@ -39,8 +39,9 @@ every ruling below is by hand, not tool output.
   apps/fleet/container/studio-bringup.sh:266,
   apps/fleet/scripts/deploy.sh:114 — though
   scripts/test/public-export.test.sh still carries 18 bare
-  `echo "$out" | grep -q` pipes (e.g. :197, :224, :275, :568) under
-  its own `set -uo pipefail` (line 59), out of this sweep's gates-only
+  pipes into `grep -q` (17 echo-shaped, e.g. :197, :224, :275, :568,
+  plus one `git log | grep -q` at :526) under its own
+  `set -uo pipefail` (line 59), out of this sweep's gates-only
   scope. activity-heartbeat.sh:174-176
   pipes `printf | sed -n` with no pipefail in effect and sed never
   early-exits, so no race either way.
