@@ -18,7 +18,7 @@ assertion edits. Import lines trimmed per half (the only non-move edit).
    verbatim, fixture preamble (dirs/tmp/afterEach, FixtureProc, procTree,
    SELF, FLOOR, PANE, LEAD, STUDIO, the :319 adj-plan byPid sorter),
    describes isProtected, protectedSet, readProcs, pickVictim, adjPlan,
-   adjScan, readMemory — 35 tests. Imports from container/memguard:
+   adjScan, readMemory — 36 tests. Imports from container/memguard:
    adjPlan, adjScan, isProtected, newAdjCache, pickVictim, protectedSet,
    readMemory, readProcs.
 2. `test/bun/memguard-select-loop.test.ts` — current :466-782 plus a copy
@@ -27,7 +27,7 @@ assertion edits. Import lines trimmed per half (the only non-move edit).
    lives in memguard-select-core.test.ts and live behaviour in
    memguard-docker.test.ts. Describes decide, step, nextTickMs,
    formatLogLine, redact, trimLog, resolveLeadParentPid,
-   refreshLeadParentPid — 33 tests. Imports from container/memguard:
+   refreshLeadParentPid — 32 tests. Imports from container/memguard:
    decide, formatLogLine, initialState, isProtected, nextTickMs,
    readProcs, redact, refreshLeadParentPid, resolveLeadParentPid, step,
    trimLog, types GuardConfig and Proc; plus redactSecrets from
@@ -48,7 +48,7 @@ Sweep docs naming the old file are historical records — untouched.
 ## Verification
 
 - Baseline before the move: cd apps/fleet && bun test test/bun/memguard-select.test.ts — 68 pass.
-- After: cd apps/fleet && bun test test/bun/memguard-select-core.test.ts test/bun/memguard-select-loop.test.ts — 68 tests, 0 fail (35+33).
+- After: cd apps/fleet && bun test test/bun/memguard-select-core.test.ts test/bun/memguard-select-loop.test.ts — 68 tests, 0 fail (36+32).
 - cd apps/fleet && npx vitest run test/studio.memguard-log.test.ts — green (comment-touched file).
 - cd apps/fleet && bun run english-check — clean.
 - cd apps/fleet && bun run check — heavy gate (five tsc projects), once, alone, under flock /tmp/fleet-gate.lock.
