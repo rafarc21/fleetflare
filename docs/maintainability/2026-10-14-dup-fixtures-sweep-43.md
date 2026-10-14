@@ -19,7 +19,7 @@ Bar: sweep 33 (#733) filed 3+-copy clusters on 2026-10-13; this sweep's bar is 2
 | F7 | `repos(list)` RepoReach fake | 2 files | CLAUDE-ONLY |
 | F8 | `body(sig)` source-slice pin | 4 files | GLM-OK |
 | F9 | `post(path, token, body)` spawn-token request builder | 2 files | CLAUDE-ONLY |
-| F10 | `authorizedReq`/`req` JWT request builders (routes pair + board pair) | 4 files | GLM-OK 2 / CLAUDE-ONLY 2 |
+| F10 | `authorizedReq`/`req` JWT request builders (routes + board pairs) | 4 files | CLAUDE-ONLY |
 | F11 | `tokenFor(id)`/`caller(id)` mintSpawnToken pair | 2 files | CLAUDE-ONLY |
 | F12 | `CONTINUE_GUARD()` bring-up pin | 2 files | GLM-OK |
 | F13 | `fakeObserved(seed)` ObservedStorage fake | 2 files | GLM-OK |
@@ -62,9 +62,9 @@ Four suites pin `src/studio/do.ts` source with the same 4-line slice idiom: find
 
 `board.fleet-directs.test.ts:61` and `board.read-repos.test.ts:214` each define a request builder `post(path, token, body)` — POST with JSON body and headers `{ [SPAWN_TOKEN_HEADER]: token, "Content-Type": "application/json" }` — byte-identical modulo arrow-vs-function form (fleet-directs: `function post`, read-repos: `const post =`). Builds requests carrying SPAWN tokens — token-lane fixture, CLAUDE-ONLY. 2 copies. Proposed home: extend `helpers/http.ts` (the request-builder home) with `tokenPost(path, token, body)`. Estimated lines removed: ~8.
 
-### F10 — `authorizedReq`/`req` JWT request builders — GLM-OK
+### F10 — `authorizedReq`/`req` JWT request builders — CLAUDE-ONLY
 
-`studio.routes-accounts.test.ts:372` and `studio.routes-handle.test.ts:386` each hand-roll `function authorizedReq(path, init)` — byte-identical to each other AND to the existing shared helper `helpers/http.ts:4` (same "test-jwt" fixture header) — sweep 36 explicitly deferred this adoption gap to "a future duplication sweep" (its Not-filed note). ALSO byte-identical to the helper except one extra header: `board.routes.test.ts:73` and `board.open-prs-route.test.ts:63` spell `req(path, init)` with `Content-Type: application/json` added — a thin variant the helper covers via `init.headers`. board.routes and board.open-prs-route are auth-lane (Access-auth) BUT the builder itself is the helper's own lane — sweep 18 filed `helpers/http.ts` as the Access-auth boundary home and ruled adopting it CLAUDE-ONLY there; so the routes-handle/routes-accounts pair (GLM-OK per #751's lane: the harness issue is GLM-OK) and the board pair (CLAUDE-ONLY, auth lane) migrate in the same one-line change but file split. 4 copies total across 2 issues. Proposed home: import `helpers/http.ts` `authorizedReq`. Estimated lines removed: ~20.
+`studio.routes-accounts.test.ts:372` and `studio.routes-handle.test.ts:386` each hand-roll `function authorizedReq(path, init)` — byte-identical to each other AND to the existing shared helper `helpers/http.ts:4` (same "test-jwt" fixture header) — sweep 36 explicitly deferred this adoption gap to "a future duplication sweep" (its Not-filed note). ALSO byte-identical to the helper except one extra header: `board.routes.test.ts:73` and `board.open-prs-route.test.ts:63` spell `req(path, init)` with `Content-Type: application/json` added — a thin variant the helper covers via `init.headers`. All four copies mock the Access-auth boundary — sweep 18 filed helpers/http.ts as that boundary's home and ruled its adoption CLAUDE-ONLY, so the whole finding is CLAUDE-ONLY regardless of which suite the copy sits in. 4 copies, one issue. Proposed home: import `helpers/http.ts` `authorizedReq`. Estimated lines removed: ~20.
 
 ### F11 — `tokenFor(id)`/`caller(id)` mintSpawnToken pair — CLAUDE-ONLY
 
@@ -95,4 +95,4 @@ Four suites pin `src/studio/do.ts` source with the same 4-line slice idiom: find
 
 ## Summary
 
-15 findings: 9 GLM-OK (F2 webhook pair, F4 run runner, F5 brief fixture, F6 db fake, F8 body(sig) pin, F12 CONTINUE_GUARD, F13 fakeObserved, F14 fakeStorage wrapper, F15 healClosure — F15 recommends no-action, recorded for completeness), 5 CLAUDE-ONLY (F1 gate-DO harness, F3 writeCredentials adoption, F7 repos fake, F9 post token builder, F11 tokenFor/caller), F10 mixed and filed split (routes pair GLM-OK + board pair CLAUDE-ONLY). Follow-ups: one issue per batch per step 5. Estimated total lines removed if all land: ~250.
+15 findings: 8 GLM-OK (F2 webhook pair, F4 run runner, F5 brief fixture, F6 db fake, F8 body(sig) pin, F12 CONTINUE_GUARD, F13 fakeObserved, F14 fakeStorage wrapper), F15 healClosure recorded GLM-OK with a no-action recommendation, 6 CLAUDE-ONLY (F1 gate-DO harness, F3 writeCredentials adoption, F7 repos fake, F9 post token builder, F10 authorizedReq adoption, F11 tokenFor/caller). Follow-ups: one issue per batch per step 5. Estimated total lines removed if all land: ~250.
