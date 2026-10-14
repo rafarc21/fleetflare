@@ -26,7 +26,7 @@ const studio: Studio = {
 // a "presentation only" clause, an operator-message scope statement) pinned
 // content that round 1 correctly moved OUT of the neutral, product-wide
 // default — it is operator-owned overlay content now (see
-// test/studio.blueprint.test.ts's "HOUSE_RULES — neutral default (issue
+// test/studio.blueprint-brief.test.ts's "HOUSE_RULES — neutral default (issue
 // #330)" for the negative regression guard: none of those strings belong
 // here). Those four tests are deleted, not fixed, because the behavior they
 // pinned is gone by design, not by bug.

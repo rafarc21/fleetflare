@@ -2,7 +2,8 @@
 // file's frontmatter+prompt, or fleet.json's JSON) into a typed object, or
 // throw BlueprintError naming the field that's wrong. No network, no
 // filesystem, no @cloudflare/sandbox import: pure functions, directly
-// unit-testable (test/studio.blueprint.test.ts). Fetching the raw text and
+// unit-testable (test/studio.blueprint-parse.test.ts,
+// test/studio.blueprint-brief.test.ts). Fetching the raw text and
 // deciding WHAT to fetch (which repo, which ref, which path) is provision.ts's
 // job, not this file's — see that file's own header for the wiring.
 //

@@ -35,7 +35,7 @@ const NOW_ISO = "2026-08-16T00:10:00.000Z";
 // divergence: "You are pilot. Work carefully." (shorter than the routes
 // suites' — spelled here as the builder arg, never a default). None of the
 // tests below exercise the blueprint fetch's OWN behavior (that's
-// test/studio.blueprint.test.ts and the routes suites' job) — this just
+// test/studio.blueprint-parse.test.ts and the routes suites' job) — this just
 // needs to round-trip through the real parseFleetJson/parseRoleFile so
 // provision keeps landing on state:"running".
 const FAKE = fakeBlueprintFiles({
