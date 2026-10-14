@@ -1,0 +1,378 @@
+import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  findOwnModuleMocks, findSourceReading, findTautologies, formatFinding, scanFile,
+} from "../../scripts/test-lies-check";
+
+/**
+ * Board issue #164, Phase 1 — a report-only scan for three shapes of "test
+ * lie" (a test that passes but structurally cannot catch a real bug):
+ * tautological assertions, source-reading, and own-module mocks.
+ *
+ * Every detector here is conservative by design: any resolution failure or
+ * ambiguity is a silent skip, never a flag — a noisy check gets disabled,
+ * which is worse than no check (same philosophy as english-check, #66).
+ * Every negative case below is a real false positive the heuristic must not
+ * produce.
+ *
+ * Detectors half of the old test-lies-check.test.ts (split #803, sweep-35
+ * F10, refs #735): findTautologies, findSourceReading, findOwnModuleMocks,
+ * formatFinding, and the scanFile escape-hatch exemption cases. The repo
+ * scan, the CLI exit-code contract, and the #323 walker characterization
+ * live in test-lies-repo.test.ts.
+ */
+
+/** A throwaway directory standing in for a slice of the repo, so the
+ *  tautology/own-module-mock detectors can resolve real relative imports
+ *  against real files on disk, the same way they would against the repo. */
+class Fixture {
+  readonly dir = mkdtempSync(join(tmpdir(), "test-lies-check-"));
+  readonly testDir = join(this.dir, "test");
+
+  constructor() {
+    mkdirSync(this.testDir, { recursive: true });
+    mkdirSync(join(this.dir, "src"), { recursive: true });
+  }
+
+  writeModule(relPath: string, text: string): void {
+    const full = join(this.dir, relPath);
+    mkdirSync(join(full, ".."), { recursive: true });
+    writeFileSync(full, text);
+  }
+
+  cleanup(): void {
+    rmSync(this.dir, { recursive: true, force: true });
+  }
+}
+
+describe("findTautologies — expect(IMPORTED_CONST).toBe(<its own value>)", () => {
+  test("flags the real repeated shape: a constant restating its own declared value", () => {
+    const fx = new Fixture();
+    try {
+      fx.writeModule("src/sweep.ts", "export const SWEEP_SECONDS = 20 * 60;\n");
+      const testText = [
+        'import { SWEEP_SECONDS } from "../src/sweep";',
+        "",
+        "test('x', () => {",
+        "  expect(SWEEP_SECONDS).toBe(20 * 60);",
+        "});",
+        "",
+      ].join("\n");
+      const hits = findTautologies(testText, fx.testDir);
+      expect(hits).toHaveLength(1);
+      expect(hits[0].kind).toBe("tautological");
+      expect(hits[0].line).toBe(4);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("flags a simple numeric-literal match (the PASTE_MAX_BYTES shape)", () => {
+    const fx = new Fixture();
+    try {
+      fx.writeModule("src/paste.ts", "export const PASTE_MAX_BYTES = 10_485_760;\n");
+      const testText = [
+        'import { PASTE_MAX_BYTES } from "../src/paste";',
+        "expect(PASTE_MAX_BYTES).toBe(10_485_760);",
+      ].join("\n");
+      const hits = findTautologies(testText, fx.testDir);
+      expect(hits).toHaveLength(1);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("does NOT flag when the literal does not match the declared value (a real assertion)", () => {
+    const fx = new Fixture();
+    try {
+      fx.writeModule("src/sweep.ts", "export const SWEEP_SECONDS = 20 * 60;\n");
+      const testText = [
+        'import { SWEEP_SECONDS } from "../src/sweep";',
+        "expect(SWEEP_SECONDS).toBe(999);",
+      ].join("\n");
+      expect(findTautologies(testText, fx.testDir)).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  // Mirrors the real test/cli.recycle-outcome.test.ts:320-322 shape — the
+  // motivating case for the paren-depth-balanced, multi-line argument
+  // extraction in the first place: a real `.toBe(...)` argument that spans
+  // several lines and contains its own parens/operators. It is NOT
+  // tautological: the declared RHS (`DESTROY_CLIENT_TIMEOUT_MS + 600_000 +
+  // 60_000` in the real module) textually differs from the asserted RHS
+  // (`DESTROY_CLIENT_TIMEOUT_MS + EXEC_CLASSES.provision.timeoutMs + ...`),
+  // even though both may be numerically equal at runtime — this detector
+  // compares text, not values, so a real cross-check like this must not be
+  // flagged as a restated-constant tautology.
+  test("does NOT flag a real multi-line assertion whose RHS differs textually from the declared one", () => {
+    const fx = new Fixture();
+    try {
+      fx.writeModule(
+        "src/recycle-outcome.ts",
+        "export const DESTROY_CLIENT_TIMEOUT_MS = 120_000;\n" +
+        "export const RECYCLE_CLIENT_TIMEOUT_MS = DESTROY_CLIENT_TIMEOUT_MS + 600_000 + 60_000;\n",
+      );
+      const testText = [
+        'import { RECYCLE_CLIENT_TIMEOUT_MS, DESTROY_CLIENT_TIMEOUT_MS } from "../src/recycle-outcome";',
+        "",
+        "it('covers destroy budget plus provision plus readiness', () => {",
+        "  expect(RECYCLE_CLIENT_TIMEOUT_MS).toBe(",
+        "    DESTROY_CLIENT_TIMEOUT_MS + EXEC_CLASSES.provision.timeoutMs + EXEC_CLASSES.readiness.timeoutMs,",
+        "  );",
+        "});",
+      ].join("\n");
+      expect(findTautologies(testText, fx.testDir)).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("does NOT flag when the identifier is a local variable, not an import", () => {
+    const fx = new Fixture();
+    try {
+      const testText = [
+        "const SWEEP_SECONDS = 20 * 60;",
+        "expect(SWEEP_SECONDS).toBe(20 * 60);",
+      ].join("\n");
+      expect(findTautologies(testText, fx.testDir)).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("does NOT flag when the import cannot be resolved (conservative skip)", () => {
+    const fx = new Fixture();
+    try {
+      const testText = [
+        'import { SWEEP_SECONDS } from "../src/does-not-exist";',
+        "expect(SWEEP_SECONDS).toBe(20 * 60);",
+      ].join("\n");
+      expect(findTautologies(testText, fx.testDir)).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("a trailing `test-lies-check: allow` exempts that one flagged line only", () => {
+    const fx = new Fixture();
+    try {
+      fx.writeModule("src/sweep.ts", "export const SWEEP_SECONDS = 20 * 60;\n");
+      fx.writeModule(
+        "test/x.test.ts",
+        [
+          'import { SWEEP_SECONDS } from "../src/sweep";',
+          "expect(SWEEP_SECONDS).toBe(20 * 60); // test-lies-check: allow",
+        ].join("\n"),
+      );
+      const text = readFileSync(join(fx.testDir, "x.test.ts"), "utf8");
+      expect(scanFile("test/x.test.ts", text, fx.dir)).toEqual([]);
+
+      fx.writeModule(
+        "test/y.test.ts",
+        [
+          'import { SWEEP_SECONDS } from "../src/sweep";',
+          "expect(SWEEP_SECONDS).toBe(20 * 60);",
+        ].join("\n"),
+      );
+      const text2 = readFileSync(join(fx.testDir, "y.test.ts"), "utf8");
+      expect(scanFile("test/y.test.ts", text2, fx.dir)).toHaveLength(1);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("expect(foo.bar).toBe(...) — a member expression — is never flagged", () => {
+    const fx = new Fixture();
+    try {
+      fx.writeModule("src/sweep.ts", "export const bar = 20 * 60;\n");
+      const testText = [
+        'import { bar } from "../src/sweep";',
+        "const foo = { bar };",
+        "expect(foo.bar).toBe(20 * 60);",
+      ].join("\n");
+      expect(findTautologies(testText, fx.testDir)).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe("findSourceReading — reading src/ as text and string-matching it", () => {
+  test("flags the inline case: expect(readFileSync(...).toString()).toContain(...)", () => {
+    const text = 'expect(readFileSync("src/foo.ts").toString()).toContain("export const FOO");';
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].kind).toBe("source-reading");
+    expect(hits[0].line).toBe(1);
+  });
+
+  test("flags the captured-variable case", () => {
+    const text = [
+      'const txt = readFileSync("src/foo.ts", "utf8");',
+      "doSomethingUnrelated();",
+      'expect(txt).toMatch(/FOO/);',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+  });
+
+  test("does NOT flag a src/ file read that is never string-matched", () => {
+    const text = [
+      'const code = readFileSync("src/foo.ts", "utf8");',
+      "const parsed = parseSomething(code);",
+      "expect(parsed.ok).toBe(true);",
+    ].join("\n");
+    expect(findSourceReading(text)).toEqual([]);
+  });
+
+  test("does NOT flag a file read whose path has no src/ segment", () => {
+    const text = 'expect(readFileSync("test/fixtures/sample.txt").toString()).toContain("hi");';
+    expect(findSourceReading(text)).toEqual([]);
+  });
+
+  // This repo's own actual idiom (wake-gate-wiring.test.ts,
+  // archive-wiring.test.ts): the first argument is not a bare string
+  // literal, it's `join(import.meta.dir, "../../src/...")`. The detector
+  // must look inside that wrapper call for the literal, not only accept a
+  // bare literal as the first argument.
+  test('flags the real join(import.meta.dir, "...") idiom, captured-variable case', () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      "doSomethingUnrelated();",
+      'expect(src).toContain("switchedBlock:");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("../../src/studio/do.ts");
+  });
+
+  test('flags the join(import.meta.dir, "...") idiom, inline case too', () => {
+    const text = 'expect(readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8")).toContain("switchedBlock:");';
+    expect(findSourceReading(text)).toHaveLength(1);
+  });
+
+  test('does NOT flag join(import.meta.dir, "...") when the joined literal has no src/ segment', () => {
+    const text = [
+      'const fixture = readFileSync(join(import.meta.dir, "fixtures/sample.txt"), "utf8");',
+      'expect(fixture).toContain("hi");',
+    ].join("\n");
+    expect(findSourceReading(text)).toEqual([]);
+  });
+
+  test("a trailing `test-lies-check: allow` exempts that one flagged line only (via scanFile)", () => {
+    const fx = new Fixture();
+    try {
+      fx.writeModule(
+        "test/x.test.ts",
+        'expect(readFileSync("src/foo.ts").toString()).toContain("x"); // test-lies-check: allow\n',
+      );
+      const text = readFileSync(join(fx.testDir, "x.test.ts"), "utf8");
+      expect(scanFile("test/x.test.ts", text, fx.dir)).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  // Board issue #174 part 2 — follow simple derivation chains, not just the
+  // directly captured variable. Mirrors the real archive-wiring.test.ts
+  // shape: src -> method (one hop: .indexOf/.slice) -> call (a second hop,
+  // chained off the FIRST derived variable, not off src directly).
+  test("flags a two-hop derivation chain: read -> derive once -> derive again -> assert", () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      'const methodStart = src.indexOf("shipTranscript");',
+      'const method = src.slice(methodStart, methodStart + 200);',
+      'const callStart = method.indexOf("runShipTickWithObservation(");',
+      'const call = method.slice(callStart, callStart + 80);',
+      'expect(call).toContain("doneRecords:");',
+    ].join("\n");
+    const hits = findSourceReading(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
+    expect(hits[0].detail).toContain("../../src/studio/do.ts");
+  });
+
+  test("does NOT flag a derivation chain that never reaches an assertion", () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      'const methodStart = src.indexOf("shipTranscript");',
+      'const method = src.slice(methodStart, methodStart + 200);',
+      'expect(methodStart).toBeGreaterThan(-1);',
+    ].join("\n");
+    expect(findSourceReading(text)).toEqual([]);
+  });
+
+  test("does NOT flag .split()/.slice() on a variable that was never tainted by a src/ read", () => {
+    const text = [
+      'const src = readFileSync(join(import.meta.dir, "../../src/studio/do.ts"), "utf8");',
+      'const unrelated = "hello world, not derived from src at all";',
+      'const piece = unrelated.split(",")[0].slice(0, 5);',
+      'expect(piece).toContain("hello");',
+    ].join("\n");
+    expect(findSourceReading(text)).toEqual([]);
+  });
+});
+
+describe("findOwnModuleMocks — mocking this repo's own src/ defeats the test", () => {
+  test('flags vi.mock("../../src/studio/paste") — resolves under src/', () => {
+    const fx = new Fixture();
+    try {
+      fx.writeModule("src/studio/paste.ts", "export const x = 1;\n");
+      const testText = 'vi.mock("../src/studio/paste");';
+      const hits = findOwnModuleMocks(testText, fx.testDir);
+      expect(hits).toHaveLength(1);
+      expect(hits[0].kind).toBe("own-module-mock");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test('flags mock.module("./paste") — resolves under src/, same way', () => {
+    const fx = new Fixture();
+    try {
+      // Resolve "./paste" from inside src/ itself, so it lands on src/paste.ts.
+      fx.writeModule("src/paste.ts", "export const x = 1;\n");
+      const testText = 'mock.module("./paste");';
+      const hits = findOwnModuleMocks(testText, join(fx.dir, "src"));
+      expect(hits).toHaveLength(1);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test('does NOT flag vi.mock("node:fs") — a system boundary, bare specifier', () => {
+    expect(findOwnModuleMocks('vi.mock("node:fs");', "/tmp/anywhere")).toEqual([]);
+  });
+
+  test('does NOT flag vi.mock("playwright-core") — an external package, bare specifier', () => {
+    expect(findOwnModuleMocks('vi.mock("playwright-core");', "/tmp/anywhere")).toEqual([]);
+  });
+
+  test("a trailing `test-lies-check: allow` exempts that one flagged line only (via scanFile)", () => {
+    const fx = new Fixture();
+    try {
+      fx.writeModule("src/studio/paste.ts", "export const x = 1;\n");
+      fx.writeModule(
+        "test/x.test.ts",
+        'vi.mock("../src/studio/paste"); // test-lies-check: allow\n',
+      );
+      const text = readFileSync(join(fx.testDir, "x.test.ts"), "utf8");
+      expect(scanFile("test/x.test.ts", text, fx.dir)).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe("formatFinding", () => {
+  test("formats a finding as path:line: [kind] detail", () => {
+    const hit = { line: 4, kind: "tautological" as const, detail: "FOO mirrors ./bar's own declared value" };
+    expect(formatFinding("test/x.test.ts", hit)).toMatch(/^test\/x\.test\.ts:4: \[tautological\] /);
+  });
+});

@@ -30,7 +30,7 @@
  * literals holding example "bad" code text), use ALLOWLIST.
  *
  * Run by hand: `bun run scripts/test-lies-check.ts`, or by its own test
- * (test/bun/test-lies-check.test.ts).
+ * (test/bun/test-lies-detectors.test.ts and test/bun/test-lies-repo.test.ts).
  */
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -45,7 +45,11 @@ const ALLOW_ESCAPE = "test-lies-check: allow";
  *  fixtures, since detection here is plain text-pattern scanning, not
  *  real parsing — it cannot tell a fixture string from live code. */
 export const ALLOWLIST: Record<string, string> = {
-  "apps/fleet/test/bun/test-lies-check.test.ts":
+  "apps/fleet/test/bun/test-lies-detectors.test.ts":
+    "its own fixtures are string literals holding example flagged code " +
+    "(e.g. `expect(FOO).toBe(5)`) fed straight into the detectors; a real " +
+    "text-pattern scan of this file would flag its own test fixtures",
+  "apps/fleet/test/bun/test-lies-repo.test.ts":
     "its own fixtures are string literals holding example flagged code " +
     "(e.g. `expect(FOO).toBe(5)`) fed straight into the detectors; a real " +
     "text-pattern scan of this file would flag its own test fixtures",
@@ -526,7 +530,7 @@ const isTestFile = (path: string): boolean => /\.test\.tsx?$/.test(path);
 
 /** The findings only, no printing or exiting — the runner's own single
  *  listing + read pass (see ./repo-check.ts), kept exported because
- *  test/bun/test-lies-check.test.ts imports it. `scanFile` takes the repo
+ *  test/bun/test-lies-repo.test.ts imports it. `scanFile` takes the repo
  *  root as its 3rd argument, so it is wrapped to the runner's 2-arg shape. */
 export async function scanRepo(root: string = REPO_ROOT): Promise<Finding[]> {
   return (await scanRepoFiles(root, isTestFile, (path, text) => scanFile(path, text, root), ALLOWLIST)).findings;
