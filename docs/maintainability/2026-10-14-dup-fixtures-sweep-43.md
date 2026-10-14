@@ -16,10 +16,10 @@ Bar: sweep 33 (#733) filed 3+-copy clusters on 2026-10-13; this sweep's bar is 2
 | F4 | `run(args, home)` Bun.spawn CLI runner | 2 files | GLM-OK |
 | F5 | `brief` createTask fixture (assign/create) | 2 files | GLM-OK |
 | F6 | `db` D1-locked prepare fake | 2 files | GLM-OK |
-| F7 | `repos(list)` RepoReach fake | 2 files | GLM-OK |
+| F7 | `repos(list)` RepoReach fake | 2 files | CLAUDE-ONLY |
 | F8 | `body(sig)` source-slice pin | 4 files | GLM-OK |
 | F9 | `post(path, token, body)` spawn-token request builder | 2 files | CLAUDE-ONLY |
-| F10 | `authorizedReq`/`req` JWT request builders (routes pair) | 2 files | GLM-OK |
+| F10 | `authorizedReq`/`req` JWT request builders (routes pair + board pair) | 4 files | GLM-OK 2 / CLAUDE-ONLY 2 |
 | F11 | `tokenFor(id)`/`caller(id)` mintSpawnToken pair | 2 files | CLAUDE-ONLY |
 | F12 | `CONTINUE_GUARD()` bring-up pin | 2 files | GLM-OK |
 | F13 | `fakeObserved(seed)` ObservedStorage fake | 2 files | GLM-OK |
@@ -52,7 +52,7 @@ Inside the six suites that #758 already covers for their fixture quartet, the SA
 
 ### F7 — `repos(list)` RepoReach fake — GLM-OK
 
-`studio.routes-handle.test.ts:1943` and `studio.spawn.test.ts:1185` carry byte-identical 13-line `function repos(list: string[] | Error)` returning a fake repo-reach port: records `calls`, throws when handed an Error, answers `{ reachable: true }` when the slug is in the list (case-insensitive) and `{ reachable: false, remedy: "is not reachable by this fleet — grant it access first" }` otherwise. The remedy string is pinned to `src/studio/do.ts`'s exact wording. Both files are also #751/#747 members but this fixture is NOT in either issue's scope (routes-handle's copy is nested inside its describe, spawn's at top level). NOTE: routes-handle is accounts-routing lane and spawn is CLAUDE-ONLY per sweep-18 F9 — both subjects — so this fixture, though mechanical, is CLAUDE-ONLY by lane; filed GLM-OK in the table above ONLY IF a reviewer confirms the remedy-string pin does not constitute an accounts-routing behavior pin — default to CLAUDE-ONLY when in doubt. Proposed home: `helpers/board-api.ts`-adjacent `helpers/repo-reach.ts` exporting `fakeRepos(list)`. Estimated lines removed: ~13.
+`studio.routes-handle.test.ts:1943` and `studio.spawn.test.ts:1185` carry byte-identical 13-line `function repos(list: string[] | Error)` returning a fake repo-reach port: records `calls`, throws when handed an Error, answers `{ reachable: true }` when the slug is in the list (case-insensitive) and `{ reachable: false, remedy: "is not reachable by this fleet — grant it access first" }` otherwise. The remedy string is pinned to `src/studio/do.ts`'s exact wording. Both files are also #751/#747 members but this fixture is NOT in either issue's scope (routes-handle's copy is nested inside its describe, spawn's at top level). Lane: routes-handle is accounts-routing lane and spawn is CLAUDE-ONLY per sweep-18 F9 — both members' subjects put this fixture in the CLAUDE-ONLY lane even though the body is mechanical. Proposed home: `helpers/board-api.ts`-adjacent `helpers/repo-reach.ts` exporting `fakeRepos(list)`. Estimated lines removed: ~13.
 
 ### F8 — `body(sig)` source-slice pin — GLM-OK
 
@@ -95,4 +95,4 @@ Four suites pin `src/studio/do.ts` source with the same 4-line slice idiom: find
 
 ## Summary
 
-15 findings: 7 GLM-OK (F2 webhook pair, F4 run runner, F5 brief fixture, F6 db fake, F7 repos fake, F8 body(sig) pin, F12 CONTINUE_GUARD, F13 fakeObserved, F14 fakeStorage wrapper, F15 healClosure — 10 counting F7-lane-conditional and F15-recommended-no-action), 5 CLAUDE-ONLY (F1 gate-DO harness, F3 writeCredentials adoption, F9 req token builder, F10 board-pair half, F11 tokenFor/caller), F10 filed split (routes pair GLM-OK + board pair CLAUDE-ONLY). Follow-ups: one issue per batch per step 5. Estimated total lines removed if all land: ~250.
+15 findings: 9 GLM-OK (F2 webhook pair, F4 run runner, F5 brief fixture, F6 db fake, F8 body(sig) pin, F12 CONTINUE_GUARD, F13 fakeObserved, F14 fakeStorage wrapper, F15 healClosure — F15 recommends no-action, recorded for completeness), 5 CLAUDE-ONLY (F1 gate-DO harness, F3 writeCredentials adoption, F7 repos fake, F9 post token builder, F11 tokenFor/caller), F10 mixed and filed split (routes pair GLM-OK + board pair CLAUDE-ONLY). Follow-ups: one issue per batch per step 5. Estimated total lines removed if all land: ~250.
