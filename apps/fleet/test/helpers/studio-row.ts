@@ -14,7 +14,6 @@ export function row(overrides: Partial<StudioStatus> = {}): StudioStatus {
 }
 
 export const runningRow = (o: Partial<StudioStatus> = {}) => row({ state: "running", ...o });
-export const stoppedRow = (o: Partial<StudioStatus> = {}) => row({ state: "stopped", ...o });
 
 // Sweep-18 F9 (#596): the zero Burn literal that co-travels with row().
 // window5hStart has NO default — the two adopting sites genuinely diverge
