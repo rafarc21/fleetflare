@@ -240,8 +240,8 @@ describe("optional role fields (may_spawn / instance_type / keep_alive)", () => 
 // optional, validated against claude's own accepted levels when present —
 // same "absent vs. present-but-wrong" testing shape as instance_type's own
 // describe block above. The cto->"max" default is NOT parse-time behavior
-// (see Role.effort's own doc comment) — that's covered separately, below,
-// against roleBringupEnv.
+// (see Role.effort's own doc comment) — that's covered separately in
+// test/studio.blueprint-brief.test.ts, against roleBringupEnv.
 describe("optional role field: effort (Fleet CTO effort default, operator directive 2026-08-19)", () => {
   const ROLE_MD_NO_OPTIONAL_FIELDS = VALID_ROLE_MD.replace(/^may_spawn:.*$\n?/m, "");
 
