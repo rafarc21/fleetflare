@@ -57,9 +57,10 @@ write-proxy, leak-gate or approvals — GLM-OK lane for all four.
   `closeTaskOnPromote` actually posts — has been the English
   "closed by <sha>, promoted to <branch>" (close-action.ts:180) since this
   file first entered the repo (born whole in the public-release squash
-  c7cf6a64 and PR #313, both already English; `git log -S "promovido" --all`
-  across every commit on every branch: zero hits — no Portuguese close-comment
-  text ever existed in this repo's history). In THIS repo, #66 is the merged
+  c7cf6a64 and PR #313, both already English; a git log -S search for the
+  Portuguese word for "promoted", across every commit on every branch: zero
+  hits — no Portuguese close-comment text ever existed in this repo's
+  history). In THIS repo, #66 is the merged
   "fleet ls: per-studio container restart count (RST)" PR
   (https://github.com/rafarc21/fleetflare/pull/66, merged 2026-09-29), which
   has nothing to do with close-comment wording. The parenthetical is a
