@@ -5077,7 +5077,7 @@ describe("container/studio-bringup.sh — Tier-0 completion gate (spec §4)", ()
 // ---------------------------------------------------------------------------
 // container/studio-bringup.sh — C2: session-reemit wiring is pinned at BOTH
 // ends (Task 6). Before this block, `grep -rn "session-reemit|SessionStart|
-// working-set" test/` returned only test/bun/bringup-heartbeat.test.ts's
+// working-set" test/` returned only test/bun/bringup-heartbeat-core.test.ts's
 // executed-BEHAVIOR tests of the extracted REEMIT script -- nothing asserted
 // that bring-up actually REGISTERS the SessionStart hook, nothing asserted
 // the persist step exists, and nothing compared the path the hook reads
