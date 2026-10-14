@@ -18,7 +18,7 @@ Bar: sweep 33 (#733) filed 3+-copy clusters on 2026-10-13; this sweep's bar is 2
 | F6 | `db` D1-locked prepare fake | 2 files | GLM-OK |
 | F7 | `repos(list)` RepoReach fake | 2 files | GLM-OK |
 | F8 | `body(sig)` source-slice pin | 4 files | GLM-OK |
-| F9 | `req(path, token, init)` spawn-token request builder | 2 files | CLAUDE-ONLY |
+| F9 | `post(path, token, body)` spawn-token request builder | 2 files | CLAUDE-ONLY |
 | F10 | `authorizedReq`/`req` JWT request builders (routes pair) | 2 files | GLM-OK |
 | F11 | `tokenFor(id)`/`caller(id)` mintSpawnToken pair | 2 files | CLAUDE-ONLY |
 | F12 | `CONTINUE_GUARD()` bring-up pin | 2 files | GLM-OK |
@@ -58,9 +58,9 @@ Inside the six suites that #758 already covers for their fixture quartet, the SA
 
 Four suites pin `src/studio/do.ts` source with the same 4-line slice idiom: find the signature, expect it found, slice to the next `"\n  }"` or `"\n  }\n"`. Copies: `studio.provision.test.ts:926` (src var, delimiter `"\n  }"`), `studio.wake-race.test.ts:123` (delimiter `"\n  }\n"`), `studio.exec-deadlines.test.ts:300` (doSrc var, `"\n  }\n"`), `studio.observation.test.ts:334` (src, `"\n  }\n"`). Three delimiter spellings, two variable names — near-identical, not byte-identical; the divergence is cosmetic (both delimiters work identically on do.ts's formatting). Proposed home: new `helpers/src-pin.ts` exporting `methodBody(src, sig)` (normalize delimiter to `"\n  }"`); or a `TEST_STUDIO_DO_SRC` sibling for files that re-read the source per-test. Estimated lines removed: ~8.
 
-### F9 — `req(path, token, init)` spawn-token request builder — CLAUDE-ONLY
+### F9 — `post(path, token, body)` spawn-token request builder — CLAUDE-ONLY
 
-`board.fleet-directs.test.ts:52`? No — correction, see F11; this finding is the request-builder pair: `board.open-prs-route.test.ts:63`? No — see F10. Actual members: `board.fleet-routes.test.ts:63`? No. Verified members: none of the above — the `req(path, token)` pair in `board.fleet-directs.test.ts` and `board.read-repos.test.ts` builds requests carrying the SPAWN_TOKEN_HEADER; the census group `['req'] files: 2` (`board.open-prs-route.test.ts:63`, `board.routes.test.ts:73`) is F10's JWT variant. So: `board.fleet-directs.test.ts` / `board.read-repos.test.ts` each define a `req(path, token)` request builder attaching the spawn-token header — CLAUDE-ONLY (token-lane fixture). 2 copies. Proposed home: extend `helpers/http.ts` with `tokenReq(path, token, init)`. Estimated lines removed: ~8.
+`board.fleet-directs.test.ts:61` and `board.read-repos.test.ts:214` each define a request builder `post(path, token, body)` — POST with JSON body and headers `{ [SPAWN_TOKEN_HEADER]: token, "Content-Type": "application/json" }` — byte-identical modulo arrow-vs-function form (fleet-directs: `function post`, read-repos: `const post =`). Builds requests carrying SPAWN tokens — token-lane fixture, CLAUDE-ONLY. 2 copies. Proposed home: extend `helpers/http.ts` (the request-builder home) with `tokenPost(path, token, body)`. Estimated lines removed: ~8.
 
 ### F10 — `authorizedReq`/`req` JWT request builders — GLM-OK
 
