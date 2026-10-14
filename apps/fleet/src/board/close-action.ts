@@ -98,9 +98,9 @@ interface CloseOnPromoteResult {
  *    to CAS against at all: logged, GitHub issue still closes, board state
  *    is left exactly as found for a human to repair rather than guessed at.
  *    Then one comment, in caveman-compressed house style: "closed by
- *    <sha>, promoted to <branch>". (Portuguese until the #66 follow-up;
- *    dedup never read the comment text, so tasks closed under the old
- *    wording get no second comment.)
+ *    <sha>, promoted to <branch>". (Historical: pre-public-release
+ *    comments were Portuguese; dedup never read the comment text, so
+ *    tasks closed under the old wording get no second comment.)
  * 5. The dedup marker is written LAST, only once every real write above has
  *    genuinely succeeded — never first. Writing it first (the original
  *    shape of this function) meant a thrown `closeIssue`/`transitionTask`/

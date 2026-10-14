@@ -12,8 +12,11 @@
 // Scope of THIS file: route + translation only (see translate.ts for every
 // actual shape conversion). The admission-gate bypass, container env wiring
 // (`lead: glm`, no CLAUDE_CODE_OAUTH_TOKEN) and burn/usage accounting are a
-// separate, later change on top of this one. (Since then: usage rows via
-// logUsage below, and issue #335's pre-stream retry via runAiWithRetry.)
+// separate, later change on top of this one — all three have since landed:
+// admission via the spawn-token parent check below, container env wiring in
+// src/studio/do.ts studioEnvVars (leadType "glm" skips CLAUDE_CODE_OAUTH_TOKEN),
+// and burn/usage rows via logUsage below. (Also since then: issue #335's
+// pre-stream retry via runAiWithRetry.)
 import type { Env } from "../env";
 import { readCappedBody } from "../http/capped-body";
 import { isSpawnTokenShaped, resolveSpawnParent, type SpawnParent } from "../studio/spawn";
