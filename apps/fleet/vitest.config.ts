@@ -183,7 +183,13 @@ export default defineConfig({
       // container bindings to construct, with none of it deploy-real. Never
       // repoint this back at "./wrangler.jsonc" — `bun run test` must pass
       // with zero operator config present, from a completely fresh clone.
-      wrangler: { configPath: "./wrangler.test.jsonc" },
+      // Issue #769: the path must stay under test/, not the app root —
+      // vitest-pool-workers merges `.dev.vars` from THE CONFIG'S OWN
+      // DIRECTORY into the ambient test env (wrangler's getVarsForDev), and
+      // the app root is exactly where the operator's untracked .dev.vars
+      // sits in every studio container. Pinned by
+      // test/bun/wrangler-test-config-location.test.ts.
+      wrangler: { configPath: "./test/wrangler.test.jsonc" },
       miniflare: {
         fetchMock,
         d1Databases: ["DB"],
