@@ -479,7 +479,7 @@ export function step(
 }
 
 // Same seven shapes, same order, as src/studio/redact.ts's redactSecrets and
-// studio-bringup.sh's bringup_redact; test/bun/memguard-select-loop.test.ts pins
+// studio-bringup.sh's bringup_redact; test/bun/memguard-select.test.ts pins
 // the equivalence. Copied, not imported: this file ships alone in the image.
 export function redact(s: string): string {
   return s
