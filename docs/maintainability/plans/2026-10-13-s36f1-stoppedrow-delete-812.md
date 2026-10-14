@@ -20,11 +20,6 @@ Changes:
    `it("runningRow() sets state and changes nothing else", ...)`
    with the two runningRow expects. Delete the stoppedRow(overrides) test
    at :37-38 entirely. burnRow describe block untouched.
-3. docs/maintainability/2026-10-13-unused-test-helpers-sweep-36.md —
-   record the resolution on the F1 section, the table row, and the
-   summary: stoppedRow deleted via #812. Same annotation style prior fix
-   PRs used (e.g. #838's sweep-2 edits). Keep the finding text; append
-   resolution, do not rewrite history.
 
 NOT touched (task rules): test/studio.session.test.ts and
 test/studio.readiness.test.ts (local stoppedRow consts are load-bearing
