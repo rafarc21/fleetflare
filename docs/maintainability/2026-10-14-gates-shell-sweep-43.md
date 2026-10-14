@@ -34,17 +34,23 @@ every ruling below is by hand, not tool output.
 - **`grep -q` in pipes — none in scope.** Exactly one `grep -q` exists
   across the five scripts (session-reemit.sh:34) and it takes a FILE
   argument, never a pipe — no SIGPIPE surface. The repo's
-  capture-then-check convention (#393/#395) is already followed
-  everywhere the same pattern appears outside this scope:
-  localci.sh:367-374, studio-bringup.sh:266. activity-heartbeat.sh:174-176
+  capture-then-check convention (#393/#395) is followed at the other
+  pipefail sites — apps/fleet/scripts/localci/localci.sh:366-372,
+  apps/fleet/container/studio-bringup.sh:266,
+  apps/fleet/scripts/deploy.sh:114 — though
+  scripts/test/public-export.test.sh still carries 18 bare
+  `echo "$out" | grep -q` pipes (e.g. :197, :224, :275, :568) under
+  its own `set -uo pipefail` (line 59), out of this sweep's gates-only
+  scope. activity-heartbeat.sh:174-176
   pipes `printf | sed -n` with no pipefail in effect and sed never
   early-exits, so no race either way.
 - **Unquoted expansions — one instance in 1142 lines** (F1 below).
   Everything else is quoted, including the classic hot spots:
   `/proc/$1/comm` and `/proc/$1/stat` (activity-heartbeat.sh:82,85),
   the tmp-then-mv path pair (activity-heartbeat.sh:243-245), `$ws`
-  (session-reemit.sh:25,34,36), every `"${STUDIO_ID:-}"` guard (all
-  five headers). No `$@`/`$*` use exists anywhere in the scope.
+  (session-reemit.sh:25,34,36), every `"${STUDIO_ID:-}"` guard (the
+  four gate headers; session-reemit.sh carries none). No `$@`/`$*`
+  use exists anywhere in the scope.
 
 ## Findings
 
