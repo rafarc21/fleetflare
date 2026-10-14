@@ -5,7 +5,8 @@
 // test/studio.refresh.test.ts, test/studio.session.test.ts — see each
 // file's own header); this one is scoped to the NEW studio-vs-role fork
 // only, named to match the repo's own src-file -> test-file convention
-// (studio.blueprint.test.ts <-> blueprint.ts, studio.studio-blueprint.test.ts
+// (studio.blueprint-parse.test.ts /
+// studio.blueprint-brief.test.ts <-> blueprint.ts, studio.studio-blueprint.test.ts
 // <-> studio-blueprint.ts). Same mocking style those files already use: a
 // path-routed fetchBlueprintFile fake, a plain in-memory Map behind
 // StudioStorage, sbExec tracked only for the bring-up exec's env argument.

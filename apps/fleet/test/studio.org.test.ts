@@ -113,7 +113,7 @@ describe("parseOrgJson", () => {
   it("the real shipped fleet/blueprint/org.json parses cleanly", () => {
     // workerd has no filesystem; vitest.config.ts injects the real file's
     // text as env.TEST_ORG_JSON the same way it does for fleet.json/pilot.md
-    // (see test/studio.blueprint.test.ts's own "real shipped files" block).
+    // (see test/studio.blueprint-brief.test.ts's own "real shipped files" block).
     const org = parseOrgJson(env.TEST_ORG_JSON);
     expect(org.edges.operator).toContain("maestro");
     expect(org.gates.merge).toContain("release");

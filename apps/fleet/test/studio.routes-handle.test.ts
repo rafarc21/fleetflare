@@ -1655,7 +1655,7 @@ describe("handleStudio", () => {
 // test's own ROLE_EFFORT assertion); this covers the actual headline
 // behavior — a cto role with no explicit frontmatter opinion defaults to
 // "max" — end to end through the real resolve+persist path, not just the
-// blueprint.ts unit level (test/studio.blueprint.test.ts).
+// blueprint.ts unit level (test/studio.blueprint-brief.test.ts).
 // ---------------------------------------------------------------------------
 
 describe("provisionWithStorage resolves ROLE_EFFORT (Fleet CTO effort default, operator directive 2026-08-19)", () => {

@@ -107,8 +107,9 @@ const cliFleetSrc = await readFile(path.join(rootDir, "cli", "fleet.ts"), "utf8"
 // Task 11: the real blueprint files this task ships — repo root is two
 // levels up from apps/fleet (this is the websites repo playing both the
 // blueprint host and the client, per the task brief). Same "no filesystem
-// in workerd" reason as containerServerSrc above: test/studio.blueprint.test.ts
-// reads these through the env bindings below instead of importing them, so
+// in workerd" reason as containerServerSrc above: test/studio.blueprint-parse.test.ts
+// (mcp) and test/studio.blueprint-brief.test.ts (real files) read these
+// through the env bindings below instead of importing them, so
 // the actual shipped files (not just synthetic fixtures) are proven to
 // parse against src/studio/blueprint.ts.
 const repoRoot = path.join(rootDir, "..", "..");
@@ -121,7 +122,7 @@ const testOrgJson = await readFile(path.join(repoRoot, "fleet", "blueprint", "or
 const testScratchRoleMd = await readFile(path.join(repoRoot, "fleet", "blueprint", "roles", "scratch.md"), "utf8");
 // Fleet Spawn P3, Task 4 (R-P3-3): the blueprint directory's own README —
 // same "no filesystem in workerd" wiring as testFleetJson/testPilotRoleMd
-// above. Source-pinned by test/studio.blueprint.test.ts so a future edit
+// above. Source-pinned by test/studio.blueprint-brief.test.ts so a future edit
 // that drops the coherence rule it documents fails a test, not just a
 // manual re-read.
 const testBlueprintReadme = await readFile(path.join(repoRoot, "fleet", "blueprint", "README.md"), "utf8");

@@ -1002,7 +1002,7 @@ describe("POST /studio/spawn (operator passthrough, Access side)", () => {
     // scratch, cto]), the same split every other real-org.json test in this
     // describe block uses. As of Task 4 the real fleet.json ALSO declares
     // "scratch" (see fleet/blueprint/README.md's coherence rule and
-    // test/studio.blueprint.test.ts's own scratch.md test), so this split is
+    // test/studio.blueprint-brief.test.ts's own scratch.md test), so this split is
     // no longer load-bearing for THIS test — kept anyway for consistency
     // with its sibling tests in this describe block, all of which still need
     // FAKE_FLEET_JSON for roles the real file does not declare (release, cto).
