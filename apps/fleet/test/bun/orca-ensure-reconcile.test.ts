@@ -9,19 +9,16 @@
 // one test that does spawn a process (`never fails its caller`) runs a bun
 // script that injects a throwing runner.
 //
-// The ENSURE half of the old orca-workspace.test.ts (split per plan
-// docs/superpowers/plans/2026-10-13-orca-split-693.md, issue #693): name
-// derivation, presence, ensureStudioWorkspace's five hard requirements,
-// duplicate-terminal reconciliation, the tabs/plan verbs, and the exit-code
-// process test. Teardown, registry, locks, and the ROW column live in
-// orca-registry.test.ts.
+// The VERBS/RECONCILE half of old orca-ensure.test.ts, split per plan
+// docs/maintainability/plans/2026-10-13-s35-f2-orca-ensure-split-795.md
+// (issue #795): duplicate-terminal reconciliation, the `fleet tabs` reconcile
+// verb, the #216 preview/plan verbs, and the exit-code process test. The
+// sibling orca-ensure-verbs.test.ts carries the ensure-core half (name
+// derivation, presence, ensureStudioWorkspace's five hard requirements);
+// teardown, registry, locks, and the ROW column live in orca-registry.test.ts.
 import { test, describe, expect } from "bun:test";
 import { join } from "node:path";
 import {
-  studioWorkspaceName,
-  studioWorkspaceTitle,
-  type WorkspaceRegistry,
-  orcaPresent,
   ensureStudioWorkspace,
   reconcileStudioWorkspaces,
   previewStudioWorkspace,
@@ -29,7 +26,6 @@ import {
   type OrcaDeps,
   type OrcaResult,
 } from "../../cli/orca-workspace";
-import type { BoardTask } from "../../src/board/types";
 import type { StudioStatus } from "../../src/studio/types";
 import { ORCA_ENV, ok, terminals } from "./helpers/orca-fixtures";
 
@@ -59,42 +55,9 @@ function memoryLock(): OrcaDeps["lock"] {
 
 /** Board #39: every ensure call now carries the row title. These suites are
  *  about the worktree/terminal lookup, not about the title text, so they pass
- *  a fixed one — `studioWorkspaceTitle`'s own behaviour is covered separately
- *  below. */
+ *  a fixed one — `studioWorkspaceTitle`'s own behaviour is covered in
+ *  orca-registry.test.ts, not here. */
 const TEST_TITLE = "websites · #7 some task";
-
-/** A `WorkspaceRegistry` that lives only for one test. Board #39: the real
- *  one is a JSON file under ~/.fleet, and no unit test should touch it. */
-function memoryRegistry(): WorkspaceRegistry {
-  const m = new Map<string, string>();
-  return {
-    get: (id) => m.get(id),
-    set: async (id, worktreeId) => {
-      m.set(id, worktreeId);
-    },
-  };
-}
-
-function boardTask(fields: {
-  number: number;
-  title: string;
-  state: BoardTask["state"];
-  assignee: string | null;
-  updatedAt?: string;
-}): BoardTask {
-  return {
-    number: fields.number,
-    url: `https://github.com/x/x/issues/${fields.number}`,
-    title: fields.title,
-    body: "",
-    state: fields.state,
-    labels: [],
-    assignee: fields.assignee,
-    milestone: null,
-    open: true,
-    updatedAt: fields.updatedAt ?? "2026-09-23T00:00:00Z",
-  };
-}
 
 /** `answers` is matched on the first two argv words, e.g. "worktree list". */
 function fake(
@@ -133,10 +96,9 @@ const REPOS = ok(JSON.stringify({
 /** #175: each entry's `path` basename matches its `displayName` — the real
  *  shape for a worktree this code itself created (`--name studio-<id>`, a
  *  path Orca names after that argument) and never renamed the PATH of, only
- *  its display title (board #39). A test specifically about a row whose
- *  display title has since diverged from its stable path (the exact #175
- *  scenario) uses `worktreesWithPath` below instead, with the two set
- *  independently. */
+ *  its display title (board #39). The tests about a row whose display title
+ *  has since diverged from its stable path (the exact #175 scenario) live
+ *  in orca-registry.test.ts, whose fixture sets the two independently. */
 function worktrees(...displayNames: string[]): OrcaResult {
   return ok(JSON.stringify({
     ok: true,
@@ -146,18 +108,6 @@ function worktrees(...displayNames: string[]): OrcaResult {
         id: `repo-websites::/w/${displayName}`, displayName, path: `/fake/orca/${displayName.replace(/-+/g, "-")}`,
       })),
     },
-  }));
-}
-
-/** Same shape as `worktrees()` but each entry's `path` is independent of its
- *  `displayName` — the field `removeStudioWorkspace` needs to make the
- *  destructive `worktree rm` call at all (see orca-workspace.ts's own
- *  "UNCONFIRMED" comment on that field), and the shape #175's own tests use
- *  to pin a task-titled display whose PATH still carries the stable name. */
-function worktreesWithPath(...entries: { displayName: string; path: string }[]): OrcaResult {
-  return ok(JSON.stringify({
-    ok: true,
-    result: { worktrees: entries.map((e) => ({ id: `repo-websites::/w/${e.displayName}`, displayName: e.displayName, path: e.path })) },
   }));
 }
 
@@ -188,172 +138,6 @@ const CREATED = ok(JSON.stringify({
 function studio(id: string, state: StudioStatus["state"]): StudioStatus {
   return { id, state } as StudioStatus;
 }
-
-describe("name derivation", () => {
-  // ---------------------------------------------------------------------------
-  // Name derivation: deterministic and collision-free.
-
-  test("workspace name is deterministic for a given studio id", () => {
-    expect(studioWorkspaceName("websites--maestro")).toBe(studioWorkspaceName("websites--maestro"));
-    expect(studioWorkspaceName("websites--maestro")).toContain("websites--maestro");
-  });
-
-  test("workspace names never collide across studio ids", () => {
-    // `a--b-c` and `a-b--c` are DIFFERENT studios (repo/role split moves), and
-    // any derivation that flattens "--" to "-" maps both onto one name — two
-    // studios sharing one sidebar entry, which is the bug this guards.
-    const ids = ["a--b-c", "a-b--c", "websites--maestro", "websites--web-studio", "acme-os--maestro"];
-    const names = ids.map(studioWorkspaceName);
-    expect(new Set(names).size).toBe(ids.length);
-  });
-
-
-});
-
-
-describe("orcaPresent", () => {
-  // ---------------------------------------------------------------------------
-  // Presence predicate.
-
-  test("orca is absent in a plain terminal even when the binary resolves", () => {
-    expect(orcaPresent({ env: { TERM_PROGRAM: "Apple_Terminal" }, hasBinary: () => "orca" })).toBe(false);
-  });
-
-  test("orca is absent when the binary does not resolve, even inside Orca", () => {
-    expect(orcaPresent({ env: ORCA_ENV, hasBinary: () => null })).toBe(false);
-  });
-
-  test("orca is present inside an Orca-managed worktree", () => {
-    expect(orcaPresent({ env: { ORCA_WORKTREE_ID: "r::/w/x" }, hasBinary: () => "orca" })).toBe(true);
-  });
-
-
-});
-
-
-describe("ensureStudioWorkspace — the five hard requirements", () => {
-  // ---------------------------------------------------------------------------
-  // The five hard requirements.
-
-  test("makes no orca call at all outside Orca", async () => {
-    const f = fake({}, { env: { TERM_PROGRAM: "Apple_Terminal" } });
-    const outcome = await ensureStudioWorkspace("websites--maestro", TEST_TITLE, f.deps);
-    expect(f.calls).toEqual([]);
-    expect(outcome.kind).toBe("skipped");
-  });
-
-  test("makes no orca call when the orca binary is missing", async () => {
-    const f = fake({}, { hasBinary: () => null });
-    const outcome = await ensureStudioWorkspace("websites--maestro", TEST_TITLE, f.deps);
-    expect(f.calls).toEqual([]);
-    expect(outcome.kind).toBe("skipped");
-  });
-
-  // Board #334: Orca is optional. Without the binary the studio still runs and
-  // `fleet attach` works in any terminal — say so, once, instead of skipping
-  // the sidebar row in silence.
-  test("missing orca binary: one line says Orca is optional and how to attach", async () => {
-    const f = fake({}, { hasBinary: () => null, env: { TERM_PROGRAM: "Apple_Terminal" } });
-    await ensureStudioWorkspace("websites--maestro", TEST_TITLE, f.deps);
-    expect(f.lines).toHaveLength(1);
-    expect(f.lines[0]).toContain("Orca is optional");
-    expect(f.lines[0]).toContain("fleet attach websites--maestro");
-  });
-
-  test("missing orca binary inside a studio container: silent (STUDIO_ID set)", async () => {
-    const f = fake({}, { hasBinary: () => null, env: { STUDIO_ID: "websites--pilot" } });
-    await ensureStudioWorkspace("websites--maestro", TEST_TITLE, f.deps);
-    expect(f.lines).toEqual([]);
-  });
-
-  test("binary present but not under Orca: silent, as before", async () => {
-    const f = fake({}, { env: { TERM_PROGRAM: "Apple_Terminal" } });
-    await ensureStudioWorkspace("websites--maestro", TEST_TITLE, f.deps);
-    expect(f.lines).toEqual([]);
-  });
-
-  test("creates the worktree and its attach terminal when the studio has none", async () => {
-    const f = fake({
-      "worktree list": worktrees("staging", "cto"),
-      "repo list": REPOS,
-      "worktree create": CREATED,
-      "terminal list": terminals(),
-    });
-    const outcome = await ensureStudioWorkspace("websites--maestro", TEST_TITLE, f.deps);
-    expect(outcome.kind).toBe("created");
-
-    const create = f.calls.find((c) => c[0] === "worktree" && c[1] === "create");
-    expect(create).toBeDefined();
-    expect(create).toContain("studio-websites--maestro");
-    expect(create).toContain("id:repo-websites");
-
-    const term = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
-    expect(term).toBeDefined();
-    expect(term).toContain("fleet attach websites--maestro");
-  });
-
-  test("opens no second workspace when the studio already has one", async () => {
-    // Item 3, translated from the operator's Portuguese: "a second call with a
-    // terminal titled \"fleet\" already present does NOT create another." The
-    // fixture is the REAL measured shape — a terminal titled "fleet" (the
-    // process name, always) that is `connected` — not the old fictional
-    // fixture where a terminal's title equalled the studio id, which real Orca
-    // never produces.
-    const f = fake({
-      "worktree list": worktrees("staging", "studio-websites--maestro"),
-      "terminal list": terminals(true),
-      "repo list": REPOS,
-      "worktree create": CREATED,
-    });
-    const outcome = await ensureStudioWorkspace("websites--maestro", TEST_TITLE, f.deps);
-    expect(outcome.kind).toBe("exists");
-    expect(f.calls.some((c) => c[0] === "worktree" && c[1] === "create")).toBe(false);
-    expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "create")).toBe(false);
-  });
-
-  // ---------------------------------------------------------------------------
-  // Board #42's own correction, verbatim: `connected` alone is not enough — a
-  // plain shell an operator opens in this dedicated worktree ALSO reports
-  // `connected: true`, and MEASURED (acme-os--release-studio, then again on
-  // acme-os--scratch) that satisfies the OLD guard with no real attach
-  // terminal ever created (defect B), and lets `fleet tabs` report a studio as
-  // covered when it has no attach terminal at all (defect C — same miscount,
-  // read from the reconcile side). Both close with the SAME criterion change:
-  // `title === "fleet"`, not merely `connected`.
-
-  test("a plain shell in the worktree does not satisfy idempotency — the real attach terminal still gets created", async () => {
-    const f = fake({
-      "worktree list": worktrees("staging", "studio-websites--maestro"),
-      "terminal list": terminalEntries({ handle: "term_shell", title: "zsh", connected: true }),
-      "repo list": REPOS,
-      "worktree create": CREATED,
-      "terminal create": TERM_CREATED,
-    });
-    const outcome = await ensureStudioWorkspace("websites--maestro", TEST_TITLE, f.deps);
-    expect(outcome.kind).toBe("created");
-    const term = f.calls.find((c) => c[0] === "terminal" && c[1] === "create");
-    expect(term).toBeDefined();
-    expect(term).toContain("fleet attach websites--maestro");
-    // The shell itself is left alone — only a genuine duplicate ATTACH
-    // terminal (title "fleet") is ever closed by this file, never a shell an
-    // operator opened on purpose.
-    expect(f.calls.some((c) => c[0] === "terminal" && c[1] === "close")).toBe(false);
-  });
-
-  test("fleet tabs does not report coverage from a plain shell — defect C", async () => {
-    const f = fake({
-      "worktree list": worktrees("studio-websites--maestro"),
-      "terminal list": terminalEntries({ handle: "term_shell", title: "zsh", connected: true }),
-      "terminal create": TERM_CREATED,
-    });
-    const report = await reconcileStudioWorkspaces([studio("websites--maestro", "running")], () => TEST_TITLE, f.deps);
-    expect(report.opened).toEqual(["websites--maestro"]);
-    expect(report.existing).toEqual([]);
-  });
-
-
-});
-
 
 describe("duplicate terminals — reconcile", () => {
   // ---------------------------------------------------------------------------
