@@ -1,9 +1,17 @@
+// src/studio/observed.ts paneLeadProbeCmd — the LEAD-IDENTITY half of the
+// former pane-probe-lead.test.ts (sweep-35 F14, issue #807): which process
+// the probe reports as the lead, and what its own argv/cwd read back as.
+// Scoping cases (foreign panes, pid-tree scoping, private sockets) live in
+// pane-probe-lead-scope.test.ts. The isolation preamble below is copied
+// verbatim from that former file — its 2026-09-24 incident comment is
+// load-bearing; the only edit is the dropped STUDIO_TMUX_SOCKET import,
+// which only the scope half's private-socket test uses.
+
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paneLeadProbeCmd, parsePaneLeadProbe } from "../../src/studio/observed";
-import { STUDIO_TMUX_SOCKET } from "../../src/studio/tmux";
 
 /**
  * Board issue #85, maestro correction #9 — the redesigned pane-lead probe,
@@ -469,188 +477,6 @@ describe.skipIf(!isLinux)("paneLeadProbeCmd against a real tmux server (issue #8
       expect(probe.hasContinue).toBe(false);
     } finally {
       sh(`tmux ${sock} kill-server`);
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("a foreign pane with an unrelated claude process elsewhere is never found — scoped strictly to the target pane's own pid tree", () => {
-    const dir = mkdtempSync(join(tmpdir(), "fleet-pane-probe-"));
-    installFakeClaude(dir);
-    const env = isolatedTmuxEnv(dir);
-    const sock = socketFlag(dir);
-    const sh = (cmd: string) => Bun.spawnSync({ cmd: ["sh", "-c", cmd], env, timeout: 15000, stdout: "pipe", stderr: "pipe" });
-    try {
-      // No `studio:claude` window at all — a DIFFERENT session ("other")
-      // entirely, whose own pane happens to be running something ALSO named
-      // `claude` (installFakeClaude's fake binary), completely outside the
-      // `studio:claude` pane's pid tree. If the probe ever fell back to a
-      // bare, unscoped `pgrep -x claude` it would find this process; the real
-      // command must not, because it never resolves a target pane pid at all.
-      sh(`tmux ${sock} new-session -d -s other -n shell ${quoteSingle(fakeLead(LEAD_ALONE))}`);
-      const res = sh(paneLeadProbeCmd());
-      expect(res.exitCode).toBe(0);
-      const probe = parsePaneLeadProbe(res.stdout.toString());
-      expect(probe.found).toBe(false);
-    } finally {
-      sh(`tmux ${sock} kill-server`);
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  // Review round 6, MUST-FIX 5(b): the existing "foreign pane" test just
-  // above proves a DIFFERENT session is ignored, but with no real lead
-  // present anywhere to potentially be confused with — it cannot distinguish
-  // "scoped to the target pane's own pid tree" from "scoped to the LOWEST
-  // claude pid on the system" (which would also happen to answer correctly
-  // there, since no real lead exists at all in that test). This test puts a
-  // REAL lead in `studio:claude` too, started AFTER a foreign claude-named
-  // process elsewhere — so the foreign one genuinely has the LOWER pid —
-  // and pins that the probe still finds the real lead: its own `pgrep -P
-  // <pane_pid>` scoping (paneLeadProbeCmd, src/studio/observed.ts), not pid
-  // ordering, is what actually decides this.
-  //
-  // Board issue #223 fix: asserting only `probe.found === true` here would
-  // ALSO pass if `paneLeadProbeCmd`'s own `pgrep -x claude -P
-  // "$FLEET_PANE_PID"` ever had its `-P` (pane-scoping) flag accidentally
-  // dropped — an unscoped `pgrep -x claude` finds ANY claude-named process on
-  // the system, including the foreign, lower-pid one, and `head -n1` (see
-  // paneLeadProbeCmd) would then hand back the foreign process's own pid,
-  // still satisfying a bare `found: true`. The real lead is launched via `cd
-  // /tmp && ...` with `--continue` as a literal argv element (never present
-  // on the foreign process, which runs `LEAD_ALONE` with no cd and no
-  // --continue) — asserting BOTH `probe.cwd === "/tmp"` and `probe.hasContinue
-  // === true` can only hold true when the probe actually read the REAL
-  // lead's own `/proc` entry, never the foreign one's.
-  test("a foreign claude process started BEFORE the lead (lower pid) never confuses the probe's own pid-tree scoping", () => {
-    const dir = mkdtempSync(join(tmpdir(), "fleet-pane-probe-"));
-    installFakeClaude(dir);
-    const env = isolatedTmuxEnv(dir);
-    const sock = socketFlag(dir);
-    const sh = (cmd: string) => Bun.spawnSync({ cmd: ["sh", "-c", cmd], env, timeout: 15000, stdout: "pipe", stderr: "pipe" });
-    try {
-      // A genuinely foreign session, started FIRST — its own claude-named
-      // process therefore gets a LOWER pid than the real lead started below.
-      // Launched via `startLeadInPane`'s safe send-keys-into-a-running-bash
-      // mechanism (session "other", window "shell"), not by passing the
-      // launch line directly as tmux's own pane-command argument — the
-      // latter has no settle step before the `pgrep` just below runs, and
-      // races tmux's own fork+exec of the pane (see `startLeadInPane`'s own
-      // doc comment). No cd, no --continue — neither of the two properties
-      // this test distinguishes on.
-      startLeadInPane(sh, sock, fakeLead(LEAD_ALONE), "other", "shell");
-      const foreignPanePid = sh(`tmux ${sock} display-message -p -t other:shell '#{pane_pid}'`).stdout.toString().trim();
-      const foreignLeadPid = Number(sh(`pgrep -x claude -P ${foreignPanePid}`).stdout.toString().trim());
-
-      // The real lead: `cd /tmp` (a bash builtin, run by the pane's own
-      // persistent shell before it forks+execs `claude` — same mechanism the
-      // "switches no window" test above already relies on) then `claude -c
-      // <script> --continue`, so `--continue` lands as its own literal argv
-      // element (bash's `-c` handling turns everything after `<script>` into
-      // positional params, never flags to bash itself — see
-      // LEAD_WITH_DIFFERING_MEMBER's own doc comment for the identical
-      // reasoning).
-      startLeadInPane(sh, sock, `cd /tmp && claude -c ${quoteSingle(LEAD_ALONE)} --continue`);
-      const realPanePid = sh(`tmux ${sock} display-message -p -t studio:claude '#{pane_pid}'`).stdout.toString().trim();
-      const realLeadPid = Number(sh(`pgrep -x claude -P ${realPanePid}`).stdout.toString().trim());
-
-      // Genuinely lower, not merely asserted — proves the ordering this test
-      // depends on actually held, rather than hoping it did.
-      expect(foreignLeadPid).toBeGreaterThan(0);
-      expect(realLeadPid).toBeGreaterThan(foreignLeadPid);
-
-      const res = sh(paneLeadProbeCmd());
-      expect(res.exitCode).toBe(0);
-      const probe = parsePaneLeadProbe(res.stdout.toString());
-      // Properties only the REAL lead has — the foreign process has neither
-      // (no cd /tmp, no --continue). A dropped `-P` scope would find the
-      // foreign process instead and fail both of these.
-      expect(probe.found).toBe(true);
-      expect(probe.cwd).toBe("/tmp");
-      expect(probe.hasContinue).toBe(true);
-    } finally {
-      sh(`tmux ${sock} kill-server`);
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  // Review round 6, MUST-FIX 5(c): `paneLeadProbeCmd`'s own target is the
-  // SESSION:WINDOW pair `studio:claude` (LEAD_PANE_TARGET, observed.ts) —
-  // never "any pane in a session named studio". A session named `studio`
-  // whose only window is `shell` (never `claude`) must answer `found: false`
-  // even when that unrelated window's own pane happens to have a
-  // claude-named child running in it (e.g. a human manually typed `claude`
-  // into an ordinary shell there).
-  //
-  // Board issue #223 fix: the earlier version of this test started the fake
-  // lead AS the pane's own tmux command (`new-session ... 'shell'
-  // <launch-line>` directly), so the window was never actually observed
-  // running a plain "shell" at any point — it ran the fake lead from the
-  // moment the session existed. That makes it impossible to tell whether a
-  // weakened probe (one that dropped the exact `session_name:window_name`
-  // match in favor of, say, a bare `pgrep -x claude` scoped only by session)
-  // would actually be caught here, or whether this test just happens to pass
-  // for some unrelated reason. Fixed to use the SAME `startLeadInPane` helper
-  // every `studio`/`claude` test above already uses — a plain interactive
-  // bash pane first, THEN `send-keys` types the launch line in, THEN waits
-  // for `pane_current_command` to read `claude` — just pointed at session
-  // `studio` window `shell` instead of `studio`/`claude`. This genuinely puts
-  // a live, running, claude-comm'd process into a window named `shell`, so
-  // the assertion below actually exercises the window-name check rather than
-  // merely asserting on a probe that had nothing real to find in the first
-  // place.
-  test("a `studio` session with only a `shell` window (never `claude`) answers found: false, even with a claude-named child in that pane", () => {
-    const dir = mkdtempSync(join(tmpdir(), "fleet-pane-probe-"));
-    installFakeClaude(dir);
-    const env = isolatedTmuxEnv(dir);
-    const sock = socketFlag(dir);
-    const sh = (cmd: string) => Bun.spawnSync({ cmd: ["sh", "-c", cmd], env, timeout: 15000, stdout: "pipe", stderr: "pipe" });
-    try {
-      startLeadInPane(sh, sock, fakeLead(LEAD_ALONE), "studio", "shell");
-      const res = sh(paneLeadProbeCmd());
-      expect(res.exitCode).toBe(0); // never crashes even though studio:claude does not exist
-      const probe = parsePaneLeadProbe(res.stdout.toString());
-      // The probe's own target is studio:claude (session:window), never
-      // merely "any pane in a session called studio" — a live claude process
-      // in the wrongly-named window must still read as not-found.
-      expect(probe.found).toBe(false);
-    } finally {
-      sh(`tmux ${sock} kill-server`);
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  // Board issue #223, minor item — #117's own socket-aware `withStudioTmux`
-  // (tmux.ts): production bring-up moves the studio session to a PRIVATE
-  // socket (`tmux -L fleet-studio`), and `paneLeadProbeCmd`'s own
-  // `__ff_tmux` wrapper auto-detects it by checking `tmux -L fleet-studio
-  // has-session -t =studio` FIRST, falling back to the default socket only
-  // when that check fails. Every other test in this file puts the lead on
-  // the DEFAULT socket (explicit `-S` pointed at the exact path
-  // `isolatedTmuxEnv`'s TMUX_TMPDIR would implicitly resolve to) — none
-  // exercises the private-socket auto-detect branch at all. `-L
-  // fleet-studio` resolves under the SAME `TMUX_TMPDIR` (isolatedTmuxEnv),
-  // so creating the studio session there — via the identical
-  // `startLeadInPane` helper, just handed `-L fleet-studio` as its own
-  // `sock` — is a small, mechanical extension of the existing fixtures, not
-  // a new isolation mechanism: `assertIsolatedEnv` already guards the shared
-  // env every tmux call in this file (including this one) runs under.
-  test("a lead running on the studio's own PRIVATE tmux socket (-L fleet-studio, #117) is still found via paneLeadProbeCmd's own auto-detection", () => {
-    const dir = mkdtempSync(join(tmpdir(), "fleet-pane-probe-"));
-    installFakeClaude(dir);
-    const env = isolatedTmuxEnv(dir);
-    const privateSock = `-L ${STUDIO_TMUX_SOCKET}`;
-    const sh = (cmd: string) => Bun.spawnSync({ cmd: ["sh", "-c", cmd], env, timeout: 15000, stdout: "pipe", stderr: "pipe" });
-    try {
-      startLeadInPane(sh, privateSock, fakeLead(LEAD_ALONE));
-      // No `-L`/`-S` here — matches production exactly: `paneLeadProbeCmd`'s
-      // own `withStudioTmux` wrapper (tmux.ts) resolves the private socket
-      // itself, under this same env, with no socket flag from the caller.
-      const res = sh(paneLeadProbeCmd());
-      expect(res.exitCode).toBe(0);
-      const probe = parsePaneLeadProbe(res.stdout.toString());
-      expect(probe.found).toBe(true);
-    } finally {
-      sh(`tmux ${privateSock} kill-server`);
       rmSync(dir, { recursive: true, force: true });
     }
   });
