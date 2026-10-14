@@ -27,7 +27,7 @@ template-literal names resolved by reading the generating loops).
 
 ### S23-F1. install-cache-security injection tests litter the checkout with empty `x$(touch …)y` dir trees — GLM-OK
 
-`test/bun/install-cache-security.test.ts` (MUTANT PROOF blocks, lines ~448-500,
+`test/bun/install-cache-security.test.ts` (2026-10-13, #790: file split by #736 into `install-cache-security-parse.test.ts` + `install-cache-security-disk.test.ts`; these proofs now live in `-parse.test.ts` ~:466-620, and the litter fix itself landed via #598) (MUTANT PROOF blocks, lines ~448-500,
 539-543) run the FIXED, shipped `installCacheRestoreCmd(evil)` /
 `installCacheSaveCmd(evil)` where `evil = x$(touch /tmp/<marker>)y` is a BARE
 relative path. The shipped commands' own `mkdir -p ${shQuote(dir)}` /

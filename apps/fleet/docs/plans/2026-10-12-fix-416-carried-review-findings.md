@@ -383,6 +383,7 @@ LEFTHOOK=0 git push
 ```
 
 ### Task 4: cli-destroy-flags.test.ts → behavioral subprocess tests (item 4)
+> Executed 2026-10-12 by #466 (d060ab5): `cli-destroy-flags.test.ts` deleted, behavioral tests live in `test/bun/cli-destroy-unmerged.test.ts`. The unchecked boxes below are completed history.
 
 **Files:**
 - Delete: `apps/fleet/test/bun/cli-destroy-flags.test.ts`
