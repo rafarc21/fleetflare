@@ -47,9 +47,9 @@ scratch or, worse, re-implementing a fix that already exists.
 
 This mirrors two existing precedents in this repo for "investigated, already
 handled, no code change" outcomes: PR #114
-(https://github.com/rafarc21/fleetflare/pull/114, a single plan doc at
-`docs/superpowers/plans/2026-09-30-done-awaiting-merge-state-110.md`
-recording a won't-do decision with no code touched), and
+(https://github.com/rafarc21/fleetflare/pull/114, a single plan doc —
+closed unmerged, so the doc never landed in the repo and is visible only
+on the PR — recording a won't-do decision with no code touched), and
 `apps/fleet/docs/plans/2026-09-30-fix-93-rescue-budget-flaky-clock.md` (whose
 verification-table style this doc follows).
 
