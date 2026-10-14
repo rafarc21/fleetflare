@@ -538,14 +538,23 @@ describe("assignTask — adoption and reassignment (P5 §3)", () => {
     expect(comment).toContain("web studio died");
   });
 
-  it("never deletes a comment — the dead studio's envelopes are the history", async () => {
+  it("the BoardApi port has no delete verb — history cannot be removed by this path", async () => {
     const api = fakeApi({
       getIssue: vi.fn(async () => task({ number: 42, labels: ["working", studioLabel(WEB)], state: "working", assignee: WEB })),
     });
     await assignTask(api, "o/r", 42, { assignee: RELEASE }, reassign);
-    // The port has no delete verb at all: history cannot be removed by this
-    // path even by mistake.
-    expect(Object.keys(api)).not.toContain("deleteComment");
+    // The port itself carries no delete verb — the directive below IS the
+    // assertion, same mechanics as studio.exports-pin-608.test.ts: TS2339
+    // fires today because BoardApi has no deleteComment; add one and the
+    // directive goes unused (TS2578), failing `bun run check`'s root
+    // `tsc --noEmit` pass — the tsconfig project that owns this file
+    // (root tsconfig.json includes test/**; test/tsconfig.json's own
+    // project covers only test/bun/** plus two bun:test files, measured:
+    // it stayed exit 0 under the mutation). Compile-time pin — vitest
+    // never typechecks, so the runtime half below is what vitest proves:
+    // reassignment comments the lineage exactly once and deletes nothing.
+    // @ts-expect-error TS2339 — BoardApi has no deleteComment verb
+    void api.deleteComment;
     expect(api.createComment).toHaveBeenCalledTimes(1);
   });
 
