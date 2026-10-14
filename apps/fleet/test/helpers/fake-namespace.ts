@@ -11,7 +11,7 @@ import type { Env } from "../../src/env";
 
 /** A per-suite DO stub: either one fixed object every get() returns, or a
  *  function get(id) dispatches to (per-id fakes, e.g. grid's tails map). */
-export type NsStub = Record<string, unknown> | ((id: string) => Record<string, unknown>);
+type NsStub = Record<string, unknown> | ((id: string) => Record<string, unknown>);
 
 /** The extracted shape — exactly three things: an object stub means get()
  *  returns it for every id; a function stub means get(id) dispatches to it;
