@@ -46,9 +46,11 @@ Pure move, describes whole, titles verbatim, zero assertion edits:
 
 - `cd apps/fleet && bun test test/bun/test-lies-detectors.test.ts
   test/bun/test-lies-repo.test.ts` — exit 0, 42 tests.
-- Test-count guard: 23 (detectors) + 19 (repo) = 42, sum equals
-  before (22 + 20 in-file before).
+- Test-count guard: 25 (detectors) + 17 (repo) = 42, sum equals
+  before (42 in the single old file).
 - `cd apps/fleet && bun run english-check` — exit 0.
 - `cd apps/fleet && bun run test-lies-check` — exit 0, 0/0/0 across
-  366 files (was 365).
+  365 files (allowlisted halves excluded from the runner's count,
+  exactly as the old single file was; RED run cross-check: 367 while
+  both new files were staged but unallowlisted).
 - `cd apps/fleet && bun x tsc --noEmit -p test` — once, alone.
