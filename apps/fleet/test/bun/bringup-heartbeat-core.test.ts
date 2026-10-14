@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BRINGUP, runSnippet } from "./exec-snippet";
+import { BRINGUP, extractShellFunc, runSnippet } from "./exec-snippet";
 // ---------------------------------------------------------------------------
 // Issue #221 (PR3b), Task 5 — the hook heartbeat, the second (higher-
 // precision) leg of the ACTIVITY column, composed with (never replacing)
@@ -501,6 +501,41 @@ describe("activity-heartbeat hook — lead-only heartbeat (issue #221 fix round 
       expect(r.code).toBe(0);
       expect(r.stderr.trim()).toBe("");
       expect(r.written).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Sweep 43, F1 (#875, refs #855) — ppid_of splits the /proc/<pid>/stat tail
+// with an unquoted `set -- $rest`: word-splitting is intended ($1 state, $2
+// ppid), but bash ALSO glob-expands an unquoted expansion, so a glob char in
+// any field would replace the positionals with cwd filename matches. Kernel
+// stat fields cannot carry glob chars, so this is hardening, not a live bug.
+// This pins the SPLIT mechanism itself: a `?`-pattern landing in field 2 must
+// stay LITERAL, never expand against the cwd (which holds a matching file).
+describe("activity-heartbeat hook — ppid_of parses the stat tail without glob-expanding it (#875)", () => {
+  linuxOnly("a glob char in a stat field stays literal — never expanded against the cwd (#875)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fleet-heartbeat-glob-"));
+    try {
+      // A cwd entry the pattern `?432?` matches if globbing is ever on during
+      // the split — pre-fix, ppid_of prints this filename (first match,
+      // sort order) instead of the literal token.
+      writeFileSync(join(dir, "x432y"), "");
+      // The crafted stat line: after `) ` the tail is
+      //   `S ?432? 1 * trailing fields`
+      // so $1=S and $2=?432? — the ppid slot carries a glob pattern. A
+      // function-local `cat` stub (shadows the command for this shell) feeds
+      // it regardless of the /proc path ppid_of asks for.
+      const script = [
+        `cat() { printf '%s\\n' '12345 (some_comm) S ?432? 1 * trailing fields'; }`,
+        extractShellFunc(ACTIVITY_HEARTBEAT, "ppid_of"),
+        `cd ${dir} || exit 1`,
+        `ppid_of 999`,
+      ].join("\n");
+      const r = runSnippet({ script, shell: "bash" });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe("?432?");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
