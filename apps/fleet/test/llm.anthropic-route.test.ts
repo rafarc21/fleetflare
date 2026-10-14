@@ -3,7 +3,8 @@
 // cloudflare:test convention as test/junior.route.test.ts (spawn-token
 // resolution needs a real registry row + a real StudioStatus shape) — every
 // actual translation direction is covered without env/HTTP mocking in
-// test/bun/llm-translate.test.ts; this file only proves the wiring:
+// test/bun/llm-translate-request.test.ts and
+// test/bun/llm-translate-stream.test.ts; this file only proves the wiring:
 // auth, path/method/size gates, and that env.AI.run is called with (and
 // responds through) the translated shapes.
 import { describe, it, expect, vi, beforeEach } from "vitest";
