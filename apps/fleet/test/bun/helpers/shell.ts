@@ -1,4 +1,4 @@
-export type ShResult = { code: number; out: string; err: string };
+type ShResult = { code: number; out: string; err: string };
 
 /** Bun-lane shared `sh()` for suites whose copies were identical modulo
  *  defaults. Git identity env is injected unless `git: false` is passed. */
