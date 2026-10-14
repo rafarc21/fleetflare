@@ -414,20 +414,35 @@ describe("provisionWithStorage — refuses --fresh-session on an involuntary-sto
   // never synced yet (no mark recorded for it at all) must never be refused
   // on a guess. Pinned at the EXACT boundary this file's own doc comment
   // describes, plus the missing-mark case itself.
+  // Issue #871 (S41-F3): the refusal gate arms on replacedAt OR
+  // session.replacementDetected — BOTH arming shapes must be pinned with a
+  // missing mark, never just one arm.
   it("MINOR 9: a MISSING SessionMark (never synced yet) is always allowed, regardless of replacedAt/replacementDetected", async () => {
-    const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
-    const { map, storage } = combinedStorage();
-    // Deliberately no `map.set(SESSION_MARK_KEY, ...)` call at all -- the
-    // exact "never synced yet" shape this test exists to pin.
-    map.set(OBSERVED_KEY, { ...emptyObserved(), replacedAt: "2026-09-29T09:00:00.000Z" });
+    // The two arming shapes of the gate's OR (provision.ts), each with NO
+    // SessionMark seeded.
+    const armings = [
+      // Arm 1: a live Observed.replacedAt (the plain involuntary-stop shape).
+      { ...emptyObserved(), replacedAt: "2026-09-29T09:00:00.000Z" },
+      // Arm 2: replacedAt already cleared by a heal, but that heal's own
+      // frozen session.replacementDetected still true (the same seedHealed
+      // shape the MAJOR 2 describe below uses).
+      { ...emptyObserved(), replacedAt: null, session: { verdict: "resumed", at: "2026-09-29T09:05:00.000Z", via: "heal", restore: "not-attempted", snapshotAgeS: null, turnsBefore: 5, reason: null, replacementDetected: true } },
+    ];
+    for (const observed of armings) {
+      const { d, calls } = deps(`${FRESH_SESSION_MARKER} moved ${ASIDE}\n`);
+      const { map, storage } = combinedStorage();
+      // Deliberately no `map.set(SESSION_MARK_KEY, ...)` call at all -- the
+      // exact "never synced yet" shape this test exists to pin.
+      map.set(OBSERVED_KEY, observed);
 
-    const status = await provisionWithStorage(
-      d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
-      "provision", storage, undefined, storage,
-    );
+      const status = await provisionWithStorage(
+        d, storage, { repo: REPO, role: "scratch", freshSession: true }, "example-org/acmeclient",
+        "provision", storage, undefined, storage,
+      );
 
-    expect(status.state).toBe("running");
-    expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+      expect(status.state).toBe("running");
+      expect(calls.map((c) => c.cmd)).toContain(BRINGUP_CMD);
+    }
   });
 
   it("MINOR 9: lines EXACTLY AT the threshold is still allowed; threshold + 1 refuses", async () => {
