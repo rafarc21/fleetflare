@@ -67,7 +67,7 @@ describe("scanStateTaskKeys", () => {
     }
   }
 
-  it("LIKE's `_` wildcard hands back a same-length decoy; startsWith is what rejects it", async () => {
+  it("LIKE's `_` wildcard hands back a same-length decoy; the exact-prefix re-check rejects it", async () => {
     // Authz depth: the repo is IN the prefix. `we_bsite` holds an `_`, so
     // the LIKE pattern's `_` matches ANY single char — D1 returns the
     // decoy `we-bsite` row, and only the exact prefix re-check kills it.
@@ -79,6 +79,14 @@ describe("scanStateTaskKeys", () => {
     ]);
     const rows = await scanStateTaskKeys(env.DB, "ns:acme-org/we_bsite:");
     expect(rows).toEqual([{ repo: "", number: 5, value: "v5" }]);
+
+    // The first decoy could have died at any filter. This one passes every
+    // suffix rule (bare number, digits clean) and differs from the prefix
+    // only at the `_` position, so LIKE hands it back too — only the
+    // exact-prefix compare can reject it.
+    await seed([["ns:acme-org/wxbsite:8", "suffix-clean-decoy"]]);
+    const rows2 = await scanStateTaskKeys(env.DB, "ns:acme-org/we_bsite:");
+    expect(rows2).toEqual([{ repo: "", number: 5, value: "v5" }]);
   });
 
   it("a colonless numeric rest reads repo \"\" — grants drops it by filter, never by the scan", async () => {
