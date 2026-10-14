@@ -30,18 +30,21 @@ studio.activity.test.ts:461) generating one `it` per non-unknown case, asserting
 block. Cases:
 
 1. Frame-verdict kinds — `nextActivity(null, <verdict>, null, null, T0)`:
-   - `waiting-question`
-   - `waiting-members` via `"subagents"`
-   - `waiting-members` via `"background-shell"` (distinct FrameVerdict value)
-   - `working`
-   - `idle`
-2. `limit` — reached NOT via `verdict.kind` but by a live limit observation
-   outranking the frame (the "not via verdict.kind" non-unknown path):
-   `nextActivity(null, { kind: "working" }, { until: <T0+90m iso>, seenAt: T0.toISOString() }, null, T0)`
-   — assert state `"limit"` AND reason null.
+   - working
+   - idle
+   - waiting-question
+   - waiting-members via "subagents"
+   - waiting-members via "background-shell" (distinct FrameVerdict value)
+2. limit — reached NOT via `verdict.kind` but by a live limit observation
+   outranking the frame (the "not via verdict.kind" non-unknown path). Own
+   `it`: assert state "limit" AND reason null, reusing the sibling limit
+   fixture shape (until: "2026-09-25T13:30:00.000Z", seenAt: T0).
 
-No `unknown` case in the loop: the sibling test "an unknown verdict never
+No unknown case in the loop: the sibling test "an unknown verdict never
 inherits the previous state's word" already asserts reason PRESENT on unknown.
+
+Verdict table typed `as const` so each literal stays assignable to
+`FrameVerdict` without widening — no import change.
 
 ## Mutation check (RED/GREEN)
 
@@ -49,10 +52,11 @@ After GREEN: temporarily mutate activity.ts:616 to
 
     const reason = verdict.kind === "idle" ? "leak" : null;
 
-RED expected: the idle `it` fails, every other `it` still passes — proves the
-loop now catches a leak the old single-kind test could not. Restore, GREEN
-again. Runs `vitest run test/studio.activity.test.ts` twice — one file, cheap,
-but serial (one gate at a time, never alongside another gate).
+RED expected: the idle `it` fails (the old single-kind working test would NOT
+have caught this leak — that is the point). The unknown sibling tests also
+fail (they expect their reason preserved) — expected RED breadth. Restore,
+GREEN again. Runs `vitest run test/studio.activity.test.ts` twice — one
+file, cheap, but serial (one gate at a time, never alongside another gate).
 
 ## Verification (serial, one gate at a time)
 
@@ -61,8 +65,8 @@ but serial (one gate at a time, never alongside another gate).
 2. Mutation RED/GREEN as above, restored.
 3. `bun x tsc --noEmit -p test` under `flock /tmp/fleet-gate.lock` (heavy,
    alone).
-4. `bun run scripts/english-check.ts` → clean.
-5. `bun run scripts/test-lies-check.ts` → clean.
+4. `bun run scripts/english-check.ts` — clean.
+5. `bun run scripts/test-lies-check.ts` — clean.
 6. Never run the full vitest suite; only this one file.
 
 ## Scope guard
@@ -70,3 +74,7 @@ but serial (one gate at a time, never alongside another gate).
 Test-only change to apps/fleet/test/studio.activity.test.ts. No src change
 survives the branch (mutation is temporary). If the surrounding code shows a
 real bug, stop and report instead. Rest of sweep 41 out of scope.
+
+Provenance note: plan written by the lead directly under the overnight
+auto-nudge override (member dispatch denied twice, no member running) —
+disclosed on the board issue, not hidden.
