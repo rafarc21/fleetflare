@@ -28,7 +28,7 @@
  * the parser against that fiction, never the real tool's own output. The
  * per-account field names themselves were already correct (confirmed by the
  * maestro's real probe cited above) — only the OUTER wrapping was wrong, so
- * `CSWAP_LIST_FIXTURE` keeps its bare-array shape (claude-swap.test.ts's own
+ * `CSWAP_LIST_FIXTURE` keeps its bare-array shape (claude-swap-join.test.ts's own
  * `joinAccountsToCswap` calls take `CswapAccount[]` directly, one layer
  * above the subprocess read) and `CSWAP_LIST_ENVELOPE` below adds the real
  * envelope wrapping for whatever exercises the parsing/subprocess layer
@@ -183,7 +183,7 @@ export const CSWAP_LIST_FIXTURE: CswapAccount[] = [
  * Issue #240: the real `cswap list --json` envelope shape — an OBJECT
  * (`{schemaVersion, activeAccountNumber, accounts}`), never the bare array
  * `CSWAP_LIST_FIXTURE` above is. `CSWAP_LIST_FIXTURE` itself is kept as a
- * bare `CswapAccount[]` on purpose: claude-swap.test.ts's own join/decision
+ * bare `CswapAccount[]` on purpose: claude-swap-join.test.ts's own join/decision
  * tests call `joinAccountsToCswap(slots, CSWAP_LIST_FIXTURE, ...)` directly
  * — that function's own signature takes `CswapAccount[]`, never the
  * envelope (it is pure join/decision logic, one layer above the subprocess

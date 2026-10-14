@@ -8,7 +8,7 @@
 import { describe, it, expect } from "vitest";
 import {
   usageMaxPct, toUsageHeadroom, pickHeadroomAccount,
-  type CswapAccount, type HeadroomCandidate, type UsageHeadroom,
+  type HeadroomCandidate, type UsageHeadroom,
 } from "../src/studio/claude-swap";
 import { OVER_SCOPED_ONLY, STALE_OK } from "./fixtures/cswap-list";
 
