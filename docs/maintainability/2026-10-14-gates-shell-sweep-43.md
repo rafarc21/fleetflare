@@ -28,9 +28,11 @@ every ruling below is by hand, not tool output.
   `exec python3 -c` — nothing fallible executes in bash, so `set -e`
   has nothing to bite on; all policy lives in the python body's
   explicit try/except. session-reemit.sh:8-9 ("Silent on every failure.
-  This is a CHECK, not a gate") guards every command by hand
-  (`|| true`, `|| exit 0`); `set -e` would turn a benign failure into
-  a nonzero exit whose stderr lands in the lead's own context.
+  This is a CHECK, not a gate") guards its fallible commands by hand
+  (`|| true`, `|| exit 0`), and the trailing `exit 0` covers the two
+  plain output lines (printf, cat); `set -e` would turn a benign
+  failure into a nonzero exit whose stderr lands in the lead's own
+  context.
 - **`grep -q` in pipes — none in scope.** Exactly one `grep -q` exists
   across the five scripts (session-reemit.sh:34) and it takes a FILE
   argument, never a pipe — no SIGPIPE surface. The repo's
