@@ -467,7 +467,7 @@ minutes later when the rollout CONVERGED and replaced a container that a
 recycle had booted on the old image. **A rollout replacement does NOT run the
 fleet's rescue-push** — only `fleet recycle` / `destroy` do. Unpushed work in a
 rolled container is gone. **`bun run deploy` runs `fleet rescue-all`
-itself** (issue #251; gate built into `scripts/deploy.sh` by issue #20) and
+itself** (issue #251; gate built into `apps/fleet/scripts/deploy.sh` by issue #20) and
 refuses on `pre-deploy gate UNSAFE`. Never call a bare `wrangler deploy`: it
 skips the gate. `--allow-unrescued` overrides, loudly; a first deploy (no
 Worker, no creds) needs it. Gate also refuses when wrangler's target Worker
