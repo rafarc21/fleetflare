@@ -1,8 +1,9 @@
 // apps/fleet/test/bun/llm-translate-request.test.ts
 // Pure translation functions for #249's GLM-led studio route — no env/fetch,
 // so every direction (Anthropic request -> OpenAI, OpenAI response ->
-// Anthropic, streaming chunk -> Anthropic SSE event, error classification)
-// is tested with plain objects, bun:test, no mocking.
+// Anthropic) is tested with plain objects, bun:test, no mocking. The
+// streaming + error-classification directions live in the sibling file
+// llm-translate-stream.test.ts.
 import { describe, expect, test } from "bun:test";
 import {
   GLM_LEAD_MODEL,
