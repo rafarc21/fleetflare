@@ -40,8 +40,9 @@ import { AUTO_CLOSE_BUDGET_MS, budgetExceeded, type TimeBudget } from "../time-b
  * invocation; open-prs.ts runs it once PER STUDIO inside one synchronous
  * route request, and the cross-studio total is that route's own concern,
  * documented beside its Promise.all (board/routes.ts). §5's busiest repo
- * measured 2026-09-24: ~41 candidates today; issue #180 projects ~186 once
- * #163's `listIssues` pagination fix keeps a wider net visible. At 300
+ * measured 2026-09-24: ~41 candidates today (BOARD_MAX_PAGES-bounded
+ * listTasks keeps the wider net visible; the ~186 projection predates the
+ * public release). At 300
  * candidates * 2 subrequests (showTask: getIssue + listComments) = 600,
  * plus listTasks' own BOARD_MAX_PAGES (20) page-fetches, a single scan
  * stays comfortably under Cloudflare's 1000-subrequests-per-invocation cap

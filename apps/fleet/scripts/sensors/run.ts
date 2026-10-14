@@ -32,7 +32,8 @@
  * issue), but skips the `gh issue edit`/`gh issue create` WRITE, printing
  * the computed body to stdout instead. Used in review so this doesn't
  * repeatedly touch the real issue. Without the flag: writes for real —
- * intended once a scheduled workflow (not part of this PR) calls it.
+ * called hourly by .github/workflows/sensors.yml (workflow_dispatch for
+ * manual runs).
  *
  * `SENSOR_REPO` env var overrides the default `rafarc21/fleetflare`.
  *
