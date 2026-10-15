@@ -7,7 +7,7 @@ import {
   isBunLaneFile, laneFilesFromTree, planBunShards,
 } from "../../src/gate/bun-lane";
 import BUN_SHARD_TIMINGS from "../../src/gate/bun-shard-timings.json";
-import { MAX_LEGS_PER_PR, parseGateConfig } from "../../src/gate/config";
+import { MAX_LEGS_PER_PR, parseGateBlock } from "../../src/gate/config";
 import { planLegs } from "../../src/gate/fanout";
 import FLEET_JSON from "../../../../fleet.json";
 
@@ -136,15 +136,16 @@ describe("checked-in gate plan", () => {
     "apps/fleet/test/studio.studio-blueprint.test.ts",
   ];
 
-  // The shipped fleet.json is the fleet's own repo, so its `gate` block is the fallback.
-  const FLEET_REPO = FLEET_JSON.blueprint.repo;
+  // The shipped fleet.json's `gate` block is the fleet repo's own gate: the
+  // config the gate reads for it at the base sha.
+  const SHIPPED = parseGateBlock(FLEET_JSON.gate)!;
 
   it("the shipped gate block parses and carries bunShards", () => {
-    expect(parseGateConfig(FLEET_JSON, FLEET_REPO, FLEET_REPO)?.bunShards).toBeGreaterThan(0);
+    expect(SHIPPED?.bunShards).toBeGreaterThan(0);
   });
 
   it("the real lane is covered exactly once by the shipped bun shard count", () => {
-    const cfg = parseGateConfig(FLEET_JSON, FLEET_REPO, FLEET_REPO)!;
+    const cfg = SHIPPED;
     const lane = laneFilesFromTree(laneOnDisk, cfg.bunLaneRoot!, cfg.bunLaneGlobs);
     const shards = planBunShards(lane, BUN_SHARD_TIMINGS.timings, cfg.bunShards);
     expect(lane.length).toBeGreaterThan(0);
@@ -153,7 +154,7 @@ describe("checked-in gate plan", () => {
   });
 
   it("the full leg plan for the shipped config stays under MAX_LEGS_PER_PR", () => {
-    const cfg = parseGateConfig(FLEET_JSON, FLEET_REPO, FLEET_REPO)!;
+    const cfg = SHIPPED;
     const bunShards = planBunShards(
       laneFilesFromTree(laneOnDisk, cfg.bunLaneRoot!, cfg.bunLaneGlobs), BUN_SHARD_TIMINGS.timings, cfg.bunShards,
     );

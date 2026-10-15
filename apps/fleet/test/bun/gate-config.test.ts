@@ -1,13 +1,12 @@
 import { describe, it, expect } from "bun:test";
 import {
-  parseGateRunnerRepos, isGateRunnerRepo, parseGateConfig, matchesPathRules,
+  parseGateRunnerRepos, isGateRunnerRepo, parseGateBlock, gateMapEntry, matchesPathRules,
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR,
 } from "../../src/gate/config";
 
-// Fixture repos are neutral on purpose (this repo is public). FLEET is the
-// repo fleet.json lives in: the `gate` block's own repo, the fallback.
-const FLEET = "acme/fleet";
+// Fixture repos are neutral on purpose (this repo is public).
 const BLOCK = { install: "x", legs: [], vitestCmd: "t", pathRules: ["a/**"] };
+const names = (n: number) => Array.from({ length: n }, (_, i) => `leg-${i}`);
 
 describe("parseGateRunnerRepos", () => {
   it("absent/empty -> no repos gated in", () => {
@@ -30,145 +29,165 @@ describe("isGateRunnerRepo", () => {
   });
 });
 
-describe("parseGateConfig", () => {
-  it("parses a well-formed gate block", () => {
-    const cfg = parseGateConfig({
-      gate: { install: "bun install --frozen-lockfile", legs: ["typecheck", "lint"],
-        vitestCmd: "bun run test --shard={i}/{n}", pathRules: ["apps/fleet/**"] },
-    }, FLEET, FLEET);
-    expect(cfg).toEqual({
+describe("parseGateBlock: a well-formed block", () => {
+  it("parses every field; string legs become { name, cmd: bun run <name> }", () => {
+    const cfg = parseGateBlock({
       install: "bun install --frozen-lockfile", legs: ["typecheck", "lint"],
+      vitestCmd: "bun run test --shard={i}/{n}", pathRules: ["apps/fleet/**"],
+    });
+    expect(cfg).toEqual({
+      install: "bun install --frozen-lockfile",
+      legs: [
+        { name: "typecheck", cmd: "bun run typecheck" },
+        { name: "lint", cmd: "bun run lint" },
+      ],
       vitestCmd: "bun run test --shard={i}/{n}", pathRules: ["apps/fleet/**"],
       vitestShards: DEFAULT_VITEST_SHARDS, bunShards: DEFAULT_BUN_SHARDS,
     });
   });
-  it("defaults to 6 bun-test shards when the gate block names none", () => {
-    const cfg = parseGateConfig({ gate: BLOCK }, FLEET, FLEET);
-    expect(cfg?.bunShards).toBe(6);
+  it("null on a missing or non-object block, not a throw", () => {
+    expect(parseGateBlock(undefined)).toBeNull();
+    expect(parseGateBlock(null)).toBeNull();
+    expect(parseGateBlock("gate")).toBeNull();
   });
-  it("reads a configured bun shard count from the gate block", () => {
-    const cfg = parseGateConfig({ gate: { ...BLOCK, bunShards: 4 } }, FLEET, FLEET);
-    expect(cfg?.bunShards).toBe(4);
-  });
-  it("null on a bun shard count that is not a positive integer", () => {
-    for (const bad of [0, -2, 1.5, "6", null]) {
-      expect(parseGateConfig({ gate: { ...BLOCK, bunShards: bad } }, FLEET, FLEET)).toBeNull();
-    }
-  });
-  it("null when the fixed legs plus bun shards leave no room for a vitest shard", () => {
-    // merge-tree (1) + 22 fixed legs + 1 bun shard + 1 vitest shard = 25 > 24
-    const legs = Array.from({ length: 22 }, (_, i) => `leg-${i}`);
-    expect(parseGateConfig({
-      gate: { ...BLOCK, legs, bunShards: 1, bunLaneRoot: "apps/fleet" },
-    }, FLEET, FLEET)).toBeNull();
-  });
-  it("accepts the largest leg list that still leaves room for bun shards and one vitest shard", () => {
-    // merge-tree (1) + 21 fixed legs + 1 bun shard + 1 vitest shard = 24
-    const legs = Array.from({ length: 21 }, (_, i) => `leg-${i}`);
-    expect(parseGateConfig({
-      gate: { ...BLOCK, legs, bunShards: 1, bunLaneRoot: "apps/fleet" },
-    }, FLEET, FLEET)?.legs.length).toBe(21);
-  });
-  it("null when the default 6 bun shards do not fit beside the fixed legs", () => {
-    // merge-tree (1) + 18 fixed legs + 6 bun shards + 1 vitest shard = 26 > 24
-    const legs = Array.from({ length: 18 }, (_, i) => `leg-${i}`);
-    expect(parseGateConfig({
-      gate: { ...BLOCK, legs, bunLaneRoot: "apps/fleet" },
-    }, FLEET, FLEET)).toBeNull();
-  });
-  it("defaults to 8 vitest shards when the gate block names none", () => {
-    const cfg = parseGateConfig({
-      gate: { ...BLOCK, vitestCmd: "bun run test --shard={i}/{n}" },
-    }, FLEET, FLEET);
-    expect(cfg?.vitestShards).toBe(8);
-  });
-  it("reads a configured shard count from the gate block", () => {
-    const cfg = parseGateConfig({ gate: { ...BLOCK, vitestShards: 12 } }, FLEET, FLEET);
-    expect(cfg?.vitestShards).toBe(12);
-  });
-  it("null on a shard count that is not a positive integer", () => {
-    for (const bad of [0, -1, 2.5, "8", null]) {
-      expect(parseGateConfig({ gate: { ...BLOCK, vitestShards: bad } }, FLEET, FLEET)).toBeNull();
-    }
-  });
-  it("null when the fixed legs alone leave no room for a vitest shard under the cap", () => {
-    // merge-tree (1) + 23 fixed legs + 1 bun shard + 1 vitest shard = 26 > 24
-    const legs = Array.from({ length: MAX_LEGS_PER_PR - 1 }, (_, i) => `leg-${i}`);
-    expect(parseGateConfig({
-      gate: { ...BLOCK, legs, bunShards: 1, bunLaneRoot: "apps/fleet" },
-    }, FLEET, FLEET)).toBeNull();
-  });
-  it("null on a missing gate block, not a throw", () => {
-    expect(parseGateConfig({}, FLEET, FLEET)).toBeNull();
-    expect(parseGateConfig(null, FLEET, FLEET)).toBeNull();
-  });
-  it("null on a gate block missing a required field", () => {
-    expect(parseGateConfig({ gate: { install: "x" } }, FLEET, FLEET)).toBeNull();
+  it("null on a block missing a required field", () => {
+    expect(parseGateBlock({ install: "x" })).toBeNull();
   });
 });
 
-describe("parseGateConfig gates map", () => {
-  it("looks up the PR's repo in the gates map and parses that block", () => {
-    const cfg = parseGateConfig({
-      gates: { "acme/example": { ...BLOCK, vitestCmd: "example-test" } },
-    }, "acme/example", FLEET);
-    expect(cfg?.vitestCmd).toBe("example-test");
+describe("parseGateBlock: object legs", () => {
+  it("an object leg keeps its own cmd verbatim", () => {
+    const cfg = parseGateBlock({
+      ...BLOCK, legs: [{ name: "e2e", cmd: "cd apps/web && bun run e2e -- --bail" }],
+    });
+    expect(cfg?.legs).toEqual([{ name: "e2e", cmd: "cd apps/web && bun run e2e -- --bail" }]);
   });
-  it("matches a map key case-insensitively, on both sides", () => {
-    const cfg = parseGateConfig({
-      gates: { "Acme/Example": { ...BLOCK, vitestCmd: "example-test" } },
-    }, "acme/EXAMPLE", FLEET);
-    expect(cfg?.vitestCmd).toBe("example-test");
+  it("mixes string and object legs in configured order", () => {
+    const cfg = parseGateBlock({ ...BLOCK, legs: ["lint", { name: "docs", cmd: "make docs" }] });
+    expect(cfg?.legs.map((l) => l.name)).toEqual(["lint", "docs"]);
+    expect(cfg?.legs[1].cmd).toBe("make docs");
   });
-  it("a map entry beats the gate-block fallback for the fleet's own repo", () => {
-    const cfg = parseGateConfig({
-      gate: { ...BLOCK, vitestCmd: "fleet-test" },
-      gates: { [FLEET]: { ...BLOCK, vitestCmd: "mapped-test" } },
-    }, FLEET, FLEET);
-    expect(cfg?.vitestCmd).toBe("mapped-test");
+  it("null on an object leg with no cmd, or an empty cmd", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: [{ name: "e2e" }] })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, legs: [{ name: "e2e", cmd: "" }] })).toBeNull();
   });
-  it("falls back to the gate block for the fleet's own repo when it has no map entry", () => {
-    const cfg = parseGateConfig({
-      gate: { ...BLOCK, vitestCmd: "fleet-test" },
-      gates: { "acme/example": { ...BLOCK, vitestCmd: "example-test" } },
-    }, FLEET, FLEET);
-    expect(cfg?.vitestCmd).toBe("fleet-test");
+  it("null on an object leg with a non-string name", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: [{ name: 3, cmd: "x" }] })).toBeNull();
   });
-  it("a repo with no map entry that is not the fleet's own repo gets no gate (null)", () => {
-    // The fleet's commands must never run against another repo's PR.
-    expect(parseGateConfig({ gate: BLOCK, gates: {} }, "acme/other", FLEET)).toBeNull();
+  it("null on a leg that is neither a string nor an object", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: [42] })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, legs: [null] })).toBeNull();
   });
-  it("null for a missing repo when fleet.json has no gates map and no gate block", () => {
-    expect(parseGateConfig({}, "acme/example", FLEET)).toBeNull();
+});
+
+describe("parseGateBlock: leg names", () => {
+  it("accepts names matching ^[a-z0-9][a-z0-9-]{0,39}$ in both forms", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: ["a", "x9-y", "0lint", { name: "a".repeat(40), cmd: "c" }] })).not.toBeNull();
   });
-  it("a malformed map entry is null, never the fallback", () => {
-    expect(parseGateConfig({
-      gate: BLOCK,
-      gates: { "acme/example": { install: "x" } },
-    }, "acme/example", FLEET)).toBeNull();
+  it("rejects a name that breaks the pattern, in either form", () => {
+    const bad = ["", "Lint", "test:unit", "under_score", "-lead", "a".repeat(41), "sp ace", "dot.name"];
+    for (const name of bad) {
+      expect(parseGateBlock({ ...BLOCK, legs: [name] })).toBeNull();
+      expect(parseGateBlock({ ...BLOCK, legs: [{ name, cmd: "c" }] })).toBeNull();
+    }
   });
-  it("a non-object gates value is ignored: the fleet's own repo still gets the fallback", () => {
-    expect(parseGateConfig({ gate: BLOCK, gates: "nope" }, FLEET, FLEET)?.vitestCmd).toBe("t");
+  it("rejects duplicate names across string and object legs", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: ["lint", { name: "lint", cmd: "other" }] })).toBeNull();
   });
-  it("reads a per-repo bun lane root and globs from the map entry", () => {
-    const cfg = parseGateConfig({
-      gates: { "acme/example": { ...BLOCK, bunLaneRoot: "packages/web", bunLaneGlobs: ["suites/*.test.ts"] } },
-    }, "acme/example", FLEET);
+  it("rejects the reserved merge-tree name", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: ["merge-tree"] })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, legs: [{ name: "merge-tree", cmd: "c" }] })).toBeNull();
+  });
+  it("rejects bun-N and vitest-N names, which the bun and vitest lanes own", () => {
+    for (const name of ["bun-1", "bun-12", "vitest-3"]) {
+      expect(parseGateBlock({ ...BLOCK, legs: [name] })).toBeNull();
+      expect(parseGateBlock({ ...BLOCK, legs: [{ name, cmd: "c" }] })).toBeNull();
+    }
+  });
+  it("keeps names that only look like the reserved ones", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: ["bun", "bun-lint", "vitest-only"] })).not.toBeNull();
+  });
+});
+
+describe("parseGateBlock: vitestCmd is optional", () => {
+  it("absent vitestCmd -> vitestCmd is undefined (zero vitest legs)", () => {
+    const { vitestCmd: _omit, ...noVitest } = BLOCK;
+    const cfg = parseGateBlock({ ...noVitest, legs: ["lint"] });
+    expect(cfg).not.toBeNull();
+    expect(cfg?.vitestCmd).toBeUndefined();
+  });
+  it("a present vitestCmd must be a non-empty string", () => {
+    expect(parseGateBlock({ ...BLOCK, vitestCmd: "" })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, vitestCmd: 8 })).toBeNull();
+  });
+});
+
+describe("parseGateBlock: cap, 1 + legs + bun legs + vitest legs <= MAX_LEGS_PER_PR", () => {
+  it("bun shards count only when the block has a bun lane", () => {
+    // 1 + 21 legs + 6 bun shards without a lane = 28 would breach, but no lane, so no bun legs.
+    expect(parseGateBlock({ ...BLOCK, legs: names(21), bunShards: 6 })).not.toBeNull();
+  });
+  it("absent vitestCmd: the largest legs list is merge-tree + 23 legs = 24", () => {
+    const { vitestCmd: _omit, ...noVitest } = BLOCK;
+    expect(parseGateBlock({ ...noVitest, legs: names(MAX_LEGS_PER_PR - 1) })).not.toBeNull();
+  });
+  it("absent vitestCmd: merge-tree + 24 legs = 25 is rejected", () => {
+    const { vitestCmd: _omit, ...noVitest } = BLOCK;
+    expect(parseGateBlock({ ...noVitest, legs: names(MAX_LEGS_PER_PR) })).toBeNull();
+  });
+  it("absent vitestCmd: bun shards with a lane still count against the cap", () => {
+    const { vitestCmd: _omit, ...noVitest } = BLOCK;
+    expect(parseGateBlock({ ...noVitest, legs: names(22), bunShards: 1, bunLaneRoot: "apps/fleet" })).not.toBeNull();
+    expect(parseGateBlock({ ...noVitest, legs: names(23), bunShards: 1, bunLaneRoot: "apps/fleet" })).toBeNull();
+  });
+  it("present vitestCmd still needs one vitest shard of room", () => {
+    expect(parseGateBlock({ ...BLOCK, legs: names(23) })).toBeNull();
+    expect(parseGateBlock({ ...BLOCK, legs: names(22) })).not.toBeNull();
+  });
+});
+
+describe("parseGateBlock shard counts", () => {
+  it("defaults to 6 bun-test shards when the block names none", () => {
+    expect(parseGateBlock({ ...BLOCK })?.bunShards).toBe(6);
+  });
+  it("reads a configured bun shard count", () => {
+    expect(parseGateBlock({ ...BLOCK, bunShards: 4 })?.bunShards).toBe(4);
+  });
+  it("null on a bun shard count that is not a positive integer", () => {
+    for (const bad of [0, -2, 1.5, "6", null]) {
+      expect(parseGateBlock({ ...BLOCK, bunShards: bad })).toBeNull();
+    }
+  });
+  it("defaults to 8 vitest shards when the block names none", () => {
+    expect(parseGateBlock({ ...BLOCK })?.vitestShards).toBe(8);
+  });
+  it("reads a configured vitest shard count", () => {
+    expect(parseGateBlock({ ...BLOCK, vitestShards: 12 })?.vitestShards).toBe(12);
+  });
+  it("null on a vitest shard count that is not a positive integer", () => {
+    for (const bad of [0, -1, 2.5, "8", null]) {
+      expect(parseGateBlock({ ...BLOCK, vitestShards: bad })).toBeNull();
+    }
+  });
+  it("reads a per-repo bun lane root and globs", () => {
+    const cfg = parseGateBlock({ ...BLOCK, bunLaneRoot: "packages/web", bunLaneGlobs: ["suites/*.test.ts"] });
     expect(cfg?.bunLaneRoot).toBe("packages/web");
     expect(cfg?.bunLaneGlobs).toEqual(["suites/*.test.ts"]);
   });
-  it("a block without bunLaneRoot has no bun lane, and its bun shards do not count against the cap", () => {
-    // merge-tree (1) + 21 fixed legs + 1 vitest shard = 23 <= 24, bun shards aside.
-    const legs = Array.from({ length: 21 }, (_, i) => `leg-${i}`);
-    const cfg = parseGateConfig({ gates: { "acme/example": { ...BLOCK, legs, bunShards: 6 } } }, "acme/example", FLEET);
-    expect(cfg).not.toBeNull();
-    expect(cfg?.bunLaneRoot).toBeUndefined();
+});
+
+describe("gateMapEntry", () => {
+  it("returns the entry for the repo, matched case-insensitively on both sides", () => {
+    const entry = { ...BLOCK, vitestCmd: "example-test" };
+    expect(gateMapEntry({ gates: { "Acme/Example": entry } }, "acme/EXAMPLE")).toEqual(entry);
   });
-  it("a block with bunLaneRoot counts its bun shards against the cap", () => {
-    const legs = Array.from({ length: 21 }, (_, i) => `leg-${i}`);
-    expect(parseGateConfig({
-      gates: { "acme/example": { ...BLOCK, legs, bunShards: 6, bunLaneRoot: "packages/web" } },
-    }, "acme/example", FLEET)).toBeNull();
+  it("undefined when the repo has no map entry", () => {
+    expect(gateMapEntry({ gates: { "acme/example": BLOCK } }, "acme/other")).toBeUndefined();
+  });
+  it("undefined when there is no gates map, or it is not an object", () => {
+    expect(gateMapEntry({}, "acme/example")).toBeUndefined();
+    expect(gateMapEntry({ gates: "nope" }, "acme/example")).toBeUndefined();
+    expect(gateMapEntry(null, "acme/example")).toBeUndefined();
   });
 });
 

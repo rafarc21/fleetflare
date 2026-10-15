@@ -273,8 +273,17 @@ describe("getPullRequest", () => {
     });
     expect(await getPullRequest("tok", "o/r", 7)).toEqual({
       number: 7, merged: true, mergeCommitSha: "deadbeef", baseRef: "staging", headRef: "feat/x",
-      title: "feat: x", body: "Closes #3", repoFullName: "O/R", open: true,
+      title: "feat: x", body: "Closes #3", repoFullName: "O/R", open: true, baseRepoPrivate: false,
     });
+  });
+
+  // #715: a private PR's leg clones through the git proxy, so the base repo's
+  // private flag rides on the PR read, not a second call.
+  it("reads the base repo's private flag (pull.base.repo.private)", async () => {
+    respond = () => Response.json({
+      number: 7, merged: false, state: "open", base: { ref: "main", repo: { full_name: "o/r", private: true } }, head: { ref: "feat/x" },
+    });
+    expect((await getPullRequest("tok", "o/r", 7)).baseRepoPrivate).toBe(true);
   });
 
   it("an unmerged PR reads merged: false and a null merge commit sha", async () => {
