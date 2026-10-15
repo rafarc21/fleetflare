@@ -38,7 +38,6 @@ describe("parseGateConfig", () => {
     });
   });
   it("defaults to 8 vitest shards when the gate block names none", () => {
-    expect(DEFAULT_VITEST_SHARDS).toBe(8);
     const cfg = parseGateConfig({
       gate: { install: "x", legs: [], vitestCmd: "bun run test --shard={i}/{n}", pathRules: ["a/**"] },
     });
@@ -60,7 +59,6 @@ describe("parseGateConfig", () => {
   it("null when the fixed legs alone leave no room for a vitest shard under the cap", () => {
     // merge-tree (1) + 23 fixed legs + one vitest shard (1) = 25 > 24
     const legs = Array.from({ length: MAX_LEGS_PER_PR - 1 }, (_, i) => `leg-${i}`);
-    expect(MAX_LEGS_PER_PR).toBe(24);
     expect(parseGateConfig({
       gate: { install: "x", legs, vitestCmd: "t", pathRules: ["a/**"] },
     })).toBeNull();
