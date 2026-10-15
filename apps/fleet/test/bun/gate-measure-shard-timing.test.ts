@@ -1,5 +1,10 @@
 import { describe, it, expect } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseVitestTimings, parseBunJunitTimings } from "../../scripts/gate/measure-shard-timing";
+
+const SCRIPT = new URL("../../scripts/gate/measure-shard-timing.ts", import.meta.url).pathname;
 
 describe("parseVitestTimings", () => {
   it("one entry per test file, duration from endTime - startTime", () => {
@@ -66,5 +71,23 @@ describe("parseBunJunitTimings", () => {
   it("testcase missing time attr -> contributes 0", () => {
     const noTime = `<?xml version="1.0"?><testsuites><testsuite name="test/bun/d.test.ts" file="test/bun/d.test.ts" tests="1" failures="0" time="0"><testcase name="t" classname="t" file="test/bun/d.test.ts" /></testsuite></testsuites>`;
     expect(parseBunJunitTimings(noTime)).toEqual([{ file: "test/bun/d.test.ts", ms: 0 }]);
+  });
+});
+
+describe("measure-shard-timing CLI", () => {
+  // The checked-in bun timing snapshot is produced by this CLI from a
+  // `bun test --reporter=junit` file, so the .xml path is the one that matters.
+  it("an .xml argument is read as bun junit and printed as {file, ms}[] JSON", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "shard-timing-"));
+    try {
+      const xml = join(dir, "lane.xml");
+      writeFileSync(xml, `<?xml version="1.0"?><testsuites><testsuite name="test/bun/a.test.ts" file="test/bun/a.test.ts" time="0"><testcase name="t" classname="t" time="1.5" file="test/bun/a.test.ts" /></testsuite></testsuites>`);
+      const proc = Bun.spawn(["bun", "run", SCRIPT, xml], { stdout: "pipe", stderr: "pipe" });
+      const out = await new Response(proc.stdout).text();
+      expect(await proc.exited).toBe(0);
+      expect(JSON.parse(out)).toEqual([{ file: "test/bun/a.test.ts", ms: 1500 }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

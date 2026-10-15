@@ -18,9 +18,11 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
-  compareFiles, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, postCommitStatus,
+  compareFiles, fetchRepoFile, getBranchSha, getPullRequest, getPullRequestHeadSha, listRepoTree, postCommitStatus,
 } from "../github/api";
 import { repoTokenMinter } from "../github/auth";
+import { laneFilesFromTree, planBunShards } from "./bun-lane";
+import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import { matchesPathRules, parseGateConfig } from "./config";
 import {
   legEventType, normalizeLegResult, planLegs, verdictToStatusArgs, type PlannedLeg,
@@ -54,7 +56,10 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // non-default branch must be gated against that branch.
       const baseSha = await getBranchSha(token, repo, pull.baseRef);
       const { files } = await compareFiles(token, repo, baseSha, headSha);
-      return { headSha, baseSha, changedFiles: files };
+      // The bun-test lane is the head's own test/bun files, not a list baked
+      // into this Worker, so a new test file is picked up on its next run.
+      const bunFiles = laneFilesFromTree(await listRepoTree(token, repo, headSha));
+      return { headSha, baseSha, changedFiles: files, bunFiles };
     });
 
     // fleet.json is read from the FLEET's own repo (env.AGENT_REPO), never
@@ -86,8 +91,9 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     const legs = planLegs({
       owner, repo: repoName, pr, runId: event.instanceId,
       headSha: resolved.headSha, baseSha: resolved.baseSha,
-      install: config.install, legs: config.legs, vitestCmd: config.vitestCmd,
-      vitestShards: config.vitestShards,
+      install: config.install, legs: config.legs,
+      bunShards: planBunShards(resolved.bunFiles, BUN_SHARD_TIMINGS.timings, config.bunShards),
+      vitestCmd: config.vitestCmd, vitestShards: config.vitestShards,
       baselineKeys: [], // lockfile baseline keys are not wired yet; each leg installs from scratch
     });
 
