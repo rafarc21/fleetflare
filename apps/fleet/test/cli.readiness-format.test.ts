@@ -9,7 +9,6 @@ import { emptyObserved, type SurvivalBriefPending } from "../src/studio/observed
 import type { Activity } from "../src/studio/activity";
 import type { MemberAlert } from "../src/studio/member-alerts";
 import { SHIP_TRANSCRIPT_SECONDS } from "../src/studio/ship-cadence";
-import { REAL_PILOT_PANE } from "./fixtures/rate-limit-panes";
 import { row, burnRow } from "./helpers/studio-row";
 
 // Fleet Spawn P3, Task 5 (R-P3-4: "fleet ls totals line if cheap"). Imports
