@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   parseGateRunnerRepos, isGateRunnerRepo, parseGateConfig, matchesPathRules,
+  DEFAULT_VITEST_SHARDS, MAX_LEGS_PER_PR,
 } from "../../src/gate/config";
 
 describe("parseGateRunnerRepos", () => {
@@ -32,14 +33,42 @@ describe("parseGateConfig", () => {
     });
     expect(cfg).toEqual({
       install: "bun install --frozen-lockfile", legs: ["typecheck", "lint"],
-      vitestCmd: "bun run test --shard={i}/{n}", pathRules: ["apps/fleet/**"], vitestShards: 1,
+      vitestCmd: "bun run test --shard={i}/{n}", pathRules: ["apps/fleet/**"],
+      vitestShards: DEFAULT_VITEST_SHARDS,
     });
   });
-  it("reads vitestShards when given", () => {
+  it("defaults to 8 vitest shards when the gate block names none", () => {
     const cfg = parseGateConfig({
-      gate: { install: "i", legs: [], vitestCmd: "v", pathRules: [], vitestShards: 8 },
+      gate: { install: "x", legs: [], vitestCmd: "bun run test --shard={i}/{n}", pathRules: ["a/**"] },
     });
     expect(cfg?.vitestShards).toBe(8);
+  });
+  it("reads a configured shard count from the gate block", () => {
+    const cfg = parseGateConfig({
+      gate: { install: "x", legs: [], vitestCmd: "t", pathRules: ["a/**"], vitestShards: 12 },
+    });
+    expect(cfg?.vitestShards).toBe(12);
+  });
+  it("null on a shard count that is not a positive integer", () => {
+    for (const bad of [0, -1, 2.5, "8", null]) {
+      expect(parseGateConfig({
+        gate: { install: "x", legs: [], vitestCmd: "t", pathRules: ["a/**"], vitestShards: bad },
+      })).toBeNull();
+    }
+  });
+  it("null when the fixed legs alone leave no room for a vitest shard under the cap", () => {
+    // merge-tree (1) + 23 fixed legs + one vitest shard (1) = 25 > 24
+    const legs = Array.from({ length: MAX_LEGS_PER_PR - 1 }, (_, i) => `leg-${i}`);
+    expect(parseGateConfig({
+      gate: { install: "x", legs, vitestCmd: "t", pathRules: ["a/**"] },
+    })).toBeNull();
+  });
+  it("accepts the largest leg list that still leaves one vitest shard", () => {
+    // merge-tree (1) + 22 fixed legs + one vitest shard (1) = 24
+    const legs = Array.from({ length: MAX_LEGS_PER_PR - 2 }, (_, i) => `leg-${i}`);
+    expect(parseGateConfig({
+      gate: { install: "x", legs, vitestCmd: "t", pathRules: ["a/**"] },
+    })?.legs.length).toBe(MAX_LEGS_PER_PR - 2);
   });
   it("null on a missing gate block, not a throw", () => {
     expect(parseGateConfig({})).toBeNull();
@@ -47,13 +76,6 @@ describe("parseGateConfig", () => {
   });
   it("null on a gate block missing a required field", () => {
     expect(parseGateConfig({ gate: { install: "x" } })).toBeNull();
-  });
-  it("null on a vitestShards that is not a positive integer", () => {
-    for (const vitestShards of [0, -1, 1.5, "8"]) {
-      expect(parseGateConfig({
-        gate: { install: "i", legs: [], vitestCmd: "v", pathRules: [], vitestShards },
-      })).toBeNull();
-    }
   });
 });
 
