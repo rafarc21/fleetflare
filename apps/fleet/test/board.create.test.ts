@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { createTask, transitionTask, autoStartSubmittedTasks, findLiveAssignedTask, type BoardApi } from "../src/board/board";
-import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
+import { defaultBrief as brief, fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import { studioLabel, type BoardTask } from "../src/board/types";
 import { GitHubError } from "../src/board/api";
 
@@ -13,19 +13,6 @@ const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
   listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1" }]),
   ...overrides,
 }, () => task());
-
-const brief = {
-  title: "Build the task board",
-  objective: "Worker-side board module.",
-  outputFormat: "A PR.",
-  // Issue #112: no "/" here on purpose — this text is reused by nearly
-  // every createTask test in this file, and extractPaths (board issue #112
-  // / #70 ask 8) would otherwise read "open/close" as a path claim and
-  // trigger the new pathClaimWarnings network calls these tests never
-  // intend to exercise. See the dedicated "createTask — path overlap
-  // warning" describe block below for the tests that DO exercise it.
-  boundaries: "No sprint open or close.",
-};
 
 describe("createTask", () => {
   it("opens the issue with the submitted label — the board's only entry state", async () => {

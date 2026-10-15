@@ -59,3 +59,17 @@ export function envelopeComment(doc: EnvelopeDoc, overrides: Partial<TaskComment
     ...overrides,
   };
 }
+
+/** The shared createTask brief both board suites hand to nearly every
+ *  createTask test. Issue #112: no "/" in boundaries on purpose —
+ *  extractPaths (board issue #112 / #70 ask 8) would otherwise read
+ *  "open/close" as a path claim and trigger pathClaimWarnings network
+ *  calls these tests never intend to exercise. The dedicated
+ *  "createTask — path overlap warning" describe block in
+ *  board.create.test.ts exercises that path with its own overlap brief. */
+export const defaultBrief = {
+  title: "Build the task board",
+  objective: "Worker-side board module.",
+  outputFormat: "A PR.",
+  boundaries: "No sprint open or close.",
+};

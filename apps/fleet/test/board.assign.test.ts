@@ -8,7 +8,7 @@ import {
   type BoardApi,
 } from "../src/board/board";
 import { parseEnvelopeComment, renderEnvelopeComment, parseEnvelope } from "../src/board/envelope";
-import { fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
+import { defaultBrief as brief, fakeApi as boardFakeApi, task as boardTask } from "./helpers/board-api";
 import {
   studioLabel, taskAssignees, TASK_STATES, TERMINAL_TASK_STATES, LIVE_TASK_STATES, type BoardTask,
 } from "../src/board/types";
@@ -25,19 +25,6 @@ const fakeApi = (overrides: Partial<BoardApi> = {}) => boardFakeApi({
   listMilestones: vi.fn(async () => [{ number: 3, title: "Sprint 1" }]),
   ...overrides,
 }, () => task());
-
-const brief = {
-  title: "Build the task board",
-  objective: "Worker-side board module.",
-  outputFormat: "A PR.",
-  // Issue #112: no "/" here on purpose — this text is reused by nearly
-  // every createTask test in this file, and extractPaths (board issue #112
-  // / #70 ask 8) would otherwise read "open/close" as a path claim and
-  // trigger the new pathClaimWarnings network calls these tests never
-  // intend to exercise. See the dedicated "createTask — path overlap
-  // warning" describe block below for the tests that DO exercise it.
-  boundaries: "No sprint open or close.",
-};
 
 describe("transitionTask", () => {
   it("removes the observed label and adds the new one, in that order", async () => {
