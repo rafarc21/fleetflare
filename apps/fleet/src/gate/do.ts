@@ -6,14 +6,16 @@
 // uses (no tmux/chromium/claude needed).
 // Created on the `durable_object` scheduling policy (wrangler.example.jsonc,
 // Task 1) — fixed at class creation; this class's code never checks it at
-// runtime. Snapshot/outbound-handler behavior that policy enables is wired
-// in by Task 16, later.
+// runtime. Outbound-handler wiring (Task 16) is the part of that policy this
+// file uses.
 //
 // Plain R2 keys, never a presigned URL: a presigned URL is itself a bearer
 // credential, forgeable by the PR code it is meant to gate. The container's
-// own plain fetches to R2 are authorized by Task 16's Worker-side outbound
-// handler, added to this file in a later wave.
+// own plain fetches to R2 are authorized by the Worker-side outbound handler
+// (outbound-entrypoint.ts, allow-list in outbound-handler.ts), registered
+// with ctx.container.interceptAllOutboundHttp before each container start.
 import { Container } from "@cloudflare/containers";
+import { exports as workerExports } from "cloudflare:workers";
 import type { Env } from "../env";
 import { buildLegEnvVars, type GateLegRequest } from "./leg-env";
 
@@ -30,6 +32,13 @@ export class GateRunnerDO extends Container<Env> {
     const url = new URL(req.url);
     if (url.pathname === "/run-leg" && req.method === "POST") {
       const body = (await req.json()) as GateLegRequest;
+      // Task 16: every plain outbound request from the leg container is served
+      // by GateOutbound, the Worker-side entrypoint that holds the R2 binding.
+      // Registered before each cold start. Assumed, not yet verified live: that
+      // interception does not survive a container stop, so it is re-applied.
+      if (!this.ctx.container?.running) {
+        await this.ctx.container?.interceptAllOutboundHttp(workerExports.GateOutbound({ props: {} }));
+      }
       await this.start({ envVars: buildLegEnvVars(body) });
       await this.startAndWaitForPorts(GATE_CONTAINER_PORT);
       const legRes = await this.containerFetch(new Request(`http://container/run`, { method: "POST" }));
@@ -39,8 +48,9 @@ export class GateRunnerDO extends Container<Env> {
     }
     return new Response("not found", { status: 404 });
   }
-  // Task 16 (Wave 3, later, same file) adds the outbound-traffic-handler
-  // wiring and changes `/run-leg` to ACK fast (202), keeping the container
-  // running via `this.ctx.waitUntil` and calling `sendEvent` on the calling
-  // Workflow instance when done. Task 14 only consumes that contract.
+  // Still open from Task 16's plan text: `/run-leg` ACKs fast (202), keeps the
+  // container running via `this.ctx.waitUntil`, and calls `sendEvent` on the
+  // calling Workflow instance when done. That needs Task 14's GATE_WORKFLOW
+  // binding and instance-id contract, neither on main yet, so this route is
+  // still synchronous.
 }
