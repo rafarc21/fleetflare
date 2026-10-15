@@ -6,7 +6,7 @@
 the lead is not relaunched. The relaunch bug fired within ~300ms when present;
 1000ms carries the same claim. Cut to 1000ms.
 
-(b) 35 tests each `fresh()` a FakeStudio. Investigated sharing one session per
+(b) 32 tests each `fresh()` a FakeStudio. Investigated sharing one session per
 describe — rejected:
 
 - Sharing needs a live-pane reset between tests (C-c, kill lead, wait for bash,
@@ -15,8 +15,9 @@ describe — rejected:
 - This suite is a SAFETY harness: isolation is one mechanism, not two (line 49).
   Test N+1 depending on test N leaving a clean pane is the cross-test pollution
   it exists to prevent; it killed a studio's tmux twice on 2026-09-24.
-- Session setup is ~0.5s each (~17s across 35), not the 76.7s driver — bringup()
-  real waits are. The flake risk is not worth ~17s.
+- Per-test session setup is a real cost (sweep-48 estimates ~2s each), but the
+  safety argument above is the decisive reason: sharing would trade isolation
+  for a speed-up this harness's own header warns against.
 
 Decision: keep per-test `fresh()`. No code change for (b).
 
@@ -28,7 +29,7 @@ Decision: keep per-test `fresh()`. No code change for (b).
 1. Plan doc commit + push.
 2. Edit the sleep to 1000ms; run the suite. TDD note: the constant is a fixed
    wait, not a branch — there is no writable RED test for it; the existing suite
-   (35 tests, real tmux, real /proc counts) is the regression guard. Confirm
+   (32 tests, real tmux, real /proc counts) is the regression guard. Confirm
    STAYS-UP still green and the file runs well under 76.7s.
 
 ## Verify (sequential, one gate at a time)
