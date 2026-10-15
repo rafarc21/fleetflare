@@ -10,6 +10,7 @@ import type { Env } from "../src/env";
 import type { BoardApi } from "../src/board/board";
 import { studioLabel, type BoardTask } from "../src/board/types";
 import { fakeCtx, type FakeCtx } from "./helpers/fake-ctx";
+import { lockedUsageLogDb } from "./helpers/d1-locked";
 
 const REPO = "acme-org/websites";
 const ME = "websites--web-studio";
@@ -175,24 +176,14 @@ describe("handleFleetJunior", () => {
   // drop a failed insert with no trace, so a missing usage row read as "the
   // studio never called". The swallow stays (a logging failure must never
   // affect the result already written to the studio) but one console.error
-  // must name the insert failure. Same fake-D1 idiom as
+  // must name the insert failure. The locked-D1 fake itself now lives in
+  // helpers/d1-locked.ts (sweep 43 F6, #883) — the same idiom as
   // junior.usage.test.ts's own missing-column db, forwarded to the real
   // env.DB for every other statement.
   it("a failed usage-row insert leaves the streamed result intact and logs one console.error (#519)", async () => {
     const { token, rows, e } = await setup();
     const realDb = (e as unknown as { DB: D1Database }).DB;
-    const db = {
-      prepare: (sql: string) => {
-        if (sql.includes("INSERT INTO junior_usage_log")) {
-          return {
-            bind: () => ({
-              run: async () => { throw new Error("D1_ERROR: the database is locked by another connection"); },
-            }),
-          };
-        }
-        return realDb.prepare(sql);
-      },
-    } as unknown as D1Database;
+    const db = lockedUsageLogDb(realDb);
     (e as unknown as { DB: D1Database }).DB = db;
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
