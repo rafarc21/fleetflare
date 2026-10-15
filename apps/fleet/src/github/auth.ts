@@ -341,6 +341,21 @@ export async function mintRepoToken(env: Env, repo: string, opts?: MintTokenOpts
   }
 }
 
+/**
+ * #715: the read-only token a private gate leg's git proxy uses. GateRunnerDO
+ * mints it once per leg, at leg start. App-only: a PAT's permissions are fixed
+ * when it is issued, so nothing sent here could make it read-only. A PAT-served
+ * owner is refused before any mint or upstream call. Same rule as
+ * mintReadReposToken. Goes through mintRepoToken, so a renamed repo keeps its
+ * one-shot rename recovery.
+ */
+export async function mintPrivateCloneToken(env: Env, repo: string): Promise<string> {
+  if (resolveRepoAuthKind(env, repo) !== "app") {
+    throw new Error("private clone needs the GitHub App on this owner");
+  }
+  return mintRepoToken(env, repo, { permissions: { contents: "read" } });
+}
+
 /** Issue #291: most repos one read-only sibling token may cover. */
 export const READ_REPOS_MAX = 15;
 

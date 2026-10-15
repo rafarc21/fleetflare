@@ -2,8 +2,9 @@
 //
 // GateRunnerDO's container-side HTTP server (#715 Phase 1). Self-contained,
 // no imports from apps/fleet/src/ — same style container/server.ts already
-// uses. Clones anonymously: the Phase 1 repo is public, so the clone URL
-// carries no credential.
+// uses. A public repo clones anonymously from github.com. A private repo
+// (GATE_PRIVATE=1) clones through the Worker git proxy, which holds the read
+// grant, so the clone URL carries no credential either way.
 //
 // Result upload and baseline restore both go through one fixed internal path,
 // http://gate-r2.internal/<key>. The request carries a plain R2 key and
@@ -14,6 +15,14 @@ import { resolveMergeTree, type ExecFn } from "./gate-merge-tree";
 const PORT = Number(process.env.PORT ?? 8080);
 const WORKDIR = "/workspace/repo";
 const R2_INTERNAL_BASE = "http://gate-r2.internal";
+const GIT_PROXY_BASE = "http://git-proxy.internal";
+
+/** #715: a private repo clones through the Worker git proxy (outbound-handler.ts),
+ *  which holds the read grant. A public repo clones anonymously from github.com.
+ *  Neither URL carries a credential. */
+export function cloneUrl(repo: string, privateRepo: boolean): string {
+  return privateRepo ? `${GIT_PROXY_BASE}/${repo}.git` : `https://github.com/${repo}.git`;
+}
 
 const exec: ExecFn = async (cmd, args, opts) => {
   const proc = Bun.spawn([cmd, ...args], { cwd: opts.cwd, stdout: "pipe", stderr: "pipe" });
@@ -40,6 +49,8 @@ export interface GateRun {
   baseRef: string;
   /** The PR number: a fork PR's head is fetched from refs/pull/<pr>/head. */
   pr: string;
+  /** #715: a private repo clones through the Worker git proxy (GATE_PRIVATE=1). */
+  private?: boolean;
 }
 
 export interface GateDeps {
@@ -67,6 +78,7 @@ export function readRunEnv(env: Record<string, string | undefined>): GateRun {
     baselineKeys: (env.GATE_BASELINE_KEYS ?? "").split(",").filter((k) => k.length > 0),
     baseRef: env.GATE_BASE_REF ?? "",
     pr: env.GATE_PR ?? "",
+    private: env.GATE_PRIVATE === "1",
   };
 }
 
@@ -123,7 +135,7 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
 
   // Blobless and without a checkout: commits and trees come down now, file
   // contents only when a step reads them.
-  const clone = await run("git", ["clone", "--filter=blob:none", "--no-checkout", "--quiet", `https://github.com/${repo}.git`, workdir], { cwd: "/workspace" });
+  const clone = await run("git", ["clone", "--filter=blob:none", "--no-checkout", "--quiet", cloneUrl(repo, req.private === true), workdir], { cwd: "/workspace" });
   if (clone.code !== 0) return { state: "error", description: `clone failed: ${firstLine(clone.stderr)}` };
 
   // A fork PR's head is not on any branch of the base repo, so the clone lacks it.

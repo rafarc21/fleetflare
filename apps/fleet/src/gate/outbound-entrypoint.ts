@@ -22,6 +22,10 @@ declare global {
 
 export class GateOutbound extends WorkerEntrypoint<Env, GateOutboundProps> {
   override fetch(req: Request): Promise<Response> {
-    return handleGateOutbound(req, this.env.STUDIO_ARCHIVE, this.ctx.props);
+    // #715: the git proxy's token arrives in props, minted once by GateRunnerDO at
+    // leg start (App-only, read-only). This entrypoint never mints.
+    return handleGateOutbound(req, this.env.STUDIO_ARCHIVE, this.ctx.props, {
+      fetch: (url, init) => globalThis.fetch(url, init),
+    });
   }
 }

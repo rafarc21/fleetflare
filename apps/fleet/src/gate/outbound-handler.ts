@@ -7,9 +7,29 @@
 // binding inside this Worker is the credential, and this allow-list decides
 // what it is used for.
 //
+// #715 private-repo clones: the same interceptor also serves
+// http://git-proxy.internal/<owner>/<repo>.git. That host proxies ONLY git
+// smart-HTTP upload-pack fetch traffic for props.repo, with the token GateRunnerDO
+// minted once at leg start (props.gitToken, App-only, contents: read). This
+// handler never mints. The container never holds the token.
+//
 // Pure on purpose: no cloudflare:workers import, so bun test can load it.
 
 export const GATE_R2_HOST = "gate-r2.internal";
+
+/** The private-repo clone host. Plain HTTP, so the Worker-side outbound
+ *  handler intercepts it. Its only job is git fetch traffic for one repo. */
+export const GIT_PROXY_HOST = "git-proxy.internal";
+
+const GITHUB_ORIGIN = "https://github.com";
+/** `<owner>/<repo>.git/` then exactly one of the two fetch endpoints. The
+ *  endpoint is what limits the proxy to fetch: `git-receive-pack` matches no
+ *  alternative here, so a push cannot be routed at all. */
+const GIT_PATH_RE = /^\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\.git\/(info\/refs|git-upload-pack)$/;
+
+/** The only container request headers copied upstream. Everything else the
+ *  container sends (its own Authorization, Cookie, Host) is dropped. */
+const FORWARD_REQUEST_HEADERS = ["content-type", "accept", "git-protocol", "content-encoding"] as const;
 
 /** Result JSON is a few KB. 1 MiB is generous headroom, and a hard cap keeps
  *  a runaway leg from buffering an arbitrary body inside the Worker. */
@@ -60,21 +80,102 @@ export interface OutboundBucket {
 
 /** Set by GateRunnerDO when it registers the interceptor (do.ts), one per leg.
  *  `resultKey` is the only key this container may PUT: the leg's own result.
- *  The run id is part of that key, so another run's key is refused by equality. */
+ *  The run id is part of that key, so another run's key is refused by equality.
+ *  A private leg adds `repo`, the one `owner/name` the git proxy will serve, and
+ *  `gitToken`, the read-only token the DO minted for it at leg start. A public
+ *  leg has neither, so the git proxy 403s for it. */
 export interface GateOutboundProps {
   resultKey: string;
+  repo?: string;
+  gitToken?: string;
+}
+
+/** The Worker's side of the git proxy: the upstream fetch. Injected so the
+ *  handler stays pure and the tests can observe every call. The token from
+ *  props is set on the upstream request only, never on anything returned. */
+export interface GitProxyDeps {
+  fetch(url: string, init: RequestInit): Promise<Response>;
+}
+
+/** Upper bound on one upstream git request. A stalled GitHub connection must
+ *  not hold the leg container open for the rest of its lifetime. */
+export const GIT_UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** The upstream URL for one allowed git fetch request, or null. Allowed:
+ *  GET info/refs?service=git-upload-pack and POST git-upload-pack, both for
+ *  exactly `scopedRepo` (case-insensitive, as GitHub names are). Refused:
+ *  receive-pack, every other endpoint or method, extra query parameters, and
+ *  any other repo. */
+export function resolveGitUpstream(method: string, url: URL, scopedRepo: string): string | null {
+  const m = GIT_PATH_RE.exec(url.pathname);
+  if (!m) return null;
+  const [, owner, repo, endpoint] = m;
+  if (owner === "." || owner === ".." || repo === "." || repo === "..") return null;
+  if (`${owner}/${repo}`.toLowerCase() !== scopedRepo.toLowerCase()) return null;
+  if (endpoint === "info/refs") {
+    if (method !== "GET") return null;
+    const keys = [...url.searchParams.keys()];
+    if (keys.length !== 1 || url.searchParams.get("service") !== "git-upload-pack") return null;
+    return `${GITHUB_ORIGIN}/${owner}/${repo}.git/info/refs?service=git-upload-pack`;
+  }
+  if (method !== "POST" || url.search !== "") return null;
+  return `${GITHUB_ORIGIN}/${owner}/${repo}.git/git-upload-pack`;
+}
+
+async function handleGitProxy(
+  req: Request,
+  url: URL,
+  props: GateOutboundProps | undefined,
+  git: GitProxyDeps | undefined,
+): Promise<Response> {
+  // A public leg has no repo and no token in props: nothing to proxy with, so 403.
+  if (!git || !props?.repo || !props.gitToken) return new Response("forbidden", { status: 403 });
+  const upstream = resolveGitUpstream(req.method, url, props.repo);
+  if (!upstream) return new Response("forbidden", { status: 403 });
+
+  // GitHub git smart HTTP rejects `Bearer` (401); it takes Basic auth with the
+  // installation token as the password of user `x-access-token`.
+  const basic = btoa(`x-access-token:${props.gitToken}`);
+  const headers = new Headers({ authorization: `Basic ${basic}`, "user-agent": "fleet-gate" });
+  for (const name of FORWARD_REQUEST_HEADERS) {
+    const value = req.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  let res: Response;
+  try {
+    res = await git.fetch(upstream, {
+      method: req.method,
+      headers,
+      body: req.method === "POST" ? req.body : undefined,
+      // A redirect would move the fetch to whatever repo it names. Refuse it.
+      redirect: "manual",
+      signal: AbortSignal.timeout(GIT_UPSTREAM_TIMEOUT_MS),
+    });
+  } catch {
+    return new Response("upstream unavailable", { status: 502 });
+  }
+  if (res.status >= 300 && res.status < 400) return new Response("upstream redirect refused", { status: 502 });
+  // Only the body and content-type of a 200 reach the container. Upstream
+  // headers (set-cookie, request ids) and error bodies are dropped.
+  if (res.status !== 200) return new Response(null, { status: res.status });
+  return new Response(res.body, {
+    status: 200,
+    headers: { "content-type": res.headers.get("content-type") ?? "application/octet-stream" },
+  });
 }
 
 /** Serves one plain container request. Every branch either uses the bucket for
  *  an allow-listed key or returns a status without touching it. A PUT needs
  *  props whose resultKey equals the requested key exactly; missing props deny
- *  every write. */
+ *  every write. A git request needs props.repo, props.gitToken and the git deps. */
 export async function handleGateOutbound(
   req: Request,
   bucket: OutboundBucket,
   props?: GateOutboundProps,
+  git?: GitProxyDeps,
 ): Promise<Response> {
   const url = new URL(req.url);
+  if (url.host === GIT_PROXY_HOST) return handleGitProxy(req, url, props, git);
   if (url.host !== GATE_R2_HOST) return new Response("forbidden", { status: 403 });
 
   const target = resolveOutboundTarget(url.pathname);
