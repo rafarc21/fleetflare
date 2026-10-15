@@ -12,11 +12,19 @@ export function isGateRunnerRepo(raw: string | undefined, workRepoSlug: string):
   return parseGateRunnerRepos(raw).includes(workRepoSlug.toLowerCase());
 }
 
+/** Vitest shards when the gate block names none (#1015 spike, #715 comment 6188308109). */
+export const DEFAULT_VITEST_SHARDS = 8;
+
+/** Hard cap on legs per PR, merge-tree and vitest shards included (#715 comment
+ *  6194310999). Each leg is a container, so this bounds cost per PR. */
+export const MAX_LEGS_PER_PR = 24;
+
 export interface GateConfig {
   install: string;
   legs: string[];
   vitestCmd: string;
   pathRules: string[];
+  vitestShards: number;
 }
 
 function isStringArray(v: unknown): v is string[] {
@@ -25,7 +33,10 @@ function isStringArray(v: unknown): v is string[] {
 
 /** Returns null on anything malformed — never throws. A repo with no `gate`
  *  block, or a malformed one, gets the Workflow's own "skip, don't guess"
- *  behavior (Task 14), not a crash. */
+ *  behavior (Task 14), not a crash. `vitestShards` is optional (absent means
+ *  DEFAULT_VITEST_SHARDS), but when present it must be a positive integer. The
+ *  fixed legs (merge-tree + fleet.json legs) must leave room for at least one
+ *  vitest shard under MAX_LEGS_PER_PR. */
 export function parseGateConfig(fleetJson: unknown): GateConfig | null {
   if (typeof fleetJson !== "object" || fleetJson === null) return null;
   const gate = (fleetJson as Record<string, unknown>).gate;
@@ -35,7 +46,13 @@ export function parseGateConfig(fleetJson: unknown): GateConfig | null {
   if (!isStringArray(g.legs)) return null;
   if (typeof g.vitestCmd !== "string") return null;
   if (!isStringArray(g.pathRules)) return null;
-  return { install: g.install, legs: g.legs, vitestCmd: g.vitestCmd, pathRules: g.pathRules };
+  const vitestShards = g.vitestShards === undefined ? DEFAULT_VITEST_SHARDS : g.vitestShards;
+  if (typeof vitestShards !== "number" || !Number.isInteger(vitestShards) || vitestShards < 1) return null;
+  // merge-tree + the fixed legs + at least one vitest shard must fit the cap.
+  if (1 + g.legs.length + 1 > MAX_LEGS_PER_PR) return null;
+  return {
+    install: g.install, legs: g.legs, vitestCmd: g.vitestCmd, pathRules: g.pathRules, vitestShards,
+  };
 }
 
 /** Mirrors localci.sh's own skip-fleet-check path filter (localci.sh:378-381):

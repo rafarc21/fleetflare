@@ -16,10 +16,11 @@ export const GATE_R2_HOST = "gate-r2.internal";
 export const MAX_RESULT_BYTES = 1024 * 1024;
 
 const SEG = "[A-Za-z0-9._-]+";
-// Results: one distinct key per leg per run (Task 10/14 layout), never a
-// baseline path. Baselines: `<owner>/<repo>/baselines/<sha>-<lockhash>.tar`
-// (baseline.ts baselineTarballKey).
-const RUN_RESULT_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/shard-[a-z0-9-]+\\.json$`);
+// Results: one distinct key per leg per run, `runs/<pr>/<runId>/shard-<leg>.json`
+// (fanout.ts planLegs). The runId segment is the Workflow instance id, so a second
+// run on the same PR never reuses a write-once key. Never a baseline path.
+// Baselines: `<owner>/<repo>/baselines/<sha>-<lockhash>.tar` (baseline.ts baselineTarballKey).
+const RUN_RESULT_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/shard-[a-z0-9-]+\\.json$`);
 const BASELINE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/baselines/(${SEG})\\.tar$`);
 
 export interface OutboundTarget {
