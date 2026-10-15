@@ -8,6 +8,9 @@
 // #249's glm-lead route (anthropic-route.ts) also writes into this table
 // now, tagged `mode: "lead"` — see aggregateJuniorUsage's own doc comment
 // for why that mode is excluded from the adoption aggregate by default.
+// Issue #934: those lead rows get their own read below (aggregateLeadUsage,
+// the GET /studio/junior/usage/lead sibling route), so the table has two
+// disjoint aggregates over it — one per mode family.
 //
 // Only counts/ids/booleans ever cross into this module's own signatures —
 // never prompt/response text — so there is nothing here to redact, by
@@ -151,5 +154,55 @@ export async function handleJuniorUsageStats(
   const since = sinceParam !== null && Number.isFinite(Number(sinceParam)) ? Number(sinceParam) : 0;
 
   const aggregate = await aggregateJuniorUsage(env.DB, since);
+  return Response.json(aggregate);
+}
+
+export interface LeadUsageRow { studioId: string; calls: number; ok: number }
+export interface LeadUsageAggregate { rows: LeadUsageRow[] }
+
+/** Issue #934: the SIBLING of aggregateJuniorUsage, which deliberately
+ *  EXCLUDES lead rows (see its own doc comment above) — this one is exactly
+ *  those rows. One GROUP BY studio_id over `ts >= sinceTs`, `mode = 'lead'`
+ *  only, answering the two numbers the fleet ls INFER column needs: how
+ *  many lead-inference calls a studio made in the window, and how many of
+ *  them succeeded. `ok` is SUM(ok) — a positive count of successes, not a
+ *  COUNT of failures — so the route's answer stays additive if the ok-shape
+ *  ever changes (a third column can extend the row; a failures count could
+ *  only be subtracted against an unknown future shape). */
+export async function aggregateLeadUsage(db: D1Database, sinceTs: number): Promise<LeadUsageAggregate> {
+  const result = await db
+    .prepare(
+      `SELECT studio_id AS studioId, COUNT(*) AS calls, SUM(ok) AS ok
+       FROM junior_usage_log
+       WHERE ts >= ? AND mode = 'lead'
+       GROUP BY studio_id
+       ORDER BY studio_id`,
+    )
+    .bind(sinceTs)
+    .all<LeadUsageRow>();
+
+  return { rows: result.results ?? [] };
+}
+
+/**
+ * GET /studio/junior/usage/lead — Issue #934's read side, shaped exactly
+ * like handleJuniorUsageStats just above: Access-authenticated the same way
+ * every other /studio/* route is (verifyAccess, unconditionally first), 405
+ * on anything but GET, `?since=<ms epoch>` defaulting to 0 (all time). The
+ * CLI layer (a later step on this issue) always hands it `now - 30min` so
+ * `fleet ls` can render the INFER column from a single batched D1 read.
+ */
+export async function handleLeadUsageStats(
+  req: Request, env: Env, verifyAccessFn: typeof verifyAccess = verifyAccess,
+): Promise<Response> {
+  const authFailure = await verifyAccessFn(req, env);
+  if (authFailure) return authFailure;
+  if (req.method !== "GET") return new Response("method not allowed", { status: 405 });
+
+  const url = new URL(req.url);
+  const sinceParam = url.searchParams.get("since");
+  const since = sinceParam !== null && Number.isFinite(Number(sinceParam)) ? Number(sinceParam) : 0;
+
+  const aggregate = await aggregateLeadUsage(env.DB, since);
   return Response.json(aggregate);
 }
