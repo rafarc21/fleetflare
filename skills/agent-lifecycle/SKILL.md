@@ -22,26 +22,29 @@ prefix `exp-`.
 
 ## Creating an agent: the trap that wastes a day
 
-**A long `--prompt` silently fails.** It creates the worktree and the terminal and
-never starts a session. No transcript, nothing responds, no error.
+**A message is typed, not submitted.** A long message lands as an unsent draft
+block. A send that reports `accepted` (with `observation: "unsupported"`) means
+typed, not received. Follow every long message with a short one-liner to flush
+it, then confirm the agent actually started running.
+
+**Terminal handles go stale.** Re-read them fresh from
+`orca terminal list --worktree <selector> --json` every sweep. An instruction
+sent to a dead handle returns `Unknown terminal` and vanishes.
+
+To create the worktree:
 
 ```bash
-dev agent create --repo <repo> --name <n>-<slug> --from <integration-branch> \
-  --prompt "Read .context/BRIEFING.md in full before anything else and follow it."
+orca worktree create --repo id:<repo-id> --name <name> --no-parent --setup skip
 # wait for the worktree to exist, THEN write the briefing:
 cp <briefing> <worktree>/.context/BRIEFING.md
-dev send <id> "Read .context/BRIEFING.md now, it is in place"
-# then VERIFY a session opened before believing it
+orca terminal create --worktree <worktree> --title <name> \
+  --command "<agent start command>"
+orca terminal send --terminal <handle> --text "Read .context/BRIEFING.md in full before anything else and follow it."
+# then VERIFY a session opened before believing it — read the screen, not the
+# send's return value: orca terminal read --screen --json
 ```
 
 `.context/` is gitignored and exists for this.
-
-**`dev send` types, it does not submit.** A long message lands as an unsent paste
-block. `"ok": true` means typed, not received. Follow every long message with a short
-one-liner to flush it, then confirm the agent actually started running.
-
-**Terminal IDs go stale.** Re-read them fresh every sweep. An instruction sent to a
-dead ID returns `Unknown terminal_id` and vanishes.
 
 ## The hard rule on killing
 
@@ -56,14 +59,17 @@ Extract all the value first. Everything else hibernates.
 
 ## Hibernate instead
 
-Where the CLI has no archive verb, hibernation is:
+Hibernation in this fleet is `fleet destroy <id> --park`: stop the container but
+keep it resumable.
 
 1. Kill the process. **This frees the RAM, which is the real cost.**
 2. Delete `node_modules`. Roughly a third of a worktree, and one install restores it.
 3. **Keep the worktree, the branch and the transcript.**
 
-Resurrect with `cc --continue` in that worktree and the agent wakes knowing what it
-knew. An agent's context is its transcript, not its process.
+Resurrect with `fleet provision <id>` and the agent wakes knowing what it knew. An
+agent's context is its transcript, not its process. A session that cannot resume
+(corrupt, oversize, exits on `--continue`) takes `fleet provision|recycle <id>
+--fresh-session` instead.
 
 ## Full teardown, when the rule is satisfied
 
@@ -84,15 +90,22 @@ Stopping the conversation frees nothing. Worktree, server and branch stay alive.
 
 ```bash
 lsof -ti TCP:<agent-port-range> -sTCP:LISTEN | xargs -r kill
-dev remove <worktree>
-git -C <repo> worktree prune          # remove does not always prune
+fleet destroy <id>        # stops the container AND tears down the Orca worktree
+                          # and attach terminal (board #57)
+git -C <repo> worktree prune          # teardown does not always prune
 git -C <repo> branch -d <branch>
 ```
 
 The origin branch stays. It is the PR history and costs nothing locally.
 
-**`dev remove` is not instant.** Removing and immediately recreating the same name
-yields `<name>-v1` on a branch nobody asked for.
+**Teardown is best-effort.** Destroy can degrade (Orca absent, wedged, or erroring)
+without failing. When it does, finish by hand: `orca terminal close --terminal
+<handle>`, then `orca worktree rm --worktree "path:<abs>"`. A live `fleet attach`
+terminal reconnects and boots a new billing container — close it.
+
+**Destroy is not instant.** Destroying and immediately respawning the same id
+yields a 409 "studio exists": the registry entry survives destroy; the way back
+is `fleet provision <id>` on that same id.
 
 ## Reap on every sweep
 
