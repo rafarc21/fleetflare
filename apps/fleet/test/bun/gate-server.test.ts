@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { restoreBaseline, putResult, cloneUrl, runGate, readRunEnv, type FetchFn, type GateRun } from "../../container/gate-server";
+import { restoreBaseline, putResult, cloneUrl, runGate, readRunEnv, createRunServer, type FetchFn, type GateRun } from "../../container/gate-server";
 import type { ExecFn } from "../../container/gate-merge-tree";
 
 const containerDir = join(import.meta.dir, "..", "..", "container");
@@ -358,5 +358,96 @@ describe("Dockerfile.gate (image shape per the repo's reproducible-build rules)"
   it("starts gate-server.ts by absolute path, on port 8080", () => {
     expect(instructions).toContain('CMD ["bun", "run", "/app/gate-server.ts"]');
     expect(raw).toContain("ENV PORT=8080");
+  });
+});
+
+// The leg command blocks until release(), so a test can observe a leg mid-run.
+function heldWorld(opts: WorldOpts = {}) {
+  const world = fakeWorld(opts);
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const exec: ExecFn = async (cmd, args, execOpts) => {
+    if (cmd === "bash") await held;
+    return world.exec(cmd, args, execOpts);
+  };
+  return { exec, calls: world.calls, release };
+}
+
+const RUN_ENV = {
+  GATE_REPO: RUN.repo, GATE_COMMIT: RUN.commit, GATE_LEG: RUN.leg, GATE_INSTALL_CMD: RUN.installCmd,
+  GATE_LEG_CMD: RUN.legCmd, GATE_RESULT_KEY: RUN.resultKey, GATE_BASE_REF: RUN.baseRef, GATE_PR: RUN.pr,
+};
+type Handler = (req: Request) => Promise<Response>;
+const post = (handler: Handler) => handler(new Request("http://container/run", { method: "POST" }));
+const get = (handler: Handler) => handler(new Request("http://container/result"));
+const cloneCount = (calls: string[][]) => calls.filter((c) => c[0] === "git" && c.includes("clone")).length;
+
+// Polls GET /result until the leg stops answering 202. Bounded: a stuck run fails the test.
+async function untilDone(handler: Handler): Promise<Response> {
+  for (let i = 0; i < 200; i++) {
+    const res = await get(handler);
+    if (res.status !== 202) return res;
+    await Bun.sleep(5);
+  }
+  throw new Error("leg never finished");
+}
+
+describe("createRunServer: single-flight /run, polled /result", () => {
+  it("answers POST /run at once with 202 running while the leg is still going", async () => {
+    const world = heldWorld();
+    const handler = createRunServer(RUN_ENV, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir() });
+    const res = await post(handler);
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ state: "running" });
+    world.release();
+  });
+
+  it("a repeat POST /run never starts a second run in the same container", async () => {
+    const world = heldWorld();
+    const handler = createRunServer(RUN_ENV, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir() });
+    await post(handler);
+    const again = await post(handler);
+    expect(again.status).toBe(202);
+    await Bun.sleep(10);
+    expect(cloneCount(world.calls)).toBe(1);
+
+    world.release();
+    await untilDone(handler);
+    const afterDone = await post(handler);
+    expect(afterDone.status).toBe(200);
+    expect(cloneCount(world.calls)).toBe(1);
+  });
+
+  it("GET /result answers 202 while running, then the leg body with 200, and still writes the R2 result", async () => {
+    const world = heldWorld();
+    const r2 = fakeR2();
+    const handler = createRunServer(RUN_ENV, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    await post(handler);
+    const running = await get(handler);
+    expect(running.status).toBe(202);
+    expect(await running.json()).toEqual({ state: "running" });
+
+    world.release();
+    const done = await untilDone(handler);
+    expect(done.status).toBe(200);
+    expect(await done.json()).toEqual({ state: "success" });
+    expect(r2.puts.map((p) => p.key)).toEqual([RUN.resultKey]);
+  });
+
+  it("carries a failed leg's own state and description through GET /result", async () => {
+    const world = heldWorld({ legCode: 1 });
+    const handler = createRunServer(RUN_ENV, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir() });
+    await post(handler);
+    world.release();
+    const done = await untilDone(handler);
+    expect(await done.json()).toEqual({ state: "failure", description: "lint exited 1" });
+  });
+
+  it("GET /result before any POST /run is a 404, and starts nothing", async () => {
+    const world = heldWorld();
+    const handler = createRunServer(RUN_ENV, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir() });
+    expect((await get(handler)).status).toBe(404);
+    expect(cloneCount(world.calls)).toBe(0);
+    world.release();
   });
 });

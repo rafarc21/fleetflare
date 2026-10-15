@@ -169,16 +169,36 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
     : { state: "failure", description: `${req.leg} exited ${test.code}`, ...tail };
 }
 
+export type RunOutcome = { state: GateBody["state"]; description?: string };
+
+/** The container's HTTP surface. One leg per container: POST /run starts it
+ *  in the background and answers at once, so no request is held open for the
+ *  whole leg. A repeat POST /run never starts a second run (a second clone
+ *  would hit the first run's /workspace/repo). GET /result polls the leg:
+ *  202 while it runs, 200 with its outcome once it has finished. */
+export function createRunServer(env: Record<string, string | undefined>, deps: GateDeps) {
+  let outcome: RunOutcome | undefined;
+  let started = false;
+  const running = () => Response.json({ state: "running" }, { status: 202 });
+
+  return async function handle(req: Request): Promise<Response> {
+    const { pathname } = new URL(req.url);
+    if (pathname === "/run" && req.method === "POST") {
+      if (!started) {
+        started = true;
+        void runGate(readRunEnv(env), deps).then((done) => { outcome = done; });
+      }
+      return outcome ? Response.json(outcome) : running();
+    }
+    if (pathname === "/result" && req.method === "GET") {
+      if (!started) return new Response("no run started", { status: 404 });
+      return outcome ? Response.json(outcome) : running();
+    }
+    return new Response("not found", { status: 404 });
+  };
+}
+
 // Only when run directly: importing this module (the tests do) must not bind a port.
 if (import.meta.main) {
-  Bun.serve({
-    port: PORT,
-    async fetch(req) {
-      if (new URL(req.url).pathname === "/run" && req.method === "POST") {
-        const outcome = await runGate(readRunEnv(process.env), { exec, fetchFn: fetch, workdir: WORKDIR });
-        return Response.json(outcome);
-      }
-      return new Response("not found", { status: 404 });
-    },
-  });
+  Bun.serve({ port: PORT, fetch: createRunServer(process.env, { exec, fetchFn: fetch, workdir: WORKDIR }) });
 }

@@ -17,6 +17,7 @@ import {
 } from "./fixtures/rate-limit-panes";
 import { REAL_PERMISSION_PROMPT_TAIL_PANE, REAL_PERMISSION_PROMPT_UNKNOWN_FOOTER_PANE } from "./fixtures/activity-panes";
 import { SURVEY_OVERLAY_PANE, RECOVERED_IDLE_PANE, LEAD_NUMBERED_LIST_PANE } from "./fixtures/survey-panes";
+import { methodBody } from "./helpers/src-pin";
 
 const NOW = new Date("2026-09-24T12:20:00.000Z");
 const STUDIO_ID = "fleetflare--maestro";
@@ -120,11 +121,7 @@ describe("single-flight: one wake in flight per studio", () => {
 
 describe("StudioDO source pins (#136)", () => {
   const src: string = env.TEST_STUDIO_DO_SRC;
-  const body = (sig: string) => {
-    const start = src.indexOf(sig);
-    expect(start).toBeGreaterThan(-1);
-    return src.slice(start, src.indexOf("\n  }\n", start));
-  };
+  const body = (sig: string) => methodBody(src, sig);
 
   it("every wake path goes through the one per-studio lock", () => {
     for (const sig of [

@@ -17,9 +17,14 @@ const READY_TIMEOUT_MS = 180_000;
 const READY_POLL_MS = 250;
 const PORT_RETRY_MS = 500;
 const PORT_RETRY_BUDGET_MS = 60_000;
-/** One leg's ceiling on the /run request. A leg past it is an error, and the
- *  finally-destroy kills its container, so nothing keeps billing. */
+/** One leg's ceiling, counted from its start. A leg past it is an error, and
+ *  the finally-destroy kills its container, so nothing keeps billing. */
 export const LEG_RUN_TIMEOUT_MS = 25 * 60_000;
+/** How often a running leg is polled for its result. */
+const POLL_MS = 5_000;
+/** Ceiling on one request to the container. A request past it is a failed
+ *  attempt, retried; the leg itself is bounded by LEG_RUN_TIMEOUT_MS. */
+const REQUEST_TIMEOUT_MS = 15_000;
 const LEG_EXCEEDED = "leg exceeded 25 min";
 
 export type LegResult = { state: "success" | "failure" | "error"; description?: string };
@@ -55,8 +60,6 @@ export interface RunLegDeps {
   outbound: OutboundBinding;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
-  /** The /run deadline. Defaults to AbortSignal.timeout; injected in tests. */
-  timeoutSignal?: (ms: number) => AbortSignal;
 }
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -82,8 +85,7 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
     if (!(await waitUntilRunning(c, now, sleep))) {
       return { state: "error", description: "gate container did not start within 180 s" };
     }
-    const signal = (deps.timeoutSignal ?? ((ms: number) => AbortSignal.timeout(ms)))(LEG_RUN_TIMEOUT_MS);
-    return await postRun(c, now, sleep, signal);
+    return await runOnServer(c, now, sleep);
   } catch (err) {
     return { state: "error", description: `gate container failed: ${errorText(err)}` };
   } finally {
@@ -109,36 +111,46 @@ async function waitUntilRunning(
   return true;
 }
 
-/** The server inside the container may bind a moment after `running` turns
- *  true. A refused connection is retried every 500 ms for at most 60 s. */
-async function postRun(
+/** Starts the leg in the container and polls it to its result. POST /run
+ *  answers at once, so no request is held for the whole leg: the container
+ *  runs the leg once, and a repeat POST never starts a second run. */
+async function runOnServer(
   c: GateContainer,
   now: () => number,
   sleep: (ms: number) => Promise<void>,
-  signal: AbortSignal,
 ): Promise<LegResult> {
   const port = c.getTcpPort(GATE_CONTAINER_PORT);
-  const started = now();
+  const legStarted = now();
+
+  // The server may bind a moment after `running` turns true. A refused
+  // connection is retried every 500 ms for at most 60 s.
+  const postStarted = now();
   for (;;) {
     let res: Response;
     try {
-      res = await port.fetch("http://container/run", { method: "POST", signal });
+      res = await port.fetch("http://container/run", { method: "POST", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     } catch (err) {
-      // An aborted request is the deadline, not a refused port: never retry it.
-      if (signal.aborted) return { state: "error", description: LEG_EXCEEDED };
-      if (now() - started >= PORT_RETRY_BUDGET_MS) {
+      if (now() - postStarted >= PORT_RETRY_BUDGET_MS) {
         return { state: "error", description: `gate server unreachable: ${errorText(err)}` };
       }
       await sleep(PORT_RETRY_MS);
       continue;
     }
-    if (!res.ok) return { state: "error", description: `gate server HTTP ${res.status}` };
+    if (res.status === 200) return (await res.json()) as LegResult;
+    if (res.status === 202) break;
+    return { state: "error", description: `gate server HTTP ${res.status}` };
+  }
+
+  // 202 from /run: the leg is running. Poll until it answers 200.
+  for (;;) {
+    await sleep(POLL_MS);
+    if (now() - legStarted >= LEG_RUN_TIMEOUT_MS) return { state: "error", description: LEG_EXCEEDED };
     try {
-      return (await res.json()) as LegResult;
-    } catch (err) {
-      // The deadline can fire while the body is still arriving.
-      if (signal.aborted) return { state: "error", description: LEG_EXCEEDED };
-      throw err;
+      const res = await port.fetch("http://container/result", { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      if (res.status === 200) return (await res.json()) as LegResult;
+      // 202: still running. Any other status is retried like a thrown poll.
+    } catch {
+      // A failed poll is retried; only the leg deadline ends the leg.
     }
   }
 }
