@@ -18,7 +18,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { cmdLs, fetchLeadInferUsage, formatTable, type Credentials } from "../../cli/fleet";
 import { lsJsonRows } from "../../cli/readiness-format";
 import {
-  formatInfer, isLeadInferenceBlocked, INFER_WINDOW_MS, INFER_BLOCKED_MIN_CALLS,
+  formatInfer, isLeadInferenceBlocked, INFER_WINDOW_MS,
   type LeadInferUsage,
 } from "../../cli/infer-format";
 import type { OrcaDeps } from "../../cli/orca-workspace";
@@ -303,11 +303,12 @@ describe("lsJsonRows — the infer decoration (#934)", () => {
 
 // The pure half called DIRECTLY, not through formatTable. The wiring pins
 // above prove the column renders these verdicts; these pins prove the
-// functions themselves, including the three edges no wiring test reaches:
+// functions themselves, including the two edges no wiring test reaches:
 // the floored percent (47.9% must read 47%, never 48% rounded up — an
-// inflated ok-rate is the exact false-clean reading #934 exists to kill),
-// the exact >=10 floor boundary (10 calls fires; the wiring tests only
-// prove 9 does not), and the constants' values themselves. A pure function
+// inflated ok-rate is the exact false-clean reading #934 exists to kill)
+// and the exact >=10 floor boundary (10 calls fires; the wiring tests only
+// prove 9 does not). The constants' values are pinned in the behavior
+// describe at the bottom — where they act, not as copied literals. A pure function
 // failing here names itself in the failure; failing through formatTable it
 // has to be traced first.
 describe("formatInfer — pure (#934)", () => {
@@ -353,9 +354,38 @@ describe("isLeadInferenceBlocked — pure (#934)", () => {
   });
 });
 
-describe("constants (#934)", () => {
-  test("INFER_WINDOW_MS is 30 minutes; INFER_BLOCKED_MIN_CALLS is 10", () => {
-    expect(INFER_WINDOW_MS).toBe(30 * 60 * 1000);
-    expect(INFER_BLOCKED_MIN_CALLS).toBe(10);
+describe("constants, pinned through behavior (#934)", () => {
+  // The window and the threshold exist to be READ by other code (the fetch's
+  // since= cutoff, the blocked gate), so this pins them where they act — a
+  // literal-to-literal copy of the export would be the tautological shape
+  // test-lies-check refuses (and would catch nothing if the value drifted).
+
+  // The fetch describe above pins the WIRING — since = nowMs -
+  // INFER_WINDOW_MS, so the route's window and whatever the export says can
+  // never drift apart — but that pin stays green through any change to the
+  // constant's VALUE. This is the magnitude pin: with now pinned, exactly
+  // 30 minutes back is a pinned string too (1770000000000 - 1800000).
+  test("the fetch's since= cutoff is exactly 30 minutes back", async () => {
+    const NOW_MS = 1770000000000; // the fetch describe's own pinned now
+    const calls: Array<{ url: string }> = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      calls.push({ url: String(input) });
+      return new Response(JSON.stringify({ rows: [] }));
+    }) as unknown as typeof fetch;
+    await fetchLeadInferUsage(CREDS, NOW_MS, fetchImpl);
+    // 30 minutes in ms, spelled as the arithmetic — never the imported
+    // constant copied back, which could not catch a drift.
+    expect(calls[0].url).toBe(
+      `http://127.0.0.1:1/studio/junior/usage/lead?since=${NOW_MS - 30 * 60 * 1000}`,
+    );
+  });
+
+  // The pure describe above pins the same two calls through the gate
+  // function; named here because this is the threshold's own meaning: 9
+  // calls says "not trying" (idle or Claude-led), the 10th says "trying
+  // and failing" — and only then may the marker speak.
+  test("the blocked gate turns on at exactly the 10th call", () => {
+    expect(isLeadInferenceBlocked({ calls: 10, ok: 4 })).toBe(true);
+    expect(isLeadInferenceBlocked({ calls: 9, ok: 1 })).toBe(false);
   });
 });
