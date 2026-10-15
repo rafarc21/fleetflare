@@ -1,5 +1,7 @@
 # apps/fleet/container/Dockerfile.gate — GateRunnerDO's image (#715 Phase 1).
-# Not Dockerfile.studio: no Claude, no tmux, no chromium, no sandbox base.
+# Runs fleetflare's real lanes (#1011): node for vitest (`#!/usr/bin/env node`),
+# tmux and /usr/local/bin/chromium for the bun-test lane (same toolset as
+# scripts/localci/Dockerfile). No Rust: fleetflare has none.
 # Plain bun base, same shape Dockerfile.deploy already uses, and the same
 # reproducible-build rules its header states (scripts/image-repro-check.sh):
 #   - SOURCE_DATE_EPOCH fixes the image's created/history times; bump never.
@@ -24,22 +26,32 @@ ARG SOURCE_DATE_EPOCH
 ARG APT_SNAPSHOT=20260929T000000Z
 COPY --from=src /src/base/ /
 
-# git: anonymous clone and merge-tree. build-essential: the linker cargo needs.
+# git: anonymous clone and merge-tree. tmux: the bun-test lane's wake-cmd
+# drives a real tmux server. xz-utils: unpacks the node tarball below.
 RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
     && apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates curl build-essential \
+      git ca-certificates curl xz-utils tmux \
     && repro-seal end
 
-# rustup-init 1.29.1: checksum-verified before it runs (never a curl | sh).
-# Toolchain 1.91.0 = cargo-nextest 0.9.148's rust-version; pinned, not "stable".
+# Node 22.23.3 (LTS): checksum-verified before it is unpacked (never a curl | sh).
 RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
-    && curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init \
-    && echo "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71  /tmp/rustup-init" | sha256sum -c - \
-    && chmod +x /tmp/rustup-init \
-    && /tmp/rustup-init -y --profile minimal --default-toolchain 1.91.0 \
-    && /root/.cargo/bin/cargo install cargo-nextest --version 0.9.148 --locked \
+    && curl -fsSL -o /tmp/node-v22.23.3-linux-x64.tar.xz https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.xz \
+    && echo "df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de  /tmp/node-v22.23.3-linux-x64.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/node-v22.23.3-linux-x64.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
+    && node --version \
     && repro-seal end
-ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Chromium: the same pinned Playwright build scripts/localci/Dockerfile uses,
+# symlinked to the exact path the ego-browser shim launches. --with-deps
+# apt-installs the libs that build needs.
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && mkdir -p /opt/pw && cd /opt/pw \
+    && bun x playwright@1.63.0 install chromium --with-deps \
+    && ln -sf /root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome /usr/local/bin/chromium \
+    && /usr/local/bin/chromium --version \
+    && tmux -V \
+    && rm -rf /var/lib/apt/lists/* \
+    && repro-seal end
 
 COPY --from=src /src/app/ /
 ENV PORT=8080

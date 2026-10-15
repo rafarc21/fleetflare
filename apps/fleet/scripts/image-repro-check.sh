@@ -1,7 +1,7 @@
 #!/bin/bash
 # Issue #84 — are the container images reproducible?
 #
-#   scripts/image-repro-check.sh [agent|deploy|studio ...]   (default: all three)
+#   scripts/image-repro-check.sh [agent|deploy|studio|gate ...]   (default: all four)
 #
 # wrangler (4.141+, containers deploy) rebuilds each image and skips the push
 # ("no changes") only when the build lands on the image id it pushed before.
@@ -96,6 +96,7 @@ spec() {
     agent) echo "container/Dockerfile|container|" ;;
     deploy) echo "container/Dockerfile.deploy|container|" ;;
     studio) echo "container/Dockerfile.studio|.|ENABLE_CAVEMAN_PLUGIN=false" ;;
+    gate) echo "container/Dockerfile.gate|container|" ;;
     *) return 1 ;;
   esac
 }
@@ -168,10 +169,10 @@ PY
 }
 
 NAMES=("$@")
-[[ ${#NAMES[@]} == 0 ]] && NAMES=(agent deploy studio)
+[[ ${#NAMES[@]} == 0 ]] && NAMES=(agent deploy studio gate)
 rc=0
 for name in "${NAMES[@]}"; do
-  s=$(spec "$name") || { echo "unknown image '$name' (agent|deploy|studio)" >&2; exit 2; }
+  s=$(spec "$name") || { echo "unknown image '$name' (agent|deploy|studio|gate)" >&2; exit 2; }
   IFS='|' read -r df ctx barg <<< "$s"
   ta="fleet-repro-check:$name-a-$$"; tb="fleet-repro-check:$name-b-$$"
   TAGS+=("$ta" "$tb")

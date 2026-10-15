@@ -11,7 +11,7 @@ import { join } from "node:path";
  * true after the next edit.
  */
 const CONTAINER = join(import.meta.dir, "..", "..", "container");
-const FILES = ["Dockerfile", "Dockerfile.deploy", "Dockerfile.studio"];
+const FILES = ["Dockerfile", "Dockerfile.deploy", "Dockerfile.studio", "Dockerfile.gate"];
 
 type Instr = { op: string; args: string; stage: number };
 
@@ -89,7 +89,7 @@ describe.each(docs)("$f", ({ f, ins }) => {
   });
 });
 
-test("all three images share one SOURCE_DATE_EPOCH and one APT_SNAPSHOT", () => {
+test("all images share one SOURCE_DATE_EPOCH and one APT_SNAPSHOT", () => {
   const pick = (re: RegExp) => new Set(docs.map(({ src }) => src.match(re)?.[1]));
   for (const values of [pick(/^ARG SOURCE_DATE_EPOCH=(\d+)$/m), pick(/^ARG APT_SNAPSHOT=(\S+)$/m)]) {
     expect(values.has(undefined)).toBe(false);
