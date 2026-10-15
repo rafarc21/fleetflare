@@ -33,6 +33,7 @@ import {
   LEAK_DENYLIST_PATH, LEAK_GATE_OFF, LEAK_GATE_ON, OPS_DENYLIST_PATH, denylistFileContent,
 } from "../src/leak-gate";
 import { fakeBlueprintFiles } from "./helpers/blueprint-fixture";
+import { methodBody } from "./helpers/src-pin";
 
 const REPO_SLUG = "acme-org/websites";
 
@@ -923,11 +924,7 @@ describe("runProvision wiring — rescue-branch discovery runs after the clone, 
   // both ports route through it. Repointing either one fails this test.
   it("do.ts: rescue (syncDeps) and discovery (deps) both route through the one rescueTarget decision", () => {
     const src: string = (env as unknown as { TEST_STUDIO_DO_SRC: string }).TEST_STUDIO_DO_SRC;
-    const body = (sig: string) => {
-      const start = src.indexOf(sig);
-      expect(start).toBeGreaterThan(-1);
-      return src.slice(start, src.indexOf("\n  }", start));
-    };
+    const body = (sig: string) => methodBody(src, sig);
     expect(src.split("resolveRescueTarget(").length - 1).toBe(1);
     expect(body("  private rescueTarget(")).toContain("resolveRescueTarget(");
     expect(body("  private deps(): ProvisionDeps {"))

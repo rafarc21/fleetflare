@@ -13,6 +13,7 @@ import { LIVENESS_RULE } from "../src/studio/recycle-cost";
 import { sbContainerBooting } from "../src/studio/sandbox-api";
 import type { SessionSyncDeps, SessionSyncStorage } from "../src/studio/session-sync";
 import type { StudioStatus } from "../src/studio/types";
+import { methodBody } from "./helpers/src-pin";
 
 // ---------------------------------------------------------------------------
 // Issue #104, observation half. `fleet destroy` had NO probe: on a wedged
@@ -331,11 +332,7 @@ describe("statusDetailWithStorage — what /status now answers", () => {
 });
 
 describe("StudioDO wiring (source-pinned — the class cannot be constructed here)", () => {
-  const body = (sig: string) => {
-    const start = doSrc.indexOf(sig);
-    expect(start).toBeGreaterThan(-1);
-    return doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
-  };
+  const body = (sig: string) => methodBody(doSrc, sig);
 
   it("onStop runs the library's own onStop first, then records the stop", () => {
     const b = body("  async onStop(");
