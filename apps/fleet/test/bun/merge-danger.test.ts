@@ -197,6 +197,21 @@ describe("classify — two-way-door cases", () => {
   });
 });
 
+describe("gate-runner paths (#715)", () => {
+  test("apps/fleet/src/gate/do.ts is one-way", () => {
+    expect(classify(["apps/fleet/src/gate/do.ts"]).oneWay).toBe(true);
+  });
+  test("apps/fleet/src/gate/outbound-handler.ts is one-way", () => {
+    expect(classify(["apps/fleet/src/gate/outbound-handler.ts"]).oneWay).toBe(true);
+  });
+  test("apps/fleet/scripts/gate/measure-shard-timing.ts is one-way", () => {
+    expect(classify(["apps/fleet/scripts/gate/measure-shard-timing.ts"]).oneWay).toBe(true);
+  });
+  test("a file outside both new globs is unaffected", () => {
+    expect(classify(["apps/fleet/src/gate-unrelated-name.ts"]).oneWay).toBe(false);
+  });
+});
+
 describe("the glob table itself", () => {
   test("every entry carries a non-trivial reason", () => {
     for (const { pattern, why } of ONE_WAY_GLOBS) {
