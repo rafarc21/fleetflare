@@ -526,18 +526,18 @@ describe("handleFleetAnthropicMessages — stream idle timeout and failure reaso
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
     let enqueued = 0;
     const upstream = new ReadableStream<Uint8Array>({
-      // One SSE frame per pull, with a 60ms gap before each: every gap is
-      // under the 300ms idle limit, but 8 pulls x 60ms ~ 480ms total is over
+      // One SSE frame per pull, with a 40ms gap before each: every gap is
+      // under the 200ms idle limit, but 8 pulls x 40ms ~ 320ms total is over
       // it — only per-chunk re-arming lets this stream through.
       async pull(controller) {
         if (enqueued >= chunks.length) { controller.close(); return; }
-        await sleep(60);
+        await sleep(40);
         if (enqueued < chunks.length - 1) controller.enqueue(enc.encode(`data: ${JSON.stringify(chunks[enqueued])}\n\n`));
         else controller.enqueue(enc.encode(`data: ${JSON.stringify(chunks[enqueued])}\n\ndata: [DONE]\n\n`));
         enqueued++;
       },
     });
-    const { token, rows, e } = await streamSetup(upstream, { LEAD_STREAM_IDLE_MS: "300" } as Partial<Env>);
+    const { token, rows, e } = await streamSetup(upstream, { LEAD_STREAM_IDLE_MS: "200" } as Partial<Env>);
 
     const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
     expect(r.status).toBe(200);
