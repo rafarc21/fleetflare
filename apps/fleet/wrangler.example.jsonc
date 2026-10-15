@@ -175,6 +175,11 @@
   "r2_buckets": [
     { "binding": "STUDIO_ARCHIVE", "bucket_name": "<YOUR_R2_BUCKET_NAME>" }
   ],
+  // #715 gate runner (Phase 1): the Workflow that fans a PR's gate legs out
+  // to GateRunnerDO containers. Class lands with the gate-runner tasks.
+  "workflows": [
+    { "name": "gate", "binding": "GATE_WORKFLOW", "class_name": "GateWorkflow" }
+  ],
   "durable_objects": {
     // Issue #379: wrangler >= 4.141 defaults Durable Object code updates to
     // "deferred" (a live instance keeps the OLD code for up to 5 minutes).
@@ -184,14 +189,16 @@
       { "name": "AGENT", "class_name": "AgentDO" },
       { "name": "DEPLOY", "class_name": "DeployDO" },
       { "name": "STUDIO", "class_name": "StudioDO" },
-      { "name": "STUDIO_BIG", "class_name": "StudioBigDO" }
+      { "name": "STUDIO_BIG", "class_name": "StudioBigDO" },
+      { "name": "GATE_RUNNER", "class_name": "GateRunnerDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["AgentDO"] },
     { "tag": "v2", "new_sqlite_classes": ["DeployDO"] },
     { "tag": "v3", "new_sqlite_classes": ["StudioDO"] },
-    { "tag": "v4", "new_sqlite_classes": ["StudioBigDO"] }
+    { "tag": "v4", "new_sqlite_classes": ["StudioBigDO"] },
+    { "tag": "v5", "new_sqlite_classes": ["GateRunnerDO"] }
   ],
   "containers": [
     {
@@ -238,6 +245,21 @@
       "instance_type": "standard-4",
       "max_instances": 2,
       "rollout_step_percentage": 100
+    },
+    {
+      // #715 gate runner. "durable_object" is fixed at class creation and
+      // cannot change later; "default" has no snapshot or outbound-handler
+      // support, which Tasks 11/16 need. Wrangler 4.141 accepts only
+      // name/class_name/scheduling_policy/images/observability/ssh/unsafe
+      // for this policy: image, instance_type, max_instances and
+      // rollout_step_percentage are rejected at config-read time, so sizing
+      // is not set here. Planned range, not yet measured (Task 0a not run):
+      // 15-18 containers per PR, operator to finalize.
+      "class_name": "GateRunnerDO",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "gate": { "dockerfile": "./container/Dockerfile.gate", "build_context": "." }
+      }
     }
   ]
 }
