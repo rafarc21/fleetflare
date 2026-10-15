@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { parseCliArgs, CLI_USAGE, VERBS, renderHelp } from "../src/studio/cli-args";
-import { RETRO_TASK_TEMPLATE } from "../src/studio/retro-template";
 
 // Fleet Spawn P3, Task 3: the Mac CLI's argv parser — see cli-args.ts's own
 // header for why this pure logic lives outside cli/fleet.ts (which is never
