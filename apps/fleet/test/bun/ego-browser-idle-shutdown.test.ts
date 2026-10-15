@@ -15,6 +15,10 @@ import { waitFor } from "./helpers/poll";
 
 const IDLE_MS = "100";
 
+// "Well past the idle window" for the negative test: 8x, so a naive
+// unconditional timer would have fired long ago, never marginally past.
+const WELL_PAST_IDLE_MS = 8 * Number(IDLE_MS);
+
 function readPid(home: string): number {
   const pidFile = join(home, "daemon.pid");
   return Number(readFileSync(pidFile, "utf8").trim());
@@ -71,9 +75,16 @@ describe("ego-browser daemon idle shutdown", () => {
         expect(round1.stdout.trim()).toBe('{"retained":[],"closed":["p1"]}');
 
         const pidFile = join(home, "daemon.pid");
-        expect(existsSync(pidFile)).toBe(true);
-        const pid = readPid(home);
-        expect(processAlive(pid)).toBe(true);
+
+        // Board #317: round1 closed its only space, so the 100ms idle timer
+        // is already armed in the separate daemon process -- a loaded host
+        // can deschedule this test past the window and the daemon
+        // legitimately removes daemon.pid before we read it. Prove the pid
+        // from append-only daemon.log (survives shutdown) instead of live
+        // state, same shape as ego-browser-idle-shutdown-launch-failure.test.ts.
+        const started = readFileSync(join(home, "daemon.log"), "utf8").match(/daemon started, pid (\d+)/);
+        expect(started).not.toBeNull();
+        const pid = Number(started![1]);
 
         // Wait comfortably past the idle window (100ms) for the daemon's
         // own timer to fire and exit.
@@ -112,7 +123,7 @@ describe("ego-browser daemon idle shutdown", () => {
 
         // Well past the 100ms idle window -- a naive unconditional timer
         // would have killed the daemon by now.
-        await new Promise((r) => setTimeout(r, 800));
+        await new Promise((r) => setTimeout(r, WELL_PAST_IDLE_MS));
         expect(existsSync(pidFile)).toBe(true);
         expect(processAlive(pid)).toBe(true);
 
