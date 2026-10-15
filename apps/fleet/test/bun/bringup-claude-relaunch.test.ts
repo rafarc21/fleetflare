@@ -816,7 +816,9 @@ REAL("relaunch harness — one private server, a lead the kernel names claude (i
     s.launchClaude();
     const before = s.claudePids();
     expect(before.length).toBe(1);
-    Bun.sleepSync(3000);
+    // The relaunch bug fired within ~300ms when present (sweep 48 F2);
+    // 1000ms still proves the lead is the same process, not relaunched.
+    Bun.sleepSync(1000);
     expect(s.claudePids()).toEqual(before);
     expect(s.paneCommand()).toBe("claude");
   }, T);
