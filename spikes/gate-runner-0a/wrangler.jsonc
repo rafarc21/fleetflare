@@ -1,0 +1,26 @@
+{
+  // THROWAWAY spike. Not apps/fleet's wrangler. Do not reuse tech-fleet names.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gate-spike-0a",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+
+  "durable_objects": {
+    "bindings": [{ "name": "GATE_SPIKE", "class_name": "GateSpikeDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GateSpikeDO"] }],
+
+  // One DO class, durable_object scheduling policy: each DO instance owns its container.
+  // Set at class creation; changing it later means a new class.
+  // Instance size is passed per start() call (standard-2 in src/index.ts).
+  // DO-managed containers do not accept top-level image/instance_type/max_instances.
+  "containers": [
+    {
+      "name": "gate-spike-0a",
+      "class_name": "GateSpikeDO",
+      "scheduling_policy": "durable_object",
+      "images": { "baseline": { "dockerfile": "./Dockerfile" } }
+    }
+  ]
+}
