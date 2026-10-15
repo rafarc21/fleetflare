@@ -11,7 +11,7 @@
 // test/bun/install-cache-security-parse.test.ts, not here.
 import { describe, it, expect, vi } from "vitest";
 import {
-  dirSlug, nodeModulesPresentCmd,
+  dirSlug,
   INSTALL_CACHE_URL_ENV, INSTALL_CACHE_RESTORE_BUDGET_MS,
   runInstallCacheRestore, type InstallCacheRestoreDeps,
   runInstallCacheSaveTick, type InstallCacheSaveDeps, type InstallCacheSaveStorage,
