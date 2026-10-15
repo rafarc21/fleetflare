@@ -206,7 +206,13 @@ export function __resetExceptionRateCapForTests(): void {
  * `keep` rows: the subquery returns no row, so `ts < NULL` is never true in
  * SQL — nothing gets deleted, which is correct (nothing to prune yet).
  */
-export async function pruneWorkerExceptions(db: D1Database, keep: number = 1000): Promise<void> {
+
+/** Row cap worker_exceptions is pruned to — STACK_HEAD's own rationale
+ *  ("no use keeping forever at 1000+ rows") is the sizing: the table stores
+ *  recent exception diagnostics for the fleet UI, not a durable log. */
+const EXCEPTIONS_KEEP_ROWS = 1000;
+
+export async function pruneWorkerExceptions(db: D1Database, keep: number = EXCEPTIONS_KEEP_ROWS): Promise<void> {
   try {
     await db
       .prepare(

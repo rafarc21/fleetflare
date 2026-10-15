@@ -23,6 +23,13 @@ import { taskAssignees } from "../board/types";
 import type { Env } from "../env";
 
 const QUALITY_WINDOW_DAYS = 14;
+
+/** One page of closed PRs — GitHub's own maximum of 100 per page. The fetch
+ *  is deliberately single-page (matching github/api.ts's listOpenPullNumbers
+ *  posture); more than this many closed PRs in the window truncates silently,
+ *  so the cap is named rather than bare. */
+const CLOSED_PULLS_PAGE_SIZE = 100;
+
 const GITHUB_API = "https://api.github.com";
 
 /** GET + JSON.parse, GitHub-API shaped — thin wrapper over the shared
@@ -98,7 +105,7 @@ export async function collectOutcomes(env: Env): Promise<PrOutcome[]> {
   const token = await repoTokenMinter(env)(repo);
   const cutoff = Date.now() - QUALITY_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
-  const params = new URLSearchParams({ state: "closed", sort: "updated", direction: "desc", per_page: "100" });
+  const params = new URLSearchParams({ state: "closed", sort: "updated", direction: "desc", per_page: String(CLOSED_PULLS_PAGE_SIZE) });
   const raw = await ghGet<RawPull[]>(token, `${GITHUB_API}/repos/${repo}/pulls?${params.toString()}`, `list closed pulls for ${repo}`);
   const recent = raw.filter((p) => p.closed_at !== null && Date.parse(p.closed_at) >= cutoff);
 
