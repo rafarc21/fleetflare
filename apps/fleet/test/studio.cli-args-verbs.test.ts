@@ -327,6 +327,7 @@ describe("fleet help", () => {
       // collapsed verb name alone is still a genuine substring of every one
       // of its rendered lines, which is all this test is pinning.
       if (cmd.startsWith("models-")) { expect(help).toContain("fleet models"); continue; }
+      if (cmd.startsWith("gate-")) { expect(help).toContain("fleet gate"); continue; }
       const two = ["task-", "memory-", "accounts-"].find((prefix) => cmd.startsWith(prefix));
       const word = two ? `fleet ${two.slice(0, -1)} ${cmd.slice(two.length)}` : `fleet ${cmd}`;
       expect(help).toContain(word);
@@ -343,7 +344,8 @@ describe("fleet help", () => {
   it("derives the short usage from the same table, so the two can never disagree", () => {
     for (const [cmd, help] of Object.entries(VERBS)) {
       const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory"
-        : cmd.startsWith("accounts-") ? "accounts" : cmd.startsWith("models-") ? "models" : cmd;
+        : cmd.startsWith("accounts-") ? "accounts" : cmd.startsWith("models-") ? "models"
+        : cmd.startsWith("gate-") ? "gate" : cmd;
       expect(CLI_USAGE).toContain(`fleet ${name}${help.args ? " " + help.args : ""}`);
     }
     expect(CLI_USAGE).toContain("fleet help");
@@ -687,5 +689,29 @@ describe("VERBS help text — #501 F3-F11", () => {
   it("junior: stats says an id can appear twice and TOTAL sums both halves (#501 F11)", () => {
     expect(VERBS.junior.summary).toContain("can appear twice");
     expect(VERBS.junior.summary).toContain("sums both halves");
+  });
+});
+
+// #715 Phase 1: `fleet gate [start <pr> | watch <pr>]`. Same sub-action-word
+// shape `fleet models` above uses; one top-level `gate` word, rest[0] picks
+// the verb. Internal cmd tags stay hyphenated (gate-start / gate-watch).
+describe("gate start / gate watch", () => {
+  it("gate start <pr> parses the PR number", () => {
+    expect(parseCliArgs(["gate", "start", "715"])).toEqual({ cmd: "gate-start", pr: 715 });
+  });
+  it("gate watch <pr> parses the PR number", () => {
+    expect(parseCliArgs(["gate", "watch", "715"])).toEqual({ cmd: "gate-watch", pr: 715 });
+  });
+  it("gate start with no PR -> usage", () => {
+    expect(parseCliArgs(["gate", "start"]).cmd).toBe("usage");
+  });
+  it("gate start with a non-numeric PR -> usage", () => {
+    expect(parseCliArgs(["gate", "start", "abc"]).cmd).toBe("usage");
+  });
+  it("gate with no sub-verb -> usage", () => {
+    expect(parseCliArgs(["gate"]).cmd).toBe("usage");
+  });
+  it("gate with an unrecognized sub-verb -> usage", () => {
+    expect(parseCliArgs(["gate", "frobnicate", "715"]).cmd).toBe("usage");
   });
 });

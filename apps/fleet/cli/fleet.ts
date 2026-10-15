@@ -32,6 +32,7 @@ import { runOnboardPreflight } from "../src/studio/onboard";
 import { cmdJunior, cmdJuniorStats } from "./junior";
 import { cmdAccounts, cmdAccountsSync, cmdAccountsHold, cmdAccountsClear } from "./accounts";
 import { cmdModelsLs, cmdModelsAssign, cmdModelsSet } from "./models";
+import { cmdGateStart, cmdGateWatch } from "./gate";
 import { formatAccountResolution } from "./accounts-format";
 import { sweepAllPages, type SweepPage } from "./junior-sweep";
 import { reapTerminalAll, type TerminalPage } from "./reap-terminal";
@@ -3144,6 +3145,10 @@ async function main(): Promise<void> {
       return cmdModelsAssign(creds, parsed.studio, parsed.model);
     case "models-set":
       return cmdModelsSet(creds, parsed.state, parsed.model);
+    case "gate-start":
+      return cmdGateStart(creds, parsed.pr);
+    case "gate-watch":
+      return cmdGateWatch(creds, parsed.pr);
   }
 }
 

@@ -264,6 +264,11 @@ export type CliCommand =
   | { cmd: "models-ls" }
   | { cmd: "models-assign"; studio: string; model: string }
   | { cmd: "models-set"; state: "promote" | "demote"; model: string }
+  // #715 Phase 1: `fleet gate [start <pr> | watch <pr>]` — the operator
+  // surface for the gate-runner Workflow (POST /studio/gate/start, GET
+  // /studio/gate/status). Same sub-action-word shape `models-*` uses above.
+  | { cmd: "gate-start"; pr: number }
+  | { cmd: "gate-watch"; pr: number }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -450,6 +455,16 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     args: "promote <model> | demote <model>",
     summary: "Promote a demoted pool model back to active, or demote an active one out of rotation.",
   },
+  // #715: two cmd literals share the `gate` word; verbLine's `gate-` prefix
+  // collapse folds both back into one "fleet gate ..." help family.
+  "gate-start": {
+    args: "start <pr>",
+    summary: "Start a gate-runner Workflow run for <pr>; a no-op unless FLEET_GATE_RUNNER is on for the repo.",
+  },
+  "gate-watch": {
+    args: "watch <pr>",
+    summary: "Poll a gate-runner run for <pr> to a terminal state; exit 0 green, 1 red, 2 infra error, 3 status post failed.",
+  },
 };
 
 /** Issue #53: "90s" | "5m" | "2h" -> ms; anything else (bare numbers, zero,
@@ -465,7 +480,8 @@ export function parseIdleDuration(raw: string): number | null {
 /** `fleet ls`, `fleet task show <n>` — the command line for one verb. */
 function verbLine(cmd: string, help: VerbHelp): string {
   const name = cmd.startsWith("task-") ? "task" : cmd.startsWith("memory-") ? "memory"
-    : cmd.startsWith("accounts-") ? "accounts" : cmd.startsWith("models-") ? "models" : cmd;
+    : cmd.startsWith("accounts-") ? "accounts" : cmd.startsWith("models-") ? "models"
+    : cmd.startsWith("gate-") ? "gate" : cmd;
   return `fleet ${name}${help.args ? " " + help.args : ""}`;
 }
 
@@ -1211,6 +1227,20 @@ export function parseCliArgs(argv: string[]): CliCommand {
         return { cmd: "models-set", state: rest[0], model: rest[1] };
       }
       return usage("usage: fleet models [assign <studio> <model> | promote <model> | demote <model>]");
+    }
+    // #715: `fleet gate [start <pr> | watch <pr>]`. ONE top-level word, the
+    // sub-verb read from rest[0] — never `gate-start` typed at the CLI.
+    case "gate": {
+      const rest = argv.slice(1);
+      if (rest[0] === "start") {
+        if (rest.length !== 2 || !/^\d+$/.test(rest[1])) return usage("usage: fleet gate start <pr>");
+        return { cmd: "gate-start", pr: Number(rest[1]) };
+      }
+      if (rest[0] === "watch") {
+        if (rest.length !== 2 || !/^\d+$/.test(rest[1])) return usage("usage: fleet gate watch <pr>");
+        return { cmd: "gate-watch", pr: Number(rest[1]) };
+      }
+      return usage("usage: fleet gate [start <pr> | watch <pr>]");
     }
     default:
       return { cmd: "usage", message: CLI_USAGE };
