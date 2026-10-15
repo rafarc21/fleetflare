@@ -24,8 +24,13 @@ export type MergeTreeResult =
 
 const firstLine = (s: string) => s.split("\n")[0].trim();
 
+// The container has no git identity, and commit-tree refuses to write a commit
+// without one. The gate commit is internal (never pushed), so a fixed identity
+// carried on the call itself is enough.
+const GATE_IDENTITY = ["-c", "user.name=fleet gate", "-c", "user.email=gate@fleet.invalid"];
+
 export async function resolveMergeTree(
-  exec: ExecFn, cwd: string, base: string, head: string,
+  exec: ExecFn, cwd: string, base: string, head: string, baseRef: string,
 ): Promise<MergeTreeResult> {
   const baseRes = await exec("git", ["rev-parse", "--verify", "--quiet", `${base}^{commit}`], { cwd });
   if (baseRes.code !== 0) return { ok: false, kind: "error", message: `unknown base ref: ${base}` };
@@ -35,15 +40,15 @@ export async function resolveMergeTree(
   if (headRes.code !== 0) return { ok: false, kind: "error", message: `unknown head ref: ${head}` };
   const headSha = headRes.stdout.trim();
 
-  // Stale gate guard: if this checkout knows origin/main, the base we were
-  // handed must be that exact commit. Otherwise the gate would test a stale main.
-  const mainRes = await exec("git", ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"], { cwd });
-  if (mainRes.code === 0) {
-    const mainSha = mainRes.stdout.trim();
-    if (mainSha !== baseSha) {
+  // Stale gate guard: if this checkout knows the PR's base branch, the base we
+  // were handed must be that exact commit. Otherwise the gate would test a stale base.
+  const branchRes = await exec("git", ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${baseRef}`], { cwd });
+  if (branchRes.code === 0) {
+    const branchSha = branchRes.stdout.trim();
+    if (branchSha !== baseSha) {
       return {
         ok: false, kind: "error",
-        message: `stale base: origin/main is ${mainSha}, got ${baseSha}`,
+        message: `stale base: origin/${baseRef} is ${branchSha}, got ${baseSha}`,
       };
     }
   }
@@ -56,7 +61,7 @@ export async function resolveMergeTree(
   const tree = firstLine(mt.stdout);
 
   const ct = await exec(
-    "git", ["commit-tree", tree, "-p", baseSha, "-p", headSha, "-m", `gate: ${headSha} onto ${baseSha}`], { cwd },
+    "git", [...GATE_IDENTITY, "commit-tree", tree, "-p", baseSha, "-p", headSha, "-m", `gate: ${headSha} onto ${baseSha}`], { cwd },
   );
   if (ct.code !== 0) {
     return { ok: false, kind: "error", message: firstLine(ct.stderr) || `git commit-tree exited ${ct.code}` };

@@ -14,6 +14,10 @@ export interface GateLegRequest {
   resultKey: string; baselineKeys: string[];
   /** #715: a private repo clones through the Worker git proxy, not github.com. */
   private?: boolean;
+  /** The PR's base branch name, for the container's stale-base check. */
+  baseRef: string;
+  /** The PR number, for fetching a fork PR's head. */
+  pr: string;
 }
 
 /** No token field, no URL field: the R2 keys below are plain keys, not
@@ -30,6 +34,8 @@ export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
     GATE_RESULT_KEY: req.resultKey,
     GATE_BASELINE_KEYS: req.baselineKeys.join(","),
     GATE_PRIVATE: req.private === true ? "1" : "0",
+    GATE_BASE_REF: req.baseRef,
+    GATE_PR: req.pr,
   };
 }
 

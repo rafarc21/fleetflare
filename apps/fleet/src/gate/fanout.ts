@@ -74,11 +74,15 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   const leg = (name: string, commit: string, installCmd: string, legCmd: string, keys: string[]): PlannedLeg => ({
     leg: name, commit, installCmd, legCmd, resultKey: keyFor(name), baselineKeys: keys,
   });
+  // Every leg commits to the base..head range: the container resolves the merge
+  // and tests that result, so a PR branched before main moved is judged on the
+  // merged tree, not its own stale branch.
+  const range = `${baseSha}..${headSha}`;
   return [
-    leg("merge-tree", `${baseSha}..${headSha}`, "", "", []),
-    ...legs.map((name) => leg(name, headSha, install, `bun run ${name}`, baselineKeys)),
-    ...bunLegs(bunShards, bunLaneRoot).map((b) => leg(b.leg, headSha, install, b.legCmd, baselineKeys)),
-    ...vitestLegs(vitestCmd, shards).map((v) => leg(v.leg, headSha, install, v.legCmd, baselineKeys)),
+    leg("merge-tree", range, "", "", []),
+    ...legs.map((name) => leg(name, range, install, `bun run ${name}`, baselineKeys)),
+    ...bunLegs(bunShards, bunLaneRoot).map((b) => leg(b.leg, range, install, b.legCmd, baselineKeys)),
+    ...vitestLegs(vitestCmd, shards).map((v) => leg(v.leg, range, install, v.legCmd, baselineKeys)),
   ];
 }
 

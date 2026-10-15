@@ -70,13 +70,14 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // non-default branch must be gated against that branch.
       const baseSha = await getBranchSha(token, repo, pull.baseRef);
       const { files } = await compareFiles(token, repo, baseSha, headSha);
+      // The branch name rides along to the container, which checks the base against it.
       // The bun-test lane is the head's own test files under the block's root,
       // not a list baked into this Worker, so a new test file is picked up on
       // its next run. A block with no bun lane lists nothing.
       const bunFiles = config.bunLaneRoot === undefined
         ? []
         : laneFilesFromTree(await listRepoTree(token, repo, headSha), config.bunLaneRoot, config.bunLaneGlobs);
-      return { headSha, baseSha, changedFiles: files, bunFiles };
+      return { headSha, baseSha, baseRef: pull.baseRef, changedFiles: files, bunFiles };
     });
 
     if (!matchesPathRules(resolved.changedFiles, config.pathRules)) {
@@ -101,7 +102,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // Promise.all over step-backed legs: each leg's own steps are independent,
     // and aggregateVerdict reads results in configured leg order either way.
     const results = await Promise.all(
-      legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName, planned)),
+      legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName, { baseRef: resolved.baseRef, pr: String(pr) }, planned)),
     );
 
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
@@ -118,7 +119,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 /** One leg, one start-<leg> step. The step's return value is the DO's LegResult. */
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
-  owner: string, repoName: string, planned: PlannedLeg,
+  owner: string, repoName: string, pr: { baseRef: string; pr: string }, planned: PlannedLeg,
 ): Promise<LegResult> {
   return runLegStep(
     { do: (name, config, fn) => step.do(name, config, fn) },
@@ -132,6 +133,7 @@ function runLeg(
           owner, repo: repoName, commit: leg.commit, leg: leg.leg,
           installCmd: leg.installCmd, legCmd: leg.legCmd,
           resultKey: leg.resultKey, baselineKeys: leg.baselineKeys,
+          baseRef: pr.baseRef, pr: pr.pr,
         }),
       });
     },

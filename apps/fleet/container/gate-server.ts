@@ -40,6 +40,48 @@ export interface BaselineDeps {
   workdir: string;
 }
 
+/** One leg's request, read from the container env the Worker set. */
+export interface GateRun {
+  repo: string; commit: string; leg: string;
+  installCmd: string; legCmd: string;
+  resultKey: string; baselineKeys: string[];
+  /** The PR's base branch name: the stale-base check reads refs/remotes/origin/<baseRef>. */
+  baseRef: string;
+  /** The PR number: a fork PR's head is fetched from refs/pull/<pr>/head. */
+  pr: string;
+  /** #715: a private repo clones through the Worker git proxy (GATE_PRIVATE=1). */
+  private?: boolean;
+}
+
+export interface GateDeps {
+  exec: ExecFn;
+  fetchFn: FetchFn;
+  workdir: string;
+}
+
+export interface GateBody {
+  state: "success" | "failure" | "error";
+  description?: string;
+  commit?: string;
+  stdout?: string;
+  stderr?: string;
+}
+
+export function readRunEnv(env: Record<string, string | undefined>): GateRun {
+  return {
+    repo: env.GATE_REPO ?? "",
+    commit: env.GATE_COMMIT ?? "",
+    leg: env.GATE_LEG ?? "",
+    installCmd: env.GATE_INSTALL_CMD ?? "",
+    legCmd: env.GATE_LEG_CMD ?? "",
+    resultKey: env.GATE_RESULT_KEY ?? "",
+    baselineKeys: (env.GATE_BASELINE_KEYS ?? "").split(",").filter((k) => k.length > 0),
+    baseRef: env.GATE_BASE_REF ?? "",
+    pr: env.GATE_PR ?? "",
+    private: env.GATE_PRIVATE === "1",
+  };
+}
+
 // Snapshot restore (the primary path) happens before this process starts:
 // GateRunnerDO boots the container from a snapshot keyed by (main-sha,
 // lockfile-hash) when one exists. This is only the fallback for the first PR
@@ -71,48 +113,60 @@ export async function putResult(key: string, body: unknown, fetchFn: FetchFn = f
   }
 }
 
-async function run(): Promise<{ state: "success" | "failure" | "error"; description?: string }> {
-  const repo = process.env.GATE_REPO ?? "";
-  const commit = process.env.GATE_COMMIT ?? "";
-  const leg = process.env.GATE_LEG ?? "";
-  const installCmd = process.env.GATE_INSTALL_CMD ?? "";
-  const legCmd = process.env.GATE_LEG_CMD ?? "";
-  const resultKey = process.env.GATE_RESULT_KEY ?? "";
-  const baselineKeys = (process.env.GATE_BASELINE_KEYS ?? "").split(",").filter((k) => k.length > 0);
+const firstLine = (s: string) => s.split("\n")[0].trim();
 
-  const clone = await exec("git", ["clone", "--quiet", cloneUrl(repo, process.env.GATE_PRIVATE === "1"), WORKDIR], { cwd: "/workspace" });
-  if (clone.code !== 0) return { state: "error", description: `clone failed: ${clone.stderr.split("\n")[0]}` };
+/** Runs one leg and writes its R2 result on every return path, including a
+ *  throw: a leg never ends without a result object for the Workflow to read. */
+export async function runGate(req: GateRun, deps: GateDeps): Promise<{ state: GateBody["state"]; description?: string }> {
+  let body: GateBody;
+  try {
+    body = await runSteps(req, deps);
+  } catch (err) {
+    body = { state: "error", description: `gate-server: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  await putResult(req.resultKey, body, deps.fetchFn);
+  return { state: body.state, description: body.description };
+}
 
-  if (leg === "merge-tree") {
-    const [base, head] = commit.split("..");
-    const result = await resolveMergeTree(exec, WORKDIR, base, head);
-    const outcome = result.ok
-      ? { state: "success" as const }
-      : result.kind === "conflict"
-        ? { state: "failure" as const, description: "merge conflict against main" }
-        : { state: "error" as const, description: result.message };
-    await putResult(resultKey, { ...outcome, commit: result.ok ? result.commit : undefined });
-    return outcome;
+async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
+  const { exec: run, workdir } = deps;
+  const { repo } = req;
+  const [base, head] = req.commit.split("..");
+
+  // Blobless and without a checkout: commits and trees come down now, file
+  // contents only when a step reads them.
+  const clone = await run("git", ["clone", "--filter=blob:none", "--no-checkout", "--quiet", cloneUrl(repo, req.private === true), workdir], { cwd: "/workspace" });
+  if (clone.code !== 0) return { state: "error", description: `clone failed: ${firstLine(clone.stderr)}` };
+
+  // A fork PR's head is not on any branch of the base repo, so the clone lacks it.
+  const headKnown = (await run("git", ["rev-parse", "--verify", "--quiet", `${head}^{commit}`], { cwd: workdir })).code === 0;
+  if (!headKnown) {
+    const fetched = await run("git", ["fetch", "--quiet", "origin", `+refs/pull/${req.pr}/head`], { cwd: workdir });
+    if (fetched.code !== 0) return { state: "error", description: `fetch failed: ${firstLine(fetched.stderr)}` };
   }
 
-  await restoreBaseline(baselineKeys, { fetchFn: fetch, exec, workdir: WORKDIR });
-
-  const checkout = await exec("git", ["checkout", "--quiet", commit], { cwd: WORKDIR });
-  if (checkout.code !== 0) return { state: "error", description: `checkout failed: ${checkout.stderr.split("\n")[0]}` };
-
-  const install = await exec("bash", ["-c", installCmd], { cwd: WORKDIR });
-  if (install.code !== 0) {
-    const outcome = { state: "error" as const, description: `install failed: ${install.stderr.split("\n")[0]}` };
-    await putResult(resultKey, outcome);
-    return outcome;
+  // Every leg tests the merge result (PR head merged onto its base), not the bare branch.
+  const merged = await resolveMergeTree(run, workdir, base, head, req.baseRef);
+  if (!merged.ok) {
+    if (merged.kind === "conflict") return { state: "failure", description: `merge conflict against ${req.baseRef}` };
+    return { state: "error", description: merged.message };
   }
+  if (req.leg === "merge-tree") return { state: "success", commit: merged.commit };
 
-  const test = await exec("bash", ["-c", legCmd], { cwd: WORKDIR });
-  const outcome = test.code === 0
-    ? { state: "success" as const }
-    : { state: "failure" as const, description: `${leg} exited ${test.code}` };
-  await putResult(resultKey, { ...outcome, stdout: test.stdout.slice(-4000), stderr: test.stderr.slice(-4000) });
-  return outcome;
+  const checkout = await run("git", ["checkout", "--quiet", merged.commit], { cwd: workdir });
+  if (checkout.code !== 0) return { state: "error", description: `checkout failed: ${firstLine(checkout.stderr)}` };
+
+  // Restored after checkout: a baseline tar must never block the checkout.
+  await restoreBaseline(req.baselineKeys, { fetchFn: deps.fetchFn, exec: run, workdir });
+
+  const install = await run("bash", ["-c", req.installCmd], { cwd: workdir });
+  if (install.code !== 0) return { state: "error", description: `install failed: ${firstLine(install.stderr)}` };
+
+  const test = await run("bash", ["-c", req.legCmd], { cwd: workdir });
+  const tail = { stdout: test.stdout.slice(-4000), stderr: test.stderr.slice(-4000) };
+  return test.code === 0
+    ? { state: "success", ...tail }
+    : { state: "failure", description: `${req.leg} exited ${test.code}`, ...tail };
 }
 
 // Only when run directly: importing this module (the tests do) must not bind a port.
@@ -121,7 +175,7 @@ if (import.meta.main) {
     port: PORT,
     async fetch(req) {
       if (new URL(req.url).pathname === "/run" && req.method === "POST") {
-        const outcome = await run();
+        const outcome = await runGate(readRunEnv(process.env), { exec, fetchFn: fetch, workdir: WORKDIR });
         return Response.json(outcome);
       }
       return new Response("not found", { status: 404 });
