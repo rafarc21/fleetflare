@@ -43,13 +43,20 @@ export async function handleGateRoute(req: Request, env: Env): Promise<Response>
     const status = await instance.status();
     // Task 14's verdict rides in the Workflow's own output once terminal;
     // anything not yet terminal maps to pending.
-    const out = status.output as { state?: string; description?: string; statusPostFailed?: boolean } | undefined;
+    const out = status.output as
+      | { state?: string; description?: string; statusPostFailed?: boolean; skipped?: string }
+      | undefined;
     // "terminated" is terminal too: mapping it to pending would poll forever.
     if (status.status === "errored" || status.status === "terminated") {
       return j({ state: "error", description: "gate workflow instance ended without a verdict" });
     }
     if (status.status !== "complete") {
       return j({ state: "pending" });
+    }
+    if (out?.skipped !== undefined) {
+      // A skipped run already posted success to GitHub (workflow.ts posts
+      // "no gated paths changed" itself); the route must not call it error.
+      return j({ state: "success", description: `skipped: ${out.skipped}`, statusPostFailed: out.statusPostFailed });
     }
     if (!out?.state) {
       return j({ state: "error", description: "gate workflow instance errored" });

@@ -64,6 +64,25 @@ export function gateWatchExitCode(status: GateStatusResponse): number {
   }
 }
 
+/** Pure parse of one status-poll reply body. A non-JSON body (Cloudflare's
+ *  own 500 HTML page) must not surface as an unhandled throw — the CLI
+ *  prints its first 200 chars and exits 2, never 1 (never RED). */
+export type ParsedStatus =
+  | { ok: true; status: GateStatusResponse }
+  | { ok: false; body: string };
+
+export function parseStatusResponse(text: string): ParsedStatus {
+  try {
+    const v = JSON.parse(text) as GateStatusResponse;
+    if (v === null || typeof v !== "object" || typeof v.state !== "string") {
+      return { ok: false, body: text.slice(0, 200) };
+    }
+    return { ok: true, status: v };
+  } catch {
+    return { ok: false, body: text.slice(0, 200) };
+  }
+}
+
 export async function cmdGateWatch(creds: Credentials, pr: number, runId: string): Promise<void> {
   const repo = await gatedRepo();
   if (!repo) return;
@@ -80,7 +99,13 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
       process.exitCode = 2;
       return;
     }
-    const status = await res.json() as GateStatusResponse;
+    const parsed = parseStatusResponse(await res.text());
+    if (!parsed.ok) {
+      console.error(`fleet gate-watch: non-JSON reply from ${creds.workerUrl}: ${parsed.body}`);
+      process.exitCode = 2;
+      return;
+    }
+    const status = parsed.status;
     if (status.state !== "pending") {
       console.log(`gate: ${status.state}${status.description ? ` — ${status.description}` : ""}`);
       process.exitCode = gateWatchExitCode(status);
