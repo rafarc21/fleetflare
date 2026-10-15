@@ -409,6 +409,9 @@ export interface Env {
   /** Comma-separated "owner/repo", same shape as INSTALL_CACHE_REPOS. Phase 1
    *  value is a single entry: the operator's own repo. */
   GATE_RUNNER_REPOS?: string;
+  /** Phase 1 (#715): operator-set warm-pool size for GateRunnerDO keep-warm
+   *  nudges. Absent/invalid = 0 = off. Never hardcoded — a cost/latency tradeoff. */
+  GATE_WARM_POOL_SIZE?: string;
   /**
    * Board #350 — THREE secrets, all optional here and ALL THREE MUST be set
    * together before this feature does anything: install-cache.ts's
