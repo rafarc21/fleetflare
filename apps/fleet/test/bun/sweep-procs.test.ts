@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { waitFor } from "./helpers/poll";
 
 /**
  * Issue #159 — a direct, fast correctness test for `sweep_procs` itself
@@ -82,8 +83,20 @@ test("sweep_procs kills cmdline/cwd/env matches, spares an unrelated process", a
   });
 
   try {
-    // Give each decoy a moment to actually start (argv/cwd/environ readable).
-    await Bun.sleep(200);
+    // Let each decoy actually exec so its argv/cwd/environ are readable:
+    // poll cmdline instead of a fixed sleep — a decoy that hasn't exec'd
+    // yet would be a flaky miss. Bounds the wait at "readable", not "200ms".
+    for (const p of [cmdlineDecoy, cwdDecoy, envDecoy, unrelated]) {
+      expect(
+        await waitFor(() => {
+          try {
+            return readFileSync(`/proc/${p.pid}/cmdline`, "utf8").length > 0;
+          } catch {
+            return false;
+          }
+        }, 2_000, 20),
+      ).toBe(true);
+    }
 
     const r = Bun.spawnSync(["bash", SCRIPT, "--sweep-procs-only", worktree, rid], {
       env: process.env,
@@ -131,7 +144,17 @@ test("sweep_procs: a sibling worktree whose path is a literal character-prefix e
   const exact = Bun.spawn(["sleep", "100"], { cwd: wt1, stdout: "ignore", stderr: "ignore" });
 
   try {
-    await Bun.sleep(200);
+    for (const p of [sibling, exact]) {
+      expect(
+        await waitFor(() => {
+          try {
+            return readFileSync(`/proc/${p.pid}/cmdline`, "utf8").length > 0;
+          } catch {
+            return false;
+          }
+        }, 2_000, 20),
+      ).toBe(true);
+    }
 
     const r = Bun.spawnSync(["bash", SCRIPT, "--sweep-procs-only", wt1, rid], { env: process.env });
     expect(r.exitCode).toBe(0);
