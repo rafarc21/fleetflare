@@ -550,8 +550,29 @@ describe("nextActivity", () => {
     expect(result.since).toBe(T1.toISOString());
   });
 
-  it("reason is null whenever state is not unknown", () => {
-    const result = nextActivity(null, { kind: "working" }, null, null, T0);
+  // S41-F1 (refs #869, refs #845): this test's old body drove ONE verdict
+  // (working) while the title claimed "whenever" — a regression leaking
+  // reason onto any other non-unknown state passed untouched. Generate one
+  // it per non-unknown kind instead (the file's own for-of shape, cf. the
+  // negative-corpus describe above) — plus limit, the one non-unknown state
+  // reached without a matching verdict.kind.
+  const NON_UNKNOWN_VERDICTS = [
+    ["working", { kind: "working" }],
+    ["idle", { kind: "idle" }],
+    ["waiting-question", { kind: "waiting-question" }],
+    ["waiting-members via subagents", { kind: "waiting-members", via: "subagents" }],
+    ["waiting-members via background-shell", { kind: "waiting-members", via: "background-shell" }],
+  ] as const;
+  for (const [name, verdict] of NON_UNKNOWN_VERDICTS) {
+    it(`reason is null on ${name} — the state is not unknown`, () => {
+      const result = nextActivity(null, verdict, null, null, T0);
+      expect(result.reason).toBeNull();
+    });
+  }
+  it("reason is null on limit — the state is not unknown", () => {
+    const limit = { until: "2026-09-25T13:30:00.000Z", seenAt: T0.toISOString() };
+    const result = nextActivity(null, { kind: "working" }, limit, null, T0);
+    expect(result.state).toBe("limit");
     expect(result.reason).toBeNull();
   });
 
