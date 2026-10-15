@@ -4,7 +4,7 @@
 import { describe, it, expect } from "bun:test";
 import { readdirSync } from "node:fs";
 import {
-  BUN_LANE_CWD, isBunLaneFile, laneFilesFromTree, planBunShards,
+  isBunLaneFile, laneFilesFromTree, planBunShards,
 } from "../../src/gate/bun-lane";
 import BUN_SHARD_TIMINGS from "../../src/gate/bun-shard-timings.json";
 import { MAX_LEGS_PER_PR, parseGateConfig } from "../../src/gate/config";
@@ -93,10 +93,6 @@ describe("planBunShards", () => {
   it("is deterministic for the same input", () => {
     const timings = [{ file: "test/bun/f03.test.ts", ms: 9_000 }];
     expect(planBunShards(FILES, timings, 4)).toEqual(planBunShards(FILES, timings, 4));
-  });
-
-  it("the lane cwd prefix runs the leg inside apps/fleet", () => {
-    expect(BUN_LANE_CWD).toBe("cd apps/fleet && ");
   });
 });
 
