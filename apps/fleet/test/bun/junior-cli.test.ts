@@ -102,8 +102,8 @@ describe("junior.sh", () => {
 
   test("wall timeout -> exit 5", async () => {
     const dir = repo({ "a.ts": "x\n" });
-    replies = [{ content: "late", delayMs: 3000 }];
-    const r = await run(dir, ["--timeout", "1", "--task", "t", "a.ts"]);
+    replies = [{ content: "late", delayMs: 1500 }];
+    const r = await run(dir, ["--timeout", "0.5", "--task", "t", "a.ts"]);
     expect(r.code).toBe(5);
   });
 
