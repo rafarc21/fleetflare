@@ -17,5 +17,4 @@ no extraction. Guard preamble :1-16 to both, first sentence names own halves.
 - Imports per half exact per implementer brief (grep-verified; studioWorkspaceName is
   dead in both halves — comment-only mentions — so NEITHER imports it). nodeOs +
   mock.module stays in rows' closeStudioRow test (:1710-1731). registry-writer.ts untouched.
-- Verify serial: bun test both files, title grep-set diff, tsc -p test (flock),
-  english-check, test-lies-check. Commits "refs #916, refs #907". Push, PR.
+- Verify serial: bun test both files, title grep-set diff, tsc -p test (flock), english-check, test-lies-check. Commits "refs #916, refs #907". Push, PR.

@@ -15,7 +15,8 @@
 // verb, the #216 preview/plan verbs, and the exit-code process test. The
 // sibling orca-ensure-verbs.test.ts carries the ensure-core half (name
 // derivation, presence, ensureStudioWorkspace's five hard requirements);
-// teardown, registry, locks, and the ROW column live in orca-registry.test.ts.
+// teardown lives in orca-registry-teardown.test.ts; registry, locks, and the
+// ROW column live in orca-registry-rows.test.ts.
 import { test, describe, expect } from "bun:test";
 import { join } from "node:path";
 import {
@@ -56,7 +57,7 @@ function memoryLock(): OrcaDeps["lock"] {
 /** Board #39: every ensure call now carries the row title. These suites are
  *  about the worktree/terminal lookup, not about the title text, so they pass
  *  a fixed one — `studioWorkspaceTitle`'s own behaviour is covered in
- *  orca-registry.test.ts, not here. */
+ *  orca-registry-rows.test.ts, not here. */
 const TEST_TITLE = "websites · #7 some task";
 
 /** `answers` is matched on the first two argv words, e.g. "worktree list". */
@@ -98,7 +99,7 @@ const REPOS = ok(JSON.stringify({
  *  path Orca names after that argument) and never renamed the PATH of, only
  *  its display title (board #39). The tests about a row whose display title
  *  has since diverged from its stable path (the exact #175 scenario) live
- *  in orca-registry.test.ts, whose fixture sets the two independently. */
+ *  in orca-registry-teardown.test.ts, whose fixture sets the two independently. */
 function worktrees(...displayNames: string[]): OrcaResult {
   return ok(JSON.stringify({
     ok: true,

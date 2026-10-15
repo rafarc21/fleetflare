@@ -21,7 +21,6 @@ import {
   removeStudioWorkspace,
   readStudioRows,
   ensureStudioWorkspace,
-  classifyStudioRow,
   findAttachHandle,
   type WorkspaceRegistry,
   type OrcaDeps,
