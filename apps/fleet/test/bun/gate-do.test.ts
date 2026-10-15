@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { buildLegEnvVars, gateOutboundProps, type GateLegRequest } from "../../src/gate/leg-env";
+import { buildLegEnvVars, gateOutboundProps, legGitToken, type GateLegRequest } from "../../src/gate/leg-env";
 
 describe("buildLegEnvVars", () => {
   it("carries every leg field into the container's env, no token or URL field", () => {
@@ -37,15 +37,58 @@ describe("buildLegEnvVars", () => {
   });
 });
 
+const RESULT_KEY = "gate/acme/example/runs/715/run-a/shard-lint.json";
+const PUBLIC_LEG: GateLegRequest = {
+  owner: "acme", repo: "example", commit: "abc123", leg: "lint",
+  installCmd: "x", legCmd: "y", resultKey: RESULT_KEY, baselineKeys: [],
+};
+const PRIVATE_LEG: GateLegRequest = { ...PUBLIC_LEG, private: true };
+
 describe("gateOutboundProps (#715: the leg's proxy scope)", () => {
-  it("scopes the outbound handler to this leg's own result key and owner/repo", () => {
-    const req: GateLegRequest = {
-      owner: "acme", repo: "example", commit: "abc123", leg: "lint",
-      installCmd: "x", legCmd: "y", resultKey: "gate/acme/example/runs/715/run-a/shard-lint.json", baselineKeys: [],
-    };
-    expect(gateOutboundProps(req)).toEqual({
-      resultKey: "gate/acme/example/runs/715/run-a/shard-lint.json",
+  it("a private leg scopes the outbound handler to its result key, its one repo, and its minted token", () => {
+    expect(gateOutboundProps(PRIVATE_LEG, "ghs_TESTONLY_0000")).toEqual({
+      resultKey: RESULT_KEY,
       repo: "acme/example",
+      gitToken: "ghs_TESTONLY_0000",
     });
+  });
+
+  it("a public leg carries no repo and no token: the git proxy 403s for it", () => {
+    const props = gateOutboundProps(PUBLIC_LEG);
+    expect(props).toEqual({ resultKey: RESULT_KEY });
+    expect("repo" in props).toBe(false);
+    expect("gitToken" in props).toBe(false);
+  });
+
+  it("a public leg never takes a token, even if one is passed by mistake", () => {
+    const props = gateOutboundProps(PUBLIC_LEG, "ghs_TESTONLY_0000");
+    expect("gitToken" in props).toBe(false);
+    expect("repo" in props).toBe(false);
+  });
+
+  it("a private leg with no minted token carries no repo either: nothing to proxy with", () => {
+    expect(gateOutboundProps(PRIVATE_LEG)).toEqual({ resultKey: RESULT_KEY });
+  });
+});
+
+describe("legGitToken (#715: one mint per leg, at leg start)", () => {
+  it("a public leg mints nothing", async () => {
+    let calls = 0;
+    const token = await legGitToken(PUBLIC_LEG, async () => { calls++; return "x"; });
+    expect(token).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+
+  it("a private leg mints exactly once, for its own owner/repo", async () => {
+    const minted: string[] = [];
+    const token = await legGitToken(PRIVATE_LEG, async (repo) => { minted.push(repo); return "ghs_TESTONLY_0000"; });
+    expect(token).toBe("ghs_TESTONLY_0000");
+    expect(minted).toEqual(["acme/example"]);
+  });
+
+  it("a mint failure propagates: the leg fails before any container starts", async () => {
+    await expect(
+      legGitToken(PRIVATE_LEG, async () => { throw new Error("private clone needs the GitHub App on this owner"); }),
+    ).rejects.toThrow("private clone needs the GitHub App on this owner");
   });
 });

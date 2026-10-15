@@ -8,13 +8,18 @@ import {
 } from "../../src/gate/outbound-handler";
 
 // #715: private-repo clones. The container clones http://git-proxy.internal/<owner>/<repo>.git,
-// the Worker-side outbound handler mints a read-only token for the ONE repo in
-// props, and proxies git smart-HTTP upload-pack traffic to github.com. These
-// tests pin what may pass and what must never leave the Worker.
+// the Worker-side outbound handler proxies git smart-HTTP upload-pack traffic to
+// github.com with the token the DO minted ONCE at leg start (props.gitToken).
+// The handler never mints. These tests pin what may pass and what must never
+// leave the Worker.
 
 const REPO = "acme/example";
-const OWN: GateOutboundProps = { resultKey: "gate/acme/example/runs/715/run-a/shard-typecheck.json", repo: REPO };
-const TOKEN = "ghs_TESTONLY_not_a_real_token_0000";
+const OWN: GateOutboundProps = {
+  resultKey: "gate/acme/example/runs/715/run-a/shard-typecheck.json",
+  repo: REPO,
+  gitToken: "ghs_TESTONLY_not_a_real_token_0000",
+};
+const TOKEN = OWN.gitToken as string;
 const ADVERT = "001e# service=git-upload-pack\n0000";
 
 const noBucket: OutboundBucket = {
@@ -23,24 +28,22 @@ const noBucket: OutboundBucket = {
   async put() { throw new Error("bucket must not be touched by a git request"); },
 };
 
-/** Records every call the Worker makes to GitHub. The token is minted by the
- *  injected minter, never read from anywhere else. */
-function fakeGit(opts: { status?: number; body?: string; mintFails?: boolean } = {}) {
+/** Records every call the Worker makes to GitHub. */
+function fakeGit(opts: { status?: number; body?: string; throws?: boolean } = {}) {
   const status = opts.status ?? 200;
   const upstream: Array<{ url: string; init: RequestInit }> = [];
-  const minted: string[] = [];
   const deps: GitProxyDeps = {
-    async mint(repo) {
-      if (opts.mintFails) throw new Error(`mint refused for ${repo}: ${TOKEN}`);
-      minted.push(repo);
-      return TOKEN;
-    },
     async fetch(url, init) {
       upstream.push({ url, init });
+      if (opts.throws) throw new DOMException("The operation timed out.", "TimeoutError");
       if (status !== 200) {
-        return new Response(null, {
+        return new Response("upstream error body: sid=1", {
           status,
-          headers: { location: "https://github.com/elsewhere/x.git/info/refs", "set-cookie": "sid=1" },
+          headers: {
+            location: "https://github.com/elsewhere/x.git/info/refs",
+            "set-cookie": "sid=1",
+            "www-authenticate": 'Basic realm="GitHub"',
+          },
         });
       }
       return new Response(opts.body ?? ADVERT, {
@@ -53,7 +56,7 @@ function fakeGit(opts: { status?: number; body?: string; mintFails?: boolean } =
       });
     },
   };
-  return { deps, upstream, minted };
+  return { deps, upstream };
 }
 
 function gitReq(method: string, url: string, init: { body?: string; headers?: Record<string, string> } = {}) {
@@ -97,7 +100,7 @@ describe("git proxy: upload-pack is allowed for props.repo", () => {
     const git = fakeGit();
     const res = await handleGateOutbound(gitReq("GET", infoRefs("Acme/Example.git")), noBucket, OWN, git.deps);
     expect(res.status).toBe(200);
-    expect(git.minted).toEqual([REPO]);
+    expect(git.upstream.length).toBe(1);
   });
 });
 
@@ -107,7 +110,6 @@ describe("git proxy: receive-pack (push) is never proxied", () => {
     const res = await handleGateOutbound(gitReq("GET", infoRefs("acme/example.git", "git-receive-pack")), noBucket, OWN, git.deps);
     expect(res.status).toBe(403);
     expect(git.upstream.length).toBe(0);
-    expect(git.minted.length).toBe(0);
   });
 
   it("POST git-receive-pack is refused, GitHub never called", async () => {
@@ -183,20 +185,34 @@ describe("git proxy: scoped to props.repo", () => {
     const res = await handleGateOutbound(gitReq("GET", infoRefs("acme/other.git")), noBucket, OWN, git.deps);
     expect(res.status).toBe(403);
     expect(git.upstream.length).toBe(0);
-    expect(git.minted.length).toBe(0);
   });
 
-  it("another owner's repo is refused, no token is minted for it", async () => {
+  it("another owner's repo is refused, GitHub never called with the leg's token", async () => {
     const git = fakeGit();
     const res = await handleGateOutbound(gitReq("POST", uploadPack("evil-org/example.git")), noBucket, OWN, git.deps);
     expect(res.status).toBe(403);
-    expect(git.minted.length).toBe(0);
+    expect(git.upstream.length).toBe(0);
   });
 
   it("props without a repo deny every git request, even an otherwise valid one", async () => {
     const git = fakeGit();
-    const res = await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, { resultKey: OWN.resultKey } as GateOutboundProps, git.deps);
+    const res = await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, { resultKey: OWN.resultKey, gitToken: TOKEN }, git.deps);
     expect(res.status).toBe(403);
+    expect(git.upstream.length).toBe(0);
+  });
+
+  it("props with a repo but no token deny every git request: nothing is fetched unauthenticated", async () => {
+    const git = fakeGit();
+    const res = await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, { resultKey: OWN.resultKey, repo: REPO }, git.deps);
+    expect(res.status).toBe(403);
+    expect(git.upstream.length).toBe(0);
+  });
+
+  it("a public leg (no repo, no token in props) gets 403 on every git request", async () => {
+    const git = fakeGit();
+    const publicProps = { resultKey: OWN.resultKey } as GateOutboundProps;
+    expect((await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, publicProps, git.deps)).status).toBe(403);
+    expect((await handleGateOutbound(gitReq("POST", uploadPack()), noBucket, publicProps, git.deps)).status).toBe(403);
     expect(git.upstream.length).toBe(0);
   });
 
@@ -263,11 +279,14 @@ describe("git proxy: the token never reaches the container", () => {
     expect(await ok.text()).not.toContain(TOKEN);
   });
 
-  it("an upstream 401 reaches the container as a bare status with no body and no token", async () => {
+  it("an upstream non-200 reaches the container as a bare status: no body, no upstream headers", async () => {
     const git = fakeGit({ status: 401 });
     const res = await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, OWN, git.deps);
     expect(res.status).toBe(401);
     expect(await res.text()).toBe("");
+    expect(res.headers.get("www-authenticate")).toBeNull();
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(res.headers.get("location")).toBeNull();
     expect([...res.headers.values()].join(" ")).not.toContain(TOKEN);
   });
 
@@ -278,11 +297,23 @@ describe("git proxy: the token never reaches the container", () => {
     expect(res.headers.get("location")).toBeNull();
   });
 
-  it("a failed mint is a 502 that echoes no error text, and nothing is fetched", async () => {
-    const git = fakeGit({ mintFails: true });
+  it("the upstream fetch never follows redirects: redirect is 'manual' on every call", async () => {
+    const git = fakeGit();
+    await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, OWN, git.deps);
+    await handleGateOutbound(gitReq("POST", uploadPack(), { body: "x" }), noBucket, OWN, git.deps);
+    expect(git.upstream.map((u) => u.init.redirect)).toEqual(["manual", "manual"]);
+  });
+
+  it("every upstream fetch carries a timeout signal, so a stalled GitHub cannot hold the leg forever", async () => {
+    const git = fakeGit();
+    await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, OWN, git.deps);
+    expect(git.upstream[0].init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("a timed-out upstream fetch is a bare 502 that echoes no error text", async () => {
+    const git = fakeGit({ throws: true });
     const res = await handleGateOutbound(gitReq("GET", infoRefs()), noBucket, OWN, git.deps);
     expect(res.status).toBe(502);
     expect(await res.text()).not.toContain(TOKEN);
-    expect(git.upstream.length).toBe(0);
   });
 });

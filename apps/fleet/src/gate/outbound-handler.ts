@@ -9,8 +9,9 @@
 //
 // #715 private-repo clones: the same interceptor also serves
 // http://git-proxy.internal/<owner>/<repo>.git. That host proxies ONLY git
-// smart-HTTP upload-pack fetch traffic for props.repo, and the Worker adds a
-// read-only installation token itself. The container never holds it.
+// smart-HTTP upload-pack fetch traffic for props.repo, with the token GateRunnerDO
+// minted once at leg start (props.gitToken, App-only, contents: read). This
+// handler never mints. The container never holds the token.
 //
 // Pure on purpose: no cloudflare:workers import, so bun test can load it.
 
@@ -80,20 +81,25 @@ export interface OutboundBucket {
 /** Set by GateRunnerDO when it registers the interceptor (do.ts), one per leg.
  *  `resultKey` is the only key this container may PUT: the leg's own result.
  *  The run id is part of that key, so another run's key is refused by equality.
- *  `repo` is the one `owner/name` the git proxy will serve for this leg. */
+ *  A private leg adds `repo`, the one `owner/name` the git proxy will serve, and
+ *  `gitToken`, the read-only token the DO minted for it at leg start. A public
+ *  leg has neither, so the git proxy 403s for it. */
 export interface GateOutboundProps {
   resultKey: string;
-  repo: string;
+  repo?: string;
+  gitToken?: string;
 }
 
-/** The Worker's side of the git proxy: mints the read token for one repo, and
- *  performs the upstream fetch. Injected so the handler stays pure and the
- *  tests can observe every call. The minted token never leaves this module's
- *  caller: it is set on the upstream request only. */
+/** The Worker's side of the git proxy: the upstream fetch. Injected so the
+ *  handler stays pure and the tests can observe every call. The token from
+ *  props is set on the upstream request only, never on anything returned. */
 export interface GitProxyDeps {
-  mint(repo: string): Promise<string>;
   fetch(url: string, init: RequestInit): Promise<Response>;
 }
+
+/** Upper bound on one upstream git request. A stalled GitHub connection must
+ *  not hold the leg container open for the rest of its lifetime. */
+export const GIT_UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** The upstream URL for one allowed git fetch request, or null. Allowed:
  *  GET info/refs?service=git-upload-pack and POST git-upload-pack, both for
@@ -122,19 +128,12 @@ async function handleGitProxy(
   props: GateOutboundProps | undefined,
   git: GitProxyDeps | undefined,
 ): Promise<Response> {
-  if (!git || !props?.repo) return new Response("forbidden", { status: 403 });
+  // A public leg has no repo and no token in props: nothing to proxy with, so 403.
+  if (!git || !props?.repo || !props.gitToken) return new Response("forbidden", { status: 403 });
   const upstream = resolveGitUpstream(req.method, url, props.repo);
   if (!upstream) return new Response("forbidden", { status: 403 });
 
-  let token: string;
-  try {
-    token = await git.mint(props.repo);
-  } catch {
-    // The mint error text is not echoed: it can name the installation or repo.
-    return new Response("upstream unavailable", { status: 502 });
-  }
-
-  const headers = new Headers({ authorization: `Bearer ${token}`, "user-agent": "fleet-gate" });
+  const headers = new Headers({ authorization: `Bearer ${props.gitToken}`, "user-agent": "fleet-gate" });
   for (const name of FORWARD_REQUEST_HEADERS) {
     const value = req.headers.get(name);
     if (value !== null) headers.set(name, value);
@@ -147,6 +146,7 @@ async function handleGitProxy(
       body: req.method === "POST" ? req.body : undefined,
       // A redirect would move the fetch to whatever repo it names. Refuse it.
       redirect: "manual",
+      signal: AbortSignal.timeout(GIT_UPSTREAM_TIMEOUT_MS),
     });
   } catch {
     return new Response("upstream unavailable", { status: 502 });
@@ -164,7 +164,7 @@ async function handleGitProxy(
 /** Serves one plain container request. Every branch either uses the bucket for
  *  an allow-listed key or returns a status without touching it. A PUT needs
  *  props whose resultKey equals the requested key exactly; missing props deny
- *  every write. A git request needs props.repo and the git deps. */
+ *  every write. A git request needs props.repo, props.gitToken and the git deps. */
 export async function handleGateOutbound(
   req: Request,
   bucket: OutboundBucket,

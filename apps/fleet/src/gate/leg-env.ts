@@ -33,8 +33,21 @@ export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
   };
 }
 
-/** The interceptor's props for this leg: its own result key, and the one repo
- *  the git proxy will serve. Nothing else is granted to the container. */
-export function gateOutboundProps(req: GateLegRequest): GateOutboundProps {
-  return { resultKey: req.resultKey, repo: `${req.owner}/${req.repo}` };
+/** #715: the one git token this leg's proxy uses, minted at leg start. Only a
+ *  private leg mints. A public leg gets undefined and no mint call. */
+export async function legGitToken(
+  req: GateLegRequest,
+  mint: (repo: string) => Promise<string>,
+): Promise<string | undefined> {
+  if (req.private !== true) return undefined;
+  return mint(`${req.owner}/${req.repo}`);
+}
+
+/** The interceptor's props for this leg: its own result key. A private leg with
+ *  a minted token also gets the one repo the git proxy will serve and that token.
+ *  A public leg, or a private leg with no token, gets no repo and no token, so
+ *  the git proxy 403s for it. Nothing else is granted to the container. */
+export function gateOutboundProps(req: GateLegRequest, gitToken?: string): GateOutboundProps {
+  if (req.private !== true || gitToken === undefined) return { resultKey: req.resultKey };
+  return { resultKey: req.resultKey, repo: `${req.owner}/${req.repo}`, gitToken };
 }
