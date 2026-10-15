@@ -38,7 +38,16 @@ exists to keep at most one heavy job running on the single Mac host at a
 time (`localci.sh:20-22`). On the larger of #715's two phase-2 repos the
 same shape (vitest run twice serially, 1440 files, plus coverage and cold
 builds and rust) stretches to 1.5-3h/PR — the background the issue body
-gives for why this is being redesigned at all. The operator has near-unlimited CF credits; the fix is
+gives for why this is being redesigned at all. **Redaction note, this
+revision**: #715's own body names both phase-2 repos; this doc does not
+reproduce either name anywhere below (nor above). Pushing an earlier draft
+of this revision was refused by this repo's own leak gate
+(`/usr/local/bin/git`'s `fleet-leak-scan` against a private denylist at
+`/opt/fleet/denylist`) because both phase-2 repo names are denylisted from
+`rafarc21/fleetflare`'s public history — confirmed empirically during this
+revision, not assumed. Every mention below says "the larger phase-2 repo"
+(the 1,440-vitest-file one) or "the other phase-2 repo" instead. The
+operator has near-unlimited CF credits; the fix is
 to stop sharing one host and instead shard every PR's full suite across
 CF containers in parallel, dropping both the per-PR wall time and the
 post-merge risk window (today's backstop: a full run after merge, not
@@ -67,8 +76,12 @@ Two new primitives, neither of which exists in this codebase today:
 
 Legs, run in parallel, one `GateRunnerDO` instance each: `typecheck`,
 `lint`, `invariants/builds`, `rust` (cargo-nextest), and
-`vitest --shard=i/N` for `i` in `1..N` (N = 20-30 per #715's own number,
-coverage blobs merged after). For fleetflare specifically today's lanes
+`vitest --shard=i/N` for `i` in `1..N` (N = 20-30 is #715's own number for
+the larger phase-2 repo, not a fixed value this doc adopts for every
+repo — see
+"CF-maximal fan-out," below, for why fleetflare's own N is a separate,
+measured value; coverage blobs merged after). For fleetflare specifically
+today's lanes
 (`localci.sh:168-174`, `bun install`, `bun run check`, `test-lies-check`,
 `vitest`, Linux `bun run bun-test`) map onto this leg list; the exact
 per-repo leg list is config (fleet.json gate block, below), not hard-coded
@@ -78,6 +91,179 @@ Storage: R2 for bytes (baselines per main SHA + lockfile hash, vite build
 cache, cargo target cache, shard outputs), a new KV namespace for the one
 small pointer (main SHA → baseline prefix) a Workflow step needs to look up
 fast without listing R2.
+
+## CF-maximal fan-out (revision, operator directive 08:25Z)
+
+The operator's 08:25Z comment on #715 (posted after this spec's first
+commit): use CF resources — containers and browser automation — "as much
+as possible... almost unlimited credits and concurrency," five numbered
+design points. Restated here in this repo's own terms, each bounded by a
+real account limit and its doc link, not a guess:
+
+1. **Wall-clock first, compute cost secondary.** Question 6's cost math
+   (below) stays a sanity check against runaway spend, not a ceiling this
+   design optimizes toward — every choice below picks "faster, more
+   containers/sessions" over "fewer, slower, cheaper" wherever the two
+   trade off, matching the operator's own framing ("credits cover it").
+2. **Max fan-out, shard to the finest grain worth its cold start, size N
+   from the slowest shard.** The Legs paragraph above borrows #715's own
+   "N = 20-30" straight from the issue body — that number belongs to the
+   larger phase-2 repo (redaction note, Why section, above), not
+   fleetflare's. That repo's own research note cites 1,440 vitest files;
+   fleetflare's `apps/fleet/test/` has 208
+   vitest `*.test.ts` files and 162 bun-test files under `test/bun`
+   (counted directly against this repo 2026-10-15) — an order of
+   magnitude fewer. fleetflare's own N is therefore a separate, smaller
+   value this doc does not invent: Testing item 7 (below) adds the
+   measurement it needs — time every file in `apps/fleet/test/` once,
+   bucket into N shards balanced by measured wall time (not file count),
+   and stop adding shards once the slowest shard's wall time stops
+   shrinking much per shard added. "The slowest shard sets p50" is the
+   stopping rule everywhere in this doc; "N=20-30" stays that repo's own
+   starting point for phase 2, itself to be re-measured against that
+   repo's files rather than carried over unverified.
+3. **Browser lanes → CF Browser Rendering, in-container chromium as
+   fallback only.** New subsection below.
+4. **Kill setup time: warm pool, R2 cache, prebuilt layers.** Three
+   separate mechanisms — warm pool is new design (subsection below); the
+   R2 dependency cache already exists in this doc (question 4's `gate/`
+   prefix, baselines keyed by `<main-sha>-<lockfile-hash>`), cross
+   referenced here, not reinvented; prebuilt image layers is a line added
+   to question 3's Dockerfile discussion (below), also not a new
+   mechanism.
+5. **Name every binding's real limit + the exact raise ask, never file
+   one.** New subsection, "Named limits and raise requests for the
+   operator," below.
+
+#### Browser Rendering vs in-container chromium
+
+Today's only browser-automation path in this codebase is in-container: the
+Linux lane image `apps/fleet/scripts/localci/Dockerfile` bakes in
+Playwright + chromium (`bun x playwright@1.63.0 install chromium
+--with-deps`, pinned to `apps/fleet/bun.lock`'s `playwright-core`), and
+`bun run bun-test` drives it through the `ego-browser` shim
+(`skills/ego-browser/SKILL.md`) — a Playwright-backed process that
+launches its own chromium inside the container, competing with the test
+process for that same container's vCPU/memory the whole time it runs.
+
+Per the operator's point 3, that stays the FALLBACK, not the primary path,
+for any GateRunner leg that needs a real browser. Primary: a new
+`BROWSER` binding — Workers Browser Rendering
+(https://developers.cloudflare.com/browser-rendering/platform/limits/),
+a Puppeteer/Playwright-compatible API with CF-managed sessions that run
+OUTSIDE `GateRunnerDO`'s own container entirely. `GateRunnerDO`'s
+Worker-side orchestration (the Workflow, or the DO itself before it hands
+a leg to its container) drives `BROWSER` directly for that leg; the
+chromium process never touches the container's own vCPU/memory budget,
+and that leg's container can be sized for the rest of its work without a
+chromium process sharing the ceiling.
+
+Limit: 200 concurrent browser sessions/account, 3 new instances/sec, 60s
+default session timeout extendable to 20 min via `keep_alive`, all on the
+Paid plan fleet already runs
+(https://developers.cloudflare.com/browser-rendering/platform/limits/).
+That ceiling is account-wide, shared with any OTHER Browser Rendering
+use — today there is none: `ego-browser` launches its own chromium
+process inside whichever container it runs in, not through this binding,
+so no existing contention. Flagged, not assumed away: if any studio or
+other feature starts using the `BROWSER` binding later, GateRunner's
+browser-lane concurrency and that other use now share the same
+200-session ceiling — worth a second look at that point, not resolved
+here.
+
+#### Warm pool: cron-nudged keep-warm set
+
+`max_instances` on a `containers[]` entry (question 3, below) is a
+per-class ceiling on how many instances CAN run at once — it is not a
+pool of N instances sitting pre-warmed and idle. Cloudflare containers
+scale from zero per request by default; nothing in either limits page
+fetched for this revision (Workflows or Containers) describes a CF-native
+"warm pool" primitive, so "kill setup time" (operator point 4) needs a
+mechanism this doc proposes, not one CF already ships:
+
+A scheduled Worker cron (or a dedicated Workflow step, run on a fixed
+cadence independent of any PR) proactively invokes a small resident set
+of `GateRunnerDO` instances on a keep-alive cadence shorter than their
+idle-eviction window, before any PR's gate run starts. That trades idle
+compute $ for eliminated cold-start latency on the p50/p90 clock —
+directly in line with operator point 1 (wall-clock first, cost
+secondary). The SIZE of that keep-warm set is itself a cost/latency
+tradeoff: a bigger set covers more simultaneous PR gates without any of
+them paying a cold start, at a higher idle-compute cost run continuously
+whether or not a PR is gating at that moment. This spec does not pick a
+size — Decisions item 6 (below) asks the operator to.
+
+#### Named limits and raise requests for the operator
+
+Every limit above that could realistically bind at fleetflare's or either
+phase-2 repo's fan-out scale, with its doc link and what to ask
+Cloudflare for if it binds. Naming the ask, not filing it — filing any
+raise request stays the operator's call, same posture as every other open
+decision in this doc.
+
+- **Containers, account-wide concurrent vCPU/memory/disk**
+  (https://developers.cloudflare.com/containers/platform-details/limits/):
+  1,500 vCPU / 6 TiB memory / 30 TB disk, shared across EVERY container
+  class in the account — confirms the account cap question 5 (below)
+  already reasons against, this time off the doc page rather than just
+  the issue's own research note. No separate `max_instances` account
+  ceiling exists beyond this shared pool: a class's own `max_instances`
+  is a soft cap the operator sets, not a second real limit. At the shard
+  counts this revision reasons about (fleetflare's own N, measured,
+  likely well under the larger phase-2 repo's 20-30), no raise ask is
+  named here; re-check once fleetflare's and that repo's real N are both
+  measured and phase 2 is live with real concurrent-PR counts across
+  three repos.
+- **Browser Rendering, 200 concurrent sessions/account**
+  (https://developers.cloudflare.com/browser-rendering/platform/limits/):
+  binds if any PR's gate opens enough simultaneous browser-lane sessions,
+  across however many PRs gate concurrently, to approach 200 — not
+  computed here because this revision doesn't yet know how many of
+  fleetflare's or either phase-2 repo's legs are actual browser legs
+  (that count belongs in each repo's `fleet.json` gate block, not
+  invented here). If it binds: the raise ask is a Browser Rendering
+  concurrent-session limit increase, named to the operator, not filed.
+- **R2 REST API, 1,200 requests/5 minutes account-wide**
+  (https://developers.cloudflare.com/r2/platform/limits/): a REAL
+  constraint on fan-out, not theoretical. The existing presign pattern
+  (`install-cache.ts`'s `AwsClient`/SigV4) mints a presigned URL through a
+  REST-API-shaped call; if every one of fleetflare's own measured-N
+  shards needs the Worker to mint its own presigned URL for cache restore
+  AND save, and several PRs gate concurrently, this ceiling is reachable.
+  Illustratively, 24 shards × 3 concurrent PRs × 2 calls/shard (restore +
+  save) = 144 calls per cache-refresh wave — not yet binding today, but
+  it scales linearly with both shard count and concurrent-PR count, both
+  of which operator point 2 pushes upward. Mitigation named here, not a
+  raise request: batch cache restore/save into fewer R2 calls per
+  container (one presigned URL covering a multi-file transfer, or one
+  per-container manifest fetch instead of one per file) rather than one
+  call per file per shard. If batching isn't enough once real numbers are
+  measured, the raise ask is an R2 REST API rate increase, named to the
+  operator, not filed.
+- **R2, concurrent writes to the same object key, 1/sec**
+  (https://developers.cloudflare.com/r2/platform/limits/): mitigated by
+  design already, not a new finding — question 4's baseline key is
+  `<main-sha>-<lockfile-hash>`, so two concurrent PRs built against the
+  same main SHA share one baseline key; only the first one to finish
+  building it writes, the rest read. No raise ask named.
+- **KV, write to the same key, 1/sec, both plans**
+  (https://developers.cloudflare.com/kv/platform/limits/): checked, not
+  just asserted — `main-sha:<owner>/<repo>` (question 4) is written once
+  per main-branch baseline build per repo, nowhere near 1/sec at any
+  realistic PR-merge cadence. No raise ask named.
+- **Workflows, concurrent instances/account: 100 (Free) / 50,000 (Paid)**
+  (https://developers.cloudflare.com/workflows/reference/limits/): fleet
+  runs Paid; not binding at today's 3-concurrent-PR autopilot cap or any
+  near-term multiple of it. No raise ask named.
+- **Workflows, compute time per step: 30s default / 5 min max (Paid)**
+  (https://developers.cloudflare.com/workflows/reference/limits/): this
+  is CPU compute time for the step's OWN code, not wall-clock time spent
+  waiting on an external container — a step that `fetch`es a
+  `GateRunnerDO` container and polls/awaits its completion is I/O wait,
+  not CPU compute, under standard Workers CPU-limit semantics. Flagged as
+  an open validation item, not asserted safe: Testing item 8 (below) adds
+  verifying this empirically once the Workflow is actually coded, before
+  trusting it at phase 1 scale.
 
 ## The seven questions
 
@@ -139,9 +325,11 @@ execs, zero R2/KV traffic for a repo not opted in.
 
 Repo-scope restriction, mirroring `INSTALL_CACHE_REPOS`'s comma-separated
 `owner/repo` list shape (`install-cache.ts:104-114`), since phase 1 is
-fleetflare-only and phase 2 adds #715's other two named repos (not
-reproduced here — public repo; owner slugs are operator config either
-way): **`GATE_RUNNER_REPOS`**,
+fleetflare-only and phase 2 adds #715's other two named repos — redacted
+here too (not just their owner slugs): the Why section's redaction note,
+above, applies to the repo names themselves, confirmed by this revision's
+own leak-gate-refused push attempt, not just to owner slugs being operator
+config: **`GATE_RUNNER_REPOS`**,
 comma-separated `owner/repo`, case-insensitive match against the studio's
 resolved work-repo slug, same precedent as `isInstallCacheRepo`
 (`install-cache.ts:116-126`). `FLEET_GATE_RUNNER=off` is the master switch;
@@ -195,6 +383,16 @@ docs-only):
 `apps/fleet/container/` where every other class's Dockerfile lives — see
 Rollback, below, for why that placement matters and what it does and does
 not buy.
+
+Wherever it ends up living (open as Decisions item 4, below), its content
+should extend `apps/fleet/scripts/localci/Dockerfile`, not start fresh:
+that image already bakes in the slow layers (`apt-get install` of tmux,
+git, zstd; the gitleaks download; `playwright@1.63.0 install chromium
+--with-deps`) at image-build time, not per-container-start. `GateRunnerDO`
+adds one more slow layer on top — rustup + cargo-nextest, for the `rust`
+leg — and otherwise reuses what's already pinned and cached rather than
+re-deriving it. This satisfies operator point 4's "prebuilt image layers"
+by extension, not a second mechanism.
 
 ### 4. R2/KV layout
 
@@ -275,7 +473,17 @@ target from #715: mem `12 × 600 × 2.5e-6 = $0.018`, CPU
 **≈ $0.066/instance-run.**
 
 Per PR, 28 containers (4 fixed legs + N=24 vitest shards, mid-range of
-#715's 20-30): `28 × $0.066 ≈ $1.85/PR` in GateRunner compute alone. Add
+#715's 20-30): `28 × $0.066 ≈ $1.85/PR` in GateRunner compute alone. This
+N=24 is still the larger phase-2 repo's range, carried over as a
+placeholder for the arithmetic shape, not fleetflare's own number — per
+the CF-maximal fan-out section above, fleetflare's `apps/fleet/test/` is
+an order of magnitude fewer files than that repo's, so fleetflare's own
+measured N
+(Testing item 7, below) plugs into this same per-instance cost
+unmodified once it exists; a smaller N lowers this line, a bigger
+keep-warm set (Warm pool, above) or added Browser Rendering sessions
+don't change this GateRunner-compute line at all (Browser Rendering and
+the keep-warm cron bill separately, not computed here either). Add
 Workflow billing (per-step + duration) — not computed here: no existing
 file in this repo cites current CF Workflows pricing, unlike the
 container-instance math above which is pulled straight off a cited pricing
@@ -286,9 +494,9 @@ main SHA + lockfile hash, not per PR) and is not broken out separately here.
 
 Monthly run-rate, **illustrative only, PR volume unverified**: at an assumed
 10 PRs/day/repo across the three repos named in #715 (fleetflare and its
-two phase-2 repos, not reproduced here — public repo) — the operator to
-confirm actual volume, no number for
-this is cited anywhere in this repo — 30 PRs/day × $1.85/PR × 30 days ≈
+two phase-2 repos, redacted per the Why section's note, above) — the
+operator to confirm actual volume, no number for this is cited anywhere
+in this repo — 30 PRs/day × $1.85/PR × 30 days ≈
 **$1,665/month** in GateRunner compute. Against "near-unlimited CF credits"
 (issue body) this is the number to sanity-check that claim against, not a
 blocker this spec resolves on its own.
@@ -299,8 +507,9 @@ blocker this spec resolves on its own.
 
 1. Workflow + `GateRunnerDO` + R2 cache, fleetflare only, behind
    `FLEET_GATE_RUNNER=off` default and `GATE_RUNNER_REPOS=rafarc21/fleetflare`.
-2. Add #715's other two named repos to `GATE_RUNNER_REPOS` and each
-   repo's own `fleet.json` gate block.
+2. Add #715's other two named repos (redacted per the Why section's note,
+   above) to `GATE_RUNNER_REPOS` and each repo's own `fleet.json` gate
+   block.
 3. Default gate for all maestros (flag flips to `on` fleet-wide once phases
    1-2 hold their p50/p90 target over 10 PRs/repo, per #715's Target
    section).
@@ -408,6 +617,22 @@ Before flipping `FLEET_GATE_RUNNER` default to `on` for any repo:
 6. Re-probe the PAT's `Commit statuses: write` scope (question 1, above)
    against a real PR before relying on `gate/verdict` for any maestro
    decision.
+7. Time every file in `apps/fleet/test/` once (vitest + bun-test lanes
+   separately), bucket into N shards balanced by measured wall time, not
+   file count, and pick fleetflare's own N where the slowest shard's wall
+   time stops shrinking much per shard added — per the CF-maximal
+   fan-out section's point 2, above. Do this before committing to any N
+   in `fleet.json`'s `vitestShards` for fleetflare; repeat independently
+   for each phase-2 repo in phase 2 rather than reusing fleetflare's
+   number or the issue's own 20-30 range unmeasured.
+8. Validate empirically, once the Workflow is actually coded, that a step
+   which `fetch`es a `GateRunnerDO` container and polls/awaits its
+   completion counts as I/O wait against Workflows' per-step compute-time
+   limit (30s default / 5 min max on Paid,
+   https://developers.cloudflare.com/workflows/reference/limits/) and not
+   as CPU compute time charged against that limit. This spec flags the
+   distinction (CF-maximal fan-out section, point 5's last bullet, above)
+   as an open item, not a tested fact.
 
 ## Decisions asked of the operator
 
@@ -428,3 +653,19 @@ Before flipping `FLEET_GATE_RUNNER` default to `on` for any repo:
 5. Re-verify the PAT's `Commit statuses: write` scope (carried forward,
    unresolved since the 2026-09-25 ci-steward spec) before this design's
    implementation PR is written.
+6. Size the keep-warm set for `GateRunnerDO` (Warm pool subsection,
+   above): how many instances stay cron-nudged resident, trading idle
+   compute $ for eliminated cold-start latency. This spec names the
+   mechanism, not a number.
+7. Confirm fleetflare's own vitest/bun-test shard count N should be
+   measured per-file (Testing item 7, above) before `fleet.json`'s
+   `vitestShards` is set, rather than reusing the issue's own 20-30 range
+   (sized for the larger phase-2 repo's 1,440 files, not fleetflare's
+   208 + 162).
+8. Two named limits that are not yet binding but could become so as
+   fan-out grows (CF-maximal fan-out section's "Named limits" subsection,
+   above) — confirm whether either needs a raise request filed once real
+   numbers are measured, or whether the named mitigation (R2 call
+   batching per container) is sufficient on its own:
+   - R2 REST API, 1,200 requests/5 min account-wide.
+   - Browser Rendering, 200 concurrent sessions/account.
