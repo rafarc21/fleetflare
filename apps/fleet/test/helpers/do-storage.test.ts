@@ -5,7 +5,12 @@
 // the only lock shape a live studio holds between operations.
 import { describe, it, expect } from "vitest";
 import { STATUS_KEY } from "../../src/studio/provision";
-import { fakeStorage } from "./do-storage";
+import type { StudioStatus } from "../../src/studio/types";
+import { fakeStorage, statusStorage } from "./do-storage";
+
+function status(state: StudioStatus["state"]): StudioStatus {
+  return { id: "fleetflare--web-studio", state, tailscaleHost: null, lastRefresh: null, error: null } as StudioStatus;
+}
 
 describe("fakeStorage — the shared Map-backed DO-storage fake (#371)", () => {
   it("an empty fake: get on any key resolves to undefined", async () => {
@@ -49,5 +54,32 @@ describe("fakeStorage — the shared Map-backed DO-storage fake (#371)", () => {
   it("put returns a promise resolving to undefined", async () => {
     const s = fakeStorage();
     expect(await s.put(STATUS_KEY, null)).toBeUndefined();
+  });
+});
+
+// S43-F14 (#890): the statusStorage fold — the byte-identical wrapper pair both
+// studio suites used to carry (seed a StudioStatus under STATUS_KEY, cast to
+// StudioStorage & { map }) now lives once in the helper, so a suite imports
+// the typed shape instead of re-wrapping fakeStorage itself.
+describe("statusStorage — the seeded StudioStorage fold (sweep-43 F14, #890)", () => {
+  it("a seeded statusStorage: get(STATUS_KEY) resolves to that exact object", async () => {
+    const row = status("running");
+    const s = statusStorage(row);
+    expect(await s.get(STATUS_KEY)).toBe(row);
+  });
+
+  it("an unseeded statusStorage: get(STATUS_KEY) resolves to undefined", async () => {
+    const s = statusStorage();
+    expect(await s.get(STATUS_KEY)).toBeUndefined();
+  });
+
+  it("hands back the typed shape: a live Map on .map, with put/get working through the interface", async () => {
+    const s = statusStorage(status("stopped"));
+    expect(s.map).toBeInstanceOf(Map);
+    expect(s.map.get(STATUS_KEY)).toMatchObject({ state: "stopped" });
+
+    await s.put("fresh-key", { state: "provisioning" });
+    expect(s.map.get("fresh-key")).toMatchObject({ state: "provisioning" });
+    expect(await s.get("fresh-key")).toMatchObject({ state: "provisioning" });
   });
 });
