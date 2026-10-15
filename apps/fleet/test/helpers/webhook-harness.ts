@@ -29,6 +29,10 @@ export interface WebhookCtl {
 
 export interface WebhookHarnessDeps {
   wakes: [string, string][];
+  // Board issue #236 round 2: WHICH RPC method got called, per `.get(...)`
+  // — `wakes` alone records studio id + prompt but can't distinguish
+  // `wakeStudio` from `wakeStudioOnAssignment`; a mutant that swapped one
+  // for the other would pass every existing wake-shape assertion.
   rpcCalls: { name: string; method: string }[];
   ctl: WebhookCtl;
 }
