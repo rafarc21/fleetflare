@@ -19,11 +19,11 @@ import { waitFor } from "./helpers/poll";
 // that doesn't exist -- chromium.launch() then rejects, ENOENT) and proves
 // the daemon still shuts down cleanly once idle with zero spaces.
 
-// Slightly more headroom than ego-browser-idle-shutdown.test.ts's 400ms:
-// this test's round1 script also pays for a real (failing) chromium.launch()
-// call before the idle timer ever arms, which adds a bit more wall-clock
-// variance under load than that test's plain taskSpace()+finish().
-const IDLE_MS = "800";
+// Same tiny window as ego-browser-idle-shutdown.test.ts: the idle timer
+// only arms after round1's script exits, so the (failing) chromium.launch()
+// wall-clock cost lands before the window ever starts -- no extra headroom
+// needed.
+const IDLE_MS = "100";
 
 // Board #317: same as the container test — a loaded host can put more than
 // the idle window between round1's exit and the next check. Simulated here

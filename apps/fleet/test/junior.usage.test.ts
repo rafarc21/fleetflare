@@ -7,7 +7,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import * as authModule from "../src/studio/auth";
-import { insertJuniorUsage, aggregateJuniorUsage, handleJuniorUsageStats } from "../src/junior/usage";
+import {
+  insertJuniorUsage, aggregateJuniorUsage, handleJuniorUsageStats,
+  aggregateLeadUsage, handleLeadUsageStats,
+} from "../src/junior/usage";
 import { handleFleetJunior } from "../src/junior/route";
 import { recordJuniorAuthorization } from "../src/junior/authz";
 import { SPAWN_TOKEN_HEADER } from "../src/studio/spawn";
@@ -367,5 +370,60 @@ describe("handleJuniorUsageStats", () => {
     vi.spyOn(authModule, "verifyAccess").mockResolvedValue(null);
     const r = await handleJuniorUsageStats(new Request("https://w/studio/junior/usage"), env as unknown as Env);
     expect(r.status).toBe(200);
+  });
+});
+
+describe("aggregateLeadUsage + handleLeadUsageStats (#934)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("groups lead rows per studio with calls and ok sums", async () => {
+    const OTHER = "websites--release-studio";
+    await insertJuniorUsage(env.DB, { id: "l1", ts: 100, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: true });
+    await insertJuniorUsage(env.DB, { id: "l2", ts: 200, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: false, error: "upstream_5xx" });
+    await insertJuniorUsage(env.DB, { id: "l3", ts: 300, studioId: OTHER, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: true });
+    const agg = await aggregateLeadUsage(env.DB, 0);
+    expect(agg.rows).toEqual([
+      { studioId: OTHER, calls: 1, ok: 1 },
+      { studioId: ME, calls: 2, ok: 1 },
+    ]);
+  });
+
+  it("excludes non-lead rows and pre-since rows", async () => {
+    await insertJuniorUsage(env.DB, { id: "e1", ts: 100, studioId: ME, mode: "edit", model: "m", inputTokens: 1, outputTokens: 1, ok: true });
+    await insertJuniorUsage(env.DB, { id: "l1", ts: 5000, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: true });
+    await insertJuniorUsage(env.DB, { id: "l0", ts: 999, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: true });
+    const agg = await aggregateLeadUsage(env.DB, 1000);
+    expect(agg.rows).toEqual([{ studioId: ME, calls: 1, ok: 1 }]);
+  });
+
+  it("401/403 when Access auth fails — same pattern as every other /studio/* route", async () => {
+    const failure = new Response("forbidden", { status: 403 });
+    const verifyAccessFn = vi.fn(async () => failure);
+    const r = await handleLeadUsageStats(new Request("https://w/studio/junior/usage/lead"), env as unknown as Env, verifyAccessFn);
+    expect(r.status).toBe(403);
+    expect(verifyAccessFn).toHaveBeenCalled();
+  });
+
+  it("200 with {rows} when authenticated, and ?since= filters correctly", async () => {
+    await insertJuniorUsage(env.DB, { id: "l1", ts: 100, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: true });
+    await insertJuniorUsage(env.DB, { id: "l2", ts: 5000, studioId: ME, mode: "lead", model: "m", inputTokens: 0, outputTokens: 0, ok: false });
+    const verifyAccessFn = vi.fn(async () => null);
+    const all = await handleLeadUsageStats(new Request("https://w/studio/junior/usage/lead"), env as unknown as Env, verifyAccessFn);
+    expect(all.status).toBe(200);
+    const allBody = await all.json<{ rows: { studioId: string; calls: number; ok: number }[] }>();
+    expect(allBody.rows).toEqual([{ studioId: ME, calls: 2, ok: 1 }]);
+    const since = await handleLeadUsageStats(
+      new Request("https://w/studio/junior/usage/lead?since=1000"), env as unknown as Env, verifyAccessFn,
+    );
+    const sinceBody = await since.json<{ rows: { studioId: string; calls: number; ok: number }[] }>();
+    expect(sinceBody.rows).toEqual([{ studioId: ME, calls: 1, ok: 0 }]);
+  });
+
+  it("405 on POST — the route is a read", async () => {
+    const verifyAccessFn = vi.fn(async () => null);
+    const r = await handleLeadUsageStats(new Request("https://w/studio/junior/usage/lead", { method: "POST" }), env as unknown as Env, verifyAccessFn);
+    expect(r.status).toBe(405);
   });
 });

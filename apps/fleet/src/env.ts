@@ -1,5 +1,7 @@
 import type { AgentDO } from "./agents/do";
 import type { DeployDO } from "./deploy/do";
+import type { GateRunnerDO } from "./gate/do";
+import type { GateWorkflowParams } from "./gate/workflow";
 // Type-only — do.ts's own value import of "@cloudflare/sandbox" never
 // reaches the runtime module graph through this. See
 // src/studio/provision.ts's header comment for why that distinction is
@@ -10,6 +12,12 @@ export interface Env {
   DB: D1Database;
   AGENT: DurableObjectNamespace<AgentDO>;
   DEPLOY: DurableObjectNamespace<DeployDO>;
+  /** #715 gate runner: one GateRunnerDO container per leg/shard. Bound in
+   *  wrangler.example.jsonc (durable_object scheduling policy). */
+  GATE_RUNNER: DurableObjectNamespace<GateRunnerDO>;
+  /** #715 gate runner: the `gate` Workflow that fans a PR's legs out and
+   *  fans the verdict back in (wrangler.example.jsonc `workflows[]`). */
+  GATE_WORKFLOW: Workflow<GateWorkflowParams>;
   STUDIO: DurableObjectNamespace<StudioDO>;
   /**
    * Issue #107 (#70 ask 3): a second StudioDO container class for roles
@@ -399,6 +407,15 @@ export interface Env {
    * safe, opt-in default.
    */
   INSTALL_CACHE_REPOS?: string;
+  /** Phase 1 (#715): default off, same posture FLEET_TELEGRAM/FLEET_JUNIOR
+   *  already use — a repo not opted in gets zero new behavior. */
+  FLEET_GATE_RUNNER?: string;
+  /** Comma-separated "owner/repo", same shape as INSTALL_CACHE_REPOS. Phase 1
+   *  value is a single entry: the operator's own repo. */
+  GATE_RUNNER_REPOS?: string;
+  /** Phase 1 (#715): operator-set warm-pool size for GateRunnerDO keep-warm
+   *  nudges. Absent/invalid = 0 = off. Never hardcoded — a cost/latency tradeoff. */
+  GATE_WARM_POOL_SIZE?: string;
   /**
    * Board #350 — THREE secrets, all optional here and ALL THREE MUST be set
    * together before this feature does anything: install-cache.ts's

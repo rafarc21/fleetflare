@@ -2286,9 +2286,20 @@ describe("container/studio-bringup.sh — C2 verification-gate source assertions
     expectBrings('TMP_RESTORE="${HOME:-/root}/.claude-restore-tmp"');
     expectBrings('cat "$RESTORE_DIR"/part-* | tar -xzf - -C "$TMP_RESTORE"');
     expectBrings('mv "$TMP_RESTORE/.claude/projects" ~/.claude/projects');
-    // Nothing else in this file ever writes to ~/.claude/projects directly —
-    // this mv is the ONLY path a restore takes into the real location.
-    expect(bringupSrc().match(/~\/\.claude\/projects/g)?.length).toBeGreaterThanOrEqual(1);
+    // This script writes to the literal path ~/.claude/projects in exactly
+    // ONE place — the atomic mv above. Every other occurrence of the path is
+    // a read (the freshness guard, claude_project_dir's printf), an echo, or
+    // a comment. Pinned as an exact count of write-shaped occurrences (write
+    // verb or redirect ahead of the path), NOT a floor: a future edit adding
+    // a second direct write site breaks this test instead of silently keeping
+    // an unbacked "only path" claim green. (Writes that reach the directory
+    // via the $fresh_projects variable — the fresh-session move-aside — are
+    // not literal-path writes and are out of this count's scope by design.)
+    expect(
+      (bringupSrc().match(
+        /\b(?:mv|cp|mkdir|ln|rmdir|rm|tee|tar|install)\b[^#|;\n]*~\/\.claude\/projects|>>?[^#|;\n]*~\/\.claude\/projects/g,
+      ) ?? []).length,
+    ).toBe(1);
   });
 
   it("fix round 2 (Important): moves .claude.json BEFORE projects — projects is the freshness guard's own key, so it must be the LAST placement step. A kill/failure between the two self-heals via retry (guard still reads 'fresh') instead of permanently orphaning .claude.json in $TMP_RESTORE (which the OLD ordering could do: projects landing first flips the guard to 'warm', so the block never runs again to notice .claude.json never made it)", () => {

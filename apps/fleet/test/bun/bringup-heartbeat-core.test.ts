@@ -1,8 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { BRINGUP, extractShellFunc, runSnippet } from "./exec-snippet";
 // ---------------------------------------------------------------------------
 // Issue #221 (PR3b), Task 5 — the hook heartbeat, the second (higher-
@@ -71,6 +71,22 @@ exit 1
   cachedTmuxStubDir = dir;
   return dir;
 }
+
+// Sweep 47 F4 (#965) — the two caches above hold mkdtemp'd dirs at module
+// scope and were never reaped: a solo run leaked two tmpdirs per process, and
+// a shard retry could return a cached path whose dir a tmpfs cleanup already
+// reaped. Reap both once the file's tests finish; rmSync is force+recursive so
+// an already-gone dir is a no-op.
+afterAll(() => {
+  if (cachedFakeClaude) {
+    rmSync(dirname(cachedFakeClaude), { recursive: true, force: true });
+    cachedFakeClaude = null;
+  }
+  if (cachedTmuxStubDir) {
+    rmSync(cachedTmuxStubDir, { recursive: true, force: true });
+    cachedTmuxStubDir = null;
+  }
+});
 
 // Issue #370: a fake `date` mimicking BSD/macOS — passes `%3N` through as the
 // LITERAL text "3N" instead of digits (real observed BSD behavior; there is

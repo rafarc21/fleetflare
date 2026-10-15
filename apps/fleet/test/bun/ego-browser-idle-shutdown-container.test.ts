@@ -35,7 +35,7 @@ import { waitFor } from "./helpers/poll";
 // descriptors -- every fd it owned was released at exit; a live process
 // doing anything at all holds at least a few).
 
-const IDLE_MS = "400";
+const IDLE_MS = "100";
 
 // Board #317: a loaded host (full native bun-test lane) can put more than
 // the idle window between round1's last request and this test's next

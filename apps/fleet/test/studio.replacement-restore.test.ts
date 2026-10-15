@@ -199,13 +199,10 @@ function scriptedProbe(hasContinue: boolean, cwd: string): string {
 }
 
 /**
- * Drives a real staged restore through the SAME heal closure `syncSession()`
- * builds: `() => this.restartStudio("heal")`, boiled down to the one call
- * that actually matters for this test (`restartWithStorage(..., "heal",
- * storage)`) — the credential refresh / spawn-token settle that closure also
- * does along the way are DO-only concerns, already covered by
- * test/studio.refresh.test.ts and test/studio.self-heal.test.ts, and are not
- * this test's job to re-prove.
+ * The heal closure `syncSession()` builds (do.ts), boiled down to the one
+ * call that actually matters for this test — see do.ts's own comment on
+ * that heal wiring (sweep 43 F15, issue #894) for why this distilled form
+ * is the whole contract a restore-path test needs.
  */
 function healClosure(
   deps: ProvisionDeps, storage: StudioStorage & ObservedStorage, id: string, fleetRepoSlug: string,

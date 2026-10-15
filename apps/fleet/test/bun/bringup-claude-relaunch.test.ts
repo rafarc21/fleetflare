@@ -816,7 +816,9 @@ REAL("relaunch harness — one private server, a lead the kernel names claude (i
     s.launchClaude();
     const before = s.claudePids();
     expect(before.length).toBe(1);
-    Bun.sleepSync(3000);
+    // The fake lead is `sleep 300`; one second proves it stays up on its own.
+    // A lead that dies right after launch would zero every claudePids() count.
+    Bun.sleepSync(1000);
     expect(s.claudePids()).toEqual(before);
     expect(s.paneCommand()).toBe("claude");
   }, T);

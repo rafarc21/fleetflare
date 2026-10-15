@@ -149,7 +149,7 @@ acme-docs--release-studio   degraded   bare: no session       0o/5h:0
 ```
 
 (Trimmed for readability — the real table has more columns too: REPO,
-RST, WIP, PRS, SESSION, ACTIVITY, CHECKED, ROW, ACCOUNT, HOST, REFRESHED,
+RST, WIP, PRS, SESSION, ACTIVITY, INFER, CHECKED, ROW, ACCOUNT, HOST, REFRESHED,
 ERROR. BURN reads `<cumulative output tokens>o/5h:<tokens in the current
 5h bucket>`.)
 

@@ -729,6 +729,14 @@ export async function listPullsForCommit(token: string, repo: string, sha: strin
   return raw.map((p) => ({ number: p.number, base: p.base.ref, head: p.head.ref }));
 }
 
+/** One page of a PR's original commits — GitHub's own maximum of 100 per
+ *  page, the same one-page posture as listOpenPullNumbers/listOpenPullFiles
+ *  above (whose bare per_page=100 carries the same note), not the multi-page
+ *  INSTALLATION_REPOS_PAGE_SIZE/BRANCH_NAMES_PAGE_SIZE loops. A PR with more
+ *  than 100 original commits truncates silently, so the cap is named rather
+ *  than bare. */
+export const PULL_COMMITS_PAGE_SIZE = 100;
+
 /**
  * A PR's own ORIGINAL commit shas, regardless of how it was merged.
  * Squash-merging changes what lands on the base branch (one new commit,
@@ -740,7 +748,7 @@ export async function listPullsForCommit(token: string, repo: string, sha: strin
 export async function listPullCommits(token: string, repo: string, pullNumber: number): Promise<string[]> {
   const raw = await ghJson<{ sha: string }[]>(
     token,
-    `https://api.github.com/repos/${repo}/pulls/${pullNumber}/commits?per_page=100`,
+    `https://api.github.com/repos/${repo}/pulls/${pullNumber}/commits?per_page=${PULL_COMMITS_PAGE_SIZE}`,
     { method: "GET" },
     `list commits for pull ${repo}#${pullNumber}`,
   );
@@ -1228,4 +1236,44 @@ export async function pullsWithClosingIssuesForCommits(
     });
   });
   return out;
+}
+
+/** Posts one commit status (#715 gate/verdict). Needs the GitHub App's
+ *  `Commit statuses: write` permission (operator precondition, Task 0b);
+ *  without it GitHub answers 403 and ghRequest throws. The sole caller is
+ *  GateWorkflow (src/gate/workflow.ts), which owns the retry-then-report
+ *  behavior, not this function. */
+export async function postCommitStatus(
+  token: string, repo: string, sha: string,
+  state: "pending" | "success" | "failure" | "error", context: string, description: string,
+): Promise<void> {
+  await ghRequest(
+    token, `https://api.github.com/repos/${repo}/statuses/${sha}`,
+    { method: "POST", body: JSON.stringify({ state, context, description }) },
+    `postCommitStatus ${context}=${state}`,
+  );
+}
+
+/** Head commit sha of one PR. getPullRequest does not return it. */
+export async function getPullRequestHeadSha(token: string, repo: string, number: number): Promise<string> {
+  const raw = await ghJson<{ head?: { sha?: string } }>(
+    token,
+    `https://api.github.com/repos/${repo}/pulls/${number}`,
+    { method: "GET" },
+    `read pull ${repo}#${number} head`,
+  );
+  if (typeof raw.head?.sha !== "string") throw new Error(`read pull ${repo}#${number} head failed: no head sha`);
+  return raw.head.sha;
+}
+
+/** Commit sha a branch points at. getDefaultBranch returns a name, not a sha. */
+export async function getBranchSha(token: string, repo: string, branch: string): Promise<string> {
+  const raw = await ghJson<{ sha?: string }>(
+    token,
+    `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(branch)}`,
+    { method: "GET" },
+    `read ${repo} branch ${branch} sha`,
+  );
+  if (typeof raw.sha !== "string") throw new Error(`read ${repo} branch ${branch} sha failed: no sha`);
+  return raw.sha;
 }

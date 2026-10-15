@@ -67,6 +67,13 @@ export const DIRECTUS_TIMEOUT_MS = 4_000;
  *  than a visible ceiling — `listRequirements` reports when it hits it. */
 const REQUIREMENTS_PAGE_LIMIT = 200;
 
+/** How many client-portal requests one list read pulls by default — same
+ *  named-bound posture as REQUIREMENTS_PAGE_LIMIT above, but smaller (a
+ *  portal request list is a short recent-activity feed, not a full
+ *  requirement inventory). No caller passes `limit` yet, so 50 is the value
+ *  every future caller inherits silently. */
+const REQUESTS_PAGE_LIMIT = 50;
+
 /**
  * Resolves the two config values, or `null` for "Directus is not configured".
  *
@@ -289,7 +296,7 @@ export async function listOpenDecisions(
  * implements; this is the read half it will need.
  */
 export async function listRequests(
-  cfg: DirectusConfig, projectId: Id, limit = 50,
+  cfg: DirectusConfig, projectId: Id, limit = REQUESTS_PAGE_LIMIT,
 ): Promise<EstateRequest[]> {
   const rows = await directusGet<EstateRequest[]>(cfg, COLLECTIONS.requests, query(
     ["id", "project", "submitted_at", "submitted_by", "body", "status",

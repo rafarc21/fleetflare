@@ -1,0 +1,733 @@
+{
+  "source": "bun 1.4.2 test --reporter=junit, lane command of bun-test-gate, local run (not CI); ms = sum of per-testcase time per file",
+  "timings": [
+    {
+      "file": "test/bun/account-switch-swallow.test.ts",
+      "ms": 1035
+    },
+    {
+      "file": "test/bun/accounts-cli.test.ts",
+      "ms": 2214
+    },
+    {
+      "file": "test/bun/archive-wiring.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/attach-liveness.test.ts",
+      "ms": 28185
+    },
+    {
+      "file": "test/bun/base64.test.ts",
+      "ms": 71
+    },
+    {
+      "file": "test/bun/blueprint-credential.test.ts",
+      "ms": 163
+    },
+    {
+      "file": "test/bun/bringup-active-window.test.ts",
+      "ms": 2328
+    },
+    {
+      "file": "test/bun/bringup-blueprint-sync.test.ts",
+      "ms": 6721
+    },
+    {
+      "file": "test/bun/bringup-claude-launch.test.ts",
+      "ms": 2327
+    },
+    {
+      "file": "test/bun/bringup-claude-relaunch-hermetic.test.ts",
+      "ms": 287
+    },
+    {
+      "file": "test/bun/bringup-claude-relaunch.test.ts",
+      "ms": 79093
+    },
+    {
+      "file": "test/bun/bringup-fresh-session.test.ts",
+      "ms": 295
+    },
+    {
+      "file": "test/bun/bringup-gates.test.ts",
+      "ms": 5149
+    },
+    {
+      "file": "test/bun/bringup-heartbeat-core.test.ts",
+      "ms": 2109
+    },
+    {
+      "file": "test/bun/bringup-launch-line.test.ts",
+      "ms": 303
+    },
+    {
+      "file": "test/bun/bringup-log.test.ts",
+      "ms": 337
+    },
+    {
+      "file": "test/bun/bringup-mcp-config.test.ts",
+      "ms": 702
+    },
+    {
+      "file": "test/bun/bringup-reemit.test.ts",
+      "ms": 410
+    },
+    {
+      "file": "test/bun/bringup-session-adopt.test.ts",
+      "ms": 15296
+    },
+    {
+      "file": "test/bun/bringup-tailscale-up.test.ts",
+      "ms": 165
+    },
+    {
+      "file": "test/bun/bringup-tmux-render.test.ts",
+      "ms": 940
+    },
+    {
+      "file": "test/bun/claude-account-switch.test.ts",
+      "ms": 1016
+    },
+    {
+      "file": "test/bun/cli-check-clear-guard.test.ts",
+      "ms": 722
+    },
+    {
+      "file": "test/bun/cli-destroy-unmerged.test.ts",
+      "ms": 587
+    },
+    {
+      "file": "test/bun/cli-gate.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/cli.fleet-ls-prs.test.ts",
+      "ms": 26
+    },
+    {
+      "file": "test/bun/cli.task-reap.test.ts",
+      "ms": 510
+    },
+    {
+      "file": "test/bun/cli.task-verify.test.ts",
+      "ms": 453
+    },
+    {
+      "file": "test/bun/cmd-syntax.test.ts",
+      "ms": 39
+    },
+    {
+      "file": "test/bun/code-reviewer-blueprint-content.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/container-port.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/context-salvage.test.ts",
+      "ms": 18
+    },
+    {
+      "file": "test/bun/deploy-config-placeholder.test.ts",
+      "ms": 121
+    },
+    {
+      "file": "test/bun/deploy-ops-guard.test.ts",
+      "ms": 27226
+    },
+    {
+      "file": "test/bun/deploy-rescue-gate-image-probe.test.ts",
+      "ms": 69592
+    },
+    {
+      "file": "test/bun/deploy-rescue-gate-misc.test.ts",
+      "ms": 79536
+    },
+    {
+      "file": "test/bun/deploy-rescue-gate-observability.test.ts",
+      "ms": 74932
+    },
+    {
+      "file": "test/bun/deploy-rescue-gate-rescue-all.test.ts",
+      "ms": 61097
+    },
+    {
+      "file": "test/bun/deploy-rescue-gate-target-a.test.ts",
+      "ms": 76988
+    },
+    {
+      "file": "test/bun/deploy-rescue-gate-target-b.test.ts",
+      "ms": 75707
+    },
+    {
+      "file": "test/bun/ego-browser-daemon-spawn-race.test.ts",
+      "ms": 658
+    },
+    {
+      "file": "test/bun/ego-browser-idle-shutdown-container.test.ts",
+      "ms": 775
+    },
+    {
+      "file": "test/bun/ego-browser-idle-shutdown-launch-failure.test.ts",
+      "ms": 3064
+    },
+    {
+      "file": "test/bun/ego-browser-idle-shutdown-scheduler.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/ego-browser-idle-shutdown.test.ts",
+      "ms": 2425
+    },
+    {
+      "file": "test/bun/ego-browser-launch-self-heal.test.ts",
+      "ms": 690
+    },
+    {
+      "file": "test/bun/ego-browser-launch-timeout.test.ts",
+      "ms": 31232
+    },
+    {
+      "file": "test/bun/ego-browser-persistence.test.ts",
+      "ms": 1456
+    },
+    {
+      "file": "test/bun/ego-browser-process-reap.test.ts",
+      "ms": 102
+    },
+    {
+      "file": "test/bun/ego-browser-registry.test.ts",
+      "ms": 9
+    },
+    {
+      "file": "test/bun/ego-browser-rpc.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/ego-browser-smoke.test.ts",
+      "ms": 665
+    },
+    {
+      "file": "test/bun/ego-browser-unimplemented.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/english-only.test.ts",
+      "ms": 2278
+    },
+    {
+      "file": "test/bun/exec-deadline.test.ts",
+      "ms": 10282
+    },
+    {
+      "file": "test/bun/exec-snippet.test.ts",
+      "ms": 46
+    },
+    {
+      "file": "test/bun/ff-file-task-retry.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/ff-new-main.test.ts",
+      "ms": 104
+    },
+    {
+      "file": "test/bun/ff-new-race.test.ts",
+      "ms": 32
+    },
+    {
+      "file": "test/bun/ff-no-tty.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/file-count-guard.test.ts",
+      "ms": 1202
+    },
+    {
+      "file": "test/bun/fleet-ls-account.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/fleet-ls-denominator.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/fleet-ls-footer.test.ts",
+      "ms": 5
+    },
+    {
+      "file": "test/bun/fleet-ls-restarts.test.ts",
+      "ms": 3
+    },
+    {
+      "file": "test/bun/fleet-ls-state.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/fleet-ls-wip.test.ts",
+      "ms": 7
+    },
+    {
+      "file": "test/bun/fleet-reap-state.test.ts",
+      "ms": 12
+    },
+    {
+      "file": "test/bun/fleet-reap-wiring.test.ts",
+      "ms": 333
+    },
+    {
+      "file": "test/bun/fleet-reap.test.ts",
+      "ms": 38
+    },
+    {
+      "file": "test/bun/fleet-tabs-scope.test.ts",
+      "ms": 6
+    },
+    {
+      "file": "test/bun/gate-baseline.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/gate-config.test.ts",
+      "ms": 2
+    },
+    {
+      "file": "test/bun/gate-do.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/gate-dockerfile.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/gate-measure-shard-timing.test.ts",
+      "ms": 17
+    },
+    {
+      "file": "test/bun/gate-merge-tree.test.ts",
+      "ms": 1786
+    },
+    {
+      "file": "test/bun/gate-outbound-handler.test.ts",
+      "ms": 5
+    },
+    {
+      "file": "test/bun/gate-server.test.ts",
+      "ms": 5
+    },
+    {
+      "file": "test/bun/gate-shard-plan.test.ts",
+      "ms": 4
+    },
+    {
+      "file": "test/bun/gate-verdict.test.ts",
+      "ms": 2
+    },
+    {
+      "file": "test/bun/gate-warm-pool.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/gate-workflow-verdict.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/gh-proxy-client.test.ts",
+      "ms": 58
+    },
+    {
+      "file": "test/bun/gh-wrapper.test.ts",
+      "ms": 4043
+    },
+    {
+      "file": "test/bun/git-wrapper.test.ts",
+      "ms": 57541
+    },
+    {
+      "file": "test/bun/harvest-record.test.ts",
+      "ms": 76
+    },
+    {
+      "file": "test/bun/image-repro-lock.test.ts",
+      "ms": 338
+    },
+    {
+      "file": "test/bun/incarnation-newline.test.ts",
+      "ms": 118
+    },
+    {
+      "file": "test/bun/inspect-cmd.test.ts",
+      "ms": 664
+    },
+    {
+      "file": "test/bun/inspect-exports.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/install-cache-security-disk.test.ts",
+      "ms": 6082
+    },
+    {
+      "file": "test/bun/install-cache-security-parse.test.ts",
+      "ms": 530
+    },
+    {
+      "file": "test/bun/install-marker-gate.test.ts",
+      "ms": 1545
+    },
+    {
+      "file": "test/bun/junior-auth.test.ts",
+      "ms": 27
+    },
+    {
+      "file": "test/bun/junior-blocks.test.ts",
+      "ms": 31
+    },
+    {
+      "file": "test/bun/junior-cli.test.ts",
+      "ms": 1529
+    },
+    {
+      "file": "test/bun/junior-client.test.ts",
+      "ms": 6
+    },
+    {
+      "file": "test/bun/junior-eval.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/junior-local-cli.test.ts",
+      "ms": 229
+    },
+    {
+      "file": "test/bun/junior-maestro-rule.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/junior-stats-cli.test.ts",
+      "ms": 615
+    },
+    {
+      "file": "test/bun/junior-stats-unit.test.ts",
+      "ms": 28
+    },
+    {
+      "file": "test/bun/leak-gate.test.ts",
+      "ms": 329
+    },
+    {
+      "file": "test/bun/llm-model-quality.test.ts",
+      "ms": 2
+    },
+    {
+      "file": "test/bun/llm-models.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/llm-router.test.ts",
+      "ms": 2
+    },
+    {
+      "file": "test/bun/llm-translate-request.test.ts",
+      "ms": 3
+    },
+    {
+      "file": "test/bun/llm-translate-stream.test.ts",
+      "ms": 3
+    },
+    {
+      "file": "test/bun/load-credentials-if-present.test.ts",
+      "ms": 273
+    },
+    {
+      "file": "test/bun/localci-daemon.test.ts",
+      "ms": 5420
+    },
+    {
+      "file": "test/bun/localci-run.test.ts",
+      "ms": 40904
+    },
+    {
+      "file": "test/bun/localci-summarize.test.ts",
+      "ms": 9
+    },
+    {
+      "file": "test/bun/maestro-in-container-verbs.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/memguard-select-core.test.ts",
+      "ms": 221
+    },
+    {
+      "file": "test/bun/memguard-select-loop.test.ts",
+      "ms": 585
+    },
+    {
+      "file": "test/bun/memory-clone.test.ts",
+      "ms": 1626
+    },
+    {
+      "file": "test/bun/memory-cmd.test.ts",
+      "ms": 1127
+    },
+    {
+      "file": "test/bun/memory-migrate.test.ts",
+      "ms": 1170
+    },
+    {
+      "file": "test/bun/merge-danger.test.ts",
+      "ms": 2
+    },
+    {
+      "file": "test/bun/model-smoke.test.ts",
+      "ms": 55
+    },
+    {
+      "file": "test/bun/orca-ensure-reconcile.test.ts",
+      "ms": 40
+    },
+    {
+      "file": "test/bun/orca-ensure-verbs.test.ts",
+      "ms": 3
+    },
+    {
+      "file": "test/bun/orca-registry-rows.test.ts",
+      "ms": 3809
+    },
+    {
+      "file": "test/bun/orca-registry-teardown.test.ts",
+      "ms": 20
+    },
+    {
+      "file": "test/bun/pane-probe-lead-identity.test.ts",
+      "ms": 1234
+    },
+    {
+      "file": "test/bun/pane-probe-lead-scope.test.ts",
+      "ms": 707
+    },
+    {
+      "file": "test/bun/pane-probe.test.ts",
+      "ms": 186
+    },
+    {
+      "file": "test/bun/paste-cmd.test.ts",
+      "ms": 338
+    },
+    {
+      "file": "test/bun/paste-mac.test.ts",
+      "ms": 61
+    },
+    {
+      "file": "test/bun/poll.test.ts",
+      "ms": 185
+    },
+    {
+      "file": "test/bun/print-attach-handle.test.ts",
+      "ms": 4
+    },
+    {
+      "file": "test/bun/provisioned-check.test.ts",
+      "ms": 39
+    },
+    {
+      "file": "test/bun/public-config.test.ts",
+      "ms": 3
+    },
+    {
+      "file": "test/bun/public-export.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/read-repos-credential.test.ts",
+      "ms": 880
+    },
+    {
+      "file": "test/bun/real-git-preload.test.ts",
+      "ms": 5
+    },
+    {
+      "file": "test/bun/repo-check-runner.test.ts",
+      "ms": 375
+    },
+    {
+      "file": "test/bun/reproducible-images.test.ts",
+      "ms": 3
+    },
+    {
+      "file": "test/bun/require-tool.test.ts",
+      "ms": 100
+    },
+    {
+      "file": "test/bun/rescue-all-fetch-timeout.test.ts",
+      "ms": 368
+    },
+    {
+      "file": "test/bun/rescue-all-scope.test.ts",
+      "ms": 396
+    },
+    {
+      "file": "test/bun/rescue-gc.test.ts",
+      "ms": 2
+    },
+    {
+      "file": "test/bun/rescue-leak-gate.test.ts",
+      "ms": 4436
+    },
+    {
+      "file": "test/bun/rescue-push.test.ts",
+      "ms": 157121
+    },
+    {
+      "file": "test/bun/rescue-remote.test.ts",
+      "ms": 5
+    },
+    {
+      "file": "test/bun/sensors-run.test.ts",
+      "ms": 13
+    },
+    {
+      "file": "test/bun/session-aside.test.ts",
+      "ms": 345
+    },
+    {
+      "file": "test/bun/session-memory.test.ts",
+      "ms": 12665
+    },
+    {
+      "file": "test/bun/session-stats-cycle.test.ts",
+      "ms": 7
+    },
+    {
+      "file": "test/bun/session-tar-budget.test.ts",
+      "ms": 3540
+    },
+    {
+      "file": "test/bun/studio-adopt.test.ts",
+      "ms": 882
+    },
+    {
+      "file": "test/bun/studio-fleet-creds.test.ts",
+      "ms": 217
+    },
+    {
+      "file": "test/bun/studio-fleet-directs.test.ts",
+      "ms": 529
+    },
+    {
+      "file": "test/bun/studio-fleet-pregate.test.ts",
+      "ms": 112
+    },
+    {
+      "file": "test/bun/studio-fleet-report-cli.test.ts",
+      "ms": 180
+    },
+    {
+      "file": "test/bun/studio-git-identity.test.ts",
+      "ms": 41
+    },
+    {
+      "file": "test/bun/studio-skills-resolve.test.ts",
+      "ms": 2
+    },
+    {
+      "file": "test/bun/studio-tmux-socket.test.ts",
+      "ms": 14000
+    },
+    {
+      "file": "test/bun/survival-split-guard.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/sweep-procs.test.ts",
+      "ms": 2583
+    },
+    {
+      "file": "test/bun/task-state-cli.test.ts",
+      "ms": 500
+    },
+    {
+      "file": "test/bun/test-lies-detectors.test.ts",
+      "ms": 47
+    },
+    {
+      "file": "test/bun/test-lies-repo.test.ts",
+      "ms": 689
+    },
+    {
+      "file": "test/bun/tmux-socket-pin.test.ts",
+      "ms": 2
+    },
+    {
+      "file": "test/bun/tmux-socket.test.ts",
+      "ms": 11108
+    },
+    {
+      "file": "test/bun/transcript-wire-equivalence.test.ts",
+      "ms": 3
+    },
+    {
+      "file": "test/bun/usage-limit-dismiss.test.ts",
+      "ms": 153
+    },
+    {
+      "file": "test/bun/vendored-skills.test.ts",
+      "ms": 7
+    },
+    {
+      "file": "test/bun/wake-cmd.test.ts",
+      "ms": 15726
+    },
+    {
+      "file": "test/bun/wake-gate-wiring.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/wake-guard.test.ts",
+      "ms": 3511
+    },
+    {
+      "file": "test/bun/wake-submit-check.test.ts",
+      "ms": 791
+    },
+    {
+      "file": "test/bun/web-studio-refactor-step.test.ts",
+      "ms": 1
+    },
+    {
+      "file": "test/bun/worktree-session-adopt.test.ts",
+      "ms": 2566
+    },
+    {
+      "file": "test/bun/wrangler-test-config-location.test.ts",
+      "ms": 0
+    },
+    {
+      "file": "test/bun/write-proxy-config.test.ts",
+      "ms": 288
+    },
+    {
+      "file": "test/bun/write-proxy-e2e.test.ts",
+      "ms": 633
+    },
+    {
+      "file": "test/bun/write-proxy-inflate.test.ts",
+      "ms": 98
+    },
+    {
+      "file": "test/bun/write-proxy-pack.test.ts",
+      "ms": 119
+    },
+    {
+      "file": "test/studio.files.test.ts",
+      "ms": 24
+    },
+    {
+      "file": "test/studio.studio-blueprint.test.ts",
+      "ms": 50
+    }
+  ]
+}

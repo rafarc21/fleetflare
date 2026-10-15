@@ -1,0 +1,1480 @@
+// apps/fleet/test/llm.anthropic-stream.test.ts
+// HTTP/auth/framing layer for #249's GLM-led studio route — the streaming
+// half (SSE streaming, stream idle timeout/failure reasons, pre-stream retry
+// + call duration, count_tokens, model pool + gateway, #767 same-model
+// backoff), split out of test/llm.anthropic-route.test.ts per sweep-45 F6
+// (#919). Same cloudflare:test convention as test/junior.route.test.ts
+// (spawn-token resolution needs a real registry row + a real StudioStatus
+// shape) — every actual translation direction is covered without env/HTTP
+// mocking in test/bun/llm-translate-request.test.ts and
+// test/bun/llm-translate-stream.test.ts; this file only proves the wiring:
+// streaming event shaping, stream-failure classification, retries, pool
+// overflow, and that env.AI.run is called with the translated shapes.
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { env } from "cloudflare:test";
+import {
+  handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH,
+  handleFleetAnthropicCountTokens, ANTHROPIC_COUNT_TOKENS_PATH,
+} from "../src/llm/anthropic-route";
+import { GLM_LEAD_MODEL } from "../src/llm/translate";
+import { POOL, type PoolModel } from "../src/llm/models";
+import { setAssignedModel } from "../src/llm/model-store";
+import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
+import type { StudioStatus } from "../src/studio/types";
+import type { Env } from "../src/env";
+import { fakeCtx } from "./helpers/fake-ctx";
+
+const ME = "acme-org--web-studio";
+// Maestro review round 1, MAJOR 2: every row here carries `leadType: "glm"`
+// by default — the route now refuses any studio whose own registry row
+// isn't glm-led, so a fixture that omitted this would 403 before reaching
+// whatever the test actually means to exercise. Tests that specifically
+// cover the leadType gate build their OWN row with a different value.
+function row(id: string, hash: string, leadType: "claude" | "glm" | undefined = "glm"): StudioStatus {
+  return { id, state: "running", tailscaleHost: null, lastRefresh: null, error: null,
+    lastRefreshError: null, burn: null, spawnedBy: null, spawnTokenHash: hash, repoSlug: "acme-org/websites",
+    ...(leadType === undefined ? {} : { leadType }) };
+}
+// fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746)
+let ctx: ReturnType<typeof fakeCtx>;
+
+async function usageRows() {
+  const res = await env.DB.prepare(
+    "SELECT studio_id AS studioId, mode, model, input_tokens AS inputTokens, output_tokens AS outputTokens, ok, error, duration_ms AS durationMs, attempts FROM junior_usage_log ORDER BY ts ASC",
+  ).all<{ studioId: string; mode: string; model: string; inputTokens: number; outputTokens: number; ok: number; error: string | null; durationMs: number | null; attempts: number | null }>();
+  return res.results ?? [];
+}
+
+// Issue #335: every fixture env retries with a 1ms backoff base, so a test
+// whose env.AI.run always throws a retryable error stays fast.
+const FAST_RETRY = { LEAD_AI_RETRY_BASE_MS: "1" } as Partial<Env>;
+
+async function setup(
+  aiResult: unknown = { choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } },
+  envOverrides: Partial<Env> = {},
+  leadType: "claude" | "glm" | undefined = "glm",
+) {
+  const token = mintSpawnToken();
+  const rows = async () => [row(ME, await hashSpawnToken(token), leadType)];
+  const run = vi.fn(async () => aiResult);
+  const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...FAST_RETRY, ...envOverrides } as unknown as Env;
+  return { token, rows, run, e };
+}
+
+const good = { model: "claude-opus-4-5", max_tokens: 100, messages: [{ role: "user", content: "hi" }] };
+
+/** Task 4 (spec 2026-10-13-model-pool-design) — a smaller variant of
+ *  `setup()` above, for the gateway/pool-overflow tests: takes a caller-built
+ *  `ai` stub directly (so a test can assert on its own `run` mock's call
+ *  args/sequence) instead of `setup()`'s own wrapped `vi.fn(async () =>
+ *  aiResult)`. Builds the same authorized POST (`good` body, a freshly
+ *  minted spawn token, a glm-led registry row) every other happy-path test
+ *  in this file already does. `pool` (code review, Standards axis, #717):
+ *  `handleFleetAnthropicMessages`'s own test-injection seam for the model
+ *  pool pickModels walks — the same `rows`-style override already used for
+ *  DB injection, now extended so a test can hand it a fixture pool instead
+ *  of mutating the real, shared `models.ts` POOL export. */
+async function callRoute(opts: {
+  ai: { run: ReturnType<typeof vi.fn> };
+  envOverrides?: Partial<Env>;
+  pool?: readonly PoolModel[];
+  /** #767: fake sleep/random threaded through the handler's own 6th
+   *  param, so a route-level test can pin the backoff schedule exactly
+   *  without ever waiting a real 3s. */
+  retryDeps?: { sleep?: (ms: number) => Promise<void>; random?: () => number };
+}) {
+  const token = mintSpawnToken();
+  const rows = async () => [row(ME, await hashSpawnToken(token))];
+  const e = { ...env, FLEET_JUNIOR: "on", AI: opts.ai, ...FAST_RETRY, ...(opts.envOverrides ?? {}) } as unknown as Env;
+  return handleFleetAnthropicMessages(req({ token }), e, ctx, rows, opts.pool, opts.retryDeps);
+}
+
+function req(opts: { token?: string | null; apiKey?: string; body?: unknown; path?: string; method?: string }) {
+  const headers: Record<string, string> = {};
+  if (opts.token) headers.authorization = `Bearer ${opts.token}`;
+  if (opts.apiKey) headers["x-api-key"] = opts.apiKey;
+  const method = opts.method ?? "POST";
+  return new Request(`https://w${opts.path ?? ANTHROPIC_MESSAGES_PATH}`, {
+    method, headers,
+    body: method === "POST" ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body ?? good)) : undefined,
+  });
+}
+beforeEach(async () => {
+  await env.DB.prepare("DELETE FROM fleet_state").run();
+  await env.DB.prepare("DELETE FROM junior_usage_log").run();
+  ctx = fakeCtx();
+});
+describe("handleFleetAnthropicMessages — streaming", () => {
+  it("stream:true pipes OpenAI SSE chunks through to the Anthropic SSE event sequence", async () => {
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ];
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toBe("text/event-stream");
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual([
+      "message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop",
+    ]);
+    expect(text).toContain('"text":"hi"');
+    expect(run).toHaveBeenCalledWith(GLM_LEAD_MODEL, expect.objectContaining({ stream: true, stream_options: { include_usage: true } }));
+  });
+
+  // Maestro review round 1, MAJOR 3: the exact bug — a mid-stream upstream
+  // failure (after message_start AND a content block already reached the
+  // client) used to be silently reported as a normal end_turn/message_stop.
+  it("a mid-stream upstream failure emits event: error — never a faked end_turn/message_stop", async () => {
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`));
+      },
+      pull() {
+        throw new Error("AiError: capacity exceeded mid-stream");
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    expect(eventTypes).not.toContain("message_stop");
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toEqual({
+      type: "error", error: { type: "overloaded_error", message: "AiError: capacity exceeded mid-stream" },
+    });
+
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].ok).toBe(0);
+  });
+
+  // Board issue #284 (a): the stream simply ends — reader hits EOF, no
+  // finish_reason chunk ever arrived, no [DONE], no error chunk either.
+  // Before this fix, this silently closed as a normal end_turn/message_stop
+  // pair; now it must emit event: error instead.
+  it("a stream that ends without ever sending a finish_reason chunk emits event: error, not a faked end_turn/message_stop (board issue #284a)", async () => {
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`));
+        // The stream just ends here — no finish_reason chunk, no [DONE].
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    expect(eventTypes).not.toContain("message_stop");
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toMatchObject({
+      type: "error", error: { message: "upstream stream ended without a finish reason" },
+    });
+
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].ok).toBe(0);
+  });
+
+  // Board issue #284 (b): an explicit upstream {"error":...} chunk arriving
+  // mid-stream — the real failure reason is already right there in the
+  // chunk, so it must flow straight into event: error, never be silently
+  // swallowed by applyOpenAIStreamChunk's own "no choices[0]" no-op path.
+  it("an explicit upstream {error:...} chunk mid-stream emits event: error with its own message, not a swallowed/silent continuation (board issue #284b)", async () => {
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: "upstream blew up mid-generation" } })}\n\n`));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    expect(eventTypes).not.toContain("message_stop");
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toEqual({
+      type: "error", error: { type: "api_error", message: "upstream blew up mid-generation" },
+    });
+
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].ok).toBe(0);
+  });
+
+  // The overflow-shaped sibling of the test above — Claude Code's client
+  // recognizes "prompt is too long" to trigger auto-compact mid-session,
+  // so the raw upstream overflow text must not pass through.
+  it("an overflow-shaped upstream {error:...} chunk mid-stream emits event: error carrying the fixed 'prompt is too long' message, not the raw upstream text (#298-4)", async () => {
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`));
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: "This model's maximum context length is 32768 tokens" } })}\n\n`));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    expect(eventTypes).not.toContain("message_stop");
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toEqual({
+      type: "error", error: { type: "invalid_request_error", message: "prompt is too long" },
+    });
+
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].ok).toBe(0);
+  });
+
+  // Board issue #284, MINOR 4(a): mirrors #218's own finding
+  // (junior.usage.test.ts) applied to the stream-pump chain itself — the
+  // Workers runtime is free to tear down this execution context the instant
+  // the Response (already returned above, carrying `readable`) is
+  // considered "done" from ITS own point of view, before a bare
+  // `void`-prefixed promise chain has actually finished writing/closing the
+  // stream. Checked BEFORE reading any byte of the body: ctx.waitUntil must
+  // be called synchronously, the instant this function kicks the pump off —
+  // not merely as an incidental side effect of the client eventually reading
+  // the stream to completion (which the real runtime gives no such guarantee
+  // about, timing-wise). The upstream stream here deliberately is never
+  // read by this test before the assertion, so if the pump chain is only
+  // reachable via a bare `void` (no ctx.waitUntil wrapping it directly),
+  // backpressure on the unread TransformStream keeps it pending and
+  // ctx.waitUntil never fires at all by this point.
+  it("the stream-pump chain itself is handed to ctx.waitUntil, not a bare fire-and-forget (board issue #284 MINOR 4a)", async () => {
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ];
+    const enc = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    expect(ctx.waitUntil).toHaveBeenCalled();
+    await r.text();
+    await ctx.drain();
+  });
+
+  it("a successful stream logs a usage row with the real tokens from the final usage-bearing chunk (MAJOR 4)", async () => {
+    const enc = new TextEncoder();
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 2 } },
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    await r.text();
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1, error: null });
+  });
+
+  // Fresh-context review, #717 critical follow-up: this is the critical gap
+  // — Claude Code streams by default, so THIS path (pumpAnthropicStream ->
+  // applyOpenAIStreamChunk/closeStreamOrError) is the one that actually
+  // broke live GLM-lead studios mid-turn. Exercises the REAL route handler
+  // end to end (a real SSE ReadableStream upstream, parsed back out of the
+  // Response body), not the pure translate.ts functions in isolation.
+  it("streaming: a huge upstream completion_tokens (reasoning_content inflation) is clamped to the request's own max_tokens in the final message_delta, not reported verbatim", async () => {
+    const enc = new TextEncoder();
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 50, completion_tokens: 70000 } },
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run } } as unknown as Env;
+    const body = { model: "claude-opus-4-5", max_tokens: 8000, stream: true, messages: [{ role: "user", content: "hi" }] };
+
+    const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const deltaLine = text.split("\n\n").find((frame) => frame.includes("message_delta"));
+    const deltaData = JSON.parse(deltaLine!.slice(deltaLine!.indexOf("data:") + 5).trim()) as { usage: { output_tokens: number } };
+    expect(deltaData.usage.output_tokens).toBe(8000);
+
+    // The D1 usage-log row (what `handleFleetAnthropicMessages` bills
+    // against) stays consistent with what the client was actually told,
+    // rather than the raw, unclamped upstream figure.
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ studioId: ME, outputTokens: 8000, ok: 1 });
+  });
+
+  // Issue #519 (sweep 13): the `.finally(() => { writer.close().catch(() => {}) })`
+  // after pumpAnthropicStream used to drop a failed close with no trace. The
+  // pump itself already finished OK here -- the client consumed every frame
+  // through message_stop, then went away before the close round-trip, which
+  // is exactly the window where close() rejects (cancelling the readable
+  // errors the writable side). The close failure must not disturb the
+  // already-returned response or the usage row; it must log one
+  // console.error. The fake DB below gates ONLY the usage insert on a
+  // manual deferred (still forwarded to the real env.DB) so the cancel
+  // deterministically lands between the pump's own return and the
+  // `.finally`'s close() -- and so the row is released INSIDE this test's
+  // own lifetime, never leaking into the next test's usageRows() read.
+  it("a writer.close() rejection after the pump finished logs one console.error, and the ok usage row still lands (#519)", async () => {
+    const enc = new TextEncoder();
+    const chunks = [
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 2 } },
+    ];
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(`data: ${JSON.stringify(c)}\n\n`));
+        controller.enqueue(enc.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const run = vi.fn(async () => upstream);
+    const token = mintSpawnToken();
+    const rows = async () => [row(ME, await hashSpawnToken(token))];
+    const realDb = env.DB;
+    let releaseInsert: () => void = () => {};
+    const insertGate = new Promise<void>((resolve) => { releaseInsert = resolve; });
+    let insertRun: Promise<unknown> | null = null;
+    const gatedUsageDb = {
+      prepare: (sql: string) => {
+        if (!sql.includes("INSERT INTO junior_usage_log")) return realDb.prepare(sql);
+        const stmt = realDb.prepare(sql);
+        return {
+          bind: (...args: unknown[]) => ({
+            run: () => {
+              insertRun = (async () => {
+                await insertGate;
+                return (stmt as unknown as { bind: (...a: unknown[]) => { run: () => Promise<unknown> } }).bind(...args).run();
+              })();
+              return insertRun;
+            },
+          }),
+        };
+      },
+    } as unknown as D1Database;
+    const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, DB: gatedUsageDb } as unknown as Env;
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+      expect(r.status).toBe(200);
+
+      // Consume every frame the pump wrote -- through message_stop, the
+      // last one -- so the pump's own writes have all resolved and it
+      // returns ok. Then the client drops (cancel) while the insert is
+      // still gated, before the `.finally`'s writer.close() runs.
+      const reader = r.body!.getReader();
+      const dec = new TextDecoder();
+      let text = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += dec.decode(value, { stream: true });
+        if (text.includes("message_stop")) break;
+      }
+      expect(text).toContain("message_stop");
+      await reader.cancel("client closed the tab before the close round-trip");
+      await ctx.drain();
+
+      const closeFailures = errors.mock.calls.filter((c) => c.join(" ").includes("writer close failed"));
+      expect(closeFailures).toHaveLength(1);
+      // The pump had already finished OK -- release the insert and let the
+      // usage row land, ok:1.
+      releaseInsert();
+      await insertRun;
+      const rowsLogged = await usageRows();
+      expect(rowsLogged).toHaveLength(1);
+      expect(rowsLogged[0]).toMatchObject({ studioId: ME, inputTokens: 7, outputTokens: 2, ok: 1, error: null });
+    } finally {
+      errors.mockRestore();
+    }
+  });
+});
+
+// Issue #302: a live GLM-lead run hit an ~8-min upstream stall. The pump sat
+// in `reader.read()` the whole time, Claude Code waited out its own 600s
+// client timeout, and the two `ok: 0` rows it left carried no reason at all.
+describe("handleFleetAnthropicMessages — stream idle timeout and failure reasons (issue #302)", () => {
+  function streamSetup(upstream: ReadableStream<Uint8Array>, envOverrides: Partial<Env> = {}) {
+    return (async () => {
+      const run = vi.fn(async () => upstream);
+      const token = mintSpawnToken();
+      const rows = async () => [row(ME, await hashSpawnToken(token))];
+      const e = { ...env, FLEET_JUNIOR: "on", AI: { run }, ...FAST_RETRY, ...envOverrides } as unknown as Env;
+      return { token, rows, e, run };
+    })();
+  }
+  const partial = () => new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`);
+
+  it("an upstream that stalls past LEAD_STREAM_IDLE_MS emits event: error and cancels the upstream read", async () => {
+    let cancelled = false;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(partial()); },
+      pull() { return new Promise<void>(() => { /* stalls forever */ }); },
+      cancel() { cancelled = true; },
+    });
+    const { token, rows, e } = await streamSetup(upstream, { LEAD_STREAM_IDLE_MS: "40" } as Partial<Env>);
+
+    const started = Date.now();
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await r.text();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual(["message_start", "content_block_start", "content_block_delta", "error"]);
+    const errorFrame = text.split("\n\n").find((f) => f.includes("event: error"));
+    expect(JSON.parse(errorFrame!.split("data: ")[1])).toEqual({
+      type: "error", error: { type: "api_error", message: "upstream stream idle timeout: no data for 40ms" },
+    });
+
+    await ctx.drain();
+    expect(cancelled).toBe(true);
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 0, error: "idle_timeout after 40ms" });
+  });
+
+  it("a slow-but-steady stream (gaps under LEAD_STREAM_IDLE_MS, total time over it) completes normally — the idle timer re-arms on every chunk", async () => {
+    // Issue #304, item 1: the stall test above proves a PERMANENT stall trips
+    // the timer, but a stream with gaps under the limit and total time over
+    // it would pass even with one single overall deadline armed before the
+    // loop. This pins the actual contract: every chunk re-arms the timer, so
+    // a live stream that keeps making progress never trips it.
+    const enc = new TextEncoder();
+    const chunks = [
+      ...Array.from({ length: 7 }, (_, i) => ({ choices: [{ delta: { content: `c${i}` } }] })),
+      { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 2 } },
+    ];
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    let enqueued = 0;
+    const upstream = new ReadableStream<Uint8Array>({
+      // One SSE frame per pull, with a 40ms gap before each: every gap is
+      // under the 200ms idle limit, but 8 pulls x 40ms ~ 320ms total is over
+      // it — only per-chunk re-arming lets this stream through.
+      async pull(controller) {
+        if (enqueued >= chunks.length) { controller.close(); return; }
+        await sleep(40);
+        if (enqueued < chunks.length - 1) controller.enqueue(enc.encode(`data: ${JSON.stringify(chunks[enqueued])}\n\n`));
+        else controller.enqueue(enc.encode(`data: ${JSON.stringify(chunks[enqueued])}\n\ndata: [DONE]\n\n`));
+        enqueued++;
+      },
+    });
+    const { token, rows, e } = await streamSetup(upstream, { LEAD_STREAM_IDLE_MS: "200" } as Partial<Env>);
+
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    const eventTypes = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+    expect(eventTypes).toEqual([
+      "message_start", "content_block_start", "content_block_delta", "content_block_delta", "content_block_delta",
+      "content_block_delta", "content_block_delta", "content_block_delta", "content_block_delta", "content_block_stop",
+      "message_delta", "message_stop",
+    ]);
+    expect(eventTypes).not.toContain("error");
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 1, error: null });
+  });
+
+  it("a garbage LEAD_STREAM_IDLE_MS falls back to the default instead of disabling the timeout", async () => {
+    const { LEAD_STREAM_IDLE_MS_DEFAULT, leadStreamIdleMs } = await import("../src/llm/anthropic-route");
+    expect(LEAD_STREAM_IDLE_MS_DEFAULT).toBe(90_000);
+    expect(leadStreamIdleMs({})).toBe(90_000);
+    expect(leadStreamIdleMs({ LEAD_STREAM_IDLE_MS: "nope" })).toBe(90_000);
+    expect(leadStreamIdleMs({ LEAD_STREAM_IDLE_MS: "0" })).toBe(90_000);
+    expect(leadStreamIdleMs({ LEAD_STREAM_IDLE_MS: "120000" })).toBe(120_000);
+  });
+
+  it("a mid-stream read throw records upstream_read_error with the classified type", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(partial()); },
+      pull() { throw new Error("AiError: capacity exceeded mid-stream"); },
+    });
+    const { token, rows, e } = await streamSetup(upstream);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    await r.text();
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({
+      ok: 0, error: "upstream_read_error overloaded_error: AiError: capacity exceeded mid-stream",
+    });
+  });
+
+  it("an explicit upstream {error} chunk records upstream_error_chunk", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(partial());
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ error: { message: "upstream blew up" } })}\n\n`));
+        controller.close();
+      },
+    });
+    const { token, rows, e } = await streamSetup(upstream);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    await r.text();
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "upstream_error_chunk api_error: upstream blew up" });
+  });
+
+  it("a stream that ends without a finish_reason records no_finish_reason", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(partial()); controller.close(); },
+    });
+    const { token, rows, e } = await streamSetup(upstream);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    await r.text();
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "no_finish_reason" });
+  });
+
+  it("the client dropping the stream records client_abort and cancels the upstream", async () => {
+    let cancelled = false;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(partial()); },
+      pull() { return new Promise<void>(() => {}); },
+      cancel() { cancelled = true; },
+    });
+    const { token, rows, e } = await streamSetup(upstream, { LEAD_STREAM_IDLE_MS: "5000" } as Partial<Env>);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const reader = r.body!.getReader();
+    await reader.read();
+    await reader.cancel("client went away");
+    await ctx.drain();
+    expect(cancelled).toBe(true);
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 0, error: "client_abort" });
+  });
+
+  it("a non-streaming env.AI.run throw records ai_run_error with the status it mapped to", async () => {
+    const { token, rows, e } = await setup();
+    (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => { throw new Error("AiError: capacity exceeded"); });
+    await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "ai_run_error 529 overloaded_error: AiError: capacity exceeded" });
+  });
+
+  it("a streaming env.AI.run throw records ai_run_error too", async () => {
+    const { token, rows, e } = await setup();
+    (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => { throw new Error("upstream timeout"); });
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(504);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, error: "ai_run_error 504 api_error: upstream timeout" });
+  });
+
+  it("a failure writes exactly one console.error line naming studio + reason, never prompt content", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const upstream = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(partial()); controller.close(); },
+      });
+      const { token, rows, e } = await streamSetup(upstream);
+      const body = { ...good, stream: true, messages: [{ role: "user", content: "TOP-SECRET-PROMPT-TEXT" }] };
+      const r = await handleFleetAnthropicMessages(req({ token, body }), e, ctx, rows);
+      await r.text();
+      await ctx.drain();
+      expect(spy).toHaveBeenCalledTimes(1);
+      const line = spy.mock.calls[0].map(String).join(" ");
+      // Issue #304: the reason is now failureClass()'s own output — class/
+      // status only. `no_finish_reason` carries no upstream text, so its
+      // redacted form is the string itself, unchanged.
+      expect(line).toBe(`[glm-lead] call failed studio=${ME} stream=true in=0 out=0 reason=no_finish_reason`);
+      expect(line).not.toContain("TOP-SECRET-PROMPT-TEXT");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Board issue #304, item 3: the upstream's OWN error message can echo
+  // request input — a context-overflow error quoting the prompt is the
+  // exact shape that motivated this. `wrangler tail` output outlives the
+  // request, so the console line must carry the failure CLASS only. The D1
+  // `error` column is NOT redacted: the full message stays there for
+  // diagnosis (issue #302's truncation cap still applies).
+  it("a prompt-echoing upstream error never reaches the console line, but the full message stays in the D1 error column (issue #304)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { token, rows, e } = await setup();
+      (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => {
+        throw new Error("bad input near: TOP-SECRET-PROMPT-TEXT");
+      });
+      const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+      expect(r.status).toBe(500);
+      await ctx.drain();
+      expect(spy).toHaveBeenCalledTimes(1);
+      const line = spy.mock.calls[0].map(String).join(" ");
+      expect(line).not.toContain("TOP-SECRET-PROMPT-TEXT");
+      expect(line).toContain("reason=ai_run_error 500 api_error");
+      expect((await usageRows())[0].error).toBe("ai_run_error 500 api_error: bad input near: TOP-SECRET-PROMPT-TEXT");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("failureClass keeps the class/status and drops everything from the first ':' onward (issue #304)", async () => {
+    const { failureClass } = await import("../src/llm/anthropic-route");
+    // Plain reasons never carry upstream text — they pass through unchanged.
+    expect(failureClass("idle_timeout after 40ms")).toBe("idle_timeout after 40ms");
+    expect(failureClass("client_abort")).toBe("client_abort");
+    expect(failureClass("no_finish_reason")).toBe("no_finish_reason");
+    // Every failureReason shape: everything from the FIRST ':' onward is
+    // the upstream message — dropped, even when the message itself carries
+    // more colons.
+    expect(failureClass("upstream_read_error overloaded_error: AiError: capacity exceeded mid-stream"))
+      .toBe("upstream_read_error overloaded_error");
+    expect(failureClass("upstream_error_chunk api_error: upstream blew up")).toBe("upstream_error_chunk api_error");
+    expect(failureClass("ai_run_error 504 api_error: upstream timeout")).toBe("ai_run_error 504 api_error");
+    expect(failureClass("pump_error: something broke inside the pump")).toBe("pump_error");
+  });
+
+  it("a successful call writes no console.error line and a null error column", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { token, rows, e } = await setup();
+      await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+      await ctx.drain();
+      expect(spy).not.toHaveBeenCalled();
+      expect((await usageRows())[0]).toMatchObject({ ok: 1, error: null });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a very long upstream message is truncated in the stored reason", async () => {
+    const { token, rows, e } = await setup();
+    (e.AI as { run: ReturnType<typeof vi.fn> }).run = vi.fn(async () => { throw new Error("x".repeat(5000)); });
+    await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    await ctx.drain();
+    const stored = (await usageRows())[0].error!;
+    expect(stored.length).toBeLessThanOrEqual(300);
+    expect(stored.startsWith("ai_run_error 500 api_error: xxx")).toBe(true);
+  });
+});
+
+describe("handleFleetAnthropicMessages — pre-stream retry and call duration (issue #335)", () => {
+  // The live shape: Workers AI throws this from inside env.AI.run, before any
+  // stream exists.
+  const TIMEOUT_504 = "AiError: 3046: Request timeout";
+  const okReply = { choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } };
+  function failThen(messages: string[], then: unknown) {
+    let n = 0;
+    return vi.fn(async () => {
+      if (n < messages.length) throw new Error(messages[n++]);
+      return then;
+    });
+  }
+
+  it("a 504 (3046 Request timeout) is retried and the second attempt's reply is returned", async () => {
+    const { token, rows, e } = await setup();
+    const run = failThen([TIMEOUT_504], okReply);
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    expect(run).toHaveBeenCalledTimes(2);
+    await ctx.drain();
+    const logged = await usageRows();
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({ ok: 1, error: null, attempts: 2 });
+  });
+
+  it("a 529 overloaded (capacity) error is retried too", async () => {
+    const { token, rows, e } = await setup();
+    const run = failThen(["AiError: capacity exceeded"], okReply);
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up after 2 retries (3 attempts) and returns the last 504, recording attempts=3", async () => {
+    const { token, rows, e } = await setup();
+    const run = vi.fn(async () => { throw new Error(TIMEOUT_504); });
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(504);
+    expect(run).toHaveBeenCalledTimes(3);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, attempts: 3, error: `ai_run_error 504 api_error: ${TIMEOUT_504}` });
+  });
+
+  it("a 4xx-mapped error is never retried (context overflow 400); a rate limit 429 gets only #767 backoff, not a #335 retry", async () => {
+    // Context overflow: classifyAiError maps it to a 400 — runAiWithRetry
+    // does not retry it, and it is not a rate limit, so #767's backoff
+    // does not fire either: exactly one call, fail fast.
+    {
+      const { token, rows, e } = await setup();
+      const run = vi.fn(async () => { throw new Error("This model's maximum context length is 32768 tokens"); });
+      (e.AI as { run: unknown }).run = run;
+      const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+      expect(r.status).toBeLessThan(500);
+      expect(run).toHaveBeenCalledTimes(1);
+    }
+    // Rate limit: still not a #335 retryable status (runAiWithRetry only
+    // retries 504/529), but #767's backoff now fires — pool off means the
+    // single model has nowhere else to go, so it reruns up to 4 extra
+    // rounds on the backoff schedule before reporting the 429.
+    {
+      const sleeps: number[] = [];
+      const { token, rows, e } = await setup();
+      const run = vi.fn(async () => { throw new Error("AiError: rate limit reached"); });
+      (e.AI as { run: unknown }).run = run;
+      const r = await handleFleetAnthropicMessages(
+        req({ token }), e, ctx, rows,
+        undefined,
+        { sleep: async (ms) => { sleeps.push(ms); }, random: () => 0 },
+      );
+      expect(r.status).toBe(429);
+      expect(run).toHaveBeenCalledTimes(5);
+      expect(sleeps).toEqual([2100, 4200, 8400, 14000]);
+    }
+  });
+
+  it("a generic 500 is not retried — only 504/529 are", async () => {
+    const { token, rows, e } = await setup();
+    const run = vi.fn(async () => { throw new Error("AiError: something else broke"); });
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(r.status).toBe(500);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("streaming: a pre-stream 504 is retried, then the stream is served normally", async () => {
+    const chunk = (c: unknown) => `data: ${JSON.stringify(c)}\n\n`;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          chunk({ choices: [{ delta: { content: "hi" } }] }) +
+          chunk({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 1 } }) +
+          "data: [DONE]\n\n",
+        ));
+        controller.close();
+      },
+    });
+    const { token, rows, e } = await setup();
+    const run = failThen([TIMEOUT_504], upstream);
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    expect(text).toContain("event: message_stop");
+    expect(run).toHaveBeenCalledTimes(2);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 1, attempts: 2, inputTokens: 5, outputTokens: 1 });
+  });
+
+  it("streaming: a failure after the first byte is never retried", async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`)); },
+      pull() { throw new Error(TIMEOUT_504); },
+    });
+    const { token, rows, e } = await setup();
+    const run = vi.fn(async () => upstream);
+    (e.AI as { run: unknown }).run = run;
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true } }), e, ctx, rows);
+    const text = await r.text();
+    expect(text).toContain("event: error");
+    expect(run).toHaveBeenCalledTimes(1);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, attempts: 1 });
+  });
+
+  it("records call duration (ms) and attempts=1 on a first-try success, streaming and not", async () => {
+    const { token, rows, e } = await setup();
+    await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    await ctx.drain();
+    const [row0] = await usageRows();
+    expect(row0.attempts).toBe(1);
+    expect(Number.isInteger(row0.durationMs)).toBe(true);
+    expect(row0.durationMs!).toBeGreaterThanOrEqual(0);
+  });
+
+  it("duration covers the backoff between attempts", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_AI_RETRY_BASE_MS: "40" } as Partial<Env>);
+    (e.AI as { run: unknown }).run = failThen([TIMEOUT_504], okReply);
+    await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    await ctx.drain();
+    // Jitter keeps the first delay within [base/2, base] = [20, 40] ms.
+    expect((await usageRows())[0].durationMs!).toBeGreaterThanOrEqual(20);
+  });
+});
+
+describe("runAiWithRetry / leadAiRetryBaseMs (issue #335)", () => {
+  it("delays are jittered exponential backoff within [base*2^n/2, base*2^n]", async () => {
+    const { runAiWithRetry } = await import("../src/llm/anthropic-route");
+    const delays: number[] = [];
+    const run = vi.fn(async () => { throw new Error("AiError: 3046: Request timeout"); });
+    for (const random of [0, 0.999]) {
+      delays.length = 0;
+      await expect(runAiWithRetry(run, { baseMs: 100, random: () => random, sleep: async (ms) => { delays.push(ms); } }))
+        .rejects.toMatchObject({ attempts: 3 });
+      if (random === 0) expect(delays).toEqual([50, 100]);
+      else expect(delays.map(Math.round)).toEqual([100, 200]);
+    }
+  });
+
+  it("returns the value and attempt count on success", async () => {
+    const { runAiWithRetry } = await import("../src/llm/anthropic-route");
+    const result = await runAiWithRetry(async () => "ok", { baseMs: 1, sleep: async () => {} });
+    expect(result).toEqual({ value: "ok", attempts: 1 });
+  });
+
+  it("a garbage LEAD_AI_RETRY_BASE_MS falls back to the default", async () => {
+    const { leadAiRetryBaseMs, LEAD_AI_RETRY_BASE_MS_DEFAULT } = await import("../src/llm/anthropic-route");
+    expect(LEAD_AI_RETRY_BASE_MS_DEFAULT).toBe(500);
+    expect(leadAiRetryBaseMs({})).toBe(500);
+    expect(leadAiRetryBaseMs({ LEAD_AI_RETRY_BASE_MS: "nope" })).toBe(500);
+    expect(leadAiRetryBaseMs({ LEAD_AI_RETRY_BASE_MS: "250" })).toBe(250);
+  });
+});
+
+// Board issue #284, MINOR 4(b): POST /v1/messages/count_tokens, the sibling
+// Anthropic Messages API endpoint some SDK client configurations probe or
+// call before a real request (Claude Code's own SDK may call it to decide
+// whether to compact context first). Before this fix the route didn't exist
+// at all — any request here fell through to the generic /fleet/ catch-all
+// and 404'd, the same failure mode issue #249's own BLOCKER (route never
+// mounted) looked like, except this gap is real: the endpoint genuinely
+// isn't implemented. Same auth/feature-flag/leadType trust boundary as
+// handleFleetAnthropicMessages above — none of those checks may be skipped
+// just because this route never calls env.AI.run.
+describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () => {
+  it("404 on the wrong path", async () => {
+    const { token, rows, e } = await setup();
+    const r = await handleFleetAnthropicCountTokens(
+      req({ token, path: "/fleet/llm/anthropic/v1/other" }), e, ctx, rows,
+    );
+    expect(r.status).toBe(404);
+  });
+
+  it("404 when FLEET_JUNIOR is not 'on' — reuses the same feature flag as the messages route", async () => {
+    const { token, rows, e } = await setup(undefined, { FLEET_JUNIOR: undefined });
+    const r = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(r.status).toBe(404);
+  });
+
+  it("401 with no token at all", async () => {
+    const { rows, e } = await setup();
+    const r = await handleFleetAnthropicCountTokens(req({ path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(r.status).toBe(401);
+  });
+
+  it("401 with a well-shaped but unknown token", async () => {
+    const { rows, e } = await setup();
+    const r = await handleFleetAnthropicCountTokens(
+      req({ token: mintSpawnToken(), path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
+    );
+    expect(r.status).toBe(401);
+  });
+
+  it("403 when the calling studio's own leadType is not 'glm'", async () => {
+    const { token, rows, e } = await setup(undefined, {}, "claude");
+    const r = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(r.status).toBe(403);
+  });
+
+  it("400 when messages is missing or empty", async () => {
+    const { token, rows, e } = await setup();
+    const r = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH, body: { ...good, messages: [] } }), e, ctx, rows,
+    );
+    expect(r.status).toBe(400);
+  });
+
+  it("200: returns a plausible non-zero input_tokens ESTIMATE for non-trivial message content, without ever calling env.AI.run", async () => {
+    const { token, rows, e, run } = await setup();
+    const body = {
+      model: "claude-opus-4-5",
+      messages: [{ role: "user", content: "This is a reasonably long message, long enough that a rough 4-chars-per-token estimate should clearly exceed a handful of tokens." }],
+    };
+    const r = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH, body }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    expect(run).not.toHaveBeenCalled();
+    const json = (await r.json()) as { input_tokens: number };
+    expect(json.input_tokens).toBeGreaterThan(10);
+  });
+
+  // The request's tools are real prompt material the backend re-receives
+  // every call — an estimate that ignores them comes in low and skews
+  // Claude Code's compact decisions the endpoint exists to feed.
+  it("a body with a non-trivial tools array estimates HIGHER than the same body without tools (#298-3)", async () => {
+    const { token, rows, e } = await setup();
+    const tool = {
+      name: "get_weather", description: "look up the current weather for a city",
+      input_schema: { type: "object", properties: { city: { type: "string" }, units: { type: "string" } }, required: ["city"] },
+    };
+    const base = { model: "claude-opus-4-5", messages: [{ role: "user", content: "weather in nyc?" }] };
+    const withTools = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH, body: { ...base, tools: [tool] } }), e, ctx, rows,
+    );
+    const withoutTools = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH, body: base }), e, ctx, rows,
+    );
+    const estimateWith = ((await withTools.json()) as { input_tokens: number }).input_tokens;
+    const estimateWithout = ((await withoutTools.json()) as { input_tokens: number }).input_tokens;
+    expect(estimateWith).toBeGreaterThan(estimateWithout);
+  });
+
+  it("array-content messages ({type:'text'} blocks) are counted, not skipped (#298-3)", async () => {
+    const { token, rows, e } = await setup();
+    const long = "a sentence of genuine content, ".repeat(20);
+    const r = await handleFleetAnthropicCountTokens(
+      req({
+        token, path: ANTHROPIC_COUNT_TOKENS_PATH,
+        body: { model: "claude-opus-4-5", messages: [{ role: "user", content: [{ type: "text", text: long }] }] },
+      }), e, ctx, rows,
+    );
+    const json = (await r.json()) as { input_tokens: number };
+    expect(json.input_tokens).toBeGreaterThan(10);
+  });
+
+  // Still throttled — the endpoint spends no AI budget, but an unthrottled
+  // endpoint is a free D1-hammering surface — now from its OWN per-minute
+  // budget, never the messages route's.
+  it("429 once its OWN per-minute limit is exceeded — same Anthropic rate_limit_error body + retry-after (#298-3)", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "1" });
+    const first = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
+    );
+    expect(first.status).toBe(200);
+    const second = await handleFleetAnthropicCountTokens(
+      req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows,
+    );
+    expect(second.status).toBe(429);
+    const retryAfter = second.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(await second.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "rate limit exceeded: too many count_tokens calls this minute" },
+    });
+  });
+
+  // A count_tokens call must spend NOTHING from the messages budget: the
+  // busiest GLM studio ran ~1800 count_tokens calls a day, and drawing them
+  // from the shared per-minute/daily counters locked studios out.
+  it("count_tokens and /messages have separate per-minute budgets — a count_tokens call spends none of /messages'", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_RATE_PER_MINUTE: "1", LEAD_COUNT_TOKENS_RATE_PER_MINUTE: "1" });
+    const count = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(count.status).toBe(200);
+    // /messages still answers 200 — the count_tokens call above spent none
+    // of its per-minute budget.
+    const msg = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(msg.status).toBe(200);
+    // The SECOND count_tokens call is what trips count_tokens' own budget.
+    const counted = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(counted.status).toBe(429);
+    const retryAfter = counted.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(await counted.json()).toEqual({
+      type: "error",
+      error: { type: "rate_limit_error", message: "rate limit exceeded: too many count_tokens calls this minute" },
+    });
+  });
+
+  // count_tokens spends no AI budget, so no daily cap applies to it — and
+  // /messages' own daily cap must never gate it either.
+  it("count_tokens has no daily cap — /messages' LEAD_DAILY_CAP does not gate it", async () => {
+    const { token, rows, e } = await setup(undefined, { LEAD_DAILY_CAP: "1" });
+    const msg = await handleFleetAnthropicMessages(req({ token }), e, ctx, rows);
+    expect(msg.status).toBe(200);
+    const count = await handleFleetAnthropicCountTokens(req({ token, path: ANTHROPIC_COUNT_TOKENS_PATH }), e, ctx, rows);
+    expect(count.status).toBe(200);
+  });
+});
+
+// Task 4 (spec 2026-10-13-model-pool-design, Components 3/4): every
+// env.AI.run call now carries the AI Gateway option (unified billing/logs),
+// and LEAD_MODEL_POOL=on walks router.ts's pickModels order on a 429/3021,
+// instead of hardcoding GLM.
+describe("model pool + gateway (spec 2026-10-13)", () => {
+  // Incident fix (#717): a production account's "default" AI Gateway isn't
+  // provisioned for unified billing — `ai.run(model, body, { gateway: { id:
+  // "default" } })` came back "2021: Insufficient unified billing credits"
+  // for EVERY GLM lead call the instant this got deployed. The gateway
+  // option is now OFF unless `LEAD_AI_GATEWAY_ID` is actually set to a
+  // non-empty string — unset means the exact pre-model-pool call shape:
+  // `ai.run(model, body)`, no third argument at all (not `undefined`, not
+  // `{}` — a genuinely 2-length args array, since a provider could branch on
+  // `arguments.length`).
+  it("LEAD_AI_GATEWAY_ID unset: ai.run is called with no gateway option at all (2 args)", async () => {
+    const calls: unknown[][] = [];
+    const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
+    const res = await callRoute({ ai, envOverrides: {} });
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe("@cf/zai-org/glm-5.3");
+    expect(calls[0].length).toBe(2);
+  });
+
+  it("LEAD_AI_GATEWAY_ID set to empty string: same as unset — no gateway option, 2 args", async () => {
+    const calls: unknown[][] = [];
+    const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_AI_GATEWAY_ID: "" } });
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].length).toBe(2);
+  });
+
+  it("pool on: 3021 on first model moves to next model, no backoff", async () => {
+    // The real pool has exactly ONE smoke-passed model today (GLM —
+    // models.ts's own POOL, kimi/deepseek not yet smoke-tested) — pickModels
+    // never offers a smoke-UNtested model as an overflow candidate (the
+    // pool's own entry rule, enforced in router.ts, not something this
+    // route may bypass), so there is genuinely no SECOND model to move to
+    // without a fixture pool where kimi has smoke-passed. Built as a plain
+    // copy of the real POOL (code review, Standards axis, #717) and handed
+    // to `callRoute`'s own `pool` override — `handleFleetAnthropicMessages`'s
+    // test-injection seam — rather than mutating the real, shared `models.ts`
+    // POOL export, which no sibling test could be sure stayed unmutated.
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("3021: rate limiting: Account rate limit exceeded");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    // Global Constraint: logUsage must record the model actually used
+    // (`usedModel`) — the SECOND model tried, never a hardcoded constant
+    // (code review, Spec axis, #717).
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].model).toBe(seen[1]);
+  });
+
+  it("pool on: every model 429s → 429 rate_limit_error with retry-after", async () => {
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => { seen.push(model); throw new Error("3021: Account rate limit exceeded"); }) };
+    const res = await callRoute({
+      ai, envOverrides: { LEAD_MODEL_POOL: "on" },
+      retryDeps: { sleep: async () => {}, random: () => 0 },
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    // #767: the LAST candidate has no untried model left to move to (every
+    // other candidate already 3021'd this walk), so it reruns through the
+    // same-model backoff — 1 first turn + 4 backoff rounds. 3 candidates
+    // in the pool → 1 + 1 + 5 = 7 ai.run calls.
+    expect(ai.run).toHaveBeenCalledTimes(7);
+    // Global Constraint: the logged usage row's model must be the LAST
+    // model actually tried, never a hardcoded constant (code review,
+    // Spec axis, #717).
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].model).toBe(seen[seen.length - 1]);
+  });
+
+  // Review Focus item 3: a genuine multi-model exhaustion — the real POOL
+  // has only one smoke-passed model today, so the test above cannot
+  // distinguish "last model tried" from "first model tried" (code review,
+  // Spec axis, #717). Built the same way as the "moves to next model"
+  // fixture pool above: a plain copy of the real POOL with every entry
+  // forced to `smokePassed: true`, handed to `callRoute`'s own `pool`
+  // injection seam rather than mutating the shared `models.ts` POOL export.
+  it("pool on: 3021 on every model (genuine multi-model exhaustion) → 429, first models once, LAST model retried via #767 backoff, usage row logs the LAST model tried", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      throw new Error("3021: rate limiting: Account rate limit exceeded");
+    }) };
+    const res = await callRoute({
+      ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool,
+      retryDeps: { sleep: async () => {}, random: () => 0 },
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    // router.ts's own round-robin hash of the studio id picks WHICH pool
+    // model goes first — not necessarily the pool's declaration order — so
+    // this asserts against `seen` (the actual try order), not a hardcoded
+    // sequence. #767: the FIRST candidates are fresh on their own turn, so
+    // each is tried once; the LAST candidate has no untried model to move
+    // to (every other candidate already 3021'd this walk), so it reruns
+    // through the same-model backoff — 1 first turn + 4 backoff rounds.
+    expect(ai.run).toHaveBeenCalledTimes(testPool.length + 4);
+    expect(seen).toHaveLength(testPool.length + 4);
+    expect(new Set(seen)).toEqual(new Set(testPool.map((m) => m.id)));
+    expect(seen.filter((m) => m === seen[seen.length - 1])).toHaveLength(5);
+    expect(seen[seen.length - 1]).not.toBe(seen[0]);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    // The logged model is the LAST one actually tried — not the first, and
+    // not a hardcoded GLM constant.
+    expect(rowsLogged[0].model).toBe(seen[seen.length - 1]);
+    expect(rowsLogged[0].model).not.toBe(seen[0]);
+    expect(rowsLogged[0].model).not.toBe(GLM_LEAD_MODEL);
+  });
+
+  // Incident fix (#717 continued, production 2026-10-13): kimi/deepseek/GLM
+  // all measured upstream 500s the overflow loop used to treat as terminal —
+  // `4002: could not route request to AI model` and `8005: Internal server
+  // error` — breaking the loop and failing the turn instead of moving to the
+  // next pool candidate. Same fixture shape as "3021 on first model moves to
+  // next model" above: a kimi copy forced to `smokePassed: true` so there is
+  // a genuine second candidate to move to.
+  it("pool on: upstream 4002 (could not route) on first model moves to next model, no backoff", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("500 api_error: 4002: could not route request to AI model");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(2);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    // No same-model retry on this error shape — the first model was tried
+    // exactly once before the loop moved on, unlike 504/529's own
+    // runAiWithRetry same-model retry.
+    expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
+  });
+
+  it("pool on: upstream 8005 (Internal server error) on first model moves to next model, no backoff", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("8005: Internal server error");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(2);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
+  });
+
+  // LEAD_MODEL_OVERFLOW=off (#768): each model has its own 20 rpm budget, so
+  // keeping a studio on its ONE assigned model spreads capacity across the
+  // pool. Same fixture pool shape as the overflow tests above — a kimi copy
+  // forced to `smokePassed: true` — plus a real D1 assigned-model row, so
+  // the route reads a genuine assignment, never a hardcoded constant.
+  it("LEAD_MODEL_OVERFLOW=off: assigned kimi is the only model tried — no overflow candidates", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    await setAssignedModel(env.DB, ME, POOL[1].id);
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on", LEAD_MODEL_OVERFLOW: "off" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([POOL[1].id]);
+  });
+
+  it("LEAD_MODEL_OVERFLOW=off: 3021 on the assigned model → same-model #767 backoff, then 429, no second-model call", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    await setAssignedModel(env.DB, ME, POOL[1].id);
+    const seen: string[] = [];
+    const sleeps: number[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      throw new Error("3021: Account rate limit exceeded");
+    }) };
+    const res = await callRoute({
+      ai, envOverrides: { LEAD_MODEL_POOL: "on", LEAD_MODEL_OVERFLOW: "off" }, pool: testPool,
+      retryDeps: { sleep: async (ms: number) => { sleeps.push(ms); }, random: () => 0 },
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    // #767: overflow off means ONE candidate, so the same-model backoff
+    // fires — the assigned model reruns 1 first turn + 4 backoff rounds
+    // (fake sleep, jitter 0) before the 429. Still no second-model call.
+    expect(ai.run).toHaveBeenCalledTimes(5);
+    expect(seen).toEqual(Array.from({ length: 5 }, () => POOL[1].id));
+    expect(sleeps.map(Math.round)).toEqual([2100, 4200, 8400, 14000]);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0].model).toBe(POOL[1].id);
+  });
+
+  it("LEAD_MODEL_OVERFLOW unset (default on): 3021 on first model still moves to next — overflow behavior unchanged", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("3021: Account rate limit exceeded");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(seen.length).toBe(2);
+    expect(seen[0]).not.toBe(seen[1]);
+  });
+
+  // Code review (Spec axis, #717): the whole point of `isOverflowRoutingError`
+  // being its OWN predicate rather than folded into `isRateLimited` is that
+  // an all-models-exhausted 4002/8005 run reports `classifyAiError`'s own
+  // default (500 `api_error`), NOT the 429 `rate_limit_error` the
+  // all-exhausted call site reports when `isRateLimited` triggered the
+  // exhaustion (see the "3021 on every model" test above). Same fixture
+  // shape as that test — every POOL entry forced to `smokePassed: true` —
+  // but throwing the 4002 incident string instead of a 3021.
+  it("pool on: 4002 on every model (genuine multi-model exhaustion) → 500 api_error, NOT 429 rate_limit_error", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      throw new Error("500 api_error: 4002: could not route request to AI model");
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(500);
+    expect((await res.json() as any).error.type).toBe("api_error");
+    expect(ai.run).toHaveBeenCalledTimes(testPool.length);
+    expect(seen).toHaveLength(testPool.length);
+  });
+
+  it("custom gateway id via LEAD_AI_GATEWAY_ID", async () => {
+    const calls: unknown[][] = [];
+    const ai = { run: vi.fn(async (...a: unknown[]) => { calls.push(a); return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }; }) };
+    await callRoute({ ai, envOverrides: { LEAD_AI_GATEWAY_ID: "fleet" } });
+    expect(calls[0][2]).toEqual({ gateway: { id: "fleet" } });
+  });
+});
+
+// #767: GLM's account is capped at 20 rpm, so ~60% of lead calls throw
+// `3021: rate limiting` from env.AI.run. The overflow walk's
+// move-to-next-model rule cannot help when there is no next model (pool
+// off, or every other candidate already 3021'd this walk), and a bare 429
+// makes Claude Code burn its own retry budget and end the turn. The fix
+// this block pins: rerun the SAME model on a jittered backoff schedule
+// [3s,6s,12s,20s] (±30%, cumulative sleep capped 45s) before giving up.
+describe("#767 — 3021 same-model backoff", () => {
+  // The measured production string — classifyAiError maps it to a 429,
+  // which runAiWithRetry does NOT retry (only 504/529), so each backoff
+  // round is exactly one ai.run call.
+  const R3021 = "3021: rate limiting: inference request per min rate reached";
+  const okReply = { choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } };
+
+  /** A run stub that throws the 3021 for its first `n` calls, then replies. */
+  function rateThen(n: number, then: unknown = okReply) {
+    let calls = 0;
+    return vi.fn(async () => {
+      if (calls < n) { calls++; throw new Error(R3021); }
+      return then;
+    });
+  }
+
+  function fakeSleep() {
+    const sleeps: number[] = [];
+    return { sleeps, deps: { sleep: async (ms: number) => { sleeps.push(ms); }, random: () => 0 } };
+  }
+
+  // Schedule pins use random=0 (the 70% jitter floor) unless a test
+  // specifically exercises the jitter itself.
+
+  it("direct runAiWithRateLimitBackoff: 3021,3021,ok resolves with attempts 3, sleeping 2100 then 4200 (random=0)", async () => {
+    const { runAiWithRateLimitBackoff } = await import("../src/llm/anthropic-route");
+    const { sleeps, deps } = fakeSleep();
+    const run = rateThen(2);
+    const r = await runAiWithRateLimitBackoff(run, { baseMs: 1, ...deps });
+    expect(r).toEqual({ value: okReply, attempts: 3 });
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([2100, 4200]);
+  });
+
+  it("direct: 5x3021 rejects as AiRunError with attempts 5, sleeping [2100,4200,8400,14000] (random=0)", async () => {
+    const { runAiWithRateLimitBackoff } = await import("../src/llm/anthropic-route");
+    const { sleeps, deps } = fakeSleep();
+    const run = rateThen(5);
+    await expect(runAiWithRateLimitBackoff(run, { baseMs: 1, ...deps })).rejects.toMatchObject({
+      message: R3021, attempts: 5,
+    });
+    expect(run).toHaveBeenCalledTimes(5);
+    expect(sleeps).toEqual([2100, 4200, 8400, 14000]);
+  });
+
+  it("direct: a non-rate-limited 500 rejects immediately, zero sleeps", async () => {
+    const { runAiWithRateLimitBackoff } = await import("../src/llm/anthropic-route");
+    const { sleeps, deps } = fakeSleep();
+    const run = vi.fn(async () => { throw new Error("AiError: something else broke"); });
+    await expect(runAiWithRateLimitBackoff(run, { baseMs: 1, ...deps })).rejects.toMatchObject({
+      message: "AiError: something else broke", attempts: 1,
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("direct: random=1 sleeps [3900,7800,15600,17700] — the 45s cap clamps the 4th round", async () => {
+    const { runAiWithRateLimitBackoff, RATE_LIMIT_BACKOFF_CAP_MS } = await import("../src/llm/anthropic-route");
+    expect(RATE_LIMIT_BACKOFF_CAP_MS).toBe(45_000);
+    const sleeps: number[] = [];
+    const run = rateThen(5);
+    const deps = { sleep: async (ms: number) => { sleeps.push(ms); }, random: () => 1 };
+    await expect(runAiWithRateLimitBackoff(run, { baseMs: 1, ...deps })).rejects.toMatchObject({ attempts: 5 });
+    // 130% of [3000,6000,12000] then the cap clamps 20000*1.3 to the
+    // remaining 45000 - (3900+7800+15600) = 17700. Rounded: 3000*1.3 is
+    // 3899.999... in float math, so compare rounded values, not exact.
+    expect(sleeps.map(Math.round)).toEqual([3900, 7800, 15600, 17700]);
+    expect(Math.round(sleeps.reduce((a, b) => a + b, 0))).toBe(45_000);
+  });
+
+  it("route-level pool-off (order=[glm]): 3021,3021,ok → 200, usage row attempts 3", async () => {
+    const { sleeps, deps } = fakeSleep();
+    const ai = { run: rateThen(2) };
+    const res = await callRoute({ ai, retryDeps: deps });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([2100, 4200]);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 1, attempts: 3, model: GLM_LEAD_MODEL });
+  });
+
+  it("route-level pool-off: 5x3021 → 429 rate_limit_error + retry-after 30, usage row attempts 5", async () => {
+    const { sleeps, deps } = fakeSleep();
+    const ai = { run: rateThen(5) };
+    const res = await callRoute({ ai, retryDeps: deps });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect((await res.json() as any).error.type).toBe("rate_limit_error");
+    expect(sleeps).toEqual([2100, 4200, 8400, 14000]);
+    await ctx.drain();
+    const rowsLogged = await usageRows();
+    expect(rowsLogged).toHaveLength(1);
+    expect(rowsLogged[0]).toMatchObject({ ok: 0, attempts: 5, model: GLM_LEAD_MODEL });
+  });
+
+  it("route-level pool-on, 3-model fixture pool: 3021 on the first model moves to the next — sleep never called", async () => {
+    // Same fixture-pool shape as the #717 tests above: a plain copy of the
+    // real POOL, every entry smoke-passed, handed to callRoute's own `pool`
+    // injection seam — never a mutation of the shared models.ts export.
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const { sleeps, deps } = fakeSleep();
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error(R3021);
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, retryDeps: deps });
+    expect(res.status).toBe(200);
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    // Today's move-to-next-model-first rule is pinned: no same-model
+    // backoff fires while another untried candidate remains.
+    expect(sleeps).toEqual([]);
+  });
+
+  it("route-level pool-on: first model 3021, second model 3021 → backoff fires on the second round (every other candidate seen)", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const { sleeps, deps } = fakeSleep();
+    const perModel: Record<string, number> = {};
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      perModel[model] = (perModel[model] ?? 0) + 1;
+      seen.push(model);
+      // Round 1: every candidate 3021s once, in walk order. Round 2: the
+      // LAST candidate's rerun finally succeeds.
+      if (perModel[model] === 1) throw new Error(R3021);
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool, retryDeps: deps });
+    expect(res.status).toBe(200);
+    // First walk: all 3 candidates, once each, no backoff. Second walk
+    // reruns the last one (every OTHER candidate already seen) with a
+    // backoff sleep before its rerun.
+    expect(seen).toHaveLength(4);
+    expect(sleeps).toEqual([2100]);
+    const last = seen[2];
+    expect(seen[3]).toBe(last);
+  });
+});

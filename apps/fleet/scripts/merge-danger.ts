@@ -69,6 +69,14 @@ export const ONE_WAY_GLOBS: OneWayGlob[] = [
     why: "mediates every push / gh write a studio makes",
   },
   {
+    pattern: "apps/fleet/src/gate/**",
+    why: "#715 gate-runner: GateRunnerDO, GateWorkflow, the outbound-credential handler — the same credential-adjacent class this repo already one-way-doors for write-proxy/rescue/etc.",
+  },
+  {
+    pattern: "apps/fleet/scripts/gate/**",
+    why: "#715 gate-runner: shard-count/timing scripts that decide CI shape for every PR, same protection class as scripts/deploy*",
+  },
+  {
     pattern: "apps/fleet/scripts/deploy*",
     why: "deploy.sh, deploy-target.ts, deploy-containers-changed.ts",
   },

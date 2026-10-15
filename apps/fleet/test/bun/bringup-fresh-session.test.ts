@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { BRINGUP, extractRegion, extractShellFunc, runSnippet } from "./exec-snippet";
 import { parseFreshSession } from "../../src/studio/provision";
 import { requireTools } from "./require-tool";
+import { continueGuardLine } from "./helpers/adopt-fixtures";
 
 /**
  * Issue #28: `--fresh-session` bring-up. A session claude cannot resume
@@ -18,12 +19,6 @@ import { requireTools } from "./require-tool";
  * bringup-session-adopt.test.ts.
  */
 const ADOPT_SCRIPT = join(import.meta.dir, "../../container/studio-adopt.sh");
-
-const CONTINUE_GUARD = () => {
-  const line = BRINGUP.split("\n").find((l) => l.includes("if claude_has_conversation ") && l.includes("--continue"));
-  if (!line) throw new Error("bring-up's --continue guard line not found");
-  return line.trim();
-};
 
 const ROOT_KEY = "-workspace-acmeclient";
 const WT_KEY = "-workspace-acmeclient--claude-worktrees-task-7";
@@ -86,7 +81,7 @@ function run(fresh: boolean) {
       `${extractShellFunc(BRINGUP, "claude_project_dir")}\n` +
       `${extractShellFunc(BRINGUP, "claude_has_conversation")}\n` +
       'claude_args=()\nrepo_dir="/workspace/${STUDIO_ID%%--*}"\n' +
-      `${CONTINUE_GUARD()}\n` +
+      `${continueGuardLine()}\n` +
       'printf "ARGV %s\\n" "${claude_args[*]:-}"\n',
     timeout: 60_000,
   });
@@ -144,7 +139,7 @@ LANE("#28 — FLEET_FRESH_SESSION: no --continue, old sessions moved aside intac
         `${extractRegion(BRINGUP, "session-adopt")}\n` +
         `${extractShellFunc(BRINGUP, "claude_project_dir")}\n${extractShellFunc(BRINGUP, "claude_has_conversation")}\n` +
         'claude_args=()\nrepo_dir="/workspace/${STUDIO_ID%%--*}"\n' +
-        `${CONTINUE_GUARD()}\n` +
+        `${continueGuardLine()}\n` +
         'printf "ARGV %s\\n" "${claude_args[*]:-}"\n',
       timeout: 60_000,
     });

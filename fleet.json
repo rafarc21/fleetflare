@@ -4,5 +4,14 @@
     "ref": "main"
   },
   "roles": ["pilot", "scratch", "maestro", "web-studio", "release-studio"],
-  "instance_type": "standard-2"
+  "instance_type": "standard-2",
+  "gate": {
+    "install": "cd apps/fleet && bun install --frozen-lockfile",
+    "legs": ["check", "test-lies-check", "english-check"],
+    "bunShards": 6,
+    "bunLaneRoot": "apps/fleet",
+    "vitestCmd": "cd apps/fleet && bun run test --shard={i}/{n}",
+    "vitestShards": 8,
+    "pathRules": ["apps/fleet/**", "skills/**", "fleet/blueprint/**", "scripts/**", "package.json"]
+  }
 }

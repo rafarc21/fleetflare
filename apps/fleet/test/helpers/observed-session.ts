@@ -1,4 +1,7 @@
-import type { ObservedSession } from "../../src/studio/observed";
+import {
+  OBSERVED_KEY, emptyObserved,
+  type Observed, type ObservedSession, type ObservedStorage,
+} from "../../src/studio/observed";
 
 // Sweep-33 F9 (#733 census, issue #753): the ObservedSession builder that
 // test/studio.survival-retry.test.ts and test/studio.survival-input.test.ts
@@ -15,4 +18,20 @@ export function session(over: Partial<ObservedSession> = {}): ObservedSession {
     verdict: "resumed", at: "2026-09-25T12:00:00.000Z", via: "recycle", restore: "restored",
     snapshotAgeS: 600, turnsBefore: 12, reason: null, ...over,
   };
+}
+
+/** The narrow ObservedStorage port over a plain Map: one key, seeded over
+ *  emptyObserved() so a partial seed is a legal record, and stored() reads
+ *  the live map rather than a snapshot. Lives beside session() because the
+ *  same split pair needs both and kept both in sync by hand before this.
+ *  The sibling suites wrap helpers/do-storage.ts instead; this port keeps
+ *  its own typed shape because its callers assert on stored(). */
+export function fakeObserved(seed?: Partial<Observed>) {
+  const map = new Map<string, Observed>();
+  if (seed) map.set(OBSERVED_KEY, { ...emptyObserved(), ...seed });
+  const storage: ObservedStorage = {
+    get: async () => map.get(OBSERVED_KEY),
+    put: async (_key, value) => { map.set(OBSERVED_KEY, value); },
+  };
+  return { storage, stored: () => map.get(OBSERVED_KEY) };
 }
