@@ -253,7 +253,8 @@ describe("git proxy: the token never reaches the container", () => {
       git.deps,
     );
     const sent = new Headers(git.upstream[0].init.headers);
-    expect(sent.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    // GitHub git smart HTTP rejects Bearer (401); it takes Basic x-access-token (200, measured 2026-10-15).
+    expect(sent.get("authorization")).toBe(`Basic ${btoa(`x-access-token:${TOKEN}`)}`);
     expect(sent.get("cookie")).toBeNull();
   });
 

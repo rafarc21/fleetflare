@@ -133,7 +133,10 @@ async function handleGitProxy(
   const upstream = resolveGitUpstream(req.method, url, props.repo);
   if (!upstream) return new Response("forbidden", { status: 403 });
 
-  const headers = new Headers({ authorization: `Bearer ${props.gitToken}`, "user-agent": "fleet-gate" });
+  // GitHub git smart HTTP rejects `Bearer` (401); it takes Basic auth with the
+  // installation token as the password of user `x-access-token`.
+  const basic = btoa(`x-access-token:${props.gitToken}`);
+  const headers = new Headers({ authorization: `Basic ${basic}`, "user-agent": "fleet-gate" });
   for (const name of FORWARD_REQUEST_HEADERS) {
     const value = req.headers.get(name);
     if (value !== null) headers.set(name, value);
