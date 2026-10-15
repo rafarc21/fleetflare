@@ -1,13 +1,13 @@
 # S45-F12 github.api.test.ts split — plan (refs #925, refs #907)
 
 Pure move of describes, titles verbatim, zero test-body edits. 137 it():
-12 describes -> files half, 20 -> queries half.
+9 describes -> files half, 23 -> queries half.
 
 ## Files
-- Create test/github.api-files.test.ts — lines 1-501 verbatim: shared
-  fetch-mock setup + write-path describes (mergePullRequest, fetchRepoFile,
-  upsertRepoFile, doneRecordPutter, createRepoFile, listInstallationRepos,
-  getDefaultBranch, commitFilesOnNewBranch, openPullRequest).
+- Create test/github.api-files.test.ts — lines 1-501 verbatim: setup +
+  write-path describes (mergePullRequest, fetchRepoFile, upsertRepoFile,
+  doneRecordPutter, createRepoFile, listInstallationRepos, getDefaultBranch,
+  commitFilesOnNewBranch, openPullRequest).
 - Create test/github.api-queries.test.ts — lines 502-1461 verbatim:
   query/exists describes (listRepoTree .. ghRequest merge order).
 - Delete test/github.api.test.ts (git rm).
@@ -19,7 +19,4 @@ Pure move of describes, titles verbatim, zero test-body edits. 137 it():
 - Imports = exactly what each half's code uses; tsc --noEmit is the proof.
 
 ## Verify (one at a time — tsc is a heavy gate)
-1. npx vitest run both files — 2 files, 137 tests, 0 failed.
-2. npx tsc --noEmit. 3. bun run english-check.
-
-Commits: plan doc, then split. Refs only, never closing keywords.
+1. npx vitest run both files — 2 files, 137 tests, 0 failed. 2. tsc. 3. english-check.
