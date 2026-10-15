@@ -101,18 +101,33 @@ describe("GET /studio/gate/status with a skipped run", () => {
     });
   });
 
-  it("skipped output with a failed status post still carries statusPostFailed", async () => {
+  it("a paths skip with a failed status post stays success and carries statusPostFailed", async () => {
     const env = fakeEnv();
     env.GATE_WORKFLOW.get = vi.fn(async () => ({
       status: vi.fn(async () => ({
         status: "complete",
-        output: { skipped: "no gate config for this repo", statusPostFailed: true },
+        output: { skipped: "no gated paths changed", statusPostFailed: true },
       })),
     })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
     const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
     const res = await handleGateRoute(req, env);
     expect(await res.json()).toEqual({
-      state: "success", description: "skipped: no gate config for this repo", statusPostFailed: true,
+      state: "success", description: "skipped: no gated paths changed", statusPostFailed: true,
+    });
+  });
+
+  it("a no-gate-block skip posted nothing to GitHub: error, never a false green", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({
+        status: "complete",
+        output: { skipped: "no gate block in fleet.json", statusPostFailed: false },
+      })),
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(await res.json()).toEqual({
+      state: "error", description: "skipped: no gate block in fleet.json", statusPostFailed: false,
     });
   });
 });

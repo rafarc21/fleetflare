@@ -54,9 +54,11 @@ export async function handleGateRoute(req: Request, env: Env): Promise<Response>
       return j({ state: "pending" });
     }
     if (out?.skipped !== undefined) {
-      // A skipped run already posted success to GitHub (workflow.ts posts
-      // "no gated paths changed" itself); the route must not call it error.
-      return j({ state: "success", description: `skipped: ${out.skipped}`, statusPostFailed: out.statusPostFailed });
+      // Only the "no gated paths changed" skip posted success to GitHub
+      // (workflow.ts post-skip-status). Any other skip (no gate block) posted
+      // nothing: the repo is not configured, so it is an error, never green.
+      const state = out.skipped.startsWith("no gated paths changed") ? "success" : "error";
+      return j({ state, description: `skipped: ${out.skipped}`, statusPostFailed: out.statusPostFailed });
     }
     if (!out?.state) {
       return j({ state: "error", description: "gate workflow instance errored" });
