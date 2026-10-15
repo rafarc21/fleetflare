@@ -81,7 +81,9 @@ describe("handleGateRoute", () => {
 
 // #1032 (refs #715): a skipped run's workflow output carries `skipped`, not
 // `state` — the route must surface success, not "instance errored", because
-// GitHub already got the skip's success status.
+// GitHub already got the skip's success status. The get mocks cast through
+// FakeEnv's own property type: its Env half demands a full WorkflowInstance,
+// while the fake implements only status().
 describe("GET /studio/gate/status with a skipped run", () => {
   it("skipped output -> success with the skip reason in the description", async () => {
     const env = fakeEnv();
@@ -90,7 +92,7 @@ describe("GET /studio/gate/status with a skipped run", () => {
         status: "complete",
         output: { skipped: "no gated paths changed", statusPostFailed: false },
       })),
-    }));
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
     const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
     const res = await handleGateRoute(req, env);
     expect(res.status).toBe(200);
@@ -106,7 +108,7 @@ describe("GET /studio/gate/status with a skipped run", () => {
         status: "complete",
         output: { skipped: "no gate config for this repo", statusPostFailed: true },
       })),
-    }));
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
     const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
     const res = await handleGateRoute(req, env);
     expect(await res.json()).toEqual({
