@@ -107,4 +107,4 @@ presence-check; everything else is shard-runner design already in the plan.
 ## Issues filed
 
 - test(GLM-OK): S49-F2 D1 migrations presence-check before per-isolate apply
-  (refs #992, #715)
+  — https://github.com/rafarc21/fleetflare/issues/1000 (refs #992, #715)
