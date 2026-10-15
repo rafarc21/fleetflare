@@ -9,6 +9,7 @@ import { runScheduledTick, TICK_DEADLINES_MS } from "../src/studio/do";
 import { STATUS_KEY, type StudioStorage } from "../src/studio/provision";
 import type { StudioStatus } from "../src/studio/types";
 import { env } from "cloudflare:test";
+import { methodBody } from "./helpers/src-pin";
 
 const doSrc: string = env.TEST_STUDIO_DO_SRC;
 
@@ -287,9 +288,7 @@ describe("StudioDO wiring — no tick execs on the default session", () => {
 
   it("waits for a cold container before the first (refresh-class) exec of provision and restart", () => {
     for (const sig of ["  private async provisionUngated(", "  private async restartUngated("]) {
-      const start = doSrc.indexOf(sig);
-      expect(start).toBeGreaterThan(-1);
-      const b = doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
+      const b = methodBody(doSrc, sig);
       const wait = b.indexOf("if (!this.ctx.container?.running) await sbAwaitReady(this);");
       expect(wait).toBeGreaterThan(b.indexOf("this.envVars = "));
       expect(wait).toBeLessThan(b.indexOf("refreshWithStorage("));
@@ -297,11 +296,7 @@ describe("StudioDO wiring — no tick execs on the default session", () => {
   });
 
   it("wires each deps builder to its own class", () => {
-    const body = (sig: string) => {
-      const start = doSrc.indexOf(sig);
-      expect(start).toBeGreaterThan(-1);
-      return doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
-    };
+    const body = (sig: string) => methodBody(doSrc, sig);
     expect(body("  private shipDeps(")).toContain("EXEC_CLASSES.ship");
     expect(body("  private refreshDeps(")).toContain("EXEC_CLASSES.refresh");
     expect(body("  async inspect(")).toContain("EXEC_CLASSES.inspect");
@@ -347,9 +342,7 @@ describe("StudioDO wiring — heal/recycle source-pin the `via` they pass throug
 // `recordStudio(this.env, s)` with no withObserved wrap.
 describe("StudioDO wiring — watchContainer's D1 write also goes through withObserved (issue #85)", () => {
   it("watchContainer's own record closure wraps withObserved before recordStudio", () => {
-    const start = doSrc.indexOf("async watchContainer(");
-    expect(start).toBeGreaterThan(-1);
-    const body = doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
+    const body = methodBody(doSrc, "  async watchContainer(");
     expect(body).toContain("withObserved(this.ctx.storage");
     expect(body).toMatch(/recordStudio\(this\.env,\s*await withObserved\(this\.ctx\.storage/);
   });
@@ -361,9 +354,7 @@ describe("StudioDO wiring — watchContainer's D1 write also goes through withOb
 // EXEC_CLASSES.provision (600s, sized for BRINGUP_CMD itself).
 describe("StudioDO wiring — the bring-up probe runs on EXEC_CLASSES.inspect, not provision (issue #85)", () => {
   it("deps()'s observationExec field is wired to EXEC_CLASSES.inspect", () => {
-    const start = doSrc.indexOf("private deps(): ProvisionDeps {");
-    expect(start).toBeGreaterThan(-1);
-    const body = doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
+    const body = methodBody(doSrc, "  private deps(): ProvisionDeps {");
     expect(body).toMatch(/observationExec:\s*\(cmd: string\) => sbExec\(this, cmd, EXEC_CLASSES\.inspect\)/);
   });
 });
@@ -377,9 +368,7 @@ describe("StudioDO wiring — the bring-up probe runs on EXEC_CLASSES.inspect, n
 // catching it.
 describe("StudioDO wiring — deps()'s r2Head is wired to STUDIO_ARCHIVE.head (issue #85 review round 3, MUST-FIX 8b)", () => {
   it("deps()'s r2Head field calls this.env.STUDIO_ARCHIVE.head", () => {
-    const start = doSrc.indexOf("private deps(): ProvisionDeps {");
-    expect(start).toBeGreaterThan(-1);
-    const body = doSrc.slice(start, doSrc.indexOf("\n  }\n", start));
+    const body = methodBody(doSrc, "  private deps(): ProvisionDeps {");
     expect(body).toMatch(/r2Head:\s*async \(key: string\) => \{[\s\S]*?this\.env\.STUDIO_ARCHIVE\.head\(key\)/);
   });
 });
