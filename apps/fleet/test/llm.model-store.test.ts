@@ -1,7 +1,8 @@
 // apps/fleet/test/llm.model-store.test.ts
 // Persistence layer for #717's model pool (spec 2026-10-13-model-pool-design),
 // built on the existing fleet_state flag table — no migration. Same
-// cloudflare:test convention as test/llm.anthropic-route.test.ts.
+// cloudflare:test convention as test/llm.anthropic-core.test.ts and
+// test/llm.anthropic-stream.test.ts (split from the former llm.anthropic-route.test.ts, #919).
 import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
 import { getAssignedModel, setAssignedModel, getModelStates, setModelState } from "../src/llm/model-store";
