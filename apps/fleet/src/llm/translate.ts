@@ -266,7 +266,7 @@ function newToolUseId(): string {
  *  empty input is a missing id — same `newToolUseId()` fallback the old
  *  `toolUseId` used, so an omitted upstream id is still generated, never left
  *  empty. */
-export function sanitizeToolId(raw: unknown): string {
+function sanitizeToolId(raw: unknown): string {
   if (typeof raw !== "string") return newToolUseId();
   const sanitized = raw.replace(/[^A-Za-z0-9_-]/g, "_");
   return sanitized.length > 0 ? sanitized : newToolUseId();
