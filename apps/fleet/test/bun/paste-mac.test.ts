@@ -6,14 +6,16 @@
 // function in a child bun process under a PATH this file fully controls.
 // Both harnesses live here: #498's real-lane tests above, #519's mock pins below.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanupTempDirs, tmpDir } from "./helpers/fleet-cli";
 import { grabClipboardPng } from "../../cli/paste-mac";
 
 const PASTE_MAC = join(import.meta.dir, "../../cli/paste-mac");
-// The module's fixed, non-injectable tmp path — tests own its cleanup.
-const PASTE_TMP = "/tmp/fleet-paste.png";
+// Per-lane injectable tmp path (FLEET_PASTE_TMP): each lane owns a private
+// file under its own mkdtemp dir, cleaned recursively by cleanupTempDirs.
+let pasteTmp: string;
+let prevPasteTmp: string | undefined;
 
 // The fake pngpaste body must not PATH-lookup its tools: its PATH holds
 // only the fake itself.
@@ -37,7 +39,7 @@ console.log(r === null ? "null" : Buffer.from(r).toString("base64"));
 `);
   const proc = Bun.spawn({
     cmd: [process.execPath, helper],
-    env: { PATH: path },
+    env: { PATH: path, FLEET_PASTE_TMP: pasteTmp },
     cwd: dir,
     stdin: "ignore", stdout: "pipe", stderr: "pipe",
   });
@@ -57,10 +59,11 @@ function writeFakePngpaste(bin: string, body: string) {
   chmodSync(fake, 0o755);
 }
 
-beforeEach(() => { rmSync(PASTE_TMP, { force: true }); });
+beforeEach(() => {
+  pasteTmp = join(tmpDir("paste-mac-tmp-"), "fleet-paste.png");
+});
 afterEach(() => {
-  // The fixed tmp path is shared machine-wide, so no lane may leave it dirty.
-  rmSync(PASTE_TMP, { force: true });
+  // The per-lane mkdtemp dir is cleaned recursively by cleanupTempDirs.
   cleanupTempDirs();
 });
 
@@ -73,12 +76,12 @@ describe("grabClipboardPng (cli/paste-mac)", () => {
   test("pngpaste exit 1 (no image) resolves null and leaves a pre-existing tmp file untouched", async () => {
     const bin = tmpDir("paste-mac-exit1-bin-");
     writeFakePngpaste(bin, "exit 1");
-    // A leftover screenshot from an earlier paste sits at the fixed tmp path:
+    // A leftover screenshot from an earlier paste sits at the lane's tmp path:
     // a "no image" answer must not serve it up as this clipboard's bytes.
-    writeFileSync(PASTE_TMP, Uint8Array.from([0xde, 0xad, 0x00, 0xbe, 0xef]));
+    writeFileSync(pasteTmp, Uint8Array.from([0xde, 0xad, 0x00, 0xbe, 0xef]));
     expect(await grabUnderPath(bin)).toBe(null);
     // The early return fired before any read or delete touched the path.
-    expect(existsSync(PASTE_TMP)).toBe(true);
+    expect(existsSync(pasteTmp)).toBe(true);
   });
 
   test("pngpaste success returns the exact clipboard bytes and removes the tmp file", async () => {
@@ -97,7 +100,7 @@ describe("grabClipboardPng (cli/paste-mac)", () => {
     writeFakePngpaste(bin, `${CP} '${fixture}' "$1"\n${CP} "$1" '${probe}'`);
     expect(await grabUnderPath(bin)).toEqual(payload);
     expect(existsSync(probe)).toBe(true);
-    expect(existsSync(PASTE_TMP)).toBe(false);
+    expect(existsSync(pasteTmp)).toBe(false);
   });
 });
 
@@ -127,12 +130,12 @@ function fakeBun() {
   let deleted: ((path: string) => Promise<void>) | undefined;
   let content: Uint8Array | null = null;
   const spawn = (cmd: string[], _opts: unknown) => {
-    expect(cmd).toEqual(["pngpaste", PASTE_TMP]);
+    expect(cmd).toEqual(["pngpaste", pasteTmp]);
     content = PNG_BYTES;
     return { exited: Promise.resolve(0) };
   };
   const file = (path: string): FakeFile => {
-    expect(path).toBe(PASTE_TMP);
+    expect(path).toBe(pasteTmp);
     return {
       arrayBuffer: async () => {
         if (content === null) throw new Error("no file");
@@ -160,8 +163,12 @@ describe("grabClipboardPng — best-effort cleanup (#519)", () => {
   beforeEach(() => {
     fake = fakeBun();
     errSpy = spyOn(console, "error").mockImplementation(() => {});
+    prevPasteTmp = process.env.FLEET_PASTE_TMP;
+    process.env.FLEET_PASTE_TMP = pasteTmp;
   });
   afterEach(() => {
+    if (prevPasteTmp === undefined) delete process.env.FLEET_PASTE_TMP;
+    else process.env.FLEET_PASTE_TMP = prevPasteTmp;
     errSpy.mockRestore();
     fake.restore();
   });

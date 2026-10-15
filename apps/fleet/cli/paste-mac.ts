@@ -4,11 +4,17 @@
 // paste intercept this CLI is modeled on — so this file has zero platform
 // bindings of its own beyond Bun.spawn.
 //
-// Fixed tmp path, matching the brief's literal command
-// (`pngpaste /tmp/fleet-paste.png`): a single interactive `fleet attach`
-// session never pastes concurrently with itself, so there is no collision
-// to guard against the way paste.ts's server-side pasteSeq has to.
-const PASTE_TMP_PATH = "/tmp/fleet-paste.png";
+// The default tmp path is /tmp/fleet-paste.png (the brief's literal
+// command), overridable via FLEET_PASTE_TMP so test lanes each own a
+// private file. A single interactive `fleet attach` never pastes
+// concurrently with itself.
+// Injectable tmp path: FLEET_PASTE_TMP overrides the fixed /tmp default so
+// test lanes (and any future concurrent caller) each own a private file
+// instead of racing on one machine-wide path. Read at CALL time, not module
+// load, so in-process mock lanes can point it wherever their test needs.
+function pasteTmpPath(): string {
+  return process.env.FLEET_PASTE_TMP ?? "/tmp/fleet-paste.png";
+}
 
 /**
  * Returns the clipboard image as PNG bytes, or null when there is nothing to
@@ -19,11 +25,12 @@ const PASTE_TMP_PATH = "/tmp/fleet-paste.png";
  */
 export async function grabClipboardPng(): Promise<Uint8Array | null> {
   try {
-    const proc = Bun.spawn(["pngpaste", PASTE_TMP_PATH], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const tmp = pasteTmpPath();
+    const proc = Bun.spawn(["pngpaste", tmp], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
     const code = await proc.exited;
     if (code !== 0) return null;
 
-    const file = Bun.file(PASTE_TMP_PATH);
+    const file = Bun.file(tmp);
     const bytes = new Uint8Array(await file.arrayBuffer());
     // Best-effort cleanup — a leftover screenshot in /tmp is cosmetic, not a
     // reason to fail a paste that already succeeded. ENOENT (never there /
