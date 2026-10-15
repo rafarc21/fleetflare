@@ -149,10 +149,10 @@ describe("Dockerfile.gate (image shape per the repo's reproducible-build rules)"
     for (const r of runs) expect(r).not.toMatch(/\|\s*(ba)?sh\b/);
   });
 
-  it("verifies rustup-init by checksum and pins the toolchain and nextest", () => {
+  it("verifies the node tarball by checksum and has no Rust layer (#1011)", () => {
     expect(raw).toContain("sha256sum -c");
-    expect(raw).toContain("--default-toolchain 1.91.0");
-    expect(raw).toContain("cargo install cargo-nextest --version 0.9.148 --locked");
+    expect(raw).toContain("node-v22.23.3-linux-x64.tar.xz");
+    expect(raw).not.toMatch(/rustup|cargo|nextest/);
   });
 
   it("copies only the two container sources and repro-seal into the image", () => {
