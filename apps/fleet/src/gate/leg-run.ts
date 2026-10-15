@@ -5,7 +5,6 @@
 // That return value is the step result. A red test is data (state "failure"),
 // never a throw. Any non-2xx is infra: the step throws, Workflows retries it
 // once, and a second failure becomes this leg's "error".
-import type { WorkflowStepConfig } from "cloudflare:workers";
 import { normalizeLegResult, type PlannedLeg } from "./fanout";
 import type { LegResult } from "./verdict";
 
@@ -13,10 +12,17 @@ import type { LegResult } from "./verdict";
  *  be near that, so it is bounded well under it. */
 const MAX_DESCRIPTION_CHARS = 2000;
 
-/** The slice of Workflows' WorkflowStep this module uses. Type-only import:
- *  erased at runtime, so bun test can still load this file. */
+/** The one step config a leg uses. Literal types, so the object is assignable
+ *  to Workflows' WorkflowStepConfig without importing cloudflare:workers here
+ *  (the check tsconfigs for test/ cannot resolve that module). */
+export interface LegStepConfig {
+  retries: { limit: number; delay: "15 seconds"; backoff: "constant" };
+  timeout: "30 minutes";
+}
+
+/** The slice of Workflows' WorkflowStep this module uses. */
 export interface LegStepRunner {
-  do(name: string, config: WorkflowStepConfig, fn: () => Promise<LegResult>): Promise<LegResult>;
+  do(name: string, config: LegStepConfig, fn: () => Promise<LegResult>): Promise<LegResult>;
 }
 
 /** Runs one leg as one start-<leg> step. Never throws: every failure becomes

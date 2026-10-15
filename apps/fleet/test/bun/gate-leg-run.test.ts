@@ -3,8 +3,7 @@
 // leg-run.ts, not workflow.ts: workflow.ts imports cloudflare:workers, which
 // bun test cannot load.
 import { describe, it, expect } from "bun:test";
-import type { WorkflowStepConfig } from "cloudflare:workers";
-import { runLegStep } from "../../src/gate/leg-run";
+import { runLegStep, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
 
@@ -16,12 +15,12 @@ const PLANNED: PlannedLeg = {
 // Mirrors Workflows' retry rule: a step that throws is re-run until its retry
 // limit is spent, then the error propagates to the caller.
 function fakeStep() {
-  const calls: { name: string; config: WorkflowStepConfig }[] = [];
+  const calls: { name: string; config: LegStepConfig }[] = [];
   return {
     calls,
-    do: async (name: string, config: WorkflowStepConfig, fn: () => Promise<LegResult>): Promise<LegResult> => {
+    do: async (name: string, config: LegStepConfig, fn: () => Promise<LegResult>): Promise<LegResult> => {
       calls.push({ name, config });
-      const limit = config.retries?.limit ?? 0;
+      const limit = config.retries.limit;
       for (let attempt = 0; ; attempt++) {
         try {
           return await fn();
