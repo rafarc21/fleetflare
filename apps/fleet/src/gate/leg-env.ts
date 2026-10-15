@@ -10,6 +10,10 @@ export interface GateLegRequest {
   owner: string; repo: string; commit: string; leg: string;
   installCmd: string; legCmd: string;
   resultKey: string; baselineKeys: string[];
+  /** The PR's base branch name, for the container's stale-base check. */
+  baseRef: string;
+  /** The PR number, for fetching a fork PR's head. */
+  pr: string;
 }
 
 /** No token field, no URL field: Phase 1's repo (rafarc21/fleetflare) is
@@ -25,5 +29,7 @@ export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
     GATE_LEG_CMD: req.legCmd,
     GATE_RESULT_KEY: req.resultKey,
     GATE_BASELINE_KEYS: req.baselineKeys.join(","),
+    GATE_BASE_REF: req.baseRef,
+    GATE_PR: req.pr,
   };
 }

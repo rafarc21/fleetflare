@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { runLegInContainer, type GateContainer, type OutboundBinding } from "../../src/gate/run-leg";
+import { runLegInContainer, LEG_RUN_TIMEOUT_MS, type GateContainer, type OutboundBinding } from "../../src/gate/run-leg";
 import { buildLegEnvVars, type GateLegRequest } from "../../src/gate/leg-env";
 
 // #715: GateRunnerDO drives the native ctx.container API. These tests run the
@@ -16,6 +16,8 @@ const LEG: GateLegRequest = {
   legCmd: "bun test",
   resultKey: "results/leg-a.json",
   baselineKeys: ["baseline/main.tar"],
+  baseRef: "main",
+  pr: "3",
 };
 
 // The binding is opaque to runLegInContainer; it only forwards it.
@@ -32,8 +34,13 @@ class FakeContainer implements GateContainer {
   images: Record<string, string> | undefined = { gate: "gate-image:v1" };
   /** Ticks of the fake clock before `running` flips true. Infinity = never. */
   runningAfterMs = 0;
-  /** Each port fetch consumes one entry: a Response, or an Error to throw. */
+  /** POST /run outcomes, consumed in order: a Response, or an Error to throw. */
   portOutcomes: Array<Response | Error> = [];
+  /** GET /result outcomes, consumed in order. Once empty, resultFallback answers. */
+  resultOutcomes: Array<Response | Error> = [];
+  resultFallback: Response | Error = running();
+  /** GET /result calls made, for the poll count. */
+  polls = 0;
   startThrows: Error | undefined;
   private startedAt: number | undefined = undefined;
   clock: { now: number } = { now: 0 };
@@ -56,9 +63,16 @@ class FakeContainer implements GateContainer {
 
   getTcpPort(_port: number): { fetch(input: string, init?: RequestInit): Promise<Response> } {
     return {
-      fetch: async () => {
-        this.calls.push("port-fetch");
+      fetch: async (input: string) => {
         this.fetchCalls += 1;
+        if (input.endsWith("/result")) {
+          this.polls += 1;
+          this.calls.push("poll");
+          const next = this.resultOutcomes.shift() ?? this.resultFallback;
+          if (next instanceof Error) throw next;
+          return next;
+        }
+        this.calls.push("port-fetch");
         const next = this.portOutcomes.shift();
         if (next === undefined) throw new Error("connection refused");
         if (next instanceof Error) throw next;
@@ -85,6 +99,11 @@ function fakeClock(container: FakeContainer) {
 
 function okResponse(state: string): Response {
   return Response.json({ state });
+}
+
+/** The 202 a server answers while its leg is still running. */
+function running(): Response {
+  return Response.json({ state: "running" }, { status: 202 });
 }
 
 describe("runLegInContainer: container start", () => {
@@ -200,42 +219,58 @@ describe("runLegInContainer: readiness and port", () => {
   });
 });
 
-describe("runLegInContainer: 25 min leg deadline", () => {
-  test("a leg past the deadline is an error leg, and the container is destroyed", async () => {
+describe("runLegInContainer: polled result", () => {
+  test("posts /run once, polls /result until the leg answers 200, then returns its body", async () => {
     const c = new FakeContainer();
-    // The deadline signal is already aborted; the port never answers.
-    const requestedMs: number[] = [];
-    const result = await runLegInContainer(LEG, {
-      container: c, outbound: OUTBOUND, ...fakeClock(c),
-      timeoutSignal: (ms) => { requestedMs.push(ms); return AbortSignal.abort(); },
-    });
+    c.portOutcomes = [running()];
+    c.resultOutcomes = [running(), running(), okResponse("success")];
+    const result = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(result).toEqual({ state: "success" });
+    expect(c.polls).toBe(3);
+    expect(c.destroyCount).toBe(1);
+  });
+
+  test("polls every 5 s: the first poll comes 5 s after the start", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [running()];
+    c.resultOutcomes = [okResponse("failure")];
+    await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(c.polls).toBe(1);
+    expect(c.clock.now).toBe(5_000);
+  });
+
+  test("a poll that throws is retried, never fatal on its own", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [running()];
+    c.resultOutcomes = [new Error("ECONNRESET"), new Response("boom", { status: 500 }), okResponse("failure")];
+    const result = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
+
+    expect(c.polls).toBe(3);
+    expect(result).toEqual({ state: "failure" });
+    expect(c.destroyCount).toBe(1);
+  });
+
+  test("a leg that never answers 200 is an error at 25 min, and the container is destroyed", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [running()];
+    c.resultFallback = running();
+    const result = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
     expect(result).toEqual({ state: "error", description: "leg exceeded 25 min" });
-    expect(requestedMs).toEqual([1_500_000]);
+    expect(c.clock.now).toBeGreaterThanOrEqual(LEG_RUN_TIMEOUT_MS);
     expect(c.destroyCount).toBe(1);
   });
 
-  test("a deadline during a port retry is not reported as an unreachable server", async () => {
+  test("a /result that fails on every poll still stops at the 25 min deadline", async () => {
     const c = new FakeContainer();
-    c.portOutcomes = [new Error("ECONNRESET")];
-    const result = await runLegInContainer(LEG, {
-      container: c, outbound: OUTBOUND, ...fakeClock(c),
-      timeoutSignal: () => AbortSignal.abort(),
-    });
+    c.portOutcomes = [running()];
+    c.resultFallback = new Error("ECONNREFUSED");
+    const result = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
-    expect(result.description).toBe("leg exceeded 25 min");
-    expect(c.destroyCount).toBe(1);
-  });
-
-  test("a leg that finishes inside the deadline is untouched by it", async () => {
-    const c = new FakeContainer();
-    c.portOutcomes = [okResponse("failure")];
-    const result = await runLegInContainer(LEG, {
-      container: c, outbound: OUTBOUND, ...fakeClock(c),
-      timeoutSignal: () => new AbortController().signal,
-    });
-
-    expect(result).toEqual({ state: "failure" });
+    expect(result).toEqual({ state: "error", description: "leg exceeded 25 min" });
+    expect(c.clock.now).toBeGreaterThanOrEqual(LEG_RUN_TIMEOUT_MS);
     expect(c.destroyCount).toBe(1);
   });
 });
