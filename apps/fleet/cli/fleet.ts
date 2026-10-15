@@ -3148,7 +3148,7 @@ async function main(): Promise<void> {
     case "gate-start":
       return cmdGateStart(creds, parsed.pr);
     case "gate-watch":
-      return cmdGateWatch(creds, parsed.pr);
+      return cmdGateWatch(creds, parsed.pr, parsed.runId);
   }
 }
 

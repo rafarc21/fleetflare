@@ -17,6 +17,9 @@ export interface GateConfig {
   legs: string[];
   vitestCmd: string;
   pathRules: string[];
+  /** How many vitest shards vitestCmd's {n} renders to. Absent = 1 (the
+   *  whole suite in one container). */
+  vitestShards: number;
 }
 
 function isStringArray(v: unknown): v is string[] {
@@ -35,7 +38,9 @@ export function parseGateConfig(fleetJson: unknown): GateConfig | null {
   if (!isStringArray(g.legs)) return null;
   if (typeof g.vitestCmd !== "string") return null;
   if (!isStringArray(g.pathRules)) return null;
-  return { install: g.install, legs: g.legs, vitestCmd: g.vitestCmd, pathRules: g.pathRules };
+  const vitestShards = g.vitestShards ?? 1;
+  if (typeof vitestShards !== "number" || !Number.isInteger(vitestShards) || vitestShards < 1) return null;
+  return { install: g.install, legs: g.legs, vitestCmd: g.vitestCmd, pathRules: g.pathRules, vitestShards };
 }
 
 /** Mirrors localci.sh's own skip-fleet-check path filter (localci.sh:378-381):

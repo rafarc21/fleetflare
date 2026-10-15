@@ -13,6 +13,7 @@
     "deploy": "scripts/deploy.sh",
     "test": "vitest run",
     "bun-test": "bun test test/bun test/studio.files.test.ts test/studio.studio-blueprint.test.ts",
+    "bun-test-gate": "bun test test/bun test/studio.files.test.ts test/studio.studio-blueprint.test.ts --path-ignore-patterns '**/memguard-docker*'",
     "test:integration": "bun test-integration/attach.e2e.ts",
     "test:acceptance": "bun test-integration/cli.acceptance.ts",
     "check": "tsc --noEmit && tsc --noEmit -p container && tsc --noEmit -p cli && tsc --noEmit -p test-integration && tsc --noEmit -p test",

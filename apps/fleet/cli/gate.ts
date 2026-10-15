@@ -1,4 +1,4 @@
-// apps/fleet/cli/gate.ts — `fleet gate start <pr>` / `fleet gate watch <pr>`
+// apps/fleet/cli/gate.ts — `fleet gate start <pr>` / `fleet gate watch <pr> <runId>`
 // (#715 Phase 1). Same request-building shape cli/models.ts already uses —
 // one POST to kick a run off, one GET per poll, a thrown Error on anything
 // but a 2xx. No GitHub token here: both routes are Access-JWT-authenticated
@@ -60,15 +60,17 @@ export function gateWatchExitCode(status: GateStatusResponse): number {
     case "failure": return 1;
     case "error": return 2;
     case "pending": return 2; // caller should not exit on pending, see cmdGateWatch
+    default: return 2; // a missing/unknown state is never a green exit
   }
 }
 
-export async function cmdGateWatch(creds: Credentials, pr: number): Promise<void> {
+export async function cmdGateWatch(creds: Credentials, pr: number, runId: string): Promise<void> {
   const repo = await gatedRepo();
   if (!repo) return;
   const url = new URL("/studio/gate/status", creds.workerUrl);
   url.searchParams.set("repo", repo);
   url.searchParams.set("pr", String(pr));
+  url.searchParams.set("runId", runId);
   for (;;) {
     let res: Response;
     try {

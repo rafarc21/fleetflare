@@ -32,8 +32,14 @@ describe("parseGateConfig", () => {
     });
     expect(cfg).toEqual({
       install: "bun install --frozen-lockfile", legs: ["typecheck", "lint"],
-      vitestCmd: "bun run test --shard={i}/{n}", pathRules: ["apps/fleet/**"],
+      vitestCmd: "bun run test --shard={i}/{n}", pathRules: ["apps/fleet/**"], vitestShards: 1,
     });
+  });
+  it("reads vitestShards when given", () => {
+    const cfg = parseGateConfig({
+      gate: { install: "i", legs: [], vitestCmd: "v", pathRules: [], vitestShards: 8 },
+    });
+    expect(cfg?.vitestShards).toBe(8);
   });
   it("null on a missing gate block, not a throw", () => {
     expect(parseGateConfig({})).toBeNull();
@@ -41,6 +47,13 @@ describe("parseGateConfig", () => {
   });
   it("null on a gate block missing a required field", () => {
     expect(parseGateConfig({ gate: { install: "x" } })).toBeNull();
+  });
+  it("null on a vitestShards that is not a positive integer", () => {
+    for (const vitestShards of [0, -1, 1.5, "8"]) {
+      expect(parseGateConfig({
+        gate: { install: "i", legs: [], vitestCmd: "v", pathRules: [], vitestShards },
+      })).toBeNull();
+    }
   });
 });
 

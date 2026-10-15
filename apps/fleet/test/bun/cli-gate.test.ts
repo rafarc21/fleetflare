@@ -11,6 +11,10 @@ describe("gateWatchExitCode", () => {
   it("error -> 2", () => {
     expect(gateWatchExitCode({ state: "error", description: "x" })).toBe(2);
   });
+  it("missing or unknown state -> 2, never a green exit", () => {
+    expect(gateWatchExitCode({} as GateStatusResponse)).toBe(2);
+    expect(gateWatchExitCode({ state: "bogus" } as unknown as GateStatusResponse)).toBe(2);
+  });
   it("statusPostFailed overrides the state's own code -> 3", () => {
     const status: GateStatusResponse = { state: "success", statusPostFailed: true };
     expect(gateWatchExitCode(status)).toBe(3);
