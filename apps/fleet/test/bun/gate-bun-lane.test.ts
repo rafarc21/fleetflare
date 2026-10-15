@@ -36,26 +36,56 @@ describe("isBunLaneFile", () => {
   });
 });
 
+describe("isBunLaneFile with the block's own globs", () => {
+  it("takes only files matching the globs it is given", () => {
+    expect(isBunLaneFile("suites/unit/a.test.ts", ["suites/*/*.test.ts"])).toBe(true);
+    expect(isBunLaneFile("test/bun/a.test.ts", ["suites/*/*.test.ts"])).toBe(false);
+  });
+  it("** crosses directories; * does not", () => {
+    expect(isBunLaneFile("suites/deep/x/a.test.ts", ["suites/**/*.test.ts"])).toBe(true);
+    expect(isBunLaneFile("suites/deep/x/a.test.ts", ["suites/*/*.test.ts"])).toBe(false);
+  });
+  it("still excludes memguard-docker under any glob set", () => {
+    expect(isBunLaneFile("suites/memguard-docker.test.ts", ["suites/*.test.ts"])).toBe(false);
+  });
+});
+
 describe("laneFilesFromTree", () => {
   it("maps repo-root paths to apps/fleet-relative lane files, sorted", () => {
     expect(laneFilesFromTree([
       "apps/fleet/test/bun/zeta.test.ts",
       "apps/fleet/test/bun/alpha.test.ts",
       "apps/fleet/test/studio.files.test.ts",
-    ])).toEqual([
+    ], "apps/fleet")).toEqual([
       "test/bun/alpha.test.ts",
       "test/bun/zeta.test.ts",
       "test/studio.files.test.ts",
     ]);
   });
-  it("drops paths outside apps/fleet, even when they look like lane files", () => {
-    expect(laneFilesFromTree(["test/bun/alpha.test.ts", "other/test/bun/beta.test.ts"])).toEqual([]);
+  it("drops paths outside the block's root, even when they look like lane files", () => {
+    expect(laneFilesFromTree(["test/bun/alpha.test.ts", "other/test/bun/beta.test.ts"], "apps/fleet")).toEqual([]);
   });
   it("applies the same lane rules as isBunLaneFile", () => {
     expect(laneFilesFromTree([
       "apps/fleet/test/bun/memguard-docker.test.ts",
       "apps/fleet/test/bun/helpers/x.ts",
-    ])).toEqual([]);
+    ], "apps/fleet")).toEqual([]);
+  });
+  it("uses the block's own root: a per-repo root reads only its own tree", () => {
+    expect(laneFilesFromTree([
+      "packages/web/test/bun/a.test.ts",
+      "apps/fleet/test/bun/b.test.ts",
+      "packages/web/test/bun/memguard-docker.test.ts",
+    ], "packages/web")).toEqual(["test/bun/a.test.ts"]);
+  });
+  it("a trailing slash on the root changes nothing", () => {
+    expect(laneFilesFromTree(["packages/web/test/bun/a.test.ts"], "packages/web/")).toEqual(["test/bun/a.test.ts"]);
+  });
+  it("takes its file set from the block's globs, relative to the root", () => {
+    expect(laneFilesFromTree([
+      "packages/web/suites/unit/a.test.ts",
+      "packages/web/test/bun/b.test.ts",
+    ], "packages/web", ["suites/*/*.test.ts"])).toEqual(["suites/unit/a.test.ts"]);
   });
 });
 
@@ -106,13 +136,16 @@ describe("checked-in gate plan", () => {
     "apps/fleet/test/studio.studio-blueprint.test.ts",
   ];
 
+  // The shipped fleet.json is the fleet's own repo, so its `gate` block is the fallback.
+  const FLEET_REPO = FLEET_JSON.blueprint.repo;
+
   it("the shipped gate block parses and carries bunShards", () => {
-    expect(parseGateConfig(FLEET_JSON)?.bunShards).toBeGreaterThan(0);
+    expect(parseGateConfig(FLEET_JSON, FLEET_REPO, FLEET_REPO)?.bunShards).toBeGreaterThan(0);
   });
 
   it("the real lane is covered exactly once by the shipped bun shard count", () => {
-    const cfg = parseGateConfig(FLEET_JSON)!;
-    const lane = laneFilesFromTree(laneOnDisk);
+    const cfg = parseGateConfig(FLEET_JSON, FLEET_REPO, FLEET_REPO)!;
+    const lane = laneFilesFromTree(laneOnDisk, cfg.bunLaneRoot!, cfg.bunLaneGlobs);
     const shards = planBunShards(lane, BUN_SHARD_TIMINGS.timings, cfg.bunShards);
     expect(lane.length).toBeGreaterThan(0);
     expect(shards.flat().sort()).toEqual(lane);
@@ -120,12 +153,14 @@ describe("checked-in gate plan", () => {
   });
 
   it("the full leg plan for the shipped config stays under MAX_LEGS_PER_PR", () => {
-    const cfg = parseGateConfig(FLEET_JSON)!;
-    const bunShards = planBunShards(laneFilesFromTree(laneOnDisk), BUN_SHARD_TIMINGS.timings, cfg.bunShards);
+    const cfg = parseGateConfig(FLEET_JSON, FLEET_REPO, FLEET_REPO)!;
+    const bunShards = planBunShards(
+      laneFilesFromTree(laneOnDisk, cfg.bunLaneRoot!, cfg.bunLaneGlobs), BUN_SHARD_TIMINGS.timings, cfg.bunShards,
+    );
     const legs = planLegs({
       owner: "acme", repo: "example", pr: 1, runId: "run-a",
       headSha: "h".repeat(40), baseSha: "b".repeat(40),
-      install: cfg.install, legs: cfg.legs, bunShards,
+      install: cfg.install, legs: cfg.legs, bunShards, bunLaneRoot: cfg.bunLaneRoot!,
       vitestCmd: cfg.vitestCmd, vitestShards: cfg.vitestShards, baselineKeys: [],
     });
     expect(legs.length).toBeLessThanOrEqual(MAX_LEGS_PER_PR);
