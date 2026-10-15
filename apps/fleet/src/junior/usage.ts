@@ -157,8 +157,8 @@ export async function handleJuniorUsageStats(
   return Response.json(aggregate);
 }
 
-export interface LeadUsageRow { studioId: string; calls: number; ok: number }
-export interface LeadUsageAggregate { rows: LeadUsageRow[] }
+interface LeadUsageRow { studioId: string; calls: number; ok: number }
+interface LeadUsageAggregate { rows: LeadUsageRow[] }
 
 /** Issue #934: the SIBLING of aggregateJuniorUsage, which deliberately
  *  EXCLUDES lead rows (see its own doc comment above) — this one is exactly
