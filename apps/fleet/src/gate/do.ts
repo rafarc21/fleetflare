@@ -51,9 +51,5 @@ export class GateRunnerDO extends Container<Env> {
     }
     return new Response("not found", { status: 404 });
   }
-  // Still open from Task 16's plan text: `/run-leg` ACKs fast (202), keeps the
-  // container running via `this.ctx.waitUntil`, and calls `sendEvent` on the
-  // calling Workflow instance when done. That needs Task 14's GATE_WORKFLOW
-  // binding and instance-id contract, neither on main yet, so this route is
-  // still synchronous.
+  // /run-leg is synchronous by design: the reply is the leg's LegResult.
 }

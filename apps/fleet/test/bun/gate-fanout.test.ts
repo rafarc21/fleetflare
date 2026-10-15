@@ -1,7 +1,7 @@
 // Pure fan-out planning for GateWorkflow (Task 14). No I/O, no bindings:
-// the Workflow feeds these results into step.do/waitForEvent calls.
+// the Workflow feeds these results into step.do calls.
 import { describe, it, expect } from "bun:test";
-import { bunLegs, legEventType, normalizeLegResult, planLegs, vitestLegs } from "../../src/gate/fanout";
+import { bunLegs, normalizeLegResult, planLegs, vitestLegs } from "../../src/gate/fanout";
 import { MAX_LEGS_PER_PR } from "../../src/gate/config";
 import { resolveOutboundTarget } from "../../src/gate/outbound-handler";
 
@@ -18,16 +18,6 @@ const BASE = {
 
 const BUN_SHARDS = [["test/bun/alpha.test.ts", "test/bun/beta.test.ts"], ["test/bun/gamma.test.ts"]];
 
-describe("legEventType", () => {
-  it("prefixes the leg name, keeping the type inside Workflows' allowed charset", () => {
-    expect(legEventType("vitest-1")).toBe("gate-leg-vitest-1");
-  });
-  it("replaces characters Workflows rejects (a dot is invalid_event_type)", () => {
-    const t = legEventType("lint.ts");
-    expect(t).toBe("gate-leg-lint_ts");
-    expect(t).toMatch(/^[A-Za-z0-9_-]+$/);
-  });
-});
 
 describe("vitestLegs", () => {
   it("substitutes {i} and {n} once per shard, 1-based", () => {
@@ -90,10 +80,6 @@ describe("planLegs with bun shards", () => {
     expect(legs.length).toBe(MAX_LEGS_PER_PR);
     expect(legs.filter((l) => l.leg.startsWith("vitest-")).length).toBe(MAX_LEGS_PER_PR - 1 - 2 - 6);
   });
-  it("every bun leg has its own event type", () => {
-    const types = planLegs({ ...BASE, bunShards: BUN_SHARDS }).map((l) => l.eventType);
-    expect(new Set(types).size).toBe(types.length);
-  });
 });
 
 describe("planLegs", () => {
@@ -145,10 +131,6 @@ describe("planLegs", () => {
     const vitest = planLegs({ ...BASE, legs: [], vitestShards: 8 }).filter((l) => l.leg.startsWith("vitest-"));
     expect(vitest.map((l) => l.legCmd)).toContain("bun run test --shard=3/8");
     expect(vitest.every((l) => l.installCmd === BASE.install)).toBe(true);
-  });
-  it("every leg gets its own event type, so concurrent waits never race", () => {
-    const types = planLegs(BASE).map((l) => l.eventType);
-    expect(new Set(types).size).toBe(types.length);
   });
   it("only the merge-tree leg skips the baseline; the rest get the baseline keys", () => {
     const legs = planLegs(BASE);
