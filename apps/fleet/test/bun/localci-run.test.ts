@@ -345,11 +345,12 @@ describe("localci.sh", () => {
   test("a hung lane is killed at its timeout: error status, lock released, no process left", () => {
     openPr(7, "apps/fleet/b.txt", "x");
     const t0 = Date.now();
-    const r = run("7", [], { STUB_LINUX_HANG: "1", LOCALCI_LANE_TIMEOUT: "2" });
+    const r = run("7", [], { STUB_LINUX_HANG: "1", LOCALCI_LANE_TIMEOUT: "1" });
     expect(Date.now() - t0).toBeLessThan(30_000);
     expect(r.code).toBe(2);
     expect(posts()[2]).toBe("local-ci/fleet-check=error");
-    expect(readFileSync(calls, "utf8")).toContain("description=lane linux timed out after 2s");
+    // 1s beats the stub's 61s sleep with room.
+    expect(readFileSync(calls, "utf8")).toContain("description=lane linux timed out after 1s");
     const pid = Number(readFileSync(join(root, "hang.pid"), "utf8"));
     const deadline = Date.now() + 5_000;
     while (running(pid) && Date.now() < deadline) Bun.sleepSync(100);
