@@ -201,3 +201,43 @@ describe("runLegInContainer: readiness and port", () => {
     expect(c.destroyCount).toBe(1);
   });
 });
+
+describe("runLegInContainer: 25 min leg deadline", () => {
+  test("a leg past the deadline is an error leg, and the container is destroyed", async () => {
+    const c = new FakeContainer();
+    // The deadline signal is already aborted; the port never answers.
+    const requestedMs: number[] = [];
+    const result = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      timeoutSignal: (ms) => { requestedMs.push(ms); return AbortSignal.abort(); },
+    });
+
+    expect(result).toEqual({ state: "error", description: "leg exceeded 25 min" });
+    expect(requestedMs).toEqual([1_500_000]);
+    expect(c.destroyCount).toBe(1);
+  });
+
+  test("a deadline during a port retry is not reported as an unreachable server", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [new Error("ECONNRESET")];
+    const result = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      timeoutSignal: () => AbortSignal.abort(),
+    });
+
+    expect(result.description).toBe("leg exceeded 25 min");
+    expect(c.destroyCount).toBe(1);
+  });
+
+  test("a leg that finishes inside the deadline is untouched by it", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [okResponse("failure")];
+    const result = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      timeoutSignal: () => new AbortController().signal,
+    });
+
+    expect(result).toEqual({ state: "failure" });
+    expect(c.destroyCount).toBe(1);
+  });
+});

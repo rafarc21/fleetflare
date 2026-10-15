@@ -2,19 +2,15 @@
 // fleet.json from the FLEET's repo -> fans one GateRunnerDO leg per container
 // out -> fans in to one gate/verdict commit status. The ONLY file in the gate
 // runner that mints a GitHub token and posts a real commit status; every
-// decision it makes (leg plan, status mapping, event normalisation) lives in
-// fanout.ts / verdict.ts / config.ts, unit-tested under bun test.
+// decision it makes (leg plan, status mapping, leg-result normalisation) lives
+// in fanout.ts / leg-run.ts / verdict.ts / config.ts, unit-tested under bun test.
 //
-// Fan-out is event fan-in, not one step.do per leg. Workflows retries a step
-// that THROWS (5x, backoff, 10-minute attempt timeout), so a red test inside
-// one big step would be retried as if it were an infra blip. Each leg is
-// therefore a short, idempotent start-<leg> step (kick the container off) and
-// a waitForEvent with its own timeout. GateRunnerDO sends the LegResult back
-// to this instance by sendEvent, carrying a red test's state:"failure" as
-// data. Only a leg whose event never arrives (infra) becomes "error".
-//
-// Requires Task 16 (GateRunnerDO's /run-leg ACKs with 202 and sendEvents
-// back). Until then the start step waits on the container's full run.
+// Fan-out is one step per leg, and the step's return value is the leg's
+// result. GateRunnerDO answers /run-leg synchronously with the LegResult, so
+// the start-<leg> step is the whole leg. A red test is data (state "failure")
+// and never throws. Any non-2xx from the DO is infra: the step throws, Workflows
+// retries it once, and a second failure becomes that leg's "error". Other legs
+// still finish either way.
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import {
@@ -24,15 +20,13 @@ import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import { matchesPathRules, parseGateConfig } from "./config";
-import {
-  legEventType, normalizeLegResult, planLegs, verdictToStatusArgs, type PlannedLeg,
-} from "./fanout";
+import { planLegs, verdictToStatusArgs, type PlannedLeg } from "./fanout";
+import { runLegStep } from "./leg-run";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
 export interface GateWorkflowParams { repo: string; pr: number }
 
 const GATE_STATUS_CONTEXT = "gate/verdict";
-const LEG_TIMEOUT = "10 minutes"; // one ceiling per leg, not one for the whole fan-out
 // Vitest shard count comes from the fleet.json gate block (default 8, capped by
 // planLegs at MAX_LEGS_PER_PR). vitestCmd's {i}/{n} renders as i/n per shard.
 
@@ -122,41 +116,29 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
   }
 }
 
-/** One leg: a short kick-off step, then a waitForEvent with its own timeout.
- *  Neither a red test nor a missing event throws out of runLeg. Any failure
- *  becomes this leg's LegResult, so the other legs still finish. */
-async function runLeg(
+/** One leg, one start-<leg> step. The step's return value is the DO's LegResult. */
+function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
   owner: string, repoName: string, pr: { baseRef: string; pr: string }, planned: PlannedLeg,
 ): Promise<LegResult> {
-  try {
-    await step.do(`start-${planned.leg}`, async () => {
+  return runLegStep(
+    { do: (name, config, fn) => step.do(name, config, fn) },
+    async (leg) => {
       // Scoped by run instance: two PRs gating the same leg name must never
       // share one container, and "one leg per container" is the DO's contract.
-      const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(`${instanceId}/${planned.leg}`));
-      // GateRunnerDO ACKs 202 and sends the result back by event (Task 16). Any
-      // non-2xx is an infra failure: throw so Workflows retries this kick-off.
-      const res = await stub.fetch("https://gate-runner/run-leg", {
+      const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(`${instanceId}/${leg.leg}`));
+      return stub.fetch("https://gate-runner/run-leg", {
         method: "POST",
         body: JSON.stringify({
-          owner, repo: repoName, commit: planned.commit, leg: planned.leg,
-          installCmd: planned.installCmd, legCmd: planned.legCmd,
-          resultKey: planned.resultKey, baselineKeys: planned.baselineKeys,
+          owner, repo: repoName, commit: leg.commit, leg: leg.leg,
+          installCmd: leg.installCmd, legCmd: leg.legCmd,
+          resultKey: leg.resultKey, baselineKeys: leg.baselineKeys,
           baseRef: pr.baseRef, pr: pr.pr,
-          instanceId, eventType: planned.eventType,
         }),
       });
-      if (!res.ok) throw new Error(`start ${planned.leg} failed (${res.status})`);
-    });
-    const received = await step.waitForEvent<LegResult>(`wait-${planned.leg}`, {
-      type: legEventType(planned.leg), timeout: LEG_TIMEOUT,
-    });
-    return normalizeLegResult(planned.leg, received.payload);
-  } catch {
-    // waitForEvent throws on timeout; a kick-off that failed past its retries
-    // lands here too. Both are infra: error, never a silent pass.
-    return { leg: planned.leg, state: "error", description: `${planned.leg} timed out or missing report` };
-  }
+    },
+    planned,
+  );
 }
 
 /** Posts the terminal status with two attempts. Returns true when both fail,
