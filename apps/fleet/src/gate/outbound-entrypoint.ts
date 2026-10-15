@@ -8,7 +8,7 @@
 // binds it to the real R2 binding.
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "../env";
-import { handleGateOutbound } from "./outbound-handler";
+import { handleGateOutbound, type GateOutboundProps } from "./outbound-handler";
 
 // Types `exports.GateOutbound` (cloudflare:workers) from the main module's own
 // exports, so do.ts gets a typed loopback binding instead of a cast.
@@ -20,8 +20,8 @@ declare global {
   }
 }
 
-export class GateOutbound extends WorkerEntrypoint<Env> {
+export class GateOutbound extends WorkerEntrypoint<Env, GateOutboundProps> {
   override fetch(req: Request): Promise<Response> {
-    return handleGateOutbound(req, this.env.STUDIO_ARCHIVE);
+    return handleGateOutbound(req, this.env.STUDIO_ARCHIVE, this.ctx.props);
   }
 }

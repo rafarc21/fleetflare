@@ -57,9 +57,22 @@ export interface OutboundBucket {
   ): Promise<unknown | null>;
 }
 
+/** Set by GateRunnerDO when it registers the interceptor (do.ts), one per leg.
+ *  `resultKey` is the only key this container may PUT: the leg's own result.
+ *  The run id is part of that key, so another run's key is refused by equality. */
+export interface GateOutboundProps {
+  resultKey: string;
+}
+
 /** Serves one plain container request. Every branch either uses the bucket for
- *  an allow-listed key or returns a status without touching it. */
-export async function handleGateOutbound(req: Request, bucket: OutboundBucket): Promise<Response> {
+ *  an allow-listed key or returns a status without touching it. A PUT needs
+ *  props whose resultKey equals the requested key exactly; missing props deny
+ *  every write. */
+export async function handleGateOutbound(
+  req: Request,
+  bucket: OutboundBucket,
+  props?: GateOutboundProps,
+): Promise<Response> {
   const url = new URL(req.url);
   if (url.host !== GATE_R2_HOST) return new Response("forbidden", { status: 403 });
 
@@ -80,6 +93,7 @@ export async function handleGateOutbound(req: Request, bucket: OutboundBucket): 
 
   if (req.method === "PUT") {
     if (!isWritableByContainer(target.key)) return new Response("forbidden", { status: 403 });
+    if (!props?.resultKey || props.resultKey !== target.key) return new Response("forbidden", { status: 403 });
     const declared = Number(req.headers.get("content-length") ?? "0");
     if (declared > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
     const body = await req.arrayBuffer();
