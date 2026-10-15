@@ -42,6 +42,12 @@ export { DeployDO } from "./deploy/do";
 // subclass, see do.ts's own comment) needs this same export the moment its
 // wrangler.jsonc containers[] entry lands.
 export { StudioDO, StudioBigDO } from "./studio/do";
+// #715 gate runner: the GateRunnerDO container class (wrangler.example.jsonc
+// `containers[]` GateRunnerDO entry) and the GateOutbound entrypoint that
+// serves its outbound R2 requests (Task 16). Same rule as above: an
+// unexported class named in wrangler fails boot for the whole Worker.
+export { GateRunnerDO } from "./gate/do";
+export { GateOutbound } from "./gate/outbound-entrypoint";
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
