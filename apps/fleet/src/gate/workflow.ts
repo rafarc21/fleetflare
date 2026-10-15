@@ -31,10 +31,8 @@ export interface GateWorkflowParams { repo: string; pr: number }
 
 const GATE_STATUS_CONTEXT = "gate/verdict";
 const LEG_TIMEOUT = "10 minutes"; // one ceiling per leg, not one for the whole fan-out
-// One vitest shard until a measured-timing source exists: Task 3's planShards
-// needs per-file ms, and nothing in Phase 1 wiring supplies it yet. vitestCmd's
-// {i}/{n} then renders as 1/1, i.e. the whole suite in one container.
-const VITEST_SHARDS = 1;
+// Vitest shard count comes from the fleet.json gate block (default 8, capped by
+// planLegs at MAX_LEGS_PER_PR). vitestCmd's {i}/{n} renders as i/n per shard.
 
 export type GateRunOutcome =
   | { state: "success" | "failure" | "error"; description?: string; statusPostFailed: boolean }
@@ -86,10 +84,10 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     }
 
     const legs = planLegs({
-      owner, repo: repoName, pr,
+      owner, repo: repoName, pr, runId: event.instanceId,
       headSha: resolved.headSha, baseSha: resolved.baseSha,
       install: config.install, legs: config.legs, vitestCmd: config.vitestCmd,
-      vitestShards: VITEST_SHARDS,
+      vitestShards: config.vitestShards,
       baselineKeys: [], // lockfile baseline keys are not wired yet; each leg installs from scratch
     });
 

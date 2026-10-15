@@ -2,6 +2,7 @@
 // Workflow/DO bindings — this file is what bun test can load, so
 // workflow.ts (which imports cloudflare:workers) stays a thin driver over
 // the decisions made here.
+import { MAX_LEGS_PER_PR } from "./config";
 import type { LegResult, Verdict } from "./verdict";
 
 export function verdictToStatusArgs(
@@ -21,6 +22,9 @@ export function legEventType(leg: string): string {
 
 export interface PlanInput {
   owner: string; repo: string; pr: number;
+  /** The Workflow instance id: unique per run, so a second run on the same PR
+   *  writes its own result keys (a write-once key would 412 otherwise). */
+  runId: string;
   headSha: string; baseSha: string;
   install: string; legs: string[];
   vitestCmd: string; vitestShards: number;
@@ -32,13 +36,14 @@ export interface PlannedLeg {
   resultKey: string; baselineKeys: string[]; eventType: string;
 }
 
-/** `{i}`/`{n}` are 1-based, matching vitest's own --shard=i/n. */
+/** `{i}`/`{n}` are 1-based, matching vitest's own --shard=i/n. Every occurrence
+ *  is replaced, so a template that names the shard twice renders consistently. */
 export function vitestLegs(vitestCmd: string, shards: number): { leg: string; legCmd: string }[] {
   return Array.from({ length: shards }, (_, idx) => {
     const i = idx + 1;
     return {
       leg: `vitest-${i}`,
-      legCmd: vitestCmd.replace("{i}", String(i)).replace("{n}", String(shards)),
+      legCmd: vitestCmd.replaceAll("{i}", String(i)).replaceAll("{n}", String(shards)),
     };
   });
 }
@@ -46,10 +51,16 @@ export function vitestLegs(vitestCmd: string, shards: number): { leg: string; le
 /** Every leg of one run, in configured order: merge-tree first (it is the
  *  cheap one that proves the PR merges at all), then fleet.json's legs, then
  *  vitest shards. aggregateVerdict reads this order, so "first failing leg"
- *  is deterministic regardless of which container reports first. */
+ *  is deterministic regardless of which container reports first.
+ *
+ *  The vitest shard count is clamped so the whole plan never exceeds
+ *  MAX_LEGS_PER_PR (parseGateConfig already rejects fixed legs that leave no
+ *  room for one shard, so the floor of 1 holds). */
 export function planLegs(input: PlanInput): PlannedLeg[] {
-  const { owner, repo, pr, headSha, baseSha, install, legs, vitestCmd, vitestShards, baselineKeys } = input;
-  const keyFor = (leg: string) => `gate/${owner}/${repo}/runs/${pr}/shard-${leg}.json`;
+  const { owner, repo, pr, runId, headSha, baseSha, install, legs, vitestCmd, vitestShards, baselineKeys } = input;
+  const keyFor = (leg: string) => `gate/${owner}/${repo}/runs/${pr}/${runId}/shard-${leg}.json`;
+  const fixedLegs = 1 + legs.length; // merge-tree + fleet.json legs
+  const shards = Math.max(1, Math.min(vitestShards, MAX_LEGS_PER_PR - fixedLegs));
   const leg = (name: string, commit: string, installCmd: string, legCmd: string, keys: string[]): PlannedLeg => ({
     leg: name, commit, installCmd, legCmd, resultKey: keyFor(name),
     baselineKeys: keys, eventType: legEventType(name),
@@ -57,7 +68,7 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   return [
     leg("merge-tree", `${baseSha}..${headSha}`, "", "", []),
     ...legs.map((name) => leg(name, headSha, install, `bun run ${name}`, baselineKeys)),
-    ...vitestLegs(vitestCmd, vitestShards).map((v) => leg(v.leg, headSha, install, v.legCmd, baselineKeys)),
+    ...vitestLegs(vitestCmd, shards).map((v) => leg(v.leg, headSha, install, v.legCmd, baselineKeys)),
   ];
 }
 

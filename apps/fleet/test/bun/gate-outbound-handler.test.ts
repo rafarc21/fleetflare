@@ -7,8 +7,8 @@ import {
   type OutboundBucket,
 } from "../../src/gate/outbound-handler";
 
-const RUN_KEY = "gate/acme/example/runs/715/shard-typecheck.json";
-const OTHER_RUN_KEY = "gate/acme/example/runs/716/shard-typecheck.json";
+const RUN_KEY = "gate/acme/example/runs/715/run-a/shard-typecheck.json";
+const OTHER_RUN_KEY = "gate/acme/example/runs/715/run-b/shard-typecheck.json";
 const BASELINE_KEY = "gate/acme/example/baselines/abc123-def456.tar";
 
 /** The props a leg's container is registered with: its own result key only. */
@@ -67,8 +67,12 @@ describe("resolveOutboundTarget", () => {
   it("an empty or malformed path is refused", () => {
     expect(resolveOutboundTarget("")).toBeNull();
     expect(resolveOutboundTarget("/")).toBeNull();
-    expect(resolveOutboundTarget("/gate/acme/example/runs/715/shard-typecheck.txt")).toBeNull();
+    expect(resolveOutboundTarget("/gate/acme/example/runs/715/run-a/shard-typecheck.txt")).toBeNull();
     expect(resolveOutboundTarget("/gate/acme/example/other/thing.json")).toBeNull();
+  });
+
+  it("a result key without the per-run segment is refused (the pre-#1015 shape)", () => {
+    expect(resolveOutboundTarget("/gate/acme/example/runs/715/shard-typecheck.json")).toBeNull();
   });
 });
 

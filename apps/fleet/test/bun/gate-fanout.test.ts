@@ -2,9 +2,11 @@
 // the Workflow feeds these results into step.do/waitForEvent calls.
 import { describe, it, expect } from "bun:test";
 import { legEventType, normalizeLegResult, planLegs, vitestLegs } from "../../src/gate/fanout";
+import { MAX_LEGS_PER_PR } from "../../src/gate/config";
+import { resolveOutboundTarget } from "../../src/gate/outbound-handler";
 
 const BASE = {
-  owner: "acme", repo: "example", pr: 7,
+  owner: "acme", repo: "example", pr: 7, runId: "run-a",
   headSha: "h".repeat(40), baseSha: "b".repeat(40),
   install: "bun install --frozen-lockfile",
   legs: ["typecheck", "lint"],
@@ -36,6 +38,18 @@ describe("vitestLegs", () => {
       { leg: "vitest-1", legCmd: "bun run test --shard=1/1" },
     ]);
   });
+  it("renders the default 8-shard fan-out: 8 legs, last one --shard=8/8", () => {
+    const legs = vitestLegs("bun run test --shard={i}/{n}", 8);
+    expect(legs.map((l) => l.leg)).toEqual(
+      ["vitest-1", "vitest-2", "vitest-3", "vitest-4", "vitest-5", "vitest-6", "vitest-7", "vitest-8"],
+    );
+    expect(legs.map((l) => l.legCmd)).toEqual(
+      Array.from({ length: 8 }, (_, idx) => `bun run test --shard=${idx + 1}/8`),
+    );
+  });
+  it("replaces every occurrence of {i} and {n}, not just the first", () => {
+    expect(vitestLegs("run {i}-{i} of {n}/{n}", 3)[1].legCmd).toBe("run 2-2 of 3/3");
+  });
 });
 
 describe("planLegs", () => {
@@ -58,9 +72,35 @@ describe("planLegs", () => {
   });
   it("result keys are one distinct gate/ key per leg per run", () => {
     const keys = planLegs(BASE).map((l) => l.resultKey);
-    expect(keys[0]).toBe("gate/acme/example/runs/7/shard-merge-tree.json");
-    expect(keys[3]).toBe("gate/acme/example/runs/7/shard-vitest-1.json");
+    expect(keys[0]).toBe("gate/acme/example/runs/7/run-a/shard-merge-tree.json");
+    expect(keys[3]).toBe("gate/acme/example/runs/7/run-a/shard-vitest-1.json");
     expect(new Set(keys).size).toBe(keys.length);
+  });
+  it("two runs on one PR never collide, even when they gate the same head SHA", () => {
+    const first = planLegs({ ...BASE, runId: "run-a" }).map((l) => l.resultKey);
+    const second = planLegs({ ...BASE, runId: "run-b" }).map((l) => l.resultKey);
+    const overlap = first.filter((k) => second.includes(k));
+    expect(overlap).toEqual([]);
+  });
+  it("every planned result key is accepted by the outbound allow-list, for its own leg", () => {
+    for (const leg of planLegs(BASE)) {
+      expect(resolveOutboundTarget(`/${leg.resultKey}`)).toEqual({ bucket: "STUDIO_ARCHIVE", key: leg.resultKey });
+    }
+  });
+  it("total legs per PR never exceed MAX_LEGS_PER_PR, even when the shard count asks for more", () => {
+    const legs = planLegs({ ...BASE, legs: ["typecheck", "lint"], vitestShards: 30 });
+    expect(legs.length).toBe(MAX_LEGS_PER_PR);
+    expect(legs.filter((l) => l.leg.startsWith("vitest-")).length).toBe(MAX_LEGS_PER_PR - 1 - 2);
+  });
+  it("a shard count under the cap is honored as asked", () => {
+    const legs = planLegs({ ...BASE, legs: ["typecheck"], vitestShards: 8 });
+    expect(legs.filter((l) => l.leg.startsWith("vitest-")).length).toBe(8);
+    expect(legs.length).toBe(10);
+  });
+  it("the default 8-shard fan-out renders --shard=i/8 on each vitest leg", () => {
+    const vitest = planLegs({ ...BASE, legs: [], vitestShards: 8 }).filter((l) => l.leg.startsWith("vitest-"));
+    expect(vitest.map((l) => l.legCmd)).toContain("bun run test --shard=3/8");
+    expect(vitest.every((l) => l.installCmd === BASE.install)).toBe(true);
   });
   it("every leg gets its own event type, so concurrent waits never race", () => {
     const types = planLegs(BASE).map((l) => l.eventType);
