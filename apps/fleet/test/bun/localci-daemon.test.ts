@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { waitFor } from "./helpers/poll";
 
 /**
  * Issue #267 — localci-daemon.sh: every poll, each open PR whose head sha
@@ -129,7 +130,8 @@ describe("localci-daemon.sh", () => {
 
   test("run: LOCALCI_POLL has a 30s floor — a typo never hammers the GitHub API", async () => {
     const p = Bun.spawn(["bash", DAEMON, "run"], { env: { ...env(), LOCALCI_POLL: "1" }, stdout: "ignore", stderr: "ignore" });
-    await Bun.sleep(3_500);
+    // 2000ms: a 1s poll would log 2+ "gh pr list" lines by now; the 30s floor keeps it 1.
+    await Bun.sleep(2_000);
     expect(stop(p)).toEqual([]);
     const polls = readFileSync(calls, "utf8").split("\n").filter((l) => l.startsWith("gh pr list"));
     expect(polls).toHaveLength(1);
@@ -137,7 +139,8 @@ describe("localci-daemon.sh", () => {
 
   test("run: a second instance exits at once, the first keeps polling", async () => {
     const first = Bun.spawn(["bash", DAEMON, "run"], { env: env(), stdout: "ignore", stderr: "ignore" });
-    await Bun.sleep(1_000);
+    // Poll for the first daemon's poll (runs before its sleep), not a fixed 1s.
+    expect(await waitFor(() => readFileSync(calls, "utf8").includes("gh pr list"), 5_000, 50)).toBe(true);
     const t0 = Date.now();
     const second = Bun.spawnSync(["bash", DAEMON, "run"], { env: env(), timeout: 10_000 });
     expect(stop(first)).toEqual([]);
