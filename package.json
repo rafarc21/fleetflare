@@ -1,0 +1,11 @@
+{
+  "name": "fleetflare",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": {
+    "check": "cd apps/fleet && bun run check",
+    "test-lies-check": "cd apps/fleet && bun run test-lies-check",
+    "english-check": "bun run apps/fleet/scripts/english-check.ts",
+    "bun-test-gate": "cd apps/fleet && bun run bun-test-gate"
+  }
+}

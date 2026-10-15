@@ -699,8 +699,13 @@ describe("gate start / gate watch", () => {
   it("gate start <pr> parses the PR number", () => {
     expect(parseCliArgs(["gate", "start", "715"])).toEqual({ cmd: "gate-start", pr: 715 });
   });
-  it("gate watch <pr> parses the PR number", () => {
-    expect(parseCliArgs(["gate", "watch", "715"])).toEqual({ cmd: "gate-watch", pr: 715 });
+  it("gate watch <pr> <runId> parses the PR number and run id", () => {
+    expect(parseCliArgs(["gate", "watch", "715", "wf-abc123"])).toEqual({
+      cmd: "gate-watch", pr: 715, runId: "wf-abc123",
+    });
+  });
+  it("gate watch without a run id -> usage (the status route needs one)", () => {
+    expect(parseCliArgs(["gate", "watch", "715"]).cmd).toBe("usage");
   });
   it("gate start with no PR -> usage", () => {
     expect(parseCliArgs(["gate", "start"]).cmd).toBe("usage");

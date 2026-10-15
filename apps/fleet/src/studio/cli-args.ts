@@ -268,7 +268,7 @@ export type CliCommand =
   // surface for the gate-runner Workflow (POST /studio/gate/start, GET
   // /studio/gate/status). Same sub-action-word shape `models-*` uses above.
   | { cmd: "gate-start"; pr: number }
-  | { cmd: "gate-watch"; pr: number }
+  | { cmd: "gate-watch"; pr: number; runId: string }
   | { cmd: "usage"; message: string };
 
 /** What `fleet task new` collects. `milestone` is spelled `--sprint` on the
@@ -462,8 +462,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Start a gate-runner Workflow run for <pr>; a no-op unless FLEET_GATE_RUNNER is on for the repo.",
   },
   "gate-watch": {
-    args: "watch <pr>",
-    summary: "Poll a gate-runner run for <pr> to a terminal state; exit 0 green, 1 red, 2 infra error, 3 status post failed.",
+    args: "watch <pr> <runId>",
+    summary: "Poll a gate-runner run (the runId `fleet gate start` prints) for <pr> to a terminal state; exit 0 green, 1 red, 2 infra error, 3 status post failed.",
   },
 };
 
@@ -1237,10 +1237,13 @@ export function parseCliArgs(argv: string[]): CliCommand {
         return { cmd: "gate-start", pr: Number(rest[1]) };
       }
       if (rest[0] === "watch") {
-        if (rest.length !== 2 || !/^\d+$/.test(rest[1])) return usage("usage: fleet gate watch <pr>");
-        return { cmd: "gate-watch", pr: Number(rest[1]) };
+        // The status route is keyed by the Workflow run id `gate start` prints.
+        if (rest.length !== 3 || !/^\d+$/.test(rest[1]) || !/^[\w-]+$/.test(rest[2])) {
+          return usage("usage: fleet gate watch <pr> <runId>");
+        }
+        return { cmd: "gate-watch", pr: Number(rest[1]), runId: rest[2] };
       }
-      return usage("usage: fleet gate [start <pr> | watch <pr>]");
+      return usage("usage: fleet gate [start <pr> | watch <pr> <runId>]");
     }
     default:
       return { cmd: "usage", message: CLI_USAGE };
