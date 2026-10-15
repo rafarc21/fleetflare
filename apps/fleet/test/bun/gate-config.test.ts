@@ -3,6 +3,7 @@ import {
   parseGateRunnerRepos, isGateRunnerRepo, parseGateBlock, gateMapEntry, matchesPathRules,
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR,
 } from "../../src/gate/config";
+import FLEET_JSON from "../../../../fleet.json";
 
 // Fixture repos are neutral on purpose (this repo is public).
 const BLOCK = { install: "x", legs: [], vitestCmd: "t", pathRules: ["a/**"] };
@@ -201,5 +202,21 @@ describe("matchesPathRules", () => {
   });
   it("empty changed-file list never matches", () => {
     expect(matchesPathRules([], rules)).toBe(false);
+  });
+});
+
+// #1032 (refs #715): the shipped fleet.json's own pathRules must gate the
+// files the bringup gates read — gates/*.sh and fleet.json itself. A
+// gates-only PR skipping the gate reads as a false green.
+describe("shipped fleet.json pathRules", () => {
+  it("covers gates/ scripts and fleet.json itself", () => {
+    const rules = FLEET_JSON.gate?.pathRules ?? [];
+    expect(matchesPathRules(["gates/lead-gate.sh"], rules)).toBe(true);
+    expect(matchesPathRules(["gates/completion-gate.sh"], rules)).toBe(true);
+    expect(matchesPathRules(["fleet.json"], rules)).toBe(true);
+  });
+  it("still excludes a file nothing reads", () => {
+    const rules = FLEET_JSON.gate?.pathRules ?? [];
+    expect(matchesPathRules(["docs/notes.md"], rules)).toBe(false);
   });
 });

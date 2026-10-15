@@ -78,3 +78,56 @@ describe("handleGateRoute", () => {
     expect(env.GATE_WORKFLOW.get).toHaveBeenCalledWith("run-1");
   });
 });
+
+// #1032 (refs #715): a skipped run's workflow output carries `skipped`, not
+// `state` — the route must surface success, not "instance errored", because
+// GitHub already got the skip's success status. The get mocks cast through
+// FakeEnv's own property type: its Env half demands a full WorkflowInstance,
+// while the fake implements only status().
+describe("GET /studio/gate/status with a skipped run", () => {
+  it("skipped output -> success with the skip reason in the description", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({
+        status: "complete",
+        output: { skipped: "no gated paths changed", statusPostFailed: false },
+      })),
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      state: "success", description: "skipped: no gated paths changed", statusPostFailed: false,
+    });
+  });
+
+  it("a paths skip with a failed status post stays success and carries statusPostFailed", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({
+        status: "complete",
+        output: { skipped: "no gated paths changed", statusPostFailed: true },
+      })),
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(await res.json()).toEqual({
+      state: "success", description: "skipped: no gated paths changed", statusPostFailed: true,
+    });
+  });
+
+  it("a no-gate-block skip posted nothing to GitHub: error, never a false green", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({
+        status: "complete",
+        output: { skipped: "no gate block in fleet.json", statusPostFailed: false },
+      })),
+    })) as unknown as FakeEnv["GATE_WORKFLOW"]["get"];
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(await res.json()).toEqual({
+      state: "error", description: "skipped: no gate block in fleet.json", statusPostFailed: false,
+    });
+  });
+});
