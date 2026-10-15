@@ -2,33 +2,63 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship Phase 1 of #715's rollout — Workflow `gate` + `GateRunnerDO` container class + `gate/` R2 prefix + `GATE_KV` — for `rafarc21/fleetflare` only, entirely behind `FLEET_GATE_RUNNER` (default `"off"`) and `GATE_RUNNER_REPOS`. Phases 2 (two operator repos, config only) and 3 (default-on fleet-wide) are out of scope for this plan — they are config/flag changes on top of what Phase 1 ships, not new code, and are mentioned only where they'd otherwise look like a design gap.
+**v2 note:** This revision folds in 3 real review comments that landed on issue #715 after this plan was first written (scheduling-policy choice, outbound-handler credential isolation, the GitHub App's missing `statuses` permission), plus knock-on corrections to shard count, Workflow fan-in design, `GATE_KV` removal, CLI verb spacing, `fleet.json`'s location, `ONE_WAY_GLOBS`, the `classify` required check, and the browser lane's primary/fallback order. Every task number below is unchanged from v1 except: Task 5 is repurposed (was `GATE_KV` pointer, now an R2 baseline-key helper, no KV); new Tasks 0a/0b (operator-run preconditions, Wave 0), 15, 16, 17 are appended rather than inserted, so no existing cross-reference by number needed renumbering.
 
-**Architecture:** Three new primitives, each a thin layer over an existing pattern this codebase already uses: a `Container<Env>`-based `GateRunnerDO` (same shape as `AgentDO`/`DeployDO`), a `WorkflowEntrypoint` class `GateWorkflow` that resolves PR state, fans out one `GateRunnerDO` leg/shard per container, fans in to one `gate/verdict` commit status, and a `gate/` R2 prefix + new `GATE_KV` namespace for baseline caching — parallel, not substituting, `install-cache.ts`'s existing `caches/` prefix pattern. Pure decision logic (shard bucketing, verdict aggregation, merge-tree exit-code interpretation, config parsing) is split into small, directly-unit-testable modules so the one task that actually mints/uses a GitHub token (`GateWorkflow` itself) is as small as possible.
+**Goal:** Ship Phase 1 of #715's rollout — Workflow `gate` + `GateRunnerDO` container class (Cloudflare Containers `durable_object` scheduling policy, not `default` — see Task 0a/1) + `gate/` R2 prefix (no `GATE_KV`; baseline lookup is a deterministic R2 key, R2 reads are already strongly consistent) — for `rafarc21/fleetflare` only, entirely behind `FLEET_GATE_RUNNER` (default `"off"`) and `GATE_RUNNER_REPOS`. Phases 2 (the other two repos #715 names, config only) and 3 (default-on fleet-wide) are out of scope for this plan — they are config/flag changes on top of what Phase 1 ships, not new code, and are mentioned only where they'd otherwise look like a design gap.
 
-**Tech Stack:** Cloudflare Workflows, `@cloudflare/containers` (`Container<Env>`), Durable Objects, R2 (`STUDIO_ARCHIVE`, existing bucket), new KV namespace, Bun (container-side scripts, matching `container/server.ts`'s own style), vitest (`cloudflare:test` pool) + bun test, existing fleet CLI (`apps/fleet/cli/`).
+**Architecture:** Three new primitives, each a thin layer over an existing pattern this codebase already uses: a `Container<Env>`-based `GateRunnerDO` (same shape as `AgentDO`/`DeployDO`, but on the `durable_object` scheduling policy, decided once at class creation and never changed after — Task 0a/1/10), a `WorkflowEntrypoint` class `GateWorkflow` that resolves PR state, fans out one `GateRunnerDO` leg/shard per container via short `waitForEvent`/`sendEvent` steps (not a naive `step.do` per leg — Task 14), fans in to one `gate/verdict` commit status, and a `gate/` R2 prefix for both results and baseline caching — parallel, not substituting, `install-cache.ts`'s existing `caches/` prefix pattern. Pure decision logic (shard bucketing, verdict aggregation, merge-tree exit-code interpretation, config parsing, baseline keying) is split into small, directly-unit-testable modules so the tasks that actually mint/use a credential (`GateWorkflow`, the new outbound-handler task) are as small as possible — see the CLAUDE-ONLY/GLM-OK tag table below.
 
-**Spec:** `docs/superpowers/specs/2026-10-15-gate-runner-design.md` (as of 2026-10-15; a parallel task is revising it for a CF-maximal-fan-out directive — this plan is grounded in the version read today and in the operator's own 08:25Z follow-up comment on issue #715, which arrived after the spec and is **not yet folded into the spec file**; see "Guesses / gaps for a second pass" at the end).
+**Tech Stack:** Cloudflare Workflows, `@cloudflare/containers` (`Container<Env>`, `durable_object` scheduling policy, container snapshots, outbound traffic handlers), Durable Objects, R2 (`STUDIO_ARCHIVE`, existing bucket — no new KV namespace), Bun (container-side scripts, matching `container/server.ts`'s own style), vitest (`cloudflare:test` pool) + bun test, existing fleet CLI (`apps/fleet/cli/`).
+
+**Spec:** `docs/superpowers/specs/2026-10-15-gate-runner-design.md` (as of 2026-10-15; a parallel task is revising it for a CF-maximal-fan-out directive AND for this same round of real review comments — this plan does not wait for that revision and does not touch the spec file; it is grounded in the version read on 2026-10-15, the operator's own 08:25Z follow-up comment on issue #715, and the 3 real review comments this v2 revision folds in; see "Guesses / gaps for a second pass" at the end).
 
 ## Global Constraints
 
-- Phase 1 only: `rafarc21/fleetflare`, behind `FLEET_GATE_RUNNER=off` default and `GATE_RUNNER_REPOS=rafarc21/fleetflare`. No task below configures the two operator repos or flips any default to `on`.
+- Phase 1 only: `rafarc21/fleetflare`, behind `FLEET_GATE_RUNNER=off` default and `GATE_RUNNER_REPOS=rafarc21/fleetflare`. No task below configures either of #715's other two named repos or flips any default to `on`.
+- **`GateRunnerDO` is created on the `durable_object` Cloudflare Containers scheduling policy, never `default`.** This is a one-time, unchangeable-after-creation choice (Cloudflare Containers only let you pick a DO class's scheduling policy at creation; `default` gets its image/size from the wrangler config with no snapshot or outbound-traffic-handler support, `durable_object` additionally fixes the image + outbound-internet choice at creation, defaults to `instance_type: "lite"` unless overridden, and is the ONLY policy that supports `ctx.container.exec()`, container snapshots, and outbound traffic handlers). Task 0a decides this before any container exists; Task 1's wrangler sketch and Task 10's class both carry it explicitly. **Every task below that assumes snapshot-restore or outbound-handler behavior (Tasks 10, 11, 16, and Task 1's baseline-cache note) is sequenced after Task 0a/1, never before — this is a hard ordering constraint, not a convenience.**
 - `GateRunnerDO` never touches `StudioDO`/`StudioBigDO` or `apps/fleet/src/studio/rescue.ts`/`failover.ts`/`destroy.ts` — it is its own DO class, its own container entry, its own Dockerfile, zero shared code path.
-- No secrets in R2 artifacts. Phase 1's repo (`rafarc21/fleetflare`) is public — no task below mints or forwards a GitHub token into a `GateRunnerDO` container; cloning happens anonymously over HTTPS. (Phase 2 private repos will need a token path — explicitly out of scope here, flagged in the task that would otherwise need it.)
-- One aggregated commit-status context: **`gate/verdict`**. States `pending`/`success`/`failure`/`error` per the spec's own state machine (error never silently downgraded to failure).
+- **No raw credential (GitHub token, R2 write key) is ever passed into a `GateRunnerDO` container, in any field, env var, or URL — not even a presigned URL** (v1 of this plan used presigned PUT/GET URLs for the container's result upload and baseline restore; a real review flagged this as forgeable: "PR code runs beside the result-upload URL → PR can forge its own verdict," since a presigned URL IS itself a bearer credential once minted). The fix (Task 16, CLAUDE-ONLY): a Worker-side outbound traffic handler — only available under the `durable_object` scheduling policy — intercepts the container's own plain outbound `fetch` calls and injects the real credential server-side; the container never sees a token, key, or signed URL of any kind. Phase 1's repo (`rafarc21/fleetflare`) is additionally public, so the GitHub-clone leg of this doesn't even need the outbound handler to inject a token (anonymous HTTPS clone) — but the R2 result-PUT leg does, for every leg, from Phase 1 on. (Phase 2 private repos will need the outbound handler to also inject a GitHub token for cloning — explicitly out of scope here, flagged in Task 16's own header.)
+- One aggregated commit-status context: **`gate/verdict`**. States `pending`/`success`/`failure`/`error` per the spec's own state machine (error never silently downgraded to failure). Posting it is blocked on Task 0b (operator precondition: the GitHub App this repo's `GITHUB_REPO_AUTH` maps every owner to today needs `Commit statuses: write` added — this was speculatively called an "unverified PAT scope" in the earlier ci-steward spec; it is now confirmed to be a GitHub App permission gap, not a PAT scope, per a real review comment and this repo's own `resolveRepoAuthKind`/`GITHUB_REPO_AUTH` config, `apps/fleet/src/github/auth.ts:189-281`).
+- **`classify` (the maestro's one-way-door check, `.github/workflows/one-way-door.yml`, `apps/fleet/scripts/merge-danger.ts`) stays a required check, unconditionally.** Nothing in this plan removes it from the maestro's required-checks set, and nothing in this plan's `gate/verdict` context is a substitute for it — `gate/verdict` is a new, additional required check, sitting alongside `classify`, not replacing it. Task 17 adds this plan's own new paths to `classify`'s `ONE_WAY_GLOBS` so gate-runner source gets the same one-way-door protection every other credential-bearing path already has.
 - Image-change tasks (the Dockerfile, the `containers[]` `image` field) ship only at an operator-approved image window. Every task below says explicitly whether it is an image-change task.
-- No task in this plan runs `wrangler deploy`, touches a live `wrangler.jsonc`, or applies a migration. Tasks edit `apps/fleet/wrangler.example.jsonc` (the public template) and new/existing source files only.
+- No task in this plan runs `wrangler deploy`, touches a live `wrangler.jsonc`, or applies a migration — **except Task 0a**, which by necessity stands up one real `durable_object`-policy `GateRunnerDO` against a live Cloudflare account to measure snapshot-restore time and shard wall time; it is explicitly operator-run, not an agent-executed task with a diff, and its own section says so. Every other task edits `apps/fleet/wrangler.example.jsonc` (the public template) and new/existing source files only.
 - PR bodies: `refs #715`, never a closing keyword.
-- R2 keys under `gate/` are one distinct key per shard/leg per run (`gate/<owner>/<repo>/runs/<run-id>/shard-<leg>.json`) — no two legs of the same run ever write the same key, so R2's 1-write/sec-per-key cap is never contended by a single run's own fan-out (https://developers.cloudflare.com/r2/platform/limits/). The one KV key that *is* shared across runs (`main-sha:<owner>/<repo>`) is written once per `main`-SHA baseline build, not once per PR — far under KV's 1-write/sec-per-key cap (https://developers.cloudflare.com/kv/platform/limits/).
-- Workflows limits to design within, not re-derive: 10k steps/instance default (25k paid), 50k concurrent instances (paid), 30s/5min per-step compute (default/paid) — https://developers.cloudflare.com/workflows/reference/limits/. A fan-out of ~4 fixed legs + N vitest shards (N sized per Task 8, not fixed) stays far under the step count; a step that only `await`s a container RPC and never itself loops/computes stays far under the per-step compute ceiling even when the real wall-clock the container takes is long (compute time ≠ wall time for an `await`-bound step).
-- Containers account-wide cap: 1,500 vCPU / 6 TiB memory / 30 TB disk (https://developers.cloudflare.com/containers/platform-details/limits/). `max_instances` for `GateRunnerDO` is the spec's own open question (not re-decided here); whatever the operator picks, Task 1's wrangler sketch carries the spec's placeholder (150) with the spec's own flag that it is a question, not a decision.
-- Browser Rendering (if any gate leg needs a real browser): 200 concurrent sessions/account on Paid — https://developers.cloudflare.com/browser-rendering/platform/limits/. Task 9 is a spike/evaluation, not a switch.
+- R2 keys under `gate/` are one distinct key per shard/leg per run (`gate/<owner>/<repo>/runs/<run-id>/shard-<leg>.json`) — no two legs of the same run ever write the same key, so R2's 1-write/sec-per-key cap is never contended by a single run's own fan-out (https://developers.cloudflare.com/r2/platform/limits/). **No `GATE_KV` namespace** (v1 had one, for a `main-sha:<owner>/<repo>` baseline pointer): R2 reads are already strongly consistent immediately after a write, and KV is eventually consistent (≥60s elsewhere in this codebase's own experience) — unnecessary complexity for a lookup that is just a `GET`/`HEAD` on a deterministic key (`<main-sha>-<lockfile-hash>`, Task 5). If a task below still names `GATE_KV` or `kv-pointer.ts`, that is stale v1 text; it should not exist after this revision.
+- Workflows limits to design within, not re-derive: 10k steps/instance default (25k paid), 50k concurrent instances (paid), 30s/5min per-step compute (default/paid) — https://developers.cloudflare.com/workflows/reference/limits/. **Default step behavior is 5 retries with backoff and a 10-minute per-attempt timeout — a real review flagged that a naive "run the tests, return" step would get this retry treatment on a genuinely red test (thrown as an exception), surfacing a real test failure up to 60+ minutes late, as if it were an infra flake.** Task 14's fan-out is therefore NOT one `step.do` per leg; each shard is a short, idempotent `start-shard-i` step using `waitForEvent`/`sendEvent` with its own explicit per-shard timeout, and a red test comes back as DATA in the shard's result payload (a `LegResult` with `state: "failure"`), never as a thrown step exception. A fan-out of ~4 fixed legs + N vitest shards (N sized per Task 8, 15–18 total containers per PR — see Task 8) stays far under the step count either way.
+- Containers account-wide cap: 1,500 vCPU / 6 TiB memory / 30 TB disk (https://developers.cloudflare.com/containers/platform-details/limits/). `max_instances` for `GateRunnerDO` is still the spec's own open question in the strict sense that the operator picks the final number, but Task 0a's spike and Task 8's real CI-timing data now give it a concrete starting range (15–18 containers per PR, not the earlier 24–28 guess) instead of an abstract placeholder — Task 1's wrangler sketch carries that range forward, flagged as measured-but-not-yet-operator-finalized.
+- Browser lane (if any gate leg needs a real browser): Cloudflare's current **Browser Run** (renamed from "Browser Rendering") does not yet fully support the Playwright Test runner — only a Playwright-assertions fork and raw CDP connections — so it is a smoke-only addition (hitting public URLs) for now, not the primary mechanism for a real e2e leg; in-container Chromium (today's `scripts/localci/Dockerfile`-baked Playwright, already proven by the real `bun-test` lane) is PRIMARY. 200 concurrent Browser Run sessions/account on Paid — https://developers.cloudflare.com/browser-rendering/platform/limits/. Task 9 is a spike/evaluation, not a switch, and includes the open CDP-feasibility question.
+
+## CLAUDE-ONLY vs GLM-OK tags
+
+Updated per the real review comment on outbound handlers (a Worker-side outbound handler, not the container, is where a credential lives now) and the GitHub App permission precondition. The blueprint's banned-areas list (auth, secrets, tokens, credentials) is the test applied to each task below, not a guess.
+
+| Task | Tag | Why |
+|---|---|---|
+| 0a. Scheduling-policy + snapshot spike | Operator-run | Live Cloudflare account, no agent diff |
+| 0b. GitHub App `statuses: write` grant | Operator-run | Mints/grants a real repo-auth permission |
+| 1. Wrangler bindings + env.ts | GLM-OK | Config sketch + type fields, no credential logic |
+| 2. `fleet.json` gate config + repo gate | GLM-OK | Pure parsing, no network, no token |
+| 3. Shard fan-out bucketing | GLM-OK | Pure bin-packing |
+| 4. Verdict/fan-in state machine | GLM-OK | Pure aggregation, no I/O |
+| 5. R2 baseline key helper | GLM-OK | Pure key-naming, no credential |
+| 6. Container-side merge-tree logic | GLM-OK | Pure `git` exec wrapper, injected `ExecFn` |
+| 7. CLI `gate start`/`gate watch` | GLM-OK | Access-JWT-authenticated board verb, no GitHub token |
+| 8. Shard timing measurement script | GLM-OK | Parses existing JSON, no credential |
+| 9. Browser lane spike doc | GLM-OK | Doc only, no code |
+| 10. `GateRunnerDO` class | GLM-OK | Wires `env.GATE_RUNNER`/`durable_object` policy; carries plain R2 keys, never a credential (that moved to Task 16) |
+| 11. `Dockerfile.gate` + container entrypoint | GLM-OK | Container-side leg-running code never holds a secret directly — this is exactly the real review's point: isolate the credential in the Worker's outbound handler, not here |
+| 12. Worker gate HTTP routes | GLM-OK | Reads the Workflow binding's own native status, no GitHub token |
+| 13. Warm-pool cron | GLM-OK | Pings an idle container, no credential |
+| 14. `GateWorkflow` + `postCommitStatus` | **CLAUDE-ONLY** | Mints a real GitHub token and posts a real commit status — the banned-areas list names this directly |
+| 15. Split `deploy-rescue-gate.test.ts` by test name | GLM-OK | Sharding config only, no credential |
+| 16. Worker-side outbound handler | **CLAUDE-ONLY** | This is where the real R2/GitHub credential now lives and gets injected into the container's plain outbound requests — full stop, no exceptions, per the banned-areas list |
+| 17. `ONE_WAY_GLOBS` additions | **CLAUDE-ONLY** | `merge-danger.ts` is itself a safety-classification file |
 
 ## Note on `apps/fleet/src/env.ts` — a deliberate 3-task split of one file
 
-`env.ts` already imports each DO class's own *type* for its binding (`import type { AgentDO } from "./agents/do"` etc., `env.ts:1-7`) — a `DurableObjectNamespace<X>` binding needs `X`'s class to exist as a file before that specific line can be written. `GateRunnerDO` (Task 10) and the `GateWorkflow`/params type (Task 14) don't exist yet when Task 1 runs. So `env.ts` is touched by **three** tasks across **three different waves**, never two in the same wave: Task 1 adds the class-independent fields (`GATE_KV`, `FLEET_GATE_RUNNER`, `GATE_RUNNER_REPOS`), Task 10 adds one line (`GATE_RUNNER: DurableObjectNamespace<GateRunnerDO>`) once its own class exists, Task 14 adds one line (`GATE_WORKFLOW: Workflow<GateWorkflowParams>`) once its own class exists. This is the one place this plan intentionally does NOT fold a shared file into one task — see each task's own note.
+`env.ts` already imports each DO class's own *type* for its binding (`import type { AgentDO } from "./agents/do"` etc., `env.ts:1-7`) — a `DurableObjectNamespace<X>` binding needs `X`'s class to exist as a file before that specific line can be written. `GateRunnerDO` (Task 10) and the `GateWorkflow`/params type (Task 14) don't exist yet when Task 1 runs. So `env.ts` is touched by **three** tasks across **three different waves**, never two in the same wave: Task 1 adds the class-independent fields (`FLEET_GATE_RUNNER`, `GATE_RUNNER_REPOS` — no `GATE_KV`, see Global Constraints), Task 10 adds one line (`GATE_RUNNER: DurableObjectNamespace<GateRunnerDO>`) once its own class exists, Task 14 adds one line (`GATE_WORKFLOW: Workflow<GateWorkflowParams>`) once its own class exists. This is the one place this plan intentionally does NOT fold a shared file into one task — see each task's own note.
 
-`apps/fleet/wrangler.example.jsonc` has no such problem: JSONC has no compile-time class reference, so Task 1 writes the **entire** `workflows`/`kv_namespaces`/`durable_objects`/`migrations`/`containers` sketch in one task, even though the classes it names (`GateRunnerDO`, `GateWorkflow`) don't exist until later waves — exactly how the spec's own sketch (design spec §3) is already written, decoupled from any class existing yet.
+`apps/fleet/wrangler.example.jsonc` has no such problem: JSONC has no compile-time class reference, so Task 1 writes the **entire** `workflows`/`durable_objects`/`migrations`/`containers` sketch (including the `durable_object` `scheduling_policy` field — no `kv_namespaces` entry, see Global Constraints) in one task, even though the classes it names (`GateRunnerDO`, `GateWorkflow`) don't exist until later waves — exactly how the spec's own sketch (design spec §3) is already written, decoupled from any class existing yet.
 
 ---
 
@@ -36,33 +66,36 @@
 
 New module directory `apps/fleet/src/gate/` (Worker-side, pure-logic-first, mirrors `apps/fleet/src/llm/`'s shape in the model-pool plan):
 
-- `apps/fleet/src/gate/config.ts` — `fleet.json` `gate` block parsing, `FLEET_GATE_RUNNER`/`GATE_RUNNER_REPOS` gate, path-rule skip check.
+- `apps/fleet/src/gate/config.ts` — `fleet.json` `gate` block parsing, `FLEET_GATE_RUNNER`/`GATE_RUNNER_REPOS` gate, path-rule skip check. (`fleet.json` itself is always read from `env.AGENT_REPO`, the fleet's own blueprint repo — never from the work repo being gated, same "a work repo must never move that pointer" rule `env.ts`'s own `AGENT_REPO` doc comment states, `env.ts:216-229`. This module takes an already-parsed `fleetJson: unknown`; Task 14's own fetch, not this module, is what pins the source to `AGENT_REPO`.)
 - `apps/fleet/src/gate/shard-plan.ts` — balanced-by-wall-time shard bucketing (LPT bin-packing), not a fixed N.
 - `apps/fleet/src/gate/verdict.ts` — fan-in + `gate/verdict` state-machine aggregation.
-- `apps/fleet/src/gate/kv-pointer.ts` — `GATE_KV` `main-sha:<owner>/<repo>` pointer read/write.
-- `apps/fleet/src/gate/do.ts` — `GateRunnerDO` class.
+- `apps/fleet/src/gate/baseline.ts` — deterministic R2 baseline key (`<main-sha>-<lockfile-hash>`), snapshot-name helper, and tarball-key helper. No KV pointer: the key IS the lookup (Task 5).
+- `apps/fleet/src/gate/do.ts` — `GateRunnerDO` class (Task 10) + the outbound-handler wiring (Task 16, same file, later wave — same "shared file, never the same wave" pattern `env.ts`'s own 3-way split already uses).
 - `apps/fleet/src/gate/routes.ts` — `/studio/gate/start`, `/studio/gate/status` inner handlers.
 - `apps/fleet/src/gate/warm-pool.ts` — warm-pool sizing (operator-set, not hardcoded) + the cron nudge's pure decision of which/how many to ping.
-- `apps/fleet/src/gate/workflow.ts` — `GateWorkflow` (`WorkflowEntrypoint`), the one file that mints a GitHub token and posts `gate/verdict`.
+- `apps/fleet/src/gate/workflow.ts` — `GateWorkflow` (`WorkflowEntrypoint`), the one file that mints a GitHub token and posts `gate/verdict`, fanning legs out via `waitForEvent`/`sendEvent` steps (Task 14).
 
 Container-side (baked into the new image, mirrors `apps/fleet/container/server.ts`'s self-contained style — no imports from `apps/fleet/src/`):
 
 - `apps/fleet/container/gate-merge-tree.ts` — pure, dependency-injected `git merge-tree`/`commit-tree` exit-code interpreter (TS port of `localci.sh:350-363`).
-- `apps/fleet/container/gate-server.ts` — the container's own tiny HTTP server: clones (anonymous, public repo), checks out, restores baseline cache from a presigned GET URL, runs the leg's install+test command via `Bun.spawn`, PUTs the JSON result to a presigned URL, replies to the DO.
+- `apps/fleet/container/gate-server.ts` — the container's own tiny HTTP server: clones (anonymous, public repo), restores baseline from a snapshot (primary) or a plain R2 GET the Worker's outbound handler authorizes (fallback), runs the leg's install+test command via `Bun.spawn`, PUTs the JSON result via a plain R2 PUT the same outbound handler authorizes, replies to the DO. **No presigned URL, no token, anywhere in this file** — that credential now lives in Task 16's Worker-side outbound handler, never in the container.
 - `apps/fleet/container/Dockerfile.gate` — new image: bun + node + rustup + cargo-nextest + git, no Claude/tmux/chromium (not a studio).
 
-CLI:
+CLI (space-separated verbs, matching this repo's own `fleet models <subverb>` / `fleet accounts` convention, `apps/fleet/src/studio/cli-args.ts:1198-1214` — NOT `gate-start`/`gate-watch` as separate top-level commands):
 
-- Modify `apps/fleet/src/studio/cli-args.ts` — `gate-start <pr>` / `gate-watch <pr>` parsing.
+- Modify `apps/fleet/src/studio/cli-args.ts` — `fleet gate start <pr>` / `fleet gate watch <pr>` parsing (top-level `case "gate":`, sub-verb from `rest[0]`, same shape `case "models":` already uses).
 - Modify `apps/fleet/cli/fleet.ts` — dispatch wiring.
 - Create `apps/fleet/cli/gate.ts` — `cmdGateStart`, `cmdGateWatch` (thin `fetch` wrappers, same shape as `cli/models.ts`).
 
 Docs/scripts:
 
-- `apps/fleet/scripts/gate/measure-shard-timing.ts` — parses the existing `vitest --reporter=json` output shape (`localci.sh`'s own `$RUN/vitest.json`, already parsed once by `scripts/localci/summarize.ts`) into `{file, ms}[]` for Task 3's bucketer.
-- `docs/superpowers/evidence/2026-10-15-gate-runner-browser-lane-spike.md` — CF Browser Rendering vs in-container Playwright evaluation.
+- `apps/fleet/scripts/gate/measure-shard-timing.ts` — parses the existing `vitest --reporter=json` output shape (`localci.sh`'s own `$RUN/vitest.json`, already parsed once by `scripts/localci/summarize.ts`) into `{file, ms}[]` for Task 3's bucketer; Task 8 seeds it with this repo's own real 98-run CI data.
+- `apps/fleet/scripts/gate/shard-by-test-name.ts` — splits `deploy-rescue-gate.test.ts`'s own tests across N shards by test NAME, not by file (Task 15 — this one file is the bun-test lane's floor).
+- `docs/superpowers/evidence/2026-10-15-gate-runner-browser-lane-spike.md` — CF Browser Run vs in-container Playwright evaluation, in-container PRIMARY.
 
-Modify (minimal, one field/line each, see the 3-way split above): `apps/fleet/wrangler.example.jsonc`, `apps/fleet/src/env.ts`, `apps/fleet/src/studio/routes.ts`, `apps/fleet/src/index.ts`, `apps/fleet/src/github/api.ts`.
+New: `apps/fleet/src/gate/outbound-handler.ts` (Task 16, CLAUDE-ONLY) — the Worker-side function CF's `durable_object`-policy outbound-traffic-handler hook calls for every plain outbound request `GateRunnerDO`'s own container makes; injects the real R2 (and, Phase 2 only, GitHub) credential server-side. **The one file in this plan, besides `workflow.ts`, that ever touches a real credential.**
+
+Modify (minimal, one field/line each, see the 3-way split above): `apps/fleet/wrangler.example.jsonc`, `apps/fleet/src/env.ts`, `apps/fleet/src/studio/routes.ts`, `apps/fleet/src/index.ts`, `apps/fleet/src/github/api.ts`, `apps/fleet/scripts/merge-danger.ts` (Task 17 — new `ONE_WAY_GLOBS` entries for `apps/fleet/src/gate/**` and `apps/fleet/scripts/gate/**`).
 
 ---
 
@@ -70,38 +103,72 @@ Modify (minimal, one field/line each, see the 3-way split above): `apps/fleet/wr
 
 | Task | Depends on | Dependency kind |
 |---|---|---|
-| 1. Wrangler bindings + env.ts (class-independent fields) | — | — |
+| 0a. Scheduling-policy + snapshot/shard spike | — | operator-run, blocks any task that commits to a final shard count or `max_instances` |
+| 0b. GitHub App `statuses: write` grant | — | operator-run, blocks Task 14's verdict-posting step |
+| 1. Wrangler bindings + env.ts (class-independent fields) | 0a (informs the `scheduling_policy`/sizing values the sketch carries) | design input, not a file/compile dependency |
 | 2. `fleet.json` gate config + repo gate | — | — |
 | 3. Shard fan-out bucketing | — | — |
 | 4. Verdict/fan-in state machine | — | — |
-| 5. `GATE_KV` baseline pointer | — | — |
+| 5. R2 baseline key helper | — | — |
 | 6. Container-side merge-tree decision logic | — | — |
-| 7. CLI `gate-start`/`gate-watch` | — | wire contract only (documented in Tasks 7 & 12, not a file import) |
-| 8. Shard timing measurement script | — | — |
-| 9. Browser-rendering lane spike doc | — | — |
-| 10. `GateRunnerDO` class (+ its own `env.ts` line) | 1 | compile (Env type) |
-| 11. Dockerfile.gate + container entrypoint server | 6 | compile (imports gate-merge-tree.ts) |
+| 7. CLI `gate start`/`gate watch` | — | wire contract only (documented in Tasks 7 & 12, not a file import) |
+| 8. Shard timing measurement script | 0a (seeded with its real CI-timing data) | design input, not a file/compile dependency |
+| 9. Browser lane spike doc | — | — |
+| 15. Split `deploy-rescue-gate.test.ts` by test name | — | — |
+| 17. `ONE_WAY_GLOBS` additions | — | — |
+| 10. `GateRunnerDO` class (+ its own `env.ts` line) | 1, 0a | compile (Env type) + scheduling-policy decision must exist first |
+| 11. Dockerfile.gate + container entrypoint server | 6, 5, 0a | compile (imports gate-merge-tree.ts) + baseline-key shape + snapshot/outbound-handler availability |
 | 12. Worker gate HTTP routes | 1, 2 | compile (Env type, repo gate) |
 | 13. Warm-pool cron | 1, 2 | compile (Env type, repo gate) |
-| 14. `GateWorkflow` + `postCommitStatus` (+ its own `env.ts` line) | 1, 2, 3, 4, 5, 6, 10, 11 | compile (1–5) + contract (6, 10, 11 — DO/container RPC shape, not a file import) |
+| 16. Worker-side outbound handler | 10 | compile (same `do.ts` file, later wave — same pattern as `env.ts`'s 3-way split) |
+| 14. `GateWorkflow` + `postCommitStatus` (+ its own `env.ts` line) | 1, 2, 3, 4, 5, 6, 10, 11, 16, 0b | compile (1–5) + contract (6, 10, 11, 16 — DO/container/outbound-handler RPC shape, not a file import) + operator precondition (0b) |
 
 Task 7 ↔ Task 12 share a wire contract (request/response JSON, specified identically in both tasks below) rather than a file or import — this is why they can both sit in Wave 1 even though end-to-end they clearly depend on each other.
 
 ## Waves (max parallel lanes)
 
-- **Wave 1: 9 tasks, 9 members in parallel, zero file overlap.** Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9.
-- **Wave 2: 4 tasks, 4 members in parallel, zero file overlap.** Tasks 10, 11, 12, 13 (each depends only on Wave-1 files; `do.ts` vs `container/*` vs `routes.ts`+`studio/routes.ts` vs `warm-pool.ts`+`index.ts` never collide).
-- **Wave 3: 1 task.** Task 14 — the fan-in point, depends on nearly everything, inherently sequential-last.
+- **Wave 0: 2 operator-run preconditions, not agent tasks, before Wave 1 starts.** Task 0a (scheduling-policy + snapshot/shard spike — live Cloudflare account, no diff) and Task 0b (GitHub App `Commit statuses: write` grant). Neither blocks Wave 1's pure-logic tasks from starting, but Task 0a's numbers feed Task 1/8's sketches and Task 0b blocks Task 14 (Wave 3) from actually posting a real status.
+- **Wave 1: 11 tasks, 11 members in parallel, zero file overlap.** Tasks 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 17 (Task 17 touches only `apps/fleet/scripts/merge-danger.ts`, untouched by every other Wave-1 task; Task 15 touches only its own new `apps/fleet/scripts/gate/shard-by-test-name.ts`).
+- **Wave 2: 4 tasks, 4 members in parallel, zero file overlap.** Tasks 10, 11, 12, 13 (each depends only on Wave-0/1 outputs; `do.ts` vs `container/*` vs `routes.ts`+`studio/routes.ts` vs `warm-pool.ts`+`index.ts` never collide).
+- **Wave 3: 2 tasks, 2 members in parallel, zero file overlap.** Task 16 (adds the outbound handler to `do.ts` — same file Task 10 already finished in Wave 2, never concurrent with it) and Task 14 (the fan-in point, depends on nearly everything, inherently sequential-last; also blocked on Task 0b). `do.ts` (Task 16) and `workflow.ts`/`env.ts`/`github/api.ts` (Task 14) don't collide.
 
 ---
 
 ## Review Focus
 
-1. `GATE_RUNNER_REPOS` absent/empty, or `FLEET_GATE_RUNNER` anything but `"on"` → Task 12's routes 404 before touching `GATE_WORKFLOW`/`GATE_KV`/R2 at all — zero new behavior for every repo not opted in, same posture `install-cache.ts` already proves for `INSTALL_CACHE_REPOS`.
-2. Task 4's verdict aggregation: any `error` leg wins over any `failure` leg, regardless of arrival order (legs run in parallel — "first failing/erroring leg" must be deterministic by the *configured* leg order, not network arrival order).
+1. `GATE_RUNNER_REPOS` absent/empty, or `FLEET_GATE_RUNNER` anything but `"on"` → Task 12's routes 404 before touching `GATE_WORKFLOW`/R2 at all — zero new behavior for every repo not opted in, same posture `install-cache.ts` already proves for `INSTALL_CACHE_REPOS`.
+2. Task 4's verdict aggregation: any `error` leg wins over any `failure` leg, regardless of arrival order (legs run in parallel — "first failing/erroring leg" must be deterministic by the *configured* leg order, not network arrival order). A red-test shard's `LegResult` reaches `aggregateVerdict` as `state: "failure"` DATA, never as a step exception Task 14's Workflow had to catch.
 3. Task 3's shard bucketer never returns zero shards for non-empty input, and never splits a single huge file across two shards.
 4. Task 14's `gate/verdict` POST failing twice is surfaced distinctly from a real `failure`/`error` leg (own field, not folded into `state`) — `gate-watch`'s exit code 3 depends on this distinction surviving the Worker route → CLI round trip.
-5. Task 11's container never receives a GitHub token (Phase 1, public repo) — grep the task's own diff for `Authorization`/`GITHUB_TOKEN` before calling it done.
+5. Task 11's container never receives a GitHub token OR a presigned URL (Phase 1, public repo; Phase 1 R2 writes too) — grep the task's own diff for `Authorization`/`GITHUB_TOKEN`/`presign`/`https://.*\.r2\.` before calling it done. The ONLY place any of those strings may legitimately appear is Task 16's `outbound-handler.ts`.
+6. Task 10's class is created with `scheduling_policy: "durable_object"` in Task 1's wrangler sketch — grep for the literal string `"durable_object"` next to `GateRunnerDO`'s `containers[]` entry before calling Task 1 done; its absence silently falls back to `default`, which breaks every later task that assumes snapshot/outbound-handler support.
+7. Nothing in Task 12 or Task 14's own text says or implies `gate/verdict` replaces `classify` in the maestro's required-checks set — grep both tasks' diffs for the word `classify` finding only Task 17's own addition, never a removal.
+
+---
+
+### Task 0a: Scheduling-policy + snapshot/shard spike (OPERATOR-RUN, Wave 0 — runs before any task below commits to a final number)
+
+**Files:** none — this is a live-infrastructure spike against a real Cloudflare account, not an agent-executed diff. No code ships from this task; its OUTPUT (measured numbers) is a design input to Task 1's wrangler sketch and Task 8's shard-count data, cited there.
+
+**Why this has to come first:** Cloudflare Containers only let you pick a DO class's scheduling policy (`default` vs `durable_object`) once, at creation, and never change it after. Every later task in this plan (10, 11, 16, and Task 1's own sketch) assumes `durable_object` (snapshot support, outbound traffic handlers, `ctx.container.exec()`). If that assumption is wrong, or if snapshot-restore time turns out too slow to be worth it, the fix is a new DO class, not a patch — so this plan measures BEFORE committing, not after.
+
+**What the operator runs:**
+1. Stand up one `GateRunnerDO`-shaped class on the `durable_object` scheduling policy against `rafarc21/fleetflare`'s own Cloudflare account (a throwaway `wrangler.jsonc`, not `apps/fleet/wrangler.example.jsonc` — never committed).
+2. Snapshot a baseline container (`main`'s own installed `node_modules`/`target` dirs) via `snapshotContainer()`.
+3. Restore that snapshot into fresh DO instances at N=8, N=24, N=48 concurrent shards; measure restore time and total shard wall time at each N.
+4. Record results in `docs/superpowers/evidence/2026-10-15-gate-runner-snapshot-spike.md` (the one artifact this task DOES produce — a real measurement, not a code diff).
+
+**Output consumed downstream:** the restore-time number decides whether Task 11's baseline mechanism can lean on snapshots as primary (fast) or needs the R2-tarball fallback to actually be primary in practice (slow restore); the wall-time-at-N numbers, combined with Task 8's real CI-timing data, are what makes the "15–18 containers per PR" figure in Global Constraints/Task 8 a measured starting point rather than a guess.
+
+---
+
+### Task 0b: Operator grants the GitHub App `Commit statuses: write` (OPERATOR-RUN, Wave 0 — blocks Task 14's verdict-posting step)
+
+**Files:** none — this is a GitHub App permission change in GitHub's own UI/API, not a repo diff.
+
+**Why:** `rafarc21/fleetflare`'s live `GITHUB_REPO_AUTH` config (`apps/fleet/src/github/auth.ts:189-281`, `resolveRepoAuthKind`) maps this repo's owner to the `app` provider, not `token`. A real review comment confirmed the App's current installation permissions do not include `Commit statuses: write` — this was speculatively called an "unverified PAT scope" in the earlier ci-steward spec; it is now confirmed to be a GitHub App permission gap specifically, not a PAT. Task 14's `postCommitStatus` call will fail with a 403 on every single run until this is granted, regardless of how correct its own code is.
+
+**What the operator runs:** adds `Commit statuses: write` to the GitHub App's installation permissions for `rafarc21/fleetflare` (GitHub App settings → Permissions & events → Commit statuses → Read and write), then re-installs/accepts the new permission grant on the repo. A live, operator-run step — not a unit test, not something Task 14's own diff can route around (`workerWriteToken`, `apps/fleet/src/write-proxy/gh-route.ts:164-168`, mints the Worker's own credential correctly either way; the App simply doesn't have the permission to use it for a status write until this is granted).
 
 ---
 
@@ -112,8 +179,8 @@ Task 7 ↔ Task 12 share a wire contract (request/response JSON, specified ident
 - Modify: `apps/fleet/src/env.ts`
 
 **Interfaces:**
-- Produces: `Env.GATE_KV?: KVNamespace`, `Env.FLEET_GATE_RUNNER?: string`, `Env.GATE_RUNNER_REPOS?: string`. The `workflows`/`durable_objects`/`migrations`/`containers` JSONC entries naming `GateWorkflow`/`GateRunnerDO` (classes land in Tasks 10/14 — JSONC has no compile dependency on them existing yet).
-- Consumes: nothing.
+- Produces: `Env.FLEET_GATE_RUNNER?: string`, `Env.GATE_RUNNER_REPOS?: string` (no `Env.GATE_KV` — see Global Constraints). The `workflows`/`durable_objects`/`migrations`/`containers` JSONC entries naming `GateWorkflow`/`GateRunnerDO` (classes land in Tasks 10/14 — JSONC has no compile dependency on them existing yet), including the `durable_object` `scheduling_policy` field Task 0a's decision requires.
+- Consumes: Task 0a's spike numbers (design input only — this task does not import or wait on Task 0a's non-existent code, it just carries the measured range forward in a comment).
 
 - [ ] **Step 1: Add the wrangler sketch**
 
@@ -123,10 +190,9 @@ In `apps/fleet/wrangler.example.jsonc`, add a top-level `"workflows"` array (new
 "workflows": [
   { "name": "gate", "binding": "GATE_WORKFLOW", "class_name": "GateWorkflow" }
 ],
-"kv_namespaces": [
-  { "binding": "GATE_KV", "id": "<YOUR_GATE_KV_NAMESPACE_ID>" }
-],
 ```
+
+No `"kv_namespaces"` entry — v1 of this plan had one for a `GATE_KV` baseline pointer; removed per Global Constraints (R2 reads are already strongly consistent, KV is not, and the lookup is just a deterministic key — Task 5).
 
 In the existing `"durable_objects").bindings` array (next to `AGENT`/`DEPLOY`/`STUDIO`/`STUDIO_BIG`), add:
 
@@ -147,9 +213,19 @@ In the existing `"containers"` array (next to `AgentDO`/`DeployDO`/`StudioDO`/`S
   "class_name": "GateRunnerDO",
   "image": "./container/Dockerfile.gate",
   "image_build_context": ".",
+  // Real review correction: Cloudflare Containers fix a DO class's
+  // scheduling policy at creation and never let it change after. "default"
+  // (what every other class in this file uses today) has no snapshot or
+  // outbound-traffic-handler support — GateRunnerDO needs both (Tasks
+  // 11/16), so it is "durable_object", not "default", from its very first
+  // deploy. Task 0a is the spike that confirmed this before any class
+  // existed; every class below it in this plan assumes it.
+  "scheduling_policy": "durable_object",
   "instance_type": "standard-4",
-  // #715's own number; spec's own open question (max_instances sizing) —
-  // not re-decided here, carried forward as-is for the operator.
+  // Task 0a's spike + Task 8's real CI-timing data put the real working
+  // range at 15-18 containers per PR (not v1's 24-28 guess); max_instances
+  // sizing is still the operator's own final call (account-wide 1,500 vCPU
+  // cap, Global Constraints), carried forward as a range, not a decision.
   "max_instances": 150,
   "rollout_step_percentage": 100
 }
@@ -168,9 +244,9 @@ FLEET_GATE_RUNNER?: string;
 /** Comma-separated "owner/repo", same shape as INSTALL_CACHE_REPOS. Phase 1
  *  value is a single entry: "rafarc21/fleetflare". */
 GATE_RUNNER_REPOS?: string;
-/** New KV namespace (#715) — main-sha baseline pointer, src/gate/kv-pointer.ts. */
-GATE_KV?: KVNamespace;
 ```
+
+No `GATE_KV?: KVNamespace` field — see Global Constraints; the baseline lookup (Task 5) reads/writes R2 directly via a deterministic key, no pointer namespace.
 
 `GATE_RUNNER: DurableObjectNamespace<GateRunnerDO>` and `GATE_WORKFLOW: Workflow<GateWorkflowParams>` are deliberately NOT added here — see Tasks 10 and 14.
 
@@ -191,7 +267,7 @@ git commit -m "feat(fleet): gate-runner wrangler sketch + class-independent Env 
 
 **Interfaces:**
 - Produces: `parseGateRunnerRepos(raw: string | undefined): string[]`, `isGateRunnerRepo(raw: string | undefined, workRepoSlug: string): boolean`, `GateConfig` interface `{ install: string; legs: string[]; vitestCmd: string; pathRules: string[] }`, `parseGateConfig(fleetJson: unknown): GateConfig | null`, `matchesPathRules(changedFiles: string[], pathRules: string[]): boolean`.
-- Consumes: nothing (pure).
+- Consumes: nothing (pure — takes an already-parsed `fleetJson: unknown`). **This module never fetches `fleet.json` itself, and that is deliberate**: `fleet.json` always lives in `env.AGENT_REPO` (the fleet's own blueprint repo, `env.ts:216-229`'s own "a work repo must never be able to move that pointer" rule), never in the work repo being gated — a gated repo must never be able to weaken its own gate by editing its own config. Task 14's own fetch (not this module) is what pins the source to `AGENT_REPO`; this module would behave identically no matter which repo the caller fetched from, which is exactly why that pinning has to live in the one caller, not here.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -495,6 +571,25 @@ describe("aggregateVerdict", () => {
     results[0] = { leg: "typecheck", state: "failure" };
     expect(aggregateVerdict(legs, results)).toEqual({ state: "failure", description: "typecheck failed" });
   });
+
+  // Real review correction: Cloudflare Workflows retries a step that THROWS
+  // 5x with backoff before giving up — a genuinely red test must never
+  // reach this function (or Task 14's own step) as a thrown exception, only
+  // as a LegResult with state: "failure". This test pins that a red-test
+  // shard's result is handled as ordinary DATA, same as any other failure
+  // — aggregateVerdict never distinguishes "a shard's own step threw" from
+  // "a shard's own step returned a failing LegResult" because the latter is
+  // the ONLY shape a shard's step is allowed to return (Task 14's own
+  // waitForEvent/sendEvent design, not re-tested here since it needs a live
+  // Workflow — this is the pure half of that contract).
+  it("a red-test shard result is success-with-failing-data, not a retried/thrown step", () => {
+    const results: LegResult[] = legs.map((leg) => ({ leg, state: "success" as const }));
+    results[2] = { leg: "vitest-1", state: "failure", description: "vitest-1 exited 1" };
+    const verdict = aggregateVerdict(legs, results);
+    expect(verdict).toEqual({ state: "failure", description: "vitest-1 exited 1" });
+    // never a thrown/rejected call — aggregateVerdict is a plain sync function
+    expect(() => aggregateVerdict(legs, results)).not.toThrow();
+  });
 });
 ```
 
@@ -544,7 +639,7 @@ export function aggregateVerdict(expectedLegs: string[], results: LegResult[]): 
 - [ ] **Step 4: Run, confirm it passes**
 
 Run: `cd apps/fleet && bun test test/bun/gate-verdict.test.ts`
-Expected: PASS, all 5 cases green.
+Expected: PASS, all 6 cases green.
 
 - [ ] **Step 5: Commit**
 
@@ -555,99 +650,98 @@ git commit -m "feat(fleet): gate-runner verdict fan-in state machine (refs #715)
 
 ---
 
-### Task 5: `GATE_KV` baseline pointer helper
+### Task 5: R2 baseline key helper (no KV — the key IS the lookup)
+
+**v2 rewrite:** v1 of this plan had a `GATE_KV` namespace here, storing a `main-sha:<owner>/<repo>` pointer so a PR's Workflow run could find its baseline without listing R2. Removed per Global Constraints: R2 reads are already strongly consistent immediately after a write; KV is not (≥60s eventual consistency elsewhere in this codebase's own experience). A baseline's identity is fully determined by `(mainSha, lockfileHash)` — there is nothing to "point to" that isn't already encoded in a deterministic key, so there's no pointer to store, read, or go stale.
 
 **Files:**
-- Create: `apps/fleet/src/gate/kv-pointer.ts`
-- Test: `apps/fleet/test/gate-kv-pointer.test.ts` (vitest, `cloudflare:test` pool — needs a real `KVNamespace` mock, this repo's first KV binding of any kind, `grep -rn "kv_namespaces" apps/fleet` returns nothing today).
+- Create: `apps/fleet/src/gate/baseline.ts`
+- Test: `apps/fleet/test/bun/gate-baseline.test.ts` (bun test — pure string functions, no R2/KV mock needed at all, unlike v1's `cloudflare:test`-pool `gate-kv-pointer.test.ts`).
 
 **Interfaces:**
-- Produces: `BaselinePointer { sha: string; lockfileHash: string; baselinePrefix: string; updatedAt: number }`, `getBaselinePointer(kv: KVNamespace, owner: string, repo: string): Promise<BaselinePointer | null>`, `putBaselinePointer(kv: KVNamespace, owner: string, repo: string, pointer: BaselinePointer): Promise<void>`.
-- Consumes: a `KVNamespace` (not `Env` — deliberately decoupled from Task 1's `Env.GATE_KV` field so this file has zero compile dependency on Task 1 and can land in Wave 1).
+- Produces: `baselineId(mainSha: string, lockfileHash: string): string` (`<mainSha>-<lockfileHash>`, the one shared identity both mechanisms below key off); `baselineTarballKey(owner: string, repo: string, mainSha: string, lockfileHash: string): string` (R2 fallback key, `gate/<owner>/<repo>/baselines/<id>.tar`); `baselineSnapshotName(owner: string, repo: string, mainSha: string, lockfileHash: string): string` (the primary mechanism per Task 0a/11's `durable_object`-policy container-snapshot correction — the name/tag `snapshotContainer()`/its restore call key off, same `<id>` shape, `<owner>-<repo>-<id>` sanitized for whatever charset Cloudflare's snapshot-name field allows, ASCII lower-kebab here).
+- Consumes: nothing (pure). Task 10/11 call these directly against R2/the container-snapshot API — no pointer namespace to read first; a `HEAD` on the tarball key or a restore-by-name call against the snapshot name is itself the "does a baseline exist" check, no extra round trip.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 ```ts
-// apps/fleet/test/gate-kv-pointer.test.ts
-import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
-import { getBaselinePointer, putBaselinePointer, type BaselinePointer } from "../src/gate/kv-pointer";
+// apps/fleet/test/bun/gate-baseline.test.ts
+import { describe, it, expect } from "bun:test";
+import { baselineId, baselineTarballKey, baselineSnapshotName } from "../../src/gate/baseline";
 
-describe("gate kv-pointer", () => {
-  it("round-trips a pointer", async () => {
-    const kv = (env as unknown as { GATE_KV: KVNamespace }).GATE_KV;
-    const pointer: BaselinePointer = {
-      sha: "abc123", lockfileHash: "def456",
-      baselinePrefix: "gate/rafarc21/fleetflare/baselines/abc123-def456", updatedAt: 1760000000000,
-    };
-    await putBaselinePointer(kv, "rafarc21", "fleetflare", pointer);
-    expect(await getBaselinePointer(kv, "rafarc21", "fleetflare")).toEqual(pointer);
+describe("baselineId", () => {
+  it("joins sha and lockfile hash with a dash, no other lookup needed", () => {
+    expect(baselineId("abc123", "def456")).toBe("abc123-def456");
   });
+});
 
-  it("null when no pointer has been written yet", async () => {
-    const kv = (env as unknown as { GATE_KV: KVNamespace }).GATE_KV;
-    expect(await getBaselinePointer(kv, "rafarc21", "no-such-repo")).toBeNull();
+describe("baselineTarballKey", () => {
+  it("builds the R2 fallback key under gate/<owner>/<repo>/baselines/", () => {
+    expect(baselineTarballKey("rafarc21", "fleetflare", "abc123", "def456")).toBe(
+      "gate/rafarc21/fleetflare/baselines/abc123-def456.tar",
+    );
+  });
+});
+
+describe("baselineSnapshotName", () => {
+  it("builds a lower-kebab snapshot name, the primary mechanism", () => {
+    expect(baselineSnapshotName("rafarc21", "fleetflare", "abc123", "def456")).toBe(
+      "rafarc21-fleetflare-abc123-def456",
+    );
+  });
+  it("same (owner, repo, sha, lockfileHash) always names the same snapshot — deterministic, not random", () => {
+    const a = baselineSnapshotName("rafarc21", "fleetflare", "abc123", "def456");
+    const b = baselineSnapshotName("rafarc21", "fleetflare", "abc123", "def456");
+    expect(a).toBe(b);
   });
 });
 ```
 
-Note for the executing task: this needs a `GATE_KV` KV namespace declared in whatever `wrangler.test.jsonc`/vitest-pool-workers config this repo's existing vitest setup uses (check `apps/fleet/vitest.config.ts` and its referenced test wrangler config for how `STUDIO_ARCHIVE`/`DB` are already declared there, and add `GATE_KV` the same way — same file, no collision with Task 1's `wrangler.example.jsonc`).
-
 - [ ] **Step 2: Run, confirm it fails**
 
-Run: `cd apps/fleet && bun x vitest run test/gate-kv-pointer.test.ts`
-Expected: FAIL — module not found (and/or `GATE_KV` undefined until the test-config addition above lands).
+Run: `cd apps/fleet && bun test test/bun/gate-baseline.test.ts`
+Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement**
 
 ```ts
-// apps/fleet/src/gate/kv-pointer.ts
+// apps/fleet/src/gate/baseline.ts
 //
-// GATE_KV's one key shape (#715 spec §4): main-sha:<owner>/<repo> -> the
-// baseline a PR's Workflow run looks up without listing R2. Takes a plain
-// KVNamespace, not Env, so this module has no compile dependency on
-// src/env.ts's GATE_KV field landing first.
+// #715 Phase 1, v2 correction: no GATE_KV. A baseline's identity is fully
+// determined by (mainSha, lockfileHash) — R2's own strong read-after-write
+// consistency makes a deterministic key the lookup; there is no mutable
+// pointer to go stale. Container snapshots (Cloudflare Containers,
+// durable_object policy only, snapshotContainer()) are the PRIMARY restore
+// mechanism once Task 0a's spike confirms acceptable restore time; the R2
+// tarball key below is the FALLBACK until that's measured (Task 11).
 
-export interface BaselinePointer {
-  sha: string;
-  lockfileHash: string;
-  baselinePrefix: string;
-  updatedAt: number;
+export function baselineId(mainSha: string, lockfileHash: string): string {
+  return `${mainSha}-${lockfileHash}`;
 }
 
-function pointerKey(owner: string, repo: string): string {
-  return `main-sha:${owner}/${repo}`;
+export function baselineTarballKey(
+  owner: string, repo: string, mainSha: string, lockfileHash: string,
+): string {
+  return `gate/${owner}/${repo}/baselines/${baselineId(mainSha, lockfileHash)}.tar`;
 }
 
-export async function getBaselinePointer(
-  kv: KVNamespace, owner: string, repo: string,
-): Promise<BaselinePointer | null> {
-  const raw = await kv.get(pointerKey(owner, repo));
-  if (raw === null) return null;
-  try {
-    return JSON.parse(raw) as BaselinePointer;
-  } catch {
-    return null;
-  }
-}
-
-export async function putBaselinePointer(
-  kv: KVNamespace, owner: string, repo: string, pointer: BaselinePointer,
-): Promise<void> {
-  await kv.put(pointerKey(owner, repo), JSON.stringify(pointer));
+export function baselineSnapshotName(
+  owner: string, repo: string, mainSha: string, lockfileHash: string,
+): string {
+  return `${owner}-${repo}-${baselineId(mainSha, lockfileHash)}`;
 }
 ```
 
 - [ ] **Step 4: Run, confirm it passes**
 
-Run: `cd apps/fleet && bun x vitest run test/gate-kv-pointer.test.ts`
-Expected: PASS, both cases green.
+Run: `cd apps/fleet && bun test test/bun/gate-baseline.test.ts`
+Expected: PASS, all 4 cases green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add apps/fleet/src/gate/kv-pointer.ts apps/fleet/test/gate-kv-pointer.test.ts
-git commit -m "feat(fleet): gate-runner GATE_KV baseline pointer helper (refs #715)"
+git add apps/fleet/src/gate/baseline.ts apps/fleet/test/bun/gate-baseline.test.ts
+git commit -m "feat(fleet): gate-runner R2 baseline key helper, no KV (refs #715)"
 ```
 
 ---
@@ -789,7 +883,9 @@ git commit -m "feat(fleet): gate-runner container-side merge-tree decision logic
 
 ---
 
-### Task 7: CLI `gate-start`/`gate-watch`
+### Task 7: CLI `gate start`/`gate watch`
+
+**v2 correction:** v1 wrote this as two top-level commands, `gate-start`/`gate-watch`. This repo's own real convention (`apps/fleet/src/studio/cli-args.ts:1198-1214`) is a single top-level command word with a space-separated sub-verb — `fleet models ls`, `fleet models assign <studio> <model>`, `fleet models promote <model>` are all `case "models":` with `rest[0]` as the sub-verb, never `models-ls`/`models-assign` typed at the CLI (that hyphenated form is only the INTERNAL `CliArgs.cmd` tag, never what a user types). So: `fleet gate start <pr>` / `fleet gate watch <pr>`, one `case "gate":`, `rest[0]` is `"start"`/`"watch"` — not `gate-start`/`gate-watch` as separate top-level commands.
 
 **Files:**
 - Modify: `apps/fleet/src/studio/cli-args.ts`
@@ -798,7 +894,7 @@ git commit -m "feat(fleet): gate-runner container-side merge-tree decision logic
 - Test: `apps/fleet/test/bun/cli-gate.test.ts`, extend `apps/fleet/test/studio.cli-args.test.ts`
 
 **Interfaces:**
-- Produces: `CliArgs` variants `{ cmd: "gate-start"; pr: number }`, `{ cmd: "gate-watch"; pr: number }`; `cmdGateStart(creds, pr): Promise<void>`, `cmdGateWatch(creds, pr): Promise<void>`; `gateWatchExitCode(status: GateStatusResponse): number` (pure, extracted for testability — `cmdGateWatch` cannot itself be unit-tested without a real network call, same reasoning `agents/do.ts`'s `shouldAbortOnTerminal` extraction gives).
+- Produces: `CliArgs` variants `{ cmd: "gate-start"; pr: number }`, `{ cmd: "gate-watch"; pr: number }` (internal tag only, same hyphenated-internal/space-separated-CLI split `models-ls` etc. already use); `cmdGateStart(creds, pr): Promise<void>`, `cmdGateWatch(creds, pr): Promise<void>`; `gateWatchExitCode(status: GateStatusResponse): number` (pure, extracted for testability — `cmdGateWatch` cannot itself be unit-tested without a real network call, same reasoning `agents/do.ts`'s `shouldAbortOnTerminal` extraction gives).
 - Consumes (wire contract, shared with Task 12 — not a file import): `POST /studio/gate/start` body `{ repo: string; pr: number }` → `{ started: true; runId: string } | { error: string }` (404 when the repo isn't gated in). `GET /studio/gate/status?repo=<owner/repo>&runId=<runId>` → `GateStatusResponse = { state: "pending" | "success" | "failure" | "error"; description?: string; statusPostFailed?: boolean }`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -825,21 +921,27 @@ describe("gateWatchExitCode", () => {
 });
 ```
 
-Extend `apps/fleet/test/studio.cli-args.test.ts` (existing file) with the `gate-start`/`gate-watch` parsing cases, following that file's own existing per-command describe-block shape (e.g. the `models-ls`/`models-assign` blocks already there):
+Extend `apps/fleet/test/studio.cli-args.test.ts` (existing file) with the `gate start`/`gate watch` parsing cases, following that file's own existing per-command describe-block shape (e.g. the `models-ls`/`models-assign` blocks already there, and `case "models":`'s own `rest`-array shape at `cli-args.ts:1198-1214`):
 
 ```ts
-describe("gate-start / gate-watch", () => {
-  it("gate-start <pr> parses the PR number", () => {
-    expect(parseCliArgs(["gate-start", "715"])).toEqual({ cmd: "gate-start", pr: 715 });
+describe("gate start / gate watch", () => {
+  it("gate start <pr> parses the PR number", () => {
+    expect(parseCliArgs(["gate", "start", "715"])).toEqual({ cmd: "gate-start", pr: 715 });
   });
-  it("gate-watch <pr> parses the PR number", () => {
-    expect(parseCliArgs(["gate-watch", "715"])).toEqual({ cmd: "gate-watch", pr: 715 });
+  it("gate watch <pr> parses the PR number", () => {
+    expect(parseCliArgs(["gate", "watch", "715"])).toEqual({ cmd: "gate-watch", pr: 715 });
   });
-  it("gate-start with no PR -> usage", () => {
-    expect(parseCliArgs(["gate-start"]).cmd).toBe("usage");
+  it("gate start with no PR -> usage", () => {
+    expect(parseCliArgs(["gate", "start"]).cmd).toBe("usage");
   });
-  it("gate-start with a non-numeric PR -> usage", () => {
-    expect(parseCliArgs(["gate-start", "abc"]).cmd).toBe("usage");
+  it("gate start with a non-numeric PR -> usage", () => {
+    expect(parseCliArgs(["gate", "start", "abc"]).cmd).toBe("usage");
+  });
+  it("gate with no sub-verb -> usage", () => {
+    expect(parseCliArgs(["gate"]).cmd).toBe("usage");
+  });
+  it("gate with an unrecognized sub-verb -> usage", () => {
+    expect(parseCliArgs(["gate", "frobnicate", "715"]).cmd).toBe("usage");
   });
 });
 ```
@@ -849,7 +951,7 @@ describe("gate-start / gate-watch", () => {
 Run: `cd apps/fleet && bun test test/bun/cli-gate.test.ts`
 Expected: FAIL — `../../cli/gate` does not exist.
 Run: `cd apps/fleet && bun test test/studio.cli-args.test.ts`
-Expected: FAIL on the new `gate-start`/`gate-watch` cases — unrecognized command.
+Expected: FAIL on the new `gate start`/`gate watch` cases — unrecognized command.
 
 - [ ] **Step 3: Implement**
 
@@ -860,30 +962,36 @@ In `apps/fleet/src/studio/cli-args.ts`, add to the `CliArgs` union (near the exi
 | { cmd: "gate-watch"; pr: number }
 ```
 
-and to the command dispatch (same `switch` that handles `"models"`, following that block's own `rest`-array shape, `cli-args.ts:1204-1216`):
+and to the command dispatch (a new `case "gate":`, same shape as the existing `case "models":`, `cli-args.ts:1198-1214` — ONE top-level command word, sub-verb read from `rest[0]`, not two top-level commands):
 
 ```ts
-case "gate-start": {
-  if (rest.length !== 1 || !/^\d+$/.test(rest[0])) return usage("usage: fleet gate-start <pr>");
-  return { cmd: "gate-start", pr: Number(rest[0]) };
-}
-case "gate-watch": {
-  if (rest.length !== 1 || !/^\d+$/.test(rest[0])) return usage("usage: fleet gate-watch <pr>");
-  return { cmd: "gate-watch", pr: Number(rest[0]) };
+// #715: `fleet gate [start <pr> | watch <pr>]`. Same "sub-action word,
+// never a flag" shape `fleet models`/`fleet accounts` already use.
+case "gate": {
+  const rest = argv.slice(1);
+  if (rest[0] === "start") {
+    if (rest.length !== 2 || !/^\d+$/.test(rest[1])) return usage("usage: fleet gate start <pr>");
+    return { cmd: "gate-start", pr: Number(rest[1]) };
+  }
+  if (rest[0] === "watch") {
+    if (rest.length !== 2 || !/^\d+$/.test(rest[1])) return usage("usage: fleet gate watch <pr>");
+    return { cmd: "gate-watch", pr: Number(rest[1]) };
+  }
+  return usage("usage: fleet gate [start <pr> | watch <pr>]");
 }
 ```
 
-Add a `CLI_HELP`-style entry (next to the existing `"models-ls"` entry, `cli-args.ts:441-452`):
+Add a `CLI_HELP`-style entry (next to the existing `"models-ls"` entry, `cli-args.ts:441-452` — keyed by the internal hyphenated tag, same as every other multi-word command's help entry already is):
 
 ```ts
-"gate-start": { args: "<pr>", summary: "Starts a gate-runner Workflow run for <pr> (no-op if FLEET_GATE_RUNNER is off for the repo)." },
-"gate-watch": { args: "<pr>", summary: "Polls a gate-runner run for <pr> to a terminal state; exit 0 green/1 red/2 infra error/3 status-post failed." },
+"gate-start": { args: "<pr>", summary: "fleet gate start <pr> — starts a gate-runner Workflow run for <pr> (no-op if FLEET_GATE_RUNNER is off for the repo)." },
+"gate-watch": { args: "<pr>", summary: "fleet gate watch <pr> — polls a gate-runner run for <pr> to a terminal state; exit 0 green/1 red/2 infra error/3 status-post failed." },
 ```
 
 Create `apps/fleet/cli/gate.ts` (same thin-`fetch` shape as `cli/models.ts`):
 
 ```ts
-// apps/fleet/cli/gate.ts — `fleet gate-start <pr>` / `fleet gate-watch <pr>`
+// apps/fleet/cli/gate.ts — `fleet gate start <pr>` / `fleet gate watch <pr>`
 // (#715 Phase 1). Same request-building shape cli/models.ts already uses —
 // one POST to kick a run off, one GET per poll, a thrown Error on anything
 // but a 2xx. No GitHub token here: both routes are Access-JWT-authenticated
@@ -983,13 +1091,15 @@ git commit -m "feat(fleet): gate-start/gate-watch CLI (refs #715)"
 
 ### Task 8: Shard timing measurement script
 
+**v2: real starting numbers, not an abstract placeholder.** 98 runs of this repo's existing `check` job (today's `bun-test`/`vitest` lanes) model fleetflare's own floor: bun shards pack to a 209s floor at N=4-8 (one hot file, `apps/fleet/test/bun/deploy-rescue-gate.test.ts`, needs splitting BY TEST to go lower — Task 15), vitest shards floor at 67s at N=8 (hot file `apps/fleet/test/studio.burn.test.ts`). Recommended real mix, combined with Task 0a's snapshot-spike numbers: bun 5 (8 after Task 15's hot-file split), vitest 8, typecheck/check 1, english+test-lies+classify 1 → **15-18 containers per PR**, not v1's 24-28 guess. This is the concrete number Task 1's wrangler sketch and the Containers account-wide cap bullet (Global Constraints) both now cite.
+
 **Files:**
 - Create: `apps/fleet/scripts/gate/measure-shard-timing.ts`
 - Test: `apps/fleet/test/bun/gate-measure-shard-timing.test.ts`
 
 **Interfaces:**
 - Produces: `parseVitestTimings(text: string): { file: string; ms: number }[]`.
-- Consumes: the `vitest --reporter=json` output shape `scripts/localci/summarize.ts`'s `parseVitestJson` already parses (`testResults[].name`/`.startTime`/`.endTime`) — same shape, not a shared import (that function lives in a different, unrelated module with its own responsibility).
+- Consumes: the `vitest --reporter=json` output shape `scripts/localci/summarize.ts`'s `parseVitestJson` already parses (`testResults[].name`/`.startTime`/`.endTime`) — same shape, not a shared import (that function lives in a different, unrelated module with its own responsibility). Task 0a's spike numbers are this script's own real-world calibration, not a code dependency.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1039,6 +1149,12 @@ Expected: FAIL — module not found.
 // parseVitestJson) into {file, ms}[] for src/gate/shard-plan.ts's bucketer.
 // Run standalone: `bun run apps/fleet/scripts/gate/measure-shard-timing.ts
 // <vitest.json path>` prints the {file, ms}[] JSON to stdout.
+//
+// Real starting numbers (98 runs of this repo's own `check` job, v2
+// correction — see this task's own header): vitest shards floor at 67s at
+// N=8 (hot file test/studio.burn.test.ts); the bun-test lane's own floor
+// (209s at N=4-8) is a SEPARATE lane this script doesn't parse — that one
+// needs Task 15's by-test split, not more vitest shards.
 
 export function parseVitestTimings(text: string): { file: string; ms: number }[] {
   let j: unknown;
@@ -1083,7 +1199,9 @@ git commit -m "feat(fleet): gate-runner shard-timing measurement script (refs #7
 
 ---
 
-### Task 9: Browser-rendering lane spike (design doc, no code)
+### Task 9: Browser lane spike (design doc, no code) — v2: primary/fallback flipped
+
+**v2 correction:** v1 recommended CF Browser Rendering as PRIMARY for any future browser-touching leg. A real review comment flagged that Cloudflare's current **Browser Run** (renamed from "Browser Rendering") does not yet fully support the Playwright Test runner — only a Playwright-assertions fork and raw CDP connections — so it can't actually run this repo's own `playwright test` suites today. Flipped: in-container Chromium (today's `apps/fleet/scripts/localci/Dockerfile` pattern, already proven by the real `bun-test` lane) is PRIMARY for any real e2e leg; Browser Run becomes a smoke-only addition (hitting public URLs, no Playwright Test runner needed for that) plus an open spike question, not a switch to flip.
 
 **Files:**
 - Create: `docs/superpowers/evidence/2026-10-15-gate-runner-browser-lane-spike.md`
@@ -1093,60 +1211,73 @@ git commit -m "feat(fleet): gate-runner shard-timing measurement script (refs #7
 - [ ] **Step 1: Write the doc**
 
 ```markdown
-# Gate runner browser lane — CF Browser Rendering vs in-container Playwright
+# Gate runner browser lane — in-container Playwright vs CF Browser Run
 
-Evaluation only (#715 operator 08:25Z directive) — no leg in fleetflare's
-own Phase 1 gate list (typecheck/lint/invariants/rust/vitest shards) is a
-browser test, so this doc has no Phase 1 consumer. It is here so a later
-repo/phase whose gate DOES need a browser lane has the comparison already
-made instead of defaulting to "whatever's already baked into the image."
+Evaluation only (#715 operator 08:25Z directive, v2-corrected per a real
+review comment on #715) — no leg in fleetflare's own Phase 1 gate list
+(typecheck/lint/invariants/rust/vitest shards) is a browser test, so this
+doc has no Phase 1 consumer. It is here so a later repo/phase whose gate
+DOES need a browser lane has the comparison already made instead of
+defaulting to "whatever's already baked into the image."
 
 ## Candidates
 
-1. **CF Browser Rendering** (Workers binding, Puppeteer/Playwright-compatible
-   REST + binding API) — https://developers.cloudflare.com/browser-rendering/.
-   Limit: 200 concurrent sessions/account on the Paid plan
-   (https://developers.cloudflare.com/browser-rendering/platform/limits/).
-   No container image to bake/maintain; sessions are billed/limited
-   separately from GateRunnerDO's own container vCPU budget — a browser-
-   heavy leg does not eat into the 1,500-vCPU container cap this plan's
-   other legs share.
-2. **In-container chromium** (today's `apps/fleet/scripts/localci/Dockerfile`
-   pattern, Playwright baked into the image) — proven today (an operator repo's
-   own gate already runs this way per #715's background), but every
-   concurrent browser-touching shard is itself a GateRunnerDO container,
-   competing with every OTHER leg for the same 1,500-vCPU account cap
+1. **In-container Chromium** (today's `apps/fleet/scripts/localci/Dockerfile`
+   pattern, Playwright baked into the image) — PRIMARY. Proven today (one
+   of #715's other named repos already gates this way per #715's own
+   background), runs the real `playwright test` runner this repo's own
+   e2e suites already use. Tradeoff: every concurrent browser-touching
+   shard is itself a GateRunnerDO container, competing with every OTHER leg
+   for the same 1,500-vCPU account cap
    (https://developers.cloudflare.com/containers/platform-details/limits/).
+2. **CF Browser Run** (Workers binding, formerly "Browser Rendering";
+   Puppeteer/Playwright-compatible REST + binding API) —
+   https://developers.cloudflare.com/browser-rendering/. Limit: 200
+   concurrent sessions/account on the Paid plan
+   (https://developers.cloudflare.com/browser-rendering/platform/limits/).
+   Does NOT yet fully support the Playwright TEST RUNNER — only a
+   Playwright-assertions fork and raw CDP connections — so it cannot run
+   this repo's own `playwright test` suites as-is today. SMOKE-ONLY
+   addition for now (hitting public URLs, no test-runner dependency), plus
+   one open question below.
 
 ## Recommendation
 
-Primary: CF Browser Rendering, for any FUTURE browser-touching leg — it
-doesn't compete with the container vCPU budget the rest of this plan's legs
-share, and 200 concurrent sessions is well above what one PR's gate needs
-even at high fan-out. Fallback: in-container Playwright, for a leg Browser
-Rendering's API shape can't express (a real Playwright API Browser
-Rendering's binding doesn't cover) — same posture `fleet.json`'s own
-per-repo `gate` block already takes for every other leg: config, not a
-hard-coded choice.
+Primary: in-container Chromium, for any real e2e leg needing the actual
+`playwright test` runner — it is proven today and needs no new binding.
+Addition, not a replacement: CF Browser Run for smoke checks against public
+URLs, since it doesn't compete with the container vCPU budget the rest of
+this plan's legs share and 200 concurrent sessions is well above what one
+PR's gate needs. Fallback/future: if Browser Run's Playwright Test runner
+support lands, re-evaluate — same posture `fleet.json`'s own per-repo
+`gate` block already takes for every other leg: config, not a hard-coded
+choice.
 
-## Open for the operator
+## Open for the operator — the one spike this doc can't answer from docs alone
 
-Browser Rendering's binding needs its own wrangler.jsonc entry (another new
+Does `playwright test` actually work over a raw CDP connection against
+Browser Run today, for THIS repo's own test suites? Find out with a real
+spike before any future plan depends on it — this doc only establishes the
+primary/fallback ORDER, not whether the fallback path is viable at all.
+
+Browser Run's binding needs its own wrangler.jsonc entry (another new
 binding kind, same "docs-only sketch now, real binding at image-window
-time" posture this plan's own Task 1 takes for workflows/kv_namespaces) —
-not sketched here since no Phase 1 leg needs it yet.
+time" posture this plan's own Task 1 takes for `workflows`) — not sketched
+here since no Phase 1 leg needs it yet.
 ```
 
 - [ ] **Step 2: Commit**
 
 ```bash
 git add docs/superpowers/evidence/2026-10-15-gate-runner-browser-lane-spike.md
-git commit -m "docs(fleet): gate-runner browser-rendering lane spike (refs #715)"
+git commit -m "docs(fleet): gate-runner browser lane spike, in-container primary (refs #715)"
 ```
 
 ---
 
-### Task 10: `GateRunnerDO` class
+### Task 10: `GateRunnerDO` class — v2: no presigned URLs, plain R2 keys only
+
+**v2 correction:** v1 had this task presign a PUT URL (for the leg's result) and GET URLs (for baseline restore) via the existing `presignR2` helper, then hand those URLs to the container in its env vars. A real review comment flagged that a presigned URL IS itself a bearer credential once minted — "PR code runs beside the result-upload URL → PR can forge its own verdict." Fixed: this task now hands the container plain R2 KEYS (not URLs), created on the `durable_object` scheduling policy (Task 0a/1 decided this first), and the container does plain, unauthenticated-looking `fetch`es that Task 16's Worker-side outbound handler intercepts and actually authorizes — the container never holds a credential OR a credential-bearing URL of any kind. `presignR2` is no longer called anywhere in this plan.
 
 **Files:**
 - Create: `apps/fleet/src/gate/do.ts`
@@ -1154,10 +1285,10 @@ git commit -m "docs(fleet): gate-runner browser-rendering lane spike (refs #715)
 - Test: `apps/fleet/test/bun/gate-do.test.ts` (pure helpers only — `GateRunnerDO` itself cannot be constructed under `vitest-pool-workers`, same documented gap `agents/do.ts`'s own header names for `AgentDO`; every decision this class makes is extracted to a plain function first, same shape `shouldAbortOnTerminal`/`toStartInput` already use in `agents/do.ts`).
 
 **Interfaces:**
-- Produces: `class GateRunnerDO extends Container<Env>`, exposing `POST /run-leg` (called by Task 14's Workflow step); `buildLegEnvVars(req: GateLegRequest): Record<string, string>` (pure, extracted); `GateLegRequest { owner: string; repo: string; commit: string; leg: string; installCmd: string; legCmd: string; resultPutUrl: string; baselineGetUrls: string[] }`.
-- Consumes: `Env.GATE_RUNNER` (added by this task, see below); `presignR2` (existing, `apps/fleet/src/studio/install-cache.ts:1369` — reused as-is, not re-implemented: this task mints a presigned PUT URL for the leg's result JSON and presigned GET URLs for any baseline cache keys, via the already-reviewed helper, never touching the raw R2 credentials itself).
+- Produces: `class GateRunnerDO extends Container<Env>`, exposing `POST /run-leg` (called by Task 14's Workflow step); `buildLegEnvVars(req: GateLegRequest): Record<string, string>` (pure, extracted); `GateLegRequest { owner: string; repo: string; commit: string; leg: string; installCmd: string; legCmd: string; resultKey: string; baselineKeys: string[] }` (plain KEYS now, never a URL).
+- Consumes: `Env.GATE_RUNNER` (added by this task, see below). **No longer consumes `presignR2`** — the credential/signing concern moved entirely to Task 16's outbound handler, added to this same file in Wave 3 (never the same wave as this task — same "shared file, different wave" pattern `env.ts`'s own 3-way split uses).
 
-**Phase 1 scoping note:** `rafarc21/fleetflare` is public — `GateLegRequest` carries no GitHub token field. The container (Task 11's `gate-server.ts`) clones anonymously. A `ghToken?: string` field is deliberately NOT added here; Phase 2's private repos are out of scope for this plan and would need their own task to add one (mirroring `agents/do.ts`'s own `StartBody.ghToken` passthrough shape, `agents/do.ts:16`).
+**Phase 1 scoping note:** `rafarc21/fleetflare` is public — `GateLegRequest` carries no GitHub token field. The container (Task 11's `gate-server.ts`) clones anonymously. A `ghToken?: string` field is deliberately NOT added here; Phase 2's private repos are out of scope for this plan and would need their own task to add one (mirroring `agents/do.ts`'s own `StartBody.ghToken` passthrough shape, `agents/do.ts:16`) AND would need Task 16's outbound handler extended to inject it, never passed through this file.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1167,29 +1298,30 @@ import { describe, it, expect } from "bun:test";
 import { buildLegEnvVars, type GateLegRequest } from "../../src/gate/do";
 
 describe("buildLegEnvVars", () => {
-  it("carries every leg field into the container's env, no token field", () => {
+  it("carries every leg field into the container's env, no token or URL field", () => {
     const req: GateLegRequest = {
       owner: "rafarc21", repo: "fleetflare", commit: "abc123", leg: "typecheck",
       installCmd: "bun install --frozen-lockfile", legCmd: "bun run check",
-      resultPutUrl: "https://example.r2.cloudflarestorage.com/signed-put",
-      baselineGetUrls: ["https://example.r2.cloudflarestorage.com/signed-get"],
+      resultKey: "gate/rafarc21/fleetflare/runs/715/shard-typecheck.json",
+      baselineKeys: ["gate/rafarc21/fleetflare/baselines/mainsha-lockhash.tar"],
     };
     const env = buildLegEnvVars(req);
     expect(env).toEqual({
       GATE_REPO: "rafarc21/fleetflare", GATE_COMMIT: "abc123", GATE_LEG: "typecheck",
       GATE_INSTALL_CMD: "bun install --frozen-lockfile", GATE_LEG_CMD: "bun run check",
-      GATE_RESULT_PUT_URL: "https://example.r2.cloudflarestorage.com/signed-put",
-      GATE_BASELINE_GET_URLS: "https://example.r2.cloudflarestorage.com/signed-get",
+      GATE_RESULT_KEY: "gate/rafarc21/fleetflare/runs/715/shard-typecheck.json",
+      GATE_BASELINE_KEYS: "gate/rafarc21/fleetflare/baselines/mainsha-lockhash.tar",
     });
     expect(Object.keys(env).join(",")).not.toMatch(/token/i);
+    expect(Object.values(env).join(",")).not.toMatch(/https?:\/\//);
   });
 
-  it("empty baselineGetUrls -> empty string, not undefined", () => {
+  it("empty baselineKeys -> empty string, not undefined", () => {
     const req: GateLegRequest = {
       owner: "rafarc21", repo: "fleetflare", commit: "abc123", leg: "lint",
-      installCmd: "x", legCmd: "y", resultPutUrl: "z", baselineGetUrls: [],
+      installCmd: "x", legCmd: "y", resultKey: "z", baselineKeys: [],
     };
-    expect(buildLegEnvVars(req).GATE_BASELINE_GET_URLS).toBe("");
+    expect(buildLegEnvVars(req).GATE_BASELINE_KEYS).toBe("");
   });
 });
 ```
@@ -1219,22 +1351,33 @@ GATE_RUNNER: DurableObjectNamespace<GateRunnerDO>;
 // StudioBigDO, wrangler.example.jsonc:183-242), via the plain Container<Env>
 // base AgentDO/DeployDO already use (agents/do.ts, deploy/do.ts) — NOT the
 // heavier Sandbox<Env> base StudioDO uses (no tmux/chromium/claude needed).
+// Created on the `durable_object` scheduling policy (Task 1's wrangler
+// sketch) — this class's own code never checks that at runtime, since the
+// policy is fixed at creation; it just relies on the snapshot/outbound-
+// handler capabilities that policy provides, wired in by Task 16, later.
+//
+// v2 correction: this file hands the container PLAIN R2 KEYS, never a
+// presigned URL — a real review flagged that a presigned URL IS a bearer
+// credential, forgeable by the very PR code it's meant to gate. The
+// container's own plain fetches to R2 are authorized by Task 16's
+// Worker-side outbound handler, added to this file in a later wave.
 import { Container } from "@cloudflare/containers";
 import type { Env } from "../env";
-import { presignR2 } from "../studio/install-cache";
 
 const GATE_CONTAINER_PORT = 8080;
-const RESULT_URL_TTL_SECONDS = 1800; // same TTL install-cache.ts's own presign calls use
 
 export interface GateLegRequest {
   owner: string; repo: string; commit: string; leg: string;
   installCmd: string; legCmd: string;
-  resultPutUrl: string; baselineGetUrls: string[];
+  resultKey: string; baselineKeys: string[];
 }
 
 /** Pure — extracted so the env-var shape is unit-testable without a real
  *  container, same reasoning agents/do.ts's toStartInput extraction gives.
- *  No token field: Phase 1's repo (rafarc21/fleetflare) is public. */
+ *  No token field, no URL field: Phase 1's repo (rafarc21/fleetflare) is
+ *  public, and even the R2 keys below are plain keys, not credentials —
+ *  Task 16's outbound handler is what turns a plain fetch to one of these
+ *  keys into an authorized one. */
 export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
   return {
     GATE_REPO: `${req.owner}/${req.repo}`,
@@ -1242,8 +1385,8 @@ export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
     GATE_LEG: req.leg,
     GATE_INSTALL_CMD: req.installCmd,
     GATE_LEG_CMD: req.legCmd,
-    GATE_RESULT_PUT_URL: req.resultPutUrl,
-    GATE_BASELINE_GET_URLS: req.baselineGetUrls.join(","),
+    GATE_RESULT_KEY: req.resultKey,
+    GATE_BASELINE_KEYS: req.baselineKeys.join(","),
   };
 }
 
@@ -1257,22 +1400,8 @@ export class GateRunnerDO extends Container<Env> {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === "/run-leg" && req.method === "POST") {
-      const body = (await req.json()) as {
-        owner: string; repo: string; commit: string; leg: string;
-        installCmd: string; legCmd: string; resultKey: string; baselineKeys: string[];
-      };
-      const resultPutUrl = await presignR2(this.env, body.resultKey, "PUT", RESULT_URL_TTL_SECONDS);
-      if (resultPutUrl === null) {
-        return Response.json({ state: "error", description: "presign PUT failed — R2 secrets missing or signing threw" }, { status: 500 });
-      }
-      const baselineGetUrls = (await Promise.all(
-        body.baselineKeys.map((k) => presignR2(this.env, k, "GET", RESULT_URL_TTL_SECONDS)),
-      )).filter((u): u is string => u !== null);
-      const envVars = buildLegEnvVars({
-        owner: body.owner, repo: body.repo, commit: body.commit, leg: body.leg,
-        installCmd: body.installCmd, legCmd: body.legCmd,
-        resultPutUrl, baselineGetUrls,
-      });
+      const body = (await req.json()) as GateLegRequest;
+      const envVars = buildLegEnvVars(body);
       await this.start({ envVars });
       await this.startAndWaitForPorts();
       const legRes = await this.containerFetch(new Request(`http://container/run`, { method: "POST" }));
@@ -1281,6 +1410,15 @@ export class GateRunnerDO extends Container<Env> {
     }
     return new Response("not found", { status: 404 });
   }
+  // Task 16 (Wave 3, later than this task, same file) adds BOTH this
+  // class's outbound-traffic-handler wiring AND the `/run-leg` change to
+  // ACK fast (202) + keep running the container via `this.ctx.waitUntil`,
+  // calling `sendEvent` on the calling Workflow instance once done — both
+  // land in Task 16, not split across Task 16 and Task 14, so `do.ts` is
+  // still only ever touched by ONE task per wave (Task 10 here, Task 16
+  // later) — Task 14 (same wave as 16, different file) only CONSUMES this
+  // contract, never edits this file. Not sketched in THIS task; see
+  // Task 16's own header.
 }
 ```
 
@@ -1293,12 +1431,14 @@ Expected: PASS, both cases green.
 
 ```bash
 git add apps/fleet/src/gate/do.ts apps/fleet/src/env.ts apps/fleet/test/bun/gate-do.test.ts
-git commit -m "feat(fleet): GateRunnerDO container class (refs #715)"
+git commit -m "feat(fleet): GateRunnerDO container class, plain R2 keys not presigned URLs (refs #715)"
 ```
 
 ---
 
-### Task 11: `Dockerfile.gate` + container entrypoint server (IMAGE CHANGE — operator-approved window only)
+### Task 11: `Dockerfile.gate` + container entrypoint server (IMAGE CHANGE — operator-approved window only) — v2: plain keys, outbound-handler-mediated R2 access, snapshot-primary baseline
+
+**v2 correction:** v1's `gate-server.ts` PUT its result straight to a presigned URL and restored a baseline from a presigned GET URL — both bearer credentials the container held directly. Fixed: the container now does a plain `fetch` against a fixed internal R2 proxy path, carrying a plain R2 KEY (never a credential); Task 16's Worker-side outbound handler is what turns that plain request into an authorized one before it leaves the Worker's own network boundary — the container's own code and its own TLS/HTTP view of the world never contain anything that looks like a secret. Baseline restore also now tries a container snapshot FIRST (Task 0a/5's primary mechanism) before falling back to the R2 tarball GET (same outbound-handler-mediated path as the result PUT).
 
 **Files:**
 - Create: `apps/fleet/container/Dockerfile.gate`
@@ -1306,11 +1446,13 @@ git commit -m "feat(fleet): GateRunnerDO container class (refs #715)"
 
 **Interfaces:**
 - Produces: the container's own `POST /run` HTTP handler (consumed by Task 10's `GateRunnerDO.fetch`'s `/run-leg` handler, via `containerFetch`).
-- Consumes: `resolveMergeTree`/`ExecFn` from Task 6's `apps/fleet/container/gate-merge-tree.ts` (used for a `leg === "merge-tree"` request — the one leg type whose "install/test command" IS the merge-tree/commit-tree pair, run once per PR before every other leg can check out a resolved tree); the env vars Task 10's `buildLegEnvVars` sets (`GATE_REPO`, `GATE_COMMIT`, `GATE_LEG`, `GATE_INSTALL_CMD`, `GATE_LEG_CMD`, `GATE_RESULT_PUT_URL`, `GATE_BASELINE_GET_URLS`).
+- Consumes: `resolveMergeTree`/`ExecFn` from Task 6's `apps/fleet/container/gate-merge-tree.ts` (used for a `leg === "merge-tree"` request — the one leg type whose "install/test command" IS the merge-tree/commit-tree pair, run once per PR before every other leg can check out a resolved tree); the env vars Task 10's `buildLegEnvVars` sets (`GATE_REPO`, `GATE_COMMIT`, `GATE_LEG`, `GATE_INSTALL_CMD`, `GATE_LEG_CMD`, `GATE_RESULT_KEY`, `GATE_BASELINE_KEYS` — plain keys, not URLs); Task 16's outbound handler, implicitly, via every plain `fetch` this file makes to the fixed `http://gate-r2.internal/<key>` path (the handler, not this file, decides what that resolves to and with what credential).
 
-**This is an image-change task.** It ships only at an operator-approved image window (same constraint `apps/fleet/scripts/merge-danger.ts`'s `ONE_WAY_GLOBS` already enforces for every other container Dockerfile, `merge-danger.ts:34-38`). **Plan-level decision, answering the spec's own open question #4:** this Dockerfile lives at `apps/fleet/container/Dockerfile.gate`, NOT `apps/fleet/scripts/gate/Dockerfile` — same directory every other class's Dockerfile already lives in, already covered by `ONE_WAY_GLOBS`'s existing `apps/fleet/container/**` pattern (`merge-danger.ts:35-38`), so this plan needs **zero** `merge-danger.ts` change. The spec itself explicitly left this choice to "whoever writes the implementation plan" — this is that choice; flag it to the operator for the spec's next revision.
+**This is an image-change task.** It ships only at an operator-approved image window (same constraint `apps/fleet/scripts/merge-danger.ts`'s `ONE_WAY_GLOBS` already enforces for every other container Dockerfile, `merge-danger.ts:34-38`). **Plan-level decision, answering the spec's own open question #4:** this Dockerfile lives at `apps/fleet/container/Dockerfile.gate`, NOT `apps/fleet/scripts/gate/Dockerfile` — same directory every other class's Dockerfile already lives in, already covered by `ONE_WAY_GLOBS`'s existing `apps/fleet/container/**` pattern (`merge-danger.ts:35-38`), so this plan needs **zero** `merge-danger.ts` change for THIS path (Task 17's own new `apps/fleet/src/gate/**`/`apps/fleet/scripts/gate/**` entries are a separate, unrelated gap). The spec itself explicitly left this choice to "whoever writes the implementation plan" — this is that choice; flag it to the operator for the spec's next revision.
 
 This task has no TDD step of its own beyond what Task 6 already proved (`resolveMergeTree`'s decision table) — `gate-server.ts`'s own `/run` handler is thin wiring (read env vars, call `Bun.spawn`, PUT a result) in the same self-contained style `container/server.ts` already uses (no test file for that file either, per today's repo). The file-structure note below is the concrete deliverable.
+
+**Open gap, flagged explicitly (not guessed past):** the exact Cloudflare Containers hook/method name a `durable_object`-policy DO class overrides to register its own outbound traffic handler is NOT pinned down here — this plan describes the OUTCOME (container's plain fetch to a fixed internal path gets rewritten + authorized server-side) and leaves the exact binding/method name for Task 16's own implementer to verify against live Cloudflare Containers docs at build time, same posture this plan already takes for other not-yet-built-against-live-docs specifics.
 
 - [ ] **Step 1: Write `gate-server.ts`**
 
@@ -1321,10 +1463,16 @@ This task has no TDD step of its own beyond what Task 6 already proved (`resolve
 // no imports from apps/fleet/src/ — same style container/server.ts already
 // uses. Clones ANONYMOUSLY (Phase 1's repo, rafarc21/fleetflare, is public —
 // no GitHub token anywhere in this file, by construction, not by omission).
+//
+// v2: result PUT and baseline restore both go through a fixed internal
+// path (http://gate-r2.internal/<key>) that Task 16's Worker-side outbound
+// handler intercepts and authorizes — this file never holds a credential
+// or a credential-bearing URL, only a plain key string.
 import { resolveMergeTree, type ExecFn } from "./gate-merge-tree";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const WORKDIR = "/workspace/repo";
+const R2_INTERNAL_BASE = "http://gate-r2.internal"; // rewritten by Task 16's outbound handler, never resolved as-is
 
 const exec: ExecFn = async (cmd, args, opts) => {
   const proc = Bun.spawn([cmd, ...args], { cwd: opts.cwd, stdout: "pipe", stderr: "pipe" });
@@ -1334,13 +1482,33 @@ const exec: ExecFn = async (cmd, args, opts) => {
   return { code, stdout, stderr };
 };
 
+async function restoreBaseline(baselineKeys: string[]): Promise<void> {
+  // Snapshot restore (Task 0a/5's primary mechanism) happens BEFORE this
+  // container's own code runs at all — GateRunnerDO starts the container
+  // FROM a snapshot when one exists for this (main-sha, lockfile-hash), so
+  // by the time gate-server.ts is running, a snapshot restore (if any) is
+  // already done. This function is only the FALLBACK: an R2 tarball GET,
+  // for the case no snapshot exists yet (first PR against a new main SHA).
+  for (const key of baselineKeys) {
+    try {
+      const res = await fetch(`${R2_INTERNAL_BASE}/${key}`);
+      if (!res.ok) continue;
+      await Bun.write(`${WORKDIR}/.gate-baseline.tar`, await res.arrayBuffer());
+      await exec("tar", ["-xf", `${WORKDIR}/.gate-baseline.tar`, "-C", WORKDIR], { cwd: WORKDIR });
+    } catch (err) {
+      console.error("gate-server: baseline restore failed", err instanceof Error ? err.message : String(err));
+    }
+  }
+}
+
 async function run(): Promise<{ state: "success" | "failure" | "error"; description?: string }> {
   const repo = process.env.GATE_REPO ?? "";
   const commit = process.env.GATE_COMMIT ?? "";
   const leg = process.env.GATE_LEG ?? "";
   const installCmd = process.env.GATE_INSTALL_CMD ?? "";
   const legCmd = process.env.GATE_LEG_CMD ?? "";
-  const resultPutUrl = process.env.GATE_RESULT_PUT_URL ?? "";
+  const resultKey = process.env.GATE_RESULT_KEY ?? "";
+  const baselineKeys = (process.env.GATE_BASELINE_KEYS ?? "").split(",").filter((k) => k.length > 0);
 
   const clone = await exec("git", ["clone", "--quiet", `https://github.com/${repo}.git`, WORKDIR], { cwd: "/workspace" });
   if (clone.code !== 0) return { state: "error", description: `clone failed: ${clone.stderr.split("\n")[0]}` };
@@ -1353,9 +1521,11 @@ async function run(): Promise<{ state: "success" | "failure" | "error"; descript
       : result.kind === "conflict"
         ? { state: "failure" as const, description: "merge conflict against main" }
         : { state: "error" as const, description: result.message };
-    await putResult(resultPutUrl, { ...outcome, commit: result.ok ? result.commit : undefined });
+    await putResult(resultKey, { ...outcome, commit: result.ok ? result.commit : undefined });
     return outcome;
   }
+
+  await restoreBaseline(baselineKeys);
 
   const checkout = await exec("git", ["checkout", "--quiet", commit], { cwd: WORKDIR });
   if (checkout.code !== 0) return { state: "error", description: `checkout failed: ${checkout.stderr.split("\n")[0]}` };
@@ -1363,7 +1533,7 @@ async function run(): Promise<{ state: "success" | "failure" | "error"; descript
   const install = await exec("bash", ["-c", installCmd], { cwd: WORKDIR });
   if (install.code !== 0) {
     const outcome = { state: "error" as const, description: `install failed: ${install.stderr.split("\n")[0]}` };
-    await putResult(resultPutUrl, outcome);
+    await putResult(resultKey, outcome);
     return outcome;
   }
 
@@ -1371,14 +1541,14 @@ async function run(): Promise<{ state: "success" | "failure" | "error"; descript
   const outcome = test.code === 0
     ? { state: "success" as const }
     : { state: "failure" as const, description: `${leg} exited ${test.code}` };
-  await putResult(resultPutUrl, { ...outcome, stdout: test.stdout.slice(-4000), stderr: test.stderr.slice(-4000) });
+  await putResult(resultKey, { ...outcome, stdout: test.stdout.slice(-4000), stderr: test.stderr.slice(-4000) });
   return outcome;
 }
 
-async function putResult(url: string, body: unknown): Promise<void> {
-  if (!url) return;
+async function putResult(key: string, body: unknown): Promise<void> {
+  if (!key) return;
   try {
-    await fetch(url, { method: "PUT", body: JSON.stringify(body) });
+    await fetch(`${R2_INTERNAL_BASE}/${key}`, { method: "PUT", body: JSON.stringify(body) });
   } catch (err) {
     console.error("gate-server: result PUT failed", err instanceof Error ? err.message : String(err));
   }
@@ -1435,7 +1605,7 @@ CMD ["bun", "run", "gate-server.ts"]
 
 ```bash
 git add apps/fleet/container/Dockerfile.gate apps/fleet/container/gate-server.ts
-git commit -m "feat(fleet): GateRunnerDO image + container entrypoint server (refs #715)
+git commit -m "feat(fleet): GateRunnerDO image + container entrypoint, no presigned URLs (refs #715)
 
 IMAGE CHANGE — ships only at an operator-approved image window."
 ```
@@ -1700,7 +1870,9 @@ git commit -m "feat(fleet): gate-runner warm-pool keep-warm cron (refs #715)"
 
 ---
 
-### Task 14: `GateWorkflow` + `postCommitStatus` (CLAUDE-ONLY, Wave 3)
+### Task 14: `GateWorkflow` + `postCommitStatus` (CLAUDE-ONLY, Wave 3) — v2: event fan-in, not a naive `step.do` per leg; blocked on Task 0b
+
+**v2 correction (real review comment — this changes the Workflow's own DESIGN, not just its wording):** Cloudflare Workflows retries a step that THROWS 5x with backoff, up to a 10-minute per-attempt timeout. v1's `run-legs` step wrapped the ENTIRE fan-out — every leg's full container run — inside one `step.do` call: if any single leg's `fetch` legitimately threw (a real infra blip), the WHOLE batch (every leg, including ones that already finished) would be retried, re-running containers that had already posted a correct result. Fixed: each leg is now a short, idempotent `start-shard-<leg>` step that only KICKS OFF its `GateRunnerDO` (fire-and-forget, via `ctx.waitUntil`, not awaited to completion inside the step), followed by a `step.waitForEvent` with its own explicit per-leg timeout; `GateRunnerDO` calls `sendEvent` back on the SAME workflow instance once its container finishes, carrying the `LegResult` — including a red test's `state: "failure"` — as the event's DATA payload, never as a thrown step exception. A genuinely red test can never trigger Workflows' infra-retry behavior; only a real infra failure (the event never arriving before its own timeout) does.
 
 **Files:**
 - Create: `apps/fleet/src/gate/workflow.ts`
@@ -1708,9 +1880,13 @@ git commit -m "feat(fleet): gate-runner warm-pool keep-warm cron (refs #715)"
 - Modify: `apps/fleet/src/github/api.ts` (add `postCommitStatus`)
 - Test: `apps/fleet/test/bun/gate-workflow-verdict.test.ts` (the one pure seam inside this file — everything else needs a live Workflow/DO/GitHub-token round trip and is validated per the spec's own testing plan, not unit-tested here)
 
+**Does NOT touch `apps/fleet/src/gate/do.ts`.** The `/run-leg` handler change this task's own design needs (ACK fast with 202, call `sendEvent` back on the calling Workflow instance once the container finishes, instead of the Worker-side route awaiting the container's full run synchronously) is Task 16's own diff against `do.ts`, not this task's — keeping `do.ts` touched by exactly one task per wave (Task 10, then Task 16), never both Task 14 and Task 16 in the same Wave 3.
+
+**Precondition, not a routing-around option:** blocked on Task 0b (the GitHub App's `Commit statuses: write` grant). `postCommitStatus` will 403 on every run until that lands, regardless of how correct this task's own diff is — this is a GitHub App permission gap, confirmed by a real review comment, not an "unverified PAT scope" as the earlier ci-steward spec speculated.
+
 **Interfaces:**
 - Produces: `class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams>`, `GateWorkflowParams { repo: string; pr: number }`; `postCommitStatus(token: string, repo: string, sha: string, state: "pending" | "success" | "failure" | "error", context: string, description: string): Promise<void>` (in `github/api.ts`, alongside `mergePullRequest`/`ghRequest` it already exports).
-- Consumes: Task 2's `config.ts` (`parseGateConfig`, `matchesPathRules`), Task 3's `shard-plan.ts` (`planShards`), Task 4's `verdict.ts` (`aggregateVerdict`), Task 5's `kv-pointer.ts` (`getBaselinePointer`/`putBaselinePointer`), Task 10's `GateRunnerDO` RPC contract (`POST /run-leg`, documented in Task 10) via `env.GATE_RUNNER`, existing `apps/fleet/src/github/api.ts` exports (`getPullRequest`, `getDefaultBranch`) and `apps/fleet/src/github/auth.ts`'s `repoTokenMinter`.
+- Consumes: Task 2's `config.ts` (`parseGateConfig`, `matchesPathRules`), Task 3's `shard-plan.ts` (`planShards`), Task 4's `verdict.ts` (`aggregateVerdict`), Task 5's `baseline.ts` (`baselineId`, `baselineTarballKey`, `baselineSnapshotName` — no KV, see Global Constraints), Task 10's `GateRunnerDO` RPC contract (`POST /run-leg`, documented in Task 10) via `env.GATE_RUNNER`, Task 16's outbound handler implicitly (every leg's R2 access goes through it, this file never touches R2 directly), existing `apps/fleet/src/github/api.ts` exports (`getPullRequest`, `getDefaultBranch`) and `apps/fleet/src/github/auth.ts`'s `repoTokenMinter`. `fleet.json`'s own gate block is fetched from `env.AGENT_REPO`, never from `repo` (the work repo being gated) — Task 2's own header states this; this is the one place in the plan that actually performs that fetch, so this is the one place the pin matters.
 
 - [ ] **Step 1: Write the failing test (the one pure seam)**
 
@@ -1784,14 +1960,24 @@ Add to `apps/fleet/src/env.ts`: `import type { GateWorkflow } from "./gate/workf
 // one gate/verdict commit status -> writes the run's manifest to R2. The
 // ONE file in this plan that mints a GitHub token and posts a REAL commit
 // status — every other piece of logic it calls (config, shard-plan,
-// verdict, kv-pointer) is pure and already unit-tested in its own task.
+// verdict, baseline) is pure and already unit-tested in its own task.
 //
-// Open risk carried forward from the spec, NOT resolved here: the PAT's
-// "Commit statuses: write" scope is UNVERIFIED as of the 2026-09-25
-// ci-steward spec. Before this ships behind FLEET_GATE_RUNNER=on for real,
-// re-probe it: `gh api -X POST repos/rafarc21/fleetflare/statuses/<sha>
-// -f state=pending -f context=gate/probe` — a live, operator-run step, not
-// a unit test.
+// v2 correction (real review, changes design not just wording): Workflows
+// retries a step that THROWS 5x with backoff. Each leg below is therefore
+// a SHORT, idempotent "start-shard-<leg>" step (just kicks the container
+// off, fire-and-forget via ctx.waitUntil) followed by a step.waitForEvent
+// with its OWN per-leg timeout — GateRunnerDO calls sendEvent back on this
+// same instance once its container finishes, carrying the LegResult
+// (including a red test's state: "failure") as EVENT DATA, never as a
+// thrown step exception. A red test can never trigger Workflows' own
+// infra-retry behavior; only a real infra failure (timeout with no event)
+// does.
+//
+// Precondition, not resolved here: Task 0b (operator grants the GitHub
+// App `Commit statuses: write`) must land before postCommitStatus below
+// can succeed — confirmed a GitHub App permission gap by a real review
+// comment, not an "unverified PAT scope" as the earlier ci-steward spec
+// speculated.
 import { WorkflowEntrypoint, type WorkflowStep } from "cloudflare:workers";
 import type { Env } from "../env";
 import { getPullRequest, getDefaultBranch, postCommitStatus } from "../github/api";
@@ -1799,11 +1985,13 @@ import { repoTokenMinter } from "../github/auth";
 import { parseGateConfig, matchesPathRules } from "./config";
 import { planShards } from "./shard-plan";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
-import { getBaselinePointer, putBaselinePointer } from "./kv-pointer";
+import { baselineTarballKey, baselineSnapshotName } from "./baseline";
 
 export interface GateWorkflowParams { repo: string; pr: number }
 
 const GATE_STATUS_CONTEXT = "gate/verdict";
+const SHARD_EVENT_TYPE = "gate.shard.result";
+const SHARD_TIMEOUT = "10 minutes"; // one per-leg ceiling, not one ceiling for the whole fan-out
 
 /** Pure — the one seam unit-tested without a live Workflow (Step 1, above).
  *  verdict.ts's own "pending" state never reaches here (the Workflow only
@@ -1815,11 +2003,44 @@ export function verdictToStatusArgs(
   return { state: verdict.state, description: verdict.description };
 }
 
+/** Fans one leg out as a short kick-off step + a waitForEvent with its own
+ *  timeout — NOT a step.do that awaits the container's full run. Task 10's
+ *  do.ts (its own later-wave addition, same task as this one touches) is
+ *  what calls `env.GATE_WORKFLOW.get(instanceId).sendEvent(...)` once the
+ *  container finishes; this function only kicks that off and waits. */
+async function runLeg(
+  env: Env, step: WorkflowStep, instanceId: string,
+  owner: string, repoName: string, leg: string, commit: string,
+  installCmd: string, legCmd: string, resultKey: string, baselineKeys: string[],
+): Promise<LegResult> {
+  await step.do(`start-shard-${leg}`, async () => {
+    const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(`${owner}/${repoName}-${leg}`));
+    // GateRunnerDO's own /run-leg handler (Task 10/14's do.ts addition)
+    // ACKs immediately (202) and keeps the container running via its own
+    // `this.ctx.waitUntil` — the fire-and-forget boundary lives in the DO,
+    // not here, so this step's own await resolves fast either way. The
+    // actual leg result arrives later via sendEvent, below, never via this
+    // fetch's own response body.
+    await stub.fetch("https://gate-runner/run-leg", {
+      method: "POST",
+      body: JSON.stringify({
+        owner, repo: repoName, commit, leg, installCmd, legCmd, resultKey, baselineKeys,
+        instanceId, eventType: SHARD_EVENT_TYPE,
+      }),
+    });
+  });
+  const received = await step.waitForEvent<LegResult>(`shard-${leg}-done`, {
+    type: SHARD_EVENT_TYPE, timeout: SHARD_TIMEOUT,
+  });
+  return received.payload;
+}
+
 export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
   async run(event: { payload: GateWorkflowParams }, step: WorkflowStep) {
     const { repo, pr } = event.payload;
     const [owner, repoName] = repo.split("/");
     const mintToken = repoTokenMinter(this.env);
+    const instanceId = (this as unknown as { instanceId?: string }).instanceId ?? `${repo}-${pr}`;
 
     const prInfo = await step.do("resolve-pr", async () => {
       const token = await mintToken(repo);
@@ -1828,32 +2049,27 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       return { headSha: pull.headSha, base };
     });
 
-    // fleet.json's own gate block — not fetched here in detail (repo-content
-    // read via existing fetchRepoFile, same token path); legs/install/
-    // vitestCmd come from parseGateConfig once that fetch lands in the real
-    // implementation. Path-rule skip (matchesPathRules) short-circuits
-    // before any container spins up, same as localci.sh's own skip_fleet.
+    // fleet.json's own gate block — fetched from env.AGENT_REPO, NEVER from
+    // `repo` (the work repo being gated; Task 2's own header states why).
+    // legs/install/vitestCmd come from parseGateConfig once that fetch
+    // lands in the real implementation. Path-rule skip (matchesPathRules)
+    // short-circuits before any container spins up, same as localci.sh's
+    // own skip_fleet. baselineTarballKey/baselineSnapshotName (Task 5) key
+    // off (owner, repo, prInfo.base-sha, lockfileHash) — snapshot restore
+    // is attempted first by GateRunnerDO's own start sequence (Task 11),
+    // the tarball key below is only the fallback list passed through.
 
-    const legResults: LegResult[] = await step.do("run-legs", async () => {
-      const results: LegResult[] = [];
-      const stub = this.env.GATE_RUNNER.get(this.env.GATE_RUNNER.idFromName(`${repo}-${pr}-merge-tree`));
-      const res = await stub.fetch("https://gate-runner/run-leg", {
-        method: "POST",
-        body: JSON.stringify({
-          owner, repo: repoName, commit: `${prInfo.base}..${prInfo.headSha}`, leg: "merge-tree",
-          installCmd: "", legCmd: "",
-          resultKey: `gate/${owner}/${repoName}/runs/${pr}/shard-merge-tree.json`, baselineKeys: [],
-        }),
-      });
-      const body = await res.json() as LegResult;
-      results.push({ leg: "merge-tree", state: body.state, description: body.description });
-      return results;
-      // Every other leg (typecheck/lint/invariants/rust/vitest shards, per
-      // Task 2's fleet.json config + Task 3's shard-plan) fans out the same
-      // way, one GateRunnerDO instance each, collected into `results` the
-      // same way — elided here since it is the same pattern repeated N
-      // times, not new logic.
-    });
+    const mergeTreeResult = await runLeg(
+      this.env, step, instanceId, owner, repoName, "merge-tree",
+      `${prInfo.base}..${prInfo.headSha}`, "", "",
+      `gate/${owner}/${repoName}/runs/${pr}/shard-merge-tree.json`, [],
+    );
+    const legResults: LegResult[] = [{ leg: "merge-tree", state: mergeTreeResult.state, description: mergeTreeResult.description }];
+    // Every other leg (typecheck/lint/invariants/rust/vitest shards, per
+    // Task 2's fleet.json config + Task 3's shard-plan) fans out via the
+    // same runLeg() call, one GateRunnerDO instance each, each with its own
+    // start-shard-<leg> step + waitForEvent — elided here since it is the
+    // same pattern repeated N times, not new logic.
 
     const verdict = await step.do("aggregate-verdict", async () =>
       aggregateVerdict(legResults.map((r) => r.leg), legResults));
@@ -1894,24 +2110,294 @@ git commit -m "feat(fleet): GateWorkflow + postCommitStatus (refs #715)"
 
 ---
 
+### Task 15: Split `deploy-rescue-gate.test.ts` by test name, not by file (Wave 1, new)
+
+**Why:** Task 8's real CI-timing data (98 runs) shows `apps/fleet/test/bun/deploy-rescue-gate.test.ts` is the bun-test lane's own floor — one file, confirmed real in this repo (138 tests across its own `describe`/`it` blocks). File-level sharding can't split this floor any further; the fix is a test-NAME filter, so the same file's tests spread across multiple shards.
+
+**Files:**
+- Create: `apps/fleet/scripts/gate/shard-by-test-name.ts`
+- Test: `apps/fleet/test/bun/gate-shard-by-test-name.test.ts`
+
+**Interfaces:**
+- Produces: `listTestNames(filePath: string): Promise<string[]>` (shells out to `bun test --list-tests` or an equivalent enumeration — exact bun flag verified against this repo's own bun version at implementation time, flagged as a guess here); `bucketTestNames(names: string[], n: number): string[][]` (pure — reuses the same LPT-style balancing idea as Task 3's `planShards`, but keyed by test NAME not file, since this is one file's own tests).
+- Consumes: nothing at the type level; the gate leg's own `legCmd` for this file becomes `bun test deploy-rescue-gate.test.ts -t "<name-filter-for-this-shard>"` once wired into Task 2's `fleet.json` gate block — that wiring is config, not code, out of scope for this task's own diff.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// apps/fleet/test/bun/gate-shard-by-test-name.test.ts
+import { describe, it, expect } from "bun:test";
+import { bucketTestNames } from "../../scripts/gate/shard-by-test-name";
+
+describe("bucketTestNames", () => {
+  it("splits N names across n buckets, every name assigned exactly once", () => {
+    const names = Array.from({ length: 16 }, (_, i) => `test ${i}`);
+    const buckets = bucketTestNames(names, 8);
+    expect(buckets.length).toBe(8);
+    expect(buckets.flat().sort()).toEqual(names.slice().sort());
+  });
+
+  it("never returns an empty bucket when n <= names.length", () => {
+    const names = ["a", "b", "c"];
+    const buckets = bucketTestNames(names, 3);
+    expect(buckets.every((b) => b.length > 0)).toBe(true);
+  });
+
+  it("empty input -> n empty buckets, not a throw", () => {
+    expect(bucketTestNames([], 4)).toEqual([[], [], [], []]);
+  });
+});
+```
+
+- [ ] **Step 2: Run, confirm it fails**
+
+Run: `cd apps/fleet && bun test test/bun/gate-shard-by-test-name.test.ts`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement**
+
+```ts
+// apps/fleet/scripts/gate/shard-by-test-name.ts
+//
+// #715 v2 (real CI-timing data): deploy-rescue-gate.test.ts's own 138 tests
+// are the bun-test lane's floor at file-level sharding (209s at N=4-8).
+// bucketTestNames splits that ONE file's own test names round-robin across
+// n shards — simple round-robin, not LPT-weighted like Task 3's
+// planShards, since per-test timing within one file isn't measured here
+// (Task 8's own scope is per-FILE timing); round-robin is good enough to
+// go from "209s floor" to "209s / n", even without per-test weights.
+
+export function bucketTestNames(names: string[], n: number): string[][] {
+  const buckets: string[][] = Array.from({ length: n }, () => []);
+  names.forEach((name, i) => buckets[i % n].push(name));
+  return buckets;
+}
+
+if (import.meta.main) {
+  const n = Number(process.argv[2] ?? 8);
+  const proc = Bun.spawn(["bun", "test", "test/bun/deploy-rescue-gate.test.ts", "--list-tests"], { stdout: "pipe" });
+  const text = await new Response(proc.stdout).text();
+  const names = text.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  console.log(JSON.stringify(bucketTestNames(names, n)));
+}
+```
+
+- [ ] **Step 4: Run, confirm it passes**
+
+Run: `cd apps/fleet && bun test test/bun/gate-shard-by-test-name.test.ts`
+Expected: PASS, all 3 cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/fleet/scripts/gate/shard-by-test-name.ts apps/fleet/test/bun/gate-shard-by-test-name.test.ts
+git commit -m "feat(fleet): split deploy-rescue-gate.test.ts by test name, not file (refs #715)"
+```
+
+---
+
+### Task 16: Worker-side outbound handler for `GateRunnerDO` (CLAUDE-ONLY, Wave 3)
+
+**Why this is CLAUDE-ONLY, full stop:** this is the one file, besides `workflow.ts`, where a real credential (the R2 write key) lives — the blueprint's banned-areas list names auth/secrets/tokens/credentials directly. v1 of this plan had no such file: it presigned URLs in Task 10 instead, which a real review comment flagged as itself a forgeable credential ("PR code runs beside the result-upload URL → PR can forge its own verdict"). This task is the actual fix: the credential moves OFF any path the container ever sees, into a Worker-side hook that only Cloudflare's own outbound-traffic-handler mechanism can reach — confirmed real and documented ("programmable egress proxies... have access to all Workers bindings... No token is exposed to the container. The secret lives in the Worker's environment and is never passed into the sandbox"), available only under the `durable_object` scheduling policy Task 0a/1 already committed to.
+
+**Files:**
+- Modify: `apps/fleet/src/gate/do.ts` (Task 10's file — this task's own diff, in a LATER wave than Task 10, never concurrent with it)
+- Create: `apps/fleet/src/gate/outbound-handler.ts`
+- Test: `apps/fleet/test/bun/gate-outbound-handler.test.ts` (the pure routing/rewrite decision — which internal path maps to which real R2 key/credential-injection call — is unit-tested; the actual credential injection itself needs a live container+Worker round trip, same posture Task 14's own live-round-trip items take)
+
+**Interfaces:**
+- Produces: `resolveOutboundTarget(path: string): { bucket: "STUDIO_ARCHIVE"; key: string } | null` (pure — parses the container's own fixed `http://gate-r2.internal/<key>` request path from Task 11's `gate-server.ts` into the real R2 binding + key, or `null` for anything that doesn't match that one allowed shape — an allow-list, not a passthrough); the actual outbound-handler hook wired onto `GateRunnerDO` (exact Cloudflare Containers method/hook name flagged as unverified against live docs in Task 11's own header — this task's implementer confirms it at build time); the `/run-leg` handler change (ACK 202 fast, `this.ctx.waitUntil` keeps the container run going, `sendEvent` back on the calling Workflow instance once done — Task 14's own design need, consumed here since `do.ts` is this task's file this wave, not Task 14's).
+- Consumes: `env.STUDIO_ARCHIVE` (existing R2 binding, this plan's own `gate/` prefix within it — no new bucket); Task 5's `baselineTarballKey`/`baselineSnapshotName` key SHAPES (to validate an incoming path actually looks like a gate-runner key before authorizing anything against it — never a blanket "sign anything asked").
+
+**Review Focus for this task specifically:** `resolveOutboundTarget` must return `null` (never authorize) for any path that doesn't match the exact `gate/<owner>/<repo>/...` prefix shape — a container that somehow got a different internal path should get refused, not silently signed against an arbitrary key.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// apps/fleet/test/bun/gate-outbound-handler.test.ts
+import { describe, it, expect } from "bun:test";
+import { resolveOutboundTarget } from "../../src/gate/outbound-handler";
+
+describe("resolveOutboundTarget", () => {
+  it("a valid gate-runner result key resolves to STUDIO_ARCHIVE + that key", () => {
+    expect(resolveOutboundTarget("/gate/rafarc21/fleetflare/runs/715/shard-typecheck.json")).toEqual({
+      bucket: "STUDIO_ARCHIVE", key: "gate/rafarc21/fleetflare/runs/715/shard-typecheck.json",
+    });
+  });
+
+  it("a valid baseline tarball key resolves the same way", () => {
+    expect(resolveOutboundTarget("/gate/rafarc21/fleetflare/baselines/abc-def.tar")).toEqual({
+      bucket: "STUDIO_ARCHIVE", key: "gate/rafarc21/fleetflare/baselines/abc-def.tar",
+    });
+  });
+
+  it("anything outside the gate/ prefix is refused, never authorized", () => {
+    expect(resolveOutboundTarget("/caches/install/anything")).toBeNull();
+    expect(resolveOutboundTarget("/../../etc/passwd")).toBeNull();
+  });
+
+  it("an empty or malformed path is refused", () => {
+    expect(resolveOutboundTarget("")).toBeNull();
+    expect(resolveOutboundTarget("/")).toBeNull();
+  });
+});
+```
+
+- [ ] **Step 2: Run, confirm it fails**
+
+Run: `cd apps/fleet && bun test test/bun/gate-outbound-handler.test.ts`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement**
+
+```ts
+// apps/fleet/src/gate/outbound-handler.ts
+//
+// #715 v2 (real review correction): the ONE place a real R2 write
+// credential lives for GateRunnerDO's own flow. The container (Task 11's
+// gate-server.ts) makes a PLAIN fetch to a fixed internal path
+// (http://gate-r2.internal/<key>) — this file is what Cloudflare's own
+// durable_object-policy outbound traffic handler calls to decide what that
+// plain request actually resolves to and with what credential, entirely
+// inside the Worker's own boundary. The container never sees a token, a
+// key, or a signed URL — only this allow-list decides what gets
+// authorized, and anything outside the gate/ prefix is refused.
+export function resolveOutboundTarget(path: string): { bucket: "STUDIO_ARCHIVE"; key: string } | null {
+  const key = path.replace(/^\/+/, "");
+  if (!key.startsWith("gate/")) return null;
+  if (key.includes("..")) return null;
+  return { bucket: "STUDIO_ARCHIVE", key };
+}
+```
+
+Add to `apps/fleet/src/gate/do.ts` (this task's own diff, Task 10's file, this wave only):
+
+```ts
+// Added by Task 16 — the outbound-traffic-handler wiring + the /run-leg
+// ACK-fast change Task 14's event-fan-in design needs. Exact Cloudflare
+// Containers hook/method name verified against live docs at build time
+// (flagged in Task 11's own header) — this sketch shows the OUTCOME, not
+// a guessed-exact API surface.
+import { resolveOutboundTarget } from "./outbound-handler";
+// ... inside GateRunnerDO, replacing /run-leg's body:
+//   1. ACK 202 immediately.
+//   2. this.ctx.waitUntil(this.start({ envVars }).then(() => this.startAndWaitForPorts())
+//        .then(() => this.containerFetch(new Request("http://container/run", { method: "POST" })))
+//        .then((res) => res.json())
+//        .then((legBody) => env.GATE_WORKFLOW.get(instanceId).sendEvent({ type: eventType, payload: legBody })));
+//   3. The class's own outbound-handler override calls resolveOutboundTarget
+//      on every outbound request's path; a non-null result signs/injects
+//      the real STUDIO_ARCHIVE credential server-side before the request
+//      leaves the Worker's boundary, a null result lets the request fail
+//      closed (refused, not silently unsigned).
+```
+
+- [ ] **Step 4: Run, confirm it passes**
+
+Run: `cd apps/fleet && bun test test/bun/gate-outbound-handler.test.ts`
+Expected: PASS, all 4 cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/fleet/src/gate/outbound-handler.ts apps/fleet/src/gate/do.ts apps/fleet/test/bun/gate-outbound-handler.test.ts
+git commit -m "feat(fleet): Worker-side outbound handler for GateRunnerDO, no credential in container (refs #715)"
+```
+
+---
+
+### Task 17: `ONE_WAY_GLOBS` additions for gate-runner source (CLAUDE-ONLY, Wave 1)
+
+**Why CLAUDE-ONLY:** `apps/fleet/scripts/merge-danger.ts` is itself a safety-classification file (confirmed real: `classify`, `.github/workflows/one-way-door.yml`) — same reasoning every other edit to it already gets in this repo's own history.
+
+**Files:**
+- Modify: `apps/fleet/scripts/merge-danger.ts`
+- Test: extend `apps/fleet/test/bun/merge-danger.test.ts` (existing file)
+
+**Interfaces:**
+- Produces: two new `ONE_WAY_GLOBS` entries. No new exported function — `classify`/`ONE_WAY_GLOBS` already exist (`merge-danger.ts:29-105`, confirmed real); this task only adds data.
+- Consumes: nothing new.
+
+**Why these two paths, not more:** `apps/fleet/container/**` already covers `Dockerfile.gate`/`gate-server.ts`/`gate-merge-tree.ts` (Tasks 6/11 — confirmed real, `merge-danger.ts:36-38`); `apps/fleet/src/write-proxy/**` already covers credential-minting helpers like `workerWriteToken` (confirmed real, `gh-route.ts:164-168`) but does NOT cover this plan's new `apps/fleet/src/gate/**` (`do.ts`, `workflow.ts`, `outbound-handler.ts`, `routes.ts` — all credential-adjacent) or `apps/fleet/scripts/gate/**` (the sharding/measurement scripts, lower-risk but still worth the same one-way-door protection every other new script path under `apps/fleet/scripts/` gets if it touches CI shape). Both are genuinely new — neither is covered by an existing glob.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// extend apps/fleet/test/bun/merge-danger.test.ts
+describe("gate-runner paths (#715)", () => {
+  it("apps/fleet/src/gate/do.ts is one-way", () => {
+    expect(classify(["apps/fleet/src/gate/do.ts"]).oneWay).toBe(true);
+  });
+  it("apps/fleet/src/gate/outbound-handler.ts is one-way", () => {
+    expect(classify(["apps/fleet/src/gate/outbound-handler.ts"]).oneWay).toBe(true);
+  });
+  it("apps/fleet/scripts/gate/measure-shard-timing.ts is one-way", () => {
+    expect(classify(["apps/fleet/scripts/gate/measure-shard-timing.ts"]).oneWay).toBe(true);
+  });
+  it("a file outside both new globs is unaffected", () => {
+    expect(classify(["apps/fleet/src/gate-unrelated-name.ts"]).oneWay).toBe(false);
+  });
+});
+```
+
+- [ ] **Step 2: Run, confirm it fails**
+
+Run: `cd apps/fleet && bun test test/bun/merge-danger.test.ts`
+Expected: FAIL on the 3 new `true` cases — neither glob exists yet.
+
+- [ ] **Step 3: Implement**
+
+Add to `ONE_WAY_GLOBS` (`merge-danger.ts:34-105`, next to the existing `apps/fleet/src/write-proxy/**` entry):
+
+```ts
+{
+  pattern: "apps/fleet/src/gate/**",
+  why: "#715 gate-runner: GateRunnerDO, GateWorkflow, the outbound-credential handler — the same credential-adjacent class this repo already one-way-doors for write-proxy/rescue/etc.",
+},
+{
+  pattern: "apps/fleet/scripts/gate/**",
+  why: "#715 gate-runner: shard-count/timing scripts that decide CI shape for every PR, same protection class as scripts/deploy*",
+},
+```
+
+- [ ] **Step 4: Run, confirm it passes**
+
+Run: `cd apps/fleet && bun test test/bun/merge-danger.test.ts`
+Expected: PASS, all cases green including every pre-existing case.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/fleet/scripts/merge-danger.ts apps/fleet/test/bun/merge-danger.test.ts
+git commit -m "chore(fleet): add gate-runner paths to ONE_WAY_GLOBS (refs #715)"
+```
+
+---
+
 ## Out of scope for this plan (later phases of #715)
 
-- Phase 2: adding the two operator repos to `GATE_RUNNER_REPOS` and each repo's own `fleet.json` gate block — config only, no new code, once Phase 1 holds its p50/p90 target over 10 PRs (spec's own testing plan, item 5).
-- Phase 2: a GitHub token path INTO `GateRunnerDO`'s container (needed once a private repo is gated in) — `GateLegRequest`/`buildLegEnvVars` (Task 10) deliberately carry no token field for Phase 1's public repo; adding one is its own task against Task 10's file, not re-opened here.
+- Phase 2: adding #715's other two named repos to `GATE_RUNNER_REPOS` and each repo's own `fleet.json` gate block — config only, no new code, once Phase 1 holds its p50/p90 target over 10 PRs (spec's own testing plan, item 5).
+- Phase 2: a GitHub token path INTO `GateRunnerDO`'s container (needed once a private repo is gated in) — `GateLegRequest`/`buildLegEnvVars` (Task 10) deliberately carry no token field for Phase 1's public repo; adding one is its own task against Task 10's file, AND Task 16's outbound handler would need extending to inject it (never passed through Task 10's file directly), not re-opened here.
 - Phase 3: flipping `FLEET_GATE_RUNNER` default to `on` fleet-wide.
-- The spec's own open questions this plan does not re-decide: `max_instances` sizing (150 vs tighter), the illustrative 10-PRs/day/repo cost assumption, re-verifying the PAT's `Commit statuses: write` scope (carried forward as a live, operator-run precondition in Task 14's header, not a unit test).
+- The spec's own open questions this plan does not re-decide: final `max_instances` sizing within the 15-18-container range Task 0a/8 measured, the illustrative 10-PRs/day/repo cost assumption. **No longer open:** the `Commit statuses: write` gap is now a confirmed GitHub App permission (Task 0b, a live operator precondition blocking Task 14, not a unit test) — v1 had speculatively called this an "unverified PAT scope."
 
 ## Self-review (writing-plans skill checklist)
 
-1. **Spec coverage.** Verdict/commit-status (§1) → Tasks 4, 14. Flag name (§2) → Tasks 1, 2. Bindings (§3) → Task 1. R2/KV layout (§4) → Tasks 5, 10 (`presignR2` reuse), the `gate/` key shapes named directly in Task 10/14's leg requests. Instance type/limits (§5) → carried forward verbatim in Task 1, not re-decided. Cost (§6) → not re-derived (no new task needed; nothing in this plan changes the cost model). Rollout/rollback (§7) → Task 1's image-change note, Task 11's `ONE_WAY_GLOBS` decision, Global Constraints. `fleet.json` gate block (spec's own section) → Task 2. CLI (spec's own section) → Task 7. Testing plan → Tasks 3/4/6's own TDD steps cover items 1–3 directly; items 4–6 (live PR diff, p50/p90 measurement, PAT re-probe) are explicitly operator-run, not plan tasks (flagged in Task 14's header and here).
-2. **Placeholder scan.** No task above says "add appropriate error handling" or "similar to Task N" without the actual code; every test has real assertions, every implementation step has a real function body.
-3. **Type consistency.** `LegResult`/`LegState` (Task 4) are the exact types Task 10's `/run-leg` response and Task 14's `legResults` array use. `GateLegRequest`/`buildLegEnvVars` (Task 10) and `gate-server.ts`'s env var names (Task 11) use the identical `GATE_*` key set. `GateStatusResponse` (Task 7) and Task 12's route response use the identical `{ state, description?, statusPostFailed? }` shape.
+1. **Spec coverage.** Verdict/commit-status (§1) → Tasks 4, 14. Flag name (§2) → Tasks 1, 2. Bindings (§3) → Task 1 (now including `scheduling_policy: "durable_object"`). R2 layout (§4, **no KV** — v2 correction) → Task 5 (deterministic baseline key, no pointer), Task 10 (plain R2 keys, `presignR2` no longer used anywhere in this plan — Task 16's outbound handler is the credential boundary now), the `gate/` key shapes named directly in Task 10/14's leg requests. Instance type/limits (§5) → carried forward in Task 1 within the measured 15-18-container range (Task 0a/8), not a final decision. Cost (§6) → not re-derived (no new task needed; nothing in this plan changes the cost model). Rollout/rollback (§7) → Task 1's image-change note, Task 17's `ONE_WAY_GLOBS` additions (NEW, v2), Global Constraints' `classify`-stays-required bullet (NEW, v2). `fleet.json` gate block (spec's own section) → Task 2, pinned to `AGENT_REPO` (v2, confirmed real). CLI (spec's own section) → Task 7, space-separated `fleet gate start/watch` (v2 correction, confirmed real convention). Testing plan → Tasks 3/4/6's own TDD steps cover items 1–3 directly; items 4–6 (live PR diff, p50/p90 measurement, GitHub App permission precondition) are explicitly operator-run, not plan tasks (flagged in Task 0b/14's headers and here).
+2. **Placeholder scan.** No task above says "add appropriate error handling" or "similar to Task N" without the actual code; every test has real assertions, every implementation step has a real function body. The one explicitly-flagged exception (the exact Cloudflare Containers outbound-handler hook/method name, Tasks 11/16) is named as an open verification-at-build-time gap, not silently guessed past.
+3. **Type consistency.** `LegResult`/`LegState` (Task 4) are the exact types Task 10's `/run-leg` response, Task 14's `runLeg`/`legResults`, and Task 16's `sendEvent` payload all use. `GateLegRequest`/`buildLegEnvVars` (Task 10, v2: `resultKey`/`baselineKeys`, plain strings, never a URL) and `gate-server.ts`'s env var names (Task 11: `GATE_RESULT_KEY`/`GATE_BASELINE_KEYS`) use the identical `GATE_*` key set. `GateStatusResponse` (Task 7) and Task 12's route response use the identical `{ state, description?, statusPostFailed? }` shape. `baselineTarballKey`/`baselineSnapshotName` (Task 5) and `resolveOutboundTarget` (Task 16) agree on the `gate/<owner>/<repo>/...` key shape.
+4. **No `GATE_KV` reference survives this revision** — grepped for it across every task above; the only remaining mentions are in this section's own "v1 had..." historical notes and the Global Constraints bullet explaining why it was removed.
+5. **No task assumes the `default` Containers scheduling policy** — Task 1's sketch, Task 10's header, and Task 11/16's headers all say `durable_object` explicitly; Task 0a is sequenced first specifically so this decision predates any task that depends on it.
+6. **Nothing in Task 12 or Task 14 implies `gate/verdict` replaces `classify`** in the maestro's required-checks set — Global Constraints' new bullet and Review Focus item 7 both say so explicitly; Task 17 ADDS to `classify`'s own `ONE_WAY_GLOBS`, never touches its required-check status.
+7. **Wave table file-collision check, re-run after this revision's reordering:** Wave 0 (0a, 0b — no files, operator-run). Wave 1 (1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 17 — eleven tasks, eleven distinct file sets: `wrangler.example.jsonc`+`env.ts` / `config.ts` / `shard-plan.ts` / `verdict.ts` / `baseline.ts` / `container/gate-merge-tree.ts` / `cli-args.ts`+`cli/fleet.ts`+`cli/gate.ts` / `scripts/gate/measure-shard-timing.ts` / the browser-lane doc / `scripts/gate/shard-by-test-name.ts` / `scripts/merge-danger.ts` — no overlap). Wave 2 (10, 11, 12, 13 — `gate/do.ts` / `container/Dockerfile.gate`+`container/gate-server.ts` / `gate/routes.ts`+`studio/routes.ts` / `gate/warm-pool.ts`+`index.ts`+`env.ts` — no overlap; Task 13's own `env.ts` touch and Task 1's Wave-1 `env.ts` touch are different waves, per the existing 3(now 4)-way split). Wave 3 (16, 14 — `gate/do.ts`(Task 16, picking up from Task 10's Wave-2 version) + `gate/outbound-handler.ts` / `gate/workflow.ts`+`env.ts`+`github/api.ts` — no overlap; Task 14 explicitly does NOT touch `do.ts`, see its own header, specifically to keep this true).
 
 ## Guesses / gaps for a second pass (flagging explicitly, per the accepted rework-cost tradeoff)
 
 1. **The spec's own open question #4** (where `GateRunnerDO`'s Dockerfile lives) is answered here as a plan-level decision (`apps/fleet/container/Dockerfile.gate`, already covered by `ONE_WAY_GLOBS`) rather than left open — the spec itself invited this ("flags the gap for whoever writes the implementation plan"). If the operator's spec revision picks the OTHER option (`apps/fleet/scripts/gate/`), Task 11's file path and `merge-danger.ts`'s glob both need a follow-up task.
 2. **`/studio/gate/status` reads the Workflow binding's native `.status()`, not a second GitHub commit-status read.** The spec's CLI section only says `gate-watch` "polls the Workflow instance / `gate/verdict` status" without picking one — I picked the Workflow-native read specifically because it keeps Task 12's route token-free (GLM-OK). If the operator's spec revision requires polling the real GitHub commit status instead (e.g. so a non-fleet consumer of the PR can see the same thing `gate-watch` sees), Task 12 would need a GitHub token and should be re-tagged CLAUDE-ONLY.
-3. **Phase 1 has no GitHub token anywhere in `GateRunnerDO`'s container path**, justified by `rafarc21/fleetflare` being public. This is explicit in Tasks 10/11's own headers — if Phase 1's scope ever widens to include a private repo before Phase 2, that assumption breaks and both tasks need a follow-up.
-4. **The `/ping` warm-pool target (Task 13) needs one line added to Task 10's `do.ts`** (`GateRunnerDO.fetch` returning 200 rather than 404 for an unrecognized path, or an explicit `/ping` branch) — the one place this plan's Wave 2 file-disjointness isn't perfectly clean, flagged inline in Task 13 rather than silently assumed.
-5. **Every other leg's fan-out in Task 14** (typecheck/lint/invariants/rust/vitest shards — only `merge-tree` is spelled out in full) is the same `GATE_RUNNER.get(...).fetch("/run-leg", ...)` pattern repeated N times with Task 2's config + Task 3's shard-plan feeding the command strings — elided in the plan's own code sample as "the same pattern repeated," not a placeholder for genuinely new logic, but the executing task should expand it fully rather than literally loop-call the sample as written.
-6. **The operator's 08:25Z CF-maximal directive arrived after the spec file was written** and is not yet folded into `docs/superpowers/specs/2026-10-15-gate-runner-design.md` itself (max fan-out, Browser Rendering, warm pool, measured shard count). This plan grounds Tasks 3, 8, 9, 13 in that directive directly rather than waiting for the spec's own revision to catch up — per the operator's own accepted rework-cost tradeoff, a second pass may need to adjust these tasks once the spec text itself changes.
+3. **Phase 1 has no GitHub token anywhere in `GateRunnerDO`'s container path**, justified by `rafarc21/fleetflare` being public. This is explicit in Tasks 10/11's own headers — if Phase 1's scope ever widens to include a private repo before Phase 2, that assumption breaks and both tasks (plus Task 16's outbound handler) need a follow-up.
+4. **The `/ping` warm-pool target (Task 13) needs one line added to Task 10's `do.ts`** (`GateRunnerDO.fetch` returning 200 rather than 404 for an unrecognized path, or an explicit `/ping` branch) — the one place this plan's Wave 2 file-disjointness isn't perfectly clean, flagged inline in Task 13 rather than silently assumed. (Pre-existing from v1; not introduced or fixed by this revision — out of this revision's own stated scope.)
+5. **Every other leg's fan-out in Task 14** (typecheck/lint/invariants/rust/vitest shards — only `merge-tree` is spelled out in full) is the same `runLeg(...)` call repeated N times with Task 2's config + Task 3's shard-plan feeding the command strings — elided in the plan's own code sample as "the same pattern repeated," not a placeholder for genuinely new logic, but the executing task should expand it fully rather than literally loop-call the sample as written.
+6. **The operator's 08:25Z CF-maximal directive arrived after the spec file was written** and is not yet folded into `docs/superpowers/specs/2026-10-15-gate-runner-design.md` itself (max fan-out, browser lane, warm pool, measured shard count) — nor are this v2 revision's own 3 real review-comment corrections; a separate, parallel task is revising the spec for both. This plan grounds its own tasks in both directly rather than waiting for the spec's own revision to catch up.
+7. **The exact Cloudflare Containers outbound-traffic-handler hook/method name is not pinned down** (Tasks 11/16, both flag it explicitly) — this plan describes the OUTCOME (container's plain fetch gets rewritten + authorized server-side, container never sees a credential) and leaves the exact binding/override name for Task 16's own implementer to verify against live docs at build time. I do not have independent access to verify this specific API surface myself from this environment; the lead's own task brief separately confirmed the underlying mechanism (outbound traffic handlers, `durable_object` policy, `ctx.container`) is real and documented, which is what this revision relies on.
+8. **Task 0a's own snapshot-restore-time numbers do not exist yet** — unlike Task 8's real 98-run CI-timing data (already known, cited directly), Task 0a's spike has not been run. Every place this plan says "primary: snapshot, fallback: tarball" (Task 5, 11) is a design DECISION made ahead of that measurement, on the strength of the real review comment that container snapshots are a real, documented Cloudflare Containers feature — not a claim that the restore time is already known to be acceptable. If Task 0a's real numbers come back unfavorable, Task 11's own fallback path is what Phase 1 actually ships on, not a hypothetical.
