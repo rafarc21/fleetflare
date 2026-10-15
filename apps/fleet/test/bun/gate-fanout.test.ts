@@ -13,6 +13,7 @@ const BASE = {
   vitestCmd: "bun run test --shard={i}/{n}",
   vitestShards: 2,
   bunShards: [],
+  bunLaneRoot: "apps/fleet",
   baselineKeys: ["gate/acme/example/baselines/x.tar"],
 };
 
@@ -47,16 +48,21 @@ describe("vitestLegs", () => {
 
 describe("bunLegs", () => {
   it("one leg per bun shard, named bun-1..bun-n", () => {
-    expect(bunLegs(BUN_SHARDS).map((l) => l.leg)).toEqual(["bun-1", "bun-2"]);
+    expect(bunLegs(BUN_SHARDS, "apps/fleet").map((l) => l.leg)).toEqual(["bun-1", "bun-2"]);
   });
-  it("each leg runs bun test on its own files, inside apps/fleet", () => {
-    expect(bunLegs(BUN_SHARDS).map((l) => l.legCmd)).toEqual([
+  it("each leg runs bun test on its own files, inside the block's root", () => {
+    expect(bunLegs(BUN_SHARDS, "apps/fleet").map((l) => l.legCmd)).toEqual([
       "cd apps/fleet && bun test test/bun/alpha.test.ts test/bun/beta.test.ts",
       "cd apps/fleet && bun test test/bun/gamma.test.ts",
     ]);
   });
+  it("a per-repo root moves every bun leg's cd, not just the fleet's", () => {
+    expect(bunLegs([["test/bun/a.test.ts"]], "packages/web")[0].legCmd).toBe(
+      "cd packages/web && bun test test/bun/a.test.ts",
+    );
+  });
   it("no shards -> no legs", () => {
-    expect(bunLegs([])).toEqual([]);
+    expect(bunLegs([], "apps/fleet")).toEqual([]);
   });
 });
 
