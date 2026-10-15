@@ -31,26 +31,14 @@ import { composeSurvivalBrief } from "../src/studio/survival-brief";
 import { wipSyncRef } from "../src/studio/rescue";
 import {
   OBSERVED_KEY, emptyObserved,
-  type BringupVia, type Observed, type ObservedStorage,
+  type BringupVia,
 } from "../src/studio/observed";
 import { type EnvelopeArtifact } from "../src/board/types";
 import { REAL_WEBSTUDIO_PANE } from "./fixtures/rate-limit-panes";
-import { session } from "./helpers/observed-session";
+import { session, fakeObserved } from "./helpers/observed-session";
 
 const STUDIO = "fleetflare--web-studio";
 const NOW = "2026-09-25T12:00:00.000Z";
-
-/** The narrow ObservedStorage port over a plain Map — the same fakeStorage
- *  shape test/studio.observed.test.ts and test/studio.wake-gate.test.ts use. */
-function fakeObserved(seed?: Partial<Observed>) {
-  const map = new Map<string, Observed>();
-  if (seed) map.set(OBSERVED_KEY, { ...emptyObserved(), ...seed });
-  const storage: ObservedStorage = {
-    get: async () => map.get(OBSERVED_KEY),
-    put: async (_key, value) => { map.set(OBSERVED_KEY, value); },
-  };
-  return { map, storage, stored: () => map.get(OBSERVED_KEY) };
-}
 
 // A REAL `tmux capture-pane -p` of fleetflare--web-studio (#106's own capture
 // set, test/fixtures/rate-limit-panes.ts): claude's footer at the bottom with
