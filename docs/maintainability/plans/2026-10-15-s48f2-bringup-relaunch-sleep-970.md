@@ -3,8 +3,10 @@
 `apps/fleet/test/bun/bringup-claude-relaunch.test.ts`, measured 76.7s (sweep 48, F2).
 
 (a) `:819` `Bun.sleepSync(3000)` in "the fake lead STAYS UP" — a fixed wait proving
-the lead is not relaunched. The relaunch bug fired within ~300ms when present;
-1000ms carries the same claim. Cut to 1000ms.
+the fake lead (`sleep 300`) stays up after launch, so every other test's
+`claudePids()` baseline is trustworthy. No pinned threshold: the lead's own
+lifetime is 300s, so 1000ms proves persistence as soundly as 3000ms. Cut to
+1000ms.
 
 (b) 32 tests each `fresh()` a FakeStudio. Investigated sharing one session per
 describe — rejected:
@@ -23,7 +25,7 @@ Decision: keep per-test `fresh()`. No code change for (b).
 
 ## Change
 - `apps/fleet/test/bun/bringup-claude-relaunch.test.ts:819`: `3000` → `1000`,
-  with a one-line comment naming the ~300ms relaunch-bug fact.
+  with a WHY comment (fake lead persists; no pinned threshold).
 
 ## Steps
 1. Plan doc commit + push.
