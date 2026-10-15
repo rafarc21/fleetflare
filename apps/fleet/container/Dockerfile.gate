@@ -1,0 +1,47 @@
+# apps/fleet/container/Dockerfile.gate — GateRunnerDO's image (#715 Phase 1).
+# Not Dockerfile.studio: no Claude, no tmux, no chromium, no sandbox base.
+# Plain bun base, same shape Dockerfile.deploy already uses, and the same
+# reproducible-build rules its header states (scripts/image-repro-check.sh):
+#   - SOURCE_DATE_EPOCH fixes the image's created/history times; bump never.
+#   - base image pinned by digest; apt from the dated APT_SNAPSHOT; every
+#     download pinned by version (and checksum where it is a file).
+#   - every RUN that installs or downloads is wrapped in repro-seal begin/end.
+# IMAGE CHANGE: ships only at an operator-approved image window.
+ARG SOURCE_DATE_EPOCH=1790640000
+
+FROM oven/bun:1.3-debian@sha256:9dba1a1b43ce28c9d7931bfc4eb00feb63b0114720a0277a8f939ae4dfc9db6f AS src
+ARG SOURCE_DATE_EPOCH
+COPY repro-seal.sh gate-server.ts gate-merge-tree.ts /src/
+RUN mkdir -p /src/base/etc /src/base/usr/local/bin /src/base/workspace /src/app/app \
+    && printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n' > /src/base/etc/hosts \
+    && mv /src/repro-seal.sh /src/base/usr/local/bin/repro-seal \
+    && mv /src/gate-server.ts /src/gate-merge-tree.ts /src/app/app/ \
+    && chmod -R u=rwX,go=rX /src && chmod 0755 /src/base/usr/local/bin/repro-seal \
+    && find /src -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
+
+FROM oven/bun:1.3-debian@sha256:9dba1a1b43ce28c9d7931bfc4eb00feb63b0114720a0277a8f939ae4dfc9db6f
+ARG SOURCE_DATE_EPOCH
+ARG APT_SNAPSHOT=20260929T000000Z
+COPY --from=src /src/base/ /
+
+# git: anonymous clone and merge-tree. build-essential: the linker cargo needs.
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates curl build-essential \
+    && repro-seal end
+
+# rustup-init 1.29.1: checksum-verified before it runs (never a curl | sh).
+# Toolchain 1.91.0 = cargo-nextest 0.9.148's rust-version; pinned, not "stable".
+RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
+    && curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init \
+    && echo "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71  /tmp/rustup-init" | sha256sum -c - \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --profile minimal --default-toolchain 1.91.0 \
+    && /root/.cargo/bin/cargo install cargo-nextest --version 0.9.148 --locked \
+    && repro-seal end
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+COPY --from=src /src/app/ /
+ENV PORT=8080
+EXPOSE 8080
+CMD ["bun", "run", "/app/gate-server.ts"]
