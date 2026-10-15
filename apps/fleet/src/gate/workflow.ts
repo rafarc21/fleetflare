@@ -42,6 +42,26 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
     // Only the SHAs and file list leave this step. The token is minted inside
     // each step and never returned, because step results persist in Workflow state.
+    // fleet.json is read from the FLEET's own repo (env.AGENT_REPO), never
+    // from `repo`: a gated repo must not be able to weaken its own gate. The
+    // config is loaded first: its bun lane root decides which tree to list.
+    const config = await step.do("load-config", async () => {
+      const agentRepo = this.env.AGENT_REPO;
+      const token = await mintToken(agentRepo);
+      const text = await fetchRepoFile(token, agentRepo, "fleet.json", "HEAD");
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(text); } catch { return null; }
+      // The PR's repo picks its `gates` entry; the `gate` block is the
+      // fallback for the fleet's own repo only.
+      return parseGateConfig(parsed, repo, agentRepo);
+    });
+
+    if (config === null) {
+      // No gate block for this repo: not a repo this gate runs for. Post
+      // nothing; the route layer (Task 12) already filters on GATE_RUNNER_REPOS.
+      return { skipped: "no gate config for this repo", statusPostFailed: false };
+    }
+
     const resolved = await step.do("resolve-pr", async () => {
       const token = await mintToken(repo);
       const pull = await getPullRequest(token, repo, pr);
@@ -50,28 +70,14 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       // non-default branch must be gated against that branch.
       const baseSha = await getBranchSha(token, repo, pull.baseRef);
       const { files } = await compareFiles(token, repo, baseSha, headSha);
-      // The bun-test lane is the head's own test/bun files, not a list baked
-      // into this Worker, so a new test file is picked up on its next run.
-      const bunFiles = laneFilesFromTree(await listRepoTree(token, repo, headSha));
+      // The bun-test lane is the head's own test files under the block's root,
+      // not a list baked into this Worker, so a new test file is picked up on
+      // its next run. A block with no bun lane lists nothing.
+      const bunFiles = config.bunLaneRoot === undefined
+        ? []
+        : laneFilesFromTree(await listRepoTree(token, repo, headSha), config.bunLaneRoot, config.bunLaneGlobs);
       return { headSha, baseSha, changedFiles: files, bunFiles };
     });
-
-    // fleet.json is read from the FLEET's own repo (env.AGENT_REPO), never
-    // from `repo`: a gated repo must not be able to weaken its own gate.
-    const config = await step.do("load-config", async () => {
-      const agentRepo = this.env.AGENT_REPO;
-      const token = await mintToken(agentRepo);
-      const text = await fetchRepoFile(token, agentRepo, "fleet.json", "HEAD");
-      let parsed: unknown = null;
-      try { parsed = JSON.parse(text); } catch { return null; }
-      return parseGateConfig(parsed);
-    });
-
-    if (config === null) {
-      // No gate block: not a repo this gate runs for. Post nothing; the
-      // route layer (Task 12) already filters on GATE_RUNNER_REPOS.
-      return { skipped: "no gate block in fleet.json", statusPostFailed: false };
-    }
 
     if (!matchesPathRules(resolved.changedFiles, config.pathRules)) {
       // Nothing gated changed. Post success so the required context is not
@@ -87,6 +93,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       headSha: resolved.headSha, baseSha: resolved.baseSha,
       install: config.install, legs: config.legs,
       bunShards: planBunShards(resolved.bunFiles, BUN_SHARD_TIMINGS.timings, config.bunShards),
+      bunLaneRoot: config.bunLaneRoot ?? "",
       vitestCmd: config.vitestCmd, vitestShards: config.vitestShards,
       baselineKeys: [], // lockfile baseline keys are not wired yet; each leg installs from scratch
     });
