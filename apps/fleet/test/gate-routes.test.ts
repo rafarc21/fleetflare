@@ -16,7 +16,7 @@ function fakeEnv(overrides: Partial<Env> = {}): FakeEnv {
     GATE_RUNNER_REPOS: REPO,
     GATE_WORKFLOW: {
       create: vi.fn(async () => ({ id: "run-1" })),
-      get: vi.fn(() => ({ status: vi.fn(async () => ({ status: "running" })) })),
+      get: vi.fn(async () => ({ status: vi.fn(async () => ({ status: "running" })) })),
     },
     ...overrides,
   } as unknown as FakeEnv;
