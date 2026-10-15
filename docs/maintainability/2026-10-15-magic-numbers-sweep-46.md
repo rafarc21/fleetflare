@@ -21,7 +21,7 @@ directly above each; install-cache.ts's flat 600s `--max-time` (:938, :1694,
 listOpenPullNumbers/listOpenPullFiles `per_page=100` (:585, :616 — comments
 state the one-page-at-GitHub's-max posture); junior/route.ts:178's
 64_000/128_000 (comment names the Global Constraint and the client sibling
-cap); watchdog.ts:110's `attempts >= 2` (doc comment at :95-105 explains the
+cap); tasks/watchdog.ts:110's `attempts >= 2` (doc comment at :95-105 explains the
 two-consecutive-failures threshold in full).
 
 **Tier rule:** GLM-OK = none of auth, secrets, tokens, credentials, rescue,
@@ -79,7 +79,7 @@ precedent for that lane).
   `DELETE ... OFFSET ?` boundary at :213-215).
 - **Evidence:** every other bound in this file is a named constant with a
   why-comment (MAX_FIELD_CHARS :107, STACK_HEAD_MAX_LINES :26,
-  INSERT_TIMEOUT_MS :147, RATE_CAP_PER_WINDOW/RATE_WINDOW_MS :162-163); the
+  INSERT_TIMEOUT_MS :147, RATE_CAP_PER_WINDOW/RATE_WINDOW_MS :159-160); the
   doc comment above the function (:196-208) explains the boundary-timestamp
   mechanism but never why 1000 rows is the cap. Its only caller (:287) passes
   nothing, so 1000 is the live value.
