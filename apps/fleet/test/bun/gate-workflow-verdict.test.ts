@@ -24,4 +24,14 @@ describe("verdictToStatusArgs", () => {
       state: "error", description: "GateRunnerDO OOM",
     });
   });
+  it("caps a description at 140 chars (GitHub 422s longer ones, posting no verdict at all)", () => {
+    const long = "x".repeat(300);
+    const args = verdictToStatusArgs({ state: "error", description: long });
+    expect(args.description.length).toBeLessThanOrEqual(140);
+  });
+  it("keeps the short one-argument shape it already had", () => {
+    expect(verdictToStatusArgs({ state: "failure", description: "vitest-3 failed" })).toEqual({
+      state: "failure", description: "vitest-3 failed",
+    });
+  });
 });

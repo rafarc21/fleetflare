@@ -10,7 +10,9 @@ export function verdictToStatusArgs(
   verdict: Exclude<Verdict, { state: "pending" }>,
 ): { state: "success" | "failure" | "error"; description: string } {
   if (verdict.state === "success") return { state: "success", description: "all legs green" };
-  return { state: verdict.state, description: verdict.description };
+  // GitHub 422s a commit-status description over 140 chars, which would
+  // silently drop the verdict entirely — truncate instead.
+  return { state: verdict.state, description: verdict.description.slice(0, 140) };
 }
 
 export interface PlanInput {
