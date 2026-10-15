@@ -252,6 +252,39 @@ describe("anthropicRequestToOpenAI — tool_use / tool_result round trip", () =>
       { role: "tool", tool_call_id: "t1", content: "ok" },
     ]);
   });
+
+  // Board issue #951: Kimi (and other non-Anthropic pool models) generate
+  // tool ids containing ":" and "." (e.g. call_abc:def.123), which violate
+  // Anthropic's Messages API id pattern ^[a-zA-Z0-9_-]+$. A resumed session
+  // replays history containing those poisoned ids, so every id this file
+  // passes through must be sanitized to that pattern — deterministically,
+  // so a later tool_result still pairs with the tool_use it references.
+  test("an assistant tool_use id with ':' and '.' is sanitized to the ^[a-zA-Z0-9_-]+$ pattern", () => {
+    const out = anthropicRequestToOpenAI({
+      model: "x", max_tokens: 10,
+      messages: [{
+        role: "assistant",
+        content: [{ type: "tool_use", id: "call_abc:def.123", name: "get_weather", input: { city: "nyc" } }],
+      }],
+    });
+    expect(out.messages[0].tool_calls[0].id).toBe("call_abc_def_123");
+  });
+
+  test("a user tool_result whose tool_use_id has ':' and '.' is sanitized identically, so it still pairs", () => {
+    const out = anthropicRequestToOpenAI({
+      model: "x", max_tokens: 10,
+      messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "call_abc:def.123", content: "ok" }] }],
+    });
+    expect(out.messages[0]).toEqual({ role: "tool", tool_call_id: "call_abc_def_123", content: "ok" });
+  });
+
+  test("an already-sanitized id passes through unchanged (idempotence, so a later tool_result still pairs)", () => {
+    const out = anthropicRequestToOpenAI({
+      model: "x", max_tokens: 10,
+      messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "call_abc_def_123", content: "ok" }] }],
+    });
+    expect(out.messages[0]).toEqual({ role: "tool", tool_call_id: "call_abc_def_123", content: "ok" });
+  });
 });
 
 describe("openAIResponseToAnthropic — text", () => {
@@ -427,6 +460,25 @@ describe("openAIResponseToAnthropic — tool_calls", () => {
       usage: { prompt_tokens: 1, completion_tokens: 1 },
     }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.content[0].id).toBe("call_abc123");
+  });
+
+  // Board issue #951: a Kimi-style id containing ":" and "." must be
+  // sanitized on the way OUT to the Anthropic client too — same deterministic
+  // mapping as the inbound direction, so the emitted tool_use.id always
+  // matches ^[a-zA-Z0-9_-]+$ and a later tool_result can still pair with it.
+  test("a tool_call id with ':' and '.' becomes a tool_use id matching ^[a-zA-Z0-9_-]+$", () => {
+    const out = openAIResponseToAnthropic({
+      choices: [{
+        message: {
+          role: "assistant", content: null,
+          tool_calls: [{ id: "call_abc:def.123", type: "function", function: { name: "get_weather", arguments: JSON.stringify({ city: "nyc" }) } }],
+        },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 2, completion_tokens: 3 },
+    }, { model: "m", requestedMaxTokens: 1_000_000 });
+    expect(out.content[0].id).toBe("call_abc_def_123");
+    expect(out.content[0].id).toMatch(/^[a-zA-Z0-9_-]+$/);
   });
 
   // Minor fix (maestro review round 1): stop_reason derived from whether any
