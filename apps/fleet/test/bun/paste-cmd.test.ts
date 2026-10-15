@@ -10,20 +10,21 @@
 // dependency is the spawned `pngpaste`, so a bin-only PATH fully controls
 // what the child's clipboard holds -- an empty bin dir IS "no image".
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanupTempDirs, FLEET, tmpDir } from "./helpers/fleet-cli";
 
-// grabClipboardPng's fixed, non-injectable tmp path -- shared machine-wide,
-// so no lane may leave it dirty (same ownership as paste-mac.test.ts).
-const PASTE_TMP = "/tmp/fleet-paste.png";
+// Per-lane injectable tmp path (FLEET_PASTE_TMP): each lane owns a private
+// file under its own mkdtemp dir, cleaned recursively by cleanupTempDirs.
+let pasteTmp: string;
 // The fake pngpaste must not PATH-lookup its tools: its PATH holds only the
 // fake itself.
 const CP = existsSync("/bin/cp") ? "/bin/cp" : "/usr/bin/cp";
 
-beforeEach(() => { rmSync(PASTE_TMP, { force: true }); });
+beforeEach(() => {
+  pasteTmp = join(tmpDir("paste-cmd-tmp-"), "fleet-paste.png");
+});
 afterEach(() => {
-  rmSync(PASTE_TMP, { force: true });
   cleanupTempDirs();
 });
 
@@ -85,7 +86,7 @@ function clipboardBin(): string {
 async function run(args: string[], home: string, cwd: string, bin: string) {
   const proc = Bun.spawn({
     cmd: [process.execPath, FLEET, ...args],
-    env: { PATH: bin, HOME: home },
+    env: { PATH: bin, HOME: home, FLEET_PASTE_TMP: pasteTmp },
     cwd,
     stdin: "ignore",
     stdout: "pipe",
