@@ -36,8 +36,11 @@ export class GateRunnerDO extends Container<Env> {
       // by GateOutbound, the Worker-side entrypoint that holds the R2 binding.
       // Registered before each cold start. Assumed, not yet verified live: that
       // interception does not survive a container stop, so it is re-applied.
+      // Props carry this leg's own resultKey: the only key the container may PUT.
       if (!this.ctx.container?.running) {
-        await this.ctx.container?.interceptAllOutboundHttp(workerExports.GateOutbound({ props: {} }));
+        await this.ctx.container?.interceptAllOutboundHttp(
+          workerExports.GateOutbound({ props: { resultKey: body.resultKey } }),
+        );
       }
       await this.start({ envVars: buildLegEnvVars(body) });
       await this.startAndWaitForPorts(GATE_CONTAINER_PORT);
