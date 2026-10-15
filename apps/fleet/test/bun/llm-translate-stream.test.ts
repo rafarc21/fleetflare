@@ -153,6 +153,21 @@ describe("streaming: prelude + chunk application + close", () => {
     expect(events[7].data).toMatchObject({ type: "message_delta", delta: { stop_reason: "tool_use" } });
   });
 
+  // Board issue #951: the streaming path emits the SAME tool_use.id to the
+  // client as the non-streaming path, so a Kimi-style id containing ":" and
+  // "." must be sanitized here too — otherwise a resumed session replays a
+  // poisoned id and Anthropic returns 400 on the ^[a-zA-Z0-9_-]+$ pattern.
+  test("a streamed tool call with a kimi-style id ':' '.' sanitizes to ^[a-zA-Z0-9_-]+$ on content_block_start", () => {
+    const state = createStreamState();
+    const frames = applyOpenAIStreamChunk(state, {
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "call_abc:def.123", function: { name: "get_weather", arguments: "" } }] } }],
+    });
+    const [start] = frames.map(parseFrame);
+    const block = (start.data as { content_block: { id: string } }).content_block;
+    expect(block.id).toBe("call_abc_def_123");
+    expect(block.id).toMatch(/^[a-zA-Z0-9_-]+$/);
+  });
+
   test("usage from the final OpenAI chunk reaches message_delta's output_tokens", () => {
     const state = createStreamState();
     applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "hi" } }] });

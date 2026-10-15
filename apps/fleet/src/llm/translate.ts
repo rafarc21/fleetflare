@@ -110,7 +110,7 @@ function anthropicMessageToOpenAI(m: Json): Json[] {
       if (b.type === "text") textParts.push(b.text);
       else if (b.type === "tool_use") {
         toolCalls.push({
-          id: b.id, type: "function",
+          id: sanitizeToolId(b.id), type: "function",
           function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
         });
       }
@@ -136,7 +136,7 @@ function anthropicMessageToOpenAI(m: Json): Json[] {
     } else if (b.type === "tool_result") {
       flush();
       const content = flattenTextLike(b.content);
-      out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.is_error ? `[error] ${content}` : content });
+      out.push({ role: "tool", tool_call_id: sanitizeToolId(b.tool_use_id), content: b.is_error ? `[error] ${content}` : content });
     }
     // Images in a user turn: same drop-and-comment rule as the assistant
     // branch above.
@@ -248,8 +248,28 @@ function newMessageId(): string {
 function newToolUseId(): string {
   return `toolu_${crypto.randomUUID().replace(/-/g, "")}`;
 }
-function toolUseId(raw: unknown): string {
-  return typeof raw === "string" && raw.length > 0 ? raw : newToolUseId();
+
+/** Board issue #951: sanitize an upstream OpenAI-chat-completions tool-call
+ *  id (from GLM, Kimi, or any other non-Anthropic pool model) into an id that
+ *  always matches Anthropic's Messages API `tool_use.id` pattern
+ *  `^[a-zA-Z0-9_-]+$`. Kimi-style ids contain `:` and `.` (e.g.
+ *  `call_abc:def.123`) — copied verbatim, they poison a session's history,
+ *  and when a lead studio RESUMES that session Anthropic replays the poisoned
+ *  ids and returns 400 `String should match pattern '^[a-zA-Z0-9_-]+$'`.
+ *
+ *  The mapping MUST stay deterministic — same input, same output. That is the
+ *  load-bearing property: a `tool_result.tool_use_id` in a LATER inbound turn
+ *  must sanitize to exactly the same id this function emitted for the earlier
+ *  outbound `tool_use` it references, or the pair breaks. A plain character
+ *  substitution (`:`/`.` -> `_`) is both deterministic and idempotent (an id
+ *  already sanitized into history passes through unchanged). A non-string or
+ *  empty input is a missing id — same `newToolUseId()` fallback the old
+ *  `toolUseId` used, so an omitted upstream id is still generated, never left
+ *  empty. */
+function sanitizeToolId(raw: unknown): string {
+  if (typeof raw !== "string") return newToolUseId();
+  const sanitized = raw.replace(/[^A-Za-z0-9_-]/g, "_");
+  return sanitized.length > 0 ? sanitized : newToolUseId();
 }
 
 /** Minor fix (maestro review round 1): whether any tool_use content block
@@ -301,7 +321,7 @@ export function openAIResponseToAnthropic(
     let input: Json = {};
     try { input = JSON.parse(tc.function?.arguments ?? "{}"); }
     catch { /* malformed model output — an empty input beats throwing on a tool the caller DID ask for */ }
-    content.push({ type: "tool_use", id: toolUseId(tc.id), name: tc.function?.name, input });
+    content.push({ type: "tool_use", id: sanitizeToolId(tc.id), name: tc.function?.name, input });
   }
 
   let stopReason = anyToolUseBlocks(content) ? "tool_use" : mapFinishReason(choice.finish_reason);
@@ -535,7 +555,7 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
       state.openKind = openAiIndex;
       events.push(sseEvent("content_block_start", {
         type: "content_block_start", index: anthropicIndex,
-        content_block: { type: "tool_use", id: toolUseId(tc.id), name: tc.function?.name, input: {} },
+        content_block: { type: "tool_use", id: sanitizeToolId(tc.id), name: tc.function?.name, input: {} },
       }));
     } else if (state.openKind !== openAiIndex) {
       // A delta for an openAiIndex this stream has already seen (and
