@@ -349,7 +349,7 @@ describe("localci.sh", () => {
     expect(Date.now() - t0).toBeLessThan(30_000);
     expect(r.code).toBe(2);
     expect(posts()[2]).toBe("local-ci/fleet-check=error");
-    // 1s beats the stub's 61s sleep with room; the watchdog bug fires within ~300ms.
+    // 1s beats the stub's 61s sleep with room.
     expect(readFileSync(calls, "utf8")).toContain("description=lane linux timed out after 1s");
     const pid = Number(readFileSync(join(root, "hang.pid"), "utf8"));
     const deadline = Date.now() + 5_000;
