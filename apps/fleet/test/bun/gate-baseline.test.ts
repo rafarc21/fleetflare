@@ -27,8 +27,8 @@ describe("baselineSnapshotName", () => {
     expect(a).toBe(b);
   });
   it("sanitizes mixed-case owner/repo (dots, underscores) to ASCII lower-kebab, per the interface contract", () => {
-    expect(baselineSnapshotName("Rafa.Rc21", "Fleet_Flare", "abc123", "def456")).toBe(
-      "rafa-rc21-fleet-flare-abc123-def456",
+    expect(baselineSnapshotName("Acme.Co21", "Fleet_Flare", "abc123", "def456")).toBe(
+      "acme-co21-fleet-flare-abc123-def456",
     );
   });
 });
