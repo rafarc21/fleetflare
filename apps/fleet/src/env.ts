@@ -1,6 +1,7 @@
 import type { AgentDO } from "./agents/do";
 import type { DeployDO } from "./deploy/do";
 import type { GateRunnerDO } from "./gate/do";
+import type { GateWorkflowParams } from "./gate/workflow";
 // Type-only — do.ts's own value import of "@cloudflare/sandbox" never
 // reaches the runtime module graph through this. See
 // src/studio/provision.ts's header comment for why that distinction is
@@ -14,6 +15,9 @@ export interface Env {
   /** #715 gate runner: one GateRunnerDO container per leg/shard. Bound in
    *  wrangler.example.jsonc (durable_object scheduling policy). */
   GATE_RUNNER: DurableObjectNamespace<GateRunnerDO>;
+  /** #715 gate runner: the `gate` Workflow that fans a PR's legs out and
+   *  fans the verdict back in (wrangler.example.jsonc `workflows[]`). */
+  GATE_WORKFLOW: Workflow<GateWorkflowParams>;
   STUDIO: DurableObjectNamespace<StudioDO>;
   /**
    * Issue #107 (#70 ask 3): a second StudioDO container class for roles

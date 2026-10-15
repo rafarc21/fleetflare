@@ -48,6 +48,9 @@ export { StudioDO, StudioBigDO } from "./studio/do";
 // unexported class named in wrangler fails boot for the whole Worker.
 export { GateRunnerDO } from "./gate/do";
 export { GateOutbound } from "./gate/outbound-entrypoint";
+// The `gate` Workflow class named in wrangler.example.jsonc `workflows[]`.
+// Same rule: an unexported class fails boot for the whole Worker.
+export { GateWorkflow } from "./gate/workflow";
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
