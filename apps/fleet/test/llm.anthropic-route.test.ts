@@ -20,6 +20,7 @@ import { hashSpawnToken, mintSpawnToken } from "../src/studio/org";
 import type { StudioStatus } from "../src/studio/types";
 import type { Env } from "../src/env";
 import { fakeCtx, type FakeCtx } from "./helpers/fake-ctx";
+import { lockedUsageLogDb } from "./helpers/d1-locked";
 
 const ME = "acme-org--web-studio";
 // Maestro review round 1, MAJOR 2: every row here carries `leadType: "glm"`
@@ -270,24 +271,14 @@ describe("handleFleetAnthropicMessages — spend controls (MAJOR 2)", () => {
   // missing usage rows read identically to "nobody called". The swallow
   // stays (a logging failure must never touch the response already
   // returned) but one console.error naming "usage insert failed" must
-  // fire. Same fake-D1 idiom as junior.usage.test.ts's own
+  // fire. The locked-D1 fake itself now lives in helpers/d1-locked.ts
+  // (sweep 43 F6, #883) — the same idiom as junior.usage.test.ts's own
   // missing-column db, forwarded to the real env.DB for every OTHER
   // statement (the rate limiter's fleet_state reads still need to work
   // for the call to reach the insert at all).
   it("a failed usage-row insert leaves the response intact and logs one console.error naming the insert failure (#519)", async () => {
     const realDb = env.DB;
-    const db = {
-      prepare: (sql: string) => {
-        if (sql.includes("INSERT INTO junior_usage_log")) {
-          return {
-            bind: () => ({
-              run: async () => { throw new Error("D1_ERROR: the database is locked by another connection"); },
-            }),
-          };
-        }
-        return realDb.prepare(sql);
-      },
-    } as unknown as D1Database;
+    const db = lockedUsageLogDb(realDb);
     const { token, rows, e } = await setup();
     (e as { DB: unknown }).DB = db;
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
