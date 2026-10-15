@@ -399,6 +399,12 @@ export interface Env {
    * safe, opt-in default.
    */
   INSTALL_CACHE_REPOS?: string;
+  /** Phase 1 (#715): default off, same posture FLEET_TELEGRAM/FLEET_JUNIOR
+   *  already use — a repo not opted in gets zero new behavior. */
+  FLEET_GATE_RUNNER?: string;
+  /** Comma-separated "owner/repo", same shape as INSTALL_CACHE_REPOS. Phase 1
+   *  value is a single entry: the operator's own repo. */
+  GATE_RUNNER_REPOS?: string;
   /**
    * Board #350 — THREE secrets, all optional here and ALL THREE MUST be set
    * together before this feature does anything: install-cache.ts's
