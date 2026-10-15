@@ -37,10 +37,21 @@ describe("Dockerfile.gate runs the real lanes", () => {
     expect(code).toMatch(/ln -sf \S+ \/usr\/local\/bin\/chromium/);
   });
 
-  test("has no rustup, cargo or cargo-nextest layer", () => {
-    expect(code).not.toMatch(/rustup/i);
-    expect(code).not.toMatch(/cargo/i);
-    expect(code).not.toMatch(/nextest/i);
+  test("installs the gate legs' tools: python3, procps, C toolchain, Rust 1.96 (#1037)", () => {
+    expect(code).toMatch(
+      /apt-get install -y --no-install-recommends[^&]*\bpython3\b[^&]*\bprocps\b/,
+    );
+    for (const pkg of ["python3", "procps", "zstd", "gcc", "g\\+\\+", "make", "libc6-dev", "jq", "binutils"]) {
+      expect(code).toMatch(new RegExp(`apt-get install -y --no-install-recommends[^&]*\\b${pkg}\\b`));
+    }
+  });
+
+  test("installs a pinned Rust toolchain via checksum-verified rustup-init (#1037)", () => {
+    expect(code).toMatch(/static\.rust-lang\.org\/rustup\/archive\/1\.28\.2\/x86_64-unknown-linux-gnu\/rustup-init/);
+    expect(code).toMatch(/[0-9a-f]{64}\s+\/tmp\/rustup-init/);
+    expect(code).toMatch(/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1\.96\.0/);
+    expect(code).toMatch(/-c rustfmt,clippy,llvm-tools-preview -t wasm32-unknown-unknown/);
+    expect(code).toMatch(/rustc --version && cargo --version && python3 --version && pgrep --version/);
   });
 
   test("every install step in the final stage stays inside repro-seal begin/end", () => {

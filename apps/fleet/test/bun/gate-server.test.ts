@@ -149,10 +149,11 @@ describe("Dockerfile.gate (image shape per the repo's reproducible-build rules)"
     for (const r of runs) expect(r).not.toMatch(/\|\s*(ba)?sh\b/);
   });
 
-  it("verifies the node tarball by checksum and has no Rust layer (#1011)", () => {
+  it("verifies the node tarball and the rustup-init binary by checksum (#1011, #1037)", () => {
     expect(raw).toContain("sha256sum -c");
     expect(raw).toContain("node-v22.23.3-linux-x64.tar.xz");
-    expect(raw).not.toMatch(/rustup|cargo|nextest/);
+    expect(raw).toContain("20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c  /tmp/rustup-init");
+    expect(raw).toMatch(/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1\.96\.0/);
   });
 
   it("copies only the two container sources and repro-seal into the image", () => {
