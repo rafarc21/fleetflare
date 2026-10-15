@@ -24,3 +24,18 @@ export function tmpDir(prefix: string): string {
 export function cleanupTempDirs(): void {
   while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 }
+
+// Sweep 43 F4 (refs #850, #881): the byte-identical subprocess runner
+// cli-check-clear-guard and cli-destroy-unmerged both carried. The helper
+// already owns the FLEET path, so the spawn belongs beside it.
+export async function runFleet(args: string[], home: string): Promise<{ out: string; err: string; code: number }> {
+  const proc = Bun.spawn({
+    cmd: [process.execPath, FLEET, ...args],
+    env: { PATH: process.env.PATH!, HOME: home },
+    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  const [out, err, code] = await Promise.all([
+    new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+  ]);
+  return { out, err, code };
+}

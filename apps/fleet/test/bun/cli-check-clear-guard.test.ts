@@ -31,8 +31,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runFleet } from "./helpers/fleet-cli";
 
-const FLEET_CLI = join(import.meta.dir, "../../cli/fleet.ts");
 const ID = "websites--web-studio";
 
 /** A minimal studio row, the same shape the destroy lane's stand-in answers
@@ -78,27 +78,13 @@ function startCheckServer(handler: (req: Request, pathname: string) => Response 
   return { server, requests };
 }
 
-/** The real CLI, as a subprocess: parse -> credentials -> one request ->
- *  print -> exit code, exactly what an operator's terminal sees. */
-async function run(args: string[], home: string) {
-  const proc = Bun.spawn({
-    cmd: [process.execPath, FLEET_CLI, ...args],
-    env: { PATH: process.env.PATH!, HOME: home },
-    stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  });
-  const [out, err, code] = await Promise.all([
-    new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
-  ]);
-  return { out, err, code };
-}
-
 describe("cmdCheck — the wiring, end to end (#495)", () => {
   test("a 200 row answers exit 0: the one-row table, the READY caveat's distinctive substrings, no full-ERROR line, one POST /studio/:id/check", async () => {
     const { server, requests } = startCheckServer((_req, pathname) =>
       pathname === `/studio/${ID}/check` ? Response.json(row(null)) : undefined);
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["check", ID], home);
+      const r = await runFleet(["check", ID], home);
       expect(r.code).toBe(0);
       // The one-row table: the studio id and the header row's STATE column.
       expect(r.out).toContain(ID);
@@ -121,7 +107,7 @@ describe("cmdCheck — the wiring, end to end (#495)", () => {
       pathname === `/studio/${ID}/check` ? Response.json(row(longError)) : undefined);
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["check", ID], home);
+      const r = await runFleet(["check", ID], home);
       expect(r.code).toBe(0);
       expect(r.out).toContain(`ERROR (full): ${longError}`);
       expect(requests).toContain(`POST /studio/${ID}/check`);
@@ -134,7 +120,7 @@ describe("cmdCheck — the wiring, end to end (#495)", () => {
     const { server } = startCheckServer(() => new Response("worker exploded", { status: 500 }));
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["check", ID], home);
+      const r = await runFleet(["check", ID], home);
       expect(r.code).toBe(1);
       // toContain, not a whole-string pin: the contract is the prefix names
       // the verb and the status, then the body's own words, verbatim.
@@ -150,7 +136,7 @@ describe("cmdCheck — the wiring, end to end (#495)", () => {
       Response.json({ error: "the container did not answer an 8s probe" }, { status: 500 }));
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["check", ID], home);
+      const r = await runFleet(["check", ID], home);
       expect(r.code).toBe(1);
       expect(r.err).toContain("fleet check: 500 the container did not answer an 8s probe");
       // Issue #217's rule, behavioral: the operator reads the reason, not
@@ -165,7 +151,7 @@ describe("cmdCheck — the wiring, end to end (#495)", () => {
     const { server } = startCheckServer(() => Response.json({ ok: true }));
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["check", ID], home);
+      const r = await runFleet(["check", ID], home);
       expect(r.code).toBe(1);
       expect(r.err).toContain("fleet check: answered 200 but the body was not a studio row");
     } finally {
@@ -180,7 +166,7 @@ describe("cmdClearSessionGuard — the wiring, end to end (#495)", () => {
       pathname === `/studio/${ID}/clear-session-guard` ? Response.json(row(null)) : undefined);
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["clear-session-guard", ID], home);
+      const r = await runFleet(["clear-session-guard", ID], home);
       expect(r.code).toBe(0);
       expect(r.out).toContain(ID);
       expect(r.out).toContain("STATE");
@@ -199,7 +185,7 @@ describe("cmdClearSessionGuard — the wiring, end to end (#495)", () => {
     const { server } = startCheckServer(() => new Response("nope", { status: 500 }));
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["clear-session-guard", ID], home);
+      const r = await runFleet(["clear-session-guard", ID], home);
       expect(r.code).toBe(1);
       expect(r.err).toContain("fleet clear-session-guard: 500");
       expect(r.err).toContain("fleet clear-session-guard: 500 nope");
@@ -212,7 +198,7 @@ describe("cmdClearSessionGuard — the wiring, end to end (#495)", () => {
     const { server } = startCheckServer(() => Response.json({ ok: true }));
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["clear-session-guard", ID], home);
+      const r = await runFleet(["clear-session-guard", ID], home);
       expect(r.code).toBe(1);
       expect(r.err).toContain("fleet clear-session-guard: answered 200 but the body was not a studio row");
     } finally {

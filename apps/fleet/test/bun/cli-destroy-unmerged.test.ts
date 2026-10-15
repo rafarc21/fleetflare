@@ -16,6 +16,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runFleet } from "./helpers/fleet-cli";
 import {
   fetchStudioOpenPrs, parkWarningLines, strictRefusalLines,
   STRICT_UNMERGED_UNKNOWN_PROCEEDING, STRICT_UNMERGED_UNKNOWN_SCAN,
@@ -197,7 +198,6 @@ describe("fetchStudioOpenPrs — one studio's live answer (#332)", () => {
 // refusal-before-destroy, and warning-after-stop, without reading source
 // text (#416 item 4: they replaced the old cmdDestroy source-pin file).
 describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 review H2)", () => {
-  const FLEET_CLI = join(import.meta.dir, "../../cli/fleet.ts");
   const ID = "websites--web-studio";
 
   const tempDirs: string[] = [];
@@ -241,18 +241,6 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
     return { server, requests };
   }
 
-  async function run(args: string[], home: string) {
-    const proc = Bun.spawn({
-      cmd: [process.execPath, FLEET_CLI, ...args],
-      env: { PATH: process.env.PATH!, HOME: home },
-      stdin: "ignore", stdout: "pipe", stderr: "pipe",
-    });
-    const [out, err, code] = await Promise.all([
-      new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
-    ]);
-    return { out, err, code };
-  }
-
   /** The Worker stand-in, destroy-capable: GET /studio/<id>/status answers a
    *  row (state given), GET /studio/board/open-prs answers the scripted body,
    *  POST /studio/<id>/destroy answers a stopped row, and every request is
@@ -284,7 +272,7 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
     const { server, requests } = startWorker({ repo: "acme-org/websites", prs: {}, unknown: [ID] });
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["destroy", ID, "--strict-unmerged"], home);
+      const r = await runFleet(["destroy", ID, "--strict-unmerged"], home);
       // The refusal line itself — the exact contract the strict flag is:
       // uncertainty about zero is a refusal, never a silent proceed.
       expect(r.err).toContain(STRICT_UNMERGED_UNKNOWN_SCAN);
@@ -305,7 +293,7 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
     const { server, requests } = startDestroyWorker({ repo: "acme-org/websites", prs: {}, unknown: [] });
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["destroy", ID, "--force", "--discard-unsynced", "--park"], home);
+      const r = await runFleet(["destroy", ID, "--force", "--discard-unsynced", "--park"], home);
       expect(requests).toContain(`POST /studio/${ID}/destroy?force=true&discard-unsynced=true&park=true`);
       expect(r.code).toBe(0);
     } finally {
@@ -317,7 +305,7 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
     const { server, requests } = startDestroyWorker({ repo: "acme-org/websites", prs: {}, unknown: [] });
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      await run(["destroy", ID], home);
+      await runFleet(["destroy", ID], home);
       expect(requests).toContain(`POST /studio/${ID}/destroy`);
     } finally {
       server.stop(true);
@@ -330,7 +318,7 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
     });
     const home = tmpHomeWithCredentials(`http://127.0.0.1:${server.port}`);
     try {
-      const r = await run(["destroy", ID, "--strict-unmerged"], home);
+      const r = await runFleet(["destroy", ID, "--strict-unmerged"], home);
       expect(r.err).toContain("fleet destroy: refusing: 2 unmerged PR(s) still open (--strict-unmerged)");
       expect(r.code).toBe(1);
       expect(requests.some((p) => p.endsWith("/destroy"))).toBe(false);
@@ -346,7 +334,7 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
     const ok = startDestroyWorker({ repo: "acme-org/websites", prs: { [ID]: [pr(9)] }, unknown: [] });
     const okHome = tmpHomeWithCredentials(`http://127.0.0.1:${ok.server.port}`);
     try {
-      const r = await run(["destroy", ID], okHome);
+      const r = await runFleet(["destroy", ID], okHome);
       expect(r.err).toContain("park warning: websites--web-studio still has 1 unmerged PR(s)");
       expect(r.code).toBe(0);
     } finally {
@@ -374,7 +362,7 @@ describe("cmdDestroy — the strict unknown-scan refusal, end to end (#332 revie
     });
     const failHome = tmpHomeWithCredentials(`http://127.0.0.1:${failServer.port}`);
     try {
-      const r = await run(["destroy", ID], failHome);
+      const r = await runFleet(["destroy", ID], failHome);
       expect(r.err).not.toContain("park warning");
       expect(r.code).toBe(1);
     } finally {
