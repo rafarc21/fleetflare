@@ -63,6 +63,25 @@ const CHROMIUM_PATH = process.env.EGO_BROWSER_CHROMIUM_PATH?.trim() || "/usr/loc
 // ego-browser-launch-timeout.test.ts).
 const LAUNCH_TIMEOUT_MS = Number(process.env.EGO_BROWSER_LAUNCH_TIMEOUT_MS?.trim()) || 30000;
 
+// Playwright-core's own launch-timeout cleanup (verified in its
+// coreBundle.js) does not SIGKILL the hung browser tree immediately after
+// the bound fires: it first sends Browser.close over the pipe and waits out
+// a graceful-close window -- closeOrKill(options.__testHookBrowserCloseTimeout
+// || DEFAULT_PLAYWRIGHT_TIMEOUT), 30000ms by default -- before falling
+// back to its group SIGKILL. __testHookBrowserCloseTimeout is a real (read,
+// but undocumented) chromium.launch() option: _validateLaunchOptions
+// spreads unknown keys through, and the daemon-side closeOrKill reads it
+// directly -- BUT only when playwright-core's isUnderTest() flag
+// (PWTEST_UNDER_TEST env, read at its module init) is set does the
+// client->server channel validator let __testHook* options through;
+// measured live without it the knob is stripped and the tree still dies at
+// ~t=30.5s. ego-browser-launch-timeout.test.ts sets both this knob and
+// PWTEST_UNDER_TEST to shrink that window to 1s (tree dead ~t=1.5s)
+// instead of burning 30s of suite wall; see TREE_KILL_WAIT_MS there. Env
+// unset (every non-test invocation) -> option absent -> Playwright's own
+// 30s default, i.e. production behavior is identical.
+const CLOSE_KILL_MS = Number(process.env.EGO_BROWSER_LAUNCH_CLOSE_KILL_MS?.trim()) || 0;
+
 let browserPromise: Promise<Browser> | undefined;
 /** The real Chromium OS pid, once known -- see process-reap.ts's
  * findDirectChildPid(). Read by shutdown()'s SIGKILL backstop and logged
@@ -89,6 +108,11 @@ function getBrowser(): Promise<Browser> {
         // server's own chromium install).
         args: ["--no-sandbox"],
         timeout: LAUNCH_TIMEOUT_MS,
+        // See CLOSE_KILL_MS above: only present when the env knob is set,
+        // i.e. never in production. The conditional spread keeps the object
+        // typed as LaunchOptions -- the .d.ts does not declare this
+        // playwright-core-internal key.
+        ...(CLOSE_KILL_MS > 0 ? { __testHookBrowserCloseTimeout: CLOSE_KILL_MS } : {}),
       })
       .then((browser) => {
         browserPid = findDirectChildPid(process.pid, { chromiumBinaryName: basename(CHROMIUM_PATH) });

@@ -33,9 +33,16 @@ Only knob Playwright-core exposes for the 30s window is the undocumented-but-rea
 Pass it from daemon.ts's `chromium.launch()` under a new env knob, same
 override-via-env convention as EGO_BROWSER_LAUNCH_TIMEOUT_MS:
 
-- `EGO_BROWSER_LAUNCH_CLOSE_KILL_MS`: when set, daemon.ts adds
-  `__testHookBrowserCloseTimeout: Number(...)` to the launch options. Production
-  behavior unchanged (env unset → Playwright's 30s default).
+- `EGO_BROWSER_LAUNCH_CLOSE_KILL_MS`: when set, daemon.ts passes
+  `__testHookBrowserCloseTimeout: Number(...)` into the launch options — AND the
+  test also sets `PWTEST_UNDER_TEST=1` in the daemon's env (inherited through
+  runEgoBrowser), because playwright-core's client→server channel validator
+  (`tObject`, coreBundle.js, gated on `isUnderTest()`, which reads
+  `PWTEST_UNDER_TEST` at module init) strips `__testHook*` launch options
+  without it. Production behavior unchanged (env unset → Playwright's 30s
+  default).
+  Measured live in this container: no knob → tree dead t=30563ms; knob alone →
+  t=30562ms (stripped, no effect); knob + `PWTEST_UNDER_TEST=1` → t=1533ms.
 - Test sets it to 1000ms: the graceful window burns 1s instead of 30, then the tree
   still dies by the SAME group-SIGKILL path production uses. The test still proves
   the whole tree dies — via Playwright's own kill, not the finally SIGKILL.
