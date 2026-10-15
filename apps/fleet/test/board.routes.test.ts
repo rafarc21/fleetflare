@@ -784,8 +784,25 @@ describe("handleBoard", () => {
   it("GETs are not assignment verbs — a read can never move a task", async () => {
     authorized();
     for (const action of ["adopt", "assign"]) {
-      const res = await handleBoard(req(`/studio/board/tasks/42/${action}`), testEnv, { api: fakeApi(), reach });
+      // The 405 alone does not pin the title's "never moves" clause: a
+      // refactor that runs the assignment work BEFORE rejecting the method
+      // would still answer 405. The wake and the write verbs are what prove
+      // the refusal fired first (issue #872, S41-F4).
+      const api = fakeApi();
+      const wake = vi.fn(async (_studioId: string, _prompt: string) => ({ ok: true as const }));
+      const res = await handleBoard(req(`/studio/board/tasks/42/${action}`), testEnv, {
+        api, reach,
+        assignWake: {
+          studioState: vi.fn(async (_studioId: string) => ({ state: "running", repoSlug: null })),
+          wake,
+          resolveCanonicalRepo: vi.fn(async (slug: string) => slug),
+        },
+      });
       expect(res.status).toBe(405);
+      expect(wake).not.toHaveBeenCalled();
+      expect(api.addLabels).not.toHaveBeenCalled();
+      expect(api.removeLabel).not.toHaveBeenCalled();
+      expect(api.createComment).not.toHaveBeenCalled();
     }
   });
 
@@ -810,8 +827,19 @@ describe("handleBoard", () => {
 
     it("GET is not allowed — a read must never trigger outbound checks or a comment", async () => {
       authorized();
-      const res = await handleBoard(req("/studio/board/tasks/42/verify"), testEnv, { api: fakeApi(), reach });
+      // Shaped so the title's two "never" clauses are load-bearing: the task
+      // HAS a result envelope, so a route that ran the checks before
+      // rejecting the method would fetch the url and post the verdict
+      // comment while still answering 405 (issue #872, S41-F4).
+      const api = fakeApi({
+        getIssue: vi.fn(async () => task({ number: 42, state: "working", labels: ["working"] })),
+        listComments: vi.fn(async () => [resultEnvelopeComment()]),
+      });
+      const verifyFetch = vi.fn(async (_url: string) => ({ status: 200 }));
+      const res = await handleBoard(req("/studio/board/tasks/42/verify"), testEnv, { api, reach, verifyFetch });
       expect(res.status).toBe(405);
+      expect(verifyFetch).not.toHaveBeenCalled();
+      expect(api.createComment).not.toHaveBeenCalled();
     });
 
     it("401s without an Access header, same gate as every other action", async () => {
