@@ -13,7 +13,7 @@ import { waitFor } from "./helpers/poll";
 // naive "always exit after N ms" regression that direction 1 alone cannot
 // distinguish from the real fix.
 
-const IDLE_MS = "400";
+const IDLE_MS = "100";
 
 function readPid(home: string): number {
   const pidFile = join(home, "daemon.pid");
@@ -75,7 +75,7 @@ describe("ego-browser daemon idle shutdown", () => {
         const pid = readPid(home);
         expect(processAlive(pid)).toBe(true);
 
-        // Wait comfortably past the idle window (400ms) for the daemon's
+        // Wait comfortably past the idle window (100ms) for the daemon's
         // own timer to fire and exit.
         const gone = await waitFor(() => !existsSync(pidFile) && !processAlive(pid), 10000);
         expect(gone).toBe(true);
@@ -110,9 +110,9 @@ describe("ego-browser daemon idle shutdown", () => {
         const pidFile = join(home, "daemon.pid");
         const pid = readPid(home);
 
-        // Well past the 400ms idle window -- a naive unconditional timer
+        // Well past the 100ms idle window -- a naive unconditional timer
         // would have killed the daemon by now.
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 800));
         expect(existsSync(pidFile)).toBe(true);
         expect(processAlive(pid)).toBe(true);
 
