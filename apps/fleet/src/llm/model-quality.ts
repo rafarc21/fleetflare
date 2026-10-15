@@ -27,7 +27,13 @@ const MIN_PRS = 5;
 const GAP = 0.25;
 const MAX_REVERTS = 2;
 
-export function modelStats(outcomes: PrOutcome[], window = 10): ModelStats[] {
+/** How many most-recent closed PRs per model feed its quality stats — the
+ *  spec's Quality section (2026-10-13-model-pool-design) sizes the live
+ *  window; the only caller (model-quality-cron.ts runDailyModelQuality)
+ *  passes no window, so this default is the live value. */
+const MODEL_STATS_WINDOW_PRS = 10;
+
+export function modelStats(outcomes: PrOutcome[], window = MODEL_STATS_WINDOW_PRS): ModelStats[] {
   const by = new Map<string, PrOutcome[]>();
   for (const o of outcomes) by.set(o.model, [...(by.get(o.model) ?? []), o]);
   return [...by.entries()].map(([model, list]) => {

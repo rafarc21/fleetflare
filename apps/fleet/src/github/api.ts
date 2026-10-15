@@ -729,6 +729,14 @@ export async function listPullsForCommit(token: string, repo: string, sha: strin
   return raw.map((p) => ({ number: p.number, base: p.base.ref, head: p.head.ref }));
 }
 
+/** One page of a PR's original commits — GitHub's own maximum of 100 per
+ *  page, the same one-page posture as listOpenPullNumbers/listOpenPullFiles
+ *  above (whose bare per_page=100 carries the same note), not the multi-page
+ *  INSTALLATION_REPOS_PAGE_SIZE/BRANCH_NAMES_PAGE_SIZE loops. A PR with more
+ *  than 100 original commits truncates silently, so the cap is named rather
+ *  than bare. */
+export const PULL_COMMITS_PAGE_SIZE = 100;
+
 /**
  * A PR's own ORIGINAL commit shas, regardless of how it was merged.
  * Squash-merging changes what lands on the base branch (one new commit,
@@ -740,7 +748,7 @@ export async function listPullsForCommit(token: string, repo: string, sha: strin
 export async function listPullCommits(token: string, repo: string, pullNumber: number): Promise<string[]> {
   const raw = await ghJson<{ sha: string }[]>(
     token,
-    `https://api.github.com/repos/${repo}/pulls/${pullNumber}/commits?per_page=100`,
+    `https://api.github.com/repos/${repo}/pulls/${pullNumber}/commits?per_page=${PULL_COMMITS_PAGE_SIZE}`,
     { method: "GET" },
     `list commits for pull ${repo}#${pullNumber}`,
   );
