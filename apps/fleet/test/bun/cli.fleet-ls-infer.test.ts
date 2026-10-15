@@ -17,7 +17,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { cmdLs, fetchLeadInferUsage, formatTable, type Credentials } from "../../cli/fleet";
 import { lsJsonRows } from "../../cli/readiness-format";
-import { INFER_WINDOW_MS, type LeadInferUsage } from "../../cli/infer-format";
+import {
+  formatInfer, isLeadInferenceBlocked, INFER_WINDOW_MS, INFER_BLOCKED_MIN_CALLS,
+  type LeadInferUsage,
+} from "../../cli/infer-format";
 import type { OrcaDeps } from "../../cli/orca-workspace";
 import type { StudioStatus } from "../../src/studio/types";
 
@@ -295,5 +298,64 @@ describe("lsJsonRows — the infer decoration (#934)", () => {
   test("no map passed (a caller predating this feature): unchanged shape, no infer key", () => {
     const rows = lsJsonRows([row()], NOW);
     expect(Object.hasOwn(rows[0], "infer")).toBe(false);
+  });
+});
+
+// The pure half called DIRECTLY, not through formatTable. The wiring pins
+// above prove the column renders these verdicts; these pins prove the
+// functions themselves, including the three edges no wiring test reaches:
+// the floored percent (47.9% must read 47%, never 48% rounded up — an
+// inflated ok-rate is the exact false-clean reading #934 exists to kill),
+// the exact >=10 floor boundary (10 calls fires; the wiring tests only
+// prove 9 does not), and the constants' values themselves. A pure function
+// failing here names itself in the failure; failing through formatTable it
+// has to be traced first.
+describe("formatInfer — pure (#934)", () => {
+  test("undefined (no lead rows: Claude-led or idle) renders '-'", () => {
+    expect(formatInfer(undefined)).toBe("-");
+  });
+
+  test("12 ok of 48 calls renders '12/48 25%'", () => {
+    expect(formatInfer({ calls: 48, ok: 12 })).toBe("12/48 25%");
+  });
+
+  test("all ok renders '48/48 100%', not a bare '48/48'", () => {
+    expect(formatInfer({ calls: 48, ok: 48 })).toBe("48/48 100%");
+  });
+
+  test("zero-call row never prints NaN — '-' instead", () => {
+    expect(formatInfer({ calls: 0, ok: 0 })).toBe("-");
+  });
+
+  test("floored percent, never rounded up: 23/48 (47.9%) renders 47%", () => {
+    expect(formatInfer({ calls: 48, ok: 23 })).toBe("23/48 47%");
+  });
+});
+
+describe("isLeadInferenceBlocked — pure (#934)", () => {
+  test("fires at >=10 calls under 50% ok", () => {
+    expect(isLeadInferenceBlocked({ calls: 48, ok: 12 })).toBe(true);
+    expect(isLeadInferenceBlocked({ calls: 10, ok: 4 })).toBe(true);
+  });
+
+  test("under 10 calls never fires, however bad the rate", () => {
+    expect(isLeadInferenceBlocked({ calls: 9, ok: 1 })).toBe(false);
+    expect(isLeadInferenceBlocked({ calls: 0, ok: 0 })).toBe(false);
+  });
+
+  test("exactly 50% ok does NOT fire — the threshold is strictly under", () => {
+    expect(isLeadInferenceBlocked({ calls: 48, ok: 24 })).toBe(false);
+    expect(isLeadInferenceBlocked({ calls: 20, ok: 10 })).toBe(false);
+  });
+
+  test("undefined never fires", () => {
+    expect(isLeadInferenceBlocked(undefined)).toBe(false);
+  });
+});
+
+describe("constants (#934)", () => {
+  test("INFER_WINDOW_MS is 30 minutes; INFER_BLOCKED_MIN_CALLS is 10", () => {
+    expect(INFER_WINDOW_MS).toBe(30 * 60 * 1000);
+    expect(INFER_BLOCKED_MIN_CALLS).toBe(10);
   });
 });
