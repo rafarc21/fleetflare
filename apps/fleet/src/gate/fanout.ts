@@ -3,7 +3,7 @@
 // workflow.ts (which imports cloudflare:workers) stays a thin driver over
 // the decisions made here.
 import { MAX_LEGS_PER_PR } from "./config";
-import { BUN_LANE_CWD } from "./bun-lane";
+import { bunLaneCwd } from "./bun-lane";
 import type { LegResult, Verdict } from "./verdict";
 
 export function verdictToStatusArgs(
@@ -30,6 +30,8 @@ export interface PlanInput {
   install: string; legs: string[];
   /** The bun-test lane, already packed: one array of lane files per leg. */
   bunShards: string[][];
+  /** The block's bunLaneRoot: each bun leg enters this directory first. */
+  bunLaneRoot: string;
   vitestCmd: string; vitestShards: number;
   baselineKeys: string[];
 }
@@ -52,11 +54,11 @@ export function vitestLegs(vitestCmd: string, shards: number): { leg: string; le
 }
 
 /** One leg per bun-lane shard, named bun-1..bun-n. Each runs `bun test` on
- *  its own files, entering apps/fleet first (BUN_LANE_CWD). */
-export function bunLegs(shards: string[][]): { leg: string; legCmd: string }[] {
+ *  its own files, entering the block's root first (bunLaneCwd). */
+export function bunLegs(shards: string[][], root: string): { leg: string; legCmd: string }[] {
   return shards.map((files, idx) => ({
     leg: `bun-${idx + 1}`,
-    legCmd: `${BUN_LANE_CWD}bun test ${files.join(" ")}`,
+    legCmd: `${bunLaneCwd(root)}bun test ${files.join(" ")}`,
   }));
 }
 
@@ -72,7 +74,7 @@ export function bunLegs(shards: string[][]): { leg: string; legCmd: string }[] {
  *  floor of 1 holds. */
 export function planLegs(input: PlanInput): PlannedLeg[] {
   const {
-    owner, repo, pr, runId, headSha, baseSha, install, legs, bunShards, vitestCmd, vitestShards, baselineKeys,
+    owner, repo, pr, runId, headSha, baseSha, install, legs, bunShards, bunLaneRoot, vitestCmd, vitestShards, baselineKeys,
   } = input;
   const keyFor = (leg: string) => `gate/${owner}/${repo}/runs/${pr}/${runId}/shard-${leg}.json`;
   const fixedLegs = 1 + legs.length + bunShards.length; // merge-tree + fleet.json legs + bun shards
@@ -84,7 +86,7 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   return [
     leg("merge-tree", `${baseSha}..${headSha}`, "", "", []),
     ...legs.map((name) => leg(name, headSha, install, `bun run ${name}`, baselineKeys)),
-    ...bunLegs(bunShards).map((b) => leg(b.leg, headSha, install, b.legCmd, baselineKeys)),
+    ...bunLegs(bunShards, bunLaneRoot).map((b) => leg(b.leg, headSha, install, b.legCmd, baselineKeys)),
     ...vitestLegs(vitestCmd, shards).map((v) => leg(v.leg, headSha, install, v.legCmd, baselineKeys)),
   ];
 }
