@@ -78,3 +78,39 @@ describe("handleGateRoute", () => {
     expect(env.GATE_WORKFLOW.get).toHaveBeenCalledWith("run-1");
   });
 });
+
+// #1032 (refs #715): a skipped run's workflow output carries `skipped`, not
+// `state` — the route must surface success, not "instance errored", because
+// GitHub already got the skip's success status.
+describe("GET /studio/gate/status with a skipped run", () => {
+  it("skipped output -> success with the skip reason in the description", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({
+        status: "complete",
+        output: { skipped: "no gated paths changed", statusPostFailed: false },
+      })),
+    }));
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      state: "success", description: "skipped: no gated paths changed", statusPostFailed: false,
+    });
+  });
+
+  it("skipped output with a failed status post still carries statusPostFailed", async () => {
+    const env = fakeEnv();
+    env.GATE_WORKFLOW.get = vi.fn(async () => ({
+      status: vi.fn(async () => ({
+        status: "complete",
+        output: { skipped: "no gate config for this repo", statusPostFailed: true },
+      })),
+    }));
+    const req = new Request(`https://worker/studio/gate/status?repo=${REPO}&runId=run-1`);
+    const res = await handleGateRoute(req, env);
+    expect(await res.json()).toEqual({
+      state: "success", description: "skipped: no gate config for this repo", statusPostFailed: true,
+    });
+  });
+});
