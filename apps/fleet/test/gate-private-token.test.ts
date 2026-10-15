@@ -1,6 +1,6 @@
-import { describe, it, expect } from "bun:test";
-import type { Env } from "../../src/env";
-import { mintPrivateCloneToken } from "../../src/github/auth";
+import { describe, it, expect } from "vitest";
+import type { Env } from "../src/env";
+import { mintPrivateCloneToken } from "../src/github/auth";
 
 // #715: the git proxy's token for a private leg is read-only, and only the GitHub
 // App can mint one. A PAT's permissions are fixed when it is issued, so a
