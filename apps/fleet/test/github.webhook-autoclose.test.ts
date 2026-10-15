@@ -7,6 +7,7 @@ import type { StudioStatus } from "../src/studio/types";
 import { isJuniorAuthorized, recordJuniorAuthorization } from "../src/junior/authz";
 import { fakeCtx } from "./helpers/fake-ctx";
 import { sign } from "./helpers/webhook-sign";
+import { post, drainLast, envWithStudio } from "./helpers/webhook-harness";
 
 const SECRET = "hook-secret";
 let sent: { body: any }[] = [];
@@ -18,94 +19,22 @@ const push = (ref: string) => JSON.stringify({
   sender: { login: "example-bot[bot]" },
 });
 
-// Every wake the handler asked for: [studio id, prompt]. Reset per test.
-let wakes: [string, string][] = [];
-// The container's answer to a wake, overridable so a test can prove a FAILED
-// wake still returns 200 -- GitHub retries a non-2xx delivery, and a dead
-// tmux window is not something a retry fixes.
-let wakeOutcome: { ok: boolean; error?: string } = { ok: true };
-// Board issue #182: how many times the handler ever reached `STUDIO.get(...)`
-// at all -- one level BEFORE `wakeStudio` runs. The whole point of #182 is
-// that a stopped maestro never reaches this call, so `wakes` alone (which
-// only records a completed `wakeStudio`) can't prove that; this is a
-// separate counter for `.get()` itself. Reset per test.
-let getCalls = 0;
-// Board issue #236 round 2: WHICH RPC method got called, per `.get(...)`
-// call -- `wakes` alone records studio id + prompt but can't distinguish
-// `wakeStudio` from `wakeStudioOnAssignment` (both push into the same list,
-// same shape). They gate/arm differently (do.ts's own doc comments on each),
-// so a mutant that swapped one for the other would pass every existing
-// assertion here. Reset per test.
-let rpcCalls: { name: string; method: string }[] = [];
-// Issue #41: runs inside the maestro's wakeStudio, so a test can observe
-// what had already happened when the (possibly slow) wake began. Reset per test.
-let onWake: (() => Promise<void>) | null = null;
-
-function envWithStudio() {
-  return {
-    ...env,
-    GITHUB_WEBHOOK_SECRET: SECRET,
-    STUDIO: {
-      idFromName: (name: string) => name,
-      get: (name: string) => {
-        getCalls++;
-        return {
-          wakeStudio: async (prompt: string) => {
-            await onWake?.();
-            wakes.push([name as string, prompt]);
-            rpcCalls.push({ name: name as string, method: "wakeStudio" });
-            return wakeOutcome;
-          },
-          // Board issue #236: the task-assignee wake goes through this RPC,
-          // not wakeStudio -- see src/studio/do.ts's own doc comment on why
-          // (it does not arm the maestro's sweep). Recorded into the SAME
-          // `wakes` list, distinguishable by studio id, since the maestro's
-          // id is always `<repo>--maestro` and a task assignee's id never is.
-          wakeStudioOnAssignment: async (prompt: string) => {
-            wakes.push([name as string, prompt]);
-            rpcCalls.push({ name: name as string, method: "wakeStudioOnAssignment" });
-            return wakeOutcome;
-          },
-        };
-      },
-    },
-  } as any;
-}
+// Sweep 43 F2 (refs #850): envWithStudio/post/drainLast now live in
+// helpers/webhook-harness.ts; the counters they record into are this
+// suite's own state below (arrays reset in place, ctl reassigned member by
+// member in beforeEach) — snapshot-safe for the harness.
+const wakes: [string, string][] = [];
+const rpcCalls: { name: string; method: string }[] = [];
+const ctl = {
+  wakeOutcome: { ok: true } as { ok: boolean; error?: string },
+  getCalls: 0,
+  onWake: null as (() => Promise<void>) | null,
+  lastCtx: null as ReturnType<typeof fakeCtx> | null,
+};
+const h = { wakes, rpcCalls, ctl };
+const send = (body: string, sig: string | null, event?: string) => post(h, SECRET, body, sig, event);
 
 // fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746); webhook variant passes swallow:false so a rejecting queued task stays observable through drain().
-
-// Board issue #236 round 2: `wakeTaskOnComment` now runs behind
-// `ctx.waitUntil` (SHOULD-FIX item 4 -- it can take up to 30s and must not
-// block the response inside GitHub's 10s webhook budget, same reasoning
-// issue #198 already applied to the push path's own `autoCloseOnPromote`).
-// `post` keeps its old fire-and-forget signature for every test that only
-// cares about the synchronous response/wakeMaestro path; `lastCtx` exposes
-// the fake ctx `post` built internally so a test that DOES depend on the
-// deferred wake can `await drainLast()` before asserting.
-let lastCtx: ReturnType<typeof fakeCtx> | null = null;
-
-async function post(body: string, sig: string | null, event = "push") {
-  lastCtx = fakeCtx({ swallow: false });
-  return handleGithubWebhook(
-    new Request("https://x/gh", {
-      method: "POST",
-      headers: {
-        "x-github-event": event,
-        ...(sig ? { "x-hub-signature-256": sig } : {}),
-      },
-      body,
-    }),
-    envWithStudio(),
-    () => 5_000_000,
-    lastCtx,
-  );
-}
-
-/** Drains whatever `ctx.waitUntil` queued on the MOST RECENT `post()` call --
- *  see `lastCtx`'s own doc comment above for why this exists. */
-async function drainLast(): Promise<void> {
-  await lastCtx?.drain();
-}
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM approvals").run();
@@ -117,12 +46,12 @@ beforeEach(async () => {
     await recordStudio(env as any, { id, state: "running", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null } as StudioStatus);
   }
   sent = [];
-  wakes = [];
-  wakeOutcome = { ok: true };
-  getCalls = 0;
-  rpcCalls = [];
-  onWake = null;
-  lastCtx = null;
+  wakes.length = 0;
+  rpcCalls.length = 0;
+  ctl.wakeOutcome = { ok: true };
+  ctl.getCalls = 0;
+  ctl.onWake = null;
+  ctl.lastCtx = null;
   realFetch = globalThis.fetch;
   globalThis.fetch = (async (_i: any, init: any) => {
     sent.push({ body: JSON.parse(init.body as string) });
@@ -170,7 +99,7 @@ describe("github webhook -> auto-close the board task when its PR is promoted to
   let issueComments: Record<number, { id: number; html_url: string; body: string; created_at: string; user: { login: string } }[]>;
 
   function envWithToken() {
-    return { ...envWithStudio(), GITHUB_TOKEN: "gh-token" };
+    return { ...envWithStudio(SECRET, h), GITHUB_TOKEN: "gh-token" };
   }
 
   function pushWithCommits(ref: string, commits: { id: string; message?: string }[]) {
@@ -991,8 +920,8 @@ describe("issues webhook — a terminal label or close also revokes the task's j
     it(`${action} ${label}: record revoked`, async () => {
       await seed();
       const body = issues(action, { label: { name: label } });
-      expect((await post(body, await sign(body, SECRET), "issues")).status).toBe(200);
-      await drainLast();
+      expect((await send(body, await sign(body, SECRET), "issues")).status).toBe(200);
+      await drainLast(h);
       expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(false);
     });
   }
@@ -1002,11 +931,11 @@ describe("issues webhook — a terminal label or close also revokes the task's j
   it("the revoke lands BEFORE the maestro wake starts", async () => {
     await seed();
     let authorizedAtWake: boolean | null = null;
-    onWake = async () => { authorizedAtWake = await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO); };
+    ctl.onWake = async () => { authorizedAtWake = await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO); };
     // A titled issue: the maestro wake digest needs one (wake-events.ts).
     const body = issues("labeled", { label: { name: "canceled" }, issue: { number: 7, title: "t", state: "open" } });
-    expect((await post(body, await sign(body, SECRET), "issues")).status).toBe(200);
-    await drainLast();
+    expect((await send(body, await sign(body, SECRET), "issues")).status).toBe(200);
+    await drainLast(h);
     expect(wakes.map(([id]) => id)).toContain("websites--maestro");
     expect(authorizedAtWake).toBe(false);
   });
@@ -1014,8 +943,8 @@ describe("issues webhook — a terminal label or close also revokes the task's j
   it("closed: record revoked", async () => {
     await seed();
     const body = issues("closed");
-    await post(body, await sign(body, SECRET), "issues");
-    await drainLast();
+    await send(body, await sign(body, SECRET), "issues");
+    await drainLast(h);
     expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(false);
   });
 
@@ -1023,8 +952,8 @@ describe("issues webhook — a terminal label or close also revokes the task's j
     await seed();
     for (const name of ["working", "junior", "bug"]) {
       const body = issues("labeled", { label: { name } });
-      await post(body, await sign(body, SECRET), "issues");
-      await drainLast();
+      await send(body, await sign(body, SECRET), "issues");
+      await drainLast(h);
     }
     expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(true);
   });
@@ -1032,15 +961,15 @@ describe("issues webhook — a terminal label or close also revokes the task's j
   it("unsigned delivery: nothing revoked", async () => {
     await seed();
     const body = issues("labeled", { label: { name: "canceled" } });
-    expect((await post(body, "sha256=nope", "issues")).status).toBe(401);
+    expect((await send(body, "sha256=nope", "issues")).status).toBe(401);
     expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(true);
   });
 
   it("another repo's same issue number: untouched", async () => {
     await seed();
     const body = issues("labeled", { label: { name: "canceled" } }, "acme-org/other");
-    await post(body, await sign(body, SECRET), "issues");
-    await drainLast();
+    await send(body, await sign(body, SECRET), "issues");
+    await drainLast(h);
     expect(await isJuniorAuthorized(env.DB, "acme-org/websites", 7, STUDIO)).toBe(true);
   });
 });

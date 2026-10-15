@@ -7,6 +7,7 @@ import { recordStudio } from "../src/studio/registry";
 import type { StudioStatus } from "../src/studio/types";
 import { fakeCtx } from "./helpers/fake-ctx";
 import { sign } from "./helpers/webhook-sign";
+import { post, drainLast } from "./helpers/webhook-harness";
 
 const SECRET = "hook-secret";
 let sent: { body: any }[] = [];
@@ -18,94 +19,22 @@ const push = (ref: string) => JSON.stringify({
   sender: { login: "example-bot[bot]" },
 });
 
-// Every wake the handler asked for: [studio id, prompt]. Reset per test.
-let wakes: [string, string][] = [];
-// The container's answer to a wake, overridable so a test can prove a FAILED
-// wake still returns 200 -- GitHub retries a non-2xx delivery, and a dead
-// tmux window is not something a retry fixes.
-let wakeOutcome: { ok: boolean; error?: string } = { ok: true };
-// Board issue #182: how many times the handler ever reached `STUDIO.get(...)`
-// at all -- one level BEFORE `wakeStudio` runs. The whole point of #182 is
-// that a stopped maestro never reaches this call, so `wakes` alone (which
-// only records a completed `wakeStudio`) can't prove that; this is a
-// separate counter for `.get()` itself. Reset per test.
-let getCalls = 0;
-// Board issue #236 round 2: WHICH RPC method got called, per `.get(...)`
-// call -- `wakes` alone records studio id + prompt but can't distinguish
-// `wakeStudio` from `wakeStudioOnAssignment` (both push into the same list,
-// same shape). They gate/arm differently (do.ts's own doc comments on each),
-// so a mutant that swapped one for the other would pass every existing
-// assertion here. Reset per test.
-let rpcCalls: { name: string; method: string }[] = [];
-// Issue #41: runs inside the maestro's wakeStudio, so a test can observe
-// what had already happened when the (possibly slow) wake began. Reset per test.
-let onWake: (() => Promise<void>) | null = null;
-
-function envWithStudio() {
-  return {
-    ...env,
-    GITHUB_WEBHOOK_SECRET: SECRET,
-    STUDIO: {
-      idFromName: (name: string) => name,
-      get: (name: string) => {
-        getCalls++;
-        return {
-          wakeStudio: async (prompt: string) => {
-            await onWake?.();
-            wakes.push([name as string, prompt]);
-            rpcCalls.push({ name: name as string, method: "wakeStudio" });
-            return wakeOutcome;
-          },
-          // Board issue #236: the task-assignee wake goes through this RPC,
-          // not wakeStudio -- see src/studio/do.ts's own doc comment on why
-          // (it does not arm the maestro's sweep). Recorded into the SAME
-          // `wakes` list, distinguishable by studio id, since the maestro's
-          // id is always `<repo>--maestro` and a task assignee's id never is.
-          wakeStudioOnAssignment: async (prompt: string) => {
-            wakes.push([name as string, prompt]);
-            rpcCalls.push({ name: name as string, method: "wakeStudioOnAssignment" });
-            return wakeOutcome;
-          },
-        };
-      },
-    },
-  } as any;
-}
+// Sweep 43 F2 (refs #850): envWithStudio/post/drainLast now live in
+// helpers/webhook-harness.ts; the counters they record into are this
+// suite's own state below (arrays reset in place, ctl reassigned member by
+// member in beforeEach) — snapshot-safe for the harness.
+const wakes: [string, string][] = [];
+const rpcCalls: { name: string; method: string }[] = [];
+const ctl = {
+  wakeOutcome: { ok: true } as { ok: boolean; error?: string },
+  getCalls: 0,
+  onWake: null as (() => Promise<void>) | null,
+  lastCtx: null as ReturnType<typeof fakeCtx> | null,
+};
+const h = { wakes, rpcCalls, ctl };
+const send = (body: string, sig: string | null, event?: string) => post(h, SECRET, body, sig, event);
 
 // fakeCtx: shared queue-drain fake — helpers/fake-ctx.ts (sweep 33 F2, #746); webhook variant passes swallow:false so a rejecting queued task stays observable through drain().
-
-// Board issue #236 round 2: `wakeTaskOnComment` now runs behind
-// `ctx.waitUntil` (SHOULD-FIX item 4 -- it can take up to 30s and must not
-// block the response inside GitHub's 10s webhook budget, same reasoning
-// issue #198 already applied to the push path's own `autoCloseOnPromote`).
-// `post` keeps its old fire-and-forget signature for every test that only
-// cares about the synchronous response/wakeMaestro path; `lastCtx` exposes
-// the fake ctx `post` built internally so a test that DOES depend on the
-// deferred wake can `await drainLast()` before asserting.
-let lastCtx: ReturnType<typeof fakeCtx> | null = null;
-
-async function post(body: string, sig: string | null, event = "push") {
-  lastCtx = fakeCtx({ swallow: false });
-  return handleGithubWebhook(
-    new Request("https://x/gh", {
-      method: "POST",
-      headers: {
-        "x-github-event": event,
-        ...(sig ? { "x-hub-signature-256": sig } : {}),
-      },
-      body,
-    }),
-    envWithStudio(),
-    () => 5_000_000,
-    lastCtx,
-  );
-}
-
-/** Drains whatever `ctx.waitUntil` queued on the MOST RECENT `post()` call --
- *  see `lastCtx`'s own doc comment above for why this exists. */
-async function drainLast(): Promise<void> {
-  await lastCtx?.drain();
-}
 
 beforeEach(async () => {
   await env.DB.prepare("DELETE FROM approvals").run();
@@ -117,12 +46,12 @@ beforeEach(async () => {
     await recordStudio(env as any, { id, state: "running", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null } as StudioStatus);
   }
   sent = [];
-  wakes = [];
-  wakeOutcome = { ok: true };
-  getCalls = 0;
-  rpcCalls = [];
-  onWake = null;
-  lastCtx = null;
+  wakes.length = 0;
+  rpcCalls.length = 0;
+  ctl.wakeOutcome = { ok: true };
+  ctl.getCalls = 0;
+  ctl.onWake = null;
+  ctl.lastCtx = null;
   realFetch = globalThis.fetch;
   globalThis.fetch = (async (_i: any, init: any) => {
     sent.push({ body: JSON.parse(init.body as string) });
@@ -144,7 +73,7 @@ describe("github webhook", () => {
     // last character is NOT guarantees an actual mismatch regardless of
     // what that character happens to be.
     const bad = await sign(body, SECRET).then((s) => s.slice(0, -1) + (s.endsWith("0") ? "1" : "0"));
-    expect((await post(body, bad)).status).toBe(401);
+    expect((await send(body, bad)).status).toBe(401);
     expect(sent).toEqual([]);
     // The security requirement names three things a failed verification
     // must not do: "no event, no alert, no D1 write". sent===[] above only
@@ -154,14 +83,14 @@ describe("github webhook", () => {
 
   it("rejects an unsigned body", async () => {
     const body = push("refs/heads/staging");
-    expect((await post(body, null)).status).toBe(401);
+    expect((await send(body, null)).status).toBe(401);
     expect(sent).toEqual([]);
     expect(await readSince(env.DB, "human", 0)).toEqual([]);
   });
 
   it("ignores a push to a feature branch", async () => {
     const body = push("refs/heads/some-feature");
-    expect((await post(body, await sign(body, SECRET))).status).toBe(200);
+    expect((await send(body, await sign(body, SECRET))).status).toBe(200);
     expect(sent).toEqual([]);
   });
 
@@ -174,7 +103,7 @@ describe("github webhook", () => {
   // secret, must not crash the handler.
   it("returns 200 without crashing on a validly signed body that is not JSON", async () => {
     const body = "not json at all";
-    const res = await post(body, await sign(body, SECRET));
+    const res = await send(body, await sign(body, SECRET));
     expect(res.status).toBe(200);
     expect(sent).toEqual([]);
   });
@@ -193,12 +122,12 @@ describe("github webhook", () => {
     const warns = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const body = "not json at all";
-      const res = await post(body, await sign(body, SECRET), "issues");
+      const res = await send(body, await sign(body, SECRET), "issues");
       expect(res.status).toBe(200);
       expect(wakes).toEqual([]);
       expect(warns).toHaveBeenCalledTimes(1);
       expect(warns.mock.calls[0].join(" ")).toContain("not JSON");
-      await drainLast();
+      await drainLast(h);
       expect(wakes).toEqual([]);
     } finally {
       warns.mockRestore();
@@ -208,14 +137,14 @@ describe("github webhook", () => {
 
   it("returns 200 without crashing on a validly signed JSON body of literal null", async () => {
     const body = "null";
-    const res = await post(body, await sign(body, SECRET));
+    const res = await send(body, await sign(body, SECRET));
     expect(res.status).toBe(200);
     expect(sent).toEqual([]);
   });
 
   it("alerts on a write to staging with no approved gate", async () => {
     const body = push("refs/heads/staging");
-    await post(body, await sign(body, SECRET));
+    await send(body, await sign(body, SECRET));
     expect(sent).toHaveLength(1);
     expect(sent[0].body.text).toMatch(/UNAPPROVED WRITE/);
     expect(sent[0].body.text).toMatch(/example-bot\[bot\]/);
@@ -229,7 +158,7 @@ describe("github webhook", () => {
     }, 4_990_000);
     await finishApproval(env.DB, "appr_1", "executed", "merged");
     const body = push("refs/heads/staging");
-    expect((await post(body, await sign(body, SECRET))).status).toBe(200);
+    expect((await send(body, await sign(body, SECRET))).status).toBe(200);
     expect(sent).toEqual([]);
   });
 
@@ -247,7 +176,7 @@ describe("github webhook", () => {
     }, 4_990_000);
     await decideApproval(env.DB, "appr_5", "approved", "100000001", 4_990_500);
     const body = push("refs/heads/staging");
-    expect((await post(body, await sign(body, SECRET))).status).toBe(200);
+    expect((await send(body, await sign(body, SECRET))).status).toBe(200);
     expect(sent).toEqual([]);
   });
 
@@ -258,7 +187,7 @@ describe("github webhook", () => {
     }, 4_990_000);
     await finishApproval(env.DB, "appr_2", "failed", "rejected by operator");
     const body = push("refs/heads/staging");
-    await post(body, await sign(body, SECRET));
+    await send(body, await sign(body, SECRET));
     expect(sent).toHaveLength(1);
   });
 
@@ -269,7 +198,7 @@ describe("github webhook", () => {
     }, 1_000_000);
     await finishApproval(env.DB, "appr_3", "executed", "merged");
     const body = push("refs/heads/staging");
-    await post(body, await sign(body, SECRET));
+    await send(body, await sign(body, SECRET));
     expect(sent).toHaveLength(1);
   });
 });
@@ -346,7 +275,7 @@ describe("github webhook -> maestro wake", () => {
   });
 
   it("wakes THIS repo's maestro with the delta digest", async () => {
-    const res = await post(issueComment, await sign(issueComment, SECRET), "issue_comment");
+    const res = await send(issueComment, await sign(issueComment, SECRET), "issue_comment");
     expect(res.status).toBe(200);
     expect(wakes).toEqual([[
       "websites--maestro",
@@ -364,8 +293,8 @@ describe("github webhook -> maestro wake", () => {
       issue: { number: 7, title: "board task", state: "open" },
       comment: { user: { login: "rafarc21" }, body: "go" },
     });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.map(([id]) => id)).toEqual(["demosite-life--maestro"]);
   });
@@ -377,21 +306,21 @@ describe("github webhook -> maestro wake", () => {
       issue: { number: 7, title: "board task", state: "open" },
       comment: { user: { login: "rafarc21" }, body: "go" },
     });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes).toEqual([]);
   });
 
   it("never wakes on an unsigned delivery", async () => {
-    const res = await post(issueComment, "sha256=" + "0".repeat(64), "issue_comment");
+    const res = await send(issueComment, "sha256=" + "0".repeat(64), "issue_comment");
     expect(res.status).toBe(401);
     expect(wakes).toEqual([]);
   });
 
   it("still returns 200 when the wake itself fails", async () => {
-    wakeOutcome = { ok: false, error: "wake failed (1): can't find window: studio:claude" };
-    const res = await post(issueComment, await sign(issueComment, SECRET), "issue_comment");
+    ctl.wakeOutcome = { ok: false, error: "wake failed (1): can't find window: studio:claude" };
+    const res = await send(issueComment, await sign(issueComment, SECRET), "issue_comment");
     expect(res.status).toBe(200);
     expect(wakes.length).toBe(1);
   });
@@ -401,7 +330,7 @@ describe("github webhook -> maestro wake", () => {
   // the webhook now does too.
   it("never touches a Durable Object for a repo with no maestro in the registry", async () => {
     await env.DB.prepare("DELETE FROM fleet_state").run();
-    const res = await post(issueComment, await sign(issueComment, SECRET), "issue_comment");
+    const res = await send(issueComment, await sign(issueComment, SECRET), "issue_comment");
     expect(res.status).toBe(200);
     expect(wakes).toEqual([]);
   });
@@ -409,10 +338,10 @@ describe("github webhook -> maestro wake", () => {
   // Board issue #100 F5: a stopped maestro's refusal is the gate WORKING, not
   // a failure — one console.error per GitHub event buried real errors.
   it("logs a deliberate skip (stopped maestro) at info level, never as an error", async () => {
-    wakeOutcome = { ok: false, skipped: true, error: "refused: this studio is stopped" } as typeof wakeOutcome;
+    ctl.wakeOutcome = { ok: false, skipped: true, error: "refused: this studio is stopped" } as typeof ctl.wakeOutcome;
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const infos = vi.spyOn(console, "log").mockImplementation(() => {});
-    const res = await post(issueComment, await sign(issueComment, SECRET), "issue_comment");
+    const res = await send(issueComment, await sign(issueComment, SECRET), "issue_comment");
     expect(res.status).toBe(200);
     expect(errors.mock.calls.flat().join(" ")).not.toContain("stopped");
     expect(infos.mock.calls.flat().join(" ")).toContain("stopped");
@@ -422,14 +351,14 @@ describe("github webhook -> maestro wake", () => {
 
   it("ignores an event nobody asked to be woken for", async () => {
     const body = JSON.stringify({ action: "created", repository: { full_name: "acme-org/websites" } });
-    const res = await post(body, await sign(body, SECRET), "star");
+    const res = await send(body, await sign(body, SECRET), "star");
     expect(res.status).toBe(200);
     expect(wakes).toEqual([]);
   });
 
   it("leaves the push path alone -- a push wakes nobody", async () => {
     const body = push("refs/heads/main");
-    const res = await post(body, await sign(body, SECRET));
+    const res = await send(body, await sign(body, SECRET));
     expect(res.status).toBe(200);
     expect(wakes).toEqual([]);
     // ...and the UNAPPROVED WRITE alarm still fired, so the branch above did
@@ -494,8 +423,8 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
 
   it("wakes the task's own assignee -- not the maestro -- on a genuine input_required comment", async () => {
     const body = commentPayload({ boardState: "input_required" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     const assigneeWakes = wakes.filter(([id]) => id === ASSIGNEE);
     expect(assigneeWakes.length).toBe(1);
@@ -523,8 +452,8 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
 
   it("never wakes on the studio's own envelope comment, even on an input_required task", async () => {
     const body = commentPayload({ boardState: "input_required", body: envelopeCommentBody });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
   });
@@ -541,32 +470,32 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
       JSON.stringify({ envelope: { msg_id: "m2", task_id: 231 }, payload: { status: "done" }, notes: "" }) +
       "\n```";
     const body = commentPayload({ boardState: "working", body: envelopeWithWakeMarkerBody });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
   });
 
   it("never wakes on a comment authored by a [bot] login, even on an input_required task", async () => {
     const body = commentPayload({ boardState: "input_required", login: "example-bot[bot]" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
   });
 
   it("does not wake a non-input_required task on a plain comment with no explicit marker", async () => {
     const body = commentPayload({ boardState: "working" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
   });
 
   it("wakes a RUNNING studio on a comment starting with the explicit /wake marker, for a non-input_required task", async () => {
     const body = commentPayload({ boardState: "working", body: "/wake please take another look" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     const assigneeWakes = wakes.filter(([id]) => id === ASSIGNEE);
     expect(assigneeWakes.length).toBe(1);
@@ -575,8 +504,8 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
 
   it("an explicit /wake marker beats the [bot] exclusion -- the cloud maestro's own marker must wake", async () => {
     const body = commentPayload({ boardState: "working", login: "example-bot[bot]", body: "/wake answer" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     const assigneeWakes = wakes.filter(([id]) => id === ASSIGNEE);
     expect(assigneeWakes.length).toBe(1);
@@ -585,8 +514,8 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
   it("does not wake a STOPPED studio even with the explicit marker", async () => {
     await setAssigneeState("stopped");
     const body = commentPayload({ boardState: "working", body: "/wake please take another look" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
   });
@@ -596,10 +525,10 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
     const second = commentPayload({
       boardState: "input_required", body: "actually here's the real fix", commentUrl: `${COMMENT_URL}-2`,
     });
-    await post(first, await sign(first, SECRET), "issue_comment");
-    await drainLast();
-    await post(second, await sign(second, SECRET), "issue_comment");
-    await drainLast();
+    await send(first, await sign(first, SECRET), "issue_comment");
+    await drainLast(h);
+    await send(second, await sign(second, SECRET), "issue_comment");
+    await drainLast(h);
     const assigneeWakes = wakes.filter(([id]) => id === ASSIGNEE);
     // Both wakes fire -- no dedup suppresses the second. Round 3: each
     // digest carries its OWN comment's URL (identifying which comment is
@@ -615,8 +544,8 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
 
   it("does not wake at all when the task has no single studio assignee (backlog)", async () => {
     const body = commentPayload({ boardState: "input_required", noAssignee: true });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id !== "websites--maestro")).toEqual([]);
   });
@@ -635,8 +564,8 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
         tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
       } as StudioStatus);
       const body = commentPayload({ boardState: "input_required" });
-      const res = await post(body, await sign(body, SECRET), "issue_comment");
-      await drainLast();
+      const res = await send(body, await sign(body, SECRET), "issue_comment");
+      await drainLast(h);
       expect(res.status).toBe(200); // GitHub's delivery is still accepted -- the refusal is logged, not surfaced as an error.
       expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
       // Board #111: this task's own assignee (ASSIGNEE, websites--web-studio)
@@ -652,8 +581,8 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
         tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
       } as StudioStatus);
       const body = commentPayload({ boardState: "input_required" });
-      const res = await post(body, await sign(body, SECRET), "issue_comment");
-      await drainLast();
+      const res = await send(body, await sign(body, SECRET), "issue_comment");
+      await drainLast(h);
       expect(res.status).toBe(200);
       const assigneeWakes = wakes.filter(([id]) => id === ASSIGNEE);
       expect(assigneeWakes.length).toBe(1);
@@ -663,8 +592,8 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
 
   it("ignores an edited comment -- only a NEW (created) comment can trigger", async () => {
     const body = commentPayload({ boardState: "input_required", action: "edited" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
   });
@@ -677,16 +606,16 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
       id: OTHER, state: "running", tailscaleHost: null, lastRefresh: null, error: null, lastRefreshError: null,
     } as StudioStatus);
     const body = commentPayload({ boardState: "input_required", assignees: [ASSIGNEE, OTHER] });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id !== "websites--maestro")).toEqual([]);
   });
 
   it("mutant pin: [working, input_required] state-label drift + plain body (no marker) -> zero assignee wakes", async () => {
     const body = commentPayload({ boardState: "working", extraBoardState: "input_required" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
   });
@@ -694,9 +623,9 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
   it("mutant pin: a studio: label with NO registry row is never handed to env.STUDIO.get() (issue #40 phantom-DO hazard)", async () => {
     const PHANTOM = "websites--ghost";
     const body = commentPayload({ boardState: "input_required", assignees: [PHANTOM] });
-    const before = getCalls;
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const before = ctl.getCalls;
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     // Board #111: PHANTOM is a single, non-maestro assignee, so this task is
     // a DIFFERENT lane's business -- the maestro's own generic wake now
@@ -705,13 +634,13 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
     // stay at zero regardless is any .get() reaching the phantom PHANTOM id
     // itself, through either wake path.
     expect(rpcCalls.some((c) => c.name === PHANTOM)).toBe(false);
-    expect(getCalls).toBe(before);
+    expect(ctl.getCalls).toBe(before);
   });
 
   it("mutant pin: the assignee wake goes through wakeStudioOnAssignment, never the plain wakeStudio RPC", async () => {
     const body = commentPayload({ boardState: "input_required" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     const assigneeCalls = rpcCalls.filter((c) => c.name === ASSIGNEE);
     expect(assigneeCalls.length).toBe(1);
@@ -720,16 +649,16 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
 
   it("mutant pin: '/wakeup now' (different word) on a working task never wakes -- no loose substring match", async () => {
     const body = commentPayload({ boardState: "working", body: "/wakeup now" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
   });
 
   it("mutant pin: '/wake' present but NOT on the first line never wakes -- first-line-only rule", async () => {
     const body = commentPayload({ boardState: "working", body: "hi\n/wake" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
   });
@@ -740,8 +669,8 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
   // comment would land two prompts in the same tmux pane.
   it("SHOULD-FIX 5: skips the assignee wake when the assignee IS the repo's own maestro (wakeMaestro already woke it)", async () => {
     const body = commentPayload({ boardState: "input_required", assignees: ["websites--maestro"] });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
-    await drainLast();
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
+    await drainLast(h);
     expect(res.status).toBe(200);
     const maestroWakes = wakes.filter(([id]) => id === "websites--maestro");
     expect(maestroWakes.length).toBe(1);
@@ -753,14 +682,14 @@ describe("github webhook -> comment wakes the task's OWN assignee, never another
   // SHOULD-FIX item 4 (round 2): the assignee wake must run behind
   // ctx.waitUntil, not block the response -- GitHub's webhook delivery
   // budget is 10s, a wake's own exec can take up to 30s. Proven directly:
-  // right after `post()` resolves (before `drainLast()`), the wake has NOT
+  // right after `send()` resolves (before `drainLast(h)`), the wake has NOT
   // happened yet; only after draining does it show up.
   it("SHOULD-FIX 4: the assignee wake is deferred behind ctx.waitUntil, not awaited inline", async () => {
     const body = commentPayload({ boardState: "input_required" });
-    const res = await post(body, await sign(body, SECRET), "issue_comment");
+    const res = await send(body, await sign(body, SECRET), "issue_comment");
     expect(res.status).toBe(200);
     expect(wakes.filter(([id]) => id === ASSIGNEE)).toEqual([]);
-    await drainLast();
+    await drainLast(h);
     expect(wakes.filter(([id]) => id === ASSIGNEE).length).toBe(1);
   });
 });
@@ -807,41 +736,41 @@ describe("github webhook -> maestro wake: a stopped maestro is skipped, a runnin
     ["pull_request", pullRequestPayload],
   ])("never touches the Durable Object for a STOPPED maestro (%s)", async (event, body) => {
     await setState("stopped");
-    const res = await post(body, await sign(body, SECRET), event);
+    const res = await send(body, await sign(body, SECRET), event);
     expect(res.status).toBe(200);
     expect(wakes).toEqual([]);
-    expect(getCalls).toBe(0);
+    expect(ctl.getCalls).toBe(0);
   });
 
   it("still wakes a RUNNING maestro exactly as before", async () => {
     await setState("running");
-    const res = await post(issueCommentPayload, await sign(issueCommentPayload, SECRET), "issue_comment");
+    const res = await send(issueCommentPayload, await sign(issueCommentPayload, SECRET), "issue_comment");
     expect(res.status).toBe(200);
     expect(wakes.length).toBe(1);
-    expect(getCalls).toBe(1);
+    expect(ctl.getCalls).toBe(1);
   });
 
   it("logs the stopped-skip once per episode, not once per event", async () => {
     await setState("stopped");
     const infos = vi.spyOn(console, "log").mockImplementation(() => {});
-    await post(issuesPayload, await sign(issuesPayload, SECRET), "issues");
-    await post(issuesPayload, await sign(issuesPayload, SECRET), "issues");
+    await send(issuesPayload, await sign(issuesPayload, SECRET), "issues");
+    await send(issuesPayload, await sign(issuesPayload, SECRET), "issues");
     const stoppedLogs = infos.mock.calls.filter(
       (c) => c.join(" ").includes(STUDIO_ID) && c.join(" ").toLowerCase().includes("stopped"),
     );
     expect(stoppedLogs.length).toBe(1);
-    expect(getCalls).toBe(0);
+    expect(ctl.getCalls).toBe(0);
     infos.mockRestore();
   });
 
   it("clears the flag on recovery so the NEXT stopped episode logs again", async () => {
     const infos = vi.spyOn(console, "log").mockImplementation(() => {});
     await setState("stopped");
-    await post(issuesPayload, await sign(issuesPayload, SECRET), "issues"); // episode 1: logs
+    await send(issuesPayload, await sign(issuesPayload, SECRET), "issues"); // episode 1: logs
     await setState("running");
-    await post(issuesPayload, await sign(issuesPayload, SECRET), "issues"); // recovered: not stopped, no skip log
+    await send(issuesPayload, await sign(issuesPayload, SECRET), "issues"); // recovered: not stopped, no skip log
     await setState("stopped");
-    await post(issuesPayload, await sign(issuesPayload, SECRET), "issues"); // episode 2: new episode, logs again
+    await send(issuesPayload, await sign(issuesPayload, SECRET), "issues"); // episode 2: new episode, logs again
     const stoppedLogs = infos.mock.calls.filter(
       (c) => c.join(" ").includes(STUDIO_ID) && c.join(" ").toLowerCase().includes("stopped"),
     );
