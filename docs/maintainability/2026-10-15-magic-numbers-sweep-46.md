@@ -16,7 +16,7 @@ timeout maps), then hand-verify every candidate against its surrounding code.
 **Ruled out (value explained by comment or named constant):** EXEC_CLASSES
 (src/studio/sandbox-api.ts:160-170) and TICK_DEADLINES_MS
 (src/studio/do.ts:3699-3704) — every value explained by the comment table
-directly above each; install-cache.ts's flat 600s `--max-time` (:938, :1694,
+directly above each; src/studio/install-cache.ts's flat 600s `--max-time` (:938, :1694,
 :1702 — doc comments at :902-906 and :1630); github/api.ts
 listOpenPullNumbers/listOpenPullFiles `per_page=100` (:585, :616 — comments
 state the one-page-at-GitHub's-max posture); junior/route.ts:178's
