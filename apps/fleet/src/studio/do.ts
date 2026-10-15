@@ -8315,6 +8315,15 @@ export class StudioDO extends Sandbox<Env> {
         // that invented its own notion of "came up correctly" would be a
         // second definition of ready, which is exactly what issue #37 spent a
         // release removing.
+        // Sweep 43 F15 (issue #894): this closure's distilled form for tests.
+        // `restartWithStorage(deps, storage, id, slug, "heal", storage)` is
+        // the one call a restore-path test needs to drive a real staged
+        // heal; the credential refresh / spawn-token settle restartStudio()
+        // also does along the way are DO-only concerns, already covered by
+        // test/studio.refresh.test.ts and test/studio.self-heal.test.ts.
+        // The two replacement suites cite THIS comment from their local
+        // healClosure() adapters rather than restating it (it used to be
+        // byte-identical in both test files).
         () => this.restartStudio("heal"),
         this.ctx.storage,
         // Issue #249 (PR4b) round 2, item 2: the deferred re-brief's retry.
