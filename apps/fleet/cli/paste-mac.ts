@@ -5,13 +5,9 @@
 // bindings of its own beyond Bun.spawn.
 //
 // The default tmp path is /tmp/fleet-paste.png (the brief's literal
-// command), overridable via FLEET_PASTE_TMP so test lanes each own a
-// private file. A single interactive `fleet attach` never pastes
-// concurrently with itself.
-// Injectable tmp path: FLEET_PASTE_TMP overrides the fixed /tmp default so
-// test lanes (and any future concurrent caller) each own a private file
-// instead of racing on one machine-wide path. Read at CALL time, not module
-// load, so in-process mock lanes can point it wherever their test needs.
+// command); FLEET_PASTE_TMP overrides it so test lanes each own a private
+// file instead of racing on one machine-wide path. Read at CALL time, not
+// module load, so in-process mock lanes can point it wherever they need.
 function pasteTmpPath(): string {
   return process.env.FLEET_PASTE_TMP ?? "/tmp/fleet-paste.png";
 }
