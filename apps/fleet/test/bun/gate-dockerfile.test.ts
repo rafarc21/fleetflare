@@ -42,7 +42,11 @@ describe("Dockerfile.gate runs the real lanes", () => {
       /apt-get install -y --no-install-recommends[^&]*\bpython3\b[^&]*\bprocps\b/,
     );
     for (const pkg of ["python3", "procps", "zstd", "gcc", "g\\+\\+", "make", "libc6-dev", "jq", "binutils"]) {
-      expect(code).toMatch(new RegExp(`apt-get install -y --no-install-recommends[^&]*\\b${pkg}\\b`));
+      // (?!\w), not a trailing \b: g++ ends in a non-word char, and \b there
+      // only matches before a word char — \bg\+\+\b could never match the
+      // space-delimited package list, only a glued "g++x" token. For the
+      // word-ending packages the two are identical.
+      expect(code).toMatch(new RegExp(`apt-get install -y --no-install-recommends[^&]*\\b${pkg}(?!\\w)`));
     }
   });
 
