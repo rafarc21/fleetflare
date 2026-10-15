@@ -65,6 +65,10 @@ import {
   formatObservedLines, formatActivity, lsJsonRows,
 } from "./readiness-format";
 import { formatTaskTable, formatTaskShow, formatAssignWake } from "./task-format";
+// Issue #934: the INFER column's pure half (the cell format + the blocked
+// threshold), kept Bun/node-free so either test pool can import it — see
+// that module's own header.
+import { formatInfer, isLeadInferenceBlocked, INFER_WINDOW_MS, type LeadInferUsage } from "./infer-format";
 import type { AssignWakeReport } from "../src/board/assign-wake";
 // Board issue #332: the open-prs route's answer shape — a type-only import,
 // so none of src/board's runtime graph rides into this CLI binary.
@@ -382,10 +386,23 @@ export function fullErrorLine(s: StudioStatus): string | null {
  * live reads); see the cell's own comment for the "-"/count/0 contract.
  * Every single-studio call site passes no map and renders "-" — "no data" is
  * the honest reading for a view that never asked the board.
+ *
+ * INFER column (issue #934): this studio's lead-inference calls in the last
+ * 30 minutes, "<ok>/<calls> <pct>%" — the one number that answers "is this
+ * row alive AND getting answers", which READY cannot (an alive lead blocked
+ * on Workers AI 429/5xx reads `running` with every number frozen; that
+ * silence looked like progress for 5h on 2026-10-15). `inferBy` (studio id
+ * -> {calls, ok}) comes from cmdLs's one batched GET
+ * /studio/junior/usage/lead — NOT behind a flag, unlike PRS: it is a single
+ * D1 GROUP BY inside the Worker, never a per-studio fan-out, so the #332
+ * review H1 "bare ls never fans out live reads" rule does not apply. Placed
+ * between ACTIVITY and CHECKED because it is read beside the live-signal
+ * columns. Every single-studio call site passes no map and renders "-" —
+ * same honest-reading reason as PRS.
  */
 export function formatTable(
   studios: StudioStatus[], now: Date = new Date(), orcaRows?: Map<string, string> | null,
-  openPrs?: Map<string, number>,
+  openPrs?: Map<string, number>, inferBy?: Map<string, LeadInferUsage>,
 ): string {
   if (studios.length === 0) return "(no studios provisioned)";
   // REPO column (operator request 2026-08-20): a studio id is
@@ -396,76 +413,97 @@ export function formatTable(
   // of truth, and a malformed id keeps rendering rather than crashing the
   // table.
   const headers = [
-    "ID", "REPO", "STATE", "RST", "WIP", "PRS", "READY", "SESSION", "ACTIVITY", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
+    "ID", "REPO", "STATE", "RST", "WIP", "PRS", "READY", "SESSION", "ACTIVITY", "INFER", "CHECKED", "ROW", "ACCOUNT", "HOST", "BURN", "REFRESHED", "ERROR",
   ];
-  const rows = studios.map((s) => [
-    s.id,
-    parseStudioId(s.id)?.repo ?? "-",
-    // STATE column (issue #95): formatState calls out a `stopped` row whose
-    // container the Worker's detector saw RUNNING — billing while the
-    // registry says off — rather than the bare state word.
-    formatState(s),
-    // RST column (issue #56): containers replaced in the last 24h / lifetime
-    // -- churn a coordinator can see without opening a container.
-    formatRestartCell(s, now),
-    // WIP column (board issue #208, part 2): age since the last periodic
-    // WIP safety-net check (fleet/rescue/<studio>/wip/<bootStamp>, #208 fix
-    // round item 1 -- scoped per container boot) -- bounds how much a
-    // platform-side container replacement (no pre-replacement rescue hook)
-    // could have cost, without opening a container.
-    formatWipCell(s, now),
-    // PRS cell (board issue #332): a map ENTRY (0 included) is a counted
-    // answer from the board's open-prs route; ABSENCE is "no data" — the
-    // route was unavailable for this studio's repo (an old Worker answering
-    // 404) — rendered "-", never a silent 0: "could not look" must not read
-    // as "looked and found none", the exact false-clean shape #332 exists
-    // to prevent (a bounced security-adjacent PR parked 5x in a day while
-    // nothing anywhere said so).
-    String(openPrs?.get(s.id) ?? "-"),
-    // Issue #85: `readyOverride` reads the DO's own Observed evidence
-    // (replaced/unreachable/unverified) FIRST — that evidence contradicts or
-    // supersedes the last container-side check `formatReady` renders, and
-    // first-match-wins beats a stale/hopeful "provisioned". `formatReady` is
-    // the fallback only once none of those overrides apply — and (issue #99)
-    // itself checks the row's own rateLimited field before falling through
-    // to the container-side readiness verdict.
-    readyOverride(s, now) ?? formatReady(s.readiness, s, now),
-    formatSession(s, now),
-    // ACTIVITY column (issue #221, PR3a): working/idle/waiting-members/limit
-    // from the pane itself, `?` with a reason when it cannot say — the
-    // answer READY cannot give (READY only says alive-or-dead). Reads the
-    // D1-mirrored `observed.activity`, so this budget is the mirror one
-    // (`formatActivity`'s own default third argument).
-    formatActivity(s, now),
-    formatCheckedAt(s.readiness, now),
-    // ROW column (board #55): this machine's Orca row + attach terminal,
-    // cli/orca-workspace.ts's classifyStudioRow. `fleet ls` always passes a
-    // map (`?` + footer when Orca gave no verdict, #299); "-" only on the
-    // single-studio views that never read Orca at all.
-    orcaRows?.get(s.id) ?? "-",
-    // ACCOUNT column (issue #53): WHICH claude account this studio is running
-    // on, by the name of the Worker secret it comes from. The fleet now moves
-    // a studio to the next account by itself when the first one hits its
-    // limit, and "a silent failover that works is still a failover nobody can
-    // audit when the second account drains too" — this column is where an
-    // operator sees that it happened, without opening a container.
-    //
-    // The secret's NAME, never its value: a variable name is not a credential.
-    // Absent is rendered as the first account rather than "-": a studio that
-    // has never switched is on CLAUDE_CODE_OAUTH_TOKEN by construction (see
-    // StudioStatus.claudeAccount), and "-" would read as "unknown".
-    //
-    // Issue #271: with the operator's label (CLAUDE_ACCOUNT_<n>_LABEL, stamped
-    // by the Worker's listStudios) as `<label> (<secret name>)`.
-    //
-    // Issue #289/#285: the account the container was LAUNCHED on, the next
-    // launch's in a note when they differ; "-" after a refused launch.
-    formatAccount(s),
-    s.tailscaleHost ?? "-",
-    formatBurn(s.burn),
-    s.lastRefresh ?? "-",
-    capErrorCell(s.error),
-  ]);
+  const rows = studios.map((s) => {
+    // Issue #934: the blocked verdict is computed before the cells below,
+    // because the marker rides the READY cell while the numbers live in
+    // INFER — one lookup, shared by both.
+    const blocked = isLeadInferenceBlocked(inferBy?.get(s.id));
+    return [
+      s.id,
+      parseStudioId(s.id)?.repo ?? "-",
+      // STATE column (issue #95): formatState calls out a `stopped` row whose
+      // container the Worker's detector saw RUNNING — billing while the
+      // registry says off — rather than the bare state word.
+      formatState(s),
+      // RST column (issue #56): containers replaced in the last 24h / lifetime
+      // -- churn a coordinator can see without opening a container.
+      formatRestartCell(s, now),
+      // WIP column (board issue #208, part 2): age since the last periodic
+      // WIP safety-net check (fleet/rescue/<studio>/wip/<bootStamp>, #208 fix
+      // round item 1 -- scoped per container boot) -- bounds how much a
+      // platform-side container replacement (no pre-replacement rescue hook)
+      // could have cost, without opening a container.
+      formatWipCell(s, now),
+      // PRS cell (board issue #332): a map ENTRY (0 included) is a counted
+      // answer from the board's open-prs route; ABSENCE is "no data" — the
+      // route was unavailable for this studio's repo (an old Worker answering
+      // 404) — rendered "-", never a silent 0: "could not look" must not read
+      // as "looked and found none", the exact false-clean shape #332 exists
+      // to prevent (a bounced security-adjacent PR parked 5x in a day while
+      // nothing anywhere said so).
+      String(openPrs?.get(s.id) ?? "-"),
+      // Issue #85: `readyOverride` reads the DO's own Observed evidence
+      // (replaced/unreachable/unverified) FIRST — that evidence contradicts or
+      // supersedes the last container-side check `formatReady` renders, and
+      // first-match-wins beats a stale/hopeful "provisioned". `formatReady` is
+      // the fallback only once none of those overrides apply — and (issue #99)
+      // itself checks the row's own rateLimited field before falling through
+      // to the container-side readiness verdict.
+      // Issue #934: a blocked lead APPENDS " inference-blocked" here — the
+      // READY column is where an operator already looks for "this row is
+      // lying about being fine" (issue #99's rate-limit override reads there),
+      // and the marker never REPLACES the verdict underneath (it still
+      // shows), firing only on the threshold: >=10 calls under 50% ok in the
+      // last 30 min (isLeadInferenceBlocked, cli/infer-format.ts).
+      (() => {
+        const ready = readyOverride(s, now) ?? formatReady(s.readiness, s, now);
+        return blocked ? `${ready} inference-blocked` : ready;
+      })(),
+      formatSession(s, now),
+      // ACTIVITY column (issue #221, PR3a): working/idle/waiting-members/limit
+      // from the pane itself, `?` with a reason when it cannot say — the
+      // answer READY cannot give (READY only says alive-or-dead). Reads the
+      // D1-mirrored `observed.activity`, so this budget is the mirror one
+      // (`formatActivity`'s own default third argument).
+      formatActivity(s, now),
+      // INFER cell (issue #934): "<ok>/<calls> <pct>%" of this studio's
+      // lead-inference calls in the last 30 min, "-" when it made none in the
+      // window (Claude-led or idle) or the route never answered — the same
+      // absent-means-no-data contract the PRS cell above carries. See
+      // formatInfer's own doc comment (cli/infer-format.ts) for the shape.
+      formatInfer(inferBy?.get(s.id)),
+      formatCheckedAt(s.readiness, now),
+      // ROW column (board #55): this machine's Orca row + attach terminal,
+      // cli/orca-workspace.ts's classifyStudioRow. `fleet ls` always passes a
+      // map (`?` + footer when Orca gave no verdict, #299); "-" only on the
+      // single-studio views that never read Orca at all.
+      orcaRows?.get(s.id) ?? "-",
+      // ACCOUNT column (issue #53): WHICH claude account this studio is running
+      // on, by the name of the Worker secret it comes from. The fleet now moves
+      // a studio to the next account by itself when the first one hits its
+      // limit, and "a silent failover that works is still a failover nobody can
+      // audit when the second account drains too" — this column is where an
+      // operator sees that it happened, without opening a container.
+      //
+      // The secret's NAME, never its value: a variable name is not a credential.
+      // Absent is rendered as the first account rather than "-": a studio that
+      // has never switched is on CLAUDE_CODE_OAUTH_TOKEN by construction (see
+      // StudioStatus.claudeAccount), and "-" would read as "unknown".
+      //
+      // Issue #271: with the operator's label (CLAUDE_ACCOUNT_<n>_LABEL, stamped
+      // by the Worker's listStudios) as `<label> (<secret name>)`.
+      //
+      // Issue #289/#285: the account the container was LAUNCHED on, the next
+      // launch's in a note when they differ; "-" after a refused launch.
+      formatAccount(s),
+      s.tailscaleHost ?? "-",
+      formatBurn(s.burn),
+      s.lastRefresh ?? "-",
+      capErrorCell(s.error),
+    ];
+  });
   return formatColumns(headers, rows);
 }
 
@@ -666,6 +704,70 @@ export const PARK_WARNING_UNAVAILABLE =
  *  studio's own scan failed — "could not check", never a clean zero. */
 export const PARK_WARNING_UNKNOWN_SCAN =
   "park warning: could not check unmerged PRs (the scan failed for this studio)";
+
+// ---------------------------------------------------------------------------
+// Issue #934: the lead-inference read behind the INFER column. ONE route —
+// GET /studio/junior/usage/lead?since=<ms> (src/junior/usage.ts's
+// handleLeadUsageStats, this issue's step 1) — answers EVERY studio at once:
+// the GROUP BY runs inside the Worker as one batched D1 read, so the #332
+// review H1 "bare ls never fans out live reads" concern does not apply and
+// this fetch is NOT behind a flag, unlike --prs. Best-effort the same way
+// openPrsByStudio above is: a 404 from a Worker deployed before this
+// feature, a 5xx, or a transport blip contributes NO data and never fails
+// the listing that asked.
+
+/** The route path for the window — `since` is the epoch-ms cutoff, exactly
+ *  what the route's own doc comment says the CLI layer always hands it:
+ *  `now - 30min` (INFER_WINDOW_MS). */
+function leadInferPath(sinceMs: number): string {
+  return `/usage/lead?since=${encodeURIComponent(String(sinceMs))}`;
+}
+
+/** #934 review posture (same rule as OPEN_PRS_TIMEOUT_MS): the fetch carries
+ *  its own deadline — `fleet ls` must never sit waiting on a slow read; the
+ *  AbortSignal turns a hung read into the same "no data" degrade the 404
+ *  path already takes. */
+const LEAD_INFER_TIMEOUT_MS = 10_000;
+
+/**
+ * The per-studio lead-inference usage for a whole listing (#934): one GET
+ * to /studio/junior/usage/lead with `since = nowMs - INFER_WINDOW_MS`, the
+ * rows folded into a single studio-id -> {calls, ok} map for formatTable's
+ * INFER cell and `fleet ls --json` (readiness-format.ts's lsJsonRows).
+ *
+ * A tagged result, never a throw and never a rejection — every failure
+ * (a !ok answer above all a 404 from a Worker that predates the route, or
+ * a transport blip) reads as `{ ok: false, message }`, and the caller
+ * degrades: the table still prints, every INFER cell reads "-", and ONE
+ * stderr line says the status is unavailable. `fetchImpl` is a parameter
+ * for the same reason openPrsByStudio's is: the real caller passes the
+ * global fetch; a test passes a fake and needs no network.
+ */
+export async function fetchLeadInferUsage(
+  creds: Credentials, nowMs: number, fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: true; by: Map<string, LeadInferUsage> } | { ok: false; message: string }> {
+  try {
+    const res = await fetchImpl(juniorUrl(creds, leadInferPath(nowMs - INFER_WINDOW_MS)), {
+      headers: { ...accessHeaders(creds), Accept: "application/json" },
+      signal: AbortSignal.timeout(LEAD_INFER_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      // Never a failed ls — a 404 is an old Worker, the cells read "-".
+      return { ok: false, message: `HTTP ${res.status}: ${(await res.text()).slice(0, ERROR_SNIPPET_MAX_CHARS)}` };
+    }
+    const body = (await res.json()) as { rows?: { studioId: string; calls: number; ok: number }[] };
+    const by = new Map<string, LeadInferUsage>();
+    // The route answers every studio with lead rows in the window; a studio
+    // absent from the body made no lead calls there (Claude-led or idle),
+    // which is absence, never a silent 0 — the cell's own "-" contract.
+    for (const r of body.rows ?? []) by.set(r.studioId, { calls: r.calls, ok: r.ok });
+    return { ok: true, by };
+  } catch (err) {
+    // A transport blip is the same as the route being unavailable: absence
+    // for everyone, never a failed command.
+    return { ok: false, message: errText(err) };
+  }
+}
 
 /**
  * Issue #37: one studio, checked LIVE — POST /studio/:id/check (routes.ts).
@@ -911,6 +1013,14 @@ export async function cmdLs(
   const openPrs = prs
     ? openPrsByStudio(creds, studios)
     : Promise.resolve({ counts: new Map<string, number>(), unknown: [] as string[] });
+  // Issue #934: the INFER column's read, launched unconditionally (NOT
+  // behind a flag, unlike --prs) — one batched D1 GROUP BY inside the
+  // Worker, never a per-studio fan-out, so the #332 review H1 rule does not
+  // apply. Fired here so it overlaps the openPrs await above instead of
+  // stacking on it; best-effort, never rejects — a Worker that predates the
+  // route only costs this await and the degrade line below. Runs in BOTH
+  // --json and table mode: it is one cheap read either way.
+  const inferFetch = fetchLeadInferUsage(creds, Date.now());
   // #332 review H2: a scan the route reports as failed prints ONE degrade
   // warning naming the studios — never a confident zero. console.error, so
   // stdout stays machine-clean in --json mode.
@@ -918,15 +1028,24 @@ export async function cmdLs(
   if (openPrsUnknown.length > 0) {
     console.error(`fleet ls: unmerged-PR status unknown for ${openPrsUnknown.join(", ")} (scan failed)`);
   }
+  const inferRes = await inferFetch;
+  const inferBy = inferRes.ok ? inferRes.by : undefined;
+  if (!inferRes.ok) {
+    // One line, stderr, never a failed listing: the table still prints,
+    // every INFER cell reads "-", and stdout stays machine-clean in --json
+    // mode. console.error, same posture as the openPrs warning above.
+    console.error(`fleet ls: lead inference status unavailable (${inferRes.message})`);
+  }
   // Issue #70 ask 4: machine-readable lead state, nothing else on stdout.
   // #332: openPrs rides each row when the route answered for its repo.
+  // #934: infer rides each row the same way (absence = no data, never 0/0).
   if (json) {
-    console.log(JSON.stringify(lsJsonRows(studios, new Date(), undefined, openPrsCounts), null, 2));
+    console.log(JSON.stringify(lsJsonRows(studios, new Date(), undefined, openPrsCounts, inferBy), null, 2));
     return;
   }
   for (const line of formatLsHead(studios)) console.log(line);
   const orca = await readStudioRows(studios, orcaDeps);
-  console.log(formatTable(studios, new Date(), orca.rows, openPrsCounts));
+  console.log(formatTable(studios, new Date(), orca.rows, openPrsCounts, inferBy));
   // #299: stdout, not stderr — survives `fleet ls 2>&1 | grep`-style reads.
   if (orca.footer && studios.length > 0) console.log(orca.footer);
   // Issue #53: idle studios bill with zero events; say so above the caveat.

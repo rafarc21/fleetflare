@@ -13,7 +13,7 @@ import { isWatchMinute, watchStoppedContainers } from "./studio/container-watch"
 import { handleBoard, handleFleetBoard } from "./board/routes";
 import { handleMemory } from "./memory/routes";
 import { handleFleetJunior } from "./junior/route";
-import { handleJuniorUsageStats } from "./junior/usage";
+import { handleJuniorUsageStats, handleLeadUsageStats } from "./junior/usage";
 import {
   handleFleetAnthropicMessages, ANTHROPIC_MESSAGES_PATH,
   handleFleetAnthropicCountTokens, ANTHROPIC_COUNT_TOKENS_PATH,
@@ -124,6 +124,11 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, url: U
   // reason `/studio/board/` and `/studio/memory` are above — a studio id
   // always contains `--` (studio/ids.ts), so the literal `junior` is not one.
   if (url.pathname === "/studio/junior/usage") return handleJuniorUsageStats(req, env);
+  // Issue #934: the lead-only sibling of the route just above — per-studio
+  // lead-inference calls + ok sums for the fleet ls INFER column. Pathname
+  // equality (===) on both, so neither can shadow the other regardless of
+  // order; mounted directly after its sibling for readability.
+  if (url.pathname === "/studio/junior/usage/lead") return handleLeadUsageStats(req, env);
   if (url.pathname.startsWith("/studio/")) return handleStudio(req, env);
   if (url.pathname.startsWith("/fleet/memory")) return handleMemory(req, env);
   // P4a-2: the studio's own read of its own board, spawn-token

@@ -14,6 +14,10 @@ import { formatRateLimited, type RateLimitObservation } from "../src/studio/rate
 import { isUnreachable, type Observed } from "../src/studio/observed";
 import type { Activity } from "../src/studio/activity";
 import type { MemberAlert } from "../src/studio/member-alerts";
+// Issue #934: the INFER decoration's value shape — a TYPE-ONLY import so this
+// module stays pure (no node:*/Bun imports, the header above's own reason),
+// and cli/infer-format.ts is itself pure, so nothing rides along either way.
+import type { LeadInferUsage } from "./infer-format";
 
 /**
  * One word, machine-parseable first token — reuses the SAME vocabulary
@@ -479,12 +483,19 @@ interface LsJsonRow {
    *  404s), never a silent 0 — the same "-"-vs-count split the PRS table
    *  column renders. */
   openPrs?: number;
+  /** Issue #934: lead calls + ok count in the last 30 min, present ONLY
+   *  when the lead-usage route answered for this studio (absence = no data,
+   *  same contract as openPrs above — no lead calls in the window, or a
+   *  Worker whose route 404s — never a silent 0/0). */
+  infer?: { calls: number; ok: number };
 }
 
-/** The same data the ACTIVITY column renders, as a lead state per studio. */
+/** The same data the ACTIVITY column renders, as a lead state per studio.
+ *  #934: `inferBy` rides along exactly like `openPrs` — one map for the
+ *  whole listing, per-row keys only for the studios it covers. */
 export function lsJsonRows(
   studios: StudioStatus[], now: Date, staleAfterSeconds: number = ACTIVITY_MIRROR_STALE_SECONDS,
-  openPrs?: Map<string, number>,
+  openPrs?: Map<string, number>, inferBy?: Map<string, LeadInferUsage>,
 ): LsJsonRow[] {
   return studios.map((s) => {
     // #403's precedence chain lives in leadGate above; the nested-function
@@ -529,9 +540,13 @@ export function lsJsonRows(
     // Board issue #332: an entry (0 included) is a counted answer; ABSENCE
     // is "no data", so the key is omitted entirely rather than written as 0 —
     // a reader scraping this JSON must never mistake "could not look" for
-    // "looked and found none".
+    // "looked and found none". Issue #934: `infer` folds onto that SAME
+    // trailing return — one shape, both decorations, absence never a 0/0.
     const count = openPrs?.get(s.id);
-    return count === undefined ? row : { ...row, openPrs: count };
+    const infer = inferBy?.get(s.id);
+    return count === undefined && infer === undefined
+      ? row
+      : { ...row, ...(count === undefined ? {} : { openPrs: count }), ...(infer === undefined ? {} : { infer }) };
   });
 }
 
