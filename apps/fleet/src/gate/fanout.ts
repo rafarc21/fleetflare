@@ -3,7 +3,7 @@
 // workflow.ts (which imports cloudflare:workers) stays a thin driver over
 // the decisions made here.
 import { MAX_LEGS_PER_PR } from "./config";
-import { BUN_LANE_CWD } from "./bun-lane";
+import { bunLaneCwd } from "./bun-lane";
 import type { LegResult, Verdict } from "./verdict";
 
 export function verdictToStatusArgs(
@@ -11,14 +11,6 @@ export function verdictToStatusArgs(
 ): { state: "success" | "failure" | "error"; description: string } {
   if (verdict.state === "success") return { state: "success", description: "all legs green" };
   return { state: verdict.state, description: verdict.description };
-}
-
-/** One waitForEvent type per leg. Workflows matches waitForEvent by type
- *  only, so N legs sharing one type would let any leg's result satisfy any
- *  other leg's wait. Workflows also rejects "." in a type, so every
- *  character outside [A-Za-z0-9_-] becomes "_". */
-export function legEventType(leg: string): string {
-  return `gate-leg-${leg.replace(/[^A-Za-z0-9_-]/g, "_")}`;
 }
 
 export interface PlanInput {
@@ -30,13 +22,15 @@ export interface PlanInput {
   install: string; legs: string[];
   /** The bun-test lane, already packed: one array of lane files per leg. */
   bunShards: string[][];
+  /** The block's bunLaneRoot: each bun leg enters this directory first. */
+  bunLaneRoot: string;
   vitestCmd: string; vitestShards: number;
   baselineKeys: string[];
 }
 
 export interface PlannedLeg {
   leg: string; commit: string; installCmd: string; legCmd: string;
-  resultKey: string; baselineKeys: string[]; eventType: string;
+  resultKey: string; baselineKeys: string[];
 }
 
 /** `{i}`/`{n}` are 1-based, matching vitest's own --shard=i/n. Every occurrence
@@ -52,11 +46,11 @@ export function vitestLegs(vitestCmd: string, shards: number): { leg: string; le
 }
 
 /** One leg per bun-lane shard, named bun-1..bun-n. Each runs `bun test` on
- *  its own files, entering apps/fleet first (BUN_LANE_CWD). */
-export function bunLegs(shards: string[][]): { leg: string; legCmd: string }[] {
+ *  its own files, entering the block's root first (bunLaneCwd). */
+export function bunLegs(shards: string[][], root: string): { leg: string; legCmd: string }[] {
   return shards.map((files, idx) => ({
     leg: `bun-${idx + 1}`,
-    legCmd: `${BUN_LANE_CWD}bun test ${files.join(" ")}`,
+    legCmd: `${bunLaneCwd(root)}bun test ${files.join(" ")}`,
   }));
 }
 
@@ -72,28 +66,26 @@ export function bunLegs(shards: string[][]): { leg: string; legCmd: string }[] {
  *  floor of 1 holds. */
 export function planLegs(input: PlanInput): PlannedLeg[] {
   const {
-    owner, repo, pr, runId, headSha, baseSha, install, legs, bunShards, vitestCmd, vitestShards, baselineKeys,
+    owner, repo, pr, runId, headSha, baseSha, install, legs, bunShards, bunLaneRoot, vitestCmd, vitestShards, baselineKeys,
   } = input;
   const keyFor = (leg: string) => `gate/${owner}/${repo}/runs/${pr}/${runId}/shard-${leg}.json`;
   const fixedLegs = 1 + legs.length + bunShards.length; // merge-tree + fleet.json legs + bun shards
   const shards = Math.max(1, Math.min(vitestShards, MAX_LEGS_PER_PR - fixedLegs));
   const leg = (name: string, commit: string, installCmd: string, legCmd: string, keys: string[]): PlannedLeg => ({
-    leg: name, commit, installCmd, legCmd, resultKey: keyFor(name),
-    baselineKeys: keys, eventType: legEventType(name),
+    leg: name, commit, installCmd, legCmd, resultKey: keyFor(name), baselineKeys: keys,
   });
   return [
     leg("merge-tree", `${baseSha}..${headSha}`, "", "", []),
     ...legs.map((name) => leg(name, headSha, install, `bun run ${name}`, baselineKeys)),
-    ...bunLegs(bunShards).map((b) => leg(b.leg, headSha, install, b.legCmd, baselineKeys)),
+    ...bunLegs(bunShards, bunLaneRoot).map((b) => leg(b.leg, headSha, install, b.legCmd, baselineKeys)),
     ...vitestLegs(vitestCmd, shards).map((v) => leg(v.leg, headSha, install, v.legCmd, baselineKeys)),
   ];
 }
 
 const LEG_STATES = new Set<LegResult["state"]>(["success", "failure", "error"]);
 
-/** The Workflow decides which leg a received event belongs to (by its own
- *  event type), so the leg name is forced to the planned one. An unknown
- *  state becomes error: a malformed report must never read as success. */
+/** The leg name is forced to the planned one, whatever the DO echoed back. An
+ *  unknown state becomes error: a malformed report must never read as success. */
 export function normalizeLegResult(planned: string, payload: LegResult): LegResult {
   if (!LEG_STATES.has(payload.state)) {
     return { leg: planned, state: "error", description: `${planned} returned an unknown state` };

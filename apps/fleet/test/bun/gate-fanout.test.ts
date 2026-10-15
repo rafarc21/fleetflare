@@ -1,7 +1,7 @@
 // Pure fan-out planning for GateWorkflow (Task 14). No I/O, no bindings:
-// the Workflow feeds these results into step.do/waitForEvent calls.
+// the Workflow feeds these results into step.do calls.
 import { describe, it, expect } from "bun:test";
-import { bunLegs, legEventType, normalizeLegResult, planLegs, vitestLegs } from "../../src/gate/fanout";
+import { bunLegs, normalizeLegResult, planLegs, vitestLegs } from "../../src/gate/fanout";
 import { MAX_LEGS_PER_PR } from "../../src/gate/config";
 import { resolveOutboundTarget } from "../../src/gate/outbound-handler";
 
@@ -13,21 +13,12 @@ const BASE = {
   vitestCmd: "bun run test --shard={i}/{n}",
   vitestShards: 2,
   bunShards: [],
+  bunLaneRoot: "apps/fleet",
   baselineKeys: ["gate/acme/example/baselines/x.tar"],
 };
 
 const BUN_SHARDS = [["test/bun/alpha.test.ts", "test/bun/beta.test.ts"], ["test/bun/gamma.test.ts"]];
 
-describe("legEventType", () => {
-  it("prefixes the leg name, keeping the type inside Workflows' allowed charset", () => {
-    expect(legEventType("vitest-1")).toBe("gate-leg-vitest-1");
-  });
-  it("replaces characters Workflows rejects (a dot is invalid_event_type)", () => {
-    const t = legEventType("lint.ts");
-    expect(t).toBe("gate-leg-lint_ts");
-    expect(t).toMatch(/^[A-Za-z0-9_-]+$/);
-  });
-});
 
 describe("vitestLegs", () => {
   it("substitutes {i} and {n} once per shard, 1-based", () => {
@@ -57,16 +48,21 @@ describe("vitestLegs", () => {
 
 describe("bunLegs", () => {
   it("one leg per bun shard, named bun-1..bun-n", () => {
-    expect(bunLegs(BUN_SHARDS).map((l) => l.leg)).toEqual(["bun-1", "bun-2"]);
+    expect(bunLegs(BUN_SHARDS, "apps/fleet").map((l) => l.leg)).toEqual(["bun-1", "bun-2"]);
   });
-  it("each leg runs bun test on its own files, inside apps/fleet", () => {
-    expect(bunLegs(BUN_SHARDS).map((l) => l.legCmd)).toEqual([
+  it("each leg runs bun test on its own files, inside the block's root", () => {
+    expect(bunLegs(BUN_SHARDS, "apps/fleet").map((l) => l.legCmd)).toEqual([
       "cd apps/fleet && bun test test/bun/alpha.test.ts test/bun/beta.test.ts",
       "cd apps/fleet && bun test test/bun/gamma.test.ts",
     ]);
   });
+  it("a per-repo root moves every bun leg's cd, not just the fleet's", () => {
+    expect(bunLegs([["test/bun/a.test.ts"]], "packages/web")[0].legCmd).toBe(
+      "cd packages/web && bun test test/bun/a.test.ts",
+    );
+  });
   it("no shards -> no legs", () => {
-    expect(bunLegs([])).toEqual([]);
+    expect(bunLegs([], "apps/fleet")).toEqual([]);
   });
 });
 
@@ -89,10 +85,6 @@ describe("planLegs with bun shards", () => {
     const legs = planLegs({ ...BASE, legs: ["typecheck", "lint"], bunShards, vitestShards: 30 });
     expect(legs.length).toBe(MAX_LEGS_PER_PR);
     expect(legs.filter((l) => l.leg.startsWith("vitest-")).length).toBe(MAX_LEGS_PER_PR - 1 - 2 - 6);
-  });
-  it("every bun leg has its own event type", () => {
-    const types = planLegs({ ...BASE, bunShards: BUN_SHARDS }).map((l) => l.eventType);
-    expect(new Set(types).size).toBe(types.length);
   });
 });
 
@@ -145,10 +137,6 @@ describe("planLegs", () => {
     const vitest = planLegs({ ...BASE, legs: [], vitestShards: 8 }).filter((l) => l.leg.startsWith("vitest-"));
     expect(vitest.map((l) => l.legCmd)).toContain("bun run test --shard=3/8");
     expect(vitest.every((l) => l.installCmd === BASE.install)).toBe(true);
-  });
-  it("every leg gets its own event type, so concurrent waits never race", () => {
-    const types = planLegs(BASE).map((l) => l.eventType);
-    expect(new Set(types).size).toBe(types.length);
   });
   it("only the merge-tree leg skips the baseline; the rest get the baseline keys", () => {
     const legs = planLegs(BASE);
