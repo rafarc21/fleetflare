@@ -20,11 +20,12 @@ export function session(over: Partial<ObservedSession> = {}): ObservedSession {
   };
 }
 
-/** The narrow ObservedStorage port over a plain Map — a #697 split pair
- *  (studio.survival-retry / studio.survival-input) carried byte-identical
- *  local copies of it, in the same shape test/studio.observed.test.ts and
- *  test/studio.wake-gate.test.ts use. Lives here because `session()` above
- *  already serves that pair, for the same hand-sync reason. */
+/** The narrow ObservedStorage port over a plain Map: one key, seeded over
+ *  emptyObserved() so a partial seed is a legal record, and stored() reads
+ *  the live map rather than a snapshot. Lives beside session() because the
+ *  same split pair needs both and kept both in sync by hand before this.
+ *  The sibling suites wrap helpers/do-storage.ts instead; this port keeps
+ *  its own typed shape because its callers assert on stored(). */
 export function fakeObserved(seed?: Partial<Observed>) {
   const map = new Map<string, Observed>();
   if (seed) map.set(OBSERVED_KEY, { ...emptyObserved(), ...seed });
@@ -32,5 +33,5 @@ export function fakeObserved(seed?: Partial<Observed>) {
     get: async () => map.get(OBSERVED_KEY),
     put: async (_key, value) => { map.set(OBSERVED_KEY, value); },
   };
-  return { map, storage, stored: () => map.get(OBSERVED_KEY) };
+  return { storage, stored: () => map.get(OBSERVED_KEY) };
 }
