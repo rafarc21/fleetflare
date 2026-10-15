@@ -78,8 +78,8 @@ describe("statusStorage — the seeded StudioStorage fold (sweep-43 F14, #890)",
     expect(s.map).toBeInstanceOf(Map);
     expect(s.map.get(STATUS_KEY)).toMatchObject({ state: "stopped" });
 
-    await s.put("fresh-key", { state: "provisioning" });
-    expect(s.map.get("fresh-key")).toMatchObject({ state: "provisioning" });
-    expect(await s.get("fresh-key")).toMatchObject({ state: "provisioning" });
+    await s.put(STATUS_KEY, status("provisioning"));
+    expect(s.map.get(STATUS_KEY)).toMatchObject({ state: "provisioning" });
+    expect(await s.get(STATUS_KEY)).toMatchObject({ state: "provisioning" });
   });
 });
