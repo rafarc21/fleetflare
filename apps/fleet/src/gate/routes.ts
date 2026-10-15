@@ -12,7 +12,7 @@ import { isGateRunnerRepo } from "./config";
 // Env; until then this cast keeps this module typechecking. Drop it then.
 type GateWorkflowBinding = {
   create(opts: { params: { repo: string; pr: number } }): Promise<{ id: string }>;
-  get(id: string): { status(): Promise<{ status: string; output?: unknown }> };
+  get(id: string): Promise<{ status(): Promise<{ status: string; output?: unknown }> }>;
 };
 
 const workflow = (env: Env) => (env as unknown as { GATE_WORKFLOW: GateWorkflowBinding }).GATE_WORKFLOW;
@@ -39,7 +39,8 @@ export async function handleGateRoute(req: Request, env: Env): Promise<Response>
     }
     const runId = url.searchParams.get("runId");
     if (!runId) return j({ error: "runId required" }, 400);
-    const status = await workflow(env).get(runId).status();
+    const instance = await workflow(env).get(runId); // Workflows get() is async
+    const status = await instance.status();
     // Task 14's verdict rides in the Workflow's own output once terminal;
     // anything not yet terminal maps to pending.
     const out = status.output as { state?: string; description?: string; statusPostFailed?: boolean } | undefined;
