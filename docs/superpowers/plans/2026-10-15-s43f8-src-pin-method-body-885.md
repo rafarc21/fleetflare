@@ -87,7 +87,7 @@ on 2026-10-15 against `apps/fleet/src/studio/do.ts` at this branch):
 - Distinguishing lines INSIDE that range: **zero**
   (`awk 'NR>=5748 && NR<=8623' src/studio/do.ts | grep -cE '^  \}.'` = 0).
   Nearest below the class: line 5674 (`  };`). Nearest above: line 8656
-  (`  } catch (err) {`, inside the top-level `installLeakGatePort`
+  (`  } catch (err) {`, inside the top-level `applyStudioGitSafetyPort`
   function).
 - Every signature the four suites pin is a class method inside that range,
   occurring exactly once in the file:
