@@ -13,10 +13,9 @@
 // invocation is INJECTED, so no test here ever shells out to real Orca — the
 // tests that do spawn processes (the 8-process registry race, the registry
 // writer scripts) write real files under temp dirs only.
-import { test, describe, expect, mock, spyOn } from "bun:test";
+import { test, describe, expect, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import * as nodeOs from "node:os";
 import { dirname, join } from "node:path";
 import {
   studioWorkspaceTitle,
@@ -1310,35 +1309,20 @@ describe("#322 — pair functions", () => {
       "worktree list": worktreesWithPath({ displayName: "studio-websites--maestro", path: wt }),
       "terminal list": terminals(),
     });
-    // The 2-param call IS the production shape: the DEFAULT salvage destination
-    // — `join(homedir(), "fleet-teardown-salvage")` — is what flows through, so
-    // left alone this test would mkdir+cp the fixture into the operator's REAL
-    // home on every run (2026-10-10: nine stray fixture dirs found in
-    // /root/fleet-teardown-salvage from exactly that). Redirecting it cannot be
-    // `process.env.HOME = ...`: Bun's `os.homedir()` snapshots $HOME at process
-    // LAUNCH, so a runtime mutation is a no-op here (measured: mutating before
-    // or after the first call changes nothing). The working redirect is
-    // `mock.module` of the node:os system boundary — captured real exports
-    // spread back in `finally`, because an unrestored mock.module leaks to every
-    // LATER test and file in the same bun process (measured too). The spread is
-    // the REAL os only because nothing else mocks node:os before this file
-    // loads — this is the repo's only node:os mock (a second one would have
-    // to capture before that one).
-    const tmpHome = mkdtempSync(join(tmpdir(), "orca-salvage-home-"));
-    const realOs = { ...nodeOs }; // copied at capture, so the mock cannot rewrite it
-    await mock.module("node:os", () => ({ ...realOs, homedir: () => tmpHome }));
-    try {
-      const lines = await closeStudioRow("websites--maestro", f.deps);
-      expect(lines[0]).toBe("websites--maestro: Orca worktree and attach terminal removed");
-      expect(lines).toHaveLength(2);
-      expect(lines[1]).toContain("salvaged .context/");
-      // The redirect held: the destination the operator would be told to look in
-      // is under the temp HOME, never the real one.
-      expect(lines[1]).toContain(join(tmpHome, "fleet-teardown-salvage"));
-    } finally {
-      await mock.module("node:os", () => ({ ...realOs }));
-      rmSync(tmpHome, { recursive: true, force: true });
-    }
+    // Salvage destination is INJECTED (3rd arg, forwarded to
+    // removeStudioWorkspace), never read from homedir() — so no node:os mock is
+    // needed, and this file never risks restoring realOs over another sharded
+    // file's mock (sweep-47 F6). Left to the default, closeStudioRow would
+    // mkdir+cp the fixture into the operator's REAL home on every run.
+    const dest = tmpSalvageRoot();
+    const lines = await closeStudioRow("websites--maestro", f.deps, dest);
+    expect(lines[0]).toBe("websites--maestro: Orca worktree and attach terminal removed");
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("salvaged .context/");
+    // The redirect held: the destination the operator would be told to look in
+    // is under the temp root, never the real home.
+    expect(lines[1]).toContain(dest.root);
+    rmSync(dest.root, { recursive: true, force: true });
   });
 
   test("closeStudioRow: absent — the single teardown-complete line, byte-identical to describeWorkspaceRemoval's", async () => {
