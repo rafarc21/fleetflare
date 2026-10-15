@@ -47,6 +47,7 @@ import { makeEvent, shortId } from "../events/schema";
 import { writeFleetAccountUsage, readOneAccountUsage } from "./account-usage-store";
 import { countWorkerExceptions } from "../exceptions";
 import { handleModelsRoute } from "../llm/models-route";
+import { handleGateRoute } from "../gate/routes";
 import { setAssignedModel } from "../llm/model-store";
 
 const ROUTE_RE = /^\/studio\/([^/]+)\/(status|provisioned|provision|restart|recycle|destroy|wake|check|rescue|inspect|ws\/terminal|paste|terminal|clear-session-guard)$/;
@@ -908,6 +909,16 @@ export async function handleStudio(
    */
   if (url.pathname === "/studio/models" || url.pathname.startsWith("/studio/models/")) {
     return handleModelsRoute(req, env);
+  }
+
+  /**
+   * #715 gate runner (Phase 1): /studio/gate/start and /studio/gate/status.
+   * Same Access-gated lane as /studio/models above — handleGateRoute carries
+   * no auth of its own, so this mount point is the only guard. 404s itself
+   * unless FLEET_GATE_RUNNER is "on" and the repo is in GATE_RUNNER_REPOS.
+   */
+  if (url.pathname === "/studio/gate/start" || url.pathname === "/studio/gate/status") {
+    return handleGateRoute(req, env);
   }
 
   /**
