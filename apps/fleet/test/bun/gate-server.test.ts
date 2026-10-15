@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { restoreBaseline, putResult, type FetchFn } from "../../container/gate-server";
+import { restoreBaseline, putResult, runGate, readRunEnv, type FetchFn, type GateRun } from "../../container/gate-server";
 import type { ExecFn } from "../../container/gate-merge-tree";
 
 const containerDir = join(import.meta.dir, "..", "..", "container");
@@ -103,6 +103,192 @@ describe("putResult (plain R2 key, no credential on the request)", () => {
     const fn: FetchFn = async () => { called = true; return new Response(null); };
     await putResult("", { state: "success" }, fn);
     expect(called).toBe(false);
+  });
+});
+
+const SHA = { base: "a".repeat(40), head: "b".repeat(40), merge: "c".repeat(40), tree: "d".repeat(40) };
+const RUN: GateRun = {
+  repo: "owner/repo", commit: `${SHA.base}..${SHA.head}`, leg: "lint",
+  installCmd: "bun install", legCmd: "bun run lint", resultKey: "runs/7/shard-lint.json",
+  baselineKeys: [], baseRef: "main", pr: "7",
+};
+const MERGE_RUN: GateRun = { ...RUN, leg: "merge-tree", installCmd: "", legCmd: "" };
+
+interface WorldOpts { cloneCode?: number; checkoutCode?: number; mergeCode?: number; legCode?: number; headPresent?: boolean }
+
+// A scripted git. Every command succeeds unless the opts fail it. `rev-parse` resolves only the
+// refs in `known`; the PR head is missing until a fetch brings it in (the fork-PR path).
+function fakeWorld(opts: WorldOpts = {}) {
+  const calls: string[][] = [];
+  let headPresent = opts.headPresent ?? true;
+  const known: Record<string, string> = {
+    [SHA.base]: SHA.base, [SHA.head]: SHA.head,
+    "refs/remotes/origin/main": SHA.base, "refs/remotes/origin/staging": SHA.base,
+  };
+  const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+  const fail = (code: number, stderr: string) => ({ code, stdout: "", stderr });
+  const exec: ExecFn = async (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (cmd === "tar") return ok();
+    if (cmd === "bash") {
+      if (args[1] === RUN.legCmd && opts.legCode) return fail(opts.legCode, "leg broke");
+      return ok();
+    }
+    // `git -c k=v commit-tree` puts its own flags first, so match the verb anywhere in argv.
+    const verb = args.find((a) => ["clone", "fetch", "rev-parse", "merge-tree", "commit-tree", "rev-list", "checkout"].includes(a)) ?? args[0];
+    switch (verb) {
+      case "clone": return opts.cloneCode ? fail(opts.cloneCode, "fatal: repository not found") : ok();
+      case "fetch": headPresent = true; return ok();
+      case "rev-parse": {
+        const name = args[args.length - 1].replace(/\^\{commit\}$/, "");
+        const sha = name === SHA.head && !headPresent ? undefined : known[name];
+        return sha ? ok(`${sha}\n`) : fail(1, "");
+      }
+      case "merge-tree": return opts.mergeCode !== undefined ? fail(opts.mergeCode, "") : ok(`${SHA.tree}\n`);
+      case "commit-tree": return ok(`${SHA.merge}\n`);
+      case "rev-list": return ok(`${SHA.merge} ${SHA.base} ${SHA.head}\n`);
+      case "checkout": return opts.checkoutCode ? fail(opts.checkoutCode, "error: pathspec") : ok();
+      default: return ok();
+    }
+  };
+  return { exec, calls };
+}
+
+// Records every PUT body by R2 key; GETs answer from `table` like fakeFetch.
+function fakeR2(table: Record<string, number> = {}) {
+  const puts: { key: string; body: { state: string; description?: string; commit?: string } }[] = [];
+  const fn: FetchFn = async (url, init) => {
+    const key = url.slice(R2.length);
+    if (init?.method === "PUT") {
+      puts.push({ key, body: JSON.parse(String(init.body)) });
+      return new Response(null, { status: 200 });
+    }
+    const status = table[key] ?? 404;
+    return new Response(status === 200 ? new Uint8Array([1, 2, 3]) : null, { status });
+  };
+  return { fn, puts };
+}
+
+const indexOfCall = (calls: string[][], pred: (c: string[]) => boolean) => calls.findIndex(pred);
+const isCheckout = (c: string[]) => c[0] === "git" && c.includes("checkout");
+
+describe("runGate: every leg tests the merge result", () => {
+  it("checks out the merge commit before install and before the leg command", async () => {
+    const world = fakeWorld();
+    await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir() });
+    const checkout = indexOfCall(world.calls, isCheckout);
+    expect(world.calls[checkout]).toEqual(["git", "checkout", "--quiet", SHA.merge]);
+    const install = indexOfCall(world.calls, (c) => c[0] === "bash" && c[2] === RUN.installCmd);
+    const leg = indexOfCall(world.calls, (c) => c[0] === "bash" && c[2] === RUN.legCmd);
+    expect(checkout).toBeLessThan(install);
+    expect(install).toBeLessThan(leg);
+  });
+
+  it("restores the baseline after checkout, never before it", async () => {
+    const world = fakeWorld();
+    const r2 = fakeR2({ "base.tar": 200 });
+    await runGate({ ...RUN, baselineKeys: ["base.tar"] }, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    const tar = indexOfCall(world.calls, (c) => c[0] === "tar");
+    expect(tar).toBeGreaterThan(indexOfCall(world.calls, isCheckout));
+  });
+
+  it("merge-tree leg resolves the merge and reports its commit, with no checkout or install", async () => {
+    const world = fakeWorld();
+    const r2 = fakeR2();
+    await runGate(MERGE_RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    expect(world.calls.some(isCheckout)).toBe(false);
+    expect(world.calls.some((c) => c[0] === "bash")).toBe(false);
+    expect(r2.puts).toHaveLength(1);
+    expect(r2.puts[0].body).toMatchObject({ state: "success", commit: SHA.merge });
+  });
+
+  it("a conflict reports failure against the base branch and installs nothing", async () => {
+    const world = fakeWorld({ mergeCode: 1 });
+    const r2 = fakeR2();
+    const outcome = await runGate(RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    expect(outcome).toMatchObject({ state: "failure", description: "merge conflict against main" });
+    expect(world.calls.some((c) => c[0] === "bash")).toBe(false);
+    expect(r2.puts[0].body).toMatchObject({ state: "failure", description: "merge conflict against main" });
+  });
+
+  it("a non-conflict merge-tree failure reports error, not failure", async () => {
+    const world = fakeWorld({ mergeCode: 128 });
+    const r2 = fakeR2();
+    await runGate(RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    expect(r2.puts[0].body.state).toBe("error");
+    expect(r2.puts[0].body.description).toMatch(/merge-tree exited 128/);
+  });
+
+  it("resolves the stale-base check against origin/<baseRef> from the request", async () => {
+    const world = fakeWorld();
+    await runGate({ ...RUN, baseRef: "staging" }, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir() });
+    expect(world.calls).toContainEqual(["git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/staging"]);
+    expect(world.calls.some((c) => c.includes("refs/remotes/origin/main"))).toBe(false);
+  });
+
+  it("clones blobless and without a checkout", async () => {
+    const world = fakeWorld();
+    await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir() });
+    expect(world.calls[0].slice(0, 6)).toEqual([
+      "git", "clone", "--filter=blob:none", "--no-checkout", "--quiet", "https://github.com/owner/repo.git",
+    ]);
+  });
+
+  it("fetches the PR head when the head commit is missing after clone (fork PR)", async () => {
+    const world = fakeWorld({ headPresent: false });
+    const r2 = fakeR2();
+    await runGate(RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    const fetch = indexOfCall(world.calls, (c) => c.includes("fetch"));
+    expect(world.calls[fetch]).toEqual(["git", "fetch", "--quiet", "origin", "+refs/pull/7/head"]);
+    expect(fetch).toBeLessThan(indexOfCall(world.calls, (c) => c.includes("merge-tree")));
+    expect(r2.puts[0].body.state).toBe("success");
+  });
+
+  it("writes an error result when the clone fails", async () => {
+    const world = fakeWorld({ cloneCode: 128 });
+    const r2 = fakeR2();
+    await runGate(RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    expect(r2.puts).toHaveLength(1);
+    expect(r2.puts[0].key).toBe(RUN.resultKey);
+    expect(r2.puts[0].body).toMatchObject({ state: "error" });
+    expect(r2.puts[0].body.description).toMatch(/clone failed/);
+  });
+
+  it("writes an error result when checkout fails", async () => {
+    const world = fakeWorld({ checkoutCode: 1 });
+    const r2 = fakeR2();
+    await runGate(RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    expect(r2.puts[0].body).toMatchObject({ state: "error" });
+    expect(r2.puts[0].body.description).toMatch(/checkout failed/);
+  });
+
+  it("writes a failure result when the leg command fails", async () => {
+    const world = fakeWorld({ legCode: 2 });
+    const r2 = fakeR2();
+    await runGate(RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    expect(r2.puts[0].body).toMatchObject({ state: "failure", description: "lint exited 2" });
+  });
+
+  it("writes an error result when a step throws, so no leg ends without one", async () => {
+    const exec: ExecFn = async () => { throw new Error("spawn EACCES"); };
+    const r2 = fakeR2();
+    const outcome = await runGate(RUN, { exec, fetchFn: r2.fn, workdir: workdir() });
+    expect(outcome.state).toBe("error");
+    expect(r2.puts).toHaveLength(1);
+    expect(r2.puts[0].body.description).toMatch(/spawn EACCES/);
+  });
+});
+
+describe("readRunEnv", () => {
+  it("reads every run field from the container env, including baseRef and pr", () => {
+    expect(readRunEnv({
+      GATE_REPO: "owner/repo", GATE_COMMIT: "a..b", GATE_LEG: "lint",
+      GATE_INSTALL_CMD: "bun install", GATE_LEG_CMD: "bun run lint",
+      GATE_RESULT_KEY: "k", GATE_BASELINE_KEYS: "", GATE_BASE_REF: "staging", GATE_PR: "7",
+    })).toEqual({
+      repo: "owner/repo", commit: "a..b", leg: "lint", installCmd: "bun install", legCmd: "bun run lint",
+      resultKey: "k", baselineKeys: [], baseRef: "staging", pr: "7",
+    });
   });
 });
 

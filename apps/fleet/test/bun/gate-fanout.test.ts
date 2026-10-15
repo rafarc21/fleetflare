@@ -77,7 +77,7 @@ describe("planLegs with bun shards", () => {
     const bun = planLegs({ ...BASE, bunShards: BUN_SHARDS }).find((l) => l.leg === "bun-2")!;
     expect(bun.installCmd).toBe(BASE.install);
     expect(bun.legCmd).toBe("cd apps/fleet && bun test test/bun/gamma.test.ts");
-    expect(bun.commit).toBe(BASE.headSha);
+    expect(bun.commit).toBe(`${BASE.baseSha}..${BASE.headSha}`);
     expect(bun.baselineKeys).toEqual(BASE.baselineKeys);
   });
   it("bun shards count toward MAX_LEGS_PER_PR: vitest shards shrink to fit", () => {
@@ -100,11 +100,17 @@ describe("planLegs", () => {
     expect(mt.installCmd).toBe("");
     expect(mt.legCmd).toBe("");
   });
+  it("every leg carries the base..head merge range, never the bare PR head", () => {
+    const range = `${BASE.baseSha}..${BASE.headSha}`;
+    const legs = planLegs({ ...BASE, legs: ["typecheck", "lint"], bunShards: BUN_SHARDS });
+    expect(legs.length).toBeGreaterThan(1);
+    for (const l of legs) expect(l.commit).toBe(range);
+  });
   it("configured legs run `bun run <name>` after the shared install", () => {
     const lint = planLegs(BASE)[2];
     expect(lint.installCmd).toBe(BASE.install);
     expect(lint.legCmd).toBe("bun run lint");
-    expect(lint.commit).toBe(BASE.headSha);
+    expect(lint.commit).toBe(`${BASE.baseSha}..${BASE.headSha}`);
   });
   it("result keys are one distinct gate/ key per leg per run", () => {
     const keys = planLegs(BASE).map((l) => l.resultKey);

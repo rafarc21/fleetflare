@@ -16,6 +16,8 @@ const LEG: GateLegRequest = {
   legCmd: "bun test",
   resultKey: "results/leg-a.json",
   baselineKeys: ["baseline/main.tar"],
+  baseRef: "main",
+  pr: "3",
 };
 
 // The binding is opaque to runLegInContainer; it only forwards it.
