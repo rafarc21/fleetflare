@@ -8,17 +8,28 @@ export interface FileTiming { file: string; ms: number }
 
 const DEFAULT_MS = 60_000; // first run, nothing measured yet
 
-export function planShards(timings: FileTiming[], targetShardMs: number): string[][] {
-  if (timings.length === 0) return [];
+/** Sum of the weights: the wall time the whole set costs, unmeasured files
+ *  included at the median. */
+export function totalWeightMs(timings: FileTiming[]): number {
+  return weighTimings(timings).reduce((sum, ms) => sum + ms, 0);
+}
 
-  // A file with ms 0 has no measurement behind it — weigh the measured
-  // median instead so a fresh file neither hides at 0ms nor starves a
-  // shard of balance. All-unmeasured input falls back to DEFAULT_MS.
+/** Per-file weight in ms, aligned with `timings`. A file with ms 0 has no
+ *  measurement behind it — weigh the measured median instead so a fresh file
+ *  neither hides at 0ms nor starves a shard of balance. All-unmeasured input
+ *  falls back to DEFAULT_MS. */
+export function weighTimings(timings: FileTiming[]): number[] {
   const measured = timings.filter((t) => t.ms > 0).map((t) => t.ms).sort((a, b) => a - b);
   const median = measured.length > 0
     ? measured[Math.floor((measured.length - 1) / 2)]
     : DEFAULT_MS;
-  const weights = timings.map((t) => (t.ms > 0 ? t.ms : median));
+  return timings.map((t) => (t.ms > 0 ? t.ms : median));
+}
+
+export function planShards(timings: FileTiming[], targetShardMs: number): string[][] {
+  if (timings.length === 0) return [];
+
+  const weights = weighTimings(timings);
 
   // Longest first; path breaks ms ties so sort order is total.
   const order = timings
@@ -30,30 +41,20 @@ export function planShards(timings: FileTiming[], targetShardMs: number): string
   const totalMs = order.reduce((sum, t) => sum + t.ms, 0);
   const n = Math.min(order.length, Math.max(1, Math.ceil(totalMs / targetShardMs)));
 
+  // LPT: the first n files each open a shard (heaviest first), then every
+  // later file goes to the lightest shard. Filling a shard up to target
+  // before opening the next overshoots by a whole file per shard, which left
+  // the bun lane's slowest leg ~36% over an even split (#1018).
   const shards: { files: string[]; ms: number }[] = [];
   for (const t of order) {
-    // A file heavier than a whole shard's budget gets a shard of its own —
-    // pairing it with anything would just starve that neighbor.
-    if (t.ms > targetShardMs && shards.length < n) {
+    if (shards.length < n) {
       shards.push({ files: [t.file], ms: t.ms });
       continue;
     }
-    if (shards.length >= n) {
-      // All slots taken: pack onto the lightest existing shard.
-      let lightest = shards[0];
-      for (const s of shards) if (s.ms < lightest.ms) lightest = s;
-      lightest.files.push(t.file);
-      lightest.ms += t.ms;
-      continue;
-    }
-    // Slots remain: fill each new shard up to target before opening another.
-    const current = shards[shards.length - 1];
-    if (current && current.ms < targetShardMs) {
-      current.files.push(t.file);
-      current.ms += t.ms;
-    } else {
-      shards.push({ files: [t.file], ms: t.ms });
-    }
+    let lightest = shards[0];
+    for (const s of shards) if (s.ms < lightest.ms) lightest = s;
+    lightest.files.push(t.file);
+    lightest.ms += t.ms;
   }
   return shards.map((s) => s.files);
 }

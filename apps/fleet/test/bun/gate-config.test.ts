@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   parseGateRunnerRepos, isGateRunnerRepo, parseGateConfig, matchesPathRules,
-  DEFAULT_VITEST_SHARDS, MAX_LEGS_PER_PR,
+  DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR,
 } from "../../src/gate/config";
 
 describe("parseGateRunnerRepos", () => {
@@ -34,8 +34,48 @@ describe("parseGateConfig", () => {
     expect(cfg).toEqual({
       install: "bun install --frozen-lockfile", legs: ["typecheck", "lint"],
       vitestCmd: "bun run test --shard={i}/{n}", pathRules: ["apps/fleet/**"],
-      vitestShards: DEFAULT_VITEST_SHARDS,
+      vitestShards: DEFAULT_VITEST_SHARDS, bunShards: DEFAULT_BUN_SHARDS,
     });
+  });
+  it("defaults to 6 bun-test shards when the gate block names none", () => {
+    const cfg = parseGateConfig({
+      gate: { install: "x", legs: [], vitestCmd: "t", pathRules: ["a/**"] },
+    });
+    expect(cfg?.bunShards).toBe(6);
+  });
+  it("reads a configured bun shard count from the gate block", () => {
+    const cfg = parseGateConfig({
+      gate: { install: "x", legs: [], vitestCmd: "t", pathRules: ["a/**"], bunShards: 4 },
+    });
+    expect(cfg?.bunShards).toBe(4);
+  });
+  it("null on a bun shard count that is not a positive integer", () => {
+    for (const bad of [0, -2, 1.5, "6", null]) {
+      expect(parseGateConfig({
+        gate: { install: "x", legs: [], vitestCmd: "t", pathRules: ["a/**"], bunShards: bad },
+      })).toBeNull();
+    }
+  });
+  it("null when the fixed legs plus bun shards leave no room for a vitest shard", () => {
+    // merge-tree (1) + 22 fixed legs + 1 bun shard + 1 vitest shard = 25 > 24
+    const legs = Array.from({ length: 22 }, (_, i) => `leg-${i}`);
+    expect(parseGateConfig({
+      gate: { install: "x", legs, vitestCmd: "t", pathRules: ["a/**"], bunShards: 1 },
+    })).toBeNull();
+  });
+  it("accepts the largest leg list that still leaves room for bun shards and one vitest shard", () => {
+    // merge-tree (1) + 21 fixed legs + 1 bun shard + 1 vitest shard = 24
+    const legs = Array.from({ length: 21 }, (_, i) => `leg-${i}`);
+    expect(parseGateConfig({
+      gate: { install: "x", legs, vitestCmd: "t", pathRules: ["a/**"], bunShards: 1 },
+    })?.legs.length).toBe(21);
+  });
+  it("null when the default 6 bun shards do not fit beside the fixed legs", () => {
+    // merge-tree (1) + 18 fixed legs + 6 bun shards + 1 vitest shard = 26 > 24
+    const legs = Array.from({ length: 18 }, (_, i) => `leg-${i}`);
+    expect(parseGateConfig({
+      gate: { install: "x", legs, vitestCmd: "t", pathRules: ["a/**"] },
+    })).toBeNull();
   });
   it("defaults to 8 vitest shards when the gate block names none", () => {
     const cfg = parseGateConfig({
@@ -57,18 +97,11 @@ describe("parseGateConfig", () => {
     }
   });
   it("null when the fixed legs alone leave no room for a vitest shard under the cap", () => {
-    // merge-tree (1) + 23 fixed legs + one vitest shard (1) = 25 > 24
+    // merge-tree (1) + 23 fixed legs + 1 bun shard + 1 vitest shard = 26 > 24
     const legs = Array.from({ length: MAX_LEGS_PER_PR - 1 }, (_, i) => `leg-${i}`);
     expect(parseGateConfig({
-      gate: { install: "x", legs, vitestCmd: "t", pathRules: ["a/**"] },
+      gate: { install: "x", legs, vitestCmd: "t", pathRules: ["a/**"], bunShards: 1 },
     })).toBeNull();
-  });
-  it("accepts the largest leg list that still leaves one vitest shard", () => {
-    // merge-tree (1) + 22 fixed legs + one vitest shard (1) = 24
-    const legs = Array.from({ length: MAX_LEGS_PER_PR - 2 }, (_, i) => `leg-${i}`);
-    expect(parseGateConfig({
-      gate: { install: "x", legs, vitestCmd: "t", pathRules: ["a/**"] },
-    })?.legs.length).toBe(MAX_LEGS_PER_PR - 2);
   });
   it("null on a missing gate block, not a throw", () => {
     expect(parseGateConfig({})).toBeNull();

@@ -4,7 +4,9 @@
 // produces (its own $RUN/vitest.json, scripts/localci/summarize.ts's own
 // parseVitestJson) into {file, ms}[] for src/gate/shard-plan.ts's bucketer.
 // Run standalone: `bun run apps/fleet/scripts/gate/measure-shard-timing.ts
-// <vitest.json path>` prints the {file, ms}[] JSON to stdout.
+// <vitest.json path>` prints the {file, ms}[] JSON to stdout. An `.xml` path
+// is read as `bun test --reporter=junit` output instead (#1018: the bun-lane
+// timing snapshot is made this way).
 
 export function parseVitestTimings(text: string): { file: string; ms: number }[] {
   let j: unknown;
@@ -53,9 +55,10 @@ export function parseBunJunitTimings(xml: string): { file: string; ms: number }[
 if (import.meta.main) {
   const path = process.argv[2];
   if (!path) {
-    console.error("usage: measure-shard-timing.ts <vitest-reporter-json-path>");
+    console.error("usage: measure-shard-timing.ts <vitest-reporter-json-path | bun-junit-xml-path>");
     process.exit(2);
   }
   const text = await Bun.file(path).text();
-  console.log(JSON.stringify(parseVitestTimings(text)));
+  const timings = path.endsWith(".xml") ? parseBunJunitTimings(text) : parseVitestTimings(text);
+  console.log(JSON.stringify(timings));
 }

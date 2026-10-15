@@ -62,6 +62,18 @@ describe("planShards", () => {
     expect(shards.every((s) => s.length > 0)).toBe(true);
   });
 
+  it("packs heaviest first onto the lightest shard (LPT), so shards come out even", () => {
+    // 3 x 10s and 3 x 6s over 3 shards: LPT puts one 10 per shard, then a 6
+    // on each lightest shard -> 16s each. Fill-to-target would stack 20 / 16 / 12.
+    const timings: FileTiming[] = [
+      { file: "a.test.ts", ms: 10_000 }, { file: "b.test.ts", ms: 10_000 }, { file: "c.test.ts", ms: 10_000 },
+      { file: "d.test.ts", ms: 6_000 }, { file: "e.test.ts", ms: 6_000 }, { file: "f.test.ts", ms: 6_000 },
+    ];
+    const loads = planShards(timings, 16_000).map((s) =>
+      s.reduce((sum, f) => sum + timings.find((t) => t.file === f)!.ms, 0));
+    expect(loads.sort((x, y) => x - y)).toEqual([16_000, 16_000, 16_000]);
+  });
+
   it("deterministic: same input in different order -> same output", () => {
     const timings: FileTiming[] = [
       { file: "z.test.ts", ms: 10_000 },
