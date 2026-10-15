@@ -962,11 +962,13 @@ function couldNotVerify(id: string, why: string): string {
 /**
  * Remove + describe, as one call — the only shape every teardown caller
  * (destroy, reap) ever used. Returns the lines so the caller just prints them;
- * `removeStudioWorkspace`'s default salvage destination flows through
- * unchanged, since no caller passes one.
+ * `salvageDest` forwards through to `removeStudioWorkspace` so a caller (or a
+ * test) can redirect the salvage destination without mocking node:os.
  */
-export async function closeStudioRow(id: string, deps: OrcaDeps): Promise<string[]> {
-  return describeWorkspaceRemoval(id, await removeStudioWorkspace(id, deps));
+export async function closeStudioRow(
+  id: string, deps: OrcaDeps, salvageDest: ContextSalvageDeps = defaultSalvageDestination(),
+): Promise<string[]> {
+  return describeWorkspaceRemoval(id, await removeStudioWorkspace(id, deps, salvageDest));
 }
 
 // ---------------------------------------------------------------------------
