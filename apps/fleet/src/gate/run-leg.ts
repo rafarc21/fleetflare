@@ -17,6 +17,10 @@ const READY_TIMEOUT_MS = 180_000;
 const READY_POLL_MS = 250;
 const PORT_RETRY_MS = 500;
 const PORT_RETRY_BUDGET_MS = 60_000;
+/** One leg's ceiling on the /run request. A leg past it is an error, and the
+ *  finally-destroy kills its container, so nothing keeps billing. */
+export const LEG_RUN_TIMEOUT_MS = 25 * 60_000;
+const LEG_EXCEEDED = "leg exceeded 25 min";
 
 export type LegResult = { state: "success" | "failure" | "error"; description?: string };
 
@@ -51,6 +55,8 @@ export interface RunLegDeps {
   outbound: OutboundBinding;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** The /run deadline. Defaults to AbortSignal.timeout; injected in tests. */
+  timeoutSignal?: (ms: number) => AbortSignal;
 }
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -76,7 +82,8 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
     if (!(await waitUntilRunning(c, now, sleep))) {
       return { state: "error", description: "gate container did not start within 180 s" };
     }
-    return await postRun(c, now, sleep);
+    const signal = (deps.timeoutSignal ?? ((ms: number) => AbortSignal.timeout(ms)))(LEG_RUN_TIMEOUT_MS);
+    return await postRun(c, now, sleep, signal);
   } catch (err) {
     return { state: "error", description: `gate container failed: ${errorText(err)}` };
   } finally {
@@ -108,14 +115,17 @@ async function postRun(
   c: GateContainer,
   now: () => number,
   sleep: (ms: number) => Promise<void>,
+  signal: AbortSignal,
 ): Promise<LegResult> {
   const port = c.getTcpPort(GATE_CONTAINER_PORT);
   const started = now();
   for (;;) {
     let res: Response;
     try {
-      res = await port.fetch("http://container/run", { method: "POST" });
+      res = await port.fetch("http://container/run", { method: "POST", signal });
     } catch (err) {
+      // An aborted request is the deadline, not a refused port: never retry it.
+      if (signal.aborted) return { state: "error", description: LEG_EXCEEDED };
       if (now() - started >= PORT_RETRY_BUDGET_MS) {
         return { state: "error", description: `gate server unreachable: ${errorText(err)}` };
       }
@@ -123,7 +133,13 @@ async function postRun(
       continue;
     }
     if (!res.ok) return { state: "error", description: `gate server HTTP ${res.status}` };
-    return (await res.json()) as LegResult;
+    try {
+      return (await res.json()) as LegResult;
+    } catch (err) {
+      // The deadline can fire while the body is still arriving.
+      if (signal.aborted) return { state: "error", description: LEG_EXCEEDED };
+      throw err;
+    }
   }
 }
 
