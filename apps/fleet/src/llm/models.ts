@@ -1,7 +1,8 @@
-import { GLM_MAX_MAX_TOKENS, GLM_MIN_MAX_TOKENS } from "./translate";
-
 // Model pool for non-Claude studio leads (spec 2026-10-13-model-pool-design).
 // Per account, per model rate limits on Workers AI: each model adds its own budget.
+
+import { GLM_MAX_MAX_TOKENS, GLM_MIN_MAX_TOKENS } from "./translate";
+
 export type ModelState = "active" | "overflow" | "demoted";
 
 export interface PoolModel {

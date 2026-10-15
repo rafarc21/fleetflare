@@ -730,9 +730,11 @@ export async function listPullsForCommit(token: string, repo: string, sha: strin
 }
 
 /** One page of a PR's original commits — GitHub's own maximum of 100 per
- *  page, the same single-page posture as the module's other named page
- *  sizes. A PR with more than 100 original commits truncates silently, so
- *  the cap is named rather than bare. */
+ *  page, the same one-page posture as listOpenPullNumbers/listOpenPullFiles
+ *  above (whose bare per_page=100 carries the same note), not the multi-page
+ *  INSTALLATION_REPOS_PAGE_SIZE/BRANCH_NAMES_PAGE_SIZE loops. A PR with more
+ *  than 100 original commits truncates silently, so the cap is named rather
+ *  than bare. */
 export const PULL_COMMITS_PAGE_SIZE = 100;
 
 /**
