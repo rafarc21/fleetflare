@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { BRINGUP, extractRegion, extractShellFunc, runSnippet } from "./exec-snippet";
 import { parseSessionAdoption } from "../../src/studio/provision";
 import { requireTools } from "./require-tool";
-import { CLI, WT_ID, WT_KEY } from "./helpers/adopt-fixtures";
+import { CLI, continueGuardLine, WT_ID, WT_KEY } from "./helpers/adopt-fixtures";
 
 /**
  * Issue #146, end to end in bring-up's own bytes: a FRESH container whose
@@ -23,12 +23,6 @@ import { CLI, WT_ID, WT_KEY } from "./helpers/adopt-fixtures";
  * guard line, against a temp HOME and a temp FLEET_WORKSPACE. No tmux.
  */
 const ADOPT_SCRIPT = join(import.meta.dir, "../../container/studio-adopt.sh");
-
-const CONTINUE_GUARD = () => {
-  const line = BRINGUP.split("\n").find((l) => l.includes("if claude_has_conversation ") && l.includes("--continue"));
-  if (!line) throw new Error("bring-up's --continue guard line not found");
-  return line.trim();
-};
 
 // The restore verifies with sha256sum and the adopt is bounded by `timeout`,
 // both bounded by `tar`'s own extraction: all three coreutils/tar, all three
@@ -93,7 +87,7 @@ LANE("#146 — bring-up adopts AFTER the restore untar, so a fresh container res
         `${extractShellFunc(BRINGUP, "claude_project_dir")}\n` +
         `${extractShellFunc(BRINGUP, "claude_has_conversation")}\n` +
         'claude_args=()\nrepo_dir="/workspace/${STUDIO_ID%%--*}"\n' +
-        `${CONTINUE_GUARD()}\n` +
+        `${continueGuardLine()}\n` +
         'printf "ARGV %s\\n" "${claude_args[*]:-}"\n',
       timeout: 60_000,
     });
@@ -125,7 +119,7 @@ LANE("#146 — bring-up adopts AFTER the restore untar, so a fresh container res
         `${extractRegion(BRINGUP, "session-adopt")}\n` +
         `${extractShellFunc(BRINGUP, "claude_project_dir")}\n${extractShellFunc(BRINGUP, "claude_has_conversation")}\n` +
         'claude_args=()\nrepo_dir="/workspace/${STUDIO_ID%%--*}"\n' +
-        `${CONTINUE_GUARD()}\n` +
+        `${continueGuardLine()}\n` +
         'printf "ARGV %s\\n" "${claude_args[*]:-}"\n',
       timeout: 60_000,
     });
