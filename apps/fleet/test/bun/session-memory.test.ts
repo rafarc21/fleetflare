@@ -78,6 +78,7 @@ async function settledLive(): Promise<number> {
 const pinned = new Set<unknown>();
 beforeEach(() => {
   maxWrite = 0;
+  seed = 7;
   globalThis.DecompressionStream = class {
     readable: ReadableStream<Uint8Array>;
     writable: WritableStream<Uint8Array>;
