@@ -8,6 +8,7 @@
 // binds it to the real R2 binding.
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "../env";
+import { mintRepoToken } from "../github/auth";
 import { handleGateOutbound, type GateOutboundProps } from "./outbound-handler";
 
 // Types `exports.GateOutbound` (cloudflare:workers) from the main module's own
@@ -22,6 +23,11 @@ declare global {
 
 export class GateOutbound extends WorkerEntrypoint<Env, GateOutboundProps> {
   override fetch(req: Request): Promise<Response> {
-    return handleGateOutbound(req, this.env.STUDIO_ARCHIVE, this.ctx.props);
+    // #715: the git proxy's token is a read-only installation token for the one
+    // repo in props, minted here and set only on the upstream request.
+    return handleGateOutbound(req, this.env.STUDIO_ARCHIVE, this.ctx.props, {
+      mint: (repo) => mintRepoToken(this.env, repo, { permissions: { contents: "read" } }),
+      fetch: (url, init) => globalThis.fetch(url, init),
+    });
   }
 }

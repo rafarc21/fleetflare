@@ -12,7 +12,7 @@ const OTHER_RUN_KEY = "gate/acme/example/runs/715/run-b/shard-typecheck.json";
 const BASELINE_KEY = "gate/acme/example/baselines/abc123-def456.tar";
 
 /** The props a leg's container is registered with: its own result key only. */
-const OWN: GateOutboundProps = { resultKey: RUN_KEY };
+const OWN: GateOutboundProps = { resultKey: RUN_KEY, repo: "acme/example" };
 
 /** In-memory stand-in for the STUDIO_ARCHIVE binding. `put` returns null when
  *  an `etagDoesNotMatch: "*"` precondition finds the key already present,
@@ -180,7 +180,7 @@ describe("PUT is scoped to the leg's own result key (GateOutbound props)", () =>
 
   it("an empty resultKey in props denies every write", async () => {
     const { bucket, calls } = fakeBucket();
-    const res = await handleGateOutbound(req("PUT", `/${RUN_KEY}`, { body: "{}" }), bucket, { resultKey: "" });
+    const res = await handleGateOutbound(req("PUT", `/${RUN_KEY}`, { body: "{}" }), bucket, { resultKey: "", repo: "acme/example" });
     expect(res.status).toBe(403);
     expect(calls.length).toBe(0);
   });
@@ -188,7 +188,7 @@ describe("PUT is scoped to the leg's own result key (GateOutbound props)", () =>
   it("props naming a baseline cannot authorize a PUT to that baseline", async () => {
     const { bucket, store } = fakeBucket();
     const res = await handleGateOutbound(req("PUT", `/${BASELINE_KEY}`, { body: "EVIL" }), bucket, {
-      resultKey: BASELINE_KEY,
+      resultKey: BASELINE_KEY, repo: "acme/example",
     });
     expect(res.status).toBe(403);
     expect(store.has(BASELINE_KEY)).toBe(false);
@@ -197,7 +197,9 @@ describe("PUT is scoped to the leg's own result key (GateOutbound props)", () =>
   it("props naming a traversal path cannot authorize a PUT outside the allow-list", async () => {
     const traversal = "gate/acme/example/runs/715/../../../x.json";
     const { bucket, calls } = fakeBucket();
-    const res = await handleGateOutbound(req("PUT", `/${traversal}`, { body: "{}" }), bucket, { resultKey: traversal });
+    const res = await handleGateOutbound(req("PUT", `/${traversal}`, { body: "{}" }), bucket, {
+      resultKey: traversal, repo: "acme/example",
+    });
     expect(res.status).toBe(403);
     expect(calls.length).toBe(0);
   });

@@ -6,16 +6,20 @@
 // Plain R2 keys, never a presigned URL: a presigned URL is itself a bearer
 // credential, forgeable by the PR code it is meant to gate.
 
+import type { GateOutboundProps } from "./outbound-handler";
+
 export interface GateLegRequest {
   owner: string; repo: string; commit: string; leg: string;
   installCmd: string; legCmd: string;
   resultKey: string; baselineKeys: string[];
+  /** #715: a private repo clones through the Worker git proxy, not github.com. */
+  private?: boolean;
 }
 
-/** No token field, no URL field: Phase 1's repo (rafarc21/fleetflare) is
- *  public, and the R2 keys below are plain keys, not credentials — the
- *  Worker-side outbound handler (a later task) is what authorizes a plain
- *  fetch to one of these keys. */
+/** No token field, no URL field: the R2 keys below are plain keys, not
+ *  credentials — the Worker-side outbound handler is what authorizes a plain
+ *  fetch to one of these keys. GATE_PRIVATE is a switch, not a credential: it
+ *  picks which host the container clones from, and the Worker holds the token. */
 export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
   return {
     GATE_REPO: `${req.owner}/${req.repo}`,
@@ -25,5 +29,12 @@ export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
     GATE_LEG_CMD: req.legCmd,
     GATE_RESULT_KEY: req.resultKey,
     GATE_BASELINE_KEYS: req.baselineKeys.join(","),
+    GATE_PRIVATE: req.private === true ? "1" : "0",
   };
+}
+
+/** The interceptor's props for this leg: its own result key, and the one repo
+ *  the git proxy will serve. Nothing else is granted to the container. */
+export function gateOutboundProps(req: GateLegRequest): GateOutboundProps {
+  return { resultKey: req.resultKey, repo: `${req.owner}/${req.repo}` };
 }

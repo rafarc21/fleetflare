@@ -17,7 +17,7 @@
 import { Container } from "@cloudflare/containers";
 import { exports as workerExports } from "cloudflare:workers";
 import type { Env } from "../env";
-import { buildLegEnvVars, type GateLegRequest } from "./leg-env";
+import { buildLegEnvVars, gateOutboundProps, type GateLegRequest } from "./leg-env";
 
 const GATE_CONTAINER_PORT = 8080;
 
@@ -36,10 +36,11 @@ export class GateRunnerDO extends Container<Env> {
       // by GateOutbound, the Worker-side entrypoint that holds the R2 binding.
       // Registered before each cold start. Assumed, not yet verified live: that
       // interception does not survive a container stop, so it is re-applied.
-      // Props carry this leg's own resultKey: the only key the container may PUT.
+      // Props carry this leg's own resultKey (the only key the container may PUT)
+      // and its one repo (the only repo the git proxy will fetch, #715).
       if (!this.ctx.container?.running) {
         await this.ctx.container?.interceptAllOutboundHttp(
-          workerExports.GateOutbound({ props: { resultKey: body.resultKey } }),
+          workerExports.GateOutbound({ props: gateOutboundProps(body) }),
         );
       }
       await this.start({ envVars: buildLegEnvVars(body) });

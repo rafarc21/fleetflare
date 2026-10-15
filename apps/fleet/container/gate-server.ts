@@ -2,8 +2,9 @@
 //
 // GateRunnerDO's container-side HTTP server (#715 Phase 1). Self-contained,
 // no imports from apps/fleet/src/ — same style container/server.ts already
-// uses. Clones anonymously: the Phase 1 repo is public, so the clone URL
-// carries no credential.
+// uses. A public repo clones anonymously from github.com. A private repo
+// (GATE_PRIVATE=1) clones through the Worker git proxy, which holds the read
+// grant, so the clone URL carries no credential either way.
 //
 // Result upload and baseline restore both go through one fixed internal path,
 // http://gate-r2.internal/<key>. The request carries a plain R2 key and
@@ -14,6 +15,14 @@ import { resolveMergeTree, type ExecFn } from "./gate-merge-tree";
 const PORT = Number(process.env.PORT ?? 8080);
 const WORKDIR = "/workspace/repo";
 const R2_INTERNAL_BASE = "http://gate-r2.internal";
+const GIT_PROXY_BASE = "http://git-proxy.internal";
+
+/** #715: a private repo clones through the Worker git proxy (outbound-handler.ts),
+ *  which holds the read grant. A public repo clones anonymously from github.com.
+ *  Neither URL carries a credential. */
+export function cloneUrl(repo: string, privateRepo: boolean): string {
+  return privateRepo ? `${GIT_PROXY_BASE}/${repo}.git` : `https://github.com/${repo}.git`;
+}
 
 const exec: ExecFn = async (cmd, args, opts) => {
   const proc = Bun.spawn([cmd, ...args], { cwd: opts.cwd, stdout: "pipe", stderr: "pipe" });
@@ -71,7 +80,7 @@ async function run(): Promise<{ state: "success" | "failure" | "error"; descript
   const resultKey = process.env.GATE_RESULT_KEY ?? "";
   const baselineKeys = (process.env.GATE_BASELINE_KEYS ?? "").split(",").filter((k) => k.length > 0);
 
-  const clone = await exec("git", ["clone", "--quiet", `https://github.com/${repo}.git`, WORKDIR], { cwd: "/workspace" });
+  const clone = await exec("git", ["clone", "--quiet", cloneUrl(repo, process.env.GATE_PRIVATE === "1"), WORKDIR], { cwd: "/workspace" });
   if (clone.code !== 0) return { state: "error", description: `clone failed: ${clone.stderr.split("\n")[0]}` };
 
   if (leg === "merge-tree") {

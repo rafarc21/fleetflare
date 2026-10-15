@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { restoreBaseline, putResult, type FetchFn } from "../../container/gate-server";
+import { restoreBaseline, putResult, cloneUrl, type FetchFn } from "../../container/gate-server";
 import type { ExecFn } from "../../container/gate-merge-tree";
 
 const containerDir = join(import.meta.dir, "..", "..", "container");
@@ -103,6 +103,16 @@ describe("putResult (plain R2 key, no credential on the request)", () => {
     const fn: FetchFn = async () => { called = true; return new Response(null); };
     await putResult("", { state: "success" }, fn);
     expect(called).toBe(false);
+  });
+});
+
+describe("cloneUrl (#715: private repos clone through the Worker git proxy)", () => {
+  it("a public repo clones anonymously from github.com", () => {
+    expect(cloneUrl("acme/example", false)).toBe("https://github.com/acme/example.git");
+  });
+
+  it("a private repo clones from the Worker proxy host, never from github.com", () => {
+    expect(cloneUrl("acme/example", true)).toBe("http://git-proxy.internal/acme/example.git");
   });
 });
 
