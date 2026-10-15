@@ -13,7 +13,7 @@ import {
 } from "../src/studio/do";
 import { LIMIT_SIGHTING_KEY, type LimitSighting } from "../src/studio/rate-limit";
 import { V2_SESSION_LIMIT_PANE } from "./fixtures/rate-limit-panes";
-import { fakeStorage as doStorage } from "./helpers/do-storage";
+import { statusStorage } from "./helpers/do-storage";
 import { spawnDeps } from "../src/studio/routes";
 import type { Env } from "../src/env";
 import { runDestroy } from "../src/studio/destroy";
@@ -31,11 +31,6 @@ function status(state: StudioStatus["state"]): StudioStatus {
   return { id: STUDIO_ID, state, tailscaleHost: null, lastRefresh: null, error: null } as StudioStatus;
 }
 
-function fakeStorage(seed?: StudioStatus) {
-  const s = doStorage(seed ? { [STATUS_KEY]: seed } : undefined);
-  return s as unknown as StudioStorage & { map: Map<string, unknown> };
-}
-
 /** A container whose pane answers `pane`, recording every command. */
 function container(pane = "claude") {
   const cmds: string[] = [];
@@ -50,7 +45,7 @@ function container(pane = "claude") {
 
 describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
   it("a STOPPED studio: zero execs, no sweep re-arm, and the refusal is a deliberate skip", async () => {
-    const storage = fakeStorage(status("stopped"));
+    const storage = statusStorage(status("stopped"));
     const { cmds, exec } = container();
     const armSweep = vi.fn(async () => {});
     const outcome = await wakeStudioWith(storage, exec, { isMaestro: true, armSweep, prompt: "WAKE EVENT #2 20s", now: () => NOW });
@@ -62,7 +57,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
   });
 
   it("a never-provisioned studio (no recorded status): zero execs — a wake must not mint a container", async () => {
-    const storage = fakeStorage();
+    const storage = statusStorage();
     const { cmds, exec } = container();
     const outcome = await wakeStudioWith(storage, exec, { isMaestro: true, armSweep: vi.fn(async () => {}), prompt: "WAKE", now: () => NOW });
     expect(cmds).toEqual([]);
@@ -71,7 +66,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
   });
 
   it("a landed wake on a maestro re-arms the sweep exactly once", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const { cmds, exec } = container("claude");
     const armSweep = vi.fn(async () => {});
     const outcome = await wakeStudioWith(storage, exec, { isMaestro: true, armSweep, prompt: "WAKE sweep 3", now: () => NOW });
@@ -81,7 +76,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
   });
 
   it("a refused wake (bash in the pane) does NOT re-arm the sweep", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const { cmds, exec } = container("bash");
     const armSweep = vi.fn(async () => {});
     const outcome = await wakeStudioWith(storage, exec, { isMaestro: true, armSweep, prompt: "WAKE sweep 3", now: () => NOW });
@@ -92,7 +87,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
   });
 
   it("a landed wake on a NON-maestro never arms the sweep", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const { exec } = container("claude");
     const armSweep = vi.fn(async () => {});
     const outcome = await wakeStudioWith(storage, exec, { isMaestro: false, armSweep, prompt: "WAKE", now: () => NOW });
@@ -101,7 +96,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
   });
 
   it("a destroy in flight (fresh marker) reads as stopped: zero execs", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     await storage.put(DESTROYING_KEY, new Date(NOW.getTime() - 5_000).toISOString());
     const { cmds, exec } = container("claude");
     const outcome = await wakeStudioWith(storage, exec, { isMaestro: true, armSweep: vi.fn(async () => {}), prompt: "WAKE", now: () => NOW });
@@ -111,7 +106,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
   });
 
   it("a STALE destroy marker (isolate died mid-destroy) does not block wakes forever", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     await storage.put(DESTROYING_KEY, new Date(NOW.getTime() - 60 * 60 * 1000).toISOString());
     const { cmds, exec } = container("claude");
     const outcome = await wakeStudioWith(storage, exec, { isMaestro: false, armSweep: vi.fn(async () => {}), prompt: "WAKE", now: () => NOW });
@@ -128,7 +123,7 @@ describe("wakeStudioWith — StudioDO.wakeStudio's real body", () => {
 // ---------------------------------------------------------------------------
 describe("sweepWake reads the first sighting from LIMIT_SIGHTING_KEY (#170 D4/D5)", () => {
   it("a block first seen 12:00Z (reset 13:30Z) is history at +21h, and the sweep wake types", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     // Straight into the map: the sighting key is deliberately OFF
     // StudioStorage's overloads (see failover.ts's SightingStorage).
     storage.map.set(LIMIT_SIGHTING_KEY, {
@@ -204,7 +199,7 @@ describe("runDestroy — writes its stop marker BEFORE destroy() (#100 F3)", () 
   }
 
   it("the marker is set while destroy() runs and cleared once it resolves", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     let markerDuringDestroy: unknown = "never read";
     const outcome = await runDestroy(
       async () => ({ ok: true, hasOpenTask: false }), STUDIO_ID, "rafarc21/fleetflare", false,
@@ -222,7 +217,7 @@ describe("runDestroy — writes its stop marker BEFORE destroy() (#100 F3)", () 
   });
 
   it("a FAILED destroy clears the marker too — a degraded studio stays wakeable", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     await expect(runDestroy(
       async () => ({ ok: true, hasOpenTask: false }), STUDIO_ID, "rafarc21/fleetflare", false,
       syncDeps(), storage as never, STUDIO_ID,
@@ -244,7 +239,7 @@ describe("checkProvisionedGated — GET /studio/:id/provisioned never starts a s
 
   it("a STOPPED studio answers inconclusive with zero execs", async () => {
     const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
-    const verdict = await checkProvisionedGated(fakeStorage(status("stopped")), syncDeps(exec), "fleetflare", STUDIO_ID);
+    const verdict = await checkProvisionedGated(statusStorage(status("stopped")), syncDeps(exec), "fleetflare", STUDIO_ID);
     expect(exec).not.toHaveBeenCalled();
     expect(verdict.kind).toBe("inconclusive");
     expect((verdict as { reason: string }).reason).toContain("stopped");
@@ -252,14 +247,14 @@ describe("checkProvisionedGated — GET /studio/:id/provisioned never starts a s
 
   it("a never-provisioned studio answers inconclusive with zero execs", async () => {
     const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
-    const verdict = await checkProvisionedGated(fakeStorage(), syncDeps(exec), "fleetflare", STUDIO_ID);
+    const verdict = await checkProvisionedGated(statusStorage(), syncDeps(exec), "fleetflare", STUDIO_ID);
     expect(exec).not.toHaveBeenCalled();
     expect(verdict.kind).toBe("inconclusive");
   });
 
   it("a running studio still runs the real check", async () => {
     const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
-    await checkProvisionedGated(fakeStorage(status("running")), syncDeps(exec), "fleetflare", STUDIO_ID);
+    await checkProvisionedGated(statusStorage(status("running")), syncDeps(exec), "fleetflare", STUDIO_ID);
     expect(exec).toHaveBeenCalled();
   });
 
@@ -274,7 +269,7 @@ describe("checkProvisionedGated — GET /studio/:id/provisioned never starts a s
     });
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const verdict = await checkProvisionedGated(fakeStorage(status("running")), syncDeps(exec), "fleetflare", STUDIO_ID);
+      const verdict = await checkProvisionedGated(statusStorage(status("running")), syncDeps(exec), "fleetflare", STUDIO_ID);
       expect(verdict.kind).toBe("bare");
       const line = errSpy.mock.calls.map((c) => String(c[0]))
         .find((s) => s.includes("bring-up log tail read failed"));
@@ -341,7 +336,7 @@ describe("StudioDO source pins (#100 F7)", () => {
 
 describe("the destroy marker's refusal names itself (#100 N4)", () => {
   it("a wake during a destroy says 'a destroy is in flight', still a deliberate skip", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     await storage.put(DESTROYING_KEY, new Date(NOW.getTime() - 5_000).toISOString());
     const { exec } = container("claude");
     const outcome = await wakeStudioWith(storage, exec, { isMaestro: false, armSweep: vi.fn(async () => {}), prompt: "WAKE", now: () => NOW });
@@ -350,7 +345,7 @@ describe("the destroy marker's refusal names itself (#100 N4)", () => {
   });
 
   it("/provisioned during a destroy says the same, with zero execs", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     await storage.put(DESTROYING_KEY, new Date(NOW.getTime() - 5_000).toISOString());
     const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
     const verdict = await checkProvisionedGated(storage, { exec, now: () => NOW } as unknown as SessionSyncDeps, "fleetflare", STUDIO_ID);
@@ -361,7 +356,7 @@ describe("the destroy marker's refusal names itself (#100 N4)", () => {
 
 describe("destroyWithSync clears its marker in a real finally (#100 N4)", () => {
   it("a throwing status write after destroy() still clears the marker", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const put = storage.put;
     let destroyed = false;
     storage.put = (async (k: string, v: unknown) => {
@@ -382,7 +377,7 @@ describe("destroyWithSync clears its marker in a real finally (#100 N4)", () => 
 
 describe("the destroy race, TICK side (#100 N5)", () => {
   it("runScheduledTick skips the tick BODY while a destroy is in flight, and still re-arms", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     await storage.put(DESTROYING_KEY, new Date(Date.now() - 5_000).toISOString());
     const tick = vi.fn(async () => {});
     const rearm = vi.fn(async () => {});
@@ -392,7 +387,7 @@ describe("the destroy race, TICK side (#100 N5)", () => {
   });
 
   it("a null marker (#103: the released shape) is no marker — the tick runs", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     await storage.put(DESTROYING_KEY, null);
     const tick = vi.fn(async () => {});
     await runScheduledTick(storage, tick, vi.fn(async () => {}));
@@ -409,7 +404,7 @@ describe("the destroy race, TICK side (#100 N5)", () => {
   });
 
   it("healBareContainer reads the marker from storage: no restart undoes a destroy", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     await storage.put(DESTROYING_KEY, new Date(NOW.getTime() - 5_000).toISOString());
     const heal = vi.fn(async () => {});
     const d = await healBareContainer(storage as never, STUDIO_ID, status("running"), bare, () => NOW, heal, async () => {});
@@ -477,7 +472,7 @@ describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up deli
   const INC_2 = "22222222-2222-4222-8222-222222222222";
 
   it("a stopped studio with a filed task, then a verified bring-up: exactly one gated wake naming that task", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const boardLookup = vi.fn(async () => [TASK]);
     const wake = vi.fn(async () => ({ ok: true }));
     await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake);
@@ -492,7 +487,7 @@ describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up deli
   });
 
   it("no task currently assigned: no wake, nothing recorded", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const boardLookup = vi.fn(async () => []);
     const wake = vi.fn(async () => ({ ok: true }));
     await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake);
@@ -501,7 +496,7 @@ describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up deli
   });
 
   it("a task already delivered: no second wake, across two separate bring-ups on the SAME incarnation", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const boardLookup = vi.fn(async () => [TASK]);
     const wake = vi.fn(async () => ({ ok: true }));
     await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake);
@@ -517,7 +512,7 @@ describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up deli
   // rebuilt (an image rollout). A bring-up with a DIFFERENT incarnation than
   // the one that last delivered this task must earn a fresh wake.
   it("board issue #137: the SAME task, on the SAME storage, but a DIFFERENT incarnation — re-delivered, not suppressed", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const boardLookup = vi.fn(async () => [TASK]);
     const wake = vi.fn(async () => ({ ok: true }));
     await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, wake);
@@ -528,7 +523,7 @@ describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up deli
   });
 
   it("a limit modal on screen: refused, and NOTHING is persisted, so the next bring-up retries and delivers", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const boardLookup = vi.fn(async () => [TASK]);
     const refusedWake = vi.fn(async (): Promise<WakeOutcome> => ({ ok: false, skipped: true, error: "refused: a modal is on screen" }));
     await deliverAssignedTaskOnBringup(storage, INC_1, boardLookup, refusedWake);
@@ -544,7 +539,7 @@ describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up deli
   });
 
   it("two simultaneously open tasks in ONE boardLookup call: each gets its own wake, each independently recorded", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const OTHER = { taskNumber: 900, title: "A second open task" };
     const wake = vi.fn(async () => ({ ok: true }));
     await deliverAssignedTaskOnBringup(storage, INC_1, async () => [TASK, OTHER], wake);
@@ -565,7 +560,7 @@ describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up deli
   });
 
   it("incarnation === null behaves like the old marker always did: forever, no reset", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const boardLookup = vi.fn(async () => [TASK]);
     const wake = vi.fn(async () => ({ ok: true }));
     await deliverAssignedTaskOnBringup(storage, null, boardLookup, wake);
@@ -584,7 +579,7 @@ describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up deli
   // returns a task — proving the veto is a SEPARATE check, not something the
   // dedup logic already covers.
   it("a destroy landing between deciding to deliver and sending the wake vetoes the send (5th `moved` param)", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     let moved = false;
     const lookup = vi.fn(async () => {
       moved = true;
@@ -606,7 +601,7 @@ describe("deliverAssignedTaskOnBringup — board issue #213/#137's bring-up deli
   // itself resolved, standing in for a destroy that completes in the gap
   // between task A's wake and task B's `moved` check.
   it("a destroy landing between two tasks' wakes: task A's wake lands and is recorded, task B's is vetoed and nothing persists for it", async () => {
-    const storage = fakeStorage(status("running"));
+    const storage = statusStorage(status("running"));
     const OTHER = { taskNumber: 900, title: "A second open task" };
     const boardLookup = vi.fn(async () => [TASK, OTHER]);
     let wakeCalls = 0;
