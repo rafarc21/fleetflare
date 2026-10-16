@@ -20,14 +20,14 @@ import {
 import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
-import { decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
+import { bundleOptedIn, decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
   bundleKeyFor, outcomeLegs, pendingStatusArgs, planBundleLeg, planUnionLegs, verdictToStatusArgs,
   type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
-import { bundleWanted, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
+import { bundleStepEnabled, gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
 import { markRunProgress } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import {
@@ -167,7 +167,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // clone, as before. Off unless GATE_BUNDLE is on AND every block that runs legs
     // opts in (`bundle: true`): a repo whose legs read git history never gets a snapshot.
     const bundleKey = bundleKeyFor(owner, repoName, event.instanceId, resolved.headSha);
-    const bundled = bundleWanted(this.env.GATE_BUNDLE, [base, head]) && await runBundleStep(
+    const bundled = bundleStepEnabled(this.env.GATE_BUNDLE, bundleOptedIn([base, head])) && await runBundleStep(
       { do: (name, config, fn) => step.do(name, config, fn) },
       (planned) => {
         const stub = this.env.GATE_RUNNER.get(this.env.GATE_RUNNER.idFromName(gateRunnerName(event.instanceId, planned.leg, crypto.randomUUID())));

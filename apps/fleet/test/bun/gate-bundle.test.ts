@@ -4,7 +4,7 @@
 import { describe, it, expect } from "bun:test";
 import { bundleKeyFor, planBundleLeg, type PlannedLeg } from "../../src/gate/fanout";
 import { BUNDLE_LEG, buildLegEnvVars, gateOutboundProps } from "../../src/gate/leg-env";
-import { bundleStepEnabled, bundleWanted, legRequest, runBundleStep, type BundleStepRunner } from "../../src/gate/leg-run";
+import { bundleStepEnabled, legRequest, runBundleStep, type BundleStepRunner } from "../../src/gate/leg-run";
 import { bundleOptedIn, parseGateBlock, parseLegs } from "../../src/gate/config";
 import {
   GATE_R2_HOST,
@@ -186,15 +186,36 @@ describe("the bundle leg name is reserved (#1080: a gate block leg named bundle 
   });
 });
 
-describe("bundleStepEnabled: the bundle step is behind a flag, default off (#1080 deploy skew)", () => {
-  it("is off when the flag is unset, so an old gate image never sees a bundle leg", () => {
-    expect(bundleStepEnabled(undefined)).toBe(false);
-    expect(bundleStepEnabled("")).toBe(false);
+describe("bundleStepEnabled: fleet flag AND per-repo opt-in, both default off (#1080)", () => {
+  it("is off when the fleet flag is unset, so an old gate image never sees a bundle leg", () => {
+    expect(bundleStepEnabled(undefined, true)).toBe(false);
+    expect(bundleStepEnabled("", true)).toBe(false);
   });
 
-  it("is on only for the exact value 1", () => {
-    expect(bundleStepEnabled("1")).toBe(true);
-    expect(bundleStepEnabled("true")).toBe(false);
+  it("is on only for the exact fleet value 1", () => {
+    expect(bundleStepEnabled("1", true)).toBe(true);
+    expect(bundleStepEnabled("true", true)).toBe(false);
+  });
+
+  it("a repo that did not opt in clones exactly as today, even with the fleet flag on", () => {
+    expect(bundleStepEnabled("1", undefined)).toBe(false);
+    expect(bundleStepEnabled("1", false)).toBe(false);
+  });
+});
+
+describe("parseGateBlock: per-repo bundle opt-in (#1080, default off)", () => {
+  const BLOCK = { install: "bun install", legs: ["lint"], pathRules: ["apps/**"] };
+
+  it("bundle: true in the gate block opts the repo in", () => {
+    expect(parseGateBlock({ ...BLOCK, bundle: true })?.bundle).toBe(true);
+  });
+
+  it("an absent bundle key is off: the repo clones", () => {
+    expect(parseGateBlock(BLOCK)?.bundle).not.toBe(true);
+  });
+
+  it("a non-boolean bundle value is a malformed block", () => {
+    expect(parseGateBlock({ ...BLOCK, bundle: "yes" })).toBeNull();
   });
 });
 
@@ -320,6 +341,9 @@ describe("the merge base rides with the bundle key, and only then (#1080 HIGH 1)
 });
 
 describe("per-repo opt-in: bundle: true in the gate block (#1080 maestro decision)", () => {
+  /** Both switches: the fleet flag, and every block that runs legs opting in. */
+  const wanted = (flag: string | undefined, blocks: (ReturnType<typeof parseGateBlock> | null | undefined)[]) =>
+    bundleStepEnabled(flag, bundleOptedIn(blocks));
   const block = (extra: Record<string, unknown> = {}) => ({ install: "bun install", legs: ["lint"], pathRules: ["src/**"], ...extra });
 
   it("a gate block with no bundle key parses with no opt-in", () => {
@@ -349,19 +373,19 @@ describe("per-repo opt-in: bundle: true in the gate block (#1080 maestro decisio
 
   it("a repo without the opt-in clones as today, even with GATE_BUNDLE on", () => {
     const off = parseGateBlock(block());
-    expect(bundleWanted("1", [off, off])).toBe(false);
-    expect(bundleWanted("1", [null, off])).toBe(false);
+    expect(wanted("1", [off, off])).toBe(false);
+    expect(wanted("1", [null, off])).toBe(false);
   });
 
   it("GATE_BUNDLE off is the fleet-wide kill switch, even for an opted-in repo", () => {
     const on = parseGateBlock(block({ bundle: true }));
-    expect(bundleWanted(undefined, [on, on])).toBe(false);
-    expect(bundleWanted("0", [on, on])).toBe(false);
+    expect(wanted(undefined, [on, on])).toBe(false);
+    expect(wanted("0", [on, on])).toBe(false);
   });
 
   it("both switches on turns the bundle step on", () => {
     const on = parseGateBlock(block({ bundle: true }));
-    expect(bundleWanted("1", [on, on])).toBe(true);
+    expect(wanted("1", [on, on])).toBe(true);
   });
 });
 

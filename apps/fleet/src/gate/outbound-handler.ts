@@ -71,7 +71,13 @@ export function lengthChecked(body: ReadableStream<Uint8Array> | null, declared:
   const source = body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() });
   // Read off globalThis: the Bun-typed project declares no FixedLengthStream, and Bun has none at runtime.
   const FixedLength = (globalThis as { FixedLengthStream?: new (length: number) => TransformStream<Uint8Array, Uint8Array> }).FixedLengthStream;
-  if (FixedLength !== undefined) return source.pipeThrough(new FixedLength(declared));
+  if (FixedLength !== undefined) {
+    const fixed = new FixedLength(declared);
+    // A body that disagrees with its length errors both sides of this pipe. R2 reports the refusal on the
+    // readable side (putBundle answers 400), so this rejection is that same event: handled here, not left unhandled.
+    source.pipeTo(fixed.writable).catch(() => {});
+    return fixed.readable;
+  }
   let seen = 0;
   return source.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, ctl) {

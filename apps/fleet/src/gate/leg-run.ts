@@ -7,7 +7,7 @@
 // once, and a second failure becomes this leg's "error".
 import type { GateLegRequest } from "./leg-env";
 import { normalizeLegResult, type LegRunMeta, type PlannedLeg } from "./fanout";
-import { bundleOptedIn, legTimeoutMin, type GateConfig } from "./config";
+import { legTimeoutMin } from "./config";
 import type { LegResult } from "./verdict";
 
 /** A leg's result as the step returns it: the DO's LegResult plus wall time and summary. */
@@ -303,17 +303,12 @@ export interface BundleStepRunner {
   do(name: string, config: LegStepConfig, fn: () => Promise<void>): Promise<void>;
 }
 
-/** #1080: the bundle step is behind a flag, off by default. Until the gate image
- *  that understands the bundle leg is live, an old image would run it as a
- *  normal clone-and-checkout leg. Only the exact value "1" turns it on. */
-export function bundleStepEnabled(raw: string | undefined): boolean {
-  return raw === "1";
-}
-
-/** #1080: the bundle step runs only when both switches are on: the fleet-wide
- *  GATE_BUNDLE flag, and every gate block that runs legs opting in (`bundle: true`). */
-export function bundleWanted(raw: string | undefined, blocks: (GateConfig | null | undefined)[]): boolean {
-  return bundleStepEnabled(raw) && bundleOptedIn(blocks);
+/** #1080: the bundle step needs two switches, both off by default. The fleet
+ *  flag (GATE_BUNDLE="1") is the kill switch: until the gate image that understands
+ *  the bundle leg is live, an old image would run it as a normal clone-and-checkout
+ *  leg. The repo's own `bundle: true` opts that repo in. Either one off, every leg clones. */
+export function bundleStepEnabled(fleetFlag: string | undefined, repoOptIn: boolean | undefined): boolean {
+  return fleetFlag === "1" && repoOptIn === true;
 }
 
 /** #1080: the one bundle step before the legs. True only when the bundle leg

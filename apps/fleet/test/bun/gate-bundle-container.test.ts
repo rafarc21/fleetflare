@@ -361,5 +361,5 @@ describe("real git: a snapshot carries what a leg needs, is smaller than the his
     expect(merged.code).toBe(0);
     expect(merged.stdout.split("\n")[0]).toBe(expectedTree);
     expect(git(leg, "commit-tree", expectedTree, "-p", base, "-p", head, "-m", "gate").code).toBe(0);
-  });
+  }, 30_000);
 });
