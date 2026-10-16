@@ -117,6 +117,11 @@ describe("planLegs", () => {
     expect(e2e.legCmd).toBe("cd apps/web && bun run e2e -- --bail");
     expect(e2e.installCmd).toBe(BASE.install);
   });
+  it("a configured leg's timeoutMin is carried onto its planned leg; a leg without one carries none", () => {
+    const legs = planLegs({ ...BASE, legs: [{ name: "e2e", cmd: "make e2e", timeoutMin: 9 }, { name: "lint", cmd: "bun run lint" }] });
+    expect(legs.find((l) => l.leg === "e2e")?.timeoutMin).toBe(9);
+    expect(legs.find((l) => l.leg === "lint")?.timeoutMin).toBeUndefined();
+  });
   it("vitest absent -> zero vitest legs; the plan is merge-tree, configured legs, bun shards", () => {
     const legs = planLegs({ ...BASE, vitestCmd: undefined, bunShards: BUN_SHARDS });
     expect(legs.map((l) => l.leg)).toEqual(["merge-tree", "typecheck", "lint", "bun-1", "bun-2"]);

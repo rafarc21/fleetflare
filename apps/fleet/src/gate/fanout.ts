@@ -71,6 +71,8 @@ export interface PlanInput {
 export interface PlannedLeg {
   leg: string; commit: string; installCmd: string; legCmd: string;
   resultKey: string; baselineKeys: string[];
+  /** The leg's own deadline in minutes. Absent on lanes and default legs: the run applies the default. */
+  timeoutMin?: number;
 }
 
 /** `{i}`/`{n}` are 1-based, matching vitest's own --shard=i/n. Every occurrence
@@ -111,8 +113,9 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   const keyFor = (leg: string) => `gate/${owner}/${repo}/runs/${pr}/${runId}/shard-${leg}.json`;
   const fixedLegs = 1 + legs.length + bunShards.length; // merge-tree + block legs + bun shards
   const shards = Math.max(1, Math.min(vitestShards, MAX_LEGS_PER_PR - fixedLegs));
-  const leg = (name: string, commit: string, installCmd: string, legCmd: string, keys: string[]): PlannedLeg => ({
+  const leg = (name: string, commit: string, installCmd: string, legCmd: string, keys: string[], timeoutMin?: number): PlannedLeg => ({
     leg: name, commit, installCmd, legCmd, resultKey: keyFor(name), baselineKeys: keys,
+    ...(timeoutMin === undefined ? {} : { timeoutMin }),
   });
   // Every leg commits to the base..head range: the container resolves the merge
   // and tests that result, so a PR branched before main moved is judged on the
@@ -120,7 +123,7 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
   const range = `${baseSha}..${headSha}`;
   return [
     leg("merge-tree", range, "", "", []),
-    ...legs.map((l) => leg(l.name, range, install, l.cmd, baselineKeys)),
+    ...legs.map((l) => leg(l.name, range, install, l.cmd, baselineKeys, l.timeoutMin)),
     ...bunLegs(bunShards, bunLaneRoot).map((b) => leg(b.leg, range, install, b.legCmd, baselineKeys)),
     ...(vitestCmd === undefined ? [] : vitestLegs(vitestCmd, shards))
       .map((v) => leg(v.leg, range, install, v.legCmd, baselineKeys)),

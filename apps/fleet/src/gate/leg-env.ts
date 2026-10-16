@@ -18,6 +18,8 @@ export interface GateLegRequest {
   baseRef: string;
   /** The PR number, for fetching a fork PR's head. */
   pr: string;
+  /** The leg's own deadline in minutes. Absent means the default (25). */
+  timeoutMin?: number;
 }
 
 /** No token field, no URL field: the R2 keys below are plain keys, not

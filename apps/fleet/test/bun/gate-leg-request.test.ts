@@ -33,6 +33,11 @@ describe("legRequest", () => {
     });
   });
 
+  it("the planned leg's timeoutMin reaches the /run-leg body", () => {
+    const body = legRequest("acme", "example", { ...PLANNED, timeoutMin: 9 }, { baseRef: "main", pr: "7", private: false });
+    expect(body.timeoutMin).toBe(9);
+  });
+
   it("the request keeps the planned leg's command and result key unchanged", () => {
     const body = legRequest("acme", "example", PLANNED, { baseRef: "main", pr: "7", private: false });
     expect(body).toMatchObject({
