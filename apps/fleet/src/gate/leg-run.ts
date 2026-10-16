@@ -20,6 +20,10 @@ const MAX_DESCRIPTION_CHARS = 2000;
  *  503 body's error, cut to this many chars so it stays a one-line cause. */
 const MAX_INFRA_CAUSE_CHARS = 200;
 
+/** The first attempt's red description, cut to this many chars when the leg
+ *  passes on retry, so the flake's cause stays in the one-line status. */
+const MAX_FIRST_DESCRIPTION_CHARS = 150;
+
 /** The one step config a leg uses. Literal types, so the object is assignable
  *  to Workflows' WorkflowStepConfig without importing cloudflare:workers here
  *  (the check tsconfigs for test/ cannot resolve that module). */
@@ -47,22 +51,22 @@ export async function runLegStep(
   dispatch: (planned: PlannedLeg) => Promise<Response>,
   planned: PlannedLeg,
 ): Promise<LegRunResult> {
-  const attempt = async (name: string): Promise<LegRunResult> =>
+  const attempt = async (name: string, target: PlannedLeg): Promise<LegRunResult> =>
     step.do(name, LEG_STEP_CONFIG, async () => {
       // Timed inside the callback: a Workflow replay returns the recorded ms
       // instead of timing the replay.
       const started = Date.now();
-      const res = await dispatch(planned);
+      const res = await dispatch(target);
       if (!res.ok) {
         // A non-2xx (infra, 503) carries its cause in the body's `error`
-        // field — surface it, cut to 200 chars.
-        let cause = `${planned.leg}`;
+        // field — surface it, cut to 200 chars. No usable body: name the HTTP status.
+        let cause = `${planned.leg}: HTTP ${res.status}`;
         try {
           const body = await res.json() as { error?: unknown };
           if (typeof body.error === "string" && body.error.length > 0) {
             cause = `${planned.leg}: ${body.error}`;
           }
-        } catch { /* non-JSON body: keep the leg name as the cause */ }
+        } catch { /* non-JSON body: keep the HTTP status as the cause */ }
         throw new Error(cause.slice(0, MAX_INFRA_CAUSE_CHARS));
       }
       const normalized = normalizeLegResult(planned.leg, (await res.json()) as LegRunResult);
@@ -73,7 +77,7 @@ export async function runLegStep(
       };
     });
 
-  const first = await attempt(`start-${planned.leg}`).catch((err: unknown): LegRunResult => {
+  const first = await attempt(`start-${planned.leg}`, planned).catch((err: unknown): LegRunResult => {
     // Retries spent (infra). The thrown message already carries the cause.
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
@@ -83,7 +87,9 @@ export async function runLegStep(
   // container. success/error are final; only failure retries.
   if (first.state !== "failure") return first;
 
-  const retry = await attempt(`retry-${planned.leg}`).catch((err: unknown): LegRunResult => {
+  // The retry writes its own log: the first attempt's shard-<leg>.json stays as evidence.
+  const retryTarget: PlannedLeg = { ...planned, resultKey: retryResultKey(planned.resultKey) };
+  const retry = await attempt(`retry-${planned.leg}`, retryTarget).catch((err: unknown): LegRunResult => {
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
   });
@@ -91,9 +97,18 @@ export async function runLegStep(
   // Wall time covers both attempts.
   const ms = sumMs(first.ms, retry.ms);
   if (retry.state === "success") {
-    return { leg: planned.leg, state: "success", description: "flaky: passed on retry", ms, summary: retry.summary };
+    const firstCause = (first.description ?? "failure").slice(0, MAX_FIRST_DESCRIPTION_CHARS);
+    return {
+      leg: planned.leg, state: "success", description: `flaky: passed on retry; first: ${firstCause}`, ms, summary: retry.summary,
+    };
   }
   return { ...retry, ms };
+}
+
+/** The retry's R2 key: the leg's own key with ".retry" before ".json", so the
+ *  container still PUTs only under its leg's resultKey. */
+export function retryResultKey(resultKey: string): string {
+  return resultKey.replace(/\.json$/, ".retry.json");
 }
 
 /** The sum of the attempts that were timed; undefined when none was. */
