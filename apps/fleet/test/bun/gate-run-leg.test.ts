@@ -258,31 +258,25 @@ describe("runLegInContainer: polled result", () => {
     expect(c.destroyCount).toBe(1);
   });
 
-  test("a leg that never answers 200 is a final error result at 25 min, not an infra retry, and the container is destroyed", async () => {
+  test("a leg that never answers 200 is infra at 25 min (the step retries once on a fresh container), and the container is destroyed", async () => {
     const c = new FakeContainer();
     c.portOutcomes = [running()];
     c.resultFallback = running();
     const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
-    expect(outcome).toEqual({
-      kind: "result",
-      result: { state: "error", description: "leg-a exceeded 25 min without a result" },
-    });
+    expect(outcome).toEqual({ kind: "infra", description: "leg-a exceeded 25 min without a result" });
     expect(c.clock.now).toBeGreaterThanOrEqual(25 * 60_000);
     expect(c.clock.now).toBeLessThan(25 * 60_000 + 5_000);
     expect(c.destroyCount).toBe(1);
   });
 
-  test("a /result that fails on every poll still ends at the 25 min deadline as a final error result", async () => {
+  test("a /result that fails on every poll still ends at the 25 min deadline as infra", async () => {
     const c = new FakeContainer();
     c.portOutcomes = [running()];
     c.resultFallback = new Error("ECONNREFUSED");
     const outcome = await runLegInContainer(LEG, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
-    expect(outcome).toEqual({
-      kind: "result",
-      result: { state: "error", description: "leg-a exceeded 25 min without a result" },
-    });
+    expect(outcome).toEqual({ kind: "infra", description: "leg-a exceeded 25 min without a result" });
     expect(c.clock.now).toBeGreaterThanOrEqual(25 * 60_000);
     expect(c.destroyCount).toBe(1);
   });
@@ -295,10 +289,7 @@ describe("runLegInContainer: per-leg deadline", () => {
     c.resultFallback = running();
     const outcome = await runLegInContainer({ ...LEG, timeoutMin: 3 }, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
-    expect(outcome).toEqual({
-      kind: "result",
-      result: { state: "error", description: "leg-a exceeded 3 min without a result" },
-    });
+    expect(outcome).toEqual({ kind: "infra", description: "leg-a exceeded 3 min without a result" });
     expect(c.clock.now).toBeGreaterThanOrEqual(3 * 60_000);
     expect(c.clock.now).toBeLessThan(4 * 60_000);
     expect(c.destroyCount).toBe(1);
@@ -310,10 +301,7 @@ describe("runLegInContainer: per-leg deadline", () => {
     c.resultFallback = running();
     const outcome = await runLegInContainer({ ...LEG, timeoutMin: 99 }, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
-    expect(outcome).toEqual({
-      kind: "result",
-      result: { state: "error", description: "leg-a exceeded 28 min without a result" },
-    });
+    expect(outcome).toEqual({ kind: "infra", description: "leg-a exceeded 28 min without a result" });
     expect(c.clock.now).toBeGreaterThanOrEqual(28 * 60_000);
   });
 
@@ -323,10 +311,7 @@ describe("runLegInContainer: per-leg deadline", () => {
     c.resultFallback = running();
     const outcome = await runLegInContainer({ ...LEG, timeoutMin: 0 }, { container: c, outbound: OUTBOUND, ...fakeClock(c) });
 
-    expect(outcome).toEqual({
-      kind: "result",
-      result: { state: "error", description: "leg-a exceeded 1 min without a result" },
-    });
+    expect(outcome).toEqual({ kind: "infra", description: "leg-a exceeded 1 min without a result" });
     expect(c.clock.now).toBeLessThan(2 * 60_000);
   });
 
@@ -369,10 +354,10 @@ describe("runLegInContainer: stale container", () => {
 });
 
 describe("legResponse: /run-leg status mapping", () => {
-  test("a leg deadline's final error result answers 200, so the step does not retry it as infra", async () => {
-    const res = legResponse({ kind: "result", result: { state: "error", description: "lint exceeded 25 min without a result" } });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ state: "error", description: "lint exceeded 25 min without a result" });
+  test("a leg deadline is infra: it answers 503 with the cause, so the step retries it once on a fresh container", async () => {
+    const res = legResponse({ kind: "infra", description: "lint exceeded 25 min without a result" });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "lint exceeded 25 min without a result" });
   });
 
   test("an infra failure answers 503 with an error body, never a 200 leg result", async () => {
