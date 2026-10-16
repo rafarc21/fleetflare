@@ -1,17 +1,20 @@
 // /studio/gate/start, /studio/gate/status (#715 Phase 1). Mounted inside
 // src/studio/routes.ts's handleStudio, same Access-gated lane as
 // /studio/models — this module carries no auth of its own, same posture
-// handleModelsRoute's own header states. Never touches a GitHub token:
-// /start creates a GATE_WORKFLOW instance (the Workflow itself, Task 14,
-// is the one place that mints one); /status reads the Workflow binding's
-// OWN native instance-status API, not a second GitHub read.
+// handleModelsRoute's own header states. /start reads the PR's head sha (one
+// token mint) and starts the run keyed by that sha (#1072), so a manual run of
+// a sha the auto-run already started reuses it. /status reads the Workflow
+// binding's OWN native instance-status API, not a second GitHub read.
 import type { Env } from "../env";
+import { getPullRequestHeadSha } from "../github/api";
+import { repoTokenMinter } from "../github/auth";
+import { startGateRun, type GateRunParams } from "./auto-run";
 import { isGateRunnerRepo } from "./config";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
 // Env; until then this cast keeps this module typechecking. Drop it then.
 type GateWorkflowBinding = {
-  create(opts: { params: { repo: string; pr: number } }): Promise<{ id: string }>;
+  create(opts: { id?: string; params: GateRunParams }): Promise<{ id: string }>;
   get(id: string): Promise<{ status(): Promise<{ status: string; output?: unknown }> }>;
 };
 
@@ -20,7 +23,13 @@ const workflow = (env: Env) => (env as unknown as { GATE_WORKFLOW: GateWorkflowB
 const j = (v: unknown, status = 200) =>
   new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
 
-export async function handleGateRoute(req: Request, env: Env): Promise<Response> {
+/** The PR's live head sha: the manual start keys its run on it (#1072). */
+export const liveHeadSha = (env: Env) => async (repo: string, pr: number): Promise<string> =>
+  getPullRequestHeadSha(await repoTokenMinter(env)(repo), repo, pr);
+
+export async function handleGateRoute(
+  req: Request, env: Env, headShaOf: (repo: string, pr: number) => Promise<string> = liveHeadSha(env),
+): Promise<Response> {
   const url = new URL(req.url);
 
   if (url.pathname === "/studio/gate/start" && req.method === "POST") {
@@ -28,8 +37,9 @@ export async function handleGateRoute(req: Request, env: Env): Promise<Response>
     if (env.FLEET_GATE_RUNNER !== "on" || !isGateRunnerRepo(env.GATE_RUNNER_REPOS, body.repo)) {
       return j({ error: "gate runner not enabled for this repo" }, 404);
     }
-    const instance = await workflow(env).create({ params: { repo: body.repo, pr: body.pr } });
-    return j({ started: true, runId: instance.id });
+    const headSha = await headShaOf(body.repo, body.pr);
+    const run = await startGateRun(workflow(env), { repo: body.repo, pr: body.pr, headSha });
+    return j({ started: true, runId: run.runId, reused: run.reused });
   }
 
   if (url.pathname === "/studio/gate/status" && req.method === "GET") {
