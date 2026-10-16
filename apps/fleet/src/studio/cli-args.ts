@@ -87,7 +87,9 @@ export type CliCommand =
   // exclusive with `freshSession` above.
   // Issue #231: `discardSession` — `--discard-session`, the operator's
   // stated override of provisionWithStorage's own involuntary-stop refusal.
-  | { cmd: "provision"; id: string; freshSession: boolean; cancelFreshSession: boolean; discardSession: boolean }
+  // Issue #1074 ask 2: `forceMappedAccount`, present (`true`) only when
+  // `--account mapped` was given — same shape and meaning as recycle's.
+  | { cmd: "provision"; id: string; freshSession: boolean; cancelFreshSession: boolean; discardSession: boolean; forceMappedAccount?: true }
   // Issue #37: one studio, checked LIVE, right now. The container check
   // (provision.ts's provisionedCheckCmd) always tested the right things;
   // until this verb, nothing exposed it on demand, so the only way to tell a
@@ -349,7 +351,7 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Create a studio for <role> in the repo you are standing in (the roles this fleet declares in fleet.json). Boots a container. Issue #269: `--new` creates an ADDITIONAL studio for that role on the lowest free instance number (<repo>--<role>--2, --3, ...) instead of refusing because instance 1 exists. All studios share ONE Claude account: more instances run more leads concurrently, they do not buy more capacity, and a session limit hits every one of them. Issue #249: `--lead glm` boots this studio's lead on this fleet's own GLM-translation route instead of a Claude account — no Claude quota spent, sticky for the studio's whole life (set once, here, never re-asked on a later provision/restart/recycle). `--lead claude` is the explicit, redundant spelling of today's default. #717: `--lead kimi` / `--lead deepseek` are also glm-led, with that pool model (`fleet models`) pinned as the studio's main model instead of the round-robin default. maestro is spawnable from the Mac (the operator edge); ff refuses it (always local, issue #250), and `--new` never applies to it (singleton).",
   },
   provision: {
-    args: "<id> [--fresh-session [--discard-session]|--no-fresh-session]",
+    args: "<id> [--fresh-session [--discard-session]|--no-fresh-session] [--account mapped]",
     summary: "Re-run clone + bring-up on the studio's EXISTING container. Heals a half-built studio; does not pick up a new image. Re-checks readiness before answering, so the row it prints is the studio as it is NOW, not the last recorded verdict. " + FRESH_SESSION_HELP + " Issue #115: --no-fresh-session cancels a pending fresh-session intent left armed by a PRIOR --fresh-session attempt that failed before it was confirmed — that intent otherwise keeps forcing every later provision (flagged or not) to run fresh until one finally succeeds; this call clears it explicitly and proceeds as an ordinary (non-fresh) provision. `fleet ls` shows a pending intent as \"FRESH SESSION <id>: fresh-session pending\". Issue #231: --fresh-session on a studio whose last stop was an involuntary platform replacement (not a park/destroy) with a non-trivial session REFUSES (409), naming the session's real size — recovering from a replacement should resume, not discard real work. --discard-session forces it anyway, as a stated choice.",
   },
   check: {
@@ -955,7 +957,19 @@ export function parseCliArgs(argv: string[]): CliCommand {
     // .cancelFreshSession's own doc comment).
     case "provision": {
       if (!arg || arg.startsWith("--")) return { cmd: "usage", message: CLI_USAGE };
-      const rest = argv.slice(2);
+      // Issue #1074 ask 2: `--account mapped`, pulled out of `rest` BEFORE the
+      // boolean-flag scan — same bespoke shape and same literal-"mapped" rule
+      // as recycle below (board task #131 ask 2).
+      const rest0 = argv.slice(2);
+      const accountIdx = rest0.indexOf("--account");
+      let forceMappedAccount = false;
+      let rest = rest0;
+      if (accountIdx !== -1) {
+        if (rest0.indexOf("--account", accountIdx + 1) !== -1) return usage("--account was given twice");
+        if (rest0[accountIdx + 1] !== "mapped") return usage('fleet provision: --account only accepts "mapped"');
+        forceMappedAccount = true;
+        rest = [...rest0.slice(0, accountIdx), ...rest0.slice(accountIdx + 2)];
+      }
       const known = ["--fresh-session", "--no-fresh-session", "--discard-session"];
       const stray = rest.find((f, i) => !known.includes(f) || rest.indexOf(f) !== i);
       if (stray !== undefined) return usage(`unexpected ${JSON.stringify(stray)}`);
@@ -972,7 +986,7 @@ export function parseCliArgs(argv: string[]): CliCommand {
       // same "unknown/invalid combination" usage-error convention this
       // parser already gives `--fresh-session`/`--no-fresh-session` above.
       if (discardSession && !freshSession) return usage("--discard-session needs --fresh-session on the same call");
-      return { cmd: "provision", id: arg, freshSession, cancelFreshSession, discardSession };
+      return { cmd: "provision", id: arg, freshSession, cancelFreshSession, discardSession, ...(forceMappedAccount ? { forceMappedAccount: true } : {}) };
     }
     // Issue #96: same bespoke shape as `destroy --force` below, same reasons.
     // Issue #28: plus `--fresh-session`, either order, each at most once.

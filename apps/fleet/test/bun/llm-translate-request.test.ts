@@ -5,8 +5,10 @@
 // streaming + error-classification directions live in the sibling file
 // llm-translate-stream.test.ts.
 import { describe, expect, test } from "bun:test";
+import { modelByKey } from "../../src/llm/models";
 import {
   GLM_LEAD_MODEL,
+  GLM_MAX_MAX_TOKENS,
   GLM_MIN_MAX_TOKENS,
   anthropicRequestToOpenAI,
   openAIResponseToAnthropic,
@@ -498,5 +500,25 @@ describe("openAIResponseToAnthropic — tool_calls", () => {
       usage: { prompt_tokens: 1, completion_tokens: 1 },
     }, { model: "m", requestedMaxTokens: 1_000_000 });
     expect(out.stop_reason).toBe("tool_use");
+  });
+});
+
+describe("anthropicRequestToOpenAI — kimi per-model ceiling (issue #1073)", () => {
+  const kimi = modelByKey("kimi");
+  const body = (max_tokens: number) => ({ model: "claude", max_tokens, messages: [{ role: "user", content: "hi" }] });
+
+  test("kimi clamps a 64000 request to its own ceiling, below the GLM ceiling", () => {
+    expect(kimi).toBeDefined();
+    const out = anthropicRequestToOpenAI(body(64000), kimi!);
+    expect(out.model).toBe(kimi!.id);
+    expect(out.max_tokens).toBe(24000);
+  });
+
+  test("kimi ceiling is strictly under the GLM ceiling it used to share", () => {
+    expect(anthropicRequestToOpenAI(body(64000), kimi!).max_tokens).toBeLessThan(GLM_MAX_MAX_TOKENS);
+  });
+
+  test("kimi floor still raises a tiny request up to the floor", () => {
+    expect(anthropicRequestToOpenAI(body(1024), kimi!).max_tokens).toBe(16000);
   });
 });

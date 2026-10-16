@@ -385,3 +385,119 @@ describe("parseStreamErrorChunk — board issue #284 (b): an explicit upstream {
     expect(parseStreamErrorChunk({})).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #1073: kimi writes tool calls INSIDE its <think> block and then idles.
+// Shapes below are the assumed upstream form (`<think>` tags streamed in
+// `delta.content`, tool call as `<tool_call>{json}</tool_call>` or a bare
+// JSON object) — hand-written, not yet confirmed against a live kimi
+// recording. Re-check against a live smoke before re-promoting kimi.
+// ---------------------------------------------------------------------------
+
+/** Feeds content deltas (one per chunk) then a finish_reason chunk through
+ *  the stream translator and returns the parsed SSE frames it produced. */
+function runThinkStream(contentChunks: string[], finishReason: string | null) {
+  const state = createStreamState({ thinkTags: true });
+  const frames: string[] = [];
+  for (const c of contentChunks) {
+    frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { content: c }, finish_reason: null }] }));
+  }
+  if (finishReason !== null) {
+    frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: finishReason }] }));
+  }
+  return { state, frames, closed: closeStreamOrError(state, 64000) };
+}
+
+describe("think-block tool calls (issue #1073)", () => {
+  test("a tagged tool call inside <think> becomes a real tool_use block; reasoning is not leaked as text", () => {
+    const { frames, closed } = runThinkStream([
+      "<think>I should read the README first.\n<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"/workspace/acme/README.md\"}}</tool_call></think>",
+    ], "stop");
+    const parsed = frames.map(parseFrame);
+    const start = parsed.find((f) => f.event === "content_block_start");
+    expect(start?.data).toMatchObject({ content_block: { type: "tool_use", name: "Read" } });
+    const inputJson = parsed.filter((f) => f.event === "content_block_delta").map((f) => (f.data as { delta: { partial_json?: string } }).delta.partial_json ?? "").join("");
+    expect(JSON.parse(inputJson)).toEqual({ file_path: "/workspace/acme/README.md" });
+    expect(parsed.some((f) => f.event === "content_block_delta" && (f.data as { delta: { type: string } }).delta.type === "text_delta")).toBe(false);
+    const messageDelta = closed.frames.map(parseFrame).find((f) => f.event === "message_delta");
+    expect((messageDelta?.data as { delta: { stop_reason: string } }).delta.stop_reason).toBe("tool_use");
+    expect(closed.ok).toBe(true);
+  });
+
+  test("a bare JSON tool call as the whole <think> body is recovered (input key form)", () => {
+    const { frames, closed } = runThinkStream([
+      "<think>{\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}}</think>",
+    ], "stop");
+    const start = frames.map(parseFrame).find((f) => f.event === "content_block_start");
+    expect(start?.data).toMatchObject({ content_block: { type: "tool_use", name: "Bash" } });
+    expect(closed.ok).toBe(true);
+    expect(closed.frames.map(parseFrame).find((f) => f.event === "message_delta")?.data)
+      .toMatchObject({ delta: { stop_reason: "tool_use" } });
+  });
+
+  test("tags split across chunk boundaries are still recognized", () => {
+    const { frames, closed } = runThinkStream([
+      "<thi", "nk>plan\n<tool_c", "all>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"a\"}}</tool", "_call></th", "ink>",
+    ], "stop");
+    expect(frames.map(parseFrame).find((f) => f.event === "content_block_start")?.data)
+      .toMatchObject({ content_block: { type: "tool_use", name: "Read" } });
+    expect(closed.ok).toBe(true);
+  });
+
+  test("reasoning with no tool call is dropped; visible text after </think> still streams", () => {
+    const { frames, closed } = runThinkStream([
+      "<think>plan the work</think>Here is the answer.",
+    ], "stop");
+    const parsed = frames.map(parseFrame);
+    const texts = parsed.filter((f) => f.event === "content_block_delta").map((f) => (f.data as { delta: { text?: string } }).delta.text ?? "");
+    expect(texts.join("")).toBe("Here is the answer.");
+    expect(parsed.some((f) => f.event === "content_block_start" && (f.data as { content_block: { type: string } }).content_block.type === "tool_use")).toBe(false);
+    expect(closed.frames.map(parseFrame).find((f) => f.event === "message_delta")?.data)
+      .toMatchObject({ delta: { stop_reason: "end_turn" } });
+  });
+
+  test("an unterminated <think> at end of stream still recovers a complete tool call", () => {
+    const { closed } = runThinkStream([
+      "<think><tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"b\"}}</tool_call>",
+    ], "length");
+    expect(closed.frames.map(parseFrame).find((f) => f.event === "content_block_start")?.data)
+      .toMatchObject({ content_block: { type: "tool_use", name: "Read" } });
+    expect(closed.ok).toBe(true);
+  });
+
+  test("an unrecoverable tool call inside <think>, with no visible output, ends with a retryable error frame — never a silent idle", () => {
+    const { closed } = runThinkStream([
+      "<think><tool_call>{not valid json</tool_call></think>",
+    ], "length");
+    expect(closed.ok).toBe(false);
+    const errorFrame = closed.frames.map(parseFrame).find((f) => f.event === "error");
+    expect(errorFrame).toBeDefined();
+    expect((errorFrame?.data as { error: { message: string } }).error.message).toMatch(/retry/i);
+    expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+});
+
+describe("think tags are off for every model except kimi (issue #1073 review)", () => {
+  test("GLM/DeepSeek stream (thinkTags off) passes literal <think> and tool_call text through byte-identical", () => {
+    const state = createStreamState();
+    const frames: string[] = [];
+    frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "<think>plan" }, finish_reason: null }] }));
+    frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "</think><tool_call>{\"name\":\"Read\"}</tool_call>" }, finish_reason: null }] }));
+    frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] }));
+    const closed = closeStreamOrError(state, 64000);
+    expect(frames).toEqual([
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<think>plan"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"</think><tool_call>{\\"name\\":\\"Read\\"}</tool_call>"}}\n\n',
+    ]);
+    expect(closed.ok).toBe(true);
+    expect(closed.frames.map(parseFrame).find((f) => f.event === "message_delta")?.data)
+      .toMatchObject({ delta: { stop_reason: "end_turn" } });
+  });
+
+  test("with thinkTags off, a <think> tag split across chunks is never held back", () => {
+    const state = createStreamState();
+    const frames = applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "<thi" }, finish_reason: null }] });
+    expect(frames.map(parseFrame).map((f) => (f.data as { delta?: { text?: string } }).delta?.text)).toEqual([undefined, "<thi"]);
+  });
+});

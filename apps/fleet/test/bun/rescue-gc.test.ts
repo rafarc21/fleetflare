@@ -73,3 +73,38 @@ describe("#217 — fleet rescue-gc", () => {
     expect(d.deleted).toEqual([]);
   });
 });
+
+/**
+ * Issue #1074 ask 3: a squash-merged branch never has its commits become
+ * ancestors of the default branch, so "every commit already on main" is false
+ * forever for it. The GC accepts a PR-merged verdict instead — the PR is
+ * MERGED and its merge commit is on the default branch.
+ */
+describe("#1074 — squash-merged rescue branches", () => {
+  test("a squash-merged branch with real-looking diff is deleted when its PR landed on the default branch", async () => {
+    const d = deps([B("sq-20260901000000", 30)], { "fleet/rescue/sq-20260901000000": { aheadBy: 4, files: ["src/a.ts"] } });
+    const withPr: RescueGcDeps & { deleted: string[] } = {
+      ...d,
+      landedByPr: async () => true,
+    };
+    const r = await runRescueGc(withPr, { apply: true, olderThanDays: 14, now: NOW, defaultBranch: "main" });
+    expect(r).toEqual([{ branch: "fleet/rescue/sq-20260901000000", outcome: "deleted", reason: "its PR is merged to main (squash)" }]);
+    expect(d.deleted).toEqual(["fleet/rescue/sq-20260901000000"]);
+  });
+
+  test("a branch whose PR did not land is still KEPT", async () => {
+    const d = deps([B("sq2-20260901000000", 30)], { "fleet/rescue/sq2-20260901000000": { aheadBy: 4, files: ["src/a.ts"] } });
+    const withPr: RescueGcDeps & { deleted: string[] } = { ...d, landedByPr: async () => false };
+    const r = await runRescueGc(withPr, { apply: true, olderThanDays: 14, now: NOW, defaultBranch: "main" });
+    expect(r).toEqual([{ branch: "fleet/rescue/sq2-20260901000000", outcome: "kept", reason: "1 file(s) of real work not on main" }]);
+    expect(d.deleted).toEqual([]);
+  });
+
+  test("the PR check is asked only when plain ancestry fails — never for a branch already on main", async () => {
+    const d = deps([B("sq3-20260901000000", 30)], { "fleet/rescue/sq3-20260901000000": { aheadBy: 0, files: [] } });
+    let asked = 0;
+    const withPr: RescueGcDeps & { deleted: string[] } = { ...d, landedByPr: async () => { asked += 1; return true; } };
+    await runRescueGc(withPr, { apply: false, olderThanDays: 14, now: NOW, defaultBranch: "main" });
+    expect(asked).toBe(0);
+  });
+});

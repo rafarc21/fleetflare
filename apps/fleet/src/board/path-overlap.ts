@@ -33,13 +33,26 @@
 const PATH_CANDIDATE = /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g;
 const TRIM_EDGES = /^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g;
 
+/**
+ * Issue #1074 ask 4: a two-segment slash pair with no file extension is prose
+ * (`origin/staging`, `before/after`, `read/write`), not a path — it fired
+ * "path claim overlap" on every brief that said so. Only the shapes a real
+ * path takes count: three or more segments (a directory tree), or a last
+ * segment carrying an extension (a file). Costs a two-segment bare directory
+ * claim such as `apps/fleet` — the lesser error for a warning.
+ */
+function looksLikePath(p: string): boolean {
+  const segments = p.split("/");
+  return segments.length >= 3 || /\.[A-Za-z0-9]+$/.test(segments[segments.length - 1]);
+}
+
 export function extractPaths(text: string): string[] {
   const raw = text.match(PATH_CANDIDATE) ?? [];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const m of raw) {
     const trimmed = m.replace(TRIM_EDGES, "");
-    if (trimmed === "" || !trimmed.includes("/") || seen.has(trimmed)) continue;
+    if (trimmed === "" || !trimmed.includes("/") || !looksLikePath(trimmed) || seen.has(trimmed)) continue;
     seen.add(trimmed);
     out.push(trimmed);
   }

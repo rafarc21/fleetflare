@@ -18,6 +18,9 @@ import type { MemberAlert } from "../src/studio/member-alerts";
 // module stays pure (no node:*/Bun imports, the header above's own reason),
 // and cli/infer-format.ts is itself pure, so nothing rides along either way.
 import type { LeadInferUsage } from "./infer-format";
+// Issue #1074 ask 1: the lead-model read behind the MODEL column and the
+// --json leadType/leadModel fields (a pure module of its own, see its header).
+import { leadModelOf } from "./lead-model";
 
 /**
  * One word, machine-parseable first token — reuses the SAME vocabulary
@@ -488,6 +491,11 @@ interface LsJsonRow {
    *  same contract as openPrs above — no lead calls in the window, or a
    *  Worker whose route 404s — never a silent 0/0). */
   infer?: { calls: number; ok: number };
+  /** Issue #1074 ask 1: the lead's type — claude, glm, or a pool key (kimi,
+   *  deepseek) — and the short id of the model it runs on (null when the
+   *  CLI cannot know it: a claude lead, or a glm lead with no assignment). */
+  leadType: string;
+  leadModel: string | null;
 }
 
 /** The same data the ACTIVITY column renders, as a lead state per studio.
@@ -496,12 +504,15 @@ interface LsJsonRow {
 export function lsJsonRows(
   studios: StudioStatus[], now: Date, staleAfterSeconds: number = ACTIVITY_MIRROR_STALE_SECONDS,
   openPrs?: Map<string, number>, inferBy?: Map<string, LeadInferUsage>,
+  assignments?: Record<string, string>,
 ): LsJsonRow[] {
   return studios.map((s) => {
     // #403's precedence chain lives in leadGate above; the nested-function
     // wrap is #332's: the PRS decoration below wraps every kind's return in
     // ONE place instead of editing each case.
-    const leadRow = (): LsJsonRow => {
+    // The lead fields are folded on after the kind switch (below), so the
+    // per-kind builder types the row without them.
+    const leadRow = (): Omit<LsJsonRow, "leadType" | "leadModel"> => {
       const base = {
         id: s.id, state: s.state, repo: s.repoSlug ?? null, activity: formatActivity(s, now, staleAfterSeconds),
         lastLine: s.observed?.lastMessageLine ?? null,
@@ -544,9 +555,13 @@ export function lsJsonRows(
     // trailing return — one shape, both decorations, absence never a 0/0.
     const count = openPrs?.get(s.id);
     const infer = inferBy?.get(s.id);
-    return count === undefined && infer === undefined
+    const decorated = count === undefined && infer === undefined
       ? row
       : { ...row, ...(count === undefined ? {} : { openPrs: count }), ...(infer === undefined ? {} : { infer }) };
+    // Issue #1074 ask 1: lead type and model ride every row — never absent,
+    // so a reader never has to guess a missing key means "claude".
+    const lead = leadModelOf(s, assignments);
+    return { ...decorated, leadType: lead.leadType, leadModel: lead.leadModel };
   });
 }
 

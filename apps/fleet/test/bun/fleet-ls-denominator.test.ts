@@ -82,6 +82,18 @@ describe("formatTable — no trailing pad, capped ERROR (#205)", () => {
       "acme-os--maestro  acme-os  running  -    -    -    ?      ? · snap ?  ?         -      never    -    CLAUDE_CODE_OAUTH_TOKEN  -     -     -          -",
     );
   });
+
+  // Issue #1074 (review): no new column — a non-Claude lead's model rides the
+  // ACCOUNT cell as `<lead>:<model>`, and a claude lead's ACCOUNT is unchanged.
+  test("a glm lead's ACCOUNT cell names its model; the header keeps every column (#1074)", () => {
+    const t = formatTable([row({ id: "acme-os--pilot", leadType: "glm" })], new Date(), null, undefined, undefined,
+      { "acme-os--pilot": "@cf/zai-org/glm-5.3" });
+    const [header, line] = t.split("\n");
+    expect(header.split(/\s{2,}/)).not.toContain("MODEL");
+    expect(header.split(/\s{2,}/)).toContain("ACCOUNT");
+    expect(line).toContain("glm:glm-5.3");
+    expect(line).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+  });
 });
 
 describe("fleet check <id> keeps the full error (#205)", () => {

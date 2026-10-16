@@ -56,6 +56,14 @@ export const GLM_MIN_MAX_TOKENS = 16000;
  *  allowing for reasoning_content on top of visible content. */
 export const GLM_MAX_MAX_TOKENS = 32000;
 
+/** Ceiling on the `max_tokens` sent to kimi (issue #1073). kimi runs its
+ *  reasoning inside `<think>` content, and a turn that runs away in there
+ *  reaches the 64k output cap; the shared GLM ceiling above is too high for
+ *  it. 24000 is a judgment call, not a measured value — no recorded kimi
+ *  run in the repo gives a per-token budget. Still above the floor, so a
+ *  small client request still gets the floor. Re-check after a live smoke. */
+export const KIMI_MAX_MAX_TOKENS = 24000;
+
 // ---------------------------------------------------------------------------
 // Anthropic request -> OpenAI chat-completions request
 // ---------------------------------------------------------------------------
@@ -464,12 +472,32 @@ interface StreamState {
    *  until that chunk arrives, same "0 until proven otherwise" posture
    *  `outputTokens` already had. */
   inputTokens: number;
+  /** Issue #1073: true while inside a `<think>` region of message content
+   *  (kimi writes its reasoning there). Text in the region is buffered, not
+   *  streamed as visible text, and scanned for tool-call payloads on close. */
+  thinking: boolean;
+  /** Reasoning text accumulated for the current `<think>` region. */
+  thinkText: string;
+  /** Trailing content that may be the start of `<think>` / `</think>`,
+   *  held back until the next chunk shows whether it completes a tag. */
+  pendingTag: string;
+  /** tool_use blocks recovered out of think regions (not counted in
+   *  `toolIndexByOpenAiIndex`, which tracks OpenAI-native tool_calls only). */
+  thinkToolUses: number;
+  /** A think region carried tool-call-shaped text that could not be
+   *  recovered into a tool_use block. */
+  unrecoverableToolCall: boolean;
+  /** Only kimi's stream sets this (models.ts `thinkTags`). Off, content
+   *  streams straight through as text, byte-for-byte as before #1073. */
+  thinkTags: boolean;
 }
 
-export function createStreamState(): StreamState {
+export function createStreamState(opts: { thinkTags?: boolean } = {}): StreamState {
   return {
     nextIndex: 0, textIndex: null, toolIndexByOpenAiIndex: new Map(),
     openIndex: null, openKind: null, finishReason: null, outputTokens: 0, inputTokens: 0,
+    thinking: false, thinkText: "", pendingTag: "", thinkToolUses: 0, unrecoverableToolCall: false,
+    thinkTags: opts.thinkTags === true,
   };
 }
 
@@ -505,6 +533,122 @@ export function streamPrelude(id: string, model: string): string[] {
   })];
 }
 
+// Issue #1073: kimi writes its reasoning inside `<think>...</think>` in the
+// message content, and sometimes writes a tool call inside that region. The
+// tag bytes are the only shape this parser relies on; the tool-call payload
+// shapes it recognizes are listed at recoverThinkToolCalls below.
+const THINK_OPEN = "<think>";
+const THINK_CLOSE = "</think>";
+const TOOL_CALL_TAG = /<tool_call>([\s\S]*?)<\/tool_call>/g;
+/** Anything that looks like a tool call, even one that will not parse. A
+ *  `"name": "..."` match alone is common in reasoning prose, so it only
+ *  counts toward the error path when the turn also has no visible output. */
+const TOOL_CALL_MARKER = /<tool_call\b|"name"\s*:\s*"/;
+const UNRECOVERED_TOOL_CALL_MESSAGE =
+  "upstream emitted a tool call inside its reasoning block that could not be recovered; retry the turn";
+
+/** Length of the longest suffix of `text` that is a proper prefix of `tag` —
+ *  the bytes to hold back because the next chunk may complete the tag. */
+function partialTagSuffix(text: string, tag: string): number {
+  for (let n = Math.min(tag.length - 1, text.length); n > 0; n--) {
+    if (tag.startsWith(text.slice(text.length - n))) return n;
+  }
+  return 0;
+}
+
+/** Streams visible text as one text block, opening it on the first text run
+ *  after a non-text block (same sequential-block rule as the tool branch). */
+function emitText(state: StreamState, text: string, events: string[]): void {
+  if (state.openKind !== "text") {
+    closeOpenBlock(state, events);
+    state.textIndex = state.nextIndex++;
+    state.openIndex = state.textIndex;
+    state.openKind = "text";
+    events.push(sseEvent("content_block_start", { type: "content_block_start", index: state.textIndex, content_block: { type: "text", text: "" } }));
+  }
+  events.push(sseEvent("content_block_delta", { type: "content_block_delta", index: state.textIndex!, delta: { type: "text_delta", text } }));
+}
+
+/** Inside a think region the text is buffered for the close-time scan;
+ *  outside one it is visible text. */
+function pushSegment(state: StreamState, text: string, events: string[]): void {
+  if (text.length === 0) return;
+  if (state.thinking) state.thinkText += text;
+  else emitText(state, text, events);
+}
+
+/** Splits one content delta on `<think>` / `</think>` boundaries. A tag split
+ *  across chunks is held in `pendingTag` until the next chunk completes it. */
+function routeContent(state: StreamState, content: string, events: string[]): void {
+  let input = state.pendingTag + content;
+  state.pendingTag = "";
+  for (;;) {
+    const tag = state.thinking ? THINK_CLOSE : THINK_OPEN;
+    const at = input.indexOf(tag);
+    if (at === -1) {
+      const keep = partialTagSuffix(input, tag);
+      pushSegment(state, input.slice(0, input.length - keep), events);
+      state.pendingTag = input.slice(input.length - keep);
+      return;
+    }
+    pushSegment(state, input.slice(0, at), events);
+    input = input.slice(at + tag.length);
+    if (state.thinking) {
+      state.thinking = false;
+      finishThink(state, events);
+    } else {
+      state.thinking = true;
+    }
+  }
+}
+
+/** The payload shapes recognized inside a think region, in order:
+ *   1. one or more `<tool_call>{json}</tool_call>` blocks, where the JSON is
+ *      `{"name": string, "arguments" | "input": object}` (`arguments` may also
+ *      be a JSON-encoded string, OpenAI-style);
+ *   2. the whole think body being that one JSON object, with no tags.
+ *  Anything else is not recovered — a payload that does not parse, or prose
+ *  wrapped around the call, is left for the error path to report. */
+function recoverThinkToolCalls(thinkText: string): Array<{ name: string; input: Record<string, unknown> }> {
+  const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
+  const take = (raw: string) => {
+    let value: Json;
+    try { value = JSON.parse(raw.trim()); } catch { return; }
+    if (!value || typeof value !== "object" || typeof value.name !== "string" || value.name.length === 0) return;
+    let input: Json = value.arguments ?? value.input ?? {};
+    if (typeof input === "string") {
+      try { input = JSON.parse(input); } catch { return; }
+    }
+    if (input && typeof input === "object" && !Array.isArray(input)) calls.push({ name: value.name, input });
+  };
+  const tagged = [...thinkText.matchAll(TOOL_CALL_TAG)];
+  if (tagged.length > 0) for (const m of tagged) take(m[1]);
+  else take(thinkText);
+  return calls;
+}
+
+/** Closes a think region: recovered tool calls become complete tool_use
+ *  blocks (opened and closed here, never left open); a region with
+ *  tool-call-shaped text that could not be recovered is flagged for the
+ *  error path in closeStreamOrError. */
+function finishThink(state: StreamState, events: string[]): void {
+  const calls = recoverThinkToolCalls(state.thinkText);
+  if (calls.length === 0 && TOOL_CALL_MARKER.test(state.thinkText)) state.unrecoverableToolCall = true;
+  state.thinkText = "";
+  if (calls.length === 0) return;
+  closeOpenBlock(state, events);
+  for (const call of calls) {
+    const index = state.nextIndex++;
+    state.thinkToolUses++;
+    events.push(sseEvent("content_block_start", {
+      type: "content_block_start", index,
+      content_block: { type: "tool_use", id: newToolUseId(), name: call.name, input: {} },
+    }));
+    events.push(sseEvent("content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(call.input) } }));
+    events.push(sseEvent("content_block_stop", { type: "content_block_stop", index }));
+  }
+}
+
 /** Applies one parsed OpenAI streaming chunk to `state` (mutated in place —
  *  one state per in-flight request, never shared) and returns the Anthropic
  *  SSE frames it produces. A chunk with no `choices[0]` (some providers send
@@ -529,16 +673,8 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
   if (choice.finish_reason !== undefined && choice.finish_reason !== null) state.finishReason = choice.finish_reason;
 
   if (typeof delta.content === "string" && delta.content.length > 0) {
-    if (state.openKind !== "text") {
-      // Either nothing is open yet, or a tool call's block is — close it
-      // (a no-op if nothing is open) before this text run opens its own.
-      closeOpenBlock(state, events);
-      state.textIndex = state.nextIndex++;
-      state.openIndex = state.textIndex;
-      state.openKind = "text";
-      events.push(sseEvent("content_block_start", { type: "content_block_start", index: state.textIndex, content_block: { type: "text", text: "" } }));
-    }
-    events.push(sseEvent("content_block_delta", { type: "content_block_delta", index: state.textIndex!, delta: { type: "text_delta", text: delta.content } }));
+    if (state.thinkTags) routeContent(state, delta.content, events);
+    else emitText(state, delta.content, events);
   }
 
   for (const tc of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
@@ -617,6 +753,16 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
  */
 export function closeStream(state: StreamState, requestedMaxTokens: number): string[] {
   const events: string[] = [];
+  // Issue #1073: a held-back partial tag never completed — it is plain
+  // content — and an unterminated think region still gets its close-time scan.
+  if (state.pendingTag.length > 0) {
+    pushSegment(state, state.pendingTag, events);
+    state.pendingTag = "";
+  }
+  if (state.thinking) {
+    state.thinking = false;
+    finishThink(state, events);
+  }
   closeOpenBlock(state, events);
   // Minor fix (maestro review round 1): derived from whether this stream
   // actually opened any tool_use block, not only from the upstream's own
@@ -631,7 +777,7 @@ export function closeStream(state: StreamState, requestedMaxTokens: number): str
   // reasoning, nothing visible ever streamed). Forced to max_tokens
   // regardless of finish_reason, for the same reason as the non-streaming
   // guard: finish_reason alone is not a reliable signal for this failure.
-  const stopReason = state.toolIndexByOpenAiIndex.size > 0
+  const stopReason = state.toolIndexByOpenAiIndex.size > 0 || state.thinkToolUses > 0
     ? "tool_use"
     : state.nextIndex === 0
       ? "max_tokens"
@@ -716,11 +862,21 @@ export function parseStreamErrorChunk(chunk: Json): string | null {
 interface StreamCloseResult {
   frames: string[];
   ok: boolean;
+  /** Set only when `ok` is false: the failure reason the caller logs. */
+  reason?: string;
 }
 
 export function closeStreamOrError(state: StreamState, requestedMaxTokens: number): StreamCloseResult {
   if (state.finishReason === null) {
-    return { frames: [streamErrorFrame("upstream stream ended without a finish reason")], ok: false };
+    return { frames: [streamErrorFrame("upstream stream ended without a finish reason")], ok: false, reason: "no_finish_reason" };
   }
-  return { frames: closeStream(state, requestedMaxTokens), ok: true };
+  const frames = closeStream(state, requestedMaxTokens);
+  // Issue #1073: a turn whose only output was a tool call kimi wrote inside
+  // its think block, and that did not recover, would otherwise close as an
+  // empty max_tokens turn — a silent idle the client never retries. nextIndex
+  // === 0 means no block was ever opened, so no tool call was recovered either.
+  if (state.unrecoverableToolCall && state.nextIndex === 0) {
+    return { frames: [streamErrorFrame(UNRECOVERED_TOOL_CALL_MESSAGE)], ok: false, reason: "think_tool_call_unrecovered" };
+  }
+  return { frames, ok: true };
 }

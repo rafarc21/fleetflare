@@ -26,7 +26,7 @@ import type { RepoReachFetch } from "../github/reach";
 import {
   pullRequestExists, branchExists, commitExists, issueExists, pathExists, compareExists,
   closeIssue as closeIssueApi, getDefaultBranch, getPullRequest, commitReachableFromBranch,
-  getIssueCloser, type IssueCloser, pullClaimsIssue,
+  listPullsForCommit, getIssueCloser, type IssueCloser, pullClaimsIssue,
   listMatchingBranches, commitDate, compareFiles, deleteBranch,
   repoIsPrivate, fetchRepoFile, listOpenPullFiles,
 } from "../github/api";
@@ -299,6 +299,9 @@ export interface RescueGcPort {
   /** Every `fleet/rescue/*` branch with its tip commit's date. */
   listRescueBranches: (repo: string) => Promise<RescueBranch[]>;
   compare: (repo: string, base: string, head: string) => Promise<{ aheadBy: number; files: string[] }>;
+  /** Issue #1074: squash-safe landed verdict for a branch tip — see
+   *  RescueGcDeps.landedByPr. Optional so a fake port need not supply it. */
+  landedByPr?: (repo: string, defaultBranch: string, sha: string) => Promise<boolean>;
   deleteBranch: (repo: string, branch: string) => Promise<void>;
 }
 
@@ -312,6 +315,19 @@ function realRescueGcPort(env: Env): RescueGcPort {
       return Promise.all(refs.map(async (r) => ({ ...r, date: await commitDate(token, repo, r.sha) })));
     },
     compare: async (repo, base, head) => compareFiles(await mint(repo), repo, base, head),
+    // Issue #1074: the PR(s) this tip belongs to; landed when one is MERGED
+    // and its merge commit is on the default branch (squash-safe — the
+    // branch's own commits never become ancestors after a squash).
+    landedByPr: async (repo, defaultBranch, sha) => {
+      const token = await mint(repo);
+      for (const p of await listPullsForCommit(token, repo, sha)) {
+        const pr = await getPullRequest(token, repo, p.number);
+        if (!pr.merged || pr.mergeCommitSha === null) continue;
+        if (pr.baseRef === defaultBranch) return true;
+        if (await commitReachableFromBranch(token, repo, defaultBranch, pr.mergeCommitSha)) return true;
+      }
+      return false;
+    },
     deleteBranch: async (repo, branch) => deleteBranch(await mint(repo), repo, branch),
   };
 }
@@ -341,6 +357,7 @@ async function handleRescueGcRoute(
       {
         listBranches: () => port.listRescueBranches(repo),
         compare: (name) => port.compare(repo, defaultBranch, name),
+        landedByPr: port.landedByPr ? (_name, sha) => port.landedByPr!(repo, defaultBranch, sha) : undefined,
         deleteBranch: (name) => port.deleteBranch(repo, name),
       },
       { apply, olderThanDays, now: new Date(), defaultBranch },
