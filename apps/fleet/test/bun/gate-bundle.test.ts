@@ -5,7 +5,7 @@ import { describe, it, expect } from "bun:test";
 import { bundleKeyFor, planBundleLeg, type PlannedLeg } from "../../src/gate/fanout";
 import { BUNDLE_LEG, buildLegEnvVars, gateOutboundProps } from "../../src/gate/leg-env";
 import { bundleStepEnabled, legRequest, runBundleStep, type BundleStepRunner } from "../../src/gate/leg-run";
-import { parseLegs } from "../../src/gate/config";
+import { parseGateBlock, parseLegs } from "../../src/gate/config";
 import {
   GATE_R2_HOST,
   MAX_BUNDLE_BYTES,
@@ -186,15 +186,36 @@ describe("the bundle leg name is reserved (#1080: a gate block leg named bundle 
   });
 });
 
-describe("bundleStepEnabled: the bundle step is behind a flag, default off (#1080 deploy skew)", () => {
-  it("is off when the flag is unset, so an old gate image never sees a bundle leg", () => {
-    expect(bundleStepEnabled(undefined)).toBe(false);
-    expect(bundleStepEnabled("")).toBe(false);
+describe("bundleStepEnabled: fleet flag AND per-repo opt-in, both default off (#1080)", () => {
+  it("is off when the fleet flag is unset, so an old gate image never sees a bundle leg", () => {
+    expect(bundleStepEnabled(undefined, true)).toBe(false);
+    expect(bundleStepEnabled("", true)).toBe(false);
   });
 
-  it("is on only for the exact value 1", () => {
-    expect(bundleStepEnabled("1")).toBe(true);
-    expect(bundleStepEnabled("true")).toBe(false);
+  it("is on only for the exact fleet value 1", () => {
+    expect(bundleStepEnabled("1", true)).toBe(true);
+    expect(bundleStepEnabled("true", true)).toBe(false);
+  });
+
+  it("a repo that did not opt in clones exactly as today, even with the fleet flag on", () => {
+    expect(bundleStepEnabled("1", undefined)).toBe(false);
+    expect(bundleStepEnabled("1", false)).toBe(false);
+  });
+});
+
+describe("parseGateBlock: per-repo bundle opt-in (#1080, default off)", () => {
+  const BLOCK = { install: "bun install", legs: ["lint"], pathRules: ["apps/**"] };
+
+  it("bundle: true in the gate block opts the repo in", () => {
+    expect(parseGateBlock({ ...BLOCK, bundle: true })?.bundle).toBe(true);
+  });
+
+  it("an absent bundle key is off: the repo clones", () => {
+    expect(parseGateBlock(BLOCK)?.bundle).not.toBe(true);
+  });
+
+  it("a non-boolean bundle value is a malformed block", () => {
+    expect(parseGateBlock({ ...BLOCK, bundle: "yes" })).toBeNull();
   });
 });
 

@@ -164,7 +164,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     // that does not build is not a run failure: the legs get no bundle key and
     // clone, as before.
     const bundleKey = bundleKeyFor(owner, repoName, event.instanceId, resolved.headSha);
-    const bundled = bundleStepEnabled(this.env.GATE_BUNDLE) && await runBundleStep(
+    const bundled = bundleStepEnabled(this.env.GATE_BUNDLE, base?.bundle) && await runBundleStep(
       { do: (name, config, fn) => step.do(name, config, fn) },
       (planned) => {
         const stub = this.env.GATE_RUNNER.get(this.env.GATE_RUNNER.idFromName(gateRunnerName(event.instanceId, planned.leg, crypto.randomUUID())));

@@ -70,6 +70,9 @@ export interface GateConfig {
   bunLaneRoot?: string;
   /** Lane file globs, relative to bunLaneRoot. Absent means the lane's default set. */
   bunLaneGlobs?: string[];
+  /** #1080: the repo opts into the one-bundle-per-run path. Absent means off: the legs clone. Opt in only
+   *  when no leg reads git history beyond what a snapshot holds (see docs/operations.md). */
+  bundle?: boolean;
   /** The block's image key (#1066). Absent means DEFAULT_GATE_IMAGE at run time. */
   image?: string;
 }
@@ -123,6 +126,7 @@ export function parseGateBlock(block: unknown): GateConfig | null {
   if (typeof bunShards !== "number" || !Number.isInteger(bunShards) || bunShards < 1) return null;
   if (g.bunLaneRoot !== undefined && (typeof g.bunLaneRoot !== "string" || g.bunLaneRoot === "")) return null;
   if (g.bunLaneGlobs !== undefined && !isStringArray(g.bunLaneGlobs)) return null;
+  if (g.bundle !== undefined && typeof g.bundle !== "boolean") return null;
   // Bun shards only take cap room when the block has a bun lane. A vitest
   // lane, when configured, needs at least one shard of room.
   const bunLegs = g.bunLaneRoot === undefined ? 0 : bunShards;
@@ -137,7 +141,7 @@ export function parseGateBlock(block: unknown): GateConfig | null {
   }
   return {
     install: g.install, legs, vitestCmd: g.vitestCmd, pathRules: g.pathRules, vitestShards, bunShards,
-    bunLaneRoot: g.bunLaneRoot, bunLaneGlobs: g.bunLaneGlobs, ...(image === undefined ? {} : { image }),
+    bunLaneRoot: g.bunLaneRoot, bunLaneGlobs: g.bunLaneGlobs, bundle: g.bundle, ...(image === undefined ? {} : { image }),
   };
 }
 
