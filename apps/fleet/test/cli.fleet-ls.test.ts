@@ -413,7 +413,7 @@ describe("lsJsonRows", () => {
       observed: { ...emptyObserved(), activity: act({ state: "working", since: "2026-09-25T12:01:20.000Z" }) } });
     expect(r).toEqual({ id: "demo--web-studio", state: "running", repo: "example-org/demo",
       lead: "working", leadSince: "2026-09-25T12:01:20.000Z", limitResetsAt: null, activity: "WORKING 40s",
-      lastLine: null });
+      lastLine: null, leadType: "claude", leadModel: null });
     expect(row({ observed: { ...emptyObserved(), activity: act({ state: "waiting-question" }) } }).lead).toBe("waiting-question");
   });
 
@@ -574,5 +574,55 @@ describe("staleness-budget twins derive from SHIP_TRANSCRIPT_SECONDS (issue #513
       state: "idle", at: new Date(READ_AT.getTime() - budgetMs).toISOString(),
     });
     expect(fresh.source).toBe("hook");
+  });
+});
+
+// Issue #1074 ask 1: the lead model is verifiable without reading a screen —
+// a MODEL column plus `leadType` / `leadModel` on every `fleet ls --json` row.
+import { leadModelOf, formatLeadModelCell } from "../cli/lead-model";
+
+describe("lead model (#1074): MODEL column and --json leadType/leadModel", () => {
+  const T = new Date("2026-09-25T12:00:00.000Z");
+  const ASSIGN: Record<string, string> = {
+    "websites--pilot": "@cf/moonshotai/kimi-k2.7-code",
+    "beta--pilot": "@cf/zai-org/glm-5.3",
+  };
+
+  it("a claude-led studio reads leadType claude and no leadModel", () => {
+    expect(leadModelOf(status({ id: "websites--pilot" }), ASSIGN)).toEqual({ leadType: "claude", leadModel: null });
+  });
+
+  it("a glm-led studio assigned the kimi pool model reads leadType kimi and the short model id", () => {
+    expect(leadModelOf(status({ id: "websites--pilot", leadType: "glm" }), ASSIGN))
+      .toEqual({ leadType: "kimi", leadModel: "kimi-k2.7-code" });
+  });
+
+  it("a glm-led studio assigned the glm pool model reads leadType glm and its short model id", () => {
+    expect(leadModelOf(status({ id: "beta--pilot", leadType: "glm" }), ASSIGN))
+      .toEqual({ leadType: "glm", leadModel: "glm-5.3" });
+  });
+
+  it("a glm-led studio with no assignment reads leadType glm and no leadModel", () => {
+    expect(leadModelOf(status({ id: "gamma--pilot", leadType: "glm" }), ASSIGN))
+      .toEqual({ leadType: "glm", leadModel: null });
+  });
+
+  it("the MODEL cell is the lead type, plus the short model id when there is one", () => {
+    expect(formatLeadModelCell({ leadType: "claude", leadModel: null })).toBe("claude");
+    expect(formatLeadModelCell({ leadType: "kimi", leadModel: "kimi-k2.7-code" })).toBe("kimi kimi-k2.7-code");
+  });
+
+  it("lsJsonRows carries leadType and leadModel on every row", () => {
+    const rows = lsJsonRows(
+      [status({ id: "websites--pilot", leadType: "glm" }), status({ id: "gamma--pilot" })],
+      T, undefined, undefined, undefined, ASSIGN,
+    );
+    expect(rows[0]).toMatchObject({ id: "websites--pilot", leadType: "kimi", leadModel: "kimi-k2.7-code" });
+    expect(rows[1]).toMatchObject({ id: "gamma--pilot", leadType: "claude", leadModel: null });
+  });
+
+  it("lsJsonRows with no assignments map still names the lead type (glm, no model)", () => {
+    const row = lsJsonRows([status({ id: "beta--pilot", leadType: "glm" })], T)[0];
+    expect(row).toMatchObject({ leadType: "glm", leadModel: null });
   });
 });

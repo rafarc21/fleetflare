@@ -75,11 +75,13 @@ describe("formatTable — no trailing pad, capped ERROR (#205)", () => {
   // table's own output. Issue #934: same again for the INFER column
   // (between ACTIVITY and CHECKED) — a row with no lead rows in the
   // window renders "-" in it, re-transcribed from the table's own output.
+  // Issue #1074 ask 1: the MODEL column sits right after STATE; a base row
+  // (no leadType set) is claude-led, so it reads "claude" there.
   test("a base row's whole single-row table, every byte (#399)", () => {
     const t = formatTable([row()]);
     expect(t).toBe(
-      "ID                REPO     STATE    RST  WIP  PRS  READY  SESSION     ACTIVITY  INFER  CHECKED  ROW  ACCOUNT                  HOST  BURN  REFRESHED  ERROR\n" +
-      "acme-os--maestro  acme-os  running  -    -    -    ?      ? · snap ?  ?         -      never    -    CLAUDE_CODE_OAUTH_TOKEN  -     -     -          -",
+      "ID                REPO     STATE    MODEL   RST  WIP  PRS  READY  SESSION     ACTIVITY  INFER  CHECKED  ROW  ACCOUNT                  HOST  BURN  REFRESHED  ERROR\n" +
+      "acme-os--maestro  acme-os  running  claude  -    -    -    ?      ? · snap ?  ?         -      never    -    CLAUDE_CODE_OAUTH_TOKEN  -     -     -          -",
     );
   });
 });

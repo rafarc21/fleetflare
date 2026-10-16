@@ -24,6 +24,12 @@ export interface RescueGcDeps {
   listBranches(): Promise<RescueBranch[]>;
   /** The branch against the default branch: commits ahead, and every file its diff touches. */
   compare(name: string): Promise<{ aheadBy: number; files: string[] }>;
+  /** Issue #1074: a squash-merged branch never has its commits become
+   *  ancestors of the default branch, so `compare` keeps reading them as
+   *  unlanded forever. This is the squash-safe verdict: the PR this branch
+   *  tip belongs to is MERGED and its merge commit is on the default branch.
+   *  Optional — a caller without a PR reader keeps the ancestry-only rule. */
+  landedByPr?(name: string, sha: string): Promise<boolean>;
   deleteBranch(name: string): Promise<void>;
 }
 
@@ -57,7 +63,17 @@ export async function runRescueGc(
     }
     const work = cmp.files.filter((f) => !isRescueMarkerPath(f));
     let reason: string;
+    let squashLanded = false;
+    if (cmp.aheadBy > 0 && deps.landedByPr) {
+      try {
+        squashLanded = await deps.landedByPr(b.name, b.sha);
+      } catch (err) {
+        keep(`could not read its PR: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+    }
     if (cmp.aheadBy === 0) reason = `every commit is already on ${opts.defaultBranch}`;
+    else if (squashLanded) reason = `its PR is merged to ${opts.defaultBranch} (squash)`;
     else if (work.length === 0 && cmp.files.length > 0) reason = `only tool markers (${RESCUE_MARKER_PATHS.join(", ")})`;
     else {
       keep(`${work.length} file(s) of real work not on ${opts.defaultBranch}`);

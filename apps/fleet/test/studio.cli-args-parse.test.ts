@@ -746,3 +746,33 @@ describe("parseCliArgs: task", () => {
   });
 });
 
+
+// Issue #1074 ask 2: `fleet provision <id> --account mapped` forces the repo's
+// mapped account, same as `recycle --account mapped` (board task #131).
+describe("provision --account mapped (#1074)", () => {
+  it("provision --account mapped sets forceMappedAccount: true", () => {
+    expect(parseCliArgs(["provision", "websites--scratch", "--account", "mapped"])).toEqual({
+      cmd: "provision", id: "websites--scratch", freshSession: false, cancelFreshSession: false, discardSession: false,
+      forceMappedAccount: true,
+    });
+  });
+
+  it("provision without --account leaves forceMappedAccount absent", () => {
+    const res = parseCliArgs(["provision", "websites--scratch"]) as Record<string, unknown>;
+    expect("forceMappedAccount" in res).toBe(false);
+  });
+
+  it("provision --account only accepts the literal \"mapped\" — any other value is a usage error", () => {
+    const res = parseCliArgs(["provision", "websites--scratch", "--account", "primary"]);
+    expect(res.cmd).toBe("usage");
+    expect((res as { message: string }).message).toContain('--account only accepts "mapped"');
+    expect(parseCliArgs(["provision", "websites--scratch", "--account"]).cmd).toBe("usage");
+    expect(parseCliArgs(["provision", "websites--scratch", "--account", "mapped", "--account", "mapped"]).cmd).toBe("usage");
+  });
+
+  it("provision --account mapped coexists with --fresh-session, in any order", () => {
+    const want = { cmd: "provision", id: "websites--scratch", freshSession: true, cancelFreshSession: false, discardSession: false, forceMappedAccount: true };
+    expect(parseCliArgs(["provision", "websites--scratch", "--account", "mapped", "--fresh-session"])).toEqual(want);
+    expect(parseCliArgs(["provision", "websites--scratch", "--fresh-session", "--account", "mapped"])).toEqual(want);
+  });
+});
