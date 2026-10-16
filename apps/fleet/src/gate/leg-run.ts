@@ -11,7 +11,10 @@ import { legTimeoutMin } from "./config";
 import type { LegResult } from "./verdict";
 
 /** A leg's result as the step returns it: the DO's LegResult plus wall time and summary. */
-export type LegRunResult = LegResult & LegRunMeta;
+export type LegRunResult = LegResult & LegRunMeta & {
+  /** Set when the leg's first attempt was a red test: its retry's infra error is not infra (#1119). */
+  redFirst?: true;
+};
 
 /** Workflows caps a step result at 1 MiB; a leg description has no reason to
  *  be near that, so it is bounded well under it. */
@@ -165,7 +168,8 @@ export async function runLegStep(
       leg: planned.leg, state: "success", description: `flaky: passed on retry; first: ${firstCause}`, ms, summary: retry.summary,
     };
   }
-  if (first.state === "failure") return { ...retry, ms };
+  // A red first try stays a real failure for the infra rerun, even if its retry lost the connection (#1119).
+  if (first.state === "failure") return { ...retry, ms, redFirst: true };
   // An install retry that did not pass: its final description notes the first cause (#1092).
   const retryCause = retry.description ?? retry.state;
   return {

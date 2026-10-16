@@ -27,7 +27,8 @@ import {
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
 import { gateRunnerName, legRequest, legResultReader, runLegStep, type LegRunResult } from "./leg-run";
-import { infraRerunDecision, rerunStatusArgs } from "./infra-rerun";
+import { d1RunIndex } from "./auto-run-env";
+import { infraRerunDecision, recordInfraRerun, rerunStatusArgs, startInfraRerun } from "./infra-rerun";
 import { postGateStatus, type StatusPort } from "./status-post";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
@@ -174,15 +175,16 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       const statusPostFailed = await step.do("post-infra-rerun", async () =>
         postGateStatus(this.statusPort(), repo, resolved.headSha, rerunStatusArgs(event.instanceId)));
       const started = await step.do("start-infra-rerun", async () => {
-        try {
-          await this.env.GATE_WORKFLOW.create({
-            id: rerunId, params: { repo, pr, headSha: resolved.headSha, rerunOf: event.instanceId },
+        const ok = await startInfraRerun(() => this.env.GATE_WORKFLOW.create({
+          id: rerunId, params: { repo, pr, headSha: resolved.headSha, rerunOf: event.instanceId },
+        }));
+        // The rerun takes the PR's run pointer, so a manual start finds it (#1084).
+        if (ok) {
+          await recordInfraRerun(d1RunIndex(this.env.DB), {
+            repo, pr, headSha: resolved.headSha, runId: rerunId, instanceId: event.instanceId,
           });
-          return true;
-        } catch (err) {
-          console.error("gate: infra rerun create failed", err instanceof Error ? err.message : String(err));
-          return false;
         }
+        return ok;
       });
       if (started) return { rerun: rerunId, statusPostFailed, legs: outcomeLegs(results) };
     }

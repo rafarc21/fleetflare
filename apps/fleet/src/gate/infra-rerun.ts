@@ -1,6 +1,7 @@
 // #1119: the infra-only auto-rerun decision. Pure: no I/O, no bindings, so
 // bun test can load it. workflow.ts reads the decision, creates the rerun
 // instance and posts the rerun status.
+import type { GateRunIndex } from "./auto-run";
 import type { LegResult } from "./verdict";
 
 /** A leg error whose cause is the platform or host, not the code: a Workflows
@@ -17,12 +18,50 @@ const INFRA_CAUSE = new RegExp([
 ].join("|"));
 
 /** An error leg is infra-class by its cause. A leg whose first attempt was red
- *  is not: its "; first:" cause is a real test failure, so the leg is not infra. */
-export function isInfraLegFailure(result: LegResult): boolean {
-  if (result.state !== "error") return false;
-  const description = result.description ?? "";
-  if (description.includes("; first:")) return false;
-  return INFRA_CAUSE.test(description);
+ *  (`redFirst`, set by runLegStep) is not: a real test failure is never infra,
+ *  even when its retry then lost the connection. */
+export function isInfraLegFailure(result: LegResult & { redFirst?: boolean }): boolean {
+  if (result.state !== "error" || result.redFirst === true) return false;
+  return INFRA_CAUSE.test(result.description ?? "");
+}
+
+/** Creates the rerun instance. A create that throws "already exists" is a
+ *  replayed step: the rerun is already running, so it is success. Any other
+ *  failure is not started, and the caller posts the final error verdict. */
+export async function startInfraRerun(create: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await create();
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/already exists/i.test(message)) return true;
+    console.error("gate: infra rerun create failed", message);
+    return false;
+  }
+}
+
+/** Points the PR's run index at the rerun, like a normal start (#1084 must see
+ *  it), but only while the first run is still the latest: a newer push's run
+ *  keeps the pointer, so the rerun never takes it back. */
+export async function recordInfraRerun(
+  index: GateRunIndex,
+  input: { repo: string; pr: number; headSha: string; runId: string; instanceId: string },
+): Promise<void> {
+  const latest = await index.latest(input.repo, input.pr);
+  if (latest?.runId !== input.instanceId) return;
+  await index.record(input.repo, input.pr, { headSha: input.headSha, runId: input.runId });
+}
+
+/** The status a poller sees for a run that may have handed off to its infra
+ *  rerun (#1119): a complete run with a `rerun` in its output reports the
+ *  rerun's status, so `fleet gate run` waits for the rerun's own verdict. */
+export async function statusFollowingRerun<S extends { status: string; output?: unknown }>(
+  first: S,
+  getRerun: (rerunId: string) => Promise<S>,
+): Promise<S> {
+  const rerunId = (first.output as { rerun?: unknown } | undefined)?.rerun;
+  if (first.status !== "complete" || typeof rerunId !== "string") return first;
+  return getRerun(rerunId);
 }
 
 /** One auto-rerun for an all-infra run. Any red leg, any non-infra error, or a

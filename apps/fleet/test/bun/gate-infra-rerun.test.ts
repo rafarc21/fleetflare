@@ -4,7 +4,9 @@
 // classifier, the rerun decision, the rerun's pending status and the per-leg
 // step deadline (no orphan step holds the run open).
 import { describe, it, expect } from "bun:test";
-import { infraRerunDecision, isInfraLegFailure, rerunStatusArgs } from "../../src/gate/infra-rerun";
+import {
+  infraRerunDecision, isInfraLegFailure, recordInfraRerun, rerunStatusArgs, startInfraRerun, statusFollowingRerun,
+} from "../../src/gate/infra-rerun";
 import { runLegStep, withStepDeadline, type LegStepConfig } from "../../src/gate/leg-run";
 import type { PlannedLeg } from "../../src/gate/fanout";
 import type { LegResult } from "../../src/gate/verdict";
@@ -30,6 +32,8 @@ function fakeStep() {
 }
 
 const INFRA = "Attempt failed due to internal workflows error";
+const HEAD = "a".repeat(40);
+const NEWER = "c".repeat(40);
 
 describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
   it.each([
@@ -58,9 +62,11 @@ describe("isInfraLegFailure: which leg errors are infra-class (#1119)", () => {
     expect(isInfraLegFailure({ leg: "lint", state: "error", description })).toBe(false);
   });
 
-  it("a leg whose first attempt was red is not infra, even when its retry lost the connection", () => {
-    const description = `Network connection lost. after 0 min; first: lint 3 errors`;
-    expect(isInfraLegFailure({ leg: "lint", state: "error", description })).toBe(false);
+  it("a leg whose first attempt was red is not infra, even when its retry lost the connection (redFirst)", () => {
+    // The shape runLegStep really returns: the retry's own error, flagged redFirst.
+    const description = "lint: Network connection lost. after 0 min";
+    expect(isInfraLegFailure({ leg: "lint", state: "error", description, redFirst: true })).toBe(false);
+    expect(isInfraLegFailure({ leg: "lint", state: "error", description })).toBe(true);
   });
 
   it("a red test or a pass is never infra", () => {
@@ -122,5 +128,79 @@ describe("runLegStep: a hung dispatch ends the step at its deadline, as infra (#
     expect(result.state).toBe("error");
     expect(result.description).toContain("no progress past its deadline");
     expect(isInfraLegFailure({ leg: "lint", state: result.state, description: result.description })).toBe(true);
+  });
+});
+
+describe("runLegStep: a red first try with an infra retry is flagged redFirst, never infra (#1119 review)", () => {
+  it("the retry's infra error comes back redFirst, so the run does not auto-rerun on it", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      if (sent === 1) return new Response(JSON.stringify({ state: "failure", description: "lint 3 errors" }));
+      throw new Error("Network connection lost.");
+    };
+    const result = await runLegStep(step, dispatch, PLANNED, {});
+    expect(result).toMatchObject({ leg: "lint", state: "error", redFirst: true });
+    expect(isInfraLegFailure(result)).toBe(false);
+  });
+});
+
+describe("startInfraRerun: a replayed start is success, not a failed rerun (#1119 review)", () => {
+  it("a create that resolves starts the rerun", async () => {
+    expect(await startInfraRerun(async () => ({ id: "rerun-x" }))).toBe(true);
+  });
+
+  it("an 'already exists' create (a replayed step) is success: the rerun is running", async () => {
+    expect(await startInfraRerun(async () => { throw new Error("Instance already exists: rerun-x"); })).toBe(true);
+  });
+
+  it("any other create failure is not started, so the final error verdict posts", async () => {
+    expect(await startInfraRerun(async () => { throw new Error("quota exceeded"); })).toBe(false);
+  });
+});
+
+describe("recordInfraRerun: the rerun takes the PR's run pointer, like a normal start (#1119 review)", () => {
+  function fakeIndex(latest: { headSha: string; runId: string } | null) {
+    const records: { repo: string; pr: number; run: { headSha: string; runId: string } }[] = [];
+    return {
+      records,
+      index: {
+        latest: async () => latest,
+        record: async (repo: string, pr: number, run: { headSha: string; runId: string }) => {
+          records.push({ repo, pr, run });
+        },
+      },
+    };
+  }
+
+  it("the first run is still the PR's latest: the rerun is recorded on the same head", async () => {
+    const { index, records } = fakeIndex({ headSha: HEAD, runId: "first" });
+    await recordInfraRerun(index, { repo: "acme/example", pr: 7, headSha: HEAD, runId: "rerun-first", instanceId: "first" });
+    expect(records).toEqual([{ repo: "acme/example", pr: 7, run: { headSha: HEAD, runId: "rerun-first" } }]);
+  });
+
+  it("a newer push already took the pointer: the rerun is not recorded over it", async () => {
+    const { index, records } = fakeIndex({ headSha: NEWER, runId: "newer" });
+    await recordInfraRerun(index, { repo: "acme/example", pr: 7, headSha: HEAD, runId: "rerun-first", instanceId: "first" });
+    expect(records).toEqual([]);
+  });
+});
+
+describe("statusFollowingRerun: a run that handed off to its rerun reports the rerun's status (#1119 review)", () => {
+  it("a complete run that handed off answers with its rerun's status, so the poller waits for the rerun", async () => {
+    const first = { status: "complete", output: { rerun: "rerun-first", statusPostFailed: false, legs: [] } };
+    const rerun = { status: "running" };
+    expect(await statusFollowingRerun(first, async (id) => (id === "rerun-first" ? rerun : { status: "missing" }))).toEqual(rerun);
+  });
+
+  it("a run with no handoff is its own status", async () => {
+    const own = { status: "complete", output: { state: "success", statusPostFailed: false } };
+    expect(await statusFollowingRerun(own, async () => { throw new Error("not called"); })).toEqual(own);
+  });
+
+  it("a run still running is its own status, even if it carries no output yet", async () => {
+    const running = { status: "running" };
+    expect(await statusFollowingRerun(running, async () => { throw new Error("not called"); })).toEqual(running);
   });
 });

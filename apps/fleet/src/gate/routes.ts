@@ -12,6 +12,7 @@ import { repoTokenMinter } from "../github/auth";
 import { startManualGateRun, type GateRunParams } from "./auto-run";
 import { d1RunIndex } from "./auto-run-env";
 import { isGateRunnerRepo } from "./config";
+import { statusFollowingRerun } from "./infra-rerun";
 
 // Narrow view of the GATE_WORKFLOW binding. Task 14 adds the real field to
 // Env; until then this cast keeps this module typechecking. Drop it then.
@@ -55,7 +56,9 @@ export async function handleGateRoute(
     const runId = url.searchParams.get("runId");
     if (!runId) return j({ error: "runId required" }, 400);
     const instance = await workflow(env).get(runId); // Workflows get() is async
-    const status = await instance.status();
+    // A run that handed off to its infra rerun (#1119) reports the rerun's status.
+    const status = await statusFollowingRerun(await instance.status(), async (rerunId) =>
+      (await workflow(env).get(rerunId)).status());
     // Task 14's verdict rides in the Workflow's own output once terminal;
     // anything not yet terminal maps to pending.
     const out = status.output as
