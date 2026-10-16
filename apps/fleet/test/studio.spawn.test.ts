@@ -217,6 +217,14 @@ describe("resolveSpawnParent", () => {
     expect(await resolveSpawnParent(rows, token)).toEqual({ id: PARENT_ID, repo: "websites", role: "pilot" });
   });
 
+  // Lead-model routing (#1070): the parent's own leadType rides along so
+  // runSpawn can hand a glm-led parent's members the glm shape.
+  it("carries a glm-led parent's leadType on the resolved parent", async () => {
+    const token = mintSpawnToken();
+    const rows = [status({ id: PARENT_ID, spawnTokenHash: await hashSpawnToken(token), leadType: "glm" })];
+    expect(await resolveSpawnParent(rows, token)).toEqual({ id: PARENT_ID, repo: "websites", role: "pilot", leadType: "glm" });
+  });
+
   it("returns null for an absent token", async () => {
     expect(await resolveSpawnParent([], null)).toBeNull();
   });
@@ -1502,6 +1510,49 @@ describe("runSpawn — {leadType} (#249)", () => {
       PARENT, { role: "release", leadType: "kimi" },
     );
     expect(res.status).toBe(200);
+  });
+
+  // Lead-model routing (#1070): a member spawned BY a glm-led studio used to
+  // carry no leadType at all, so its container got CLAUDE_CODE_OAUTH_TOKEN
+  // and drew the Claude slot. The child now inherits the parent's glm-led
+  // shape when the request says nothing.
+  describe("inherits glm from a glm-led parent (#1070)", () => {
+    const GLM_PARENT: SpawnParent = { ...PARENT, leadType: "glm" };
+
+    it("a glm-led parent's child gets leadType glm when the request omits leadType", async () => {
+      let seen: ProvisionConfig | null = null;
+      const deps = leadDeps(async (childId: string, cfg: ProvisionConfig) => { seen = cfg; return status({ id: childId }); });
+      const res = await runSpawn(deps, GLM_PARENT, { role: "release" });
+      expect(res.status).toBe(200);
+      expect(seen!.leadType).toBe("glm");
+    });
+
+    it("an explicit leadType in the request wins over the parent's — leadType claude is honoured", async () => {
+      let seen: ProvisionConfig | null = null;
+      const deps = leadDeps(async (childId: string, cfg: ProvisionConfig) => { seen = cfg; return status({ id: childId }); });
+      const res = await runSpawn(deps, GLM_PARENT, { role: "release", leadType: "claude" });
+      expect(res.status).toBe(200);
+      expect(seen!.leadType).toBe("claude");
+    });
+
+    it("the inherited glm child gets no pinned model — it is left to the pool's own routing", async () => {
+      const calls: [string, string][] = [];
+      const deps = leadDeps(
+        async (childId: string) => status({ id: childId }),
+        async (studioId: string, modelId: string) => { calls.push([studioId, modelId]); },
+      );
+      const res = await runSpawn(deps, GLM_PARENT, { role: "release" });
+      expect(res.status).toBe(200);
+      expect(calls).toEqual([]);
+    });
+
+    it("a claude-led parent's child still carries no leadType (today's byte-identical request)", async () => {
+      let seen: ProvisionConfig | null = null;
+      const deps = leadDeps(async (childId: string, cfg: ProvisionConfig) => { seen = cfg; return status({ id: childId }); });
+      const res = await runSpawn(deps, { ...PARENT, leadType: "claude" }, { role: "release" });
+      expect(res.status).toBe(200);
+      expect(seen!.leadType).toBeUndefined();
+    });
   });
 });
 
