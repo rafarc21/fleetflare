@@ -23,7 +23,7 @@ import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import { matchesPathRules } from "./config";
 import { outcomeLegs, planLegs, verdictToStatusArgs, type OutcomeLeg, type PlannedLeg } from "./fanout";
 import { loadGateConfig, type FleetJsonReader } from "./load-config";
-import { legRequest, runLegStep, type LegRunResult } from "./leg-run";
+import { gateRunnerName, legRequest, runLegStep, type LegRunResult } from "./leg-run";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
 export interface GateWorkflowParams { repo: string; pr: number }
@@ -137,10 +137,11 @@ function runLeg(
 ): Promise<LegRunResult> {
   return runLegStep(
     { do: (name, config, fn) => step.do(name, config, fn) },
-    async (leg) => {
-      // Scoped by run instance: two PRs gating the same leg name must never
-      // share one container, and "one leg per container" is the DO's contract.
-      const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(`${instanceId}/${leg.leg}`));
+    async (leg, attemptId) => {
+      // Scoped by run instance, leg AND attempt: two PRs gating the same leg name
+      // must never share one container, one leg per container is the DO's
+      // contract, and a retry must never reuse a DO a prior attempt is tearing down (#1068).
+      const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(gateRunnerName(instanceId, leg.leg, attemptId)));
       return stub.fetch("https://gate-runner/run-leg", {
         method: "POST",
         body: JSON.stringify(legRequest(owner, repoName, leg, pr)),

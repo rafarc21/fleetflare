@@ -42,39 +42,59 @@ const LEG_STEP_CONFIG: LegStepConfig = {
   timeout: "30 minutes",
 };
 
+/** The runner DO name for one attempt of one leg. Every attempt (the start
+ *  step, its infra step-retry, and the retry-<leg> step) gets its own name, so
+ *  an attempt never lands on a DO whose previous container may still be
+ *  tearing down (#1068). Pure: the workflow passes its instance id and the
+ *  attempt id made inside the step callback. */
+export function gateRunnerName(instanceId: string, leg: string, attemptId: string): string {
+  return `${instanceId}/${leg}/${attemptId}`;
+}
+
 /** Runs one leg: a start-<leg> step, and when that returns state "failure"
  *  (a red test, possibly flaky) a single retry-<leg> step with a fresh
  *  container. Never throws: every failure becomes this leg's LegResult, so
  *  the other legs still finish. */
 export async function runLegStep(
   step: LegStepRunner,
-  dispatch: (planned: PlannedLeg) => Promise<Response>,
+  dispatch: (planned: PlannedLeg, attemptId: string) => Promise<Response>,
   planned: PlannedLeg,
 ): Promise<LegRunResult> {
   const attempt = async (name: string, target: PlannedLeg): Promise<LegRunResult> =>
     step.do(name, LEG_STEP_CONFIG, async () => {
+      // Made inside the callback: a Workflows step retry re-runs it, so every
+      // try gets its own runner DO. A replayed step returns its recorded result.
+      const attemptId = crypto.randomUUID();
       // Timed inside the callback: a Workflow replay returns the recorded ms
       // instead of timing the replay.
       const started = Date.now();
-      const res = await dispatch(target);
-      if (!res.ok) {
-        // A non-2xx (infra, 503) carries its cause in the body's `error`
-        // field — surface it, cut to 200 chars. No usable body: name the HTTP status.
-        let cause = `${planned.leg}: HTTP ${res.status}`;
-        try {
-          const body = await res.json() as { error?: unknown };
-          if (typeof body.error === "string" && body.error.length > 0) {
-            cause = `${planned.leg}: ${body.error}`;
-          }
-        } catch { /* non-JSON body: keep the HTTP status as the cause */ }
-        throw new Error(cause.slice(0, MAX_INFRA_CAUSE_CHARS));
+      try {
+        const res = await dispatch(target, attemptId);
+        if (!res.ok) {
+          // A non-2xx (infra, 503) carries its cause in the body's `error`
+          // field — surface it. No usable body: name the HTTP status.
+          let cause = `${planned.leg}: HTTP ${res.status}`;
+          try {
+            const body = await res.json() as { error?: unknown };
+            if (typeof body.error === "string" && body.error.length > 0) {
+              cause = `${planned.leg}: ${body.error}`;
+            }
+          } catch { /* non-JSON body: keep the HTTP status as the cause */ }
+          throw new Error(cause);
+        }
+        const normalized = normalizeLegResult(planned.leg, (await res.json()) as LegRunResult);
+        return {
+          ...normalized,
+          description: normalized.description?.slice(0, MAX_DESCRIPTION_CHARS),
+          ms: Date.now() - started,
+        };
+      } catch (err) {
+        // A thrown attempt still counts: its wall time rides in the message, so
+        // a failed leg's description shows real time (ms skips thrown attempts).
+        const message = err instanceof Error ? err.message : String(err);
+        const minutes = Math.round((Date.now() - started) / 60_000);
+        throw new Error(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min`);
       }
-      const normalized = normalizeLegResult(planned.leg, (await res.json()) as LegRunResult);
-      return {
-        ...normalized,
-        description: normalized.description?.slice(0, MAX_DESCRIPTION_CHARS),
-        ms: Date.now() - started,
-      };
     });
 
   const first = await attempt(`start-${planned.leg}`, planned).catch((err: unknown): LegRunResult => {
