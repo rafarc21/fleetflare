@@ -1,7 +1,7 @@
 // Pure fan-out planning for GateWorkflow (Task 14). No I/O, no bindings:
 // the Workflow feeds these results into step.do calls.
 import { describe, it, expect } from "bun:test";
-import { bunLegs, normalizeLegResult, planLegs, vitestLegs } from "../../src/gate/fanout";
+import { bunLegs, normalizeLegResult, outcomeLegs, planLegs, vitestLegs } from "../../src/gate/fanout";
 import { MAX_LEGS_PER_PR } from "../../src/gate/config";
 import { resolveOutboundTarget } from "../../src/gate/outbound-handler";
 
@@ -187,5 +187,27 @@ describe("normalizeLegResult", () => {
     expect(normalizeLegResult("lint", { leg: "lint", state: "passed" as never })).toEqual({
       leg: "lint", state: "error", description: "lint returned an unknown state",
     });
+  });
+});
+
+describe("normalizeLegResult keeps ms and summary (#1049)", () => {
+  it("passes both through beside the leg, state and description", () => {
+    expect(normalizeLegResult("vitest-1", {
+      leg: "x", state: "failure", description: "f", ms: 1200, summary: "Tests 1 failed | 1640 passed (1641)",
+    })).toEqual({
+      leg: "vitest-1", state: "failure", description: "f", ms: 1200, summary: "Tests 1 failed | 1640 passed (1641)",
+    });
+  });
+});
+
+describe("outcomeLegs (#1049: per-leg output in plan order)", () => {
+  it("maps each leg to its state, ms, summary and description, in the order given", () => {
+    expect(outcomeLegs([
+      { leg: "merge-tree", state: "success", ms: 900 },
+      { leg: "lint", state: "failure", description: "3 errors", ms: 83_000, summary: "Tests 3 failed" },
+    ])).toEqual([
+      { leg: "merge-tree", state: "success", ms: 900 },
+      { leg: "lint", state: "failure", ms: 83_000, summary: "Tests 3 failed", description: "3 errors" },
+    ]);
   });
 });

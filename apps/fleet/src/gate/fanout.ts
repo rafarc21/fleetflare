@@ -6,13 +6,50 @@ import { MAX_LEGS_PER_PR, type GateLeg } from "./config";
 import { bunLaneCwd } from "./bun-lane";
 import type { LegResult, Verdict } from "./verdict";
 
+/** GitHub 422s a commit-status description over 140 chars, which would
+ *  silently drop the verdict entirely. */
+const MAX_STATUS_CHARS = 140;
+
+export interface RosterInput {
+  /** Every planned leg name, in plan order. A leg with no result counts as red. */
+  expected: string[];
+  results: LegResult[];
+  /** The Workflow instance id; the roster shows its first 8 chars. */
+  runId: string;
+}
+
+/** The commit status: state from the verdict, description the per-leg roster
+ *  (#1049 addendum): "<n>/<n> green (run <id8>)" on an all-green run, naming any
+ *  flaky legs; otherwise "<green>/<total> green; red: <legs> (run <id8>)". */
 export function verdictToStatusArgs(
   verdict: Exclude<Verdict, { state: "pending" }>,
+  roster: RosterInput,
 ): { state: "success" | "failure" | "error"; description: string } {
-  if (verdict.state === "success") return { state: "success", description: "all legs green" };
-  // GitHub 422s a commit-status description over 140 chars, which would
-  // silently drop the verdict entirely — truncate instead.
-  return { state: verdict.state, description: verdict.description.slice(0, 140) };
+  return { state: verdict.state, description: rosterDescription(roster) };
+}
+
+function rosterDescription({ expected, results, runId }: RosterInput): string {
+  const byLeg = new Map(results.map((r) => [r.leg, r]));
+  const red = expected.filter((leg) => byLeg.get(leg)?.state !== "success");
+  const total = expected.length;
+  const green = total - red.length;
+  const runTag = `(run ${runId.slice(0, 8)})`;
+  if (red.length > 0) return withLegList(`${green}/${total} green; red: `, red, ` ${runTag}`);
+  const flaky = expected.filter((leg) => byLeg.get(leg)?.description?.startsWith("flaky:"));
+  if (flaky.length === 0) return `${total}/${total} green ${runTag}`;
+  return withLegList(`${total}/${total} green (${flaky.length} flaky: `, flaky, `) ${runTag}`);
+}
+
+/** head + the leg names + tail, within 140 chars. Names are cut from the end
+ *  and "+N more" stands in for them; head and tail are always kept whole. */
+function withLegList(head: string, names: string[], tail: string): string {
+  const full = `${head}${names.join(", ")}${tail}`;
+  if (full.length <= MAX_STATUS_CHARS) return full;
+  for (let keep = names.length - 1; keep >= 1; keep--) {
+    const text = `${head}${names.slice(0, keep).join(", ")}, +${names.length - keep} more${tail}`;
+    if (text.length <= MAX_STATUS_CHARS) return text;
+  }
+  return `${head}+${names.length} more${tail}`;
 }
 
 export interface PlanInput {
@@ -92,11 +129,34 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
 
 const LEG_STATES = new Set<LegResult["state"]>(["success", "failure", "error"]);
 
+/** What a leg reports beside its state (#1049): wall time summed over its
+ *  attempts, and the test summary line from its own output. Both optional. */
+export interface LegRunMeta { ms?: number; summary?: string }
+
 /** The leg name is forced to the planned one, whatever the DO echoed back. An
  *  unknown state becomes error: a malformed report must never read as success. */
-export function normalizeLegResult(planned: string, payload: LegResult): LegResult {
+export function normalizeLegResult(planned: string, payload: LegResult & LegRunMeta): LegResult & LegRunMeta {
   if (!LEG_STATES.has(payload.state)) {
     return { leg: planned, state: "error", description: `${planned} returned an unknown state` };
   }
-  return { leg: planned, state: payload.state, description: payload.description };
+  return {
+    leg: planned, state: payload.state, description: payload.description, ms: payload.ms, summary: payload.summary,
+  };
+}
+
+/** One leg as the status route reports it, in plan order (#1049). */
+export interface OutcomeLeg {
+  leg: string;
+  state: LegResult["state"];
+  ms?: number;
+  summary?: string;
+  description?: string;
+}
+
+/** Per-leg output for the Workflow's final result. `results` is already in
+ *  plan order: legs run under Promise.all, which keeps order. */
+export function outcomeLegs(results: (LegResult & LegRunMeta)[]): OutcomeLeg[] {
+  return results.map((r) => ({
+    leg: r.leg, state: r.state, ms: r.ms, summary: r.summary, description: r.description,
+  }));
 }

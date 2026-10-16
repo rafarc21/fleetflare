@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach, beforeEach } from "bun:test";
-import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, runGate, type GateStatusResponse } from "../../cli/gate";
+import { describe, it, expect, afterEach, beforeEach, spyOn } from "bun:test";
+import { gateWatchExitCode, gateWatchDecision, onGateWatchDeadline, GATE_WATCH_DEADLINE_MS, parseStatusResponse, runGate, formatMs, legLines, type GateStatusResponse } from "../../cli/gate";
 
 describe("gateWatchExitCode", () => {
   it("success -> 0", () => {
@@ -139,5 +139,82 @@ describe("parseStatusResponse", () => {
   });
   it("JSON that is not a status object (e.g. null) is an error too", () => {
     expect(parseStatusResponse("null").ok).toBe(false);
+  });
+});
+
+describe("formatMs (#1049: wall time per leg)", () => {
+  it("seconds under a minute, minutes and seconds above", () => {
+    expect(formatMs(0)).toBe("0s");
+    expect(formatMs(3_000)).toBe("3s");
+    expect(formatMs(59_999)).toBe("59s");
+    expect(formatMs(83_000)).toBe("1m23s");
+    expect(formatMs(120_000)).toBe("2m0s");
+  });
+});
+
+describe("legLines: one line per leg (#1049)", () => {
+  it("no legs field -> no lines", () => {
+    expect(legLines({ state: "error", description: "x" })).toEqual([]);
+  });
+
+  it("mark, padded name, wall time, then the summary or the description", () => {
+    const lines = legLines({ state: "failure", legs: [
+      { leg: "merge-tree", state: "success", ms: 3_000 },
+      { leg: "vitest-1", state: "failure", ms: 83_000, summary: "Tests  1 failed | 1640 passed (1641)", description: "vitest-1 exited 1" },
+    ] });
+    expect(lines).toEqual([
+      "ok   merge-tree  3s",
+      "FAIL vitest-1    1m23s  Tests  1 failed | 1640 passed (1641)",
+    ]);
+  });
+
+  it("a leg that passed on its retry reads FLKY, never ok", () => {
+    const [line] = legLines({ state: "success", legs: [
+      { leg: "bun-1", state: "success", ms: 5_000, description: "flaky: passed on retry" },
+    ] });
+    expect(line.startsWith("FLKY ")).toBe(true);
+  });
+
+  it("an error leg reads ERR; a leg with no time reads '-'", () => {
+    const [line] = legLines({ state: "error", legs: [
+      { leg: "lint", state: "error", description: "gate container failed: boom" },
+    ] });
+    expect(line).toBe("ERR  lint  -      gate container failed: boom");
+  });
+
+  it("the text is cut at 100 chars", () => {
+    const [line] = legLines({ state: "failure", legs: [
+      { leg: "lint", state: "failure", ms: 1_000, description: "x".repeat(150) },
+    ] });
+    expect(line.endsWith("x".repeat(100))).toBe(true);
+    expect(line.includes("x".repeat(101))).toBe(false);
+  });
+});
+
+describe("runGate prints one line per leg after the verdict (#1049)", () => {
+  beforeEach(() => { server = undefined; });
+  afterEach(() => { server?.stop(true); });
+
+  it("verdict line first, then the leg lines; the exit code is unchanged", async () => {
+    const legs = [
+      { leg: "merge-tree", state: "success" as const, ms: 3_000 },
+      { leg: "vitest-1", state: "failure" as const, ms: 83_000, summary: "Tests  1 failed | 1640 passed (1641)" },
+    ];
+    const status = { state: "failure" as const, description: "1/2 green; red: vitest-1 (run 01234567)", legs };
+    const stub = stubWorker({ start: STARTED, statuses: [status] });
+    const logs: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((m?: unknown) => { logs.push(String(m)); });
+    let code: number;
+    try {
+      code = await runGate(stub.creds, "acme/example", 7, { pollMs: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(code).toBe(1);
+    expect(logs).toEqual([
+      "gate-start: run run-1 started for PR #7",
+      "gate: failure — 1/2 green; red: vitest-1 (run 01234567)",
+      ...legLines(status),
+    ]);
   });
 });

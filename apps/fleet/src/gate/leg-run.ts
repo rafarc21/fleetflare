@@ -6,8 +6,11 @@
 // never a throw. Any non-2xx is infra: the step throws, Workflows retries it
 // once, and a second failure becomes this leg's "error".
 import type { GateLegRequest } from "./leg-env";
-import { normalizeLegResult, type PlannedLeg } from "./fanout";
+import { normalizeLegResult, type LegRunMeta, type PlannedLeg } from "./fanout";
 import type { LegResult } from "./verdict";
+
+/** A leg's result as the step returns it: the DO's LegResult plus wall time and summary. */
+export type LegRunResult = LegResult & LegRunMeta;
 
 /** Workflows caps a step result at 1 MiB; a leg description has no reason to
  *  be near that, so it is bounded well under it. */
@@ -27,7 +30,7 @@ export interface LegStepConfig {
 
 /** The slice of Workflows' WorkflowStep this module uses. */
 export interface LegStepRunner {
-  do(name: string, config: LegStepConfig, fn: () => Promise<LegResult>): Promise<LegResult>;
+  do(name: string, config: LegStepConfig, fn: () => Promise<LegRunResult>): Promise<LegRunResult>;
 }
 
 const LEG_STEP_CONFIG: LegStepConfig = {
@@ -43,9 +46,12 @@ export async function runLegStep(
   step: LegStepRunner,
   dispatch: (planned: PlannedLeg) => Promise<Response>,
   planned: PlannedLeg,
-): Promise<LegResult> {
-  const attempt = async (name: string): Promise<LegResult> =>
+): Promise<LegRunResult> {
+  const attempt = async (name: string): Promise<LegRunResult> =>
     step.do(name, LEG_STEP_CONFIG, async () => {
+      // Timed inside the callback: a Workflow replay returns the recorded ms
+      // instead of timing the replay.
+      const started = Date.now();
       const res = await dispatch(planned);
       if (!res.ok) {
         // A non-2xx (infra, 503) carries its cause in the body's `error`
@@ -59,14 +65,15 @@ export async function runLegStep(
         } catch { /* non-JSON body: keep the leg name as the cause */ }
         throw new Error(cause.slice(0, MAX_INFRA_CAUSE_CHARS));
       }
-      const normalized = normalizeLegResult(planned.leg, (await res.json()) as LegResult);
+      const normalized = normalizeLegResult(planned.leg, (await res.json()) as LegRunResult);
       return {
         ...normalized,
         description: normalized.description?.slice(0, MAX_DESCRIPTION_CHARS),
+        ms: Date.now() - started,
       };
     });
 
-  const first = await attempt(`start-${planned.leg}`).catch((err: unknown): LegResult => {
+  const first = await attempt(`start-${planned.leg}`).catch((err: unknown): LegRunResult => {
     // Retries spent (infra). The thrown message already carries the cause.
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
@@ -76,15 +83,23 @@ export async function runLegStep(
   // container. success/error are final; only failure retries.
   if (first.state !== "failure") return first;
 
-  const retry = await attempt(`retry-${planned.leg}`).catch((err: unknown): LegResult => {
+  const retry = await attempt(`retry-${planned.leg}`).catch((err: unknown): LegRunResult => {
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
   });
 
+  // Wall time covers both attempts.
+  const ms = sumMs(first.ms, retry.ms);
   if (retry.state === "success") {
-    return { leg: planned.leg, state: "success", description: "flaky: passed on retry" };
+    return { leg: planned.leg, state: "success", description: "flaky: passed on retry", ms, summary: retry.summary };
   }
-  return retry;
+  return { ...retry, ms };
+}
+
+/** The sum of the attempts that were timed; undefined when none was. */
+function sumMs(...parts: (number | undefined)[]): number | undefined {
+  const timed = parts.filter((p): p is number => p !== undefined);
+  return timed.length > 0 ? timed.reduce((a, b) => a + b, 0) : undefined;
 }
 
 /** The /run-leg request body for one planned leg of one PR. Pure, so the

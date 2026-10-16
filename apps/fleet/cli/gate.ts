@@ -7,10 +7,44 @@
 import { accessHeaders, detectRepo, type Credentials } from "./fleet";
 import { errText } from "./diag";
 
+/** One leg of a finished run, in plan order (#1049). */
+export interface GateLegLine {
+  leg: string;
+  state: "success" | "failure" | "error";
+  ms?: number;
+  summary?: string;
+  description?: string;
+}
+
 export interface GateStatusResponse {
   state: "pending" | "success" | "failure" | "error";
   description?: string;
   statusPostFailed?: boolean;
+  legs?: GateLegLine[];
+}
+
+/** Wall time as "3s", "59s" or "1m23s". */
+export function formatMs(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  return s >= 60 ? `${Math.floor(s / 60)}m${s % 60}s` : `${s}s`;
+}
+
+/** ok, FLKY (passed on its retry: never ok), FAIL or ERR. */
+function legMark(l: GateLegLine): string {
+  if (l.state === "success") return l.description?.startsWith("flaky:") ? "FLKY" : "ok";
+  return l.state === "failure" ? "FAIL" : "ERR";
+}
+
+/** One line per leg, plan order: mark, name, wall time, then the test summary
+ *  (or the description), cut at 100 chars. Pure. No legs field -> no lines. */
+export function legLines(status: GateStatusResponse): string[] {
+  const legs = status.legs ?? [];
+  const width = Math.max(0, ...legs.map((l) => l.leg.length));
+  return legs.map((l) => {
+    const time = l.ms === undefined ? "-" : formatMs(l.ms);
+    const text = (l.summary ?? l.description ?? "").slice(0, 100);
+    return `${legMark(l).padEnd(5)}${l.leg.padEnd(width + 2)}${time.padEnd(7)}${text}`.trimEnd();
+  });
 }
 
 const POLL_MS = 5_000;
@@ -132,6 +166,7 @@ export async function cmdGateWatch(creds: Credentials, pr: number, runId: string
     const decision = gateWatchDecision(parsed.status, Date.now() - started);
     if (decision.kind === "terminal") {
       console.log(`gate: ${decision.status.state}${decision.status.description ? ` — ${decision.status.description}` : ""}`);
+      for (const line of legLines(decision.status)) console.log(line);
       process.exitCode = gateWatchExitCode(decision.status);
       return;
     }
@@ -186,6 +221,7 @@ export async function runGate(creds: Credentials, repo: string, pr: number, opts
     }
     if (status.state !== "pending") {
       console.log(`gate: ${status.state}${status.description ? ` — ${status.description}` : ""}`);
+      for (const line of legLines(status)) console.log(line);
       const code = gateWatchExitCode(status);
       return code === 0 || code === 1 ? code : 2;
     }
