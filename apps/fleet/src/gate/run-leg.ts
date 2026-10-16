@@ -137,9 +137,10 @@ async function waitUntilRunning(
  *  answers at once, so no request is held for the whole leg: the container
  *  runs the leg once, and a repeat POST never starts a second run.
  *
- *  Two ways a polled leg ends early. A container that stopped running is infra
- *  (503, the step retries on a fresh container). A leg past its own deadline is
- *  a final error result (200): a retry would hang for the same deadline again. */
+ *  Two ways a polled leg ends early, both infra (503, the step retries once on a
+ *  fresh container): a container that stopped running, and a leg past its own
+ *  deadline. Live 10-16: a typecheck leg hung to the deadline and its retry on a
+ *  fresh container passed in 108 s, so a deadline is a host hang, not a verdict. */
 async function runOnServer(
   c: GateContainer,
   req: GateLegRequest,
@@ -174,7 +175,7 @@ async function runOnServer(
     await sleep(POLL_MS);
     if (!c.running) return { kind: "infra", description: "gate container exited mid-leg" };
     if (now() - legStarted >= minutes * 60_000) {
-      return { kind: "result", result: { state: "error", description: `${req.leg} exceeded ${minutes} min without a result` } };
+      return { kind: "infra", description: `${req.leg} exceeded ${minutes} min without a result` };
     }
     try {
       const res = await port.fetch("http://container/result", { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
