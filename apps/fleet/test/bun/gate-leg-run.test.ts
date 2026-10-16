@@ -42,14 +42,24 @@ describe("runLegStep", () => {
     expect(await runLegStep(step, dispatch, PLANNED)).toEqual({ leg: "lint", state: "success" });
   });
 
-  it("failure: a red test is data, carried through and never retried", async () => {
+  it("failure: a red leg retries once as retry-<leg>, and a second failure is the final result", async () => {
     const step = fakeStep();
     let sent = 0;
     const dispatch = async () => { sent++; return reply({ state: "failure", description: "3 errors" }); };
-    expect(await runLegStep(step, dispatch, PLANNED)).toEqual({
-      leg: "lint", state: "failure", description: "3 errors",
-    });
-    expect(sent).toBe(1);
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toEqual({ leg: "lint", state: "failure", description: "3 errors" });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(sent).toBe(2);
+  });
+
+  it("failure then success on retry: success with 'flaky: passed on retry'", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "failure", description: "timing" }) : reply({ state: "success" }); };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toEqual({ leg: "lint", state: "success", description: "flaky: passed on retry" });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(sent).toBe(2);
   });
 
   it("error: a leg-reported error is data, carried through", async () => {
@@ -60,14 +70,14 @@ describe("runLegStep", () => {
     });
   });
 
-  it("non-2xx: retried once, then becomes an error leg (infra, never a pass)", async () => {
+  it("non-2xx: retried once; the 503 error body surfaces as '<leg>: <error>'", async () => {
     const step = fakeStep();
     let sent = 0;
-    const dispatch = async () => { sent++; return reply({ error: "boom" }, 503); };
+    const dispatch = async () => { sent++; return reply({ error: "gate container did not start within 180 s" }, 503); };
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result.leg).toBe("lint");
     expect(result.state).toBe("error");
-    expect(result.description).toContain("lint");
+    expect(result.description).toBe("lint: gate container did not start within 180 s");
     expect(sent).toBe(2);
   });
 
@@ -76,6 +86,13 @@ describe("runLegStep", () => {
     await runLegStep(step, async () => reply({ state: "success" }), PLANNED);
     expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
     expect("waitForEvent" in step).toBe(false);
+  });
+
+  it("a first success or error never retries — one start step only", async () => {
+    const step = fakeStep();
+    const dispatch = async () => reply({ state: "error", description: "container OOM" });
+    await runLegStep(step, dispatch, PLANNED);
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
   });
 
   it("start step config: one retry after 15s constant, 30-minute attempt timeout", async () => {
@@ -92,6 +109,7 @@ describe("runLegStep", () => {
     const dispatch = async () => reply({ state: "failure", description: "x".repeat(5000) });
     const result = await runLegStep(step, dispatch, PLANNED);
     expect(result.description?.length).toBe(2000);
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
   });
 
   it("unknown state from the DO becomes error, never success", async () => {
