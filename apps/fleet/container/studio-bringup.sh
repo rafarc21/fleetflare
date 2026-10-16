@@ -331,6 +331,53 @@ fi
 # region is extracted and run standalone by its test, where that function does
 # not exist; keeping the call above the opener keeps the region self-contained
 # and still logs this step like every other.
+# --- studio tools (issue #1160, option 2) -----------------------------------
+# A repo opts in with `studio.tools` in its own fleet.json; provision.ts passes
+# the names here as STUDIO_TOOLS (comma- or space-separated). Only names on
+# this case list are installed. Each install runs only when the tool is
+# missing, so a re-run is a no-op. Nothing here blocks bring-up: a failure is
+# logged and leaves a marker that the READY check shows. The marker is one
+# fixed line, never apt's own output, which goes to the redacted log.
+#
+# The allow-list is the case below and it must match STUDIO_TOOL_ALLOWLIST in
+# src/studio/studio-tools.ts. Unknown names are refused here too, as a second
+# gate in case the Worker and the image ever disagree.
+bringup_step studio-tools
+# >>> studio-tools >>>
+tools_root="${FLEET_WORKSPACE:-/workspace}"
+tools_marker="$tools_root/.fleet/tools-down"
+mkdir -p "$tools_root/.fleet" 2>/dev/null || true
+tools_failed=""
+tools_list="${STUDIO_TOOLS:-}"
+for tool in ${tools_list//,/ }; do
+  case "$tool" in
+    azure-cli)
+      if command -v az >/dev/null 2>&1; then
+        bringup_log "tools azure-cli present"
+        echo "studio-bringup: tools azure-cli already installed"
+      elif apt-get update -qq >/dev/null 2>&1 \
+        && apt-get install -y --no-install-recommends azure-cli >/dev/null 2>&1; then
+        bringup_log "tools azure-cli installed"
+        echo "studio-bringup: tools azure-cli installed"
+      else
+        bringup_log "tools azure-cli install-failed"
+        echo "studio-bringup: tools azure-cli install failed -- bring-up continues without it" >&2
+        tools_failed=1
+      fi
+      ;;
+    *)
+      bringup_log "tools $tool rejected: not on the allow-list"
+      echo "studio-bringup: tools \"$tool\" is not on the allow-list -- skipped" >&2
+      tools_failed=1
+      ;;
+  esac
+done
+if [ -n "$tools_failed" ]; then
+  printf 'tools: not installed\n' > "$tools_marker" 2>/dev/null || true
+else
+  rm -f "$tools_marker" 2>/dev/null || true
+fi
+# <<< studio-tools <<<
 bringup_step tmux-session
 # >>> tmux-render-options >>>
 #

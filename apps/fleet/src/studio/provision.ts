@@ -47,6 +47,7 @@ import { buildStudioId, parseStudioId } from "./ids";
 import { repoIdSegment } from "./repo";
 import { parseFleetJson, parseRoleFile, assertRoleInFleet, roleBringupEnv } from "./blueprint";
 import { parseStudioFile, validateMemberFile, studioBringupEnv, type Studio, type MemberFile } from "./studio-blueprint";
+import { parseStudioTools } from "./studio-tools";
 import {
   restorePlan, sessionDailyPrefix, dailyKeeperKeys, SESSION_FORCE_KEY, SESSION_MARK_KEY, type RestoreAction,
 } from "./session-sync";
@@ -437,6 +438,11 @@ export type StudioEnv = {
    *  STUDIO_COMPLETION_GATE: an env stored before this field existed reads as
    *  `${BLUEPRINT_REF:-}`, and bring-up falls back to the remote's HEAD. */
   BLUEPRINT_REF?: string;
+  /** Issue #1160: the work repo's declared `studio.tools`, comma-joined, read
+   *  by studio-bringup.sh's studio-tools region. Optional on the TYPE: an env
+   *  stored before this field existed has no such key, and the region reads
+   *  it as `${STUDIO_TOOLS:-}`, so no tools until the next provision. */
+  STUDIO_TOOLS?: string;
 };
 
 /** The keys this feature stores. Exported so tests can seed/read storage
@@ -1554,7 +1560,7 @@ export function provisionedCheckCmd(repo: string, harness?: string | null): stri
     `if [ "$p" = claude ]; then break; fi; i=$((i+1)); sleep 1; done; ` +
     `if [ "$p" != claude ]; then echo "claude is not running in tmux studio:claude (pane runs: \${p:-none})"; ` +
     `else ${harness ? harnessCheckSnippet(harness) : `echo "${PROVISIONED_OK}"`}; fi; fi; ` +
-    `cat "${TAILNET_DOWN_PATH}" 2>/dev/null || true`
+    `cat "${TAILNET_DOWN_PATH}" 2>/dev/null || true; cat "${TOOLS_DOWN_PATH}" 2>/dev/null || true`
   );
 }
 
@@ -1569,6 +1575,45 @@ const TAILNET_DOWN_PATH = "${FLEET_WORKSPACE:-/workspace}/.fleet/tailnet-down";
  *  anything else the container printed is not a tailnet warning. */
 export function tailnetWarningIn(stdout: string): string | null {
   return stdout.match(/^tailnet: (?:quota reached|down)$/m)?.[0] ?? null;
+}
+
+/** Issue #1160: written by container/studio-bringup.sh's studio-tools region
+ *  when a declared tool could not be installed (or was not on the allow-list),
+ *  removed when every declared tool is in place. Same one-fixed-line shape and
+ *  same `${FLEET_WORKSPACE:-/workspace}` expansion as TAILNET_DOWN_PATH. */
+const TOOLS_DOWN_PATH = "${FLEET_WORKSPACE:-/workspace}/.fleet/tools-down";
+
+/** The tools marker line out of the check's stdout, or null. */
+export function toolsWarningIn(stdout: string): string | null {
+  return stdout.match(/^tools: not installed$/m)?.[0] ?? null;
+}
+
+/** Every READY warning on one check's stdout, joined, or null. The tailnet
+ *  and tools markers can both be present; READY shows both. */
+export function readinessWarningIn(stdout: string): string | null {
+  const found = [tailnetWarningIn(stdout), toolsWarningIn(stdout)].filter((w): w is string => w !== null);
+  return found.length > 0 ? found.join("; ") : null;
+}
+
+/**
+ * Issue #1160 (option 2): the work repo's OWN root fleet.json declares which
+ * studio tools bring-up installs (`studio.tools`). A repo with no fleet.json
+ * at all is not opted in: a 404 means no tools. Any other fetch failure
+ * propagates, the same as every other fetch in resolveBringupEnv. A declared
+ * unknown name throws from parseStudioTools, so a typo fails the provision
+ * loudly rather than leaving the studio without the tool.
+ */
+export async function resolveStudioTools(
+  deps: Pick<ProvisionDeps, "fetchBlueprintFile">, workRepoSlug: string,
+): Promise<string[]> {
+  let text: string;
+  try {
+    text = await deps.fetchBlueprintFile(workRepoSlug, FLEET_JSON_PATH, FLEET_JSON_DEFAULT_REF);
+  } catch (err) {
+    if (isNotFoundError(err)) return [];
+    throw err;
+  }
+  return parseStudioTools(text);
 }
 
 /**
@@ -2057,6 +2102,7 @@ export async function resolveBringupEnv(
         ),
         BLUEPRINT_REPO: fleet.blueprint.repo,
         BLUEPRINT_REF: ref,
+        STUDIO_TOOLS: (await resolveStudioTools(deps, workRepoSlug)).join(","),
       },
       keepAlive: studio.keep_alive,
       houseRulesOverlayNote: opsOverlay.note,

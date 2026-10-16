@@ -23,7 +23,7 @@ import { buildStudioId, parseStudioId } from "./ids";
 // ensureSpawnToken below rather than letting that Env-blind call guess.
 import { realDoClassForRole } from "./profile";
 import {
-  provisionWithStorage, getStatusWithStorage, restartWithStorage, freshStatus, provisionedCheckCmd, PROVISIONED_OK, tailnetWarningIn,
+  provisionWithStorage, getStatusWithStorage, restartWithStorage, freshStatus, provisionedCheckCmd, PROVISIONED_OK, readinessWarningIn,
   PROVISIONED_UNKNOWN, harnessExpectation, ROLE_ENV_KEY,
   STATUS_KEY, resolveWorkRepoSlug, NO_ROLE_ENV_ERROR, HEAL_ATTEMPT_KEY, relaunchBringup,
   OPERATION_KEY, OPERATION_STALE_MS, DESTROYING_KEY, DESTROY_IN_FLIGHT, LAST_STOP_KEY,
@@ -2501,8 +2501,8 @@ async function runProvisionedCheck(
     // Issue #189: the tailnet marker line rides on every answer. Read it,
     // then judge the verdict on the rest -- a marker alone is no verdict,
     // and it never belongs in a bare reason (PR #190 review).
-    const warning = tailnetWarningIn(res.stdout);
-    const out = res.stdout.split("\n").filter((l) => tailnetWarningIn(l) === null).join("\n").trim();
+    const warning = readinessWarningIn(res.stdout);
+    const out = res.stdout.split("\n").filter((l) => readinessWarningIn(l) === null).join("\n").trim();
     // UNKNOWN first: it is the container saying the CHECK broke, not the
     // studio. Reading it as "bare" would turn a broken check into a recycle
     // trigger — the exact inversion the three-verdict split exists to stop.
