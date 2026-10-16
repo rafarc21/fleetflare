@@ -123,13 +123,15 @@ export async function runLegStep(
           ms: Date.now() - started,
         };
       } catch (err) {
+        // The container may have written its own result before the transport
+        // died. A known state there IS the leg's result (#1122), state included.
+        const stored = await storedLegResult(deps.readResult, target.resultKey);
+        if (stored !== undefined) return { leg: planned.leg, ms: Date.now() - started, ...stored };
         // A thrown attempt still counts: its wall time rides in the message, so
         // a failed leg's description shows real time (ms skips thrown attempts).
         const message = err instanceof Error ? err.message : String(err);
         const minutes = Math.round((Date.now() - started) / 60_000);
-        // The container may have written its own result before it stopped (#1094).
-        const result = await resultCause(deps.readResult, target.resultKey);
-        throw new Error(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min${result === undefined ? "" : `; result: ${result}`}`);
+        throw new Error(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min`);
       }
     });
   };
@@ -202,17 +204,21 @@ export function legResultReader(bucket: ResultBucket): (resultKey: string) => Pr
   };
 }
 
-/** The leg's R2 result as one phrase for an infra description, or undefined when
- *  there is none or the read fails. Exit 143 (SIGTERM) gets its likely cause named (#1094). */
-async function resultCause(
+/** The leg's R2 result after a transport loss (#1122): its state and a description
+ *  that names where it came from. Only the state and description are read, never
+ *  stderr. Undefined when there is no reader, no known state, or the read throws. */
+export async function storedLegResult(
   read: LegRunDeps["readResult"], resultKey: string,
-): Promise<string | undefined> {
+): Promise<StoredLegResult & { description: string } | undefined> {
   if (read === undefined) return undefined;
   try {
-    const result = await read(resultKey);
-    if (result === undefined) return undefined;
-    const text = (result.description ?? result.state).slice(0, MAX_INFRA_CAUSE_CHARS);
-    return /exited 143\b/.test(text) ? `${text} (container stopped?)` : text;
+    const stored = await read(resultKey);
+    if (stored === undefined) return undefined;
+    const text = stored.description ?? stored.state;
+    return {
+      state: stored.state,
+      description: `result read from R2 after transport loss: ${text}`.slice(0, MAX_DESCRIPTION_CHARS),
+    };
   } catch {
     return undefined;
   }

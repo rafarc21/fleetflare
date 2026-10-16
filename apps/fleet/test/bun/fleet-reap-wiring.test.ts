@@ -166,6 +166,36 @@ test("a hung board read aborts at the read budget and reaps nothing", async () =
   expect(seen.some((s) => s.startsWith("POST "))).toBe(false);
 });
 
+// Issue #1117: a big repo's board listing can take 25-30 s. The default
+// budget is 60 s, and every board read logs its elapsed ms, so slowness
+// shows in the log before it ever fails.
+test("issue #1117: a slow board read inside the budget succeeds and logs its elapsed ms", async () => {
+  slowBoardMs = 400;
+  const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");
+  const lines: string[] = [];
+  const out = await runReap(
+    { apply: false, idleMs: 30 * MIN, repo: REPO },
+    reapDeps(creds(), REPO, statePath, (l) => lines.push(l), NOT_UNDER_ORCA, { readTimeoutMs: 2_000 }),
+  );
+  expect(out.exitCode).toBe(0);
+  const timed = lines.filter((l) => /^fleet reap: board read \d+ ms$/.test(l));
+  expect(timed.length).toBe(1);
+  expect(Number(/(\d+) ms$/.exec(timed[0]!)![1])).toBeGreaterThanOrEqual(350);
+});
+
+test("issue #1117: a board read over a --read-timeout override aborts and still logs elapsed ms", async () => {
+  slowBoardMs = 1_000;
+  const statePath = join(mkdtempSync(join(tmpdir(), "reap-")), "reap-state.json");
+  const lines: string[] = [];
+  const out = await runReap(
+    { apply: true, idleMs: 30 * MIN, repo: REPO },
+    reapDeps(creds(), REPO, statePath, (l) => lines.push(l), NOT_UNDER_ORCA, { readTimeoutMs: 200 }),
+  );
+  expect(out.exitCode).toBe(1);
+  expect(lines.some((l) => /^fleet reap: board read \d+ ms \(failed\)$/.test(l))).toBe(true);
+  expect(seen.some((s) => s.startsWith("POST "))).toBe(false);
+});
+
 // Review F5: a state file that cannot be trusted is kept aside, never
 // silently overwritten, and the poll reaps nothing (its floor is unknown).
 for (const [name, content] of [["corrupt JSON", "{not json"], ["wrong types", JSON.stringify({ backoffUntil: 5, boardRows: { x: "y" } })]]) {

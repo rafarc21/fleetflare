@@ -20,6 +20,7 @@ import type { Env } from "../env";
 import { mintPrivateCloneToken } from "../github/auth";
 import { gateOutboundProps, legGitToken, type GateLegRequest } from "./leg-env";
 import { legResponse, runLegInContainer, type LegResult } from "./run-leg";
+import { legResultReader } from "./leg-run";
 
 /** The one refusal a PAT-served private leg gets. Named so it reaches the leg. */
 const PAT_ONLY_REFUSAL = "private clone needs the GitHub App on this owner";
@@ -46,7 +47,10 @@ export class GateRunnerDO extends DurableObject<Env> {
       // Props carry this leg's own resultKey (the only key the container may PUT)
       // and, for a private leg, its one repo and minted token.
       const outbound = workerExports.GateOutbound({ props: gateOutboundProps(body, gitToken) });
-      const result = await runLegInContainer(body, { container: this.ctx.container, outbound });
+      // The container's own R2 result, read on a transport loss (#1122).
+      const result = await runLegInContainer(body, {
+        container: this.ctx.container, outbound, readResult: legResultReader(this.env.STUDIO_ARCHIVE),
+      });
       return legResponse(result);
     }
     return new Response("not found", { status: 404 });

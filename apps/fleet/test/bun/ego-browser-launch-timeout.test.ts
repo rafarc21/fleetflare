@@ -37,10 +37,17 @@ const LAUNCH_TIMEOUT_MS = 500;
 // writes both pids to EGO_BROWSER_TEST_HANG_PIDFILE. Both must be dead
 // after the launch timeout fires. Playwright's own launch() `timeout`
 // kills the process group (`kill(-pid)`), which covers both -- but only
-// after first sending Browser.close over the pipe and waiting up to its
-// 30000ms DEFAULT_PLAYWRIGHT_TIMEOUT for a graceful exit the hung fixture
-// never makes. Hence the long wait below.
-const TREE_KILL_WAIT_MS = 40000;
+// after first sending Browser.close over the pipe and waiting out its
+// graceful-close window. Unshrunk that window is the 30000ms
+// DEFAULT_PLAYWRIGHT_TIMEOUT (measured live: the tree died at ~t=30.5s
+// here), which is where this test's old ~31s wall went. The daemon's
+// EGO_BROWSER_LAUNCH_CLOSE_KILL_MS knob (this test sets 1000) shrinks that
+// same window via the __testHookBrowserCloseTimeout launch option, so the
+// group SIGKILL fallback fires after ~1s instead of ~30s (re-measured
+// live: tree dead at ~t=1.5s). TREE_KILL_WAIT_MS=10000 is still >10x that
+// plus the reap margin, without timing out the whole suite slot on a
+// loaded container.
+const TREE_KILL_WAIT_MS = 10000;
 //
 // Linux-only: the fixture relies on `sleep infinity` (GNU coreutils) and
 // the liveness check reads /proc.
@@ -99,6 +106,17 @@ describe("ego-browser daemon: getBrowser() against a genuinely-hung chromium lau
           env: {
             EGO_BROWSER_CHROMIUM_PATH: CHROMIUM_FIXTURE,
             EGO_BROWSER_LAUNCH_TIMEOUT_MS: String(LAUNCH_TIMEOUT_MS),
+            // Shrinks playwright-core's own graceful-close window (see the
+            // TREE_KILL_WAIT_MS comment above) from its 30s
+            // DEFAULT_PLAYWRIGHT_TIMEOUT to 1s.
+            EGO_BROWSER_LAUNCH_CLOSE_KILL_MS: "1000",
+            // playwright-core's client->server channel validator only lets
+            // __testHook* launch options through when its isUnderTest() flag
+            // is set, and that flag is read (module init) from
+            // PWTEST_UNDER_TEST -- measured live: without this the knob is
+            // stripped and the tree still dies at ~t=30.5s, with it at
+            // ~t=1.5s. Inherited by the daemon, never set in production.
+            PWTEST_UNDER_TEST: "1",
             EGO_BROWSER_TEST_HANG_PIDFILE: pidfile,
           },
           code: `
@@ -146,6 +164,6 @@ describe("ego-browser daemon: getBrowser() against a genuinely-hung chromium lau
         cleanupEgoBrowserHome(home);
       }
     },
-    60000,
+    20000,
   );
 });

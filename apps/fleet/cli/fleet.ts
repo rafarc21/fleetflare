@@ -17,9 +17,11 @@
  * the same routes the commands below already call. Importing this module runs
  * no CLI: `main()` is guarded by `import.meta.main` at the bottom.
  */
-import { homedir } from "node:os";
+import { constants as osConstants, homedir } from "node:os";
 import { join } from "node:path";
-import { statSync } from "node:fs";
+import { statSync, unlinkSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { parseFrame, resizeFrameFor } from "../src/studio/frames";
 import { reconnectDelayMs, nextAttempt, attachRefusal } from "./backoff";
 import { postTaskNew, taskNewFailureLine } from "./task-new-retry";
@@ -2564,8 +2566,10 @@ export async function cmdRescueAll(creds: Credentials, flags: RescueAllFlags): P
 const REAP_STATE_PATH = join(homedir(), ".fleet", "reap-state.json");
 
 /** Review F1: every plain read reap makes is bounded. A hung read must never
- *  sit between the last live read and a destroy, nor stall a poll. */
-const REAP_READ_TIMEOUT_MS = 20_000;
+ *  sit between the last live read and a destroy, nor stall a poll. Issue
+ *  #1117: 20 s timed out on a big repo's board listing (~25 s), so no nudge
+ *  fired. `--read-timeout` overrides it. */
+const REAP_READ_TIMEOUT_MS = 60_000;
 /** `--nudge` (issue #1098): one assign call, whose wake the Worker runs. */
 const REAP_NUDGE_TIMEOUT_MS = 60_000;
 /** A lock file older than this is a crashed run's, and is taken over. */
@@ -2626,6 +2630,19 @@ export function reapDeps(
   const headers = accessHeaders(creds);
   const repoQ = `repo=${encodeURIComponent(repo)}`;
   const readMs = opts.readTimeoutMs ?? REAP_READ_TIMEOUT_MS;
+  // Issue #1117: every board read logs its elapsed ms, ok or failed, so a slow
+  // listing is visible before it times out.
+  const boardRead = async (path: string) => {
+    const started = Date.now();
+    try {
+      const body = await fetchJson(boardUrl(creds, path), headers, readMs);
+      log(`fleet reap: board read ${Date.now() - started} ms`);
+      return body;
+    } catch (err) {
+      log(`fleet reap: board read ${Date.now() - started} ms (failed)`);
+      throw err;
+    }
+  };
   return {
     now: () => new Date(),
     listStudios: async () => {
@@ -2635,12 +2652,12 @@ export function reapDeps(
       return studios;
     },
     listBoard: async () => {
-      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}`), headers, readMs);
+      const body = await boardRead(`/tasks?${repoQ}`);
       if (!Array.isArray(body)) throw new Error("board listing was not a JSON array");
       return body as BoardTask[];
     },
     studioTasks: async (id) => {
-      const body = await fetchJson(boardUrl(creds, `/tasks?${repoQ}&assignedTo=${encodeURIComponent(id)}`), headers, readMs);
+      const body = await boardRead(`/tasks?${repoQ}&assignedTo=${encodeURIComponent(id)}`);
       if (!Array.isArray(body)) throw new Error("task listing was not a JSON array");
       return body as BoardTask[];
     },
@@ -2723,23 +2740,71 @@ export function reapDeps(
   };
 }
 
+const execFileP = promisify(execFile);
+
+/** Issue #1115: a process's start time (`ps -o lstart=`), or null when it
+ *  cannot be read (no such pid, no ps). Pairs with the pid in the lock so a
+ *  reused pid reads as a different process. */
+async function processStartTime(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileP("ps", ["-o", "lstart=", "-p", String(pid)]);
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Issue #1115: is the lock's holder gone? `dead` only when the pid is gone
+ *  (ESRCH) or its start time no longer matches the one the lock recorded.
+ *  Anything it cannot prove (no recorded start time, ps unreadable) is
+ *  `unsure`, and the caller keeps the age rule: unsure refuses while fresh. */
+async function lockHolderState(pid: number, recordedStart: string | null): Promise<"dead" | "live" | "unsure"> {
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ESRCH") return "dead";
+  }
+  if (recordedStart === null) return "unsure";
+  const now = await processStartTime(pid);
+  if (now === null) return "unsure";
+  return now === recordedStart ? "live" : "dead";
+}
+
 /** Review F5: one reap per state file at a time. The lock is an exclusively
  *  created file; a second run refuses rather than racing the state or the
  *  destroys. A lock older than REAP_LOCK_STALE_MS (a crashed run) is taken over.
+ *  Issue #1115: the lock names its holder (`pid time start-time`). A dead
+ *  holder is reclaimed at once, with one log line; a live one refuses as before.
+ *  A SIGINT/SIGTERM during the run removes the lock before the process exits.
  *  `fn` gets `refresh`, which re-stamps the lock's mtime: runReap calls it once
  *  per candidate (ReapDeps.heartbeat), so a live run with several candidates
  *  never looks stale — only a run that stopped refreshing does. */
-export async function withReapLock<T>(statePath: string, fn: (refresh: () => Promise<void>) => Promise<T>): Promise<T> {
+export async function withReapLock<T>(
+  statePath: string,
+  fn: (refresh: () => Promise<void>) => Promise<T>,
+  log: (line: string) => void = (line) => console.log(line),
+): Promise<T> {
   const lock = `${statePath}.lock`;
   await mkdir(dirname(statePath), { recursive: true });
-  const take = () => writeFile(lock, `${process.pid} ${new Date().toISOString()}\n`, { flag: "wx" });
+  const ownStart = await processStartTime(process.pid);
+  const body = `${process.pid} ${new Date().toISOString()}${ownStart ? ` ${ownStart}` : ""}\n`;
+  const take = () => writeFile(lock, body, { flag: "wx" });
   try {
     await take();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    const age = Date.now() - (await stat(lock)).mtimeMs;
-    if (age < REAP_LOCK_STALE_MS) {
-      throw new Error(`another fleet reap holds ${lock} (${Math.round(age / 1000)}s old); refusing to run alongside it`);
+    const [, pidText, recordedStart] = /^(\d+) \S+(?: (.+))?$/.exec((await readFile(lock, "utf8")).trim()) ?? [];
+    const holderPid = pidText ? Number(pidText) : NaN;
+    const holder = Number.isInteger(holderPid) && holderPid > 0
+      ? await lockHolderState(holderPid, recordedStart ?? null)
+      : "unsure";
+    if (holder === "dead") {
+      log(`reclaimed reap lock from dead pid ${holderPid}`);
+    } else {
+      const age = Date.now() - (await stat(lock)).mtimeMs;
+      if (age < REAP_LOCK_STALE_MS) {
+        throw new Error(`another fleet reap holds ${lock} (${Math.round(age / 1000)}s old); refusing to run alongside it`);
+      }
     }
     await unlink(lock);
     await take();
@@ -2748,14 +2813,25 @@ export async function withReapLock<T>(statePath: string, fn: (refresh: () => Pro
     const now = new Date();
     await utimes(lock, now, now);
   };
+  // A signal's default action would skip `finally`, so the lock is removed
+  // here, synchronously, and the process exits with the shell's 128+N code.
+  const onSignal = (signal: NodeJS.Signals) => {
+    try { unlinkSync(lock); } catch { /* already gone */ }
+    process.exit(128 + osConstants.signals[signal]);
+  };
+  const signals = ["SIGINT", "SIGTERM"] as const;
+  for (const signal of signals) process.on(signal, onSignal);
   try {
     return await fn(refresh);
   } finally {
+    for (const signal of signals) process.off(signal, onSignal);
     await unlink(lock).catch(() => {});
   }
 }
 
-async function cmdReap(creds: Credentials, flags: Omit<ReapFlags, "repo"> & { repo: string | null }): Promise<void> {
+async function cmdReap(
+  creds: Credentials, flags: Omit<ReapFlags, "repo"> & { repo: string | null; readTimeoutMs: number },
+): Promise<void> {
   let repo = flags.repo;
   if (repo === null) {
     const detected = await detectRepo();
@@ -2766,8 +2842,12 @@ async function cmdReap(creds: Credentials, flags: Omit<ReapFlags, "repo"> & { re
     console.error("fleet reap: no repo — stand in a repo checkout or pass --repo owner/name. Never fleet-wide.");
     process.exit(1);
   }
+  const { readTimeoutMs, ...reapFlags } = flags;
   const { exitCode } = await withReapLock(REAP_STATE_PATH, (refresh) =>
-    runReap({ ...flags, repo }, { ...reapDeps(creds, repo, REAP_STATE_PATH, (l) => console.log(l)), heartbeat: refresh }));
+    runReap({ ...reapFlags, repo }, {
+      ...reapDeps(creds, repo, REAP_STATE_PATH, (l) => console.log(l), undefined, { readTimeoutMs }),
+      heartbeat: refresh,
+    }));
   if (exitCode !== 0) process.exit(exitCode);
 }
 
@@ -3325,7 +3405,7 @@ async function main(): Promise<void> {
     case "reap":
       return cmdReap(creds, {
         apply: parsed.apply, idleMs: parsed.idleMs, repo: parsed.repo,
-        nudge: parsed.nudge, nudgeAfterMs: parsed.nudgeAfterMs,
+        nudge: parsed.nudge, nudgeAfterMs: parsed.nudgeAfterMs, readTimeoutMs: parsed.readTimeoutMs,
       });
     case "memory-ls":
       return cmdMemoryLs(creds);
