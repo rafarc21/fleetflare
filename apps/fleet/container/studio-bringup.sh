@@ -1046,6 +1046,34 @@ pt.append({
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
 '
+
+    # OSS-lead continue hook (issue #1112, layer 2): a Stop hook that keeps a
+    # glm/kimi/deepseek lead working while its TodoWrite list still has open
+    # items. Copied from gates/oss-lead-continue.sh like every hook here. The
+    # scope check (STUDIO_ID set, fleet-route ANTHROPIC_BASE_URL) lives inside
+    # the script, so a Claude-led studio gets a silent no-op. Fails open, like
+    # the PostToolUse install-marker above: a missing script costs one skipped
+    # nudge, never a refusal.
+    if [ -f /opt/blueprint/gates/oss-lead-continue.sh ]; then
+      cp /opt/blueprint/gates/oss-lead-continue.sh ~/.claude/hooks/oss-lead-continue.sh
+    else
+      echo "studio-bringup: /opt/blueprint/gates/oss-lead-continue.sh missing -- cannot install oss-lead-continue hook" >&2
+    fi
+    chmod 0755 ~/.claude/hooks/oss-lead-continue.sh 2>/dev/null || true
+    python3 -c '
+import json, os
+path = os.path.expanduser("~/.claude/settings.json")
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, ValueError):
+    cfg = {}
+stop = cfg.setdefault("hooks", {}).setdefault("Stop", [])
+stop[:] = [e for e in stop if "oss-lead-continue.sh" not in json.dumps(e)]
+stop.append({"hooks": [{"type": "command", "command": "S=\"$HOME/.claude/hooks/oss-lead-continue.sh\"; [ -x \"$S\" ] && exec \"$S\" || exit 0"}]})
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+'
   fi
 
   # --- activity heartbeat hook (issue #221, PR3b) -----------------------------
