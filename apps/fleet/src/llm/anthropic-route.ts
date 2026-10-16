@@ -376,7 +376,7 @@ export function failureClass(failure: string): string {
  */
 async function pumpAnthropicStream(
   upstream: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<Uint8Array>,
-  id: string, model: string, requestedMaxTokens: number, idleMs: number,
+  id: string, model: string, requestedMaxTokens: number, idleMs: number, thinkTags = false,
 ): Promise<PumpResult> {
   const enc = new TextEncoder();
   const write = async (frames: string[]) => {
@@ -384,7 +384,7 @@ async function pumpAnthropicStream(
       try { await writer.write(enc.encode(f)); } catch { throw new ClientAbort(); }
     }
   };
-  const state = createStreamState();
+  const state = createStreamState({ thinkTags });
   const reader = upstream.getReader();
   const cancelUpstream = () => { reader.cancel().catch(() => {}); };
   const end = (ok: boolean, failure?: string): PumpResult => ({
@@ -783,7 +783,7 @@ export async function handleFleetAnthropicMessages(
     // rejection; what still rejects here is a bug inside the pump itself,
     // logged as `pump_error` rather than dropped without a row.
     ctx.waitUntil(
-      pumpAnthropicStream(upstream, writer, id, requestedModel, body.max_tokens, leadStreamIdleMs(env))
+      pumpAnthropicStream(upstream, writer, id, requestedModel, body.max_tokens, leadStreamIdleMs(env), modelById(usedModel)?.thinkTags === true)
         .then((result) => logUsage(env, ctx, studio.id, { model: usedModel, stream: true, ...result, startedAt, attempts }))
         .catch((e) => logUsage(env, ctx, studio.id, {
           model: usedModel, stream: true, inputTokens: 0, outputTokens: 0, ok: false,

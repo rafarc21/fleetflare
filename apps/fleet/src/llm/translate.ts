@@ -487,13 +487,17 @@ interface StreamState {
   /** A think region carried tool-call-shaped text that could not be
    *  recovered into a tool_use block. */
   unrecoverableToolCall: boolean;
+  /** Only kimi's stream sets this (models.ts `thinkTags`). Off, content
+   *  streams straight through as text, byte-for-byte as before #1073. */
+  thinkTags: boolean;
 }
 
-export function createStreamState(): StreamState {
+export function createStreamState(opts: { thinkTags?: boolean } = {}): StreamState {
   return {
     nextIndex: 0, textIndex: null, toolIndexByOpenAiIndex: new Map(),
     openIndex: null, openKind: null, finishReason: null, outputTokens: 0, inputTokens: 0,
     thinking: false, thinkText: "", pendingTag: "", thinkToolUses: 0, unrecoverableToolCall: false,
+    thinkTags: opts.thinkTags === true,
   };
 }
 
@@ -668,7 +672,10 @@ export function applyOpenAIStreamChunk(state: StreamState, chunk: Json): string[
   const delta = choice.delta ?? {};
   if (choice.finish_reason !== undefined && choice.finish_reason !== null) state.finishReason = choice.finish_reason;
 
-  if (typeof delta.content === "string" && delta.content.length > 0) routeContent(state, delta.content, events);
+  if (typeof delta.content === "string" && delta.content.length > 0) {
+    if (state.thinkTags) routeContent(state, delta.content, events);
+    else emitText(state, delta.content, events);
+  }
 
   for (const tc of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
     const openAiIndex = tc.index ?? 0;

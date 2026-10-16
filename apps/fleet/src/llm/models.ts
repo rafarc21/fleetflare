@@ -18,11 +18,15 @@ export interface PoolModel {
   maxMaxTokens: number;
   /** True only after scripts/model-smoke.ts passed against live Workers AI. */
   smokePassed: boolean;
+  /** Issue #1073: this model writes reasoning inside `<think>` tags in its
+   *  message content, and sometimes a tool call inside them. Only then does
+   *  the stream translator parse think regions (translate.ts thinkTags). */
+  thinkTags?: boolean;
 }
 
 export const POOL: readonly PoolModel[] = [
   { key: "glm", id: "@cf/zai-org/glm-5.3", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: true },
-  { key: "kimi", id: "@cf/moonshotai/kimi-k2.7-code", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: KIMI_MAX_MAX_TOKENS, smokePassed: true },
+  { key: "kimi", id: "@cf/moonshotai/kimi-k2.7-code", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: KIMI_MAX_MAX_TOKENS, smokePassed: true, thinkTags: true },
   { key: "deepseek", id: "@cf/deepseek-ai/deepseek-v4-pro-0813", minMaxTokens: GLM_MIN_MAX_TOKENS, maxMaxTokens: GLM_MAX_MAX_TOKENS, smokePassed: true },
 ];
 

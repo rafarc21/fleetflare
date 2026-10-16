@@ -397,7 +397,7 @@ describe("parseStreamErrorChunk — board issue #284 (b): an explicit upstream {
 /** Feeds content deltas (one per chunk) then a finish_reason chunk through
  *  the stream translator and returns the parsed SSE frames it produced. */
 function runThinkStream(contentChunks: string[], finishReason: string | null) {
-  const state = createStreamState();
+  const state = createStreamState({ thinkTags: true });
   const frames: string[] = [];
   for (const c of contentChunks) {
     frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { content: c }, finish_reason: null }] }));
@@ -474,5 +474,30 @@ describe("think-block tool calls (issue #1073)", () => {
     expect(errorFrame).toBeDefined();
     expect((errorFrame?.data as { error: { message: string } }).error.message).toMatch(/retry/i);
     expect(closed.frames.some((f) => f.includes("message_stop"))).toBe(false);
+  });
+});
+
+describe("think tags are off for every model except kimi (issue #1073 review)", () => {
+  test("GLM/DeepSeek stream (thinkTags off) passes literal <think> and tool_call text through byte-identical", () => {
+    const state = createStreamState();
+    const frames: string[] = [];
+    frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "<think>plan" }, finish_reason: null }] }));
+    frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "</think><tool_call>{\"name\":\"Read\"}</tool_call>" }, finish_reason: null }] }));
+    frames.push(...applyOpenAIStreamChunk(state, { choices: [{ delta: {}, finish_reason: "stop" }] }));
+    const closed = closeStreamOrError(state, 64000);
+    expect(frames).toEqual([
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<think>plan"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"</think><tool_call>{\\"name\\":\\"Read\\"}</tool_call>"}}\n\n',
+    ]);
+    expect(closed.ok).toBe(true);
+    expect(closed.frames.map(parseFrame).find((f) => f.event === "message_delta")?.data)
+      .toMatchObject({ delta: { stop_reason: "end_turn" } });
+  });
+
+  test("with thinkTags off, a <think> tag split across chunks is never held back", () => {
+    const state = createStreamState();
+    const frames = applyOpenAIStreamChunk(state, { choices: [{ delta: { content: "<thi" }, finish_reason: null }] });
+    expect(frames.map(parseFrame).map((f) => (f.data as { delta?: { text?: string } }).delta?.text)).toEqual([undefined, "<thi"]);
   });
 });
