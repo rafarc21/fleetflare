@@ -2,7 +2,7 @@ import { describe, it, expect } from "bun:test";
 import {
   parseGateRunnerRepos, isGateRunnerRepo, parseGateBlock, gateMapEntry, matchesPathRules,
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR, legTimeoutMin,
-  GATE_IMAGES, changesFleetJson, gateDecision,
+  GATE_IMAGES, fleetJsonChanged, gateDecision, decideGateRun, headFleetJsonFailure,
 } from "../../src/gate/config";
 import FLEET_JSON from "../../../../fleet.json";
 
@@ -276,30 +276,83 @@ describe("parseGateBlock: per-repo image key", () => {
   });
 });
 
-// #1091 (refs #715): a PR that changes the repo's own fleet.json is gated in
-// full, on the config it changes to. A fleet.json-only diff must never skip.
-describe("changesFleetJson (#1091)", () => {
-  it("true when the repo-root fleet.json is among the changed files", () => {
-    expect(changesFleetJson(["fleet.json"])).toBe(true);
-    expect(changesFleetJson(["README.md", "fleet.json"])).toBe(true);
+// #1091 review round 2 (refs #715): the gate decides on fleet.json CONTENT at
+// base vs head, not on the diff's file list. The compare API lists a rename by
+// its new name only and caps at 300 files, so a file list can miss a move.
+describe("fleetJsonChanged (#1091 review round 2)", () => {
+  const CFG = { gate: { install: "x", legs: [], pathRules: ["a/**"] } };
+  it("false when the root fleet.json is identical at base and head", () => {
+    expect(fleetJsonChanged(CFG, { ...CFG })).toBe(false);
   });
-  it("false for a nested fleet.json or a diff without one", () => {
-    expect(changesFleetJson(["apps/example/fleet.json"])).toBe(false);
-    expect(changesFleetJson(["README.md"])).toBe(false);
-    expect(changesFleetJson([])).toBe(false);
+  it("false when the file is absent at both shas", () => {
+    expect(fleetJsonChanged(null, null)).toBe(false);
+  });
+  it("true when the content differs at all", () => {
+    expect(fleetJsonChanged(CFG, { gate: { install: "y", legs: [], pathRules: ["a/**"] } })).toBe(true);
+  });
+  it("true when the file is deleted or moved away: present at base, null at head", () => {
+    expect(fleetJsonChanged(CFG, null)).toBe(true);
+  });
+  it("true when the file is added: null at base, present at head (gate added with no base)", () => {
+    expect(fleetJsonChanged(null, CFG)).toBe(true);
+  });
+});
+
+describe("headFleetJsonFailure (#1091 review round 2)", () => {
+  const HEAD = parseGateBlock(BLOCK);
+  it("null when the config did not change, whatever the head holds", () => {
+    expect(headFleetJsonFailure(false, undefined)).toBeNull();
+    expect(headFleetJsonFailure(false, null)).toBeNull();
+  });
+  it("null when the config changed and the head block is valid", () => {
+    expect(headFleetJsonFailure(true, HEAD)).toBeNull();
+  });
+  it("a failure, never a skip, when the config changed and the head block is absent or invalid", () => {
+    expect(headFleetJsonFailure(true, null)).toBe("head fleet.json invalid");
+    expect(headFleetJsonFailure(true, undefined)).toBe("head fleet.json invalid");
   });
 });
 
 describe("gateDecision (#1091)", () => {
   const rules = ["apps/fleet/**"];
-  it("a fleet.json-only diff gates even when no pathRule matches", () => {
-    expect(gateDecision(["fleet.json"], rules)).toBe("gate");
+  it("a config change gates even when no pathRule matches", () => {
+    expect(gateDecision(["README.md"], rules, true)).toBe("gate");
   });
   it("a diff matching a pathRule gates", () => {
-    expect(gateDecision(["apps/fleet/src/index.ts"], rules)).toBe("gate");
+    expect(gateDecision(["apps/fleet/src/index.ts"], rules, false)).toBe("gate");
   });
-  it("a diff with neither a pathRule match nor fleet.json skips", () => {
-    expect(gateDecision(["README.md"], rules)).toBe("skip");
-    expect(gateDecision([], rules)).toBe("skip");
+  it("a diff with neither a pathRule match nor a config change skips", () => {
+    expect(gateDecision(["README.md"], rules, false)).toBe("skip");
+    expect(gateDecision([], rules, false)).toBe("skip");
+  });
+});
+
+// The workflow's decision chain, as one pure function (#1091 review round 2).
+describe("decideGateRun (#1091 review round 2)", () => {
+  const cfg = parseGateBlock(BLOCK)!;
+  const rules = ["apps/fleet/**"];
+  it("a moved fleet.json (docs/fleet.json; root file gone at head) fails: head config absent", () => {
+    expect(decideGateRun({ changedFiles: ["docs/fleet.json"], fleetJsonChanged: true, base: cfg, head: null }))
+      .toEqual({ action: "fail", description: "head fleet.json invalid" });
+  });
+  it("a truncated file list still gates when the config changed by content", () => {
+    expect(decideGateRun({ changedFiles: ["README.md"], fleetJsonChanged: true, base: cfg, head: cfg }))
+      .toEqual({ action: "run" });
+  });
+  it("gate added with no base config runs on the head config", () => {
+    expect(decideGateRun({ changedFiles: ["fleet.json"], fleetJsonChanged: true, base: null, head: cfg }))
+      .toEqual({ action: "run" });
+  });
+  it("no config on either side and no change: skipped with no status post", () => {
+    expect(decideGateRun({ changedFiles: ["README.md"], fleetJsonChanged: false, base: null, head: undefined }))
+      .toEqual({ action: "skip", reason: "no gate config for this repo", status: false });
+  });
+  it("config present, nothing gated changed: skipped with a success status", () => {
+    expect(decideGateRun({ changedFiles: ["README.md"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined }))
+      .toEqual({ action: "skip", reason: "no gated paths changed", status: true });
+  });
+  it("a pathRule match runs the gate", () => {
+    expect(decideGateRun({ changedFiles: ["apps/fleet/src/x.ts"], fleetJsonChanged: false, base: { ...cfg, pathRules: rules }, head: undefined }))
+      .toEqual({ action: "run" });
   });
 });

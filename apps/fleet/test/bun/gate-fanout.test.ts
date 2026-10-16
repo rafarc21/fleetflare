@@ -2,7 +2,7 @@
 // the Workflow feeds these results into step.do calls.
 import { describe, it, expect } from "bun:test";
 import { bunLegs, normalizeLegResult, outcomeLegs, planLegs, planUnionLegs, vitestLegs } from "../../src/gate/fanout";
-import { headFleetJsonFailure, MAX_LEGS_PER_PR } from "../../src/gate/config";
+import { MAX_LEGS_PER_PR } from "../../src/gate/config";
 import { resolveOutboundTarget } from "../../src/gate/outbound-handler";
 
 const LEGS = [
@@ -247,9 +247,40 @@ describe("planUnionLegs: base plan + differing head legs (#1091 review)", () => 
     expect(legs.find((l) => l.leg === "lint@head")?.image).toBe("desktop");
   });
 
-  it("a changed fleet.json whose head config is absent or invalid fails, never skips", () => {
-    expect(headFleetJsonFailure(["fleet.json"], null)).toBe("head fleet.json invalid");
-    expect(headFleetJsonFailure(["fleet.json"], undefined)).toBe("head fleet.json invalid");
-    expect(headFleetJsonFailure(["README.md"], undefined)).toBeNull();
+  it("an install change runs every head leg as @head: the install is part of the leg", () => {
+    const legs = planUnionLegs(BASE, { ...BASE, install: "bun install" });
+    expect(legs.map((l) => l.leg)).toEqual([
+      "merge-tree", "typecheck", "lint", "vitest-1", "vitest-2",
+      "typecheck@head", "lint@head", "vitest@head-1", "vitest@head-2",
+    ]);
+  });
+
+  it("a vitestCmd change runs only the head vitest shards as @head", () => {
+    const legs = planUnionLegs(BASE, { ...BASE, vitestCmd: "bun run test --shard={i}/{n} --changed" });
+    expect(legs.map((l) => l.leg)).toEqual([
+      "merge-tree", "typecheck", "lint", "vitest-1", "vitest-2", "vitest@head-1", "vitest@head-2",
+    ]);
+    expect(legs.find((l) => l.leg === "vitest@head-1")?.legCmd).toBe("bun run test --shard=1/2 --changed");
+  });
+
+  it("an image-only change (same commands, gate to desktop) still runs every head leg as @head", () => {
+    const legs = planUnionLegs({ ...BASE, image: "gate" }, { ...BASE, image: "desktop" });
+    expect(legs.map((l) => l.leg)).toEqual([
+      "merge-tree", "typecheck", "lint", "vitest-1", "vitest-2",
+      "typecheck@head", "lint@head", "vitest@head-1", "vitest@head-2",
+    ]);
+    expect(legs.find((l) => l.leg === "typecheck@head")?.image).toBe("desktop");
+    expect(legs.find((l) => l.leg === "typecheck")?.image).toBe("gate");
+  });
+
+  it("a gate added with no base runs the head legs, all named @head", () => {
+    const legs = planUnionLegs(null, BASE);
+    expect(legs.map((l) => l.leg)).toEqual([
+      "merge-tree", "typecheck@head", "lint@head", "vitest@head-1", "vitest@head-2",
+    ]);
+  });
+
+  it("an omitted image and an explicit default image are the same leg: no @head copy", () => {
+    expect(planUnionLegs(BASE, { ...BASE, image: "gate" })).toEqual(planLegs(BASE));
   });
 });
