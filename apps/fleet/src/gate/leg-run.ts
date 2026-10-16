@@ -61,8 +61,8 @@ export interface LegRunDeps {
 export type StoredLegResult = { state: LegResult["state"]; description?: string };
 
 /** Runs one leg: a start-<leg> step, and when that returns state "failure"
- *  (a red test, possibly flaky) or an "install failed" error (#1092) a single
- *  retry-<leg> step with a fresh container. Never throws: every failure becomes
+ *  (a red test, possibly flaky), an "install failed" error (#1092), or a
+ *  "clone failed" error (#1104) a single retry-<leg> step with a fresh container. Never throws: every failure becomes
  *  this leg's LegResult, so the other legs still finish. */
 export async function runLegStep(
   step: LegStepRunner,
@@ -124,7 +124,8 @@ export async function runLegStep(
   });
 
   // A red test is data, but it may be a flake: run it once more on a fresh
-  // container. An "install failed" error is a flake too (#1092). Other errors stay final.
+  // container. An "install failed" (#1092) or "clone failed" (#1104) error is a flake too.
+  // Other errors stay final.
   if (!isRetryable(first)) return first;
 
   // The retry writes its own log: the first attempt's shard-<leg>.json stays as evidence.
@@ -150,11 +151,14 @@ export async function runLegStep(
   };
 }
 
-/** A first result that earns the one retry: a red test (state failure), or an
- *  "install failed" error (#1092), a dropped tarball fetch that a fresh container clears. */
+/** A first result that earns the one retry: a red test (state failure), an
+ *  "install failed" error (#1092), a dropped tarball fetch that a fresh container clears,
+ *  or a "clone failed" error (#1104), a git stream garbled through the outbound proxy. */
 export function isRetryable(first: LegRunResult): boolean {
   if (first.state === "failure") return true;
-  return first.state === "error" && (first.description ?? "").startsWith("install failed");
+  if (first.state !== "error") return false;
+  const description = first.description ?? "";
+  return description.startsWith("install failed") || description.startsWith("clone failed:");
 }
 
 /** The minimal R2 bucket shape the reader needs: the real R2Bucket satisfies it. */
