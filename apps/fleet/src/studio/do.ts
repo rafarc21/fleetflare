@@ -2852,11 +2852,11 @@ export function armedForAnEarlierIncarnation(marker: HealAttempt, replacedAt?: s
   return Number.isFinite(armedAt) && Number.isFinite(replaced) && armedAt < replaced;
 }
 
-/** Issue #1146: the one board event a replace emits, so a coordinator sees it
- *  without polling `fleet inspect`. Built once per replace: the ship tick
- *  stamps `replacedAt` only on the first sighting (incarnationPatch), so a
- *  replacement that stays bare does not re-emit every tick. The cause is not
- *  knowable from here and is said so in the body. */
+/** Issue #1146: the one `events` log row a replace emits — a log row only, no
+ *  reader surfaces it (see #1152 review item 2). Built once per replace: the
+ *  ship tick stamps `replacedAt` only on the first sighting (incarnationPatch),
+ *  so a replacement that stays bare does not re-emit every tick. The cause is
+ *  not knowable from here and is said so in the body. */
 export function replacementEvent(
   id: string, replacedAt: string, oldToken: string | null, newToken: string, nowMs: number, rand: string,
 ): FleetEvent {
@@ -8392,8 +8392,9 @@ export class StudioDO extends Sandbox<Env> {
             { doneRecords: this.doneRecordPorts(), resolveOpsRepo: this.memoryDeps().resolveMemoryRepo },
             () => this.autoStartSubmitted(),
             () => this.notifyStaleBackgroundShell(),
-            // Issue #1146: one board event per replace, on the same D1 the
-            // board reads. A throw here is caught by the tick's own handler.
+            // Issue #1146: one `events` log row per replace — a log row only,
+            // no reader surfaces it (see #1152 review item 2). A throw here is
+            // caught by the tick's own handler.
             // Issue #1152 review: the heal runs in the sync tick (300 s), so a
             // replace pulls that tick forward. The rearm runs even if the
             // event write fails: the heal must not wait on the log.

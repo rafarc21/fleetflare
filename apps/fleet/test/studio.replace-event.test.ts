@@ -1,9 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
+import { env } from "cloudflare:test";
 import { runShipTickWithObservation } from "../src/studio/do";
 import { OBSERVED_KEY, emptyObserved, getObserved, type Observed } from "../src/studio/observed";
 import type { ShipDeps } from "../src/studio/transcript";
 import type { FleetEvent } from "../src/events/schema";
 import { fakeStorage as doStorage } from "./helpers/do-storage";
+import { methodBody } from "./helpers/src-pin";
 
 // ---------------------------------------------------------------------------
 // Issue #1146 — one board event per replace, emitted by the ship tick at the
@@ -89,5 +91,14 @@ describe("runShipTickWithObservation — onReplaced (issue #1146)", () => {
     expect((await getObserved(storage as never)).replacedAt).toBe(T0.toISOString());
     expect(logged).toHaveBeenCalled();
     logged.mockRestore();
+  });
+});
+
+const doSrc: string = env.TEST_STUDIO_DO_SRC;
+
+describe("review #1152 — the replace rearm is jittered, not a fixed delay", () => {
+  it("shipTranscript rearms syncSession with replaceHealDelaySeconds()", () => {
+    const body = methodBody(doSrc, "  async shipTranscript(");
+    expect(body).toContain('this.rearm("syncSession", replaceHealDelaySeconds())');
   });
 });
