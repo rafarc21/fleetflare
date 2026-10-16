@@ -154,6 +154,9 @@ async function handleGitProxy(
   } catch {
     return new Response("upstream unavailable", { status: 502 });
   }
+  // Diagnosis for a garbled git stream (#1104): the framing headers of every
+  // upstream response. Status and encoding headers only, never the token.
+  console.log(`gate git-proxy: upstream ${res.status} content-encoding=${res.headers.get("content-encoding") ?? "-"} transfer-encoding=${res.headers.get("transfer-encoding") ?? "-"}`);
   if (res.status >= 300 && res.status < 400) return new Response("upstream redirect refused", { status: 502 });
   // Only the body and content-type of a 200 reach the container. Upstream
   // headers (set-cookie, request ids) and error bodies are dropped.
