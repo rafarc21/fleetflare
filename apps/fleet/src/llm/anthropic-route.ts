@@ -329,6 +329,11 @@ function raceUpstream(
  *  TransformStream is gone — the one failure that is not the upstream's. */
 class ClientAbort extends Error {}
 
+/** Issue #1147 review: a keepalive or idle-error write that the client does not
+ *  accept before the idle deadline. Treated like the upstream going quiet, so
+ *  the call ends as `idle_timeout` and its usage row is still written. */
+class WriteStalled extends Error {}
+
 /** Issue #302: `<class> <anthropic error type>: <upstream message>` — the
  *  class says where it broke, the type is classifyAiError's own mapping of
  *  the upstream message. Messages come from the upstream/runtime, never from
@@ -418,9 +423,35 @@ async function pumpAnthropicStream(
   keepalive: { pingMs: number; signal?: AbortSignal } = { pingMs: 0 },
 ): Promise<PumpResult> {
   const enc = new TextEncoder();
-  const write = async (frames: string[]) => {
+  // Issue #1147 review: the keepalive clock runs from the last byte the CLIENT
+  // accepted. Upstream chunks that emit no frame (reasoning-only) must not reset it.
+  let lastWriteAt = Date.now();
+  // Issue #1147 review: a write waits on the client, and a client that stops
+  // reading blocks it. `gone` settles when the client aborts, so every write
+  // races it. A ping or idle-error write also gives up at `untilMs`.
+  const gone = new Promise<never>((_, reject) => {
+    const signal = keepalive.signal;
+    if (!signal) return;
+    const onAbort = () => reject(new ClientAbort());
+    if (signal.aborted) onAbort(); else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  gone.catch(() => {});
+  const write = async (frames: string[], untilMs = Infinity) => {
     for (const f of frames) {
-      try { await writer.write(enc.encode(f)); } catch { throw new ClientAbort(); }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const stalled = new Promise<never>((_, reject) => {
+        if (untilMs !== Infinity) timer = setTimeout(() => reject(new WriteStalled()), Math.max(0, untilMs - Date.now()));
+      });
+      stalled.catch(() => {});
+      try {
+        await Promise.race([writer.write(enc.encode(f)), gone, stalled]);
+      } catch (e) {
+        if (e instanceof WriteStalled) throw e;
+        throw new ClientAbort();
+      } finally {
+        clearTimeout(timer);
+      }
+      lastWriteAt = Date.now();
     }
   };
   const state = createStreamState({ thinkTags: poolModel?.thinkTags === true });
@@ -450,8 +481,9 @@ async function pumpAnthropicStream(
     let lastUpstreamAt = Date.now();
     while (!done) {
       let step: ReadableStreamReadResult<Uint8Array> | typeof IDLE | typeof PING | typeof ABORTED;
+      const pingLeftMs = keepalive.pingMs > 0 ? Math.max(1, lastWriteAt + keepalive.pingMs - Date.now()) : 0;
       try {
-        step = await raceUpstream(pending, lastUpstreamAt + idleMs - Date.now(), keepalive.pingMs, keepalive.signal);
+        step = await raceUpstream(pending, lastUpstreamAt + idleMs - Date.now(), pingLeftMs, keepalive.signal);
       } catch (e) {
         // The upstream failed after message_start (and possibly a content
         // block) already reached the client — a genuine mid-stream error, not
@@ -461,7 +493,13 @@ async function pumpAnthropicStream(
         return end(false, failureReason("upstream_read_error", message));
       }
       if (step === PING) {
-        await write([streamPing()]);
+        try {
+          await write([streamPing()], lastUpstreamAt + idleMs);
+        } catch (e) {
+          if (!(e instanceof WriteStalled)) throw e;
+          cancelUpstream();
+          return end(false, `idle_timeout after ${idleMs}ms`);
+        }
         continue;
       }
       if (step === ABORTED) throw new ClientAbort();
@@ -470,7 +508,7 @@ async function pumpAnthropicStream(
         // the error frame can no longer be written. A client that also left
         // meanwhile does not hide the stall: the reason stays idle_timeout.
         cancelUpstream();
-        await write([streamErrorFrame(`upstream stream idle timeout: no data for ${idleMs}ms`)]).catch(() => {});
+        await write([streamErrorFrame(`upstream stream idle timeout: no data for ${idleMs}ms`)], Date.now() + idleMs).catch(() => {});
         return end(false, `idle_timeout after ${idleMs}ms`);
       }
       const { done: readerDone, value } = step;
