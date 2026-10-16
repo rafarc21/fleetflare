@@ -102,9 +102,9 @@ describe("infraRerunDecision: one auto-rerun for an all-infra run (#1119)", () =
 });
 
 describe("rerunStatusArgs: the status a re-running run posts instead of an error verdict (#1119)", () => {
-  it("is pending, with the rerun phrase and the run's short id", () => {
+  it("is pending, with the rerun phrase and the run's full id (#1144)", () => {
     expect(rerunStatusArgs("1234567890abcdef")).toEqual({
-      state: "pending", description: "rerun after infra error (run 12345678)",
+      state: "pending", description: "rerun after infra error (run 1234567890abcdef)",
     });
   });
 });
