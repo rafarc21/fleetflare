@@ -81,6 +81,15 @@ describe("runLegStep", () => {
     expect(sent).toBe(2);
   });
 
+  it("the infra cause is cut at 200 chars", async () => {
+    const step = fakeStep();
+    const dispatch = async () => reply({ error: "x".repeat(300) }, 503);
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result.state).toBe("error");
+    expect(result.description).toBe(`lint: ${"x".repeat(200 - "lint: ".length)}`);
+    expect(result.description?.length).toBe(200);
+  });
+
   it("only one step per leg, and no waitForEvent: the start step is the whole leg", async () => {
     const step = fakeStep();
     await runLegStep(step, async () => reply({ state: "success" }), PLANNED);
