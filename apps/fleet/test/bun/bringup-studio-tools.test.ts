@@ -5,7 +5,7 @@
 // tools, only when missing, logs every decision, and never blocks bring-up:
 // a failure leaves a marker file that the READY check surfaces.
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BRINGUP, extractRegion, extractShellFunc, runSnippet } from "./exec-snippet";
@@ -22,6 +22,21 @@ function tmp(prefix: string): string {
   const d = mkdtempSync(join(tmpdir(), prefix));
   dirs.push(d);
   return d;
+}
+
+/** The utilities the region and bringup_log call. They are symlinked into a
+ *  dedicated dir instead of letting PATH reach the host's /usr/bin, because a
+ *  host can carry a real `az` there (the CI runner does), and the region's
+ *  `command -v az` would then find it and never reach the install branch. */
+const SYS_TOOLS = ["sh", "bash", "sed", "grep", "date", "printf", "echo", "mkdir", "rm", "cat", "tr", "cut", "env", "dirname", "basename", "head", "tail"];
+
+function sysBin(): string {
+  const dir = tmp("fleet-tools-sys-");
+  for (const t of SYS_TOOLS) {
+    const real = Bun.which(t);
+    if (real) symlinkSync(real, join(dir, t));
+  }
+  return dir;
 }
 
 /** A fake PATH dir. `apt-get` records its argv and exits APT_EXIT (default 0);
@@ -65,7 +80,7 @@ function runRegion(opts: { tools: string; withAz?: boolean; aptExit?: number; pr
       APT_LOG: aptLog,
       APT_EXIT: String(opts.aptExit ?? 0),
       STUDIO_TOOLS: opts.tools,
-      PATH: `${bin}:/usr/bin:/bin`,
+      PATH: `${bin}:${sysBin()}`,
     },
     script:
       "set -euo pipefail\n" +
