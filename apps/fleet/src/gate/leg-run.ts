@@ -61,17 +61,21 @@ export interface LegRunDeps {
 export type StoredLegResult = { state: LegResult["state"]; description?: string };
 
 /** Runs one leg: a start-<leg> step, and when that returns state "failure"
- *  (a red test, possibly flaky) a single retry-<leg> step with a fresh
- *  container. Never throws: every failure becomes this leg's LegResult, so
- *  the other legs still finish. */
+ *  (a red test, possibly flaky) or an "install failed" error (#1092) a single
+ *  retry-<leg> step with a fresh container. Never throws: every failure becomes
+ *  this leg's LegResult, so the other legs still finish. */
 export async function runLegStep(
   step: LegStepRunner,
   dispatch: (planned: PlannedLeg, attemptId: string) => Promise<Response>,
   planned: PlannedLeg,
   deps: LegRunDeps = {},
 ): Promise<LegRunResult> {
-  const attempt = async (name: string, target: PlannedLeg): Promise<LegRunResult> =>
-    step.do(name, LEG_STEP_CONFIG, async () => {
+  // targetFor takes the try number: the start step's infra retry gets its own
+  // result key (see infraRetryResultKey).
+  const attempt = (name: string, targetFor: (tryNo: number) => PlannedLeg): Promise<LegRunResult> => {
+    let tryNo = 0;
+    return step.do(name, LEG_STEP_CONFIG, async () => {
+      const target = targetFor(++tryNo);
       // Made inside the callback: a Workflows step retry re-runs it, so every
       // try gets its own runner DO. A replayed step returns its recorded result.
       const attemptId = crypto.randomUUID();
@@ -108,39 +112,58 @@ export async function runLegStep(
         throw new Error(`${message.slice(0, MAX_INFRA_CAUSE_CHARS)} after ${minutes} min${result === undefined ? "" : `; result: ${result}`}`);
       }
     });
+  };
 
-  const first = await attempt(`start-${planned.leg}`, planned).catch((err: unknown): LegRunResult => {
+  const first = await attempt(`start-${planned.leg}`, (tryNo) => tryNo === 1
+    ? planned
+    : { ...planned, resultKey: infraRetryResultKey(planned.resultKey) },
+  ).catch((err: unknown): LegRunResult => {
     // Retries spent (infra). The thrown message already carries the cause.
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
   });
 
   // A red test is data, but it may be a flake: run it once more on a fresh
-  // container. success/error are final; only failure retries.
-  if (first.state !== "failure") return first;
+  // container. An "install failed" error is a flake too (#1092). Other errors stay final.
+  if (!isRetryable(first)) return first;
 
   // The retry writes its own log: the first attempt's shard-<leg>.json stays as evidence.
   const retryTarget: PlannedLeg = { ...planned, resultKey: retryResultKey(planned.resultKey) };
-  const retry = await attempt(`retry-${planned.leg}`, retryTarget).catch((err: unknown): LegRunResult => {
+  const retry = await attempt(`retry-${planned.leg}`, () => retryTarget).catch((err: unknown): LegRunResult => {
     const message = err instanceof Error ? err.message : String(err);
     return { leg: planned.leg, state: "error", description: message.slice(0, MAX_DESCRIPTION_CHARS) };
   });
 
   // Wall time covers both attempts.
   const ms = sumMs(first.ms, retry.ms);
+  const firstCause = (first.description ?? "failure").slice(0, MAX_FIRST_DESCRIPTION_CHARS);
   if (retry.state === "success") {
-    const firstCause = (first.description ?? "failure").slice(0, MAX_FIRST_DESCRIPTION_CHARS);
     return {
       leg: planned.leg, state: "success", description: `flaky: passed on retry; first: ${firstCause}`, ms, summary: retry.summary,
     };
   }
-  return { ...retry, ms };
+  if (first.state === "failure") return { ...retry, ms };
+  // An install retry that did not pass: its final description notes the first cause (#1092).
+  const retryCause = retry.description ?? retry.state;
+  return {
+    ...retry, ms, description: `${retryCause}; first: ${firstCause}`.slice(0, MAX_DESCRIPTION_CHARS),
+  };
+}
+
+/** A first result that earns the one retry: a red test (state failure), or an
+ *  "install failed" error (#1092), a dropped tarball fetch that a fresh container clears. */
+export function isRetryable(first: LegRunResult): boolean {
+  if (first.state === "failure") return true;
+  return first.state === "error" && (first.description ?? "").startsWith("install failed");
 }
 
 /** The minimal R2 bucket shape the reader needs: the real R2Bucket satisfies it. */
 export interface ResultBucket {
   get(key: string): Promise<{ json(): Promise<unknown> } | null>;
 }
+
+/** The states the container writes to R2. A body with any other state is not a leg result. */
+const STORED_STATES: ReadonlySet<string> = new Set(["success", "failure", "error"]);
 
 /** Reads a leg's R2 result by key. Absent, or a body with no known state, is
  *  undefined. Pure over the bucket it is given, so the test supplies a fake. */
@@ -149,7 +172,7 @@ export function legResultReader(bucket: ResultBucket): (resultKey: string) => Pr
     const obj = await bucket.get(resultKey);
     if (obj === null) return undefined;
     const body = (await obj.json()) as Partial<StoredLegResult> | null;
-    return body !== null && typeof body === "object" && typeof body.state === "string"
+    return body !== null && typeof body === "object" && typeof body.state === "string" && STORED_STATES.has(body.state)
       ? body as StoredLegResult
       : undefined;
   };
@@ -175,6 +198,13 @@ async function resultCause(
  *  container still PUTs only under its leg's resultKey. */
 export function retryResultKey(resultKey: string): string {
   return resultKey.replace(/\.json$/, ".retry.json");
+}
+
+/** The start step's infra-retry key: its own, so a try 1 that wrote its result
+ *  before its transport died is never read back as try 2's. Dashes, not dots:
+ *  the container may only PUT `shard-<leg>[-…].json` (outbound-handler.ts). */
+export function infraRetryResultKey(resultKey: string): string {
+  return resultKey.replace(/\.json$/, "-try2.json");
 }
 
 /** The sum of the attempts that were timed; undefined when none was. */
