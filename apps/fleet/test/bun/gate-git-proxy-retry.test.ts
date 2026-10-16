@@ -93,24 +93,61 @@ describe("git proxy: upstream 429 is retried server-side (#1137)", () => {
     expect(git.sleeps).toEqual([5000]);
   });
 
-  it("caps Retry-After at 60s: a one-hour hint waits 60s", async () => {
+  it("a Retry-After too long for the budget is never retried early: the 429 passes through at once", async () => {
     const git = scriptedGit([{ status: 429, headers: { "retry-after": "3600" } }, { status: 200 }]);
+    const res = await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
+    expect(res.status).toBe(429);
+    expect(git.upstream.length).toBe(1);
+    expect(git.sleeps).toEqual([]);
+  });
+
+  it("a Retry-After that fits the budget is waited in full, never cut short", async () => {
+    const git = scriptedGit([{ status: 429, headers: { "retry-after": "240" } }, { status: 200 }]);
+    await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
+    expect(git.sleeps).toEqual([240_000]);
+  });
+
+  it("jitter scales with the wait: at least 1s, or half the wait if that is larger", async () => {
+    // 3s wait: jitter = floor(0.5 * max(1000, 1500)) = 750.
+    const small = scriptedGit([{ status: 429, headers: { "retry-after": "3" } }, { status: 200 }], { random: 0.5 });
+    await handleGateOutbound(gitGet(), noBucket, OWN, small.deps);
+    expect(small.sleeps).toEqual([3750]);
+    // 60s wait: jitter = floor(0.5 * max(1000, 30000)) = 15000.
+    const large = scriptedGit([{ status: 429, headers: { "retry-after": "60" } }, { status: 200 }], { random: 0.5 });
+    await handleGateOutbound(gitGet(), noBucket, OWN, large.deps);
+    expect(large.sleeps).toEqual([75_000]);
+  });
+
+  it("a 429 with no Retry-After waits 60s, not a second: GitHub asks for at least one minute", async () => {
+    const git = scriptedGit([{ status: 429 }, { status: 200 }]);
+    await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
+    expect(git.upstream.length).toBe(2);
+    expect(git.sleeps).toEqual([60_000]);
+  });
+
+  it("x-ratelimit-reset is honored when remaining is 0 and there is no Retry-After", async () => {
+    // startMs 0: reset epoch 10s is 10s away.
+    const git = scriptedGit([
+      { status: 429, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "10" } },
+      { status: 200 },
+    ]);
+    await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
+    expect(git.sleeps).toEqual([10_000]);
+  });
+
+  it("a Retry-After that is neither seconds nor an HTTP date ('1.5') is ignored: the backoff applies", async () => {
+    const git = scriptedGit([{ status: 429, headers: { "retry-after": "1.5" } }, { status: 200 }]);
     await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
     expect(git.sleeps).toEqual([60_000]);
   });
 
-  it("adds jitter on top of the wait: random() scales up to 1s", async () => {
-    const git = scriptedGit([{ status: 429, headers: { "retry-after": "3" } }, { status: 200 }], { random: 0.5 });
-    await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
-    expect(git.sleeps).toEqual([3500]);
-  });
-
-  it("a 429 with no Retry-After still retries, after a backoff, not immediately", async () => {
-    const git = scriptedGit([{ status: 429 }, { status: 200 }]);
-    await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
-    expect(git.upstream.length).toBe(2);
-    expect(git.sleeps.length).toBe(1);
-    expect(git.sleeps[0]).toBeGreaterThan(0);
+  it("no retry starts with under 5 min of budget left after its wait", async () => {
+    // 320s spent by the first call; a 1s wait would leave 279s, under the 5 min floor.
+    const git = scriptedGit([{ status: 429, headers: { "retry-after": "1" } }, { status: 200 }], { costMs: 320_000 });
+    const res = await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
+    expect(res.status).toBe(429);
+    expect(git.upstream.length).toBe(1);
+    expect(git.sleeps).toEqual([]);
   });
 
   it("403 carrying Retry-After (secondary limit) is retried", async () => {
@@ -233,13 +270,35 @@ describe("git proxy: other statuses pass through unchanged, with no retry (#1137
 // Retried attempts log the same status and framing lines as before, plus one
 // line per retry: status and wait. The token never reaches the log.
 describe("git proxy: retries are logged, never with the token (#1137)", () => {
+  it("each upstream line carries the raw Retry-After and rate-limit headers, so a throttle is diagnosable", async () => {
+    const logged: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.join(" ")); });
+    try {
+      const git = scriptedGit([
+        { status: 429, headers: { "retry-after": "2", "x-ratelimit-remaining": "0" } },
+        { status: 200 },
+      ]);
+      await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
+      const first = logged.find((l) => l.includes("upstream 429")) ?? "";
+      expect(first).toContain("retry-after=2");
+      expect(first).toContain("ratelimit-remaining=0");
+      const second = logged.find((l) => l.includes("upstream 200")) ?? "";
+      expect(second).toContain("retry-after=-");
+      expect(second).toContain("ratelimit-remaining=-");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("git proxy: retries are logged, never with the token (#1137)", () => {
   it("each retry logs its status, attempt number and wait", async () => {
     const logged: string[] = [];
     const spy = spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.join(" ")); });
     try {
       const git = scriptedGit([{ status: 429, headers: { "retry-after": "2" } }, { status: 200 }]);
       await handleGateOutbound(gitGet(), noBucket, OWN, git.deps);
-      const line = logged.find((l) => l.includes("retry"));
+      const line = logged.find((l) => l.includes("gate git-proxy: retry status="));
       expect(line).toBeDefined();
       expect(line).toContain("status=429");
       expect(line).toContain("wait=2000ms");
