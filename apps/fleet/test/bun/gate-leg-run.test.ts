@@ -304,3 +304,74 @@ describe("runLegStep: a thrown attempt reports its wall time (#1068)", () => {
     expect(result.description).toBe("container OOM");
   });
 });
+
+// #1092: an "install failed" error is an infra-class flake (a tarball fetch
+// that died), so it gets the same one retry as a red leg, on a fresh container.
+describe("runLegStep: install failure retries once (#1092)", () => {
+  const INSTALL = 'install failed: error: Fail extracting tarball for "wrangler"';
+
+  it("install failed, then success on a fresh container: success, first cause noted", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; return sent === 1 ? reply({ state: "error", description: INSTALL }) : reply({ state: "success" }); };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toEqual({ ms: expect.any(Number), leg: "lint", state: "success", description: `flaky: passed on retry; first: ${INSTALL}` });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(sent).toBe(2);
+  });
+
+  it("install failed twice: the retry's error is final, and its description notes the first cause", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => { sent++; return reply({ state: "error", description: sent === 1 ? INSTALL : "install failed: 404 for registry" }); };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toEqual({
+      ms: expect.any(Number), leg: "lint", state: "error",
+      description: `install failed: 404 for registry; first: ${INSTALL}`,
+    });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+    expect(sent).toBe(2);
+  });
+
+  it("the install retry runs under retry-<leg> with the .retry.json evidence key", async () => {
+    const step = fakeStep();
+    const keys: string[] = [];
+    let sent = 0;
+    const dispatch = async (p: PlannedLeg) => {
+      keys.push(p.resultKey);
+      sent++;
+      return sent === 1 ? reply({ state: "error", description: INSTALL }) : reply({ state: "success" });
+    };
+    await runLegStep(step, dispatch, PLANNED);
+    expect(keys).toEqual([
+      "gate/o/r/runs/1/i/shard-lint.json",
+      "gate/o/r/runs/1/i/shard-lint.retry.json",
+    ]);
+  });
+
+  it("an install retry that dies as infra still ends as error with the first cause noted", async () => {
+    const step = fakeStep();
+    let sent = 0;
+    const dispatch = async () => {
+      sent++;
+      return sent === 1 ? reply({ state: "error", description: INSTALL }) : reply({ error: "gate container did not start within 180 s" }, 503);
+    };
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result.state).toBe("error");
+    expect(result.description).toBe(`lint: gate container did not start within 180 s after 0 min; first: ${INSTALL}`);
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint", "retry-lint"]);
+  });
+
+  it.each([
+    ["clone failed: repository not found"],
+    ["fetch failed: fatal: couldn't find remote ref"],
+    ["checkout failed: error: pathspec"],
+    ["gate-server: boom"],
+  ])("other error kinds stay final, no retry: %s", async (description) => {
+    const step = fakeStep();
+    const dispatch = async () => reply({ state: "error", description });
+    const result = await runLegStep(step, dispatch, PLANNED);
+    expect(result).toMatchObject({ state: "error", description });
+    expect(step.calls.map((c) => c.name)).toEqual(["start-lint"]);
+  });
+});
