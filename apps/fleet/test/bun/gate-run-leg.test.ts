@@ -424,3 +424,122 @@ describe("runLegInContainer: per-repo image key", () => {
     expect(c.starts).toHaveLength(0);
   });
 });
+
+// #1122: a transport loss after the container wrote its own R2 result. The
+// leg's result is that R2 result, read before the port-retry budget is spent.
+// An absent or unknown R2 result keeps the retry path (readResult answers undefined).
+describe("runLegInContainer: R2 result after transport loss (#1122)", () => {
+  const LOST = new Error("Network connection lost.");
+
+  test("POST loses its transport and R2 holds a known state: that result, no retry, no budget spent", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [LOST];
+    const reads: string[] = [];
+    const outcome = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      readResult: async (key) => { reads.push(key); return { state: "success" }; },
+    });
+
+    expect(outcome).toEqual({
+      kind: "result", result: { state: "success", description: "result read from R2 after transport loss: success" },
+    });
+    expect(c.fetchCalls).toBe(1);
+    expect(c.clock.now).toBe(0);
+    expect(reads).toEqual([LEG.resultKey]);
+  });
+
+  test("POST loses its transport and R2 holds a failure: the leg is that failure, with the R2 description", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [LOST];
+    const outcome = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      readResult: async () => ({ state: "failure", description: "lint 3 errors" }),
+    });
+
+    expect(outcome).toEqual({
+      kind: "result", result: { state: "failure", description: "result read from R2 after transport loss: lint 3 errors" },
+    });
+  });
+
+  test("POST loses its transport and R2 is absent: the port is retried as before", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [LOST, okResponse("failure")];
+    const outcome = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      readResult: async () => undefined,
+    });
+
+    expect(outcome).toEqual({ kind: "result", result: { state: "failure" } });
+    expect(c.fetchCalls).toBe(2);
+  });
+
+  test("a port refusal that outlasts the budget reads R2 once, on the first failure", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = Array.from({ length: 1000 }, () => new Error("ECONNREFUSED"));
+    let reads = 0;
+    const outcome = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      readResult: async () => { reads += 1; return undefined; },
+    });
+
+    expect(outcome.kind).toBe("infra");
+    expect(c.fetchCalls).toBe(481);
+    expect(reads).toBe(1);
+  });
+
+  test("a poll that loses its transport reads R2: a known state ends the leg while the container still runs", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [running()];
+    c.resultOutcomes = [LOST];
+    const outcome = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      readResult: async () => ({ state: "failure", description: "lint 3 errors" }),
+    });
+
+    expect(outcome).toEqual({
+      kind: "result", result: { state: "failure", description: "result read from R2 after transport loss: lint 3 errors" },
+    });
+    expect(c.polls).toBe(1);
+    expect(c.clock.now).toBe(5_000);
+  });
+
+  test("a poll that loses its transport and R2 is absent keeps polling until the leg answers", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [running()];
+    c.resultOutcomes = [LOST, okResponse("success")];
+    const outcome = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      readResult: async () => undefined,
+    });
+
+    expect(outcome).toEqual({ kind: "result", result: { state: "success" } });
+    expect(c.polls).toBe(2);
+  });
+
+  test("a container that stopped mid-leg reads R2 first: its known result wins over 'exited mid-leg'", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [running()];
+    c.resultFallback = running();
+    c.exitAtMs = 12_000;
+    const outcome = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      readResult: async () => ({ state: "success" }),
+    });
+
+    expect(outcome).toEqual({
+      kind: "result", result: { state: "success", description: "result read from R2 after transport loss: success" },
+    });
+    expect(c.destroyCount).toBe(1);
+  });
+
+  test("an R2 read that throws never masks the transport error: the POST is retried", async () => {
+    const c = new FakeContainer();
+    c.portOutcomes = [LOST, okResponse("failure")];
+    const outcome = await runLegInContainer(LEG, {
+      container: c, outbound: OUTBOUND, ...fakeClock(c),
+      readResult: async () => { throw new Error("r2 down"); },
+    });
+
+    expect(outcome).toEqual({ kind: "result", result: { state: "failure" } });
+  });
+});
