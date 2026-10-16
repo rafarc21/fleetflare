@@ -20,9 +20,11 @@ import {
 import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
-import { changesFleetJson, gateDecision } from "./config";
+import { changesFleetJson, gateDecision, headFleetJsonFailure, type GateConfig } from "./config";
 import { fleetJsonReader } from "./fleet-json";
-import { outcomeLegs, pendingStatusArgs, planLegs, verdictToStatusArgs, type OutcomeLeg, type PlannedLeg } from "./fanout";
+import {
+  outcomeLegs, pendingStatusArgs, planUnionLegs, verdictToStatusArgs, type OutcomeLeg, type PlanInput, type PlannedLeg,
+} from "./fanout";
 import { loadGateConfig } from "./load-config";
 import { gateRunnerName, legRequest, runLegStep, type LegRunResult } from "./leg-run";
 import { postGateStatus, type StatusPort } from "./status-post";
@@ -64,22 +66,32 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       return { headSha, baseSha, baseRef: pull.baseRef, changedFiles: files, private: pull.baseRepoPrivate };
     });
 
-    // The config is read at the PR's BASE sha (never the head), so a PR cannot
-    // edit its own gate. The fleet repo's `gates` map is read at HEAD. A PR
-    // that changes fleet.json is the exception (#1091): it is gated on the
-    // head's config, the one it introduces, so a bad edit fails its own PR.
-    const configSha = changesFleetJson(resolved.changedFiles) ? resolved.headSha : resolved.baseSha;
+    // The gate config is read at the PR's BASE sha (never the head), so a PR
+    // cannot edit its own gate. The fleet repo's `gates` map is read at HEAD.
+    // A PR that changes fleet.json is also read at its HEAD (#1091 review): the
+    // run gates on base legs in full, plus the head's legs that differ from
+    // them. A head config that is absent or invalid fails the run, never skips.
     const readFleetJson = fleetJsonReader(mintToken);
-    const config = await step.do("load-config", async () =>
-      loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, configSha }, readFleetJson));
+    const changed = changesFleetJson(resolved.changedFiles);
+    const base = await step.do("load-config", async () =>
+      loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, configSha: resolved.baseSha }, readFleetJson));
+    const head: GateConfig | null | undefined = changed ? await step.do("load-head-config", async () =>
+      loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, configSha: resolved.headSha }, readFleetJson)) : undefined;
 
-    if (config === null) {
+    const headFailure = headFleetJsonFailure(resolved.changedFiles, head);
+    if (headFailure !== null) {
+      const statusPostFailed = await step.do("post-head-invalid", async () =>
+        postGateStatus(this.statusPort(), repo, resolved.headSha, { state: "failure", description: headFailure }));
+      return { state: "failure", description: headFailure, statusPostFailed, legs: [] };
+    }
+
+    if (base === null && !changed) {
       // No gate config for this repo: not a repo this gate runs for. Post
       // nothing; the route layer (Task 12) already filters on GATE_RUNNER_REPOS.
       return { skipped: "no gate config for this repo", statusPostFailed: false };
     }
 
-    if (gateDecision(resolved.changedFiles, config.pathRules) === "skip") {
+    if (gateDecision(resolved.changedFiles, base?.pathRules ?? []) === "skip") {
       // Nothing gated changed. Post success so the required context is not
       // left pending forever. (A guess: localci.sh's own skip path is the model.)
       const statusPostFailed = await step.do("post-skip-status", async () =>
@@ -88,25 +100,29 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       return { skipped: "no gated paths changed", statusPostFailed };
     }
 
-    // The bun-test lane is the head's own test files under the block's root,
+    // The bun-test lane is the head's own test files under each block's root,
     // not a list baked into this Worker, so a new test file is picked up on
     // its next run. A block with no bun lane lists nothing.
-    const bunRoot = config.bunLaneRoot;
-    const bunGlobs = config.bunLaneGlobs;
-    const bunFiles = bunRoot === undefined ? [] : await step.do("list-bun-lane", async () => {
+    const wantsBun = base?.bunLaneRoot !== undefined || head?.bunLaneRoot !== undefined;
+    const bunFiles = wantsBun ? await step.do("list-bun-lane", async () => {
       const token = await mintToken(repo);
-      return laneFilesFromTree(await listRepoTree(token, repo, resolved.headSha), bunRoot, bunGlobs);
-    });
+      const tree = await listRepoTree(token, repo, resolved.headSha);
+      return { base: bunLaneFiles(tree, base), head: bunLaneFiles(tree, head) };
+    }) : { base: [], head: [] };
 
-    const legs = planLegs({
+    const planFor = (cfg: GateConfig, files: string[]): PlanInput => ({
       owner, repo: repoName, pr, runId: event.instanceId,
       headSha: resolved.headSha, baseSha: resolved.baseSha,
-      install: config.install, legs: config.legs,
-      bunShards: planBunShards(bunFiles, BUN_SHARD_TIMINGS.timings, config.bunShards),
-      bunLaneRoot: bunRoot ?? "",
-      vitestCmd: config.vitestCmd, vitestShards: config.vitestShards,
+      install: cfg.install, legs: cfg.legs,
+      bunShards: planBunShards(files, BUN_SHARD_TIMINGS.timings, cfg.bunShards),
+      bunLaneRoot: cfg.bunLaneRoot ?? "",
+      vitestCmd: cfg.vitestCmd, vitestShards: cfg.vitestShards, image: cfg.image,
       baselineKeys: [], // lockfile baseline keys are not wired yet; each leg installs from scratch
     });
+    const legs = planUnionLegs(
+      base === null ? null : planFor(base, bunFiles.base),
+      head ? planFor(head, bunFiles.head) : null,
+    );
 
     // Promise.all over step-backed legs: each leg's own steps are independent,
     // and aggregateVerdict reads results in configured leg order either way.
@@ -118,7 +134,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
     const results = await Promise.all(
       legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName,
-        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, image: config.image }, planned)),
+        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private }, planned)),
     );
 
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
@@ -135,10 +151,16 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
   }
 }
 
+/** The lane files for one gate block, from the run's head tree. None when the block has no bun lane. */
+function bunLaneFiles(tree: Parameters<typeof laneFilesFromTree>[0], cfg: GateConfig | null | undefined): string[] {
+  if (cfg?.bunLaneRoot === undefined) return [];
+  return laneFilesFromTree(tree, cfg.bunLaneRoot, cfg.bunLaneGlobs);
+}
+
 /** One leg: a start-<leg> step, and a retry-<leg> step when it fails red. The step's return value is the DO's LegResult. */
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
-  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean; image?: string }, planned: PlannedLeg,
+  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean }, planned: PlannedLeg,
 ): Promise<LegRunResult> {
   return runLegStep(
     { do: (name, config, fn) => step.do(name, config, fn) },
@@ -149,7 +171,7 @@ function runLeg(
       const stub = env.GATE_RUNNER.get(env.GATE_RUNNER.idFromName(gateRunnerName(instanceId, leg.leg, attemptId)));
       return stub.fetch("https://gate-runner/run-leg", {
         method: "POST",
-        body: JSON.stringify(legRequest(owner, repoName, leg, pr)),
+        body: JSON.stringify(legRequest(owner, repoName, leg, { ...pr, image: leg.image })),
       });
     },
     planned,

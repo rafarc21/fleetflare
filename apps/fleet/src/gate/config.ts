@@ -170,6 +170,14 @@ export function changesFleetJson(changedFiles: string[]): boolean {
   return changedFiles.includes(FLEET_JSON_PATH);
 }
 
+/** The verdict a PR that changes fleet.json fails with when its head config is
+ *  absent or invalid (#1091 review): a failure, never a skip. Null otherwise.
+ *  `head` is undefined when the PR does not change fleet.json. */
+export function headFleetJsonFailure(changedFiles: string[], head: GateConfig | null | undefined): string | null {
+  if (!changesFleetJson(changedFiles)) return null;
+  return head ? null : "head fleet.json invalid";
+}
+
 /** Whether a PR's diff gates the run (#1091). A fleet.json change always gates,
  *  so a config edit is validated by its own PR, not the next unrelated one. */
 export function gateDecision(changedFiles: string[], pathRules: string[]): "gate" | "skip" {

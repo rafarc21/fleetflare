@@ -22,7 +22,8 @@ export interface LoadGateConfigInput {
   /** The repo fleet.json's `gates` map lives in (env.AGENT_REPO). */
   fleetRepo: string;
   /** The sha the PR's own fleet.json is read at: the base sha (resolve-pr's
-   *  baseSha), or the head when the PR changes fleet.json (#1091). */
+   *  baseSha), or the head for a PR that changes fleet.json (#1091 review: the
+   *  workflow reads both). */
   configSha: string;
 }
 
