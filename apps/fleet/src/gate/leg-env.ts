@@ -8,6 +8,10 @@
 
 import type { GateOutboundProps } from "./outbound-handler";
 
+/** #1080: the leg that fetches and builds the run's bundle, once, before the
+ *  other legs start. Its result never joins the verdict. */
+export const BUNDLE_LEG = "bundle";
+
 export interface GateLegRequest {
   owner: string; repo: string; commit: string; leg: string;
   installCmd: string; legCmd: string;
@@ -22,6 +26,8 @@ export interface GateLegRequest {
   timeoutMin?: number;
   /** The run's image key (#1066), a lookup into the operator's images map. Absent means the default. */
   image?: string;
+  /** #1080: the run's bundle key. Every leg reads it; the bundle leg writes it. Absent: clone, as before. */
+  bundleKey?: string;
 }
 
 /** No token field, no URL field: the R2 keys below are plain keys, not
@@ -40,6 +46,7 @@ export function buildLegEnvVars(req: GateLegRequest): Record<string, string> {
     GATE_PRIVATE: req.private === true ? "1" : "0",
     GATE_BASE_REF: req.baseRef,
     GATE_PR: req.pr,
+    ...(req.bundleKey === undefined ? {} : { GATE_BUNDLE_KEY: req.bundleKey }),
   };
 }
 
@@ -58,6 +65,10 @@ export async function legGitToken(
  *  A public leg, or a private leg with no token, gets no repo and no token, so
  *  the git proxy 403s for it. Nothing else is granted to the container. */
 export function gateOutboundProps(req: GateLegRequest, gitToken?: string): GateOutboundProps {
-  if (req.private !== true || gitToken === undefined) return { resultKey: req.resultKey };
-  return { resultKey: req.resultKey, repo: `${req.owner}/${req.repo}`, gitToken };
+  const bundle = {
+    ...(req.bundleKey === undefined ? {} : { bundleKey: req.bundleKey }),
+    ...(req.bundleKey !== undefined && req.leg === BUNDLE_LEG ? { bundleWriter: true } : {}),
+  };
+  if (req.private !== true || gitToken === undefined) return { resultKey: req.resultKey, ...bundle };
+  return { resultKey: req.resultKey, repo: `${req.owner}/${req.repo}`, gitToken, ...bundle };
 }

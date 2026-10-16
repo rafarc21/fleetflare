@@ -45,6 +45,13 @@ const SEG = "[A-Za-z0-9._-]+";
 // Baselines: `<owner>/<repo>/baselines/<sha>-<lockhash>.tar` (baseline.ts baselineTarballKey).
 const RUN_RESULT_RE = new RegExp(`^gate/(${SEG})/(${SEG})/runs/(${SEG})/(${SEG})/shard-[a-z0-9-]+(@head)?(\\.retry)?\\.json$`);
 const BASELINE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/baselines/(${SEG})\\.tar$`);
+// #1080: one git bundle per run, `bundles/<runId>/<headSha>.bundle`. Only the
+// bundle leg may write it (bundleWriter); every other leg reads its own run's.
+const BUNDLE_RE = new RegExp(`^gate/(${SEG})/(${SEG})/bundles/(${SEG})/([0-9a-f]{40})\\.bundle$`);
+/** The largest bundle the Worker buffers in one PUT. Above it the bundle leg
+ *  uploads nothing and every leg clones (the fallback), so a big repo costs
+ *  time, never a wrong verdict. */
+export const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
 
 export interface OutboundTarget {
   bucket: "STUDIO_ARCHIVE";
@@ -58,13 +65,14 @@ export interface OutboundTarget {
 export function resolveOutboundTarget(path: string): OutboundTarget | null {
   const key = path.replace(/^\/+/, "");
   if (key.split("/").some((seg) => seg === "." || seg === "..")) return null;
-  if (RUN_RESULT_RE.test(key) || BASELINE_RE.test(key)) return { bucket: "STUDIO_ARCHIVE", key };
+  if (RUN_RESULT_RE.test(key) || BASELINE_RE.test(key) || BUNDLE_RE.test(key)) return { bucket: "STUDIO_ARCHIVE", key };
   return null;
 }
 
 /** The container may write its own leg's result, never a baseline. A baseline
  *  is what every later PR's gate restores from, so PR code that could write one
- *  could poison every later verdict. */
+ *  could poison every later verdict. A bundle is written only through its own
+ *  PUT path above (bundleWriter), never here. */
 function isWritableByContainer(key: string): boolean {
   return RUN_RESULT_RE.test(key);
 }
@@ -91,6 +99,10 @@ export interface GateOutboundProps {
   resultKey: string;
   repo?: string;
   gitToken?: string;
+  /** #1080: this run's bundle key. The only bundle key this container may read. */
+  bundleKey?: string;
+  /** #1080: set on the bundle leg alone. It may PUT `bundleKey`, and no other key. */
+  bundleWriter?: boolean;
 }
 
 /** The Worker's side of the git proxy: the upstream fetch. Injected so the
@@ -186,6 +198,9 @@ export async function handleGateOutbound(
 
   const target = resolveOutboundTarget(url.pathname);
   if (!target) return new Response("forbidden", { status: 403 });
+  const isBundle = BUNDLE_RE.test(target.key);
+  // #1080: a bundle is read only by the run it was built for, and written only by its bundle leg.
+  if (isBundle && props?.bundleKey !== target.key) return new Response("forbidden", { status: 403 });
 
   if (req.method === "GET") {
     const obj = await bucket.get(target.key);
@@ -200,12 +215,17 @@ export async function handleGateOutbound(
   }
 
   if (req.method === "PUT") {
-    if (!isWritableByContainer(target.key)) return new Response("forbidden", { status: 403 });
-    if (!props?.resultKey || props.resultKey !== target.key) return new Response("forbidden", { status: 403 });
+    if (isBundle) {
+      if (!props?.bundleWriter) return new Response("forbidden", { status: 403 });
+    } else {
+      if (!isWritableByContainer(target.key)) return new Response("forbidden", { status: 403 });
+      if (!props?.resultKey || props.resultKey !== target.key) return new Response("forbidden", { status: 403 });
+    }
+    const cap = isBundle ? MAX_BUNDLE_BYTES : MAX_RESULT_BYTES;
     const declared = Number(req.headers.get("content-length") ?? "0");
-    if (declared > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
+    if (declared > cap) return new Response("too large", { status: 413 });
     const body = await req.arrayBuffer();
-    if (body.byteLength > MAX_RESULT_BYTES) return new Response("too large", { status: 413 });
+    if (body.byteLength > cap) return new Response("too large", { status: 413 });
     // write-once: a leg's result key may be created once, never replaced.
     const stored = await bucket.put(target.key, body, { onlyIf: { etagDoesNotMatch: "*" } });
     if (stored === null) return new Response("already written", { status: 412 });

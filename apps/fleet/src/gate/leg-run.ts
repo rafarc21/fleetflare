@@ -227,7 +227,7 @@ function sumMs(...parts: (number | undefined)[]): number | undefined {
  *  private flag and the PR's own owner/repo reach the DO by a tested path. */
 export function legRequest(
   owner: string, repo: string, planned: PlannedLeg,
-  pr: { baseRef: string; pr: string; private: boolean; image?: string },
+  pr: { baseRef: string; pr: string; private: boolean; image?: string; bundleKey?: string },
 ): GateLegRequest {
   return {
     owner, repo, commit: planned.commit, leg: planned.leg,
@@ -236,5 +236,25 @@ export function legRequest(
     private: pr.private, baseRef: pr.baseRef, pr: pr.pr,
     ...(planned.timeoutMin === undefined ? {} : { timeoutMin: planned.timeoutMin }),
     ...(pr.image === undefined ? {} : { image: pr.image }),
+    ...(pr.bundleKey === undefined ? {} : { bundleKey: pr.bundleKey }),
   };
+}
+
+/** The slice of Workflows' WorkflowStep the bundle step uses. */
+export interface BundleStepRunner {
+  do(name: string, config: LegStepConfig, fn: () => Promise<void>): Promise<void>;
+}
+
+/** #1080: the one bundle step before the legs. True when the bundle leg answered
+ *  200 (the bundle is in R2). False on any failure, and it never throws: a run
+ *  whose bundle did not build clones in each leg, as before. */
+export async function runBundleStep(
+  step: BundleStepRunner,
+  dispatch: (planned: PlannedLeg) => Promise<Response>,
+  planned: PlannedLeg,
+): Promise<boolean> {
+  return step.do("build-bundle", LEG_STEP_CONFIG, async () => {
+    const res = await dispatch(planned);
+    if (!res.ok) throw new Error(`bundle leg: HTTP ${res.status}`);
+  }).then(() => true, () => false);
 }

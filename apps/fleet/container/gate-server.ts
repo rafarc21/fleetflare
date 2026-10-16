@@ -16,6 +16,10 @@ const PORT = Number(process.env.PORT ?? 8080);
 const WORKDIR = "/workspace/repo";
 const R2_INTERNAL_BASE = "http://gate-r2.internal";
 const GIT_PROXY_BASE = "http://git-proxy.internal";
+/** #1080: where a leg's bundle lands before it is fetched into the repo. */
+const BUNDLE_PATH = "/workspace/gate.bundle";
+/** The one leg that clones, builds the run's bundle and uploads it. Same literal as BUNDLE_LEG in src/gate/leg-env.ts. */
+const BUNDLE_LEG = "bundle";
 
 /** #715: a private repo clones through the Worker git proxy (outbound-handler.ts),
  *  which holds the read grant. A public repo clones anonymously from github.com.
@@ -58,6 +62,8 @@ export interface GateRun {
   pr: string;
   /** #715: a private repo clones through the Worker git proxy (GATE_PRIVATE=1). */
   private?: boolean;
+  /** #1080: the run's bundle key. A leg reads it instead of cloning; absent means clone. */
+  bundleKey?: string;
 }
 
 export interface GateDeps {
@@ -68,6 +74,8 @@ export interface GateDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Jitter source for the clone backoff; tests pin it. */
   random?: () => number;
+  /** #1080: where the bundle file is written. Tests point it at a scratch dir. */
+  bundlePath?: string;
 }
 
 /** Live: concurrent legs got HTTP 429 from GitHub on clone. A rate limit or a
@@ -106,6 +114,7 @@ export function readRunEnv(env: Record<string, string | undefined>): GateRun {
     baseRef: env.GATE_BASE_REF ?? "",
     pr: env.GATE_PR ?? "",
     private: env.GATE_PRIVATE === "1",
+    bundleKey: env.GATE_BUNDLE_KEY || undefined,
   };
 }
 
@@ -171,24 +180,56 @@ export async function runGate(req: GateRun, deps: GateDeps): Promise<RunOutcome>
   return { state: body.state, description: body.description, summary: body.summary };
 }
 
+/** #1080: fills `workdir` from the run's bundle. True when the bundle was fetched
+ *  into a repo. False (a missing or refused bundle, a bad fetch) means the caller
+ *  clones instead, and the bundle path is left empty of the failed attempt. */
+async function cloneFromBundle(bundleKey: string, bundlePath: string, deps: GateDeps): Promise<boolean> {
+  const { exec: run, workdir } = deps;
+  try {
+    const res = await deps.fetchFn(`${R2_INTERNAL_BASE}/${bundleKey}`);
+    if (!res.ok) return false;
+    await Bun.write(bundlePath, await res.arrayBuffer());
+  } catch (err) {
+    console.error("gate-server: bundle read failed", err instanceof Error ? err.message : String(err));
+    return false;
+  }
+  const init = await run("git", ["init", "--quiet", workdir], { cwd: "/workspace" });
+  const fetched = init.code === 0
+    ? await run("git", ["fetch", "--quiet", bundlePath, "refs/*:refs/*"], { cwd: workdir })
+    : init;
+  if (fetched.code === 0) return true;
+  console.error("gate-server: bundle fetch failed, cloning", firstLine(fetched.stderr));
+  await run("rm", ["-rf", workdir], { cwd: "/workspace" });
+  return false;
+}
+
 async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
   const { exec: run, workdir } = deps;
   const { repo } = req;
   const [base, head] = req.commit.split("..");
+  const bundlePath = deps.bundlePath ?? BUNDLE_PATH;
+  const isBundleLeg = req.leg === BUNDLE_LEG;
 
-  // Blobless and without a checkout: commits and trees come down now, file
-  // contents only when a step reads them.
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const random = deps.random ?? Math.random;
-  const cloneArgs = ["clone", "--filter=blob:none", "--no-checkout", "--quiet", cloneUrl(repo, req.private === true), workdir];
-  let clone = await run("git", cloneArgs, { cwd: "/workspace" });
-  for (let attempt = 2; clone.code !== 0 && attempt <= CLONE_ATTEMPTS && TRANSIENT_CLONE.test(clone.stderr); attempt++) {
-    // A failed clone can leave a partial directory that the next clone refuses.
-    await run("rm", ["-rf", workdir], { cwd: "/workspace" });
-    await sleep(CLONE_BACKOFF_BASE_MS * 2 ** (attempt - 2) * (0.5 + random()));
-    clone = await run("git", cloneArgs, { cwd: "/workspace" });
+  // Every leg but the bundle leg reads the run's bundle when it exists (#1080):
+  // no clone, so no git-proxy burst. A missing bundle falls through to the clone.
+  const fromBundle = !isBundleLeg && req.bundleKey !== undefined
+    && await cloneFromBundle(req.bundleKey, bundlePath, deps);
+  if (!fromBundle) {
+    // Blobless and without a checkout: commits and trees come down now, file
+    // contents only when a step reads them. The bundle leg keeps the blobs, because its bundle must hold them.
+    const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const random = deps.random ?? Math.random;
+    const filter = isBundleLeg ? [] : ["--filter=blob:none"];
+    const cloneArgs = ["clone", ...filter, "--no-checkout", "--quiet", cloneUrl(repo, req.private === true), workdir];
+    let clone = await run("git", cloneArgs, { cwd: "/workspace" });
+    for (let attempt = 2; clone.code !== 0 && attempt <= CLONE_ATTEMPTS && TRANSIENT_CLONE.test(clone.stderr); attempt++) {
+      // A failed clone can leave a partial directory that the next clone refuses.
+      await run("rm", ["-rf", workdir], { cwd: "/workspace" });
+      await sleep(CLONE_BACKOFF_BASE_MS * 2 ** (attempt - 2) * (0.5 + random()));
+      clone = await run("git", cloneArgs, { cwd: "/workspace" });
+    }
+    if (clone.code !== 0) return { state: "error", description: `clone failed: ${firstLine(clone.stderr)}` };
   }
-  if (clone.code !== 0) return { state: "error", description: `clone failed: ${firstLine(clone.stderr)}` };
 
   // A fork PR's head is not on any branch of the base repo, so the clone lacks it.
   const headKnown = (await run("git", ["rev-parse", "--verify", "--quiet", `${head}^{commit}`], { cwd: workdir })).code === 0;
@@ -196,6 +237,8 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
     const fetched = await run("git", ["fetch", "--quiet", "origin", `+refs/pull/${req.pr}/head`], { cwd: workdir });
     if (fetched.code !== 0) return { state: "error", description: `fetch failed: ${firstLine(fetched.stderr)}` };
   }
+
+  if (isBundleLeg) return buildBundle(req, deps, base, head, bundlePath);
 
   // Every leg tests the merge result (PR head merged onto its base), not the bare branch.
   const merged = await resolveMergeTree(run, workdir, base, head, req.baseRef);
@@ -232,6 +275,30 @@ async function runSteps(req: GateRun, deps: GateDeps): Promise<GateBody> {
   return test.code === 0
     ? { state: "success", description: baseNote, ...tail, summary }
     : { state: "failure", description: `${req.leg} exited ${test.code}`, ...tail, summary };
+}
+
+/** #1080: the bundle leg's work. It pins the base, head and origin base refs
+ *  under names the bundle keeps, bundles them (every object they reach), and
+ *  uploads the file under the run's bundle key. Any failure is an error result,
+ *  and the legs then clone. */
+async function buildBundle(
+  req: GateRun, deps: GateDeps, base: string, head: string, bundlePath: string,
+): Promise<GateBody> {
+  const { exec: run, workdir } = deps;
+  if (req.bundleKey === undefined) return { state: "error", description: "bundle failed: no bundle key" };
+  for (const [name, sha] of [["refs/gate/base", base], ["refs/gate/head", head]] as const) {
+    const pinned = await run("git", ["update-ref", name, sha], { cwd: workdir });
+    if (pinned.code !== 0) return { state: "error", description: `bundle failed: ${firstLine(pinned.stderr)}` };
+  }
+  const refs = ["refs/gate/base", "refs/gate/head", `refs/remotes/origin/${req.baseRef}`];
+  const created = await run("git", ["bundle", "create", bundlePath, ...refs], { cwd: workdir });
+  if (created.code !== 0) return { state: "error", description: `bundle failed: ${firstLine(created.stderr)}` };
+  const put = await deps.fetchFn(`${R2_INTERNAL_BASE}/${req.bundleKey}`, {
+    method: "PUT", body: await Bun.file(bundlePath).arrayBuffer(),
+  }).catch((err: unknown) => err instanceof Error ? err : new Error(String(err)));
+  if (put instanceof Error) return { state: "error", description: `bundle failed: ${put.message}` };
+  if (!put.ok) return { state: "error", description: `bundle failed: upload HTTP ${put.status}` };
+  return { state: "success", description: "bundle built" };
 }
 
 export type RunOutcome = { state: GateBody["state"]; description?: string; summary?: string };

@@ -4,6 +4,7 @@
 // the decisions made here.
 import { DEFAULT_GATE_IMAGE, legTimeoutMin, MAX_LEGS_PER_PR, type GateLeg } from "./config";
 import { bunLaneCwd } from "./bun-lane";
+import { BUNDLE_LEG } from "./leg-env";
 import type { LegResult, Verdict } from "./verdict";
 
 /** GitHub 422s a commit-status description over 140 chars, which would
@@ -85,6 +86,22 @@ export interface PlannedLeg {
   timeoutMin?: number;
   /** The image key of the block that planned this leg (#1066). Absent: the default image. */
   image?: string;
+}
+
+/** #1080: the R2 key of one run's git bundle. Keyed by run (the run id is
+ *  already one head sha, #1072), so a later run never reads an older base. */
+export function bundleKeyFor(owner: string, repo: string, runId: string, headSha: string): string {
+  return `gate/${owner}/${repo}/bundles/${runId}/${headSha}.bundle`;
+}
+
+/** #1080: the bundle leg's plan. It takes the base..head range like every
+ *  other leg, and has no install or test command: it only clones, bundles, and uploads. */
+export function planBundleLeg(input: { owner: string; repo: string; pr: number; runId: string; headSha: string; baseSha: string }): PlannedLeg {
+  const { owner, repo, pr, runId, headSha, baseSha } = input;
+  return {
+    leg: BUNDLE_LEG, commit: `${baseSha}..${headSha}`, installCmd: "", legCmd: "",
+    resultKey: `gate/${owner}/${repo}/runs/${pr}/${runId}/shard-${BUNDLE_LEG}.json`, baselineKeys: [],
+  };
 }
 
 /** `{i}`/`{n}` are 1-based, matching vitest's own --shard=i/n. Every occurrence

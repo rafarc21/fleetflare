@@ -23,10 +23,11 @@ import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import { decideGateRun, gateMapHasInvalidEntry, type GateConfig } from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import {
-  outcomeLegs, pendingStatusArgs, planUnionLegs, verdictToStatusArgs, type OutcomeLeg, type PlanInput, type PlannedLeg,
+  bundleKeyFor, outcomeLegs, pendingStatusArgs, planBundleLeg, planUnionLegs, verdictToStatusArgs,
+  type OutcomeLeg, type PlanInput, type PlannedLeg,
 } from "./fanout";
 import { isFleetRepo, loadGateConfig, prConfigChanged } from "./load-config";
-import { gateRunnerName, legRequest, legResultReader, runLegStep, type LegRunResult } from "./leg-run";
+import { gateRunnerName, legRequest, legResultReader, runBundleStep, runLegStep, type LegRunResult } from "./leg-run";
 import { postGateStatus, type StatusPort } from "./status-post";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
@@ -141,9 +142,28 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     await step.do("post-pending", async () =>
       postGateStatus(this.statusPort(), repo, resolved.headSha, pendingStatusArgs(event.instanceId, legs.length)));
 
+    // #1080: one bundle for the run, built by one leg before the others start,
+    // so the legs read it instead of each cloning (the clone 429 burst). A bundle
+    // that does not build is not a run failure: the legs get no bundle key and
+    // clone, as before.
+    const bundleKey = bundleKeyFor(owner, repoName, event.instanceId, resolved.headSha);
+    const bundled = await runBundleStep(
+      { do: (name, config, fn) => step.do(name, config, fn) },
+      (planned) => {
+        const stub = this.env.GATE_RUNNER.get(this.env.GATE_RUNNER.idFromName(gateRunnerName(event.instanceId, planned.leg, crypto.randomUUID())));
+        return stub.fetch("https://gate-runner/run-leg", {
+          method: "POST",
+          body: JSON.stringify(legRequest(owner, repoName, planned, {
+            baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, bundleKey,
+          })),
+        });
+      },
+      planBundleLeg({ owner, repo: repoName, pr, runId: event.instanceId, headSha: resolved.headSha, baseSha: resolved.baseSha }),
+    );
+
     const results = await Promise.all(
       legs.map((planned) => runLeg(this.env, step, event.instanceId, owner, repoName,
-        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private }, planned)),
+        { baseRef: resolved.baseRef, pr: String(pr), private: resolved.private, bundleKey: bundled ? bundleKey : undefined }, planned)),
     );
 
     const verdict = aggregateVerdict(legs.map((l) => l.leg), results);
@@ -169,7 +189,7 @@ function bunLaneFiles(tree: Parameters<typeof laneFilesFromTree>[0], cfg: GateCo
 /** One leg: a start-<leg> step, and a retry-<leg> step when it fails red. The step's return value is the DO's LegResult. */
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
-  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean }, planned: PlannedLeg,
+  owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean; bundleKey?: string }, planned: PlannedLeg,
 ): Promise<LegRunResult> {
   return runLegStep(
     { do: (name, config, fn) => step.do(name, config, fn) },
