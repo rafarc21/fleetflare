@@ -182,6 +182,8 @@ import { LIVE_TASK_STATES, TERMINAL_TASK_STATES } from "../board/types";
 // type-only one (WakeOutcome from ./wake), elided at build time.
 import { assignDigest } from "../board/assign-wake";
 import { observeContainer } from "./container-watch";
+import { makeEvent, shortId, type FleetEvent } from "../events/schema";
+import { appendEvent } from "../events/log";
 // A studio has no chatId of its own, so its alerts address the one human
 // operator directly. Board #334: operator and token come from
 // telegramConfig — Telegram off → every studio alert is a no-op.
@@ -2756,6 +2758,9 @@ export function decideHeal(
   // would write `running` over a destroy and start the container it stops.
   // null is the released marker (#103's lesson) and reads as none.
   destroyingSince?: string | null,
+  // Issue #1146: the `replacedAt` of THIS container, if the ship tick has seen
+  // it replaced. Only consulted by the loop guard below.
+  replacedAt?: string | null,
 ): HealDecision {
   if (readiness.kind === "provisioned") {
     return marker?.armed ? { kind: "disarm" } : { kind: "stand-down", why: "provisioned" };
@@ -2798,10 +2803,41 @@ export function decideHeal(
       };
     }
   }
-  if (marker?.armed) {
+  // Issue #1146: the loop guard binds one episode only. A marker armed BEFORE
+  // this container was replaced belongs to the container that replaced it;
+  // nothing else ever clears it (incarnationPatch leaves the marker alone), so
+  // without this a studio healed once stayed bare for good after its next
+  // replacement.
+  if (marker?.armed && !armedForAnEarlierIncarnation(marker, replacedAt)) {
     return { kind: "stand-down", why: `already healed once at ${marker.attemptedAt}, still bare` };
   }
   return { kind: "heal", reason: readiness.reason };
+}
+
+/** Issue #1146: true when an armed marker was set before this container's
+ *  `replacedAt`, so it is an earlier container's marker and does not bind
+ *  this episode. Unparseable times read as binding: the loop guard is the
+ *  safer side to err on. */
+export function armedForAnEarlierIncarnation(marker: HealAttempt, replacedAt?: string | null): boolean {
+  if (!replacedAt) return false;
+  const armedAt = Date.parse(marker.attemptedAt);
+  const replaced = Date.parse(replacedAt);
+  return Number.isFinite(armedAt) && Number.isFinite(replaced) && armedAt < replaced;
+}
+
+/** Issue #1146: the one board event a replace emits, so a coordinator sees it
+ *  without polling `fleet inspect`. Built once per replace: the ship tick
+ *  stamps `replacedAt` only on the first sighting (incarnationPatch), so a
+ *  replacement that stays bare does not re-emit every tick. The cause is not
+ *  knowable from here and is said so in the body. */
+export function replacementEvent(
+  id: string, replacedAt: string, oldToken: string | null, newToken: string, nowMs: number, rand: string,
+): FleetEvent {
+  const project = parseStudioId(id)?.repo ?? id;
+  return makeEvent({
+    from: id, to: "board", kind: "report", project, ref: id,
+    body: `studio ${id} replaced at ${replacedAt}: incarnation ${oldToken ?? "none"} -> ${newToken || "no incarnation"}; cause unknown; auto-heal runs on the next tick`,
+  }, nowMs, rand);
 }
 
 /**
@@ -2873,11 +2909,15 @@ export async function healBareContainer(
   now: () => Date,
   heal: () => Promise<unknown>,
   recordStudioFn: (status: StudioStatus) => Promise<void>,
+  // Issue #1146: where Observed lives (`replacedAt` in, `healAttemptedAt` out).
+  // Optional, so a caller that never heard of it keeps the pre-#1146 behaviour.
+  observedStorage?: ObservedStorage | null,
 ): Promise<HealDecision> {
   const marker = await storage.get(HEAL_ATTEMPT_KEY);
   const inFlight = await storage.get(OPERATION_KEY);
   const destroyingSince = await storage.get(DESTROYING_KEY);
-  const decision = decideHeal(status, readiness, marker, inFlight, now(), destroyingSince);
+  const replacedAt = observedStorage ? (await getObserved(observedStorage)).replacedAt : null;
+  const decision = decideHeal(status, readiness, marker, inFlight, now(), destroyingSince, replacedAt);
   if (decision.kind === "disarm") {
     await storage.put(HEAL_ATTEMPT_KEY, {
       armed: false,
@@ -2892,6 +2932,7 @@ export async function healBareContainer(
     attemptedAt: now().toISOString(),
     reason: redactSecrets(decision.reason),
   });
+  if (observedStorage) await mergeObserved(observedStorage, { healAttemptedAt: now().toISOString() });
   console.log(`studio ${idFallback}: container is BARE (${decision.reason}) -- restarting it once`);
   // Issue #152: `heal` IS a call to restartStudio() (syncSessionCycle's own
   // wiring), which creates and manages its OWN op ctx internally — this is
@@ -2931,6 +2972,9 @@ export async function healBareContainer(
       attemptedAt: now().toISOString(),
       reason: `heal abandoned: ${ROLLOUT_EXIT_MARKER}`,
     });
+    // Issue #1146: the attempt never reached a container that was going to
+    // survive, so READY must not report it as `auto-heal running` or `failed`.
+    if (observedStorage) await mergeObserved(observedStorage, { healAttemptedAt: null });
     console.log(`studio ${idFallback}: heal was killed by a container rollout -- attempt returned, will heal again next tick`);
     return decision;
   }
@@ -3475,7 +3519,7 @@ export async function syncSessionCycle(
       const decision = await healBareContainer(
         storage, idFallback, checked,
         checked.readiness ?? { kind: "inconclusive", reason: "no verdict recorded", checkedAt: syncDeps.now().toISOString() },
-        syncDeps.now, heal, recordStudioFn,
+        syncDeps.now, heal, recordStudioFn, observedStorage,
       );
       // `stand-down` is the overwhelmingly common outcome (every healthy
       // tick, every studio, every 300s) and logging it would bury everything
@@ -5317,6 +5361,9 @@ export async function runShipTickWithObservation(
   archive?: { doneRecords: DoneRecordPorts; resolveOpsRepo: ResolveMemoryRepo },
   onLeadWorking?: () => Promise<void>,
   onStaleBackgroundShell?: () => Promise<void>,
+  // Issue #1146: the one board event per replace (replacementEvent). Optional:
+  // a caller that never wires it keeps the pre-#1146 behaviour exactly.
+  onReplaced?: (ev: FleetEvent) => Promise<void>,
 ): Promise<ShipResult> {
   const observedBefore = await getObserved(storage);
   const adoptionToken = observedBefore.incarnation === null ? crypto.randomUUID() : undefined;
@@ -5724,6 +5771,18 @@ export async function runShipTickWithObservation(
   // write transitions: a replaced set/clear, an adoption, or an unreachable
   // clear.
   const isTransition = "replacedAt" in incPatch || isAdoption || clearsUnreachable;
+  // Issue #1146: `replacedAt` appears in the patch only on the FIRST sighting
+  // of a replacement (incarnationPatch stamps once), so this fires once per
+  // replace. Never fatal: a failed event must not cost the tick its verdict.
+  if (onReplaced && incPatch.replacedAt != null) {
+    try {
+      await onReplaced(replacementEvent(
+        id, incPatch.replacedAt, observedNow.incarnation, result.incarnationToken, Date.now(), shortId(),
+      ));
+    } catch (err) {
+      console.error(`studio ${id}: replace event failed`, err);
+    }
+  }
   if (isTransition && recordStudioFn) {
     const status = await storage.get(STATUS_KEY);
     if (status) await recordStudioFn(await withObserved(storage, status));
@@ -8287,6 +8346,9 @@ export class StudioDO extends Sandbox<Env> {
             { doneRecords: this.doneRecordPorts(), resolveOpsRepo: this.memoryDeps().resolveMemoryRepo },
             () => this.autoStartSubmitted(),
             () => this.notifyStaleBackgroundShell(),
+            // Issue #1146: one board event per replace, on the same D1 the
+            // board reads. A throw here is caught by the tick's own handler.
+            (ev) => appendEvent(this.env.DB, ev).then(() => undefined),
           );
         } catch (err) {
           console.error(`studio ${this.selfId()}: transcript ship tick failed`, err);

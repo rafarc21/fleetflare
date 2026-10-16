@@ -164,6 +164,23 @@ export function ageSeconds(iso: string, now: Date): number {
 }
 
 /**
+ * Issue #1146: what the bare-container auto-heal is doing about a replaced
+ * container, for the READY column. `pending` until a heal arms for THIS
+ * replacement; `running` from that attempt until a verdict newer than it
+ * lands; `failed: <reason>` when that verdict is still bare. An unattempted
+ * heal is never rendered as `running`.
+ */
+function autoHealState(status: StudioStatus, replacedAt: string): string {
+  const attempted = status.observed?.healAttemptedAt ?? null;
+  if (attempted === null || Date.parse(attempted) < Date.parse(replacedAt)) return "pending";
+  const r = status.readiness;
+  if (r?.kind === "bare" && Date.parse(r.checkedAt) > Date.parse(attempted)) {
+    return `failed: ${r.reason.replace(/\s+/g, " ")}`;
+  }
+  return "running";
+}
+
+/**
  * Issue #85 — READY overrides, `state: "running"` only, first match wins:
  * replaced -> unreachable -> unverified -> null (render today's formatReady).
  * A stopped or provisioning studio (the operation lock — #86/#87) never
@@ -177,7 +194,7 @@ export function readyOverride(status: StudioStatus, now: Date): string | null {
   if (status.state !== "running") return null;
   const observed = status.observed;
   if (observed?.replacedAt != null) {
-    return `replaced ${formatAge(ageSeconds(observed.replacedAt, now))} ago — not brought up`;
+    return `bare: replaced ${formatAge(ageSeconds(observed.replacedAt, now))} — auto-heal ${autoHealState(status, observed.replacedAt)}`;
   }
   // Issue #911: a glm lead recorded on a Claude account burns Claude quota and
   // stalls on its limit. Surfaced here so fleet ls shows it, not just the row.
@@ -419,7 +436,7 @@ function leadGate(status: StudioStatus, now: Date): LeadGate {
   // Issue #192 — a rollout can replace a running studio's container without
   // a clean onStop first, so the DO's `activity` key can still hold a word
   // left over from BEFORE the replacement; both renderers say "no lead"
-  // rather than contradict readyOverride's "replaced … not brought up".
+  // rather than contradict readyOverride's "replaced … auto-heal …".
   if (status.observed?.replacedAt != null) return { kind: "replaced", rl: null };
   return { kind: "activity", rl: null };
 }

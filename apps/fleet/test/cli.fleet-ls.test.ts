@@ -253,7 +253,7 @@ describe("formatActivity (cli/readiness-format.ts)", () => {
   // going through a clean onStop first, so the DO's stale `activity` key
   // from BEFORE the replacement survives (clearActivityState, activity.ts,
   // only fires on a graceful stop or a completed bring-up). `readyOverride`
-  // (this same file) already renders "replaced <age> ago — not brought up"
+  // (this same file) already renders "bare: replaced <age> — auto-heal <state>"
   // off `observed.replacedAt` for exactly this state; the ACTIVITY column
   // must not contradict it with a leftover WORKING/WAITING-MEMBERS word.
   it("— for a running studio whose container was just replaced, even with a stale-looking activity record left over", () => {
