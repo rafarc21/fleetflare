@@ -164,8 +164,14 @@ describe("relaunchBringup — failover relaunch adopts first (issue #116)", () =
     const src: string = env.TEST_STUDIO_DO_SRC;
     const line = src.split("\n").find((l) => l.includes("relaunchBringup("));
     expect(line).toBeDefined();
-    const lambda = line!.match(/relaunchBringup\((\(cmd, env\) => sbExec\(this, cmd, [^)]*\)),/)?.[1];
-    expect(lambda).toBe("(cmd, env) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env })");
+    // Issue #1153: the lambda now routes through bringupExec (glm-lead rewrite
+    // lives there), so the exec-class bag is pinned on bringupExec's own sbExec
+    // call below instead of on this line.
+    const lambda = line!.match(/relaunchBringup\((\(cmd, env\) => this\.bringupExec\(cmd, env\)),/)?.[1];
+    expect(lambda).toBe("(cmd, env) => this.bringupExec(cmd, env)");
+    const body = src.slice(src.indexOf("private async bringupExec("));
+    const sbLine = body.split("\n").find((l) => l.includes("return sbExec(this, plan.cmd"));
+    expect(sbLine).toContain("{ ...EXEC_CLASSES.provision, env: plan.env }");
 
     const seen: Array<{ cmd: string; opts: SbExecOptions }> = [];
     const sbExec = async (_self: unknown, cmd: string, opts: SbExecOptions) => {

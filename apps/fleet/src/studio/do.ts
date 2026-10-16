@@ -128,6 +128,7 @@ export { RECYCLE_REFUSED_PREFIX };
 // that statement is being rewritten by two other in-flight branches at the
 // same time, and a separate line cannot conflict with either.
 import { bringupLogTailCmd, BRINGUP_LOG_PATH, BRINGUP_LOG_TAIL_MAX_CHARS, FRESH_SESSION_PENDING_KEY } from "./provision";
+import { planBringupExec } from "./glm-lead";
 // Issue #330: the house-rules overlay reads the ops repo #346 resolves.
 import { resolveOpsRepo } from "../ops-repo";
 // Task 7: FLEET_JUNIOR/JUNIOR_REPOS -> whether this work repo gets the
@@ -6025,13 +6026,27 @@ export class StudioDO extends Sandbox<Env> {
    * repo can belong to different owners running on different providers, and
    * one owner's credential must never be served for another's repo.
    */
+  /**
+   * Issue #1153 (B2/B3): every bring-up exec goes through here. A glm-led
+   * studio's bring-up is rewritten (glm-lead.ts) so its settings.json carries
+   * the fleet route and no OAuth token survives. Any other exec passes through
+   * byte-identical. A glm studio with no spawn token is refused, not launched.
+   */
+  private async bringupExec(cmd: string, env?: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }> {
+    const leadType = resolveLeadType(await this.ctx.storage.get<StudioStatus>(STATUS_KEY));
+    const spawnToken = (await this.ctx.storage.get<string>(SPAWN_TOKEN_KEY)) ?? null;
+    const plan = planBringupExec({ cmd, leadType, env: env ?? {}, spawnToken, baseUrl: glmAnthropicBaseUrl(this.env) });
+    if (plan.kind === "refuse") return { code: 1, stdout: "", stderr: plan.reason };
+    return sbExec(this, plan.cmd, { ...EXEC_CLASSES.provision, env: plan.env });
+  }
+
   private deps(): ProvisionDeps {
     const mint = repoTokenMinter(this.env);
     // FLEET_OPS_REPO, resolved once (#330 round 4): memory and the house-rules
     // overlay both live in this one private repo (src/ops-repo.ts).
     const opsRepo = resolveOpsRepo(this.env);
     return {
-      sbExec: (cmd: string, env?: Record<string, string>) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env }),
+      sbExec: (cmd: string, env?: Record<string, string>) => this.bringupExec(cmd, env),
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
       now: () => new Date().toISOString(),
       fetchBlueprintFile: async (repo: string, path: string, ref: string) =>
@@ -7033,7 +7048,7 @@ export class StudioDO extends Sandbox<Env> {
         const roleEnv = (await this.ctx.storage.get<RoleEnv | StudioEnv>(ROLE_ENV_KEY)) ?? null;
         if (!roleEnv) return { code: 1, stdout: "", stderr: NO_ROLE_ENV_ERROR };
         // Issue #116: adopt a worktree-keyed session first, then BRINGUP_CMD.
-        return relaunchBringup((cmd, env) => sbExec(this, cmd, { ...EXEC_CLASSES.provision, env }), roleEnv, this.selfId());
+        return relaunchBringup((cmd, env) => this.bringupExec(cmd, env), roleEnv, this.selfId());
       },
       // Issue #210, ask 3 — the exact "operator ran `fleet destroy --park`"
       // verb (routes.ts's own `destroy` route, `park=true`), rescue-first
