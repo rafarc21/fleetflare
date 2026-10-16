@@ -104,6 +104,34 @@ describe("putResult (plain R2 key, no credential on the request)", () => {
     await putResult("", { state: "success" }, fn);
     expect(called).toBe(false);
   });
+
+  it("logs one line naming the key and status when R2 refuses the PUT (no silent drop)", async () => {
+    const logs: string[] = [];
+    const real = console.error;
+    console.error = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+    try {
+      const fn: FetchFn = async () => new Response("forbidden", { status: 403 });
+      await expect(putResult("gate/acme/example/runs/715/run-a/shard-x.retry.json", { state: "success" }, fn)).resolves.toBeUndefined();
+    } finally {
+      console.error = real;
+    }
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("shard-x.retry.json");
+    expect(logs[0]).toContain("403");
+  });
+
+  it("logs nothing when R2 accepts the PUT", async () => {
+    const logs: string[] = [];
+    const real = console.error;
+    console.error = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+    try {
+      const fn: FetchFn = async () => new Response(null, { status: 201 });
+      await putResult("runs/r1/shard-1.json", { state: "success" }, fn);
+    } finally {
+      console.error = real;
+    }
+    expect(logs).toEqual([]);
+  });
 });
 
 describe("cloneUrl (#715: private repos clone through the Worker git proxy)", () => {

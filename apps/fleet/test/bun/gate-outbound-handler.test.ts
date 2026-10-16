@@ -10,6 +10,9 @@ import {
 const RUN_KEY = "gate/acme/example/runs/715/run-a/shard-typecheck.json";
 const OTHER_RUN_KEY = "gate/acme/example/runs/715/run-b/shard-typecheck.json";
 const BASELINE_KEY = "gate/acme/example/baselines/abc123-def456.tar";
+/** A leg's retry log (#1063 flaky evidence) and a union leg's @head result (#1095). */
+const RETRY_KEY = "gate/acme/example/runs/715/run-a/shard-typecheck.retry.json";
+const HEAD_KEY = "gate/acme/example/runs/715/run-a/shard-typecheck@head.json";
 
 /** The props a leg's container is registered with: its own result key only. */
 const OWN: GateOutboundProps = { resultKey: RUN_KEY, repo: "acme/example" };
@@ -73,6 +76,67 @@ describe("resolveOutboundTarget", () => {
 
   it("a result key without the per-run segment is refused (the pre-#1015 shape)", () => {
     expect(resolveOutboundTarget("/gate/acme/example/runs/715/shard-typecheck.json")).toBeNull();
+  });
+
+  it("a retry log key (shard-<leg>.retry.json) resolves to its own run key", () => {
+    expect(resolveOutboundTarget(`/${RETRY_KEY}`)).toEqual({ bucket: "STUDIO_ARCHIVE", key: RETRY_KEY });
+  });
+
+  it("a union-leg head key (shard-<leg>@head.json) resolves to its own run key", () => {
+    expect(resolveOutboundTarget(`/${HEAD_KEY}`)).toEqual({ bucket: "STUDIO_ARCHIVE", key: HEAD_KEY });
+  });
+
+  it("a head retry key (shard-<leg>@head.retry.json) resolves to its own run key", () => {
+    const key = "gate/acme/example/runs/715/run-a/shard-typecheck@head.retry.json";
+    expect(resolveOutboundTarget(`/${key}`)).toEqual({ bucket: "STUDIO_ARCHIVE", key });
+  });
+
+  it("a shard name outside the exact shape is refused: path separators, uppercase, other suffixes, repeats", () => {
+    const prefix = "/gate/acme/example/runs/715/run-a/";
+    for (const name of [
+      "shard-a/b.json",
+      "../x.json",
+      "shard-Typecheck.json",
+      "shard-typecheck.txt",
+      "shard-typecheck.retry.txt",
+      "shard-typecheck.retry.retry.json",
+      "shard-typecheck@base.json",
+      "shard-typecheck@head@head.json",
+      "shard-typecheck@head.retry.retry.json",
+    ]) {
+      expect(resolveOutboundTarget(prefix + name)).toBeNull();
+    }
+  });
+});
+
+describe("PUT of a retry or head result key (write-once, leg's own key only)", () => {
+  it("the leg's own retry log PUTs write-once (201)", async () => {
+    const { bucket, store } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${RETRY_KEY}`, { body: "{}" }), bucket, { resultKey: RETRY_KEY, repo: "acme/example" });
+    expect(res.status).toBe(201);
+    expect(store.has(RETRY_KEY)).toBe(true);
+  });
+
+  it("the leg's own @head result PUTs write-once (201)", async () => {
+    const { bucket, store } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${HEAD_KEY}`, { body: "{}" }), bucket, { resultKey: HEAD_KEY, repo: "acme/example" });
+    expect(res.status).toBe(201);
+    expect(store.has(HEAD_KEY)).toBe(true);
+  });
+
+  it("a retry key under props for the plain result key is refused (403), bucket untouched", async () => {
+    const { bucket, calls } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${RETRY_KEY}`, { body: "{}" }), bucket, OWN);
+    expect(res.status).toBe(403);
+    expect(calls).toEqual([]);
+  });
+
+  it("a malformed shard name never reaches the bucket, even when props name it", async () => {
+    const bad = "gate/acme/example/runs/715/run-a/shard-Typecheck.json";
+    const { bucket, calls } = fakeBucket();
+    const res = await handleGateOutbound(req("PUT", `/${bad}`, { body: "{}" }), bucket, { resultKey: bad, repo: "acme/example" });
+    expect(res.status).toBe(403);
+    expect(calls).toEqual([]);
   });
 });
 
