@@ -87,7 +87,7 @@ const WAITING_MEMBERS_LINE = /^\s*✻ Waiting for \d+ background agents? to fini
  *  running`). The lead waits on it: the same "waiting on someone else" the
  *  waiting-members state already means, so an idle alarm never fires on it.
  *  Matches reap's live-read counter rule (cli/reap.ts chromeRefusal). */
-const BACKGROUND_COUNTER = /^\d+ (?:shells?|monitors?|background (?:tasks?|jobs?)|tasks?)$/i;
+export const BACKGROUND_COUNTER = /^\d+ (?:shells?|monitors?|background (?:tasks?|jobs?)|tasks?)$/i;
 const STILL_RUNNING = / · .*\bstill running\s*$/;
 
 function hasBackgroundWork(footer: string, statusLine: string | null): boolean {

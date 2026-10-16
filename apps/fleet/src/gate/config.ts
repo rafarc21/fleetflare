@@ -161,3 +161,73 @@ export function matchesPathRules(changedFiles: string[], pathRules: string[]): b
       return file === rule;
     }));
 }
+
+/** Whether the repo's own gate config changed (#1091 review round 2). Decided on
+ *  CONTENT: `base` and `head` are the parsed root fleet.json at each sha, null
+ *  when absent or unparseable. A file list cannot be trusted for this: the
+ *  compare API names a rename by its new path only and stops at 300 files, so a
+ *  moved or buried fleet.json would look untouched. Any difference counts,
+ *  including a file gone at head and a file new at base: over-gating costs one
+ *  run, under-gating lets a PR edit its own gate. */
+export function fleetJsonChanged(base: unknown, head: unknown): boolean {
+  return JSON.stringify(base ?? null) !== JSON.stringify(head ?? null);
+}
+
+/** The verdict a PR that changes fleet.json fails with when its head config is
+ *  absent or invalid (#1091 review): a failure, never a skip. Null otherwise.
+ *  `head` is undefined when the config did not change and was not loaded. */
+export function headFleetJsonFailure(
+  configChanged: boolean, head: GateConfig | null | undefined, headGatesInvalid = false,
+): string | null {
+  if (!configChanged) return null;
+  return head && !headGatesInvalid ? null : "head fleet.json invalid";
+}
+
+/** Whether a PR's diff gates the run (#1091). A config change always gates, so a
+ *  config edit is validated by its own PR, not the next unrelated one. */
+export function gateDecision(
+  changedFiles: string[], pathRules: string[], configChanged: boolean, truncated = false,
+): "gate" | "skip" {
+  return configChanged || truncated || matchesPathRules(changedFiles, pathRules) ? "gate" : "skip";
+}
+
+/** Whether a fleet.json's `gates` map holds an entry that is not a valid gate
+ *  block, or a `gates` value that is not an object at all (#1095 round 3). Read
+ *  on the head, so a bad entry fails the PR that adds it, not the next one. */
+export function gateMapHasInvalidEntry(fleetJson: unknown): boolean {
+  if (typeof fleetJson !== "object" || fleetJson === null) return false;
+  const gates = (fleetJson as Record<string, unknown>).gates;
+  if (gates === undefined) return false;
+  if (typeof gates !== "object" || gates === null || Array.isArray(gates)) return true;
+  return Object.values(gates).some((entry) => parseGateBlock(entry) === null);
+}
+
+/** What the gate Workflow does with one PR, decided from its inputs alone (#1091
+ *  review round 2): fail on a bad head config, skip (posting success only when
+ *  a gated repo's paths did not change), or run the legs. */
+export type GateRunDecision =
+  | { action: "fail"; description: string }
+  | { action: "skip"; reason: string; status: boolean }
+  | { action: "run" };
+
+export function decideGateRun(input: {
+  changedFiles: string[];
+  fleetJsonChanged: boolean;
+  base: GateConfig | null;
+  head: GateConfig | null | undefined;
+  /** The compare list hit COMPARE_FILE_CAP, so it may be cut short (#1095 round 3). */
+  truncated?: boolean;
+  /** The head's fleet repo `gates` map holds an invalid entry (#1095 round 3). */
+  headGatesInvalid?: boolean;
+}): GateRunDecision {
+  const { changedFiles, fleetJsonChanged: configChanged, base, head, truncated = false, headGatesInvalid = false } = input;
+  const failure = headFleetJsonFailure(configChanged, head, headGatesInvalid);
+  if (failure !== null) return { action: "fail", description: failure };
+  // No gate config for this repo: not a repo this gate runs for. Post nothing.
+  if (base === null && !configChanged) return { action: "skip", reason: "no gate config for this repo", status: false };
+  // Nothing gated changed: post success so the required context is not left pending forever.
+  if (gateDecision(changedFiles, base?.pathRules ?? [], configChanged, truncated) === "skip") {
+    return { action: "skip", reason: "no gated paths changed", status: true };
+  }
+  return { action: "run" };
+}

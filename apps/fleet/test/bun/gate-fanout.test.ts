@@ -1,7 +1,7 @@
 // Pure fan-out planning for GateWorkflow (Task 14). No I/O, no bindings:
 // the Workflow feeds these results into step.do calls.
 import { describe, it, expect } from "bun:test";
-import { bunLegs, normalizeLegResult, outcomeLegs, planLegs, vitestLegs } from "../../src/gate/fanout";
+import { bunLegs, normalizeLegResult, outcomeLegs, planLegs, planUnionLegs, vitestLegs } from "../../src/gate/fanout";
 import { MAX_LEGS_PER_PR } from "../../src/gate/config";
 import { resolveOutboundTarget } from "../../src/gate/outbound-handler";
 
@@ -214,5 +214,73 @@ describe("outcomeLegs (#1049: per-leg output in plan order)", () => {
       { leg: "merge-tree", state: "success", ms: 900 },
       { leg: "lint", state: "failure", ms: 83_000, summary: "Tests 3 failed", description: "3 errors" },
     ]);
+  });
+});
+
+// #1091 review (refs #715): a PR that changes fleet.json runs the base plan in
+// full, plus each head leg whose content differs from base, named `<leg>@head`.
+describe("planUnionLegs: base plan + differing head legs (#1091 review)", () => {
+  it("a weakening head (typecheck = true) still runs base typecheck; head's runs as typecheck@head", () => {
+    const head = { ...BASE, legs: [{ name: "typecheck", cmd: "true" }, { name: "lint", cmd: "bun run lint" }] };
+    const legs = planUnionLegs(BASE, head);
+    expect(legs.map((l) => l.leg)).toEqual(["merge-tree", "typecheck", "lint", "vitest-1", "vitest-2", "typecheck@head"]);
+    expect(legs.find((l) => l.leg === "typecheck")?.legCmd).toBe("bun run typecheck");
+    expect(legs.find((l) => l.leg === "typecheck@head")?.legCmd).toBe("true");
+  });
+
+  it("a shard-count-only change runs every base shard and every head shard", () => {
+    const legs = planUnionLegs(BASE, { ...BASE, vitestShards: 4 });
+    expect(legs.map((l) => l.leg)).toEqual([
+      "merge-tree", "typecheck", "lint", "vitest-1", "vitest-2",
+      "vitest@head-1", "vitest@head-2", "vitest@head-3", "vitest@head-4",
+    ]);
+    expect(legs.find((l) => l.leg === "vitest@head-4")?.legCmd).toBe("bun run test --shard=4/4");
+  });
+
+  it("an identical config adds no @head legs: the union is the base plan", () => {
+    expect(planUnionLegs(BASE, { ...BASE })).toEqual(planLegs(BASE));
+  });
+
+  it("each leg keeps its own block's image: base legs use base's, head legs use head's", () => {
+    const legs = planUnionLegs({ ...BASE, image: "gate" }, { ...BASE, image: "desktop", legs: [{ name: "lint", cmd: "true" }] });
+    expect(legs.find((l) => l.leg === "typecheck")?.image).toBe("gate");
+    expect(legs.find((l) => l.leg === "lint@head")?.image).toBe("desktop");
+  });
+
+  it("an install change runs every head leg as @head: the install is part of the leg", () => {
+    const legs = planUnionLegs(BASE, { ...BASE, install: "bun install" });
+    expect(legs.map((l) => l.leg)).toEqual([
+      "merge-tree", "typecheck", "lint", "vitest-1", "vitest-2",
+      "typecheck@head", "lint@head", "vitest@head-1", "vitest@head-2",
+    ]);
+  });
+
+  it("a vitestCmd change runs only the head vitest shards as @head", () => {
+    const legs = planUnionLegs(BASE, { ...BASE, vitestCmd: "bun run test --shard={i}/{n} --changed" });
+    expect(legs.map((l) => l.leg)).toEqual([
+      "merge-tree", "typecheck", "lint", "vitest-1", "vitest-2", "vitest@head-1", "vitest@head-2",
+    ]);
+    expect(legs.find((l) => l.leg === "vitest@head-1")?.legCmd).toBe("bun run test --shard=1/2 --changed");
+  });
+
+  it("an image-only change (same commands, gate to desktop) still runs every head leg as @head", () => {
+    const legs = planUnionLegs({ ...BASE, image: "gate" }, { ...BASE, image: "desktop" });
+    expect(legs.map((l) => l.leg)).toEqual([
+      "merge-tree", "typecheck", "lint", "vitest-1", "vitest-2",
+      "typecheck@head", "lint@head", "vitest@head-1", "vitest@head-2",
+    ]);
+    expect(legs.find((l) => l.leg === "typecheck@head")?.image).toBe("desktop");
+    expect(legs.find((l) => l.leg === "typecheck")?.image).toBe("gate");
+  });
+
+  it("a gate added with no base runs the head legs, all named @head", () => {
+    const legs = planUnionLegs(null, BASE);
+    expect(legs.map((l) => l.leg)).toEqual([
+      "merge-tree", "typecheck@head", "lint@head", "vitest@head-1", "vitest@head-2",
+    ]);
+  });
+
+  it("an omitted image and an explicit default image are the same leg: no @head copy", () => {
+    expect(planUnionLegs(BASE, { ...BASE, image: "gate" })).toEqual(planLegs(BASE));
   });
 });

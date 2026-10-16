@@ -226,7 +226,7 @@ export type CliCommand =
   // Issue #53: stall alarm + opt-in reap of idle studios with no open task.
   // Dry-run unless --apply. `repo` null = the CWD's git remote. Never takes
   // --force or --discard-unsynced: reap only ever destroys the safe way.
-  | { cmd: "reap"; apply: boolean; idleMs: number; repo: string | null }
+  | { cmd: "reap"; apply: boolean; idleMs: number; repo: string | null; nudge: boolean; nudgeAfterMs: number }
   // P5 §9's memory pass. Two words for the same reason `task` is: `memory` is
   // a noun with operations on it, and the survey is the one you run first.
   | { cmd: "memory-ls" }
@@ -423,8 +423,8 @@ export const VERBS: Record<Exclude<CliCommand["cmd"], "usage" | "help">, VerbHel
     summary: "Run rescue-push against every studio that is RUNNING OR DEGRADED — the pre-image-deploy gate: an image rollout replaces every studio's container with no rescue mechanism of its own running. Commits and pushes uncommitted work (main checkout and every member git worktree, each to its own fleet/rescue/... ref), plus every local branch not checked out anywhere and every stash entry holding unpushed work (repo-wide, so a member subagent's own stash or an abandoned branch is never invisible), and prints what it saved, or 'nothing to rescue' for a clean one. A push rejected non-fast-forward (the narrow shallow-clone same-timestamp-collision case — every push already targets a freshly generated ref, which a real branch moving on origin can no longer collide with) retries once to a freshly generated ref before it counts as a failure. Prints 'skipped <id> (<state>)' for a stopped/provisioning studio and 'skipped <id>: container not running' for a stale registry answer — neither is a failure. --repo scopes to one repo; --dry-run lists which studios WOULD be rescued without execing or pushing anything. Exits non-zero only on a genuine rescue failure, and ends with a verdict: 'pre-deploy gate SAFE', or '<n>/<attempted> attempted studios not rescued (<f> push FAILED, <t> TIMED OUT) -- pre-deploy gate UNSAFE; do NOT deploy'. `bun run deploy` (scripts/deploy.sh) runs it first and refuses on UNSAFE unless --allow-unrescued.",
   },
   reap: {
-    args: "[--idle 30m] [--repo owner/repo] [--dry-run|--apply]",
-    summary: "Idle studios bill with zero events; this finds them. Scope: the repo you are standing in, or --repo. Every run prints a STALL line (at most once per 15m per studio) for a running studio IDLE >= 10m that still holds an open board task. Bare (or --dry-run) lists which running studios are IDLE >= --idle (default 30m, minimum 5m; s/m/h) with NO open task, and why each other one is skipped — touches nothing. --apply, per candidate, one at a time: a live pre-check; rescue-push; a fresh board read for this studio; a final live read (must answer within 30s) that shows the lead idle since the threshold, an empty input box, no member row, and no counter or running work in the footer; then a plain destroy (never --force, never --discard-unsynced — the Worker re-checks tasks and re-runs rescue). Any failure or doubt skips that studio; a failed rescue, a refused destroy, or 3 live-read refusals in a row back it off 30m. Reaps nothing when the board read fails, returns 0 rows, or returns under half the rows of the last good read. Local state: ~/.fleet/reap-state.json (a corrupt one is kept aside as .corrupt-<time> and that poll reaps nothing); one run at a time per state file. Built to run from a coordinator's loop, e.g. every 60s.",
+    args: "[--idle 30m] [--repo owner/repo] [--nudge [--nudge-after 5m]] [--dry-run|--apply]",
+    summary: "Idle studios bill with zero events; this finds them. Scope: the repo you are standing in, or --repo. Every run prints a STALL line (at most once per 15m per studio) for a running studio IDLE >= 10m that still holds an open board task. Bare (or --dry-run) lists which running studios are IDLE >= --idle (default 30m, minimum 5m; s/m/h) with NO open task, and why each other one is skipped — touches nothing. --apply, per candidate, one at a time: a live pre-check; rescue-push; a fresh board read for this studio; a final live read (must answer within 30s) that shows the lead idle since the threshold, an empty input box, no member row, and no counter or running work in the footer; then a plain destroy (never --force, never --discard-unsynced — the Worker re-checks tasks and re-runs rescue). Any failure or doubt skips that studio; a failed rescue, a refused destroy, or 3 live-read refusals in a row back it off 30m. Reaps nothing when the board read fails, returns 0 rows, or returns under half the rows of the last good read. Local state: ~/.fleet/reap-state.json (a corrupt one is kept aside as .corrupt-<time> and that poll reaps nothing); one run at a time per state file. --nudge (opt-in, issue #1098): a non-claude lead IDLE >= --nudge-after (default 5m) with an open task is woken with a prompt to its own studio (no board write; only a `working` task, read fresh); at most once per 15m per studio and 3 per task per hour (then the STALL line says nudge budget spent). Never a limit modal, a member alert, a question, or unsent typed text. Built to run from a coordinator's loop, e.g. every 60s.",
   },
   "task-junior-sweep": {
     args: "junior-sweep [--dry-run|--apply]",
@@ -1129,6 +1129,8 @@ export function parseCliArgs(argv: string[]): CliCommand {
       let apply: boolean | null = null;
       let idleMs = 30 * 60_000;
       let repo: string | null = null;
+      let nudge = false;
+      let nudgeAfterMs: number | null = null;
       for (let i = 0; i < rest.length; i++) {
         const t = rest[i]!;
         if (t === "--apply" || t === "--dry-run") {
@@ -1153,9 +1155,21 @@ export function parseCliArgs(argv: string[]): CliCommand {
           repo = value;
           continue;
         }
+        // Issue #1098: opt-in wake of OSS leads stuck mid-task. Off, reap is unchanged.
+        if (t === "--nudge") { nudge = true; continue; }
+        const na = /^--nudge-after(?:=(.*))?$/.exec(t);
+        if (na) {
+          const raw = na[1] ?? rest[++i];
+          const ms = raw === undefined ? null : parseIdleDuration(raw);
+          if (ms === null) return usage("--nudge-after needs a duration like 5m or 2h");
+          if (ms < 5 * 60_000) return usage("--nudge-after must be at least 5m");
+          nudgeAfterMs = ms;
+          continue;
+        }
         return usage(`unexpected ${JSON.stringify(t)}`);
       }
-      return { cmd: "reap", apply: apply ?? false, idleMs, repo };
+      if (nudgeAfterMs !== null && !nudge) return usage("--nudge-after needs --nudge");
+      return { cmd: "reap", apply: apply ?? false, idleMs, repo, nudge, nudgeAfterMs: nudgeAfterMs ?? 5 * 60_000 };
     }
     case "task":
       return parseTask(argv.slice(1));

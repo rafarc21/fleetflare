@@ -7,11 +7,12 @@
 // bun:test lane (CLI code, same reason rescue-all-scope.test.ts gives).
 import { test, expect, describe } from "bun:test";
 import {
-  runReap, formatIdleAlarm, parseIdleDuration, emptyReapState, destroyRaceOutcome,
+  runReap, formatIdleAlarm, parseIdleDuration, emptyReapState, destroyRaceOutcome, chromeRefusal,
   REAP_BACKOFF_MS, STALL_ALARM_EVERY_MS, STALL_AFTER_MS, REAP_LIVE_READ_MAX_MS,
-  type ReapDeps, type ReapFlags, type ReapInspect, type ReapState, type ReapDestroyResult,
+  type ReapDeps, type ReapFlags, type ReapInspect, type ReapState, type ReapDestroyResult, type NudgeOutcome,
 } from "../../cli/reap";
 import { REAL_WEBSTUDIO_PANE } from "../fixtures/rate-limit-panes";
+import { parseCliArgs } from "../../src/studio/cli-args";
 import { WORKING_GLYPH_DOT_FOOTER_ESC_PANE } from "../fixtures/activity-panes";
 import type { StudioStatus } from "../../src/studio/types";
 import { type Activity, nextActivity, readActivityFrame } from "../../src/studio/activity";
@@ -89,6 +90,8 @@ interface World {
   loadStateError?: Error;
   rescue?: (id: string) => { ok: true } | { ok: false; error: string };
   destroy?: (id: string) => ReapDestroyResult;
+  /** --nudge's wake (issue #1098). Default: woke. A thrown Error throws. */
+  nudge?: (id: string, taskNumber: number) => NudgeOutcome | Error;
   state?: ReapState;
   now?: Date;
 }
@@ -133,6 +136,12 @@ function fake(w: World) {
     destroy: async (id) => {
       push(`destroy:${id}`);
       return w.destroy ? w.destroy(id) : { outcome: "destroyed" };
+    },
+    nudge: async (id, taskNumber) => {
+      push(`nudge:${id}:${taskNumber}`);
+      const r = w.nudge ? w.nudge(id, taskNumber) : { woke: true as const };
+      if (r instanceof Error) throw r;
+      return r;
     },
     loadState: async () => {
       if (w.loadStateError) throw w.loadStateError;
@@ -486,6 +495,39 @@ describe("reap — F2/F3: live pane chrome", () => {
   });
 });
 
+// Issue #1110: the footer hint text (`ctrl+t to hide tasks`, `PR #4343`) is
+// chrome, not work. chromeRefusal reads the footer by its `·` segments: known
+// chrome hints drop out, then the rest is checked (running words, counters,
+// unknown-with-digit = skip).
+describe("reap — #1110: footer segments and chrome hints", () => {
+  const withFooter = (footer: string) => CLEAN_IDLE.replace(/^ *⏵⏵ .*$/m, footer);
+
+  test("the measured footer (bypass + ctrl+t hint + agents hint) -> no refusal", () => {
+    const tail = withFooter("  ⏵⏵ bypass permissions on (shift+tab to cycle) · ctrl+t to hide tasks · ← for agents");
+    expect(chromeRefusal(tail)).toBeNull();
+  });
+
+  test("a `· 2 shells ·` footer segment -> refusal", () => {
+    const tail = withFooter("  ⏵⏵ bypass permissions on (shift+tab to cycle) · 2 shells · ← for agents");
+    expect(chromeRefusal(tail)).not.toBeNull();
+  });
+
+  test("an `esc to interrupt` footer segment -> refusal", () => {
+    const tail = withFooter("  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt");
+    expect(chromeRefusal(tail)).not.toBeNull();
+  });
+
+  test("a `PR #12` footer hint alone -> no refusal", () => {
+    const tail = withFooter("  ⏵⏵ bypass permissions on (shift+tab to cycle) · PR #12");
+    expect(chromeRefusal(tail)).toBeNull();
+  });
+
+  test("an unknown `· 3 foo ·` footer segment -> refusal (unknown with a digit = skip)", () => {
+    const tail = withFooter("  ⏵⏵ bypass permissions on (shift+tab to cycle) · 3 foo · ← for agents");
+    expect(chromeRefusal(tail)).not.toBeNull();
+  });
+});
+
 describe("reap — F4/F5: scope and state", () => {
   test("a studio with no repoSlug is never reaped, even when its id matches", async () => {
     const f = fake({ studios: [studio(PILOT, activity("idle", 45 * MIN), { repoSlug: null })], board: HISTORY });
@@ -708,5 +750,256 @@ describe("reap — destroy racing another destroy", () => {
     expect(destroyRaceOutcome({ state: "running", destroyInFlight: false })).toBeNull();
     expect(destroyRaceOutcome({ state: "running" })).toBeNull();
     expect(destroyRaceOutcome(null)).toBeNull();
+  });
+});
+
+// Issue #1098: `fleet reap --nudge` wakes an OSS-led lead that ended its turn
+// mid-task (TodoWrite item in progress, empty prompt, no error). The wake is
+// the same `fleet task assign` call; here it is a fake `nudge` port.
+const at = (minutes: number) => new Date(NOW.getTime() + minutes * MIN);
+const iso = (t: Date) => t.toISOString();
+
+/** The DO's own mirror of an idle lead since `forMs` before `t`, observed at `t`. */
+function idleAt(t: Date, forMs: number): Activity {
+  return {
+    state: "idle", since: iso(new Date(t.getTime() - forMs)), anchored: true, observedAt: iso(t),
+    source: "pane", reason: null, membersTickingAt: null,
+  };
+}
+
+/** A live GET /inspect answered at `t`: capture fresh, DO activity idle `forMs`. */
+function liveAt(t: Date, forMs: number, tail: string = CLEAN_IDLE): ReapInspect {
+  return { ok: true, tail, capturedAt: t.getTime() / 1000, activity: idleAt(t, forMs) };
+}
+
+/** One poll at `t`: an OSS (glm) lead idle `idleFor` on open task #7. */
+function nudgePoll(t: Date, state?: ReapState, over: {
+  idleFor?: number; studioOver?: Partial<StudioStatus>; tasks?: BoardTask[]; tail?: string;
+  nudge?: World["nudge"]; nudgeAfterMs?: number; apply?: boolean; fresh?: BoardTask[];
+} = {}) {
+  const idleFor = over.idleFor ?? 12 * MIN;
+  const f = fake({
+    studios: [studio(PILOT, idleAt(t, idleFor), { leadType: "glm", ...over.studioOver })],
+    board: over.tasks ?? [task(7, PILOT)],
+    inspect: () => liveAt(t, idleFor, over.tail),
+    studioTasks: () => over.fresh ?? over.tasks ?? [task(7, PILOT)],
+    nudge: over.nudge,
+    state,
+    now: t,
+  });
+  const run = () => runReap(
+    flags({ nudge: true, apply: over.apply ?? true, nudgeAfterMs: over.nudgeAfterMs }), f.deps,
+  );
+  return { f, run };
+}
+
+describe("reap --nudge — wake an OSS lead that stops mid-task (issue #1098)", () => {
+  test("without --nudge an OSS lead idle with an open task is only logged, never woken", async () => {
+    const f = fake({ studios: [studio(PILOT, activity("idle", 12 * MIN), { leadType: "glm" })], board: [task(7, PILOT)] });
+    await runReap(flags({ apply: true }), f.deps);
+    expect(f.calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+  });
+
+  test("apply: an OSS lead idle on an open task is woken for that task, after a live read says idle", async () => {
+    const p = nudgePoll(NOW);
+    await p.run();
+    expect(p.f.calls).toContain(`nudge:${PILOT}:7`);
+    expect(p.f.lines.some((l) => l.startsWith(`NUDGED ${PILOT}`) && l.includes("#7"))).toBe(true);
+    expect(p.f.calls.some((c) => c.startsWith("destroy") || c.startsWith("rescue"))).toBe(false);
+  });
+
+  test("dry-run prints would-nudge lines and calls no inspect, nudge, rescue or destroy", async () => {
+    const f = fake({ studios: [studio(PILOT, activity("idle", 12 * MIN), { leadType: "glm" })], board: [task(7, PILOT)] });
+    await runReap(flags({ apply: false, nudge: true }), f.deps);
+    expect(f.lines.some((l) => l.startsWith(`would nudge ${PILOT}: task #7`))).toBe(true);
+    expect(f.calls.filter((c) => /^(inspect|nudge|rescue|destroy):/.test(c))).toEqual([]);
+  });
+
+  test("a claude lead is never nudged: leadType claude, and leadType absent (= claude)", async () => {
+    for (const over of [{ leadType: "claude" as const }, {}]) {
+      const f = fake({ studios: [studio(PILOT, idleAt(NOW, 12 * MIN), over)], board: [task(7, PILOT)] });
+      await runReap(flags({ nudge: true }), f.deps);
+      expect(f.calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+    }
+  });
+
+  test("any non-claude lead type is OSS: kimi and deepseek are nudged too", async () => {
+    for (const leadType of ["kimi", "deepseek"] as const) {
+      const p = nudgePoll(NOW, undefined, { studioOver: { leadType: leadType as StudioStatus["leadType"] } });
+      await p.run();
+      expect(p.f.calls).toContain(`nudge:${PILOT}:7`);
+    }
+  });
+
+  test("an OSS lead idle under --nudge-after is not nudged (default 5m; 12m idle clears it, 15m does not)", async () => {
+    const under = nudgePoll(NOW, undefined, { idleFor: 4 * MIN });
+    await under.run();
+    expect(under.f.calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+    const high = nudgePoll(NOW, undefined, { idleFor: 12 * MIN, nudgeAfterMs: 15 * MIN });
+    await high.run();
+    expect(high.f.calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+  });
+
+  test("never nudges into a limit modal, a member alert, a waiting question or running work", async () => {
+    const limit = nudgePoll(NOW, undefined, { studioOver: { rateLimited: { until: null, seenAt: iso(NOW), select: true } } });
+    await limit.run();
+    const member = studio(PILOT, idleAt(NOW, 12 * MIN), { leadType: "glm" });
+    member.observed!.memberAlerts = [{ kind: "member-gone", at: iso(NOW), detail: "x", confidence: "inferred" } as never];
+    const members = fake({ studios: [member], board: [task(7, PILOT)] });
+    await runReap(flags({ nudge: true }), members.deps);
+    const question = fake({ studios: [studio(PILOT, activity("waiting-question", 12 * MIN), { leadType: "glm" })], board: [task(7, PILOT)] });
+    await runReap(flags({ nudge: true }), question.deps);
+    const running = nudgePoll(NOW, undefined, { tail: CLEAN_WORKING });
+    await running.run();
+    for (const calls of [limit.f.calls, members.calls, question.calls, running.f.calls]) {
+      expect(calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+    }
+  });
+
+  test("never types over text the operator is typing (unsent input box) or a running turn", async () => {
+    const typed = nudgePoll(NOW, undefined, { tail: IDLE_WITH_TYPED_TEXT });
+    await typed.run();
+    expect(typed.f.calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+    expect(typed.f.lines.some((l) => l.includes("holds unsent text"))).toBe(true);
+  });
+
+  test("at most one nudge per studio per 15m", async () => {
+    const first = nudgePoll(at(0));
+    await first.run();
+    expect(first.f.calls).toContain(`nudge:${PILOT}:7`);
+    const soon = nudgePoll(at(5), first.f.saved()!);
+    await soon.run();
+    expect(soon.f.calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+    const later = nudgePoll(at(15), soon.f.saved()!);
+    await later.run();
+    expect(later.f.calls).toContain(`nudge:${PILOT}:7`);
+  });
+
+  test("at most 3 nudges per task per hour: the 4th is held and its STALL line says nudge budget spent", async () => {
+    let state: ReapState | undefined;
+    for (const m of [0, 15, 30]) {
+      const p = nudgePoll(at(m), state);
+      await p.run();
+      expect(p.f.calls).toContain(`nudge:${PILOT}:7`);
+      state = p.f.saved()!;
+    }
+    const fourth = nudgePoll(at(45), state);
+    await fourth.run();
+    expect(fourth.f.calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+    expect(fourth.f.lines.some((l) => l.startsWith(`STALL ${PILOT}`) && l.includes("nudge budget spent"))).toBe(true);
+    // The first nudge (minute 0) leaves the hour at minute 60.
+    const after = nudgePoll(at(61), fourth.f.saved()!);
+    await after.run();
+    expect(after.f.calls).toContain(`nudge:${PILOT}:7`);
+  });
+
+  test("the budget is per task: a spent task does not block another open task on the same studio", async () => {
+    const spent = [at(-1), at(-2), at(-3)].map(iso);
+    const state = { ...emptyReapState(), taskNudges: { [`${REPO}#7`]: spent } };
+    const p = nudgePoll(NOW, state, { tasks: [task(7, PILOT), task(8, PILOT)] });
+    await p.run();
+    expect(p.f.calls).toContain(`nudge:${PILOT}:8`);
+    expect(p.f.calls).not.toContain(`nudge:${PILOT}:7`);
+  });
+
+  test("a wake the Worker refuses is logged and still spends the budget", async () => {
+    const p = nudgePoll(NOW, undefined, { nudge: () => ({ woke: false, reason: "studio is stopped" }) });
+    await p.run();
+    expect(p.f.lines.some((l) => l.startsWith(`NUDGE FAILED ${PILOT}`) && l.includes("studio is stopped"))).toBe(true);
+    expect(p.f.saved()!.taskNudges[`${REPO}#7`]).toHaveLength(1);
+    expect(p.f.saved()!.nudgedAt[PILOT]).toBeDefined();
+  });
+
+  test("a wake that throws is logged and the poll still finishes", async () => {
+    const p = nudgePoll(NOW, undefined, { nudge: () => new Error("network down") });
+    expect(await p.run()).toEqual({ exitCode: 0 });
+    expect(p.f.lines.some((l) => l.startsWith(`NUDGE FAILED ${PILOT}`) && l.includes("network down"))).toBe(true);
+  });
+
+  test("a lock refresh that fails before a nudge stops the run: no wake sent", async () => {
+    const p = nudgePoll(NOW);
+    const deps = { ...p.f.deps, heartbeat: async () => { throw new Error("lock lost"); } };
+    expect(await runReap(flags({ nudge: true }), deps)).toEqual({ exitCode: 1 });
+    expect(p.f.calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+  });
+
+  test("state: nudge records for studios no longer in the registry are dropped; records older than an hour too", async () => {
+    const GONE = "acmeclient--retired";
+    const old = iso(at(-61));
+    const recent = iso(at(-5));
+    const state: ReapState = {
+      ...emptyReapState(),
+      nudgedAt: { [PILOT]: recent, [GONE]: recent },
+      taskNudges: { [`${REPO}#7`]: [old, recent], [`${REPO}#9`]: [old] },
+    };
+    // Cooling down (5m ago), so this poll wakes nothing: only the pruning is under test.
+    const p = nudgePoll(NOW, state);
+    await p.run();
+    const saved = p.f.saved()!;
+    expect(saved.nudgedAt).toEqual({ [PILOT]: recent });
+    expect(saved.taskNudges).toEqual({ [`${REPO}#7`]: [recent] });
+  });
+});
+
+describe("fleet reap --nudge flags (issue #1098)", () => {
+  test("no flag: nudge off, the 5m floor still reported", () => {
+    expect(parseCliArgs(["reap"])).toMatchObject({ cmd: "reap", nudge: false });
+  });
+  test("--nudge alone turns it on at the 5m default", () => {
+    expect(parseCliArgs(["reap", "--nudge"])).toMatchObject({ cmd: "reap", nudge: true, nudgeAfterMs: 5 * MIN });
+  });
+  test("--nudge-after takes a duration", () => {
+    expect(parseCliArgs(["reap", "--nudge", "--nudge-after", "10m"])).toMatchObject({ cmd: "reap", nudgeAfterMs: 10 * MIN });
+    expect(parseCliArgs(["reap", "--nudge", "--nudge-after=2h"])).toMatchObject({ cmd: "reap", nudgeAfterMs: 120 * MIN });
+  });
+  test("--nudge-after below 5m is refused, like --idle", () => {
+    expect(parseCliArgs(["reap", "--nudge", "--nudge-after", "1m"]).cmd).not.toBe("reap");
+  });
+  test("--nudge-after without --nudge is refused, not silently ignored", () => {
+    expect(parseCliArgs(["reap", "--nudge-after", "10m"]).cmd).not.toBe("reap");
+  });
+});
+
+describe("reap --nudge — review (#1103): a working task, read fresh, budget per repo, saved before the wake", () => {
+  test("only a working task is nudged: input_required, submitted and a drifted (no state) task are held", async () => {
+    for (const state of ["input_required", "submitted", null] as const) {
+      const p = nudgePoll(NOW, undefined, { tasks: [task(7, PILOT, state)] });
+      await p.run();
+      expect(p.f.calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+    }
+  });
+
+  test("a task that leaves working between the listing and the fresh read is skipped", async () => {
+    const p = nudgePoll(NOW, undefined, { fresh: [task(7, PILOT, "awaiting_merge")] });
+    await p.run();
+    expect(p.f.calls.some((c) => c.startsWith("nudge:"))).toBe(false);
+    expect(p.f.lines.some((l) => l.startsWith(`skip ${PILOT}: no working task`))).toBe(true);
+  });
+
+  test("the budget is repo-scoped: another repo's task #7 does not spend this repo's budget", async () => {
+    const spent = [at(-1), at(-2), at(-3)].map(iso);
+    const state = { ...emptyReapState(), taskNudges: { "other/repo#7": spent } };
+    const p = nudgePoll(NOW, state);
+    await p.run();
+    expect(p.f.calls).toContain(`nudge:${PILOT}:7`);
+  });
+
+  test("the budget is written before the wake, so a run killed after the wake cannot wake the same task again", async () => {
+    let savedAtWake: ReapState | null = null;
+    const p = nudgePoll(NOW, undefined, {
+      nudge: () => {
+        savedAtWake = p.f.saved() ?? null;
+        return { woke: true };
+      },
+    });
+    await p.run();
+    expect(savedAtWake).not.toBeNull();
+    expect(savedAtWake!.taskNudges[`${REPO}#7`]).toHaveLength(1);
+  });
+
+  test("dry-run honors --nudge-after: an OSS lead idle under it is not listed as would-nudge", async () => {
+    const f = fake({ studios: [studio(PILOT, activity("idle", 12 * MIN), { leadType: "glm" })], board: [task(7, PILOT)] });
+    await runReap(flags({ apply: false, nudge: true, nudgeAfterMs: 15 * MIN }), f.deps);
+    expect(f.lines.some((l) => l.startsWith("would nudge"))).toBe(false);
   });
 });

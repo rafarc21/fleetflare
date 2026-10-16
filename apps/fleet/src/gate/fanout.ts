@@ -2,7 +2,7 @@
 // Workflow/DO bindings — this file is what bun test can load, so
 // workflow.ts (which imports cloudflare:workers) stays a thin driver over
 // the decisions made here.
-import { MAX_LEGS_PER_PR, type GateLeg } from "./config";
+import { DEFAULT_GATE_IMAGE, legTimeoutMin, MAX_LEGS_PER_PR, type GateLeg } from "./config";
 import { bunLaneCwd } from "./bun-lane";
 import type { LegResult, Verdict } from "./verdict";
 
@@ -72,6 +72,10 @@ export interface PlanInput {
   /** Absent means the block has no vitest lane: zero vitest legs. */
   vitestCmd?: string; vitestShards: number;
   baselineKeys: string[];
+  /** The block's image key, carried onto every leg of this plan. Absent: the default image. */
+  image?: string;
+  /** Renames a planned leg (the head's `@head` names). Absent: the name is kept. */
+  legName?: (name: string) => string;
 }
 
 export interface PlannedLeg {
@@ -79,6 +83,8 @@ export interface PlannedLeg {
   resultKey: string; baselineKeys: string[];
   /** The leg's own deadline in minutes. Absent on lanes and default legs: the run applies the default. */
   timeoutMin?: number;
+  /** The image key of the block that planned this leg (#1066). Absent: the default image. */
+  image?: string;
 }
 
 /** `{i}`/`{n}` are 1-based, matching vitest's own --shard=i/n. Every occurrence
@@ -115,14 +121,19 @@ export function bunLegs(shards: string[][], root: string): { leg: string; legCmd
 export function planLegs(input: PlanInput): PlannedLeg[] {
   const {
     owner, repo, pr, runId, headSha, baseSha, install, legs, bunShards, bunLaneRoot, vitestCmd, vitestShards, baselineKeys,
+    image, legName = (name: string) => name,
   } = input;
   const keyFor = (leg: string) => `gate/${owner}/${repo}/runs/${pr}/${runId}/shard-${leg}.json`;
   const fixedLegs = 1 + legs.length + bunShards.length; // merge-tree + block legs + bun shards
   const shards = Math.max(1, Math.min(vitestShards, MAX_LEGS_PER_PR - fixedLegs));
-  const leg = (name: string, commit: string, installCmd: string, legCmd: string, keys: string[], timeoutMin?: number): PlannedLeg => ({
-    leg: name, commit, installCmd, legCmd, resultKey: keyFor(name), baselineKeys: keys,
-    ...(timeoutMin === undefined ? {} : { timeoutMin }),
-  });
+  const leg = (base: string, commit: string, installCmd: string, legCmd: string, keys: string[], timeoutMin?: number): PlannedLeg => {
+    const name = legName(base);
+    return {
+      leg: name, commit, installCmd, legCmd, resultKey: keyFor(name), baselineKeys: keys,
+      ...(timeoutMin === undefined ? {} : { timeoutMin }),
+      ...(image === undefined ? {} : { image }),
+    };
+  };
   // Every leg commits to the base..head range: the container resolves the merge
   // and tests that result, so a PR branched before main moved is judged on the
   // merged tree, not its own stale branch.
@@ -134,6 +145,36 @@ export function planLegs(input: PlanInput): PlannedLeg[] {
     ...(vitestCmd === undefined ? [] : vitestLegs(vitestCmd, shards))
       .map((v) => leg(v.leg, range, install, v.legCmd, baselineKeys)),
   ];
+}
+
+/** A head leg's name (#1091 review): `<leg>@head`, shards `<lane>@head-<n>`.
+ *  merge-tree keeps its name: the container keys off `leg === "merge-tree"`. */
+export function headLegName(name: string): string {
+  if (name === "merge-tree") return name;
+  const shard = /^(vitest|bun)-(\d+)$/.exec(name);
+  return shard ? `${shard[1]}@head-${shard[2]}` : `${name}@head`;
+}
+
+/** A leg's runnable content: the install, the command, the deadline and the
+ *  image it runs on (#1091 review round 2). Two legs with the same content run
+ *  once; a leg that differs in any of them runs again as its head copy. */
+function legContent(l: PlannedLeg): string {
+  return JSON.stringify([l.installCmd, l.legCmd, legTimeoutMin(l.timeoutMin), l.image ?? DEFAULT_GATE_IMAGE]);
+}
+
+/** The legs of a run whose PR changes fleet.json (#1091 review). Every base
+ *  leg runs in full (integrity). Each head leg whose content differs from every
+ *  base leg runs too, named `<leg>@head`. Identical legs run once, under the base
+ *  name. A null side has no legs: no base config, or no head config to union.
+ *  merge-tree is one leg whatever the configs say: the base's copy runs, and
+ *  the head's is added only when there is no base to carry it. */
+export function planUnionLegs(base: PlanInput | null, head: PlanInput | null): PlannedLeg[] {
+  const baseLegs = base === null ? [] : planLegs(base);
+  if (head === null) return baseLegs;
+  const seen = new Set(baseLegs.map(legContent));
+  const headLegs = planLegs({ ...head, legName: headLegName })
+    .filter((l) => !seen.has(legContent(l)) && !(l.leg === "merge-tree" && baseLegs.length > 0));
+  return [...baseLegs, ...headLegs];
 }
 
 const LEG_STATES = new Set<LegResult["state"]>(["success", "failure", "error"]);

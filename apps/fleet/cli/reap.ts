@@ -45,7 +45,7 @@
 // dies with an unconfirmed error (issue #62).
 import type { StudioStatus } from "../src/studio/types";
 import type { Activity } from "../src/studio/activity";
-import { readActivityFrame, agentPanelRows } from "../src/studio/activity";
+import { readActivityFrame, agentPanelRows, BACKGROUND_COUNTER } from "../src/studio/activity";
 import type { BoardTask } from "../src/board/types";
 import { studioLabel, LIVE_TASK_STATES } from "../src/board/types";
 import { footerAtBottom, aboveAgentPanel, RULE_LINE } from "../src/studio/failover";
@@ -66,6 +66,13 @@ const REAP_CAPTURE_MAX_AGE_MS = 120_000;
 export const REAP_LIVE_READ_MAX_MS = 30_000;
 /** This many live-read refusals in a row back a studio off (review item 6). */
 const REAP_REFUSALS_BEFORE_BACKOFF = 3;
+/** `--nudge` (issue #1098): an OSS lead idle this long with an open task is woken. */
+export const DEFAULT_NUDGE_AFTER_MS = 5 * 60_000;
+/** One nudge per studio per this window. */
+export const NUDGE_EVERY_MS = 15 * 60_000;
+/** At most this many nudges per task inside NUDGE_WINDOW_MS; then the STALL line says so. */
+export const NUDGE_CAP_PER_TASK = 3;
+export const NUDGE_WINDOW_MS = 60 * 60_000;
 
 export interface ReapFlags {
   /** false = dry-run (the default): report only. */
@@ -73,6 +80,10 @@ export interface ReapFlags {
   idleMs: number;
   /** owner/name. Only this repo's studios are ever read for reap or touched. */
   repo: string;
+  /** `--nudge` (issue #1098), opt-in. Off: reap is exactly what it was. */
+  nudge?: boolean;
+  /** `--nudge-after`: the idle floor before a nudge. Default DEFAULT_NUDGE_AFTER_MS. */
+  nudgeAfterMs?: number;
 }
 
 /** Local memory between polls. Everything in it is pruned to the registry. */
@@ -85,11 +96,18 @@ export interface ReapState {
   boardRows: Record<string, number>;
   /** studio id -> live-read refusals in a row while a candidate. */
   refusals: Record<string, number>;
+  /** studio id -> ISO instant of its last nudge (NUDGE_EVERY_MS). */
+  nudgedAt: Record<string, string>;
+  /** task number -> ISO instants of its nudges, pruned to NUDGE_WINDOW_MS. */
+  taskNudges: Record<string, string[]>;
 }
 
 export function emptyReapState(): ReapState {
-  return { backoffUntil: {}, stallAlarmAt: {}, boardRows: {}, refusals: {} };
+  return { backoffUntil: {}, stallAlarmAt: {}, boardRows: {}, refusals: {}, nudgedAt: {}, taskNudges: {} };
 }
+
+/** What the wake reported. A refusal is logged, never thrown. */
+export type NudgeOutcome = { woke: true } | { woke: false; reason: string };
 
 /** GET /studio/:id/inspect, reduced to what reap reads. `capturedAt` is epoch
  *  seconds, the container's clock. `activity` is the DO's own (not the D1 mirror). */
@@ -122,6 +140,9 @@ export interface ReapDeps {
   inspect: (id: string) => Promise<ReapInspect>;
   rescue: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   destroy: (id: string) => Promise<ReapDestroyResult>;
+  /** `--nudge`: wake the studio on one of its open tasks (issue #1098) — the
+   *  same call `fleet task assign` makes. Throws on any failure. */
+  nudge?: (studioId: string, taskNumber: number) => Promise<NudgeOutcome>;
   /** Throws when the state cannot be trusted (corrupt, wrong shape): reap then
    *  treats the board floor as unknown and reaps nothing this poll. */
   loadState: () => Promise<ReapState>;
@@ -219,19 +240,34 @@ function liveReadRefusal(read: ReapInspect, idleMs: number, now: Date): string |
 /** Words in claude's chrome that mean something still runs under the lead. */
 const RUNNING_WORDS = /running|background|shells?\b|monitors?\b|tasks?\b|agents? working/i;
 
+/** Issue #1110: chrome hints that are never work. Dropped from the footer
+ *  before any check runs, so `ctrl+t to hide tasks` (a todo list is on
+ *  screen) and `PR #4343` (an open PR) no longer block a nudge or a reap. */
+const FOOTER_CHROME_HINT = [
+  /^⏵⏵ bypass permissions on \(shift\+tab to cycle\)$/,
+  /^ctrl\+t to (?:hide|show) tasks$/i,
+  /^← for agents$/,
+  /^PR #\d+$/,
+];
+
 /**
  * Review F2/F3: the chrome around the input box. The input box must hold ONLY
  * an empty `❯` row (typed-but-unsent text is an operator mid-sentence). The
- * footer must carry no counter at all (`7 shells`, `2 monitors`, anything
- * with a digit — an unknown counter is unknown, so skip), and neither the
- * footer nor the last status row may mention running/background work.
+ * footer is read by its `·` segments (#1110): known chrome hints drop out,
+ * then the footer is refused on `esc to interrupt`, a background counter
+ * (activity.ts BACKGROUND_COUNTER: `7 shells`, `2 monitors`), `still running`,
+ * or any other segment carrying a digit (an unknown counter is unknown, so
+ * skip). The last status row may not mention running/background work.
  */
-function chromeRefusal(tail: string): string | null {
+export function chromeRefusal(tail: string): string | null {
   const lines = tail.replace(/\s+$/, "").split("\n");
   const footer = footerAtBottom(lines);
   if (footer < 0) return "live pane footer not found";
-  if (/\d/.test(lines[footer]) || RUNNING_WORDS.test(lines[footer])) {
-    return `live pane footer carries a counter: ${lines[footer].trim()}`;
+  for (const seg of lines[footer].split("·").map((x) => x.trim())) {
+    if (seg === "" || FOOTER_CHROME_HINT.some((re) => re.test(seg))) continue;
+    if (/esc to interrupt/i.test(seg) || BACKGROUND_COUNTER.test(seg) || /still running/i.test(seg) || /\d/.test(seg)) {
+      return `live pane footer carries running work: ${lines[footer].trim()}`;
+    }
   }
   const head = aboveAgentPanel(lines.join("\n")).split("\n");
   const status = [...head].reverse().find((l) => /^\s*✻ /.test(l));
@@ -244,6 +280,46 @@ function chromeRefusal(tail: string): string | null {
   if (i < 0) return "live pane input box not found";
   const box = lines.slice(i + 1, bottom).filter((l) => l.trim() !== "");
   if (box.length !== 1 || !/^\s*❯\s*$/.test(box[0])) return "live pane input box holds unsent text";
+  return null;
+}
+
+/** An OSS-led lead: any lead type but claude. An absent leadType is claude
+ *  (StudioStatus.leadType's own doc comment), so it is never nudged. */
+function isOssLead(s: StudioStatus): boolean {
+  return s.leadType !== undefined && s.leadType !== "claude";
+}
+
+/** A nudge budget key: the same task number in two repos is two tasks. */
+function nudgeKey(repo: string, taskNumber: number): string {
+  return `${repo}#${taskNumber}`;
+}
+
+/** Nudges this task received inside the last hour. */
+function nudgesInWindow(state: ReapState, key: string, now: Date): number {
+  return (state.taskNudges[key] ?? []).filter((iso) => now.getTime() - Date.parse(iso) < NUDGE_WINDOW_MS).length;
+}
+
+/** Which task a nudge goes to, or why none does. Only a `working` task is
+ *  nudged (review #1103): input_required, submitted, awaiting_merge and a
+ *  drifted task are held. "cooling" while the studio's last nudge is under
+ *  NUDGE_EVERY_MS old; "none" when no task is working; "spent" when every
+ *  working task has used its hourly cap. The lowest task number wins. */
+type NudgePick = { task: BoardTask } | "cooling" | "none" | "spent";
+function pickNudgeTask(state: ReapState, studioId: string, repo: string, live: BoardTask[], now: Date): NudgePick {
+  const last = Date.parse(state.nudgedAt[studioId] ?? "");
+  if (Number.isFinite(last) && now.getTime() - last < NUDGE_EVERY_MS) return "cooling";
+  const working = live.filter((t) => t.state === "working").sort((a, b) => a.number - b.number);
+  if (working.length === 0) return "none";
+  const task = working.find((t) => nudgesInWindow(state, nudgeKey(repo, t.number), now) < NUDGE_CAP_PER_TASK);
+  return task ? { task } : "spent";
+}
+
+/** Why --nudge must not wake this lead, judged on the listing (the live read
+ *  decides the rest at apply time), or null. A limit modal and a member alert
+ *  are never nudged; a lead not idle on the mirror is not a candidate at all. */
+function nudgeHold(s: StudioStatus): string | null {
+  if (s.rateLimited) return "limit modal up";
+  if (s.observed?.memberAlerts?.length) return "member alert present";
   return null;
 }
 
@@ -270,8 +346,14 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
   const repo = flags.repo.toLowerCase();
   // Registry-derived: forget every studio the registry no longer has.
   const known = new Set(studios.map((s) => s.id));
-  for (const map of [state.backoffUntil, state.stallAlarmAt, state.refusals]) {
+  for (const map of [state.backoffUntil, state.stallAlarmAt, state.refusals, state.nudgedAt]) {
     for (const id of Object.keys(map)) if (!known.has(id)) delete map[id];
+  }
+  // Nudge records age out of their hourly window; a task with none left is forgotten.
+  for (const [task, times] of Object.entries(state.taskNudges)) {
+    const kept = times.filter((iso) => now.getTime() - Date.parse(iso) < NUDGE_WINDOW_MS);
+    if (kept.length > 0) state.taskNudges[task] = kept;
+    else delete state.taskNudges[task];
   }
 
   const running = studios.filter((s) => s.state === "running" && inScope(s, repo));
@@ -305,6 +387,7 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
   if (floorUnknown) return exit(1);
 
   const candidates: { s: StudioStatus; idleMs: number }[] = [];
+  const nudges: { s: StudioStatus; idleMs: number; task: BoardTask }[] = [];
   for (const s of running) {
     const idleMs = mirroredIdleMs(s, now);
     const live = liveTasksOf(s.id, board);
@@ -315,14 +398,22 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
     }
     if (live.length > 0) {
       const tasks = live.map((t) => `#${t.number}`).join(", ");
+      // --nudge (issue #1098): only an OSS lead is woken; a claude lead keeps the STALL line alone.
+      const pick: NudgePick | null = flags.nudge && isOssLead(s) ? pickNudgeTask(state, s.id, repo, live, now) : null;
       if (idleMs >= STALL_AFTER_MS) {
         const last = Date.parse(state.stallAlarmAt[s.id] ?? "");
         if (!Number.isFinite(last) || now.getTime() - last >= STALL_ALARM_EVERY_MS) {
-          deps.log(`STALL ${s.id}: ${idleWord(idleMs)} with open task ${tasks} — lead finished and waits, or is stuck`);
+          const spent = pick === "spent" ? " — nudge budget spent" : "";
+          deps.log(`STALL ${s.id}: ${idleWord(idleMs)} with open task ${tasks} — lead finished and waits, or is stuck${spent}`);
           state.stallAlarmAt[s.id] = now.toISOString();
         }
       } else {
         delete state.stallAlarmAt[s.id];
+      }
+      if (pick !== null && typeof pick === "object" && idleMs >= (flags.nudgeAfterMs ?? DEFAULT_NUDGE_AFTER_MS)) {
+        const held = nudgeHold(s);
+        if (held === null) nudges.push({ s, idleMs, task: pick.task });
+        else deps.log(`skip ${s.id}: nudge held — ${held}`);
       }
       deps.log(`skip ${s.id}: ${idleWord(idleMs)}, open task ${tasks}`);
       continue;
@@ -347,6 +438,9 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
   for (const id of Object.keys(state.refusals)) if (!candidateIds.has(id)) delete state.refusals[id];
 
   if (!flags.apply) {
+    for (const { s, idleMs, task } of nudges) {
+      deps.log(`would nudge ${s.id}: task #${task.number}, ${idleWord(idleMs)}, ${s.leadType} lead (live read on --apply)`);
+    }
     for (const { s, idleMs } of candidates) {
       deps.log(`would reap ${s.id}: ${idleWord(idleMs)}, no open task (rescue, re-check live pane and board, then destroy)`);
     }
@@ -367,12 +461,12 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
   };
   /** One live read, judged. Review F1: its own duration counts — a read that
    *  answers late leaves an unbounded gap before whatever comes next. */
-  const liveRead = async (id: string): Promise<string | null> => {
+  const liveRead = async (id: string, idleMs = flags.idleMs): Promise<string | null> => {
     const askedAt = deps.now().getTime();
     const read = await deps.inspect(id);
     const answeredAt = deps.now();
     if (answeredAt.getTime() - askedAt > REAP_LIVE_READ_MAX_MS) return "live read answered too late";
-    return liveReadRefusal(read, flags.idleMs, answeredAt);
+    return liveReadRefusal(read, idleMs, answeredAt);
   };
   for (const { s, idleMs } of candidates) {
     try {
@@ -422,6 +516,41 @@ export async function runReap(flags: ReapFlags, deps: ReapDeps): Promise<{ exitC
       deps.log(`REAPED ${s.id}: ${idleWord(idleMs)}, no open task, rescued, ${how}`);
     } catch (err) {
       backOff(s.id, `error: ${errText(err)}`);
+    }
+  }
+  // --nudge (issue #1098): one wake per eligible lead, and only after a live
+  // read says it is idle right now (an operator's unsent text or a running
+  // turn holds it). The budget is spent on the attempt, so a refused or
+  // thrown wake cannot turn into a retry storm.
+  for (const { s, idleMs } of nudges) {
+    try {
+      await deps.heartbeat?.();
+    } catch (err) {
+      deps.log(`fleet reap: run lock refresh failed (${errText(err)}) — stopping before nudge ${s.id}`);
+      return exit(1);
+    }
+    try {
+      // Review #1103: a fresh per-studio read, so a task that left `working`
+      // since the listing is never woken.
+      const fresh = await deps.studioTasks(s.id);
+      const pick = pickNudgeTask(state, s.id, repo, liveTasksOf(s.id, fresh), deps.now());
+      if (typeof pick !== "object") { deps.log(`skip ${s.id}: no working task on fresh read — ${pick}`); continue; }
+      const { task } = pick;
+      const held = await liveRead(s.id, flags.nudgeAfterMs ?? DEFAULT_NUDGE_AFTER_MS);
+      if (held) { deps.log(`skip ${s.id}: nudge held — ${held}`); continue; }
+      if (!deps.nudge) { deps.log(`skip ${s.id}: nudge unavailable`); continue; }
+      const stamp = deps.now().toISOString();
+      const key = nudgeKey(repo, task.number);
+      state.nudgedAt[s.id] = stamp;
+      state.taskNudges[key] = [...(state.taskNudges[key] ?? []), stamp];
+      // Review #1103: the budget is on disk BEFORE the wake, so a run killed
+      // after the wake cannot wake the same task again.
+      await deps.saveState(state);
+      const out = await deps.nudge(s.id, task.number);
+      if (out.woke) deps.log(`NUDGED ${s.id}: task #${task.number}, ${idleWord(idleMs)}, woke on its open task`);
+      else deps.log(`NUDGE FAILED ${s.id}: task #${task.number} — ${out.reason}`);
+    } catch (err) {
+      deps.log(`NUDGE FAILED ${s.id}: ${errText(err)}`);
     }
   }
   return exit(0);
