@@ -2,7 +2,7 @@ import { describe, it, expect } from "bun:test";
 import {
   parseGateRunnerRepos, isGateRunnerRepo, parseGateBlock, gateMapEntry, matchesPathRules,
   DEFAULT_VITEST_SHARDS, DEFAULT_BUN_SHARDS, MAX_LEGS_PER_PR, legTimeoutMin,
-  GATE_IMAGES,
+  GATE_IMAGES, changesFleetJson, gateDecision,
 } from "../../src/gate/config";
 import FLEET_JSON from "../../../../fleet.json";
 
@@ -273,5 +273,33 @@ describe("parseGateBlock: per-repo image key", () => {
   it("null on a non-string image and on the empty string", () => {
     expect(parseGateBlock({ ...BLOCK, image: 7 })).toBeNull();
     expect(parseGateBlock({ ...BLOCK, image: "" })).toBeNull();
+  });
+});
+
+// #1091 (refs #715): a PR that changes the repo's own fleet.json is gated in
+// full, on the config it changes to. A fleet.json-only diff must never skip.
+describe("changesFleetJson (#1091)", () => {
+  it("true when the repo-root fleet.json is among the changed files", () => {
+    expect(changesFleetJson(["fleet.json"])).toBe(true);
+    expect(changesFleetJson(["README.md", "fleet.json"])).toBe(true);
+  });
+  it("false for a nested fleet.json or a diff without one", () => {
+    expect(changesFleetJson(["apps/example/fleet.json"])).toBe(false);
+    expect(changesFleetJson(["README.md"])).toBe(false);
+    expect(changesFleetJson([])).toBe(false);
+  });
+});
+
+describe("gateDecision (#1091)", () => {
+  const rules = ["apps/fleet/**"];
+  it("a fleet.json-only diff gates even when no pathRule matches", () => {
+    expect(gateDecision(["fleet.json"], rules)).toBe("gate");
+  });
+  it("a diff matching a pathRule gates", () => {
+    expect(gateDecision(["apps/fleet/src/index.ts"], rules)).toBe("gate");
+  });
+  it("a diff with neither a pathRule match nor fleet.json skips", () => {
+    expect(gateDecision(["README.md"], rules)).toBe("skip");
+    expect(gateDecision([], rules)).toBe("skip");
   });
 });

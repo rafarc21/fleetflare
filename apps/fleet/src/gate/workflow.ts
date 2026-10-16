@@ -20,7 +20,7 @@ import {
 import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
-import { matchesPathRules } from "./config";
+import { changesFleetJson, gateDecision } from "./config";
 import { fleetJsonReader } from "./fleet-json";
 import { outcomeLegs, pendingStatusArgs, planLegs, verdictToStatusArgs, type OutcomeLeg, type PlannedLeg } from "./fanout";
 import { loadGateConfig } from "./load-config";
@@ -65,10 +65,13 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
     });
 
     // The config is read at the PR's BASE sha (never the head), so a PR cannot
-    // edit its own gate. The fleet repo's `gates` map is read at HEAD.
+    // edit its own gate. The fleet repo's `gates` map is read at HEAD. A PR
+    // that changes fleet.json is the exception (#1091): it is gated on the
+    // head's config, the one it introduces, so a bad edit fails its own PR.
+    const configSha = changesFleetJson(resolved.changedFiles) ? resolved.headSha : resolved.baseSha;
     const readFleetJson = fleetJsonReader(mintToken);
     const config = await step.do("load-config", async () =>
-      loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, baseSha: resolved.baseSha }, readFleetJson));
+      loadGateConfig({ repo, fleetRepo: this.env.AGENT_REPO, configSha }, readFleetJson));
 
     if (config === null) {
       // No gate config for this repo: not a repo this gate runs for. Post
@@ -76,7 +79,7 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
       return { skipped: "no gate config for this repo", statusPostFailed: false };
     }
 
-    if (!matchesPathRules(resolved.changedFiles, config.pathRules)) {
+    if (gateDecision(resolved.changedFiles, config.pathRules) === "skip") {
       // Nothing gated changed. Post success so the required context is not
       // left pending forever. (A guess: localci.sh's own skip path is the model.)
       const statusPostFailed = await step.do("post-skip-status", async () =>

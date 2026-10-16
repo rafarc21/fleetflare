@@ -7,7 +7,8 @@
 //      wins, and a malformed entry is a skip, never a fall-through.
 //   2. Else the PR repo's OWN root fleet.json `gate` block, read at the PR's
 //      BASE sha. Never the head or the merge commit: a PR must not be able to
-//      edit its own gate.
+//      edit its own gate. Exception (#1091): a PR that changes fleet.json is
+//      gated on the head's block, the config it introduces.
 //   3. Missing or malformed → null → the gate skips, same as today.
 import { gateMapEntry, parseGateBlock, type GateConfig } from "./config";
 
@@ -20,8 +21,9 @@ export interface LoadGateConfigInput {
   repo: string;
   /** The repo fleet.json's `gates` map lives in (env.AGENT_REPO). */
   fleetRepo: string;
-  /** The PR base branch's sha (resolve-pr's baseSha). Never the head. */
-  baseSha: string;
+  /** The sha the PR's own fleet.json is read at: the base sha (resolve-pr's
+   *  baseSha), or the head when the PR changes fleet.json (#1091). */
+  configSha: string;
 }
 
 export async function loadGateConfig(
@@ -32,7 +34,7 @@ export async function loadGateConfig(
   if (fleet === null) return null;
   const entry = gateMapEntry(fleet, input.repo);
   if (entry !== undefined) return parseGateBlock(entry);
-  const own = await readFleetJson(input.repo, input.baseSha);
+  const own = await readFleetJson(input.repo, input.configSha);
   const block = typeof own === "object" && own !== null ? (own as Record<string, unknown>).gate : undefined;
   return parseGateBlock(block);
 }

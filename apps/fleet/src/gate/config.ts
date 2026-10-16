@@ -161,3 +161,17 @@ export function matchesPathRules(changedFiles: string[], pathRules: string[]): b
       return file === rule;
     }));
 }
+
+/** The repo-root gate config file (#1091). */
+export const FLEET_JSON_PATH = "fleet.json";
+
+/** True when the diff changes the repo's own fleet.json. Only the root file counts. */
+export function changesFleetJson(changedFiles: string[]): boolean {
+  return changedFiles.includes(FLEET_JSON_PATH);
+}
+
+/** Whether a PR's diff gates the run (#1091). A fleet.json change always gates,
+ *  so a config edit is validated by its own PR, not the next unrelated one. */
+export function gateDecision(changedFiles: string[], pathRules: string[]): "gate" | "skip" {
+  return changesFleetJson(changedFiles) || matchesPathRules(changedFiles, pathRules) ? "gate" : "skip";
+}

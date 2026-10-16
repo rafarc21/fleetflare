@@ -20,7 +20,7 @@ function reader(files: Record<string, Record<string, unknown>>) {
   return { read, calls };
 }
 
-const input = { repo: PR_REPO, fleetRepo: FLEET, baseSha: BASE };
+const input = { repo: PR_REPO, fleetRepo: FLEET, configSha: BASE };
 
 describe("loadGateConfig: lookup order", () => {
   it("the fleet repo's gates map entry wins, and the PR repo is never read", async () => {
@@ -61,7 +61,7 @@ describe("loadGateConfig: lookup order", () => {
 
   it("the fleet repo with no map entry reads its own block at baseSha, not HEAD", async () => {
     const r = reader({ [`${FLEET}@HEAD`]: {}, [`${FLEET}@${BASE}`]: { gate: { ...BLOCK, vitestCmd: "fleet" } } });
-    const cfg = await loadGateConfig({ repo: FLEET, fleetRepo: FLEET, baseSha: BASE }, r.read);
+    const cfg = await loadGateConfig({ repo: FLEET, fleetRepo: FLEET, configSha: BASE }, r.read);
     expect(cfg?.vitestCmd).toBe("fleet");
     expect(r.calls.filter((c) => c.repo === FLEET).map((c) => c.ref)).toEqual(["HEAD", BASE]);
   });
