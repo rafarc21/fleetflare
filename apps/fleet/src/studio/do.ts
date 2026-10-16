@@ -6030,10 +6030,10 @@ export class StudioDO extends Sandbox<Env> {
    * the fleet route and no OAuth token survives. Every other exec passes
    * through unchanged. A glm studio with no spawn token is refused.
    */
-  private bringupExec(): RawExec {
+  private bringupExec(cfgLeadType?: "claude" | "glm"): RawExec {
     return withGlmBringup(
       async () => ({
-        leadType: resolveLeadType(await this.ctx.storage.get<StudioStatus>(STATUS_KEY)),
+        leadType: resolveLeadType(await this.ctx.storage.get<StudioStatus>(STATUS_KEY), cfgLeadType),
         spawnToken: (await this.ctx.storage.get<string>(SPAWN_TOKEN_KEY)) ?? null,
       }),
       glmAnthropicBaseUrl(this.env),
@@ -6059,13 +6059,13 @@ export class StudioDO extends Sandbox<Env> {
    * repo can belong to different owners running on different providers, and
    * one owner's credential must never be served for another's repo.
    */
-  private deps(): ProvisionDeps {
+  private deps(cfgLeadType?: "claude" | "glm"): ProvisionDeps {
     const mint = repoTokenMinter(this.env);
     // FLEET_OPS_REPO, resolved once (#330 round 4): memory and the house-rules
     // overlay both live in this one private repo (src/ops-repo.ts).
     const opsRepo = resolveOpsRepo(this.env);
     return {
-      sbExec: this.bringupExec(),
+      sbExec: this.bringupExec(cfgLeadType),
       recordStudio: async (status: StudioStatus) => recordStudio(this.env, await withObserved(this.ctx.storage, status)),
       now: () => new Date().toISOString(),
       fetchBlueprintFile: async (repo: string, path: string, ref: string) =>
@@ -7418,7 +7418,7 @@ export class StudioDO extends Sandbox<Env> {
     const status = await provisionWithStorage(
       // Issue #231: `this.ctx.storage` (real DO storage) also satisfies
       // SessionMarkStorage structurally, no cast — same as `observedStorage`.
-      this.deps(), this.ctx.storage, cfg, this.env.AGENT_REPO, via, this.ctx.storage, ctx, this.ctx.storage,
+      this.deps(cfg.leadType), this.ctx.storage, cfg, this.env.AGENT_REPO, via, this.ctx.storage, ctx, this.ctx.storage,
     );
     // Issue #221 fix round 2, Fix 4 — a fresh bring-up has no continuous
     // activity state for `since`/`anchored` to describe; clear both before

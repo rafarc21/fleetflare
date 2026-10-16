@@ -168,8 +168,9 @@ describe("relaunchBringup — failover relaunch adopts first (issue #116)", () =
     // (the glm rewrite lives in withGlmBringup). The exec-class bag is pinned
     // on that wrapper's own sbExec call, and deps()'s sbExec uses the same one.
     expect(line).toContain("relaunchBringup(this.bringupExec(), roleEnv, this.selfId())");
-    expect(src).toContain("sbExec: this.bringupExec(),");
-    const body = src.slice(src.indexOf("private bringupExec(): RawExec {"));
+    expect(src).toContain("sbExec: this.bringupExec(cfgLeadType),");
+    expect(src).toContain("this.deps(cfg.leadType)");
+    const body = src.slice(src.indexOf("private bringupExec("));
     const sbLine = body.split("\n").find((l) => l.includes("(cmd, env) => sbExec(this, cmd"));
     expect(sbLine).toContain("{ ...EXEC_CLASSES.provision, env }");
 
