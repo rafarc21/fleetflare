@@ -170,6 +170,29 @@ REAL("#117 — the studio session lives on `tmux -L fleet-studio`, never the def
     expect(env).not.toMatch(/^TMUX_PANE=/m);
   }, T);
 
+  test("a login pane shell that resets PATH (the gate image's /etc/profile) still finds the lead — $HOME/.profile restores it (#1058)", () => {
+    const b = fresh();
+    // The gate image's /etc/profile, played by a wrapper: tmux's bare
+    // new-session starts default-shell as a LOGIN shell ($0 = -sh), and
+    // Debian's /etc/profile resets PATH there. The wrapper resets PATH the
+    // same way, then hands off to a real login sh, so the studio (whose
+    // /etc/profile touches no PATH) reproduces the gate image deterministically.
+    const gateLoginSh = join(b.bin, "gate-login-sh");
+    writeFileSync(
+      gateLoginSh,
+      "#!/bin/sh\n" +
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n" +
+        "export PATH\n" +
+        "exec /bin/sh -l\n",
+      { mode: 0o755 },
+    );
+    b.env.SHELL = gateLoginSh;
+    expect(b.sh(`set -euo pipefail\n${SESSION()}`).code).toBe(0);
+    const probe = join(b.dir, "pane-claude-probe");
+    b.sh(`tmux -L ${STUDIO_TMUX_SOCKET} send-keys -t studio:claude -- ${JSON.stringify(`command -v claude > ${probe}`)} Enter`);
+    expect(b.waitFor(() => existsSync(probe) && readFileSync(probe, "utf8") === join(b.bin, "claude"))).toBe(true);
+  }, T);
+
   test("the Worker's withStudioTmux (the real function) reaches the lead's pane in the new layout", () => {
     const b = fresh();
     expect(b.sh(`set -euo pipefail\n${SESSION()}`).code).toBe(0);
