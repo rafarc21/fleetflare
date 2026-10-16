@@ -1063,6 +1063,59 @@ describe("handleFleetAnthropicCountTokens — board issue #284 MINOR 4(b)", () =
 // env.AI.run call now carries the AI Gateway option (unified billing/logs),
 // and LEAD_MODEL_POOL=on walks router.ts's pickModels order on a 429/3021,
 // instead of hardcoding GLM.
+// Lead-model routing (#1070): calls that hit the output cap (GLM_MAX_MAX_TOKENS,
+// translate.ts) must end as a clean `max_tokens` turn, never an error or a
+// hang. These pin the route-level path end to end; the translation units
+// live in test/bun/llm-translate-*.test.ts.
+describe("handleFleetAnthropicMessages — output cap ends cleanly (#1070)", () => {
+  it("a non-streaming reply cut at the cap (finish_reason length) reaches the client as stop_reason max_tokens, 200", async () => {
+    const { token, rows, e } = await setup({
+      choices: [{ message: { role: "assistant", content: "partial answer" }, finish_reason: "length" }],
+      usage: { prompt_tokens: 40, completion_tokens: 32000 },
+    });
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, max_tokens: 4000 } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const replyBody = (await r.json()) as { stop_reason: string; content: { text: string }[]; usage: { output_tokens: number } };
+    expect(replyBody.stop_reason).toBe("max_tokens");
+    expect(replyBody.content[0].text).toBe("partial answer");
+    // The reported output is clamped to what the client asked for, never the
+    // raw reasoning-inflated count.
+    expect(replyBody.usage.output_tokens).toBe(4000);
+  });
+
+  it("a streaming reply cut at the cap ends with message_delta stop_reason max_tokens and message_stop — no event: error", async () => {
+    const chunk = (c: unknown) => `data: ${JSON.stringify(c)}\n\n`;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          chunk({ choices: [{ delta: { content: "partial" } }] }) +
+          chunk({ choices: [{ delta: {}, finish_reason: "length" }], usage: { prompt_tokens: 40, completion_tokens: 32000 } }) +
+          "data: [DONE]\n\n",
+        ));
+        controller.close();
+      },
+    });
+    const { token, rows, e, run } = await setup();
+    (run as unknown as { mockImplementation: (fn: () => Promise<unknown>) => void }).mockImplementation(async () => upstream);
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, stream: true, max_tokens: 4000 } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    expect(text).not.toContain("event: error");
+    expect(text).toContain('"stop_reason":"max_tokens"');
+    expect(text).toContain("event: message_stop");
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 1, outputTokens: 4000 });
+  });
+
+  it("a client max_tokens above the model ceiling is sent upstream clamped to GLM_MAX_MAX_TOKENS (32000), never passed through", async () => {
+    const { token, rows, e, run } = await setup();
+    const r = await handleFleetAnthropicMessages(req({ token, body: { ...good, max_tokens: 64000 } }), e, ctx, rows);
+    expect(r.status).toBe(200);
+    const sent = (run.mock.calls[0] as unknown[])[1] as { max_tokens: number };
+    expect(sent.max_tokens).toBe(32000);
+  });
+});
+
 describe("model pool + gateway (spec 2026-10-13)", () => {
   // Incident fix (#717): a production account's "default" AI Gateway isn't
   // provisioned for unified billing — `ai.run(model, body, { gateway: { id:
@@ -1233,6 +1286,71 @@ describe("model pool + gateway (spec 2026-10-13)", () => {
     expect(seen.length).toBe(2);
     expect(seen[0]).not.toBe(seen[1]);
     expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
+  });
+
+  // Lead-model routing (#1070): a 504/529 used to spend LEAD_AI_MAX_RETRIES
+  // same-model retries (~235 s each on a 3046 timeout) before the overflow
+  // loop ever moved on. With another candidate left in the order, the first
+  // failure now moves straight to it; the same-model retry only runs on the
+  // LAST candidate, where no other model is left to move to.
+  it("pool on: a 504 (3046 timeout) on the first model moves to the next model after one attempt — no same-model retry (#1070)", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("AiError: 3046: Request timeout");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 1, attempts: 2, model: seen[1] });
+  });
+
+  it("pool on: a 529 (capacity) on the first model moves to the next model after one attempt — no same-model retry (#1070)", async () => {
+    const kimi = { ...POOL[1], smokePassed: true };
+    const testPool: readonly PoolModel[] = [POOL[0], kimi, POOL[2]];
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      if (seen.length === 1) throw new Error("AiError: capacity exceeded");
+      return { choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(200);
+    expect(ai.run).toHaveBeenCalledTimes(2);
+    expect(seen.filter((m) => m === seen[0])).toHaveLength(1);
+  });
+
+  it("pool on: a 504 on every model — each earlier candidate is tried once, only the LAST candidate gets the same-model retry (#1070)", async () => {
+    const testPool: readonly PoolModel[] = POOL.map((m) => ({ ...m, smokePassed: true }));
+    const seen: string[] = [];
+    const ai = { run: vi.fn(async (model: string) => {
+      seen.push(model);
+      throw new Error("AiError: 3046: Request timeout");
+    }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(504);
+    // 1 try on each non-last candidate, then the last candidate's own
+    // runAiWithRetry: 3 attempts (1 + LEAD_AI_MAX_RETRIES).
+    expect(ai.run).toHaveBeenCalledTimes(testPool.length - 1 + 3);
+    const last = seen[seen.length - 1];
+    expect(seen.filter((m) => m === last)).toHaveLength(3);
+    for (const m of new Set(seen.slice(0, -3))) expect(seen.filter((x) => x === m)).toHaveLength(1);
+    await ctx.drain();
+    expect((await usageRows())[0]).toMatchObject({ ok: 0, attempts: testPool.length - 1 + 3, model: last });
+  });
+
+  it("pool on with only one candidate: a 504 still gets the full same-model retry — nothing else to move to", async () => {
+    const testPool: readonly PoolModel[] = [POOL[0]];
+    const ai = { run: vi.fn(async () => { throw new Error("AiError: 3046: Request timeout"); }) };
+    const res = await callRoute({ ai, envOverrides: { LEAD_MODEL_POOL: "on" }, pool: testPool });
+    expect(res.status).toBe(504);
+    expect(ai.run).toHaveBeenCalledTimes(3);
   });
 
   // LEAD_MODEL_OVERFLOW=off (#768): each model has its own 20 rpm budget, so

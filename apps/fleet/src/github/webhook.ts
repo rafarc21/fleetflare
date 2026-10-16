@@ -27,6 +27,7 @@ import { makeTimeBudget, budgetExceeded, AUTO_CLOSE_BUDGET_MS, type TimeBudget }
 import { flagIsSet, markEpisode, clearEpisode } from "../state";
 import { taskAssignees, taskStates, SECURITY_LABEL, type BoardTaskState } from "../board/types";
 import { qualifiesForCommentWake, wakeOnComment } from "../board/comment-wake";
+import { flipRequestFromPullRequest, markAwaitingMerge } from "../board/pr-awaiting-merge";
 import { realWakeDeps } from "../board/wake-deps";
 
 const WATCHED = new Set(["refs/heads/staging", "refs/heads/main"]);
@@ -298,6 +299,28 @@ async function wakeTaskOnComment(env: Env, body: string): Promise<void> {
     if (!report.woke) console.error(`task comment wake (${studioId}) on #${task.number} — ${report.reason}`);
   } catch (err) {
     console.error("task comment wake threw", err);
+  }
+}
+
+/**
+ * Board issue #1071, item 1: a pull_request delivery that marks a PR ready for
+ * review flips every task it names with `refs #N` from working to
+ * awaiting_merge (src/board/pr-awaiting-merge.ts). The webhook path is the
+ * only place that sees the PR open, so it is the only place the flip can be
+ * automatic.
+ *
+ * TOTAL and swallow-all, same posture as wakeTaskOnComment: a malformed payload
+ * or a failed board write is logged and never thrown past this function.
+ */
+async function flipTasksOnPullRequest(env: Env, body: string): Promise<void> {
+  try {
+    const payload: unknown = JSON.parse(body);
+    if (payload === null || typeof payload !== "object") return;
+    const req = flipRequestFromPullRequest(payload as Parameters<typeof flipRequestFromPullRequest>[0]);
+    if (req === null) return;
+    await markAwaitingMerge(githubBoardApi(env), req.repo, req.refs);
+  } catch (err) {
+    console.error("pull_request awaiting_merge flip threw", err);
   }
 }
 
@@ -630,6 +653,9 @@ export async function handleGithubWebhook(
     // delivery budget is 10s, while a wake's own exec can take up to 30s, so
     // this must not block the response either.
     if (event === "issue_comment") ctx.waitUntil(wakeTaskOnComment(env, body));
+    // Board issue #1071, item 1: a PR marked ready flips the task it names to
+    // awaiting_merge. Deferred for the same reason as the comment wake above.
+    if (event === "pull_request") ctx.waitUntil(flipTasksOnPullRequest(env, body));
     return new Response("ok");
   }
 

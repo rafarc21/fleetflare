@@ -421,7 +421,7 @@ export type { DestroyOutcome };
  *  function's own doc comment below. This type keeps "confirmed no open
  *  task" and "lookup failed" as two DIFFERENT return shapes, on purpose. */
 export type OpenTaskChecker = (
-  studioId: string, workRepoSlug: string,
+  studioId: string, workRepoSlug: string, park?: boolean,
 ) => Promise<{ ok: true; hasOpenTask: boolean; tasks?: number[]; drifted?: number[] } | { ok: false; message: string }>;
 
 /**
@@ -458,7 +458,9 @@ export async function runDestroy(
   park = false,
 ): Promise<DestroyOutcome> {
   if (!force) {
-    const result = checkOpenTask ? await checkOpenTask(studioId, workRepoSlug) : { ok: false as const, message: "no open-task checker configured" };
+    // Issue #1071, item 2: `park` rides along so a parking destroy is not
+    // refused by input_required or awaiting_merge tasks.
+    const result = checkOpenTask ? await checkOpenTask(studioId, workRepoSlug, park) : { ok: false as const, message: "no open-task checker configured" };
     if (!result.ok) {
       return {
         ok: false, refused: true,
