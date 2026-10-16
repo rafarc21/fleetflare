@@ -254,9 +254,10 @@ RUN --mount=type=tmpfs,target=/tmp repro-seal begin \
 # apps/fleet itself (the Worker/orchestrator code) is deliberately NOT copied
 # into this image anywhere else -- copying just this one subdirectory, with
 # its own minimal package.json (pinned to the exact playwright-core version
-# apps/fleet's own root package.json/bun.lock already resolve to, so the
-# version the shim runs against in-container is never a moving target), stays
-# consistent with that rather than installing the whole workspace wholesale.
+# that package.json itself declares -- the pin's only source now that
+# apps/fleet's root manifest dropped its own copy, so the version the shim
+# runs against in-container is never a moving target), stays consistent
+# with that rather than installing the whole workspace wholesale.
 # `bun install --production` (no devDependencies to skip here, but the same
 # flag every other in-image install in this file implicitly gets by having no
 # devDependencies at all -- explicit here since this is the one package.json
