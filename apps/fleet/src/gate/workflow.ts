@@ -8,7 +8,7 @@
 //
 // Fan-out is one step per leg, and the step's return value is the leg's
 // result. GateRunnerDO answers /run-leg synchronously with the LegResult, so
-// the start-<leg> step is the whole leg. A red test is data (state "failure")
+// the start-<leg> step is the whole leg, and a red leg runs once more as retry-<leg>. A red test is data (state "failure")
 // and never throws. Any non-2xx from the DO is infra: the step throws, Workflows
 // retries it once, and a second failure becomes that leg's "error". Other legs
 // still finish either way.
@@ -21,9 +21,9 @@ import { repoTokenMinter } from "../github/auth";
 import { laneFilesFromTree, planBunShards } from "./bun-lane";
 import BUN_SHARD_TIMINGS from "./bun-shard-timings.json";
 import { matchesPathRules } from "./config";
-import { planLegs, verdictToStatusArgs, type PlannedLeg } from "./fanout";
+import { outcomeLegs, planLegs, verdictToStatusArgs, type OutcomeLeg, type PlannedLeg } from "./fanout";
 import { loadGateConfig, type FleetJsonReader } from "./load-config";
-import { legRequest, runLegStep } from "./leg-run";
+import { legRequest, runLegStep, type LegRunResult } from "./leg-run";
 import { aggregateVerdict, type LegResult, type Verdict } from "./verdict";
 
 export interface GateWorkflowParams { repo: string; pr: number }
@@ -33,7 +33,7 @@ const GATE_STATUS_CONTEXT = "gate/verdict";
 // planLegs at MAX_LEGS_PER_PR). vitestCmd's {i}/{n} renders as i/n per shard.
 
 export type GateRunOutcome =
-  | { state: "success" | "failure" | "error"; description?: string; statusPostFailed: boolean }
+  | { state: "success" | "failure" | "error"; description?: string; statusPostFailed: boolean; legs: OutcomeLeg[] }
   | { skipped: string; statusPostFailed: boolean };
 
 export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
@@ -122,16 +122,19 @@ export class GateWorkflow extends WorkflowEntrypoint<Env, GateWorkflowParams> {
 
     // Wrapped in a step so a Workflow replay never posts the status twice.
     const statusPostFailed = await step.do("post-verdict", async () =>
-      postWithRetry(mintToken, repo, resolved.headSha, verdictToStatusArgs(final)));
-    return { ...final, statusPostFailed };
+      postWithRetry(mintToken, repo, resolved.headSha, verdictToStatusArgs(final, {
+        expected: legs.map((l) => l.leg), results, runId: event.instanceId,
+      })));
+    // Per-leg output (#1049) rides in the final result, in plan order.
+    return { ...final, statusPostFailed, legs: outcomeLegs(results) };
   }
 }
 
-/** One leg, one start-<leg> step. The step's return value is the DO's LegResult. */
+/** One leg: a start-<leg> step, and a retry-<leg> step when it fails red. The step's return value is the DO's LegResult. */
 function runLeg(
   env: Env, step: WorkflowStep, instanceId: string,
   owner: string, repoName: string, pr: { baseRef: string; pr: string; private: boolean }, planned: PlannedLeg,
-): Promise<LegResult> {
+): Promise<LegRunResult> {
   return runLegStep(
     { do: (name, config, fn) => step.do(name, config, fn) },
     async (leg) => {

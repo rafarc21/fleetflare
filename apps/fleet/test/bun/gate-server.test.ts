@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { restoreBaseline, putResult, cloneUrl, runGate, readRunEnv, createRunServer, withRaisedFileLimit, type FetchFn, type GateRun } from "../../container/gate-server";
+import { restoreBaseline, putResult, cloneUrl, runGate, readRunEnv, createRunServer, withRaisedFileLimit, parseTestSummary, type FetchFn, type GateRun } from "../../container/gate-server";
 import type { ExecFn } from "../../container/gate-merge-tree";
 
 const containerDir = join(import.meta.dir, "..", "..", "container");
@@ -124,7 +124,7 @@ const RUN: GateRun = {
 };
 const MERGE_RUN: GateRun = { ...RUN, leg: "merge-tree", installCmd: "", legCmd: "" };
 
-interface WorldOpts { cloneCode?: number; cloneErrs?: string[]; checkoutCode?: number; mergeCode?: number; legCode?: number; headPresent?: boolean }
+interface WorldOpts { cloneCode?: number; cloneErrs?: string[]; checkoutCode?: number; mergeCode?: number; legCode?: number; headPresent?: boolean; legOutput?: { stdout: string; stderr: string }; installCode?: number }
 
 // A scripted git. Every command succeeds unless the opts fail it. `rev-parse` resolves only the
 // refs in `known`; the PR head is missing until a fetch brings it in (the fork-PR path).
@@ -141,7 +141,9 @@ function fakeWorld(opts: WorldOpts = {}) {
     calls.push([cmd, ...args]);
     if (cmd === "tar") return ok();
     if (cmd === "bash") {
-      if (args[1] === RUN.legCmd && opts.legCode) return fail(opts.legCode, "leg broke");
+      if (args[1] === RUN.legCmd && opts.legCode) return { code: opts.legCode, ...(opts.legOutput ?? { stdout: "", stderr: "leg broke" }) };
+      if (args[1] === RUN.legCmd && opts.legOutput) return { code: 0, ...opts.legOutput };
+      if (args[1] === RUN.installCmd && opts.installCode) return fail(opts.installCode, "install broke");
       return ok();
     }
     // `git -c k=v commit-tree` puts its own flags first, so match the verb anywhere in argv.
@@ -170,7 +172,7 @@ function fakeWorld(opts: WorldOpts = {}) {
 
 // Records every PUT body by R2 key; GETs answer from `table` like fakeFetch.
 function fakeR2(table: Record<string, number> = {}) {
-  const puts: { key: string; body: { state: string; description?: string; commit?: string } }[] = [];
+  const puts: { key: string; body: { state: string; description?: string; commit?: string; summary?: string } }[] = [];
   const fn: FetchFn = async (url, init) => {
     const key = url.slice(R2.length);
     if (init?.method === "PUT") {
@@ -308,6 +310,64 @@ describe("runGate: every leg tests the merge result", () => {
   });
 });
 
+describe("parseTestSummary (#1049: one summary line per leg)", () => {
+  it("vitest: the last 'Tests ... (N)' line, trimmed, with ANSI stripped first", () => {
+    const stdout = "\x1b[2m Tests\x1b[22m  \x1b[1m\x1b[31m1 failed\x1b[39m\x1b[22m | 1640 passed (1641)\n";
+    expect(parseTestSummary(stdout, "")).toBe("Tests  1 failed | 1640 passed (1641)");
+  });
+
+  it("vitest: when several summary lines match, the last one wins", () => {
+    const stdout = " Tests  3 failed | 10 passed (13)\nnoise\n Tests  1 failed | 1641 passed (1642)\n";
+    expect(parseTestSummary(stdout, "")).toBe("Tests  1 failed | 1641 passed (1642)");
+  });
+
+  it("vitest: a summary printed to stderr is found too", () => {
+    expect(parseTestSummary("", " Tests  2 passed (2)\n")).toBe("Tests  2 passed (2)");
+  });
+
+  it("bun test: the last ' N pass' and ' N fail' lines combined", () => {
+    const stderr = " 1640 pass\n 1 fail\n 3 expect() calls\nRan 1641 tests across 40 files.\n";
+    expect(parseTestSummary("", stderr)).toBe("1640 pass, 1 fail");
+  });
+
+  it("bun test: a pass-only run reads as its pass count", () => {
+    expect(parseTestSummary(" 12 pass\n", "")).toBe("12 pass");
+  });
+
+  it("no summary line -> undefined", () => {
+    expect(parseTestSummary("lint clean\n", "warning: something\n")).toBeUndefined();
+  });
+});
+
+describe("runGate: the leg's test summary rides in its result (#1049)", () => {
+  const vitestOut = { stdout: " Tests  1 failed | 1640 passed (1641)\n", stderr: "" };
+
+  it("a failed test run carries its summary in the R2 body and the outcome", async () => {
+    const world = fakeWorld({ legCode: 1, legOutput: vitestOut });
+    const r2 = fakeR2();
+    const outcome = await runGate(RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    expect(outcome).toMatchObject({ state: "failure", summary: "Tests  1 failed | 1640 passed (1641)" });
+    expect(r2.puts[0].body).toMatchObject({ summary: "Tests  1 failed | 1640 passed (1641)" });
+  });
+
+  it("a passing test run carries its summary too", async () => {
+    const world = fakeWorld({ legOutput: { stdout: "", stderr: " 5 pass\n" } });
+    const r2 = fakeR2();
+    const outcome = await runGate(RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    expect(outcome).toMatchObject({ state: "success", summary: "5 pass" });
+    expect(r2.puts[0].body).toMatchObject({ summary: "5 pass" });
+  });
+
+  it("an install failure (an early exit) carries no summary", async () => {
+    const world = fakeWorld({ installCode: 1 });
+    const r2 = fakeR2();
+    const outcome = await runGate(RUN, { exec: world.exec, fetchFn: r2.fn, workdir: workdir() });
+    expect(outcome.state).toBe("error");
+    expect(outcome.summary).toBeUndefined();
+    expect(r2.puts[0].body.summary).toBeUndefined();
+  });
+});
+
 describe("readRunEnv", () => {
   it("reads every run field from the container env, including baseRef and pr", () => {
     expect(readRunEnv({
@@ -334,12 +394,23 @@ describe("runGate: a transient clone failure is retried (live: 429 from GitHub o
     expect(world.calls.some((c) => c[0] === "rm" && c.includes("-rf"))).toBe(true);
   });
 
-  it("gives up after 3 transient failures and reports the clone error", async () => {
-    const world = fakeWorld({ cloneErrs: [RATE_LIMITED, RATE_LIMITED, RATE_LIMITED] });
+  it("gives up after 5 transient failures and reports the clone error", async () => {
+    const world = fakeWorld({ cloneErrs: [RATE_LIMITED, RATE_LIMITED, RATE_LIMITED, RATE_LIMITED, RATE_LIMITED] });
     const out = await runGate(RUN, { exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(), sleep: noSleep });
     expect(out.state).toBe("error");
     expect(out.description).toContain("429");
-    expect(cloneCalls(world.calls)).toBe(3);
+    expect(cloneCalls(world.calls)).toBe(5);
+  });
+
+  it("backs off exponentially with jitter between clone attempts (live: 2s/4s was too short for GitHub's 429)", async () => {
+    const world = fakeWorld({ cloneErrs: [RATE_LIMITED, RATE_LIMITED, RATE_LIMITED, RATE_LIMITED] });
+    const waits: number[] = [];
+    const out = await runGate(RUN, {
+      exec: world.exec, fetchFn: fakeR2().fn, workdir: workdir(),
+      sleep: async (ms) => { waits.push(ms); }, random: () => 0.5,
+    });
+    expect(out.state).toBe("success");
+    expect(waits).toEqual([3_000, 6_000, 12_000, 24_000]);
   });
 
   it("does not retry a clone that failed for good (repository not found)", async () => {

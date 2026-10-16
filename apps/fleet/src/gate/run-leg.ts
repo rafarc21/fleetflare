@@ -16,7 +16,9 @@ export const GATE_INSTANCE = "standard-4";
 const READY_TIMEOUT_MS = 180_000;
 const READY_POLL_MS = 250;
 const PORT_RETRY_MS = 500;
-const PORT_RETRY_BUDGET_MS = 60_000;
+/** Live: on a host that has not pulled the (Rust-sized) gate image yet, the
+ *  server took over 60 s to listen after start(). Pulls are cached per host. */
+const PORT_RETRY_BUDGET_MS = 240_000;
 /** One leg's ceiling, counted from its start. A leg past it is an error, and
  *  the finally-destroy kills its container, so nothing keeps billing. */
 export const LEG_RUN_TIMEOUT_MS = 25 * 60_000;
@@ -28,6 +30,22 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const LEG_EXCEEDED = "leg exceeded 25 min";
 
 export type LegResult = { state: "success" | "failure" | "error"; description?: string };
+
+/** A leg run ends in exactly one of two things: a real gate-server body
+ *  (success/failure/error — data, 200) or an infra failure (container never
+ *  started, server unreachable, timeout — 503 so the Workflow step retries). */
+export type LegOutcome =
+  | { kind: "result"; result: LegResult }
+  | { kind: "infra"; description: string };
+
+/** The /run-leg reply: infra failures answer 503 so leg-run.ts's non-2xx
+ *  check retries them once; a real leg body is 200 and carried as data. */
+export function legResponse(outcome: LegOutcome): Response {
+  if (outcome.kind === "infra") {
+    return new Response(JSON.stringify({ error: outcome.description }), { status: 503 });
+  }
+  return Response.json(outcome.result);
+}
 
 /** The Worker's outbound entrypoint binding (a workers-types `Fetcher` at
  *  runtime). Typed `object` so this module loads in the bun-typed test
@@ -65,16 +83,23 @@ export interface RunLegDeps {
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Starts the gate container for one leg, posts /run, and always destroys the
- *  container afterwards. Every failure becomes an error leg, never a throw,
- *  so the Workflow gets a verdict for the leg. */
-export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): Promise<LegResult> {
+ *  container afterwards. Every infra failure returns an infra outcome (503,
+ *  retried once by the Workflow step); a real gate-server body returns as a
+ *  result. Never a throw. */
+export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): Promise<LegOutcome> {
   const c = deps.container;
-  if (!c) return { state: "error", description: "gate container binding missing" };
+  if (!c) return { kind: "infra", description: "gate container binding missing" };
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? realSleep;
   try {
     const image = c.images?.gate;
-    if (!image) return { state: "error", description: "gate image not bound (images.gate)" };
+    if (!image) return { kind: "infra", description: "gate image not bound (images.gate)" };
+    // A Worker deploy can reset this DO while the container survives, leaving
+    // `running` true here. start() would throw "already running" — destroy the
+    // survivor first so this leg gets a fresh container.
+    if (c.running) {
+      await c.destroy();
+    }
     await c.interceptAllOutboundHttp(deps.outbound);
     c.start({
       image,
@@ -83,11 +108,11 @@ export async function runLegInContainer(req: GateLegRequest, deps: RunLegDeps): 
       env: buildLegEnvVars(req),
     });
     if (!(await waitUntilRunning(c, now, sleep))) {
-      return { state: "error", description: "gate container did not start within 180 s" };
+      return { kind: "infra", description: "gate container did not start within 180 s" };
     }
     return await runOnServer(c, now, sleep);
   } catch (err) {
-    return { state: "error", description: `gate container failed: ${errorText(err)}` };
+    return { kind: "infra", description: `gate container failed: ${errorText(err)}` };
   } finally {
     // The container bills while it lives: release it after every leg.
     try {
@@ -118,7 +143,7 @@ async function runOnServer(
   c: GateContainer,
   now: () => number,
   sleep: (ms: number) => Promise<void>,
-): Promise<LegResult> {
+): Promise<LegOutcome> {
   const port = c.getTcpPort(GATE_CONTAINER_PORT);
   const legStarted = now();
 
@@ -131,23 +156,23 @@ async function runOnServer(
       res = await port.fetch("http://container/run", { method: "POST", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     } catch (err) {
       if (now() - postStarted >= PORT_RETRY_BUDGET_MS) {
-        return { state: "error", description: `gate server unreachable: ${errorText(err)}` };
+        return { kind: "infra", description: `gate server unreachable: ${errorText(err)}` };
       }
       await sleep(PORT_RETRY_MS);
       continue;
     }
-    if (res.status === 200) return (await res.json()) as LegResult;
+    if (res.status === 200) return { kind: "result", result: (await res.json()) as LegResult };
     if (res.status === 202) break;
-    return { state: "error", description: `gate server HTTP ${res.status}` };
+    return { kind: "infra", description: `gate server HTTP ${res.status}` };
   }
 
   // 202 from /run: the leg is running. Poll until it answers 200.
   for (;;) {
     await sleep(POLL_MS);
-    if (now() - legStarted >= LEG_RUN_TIMEOUT_MS) return { state: "error", description: LEG_EXCEEDED };
+    if (now() - legStarted >= LEG_RUN_TIMEOUT_MS) return { kind: "infra", description: LEG_EXCEEDED };
     try {
       const res = await port.fetch("http://container/result", { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-      if (res.status === 200) return (await res.json()) as LegResult;
+      if (res.status === 200) return { kind: "result", result: (await res.json()) as LegResult };
       // 202: still running. Any other status is retried like a thrown poll.
     } catch {
       // A failed poll is retried; only the leg deadline ends the leg.
