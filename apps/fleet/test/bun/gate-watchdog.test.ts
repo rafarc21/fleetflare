@@ -101,6 +101,22 @@ describe("sweepStalledRuns: a live run with no progress for the stall window is 
     expect(h.engine.terminated).toEqual([]);
     expect(h.posts).toEqual([]);
   });
+
+  it.each(["errored", "terminated"])("a stalled first run that is %s is retired, so no later sweep reads it (#1150 review item 2)", async (status) => {
+    const h = harness({ runs: { "gate-x": status } });
+    expect(await h.sweep(T0 + GATE_STALL_MS + 60_000)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.head()?.progressedAt).toBe(-1);
+    expect(h.posts).toEqual([]);
+  });
+
+  it("a stalled run with an unknown status is not retired: the next sweep reads it again (#1150 review item 2)", async () => {
+    const h = harness({ runs: { "gate-x": "unknown" } });
+    expect(await h.sweep(T0 + GATE_STALL_MS + 60_000)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.head()?.progressedAt).toBe(T0);
+    expect(await h.sweep(T0 + GATE_STALL_MS + 120_000)).toEqual([{ runId: "gate-x", outcome: "skipped" }]);
+    expect(h.engine.terminated).toEqual([]);
+    expect(h.posts).toEqual([]);
+  });
 });
 
 describe("sweepStalledRuns: a lost leg attempt is terminated and reruns once (#1148 item 1)", () => {

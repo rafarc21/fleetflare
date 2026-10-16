@@ -88,7 +88,10 @@ async function sweepRun(deps: WatchdogDeps, row: StalledRun, now: number): Promi
   // A failed read throws: the row is kept and the next sweep reads it again.
   const status = (await (await deps.workflow.get(runId)).status()).status;
   if (!isLiveStatus(status)) {
-    await deps.index.retire(repo, pr, runId, row.progressedAt ?? 0);
+    // Only a finished run is retired. "unknown" may be a blip: the next sweep reads it again (#1150 review item 2).
+    if (status === "complete" || status === "errored" || status === "terminated") {
+      await deps.index.retire(repo, pr, runId, row.progressedAt ?? 0);
+    }
     return "skipped";
   }
 
